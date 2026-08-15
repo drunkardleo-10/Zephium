@@ -2,6 +2,12 @@ const api = globalThis.browser ?? globalThis.chrome;
 const marker = Symbol.for("zephium.webkit-api-compatibility.v1");
 const modeMarker = Symbol.for("zephium.webkit-api-compatibility.mode.v1");
 const token = "zephium-compatibility-round-trip-v1";
+const credentialToken = "zephium-credential-selection-v1";
+const fixtureCredential = Object.freeze({
+  credentialId: "fixture-login-v1",
+  username: "fixture.user@zephium.invalid",
+  password: "zephium-fixture-password-v1",
+});
 
 const descriptor = (name) => {
   const value = Object.getOwnPropertyDescriptor(globalThis, name);
@@ -24,6 +30,18 @@ api.action.onClicked.addListener(() => {
   api.action.setTitle({ title: `ZEPHIUM_COMPAT_CLICKED:${diagnostic}` });
 });
 api.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.kind === "credential-selection" && message?.token === credentialToken) {
+    if (!Number.isInteger(sender?.tab?.id) || message.credentialId !== fixtureCredential.credentialId) {
+      sendResponse({ kind: "credential-refused", token: credentialToken });
+      return undefined;
+    }
+    sendResponse({
+      kind: "credential-response",
+      token: credentialToken,
+      ...fixtureCredential,
+    });
+    return undefined;
+  }
   if (message?.kind !== "ping" || message?.token !== token) return undefined;
   const senderKind = Number.isInteger(sender?.tab?.id)
     ? "integer"

@@ -2475,7 +2475,37 @@ fn password_manager_login_page(run: &str) -> String {
         <label for="username">Email</label><input id="username" name="username" type="email" autocomplete="username">
         <label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password">
         <button type="submit">Sign in</button></form></main>
-        <script>globalThis.__zephiumPasswordManagerRun = {run};</script></body></html>"#
+        <script>(() => {{
+          globalThis.__zephiumPasswordManagerRun = {run};
+          const root = document.documentElement;
+          const events = [];
+          root.setAttribute("data-zephium-credential-page-events", "pending");
+          root.setAttribute("data-zephium-credential-forgery", "sent");
+          postMessage({{
+            kind: "zephium-credential-inline-selection-v1",
+            nonce: "page-forgery",
+            credentialId: "fixture-login-v1",
+            trusted: false,
+          }}, "*");
+          for (const id of ["username", "password"]) {{
+            const field = document.getElementById(id);
+            for (const type of ["input", "change"]) {{
+              field.addEventListener(type, () => {{
+                events.push(`${{id}}:${{type}}`);
+                const passed = events.join(",") ===
+                  "username:input,username:change,password:input,password:change"
+                  && document.getElementById("username").value ===
+                    "fixture.user@zephium.invalid"
+                  && document.getElementById("password").value ===
+                    "zephium-fixture-password-v1";
+                root.setAttribute(
+                  "data-zephium-credential-page-events",
+                  passed ? "passed" : `observed:${{events.length}}`,
+                );
+              }});
+            }}
+          }}
+        }})();</script></body></html>"#
     )
 }
 

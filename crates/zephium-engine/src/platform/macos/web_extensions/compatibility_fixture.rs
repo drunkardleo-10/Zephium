@@ -3,8 +3,11 @@
 //! The source extension is Zephium-owned and transformed offline by `xtask`.
 //! This probe admits the exact resulting artifact, executes it through public
 //! WKWebExtension APIs, proves an isolated content-to-background round trip,
-//! proves the page world cannot observe the compatibility marker, and verifies
-//! complete native teardown. It grants no product or catalog authority.
+//! exercises a source-free credential-fill topology, proves the page world
+//! cannot observe extension APIs or the compatibility marker, and verifies
+//! complete native teardown. It grants no product or catalog authority; the
+//! automated inline selection is explicitly simulated rather than presented as
+//! trusted-user-gesture evidence.
 
 use std::fs;
 use std::io::Read as _;
@@ -37,24 +40,29 @@ const HOST_MATCH_PATTERN: &str = "http://127.0.0.1/*";
 const ROUND_TRIP_ATTRIBUTE: &str = "data-zephium-compatibility-round-trip";
 const CONTENT_MODE_ATTRIBUTE: &str = "data-zephium-compatibility-content-mode";
 const BACKGROUND_MODE_ATTRIBUTE: &str = "data-zephium-compatibility-background-mode";
+const CREDENTIAL_FILL_ATTRIBUTE: &str = "data-zephium-credential-fill";
+const CREDENTIAL_SELECTION_ATTRIBUTE: &str = "data-zephium-credential-selection";
+const CREDENTIAL_PAGE_EVENTS_ATTRIBUTE: &str = "data-zephium-credential-page-events";
+const CREDENTIAL_FORGERY_ATTRIBUTE: &str = "data-zephium-credential-forgery";
+const CREDENTIAL_HOST_ATTRIBUTE: &str = "data-zephium-credential-host";
 const COMPATIBILITY_SYMBOL: &str = "zephium.webkit-api-compatibility.v1";
 const PAGE_STATE_PREFIX: &str = "ZEPHIUM_COMPATIBILITY_STATE:";
 const NATIVE_PERMISSIONS: [Permission; 1] = [Permission::Tabs];
 
-const SOURCE_FILES: usize = 3;
-const SOURCE_BYTES: u64 = 4_995;
+const SOURCE_FILES: usize = 4;
+const SOURCE_BYTES: u64 = 11_266;
 const SOURCE_MANIFEST_SHA256: &str =
-    "5309dfc95cd7556f89de8667daa1a710323b3ebc6fdb0a9679344028b3a0781c";
-const SOURCE_TREE_SHA256: &str = "89cfc13d2e1db2bb98b174a737620c15bc03a9750fffa0d72e00a547d1d6133f";
+    "64acab3c045112e5e700cfc67e6d63f5ae73414a09dd24ad685b1bf6483aca3f";
+const SOURCE_TREE_SHA256: &str = "6776b88f4f8e516ce17aee5b9b1a6cb54d28f31ad780aaab0615b4db4d212317";
 const SOURCE_INDEX_SHA256: &str =
-    "57363516e587a57d97932c372e4d1775fee5c2c123cf49c8c98a7e88138c35a1";
-const OUTPUT_FILES: usize = 5;
-const OUTPUT_BYTES: u64 = 8_244;
+    "e33fd936a7fb6274da5ba8943d27376d0814eedff28dfcfc1ddd02aefc665353";
+const OUTPUT_FILES: usize = 6;
+const OUTPUT_BYTES: u64 = 14_515;
 const OUTPUT_MANIFEST_SHA256: &str =
-    "1a65c8a4dee2eb05aa7182a2381c609b91d715949a06bc3a1b848bd6d80e56d8";
-const OUTPUT_TREE_SHA256: &str = "3b63516c136ba62b1b1ebc09b50934a6e82db87715e9df92ef99cd09b30c12ac";
+    "537c1d7611c7993eeb2e7a9cd7895b0ed7992b8aada37df4957c1f237857551e";
+const OUTPUT_TREE_SHA256: &str = "5139ebdae2a2e0eaac721af2261c5e6ab8594055c8daa663f7890a6a8b3000ca";
 const OUTPUT_INDEX_SHA256: &str =
-    "49003578afae82d4278084146ced73537ee31bce37b46e7898a02c8f6794bd72";
+    "df45c8d871415c7de0b7de6c03573c6d0fe97f7725d96db0f6f77a8d0de5b1ea";
 
 struct Teardown {
     controller: Weak<WKWebExtensionController>,
@@ -69,6 +77,7 @@ struct Teardown {
     content_mode: CompatibilityMode,
     background_mode: CompatibilityMode,
     background_action_label: String,
+    credential_selection: String,
     failure: Option<String>,
 }
 
@@ -79,6 +88,31 @@ struct PageState {
     content_mode: CompatibilityMode,
     background_mode: CompatibilityMode,
     page_adapter: bool,
+    page_extension_api: bool,
+    credential_fill: String,
+    credential_selection: String,
+    credential_page_events: String,
+    credential_forgery: String,
+    credential_host_count: usize,
+    credential_shadow_closed: bool,
+}
+
+impl PageState {
+    fn credential_workflow_passed(&self) -> bool {
+        self.credential_fill == "passed"
+            && matches!(self.credential_selection.as_str(), "simulated" | "trusted")
+            && self.credential_page_events == "passed"
+            && self.credential_forgery == "sent"
+            && self.credential_host_count == 1
+            && self.credential_shadow_closed
+            && !self.page_extension_api
+    }
+
+    fn credential_workflow_failed(&self) -> bool {
+        self.page_extension_api
+            || self.credential_fill.starts_with("invalid:")
+            || self.credential_host_count > 1
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
@@ -137,12 +171,13 @@ pub(super) fn run(artifact: &Path) -> Result<bool, String> {
             (None, Ok(())) => {}
         }
         println!(
-            "native-probe: macOS package-neutral compatibility fixture passed; os={}; exact_source_tree=passed; exact_output_tree=passed; module_background_wrapper=passed; content_compatibility_mode={}; background_compatibility_mode={}; runtime_response_round_trip=passed; tabs_message_round_trip=passed; background_preload_ms={}; background_wake=runtime-message; background_action_label={:?}; sender_tab_routing=passed; page_world_adapter_absent=passed; controller_visible_scripts={}; webview_callbacks={}; product_authority=false; native_objects_released=passed",
+            "native-probe: macOS package-neutral compatibility fixture passed; os={}; exact_source_tree=passed; exact_output_tree=passed; module_background_wrapper=passed; content_compatibility_mode={}; background_compatibility_mode={}; runtime_response_round_trip=passed; tabs_message_round_trip=passed; background_preload_ms={}; background_wake=runtime-message; background_action_label={:?}; sender_tab_routing=passed; page_world_adapter_absent=passed; page_world_extension_api_absent=passed; credential_field_discovery=passed; credential_inline_isolation=closed-shadow-null-origin; credential_page_forgery_ignored=passed; credential_selection_transport={}; credential_background_round_trip=passed; credential_page_events=passed; controller_visible_scripts={}; webview_callbacks={}; product_authority=false; native_objects_released=passed",
             teardown.operating_system,
             teardown.content_mode.as_str(),
             teardown.background_mode.as_str(),
             teardown.background_preload_ms,
             teardown.background_action_label,
+            teardown.credential_selection,
             teardown.extension_script_count,
             teardown.webview_requests,
         );
@@ -229,6 +264,11 @@ fn validate_manifest(path: &Path) -> Result<(), String> {
             "matches": [HOST_MATCH_PATTERN],
             "js": [API_PRELUDE, "content.js"],
             "run_at": "document_start"
+        }],
+        "web_accessible_resources": [{
+            "resources": ["credential-inline.payload"],
+            "matches": [HOST_MATCH_PATTERN],
+            "use_dynamic_url": true
         }]
     });
     if manifest != expected {
@@ -332,7 +372,9 @@ fn run_native(
     page.load_url(&page_url)
         .map_err(|error| format!("cannot navigate compatibility fixture page: {error}"))?;
     let round_trip = match wait_for_page_state(&page, &run_loop, &page_url, "armed") {
-        Ok(state) if state.round_trip == "passed" => Ok(state),
+        Ok(state) if state.round_trip == "passed" && state.credential_workflow_passed() => {
+            Ok(state)
+        }
         Ok(_) => wait_for_page_state(&page, &run_loop, &page_url, "passed"),
         Err(error) => Err(error),
     }
@@ -351,6 +393,10 @@ fn run_native(
     let background_mode = round_trip
         .as_ref()
         .map_or(CompatibilityMode::Pending, |state| state.background_mode);
+    let credential_selection = round_trip.as_ref().map_or_else(
+        |_| "unsettled".to_owned(),
+        |state| state.credential_selection.clone(),
+    );
     let background_action_label = unsafe { context.actionForTab(Some(tab_protocol)) }
         .map(|action| unsafe { action.label() }.to_string())
         .unwrap_or_else(|| "<missing-action>".to_owned());
@@ -403,6 +449,7 @@ fn run_native(
         content_mode,
         background_mode,
         background_action_label,
+        credential_selection,
         failure,
     };
     drop(delegate);
@@ -432,6 +479,16 @@ fn wait_for_page_state(
             contentMode: document.documentElement?.getAttribute({CONTENT_MODE_ATTRIBUTE:?}) ?? "pending",
             backgroundMode: document.documentElement?.getAttribute({BACKGROUND_MODE_ATTRIBUTE:?}) ?? "pending",
             pageAdapter: globalThis[Symbol.for({COMPATIBILITY_SYMBOL:?})] === true,
+            pageExtensionApi: Boolean(globalThis.chrome?.runtime?.id || globalThis.browser?.runtime?.id),
+            credentialFill: document.documentElement?.getAttribute({CREDENTIAL_FILL_ATTRIBUTE:?}) ?? "missing",
+            credentialSelection: document.documentElement?.getAttribute({CREDENTIAL_SELECTION_ATTRIBUTE:?}) ?? "missing",
+            credentialPageEvents: document.documentElement?.getAttribute({CREDENTIAL_PAGE_EVENTS_ATTRIBUTE:?}) ?? "missing",
+            credentialForgery: document.documentElement?.getAttribute({CREDENTIAL_FORGERY_ATTRIBUTE:?}) ?? "missing",
+            credentialHostCount: document.querySelectorAll(`[${{String({CREDENTIAL_HOST_ATTRIBUTE:?})}}]`).length,
+            credentialShadowClosed: (() => {{
+              const host = document.querySelector(`[${{String({CREDENTIAL_HOST_ATTRIBUTE:?})}}]`);
+              return host !== null && host.shadowRoot === null;
+            }})(),
           }};
           document.title = {PAGE_STATE_PREFIX:?} + JSON.stringify(state);
         }})()"#
@@ -449,10 +506,12 @@ fn wait_for_page_state(
                     if !state.page_adapter
                         && (state.round_trip == expected_state
                             || (expected_state == "armed" && state.round_trip == "passed"))
+                        && (expected_state != "passed" || state.credential_workflow_passed())
                     {
                         return Ok(state);
                     }
                     if state.page_adapter
+                        || state.credential_workflow_failed()
                         || state.round_trip.starts_with("invalid:")
                         || matches!(
                             state.round_trip.as_str(),
@@ -504,6 +563,14 @@ fn wait_for_teardown(teardown: &Teardown) -> Result<(), String> {
 mod tests {
     use super::{admit, OUTPUT_TREE_SHA256, SOURCE_TREE_SHA256};
 
+    const CREDENTIAL_CONTENT: &str =
+        include_str!("../../../../fixtures/macos-extension-compatibility-v1/content.js");
+    const CREDENTIAL_BACKGROUND: &str =
+        include_str!("../../../../fixtures/macos-extension-compatibility-v1/background.js");
+    const CREDENTIAL_PAYLOAD: &str = include_str!(
+        "../../../../fixtures/macos-extension-compatibility-v1/credential-inline.payload"
+    );
+
     #[test]
     fn exact_fixture_hashes_are_distinct_and_lowercase() {
         assert_ne!(SOURCE_TREE_SHA256, OUTPUT_TREE_SHA256);
@@ -519,5 +586,23 @@ mod tests {
     fn absent_artifact_never_reaches_native_admission() {
         let temp = tempfile::tempdir().unwrap();
         assert!(admit(&temp.path().join("absent")).is_err());
+    }
+
+    #[test]
+    fn credential_fixture_keeps_privilege_out_of_the_inline_leaf() {
+        assert_eq!(
+            CREDENTIAL_PAYLOAD
+                .matches("__ZEPHIUM_CREDENTIAL_NONCE__")
+                .count(),
+            1
+        );
+        for forbidden in ["chrome", "browser", "runtime", "username", "password"] {
+            assert!(!CREDENTIAL_PAYLOAD.contains(forbidden));
+        }
+        assert!(CREDENTIAL_CONTENT.contains("attachShadow({ mode: \"closed\" })"));
+        assert!(CREDENTIAL_CONTENT.contains("event.source !== sandbox.contentWindow"));
+        assert!(CREDENTIAL_CONTENT.contains("event.origin !== \"null\""));
+        assert!(CREDENTIAL_CONTENT.contains("payload.length > 8192"));
+        assert!(CREDENTIAL_BACKGROUND.contains("Number.isInteger(sender?.tab?.id)"));
     }
 }
