@@ -1121,6 +1121,34 @@ not the still-unimplemented pinned-source transform. The release runner at the s
 OS floor must reproduce the closed inventory and these exact behavioral
 classifications before they become floor-wide claims.
 
+The native gate also carries a separate Zephium-owned ordinary-extension
+contract. It declares `bookmarks`, `favicon`, `history`, `search`, `sessions`,
+and `storage`, mirroring only the browser-owned API delta present in the
+official [Vimium manifest](https://github.com/philc/vimium/blob/master/manifest.json);
+it does not download or execute Vimium and is not a package-compatibility
+claim. On the exercised runtime WebKit parses that MV3 manifest with no errors,
+publishes only `storage` in `requestedPermissions`, and exposes the
+`runtime`, `storage.local`, and `tabs` JavaScript controls while
+`bookmarks`, `history`, `search`, and `sessions` are `undefined`. The
+`favicon` token has neither a native permission key nor a namespace. The probe
+uses a distinct nonpersistent controller and store, applies only the exact
+native `storage` grant, validates controller/store binding, and requires its
+view, context, controller, and store to release during the same bounded
+teardown gate.
+
+This closes an important admission ambiguity: parser acceptance is not runtime
+support. The current `macos.wkwebextension.v1` grant schema therefore continues
+to reject those five non-representable permissions instead of silently
+dropping them or changing the meaning of an existing schema tag. A future
+native broker must prove background and extension-page behavior through a
+capability-limited channel and then ship under a new compatibility/grant schema;
+a generic page-world bridge is prohibited. If WebKit provides no safe
+background integration point, packages that require these APIs belong on the
+separate macOS compatibility-runtime target, not the native target. In
+particular, the current native target cannot classify Vimium as compatible;
+tabs/storage availability alone does not establish its keyboard-navigation,
+Vomnibar, history, bookmark, session, or search workflows.
+
 | Bitwarden surface | macOS native classification | Evidence / boundary |
 |---|---|---|
 | MV3 backup-localStorage through `offscreen` | Requires a reviewed Bitwarden Core adapter before release | The pinned entrypoint always selects [`OffscreenStorageService`](https://github.com/bitwarden/clients/blob/browser-v2026.7.0/apps/browser/src/platform/storage/offscreen-storage.service.ts) for MV3. Primary writes survive because the upstream [`PrimarySecondaryStorageService`](https://github.com/bitwarden/clients/blob/browser-v2026.7.0/libs/common/src/platform/storage/primary-secondary-storage.service.ts) settles both writes, but a primary miss reaches the absent API. Zephium must select a deterministic primary-only/recovery-compatible adapter in its sealed build and test migration, missing-key, and recovery behavior; it must not inject a page-world shim. |

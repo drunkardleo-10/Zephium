@@ -10,6 +10,7 @@ mod bitwarden_contract;
 mod bitwarden_core_artifact;
 mod compatibility_artifact;
 mod compatibility_fixture;
+mod major_extension_contract;
 mod permission_requests;
 mod persistent_runtime;
 mod profile_isolation;
@@ -65,7 +66,7 @@ const HTTP_RESPONSE_LIMIT: usize = 256 * 1024;
 const MAX_HTTP_REQUESTS: usize = 128;
 const MAX_EXTENSION_SCRIPT_DELTA: usize = 16;
 const MAX_WEBVIEW_CALLBACKS: usize = 1_024;
-const EXPECTED_NATIVE_CONTROLLERS: usize = 3;
+const EXPECTED_NATIVE_CONTROLLERS: usize = 4;
 const PROBE_TOKEN: &str = "zephium-wk-web-extension-v1";
 const PERSISTENT_PROFILE_A: u128 = 0xf0cc_44f2_4355_4cf9_a74f_27fe_6cb3_7eda;
 const PERSISTENT_PROFILE_B: u128 = 0x6a90_af85_503a_4db6_8359_a082_5da9_07ab;
@@ -435,6 +436,7 @@ struct Fixture {
     peer_path: std::path::PathBuf,
     permission_path: std::path::PathBuf,
     bitwarden_contract_path: std::path::PathBuf,
+    major_extension_contract_path: std::path::PathBuf,
     runtime_paths: persistent_runtime::RuntimeFixturePaths,
 }
 
@@ -456,6 +458,7 @@ impl Fixture {
         write_peer_extension(&peer_path)?;
         permission_requests::write_fixture(&permission_path)?;
         let bitwarden_contract_path = bitwarden_contract::write_fixture(temp.path())?;
+        let major_extension_contract_path = major_extension_contract::write_fixture(temp.path())?;
         let runtime_paths = persistent_runtime::write_runtime_extensions(temp.path())?;
         Ok(Self {
             _temp: temp,
@@ -463,6 +466,7 @@ impl Fixture {
             peer_path,
             permission_path,
             bitwarden_contract_path,
+            major_extension_contract_path,
             runtime_paths,
         })
     }
@@ -523,6 +527,8 @@ struct ProbeTeardown {
     extension_product_views: Vec<Weak<WKWebView>>,
     extension_product_stores: Vec<Weak<WKWebsiteDataStore>>,
     extension_ui_views: Vec<Weak<WKWebView>>,
+    capability_views: Vec<Weak<WKWebView>>,
+    capability_stores: Vec<Weak<WKWebsiteDataStore>>,
     controllers: Vec<Weak<WKWebExtensionController>>,
     contexts: Vec<Weak<WKWebExtensionContext>>,
     expected_contexts: usize,
@@ -545,6 +551,8 @@ struct ProbeTeardown {
     bitwarden_execution_world_namespace: &'static str,
     bitwarden_sandbox_isolation: &'static str,
     bitwarden_runtime_port_early_connect: &'static str,
+    major_extension_native_permissions: Box<str>,
+    major_extension_namespaces: Box<str>,
     runtime_permission_status: &'static str,
     runtime_permission_readback: String,
     runtime_permission_callbacks_coalesced_before_settlement: bool,
@@ -601,12 +609,14 @@ fn run_web_extension_probe_with_permissions(
         set_phase("teardown-wait");
         wait_for_teardown(&teardown)?;
         println!(
-            "native-probe: macOS WKWebExtension passed; os={}; mv3=temp-directory; controller_before_wry=passed; default_deny=passed; exact_native_grant_replace_readback=passed; exact_native_grant_live_revocation=passed; exact_native_grant_clear_readback=passed; exact_native_owner_lifecycle=passed; restart_controller_absence=passed; exact_host_grant=passed; private_data_default_deny=passed; private_data_explicit_grant=passed; private_data_separation=passed; runtime_permission_request={}; runtime_permission_readback={}; runtime_permission_callbacks_coalesced_before_settlement={}; runtime_permission_replacement_settlement_stranded={}; document_start=passed; isolated_worlds=passed; include_exclude=passed; all_frames=passed; match_about_blank=passed; match_origin_as_fallback=passed; exact_unload_reload=passed; peer_context=passed; nonpersistent_permission_separation=passed; protected_inventory=passed; product_profile_view_store_binding=passed; regular_cookie_isolation=passed; private_cookie_noninheritance=passed; regular_cookie_reconstruction=passed; regular_tab_routing_isolation=passed; browser_mutation_broker=passed; discarded_tab_native_view_refusal=passed; persistent_extension_storage_namespace_isolation=passed; persistent_local_zero_after_reopen=passed; private_extension_storage_noninheritance=passed; mv3_background_execution=passed; bitwarden_web_request_background_registration=passed; bitwarden_web_request_observation={}; bitwarden_scripting_main_world=passed; bitwarden_execution_world_namespace={}; bitwarden_web_navigation_observation=passed; bitwarden_alarms_lifecycle=passed; bitwarden_commands_readback=passed; bitwarden_commands_native_dispatch=passed; bitwarden_runtime_port_registered=round-trip; bitwarden_runtime_port_early_connect={}; bitwarden_context_menus_lifecycle=passed; bitwarden_context_menus_native_projection=passed; bitwarden_dynamic_resource_execution=passed; bitwarden_dynamic_resource_url={}; bitwarden_sandbox_isolation={}; bitwarden_action_popup_native_lifecycle=passed; bitwarden_http_basic_auth_autofill=degraded; extension_product_views_released={}; extension_product_stores_released={}; extension_ui_views_released={}; all_type_removal_callbacks_completed={}; baseline_controller_scripts={}; peak_extension_script_delta={}; webview_callbacks={}; protected_scripts=3; lifecycle_objects_released=3; ordinary_native_controllers_released={}; ordinary_native_contexts_released={}; persistent_native_controllers_released={}; persistent_native_contexts_released={}; persistent_native_stores_released={}; profile_views_released={}; profile_contexts_released={}; profile_controllers_released={}; profile_stores_released={}; profile_lifecycle_objects_released={}",
+            "native-probe: macOS WKWebExtension passed; os={}; mv3=temp-directory; controller_before_wry=passed; default_deny=passed; exact_native_grant_replace_readback=passed; exact_native_grant_live_revocation=passed; exact_native_grant_clear_readback=passed; exact_native_owner_lifecycle=passed; restart_controller_absence=passed; exact_host_grant=passed; private_data_default_deny=passed; private_data_explicit_grant=passed; private_data_separation=passed; runtime_permission_request={}; runtime_permission_readback={}; runtime_permission_callbacks_coalesced_before_settlement={}; runtime_permission_replacement_settlement_stranded={}; document_start=passed; isolated_worlds=passed; include_exclude=passed; all_frames=passed; match_about_blank=passed; match_origin_as_fallback=passed; exact_unload_reload=passed; peer_context=passed; nonpersistent_permission_separation=passed; protected_inventory=passed; product_profile_view_store_binding=passed; regular_cookie_isolation=passed; private_cookie_noninheritance=passed; regular_cookie_reconstruction=passed; regular_tab_routing_isolation=passed; browser_mutation_broker=passed; discarded_tab_native_view_refusal=passed; persistent_extension_storage_namespace_isolation=passed; persistent_local_zero_after_reopen=passed; private_extension_storage_noninheritance=passed; mv3_background_execution=passed; major_extension_native_permissions={}; major_extension_namespaces={}; bitwarden_web_request_background_registration=passed; bitwarden_web_request_observation={}; bitwarden_scripting_main_world=passed; bitwarden_execution_world_namespace={}; bitwarden_web_navigation_observation=passed; bitwarden_alarms_lifecycle=passed; bitwarden_commands_readback=passed; bitwarden_commands_native_dispatch=passed; bitwarden_runtime_port_registered=round-trip; bitwarden_runtime_port_early_connect={}; bitwarden_context_menus_lifecycle=passed; bitwarden_context_menus_native_projection=passed; bitwarden_dynamic_resource_execution=passed; bitwarden_dynamic_resource_url={}; bitwarden_sandbox_isolation={}; bitwarden_action_popup_native_lifecycle=passed; bitwarden_http_basic_auth_autofill=degraded; extension_product_views_released={}; extension_product_stores_released={}; extension_ui_views_released={}; capability_views_released={}; capability_stores_released={}; all_type_removal_callbacks_completed={}; baseline_controller_scripts={}; peak_extension_script_delta={}; webview_callbacks={}; protected_scripts=3; lifecycle_objects_released=3; ordinary_native_controllers_released={}; ordinary_native_contexts_released={}; persistent_native_controllers_released={}; persistent_native_contexts_released={}; persistent_native_stores_released={}; profile_views_released={}; profile_contexts_released={}; profile_controllers_released={}; profile_stores_released={}; profile_lifecycle_objects_released={}",
             teardown.operating_system,
             teardown.runtime_permission_status,
             teardown.runtime_permission_readback,
             teardown.runtime_permission_callbacks_coalesced_before_settlement,
             teardown.runtime_permission_replacement_settlement_stranded,
+            teardown.major_extension_native_permissions,
+            teardown.major_extension_namespaces,
             teardown.bitwarden_web_request_observation,
             teardown.bitwarden_execution_world_namespace,
             teardown.bitwarden_runtime_port_early_connect,
@@ -615,6 +625,8 @@ fn run_web_extension_probe_with_permissions(
             teardown.extension_product_views.len(),
             teardown.extension_product_stores.len(),
             teardown.extension_ui_views.len(),
+            teardown.capability_views.len(),
+            teardown.capability_stores.len(),
             teardown.persistent_all_type_removal_callbacks,
             teardown.baseline_script_count,
             teardown.peak_extension_script_delta,
@@ -786,6 +798,10 @@ fn run_supported_probe(
         mtm,
     )?;
     drop(bitwarden_contract_extension);
+    set_phase("major-extension-contract-parse");
+    let major_extension = load_extension(&fixture.major_extension_contract_path, &run_loop, mtm)?;
+    set_phase("major-extension-contract-runtime");
+    let major_extension_teardown = major_extension_contract::run(&major_extension, &run_loop, mtm)?;
     set_phase("runtime-extension-parse");
     let runtime_writer = load_extension(&fixture.runtime_paths.writer, &run_loop, mtm)?;
     let runtime_verifier_one = load_extension(&fixture.runtime_paths.verifier_one, &run_loop, mtm)?;
@@ -825,6 +841,7 @@ fn run_supported_probe(
     let secondary_bundle = new_nonpersistent_controller(mtm)?;
     let controller_weaks = vec![
         bitwarden_contract_teardown.controller,
+        major_extension_teardown.controller.clone(),
         Weak::from_retained(&primary_bundle.controller),
         Weak::from_retained(&secondary_bundle.controller),
     ];
@@ -857,6 +874,7 @@ fn run_supported_probe(
     assert_private_data_access(&secondary_context, false, "secondary separation")?;
     let mut context_weaks = vec![
         bitwarden_contract_teardown.context,
+        major_extension_teardown.context.clone(),
         Weak::from_retained(&primary_context),
         Weak::from_retained(&peer_context),
         Weak::from_retained(&secondary_context),
@@ -1396,6 +1414,7 @@ fn run_supported_probe(
     drop(runtime_verifier_one);
     drop(runtime_verifier_two);
     drop(runtime_empty);
+    drop(major_extension);
     drop(primary_bundle);
     drop(secondary_bundle);
     drop(primary_server);
@@ -1412,9 +1431,11 @@ fn run_supported_probe(
             .into_iter()
             .chain(permission_request_evidence.extension_views)
             .collect(),
+        capability_views: vec![major_extension_teardown.view],
+        capability_stores: vec![major_extension_teardown.store],
         controllers: controller_weaks,
         contexts: context_weaks,
-        expected_contexts: 4 + runtime_permission_contexts,
+        expected_contexts: 5 + runtime_permission_contexts,
         expected_extension_ui_views: 2 + runtime_permission_views,
         lifecycle_drops,
         baseline_script_count: baseline_inventory.len(),
@@ -1435,6 +1456,11 @@ fn run_supported_probe(
         bitwarden_sandbox_isolation: bitwarden_contract_teardown.sandbox_isolation,
         bitwarden_runtime_port_early_connect: bitwarden_contract_teardown
             .runtime_port_early_connect,
+        major_extension_native_permissions: major_extension_teardown
+            .native_permissions
+            .join(",")
+            .into_boxed_str(),
+        major_extension_namespaces: major_extension_teardown.namespace_summary,
         runtime_permission_status: match permission_mode {
             RuntimePermissionProbeMode::None => "interactive-not-run",
             RuntimePermissionProbeMode::Full => "passed",
@@ -2068,6 +2094,8 @@ fn expected_counts(role: &str, expected: ExpectedExtensions) -> (u64, u64, u64) 
 fn wait_for_teardown(teardown: &ProbeTeardown) -> Result<(), String> {
     const EXPECTED_EXTENSION_PRODUCT_VIEWS: usize = 1;
     const EXPECTED_EXTENSION_PRODUCT_STORES: usize = 1;
+    const EXPECTED_CAPABILITY_VIEWS: usize = 1;
+    const EXPECTED_CAPABILITY_STORES: usize = 1;
     const EXPECTED_PROFILE_VIEWS: usize = 7;
     const EXPECTED_PROFILE_OWNERS: usize = 6;
     const EXPECTED_PROFILE_CONTEXTS: usize = 4;
@@ -2076,6 +2104,8 @@ fn wait_for_teardown(teardown: &ProbeTeardown) -> Result<(), String> {
     if teardown.extension_product_views.len() != EXPECTED_EXTENSION_PRODUCT_VIEWS
         || teardown.extension_product_stores.len() != EXPECTED_EXTENSION_PRODUCT_STORES
         || teardown.extension_ui_views.len() != teardown.expected_extension_ui_views
+        || teardown.capability_views.len() != EXPECTED_CAPABILITY_VIEWS
+        || teardown.capability_stores.len() != EXPECTED_CAPABILITY_STORES
         || teardown.controllers.len() != EXPECTED_NATIVE_CONTROLLERS
         || teardown.contexts.len() != teardown.expected_contexts
         || teardown.profile_views.len() != EXPECTED_PROFILE_VIEWS
@@ -2085,11 +2115,13 @@ fn wait_for_teardown(teardown: &ProbeTeardown) -> Result<(), String> {
         || teardown.profile_lifecycle_drops.len() != EXPECTED_PROFILE_LIFECYCLE_GROUPS
     {
         return Err(format!(
-            "native teardown inventory mismatch: extension_product_views={}/{EXPECTED_EXTENSION_PRODUCT_VIEWS}, extension_product_stores={}/{EXPECTED_EXTENSION_PRODUCT_STORES}, extension_ui_views={}/{}, controllers={}/{EXPECTED_NATIVE_CONTROLLERS}, contexts={}/{}, profile_views={}/{EXPECTED_PROFILE_VIEWS}, profile_contexts={}/{EXPECTED_PROFILE_CONTEXTS}, profile_controllers={}/{EXPECTED_PROFILE_OWNERS}, profile_stores={}/{EXPECTED_PROFILE_OWNERS}, profile_lifecycle_groups={}/{EXPECTED_PROFILE_LIFECYCLE_GROUPS}",
+            "native teardown inventory mismatch: extension_product_views={}/{EXPECTED_EXTENSION_PRODUCT_VIEWS}, extension_product_stores={}/{EXPECTED_EXTENSION_PRODUCT_STORES}, extension_ui_views={}/{}, capability_views={}/{EXPECTED_CAPABILITY_VIEWS}, capability_stores={}/{EXPECTED_CAPABILITY_STORES}, controllers={}/{EXPECTED_NATIVE_CONTROLLERS}, contexts={}/{}, profile_views={}/{EXPECTED_PROFILE_VIEWS}, profile_contexts={}/{EXPECTED_PROFILE_CONTEXTS}, profile_controllers={}/{EXPECTED_PROFILE_OWNERS}, profile_stores={}/{EXPECTED_PROFILE_OWNERS}, profile_lifecycle_groups={}/{EXPECTED_PROFILE_LIFECYCLE_GROUPS}",
             teardown.extension_product_views.len(),
             teardown.extension_product_stores.len(),
             teardown.extension_ui_views.len(),
             teardown.expected_extension_ui_views,
+            teardown.capability_views.len(),
+            teardown.capability_stores.len(),
             teardown.controllers.len(),
             teardown.contexts.len(),
             teardown.expected_contexts,
@@ -2119,6 +2151,14 @@ fn wait_for_teardown(teardown: &ProbeTeardown) -> Result<(), String> {
             .extension_ui_views
             .iter()
             .all(|view| view.load().is_none());
+        let capability_views_released = teardown
+            .capability_views
+            .iter()
+            .all(|view| view.load().is_none());
+        let capability_stores_released = teardown
+            .capability_stores
+            .iter()
+            .all(|store| store.load().is_none());
         let contexts_released = teardown
             .contexts
             .iter()
@@ -2147,6 +2187,8 @@ fn wait_for_teardown(teardown: &ProbeTeardown) -> Result<(), String> {
             && extension_product_views_released
             && extension_product_stores_released
             && extension_ui_views_released
+            && capability_views_released
+            && capability_stores_released
             && controllers_released
             && contexts_released
             && profile_views_released
@@ -2160,7 +2202,7 @@ fn wait_for_teardown(teardown: &ProbeTeardown) -> Result<(), String> {
         }
         if Instant::now() >= deadline {
             return Err(format!(
-                "native teardown did not converge: view={}, extension_product_views_released={}/{}, extension_product_stores_released={}/{}, extension_ui_views_released={}/{}, controllers_released={}/{}, contexts_released={}/{}, profile_views_released={}/{}, profile_contexts_released={}/{}, profile_controllers_released={}/{}, profile_stores_released={}/{}, lifecycle_drops={}/3, profile_lifecycle_drops={profile_lifecycle_counts:?}/{:?}",
+                "native teardown did not converge: view={}, extension_product_views_released={}/{}, extension_product_stores_released={}/{}, extension_ui_views_released={}/{}, capability_views_released={}/{}, capability_stores_released={}/{}, controllers_released={}/{}, contexts_released={}/{}, profile_views_released={}/{}, profile_contexts_released={}/{}, profile_controllers_released={}/{}, profile_stores_released={}/{}, lifecycle_drops={}/3, profile_lifecycle_drops={profile_lifecycle_counts:?}/{:?}",
                 teardown.view.load().is_none(),
                 teardown.extension_product_views.iter().filter(|view| view.load().is_none()).count(),
                 teardown.extension_product_views.len(),
@@ -2168,6 +2210,10 @@ fn wait_for_teardown(teardown: &ProbeTeardown) -> Result<(), String> {
                 teardown.extension_product_stores.len(),
                 teardown.extension_ui_views.iter().filter(|view| view.load().is_none()).count(),
                 teardown.extension_ui_views.len(),
+                teardown.capability_views.iter().filter(|view| view.load().is_none()).count(),
+                teardown.capability_views.len(),
+                teardown.capability_stores.iter().filter(|store| store.load().is_none()).count(),
+                teardown.capability_stores.len(),
                 teardown.controllers.iter().filter(|controller| controller.load().is_none()).count(),
                 teardown.controllers.len(),
                 teardown.contexts.iter().filter(|context| context.load().is_none()).count(),
