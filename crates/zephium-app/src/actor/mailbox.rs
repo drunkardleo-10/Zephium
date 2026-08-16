@@ -8,6 +8,7 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use zephium_core::blocker::ContentPolicyGeneration;
 use zephium_core::ids::{ItemId, ProfileId};
+use zephium_core::permissions::PagePermissionRequestId;
 use zephium_core::ports::engine::{
     ContentScope, DiscardProbeId, EngineEvent, NavigationPresentationId,
 };
@@ -98,6 +99,7 @@ const MAX_CRITICAL_LIFECYCLE_FACTS: usize = zephium_core::session::MAX_SESSION_I
     + zephium_core::session::MAX_SESSION_PROFILES * 7
     + zephium_core::extensions::MAX_PENDING_EXTENSION_BROWSER_REQUESTS
     + zephium_core::ports::extensions::MAX_PENDING_EXTENSION_RUNTIME_GRANT_REQUESTS
+    + zephium_core::permissions::MAX_PENDING_PAGE_PERMISSION_REQUESTS
     + crate::api::MAX_PENDING_EXTENSION_MANAGEMENT_OPERATIONS
     + 3;
 const COMMAND_QUEUE_CAPACITY: usize = NORMAL_COMMAND_CAPACITY + MAX_CRITICAL_LIFECYCLE_FACTS + 1;
@@ -129,6 +131,12 @@ pub(crate) struct TimerState {
     profile_deletion_deadlines: std::collections::HashMap<ProfileId, (std::time::Instant, u64)>,
     blocker_preference_deadlines: std::collections::HashMap<ProfileId, (std::time::Instant, u64)>,
     blocker_catalog_deadline: Option<(std::time::Instant, u64, u8)>,
+    page_permission_deadline: Option<(
+        std::time::Instant,
+        ProfileId,
+        ItemId,
+        PagePermissionRequestId,
+    )>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -166,6 +174,11 @@ pub(crate) enum TimerWake {
     BlockerCatalog {
         operation: u64,
         attempt: u8,
+    },
+    PagePermission {
+        profile: ProfileId,
+        item: ItemId,
+        request: PagePermissionRequestId,
     },
     Stopped,
 }
@@ -470,6 +483,7 @@ impl CommandQueue {
         timer.profile_deletion_deadlines.clear();
         timer.blocker_preference_deadlines.clear();
         timer.blocker_catalog_deadline = None;
+        timer.page_permission_deadline = None;
         self.inner.timer_ready.notify_all();
     }
 
@@ -501,6 +515,45 @@ impl CommandQueue {
                 .map_or(deadline, |current| current.min(deadline)),
         );
         self.inner.timer_ready.notify_one();
+    }
+
+    pub(crate) fn schedule_page_permission(
+        &self,
+        profile: ProfileId,
+        item: ItemId,
+        request: PagePermissionRequestId,
+        deadline: std::time::Instant,
+    ) {
+        let mut timer = self
+            .inner
+            .timer_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if timer.stopped {
+            return;
+        }
+        timer.page_permission_deadline = Some((deadline, profile, item, request));
+        self.inner.timer_ready.notify_one();
+    }
+
+    pub(crate) fn cancel_page_permission(
+        &self,
+        profile: ProfileId,
+        item: ItemId,
+        request: PagePermissionRequestId,
+    ) {
+        let mut timer = self
+            .inner
+            .timer_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if timer.page_permission_deadline.is_some_and(
+            |(_, current_profile, current_item, current_request)| {
+                current_profile == profile && current_item == item && current_request == request
+            },
+        ) {
+            timer.page_permission_deadline = None;
+        }
     }
 
     pub(crate) fn cancel_extension_startup(&self) {
@@ -876,6 +929,17 @@ impl CommandQueue {
                     return TimerWake::BlockerCatalog { operation, attempt };
                 }
             }
+            let next_page_permission = timer.page_permission_deadline;
+            if let Some((deadline, profile, item, request)) = next_page_permission {
+                if now >= deadline {
+                    timer.page_permission_deadline = None;
+                    return TimerWake::PagePermission {
+                        profile,
+                        item,
+                        request,
+                    };
+                }
+            }
             if now >= maintenance_deadline {
                 return TimerWake::Maintenance;
             }
@@ -904,6 +968,9 @@ impl CommandQueue {
             }
             if let Some((blocker_catalog, _, _)) = next_blocker_catalog {
                 deadline = deadline.min(blocker_catalog);
+            }
+            if let Some((page_permission, _, _, _)) = next_page_permission {
+                deadline = deadline.min(page_permission);
             }
             let timeout = deadline.saturating_duration_since(now);
             let (next, _) = self
@@ -993,6 +1060,9 @@ fn command_is_critical(command: &Command) -> bool {
             | Command::ProfileDeletionReady(_)
             | Command::ExtensionManagementSettled { .. }
             | Command::ExtensionRuntimeGrantSettled { .. }
+            | Command::PagePermissionCatalogLoaded { .. }
+            | Command::PagePermissionCatalogMutated { .. }
+            | Command::PagePermissionTimeout { .. }
             | Command::ChromePresentationApplied { .. }
             | Command::Engine(
                 EngineEvent::UrlChanged { .. }
@@ -1004,6 +1074,7 @@ fn command_is_critical(command: &Command) -> bool {
                     | EngineEvent::ExtensionBrowserRequested { .. }
                     | EngineEvent::ExtensionRuntimeGrantRequested { .. }
                     | EngineEvent::ExtensionRuntimeGrantCancelled { .. }
+                    | EngineEvent::PermissionRequested { .. }
                     | EngineEvent::ExtensionActionsInvalidated { .. }
                     | EngineEvent::NavigationFailed { .. }
                     | EngineEvent::ZoomSettled { .. }

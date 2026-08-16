@@ -15,6 +15,9 @@ pub const MAX_PAGE_ORIGIN_BYTES: usize = 512;
 pub const MAX_PAGE_PERMISSION_GRANTS_PER_PROFILE: usize = 512;
 pub const MAX_PAGE_PERMISSION_PATCH_CHANGES: usize = 4;
 pub const MAX_PAGE_PERMISSION_CATALOG_RETAINED_BYTES: usize = 512 * 1024;
+/// Process-wide native permission completions retained concurrently by the
+/// engine. Shell currently serializes their user-visible presentation.
+pub const MAX_PENDING_PAGE_PERMISSION_REQUESTS: usize = 8;
 const MAX_DURABLE_REVISION: u64 = i64::MAX as u64;
 const ALLOCATION_MARGIN_BYTES: usize = 2 * std::mem::size_of::<usize>();
 

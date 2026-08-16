@@ -234,6 +234,37 @@ pub struct ExtensionRuntimeGrantPromptView {
     pub prompt: Option<ExtensionRuntimeGrantPromptEntryView>,
 }
 
+/// Closed page capability names rendered by browser-owned chrome. Native
+/// permission strings and page-controlled labels never cross this boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum PagePermissionKindView {
+    Camera,
+    Microphone,
+}
+
+/// One exact, foreground page-permission request. Every identity is an opaque
+/// stale fence: privileged chrome may only echo it back to the Shell.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct PagePermissionPromptEntryView {
+    pub profile_id: String,
+    pub item_id: String,
+    pub request_id: String,
+    pub origin: String,
+    pub kinds: Vec<PagePermissionKindView>,
+    /// False for ephemeral profiles; chrome must not offer durable policy.
+    pub rememberable: bool,
+    /// True while an exact durable remember-decision transaction is pending.
+    pub processing: bool,
+}
+
+/// Exact replacement for the one process-wide page permission surface.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct PagePermissionPromptView {
+    pub projection_revision: String,
+    pub prompt: Option<PagePermissionPromptEntryView>,
+}
+
 /// The one retained split group owned by the focused window. Members are
 /// normalized references into [`ItemsState::tabs`] in native pane traversal
 /// order; geometry and mutable divider ratios remain native-only authority.
@@ -734,6 +765,7 @@ pub enum Projection {
     ExtensionActionFailed(ExtensionActionFailedView),
     ExtensionManagement(ExtensionManagementView),
     ExtensionRuntimeGrantPrompt(ExtensionRuntimeGrantPromptView),
+    PagePermissionPrompt(PagePermissionPromptView),
     UiCommand(String),
     Search(SearchResults),
     Layout(LayoutState),

@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Release capability gate. Desktop does not enable this until the real
+# WKWebView camera/microphone product probe passes on the supported macOS
+# security floor and packaged build.
+macos-page-permission-prompts = []
+
 [dependencies]
 zephium-core.workspace = true
 zephium-ipc.workspace = true

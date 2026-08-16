@@ -33,6 +33,12 @@ export const commands = {
 	 *  request payload.
 	 */
 	extensionRuntimeGrantRespond: (profileId: string, installId: string, runtimeGeneration: string, requestId: string, allow: boolean) => __TAURI_INVOKE<OperationAdmission>("extension_runtime_grant_respond", { profileId, installId, runtimeGeneration, requestId, allow }),
+	/**
+	 *  Answers only the exact Shell-projected foreground page request. Origin and
+	 *  capability names are intentionally absent: chrome can choose a disposition
+	 *  but cannot mint or alter authority.
+	 */
+	pagePermissionRespond: (profileId: string, itemId: string, requestId: string, decision: PagePermissionPromptDecisionInput) => __TAURI_INVOKE<OperationAdmission>("page_permission_respond", { profileId, itemId, requestId, decision }),
 	blockerStatus: () => typedError<BlockerStatusView, null>(__TAURI_INVOKE("blocker_status")),
 	blockerSetEnabled: (enabled: boolean) => __TAURI_INVOKE<OperationAdmission>("blocker_set_enabled", { enabled }),
 	blockerRetry: (failedGeneration: string) => __TAURI_INVOKE<OperationAdmission>("blocker_retry", { failedGeneration }),
@@ -72,6 +78,7 @@ export const events = {
 	itemsChanged: makeEvent<ItemsChanged>("items-changed"),
 	layoutChanged: makeEvent<LayoutChanged>("layout-changed"),
 	operationProcessed: makeEvent<OperationProcessed>("operation-processed"),
+	pagePermissionPromptChanged: makeEvent<PagePermissionPromptChanged>("page-permission-prompt-changed"),
 	runtimeStatusChanged: makeEvent<RuntimeStatusChanged>("runtime-status-changed"),
 	searchChanged: makeEvent<SearchChanged>("search-changed"),
 	tabChanged: makeEvent<TabChanged>("tab-changed"),
@@ -504,6 +511,38 @@ export type OperationReason = "mutation_applied" | "state_unchanged" | "invalid_
  *  acknowledged, or belongs to a previous process lifetime.
  */
 export type OperationStatus = { state: "unknown" } | { state: "pending" } | { state: "processed"; disposition: OperationDisposition };
+
+/**
+ *  Closed page capability names rendered by browser-owned chrome. Native
+ *  permission strings and page-controlled labels never cross this boundary.
+ */
+export type PagePermissionKindView = "camera" | "microphone";
+
+export type PagePermissionPromptChanged = PagePermissionPromptView;
+
+export type PagePermissionPromptDecisionInput = "allow_once" | "always_allow" | "deny_once" | "always_deny";
+
+/**
+ *  One exact, foreground page-permission request. Every identity is an opaque
+ *  stale fence: privileged chrome may only echo it back to the Shell.
+ */
+export type PagePermissionPromptEntryView = {
+	profile_id: string,
+	item_id: string,
+	request_id: string,
+	origin: string,
+	kinds: PagePermissionKindView[],
+	/**  False for ephemeral profiles; chrome must not offer durable policy. */
+	rememberable: boolean,
+	/**  True while an exact durable remember-decision transaction is pending. */
+	processing: boolean,
+};
+
+/**  Exact replacement for the one process-wide page permission surface. */
+export type PagePermissionPromptView = {
+	projection_revision: string,
+	prompt: PagePermissionPromptEntryView | null,
+};
 
 export type ProfileKindView = "default" | "named" | "incognito";
 

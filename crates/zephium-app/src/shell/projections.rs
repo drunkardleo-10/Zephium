@@ -13,6 +13,41 @@ struct SidebarProjection {
 }
 
 impl Shell {
+    pub(super) fn project_page_permission_prompt(&self) {
+        let prompt =
+            self.page_permissions
+                .visible()
+                .and_then(|(profile, item, request, processing)| {
+                    let kinds = match request.kind {
+                    zephium_core::permissions::PagePermissionRequestKind::Single(kind) => {
+                        page_permission_kind_view(kind).into_iter().collect()
+                    }
+                    zephium_core::permissions::PagePermissionRequestKind::CameraAndMicrophone => {
+                        vec![
+                            PagePermissionKindView::Camera,
+                            PagePermissionKindView::Microphone,
+                        ]
+                    }
+                };
+                    if kinds.is_empty() {
+                        return None;
+                    }
+                    Some(PagePermissionPromptEntryView {
+                        profile_id: profile.to_string(),
+                        item_id: item.to_string(),
+                        request_id: format!("{:016x}", request.id.get()),
+                        origin: request.origin.to_string(),
+                        kinds,
+                        rememberable: self.page_permissions.visible_rememberable(),
+                        processing,
+                    })
+                });
+        (self.emit)(Projection::PagePermissionPrompt(PagePermissionPromptView {
+            projection_revision: format!("{:032x}", self.next_projection_revision()),
+            prompt,
+        }));
+    }
+
     pub(super) fn project_extension_runtime_grant_prompt(&self) {
         let prompt = self
             .extension_runtime_grants
@@ -527,6 +562,24 @@ impl Shell {
     pub(super) fn favicon_key_for_url(&self, profile: ProfileId, url: &str) -> Option<String> {
         let parsed = url::Url::parse(url).ok()?;
         self.favicon_key_for(profile, &origin_of(&parsed)?)
+    }
+}
+
+fn page_permission_kind_view(
+    kind: zephium_core::permissions::PagePermissionKind,
+) -> Option<PagePermissionKindView> {
+    match kind {
+        zephium_core::permissions::PagePermissionKind::Camera => {
+            Some(PagePermissionKindView::Camera)
+        }
+        zephium_core::permissions::PagePermissionKind::Microphone => {
+            Some(PagePermissionKindView::Microphone)
+        }
+        // The current native broker never admits these capabilities. Keep the
+        // projection total while preserving a closed UI vocabulary.
+        zephium_core::permissions::PagePermissionKind::Geolocation
+        | zephium_core::permissions::PagePermissionKind::Notifications
+        | zephium_core::permissions::PagePermissionKind::ClipboardRead => None,
     }
 }
 

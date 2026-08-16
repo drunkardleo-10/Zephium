@@ -26,9 +26,9 @@ pub use actor::{
 };
 pub use api::{
     ChromePresentation, ChromePresentationCallback, ChromePresentationDispatch, Command,
-    ContentPolicyStatusQueryOutcome, EmitFn, ExtensionLifecycle, PresentationChrome, SharedBlocker,
-    SharedChrome, SharedEngine, SharedStore, ShellTerminalFailure, ShellTerminalFailureCallback,
-    ShutdownOutcome,
+    ContentPolicyStatusQueryOutcome, EmitFn, ExtensionLifecycle, PagePermissionPromptDecision,
+    PresentationChrome, SharedBlocker, SharedChrome, SharedEngine, SharedStore,
+    ShellTerminalFailure, ShellTerminalFailureCallback, ShutdownOutcome,
 };
 pub use shell::Shell;
 

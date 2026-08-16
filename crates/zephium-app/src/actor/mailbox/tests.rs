@@ -67,6 +67,35 @@ fn blocker_preference_retry_timer_is_exact_and_profile_bounded() {
 }
 
 #[test]
+fn page_permission_timer_is_single_flight_exact_and_cancellable() {
+    let queue = CommandQueue::new();
+    let profile = ProfileId::from(71);
+    let item = ItemId::from(72);
+    let request = zephium_core::permissions::PagePermissionRequestId::new(73).unwrap();
+    let now = std::time::Instant::now();
+
+    queue.schedule_page_permission(profile, item, request, now);
+    assert!(matches!(
+        queue.wait_for_timer(now + std::time::Duration::from_secs(1)),
+        TimerWake::PagePermission {
+            profile: found_profile,
+            item: found_item,
+            request: found_request,
+        } if found_profile == profile && found_item == item && found_request == request
+    ));
+
+    queue.schedule_page_permission(profile, item, request, now);
+    queue.cancel_page_permission(profile, item, request);
+    assert!(queue
+        .inner
+        .timer_state
+        .lock()
+        .unwrap()
+        .page_permission_deadline
+        .is_none());
+}
+
+#[test]
 fn blocker_catalog_poll_timer_is_single_flight_and_operation_exact() {
     let queue = CommandQueue::new();
     let now = std::time::Instant::now();

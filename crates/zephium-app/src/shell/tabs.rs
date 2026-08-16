@@ -49,6 +49,7 @@ impl Shell {
             self.items.set_lifecycle(prev, Lifecycle::Inactive);
         }
         self.items.set_lifecycle(id, Lifecycle::Active);
+        self.cancel_page_permission_if_not_foreground();
         self.residency.recent.retain(|r| *r != id);
         self.residency.recent.push(id);
         self.touch(id);
@@ -59,6 +60,7 @@ impl Shell {
         if !self.item_in_focused_scope(id) {
             return NativeWork::default();
         }
+        self.cancel_page_permission_for_item(id);
         self.cancel_pending_presentation(id);
         self.cancel_favicon_attempt(id);
         if matches!(

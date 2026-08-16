@@ -32,7 +32,8 @@ use tauri_specta::{collect_commands, collect_events, Event};
 
 use zephium_app::{
     ChromePresentation, ChromePresentationCallback, ChromePresentationDispatch, Command, EmitFn,
-    ExtensionLifecycle, Handle, SharedChrome, ShellTerminalFailureCallback, ShutdownOutcome,
+    ExtensionLifecycle, Handle, PagePermissionPromptDecision, SharedChrome,
+    ShellTerminalFailureCallback, ShutdownOutcome,
 };
 use zephium_blocker_service::ManagedBlocker;
 use zephium_core::extensions::{
@@ -94,6 +95,7 @@ const EVENT_EXTENSION_ACTIONS: &str = "zephium:extension-actions";
 const EVENT_EXTENSION_ACTION_FAILED: &str = "zephium:extension-action-failed";
 const EVENT_EXTENSION_MANAGEMENT: &str = "zephium:extension-management";
 const EVENT_EXTENSION_RUNTIME_GRANT_PROMPT: &str = "zephium:extension-runtime-grant-prompt";
+const EVENT_PAGE_PERMISSION_PROMPT: &str = "zephium:page-permission-prompt";
 const EVENT_PRESENTATION_TAB: &str = "zephium:presentation-tab";
 const EVENT_UI: &str = "zephium:ui-command";
 const EVENT_SEARCH: &str = "zephium:search";
@@ -1146,6 +1148,9 @@ struct ExtensionManagementChanged(zephium_ipc::ExtensionManagementView);
 struct ExtensionRuntimeGrantPromptChanged(zephium_ipc::ExtensionRuntimeGrantPromptView);
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
+struct PagePermissionPromptChanged(zephium_ipc::PagePermissionPromptView);
+
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
 struct UiCommand(String);
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
@@ -1320,6 +1325,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             extension_management_set_enabled,
             extension_management_uninstall,
             extension_runtime_grant_respond,
+            page_permission_respond,
             blocker_status,
             blocker_set_enabled,
             blocker_retry,
@@ -1355,6 +1361,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             ExtensionActionFailed,
             ExtensionManagementChanged,
             ExtensionRuntimeGrantPromptChanged,
+            PagePermissionPromptChanged,
             UiCommand,
             SearchChanged,
             LayoutChanged,
@@ -2260,6 +2267,66 @@ fn extension_runtime_grant_respond(
             runtime: ExtensionRuntimeInstance::new(profile, install, generation),
             request,
             allow,
+        },
+    )
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, specta::Type)]
+#[serde(rename_all = "snake_case")]
+enum PagePermissionPromptDecisionInput {
+    AllowOnce,
+    AlwaysAllow,
+    DenyOnce,
+    AlwaysDeny,
+}
+
+/// Answers only the exact Shell-projected foreground page request. Origin and
+/// capability names are intentionally absent: chrome can choose a disposition
+/// but cannot mint or alter authority.
+#[tauri::command]
+#[specta::specta]
+fn page_permission_respond(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    profile_id: String,
+    item_id: String,
+    request_id: String,
+    decision: PagePermissionPromptDecisionInput,
+) -> zephium_ipc::OperationAdmission {
+    if !authorize(&caller, CallerPolicy::Main, "page_permission_respond")
+        || shutdown_started(caller.app_handle())
+        || !bounded(&profile_id, MAX_ITEM_ID_BYTES)
+        || !bounded(&item_id, MAX_ITEM_ID_BYTES)
+    {
+        return rejected_operation();
+    }
+    let Some(profile) =
+        ProfileId::parse(&profile_id).filter(|profile| profile.to_string() == profile_id)
+    else {
+        return rejected_operation();
+    };
+    let Some(item) = ItemId::parse(&item_id).filter(|item| item.to_string() == item_id) else {
+        return rejected_operation();
+    };
+    let Some(request) = fixed_nonzero_hex(&request_id)
+        .and_then(zephium_core::permissions::PagePermissionRequestId::new)
+    else {
+        return rejected_operation();
+    };
+    let decision = match decision {
+        PagePermissionPromptDecisionInput::AllowOnce => PagePermissionPromptDecision::AllowOnce,
+        PagePermissionPromptDecisionInput::AlwaysAllow => PagePermissionPromptDecision::AlwaysAllow,
+        PagePermissionPromptDecisionInput::DenyOnce => PagePermissionPromptDecision::DenyOnce,
+        PagePermissionPromptDecisionInput::AlwaysDeny => PagePermissionPromptDecision::AlwaysDeny,
+    };
+    dispatch_operation(
+        caller.app_handle(),
+        &shell,
+        Command::RespondToPagePermissionPrompt {
+            profile,
+            item,
+            request,
+            decision,
         },
     )
 }
@@ -3835,6 +3902,12 @@ pub fn run() {
                     &emit_handle,
                     MAIN_LABEL,
                     EVENT_EXTENSION_RUNTIME_GRANT_PROMPT,
+                    &prompt,
+                ),
+                Projection::PagePermissionPrompt(prompt) => emit_to_privileged(
+                    &emit_handle,
+                    MAIN_LABEL,
+                    EVENT_PAGE_PERMISSION_PROMPT,
                     &prompt,
                 ),
                 Projection::UiCommand(id) => {

@@ -183,6 +183,7 @@ impl Shell {
         if effects.is_empty() {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);
         }
+        self.cancel_page_permission_for_item(id);
         mutation_result(self.commit(effects))
     }
 
@@ -197,6 +198,7 @@ impl Shell {
             );
         }
         self.cancel_discard_probe(id);
+        self.cancel_page_permission_for_item(id);
         if !self.items.tab(id).is_some_and(TabState::has_view) {
             let effects = self.items.ensure_view(id);
             if effects.is_empty() {
@@ -233,6 +235,7 @@ impl Shell {
             );
         }
         self.cancel_discard_probe(id);
+        self.cancel_page_permission_for_item(id);
         let admission = if forward {
             self.engine.go_forward(id)
         } else {

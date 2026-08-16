@@ -31,7 +31,8 @@ impl Shell {
         // alone cannot prevent a page from obscuring the prompt or receiving
         // input behind it. Remove content from the native stage and expand
         // privileged chrome for exactly the lifetime of the retained prompt.
-        let extension_consent_active = self.extension_runtime_grants.active().is_some();
+        let extension_consent_active =
+            self.extension_runtime_grants.active().is_some() || self.page_permissions.is_visible();
         // `Items` marks a prospective view resident before its CreateView
         // effect is dispatched. While the profile's first explicit native
         // policy is still compiling/installing, that effect is intentionally

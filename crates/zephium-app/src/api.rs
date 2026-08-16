@@ -20,6 +20,9 @@ use zephium_core::ports::extensions::{
     ExtensionRuntimeGrantRequestId, ExtensionSetEnabledOutcome, ExtensionUninstallOutcome,
 };
 use zephium_core::ports::store::Store;
+use zephium_core::ports::store::{
+    PagePermissionCatalogLoadOutcome, PagePermissionCatalogMutationOutcome,
+};
 use zephium_core::split::Axis;
 use zephium_ipc::{BlockerStatusView, Projection, TabView};
 
@@ -148,6 +151,17 @@ pub enum ShutdownOutcome {
     Unclean,
 }
 
+/// Browser-owned response vocabulary for one exact page capability request.
+/// `Always*` is authority to mutate the durable per-profile catalog; `*Once`
+/// never writes policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PagePermissionPromptDecision {
+    AllowOnce,
+    AlwaysAllow,
+    DenyOnce,
+    AlwaysDeny,
+}
+
 /// Ordered result of a trusted profile content-policy status query.
 #[must_use]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -260,6 +274,34 @@ pub enum Command {
         runtime: ExtensionRuntimeInstance,
         request: ExtensionRuntimeGrantRequestId,
         allow: bool,
+    },
+    /// Browser-owned response to the exact currently projected foreground
+    /// page request. Public composition wraps this in `Operation`.
+    RespondToPagePermissionPrompt {
+        profile: ProfileId,
+        item: ItemId,
+        request: zephium_core::permissions::PagePermissionRequestId,
+        decision: PagePermissionPromptDecision,
+    },
+    /// Internal callback from one admitted on-demand durable catalog read.
+    PagePermissionCatalogLoaded {
+        profile: ProfileId,
+        item: ItemId,
+        request: zephium_core::permissions::PagePermissionRequestId,
+        outcome: Box<PagePermissionCatalogLoadOutcome>,
+    },
+    /// Internal callback from one admitted remembered-decision mutation.
+    PagePermissionCatalogMutated {
+        profile: ProfileId,
+        item: ItemId,
+        request: zephium_core::permissions::PagePermissionRequestId,
+        outcome: Box<PagePermissionCatalogMutationOutcome>,
+    },
+    /// Hard Shell-side bound shorter than the native completion watchdog.
+    PagePermissionTimeout {
+        profile: ProfileId,
+        item: ItemId,
+        request: zephium_core::permissions::PagePermissionRequestId,
     },
     /// Internal exactly-once handoff from an admitted extension-service
     /// management callback. It is never accepted through public operation

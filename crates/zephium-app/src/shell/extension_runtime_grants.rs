@@ -134,6 +134,7 @@ impl Shell {
         let prompt_was_visible = self.extension_runtime_grants.active().is_some();
         if !self.extension_startup_ready
             || self.extension_lifecycle_terminal
+            || self.page_permissions.has_pending()
             || !self.extension_runtime_grants.admit(prompt.clone())
         {
             let _ = self.settle_native_runtime_grant_prompt(

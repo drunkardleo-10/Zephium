@@ -17,6 +17,9 @@ use zephium_core::ports::engine::{
 };
 use zephium_core::ports::extensions::ExtensionRuntimeGrantPromptSettlement;
 use zephium_core::ports::store::{BlockerConfigLoadOutcome, BlockerConfigUpdateOutcome};
+use zephium_core::ports::store::{
+    PagePermissionCatalogLoadOutcome, PagePermissionCatalogMutationOutcome,
+};
 use zephium_core::session::{
     PersistedItem, PersistedKind, PersistedProfile, PersistedSpace, SessionState,
 };
@@ -1082,6 +1085,16 @@ pub(crate) struct FakeStore {
     authorized_sessions: Mutex<Vec<(ProfileId, SessionState)>>,
     finalize_outcomes: Mutex<VecDeque<ProfileDeletionFinalizeOutcome>>,
     finalize_unknown_completes: std::sync::atomic::AtomicBool,
+    page_permission_load_outcomes: Mutex<VecDeque<PagePermissionCatalogLoadOutcome>>,
+    page_permission_mutation_outcomes: Mutex<VecDeque<PagePermissionCatalogMutationOutcome>>,
+    page_permission_load_calls: Mutex<Vec<ProfileId>>,
+    page_permission_mutation_calls: Mutex<
+        Vec<(
+            ProfileId,
+            zephium_core::permissions::PagePermissionCatalogRevision,
+            zephium_core::permissions::PagePermissionPatch,
+        )>,
+    >,
 }
 
 impl FakeStore {
@@ -1107,6 +1120,46 @@ impl FakeStore {
 }
 
 impl Store for FakeStore {
+    fn load_page_permission_catalog(
+        &self,
+        profile: ProfileId,
+        done: Box<dyn FnOnce(PagePermissionCatalogLoadOutcome) + Send>,
+    ) -> bool {
+        self.page_permission_load_calls
+            .lock()
+            .unwrap()
+            .push(profile);
+        let outcome = self
+            .page_permission_load_outcomes
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or(PagePermissionCatalogLoadOutcome::Failed);
+        done(outcome);
+        true
+    }
+
+    fn mutate_page_permission_catalog(
+        &self,
+        profile: ProfileId,
+        expected: zephium_core::permissions::PagePermissionCatalogRevision,
+        patch: zephium_core::permissions::PagePermissionPatch,
+        done: Box<dyn FnOnce(PagePermissionCatalogMutationOutcome) + Send>,
+    ) -> bool {
+        self.page_permission_mutation_calls
+            .lock()
+            .unwrap()
+            .push((profile, expected, patch));
+        let outcome = self
+            .page_permission_mutation_outcomes
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or(PagePermissionCatalogMutationOutcome::Failed);
+        done(outcome);
+        true
+    }
+
     fn save_session(&self, session: SessionState) {
         if let Some(order) = self.barrier_order.lock().unwrap().as_ref() {
             order.lock().unwrap().push("persist");
@@ -1541,6 +1594,7 @@ fn apply_projection(view: &mut ItemsState, p: Projection) {
         Projection::ExtensionActionFailed(_) => {}
         Projection::ExtensionManagement(_) => {}
         Projection::ExtensionRuntimeGrantPrompt(_) => {}
+        Projection::PagePermissionPrompt(_) => {}
         Projection::UiCommand(_) => {}
         Projection::Search(_) => {}
         Projection::Layout(_) => {}
@@ -1797,6 +1851,7 @@ mod favicons;
 #[path = "navigation.rs"]
 mod navigation_tests;
 mod operations;
+mod page_permissions;
 mod persistence;
 mod presentation;
 mod profile_deletion;

@@ -55,12 +55,7 @@ impl Shell {
                     profile,
                     request,
                 } => {
-                    let _ = self.engine.settle_page_permission_request(
-                        *profile,
-                        *id,
-                        request.id,
-                        zephium_core::permissions::PagePermissionRequestSettlement::Deny,
-                    );
+                    self.on_page_permission_request(*profile, *id, request.clone());
                     return;
                 }
                 _ => {
@@ -90,6 +85,24 @@ impl Shell {
             }
             crate::diagnostic!("engine: ignored native event for quarantined profile");
             return;
+        }
+        // Native navigation/teardown independently revokes its retained
+        // completion. Close the browser-owned surface in the same actor turn
+        // so stale consent never follows a document, renderer, or profile.
+        match &event {
+            EngineEvent::UrlChanged { id, .. }
+            | EngineEvent::PresentationPending { id, .. }
+            | EngineEvent::PresentationReady { id, .. }
+            | EngineEvent::NavigationFailed { id, .. }
+            | EngineEvent::ViewCreationFailed { id }
+            | EngineEvent::Crashed { id }
+            | EngineEvent::ViewDiscarded { id, .. } => {
+                self.cancel_page_permission_for_item(*id);
+            }
+            EngineEvent::ProfileProcessExited { profile, .. } => {
+                self.cancel_page_permission_for_profile(*profile);
+            }
+            _ => {}
         }
         match event {
             EngineEvent::RuntimeRestartRequired => {
@@ -286,16 +299,7 @@ impl Shell {
                 profile,
                 request,
             } => {
-                // The durable catalog and prompt projection are wired in the
-                // next coordinator slice. Until then, complete every retained
-                // native request immediately and explicitly; never inherit a
-                // WebKit prompt or strand the completion behind this event.
-                let _ = self.engine.settle_page_permission_request(
-                    profile,
-                    id,
-                    request.id,
-                    zephium_core::permissions::PagePermissionRequestSettlement::Deny,
-                );
+                self.on_page_permission_request(profile, id, request);
             }
             EngineEvent::DownloadRequested { .. } => {}
             EngineEvent::PresentationPending {

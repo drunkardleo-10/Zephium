@@ -13,6 +13,7 @@ mod extension_repository_maintenance;
 mod extension_runtime_grants;
 mod favicons;
 mod operations;
+mod page_permissions;
 mod persistence;
 mod presentation;
 mod profile_deletion;
@@ -33,6 +34,7 @@ use extension_runtime_grants::ExtensionRuntimeGrantPromptState;
 use favicons::{origin_of, FaviconState};
 #[cfg(test)]
 use favicons::{FAVICON_POLL_DELAYS, ICON_CACHE_CAPACITY};
+use page_permissions::PagePermissionPromptState;
 #[cfg(test)]
 use presentation::PendingPresentation;
 use presentation::PresentationState;
@@ -56,6 +58,7 @@ use persistence::{PERSIST_DEBOUNCE, PERSIST_MAX_AGE, URL_CHECKPOINT_INTERVAL};
 #[cfg(test)]
 use crate::actor::{spawn, Handle, TryPushError};
 use crate::actor::{CallbackHandle, CommandQueue};
+use crate::api::PagePermissionPromptDecision;
 use crate::api::{
     ChromePresentation, ChromePresentationDispatch, Command, ContentPolicyStatusQueryOutcome,
     EmitFn, ExtensionLifecycle, ExtensionManagementCompletion, SharedBlocker, SharedChrome,
@@ -121,10 +124,11 @@ use zephium_ipc::{
     ExtensionManagementGrantView, ExtensionManagementLimitationView, ExtensionManagementPhase,
     ExtensionManagementRuntimeView, ExtensionManagementView, ExtensionRuntimeGrantPromptEntryView,
     ExtensionRuntimeGrantPromptView, ItemsState, LayoutState, OperationDisposition,
-    OperationOutcome, OperationReason, ProfileKindView, ProfileView, Projection,
-    RuntimeSecurityAdvisory, RuntimeSecurityAdvisoryKind, RuntimeSecurityUpdateTarget,
-    RuntimeStatus, SearchAction, SearchResult, SearchResults, SidebarNodeKindView, SidebarNodeView,
-    SidebarSectionView, SpaceView, SplitGroupView, TabView,
+    OperationOutcome, OperationReason, PagePermissionKindView, PagePermissionPromptEntryView,
+    PagePermissionPromptView, ProfileKindView, ProfileView, Projection, RuntimeSecurityAdvisory,
+    RuntimeSecurityAdvisoryKind, RuntimeSecurityUpdateTarget, RuntimeStatus, SearchAction,
+    SearchResult, SearchResults, SidebarNodeKindView, SidebarNodeView, SidebarSectionView,
+    SpaceView, SplitGroupView, TabView,
 };
 
 // More simultaneous native renderers are neither usable in the current tiled
@@ -183,6 +187,7 @@ pub struct Shell {
     extension_actions: ExtensionActionState,
     extension_management: ExtensionManagementState,
     extension_runtime_grants: ExtensionRuntimeGrantPromptState,
+    page_permissions: PagePermissionPromptState,
     /// A terminal maintenance settlement disables further periodic repository
     /// work until process restart; transient refusals retain the ordinary
     /// heartbeat retry path.
@@ -391,6 +396,7 @@ impl Shell {
             extension_actions: ExtensionActionState::default(),
             extension_management: ExtensionManagementState::default(),
             extension_runtime_grants: ExtensionRuntimeGrantPromptState::default(),
+            page_permissions: PagePermissionPromptState::default(),
             extension_repository_maintenance_failed_closed: false,
             extension_lifecycle_terminal: false,
             extension_startup_retry_exponent: 0,
@@ -486,6 +492,25 @@ impl Shell {
                     }
                     return;
                 }
+                if let Command::RespondToPagePermissionPrompt {
+                    profile,
+                    item,
+                    request,
+                    decision,
+                } = &command
+                {
+                    if let Some(mut completion) = self.begin_page_permission_response(
+                        operation_id.clone(),
+                        *profile,
+                        *item,
+                        *request,
+                        *decision,
+                    ) {
+                        completion.operation_id = operation_id;
+                        (self.emit)(Projection::OperationProcessed(completion));
+                    }
+                    return;
+                }
                 if let Command::DeleteProfile(profile) = &command {
                     let profile = *profile;
                     let mut completion =
@@ -575,6 +600,7 @@ impl Shell {
                         if let Some(active) = self.windows.focused().and_then(|w| w.active) {
                             self.touch(active);
                         }
+                        self.cancel_page_permission_if_not_foreground();
                     }
                     let _ = self.relayout();
                     self.maintain_views();
@@ -609,6 +635,24 @@ impl Shell {
             | Command::SetFocusedExtensionEnabled { .. }
             | Command::UninstallFocusedExtension { .. } => {}
             Command::RespondToExtensionRuntimeGrantPrompt { .. } => {}
+            Command::RespondToPagePermissionPrompt { .. } => {}
+            Command::PagePermissionCatalogLoaded {
+                profile,
+                item,
+                request,
+                outcome,
+            } => self.settle_page_permission_catalog_load(profile, item, request, *outcome),
+            Command::PagePermissionCatalogMutated {
+                profile,
+                item,
+                request,
+                outcome,
+            } => self.settle_page_permission_catalog_mutation(profile, item, request, *outcome),
+            Command::PagePermissionTimeout {
+                profile,
+                item,
+                request,
+            } => self.on_page_permission_timeout(profile, item, request),
             Command::SetExtensionManagementVisible(visible) => {
                 self.set_extension_management_visible(visible)
             }
@@ -740,6 +784,8 @@ impl Shell {
             self.retryable_shutdown_failure(ack);
             return;
         }
+
+        self.cancel_pending_page_permission_for_shutdown();
 
         let mut terminal_clean = true;
         if let Some(reads) = &self.store_reads {

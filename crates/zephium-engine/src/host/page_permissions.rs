@@ -30,7 +30,7 @@ use super::dispatch::{try_with, with_page_permission_terminal};
 use super::permits::EventPermit;
 use super::EngineHost;
 
-pub(super) const MAX_PENDING_PAGE_PERMISSION_REQUESTS: usize = 8;
+pub(super) use zephium_core::permissions::MAX_PENDING_PAGE_PERMISSION_REQUESTS;
 const PAGE_PERMISSION_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 struct PendingPagePermissionRequest {
