@@ -197,9 +197,17 @@ delegate for media capture, device orientation/motion, and file selection; optio
 dialog and popup methods are deliberately omitted so WebKit takes its cancel/no-dialog
 defaults. All privileged responses also deny ambient features through
 `Permissions-Policy` where the engine supports each directive. A bounded per-profile
-store for remembered HTTP(S) origin decisions exists, but no permission prompt or
-native request broker consumes it; every live request therefore remains denied. All
-downloads are disabled, so Zephium does not currently claim destination validation,
+store for remembered HTTP(S) origin decisions exists. Raw macOS media requests now
+cross a bounded native broker that uses WebKit's structured security origin, retains
+the native completion on the main thread, and binds it to the exact profile, item,
+physical view generation, and committed navigation. It has independent exact
+Shell, navigation, close/retirement, and 30-second timeout completion paths; malformed
+origin data, unsupported capabilities, overflow, stale identities, callback panic,
+and teardown all deny. Shell still denies every request immediately and does not read
+or mutate the durable catalog, so this infrastructure has not enabled a capability or
+native prompt. A live WKWebView media gate plus the crash-consistent prompt/store
+coordinator are required before that policy can change. All downloads are disabled,
+so Zephium does not currently claim destination validation,
 dangerous-file handling, Windows
 Mark-of-the-Web, or macOS quarantine. Linux also cancels privileged file-picker
 requests. Stable WebView2 exposes no supported file-chooser interception event, so a

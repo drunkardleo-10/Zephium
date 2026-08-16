@@ -469,6 +469,24 @@ The full surface is declared now; implementations land incrementally. Grouped:
   NavState{can_back, can_forward}, NewWindowRequested{url, disposition},
   PermissionRequested, DownloadRequested, Crashed.
 
+The macOS page-permission seam is origin-labelled and asynchronous without
+blocking WebKit's main thread. The pinned Wry adapter bounds native origin
+components before copying them, preserves a combined camera-and-microphone
+request as one atomic completion, retains at most four callbacks per WebView,
+and denies malformed metadata, overflow, handler panic, unknown settlement,
+and delegate teardown. Engine admission is stricter: at most one request per
+physical view and eight process-wide, bound to the exact profile, item,
+physical-view permit, and committed navigation epoch. Shell settlement,
+navigation, close/profile retirement, and a 30-second watchdog use an
+independent fixed terminal channel; an `Allow` is downgraded to denial after
+any identity or epoch change. Current Shell policy explicitly denies every
+delivered request, including pre-bootstrap and quarantined-profile events.
+The durable catalog therefore remains inactive authority until the bounded
+prompt/store coordinator lands; this seam does not yet claim user-visible page
+permission support. Unit and actor integration tests cover the typed boundary
+and cleanup delivery. A real WKWebView camera/microphone gate remains required
+before changing the product policy from deny-only.
+
 Session restore state (§7) rides on lifecycle (`opts` carries restore state).
 
 The built favicon path deliberately has no second Rust HTTP stack or native
