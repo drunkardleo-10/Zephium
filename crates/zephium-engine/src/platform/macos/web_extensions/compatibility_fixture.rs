@@ -246,6 +246,9 @@ fn admit(
     if admitted.surfaces.background != BackgroundAdaptation::ModuleWrapper
         || admitted.surfaces.isolated_content_scripts != 1
         || admitted.surfaces.action_popup != ActionPopupAdaptation::Absent
+        || admitted.surfaces.omitted_file_content_scripts != 0
+        || admitted.surfaces.removed_file_match_patterns != 0
+        || admitted.surfaces.same_document_navigation_routes != 0
     {
         return Err("compatibility fixture artifact surface contract drifted".into());
     }

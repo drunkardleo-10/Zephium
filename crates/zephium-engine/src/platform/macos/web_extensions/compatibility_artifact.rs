@@ -16,22 +16,28 @@ use zephium_extension_package::{
 };
 
 pub(super) const API_PRELUDE: &str = "__zephium__/webkit-api-v1.js";
+pub(super) const WEB_NAVIGATION_BRIDGE: &str = "__zephium__/webkit-web-navigation-v1.js";
 pub(super) const BACKGROUND_WRAPPER: &str = "__zephium_background_v1.js";
 
 const ARTIFACT_METADATA: &str = "ZEPHIUM-COMPATIBILITY.json";
 const ARTIFACT_INDEX: &str = "authenticated-extension-tree.json";
 const ARTIFACT_EXTENSION: &str = "extension";
 const ARTIFACT_KIND: &str = "zephium-macos-web-extension-compatibility-artifact";
-const ARTIFACT_TARGET: &str = "webkit-macos-native-v1";
-const ADAPTATIONS: [&str; 2] = [
+const ARTIFACT_TARGET: &str = "webkit-macos-native-v3";
+const ADAPTATIONS: [&str; 4] = [
     "native-api-identity-preservation-v1",
     "catalog-update-event-stub-v1",
+    "file-scheme-content-script-omission-v1",
+    "same-document-web-navigation-endpoint-v1",
 ];
-const LIMITATIONS: [&str; 4] = [
+const LIMITATIONS: [&str; 7] = [
     "not-a-product-package",
     "catalog-update-events-owned-by-zephium",
     "sandbox-pages-not-adapted",
     "non-action-extension-pages-not-adapted",
+    "file-scheme-content-scripts-omitted",
+    "same-document-web-navigation-limited-to-injected-frames",
+    "history-state-navigation-requires-host-signal",
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -78,6 +84,9 @@ pub(super) struct ArtifactSurfaces {
     pub(super) background: BackgroundAdaptation,
     pub(super) isolated_content_scripts: usize,
     pub(super) action_popup: ActionPopupAdaptation,
+    pub(super) omitted_file_content_scripts: usize,
+    pub(super) removed_file_match_patterns: usize,
+    pub(super) same_document_navigation_routes: usize,
 }
 
 #[derive(Debug)]
@@ -119,6 +128,9 @@ struct Surfaces {
     isolated_content_scripts: usize,
     action_popup: String,
     main_world_content_scripts: String,
+    omitted_file_content_scripts: usize,
+    removed_file_match_patterns: usize,
+    same_document_navigation_routes: usize,
 }
 
 pub(super) fn validate(root: &Path) -> Result<ValidatedCompatibilityArtifact, String> {
@@ -244,6 +256,9 @@ fn validate_surfaces(surfaces: Surfaces) -> Result<ArtifactSurfaces, String> {
         _ => return Err("compatibility artifact popup surface is invalid".into()),
     };
     if surfaces.isolated_content_scripts > MAX_EXTENSION_TREE_FILES
+        || surfaces.omitted_file_content_scripts > MAX_EXTENSION_TREE_FILES
+        || surfaces.removed_file_match_patterns > MAX_EXTENSION_TREE_FILES
+        || surfaces.same_document_navigation_routes > MAX_EXTENSION_TREE_FILES
         || surfaces.main_world_content_scripts != "unchanged"
     {
         return Err("compatibility artifact content-script surface is invalid".into());
@@ -252,6 +267,9 @@ fn validate_surfaces(surfaces: Surfaces) -> Result<ArtifactSurfaces, String> {
         background,
         isolated_content_scripts: surfaces.isolated_content_scripts,
         action_popup,
+        omitted_file_content_scripts: surfaces.omitted_file_content_scripts,
+        removed_file_match_patterns: surfaces.removed_file_match_patterns,
+        same_document_navigation_routes: surfaces.same_document_navigation_routes,
     })
 }
 

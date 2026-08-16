@@ -6,6 +6,7 @@
 //! sealing. Runtime code must never invoke this transform on caller-selected
 //! bytes.
 
+use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read as _, Write as _};
 #[cfg(unix)]
@@ -26,13 +27,16 @@ const ARTIFACT_KIND: &str = "zephium-macos-web-extension-compatibility-artifact"
 const ARTIFACT_METADATA: &str = "ZEPHIUM-COMPATIBILITY.json";
 const ARTIFACT_EXTENSION: &str = "extension";
 const ARTIFACT_TREE_INDEX: &str = "authenticated-extension-tree.json";
-const TARGET: &str = "webkit-macos-native-v1";
+const TARGET: &str = "webkit-macos-native-v3";
 const API_PRELUDE: &str = "__zephium__/webkit-api-v1.js";
+const WEB_NAVIGATION_BRIDGE: &str = "__zephium__/webkit-web-navigation-v1.js";
 const BACKGROUND_WRAPPER: &str = "__zephium_background_v1.js";
 const MAX_POPUP_HTML_BYTES: u64 = 2 * 1024 * 1024;
 
 const API_PRELUDE_SOURCE: &str =
     include_str!("../../crates/zephium-extension-package/assets/macos/webkit-api-v1.js");
+const WEB_NAVIGATION_BRIDGE_SOURCE: &str =
+    include_str!("../../crates/zephium-extension-package/assets/macos/webkit-web-navigation-v1.js");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum WorkerKind {
@@ -57,6 +61,17 @@ struct TransformPlan {
     background_wrapper: Option<Vec<u8>>,
     worker: WorkerKind,
     isolated_content_scripts: usize,
+    omitted_file_content_scripts: usize,
+    removed_file_match_patterns: usize,
+    same_document_navigation_routes: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct ContentScriptAdaptation {
+    isolated: usize,
+    omitted_file_entries: usize,
+    removed_file_patterns: usize,
+    same_document_navigation_routes: usize,
 }
 
 /// Materializes one deterministic, package-neutral compatibility artifact.
@@ -114,6 +129,13 @@ pub(crate) fn materialize(
         API_PRELUDE,
         API_PRELUDE_SOURCE.as_bytes(),
     )?;
+    if plan.same_document_navigation_routes != 0 {
+        write_new_file(
+            &staged_extension,
+            WEB_NAVIGATION_BRIDGE,
+            WEB_NAVIGATION_BRIDGE_SOURCE.as_bytes(),
+        )?;
+    }
     if let Some(wrapper) = plan.background_wrapper.as_deref() {
         write_new_file(&staged_extension, BACKGROUND_WRAPPER, wrapper)?;
     }
@@ -141,19 +163,27 @@ pub(crate) fn materialize(
         },
         "adaptations": [
             "native-api-identity-preservation-v1",
-            "catalog-update-event-stub-v1"
+            "catalog-update-event-stub-v1",
+            "file-scheme-content-script-omission-v1",
+            "same-document-web-navigation-endpoint-v1"
         ],
         "surfaces": {
             "background": plan.worker.label(),
             "isolated_content_scripts": plan.isolated_content_scripts,
             "action_popup": if plan.popup.is_some() { "explicit-head-injected" } else { "absent" },
             "main_world_content_scripts": "unchanged",
+            "omitted_file_content_scripts": plan.omitted_file_content_scripts,
+            "removed_file_match_patterns": plan.removed_file_match_patterns,
+            "same_document_navigation_routes": plan.same_document_navigation_routes,
         },
         "limitations": [
             "not-a-product-package",
             "catalog-update-events-owned-by-zephium",
             "sandbox-pages-not-adapted",
-            "non-action-extension-pages-not-adapted"
+            "non-action-extension-pages-not-adapted",
+            "file-scheme-content-scripts-omitted",
+            "same-document-web-navigation-limited-to-injected-frames",
+            "history-state-navigation-requires-host-signal"
         ],
     }))
     .map_err(|error| format!("cannot serialize compatibility artifact metadata: {error}"))?;
@@ -174,13 +204,16 @@ pub(crate) fn materialize(
     })?;
     sync_directory(parent)?;
     println!(
-        "macOS extension compatibility artifact materialized: target={TARGET}; source_tree={}; output_tree={}; files={}; bytes={}; background={}; isolated_content_scripts={}; action_popup={}; product_authority=false",
+        "macOS extension compatibility artifact materialized: target={TARGET}; source_tree={}; output_tree={}; files={}; bytes={}; background={}; isolated_content_scripts={}; omitted_file_content_scripts={}; removed_file_match_patterns={}; same_document_navigation_routes={}; action_popup={}; product_authority=false",
         lower_hex(source_index.tree_sha256().as_bytes()),
         lower_hex(generated.parsed.tree_sha256().as_bytes()),
         generated.parsed.files().len(),
         generated.parsed.total_bytes(),
         plan.worker.label(),
         plan.isolated_content_scripts,
+        plan.omitted_file_content_scripts,
+        plan.removed_file_match_patterns,
+        plan.same_document_navigation_routes,
         if plan.popup.is_some() { "injected" } else { "absent" },
     );
     Ok(())
@@ -201,8 +234,12 @@ fn build_plan(
         return Err("macOS compatibility transform requires Manifest V3".into());
     }
 
-    let isolated_content_scripts = adapt_content_scripts(&mut root, index)?;
-    let (worker, background_wrapper) = adapt_background(&mut root, index)?;
+    let bridge_same_document_navigation =
+        declares_permission(&root, "webNavigation") && root.get("background").is_some();
+    let content_scripts = adapt_content_scripts(&mut root, index, bridge_same_document_navigation)?;
+    let same_document_navigation_routes = content_scripts.same_document_navigation_routes;
+    let (worker, background_wrapper) =
+        adapt_background(&mut root, index, same_document_navigation_routes != 0)?;
     let popup_path = action_popup_path(&root)?;
     let popup = popup_path
         .map(|path| {
@@ -229,25 +266,72 @@ fn build_plan(
         popup,
         background_wrapper,
         worker,
-        isolated_content_scripts,
+        isolated_content_scripts: content_scripts.isolated,
+        omitted_file_content_scripts: content_scripts.omitted_file_entries,
+        removed_file_match_patterns: content_scripts.removed_file_patterns,
+        same_document_navigation_routes,
     })
+}
+
+fn declares_permission(root: &Map<String, Value>, expected: &str) -> bool {
+    root.get("permissions")
+        .and_then(Value::as_array)
+        .is_some_and(|permissions| {
+            permissions
+                .iter()
+                .any(|value| value.as_str() == Some(expected))
+        })
 }
 
 fn adapt_content_scripts(
     root: &mut Map<String, Value>,
     tree: &CanonicalExtensionTreeIndex,
-) -> Result<usize, String> {
+    bridge_same_document_navigation: bool,
+) -> Result<ContentScriptAdaptation, String> {
     let Some(scripts) = root.get_mut("content_scripts") else {
-        return Ok(0);
+        return Ok(ContentScriptAdaptation::default());
     };
     let scripts = scripts
         .as_array_mut()
         .ok_or_else(|| "extension content_scripts is not an array".to_owned())?;
-    let mut adapted = 0_usize;
-    for (index, script) in scripts.iter_mut().enumerate() {
-        let script = script
+    let mut result = ContentScriptAdaptation::default();
+    let mut retained = Vec::with_capacity(scripts.len());
+    let mut navigation_routes = Vec::new();
+    let mut navigation_route_keys = BTreeSet::new();
+    for (index, mut value) in std::mem::take(scripts).into_iter().enumerate() {
+        let script = value
             .as_object_mut()
             .ok_or_else(|| format!("content_scripts[{index}] is not an object"))?;
+        let (removed_matches, matches_empty) =
+            remove_file_scheme_patterns(script, index, "matches", true)?;
+        result.removed_file_patterns = result
+            .removed_file_patterns
+            .checked_add(removed_matches)
+            .ok_or_else(|| "file-scheme match-pattern count overflowed".to_owned())?;
+        if matches_empty {
+            result.omitted_file_entries = result
+                .omitted_file_entries
+                .checked_add(1)
+                .ok_or_else(|| "file-only content-script count overflowed".to_owned())?;
+            continue;
+        }
+        let (removed_exclusions, exclusions_empty) =
+            remove_file_scheme_patterns(script, index, "exclude_matches", false)?;
+        result.removed_file_patterns = result
+            .removed_file_patterns
+            .checked_add(removed_exclusions)
+            .ok_or_else(|| "file-scheme match-pattern count overflowed".to_owned())?;
+        if exclusions_empty {
+            script.remove("exclude_matches");
+        }
+        if bridge_same_document_navigation {
+            let route = same_document_navigation_route(script);
+            let key = serde_json::to_string(&route)
+                .map_err(|error| format!("cannot serialize WebKit navigation route: {error}"))?;
+            if navigation_route_keys.insert(key) {
+                navigation_routes.push(route);
+            }
+        }
         let world = script
             .get("world")
             .map(|value| {
@@ -258,6 +342,7 @@ fn adapt_content_scripts(
             .transpose()?
             .unwrap_or("ISOLATED");
         if world == "MAIN" {
+            retained.push(value);
             continue;
         }
         if world != "ISOLATED" {
@@ -266,12 +351,14 @@ fn adapt_content_scripts(
             ));
         }
         let Some(javascript) = script.get_mut("js") else {
+            retained.push(value);
             continue;
         };
         let javascript = javascript
             .as_array_mut()
             .ok_or_else(|| format!("content_scripts[{index}].js is not an array"))?;
         if javascript.is_empty() {
+            retained.push(value);
             continue;
         }
         for (script_index, value) in javascript.iter().enumerate() {
@@ -285,16 +372,93 @@ fn adapt_content_scripts(
             )?;
         }
         javascript.insert(0, Value::String(API_PRELUDE.to_owned()));
-        adapted = adapted
+        result.isolated = result
+            .isolated
             .checked_add(1)
             .ok_or_else(|| "content-script adaptation count overflowed".to_owned())?;
+        retained.push(value);
     }
-    Ok(adapted)
+    result.same_document_navigation_routes = navigation_routes.len();
+    let generated = navigation_routes
+        .into_iter()
+        .map(|route| {
+            let mut isolated = route;
+            isolated.insert(
+                "js".to_owned(),
+                Value::Array(vec![
+                    Value::String(API_PRELUDE.to_owned()),
+                    Value::String(WEB_NAVIGATION_BRIDGE.to_owned()),
+                ]),
+            );
+            Value::Object(isolated)
+        })
+        .collect::<Vec<_>>();
+    *scripts = generated.into_iter().chain(retained).collect();
+    Ok(result)
+}
+
+fn same_document_navigation_route(script: &Map<String, Value>) -> Map<String, Value> {
+    const ROUTING_FIELDS: [&str; 7] = [
+        "matches",
+        "exclude_matches",
+        "include_globs",
+        "exclude_globs",
+        "all_frames",
+        "match_about_blank",
+        "match_origin_as_fallback",
+    ];
+    let mut route = Map::new();
+    for field in ROUTING_FIELDS {
+        if let Some(value) = script.get(field) {
+            route.insert(field.to_owned(), value.clone());
+        }
+    }
+    route.insert(
+        "run_at".to_owned(),
+        Value::String("document_start".to_owned()),
+    );
+    route
+}
+
+fn remove_file_scheme_patterns(
+    script: &mut Map<String, Value>,
+    script_index: usize,
+    field: &str,
+    required: bool,
+) -> Result<(usize, bool), String> {
+    let Some(patterns) = script.get_mut(field) else {
+        if required {
+            return Err(format!("content_scripts[{script_index}] omitted {field}"));
+        }
+        return Ok((0, false));
+    };
+    let patterns = patterns
+        .as_array_mut()
+        .ok_or_else(|| format!("content_scripts[{script_index}].{field} is not an array"))?;
+    if required && patterns.is_empty() {
+        return Err(format!("content_scripts[{script_index}].{field} is empty"));
+    }
+    let before = patterns.len();
+    for pattern in patterns.iter() {
+        if pattern.as_str().is_none() {
+            return Err(format!(
+                "content_scripts[{script_index}].{field} contains a non-string"
+            ));
+        }
+    }
+    patterns.retain(|pattern| {
+        !pattern
+            .as_str()
+            .expect("pattern type checked above")
+            .starts_with("file:")
+    });
+    Ok((before - patterns.len(), patterns.is_empty()))
 }
 
 fn adapt_background(
     root: &mut Map<String, Value>,
     tree: &CanonicalExtensionTreeIndex,
+    bridge_same_document_navigation: bool,
 ) -> Result<(WorkerKind, Option<Vec<u8>>), String> {
     let Some(background) = root.get_mut("background") else {
         return Ok((WorkerKind::Absent, None));
@@ -322,13 +486,28 @@ fn adapt_background(
     let wrapper = match kind {
         WorkerKind::Classic => {
             let prelude = js_string(&format!("/{API_PRELUDE}"))?;
+            let navigation = bridge_same_document_navigation
+                .then(|| js_string(&format!("/{WEB_NAVIGATION_BRIDGE}")))
+                .transpose()?;
             let original = js_string(&format!("/{original}"))?;
-            format!("importScripts({prelude}, {original});\n")
+            let imports = navigation.map_or_else(
+                || format!("{prelude}, {original}"),
+                |navigation| format!("{prelude}, {navigation}, {original}"),
+            );
+            format!("importScripts({imports});\n")
         }
         WorkerKind::Module => {
             let prelude = js_string(&format!("./{API_PRELUDE}"))?;
+            let navigation = bridge_same_document_navigation
+                .then(|| js_string(&format!("./{WEB_NAVIGATION_BRIDGE}")))
+                .transpose()?;
             let original = js_string(&format!("./{original}"))?;
-            format!("import {prelude};\nimport {original};\n")
+            let mut wrapper = format!("import {prelude};\n");
+            if let Some(navigation) = navigation {
+                wrapper.push_str(&format!("import {navigation};\n"));
+            }
+            wrapper.push_str(&format!("import {original};\n"));
+            wrapper
         }
         WorkerKind::Absent => unreachable!(),
     };
@@ -505,9 +684,12 @@ fn enforce_output_budgets(
     source: &CanonicalExtensionTreeIndex,
     plan: &TransformPlan,
 ) -> Result<(), String> {
-    let added_files = 1_usize + usize::from(plan.background_wrapper.is_some());
+    let added_files = 1_usize
+        + usize::from(plan.background_wrapper.is_some())
+        + usize::from(plan.same_document_navigation_routes != 0);
+    let added_entries = 3_usize + usize::from(plan.same_document_navigation_routes != 0);
     if source.files().len().saturating_add(added_files) > MAX_EXTENSION_TREE_FILES
-        || source.total_entry_count().saturating_add(3) > MAX_EXTENSION_TREE_ENTRIES
+        || source.total_entry_count().saturating_add(added_entries) > MAX_EXTENSION_TREE_ENTRIES
     {
         return Err("adapted extension exceeds the tree entry ceiling".into());
     }
@@ -515,6 +697,8 @@ fn enforce_output_budgets(
         Some(plan.manifest.as_slice()),
         plan.popup.as_ref().map(|(_, bytes)| bytes.as_slice()),
         Some(API_PRELUDE_SOURCE.as_bytes()),
+        (plan.same_document_navigation_routes != 0)
+            .then_some(WEB_NAVIGATION_BRIDGE_SOURCE.as_bytes()),
         plan.background_wrapper.as_deref(),
     ]
     .into_iter()
@@ -541,6 +725,14 @@ fn enforce_output_budgets(
                 .map_or(0, |(_, bytes)| bytes.len() as u64),
         )
         .and_then(|bytes| bytes.checked_add(API_PRELUDE_SOURCE.len() as u64))
+        .and_then(|bytes| {
+            let navigation_bytes = if plan.same_document_navigation_routes != 0 {
+                WEB_NAVIGATION_BRIDGE_SOURCE.len() as u64
+            } else {
+                0
+            };
+            bytes.checked_add(navigation_bytes)
+        })
         .and_then(|bytes| {
             bytes.checked_add(
                 plan.background_wrapper
@@ -785,6 +977,99 @@ mod tests {
     }
 
     #[test]
+    fn web_navigation_bridge_is_isolated_deduplicated_and_loaded_before_the_worker() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir(&source).unwrap();
+        let index = fixture(
+            &source,
+            Some("module"),
+            b"<!doctype html><html><head></head><body></body></html>",
+        );
+        let manifest_path = source.join("manifest.json");
+        let mut manifest: Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["permissions"] = serde_json::json!(["webNavigation"]);
+        manifest["content_scripts"][1]["matches"] = serde_json::json!(["https://main.example/*"]);
+        manifest["content_scripts"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "matches": ["https://example.com/*"],
+                "js": ["isolated-two.js"]
+            }));
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        write(
+            &source,
+            "isolated-two.js",
+            b"globalThis.isolatedTwoLoaded = true;",
+        );
+        fs::remove_file(&index).unwrap();
+        fs::write(
+            &index,
+            extension_tree::build_tree_index(&source).unwrap().bytes,
+        )
+        .unwrap();
+
+        let output = temp.path().join("output");
+        materialize(&source, &index, &output).unwrap();
+        let extension = output.join(ARTIFACT_EXTENSION);
+        let adapted: Value =
+            serde_json::from_slice(&fs::read(extension.join("manifest.json")).unwrap()).unwrap();
+        let scripts = adapted["content_scripts"].as_array().unwrap();
+        assert_eq!(scripts.len(), 5);
+        assert_eq!(
+            scripts[0]["js"],
+            serde_json::json!([API_PRELUDE, WEB_NAVIGATION_BRIDGE])
+        );
+        assert_eq!(
+            scripts[0]["matches"],
+            serde_json::json!(["https://example.com/*"])
+        );
+        assert_eq!(scripts[0]["run_at"], serde_json::json!("document_start"));
+        assert!(scripts[0].get("world").is_none());
+        assert_eq!(
+            scripts[1]["js"],
+            serde_json::json!([API_PRELUDE, WEB_NAVIGATION_BRIDGE])
+        );
+        assert_eq!(
+            scripts[1]["matches"],
+            serde_json::json!(["https://main.example/*"])
+        );
+        assert!(scripts[1].get("world").is_none());
+        assert_eq!(
+            scripts[2]["js"],
+            serde_json::json!([API_PRELUDE, "isolated.js"])
+        );
+        assert_eq!(scripts[3]["world"], serde_json::json!("MAIN"));
+        assert_eq!(scripts[3]["js"], serde_json::json!(["main.js"]));
+        assert_eq!(
+            scripts[4]["js"],
+            serde_json::json!([API_PRELUDE, "isolated-two.js"])
+        );
+
+        let wrapper = fs::read_to_string(extension.join(BACKGROUND_WRAPPER)).unwrap();
+        assert_eq!(
+            wrapper,
+            format!(
+                "import \"./{API_PRELUDE}\";\nimport \"./{WEB_NAVIGATION_BRIDGE}\";\nimport \"./worker.js\";\n"
+            )
+        );
+        assert_eq!(
+            fs::read(extension.join(WEB_NAVIGATION_BRIDGE)).unwrap(),
+            WEB_NAVIGATION_BRIDGE_SOURCE.as_bytes()
+        );
+        let metadata: Value =
+            serde_json::from_slice(&fs::read(output.join(ARTIFACT_METADATA)).unwrap()).unwrap();
+        assert_eq!(metadata["target"], serde_json::json!(TARGET));
+        assert_eq!(
+            metadata["surfaces"]["same_document_navigation_routes"],
+            serde_json::json!(2)
+        );
+        extension_tree::verify_closed_tree(&extension, &output.join(ARTIFACT_TREE_INDEX)).unwrap();
+    }
+
+    #[test]
     fn source_drift_reserved_paths_and_ambiguous_popups_fail_closed() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("source");
@@ -825,7 +1110,7 @@ mod tests {
             "background".into(),
             serde_json::json!({"service_worker":"workers/original.js"}),
         );
-        let (kind, wrapper) = adapt_background(&mut root, &tree).unwrap();
+        let (kind, wrapper) = adapt_background(&mut root, &tree, false).unwrap();
         assert_eq!(kind, WorkerKind::Classic);
         assert_eq!(
             String::from_utf8(wrapper.unwrap()).unwrap(),
@@ -836,5 +1121,50 @@ mod tests {
         assert!(adapted.contains(&format!(
             "<head data-value='>'><script src=\"/{API_PRELUDE}\"></script><title>"
         )));
+    }
+
+    #[test]
+    fn file_only_content_scripts_are_omitted_without_touching_web_scripts() {
+        let temp = tempfile::tempdir().unwrap();
+        write(temp.path(), "manifest.json", b"{}");
+        write(temp.path(), "web.js", b"void 0;");
+        let tree = extension_tree::build_tree_index(temp.path())
+            .unwrap()
+            .parsed;
+        let mut root = serde_json::json!({
+            "content_scripts": [
+                {
+                    "matches": ["file:///", "file:///*/"],
+                    "css": ["file.css"]
+                },
+                {
+                    "matches": ["file:///*", "https://example.com/*"],
+                    "exclude_matches": ["file:///private/*"],
+                    "js": ["web.js"]
+                }
+            ]
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
+        let adaptation = adapt_content_scripts(&mut root, &tree, false).unwrap();
+        assert_eq!(
+            adaptation,
+            ContentScriptAdaptation {
+                isolated: 1,
+                omitted_file_entries: 1,
+                removed_file_patterns: 4,
+                same_document_navigation_routes: 0,
+            }
+        );
+        let scripts = root["content_scripts"].as_array().unwrap();
+        assert_eq!(scripts.len(), 1);
+        assert_eq!(
+            scripts[0]["matches"],
+            serde_json::json!(["https://example.com/*"])
+        );
+        assert!(scripts[0].get("exclude_matches").is_none());
+        assert_eq!(scripts[0]["js"], serde_json::json!([API_PRELUDE, "web.js"]));
     }
 }

@@ -2,7 +2,7 @@
 //!
 //! The browser runtime in this module is target-agnostic. The pinned contract
 //! exists only to make one external experiment reproducible: unmodified Proton
-//! Pass 1.38.2 from its signed Chrome Web Store CRX. No production entry point
+//! Pass 1.39.0 from its signed Chrome Web Store CRX. No production entry point
 //! selects, downloads, admits, or special-cases this extension.
 
 use std::fs;
@@ -36,16 +36,16 @@ use super::super::extensions::MacosNativeApiPermission as Permission;
 use crate::MacosStockPasswordManagerProbeMode as ProbeMode;
 
 const DISPLAY_NAME: &str = "Proton Pass: Free Password Manager";
-const VERSION: &str = "1.38.2";
-const CONTEXT_IDENTIFIER: &str = "zephium-stock-proton-pass-1-38-2-probe";
-const EXPECTED_FILE_COUNT: usize = 275;
-const EXPECTED_TOTAL_BYTES: u64 = 20_124_326;
+const VERSION: &str = "1.39.0";
+const CONTEXT_IDENTIFIER: &str = "zephium-stock-proton-pass-1-39-0-probe";
+const EXPECTED_FILE_COUNT: usize = 276;
+const EXPECTED_TOTAL_BYTES: u64 = 21_512_233;
 const EXPECTED_INDEX_SHA256: &str =
-    "d47a1dff312be72ed4d2fbd42a5c6ec1f5e16a07145239b1ea82b2db5fb26fcb";
+    "451ef9fd5c383eb3976d91ffbc5fb807833f115ad2d3ecbd8993b233527e8bc6";
 const EXPECTED_TREE_SHA256: &str =
-    "37c854a8bda6b9da1ead7e2b9259f91fe72adeccf5a8ef6c9f198d8ea18dcf6a";
+    "894dadc936b4c462e35981bc04d9e169a9d61989889c1747a2117c28f8c7f1ea";
 const EXPECTED_MANIFEST_SHA256: &str =
-    "13f15ff5acc3fc8a58b237118ff7b270c33a801ae433e1e367d4f99f4f0d4311";
+    "806fd0a0162a88eef12ae3d37fb6f4ec748d4f668fe3dbe95d023f8d19ef8556";
 const EXPECTED_WASM_FILES: usize = 5;
 const PAGE_READY_TITLE: &str = "zephium-stock-password-page-ready";
 const PAGE_STATE_PREFIX: &str = "ZEPHIUM_STOCK_PAGE_STATE:";
@@ -57,14 +57,14 @@ const WEBKIT_BACKGROUND_WRAPPER: &str = "zephium-webkit-background-wrapper.js";
 const WEBKIT_API_COMPATIBILITY_ATTRIBUTE: &str = "data-zephium-webkit-api-compatibility";
 const COMPATIBILITY_SYMBOL: &str = "zephium.webkit-api-compatibility.v1";
 const COMPATIBILITY_MODE_SYMBOL: &str = "zephium.webkit-api-compatibility.mode.v1";
-const EXPECTED_COMPATIBILITY_FILE_COUNT: usize = 277;
-const EXPECTED_COMPATIBILITY_TOTAL_BYTES: u64 = 20_126_819;
+const EXPECTED_COMPATIBILITY_FILE_COUNT: usize = 279;
+const EXPECTED_COMPATIBILITY_TOTAL_BYTES: u64 = 21_520_099;
 const EXPECTED_COMPATIBILITY_INDEX_SHA256: &str =
-    "455356194b367fe983e1e341eb1066cd9118307381422e9467c95e3205085355";
+    "629a580718a626497bd15407fe470b4526ee435cda8ff88011e1ac6fa66ef081";
 const EXPECTED_COMPATIBILITY_TREE_SHA256: &str =
-    "92bc016384e69ab91a1166b3c84a1c6ac0cd9aaf0d83bdbff6949c6f49b5a810";
+    "faa9115baeaabe8206168b9896dde0136e4e76ca05abaa07c7d636320692653f";
 const EXPECTED_COMPATIBILITY_MANIFEST_SHA256: &str =
-    "7b060e20e884b1acacf1e9379cc4dbef1510d2cbc8ece940e6be4e03bdc94135";
+    "610a21b051309da265acbabc7464f546f11889bea5e52e84bda4d6dc0bbeafe2";
 const WEBKIT_API_PRELUDE_SOURCE: &str = r#"(() => {
   'use strict';
   const nativeApi = globalThis.browser;
@@ -404,6 +404,9 @@ fn admit_compatibility_artifact(root: &Path) -> Result<AdmittedStockArtifact, St
         || artifact.surfaces.isolated_content_scripts != 1
         || artifact.surfaces.action_popup
             != super::compatibility_artifact::ActionPopupAdaptation::ExplicitHeadInjected
+        || artifact.surfaces.omitted_file_content_scripts != 0
+        || artifact.surfaces.removed_file_match_patterns != 0
+        || artifact.surfaces.same_document_navigation_routes != 2
     {
         return Err("stock compatibility artifact surface contract drifted".into());
     }
@@ -681,15 +684,27 @@ fn validate_compatibility_manifest(path: &Path) -> Result<(), String> {
         .pointer("/content_scripts")
         .and_then(Value::as_array)
         .ok_or_else(|| "compatibility artifact manifest has no content-script array".to_owned())?;
-    if scripts.len() != 2
+    if scripts.len() != 4
         || scripts[0].pointer("/js/0").and_then(Value::as_str)
             != Some(super::compatibility_artifact::API_PRELUDE)
-        || scripts[0].pointer("/js/1").and_then(Value::as_str) != Some("orchestrator.js")
+        || scripts[0].pointer("/js/1").and_then(Value::as_str)
+            != Some(super::compatibility_artifact::WEB_NAVIGATION_BRIDGE)
         || scripts[0].pointer("/js/2").is_some()
         || scripts[0].get("all_frames").and_then(Value::as_bool) != Some(true)
-        || scripts[1].pointer("/js/0").and_then(Value::as_str) != Some("webauthn.js")
-        || scripts[1].pointer("/js/1").is_some()
-        || scripts[1].get("world").and_then(Value::as_str) != Some("MAIN")
+        || scripts[1].pointer("/js/0").and_then(Value::as_str)
+            != Some(super::compatibility_artifact::API_PRELUDE)
+        || scripts[1].pointer("/js/1").and_then(Value::as_str)
+            != Some(super::compatibility_artifact::WEB_NAVIGATION_BRIDGE)
+        || scripts[1].pointer("/js/2").is_some()
+        || scripts[1].get("all_frames").and_then(Value::as_bool) != Some(false)
+        || scripts[2].pointer("/js/0").and_then(Value::as_str)
+            != Some(super::compatibility_artifact::API_PRELUDE)
+        || scripts[2].pointer("/js/1").and_then(Value::as_str) != Some("orchestrator.js")
+        || scripts[2].pointer("/js/2").is_some()
+        || scripts[2].get("all_frames").and_then(Value::as_bool) != Some(true)
+        || scripts[3].pointer("/js/0").and_then(Value::as_str) != Some("webauthn.js")
+        || scripts[3].pointer("/js/1").is_some()
+        || scripts[3].get("world").and_then(Value::as_str) != Some("MAIN")
     {
         return Err("compatibility artifact content-script contract drifted".into());
     }
