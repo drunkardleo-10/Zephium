@@ -4,6 +4,7 @@ mod adblock_provenance;
 mod bitwarden_core;
 mod blocker_seed;
 mod crx3;
+mod extension_release;
 mod extension_runtime_acquisition_boundary;
 mod extension_tree;
 mod macos_extension_compatibility;
@@ -125,6 +126,23 @@ fn main() {
                 exit(1);
             }
         }
+        Some("prepare-extension-crx3-release-archive")
+            if arguments.len() == 9
+                && arguments[1] == "--extension"
+                && arguments[3] == "--tree-index"
+                && arguments[5] == "--public-key"
+                && arguments[7] == "--output" =>
+        {
+            if let Err(error) = extension_release::prepare(
+                std::path::Path::new(&arguments[2]),
+                std::path::Path::new(&arguments[4]),
+                std::path::Path::new(&arguments[6]),
+                std::path::Path::new(&arguments[8]),
+            ) {
+                eprintln!("extension CRX3 release-archive preparation failed: {error}");
+                exit(1);
+            }
+        }
         Some("index-extension-probe-tree")
             if arguments.len() == 5
                 && arguments[1] == "--extension"
@@ -223,7 +241,7 @@ fn main() {
         Some("check-webview2-floor") => check_engine_floors(),
         _ => {
             eprintln!(
-                "usage: cargo xtask <ci|check-engine-floors|check-release-engine-security|check-advisory-exceptions|check-security-fork-locks|check-native-adapter-locks|check-blocker-security-fork|check-extension-runtime-host-assembler|check-extension-runtime-acquisition-boundary|check-webview2-extension-boundary|check-macos-extension-compatibility-asset|measure-macos-extension-product|check-blocker-seed|check-crx3 --archive PATH --expected-id ID|materialize-crx3-probe --archive PATH --expected-id ID --output PATH|prepare-extension-crx3-signing-message --archive PATH --public-key PATH --output PATH|assemble-extension-crx3 --archive PATH --public-key PATH --signature PATH --output PATH|index-extension-probe-tree --extension PATH --output PATH|materialize-macos-extension-compatibility --extension PATH --tree-index PATH --output PATH|check-bitwarden-core-source --source PATH|materialize-bitwarden-core-macos-probe-overlay --source PATH --output PATH|finalize-bitwarden-core-macos-probe-artifact --build PATH --output PATH [--wasm-response-mime-adapter]|materialize-blocker-seed-webkit --output PATH|update-blocker-seed --easylist PATH --easyprivacy PATH --license PATH|check-webview2-floor>"
+                "usage: cargo xtask <ci|check-engine-floors|check-release-engine-security|check-advisory-exceptions|check-security-fork-locks|check-native-adapter-locks|check-blocker-security-fork|check-extension-runtime-host-assembler|check-extension-runtime-acquisition-boundary|check-webview2-extension-boundary|check-macos-extension-compatibility-asset|measure-macos-extension-product|check-blocker-seed|check-crx3 --archive PATH --expected-id ID|materialize-crx3-probe --archive PATH --expected-id ID --output PATH|prepare-extension-crx3-signing-message --archive PATH --public-key PATH --output PATH|assemble-extension-crx3 --archive PATH --public-key PATH --signature PATH --output PATH|prepare-extension-crx3-release-archive --extension PATH --tree-index PATH --public-key PATH --output PATH|index-extension-probe-tree --extension PATH --output PATH|materialize-macos-extension-compatibility --extension PATH --tree-index PATH --output PATH|check-bitwarden-core-source --source PATH|materialize-bitwarden-core-macos-probe-overlay --source PATH --output PATH|finalize-bitwarden-core-macos-probe-artifact --build PATH --output PATH [--wasm-response-mime-adapter]|materialize-blocker-seed-webkit --output PATH|update-blocker-seed --easylist PATH --easyprivacy PATH --license PATH|check-webview2-floor>"
             );
             exit(2);
         }

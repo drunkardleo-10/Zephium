@@ -11,6 +11,7 @@ blocker-seed-runtime = ["dep:zephium-blocker", "zephium-blocker/runtime"]
 blocker-seed-webkit = ["dep:zephium-blocker", "zephium-blocker/webkit"]
 
 [dependencies]
+base64.workspace = true
 zephium-core.workspace = true
 zephium-extension-acquisition = { path = "../crates/zephium-extension-acquisition", version = "=0.1.0" }
 zephium-extension-package = { path = "../crates/zephium-extension-package", version = "=0.1.0" }
@@ -21,7 +22,7 @@ serde_json.workspace = true
 sha2 = "=0.10.9"
 tempfile.workspace = true
 toml = "0.9"
+zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2"] }
 
 [dev-dependencies]
 ring.workspace = true
-zip = { version = "=8.6.0", default-features = false }

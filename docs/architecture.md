@@ -1444,18 +1444,32 @@ tree re-verification, atomic repository publication, and a live lease remain
 separate requirements.
 
 Adapted packages no longer require release tooling to hold a private signing
-key in Zephium code. `Crx3SigningRequest` borrows one bounded ZIP plus a
-canonical P-256 public SPKI, derives its stable Chromium identity, and exposes
-the CRX3 signature preimage as four ordered slices without copying the archive.
+key in Zephium code. Before signing,
+`cargo xtask prepare-extension-crx3-release-archive` accepts only an exact
+closed MV3 tree and its canonical index. It binds the external P-256 public
+SPKI into the manifest's canonical `key`, removes the extension's upstream
+`update_url`, strips only the two known Chrome Store verification files, and
+rejects every unknown `_metadata` member. It then re-indexes the output and
+emits a deterministic ZIP in canonical file order with fixed compression,
+timestamp, platform, and mode metadata. Its private staged output is published
+through a no-replace directory reservation whose incomplete marker is removed
+only after every component is durable. The accompanying evidence records both
+tree identities, the ZIP identity, the derived extension id, and the exact
+rewrites while explicitly declaring that signature, legal policy, catalog, and
+product authority remain unsettled.
+
+`Crx3SigningRequest` borrows that bounded ZIP plus the canonical P-256 public
+SPKI, derives its stable Chromium identity, and exposes the CRX3 signature
+preimage as four ordered slices without copying the archive.
 `cargo xtask prepare-extension-crx3-signing-message` streams that exact
 preimage into a private no-replace file for an external signer.
 `cargo xtask assemble-extension-crx3` accepts only the resulting ASN.1 ECDSA
 signature, constructs one proof, re-enters the ordinary CRX verifier, runs the
 complete acquired-ZIP preflight, and atomically publishes only after all of
 those checks pass. Neither command accepts a private key or overwrites an
-output. Both remain `product_authority=false`: deterministic ZIP construction,
-manifest-key rebinding, reviewed license/legal artifacts, exact catalog rows,
-sealed product anchors, and transport are still separate release work.
+output. All three commands remain `product_authority=false`: reviewed
+license/legal artifacts, exact catalog rows, sealed product anchors, and
+transport are still separate release work.
 
 The second stock-manager gate uses the unmodified Chrome Web Store CRX for
 [Proton Pass 1.39.0](https://chromewebstore.google.com/detail/proton-pass-free-password/ghmbeldphafepmbegfdlkpapadhbakde)

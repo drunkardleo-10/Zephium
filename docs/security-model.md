@@ -530,9 +530,21 @@ until every bounded ordinary file is durably written. These commands remain
 diagnostic and cannot mint a catalog release, materialization receipt, lease,
 grant, or runtime authority.
 Release-side CRX assembly uses the same verifier rather than a second trust
-definition. The encoder accepts only one canonical P-256 public SPKI and a
-bounded ZIP, retains no private key, and exposes a scatter/gather signature
-preimage so release infrastructure may sign outside the repository process.
+definition. Its preceding release-preparation boundary first verifies an exact
+closed MV3 tree, rewrites the manifest to the external public-key identity,
+removes upstream update authority, and removes only two named Store-generated
+metadata files; an unknown Store metadata member is a refusal rather than a
+silently unbound transform. It rebuilds the closed-tree index and a
+platform-independent deterministic ZIP, then cross-checks the ZIP's CRX3
+signing identity against the rewritten manifest before publishing. Publication
+reserves a new private directory without replacement and keeps a durable
+incomplete marker until the tree, index, ZIP, and non-authorizing evidence are
+settled. A source race, malformed MV3 manifest, unsupported key shape, output
+race, or size violation cannot produce a completed artifact.
+
+The encoder accepts only one canonical P-256 public SPKI and a bounded ZIP,
+retains no private key, and exposes a scatter/gather signature preimage so
+release infrastructure may sign outside the repository process.
 Finalization accepts only a raw ASN.1 ECDSA signature, constructs exactly one
 developer proof, verifies the complete result through `VerifiedCrx3Package`,
 then applies the hostile-ZIP preflight before no-replace publication. A wrong
