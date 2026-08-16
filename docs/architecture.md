@@ -482,7 +482,10 @@ independent fixed terminal channel; an `Allow` is downgraded to denial after
 any identity or epoch change.
 
 The Shell-side coordinator is also built, but remains a release-gated dormant
-path (`zephium-app/macos-page-permission-prompts` is not enabled by desktop).
+path. Desktop defaults do not enable it; the explicit
+`zephium-desktop/macos-page-permission-prompts` feature only forwards to the
+app feature so a packaged release candidate can exercise the gate without a
+second policy implementation.
 It loads the exact profile catalog only after a supported request from the
 focused resident tab, retains at most the two relevant rows, and serializes one
 browser-owned process-wide prompt. Navigation, tab/profile loss, window hide,
@@ -498,9 +501,24 @@ only one-time choices, and cannot be coerced into durable policy through IPC.
 Default product builds therefore continue to
 deny every request, including pre-bootstrap and quarantined-profile events.
 Unit, actor, IPC-binding, and frontend projection tests cover this dormant
-path. A real WKWebView camera/microphone gate on the supported security floor
-and packaged build remains required before desktop may enable the feature and
-claim user-visible page permission support.
+path. The feature-only `macos-page-permission-probe` adds a deterministic
+loopback-origin WKWebView gate to `cargo xtask ci`: it observes one atomic
+camera-and-microphone request, defers it, resolves exact Deny once, rejects a
+duplicate settlement, and requires JavaScript `NotAllowedError`. It never
+resolves Allow, so it neither claims device access nor closes the TCC gate. Run
+that focused gate with:
+
+```sh
+cargo run --locked -p zephium-engine --features native-page-permission-probes --bin macos-page-permission-probe
+```
+
+The macOS bundle now carries human-readable `NSCameraUsageDescription` and
+`NSMicrophoneUsageDescription` values, but metadata is not capability. A
+signed packaged build on the supported security floor must still prove camera,
+microphone, and atomic combined Allow/Deny, OS consent ordering, navigation and
+tab-close invalidation, remembered-policy reload, incognito non-persistence,
+and device-track cleanup before the desktop feature becomes a release default
+or Zephium claims user-visible page permission support.
 
 Session restore state (§7) rides on lifecycle (`opts` carries restore state).
 

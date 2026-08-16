@@ -212,10 +212,15 @@ exact post-mutation read; native Allow is impossible until every capability in t
 atomic request is durably observed as allowed. Navigation, focus loss, window hide,
 shutdown, Store ambiguity, or stale echo identity closes the prompt and denies. The
 ephemeral-profile projection offers no remember control, and Shell rejects a forged
-durable response without entering Store. The desktop product does not enable this
-feature, so shipped behavior remains deny-only.
-A live WKWebView media gate on the supported security floor and packaged build is
-required before that release capability can change. All downloads are disabled,
+durable response without entering Store. The desktop default does not enable this
+feature, so shipped behavior remains deny-only. Its explicit forwarding feature
+exists solely to build the packaged release-gate candidate. Unattended macOS CI runs
+a feature-only loopback probe that defers one atomic camera-and-microphone request,
+resolves exact Deny once, rejects duplicate settlement, and observes JavaScript
+`NotAllowedError`; it never supplies native Allow or accesses a device. The bundle
+includes camera and microphone usage descriptions, but those strings grant no
+authority. A signed packaged WKWebView/TCC gate on the supported security floor is
+still required before the release capability can change. All downloads are disabled,
 so Zephium does not currently claim destination validation,
 dangerous-file handling, Windows
 Mark-of-the-Web, or macOS quarantine. Linux also cancels privileged file-picker
