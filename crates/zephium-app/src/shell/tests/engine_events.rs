@@ -197,3 +197,46 @@ fn maintenance_reconciles_a_runtime_event_lost_before_shell_admission() {
 
     assert_eq!(*statuses.lock().unwrap(), vec![false, true]);
 }
+
+#[test]
+fn page_permission_completion_is_explicitly_denied_before_and_after_bootstrap() {
+    use zephium_core::permissions::{
+        PageOrigin, PagePermissionKind, PagePermissionRequest, PagePermissionRequestId,
+        PagePermissionRequestKind, PagePermissionRequestSettlement,
+    };
+
+    let (mut shell, engine, _screen) = setup();
+    let id = ItemId::from(90_001);
+    let profile = ProfileId::from(90_002);
+    let event = |request| EngineEvent::PermissionRequested {
+        id,
+        profile,
+        request: PagePermissionRequest {
+            id: PagePermissionRequestId::new(request).unwrap(),
+            origin: PageOrigin::parse_exact("https://permissions.example").unwrap(),
+            kind: PagePermissionRequestKind::Single(PagePermissionKind::Camera),
+        },
+    };
+
+    shell.handle(Command::Engine(event(1)));
+    shell.handle(Command::Bootstrap);
+    shell.handle(Command::Engine(event(2)));
+
+    assert_eq!(
+        engine.page_permission_settlements(),
+        vec![
+            (
+                profile,
+                id,
+                PagePermissionRequestId::new(1).unwrap(),
+                PagePermissionRequestSettlement::Deny,
+            ),
+            (
+                profile,
+                id,
+                PagePermissionRequestId::new(2).unwrap(),
+                PagePermissionRequestSettlement::Deny,
+            ),
+        ]
+    );
+}

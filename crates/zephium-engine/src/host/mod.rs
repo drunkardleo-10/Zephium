@@ -10,6 +10,8 @@ mod extensions;
 mod lifecycle;
 mod navigation;
 mod page_ops;
+#[cfg(target_os = "macos")]
+mod page_permissions;
 mod permits;
 mod profiles;
 mod resources;
@@ -24,6 +26,8 @@ pub(crate) use dispatch::with_extension_action_popup_terminal;
 pub(crate) use dispatch::with_extension_browser_request_terminal;
 #[cfg(target_os = "macos")]
 pub(crate) use dispatch::with_extension_runtime_grant_terminal;
+#[cfg(target_os = "macos")]
+pub(crate) use dispatch::with_page_permission_terminal;
 pub(crate) use dispatch::{
     best_effort_with, install, shutdown, try_with, try_with_close, try_with_profile_erasure,
 };
@@ -360,6 +364,8 @@ pub(crate) struct EngineHost {
     // Allocates only after an explicit Shell publication. Ordinary inert
     // startup retains the empty map and creates no native delegate graph.
     extension_browser_surfaces: HashMap<ProfileId, ExtensionBrowserSurface>,
+    #[cfg(target_os = "macos")]
+    page_permissions: page_permissions::PagePermissionBroker,
     native_resource_accounting_failed: bool,
     navigation_snapshots: HashMap<ItemId, NavigationSnapshot>,
     partitions: HashMap<ItemId, Partition>,

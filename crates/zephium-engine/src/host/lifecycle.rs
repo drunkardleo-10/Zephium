@@ -70,6 +70,8 @@ impl EngineHost {
         // Revoke browser-document authority before the native view can begin
         // teardown or its logical id can be reused by a replacement.
         self.extension_document_authority.revoke_item(id);
+        #[cfg(target_os = "macos")]
+        self.revoke_page_permission_requests_for_close(id);
         let profile = self
             .partitions
             .get(&id)

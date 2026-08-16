@@ -581,6 +581,14 @@ pub(crate) struct FakeEngine {
             ExtensionRuntimeGrantPromptSettlement,
         )>,
     >,
+    page_permission_settlements: Mutex<
+        Vec<(
+            ProfileId,
+            ItemId,
+            zephium_core::permissions::PagePermissionRequestId,
+            zephium_core::permissions::PagePermissionRequestSettlement,
+        )>,
+    >,
     warm_spare_calls: std::sync::atomic::AtomicUsize,
     navigation_requests: Mutex<Vec<NavigationRequestId>>,
     zoom_requests: Mutex<Vec<(ItemId, f64, ZoomRequestId)>>,
@@ -711,6 +719,17 @@ impl FakeEngine {
             .clone()
     }
 
+    fn page_permission_settlements(
+        &self,
+    ) -> Vec<(
+        ProfileId,
+        ItemId,
+        zephium_core::permissions::PagePermissionRequestId,
+        zephium_core::permissions::PagePermissionRequestSettlement,
+    )> {
+        self.page_permission_settlements.lock().unwrap().clone()
+    }
+
     fn push_erasure_outcomes(&self, outcomes: impl IntoIterator<Item = ProfileDataErasureOutcome>) {
         self.erasure_outcomes.lock().unwrap().extend(outcomes);
     }
@@ -826,6 +845,19 @@ impl Engine for FakeEngine {
             .lock()
             .unwrap()
             .push((runtime, request, settlement));
+        self.native_admission()
+    }
+    fn settle_page_permission_request(
+        &self,
+        profile: ProfileId,
+        item: ItemId,
+        request: zephium_core::permissions::PagePermissionRequestId,
+        settlement: zephium_core::permissions::PagePermissionRequestSettlement,
+    ) -> NativeDispatch {
+        self.page_permission_settlements
+            .lock()
+            .unwrap()
+            .push((profile, item, request, settlement));
         self.native_admission()
     }
     fn navigate(&self, id: ItemId, url: &str, request: NavigationRequestId) -> bool {

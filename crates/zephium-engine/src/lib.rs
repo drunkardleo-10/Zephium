@@ -166,6 +166,7 @@ use zephium_core::extensions::{
 };
 use zephium_core::geometry::Rect;
 use zephium_core::ids::{ItemId, ProfileId, WindowId};
+use zephium_core::permissions::{PagePermissionRequestId, PagePermissionRequestSettlement};
 use zephium_core::ports::engine::{
     ContentScope, DiscardProbeId, Engine, EngineEvent, NativeDispatch, NavigationPresentationId,
     NavigationRequestId, Partition, ProfileDataErasureOutcome, Shortcut, UserContent,
@@ -647,7 +648,8 @@ impl RetirementGate {
             event @ EngineEvent::ExtensionBrowserRequested { .. }
             | event @ EngineEvent::ExtensionCompatibilityBrokerRequested { .. }
             | event @ EngineEvent::ExtensionRuntimeGrantRequested { .. }
-            | event @ EngineEvent::ExtensionRuntimeGrantCancelled { .. } => Some(event),
+            | event @ EngineEvent::ExtensionRuntimeGrantCancelled { .. }
+            | event @ EngineEvent::PermissionRequested { .. } => Some(event),
             event @ EngineEvent::TitleChanged { id, .. }
             | event @ EngineEvent::UrlChanged { id, .. }
             | event @ EngineEvent::PresentationPending { id, .. }
@@ -660,7 +662,6 @@ impl RetirementGate {
             | event @ EngineEvent::DiscardSafety { id, .. }
             | event @ EngineEvent::NavState { id, .. }
             | event @ EngineEvent::NewWindowRequested { id, .. }
-            | event @ EngineEvent::PermissionRequested { id, .. }
             | event @ EngineEvent::DownloadRequested { id, .. }
             | event @ EngineEvent::Captured { id, .. }
             | event @ EngineEvent::HtmlExtracted { id, .. }
@@ -1496,6 +1497,31 @@ impl Engine for WebviewEngine {
         #[cfg(not(target_os = "macos"))]
         {
             let _ = (runtime, request, settlement);
+            NativeDispatch::Unsupported
+        }
+    }
+
+    fn settle_page_permission_request(
+        &self,
+        profile: ProfileId,
+        item: ItemId,
+        request: PagePermissionRequestId,
+        settlement: PagePermissionRequestSettlement,
+    ) -> NativeDispatch {
+        #[cfg(target_os = "macos")]
+        {
+            // Terminal cleanup stays admissible after item/profile retirement.
+            // The host still requires the exact retained tuple and view
+            // generation before an Allow can reach WebKit.
+            NativeDispatch::from_scheduled(self.run(move || {
+                let _ = host::with_page_permission_terminal(move |host| {
+                    let _ = host.settle_page_permission_request(profile, item, request, settlement);
+                });
+            }))
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (profile, item, request, settlement);
             NativeDispatch::Unsupported
         }
     }
@@ -2776,7 +2802,7 @@ mod tests {
     }
 
     #[test]
-    fn rejected_erasure_dispatch_suppresses_every_late_retired_event() {
+    fn rejected_erasure_dispatch_suppresses_facts_but_delivers_terminal_permission_cleanup() {
         let profile = ProfileId::from(96);
         let id = ItemId::from(21);
         let retirement = Arc::new(Mutex::new(RetirementGate::default()));
@@ -2870,8 +2896,17 @@ mod tests {
             },
             EngineEvent::PermissionRequested {
                 id,
-                origin: "https://late.invalid".into(),
-                kind: zephium_core::ports::engine::PermissionKind::Camera,
+                profile,
+                request: zephium_core::permissions::PagePermissionRequest {
+                    id: zephium_core::permissions::PagePermissionRequestId::new(1).unwrap(),
+                    origin: zephium_core::permissions::PageOrigin::parse_exact(
+                        "https://late.invalid",
+                    )
+                    .unwrap(),
+                    kind: zephium_core::permissions::PagePermissionRequestKind::Single(
+                        zephium_core::ports::engine::PermissionKind::Camera,
+                    ),
+                },
             },
             EngineEvent::DownloadRequested {
                 id,
@@ -2914,10 +2949,20 @@ mod tests {
             };
             sink(ingress);
         }
-        assert!(events
+        let events = events
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .is_empty());
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0],
+            EngineEvent::PermissionRequested {
+                id: delivered,
+                profile: delivered_profile,
+                request,
+            } if *delivered == id
+                && *delivered_profile == profile
+                && request.id.get() == 1
+        ));
     }
 
     #[test]

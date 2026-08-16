@@ -50,6 +50,19 @@ impl Shell {
                     self.cancel_extension_runtime_grant_prompt(*runtime, *request);
                     return;
                 }
+                EngineEvent::PermissionRequested {
+                    id,
+                    profile,
+                    request,
+                } => {
+                    let _ = self.engine.settle_page_permission_request(
+                        *profile,
+                        *id,
+                        request.id,
+                        zephium_core::permissions::PagePermissionRequestSettlement::Deny,
+                    );
+                    return;
+                }
                 _ => {
                     crate::diagnostic!("engine: ignored native event before bootstrap");
                     return;
@@ -62,6 +75,19 @@ impl Shell {
         // neither mutate actor state nor recreate a renderer. Process-global
         // runtime status remains independent of any profile quarantine.
         if self.engine_event_targets_quarantined_profile(&event) {
+            if let EngineEvent::PermissionRequested {
+                id,
+                profile,
+                request,
+            } = &event
+            {
+                let _ = self.engine.settle_page_permission_request(
+                    *profile,
+                    *id,
+                    request.id,
+                    zephium_core::permissions::PagePermissionRequestSettlement::Deny,
+                );
+            }
             crate::diagnostic!("engine: ignored native event for quarantined profile");
             return;
         }
@@ -255,7 +281,22 @@ impl Shell {
             EngineEvent::ViewDiscarded { id, profile, probe } => {
                 self.on_view_discarded(id, profile, probe)
             }
-            EngineEvent::PermissionRequested { .. } => {}
+            EngineEvent::PermissionRequested {
+                id,
+                profile,
+                request,
+            } => {
+                // The durable catalog and prompt projection are wired in the
+                // next coordinator slice. Until then, complete every retained
+                // native request immediately and explicitly; never inherit a
+                // WebKit prompt or strand the completion behind this event.
+                let _ = self.engine.settle_page_permission_request(
+                    profile,
+                    id,
+                    request.id,
+                    zephium_core::permissions::PagePermissionRequestSettlement::Deny,
+                );
+            }
             EngineEvent::DownloadRequested { .. } => {}
             EngineEvent::PresentationPending {
                 id,
@@ -443,12 +484,12 @@ impl Shell {
             | EngineEvent::DiscardSafety { id, .. }
             | EngineEvent::NavState { id, .. }
             | EngineEvent::NewWindowRequested { id, .. }
-            | EngineEvent::PermissionRequested { id, .. }
             | EngineEvent::DownloadRequested { id, .. }
             | EngineEvent::ViewCreationFailed { id }
             | EngineEvent::Crashed { id }
             | EngineEvent::Captured { id, .. }
             | EngineEvent::HtmlExtracted { id, .. } => self.profile_of_item(*id),
+            EngineEvent::PermissionRequested { profile, .. } => Some(*profile),
             EngineEvent::ShortcutPressed { item, .. } => self.profile_of_item(*item),
         };
         profile.is_some_and(|profile| self.profile_deletion_quarantines(profile))

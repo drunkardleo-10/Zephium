@@ -45,6 +45,13 @@ thread_local! {
     static EXTENSION_ACTION_POPUP_TERMINAL_INVARIANT_FAILED: Cell<bool> = const { Cell::new(false) };
     #[cfg(target_os = "macos")]
     static EXTENSION_ACTION_POPUP_TERMINAL_FAILURE_REPORTED: Cell<bool> = const { Cell::new(false) };
+    #[cfg(target_os = "macos")]
+    static PENDING_PAGE_PERMISSION_TERMINALS: Cell<PagePermissionTerminalSlots> =
+        const { Cell::new(PagePermissionTerminalSlots::EMPTY) };
+    #[cfg(target_os = "macos")]
+    static PAGE_PERMISSION_TERMINAL_INVARIANT_FAILED: Cell<bool> = const { Cell::new(false) };
+    #[cfg(target_os = "macos")]
+    static PAGE_PERMISSION_TERMINAL_FAILURE_REPORTED: Cell<bool> = const { Cell::new(false) };
     #[cfg(not(target_os = "windows"))]
     static PENDING_CONTENT_POLICY_TERMINALS: Cell<ContentPolicyTerminalSlots> =
         const { Cell::new(ContentPolicyTerminalSlots::EMPTY) };
@@ -78,6 +85,11 @@ type ExtensionRuntimeGrantTerminalSlots =
     ExactTerminalSlots<EXTENSION_RUNTIME_GRANT_TERMINAL_CAPACITY>;
 #[cfg(target_os = "macos")]
 type ExtensionActionPopupTerminalSlots = ExactTerminalSlots<1>;
+#[cfg(target_os = "macos")]
+const PAGE_PERMISSION_TERMINAL_CAPACITY: usize =
+    3 * super::page_permissions::MAX_PENDING_PAGE_PERMISSION_REQUESTS;
+#[cfg(target_os = "macos")]
+type PagePermissionTerminalSlots = ExactTerminalSlots<PAGE_PERMISSION_TERMINAL_CAPACITY>;
 
 /// Inline, noncoalescing terminal ring.
 ///
@@ -388,6 +400,14 @@ pub(crate) fn install(
     EXTENSION_ACTION_POPUP_TERMINAL_INVARIANT_FAILED.with(|failed| failed.set(false));
     #[cfg(target_os = "macos")]
     EXTENSION_ACTION_POPUP_TERMINAL_FAILURE_REPORTED.with(|reported| reported.set(false));
+    #[cfg(target_os = "macos")]
+    PENDING_PAGE_PERMISSION_TERMINALS.with(|pending| {
+        drop(pending.replace(PagePermissionTerminalSlots::EMPTY));
+    });
+    #[cfg(target_os = "macos")]
+    PAGE_PERMISSION_TERMINAL_INVARIANT_FAILED.with(|failed| failed.set(false));
+    #[cfg(target_os = "macos")]
+    PAGE_PERMISSION_TERMINAL_FAILURE_REPORTED.with(|reported| reported.set(false));
     #[cfg(not(target_os = "windows"))]
     PENDING_CONTENT_POLICY_TERMINALS.with(|pending| {
         drop(pending.replace(ContentPolicyTerminalSlots::EMPTY));
@@ -412,6 +432,8 @@ pub(crate) fn install(
                 super::extension_runtime::ExtensionRuntimeRegistry::new(extension_runtime_gate),
             extension_document_authority: super::extensions::ExtensionDocumentAuthority::default(),
             extension_browser_surfaces: HashMap::new(),
+            #[cfg(target_os = "macos")]
+            page_permissions: super::page_permissions::PagePermissionBroker::default(),
             native_resource_accounting_failed: false,
             navigation_snapshots: HashMap::new(),
             partitions: HashMap::new(),
@@ -554,6 +576,14 @@ pub(crate) fn make_unavailable_for_test() {
     EXTENSION_ACTION_POPUP_TERMINAL_INVARIANT_FAILED.with(|failed| failed.set(false));
     #[cfg(target_os = "macos")]
     EXTENSION_ACTION_POPUP_TERMINAL_FAILURE_REPORTED.with(|reported| reported.set(false));
+    #[cfg(target_os = "macos")]
+    PENDING_PAGE_PERMISSION_TERMINALS.with(|pending| {
+        drop(pending.replace(PagePermissionTerminalSlots::EMPTY));
+    });
+    #[cfg(target_os = "macos")]
+    PAGE_PERMISSION_TERMINAL_INVARIANT_FAILED.with(|failed| failed.set(false));
+    #[cfg(target_os = "macos")]
+    PAGE_PERMISSION_TERMINAL_FAILURE_REPORTED.with(|reported| reported.set(false));
     #[cfg(not(target_os = "windows"))]
     PENDING_CONTENT_POLICY_TERMINALS.with(|pending| {
         drop(pending.replace(ContentPolicyTerminalSlots::EMPTY));
@@ -817,6 +847,93 @@ fn drain_extension_browser_request_terminals_with_host(host: &mut EngineHost) ->
     if report {
         (host.native_terminal_failure)(
             "extension browser request terminals exceeded their proven exact capacity",
+        );
+    }
+    false
+}
+
+/// Admits Shell settlement, navigation revocation, and watchdog work for the
+/// fixed page-permission cohort. This channel is independent from extension
+/// delegates and ordinary renderer ingress: no unrelated callback can strand
+/// a retained WebKit permission completion.
+#[cfg(target_os = "macos")]
+pub(crate) fn with_page_permission_terminal<F>(f: F) -> bool
+where
+    F: FnOnce(&mut EngineHost) + 'static,
+{
+    let task: HostTask = Box::new(f);
+    enum Admission {
+        Accepted,
+        Quarantined,
+        Exhausted,
+    }
+    let admission = PENDING_PAGE_PERMISSION_TERMINALS.with(|pending| {
+        let mut slots = pending.take();
+        let admission = match slots.push_back(task) {
+            Ok(()) => Admission::Accepted,
+            Err(task) => match slots.quarantine_overflow(task) {
+                Ok(()) => Admission::Quarantined,
+                Err(_task) => Admission::Exhausted,
+            },
+        };
+        pending.set(slots);
+        admission
+    });
+    match admission {
+        Admission::Accepted => drain_page_permission_terminals(),
+        Admission::Quarantined | Admission::Exhausted => {
+            PAGE_PERMISSION_TERMINAL_INVARIANT_FAILED.with(|failed| failed.set(true));
+            HOST_SEALED.with(|sealed| sealed.set(true));
+            let _ = drain_page_permission_terminals();
+            false
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn drain_page_permission_terminals() -> bool {
+    enum Drain {
+        Complete(bool),
+        Deferred,
+        Unavailable,
+    }
+    let drain = HOST.with(|cell| {
+        let Ok(mut slot) = cell.try_borrow_mut() else {
+            return Drain::Deferred;
+        };
+        let Some(host) = slot.as_mut() else {
+            return Drain::Unavailable;
+        };
+        Drain::Complete(drain_page_permission_terminals_with_host(host))
+    });
+    match drain {
+        Drain::Complete(clean) => clean,
+        Drain::Deferred => true,
+        Drain::Unavailable => false,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn drain_page_permission_terminals_with_host(host: &mut EngineHost) -> bool {
+    loop {
+        let task = PENDING_PAGE_PERMISSION_TERMINALS.with(|pending| {
+            let mut slots = pending.take();
+            let task = slots.pop_front();
+            pending.set(slots);
+            task
+        });
+        let Some(task) = task else {
+            break;
+        };
+        task(host);
+    }
+    if !PAGE_PERMISSION_TERMINAL_INVARIANT_FAILED.with(Cell::get) {
+        return true;
+    }
+    let report = PAGE_PERMISSION_TERMINAL_FAILURE_REPORTED.with(|reported| !reported.replace(true));
+    if report {
+        (host.native_terminal_failure)(
+            "page permission terminals exceeded their proven exact capacity",
         );
     }
     false
@@ -1231,6 +1348,10 @@ where
                 if !drain_extension_action_popup_terminals_with_host(host) {
                     return Access::TerminalFailed;
                 }
+                #[cfg(target_os = "macos")]
+                if !drain_page_permission_terminals_with_host(host) {
+                    return Access::TerminalFailed;
+                }
                 // The host exists and the barrier is about to execute. Seal
                 // before native teardown so a callback pumped by teardown
                 // cannot recreate a controller behind it.
@@ -1314,6 +1435,12 @@ where
         return false;
     }
 
+    #[cfg(target_os = "macos")]
+    if !drain_page_permission_terminals() {
+        HOST_SEALED.with(|sealed| sealed.set(true));
+        return false;
+    }
+
     #[cfg(not(target_os = "windows"))]
     if !drain_content_policy_terminal_debts() {
         // An exact native compiler terminal is a lifecycle debt, not a
@@ -1387,6 +1514,11 @@ where
         }
         #[cfg(target_os = "macos")]
         if !drain_extension_action_popup_terminals() {
+            HOST_SEALED.with(|sealed| sealed.set(true));
+            return false;
+        }
+        #[cfg(target_os = "macos")]
+        if !drain_page_permission_terminals() {
             HOST_SEALED.with(|sealed| sealed.set(true));
             return false;
         }

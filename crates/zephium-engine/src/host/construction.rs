@@ -564,6 +564,10 @@ impl EngineHost {
         let on_load = self.sink.clone();
         let load_permit = event_permit.clone();
         let load_navigation = navigation.clone();
+        #[cfg(target_os = "macos")]
+        let page_permission_pending = self.page_permissions.pending_presence();
+        #[cfg(target_os = "macos")]
+        let load_page_permission_pending = page_permission_pending.clone();
         let extension_document_permits_pending =
             self.extension_document_authority.pending_presence();
         let presentation_permit = Arc::new(AtomicBool::new(false));
@@ -914,13 +918,28 @@ impl EngineHost {
 
         #[cfg(target_os = "macos")]
         {
-            use wry::WebViewBuilderExtDarwin;
+            use wry::{WebViewBuilderExtDarwin, WebViewBuilderExtMacos};
             let permit = crash_permit.clone();
+            let page_permission_item = id.clone();
+            let page_permission_permit = event_permit.clone();
+            let page_permission_navigation = navigation.clone();
+            let page_permission_presence = page_permission_pending.clone();
+            let profile = partition.profile();
             builder = builder
                 // Link preview is a native WebKit UI/network surface outside
                 // the popup broker. Keep it disabled until chrome can label
                 // the origin and verify the initiating gesture.
                 .with_allow_link_preview(false)
+                .with_permission_request_handler(move |request| {
+                    super::page_permissions::admit_native_request(
+                        profile,
+                        page_permission_item.clone(),
+                        page_permission_permit.clone(),
+                        page_permission_navigation.clone(),
+                        page_permission_presence.clone(),
+                        request,
+                    )
+                })
                 .with_on_web_content_process_terminate_handler(move || {
                     let id = crash_id.get();
                     let queued_permit = permit.clone();
@@ -968,6 +987,13 @@ impl EngineHost {
             };
             match transition {
                 NavigationTransition::Started(epoch) => {
+                    #[cfg(target_os = "macos")]
+                    super::page_permissions::queue_navigation_revocation(
+                        id,
+                        &load_permit,
+                        &load_navigation,
+                        &load_page_permission_pending,
+                    );
                     if extension_document_permits_pending.load(Ordering::Acquire) {
                         queue_navigation_authority_invalidation(id, &load_permit, &load_navigation);
                     }

@@ -759,7 +759,7 @@ fn user_native_action_results_are_never_silently_discarded() {
 }
 
 #[test]
-fn raw_native_media_surfaces_are_denied_per_view() {
+fn raw_native_media_surfaces_are_deny_only_or_exactly_brokered_per_view() {
     let source = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/src/host/construction.rs"
@@ -773,6 +773,9 @@ fn raw_native_media_surfaces_are_denied_per_view() {
         .expect("pre-script raw view policy");
     assert!(raw_policy.contains("with_fullscreen_enabled(false)"));
     assert!(raw_policy.contains("with_picture_in_picture_enabled(false)"));
+    assert!(raw_policy.contains("with_permission_handler(|_| wry::PermissionResponse::Deny)"));
+    assert!(source.contains("with_permission_request_handler(move |request|"));
+    assert!(source.contains("page_permissions::admit_native_request("));
 }
 
 #[test]
