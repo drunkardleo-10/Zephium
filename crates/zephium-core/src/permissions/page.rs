@@ -3,6 +3,8 @@
 use std::collections::HashSet;
 use std::error::Error;
 use std::fmt;
+use std::net::IpAddr;
+use std::num::NonZeroU64;
 
 use url::Url;
 
@@ -94,6 +96,50 @@ impl PageOrigin {
             return Err(PageOriginError::NotCanonical);
         }
         Ok(origin)
+    }
+
+    /// Canonicalizes bounded components obtained from a native WebView
+    /// security-origin object. JavaScript strings must never use this path.
+    ///
+    /// The component form avoids interpolating an attacker-controlled host
+    /// into a URL string. `url` performs host parsing (including IPv6 and IDN
+    /// canonicalization), and this aggregate still admits only HTTP(S) tuple
+    /// origins under Zephium's navigation policy.
+    pub fn from_native_components(
+        scheme: &str,
+        host: &str,
+        port: Option<u16>,
+    ) -> Result<Self, PageOriginError> {
+        if !matches!(scheme, "http" | "https") {
+            return Err(PageOriginError::Unsupported);
+        }
+        if host.is_empty() {
+            return Err(PageOriginError::Empty);
+        }
+        if scheme.len().saturating_add(host.len()) > MAX_PAGE_ORIGIN_BYTES {
+            return Err(PageOriginError::TooLong {
+                length: scheme.len().saturating_add(host.len()),
+                max: MAX_PAGE_ORIGIN_BYTES,
+            });
+        }
+        let mut url =
+            Url::parse("http://native-origin.invalid").map_err(|_| PageOriginError::Malformed)?;
+        url.set_scheme(scheme)
+            .map_err(|_| PageOriginError::Malformed)?;
+        let ip_literal = host
+            .strip_prefix('[')
+            .and_then(|host| host.strip_suffix(']'))
+            .unwrap_or(host)
+            .parse::<IpAddr>();
+        if let Ok(address) = ip_literal {
+            url.set_ip_host(address)
+                .map_err(|_| PageOriginError::Malformed)?;
+        } else {
+            url.set_host(Some(host))
+                .map_err(|_| PageOriginError::Malformed)?;
+        }
+        url.set_port(port).map_err(|_| PageOriginError::Malformed)?;
+        Self::from_url(&url)
     }
 
     pub fn as_str(&self) -> &str {
@@ -191,6 +237,68 @@ impl PagePermissionKind {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RememberedPagePermission {
+    Allow,
+    Deny,
+}
+
+/// Process-local correlation identity for one retained native permission
+/// completion. The engine mints it; page content and privileged UI cannot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PagePermissionRequestId(NonZeroU64);
+
+impl PagePermissionRequestId {
+    pub const fn new(value: u64) -> Option<Self> {
+        match NonZeroU64::new(value) {
+            Some(value) => Some(Self(value)),
+            None => None,
+        }
+    }
+
+    pub const fn get(self) -> u64 {
+        self.0.get()
+    }
+}
+
+/// Atomic capability cohort represented by one native completion.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PagePermissionRequestKind {
+    Single(PagePermissionKind),
+    CameraAndMicrophone,
+}
+
+impl PagePermissionRequestKind {
+    pub fn contains(self, kind: PagePermissionKind) -> bool {
+        match self {
+            Self::Single(candidate) => candidate == kind,
+            Self::CameraAndMicrophone => matches!(
+                kind,
+                PagePermissionKind::Camera | PagePermissionKind::Microphone
+            ),
+        }
+    }
+
+    pub const fn len(self) -> usize {
+        match self {
+            Self::Single(_) => 1,
+            Self::CameraAndMicrophone => 2,
+        }
+    }
+
+    pub const fn is_empty(self) -> bool {
+        false
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PagePermissionRequest {
+    pub id: PagePermissionRequestId,
+    pub origin: PageOrigin,
+    pub kind: PagePermissionRequestKind,
+}
+
+/// Explicit settlement for one exact retained native completion.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PagePermissionRequestSettlement {
     Allow,
     Deny,
 }
@@ -688,6 +796,39 @@ mod tests {
                 "accepted {invalid}"
             );
         }
+    }
+
+    #[test]
+    fn native_origin_components_are_structured_canonical_and_bounded() {
+        assert_eq!(
+            PageOrigin::from_native_components("https", "BÜCHER.example", Some(443))
+                .unwrap()
+                .as_str(),
+            "https://xn--bcher-kva.example"
+        );
+        assert_eq!(
+            PageOrigin::from_native_components("http", "::1", Some(8080))
+                .unwrap()
+                .as_str(),
+            "http://[::1]:8080"
+        );
+        for (scheme, host, port) in [
+            ("file", "example.com", None),
+            ("https", "", None),
+            ("https", "user@example.com", None),
+            ("https", "example.com/path", None),
+        ] {
+            assert!(PageOrigin::from_native_components(scheme, host, port).is_err());
+        }
+        assert!(PageOrigin::from_native_components("https", &"x".repeat(513), None).is_err());
+
+        let pair = PagePermissionRequestKind::CameraAndMicrophone;
+        assert_eq!(pair.len(), 2);
+        assert!(pair.contains(PagePermissionKind::Camera));
+        assert!(pair.contains(PagePermissionKind::Microphone));
+        assert!(!pair.contains(PagePermissionKind::Notifications));
+        assert!(PagePermissionRequestId::new(0).is_none());
+        assert_eq!(PagePermissionRequestId::new(9).unwrap().get(), 9);
     }
 
     #[test]

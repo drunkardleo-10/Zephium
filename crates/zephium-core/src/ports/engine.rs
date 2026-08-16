@@ -12,6 +12,9 @@ use crate::geometry::Rect;
 use crate::ids::{ExtensionInstallId, ItemId, ProfileId, ScriptId, UserscriptId, WindowId};
 use crate::injection::MatchSet;
 pub use crate::permissions::PagePermissionKind as PermissionKind;
+use crate::permissions::{
+    PagePermissionRequest, PagePermissionRequestId, PagePermissionRequestSettlement,
+};
 use crate::ports::extensions::{
     ExtensionRuntimeGrantPrompt, ExtensionRuntimeGrantPromptSettlement,
     ExtensionRuntimeGrantRequestId,
@@ -652,6 +655,21 @@ pub trait Engine {
     ) -> NativeDispatch {
         NativeDispatch::Unsupported
     }
+    /// Settles one exact, origin-labelled native page-permission completion.
+    ///
+    /// The adapter must bind all four coordinates to the same live view and
+    /// retained native request. Unknown, stale, navigated, retired, or already
+    /// settled identities are rejected and can never target a replacement
+    /// view reusing the same logical item id.
+    fn settle_page_permission_request(
+        &self,
+        _profile: ProfileId,
+        _item: ItemId,
+        _request: PagePermissionRequestId,
+        _settlement: PagePermissionRequestSettlement,
+    ) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
     /// Installs one exact, immutable profile-scoped content policy.
     ///
     /// Queue admission is not native application. The terminal result arrives
@@ -929,8 +947,8 @@ pub enum EngineEvent {
     },
     PermissionRequested {
         id: ItemId,
-        origin: String,
-        kind: PermissionKind,
+        profile: ProfileId,
+        request: PagePermissionRequest,
     },
     DownloadRequested {
         id: ItemId,

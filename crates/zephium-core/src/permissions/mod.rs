@@ -11,7 +11,8 @@ pub use page::{
     PagePermissionCatalogError, PagePermissionCatalogRevision, PagePermissionChange,
     PagePermissionChangeResult, PagePermissionGrant, PagePermissionGrantRevision,
     PagePermissionKind, PagePermissionPatch, PagePermissionPatchApplication,
-    PagePermissionPatchError, PagePermissionPatchResults, RememberedPagePermission,
-    MAX_PAGE_ORIGIN_BYTES, MAX_PAGE_PERMISSION_CATALOG_RETAINED_BYTES,
+    PagePermissionPatchError, PagePermissionPatchResults, PagePermissionRequest,
+    PagePermissionRequestId, PagePermissionRequestKind, PagePermissionRequestSettlement,
+    RememberedPagePermission, MAX_PAGE_ORIGIN_BYTES, MAX_PAGE_PERMISSION_CATALOG_RETAINED_BYTES,
     MAX_PAGE_PERMISSION_GRANTS_PER_PROFILE, MAX_PAGE_PERMISSION_PATCH_CHANGES,
 };
