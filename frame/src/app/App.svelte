@@ -2,6 +2,7 @@
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { onMount } from "svelte";
   import ExtensionPermissionPrompt from "../features/extensions/ExtensionPermissionPrompt.svelte";
+  import PagePermissionPrompt from "../features/permissions/PagePermissionPrompt.svelte";
   import Launcher from "../features/launcher/Launcher.svelte";
   import * as sidebar from "../features/sidebar/sidebar-mode.svelte";
   import Dividers from "../features/split/Dividers.svelte";
@@ -11,6 +12,7 @@
   import * as extensions from "../domain/extensions/extensions.svelte";
   import * as layout from "../features/split/layout.svelte";
   import * as operations from "../domain/operations/operations";
+  import * as pagePermissions from "../domain/permissions/page-permissions.svelte";
   import * as runtime from "../domain/runtime/runtime.svelte";
   import * as tabs from "../domain/tabs/tabs.svelte";
   import * as theme from "../domain/theme/theme";
@@ -20,6 +22,8 @@
   const currentWindow = getCurrentWindow();
   const isPanel = currentWindow.label === "panel";
   let extensionPermissionPrompt = $derived(extensions.permissionPrompt());
+  let pagePermissionPrompt = $derived(pagePermissions.prompt());
+  let consentActive = $derived(extensionPermissionPrompt !== null || pagePermissionPrompt !== null);
 
   type ChromeShortcut = {
     matches: (event: KeyboardEvent) => boolean;
@@ -63,7 +67,7 @@
   function handleKeydown(event: KeyboardEvent) {
     // The native content stage is suppressed while this browser-owned modal
     // is active. Keep chrome shortcuts from mutating tabs behind it as well.
-    if (extensionPermissionPrompt !== null) return;
+    if (consentActive) return;
     for (const shortcut of chromeShortcuts) {
       if (!shortcut.matches(event)) continue;
       event.preventDefault();
@@ -94,6 +98,7 @@
     // supplies tabs, so its listener must exist before tabs starts bootstrap.
     const runtimeReady = runtime.init();
     const extensionsReady = extensions.init();
+    const pagePermissionsReady = pagePermissions.init();
     const tabsReady = tabs.init();
     const sidebarReady = sidebar.init();
     const uiEventsReady = ui.init();
@@ -108,6 +113,7 @@
           themeReady,
           runtimeReady,
           extensionsReady,
+          pagePermissionsReady,
           tabsReady,
           uiEventsReady,
           sidebarReady,
@@ -135,6 +141,7 @@
       blocker.dispose();
       runtime.dispose();
       extensions.dispose();
+      pagePermissions.dispose();
       tabs.dispose();
       ui.dispose();
       if (!IS_MAC) layout.dispose();
@@ -146,7 +153,7 @@
 {#if isPanel}
   <Launcher />
 {:else}
-  <div class="contents" inert={extensionPermissionPrompt !== null}>
+  <div class="contents" inert={consentActive}>
     <Shell />
     {#if !IS_MAC}
       <Dividers />
@@ -155,6 +162,10 @@
   {#if extensionPermissionPrompt !== null}
     {#key `${extensionPermissionPrompt.runtime_generation}:${extensionPermissionPrompt.request_id}`}
       <ExtensionPermissionPrompt prompt={extensionPermissionPrompt} />
+    {/key}
+  {:else if pagePermissionPrompt !== null}
+    {#key `${pagePermissionPrompt.profile_id}:${pagePermissionPrompt.item_id}:${pagePermissionPrompt.request_id}`}
+      <PagePermissionPrompt prompt={pagePermissionPrompt} />
     {/key}
   {/if}
 {/if}

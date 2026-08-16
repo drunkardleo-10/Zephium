@@ -7,6 +7,7 @@ import type {
   ItemsChanged,
   LayoutChanged,
   OperationProcessed,
+  PagePermissionPromptChanged,
   RuntimeStatusChanged,
   SearchChanged,
   TabChanged,
@@ -40,6 +41,9 @@ export const events = {
   ),
   extensionRuntimeGrantPromptChanged: scopedEvent<ExtensionRuntimeGrantPromptChanged>(
     "zephium:extension-runtime-grant-prompt",
+  ),
+  pagePermissionPromptChanged: scopedEvent<PagePermissionPromptChanged>(
+    "zephium:page-permission-prompt",
   ),
   presentationTab: scopedEvent<PresentationTab>("zephium:presentation-tab"),
   uiCommand: scopedEvent<UiCommand>("zephium:ui-command"),
