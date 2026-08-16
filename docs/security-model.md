@@ -529,6 +529,17 @@ and emit no byte. Its private output retains an incomplete marker
 until every bounded ordinary file is durably written. These commands remain
 diagnostic and cannot mint a catalog release, materialization receipt, lease,
 grant, or runtime authority.
+Release-side CRX assembly uses the same verifier rather than a second trust
+definition. The encoder accepts only one canonical P-256 public SPKI and a
+bounded ZIP, retains no private key, and exposes a scatter/gather signature
+preimage so release infrastructure may sign outside the repository process.
+Finalization accepts only a raw ASN.1 ECDSA signature, constructs exactly one
+developer proof, verifies the complete result through `VerifiedCrx3Package`,
+then applies the hostile-ZIP preflight before no-replace publication. A wrong
+key, signature, archive, output race, or unsupported key shape returns no CRX.
+This proves package integrity only; it does not authorize distribution or
+substitute for manifest-key, tree, catalog, license, compatibility, Store, or
+runtime admission.
 The first macOS vertical-slice overlay is deliberately non-product. It fixes
 the absent `ExecutionWorld` enum and offscreen fallback, but removes public
 inline-menu pages and forces that UI path closed because WebKit does not enforce

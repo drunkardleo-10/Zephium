@@ -38,7 +38,7 @@ mod tree;
 pub use chromium::{
     ChromiumExtensionId, ChromiumManifestKey, ChromiumManifestKeyDigest, ChromiumManifestKeyError,
 };
-pub use crx3::{Crx3PackageError, VerifiedCrx3Package};
+pub use crx3::{Crx3PackageError, Crx3SigningRequest, VerifiedCrx3Package};
 pub use json::{parse_bounded_json, BoundedJsonError, BoundedJsonLimits, BoundedJsonValue};
 pub use limits::*;
 pub use manifest::{

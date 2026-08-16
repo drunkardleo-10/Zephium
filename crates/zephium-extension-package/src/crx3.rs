@@ -24,6 +24,158 @@ const P256_ALGORITHM_IDENTIFIER: &[u8] = &[
     0x03, 0x01, 0x07,
 ];
 
+/// Borrowed, bounded CRX3 release-signing request for one exact ZIP payload.
+///
+/// The request owns no private key and does not allocate a second copy of the
+/// archive. Release tooling can stream [`Self::signed_message_parts`] into an
+/// external signer, then pass the resulting ASN.1 ECDSA signature to
+/// [`Self::finish`]. Finalization reuses the ordinary CRX3 verifier before it
+/// returns any package bytes, so encoder and verifier behavior cannot drift.
+///
+/// Constructing or signing this value is not product catalog authority. A
+/// release still has to bind the exact CRX and inner ZIP identities, manifest
+/// key, tree, legal artifacts, and compatibility profile into Zephium's sealed
+/// catalog.
+#[must_use = "a CRX3 signing request must be signed or deliberately discarded"]
+pub struct Crx3SigningRequest<'a> {
+    public_key: &'a [u8],
+    archive: &'a [u8],
+    signed_header: [u8; 18],
+    signed_header_length: [u8; 4],
+    extension_id: ChromiumExtensionId,
+    developer_key_sha256: ChromiumManifestKeyDigest,
+}
+
+impl<'a> Crx3SigningRequest<'a> {
+    /// Prepares one ECDSA P-256/SHA-256 developer proof for an exact ZIP.
+    ///
+    /// `public_key` must be a canonical DER SubjectPublicKeyInfo containing an
+    /// uncompressed P-256 point. The corresponding private key intentionally
+    /// cannot cross this API boundary.
+    pub fn new_ecdsa_p256_sha256(
+        archive: &'a [u8],
+        public_key: &'a [u8],
+    ) -> Result<Self, Crx3PackageError> {
+        if archive.is_empty()
+            || archive.len() as u64 > MAX_EXTENSION_ARCHIVE_BYTES
+            || !archive.starts_with(ZIP_LOCAL_FILE_MAGIC)
+        {
+            return Err(Crx3PackageError::Archive);
+        }
+        if public_key.is_empty() || public_key.len() > MAX_CRX3_PROOF_COMPONENT_BYTES {
+            return Err(Crx3PackageError::PublicKey);
+        }
+        let point = parse_subject_public_key(public_key, P256_ALGORITHM_IDENTIFIER)?;
+        if point.len() != 65 || point.first() != Some(&0x04) {
+            return Err(Crx3PackageError::PublicKey);
+        }
+
+        let digest: [u8; 32] = Sha256::digest(public_key).into();
+        let developer_key_sha256 = ChromiumManifestKeyDigest::from_bytes(digest);
+        let extension_id = developer_key_sha256.derived_extension_id();
+        let mut signed_header = [0_u8; 18];
+        // SignedData.crx_id: field 1, length-delimited, exactly 16 bytes.
+        signed_header[0] = 0x0a;
+        signed_header[1] = 16;
+        signed_header[2..].copy_from_slice(&digest[..16]);
+        let signed_header_length = (signed_header.len() as u32).to_le_bytes();
+
+        Ok(Self {
+            public_key,
+            archive,
+            signed_header,
+            signed_header_length,
+            extension_id,
+            developer_key_sha256,
+        })
+    }
+
+    /// Returns the stable Chromium identifier derived from the public SPKI.
+    pub const fn extension_id(&self) -> &ChromiumExtensionId {
+        &self.extension_id
+    }
+
+    /// Returns SHA-256 of the exact public SPKI bytes.
+    pub const fn developer_key_sha256(&self) -> ChromiumManifestKeyDigest {
+        self.developer_key_sha256
+    }
+
+    /// Returns the exact scatter/gather message covered by the CRX signature.
+    ///
+    /// The four slices must be signed in order with ECDSA P-256/SHA-256. They
+    /// borrow this request and remain valid only while it is alive.
+    pub fn signed_message_parts(&self) -> [&[u8]; 4] {
+        [
+            SIGNATURE_CONTEXT,
+            &self.signed_header_length,
+            &self.signed_header,
+            self.archive,
+        ]
+    }
+
+    /// Returns the exact number of bytes covered by the external signature.
+    pub fn signed_message_length(&self) -> usize {
+        self.signed_message_parts()
+            .iter()
+            .map(|part| part.len())
+            .sum()
+    }
+
+    /// Finalizes and independently verifies one externally signed CRX3 file.
+    ///
+    /// `signature` must be the ASN.1 DER ECDSA signature over the ordered
+    /// [`Self::signed_message_parts`]. Invalid or mismatched signatures return
+    /// no package bytes.
+    pub fn finish(self, signature: &[u8]) -> Result<Vec<u8>, Crx3PackageError> {
+        if signature.is_empty() || signature.len() > MAX_CRX3_PROOF_COMPONENT_BYTES {
+            return Err(Crx3PackageError::Proof);
+        }
+
+        let mut proof = Vec::new();
+        append_bytes_field(&mut proof, 1, self.public_key)?;
+        append_bytes_field(&mut proof, 2, signature)?;
+        let mut header = Vec::new();
+        append_bytes_field(&mut header, 3, &proof)?;
+        append_bytes_field(&mut header, SIGNED_HEADER_FIELD, &self.signed_header)?;
+        if header.is_empty() || header.len() > MAX_CRX3_HEADER_BYTES {
+            return Err(Crx3PackageError::HeaderSize);
+        }
+        let header_length =
+            u32::try_from(header.len()).map_err(|_| Crx3PackageError::HeaderSize)?;
+        let package_length = CRX3_PREFIX_BYTES
+            .checked_add(header.len())
+            .and_then(|value| value.checked_add(self.archive.len()))
+            .ok_or(Crx3PackageError::PackageTooLarge)?;
+        let mut package = Vec::with_capacity(package_length);
+        package.extend_from_slice(CRX3_MAGIC);
+        package.extend_from_slice(&CRX3_VERSION.to_le_bytes());
+        package.extend_from_slice(&header_length.to_le_bytes());
+        package.extend_from_slice(&header);
+        package.extend_from_slice(self.archive);
+
+        let verified = VerifiedCrx3Package::parse_and_verify(&package, Some(&self.extension_id))?;
+        if verified.developer_key_sha256() != self.developer_key_sha256
+            || verified.archive_bytes() != self.archive
+            || verified.signature_proof_count() != 1
+        {
+            return Err(Crx3PackageError::Signature);
+        }
+        Ok(package)
+    }
+}
+
+impl fmt::Debug for Crx3SigningRequest<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Crx3SigningRequest")
+            .field("extension_id", &self.extension_id)
+            .field("archive_bytes", &self.archive.len())
+            .field("public_key_bytes", &self.public_key.len())
+            .field("signed_message_bytes", &self.signed_message_length())
+            .finish_non_exhaustive()
+    }
+}
+
 /// One CRX3 package whose signed header, archive, and developer identity agree.
 ///
 /// Verification authenticates the immutable CRX bytes. It does not extract the
@@ -304,6 +456,43 @@ fn signed_message(signed_header: &[u8], archive: &[u8]) -> Result<Vec<u8>, Crx3P
     message.extend_from_slice(signed_header);
     message.extend_from_slice(archive);
     Ok(message)
+}
+
+fn append_bytes_field(
+    destination: &mut Vec<u8>,
+    number: u64,
+    value: &[u8],
+) -> Result<(), Crx3PackageError> {
+    if number == 0 {
+        return Err(Crx3PackageError::Protobuf);
+    }
+    append_varint(
+        destination,
+        number
+            .checked_shl(3)
+            .and_then(|key| key.checked_add(2))
+            .ok_or(Crx3PackageError::Protobuf)?,
+    );
+    append_varint(
+        destination,
+        u64::try_from(value.len()).map_err(|_| Crx3PackageError::Protobuf)?,
+    );
+    destination.extend_from_slice(value);
+    Ok(())
+}
+
+fn append_varint(destination: &mut Vec<u8>, mut value: u64) {
+    loop {
+        let mut byte = (value & 0x7f) as u8;
+        value >>= 7;
+        if value != 0 {
+            byte |= 0x80;
+        }
+        destination.push(byte);
+        if value == 0 {
+            return;
+        }
+    }
 }
 
 fn parse_subject_public_key<'a>(
@@ -665,6 +854,91 @@ mod tests {
         assert_eq!(package.extension_id(), &expected);
         assert_eq!(package.signature_proof_count(), 1);
         assert!(package.archive_bytes().starts_with(ZIP_LOCAL_FILE_MAGIC));
+    }
+
+    #[test]
+    fn external_signing_request_round_trips_through_the_release_verifier() {
+        let random = SystemRandom::new();
+        let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &random).unwrap();
+        let pair =
+            EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, pkcs8.as_ref(), &random)
+                .unwrap();
+        let public_key = p256_spki(pair.public_key().as_ref());
+        let archive = b"PK\x03\x04zephium-release-signing-request";
+        let request = Crx3SigningRequest::new_ecdsa_p256_sha256(archive, &public_key).unwrap();
+        let expected_id = request.extension_id().clone();
+        let expected_key_digest = request.developer_key_sha256();
+        let parts = request.signed_message_parts();
+        let message = parts.concat();
+        assert_eq!(message.len(), request.signed_message_length());
+        assert_eq!(
+            message,
+            signed_message(&request.signed_header, archive).unwrap()
+        );
+        let signature = pair.sign(&random, &message).unwrap();
+
+        let package_bytes = request.finish(signature.as_ref()).unwrap();
+        let package =
+            VerifiedCrx3Package::parse_and_verify(&package_bytes, Some(&expected_id)).unwrap();
+        assert_eq!(package.extension_id(), &expected_id);
+        assert_eq!(package.developer_key_sha256(), expected_key_digest);
+        assert_eq!(package.archive_bytes(), archive);
+        assert_eq!(package.signature_proof_count(), 1);
+    }
+
+    #[test]
+    fn external_signing_request_rejects_wrong_key_signature_and_archive_shape() {
+        let random = SystemRandom::new();
+        let first_pkcs8 =
+            EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &random).unwrap();
+        let first = EcdsaKeyPair::from_pkcs8(
+            &ECDSA_P256_SHA256_ASN1_SIGNING,
+            first_pkcs8.as_ref(),
+            &random,
+        )
+        .unwrap();
+        let second_pkcs8 =
+            EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &random).unwrap();
+        let second = EcdsaKeyPair::from_pkcs8(
+            &ECDSA_P256_SHA256_ASN1_SIGNING,
+            second_pkcs8.as_ref(),
+            &random,
+        )
+        .unwrap();
+        let public_key = p256_spki(first.public_key().as_ref());
+        let archive = b"PK\x03\x04zephium-release-signing-request";
+        let request = Crx3SigningRequest::new_ecdsa_p256_sha256(archive, &public_key).unwrap();
+        let message = request.signed_message_parts().concat();
+        let wrong_signature = second.sign(&random, &message).unwrap();
+        assert_eq!(
+            request.finish(wrong_signature.as_ref()).unwrap_err(),
+            Crx3PackageError::Signature
+        );
+
+        assert_eq!(
+            Crx3SigningRequest::new_ecdsa_p256_sha256(b"not-a-zip", &public_key).unwrap_err(),
+            Crx3PackageError::Archive
+        );
+        assert_eq!(
+            Crx3SigningRequest::new_ecdsa_p256_sha256(archive, &public_key[..8]).unwrap_err(),
+            Crx3PackageError::PublicKey
+        );
+    }
+
+    #[test]
+    fn external_signing_request_debug_output_never_includes_payload_bytes() {
+        let random = SystemRandom::new();
+        let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &random).unwrap();
+        let pair =
+            EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, pkcs8.as_ref(), &random)
+                .unwrap();
+        let public_key = p256_spki(pair.public_key().as_ref());
+        let archive = b"PK\x03\x04secret-extension-payload-canary";
+        let request = Crx3SigningRequest::new_ecdsa_p256_sha256(archive, &public_key).unwrap();
+        let debug = format!("{request:?}");
+        assert!(!debug.contains("secret-extension-payload-canary"));
+        assert!(!debug.contains(&base64::engine::general_purpose::STANDARD.encode(&public_key)));
+        assert!(debug.contains(request.extension_id().as_str()));
     }
 
     #[test]

@@ -1443,6 +1443,20 @@ still does not prove a filesystem snapshot: catalog release authority, staged
 tree re-verification, atomic repository publication, and a live lease remain
 separate requirements.
 
+Adapted packages no longer require release tooling to hold a private signing
+key in Zephium code. `Crx3SigningRequest` borrows one bounded ZIP plus a
+canonical P-256 public SPKI, derives its stable Chromium identity, and exposes
+the CRX3 signature preimage as four ordered slices without copying the archive.
+`cargo xtask prepare-extension-crx3-signing-message` streams that exact
+preimage into a private no-replace file for an external signer.
+`cargo xtask assemble-extension-crx3` accepts only the resulting ASN.1 ECDSA
+signature, constructs one proof, re-enters the ordinary CRX verifier, runs the
+complete acquired-ZIP preflight, and atomically publishes only after all of
+those checks pass. Neither command accepts a private key or overwrites an
+output. Both remain `product_authority=false`: deterministic ZIP construction,
+manifest-key rebinding, reviewed license/legal artifacts, exact catalog rows,
+sealed product anchors, and transport are still separate release work.
+
 The second stock-manager gate uses the unmodified Chrome Web Store CRX for
 [Proton Pass 1.39.0](https://chromewebstore.google.com/detail/proton-pass-free-password/ghmbeldphafepmbegfdlkpapadhbakde)
 (`ghmbeldphafepmbegfdlkpapadhbakde`). Its authenticated CRX
