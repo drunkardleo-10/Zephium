@@ -31,6 +31,9 @@ const BLOCKER_FEATURE_SETS: [&str; 5] = [
 ];
 const INTERNAL_REPOSITORY_CFG: &str = "zephium_internal_repository_e2e";
 const INTERNAL_ACQUIRED_REPOSITORY_CFG: &str = "zephium_internal_acquired_repository_e2e";
+const PRIVATE_FS_OPERATION_INSTRUMENTATION_CFG: &str =
+    "zephium_private_fs_operation_instrumentation";
+const EXTENSION_PRODUCT_MEASUREMENT_CFG: &str = "zephium_extension_product_measurement";
 const INTERNAL_AUTHORITY_SHIPPING_REJECTION: &str =
     "the internal repository E2E authority may not link into Zephium application code";
 
@@ -54,6 +57,9 @@ fn main() {
         Some("check-webview2-extension-boundary") => check_webview2_extension_boundary(),
         Some("check-macos-extension-compatibility-asset") => {
             check_macos_extension_compatibility_asset()
+        }
+        Some("measure-macos-extension-product") if arguments.len() == 1 => {
+            measure_macos_extension_product()
         }
         Some("check-blocker-seed") if arguments.len() == 1 => {
             let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
@@ -185,7 +191,7 @@ fn main() {
         Some("check-webview2-floor") => check_engine_floors(),
         _ => {
             eprintln!(
-                "usage: cargo xtask <ci|check-engine-floors|check-release-engine-security|check-advisory-exceptions|check-security-fork-locks|check-native-adapter-locks|check-blocker-security-fork|check-extension-runtime-host-assembler|check-extension-runtime-acquisition-boundary|check-webview2-extension-boundary|check-macos-extension-compatibility-asset|check-blocker-seed|check-crx3 --archive PATH --expected-id ID|materialize-crx3-probe --archive PATH --expected-id ID --output PATH|index-extension-probe-tree --extension PATH --output PATH|materialize-macos-extension-compatibility --extension PATH --tree-index PATH --output PATH|check-bitwarden-core-source --source PATH|materialize-bitwarden-core-macos-probe-overlay --source PATH --output PATH|finalize-bitwarden-core-macos-probe-artifact --build PATH --output PATH [--wasm-response-mime-adapter]|materialize-blocker-seed-webkit --output PATH|update-blocker-seed --easylist PATH --easyprivacy PATH --license PATH|check-webview2-floor>"
+                "usage: cargo xtask <ci|check-engine-floors|check-release-engine-security|check-advisory-exceptions|check-security-fork-locks|check-native-adapter-locks|check-blocker-security-fork|check-extension-runtime-host-assembler|check-extension-runtime-acquisition-boundary|check-webview2-extension-boundary|check-macos-extension-compatibility-asset|measure-macos-extension-product|check-blocker-seed|check-crx3 --archive PATH --expected-id ID|materialize-crx3-probe --archive PATH --expected-id ID --output PATH|index-extension-probe-tree --extension PATH --output PATH|materialize-macos-extension-compatibility --extension PATH --tree-index PATH --output PATH|check-bitwarden-core-source --source PATH|materialize-bitwarden-core-macos-probe-overlay --source PATH --output PATH|finalize-bitwarden-core-macos-probe-artifact --build PATH --output PATH [--wasm-response-mime-adapter]|materialize-blocker-seed-webkit --output PATH|update-blocker-seed --easylist PATH --easyprivacy PATH --license PATH|check-webview2-floor>"
             );
             exit(2);
         }
@@ -925,6 +931,22 @@ fn run_with_internal_repository_cfg(args: &[&str]) {
     }
 }
 
+fn run_with_extension_product_measurement_cfg(args: &[&str]) {
+    eprintln!(
+        "> [non-shipping extension product measurement] cargo {}",
+        args.join(" ")
+    );
+    let status = internal_repository_command_with_cfgs(
+        args,
+        &[INTERNAL_REPOSITORY_CFG, EXTENSION_PRODUCT_MEASUREMENT_CFG],
+    )
+    .status()
+    .unwrap_or_else(|error| panic!("failed to spawn cargo: {error}"));
+    if !status.success() {
+        exit(status.code().unwrap_or(1));
+    }
+}
+
 fn run_with_internal_acquired_repository_cfg(args: &[&str]) {
     eprintln!(
         "> [internal acquired repository authority] cargo {}",
@@ -939,13 +961,23 @@ fn run_with_internal_acquired_repository_cfg(args: &[&str]) {
 }
 
 fn internal_repository_command(args: &[&str]) -> Command {
-    internal_repository_command_with_cfgs(args, &[INTERNAL_REPOSITORY_CFG])
+    internal_repository_command_with_cfgs(
+        args,
+        &[
+            INTERNAL_REPOSITORY_CFG,
+            PRIVATE_FS_OPERATION_INSTRUMENTATION_CFG,
+        ],
+    )
 }
 
 fn internal_acquired_repository_command(args: &[&str]) -> Command {
     internal_repository_command_with_cfgs(
         args,
-        &[INTERNAL_REPOSITORY_CFG, INTERNAL_ACQUIRED_REPOSITORY_CFG],
+        &[
+            INTERNAL_REPOSITORY_CFG,
+            INTERNAL_ACQUIRED_REPOSITORY_CFG,
+            PRIVATE_FS_OPERATION_INSTRUMENTATION_CFG,
+        ],
     )
 }
 
@@ -984,7 +1016,7 @@ fn reject_ambient_internal_repository_cfg() {
         .is_some_and(|value| rustflags_enable_internal_repository_cfg(value.split('\u{1f}')));
     if plain || encoded {
         eprintln!(
-            "cargo xtask ci refuses an ambient internal repository E2E authority; remove the custom cfg from compiler flags"
+            "cargo xtask refuses ambient internal extension test or measurement cfgs; remove them from compiler flags"
         );
         exit(2);
     }
@@ -1017,7 +1049,10 @@ fn rustflags_enable_internal_repository_cfg<'flag>(
 fn is_internal_repository_cfg(value: &str) -> bool {
     matches!(
         value,
-        INTERNAL_REPOSITORY_CFG | INTERNAL_ACQUIRED_REPOSITORY_CFG
+        INTERNAL_REPOSITORY_CFG
+            | INTERNAL_ACQUIRED_REPOSITORY_CFG
+            | PRIVATE_FS_OPERATION_INSTRUMENTATION_CFG
+            | EXTENSION_PRODUCT_MEASUREMENT_CFG
     )
 }
 
@@ -1473,6 +1508,44 @@ fn run_macos_extension_product_probe() {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn measure_macos_extension_product() {
+    reject_ambient_internal_repository_cfg();
+    share_workspace_target_dir();
+    const COMMON: [&str; 8] = [
+        "--release",
+        "--locked",
+        "-p",
+        "zephium-extension-product-probe",
+        "--features",
+        "macos-native",
+        "--bin",
+        "macos-extension-product-probe",
+    ];
+
+    let mut clippy = vec!["clippy"];
+    clippy.extend(COMMON);
+    clippy.extend(["--", "-D", "warnings"]);
+    run_with_extension_product_measurement_cfg(&clippy);
+
+    let mut tests = vec!["test"];
+    tests.extend(COMMON);
+    run_with_extension_product_measurement_cfg(&tests);
+
+    for runtime in ["macos-native", "macos-native-brokered"] {
+        let mut execute = vec!["run"];
+        execute.extend(COMMON);
+        execute.extend(["--", "--runtime", runtime]);
+        run_with_extension_product_measurement_cfg(&execute);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn measure_macos_extension_product() {
+    eprintln!("macOS extension product measurement is available only on macOS");
+    exit(2);
+}
+
 fn check_blocker_security_fork() {
     share_workspace_target_dir();
     check_security_fork_locks();
@@ -1918,6 +1991,12 @@ mod tests {
         ]));
         assert!(rustflags_enable_internal_repository_cfg([
             "--cfg=zephium_internal_acquired_repository_e2e"
+        ]));
+        assert!(rustflags_enable_internal_repository_cfg([
+            "--cfg=zephium_extension_product_measurement"
+        ]));
+        assert!(rustflags_enable_internal_repository_cfg([
+            "--cfg=zephium_private_fs_operation_instrumentation"
         ]));
         assert!(rustflags_enable_internal_repository_cfg([
             "--cfg",

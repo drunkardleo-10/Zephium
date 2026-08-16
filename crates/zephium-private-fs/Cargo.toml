@@ -29,4 +29,6 @@ windows = { version = "=0.61.3", features = [
 [lints.rust]
 unexpected_cfgs = { level = "deny", check-cfg = [
     "cfg(zephium_internal_repository_e2e)",
+    "cfg(zephium_private_fs_operation_instrumentation)",
+    "cfg(zephium_extension_product_measurement)",
 ] }

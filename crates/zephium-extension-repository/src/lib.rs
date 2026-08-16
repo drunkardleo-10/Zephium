@@ -13,7 +13,14 @@
 #![deny(missing_docs)]
 #![deny(unsafe_code)]
 
-#[cfg(all(zephium_internal_repository_e2e, not(debug_assertions)))]
+// Optimized fixture authority exists only for the non-shipping product
+// measurement binary. Application code independently rejects the base fixture
+// cfg, so this exception cannot authorize a Zephium application build.
+#[cfg(all(
+    zephium_internal_repository_e2e,
+    not(debug_assertions),
+    not(zephium_extension_product_measurement)
+))]
 compile_error!("the internal repository E2E authority is forbidden in optimized builds");
 #[cfg(all(
     zephium_internal_acquired_repository_e2e,

@@ -11,8 +11,8 @@
 compile_error!("the native extension product probe is macOS-only");
 #[cfg(not(zephium_internal_repository_e2e))]
 compile_error!("the native extension product probe requires the sealed internal E2E authority");
-#[cfg(not(debug_assertions))]
-compile_error!("the native extension product probe is forbidden in optimized builds");
+#[cfg(all(not(debug_assertions), not(zephium_extension_product_measurement)))]
+compile_error!("optimized extension product probes require the non-shipping measurement authority");
 
 mod authenticated_fixture;
 mod macos_harness;
@@ -82,7 +82,7 @@ fn main() {
     match outcome {
         Ok(ProbeDisposition::Passed(measurements)) => {
             println!(
-                "extension-product-probe: passed; runtime={}; authenticated_startup_ms={}; durable_grant_rebind_ms={}; profile_view_ms={}; popup_presentation_ms={}; service_shutdown_ms={}; engine_shutdown_ms={}; optional_api_host_grant_rebind=passed; tabs_create_activate_update_remove=passed; brokered_recent_history={}; popup_capacity_discard_reopen=passed; repository_cleanup=passed; store_restart_cleanup=passed",
+                "extension-product-probe: passed; runtime={}; authenticated_startup_ms={}; durable_grant_rebind_ms={}; profile_view_ms={}; popup_presentation_ms={}; service_shutdown_ms={}; engine_shutdown_ms={}; main_process_peak_rss_bytes={}; process_user_cpu_ms={}; process_system_cpu_ms={}; voluntary_context_switches={}; involuntary_context_switches={}; optional_api_host_grant_rebind=passed; tabs_create_activate_update_remove=passed; brokered_recent_history={}; popup_capacity_discard_reopen=passed; repository_cleanup=passed; store_restart_cleanup=passed",
                 runtime_target_argument(runtime_target),
                 measurements.authenticated_startup.as_millis(),
                 measurements.durable_grant_rebind.as_millis(),
@@ -90,6 +90,11 @@ fn main() {
                 measurements.popup_presentation.as_millis(),
                 measurements.service_shutdown.as_millis(),
                 measurements.engine_shutdown.as_millis(),
+                measurements.process_usage.peak_rss_bytes,
+                measurements.process_usage.user_cpu_ms,
+                measurements.process_usage.system_cpu_ms,
+                measurements.process_usage.voluntary_context_switches,
+                measurements.process_usage.involuntary_context_switches,
                 if is_brokered_runtime(runtime_target) {
                     "passed"
                 } else {
@@ -150,6 +155,15 @@ struct ProbeMeasurements {
     popup_presentation: Duration,
     service_shutdown: Duration,
     engine_shutdown: Duration,
+    process_usage: ProcessUsage,
+}
+
+struct ProcessUsage {
+    peak_rss_bytes: u64,
+    user_cpu_ms: u64,
+    system_cpu_ms: u64,
+    voluntary_context_switches: u64,
+    involuntary_context_switches: u64,
 }
 
 struct ProductBrowserModel {
@@ -957,6 +971,7 @@ fn run(runtime_target: ProductExtensionRuntimeTarget) -> Result<ProbeDisposition
     set_phase("durable-clean-restart-audit");
     fixture.verify_clean_restart()?;
     set_phase("complete");
+    let process_usage = process_usage()?;
 
     Ok(ProbeDisposition::Passed(ProbeMeasurements {
         authenticated_startup,
@@ -965,7 +980,49 @@ fn run(runtime_target: ProductExtensionRuntimeTarget) -> Result<ProbeDisposition
         popup_presentation,
         service_shutdown,
         engine_shutdown,
+        process_usage,
     }))
+}
+
+fn process_usage() -> Result<ProcessUsage, String> {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+    // SAFETY: getrusage initializes the pointed-to rusage on a zero return and
+    // receives the exact RUSAGE_SELF selector. The value is not read on error.
+    if unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) } != 0 {
+        return Err(format!(
+            "cannot read product-probe process usage: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    // SAFETY: the successful getrusage call above initialized every field.
+    let usage = unsafe { usage.assume_init() };
+    Ok(ProcessUsage {
+        // macOS reports ru_maxrss in bytes. This is deliberately labelled as
+        // the main process only; WebContent helper RSS requires a separate
+        // system-level measurement campaign.
+        peak_rss_bytes: u64::try_from(usage.ru_maxrss)
+            .map_err(|_| "product-probe peak RSS was negative".to_owned())?,
+        user_cpu_ms: timeval_millis(usage.ru_utime)?,
+        system_cpu_ms: timeval_millis(usage.ru_stime)?,
+        voluntary_context_switches: u64::try_from(usage.ru_nvcsw)
+            .map_err(|_| "product-probe voluntary context switches were negative".to_owned())?,
+        involuntary_context_switches: u64::try_from(usage.ru_nivcsw)
+            .map_err(|_| "product-probe involuntary context switches were negative".to_owned())?,
+    })
+}
+
+fn timeval_millis(value: libc::timeval) -> Result<u64, String> {
+    let seconds = u64::try_from(value.tv_sec)
+        .map_err(|_| "product-probe CPU seconds were negative".to_owned())?;
+    let microseconds = u64::try_from(value.tv_usec)
+        .map_err(|_| "product-probe CPU microseconds were negative".to_owned())?;
+    if microseconds >= 1_000_000 {
+        return Err("product-probe CPU microseconds were out of range".into());
+    }
+    seconds
+        .checked_mul(1_000)
+        .and_then(|milliseconds| milliseconds.checked_add(microseconds / 1_000))
+        .ok_or_else(|| "product-probe CPU duration overflowed".to_owned())
 }
 
 fn extension_action_request(
@@ -1027,4 +1084,40 @@ fn arm_process_watchdog() -> Arc<AtomicBool> {
         std::process::exit(124);
     });
     completed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::timeval_millis;
+
+    #[test]
+    fn timeval_conversion_is_bounded_and_truncates_submilliseconds() {
+        assert_eq!(
+            timeval_millis(libc::timeval {
+                tv_sec: 1,
+                tv_usec: 999_999,
+            }),
+            Ok(1_999)
+        );
+        assert!(timeval_millis(libc::timeval {
+            tv_sec: 0,
+            tv_usec: 1_000_000,
+        })
+        .is_err());
+        assert!(timeval_millis(libc::timeval {
+            tv_sec: -1,
+            tv_usec: 0,
+        })
+        .is_err());
+        assert!(timeval_millis(libc::timeval {
+            tv_sec: 0,
+            tv_usec: -1,
+        })
+        .is_err());
+        assert!(timeval_millis(libc::timeval {
+            tv_sec: libc::time_t::MAX,
+            tv_usec: 0,
+        })
+        .is_err());
+    }
 }

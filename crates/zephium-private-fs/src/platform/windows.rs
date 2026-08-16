@@ -128,7 +128,7 @@ pub(crate) fn create_new_regular(
         .custom_flags((FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH).0)
         .open(&path)
         .map_err(|error| map_failed_create(error, &path, true))?;
-    #[cfg(zephium_internal_repository_e2e)]
+    #[cfg(zephium_private_fs_operation_instrumentation)]
     crate::instrumentation::record_regular_create();
     let admission = (|| {
         let identity = identity_for_file(&file, NodeKind::Regular)?;
@@ -273,7 +273,7 @@ pub(crate) fn remove_regular(
     name: &str,
 ) -> Result<(), PrivateFsError> {
     std::fs::remove_file(directory_path.join(name)).map_err(|_| PrivateFsError::Io)?;
-    #[cfg(zephium_internal_repository_e2e)]
+    #[cfg(zephium_private_fs_operation_instrumentation)]
     crate::instrumentation::record_regular_unlink();
     Ok(())
 }
@@ -485,7 +485,7 @@ fn move_file(
         )
     };
     if result.is_ok() {
-        #[cfg(zephium_internal_repository_e2e)]
+        #[cfg(zephium_private_fs_operation_instrumentation)]
         crate::instrumentation::record_rename();
         return Ok(());
     }

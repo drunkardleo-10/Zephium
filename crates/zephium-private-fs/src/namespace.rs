@@ -24,9 +24,9 @@ const LOCK_FILE_CONTENT: &[u8] = b"zephium-private-fs\nlock-format=1\n";
 
 #[inline]
 fn write_all_private_regular(file: &mut File, bytes: &[u8]) -> Result<(), PrivateFsError> {
-    #[cfg(zephium_internal_repository_e2e)]
+    #[cfg(zephium_private_fs_operation_instrumentation)]
     let result = crate::instrumentation::MeasuredWriter::new(file).write_all(bytes);
-    #[cfg(not(zephium_internal_repository_e2e))]
+    #[cfg(not(zephium_private_fs_operation_instrumentation))]
     let result = file.write_all(bytes);
     result.map_err(|_| PrivateFsError::Io)
 }
@@ -37,7 +37,7 @@ fn copy_exact_to_private_regular(
     file: &mut File,
     expected: StreamingFileLength,
 ) -> Result<(), ExactCopyError> {
-    #[cfg(zephium_internal_repository_e2e)]
+    #[cfg(zephium_private_fs_operation_instrumentation)]
     {
         copy_exact(
             source,
@@ -45,7 +45,7 @@ fn copy_exact_to_private_regular(
             expected,
         )
     }
-    #[cfg(not(zephium_internal_repository_e2e))]
+    #[cfg(not(zephium_private_fs_operation_instrumentation))]
     {
         copy_exact(source, file, expected)
     }
@@ -54,7 +54,7 @@ fn copy_exact_to_private_regular(
 #[inline]
 fn sync_private_regular(file: &File) -> Result<(), PrivateFsError> {
     file.sync_all().map_err(|_| PrivateFsError::Io)?;
-    #[cfg(zephium_internal_repository_e2e)]
+    #[cfg(zephium_private_fs_operation_instrumentation)]
     crate::instrumentation::record_file_sync();
     Ok(())
 }
@@ -62,7 +62,7 @@ fn sync_private_regular(file: &File) -> Result<(), PrivateFsError> {
 #[inline]
 fn sync_private_directory(file: &File) -> Result<(), PrivateFsError> {
     file.sync_all().map_err(|_| PrivateFsError::Io)?;
-    #[cfg(zephium_internal_repository_e2e)]
+    #[cfg(zephium_private_fs_operation_instrumentation)]
     crate::instrumentation::record_directory_sync();
     Ok(())
 }
@@ -1499,9 +1499,9 @@ impl PrivateDirectory {
 
         let callback_result = {
             let bounded = Read::by_ref(&mut verified.file).take(initial_length);
-            #[cfg(zephium_internal_repository_e2e)]
+            #[cfg(zephium_private_fs_operation_instrumentation)]
             let mut bounded = crate::instrumentation::MeasuredReader::new(bounded);
-            #[cfg(not(zephium_internal_repository_e2e))]
+            #[cfg(not(zephium_private_fs_operation_instrumentation))]
             let mut bounded = bounded;
             callback(&mut bounded)
         };
@@ -1551,9 +1551,9 @@ impl PrivateDirectory {
                 .unwrap_or(u64::MAX)
                 .saturating_add(1),
         );
-        #[cfg(zephium_internal_repository_e2e)]
+        #[cfg(zephium_private_fs_operation_instrumentation)]
         let mut bounded = crate::instrumentation::MeasuredReader::new(bounded);
-        #[cfg(not(zephium_internal_repository_e2e))]
+        #[cfg(not(zephium_private_fs_operation_instrumentation))]
         let mut bounded = bounded;
         bounded
             .read_to_end(&mut bytes)
@@ -2689,9 +2689,9 @@ fn read_lock_content(file: &mut File) -> Result<Vec<u8>, PrivateFsError> {
             .unwrap_or(u64::MAX)
             .saturating_add(1),
     );
-    #[cfg(zephium_internal_repository_e2e)]
+    #[cfg(zephium_private_fs_operation_instrumentation)]
     let mut bounded = crate::instrumentation::MeasuredReader::new(bounded);
-    #[cfg(not(zephium_internal_repository_e2e))]
+    #[cfg(not(zephium_private_fs_operation_instrumentation))]
     let mut bounded = bounded;
     bounded
         .read_to_end(&mut bytes)
@@ -2904,9 +2904,9 @@ fn with_bounded_sealed_regular_reader_unlocked<T, E>(
 
     let callback_result = {
         let bounded = Read::by_ref(&mut file).take(initial_length);
-        #[cfg(zephium_internal_repository_e2e)]
+        #[cfg(zephium_private_fs_operation_instrumentation)]
         let mut bounded = crate::instrumentation::MeasuredReader::new(bounded);
-        #[cfg(not(zephium_internal_repository_e2e))]
+        #[cfg(not(zephium_private_fs_operation_instrumentation))]
         let mut bounded = bounded;
         callback(&mut bounded)
     };

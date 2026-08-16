@@ -20,12 +20,14 @@ required-features = ["macos-native"]
 unexpected_cfgs = { level = "deny", check-cfg = [
     "cfg(zephium_internal_repository_e2e)",
     "cfg(zephium_internal_acquired_repository_e2e)",
+    "cfg(zephium_extension_product_measurement)",
 ] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-app-kit = "0.3"
 objc2-foundation = "0.3"
+libc = "=0.2.186"
 raw-window-handle.workspace = true
 sha2 = "=0.10.9"
 tempfile.workspace = true
