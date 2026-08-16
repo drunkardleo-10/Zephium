@@ -816,7 +816,7 @@ over-capacity, or unavailable paths deny rather than grant. This extension
 grant broker is distinct from page-origin permission events, whose general
 Shell policy remains unfinished. Remaining release gaps include the product
 acquisition coordinator, the complete permission and API matrix, quotas,
-release-build resource evidence, and endurance. Older admitted
+complete cross-process release-build resource evidence, and endurance. Older admitted
 macOS versions and Linux require a Zephium
 compatibility runtime only after per-principal world/handler isolation, exact
 match enforcement, protected-script installed state, and native hostile tests
@@ -827,6 +827,23 @@ decision, and a CDP isolated-world probe for first-party userscripts. The CDP
 probe is excluded from normal product builds and has no page-world fallback;
 its lifecycle, removal, navigation, resource, debugger-coexistence, and live
 performance gates remain open.
+
+`cargo xtask measure-macos-extension-product` is the non-shipping optimized
+macOS product-path measurement gate. It rejects ambient internal authority,
+enables the sealed fixture and a separate measurement cfg only for the probe
+crate graph, compiles private-filesystem operations without their debug
+counters, runs the bounded process-usage conversion tests, and then executes
+both native and native-brokered authenticated paths. Application code still
+compile-time rejects the base fixture authority. Two consecutive arm64 macOS
+26.6.1 campaigns on 2026-08-16 passed the full package-to-popup lifecycle. The
+native path measured 79--83 ms authenticated startup, 257--291 ms profile-view
+creation, and 276--288 ms popup presentation; the brokered path measured
+78--79 ms, 246--261 ms, and 282--291 ms respectively. Across all four short
+processes, `RUSAGE_SELF` reported 92,438,528--93,732,864 bytes peak main-process
+RSS and 601--660 ms combined user/system CPU. These are preliminary,
+machine-local observations, not release budgets: `RUSAGE_SELF` excludes WebKit
+helper-process RSS and the campaign does not measure steady-state idle wakeups,
+battery impact, tab-scale behavior, or 24-hour endurance.
 
 The remaining compatibility work needs additional foundations rather than
 merely consuming existing ports: the page-origin permission policy, per-install

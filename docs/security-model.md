@@ -543,6 +543,10 @@ engine independently caps native resources at 48 while counting live views, a wa
 spare, in-construction reservations, and WebView2 cleanup debt that may still own a
 controller. These are deterministic resource bounds, not evidence that the resulting
 RSS, CPU, wakeup, or battery budgets have passed.
+The non-shipping `measure-macos-extension-product` gate now captures optimized
+authenticated-path latency plus main-process `RUSAGE_SELF` evidence, but it
+explicitly excludes WebKit helper processes, idle/battery behavior, tab-scale
+campaigns, and endurance and therefore does not close those release gates.
 
 Every item-attributed native callback, native error, navigation observation, accelerator,
 and asynchronous JavaScript result carries the immutable permit identity of its native
