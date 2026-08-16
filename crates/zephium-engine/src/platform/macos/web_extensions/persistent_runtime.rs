@@ -1253,7 +1253,21 @@ pub(super) fn load_background_content(
         *callback_result.borrow_mut() = Some(value);
     });
     unsafe { context.loadBackgroundContentWithCompletionHandler(&callback) };
-    wait_for_result(&result, run_loop, "background-content initialization")
+    match wait_for_result(&result, run_loop, "background-content initialization") {
+        Ok(()) => Ok(()),
+        Err(wait_error) => {
+            let errors = unsafe { context.errors() };
+            if errors.count() == 0 {
+                Err(wait_error)
+            } else {
+                Err(bounded_text(&format!(
+                    "{wait_error}; context has {} error(s): {}",
+                    errors.count(),
+                    describe_record_errors(&errors),
+                )))
+            }
+        }
+    }
 }
 
 fn fetch_extension_data_records(

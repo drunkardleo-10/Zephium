@@ -120,7 +120,7 @@ pub(super) fn write_fixture_assets(path: &Path) -> Result<(), String> {
         ),
         (
             "scripting-page-script.js",
-            "document.documentElement.dataset.zephiumBitwardenProgrammaticScript = 'executed';",
+            "document.documentElement.dataset.zephiumBitwardenProgrammaticScript = 'executed'; history.pushState(null, '', `${location.pathname}?zephium-same-document=1`);",
         ),
     ] {
         super::write(path, name, contents)?;

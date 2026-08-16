@@ -161,6 +161,19 @@ pub fn run_macos_extension_compatibility_fixture_probe(
     platform::macos::run_extension_compatibility_fixture_probe(artifact)
 }
 
+/// Executes the exact authenticated Vimium compatibility artifact through
+/// public WKWebExtension APIs and real AppKit keyboard routing.
+///
+/// The feature-gated gate pins both source and transformed trees and grants no
+/// package, catalog, installation, or product authority.
+#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
+#[doc(hidden)]
+pub fn run_macos_vimium_compatibility_artifact_probe(
+    artifact: &std::path::Path,
+) -> Result<bool, String> {
+    platform::macos::run_vimium_compatibility_artifact_probe(artifact)
+}
+
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;

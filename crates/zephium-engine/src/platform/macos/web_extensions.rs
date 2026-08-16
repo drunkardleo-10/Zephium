@@ -17,6 +17,7 @@ mod persistent_runtime;
 mod profile_isolation;
 mod resource_transport;
 mod stock_password_manager;
+mod vimium_contract;
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -555,6 +556,7 @@ struct ProbeTeardown {
     bitwarden_execution_world_namespace: &'static str,
     bitwarden_sandbox_isolation: &'static str,
     bitwarden_runtime_port_early_connect: &'static str,
+    bitwarden_tabs_same_document_observation: &'static str,
     major_extension_native_permissions: Box<str>,
     major_extension_namespaces: Box<str>,
     native_broker_port: Weak<objc2_web_kit::WKWebExtensionMessagePort>,
@@ -615,7 +617,7 @@ fn run_web_extension_probe_with_permissions(
         set_phase("teardown-wait");
         wait_for_teardown(&teardown)?;
         println!(
-            "native-probe: macOS WKWebExtension passed; os={}; mv3=temp-directory; controller_before_wry=passed; default_deny=passed; exact_native_grant_replace_readback=passed; exact_native_grant_live_revocation=passed; exact_native_grant_clear_readback=passed; exact_native_owner_lifecycle=passed; restart_controller_absence=passed; exact_host_grant=passed; private_data_default_deny=passed; private_data_explicit_grant=passed; private_data_separation=passed; runtime_permission_request={}; runtime_permission_readback={}; runtime_permission_callbacks_coalesced_before_settlement={}; runtime_permission_replacement_settlement_stranded={}; document_start=passed; isolated_worlds=passed; include_exclude=passed; all_frames=passed; match_about_blank=passed; match_origin_as_fallback=passed; exact_unload_reload=passed; peer_context=passed; nonpersistent_permission_separation=passed; protected_inventory=passed; product_profile_view_store_binding=passed; regular_cookie_isolation=passed; private_cookie_noninheritance=passed; regular_cookie_reconstruction=passed; regular_tab_routing_isolation=passed; browser_mutation_broker=passed; discarded_tab_native_view_refusal=passed; persistent_extension_storage_namespace_isolation=passed; persistent_local_zero_after_reopen=passed; private_extension_storage_noninheritance=passed; mv3_background_execution=passed; major_extension_native_permissions={}; major_extension_namespaces={}; native_broker_one_shot=round-trip; native_broker_port=extension-to-host-only; native_broker_port_host_send=accepted-unobserved; native_broker_principal_binding=passed; native_broker_port_released=1; native_broker_delegate_released={}; bitwarden_web_request_background_registration=passed; bitwarden_web_request_observation={}; bitwarden_scripting_main_world=passed; bitwarden_execution_world_namespace={}; bitwarden_web_navigation_observation=passed; bitwarden_alarms_lifecycle=passed; bitwarden_commands_readback=passed; bitwarden_commands_native_dispatch=passed; bitwarden_runtime_port_registered=round-trip; bitwarden_runtime_port_early_connect={}; bitwarden_context_menus_lifecycle=passed; bitwarden_context_menus_native_projection=passed; bitwarden_dynamic_resource_execution=passed; bitwarden_dynamic_resource_url={}; bitwarden_sandbox_isolation={}; bitwarden_action_popup_native_lifecycle=passed; bitwarden_http_basic_auth_autofill=degraded; extension_product_views_released={}; extension_product_stores_released={}; extension_ui_views_released={}; capability_views_released={}; capability_stores_released={}; all_type_removal_callbacks_completed={}; baseline_controller_scripts={}; peak_extension_script_delta={}; webview_callbacks={}; protected_scripts=3; lifecycle_objects_released=3; ordinary_native_controllers_released={}; ordinary_native_contexts_released={}; persistent_native_controllers_released={}; persistent_native_contexts_released={}; persistent_native_stores_released={}; profile_views_released={}; profile_contexts_released={}; profile_controllers_released={}; profile_stores_released={}; profile_lifecycle_objects_released={}",
+            "native-probe: macOS WKWebExtension passed; os={}; mv3=temp-directory; controller_before_wry=passed; default_deny=passed; exact_native_grant_replace_readback=passed; exact_native_grant_live_revocation=passed; exact_native_grant_clear_readback=passed; exact_native_owner_lifecycle=passed; restart_controller_absence=passed; exact_host_grant=passed; private_data_default_deny=passed; private_data_explicit_grant=passed; private_data_separation=passed; runtime_permission_request={}; runtime_permission_readback={}; runtime_permission_callbacks_coalesced_before_settlement={}; runtime_permission_replacement_settlement_stranded={}; document_start=passed; isolated_worlds=passed; include_exclude=passed; all_frames=passed; match_about_blank=passed; match_origin_as_fallback=passed; exact_unload_reload=passed; peer_context=passed; nonpersistent_permission_separation=passed; protected_inventory=passed; product_profile_view_store_binding=passed; regular_cookie_isolation=passed; private_cookie_noninheritance=passed; regular_cookie_reconstruction=passed; regular_tab_routing_isolation=passed; browser_mutation_broker=passed; discarded_tab_native_view_refusal=passed; persistent_extension_storage_namespace_isolation=passed; persistent_local_zero_after_reopen=passed; private_extension_storage_noninheritance=passed; mv3_background_execution=passed; major_extension_native_permissions={}; major_extension_namespaces={}; native_broker_one_shot=round-trip; native_broker_port=extension-to-host-only; native_broker_port_host_send=accepted-unobserved; native_broker_principal_binding=passed; native_broker_port_released=1; native_broker_delegate_released={}; bitwarden_web_request_background_registration=passed; bitwarden_web_request_observation={}; bitwarden_scripting_main_world=passed; bitwarden_execution_world_namespace={}; bitwarden_web_navigation_observation=passed; bitwarden_tabs_same_document_observation={}; bitwarden_alarms_lifecycle=passed; bitwarden_commands_readback=passed; bitwarden_commands_native_dispatch=passed; bitwarden_runtime_port_registered=round-trip; bitwarden_runtime_port_early_connect={}; bitwarden_context_menus_lifecycle=passed; bitwarden_context_menus_native_projection=passed; bitwarden_dynamic_resource_execution=passed; bitwarden_dynamic_resource_url={}; bitwarden_sandbox_isolation={}; bitwarden_action_popup_native_lifecycle=passed; bitwarden_http_basic_auth_autofill=degraded; extension_product_views_released={}; extension_product_stores_released={}; extension_ui_views_released={}; capability_views_released={}; capability_stores_released={}; all_type_removal_callbacks_completed={}; baseline_controller_scripts={}; peak_extension_script_delta={}; webview_callbacks={}; protected_scripts=3; lifecycle_objects_released=3; ordinary_native_controllers_released={}; ordinary_native_contexts_released={}; persistent_native_controllers_released={}; persistent_native_contexts_released={}; persistent_native_stores_released={}; profile_views_released={}; profile_contexts_released={}; profile_controllers_released={}; profile_stores_released={}; profile_lifecycle_objects_released={}",
             teardown.operating_system,
             teardown.runtime_permission_status,
             teardown.runtime_permission_readback,
@@ -626,6 +628,7 @@ fn run_web_extension_probe_with_permissions(
             teardown.native_broker_delegate_drops.load(Ordering::Acquire),
             teardown.bitwarden_web_request_observation,
             teardown.bitwarden_execution_world_namespace,
+            teardown.bitwarden_tabs_same_document_observation,
             teardown.bitwarden_runtime_port_early_connect,
             teardown.bitwarden_dynamic_resource_url,
             teardown.bitwarden_sandbox_isolation,
@@ -679,6 +682,10 @@ pub(crate) fn run_stock_password_manager_compatibility_artifact_probe(
 
 pub(crate) fn run_extension_compatibility_fixture_probe(artifact: &Path) -> Result<bool, String> {
     compatibility_fixture::run(artifact)
+}
+
+pub(crate) fn run_vimium_compatibility_artifact_probe(artifact: &Path) -> Result<bool, String> {
+    vimium_contract::run(artifact)
 }
 
 pub(crate) fn run_resource_transport_probe() -> Result<bool, String> {
@@ -1472,6 +1479,8 @@ fn run_supported_probe(
         bitwarden_sandbox_isolation: bitwarden_contract_teardown.sandbox_isolation,
         bitwarden_runtime_port_early_connect: bitwarden_contract_teardown
             .runtime_port_early_connect,
+        bitwarden_tabs_same_document_observation: bitwarden_contract_teardown
+            .tabs_same_document_observation,
         major_extension_native_permissions: major_extension_teardown
             .native_permissions
             .join(",")
@@ -2439,6 +2448,8 @@ fn respond_to_fixture_request(
                 cross_origin.ok_or_else(|| "main fixture server has no cross origin".to_owned())?;
             main_page(run, cross_origin)
         }
+        "/keyboard" => keyboard_extension_page(run),
+        "/activated" => keyboard_activated_page(run),
         "/login" => password_manager_login_page(run),
         "/frame/same" => child_page("same", run),
         "/frame/cross" => child_page("cross", run),
@@ -2449,6 +2460,8 @@ fn respond_to_fixture_request(
         return Err("fixture response exceeded bound".into());
     }
     let status = if path == "/main"
+        || path == "/keyboard"
+        || path == "/activated"
         || path == "/login"
         || path == "/frame/same"
         || path == "/frame/cross"
@@ -2465,6 +2478,68 @@ fn respond_to_fixture_request(
     stream
         .write_all(response.as_bytes())
         .map_err(|error| format!("cannot write fixture response: {error}"))
+}
+
+fn keyboard_extension_page(run: &str) -> String {
+    let run = serde_json::to_string(run).expect("bounded run identifier is serializable");
+    format!(
+        r#"<!doctype html><html><head><meta charset="utf-8"><title>keyboard extension fixture</title>
+        <style>html,body{{margin:0}}main{{min-height:4000px;padding:24px}}a{{display:inline-block;padding:12px}}</style></head>
+        <body><main><a id="target" href="/activated">Open the only target</a></main>
+        <script>(() => {{
+          'use strict';
+          globalThis.__zephiumKeyboardExtensionRun = {run};
+          const root = document.documentElement;
+          const target = document.querySelector('#target');
+          target.href = `/activated?run=${{encodeURIComponent(globalThis.__zephiumKeyboardExtensionRun)}}`;
+          const pageApi = globalThis.browser ?? globalThis.chrome;
+          root.setAttribute(
+            'data-zephium-page-privileged-extension-api',
+            pageApi?.runtime?.id != null
+                || typeof pageApi?.runtime?.getManifest === 'function'
+                || pageApi?.storage?.local != null
+                || pageApi?.tabs != null
+                || pageApi?.webNavigation != null
+              ? 'present'
+              : 'absent',
+          );
+          root.setAttribute(
+            'data-zephium-page-adapter',
+            globalThis[Symbol.for('zephium.webkit-api-compatibility.v1')] === true
+              ? 'present'
+              : 'absent',
+          );
+          root.setAttribute('data-zephium-keyboard-link-click', 'pending');
+          root.setAttribute('data-zephium-keyboard-last-key', 'pending');
+          addEventListener('keydown', (event) => {{
+            root.setAttribute(
+              'data-zephium-keyboard-last-key',
+              `${{event.key}}:${{event.isTrusted ? 'trusted' : 'untrusted'}}`,
+            );
+          }}, true);
+          target.addEventListener('click', (event) => {{
+            sessionStorage.setItem(
+              'zephium-keyboard-link-click',
+              event.isTrusted ? 'trusted' : 'untrusted',
+            );
+          }});
+        }})()</script></body></html>"#
+    )
+}
+
+fn keyboard_activated_page(run: &str) -> String {
+    let run = serde_json::to_string(run).expect("bounded run identifier is serializable");
+    format!(
+        r#"<!doctype html><html><head><meta charset="utf-8"><title>keyboard extension target</title></head>
+        <body><main>Activated</main><script>(() => {{
+          'use strict';
+          globalThis.__zephiumKeyboardExtensionRun = {run};
+          document.documentElement.setAttribute(
+            'data-zephium-keyboard-link-click',
+            sessionStorage.getItem('zephium-keyboard-link-click') ?? 'missing',
+          );
+        }})()</script></body></html>"#
+    )
 }
 
 fn password_manager_login_page(run: &str) -> String {

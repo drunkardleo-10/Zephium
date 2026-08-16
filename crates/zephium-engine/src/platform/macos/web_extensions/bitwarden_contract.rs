@@ -56,12 +56,14 @@ const EXPECTED_BITWARDEN_RUNTIME_NAMESPACES: [(&str, &str); 12] = [
 ];
 const BITWARDEN_PRODUCT_TAB_TITLE: &str = "zephium-bitwarden-product-tab-loaded";
 const WEB_REQUEST_PROBE_TITLE: &str = "zephium-web-request-pending";
+const SAME_DOCUMENT_PROBE_TITLE: &str = "zephium-tabs-same-document-pending";
 const BITWARDEN_CONTRACT_PRINCIPAL: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const BITWARDEN_PRODUCT_PROFILE: u128 = 0x34c9_9d91_e418_4bc1_8e0a_2cd2_7185_6fd7;
 const BITWARDEN_PRODUCT_WINDOW: u64 = 0xb17;
 const BITWARDEN_PRODUCT_TAB: u128 = 0xb17;
 const BITWARDEN_SURFACE_GENERATION: u64 = 1_000;
 const WEB_REQUEST_SETTLE_POLLS: u16 = 240;
+const SAME_DOCUMENT_SETTLE_POLLS: u16 = 60;
 
 pub(super) struct ContractEvidence {
     pub(super) error_count: usize,
@@ -82,6 +84,7 @@ pub(super) struct ContractNativeTeardown {
     pub(super) execution_world_namespace: &'static str,
     pub(super) sandbox_isolation: &'static str,
     pub(super) runtime_port_early_connect: &'static str,
+    pub(super) tabs_same_document_observation: &'static str,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -189,6 +192,10 @@ pub(super) fn write_fixture(root: &Path) -> Result<PathBuf, String> {
             "<!doctype html><meta charset=\"utf-8\"><title>zephium-web-request-pending</title><script src=\"web-request-probe.js\"></script>",
         ),
         (
+            "same-document-probe.html",
+            "<!doctype html><meta charset=\"utf-8\"><title>zephium-tabs-same-document-pending</title><script src=\"same-document-probe.js\"></script>",
+        ),
+        (
             "sidepanel-disabled.html",
             "<!doctype html><title>disabled</title>",
         ),
@@ -197,6 +204,11 @@ pub(super) fn write_fixture(root: &Path) -> Result<PathBuf, String> {
         write(&path, name, contents)?;
     }
     write(&path, "web-request-probe.js", &web_request_probe_script())?;
+    write(
+        &path,
+        "same-document-probe.js",
+        &same_document_probe_script(),
+    )?;
     browser_api::write_fixture_assets(&path)?;
     let title = serde_json::to_string(BITWARDEN_PRODUCT_TAB_TITLE)
         .expect("static product-tab title is serializable");
@@ -385,6 +397,7 @@ pub(super) fn validate_native_grant_round_trip(
     let mut popup_views = Vec::new();
     let mut web_request = None;
     let mut browser_api_observation = None;
+    let mut tabs_same_document_observation = None;
     let gate = (|| {
         let window = super::new_window(mtm)?;
         let surface_host =
@@ -451,6 +464,11 @@ pub(super) fn validate_native_grant_round_trip(
         perform_native_command(&context, "autofill_login")?;
         let browser_api_evidence = probe_browser_apis(&context, run_loop, mtm, false)?;
         let observation = browser_api::validate_for_native_inspection(&browser_api_evidence)?;
+        let same_document_evidence = probe_tabs_same_document(&context, run_loop, mtm)?;
+        eprintln!("native-probe-bitwarden-message-sender: {same_document_evidence}");
+        tabs_same_document_observation = Some(validate_tabs_same_document_evidence(
+            &same_document_evidence,
+        )?);
         validate_native_context_menu(
             &context,
             tab_protocol
@@ -552,8 +570,10 @@ pub(super) fn validate_native_grant_round_trip(
             let browser_api = browser_api_observation
                 .expect("successful Bitwarden gate records browser API evidence");
             eprintln!(
-                "native-probe-bitwarden-browser-api: scripting_main_world=passed; execution_world_namespace={}; web_navigation=passed; alarms_lifecycle=passed; commands_readback=passed; commands_native_dispatch=passed; runtime_port_registered=round-trip; runtime_port_early_connect={}; context_menus_lifecycle=passed; context_menus_native_projection=passed; dynamic_resource=passed; dynamic_resource_url={}; sandbox_isolation={}",
+                "native-probe-bitwarden-browser-api: scripting_main_world=passed; execution_world_namespace={}; web_navigation=passed; tabs_same_document={}; alarms_lifecycle=passed; commands_readback=passed; commands_native_dispatch=passed; runtime_port_registered=round-trip; runtime_port_early_connect={}; context_menus_lifecycle=passed; context_menus_native_projection=passed; dynamic_resource=passed; dynamic_resource_url={}; sandbox_isolation={}",
                 browser_api.execution_world_namespace(),
+                tabs_same_document_observation
+                    .expect("successful Bitwarden gate records same-document evidence"),
                 browser_api.runtime_port_early_connect(),
                 browser_api.dynamic_resource_url(),
                 browser_api.sandbox_isolation(),
@@ -570,6 +590,8 @@ pub(super) fn validate_native_grant_round_trip(
                 execution_world_namespace: browser_api.execution_world_namespace(),
                 sandbox_isolation: browser_api.sandbox_isolation(),
                 runtime_port_early_connect: browser_api.runtime_port_early_connect(),
+                tabs_same_document_observation: tabs_same_document_observation
+                    .expect("successful Bitwarden gate records same-document evidence"),
             })
         }
         (Err(gate), Ok(())) => Err(gate),
@@ -698,6 +720,21 @@ fn probe_web_request(
         &format!("web-request-probe.html?phase={phase}"),
         WEB_REQUEST_PROBE_TITLE,
         "webRequest",
+    )
+}
+
+fn probe_tabs_same_document(
+    context: &WKWebExtensionContext,
+    run_loop: &NSRunLoop,
+    mtm: MainThreadMarker,
+) -> Result<Value, String> {
+    probe_extension_page(
+        context,
+        run_loop,
+        mtm,
+        "same-document-probe.html",
+        SAME_DOCUMENT_PROBE_TITLE,
+        "tabs same-document",
     )
 }
 
@@ -1002,6 +1039,25 @@ fn background_probe_script() -> &'static str {
     } else {
         surface.webNavigationCommitted = "absent";
     }
+    const sameDocument = {
+        tabsOnUpdated: globalThis.chrome?.tabs?.onUpdated ? "pending" : "absent",
+        senderFrame: "pending",
+        senderUrl: "pending",
+        senderTabUrl: "pending"
+    };
+    const publishSameDocument = () => api?.storage?.local?.set({
+        zephiumTabsSameDocumentProbe: sameDocument
+    });
+    if (globalThis.chrome?.tabs?.onUpdated) {
+        globalThis.chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+            if (Number.isInteger(tabId)
+                && changeInfo?.url?.includes("zephium-same-document=1")) {
+                sameDocument.tabsOnUpdated = "observed";
+                void publishSameDocument();
+            }
+        });
+    }
+    void publishSameDocument();
     if (api?.runtime?.onMessage) {
         api.runtime.onMessage.addListener((message, sender) => {
             if (message?.type === "zephium-bitwarden-context-menu-cleanup") {
@@ -1016,6 +1072,10 @@ fn background_probe_script() -> &'static str {
             }
             if (message?.type !== "zephium-bitwarden-programmatic-script") return;
             const tabId = sender?.tab?.id;
+            sameDocument.senderFrame = Number.isInteger(sender?.frameId) ? "integer" : "absent";
+            sameDocument.senderUrl = /^https?:/.test(sender?.url ?? "") ? "http" : "absent";
+            sameDocument.senderTabUrl = /^https?:/.test(sender?.tab?.url ?? "") ? "http" : "absent";
+            void publishSameDocument();
             surface.messageSenderTab = Number.isInteger(tabId) ? "present" : "absent";
             if (!Number.isInteger(tabId) || !globalThis.chrome?.scripting?.executeScript) {
                 surface.executeScript = "absent";
@@ -1163,6 +1223,61 @@ fn web_request_probe_script() -> String {
         "__ZEPHIUM_SETTLE_POLLS__",
         &WEB_REQUEST_SETTLE_POLLS.to_string(),
     )
+}
+
+fn same_document_probe_script() -> String {
+    const TEMPLATE: &str = r#"(() => {
+    const api = globalThis.browser ?? globalThis.chrome;
+    const key = "zephiumTabsSameDocumentProbe";
+    let polls = 0;
+    const settle = (value) => { document.title = JSON.stringify(value); };
+    const poll = () => api?.storage?.local?.get(key).then((stored) => {
+        const value = stored?.[key];
+        const senderSettled = value?.senderFrame !== "pending"
+            && value?.senderUrl !== "pending"
+            && value?.senderTabUrl !== "pending";
+        if (senderSettled && (value?.tabsOnUpdated === "observed" || value?.tabsOnUpdated === "absent")) {
+            settle(value);
+            return;
+        }
+        if (polls >= __ZEPHIUM_SETTLE_POLLS__) {
+            settle({
+                ...value,
+                tabsOnUpdated: value?.tabsOnUpdated === "pending" ? "unobserved" : "missing"
+            });
+            return;
+        }
+        polls += 1;
+        setTimeout(poll, 25);
+    }, (error) => settle({ error: String(error?.message ?? error) }));
+    poll();
+})()"#;
+    TEMPLATE.replace(
+        "__ZEPHIUM_SETTLE_POLLS__",
+        &SAME_DOCUMENT_SETTLE_POLLS.to_string(),
+    )
+}
+
+fn validate_tabs_same_document_evidence(evidence: &Value) -> Result<&'static str, String> {
+    for (field, expected) in [
+        ("senderFrame", "integer"),
+        ("senderUrl", "http"),
+        ("senderTabUrl", "http"),
+    ] {
+        if evidence.get(field).and_then(Value::as_str) != Some(expected) {
+            return Err(format!(
+                "tabs same-document sender evidence drifted at {field}: {evidence}"
+            ));
+        }
+    }
+    match evidence.get("tabsOnUpdated").and_then(Value::as_str) {
+        Some("observed") => Ok("observed"),
+        Some("unobserved") => Ok("unobserved"),
+        Some("absent") => Ok("absent"),
+        _ => Err(format!(
+            "tabs same-document observation returned invalid evidence: {evidence}"
+        )),
+    }
 }
 
 fn same_names(actual: &[String], expected: &[&str]) -> bool {

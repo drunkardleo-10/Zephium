@@ -20,32 +20,57 @@ use serde_json::{json, Value};
 
 const CONTRACT_PRINCIPAL: &str = "cccccccccccccccccccccccccccccccc";
 const PENDING_TITLE: &str = "zephium-major-extension-contract-pending";
-const DECLARED_PERMISSIONS: [&str; 6] = [
+const DECLARED_PERMISSIONS: [&str; 7] = [
     "bookmarks",
     "favicon",
     "history",
     "search",
     "sessions",
     "storage",
+    "webNavigation",
 ];
-const EXPECTED_NATIVE_PERMISSIONS: [&str; 1] = ["storage"];
-const NAMESPACE_NAMES: [&str; 7] = [
+const EXPECTED_NATIVE_PERMISSIONS: [&str; 2] = ["storage", "webNavigation"];
+const NAMESPACE_NAMES: [&str; 19] = [
+    "action",
+    "actionSetIcon",
     "bookmarks",
     "history",
     "runtime",
     "search",
     "sessions",
     "storageLocal",
+    "storageSession",
+    "storageSessionGet",
+    "storageSessionSet",
+    "storageSessionSetAccessLevel",
+    "storageSync",
+    "storageSyncGet",
+    "storageSyncSet",
     "tabs",
+    "webNavigationCommitted",
+    "webNavigationHistoryStateUpdated",
+    "webNavigationReferenceFragmentUpdated",
 ];
-const EXPECTED_NAMESPACES: [(&str, &str); 7] = [
+const EXPECTED_NAMESPACES: [(&str, &str); 19] = [
+    ("action", "object"),
+    ("actionSetIcon", "function"),
     ("bookmarks", "undefined"),
     ("history", "undefined"),
     ("runtime", "object"),
     ("search", "undefined"),
     ("sessions", "undefined"),
     ("storageLocal", "object"),
+    ("storageSession", "object"),
+    ("storageSessionGet", "function"),
+    ("storageSessionSet", "function"),
+    ("storageSessionSetAccessLevel", "function"),
+    ("storageSync", "object"),
+    ("storageSyncGet", "function"),
+    ("storageSyncSet", "function"),
     ("tabs", "object"),
+    ("webNavigationCommitted", "object"),
+    ("webNavigationHistoryStateUpdated", "undefined"),
+    ("webNavigationReferenceFragmentUpdated", "undefined"),
 ];
 
 pub(super) struct RuntimeEvidence {
@@ -66,6 +91,7 @@ pub(super) fn write_fixture(root: &Path) -> Result<PathBuf, String> {
         "name": "Zephium Major Extension API Contract Probe",
         "version": "1.0.0",
         "description": "Zephium-owned source-free ordinary-extension capability fixture.",
+        "action": {"default_title": "Zephium contract"},
         "permissions": DECLARED_PERMISSIONS
     });
     write(&path, "manifest.json", &manifest.to_string())?;
@@ -81,13 +107,25 @@ pub(super) fn write_fixture(root: &Path) -> Result<PathBuf, String> {
     'use strict';
     const type = (value) => typeof value;
     document.title = JSON.stringify({
+        action: type(globalThis.chrome?.action),
+        actionSetIcon: type(globalThis.chrome?.action?.setIcon),
         bookmarks: type(globalThis.chrome?.bookmarks),
         history: type(globalThis.chrome?.history),
         runtime: type(globalThis.chrome?.runtime),
         search: type(globalThis.chrome?.search),
         sessions: type(globalThis.chrome?.sessions),
         storageLocal: type(globalThis.chrome?.storage?.local),
-        tabs: type(globalThis.chrome?.tabs)
+        storageSession: type(globalThis.chrome?.storage?.session),
+        storageSessionGet: type(globalThis.chrome?.storage?.session?.get),
+        storageSessionSet: type(globalThis.chrome?.storage?.session?.set),
+        storageSessionSetAccessLevel: type(globalThis.chrome?.storage?.session?.setAccessLevel),
+        storageSync: type(globalThis.chrome?.storage?.sync),
+        storageSyncGet: type(globalThis.chrome?.storage?.sync?.get),
+        storageSyncSet: type(globalThis.chrome?.storage?.sync?.set),
+        tabs: type(globalThis.chrome?.tabs),
+        webNavigationCommitted: type(globalThis.chrome?.webNavigation?.onCommitted),
+        webNavigationHistoryStateUpdated: type(globalThis.chrome?.webNavigation?.onHistoryStateUpdated),
+        webNavigationReferenceFragmentUpdated: type(globalThis.chrome?.webNavigation?.onReferenceFragmentUpdated)
     });
 })()"#,
     )?;
@@ -106,7 +144,10 @@ pub(super) fn run(
     let context = super::new_context(extension, CONTRACT_PRINCIPAL)?;
     let applied = super::super::extensions::apply_probe_grants(
         &context,
-        &[super::super::extensions::MacosNativeApiPermission::Storage],
+        &[
+            super::super::extensions::MacosNativeApiPermission::Storage,
+            super::super::extensions::MacosNativeApiPermission::WebNavigation,
+        ],
         &[],
         false,
     )
@@ -298,9 +339,9 @@ mod tests {
         )
         .expect("manifest JSON");
         assert_eq!(manifest["permissions"], json!(DECLARED_PERMISSIONS));
-        assert_eq!(EXPECTED_NATIVE_PERMISSIONS, ["storage"]);
+        assert_eq!(EXPECTED_NATIVE_PERMISSIONS, ["storage", "webNavigation"]);
         assert_eq!(manifest["manifest_version"], 3);
-        assert!(manifest.get("action").is_none());
+        assert_eq!(manifest["action"]["default_title"], "Zephium contract");
         assert_eq!(
             std::fs::read_dir(&fixture)
                 .expect("fixture directory")
