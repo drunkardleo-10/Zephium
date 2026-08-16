@@ -221,7 +221,9 @@ impl InnerWebView {
     request: PermissionRequestId,
     response: PermissionResponse,
   ) -> bool {
-    self.ui_delegate.resolve_permission_request(request, response)
+    self
+      .ui_delegate
+      .resolve_permission_request(request, response)
   }
 
   pub fn new(

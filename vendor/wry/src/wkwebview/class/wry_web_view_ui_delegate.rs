@@ -33,14 +33,14 @@ use objc2_web_kit::{
   WKFrameInfo, WKMediaCaptureType, WKPermissionDecision, WKSecurityOrigin, WKUIDelegate,
 };
 
-use crate::{
-  native_bounds::{bounded_nsstring, PAGE_URL_LIMIT},
-  NewWindowFeatures, NewWindowResponse, PermissionKind, PermissionResponse, WryWebView,
-};
 #[cfg(target_os = "macos")]
 use crate::{
   native_bounds::NativeStringLimit, PermissionOrigin, PermissionRequest,
   PermissionRequestDisposition, PermissionRequestId, PermissionRequestKind,
+};
+use crate::{
+  native_bounds::{bounded_nsstring, PAGE_URL_LIMIT},
+  NewWindowFeatures, NewWindowResponse, PermissionKind, PermissionResponse, WryWebView,
 };
 
 #[cfg(target_os = "macos")]
@@ -157,17 +157,14 @@ pub struct WryWebViewUIDelegateIvars {
   permission_request_handler:
     Option<Box<dyn Fn(PermissionRequest) -> PermissionRequestDisposition>>,
   #[cfg(target_os = "macos")]
-  pending_permission_requests:
-    RefCell<BoundedPendingPermissionRequests<PendingPermissionRequest>>,
+  pending_permission_requests: RefCell<BoundedPendingPermissionRequests<PendingPermissionRequest>>,
 }
 
 #[cfg(target_os = "macos")]
 impl Drop for WryWebViewUIDelegateIvars {
   fn drop(&mut self) {
     for pending in self.pending_permission_requests.get_mut().drain() {
-      pending
-        .decision_handler
-        .call((WKPermissionDecision::Deny,));
+      pending.decision_handler.call((WKPermissionDecision::Deny,));
     }
   }
 }
@@ -461,9 +458,8 @@ impl WryWebViewUIDelegate {
     // SAFETY: WebKit supplied a live `WKSecurityOrigin` reference for this
     // delegate invocation. The generated accessors return retained immutable
     // values, which we bound before copying into Rust.
-    let (native_scheme, native_host, raw_port) = unsafe {
-      (origin.protocol(), origin.host(), origin.port())
-    };
+    let (native_scheme, native_host, raw_port) =
+      unsafe { (origin.protocol(), origin.host(), origin.port()) };
     let scheme = bounded_nsstring(&native_scheme, PERMISSION_ORIGIN_COMPONENT_LIMIT)?;
     let host = bounded_nsstring(&native_host, PERMISSION_ORIGIN_COMPONENT_LIMIT)?;
     if scheme.is_empty() || host.is_empty() {
@@ -543,7 +539,9 @@ impl WryWebViewUIDelegate {
       return false;
     };
     drop(requests);
-    pending.decision_handler.call((permission_decision(response),));
+    pending
+      .decision_handler
+      .call((permission_decision(response),));
     true
   }
 
