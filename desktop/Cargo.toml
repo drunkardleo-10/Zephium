@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Explicit release-gate forwarding only. Default product builds remain
+# deny-only until the packaged WKWebView/TCC gate is recorded as passing.
+macos-page-permission-prompts = ["zephium-app/macos-page-permission-prompts"]
+
 [lib]
 name = "zephium_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]

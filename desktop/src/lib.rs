@@ -6064,6 +6064,18 @@ mod tests {
     }
 
     #[test]
+    fn macos_bundle_declares_page_media_usage_without_enabling_authority() {
+        let plist = include_str!("../Info.plist");
+        assert!(plist.contains("<key>NSCameraUsageDescription</key>"));
+        assert!(plist.contains("<key>NSMicrophoneUsageDescription</key>"));
+        assert!(
+            plist.contains("Zephium uses the camera only when you allow a website to access it.")
+        );
+        assert!(plist
+            .contains("Zephium uses the microphone only when you allow a website to access it."));
+    }
+
+    #[test]
     fn production_csp_remains_fail_closed_for_privileged_chrome() {
         let config: serde_json::Value =
             serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();

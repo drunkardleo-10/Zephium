@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSCameraUsageDescription</key>
+  <string>Zephium uses the camera only when you allow a website to access it.</string>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Zephium uses the microphone only when you allow a website to access it.</string>
+</dict>
+</plist>
