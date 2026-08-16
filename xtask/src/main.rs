@@ -689,6 +689,8 @@ fn ci() {
         run_native_adapter_clippy(manifest, features, "--all-targets");
         run_native_adapter_clippy(manifest, features, "--lib");
     }
+    #[cfg(target_os = "macos")]
+    check_macos_page_permission_probe();
     // Run display-dependent AppKit/WebKit gates before the long workspace and
     // vendored-adapter test inventory. On macOS, a heavily exercised test
     // process cohort can leave LaunchServices/GPU helper admission transiently
@@ -697,8 +699,6 @@ fn ci() {
     // behind retries.
     #[cfg(target_os = "macos")]
     run_macos_principal_isolation_probe();
-    #[cfg(target_os = "macos")]
-    run_macos_page_permission_probe();
     #[cfg(target_os = "macos")]
     run_macos_web_extension_probe();
     #[cfg(target_os = "macos")]
@@ -1397,7 +1397,7 @@ fn run_macos_principal_isolation_probe() {
 }
 
 #[cfg(target_os = "macos")]
-fn run_macos_page_permission_probe() {
+fn check_macos_page_permission_probe() {
     const COMMON: [&str; 7] = [
         "--locked",
         "-p",
@@ -1413,12 +1413,12 @@ fn run_macos_page_permission_probe() {
     clippy.extend(["--", "-D", "warnings"]);
     run("cargo", &clippy);
 
-    // This exercises only an exact deferred Deny against a loopback fixture.
-    // It never resolves Allow or grants camera/microphone authority, so it is
-    // suitable for unattended macOS CI. The packaged Allow/TCC gate is separate.
-    let mut execute = vec!["run"];
-    execute.extend(COMMON);
-    run("cargo", &execute);
+    // WebKit performs real system TCC validation before it invokes
+    // WKUIDelegate, even when the embedder will ultimately deny the page
+    // request. Shipping WebKit does not expose the mock-device bypass used by
+    // upstream's own automated build. Compile and lint the feature here, but
+    // keep execution in the signed, TCC-authorized packaged release gate;
+    // unattended CI must never prompt, hang, or mutate device consent.
 }
 
 #[cfg(target_os = "macos")]
