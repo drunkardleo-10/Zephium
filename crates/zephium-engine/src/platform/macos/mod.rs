@@ -42,6 +42,7 @@ pub use native::{
     add_user_script, configure, query_document_activity, stop_loading, user_script_refusal,
     user_style_refusal,
 };
+pub(crate) use navigation::signal_same_document_navigation;
 pub use navigation::NavigationObserver;
 use objc2::rc::Retained;
 use objc2_web_kit::{WKWebViewConfiguration, WKWebsiteDataStore};

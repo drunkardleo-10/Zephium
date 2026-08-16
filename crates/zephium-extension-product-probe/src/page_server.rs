@@ -11,6 +11,40 @@ const SERVER_LIFETIME: Duration = Duration::from_secs(45);
 const IO_TIMEOUT: Duration = Duration::from_secs(2);
 const REQUEST_LIMIT: usize = 8 * 1024;
 const MAX_REQUESTS: usize = 16;
+const PAGE_BODY: &[u8] = br#"<!doctype html>
+<meta charset="utf-8">
+<title>Zephium extension product probe</title>
+<script>
+(() => {
+  "use strict";
+  const extensionMarker = "data-zephium-extension-product-probe";
+  const signal = "zephium-webkit-same-document-navigation-v1";
+  let requested = false;
+
+  document.addEventListener(signal, () => {
+    if (location.search === "?zephium-same-document=1") {
+      document.documentElement.dataset.zephiumSameDocumentSignal = "observed";
+    }
+  }, { capture: true });
+
+  const requestSameDocumentNavigation = () => {
+    if (requested) return;
+    const state = document.documentElement.getAttribute(extensionMarker);
+    if (state !== "ready:1" && state !== "ready-brokered:1") return;
+    requested = true;
+    observer.disconnect();
+    history.pushState(null, "", "?zephium-same-document=1");
+  };
+
+  const observer = new MutationObserver(requestSameDocumentNavigation);
+  observer.observe(document.documentElement, {
+    attributes: true,
+    attributeFilter: [extensionMarker],
+  });
+  queueMicrotask(requestSameDocumentNavigation);
+})();
+</script>
+<p>probe</p>"#;
 
 pub(crate) struct PageServer {
     address: SocketAddr,
@@ -73,13 +107,12 @@ fn serve(listener: TcpListener, stop: Arc<AtomicBool>) {
                 let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
                 let mut request = [0_u8; REQUEST_LIMIT];
                 let _ = stream.read(&mut request);
-                let body = b"<!doctype html><meta charset=utf-8><title>Zephium extension product probe</title><p>probe</p>";
                 let headers = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
-                    body.len()
+                    PAGE_BODY.len()
                 );
                 let _ = stream.write_all(headers.as_bytes());
-                let _ = stream.write_all(body);
+                let _ = stream.write_all(PAGE_BODY);
                 let _ = stream.flush();
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {

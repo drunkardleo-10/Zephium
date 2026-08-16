@@ -82,7 +82,7 @@ fn main() {
     match outcome {
         Ok(ProbeDisposition::Passed(measurements)) => {
             println!(
-                "extension-product-probe: passed; runtime={}; authenticated_startup_ms={}; durable_grant_rebind_ms={}; profile_view_ms={}; popup_presentation_ms={}; service_shutdown_ms={}; engine_shutdown_ms={}; main_process_peak_rss_bytes={}; process_user_cpu_ms={}; process_system_cpu_ms={}; voluntary_context_switches={}; involuntary_context_switches={}; optional_api_host_grant_rebind=passed; tabs_create_activate_update_remove=passed; brokered_recent_history={}; popup_capacity_discard_reopen=passed; repository_cleanup=passed; store_restart_cleanup=passed",
+                "extension-product-probe: passed; runtime={}; authenticated_startup_ms={}; durable_grant_rebind_ms={}; profile_view_ms={}; popup_presentation_ms={}; service_shutdown_ms={}; engine_shutdown_ms={}; main_process_peak_rss_bytes={}; process_user_cpu_ms={}; process_system_cpu_ms={}; voluntary_context_switches={}; involuntary_context_switches={}; optional_api_host_grant_rebind=passed; tabs_create_activate_update_remove=passed; same_document_history_signal=passed; brokered_recent_history={}; popup_capacity_discard_reopen=passed; repository_cleanup=passed; store_restart_cleanup=passed",
                 runtime_target_argument(runtime_target),
                 measurements.authenticated_startup.as_millis(),
                 measurements.durable_grant_rebind.as_millis(),
@@ -169,6 +169,7 @@ struct ProcessUsage {
 struct ProductBrowserModel {
     profile: zephium_core::ids::ProfileId,
     page_url: url::Url,
+    same_document_url: url::Url,
     generation: u64,
     original: ItemId,
     created: Option<ItemId>,
@@ -179,13 +180,17 @@ struct ProductBrowserModel {
     saw_activate: bool,
     saw_load: bool,
     saw_close: bool,
+    saw_same_document_navigation: bool,
 }
 
 impl ProductBrowserModel {
     fn new(profile: zephium_core::ids::ProfileId, page_url: url::Url, original: ItemId) -> Self {
+        let mut same_document_url = page_url.clone();
+        same_document_url.set_query(Some("zephium-same-document=1"));
         Self {
             profile,
             page_url,
+            same_document_url,
             generation: ExtensionBrowserSurfaceGeneration::INITIAL.get(),
             original,
             created: None,
@@ -196,7 +201,32 @@ impl ProductBrowserModel {
             saw_activate: false,
             saw_load: false,
             saw_close: false,
+            saw_same_document_navigation: false,
         }
+    }
+
+    fn handle_navigation_observation(&mut self, item: ItemId, url: String) -> Result<(), String> {
+        if item != self.original {
+            // The authenticated mutation sequence creates and navigates one
+            // temporary tab. Its exact requests are validated at admission;
+            // this proof is concerned only with the original page's native
+            // same-document source observation.
+            return Ok(());
+        }
+        let observed = url::Url::parse(&url)
+            .map_err(|error| format!("cannot parse observed product-page URL: {error}"))?;
+        if observed == self.page_url {
+            return Ok(());
+        }
+        if observed != self.same_document_url {
+            return Err(format!(
+                "product page committed unexpected same-document URL {observed:?}; expected {:?}",
+                self.same_document_url
+            ));
+        }
+        self.page_url = observed;
+        self.saw_same_document_navigation = true;
+        Ok(())
     }
 
     fn handle(
@@ -449,14 +479,19 @@ impl ProductBrowserModel {
     fn verify_complete(&self) -> Result<(), String> {
         if self.created.is_some()
             || self.active != self.original
-            || !(self.saw_create && self.saw_activate && self.saw_load && self.saw_close)
+            || !(self.saw_create
+                && self.saw_activate
+                && self.saw_load
+                && self.saw_close
+                && self.saw_same_document_navigation)
         {
             return Err(format!(
-                "authenticated mutation sequence was incomplete: create={}, activate={}, load={}, close={}, created={:?}, active={}",
+                "authenticated mutation sequence was incomplete: create={}, activate={}, load={}, close={}, same_document={}, created={:?}, active={}",
                 self.saw_create,
                 self.saw_activate,
                 self.saw_load,
                 self.saw_close,
+                self.saw_same_document_navigation,
                 self.created,
                 self.active,
             ));
@@ -466,11 +501,12 @@ impl ProductBrowserModel {
 
     fn summary(&self) -> String {
         format!(
-            "mutation evidence: create={}, activate={}, load={}, close={}, created={:?}, active={}",
+            "mutation evidence: create={}, activate={}, load={}, close={}, same_document={}, created={:?}, active={}",
             self.saw_create,
             self.saw_activate,
             self.saw_load,
             self.saw_close,
+            self.saw_same_document_navigation,
             self.created,
             self.active,
         )
@@ -618,6 +654,14 @@ impl ExecutableExtensionCoordinator for ProductExecutionModel {
         request: ExtensionCompatibilityBrokerRequest,
     ) -> Result<(), String> {
         self.broker.handle(request)
+    }
+
+    fn handle_navigation_observation(&mut self, item: ItemId, url: String) -> Result<(), String> {
+        self.browser.handle_navigation_observation(item, url)
+    }
+
+    fn same_document_navigation_observed(&self) -> bool {
+        self.browser.saw_same_document_navigation
     }
 }
 
@@ -869,6 +913,12 @@ fn run(runtime_target: ProductExtensionRuntimeTarget) -> Result<ProbeDisposition
         deadline(),
         &mut execution,
     ) {
+        return Err(format!("{error}; {}", execution.summary()));
+    }
+    set_phase("same-document-history");
+    if let Err(error) =
+        engine.wait_for_same_document_history_signal(item, deadline(), &mut execution)
+    {
         return Err(format!("{error}; {}", execution.summary()));
     }
     execution.verify_complete()?;

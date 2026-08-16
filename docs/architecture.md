@@ -1511,9 +1511,14 @@ extension API. It derives changes from the frame's real location, bounds and
 validates extension-local messages plus native tab/frame sender identities,
 and accepts only HTTP(S) or exact blank/srcdoc URLs. Hash and popstate changes
 are native DOM inputs. History API changes require a fixed browser-owned DOM
-signal from Zephium's already-observed committed URL; that production signal is
-not connected yet, so the metadata discloses the limitation rather than
-claiming complete same-document observation.
+signal from Zephium's already-observed committed URL. The macOS host now emits
+that payload-free signal only for a changed same-origin URL in the exact
+current main-frame epoch, from WebKit's default client world and independently
+of extension presence. The authenticated native and brokered product probes
+require both the native URL event and cross-world DOM observation. This closes
+changed-URL top-frame History API signaling without claiming full parity:
+same-URL `pushState`/`replaceState` and subframe History API changes invisible
+to the top-level WKWebView source remain explicit limitations.
 The emitted metadata binds source and output manifest/tree/index identities and
 states `product_authority=false`; it is not a release sealer, catalog entry, or
 redistribution decision. A Node contract gate exercises native identity,

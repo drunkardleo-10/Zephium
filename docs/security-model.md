@@ -1091,8 +1091,17 @@ scheme; reported changes come from the endpoint frame's actual location. A
 hostile page may dispatch the fixed DOM signal, but it cannot supply a URL or
 cross the isolated-world runtime boundary, and unchanged locations are ignored.
 The production History API signal may originate only from Zephium's native
-committed-URL observer. Until that host signal is connected and live-gated,
-history-state observation remains an explicit artifact limitation.
+committed-URL observer. The macOS host emits the constant, payload-free event
+only after the exact current main-frame epoch accepts a changed same-origin
+URL, and does so independently of extension presence. It evaluates the event
+in WebKit's default client world so page code cannot replace the constructors
+used to dispatch it. The authenticated product gate proves both the native URL
+observation and cross-world DOM delivery in the native and brokered runtimes.
+Same-URL `pushState`/`replaceState` calls remain unsupported: allowing a
+page-dispatchable event to report an unchanged location would let hostile
+content manufacture extension navigation events. Subframe History API changes
+that do not update the top-level WKWebView source remain limited to native
+`hashchange`/`popstate` delivery inside the injected frame.
 
 ### Extension compatibility broker
 

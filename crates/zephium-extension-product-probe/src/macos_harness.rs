@@ -44,6 +44,7 @@ const RUN_LOOP_SLICE: Duration = Duration::from_millis(5);
 const HTML_OBSERVATION_INTERVAL: Duration = Duration::from_millis(100);
 const EXTENSION_MARKER: &str = "data-zephium-extension-product-probe";
 const EXTENSION_POPUP_MARKER: &str = "data-zephium-extension-popup-probe";
+const SAME_DOCUMENT_SIGNAL_MARKER: &str = "data-zephium-same-document-signal=\"observed\"";
 
 type MainTask = Box<dyn FnOnce() + Send + 'static>;
 
@@ -61,6 +62,10 @@ pub(crate) trait ExecutableExtensionCoordinator {
         engine: &WebviewEngine,
         request: ExtensionCompatibilityBrokerRequest,
     ) -> Result<(), String>;
+
+    fn handle_navigation_observation(&mut self, item: ItemId, url: String) -> Result<(), String>;
+
+    fn same_document_navigation_observed(&self) -> bool;
 }
 
 pub(crate) fn operating_system_version() -> String {
@@ -667,6 +672,9 @@ impl MacosEngineHarness {
                     Ok(EngineEvent::Crashed { id }) if id == item => {
                         return Err("profile view crashed during extension execution".to_owned())
                     }
+                    Ok(EngineEvent::UrlChanged { id, url }) => {
+                        coordinator.handle_navigation_observation(id, url)?;
+                    }
                     Ok(EngineEvent::ExtensionBrowserRequested { request }) => {
                         coordinator.handle_browser_request(&harness.engine, request)?;
                     }
@@ -697,6 +705,83 @@ impl MacosEngineHarness {
             }
             Ok(false)
         })
+    }
+
+    pub(crate) fn wait_for_same_document_history_signal(
+        &mut self,
+        item: ItemId,
+        deadline: Instant,
+        coordinator: &mut impl ExecutableExtensionCoordinator,
+    ) -> Result<(), String> {
+        let mut signal_observed = false;
+        let mut next_observation = Instant::now();
+        self.pump_until(
+            "browser-owned same-document history signal",
+            deadline,
+            |harness| {
+                coordinator.poll(&harness.engine)?;
+                loop {
+                    match harness.events.try_recv() {
+                        Ok(EngineEvent::HtmlExtracted {
+                            id,
+                            html,
+                            truncated,
+                        }) if id == item => {
+                            if truncated {
+                                return Err(
+                                    "same-document signal observation returned truncated HTML"
+                                        .to_owned(),
+                                );
+                            }
+                            signal_observed |= html.contains(SAME_DOCUMENT_SIGNAL_MARKER);
+                        }
+                        Ok(EngineEvent::UrlChanged { id, url }) => {
+                            coordinator.handle_navigation_observation(id, url)?;
+                        }
+                        Ok(EngineEvent::ViewCreationFailed { id }) if id == item => {
+                            return Err(
+                                "profile view failed during same-document signaling".to_owned()
+                            );
+                        }
+                        Ok(EngineEvent::Crashed { id }) if id == item => {
+                            return Err(
+                                "profile view crashed during same-document signaling".to_owned()
+                            );
+                        }
+                        Ok(EngineEvent::ExtensionBrowserRequested { request }) => {
+                            coordinator.handle_browser_request(&harness.engine, request)?;
+                        }
+                        Ok(EngineEvent::ExtensionCompatibilityBrokerRequested { request }) => {
+                            coordinator
+                                .handle_compatibility_broker_request(&harness.engine, *request)?;
+                        }
+                        Ok(_) => {}
+                        Err(mpsc::TryRecvError::Empty) => break,
+                        Err(mpsc::TryRecvError::Disconnected) => {
+                            return Err("engine event ingress disconnected".to_owned());
+                        }
+                    }
+                }
+
+                if signal_observed && coordinator.same_document_navigation_observed() {
+                    return Ok(true);
+                }
+
+                let now = Instant::now();
+                if now >= next_observation {
+                    if harness.engine.extract_html(item)
+                        != zephium_core::ports::engine::NativeDispatch::Scheduled
+                    {
+                        return Err("same-document HTML observation was not admitted".into());
+                    }
+                    next_observation =
+                        now.checked_add(HTML_OBSERVATION_INTERVAL).ok_or_else(|| {
+                            "same-document observation deadline overflowed".to_owned()
+                        })?;
+                }
+                Ok(false)
+            },
+        )
     }
 
     pub(crate) fn shutdown(&mut self, deadline: Instant) -> Result<(), String> {

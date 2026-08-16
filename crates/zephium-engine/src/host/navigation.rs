@@ -298,6 +298,11 @@ impl EngineHost {
                 history,
             )
         };
+        #[cfg(target_os = "macos")]
+        let previous_committed_url = navigation
+            .committed_snapshot()
+            .filter(|(committed, _)| *committed == epoch)
+            .map(|(_, url)| url);
         let url = match resolve_committed_observed_url(&navigation, epoch, url) {
             ObservedUrl::Unavailable => {
                 // Neither the native view nor the exact committed tracker can
@@ -338,6 +343,10 @@ impl EngineHost {
                 return false;
             }
         };
+        #[cfg(target_os = "macos")]
+        let same_document_url_changed = previous_committed_url
+            .as_deref()
+            .is_some_and(|previous| previous != url);
         let became_presentable = {
             let Some(view) = self.views.get_mut(&id) else {
                 return false;
@@ -371,6 +380,31 @@ impl EngineHost {
         let previous = self.navigation_snapshots.entry(id).or_default();
         for event in navigation_observation_events(id, previous, Some(&url), history) {
             event_permit.emit(&self.sink, event);
+        }
+        #[cfg(target_os = "macos")]
+        if same_document_url_changed {
+            // The fixed signal carries no page- or extension-selected data.
+            // Revalidate the exact physical generation immediately before
+            // scheduling it, after document-bound extension permits have
+            // moved to the newly observed URL.
+            let Some(view) = self.views.get(&id).filter(|view| {
+                navigation_callback_matches(
+                    &view.event_permit,
+                    &view.navigation,
+                    &event_permit,
+                    &navigation,
+                    epoch,
+                ) && view.navigation.matches_committed_snapshot(epoch, &url)
+            }) else {
+                return false;
+            };
+            if crate::platform::imp::signal_same_document_navigation(view).is_err() {
+                // Normal browsing remains valid if WebKit refuses this
+                // compatibility notification. The authenticated product gate
+                // makes such a regression release-blocking without turning a
+                // recoverable extension degradation into a tab crash.
+                eprintln!("engine: same-document extension signal was not scheduled");
+            }
         }
         if became_presentable {
             // The URL event above enters the shell's ordered critical band

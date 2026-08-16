@@ -1,4 +1,5 @@
 use std::ffi::c_void;
+use std::panic::AssertUnwindSafe;
 use std::ptr::null_mut;
 
 use objc2::rc::{Retained, Weak};
@@ -8,7 +9,39 @@ use objc2_foundation::{
     ns_string, MainThreadMarker, NSDictionary, NSKeyValueChangeKey, NSKeyValueObservingOptions,
     NSObjectNSKeyValueObserverRegistration, NSObjectProtocol, NSString,
 };
-use objc2_web_kit::WKWebView;
+use objc2_web_kit::{WKContentWorld, WKWebView};
+
+/// Notify isolated content worlds after the host has accepted a changed URL
+/// inside the exact committed main-frame epoch.
+///
+/// The default client world keeps page JavaScript from replacing `Event` or
+/// `dispatchEvent`. The resulting DOM event remains visible to every content
+/// world, so this is emitted for all accepted same-document URL changes rather
+/// than only when an extension is installed; page content cannot use it to
+/// enumerate extensions.
+pub(crate) fn signal_same_document_navigation(view: &wry::WebView) -> Result<(), &'static str> {
+    let mtm = MainThreadMarker::new()
+        .ok_or("same-document navigation signaling requires the main thread")?;
+    let webview = super::native::webkit(view);
+    // SAFETY: `mtm` proves WebKit main-thread affinity. The singleton client
+    // world and constant JavaScript source remain valid for the duration of
+    // this call; a nil frame selects the main frame.
+    let client_world = unsafe { WKContentWorld::defaultClientWorld(mtm) };
+    // `ns_string!` places the immutable source in the binary; the route does
+    // not allocate or interpolate page data for each History API mutation.
+    let source = ns_string!(
+        "(()=>{\"use strict\";const d=globalThis.document;if(d!=null){d.dispatchEvent(new globalThis.Event(\"zephium-webkit-same-document-navigation-v1\"));}})();"
+    );
+    objc2::exception::catch(AssertUnwindSafe(|| unsafe {
+        webview.evaluateJavaScript_inFrame_inContentWorld_completionHandler(
+            source,
+            None,
+            &client_world,
+            None,
+        );
+    }))
+    .map_err(|_| "WKWebView refused the same-document navigation signal")
+}
 
 pub struct NavigationObserverIvars {
     // The host retains both this observer and the Wry WebView. Keeping only a
