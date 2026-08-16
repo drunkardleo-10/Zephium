@@ -33,6 +33,7 @@ const ENTRY_ACCOUNTING_OVERHEAD: usize = 1_024;
 const ARCHIVE_ACCOUNTING_OVERHEAD: usize = 4_096;
 const TREE_RECEIPT_ACCOUNTING_OVERHEAD: usize = 4_096;
 const MAX_ENTRY_EXTRA_BYTES: usize = 4 * 1_024;
+const MAX_EMPTY_DIRECTORY_COMPRESSED_BYTES: u64 = 64;
 
 /// Maximum central-directory bytes accepted before the ZIP crate may allocate.
 ///
@@ -864,7 +865,7 @@ fn preflight_entries<'archive>(
     let mut manifest_seen = false;
 
     for archive_index in 0..archive.len() {
-        let entry = archive
+        let mut entry = archive
             .by_index(archive_index)
             .map_err(|_| AcquiredExtensionArchiveError::MalformedZip)?;
         if entry.encrypted()
@@ -937,8 +938,20 @@ fn preflight_entries<'archive>(
                 archive_index: u16::try_from(archive_index)
                     .map_err(|_| AcquiredExtensionArchiveError::AccountingExceeded)?,
             });
-        } else if length != 0 || entry.compressed_size() != 0 {
-            return Err(AcquiredExtensionArchiveError::UnsupportedEntry);
+        } else {
+            // Chrome Web Store archives may encode an empty directory as a
+            // small deflate stream instead of a zero-byte stored entry. Bound
+            // that metadata payload and drive its reader to EOF so malformed
+            // compressed bytes or a non-empty expansion still fail closed.
+            if length != 0 || entry.compressed_size() > MAX_EMPTY_DIRECTORY_COMPRESSED_BYTES {
+                return Err(AcquiredExtensionArchiveError::UnsupportedEntry);
+            }
+            let mut unexpected = [0_u8; 1];
+            match entry.read(&mut unexpected) {
+                Ok(0) => {}
+                Ok(_) => return Err(AcquiredExtensionArchiveError::UnsupportedEntry),
+                Err(_) => return Err(AcquiredExtensionArchiveError::MalformedZip),
+            }
         }
         regions.push(validate_local_header(
             bytes,
@@ -1163,6 +1176,22 @@ mod tests {
         cursor.into_inner()
     }
 
+    fn zip_with_deflated_directory() -> Vec<u8> {
+        let mut cursor = Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut cursor);
+            let options =
+                SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+            writer.add_directory("src/", options).unwrap();
+            writer.start_file("manifest.json", options).unwrap();
+            writer.write_all(br#"{"manifest_version":3}"#).unwrap();
+            writer.start_file("src/a.js", options).unwrap();
+            writer.write_all(b"a").unwrap();
+            writer.finish().unwrap();
+        }
+        cursor.into_inner()
+    }
+
     fn push_varint(bytes: &mut Vec<u8>, mut value: u64) {
         loop {
             let mut byte = (value & 0x7f) as u8;
@@ -1310,6 +1339,29 @@ mod tests {
         let mut observed = Vec::new();
         let _receipt = acquired.copy_file(0, &mut observed).unwrap();
         assert_eq!(observed, body);
+    }
+
+    #[test]
+    fn accepts_bounded_deflated_empty_directories() {
+        let archive = zip_with_deflated_directory();
+        let mut parsed = ZipArchive::new(Cursor::new(archive.as_slice())).unwrap();
+        let directory = parsed.by_index(0).unwrap();
+        assert!(directory.is_dir());
+        assert_eq!(directory.size(), 0);
+        assert!(directory.compressed_size() <= MAX_EMPTY_DIRECTORY_COMPRESSED_BYTES);
+
+        let (crx, expected_id) = signed_crx(&archive);
+        let acquired =
+            AcquiredExtensionArchive::authenticate_crx3(&crx, &expected_id, payload(&archive))
+                .unwrap();
+        assert_eq!(
+            acquired
+                .files()
+                .iter()
+                .map(|file| file.path().as_str())
+                .collect::<Vec<_>>(),
+            ["manifest.json", "src/a.js"]
+        );
     }
 
     #[test]

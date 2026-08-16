@@ -95,14 +95,17 @@ impl<'a> VerifiedCrx3Package<'a> {
         let mut developer = None;
         for proof in &parsed.proofs {
             let public_key = proof.verification_key()?;
-            let verifier =
-                signature::UnparsedPublicKey::new(proof.algorithm.verifier(), public_key);
+            let digest: [u8; 32] = Sha256::digest(proof.public_key).into();
+            let derives_declared_extension_id = digest[..16] == declared_id;
+            let verifier = signature::UnparsedPublicKey::new(
+                proof.algorithm.verifier(derives_declared_extension_id),
+                public_key,
+            );
             verifier
                 .verify(&message, proof.signature)
                 .map_err(|_| Crx3PackageError::Signature)?;
 
-            let digest: [u8; 32] = Sha256::digest(proof.public_key).into();
-            if digest[..16] == declared_id {
+            if derives_declared_extension_id {
                 if developer.is_some() {
                     return Err(Crx3PackageError::DuplicateDeveloperProof);
                 }
@@ -155,8 +158,18 @@ enum ProofAlgorithm {
 }
 
 impl ProofAlgorithm {
-    fn verifier(self) -> &'static dyn signature::VerificationAlgorithm {
+    fn verifier(
+        self,
+        derives_declared_extension_id: bool,
+    ) -> &'static dyn signature::VerificationAlgorithm {
         match self {
+            // Chrome continues to accept legacy extension identities backed by
+            // 1024-bit RSA developer keys. Restrict that compatibility floor to
+            // the one proof whose SPKI digest derives signed_header_data.crx_id;
+            // unrelated RSA proofs retain the 2048-bit minimum.
+            Self::Rsa if derives_declared_extension_id => {
+                &signature::RSA_PKCS1_1024_8192_SHA256_FOR_LEGACY_USE_ONLY
+            }
             Self::Rsa => &signature::RSA_PKCS1_2048_8192_SHA256,
             Self::EcdsaP256 => &signature::ECDSA_P256_SHA256_ASN1,
         }
@@ -547,6 +560,7 @@ impl Error for Crx3PackageError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
     use proptest::prelude::*;
     use ring::rand::SystemRandom;
     use ring::signature::{EcdsaKeyPair, KeyPair, ECDSA_P256_SHA256_ASN1_SIGNING};
@@ -612,6 +626,38 @@ mod tests {
         (crx, extension_id)
     }
 
+    fn legacy_rsa_developer_fixture() -> (Vec<u8>, ChromiumExtensionId) {
+        // Zephium-owned deterministic vector generated with OpenSSL 3.6.0.
+        // Only the public SPKI and signature are retained; the private key was
+        // destroyed after creating this regression fixture.
+        let public_key = STANDARD
+            .decode("MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQC/0Z9/qzHK3gXD+rtf24wEByCP19zMqvtU9vkpAmSZz1Tn+ZolEcCuXy/G3v5yjRtD72EqKCX0+U8sWTDD3aFXp0e9ClYxOtyOaoHUMcXQx8mYfFS2oUhqp8i7UCL1HQbC9D6WdgUZGGrhfYoOmjqfDS7gLR4ZrHXexJAdknT5SwIDAQAB")
+            .unwrap();
+        let signature = STANDARD
+            .decode("gMmUShVqjjj3siCWx97Nwj/iYnQ1l5BufDfpwEzceV6RB0yKLvurUmDYFJ8KzaUg4YR8XwYvVFkl8XLASXM38ectFf+NpY3D26BZ2f1yMibXqJ7KKbhMzcr+nQvIaRh4XxNA2w08sBXbAS+hgzA1+zi4xWQyryiyRPKsyDdma8o=")
+            .unwrap();
+        let digest: [u8; 32] = Sha256::digest(&public_key).into();
+        let extension_id = ChromiumManifestKeyDigest::from_bytes(digest).derived_extension_id();
+        let mut signed_header = Vec::new();
+        push_bytes_field(&mut signed_header, 1, &digest[..16]);
+
+        let mut proof = Vec::new();
+        push_bytes_field(&mut proof, 1, &public_key);
+        push_bytes_field(&mut proof, 2, &signature);
+        let mut header = Vec::new();
+        push_bytes_field(&mut header, 2, &proof);
+        push_bytes_field(&mut header, SIGNED_HEADER_FIELD, &signed_header);
+
+        let archive = b"PK\x03\x04zephium-crx3-rsa1024-fixture";
+        let mut crx = Vec::new();
+        crx.extend_from_slice(CRX3_MAGIC);
+        crx.extend_from_slice(&CRX3_VERSION.to_le_bytes());
+        crx.extend_from_slice(&(header.len() as u32).to_le_bytes());
+        crx.extend_from_slice(&header);
+        crx.extend_from_slice(archive);
+        (crx, extension_id)
+    }
+
     #[test]
     fn verifies_exact_signed_archive_and_expected_identity() {
         let (bytes, expected) = signed_fixture();
@@ -619,6 +665,20 @@ mod tests {
         assert_eq!(package.extension_id(), &expected);
         assert_eq!(package.signature_proof_count(), 1);
         assert!(package.archive_bytes().starts_with(ZIP_LOCAL_FILE_MAGIC));
+    }
+
+    #[test]
+    fn verifies_legacy_rsa_developer_identity_and_exact_payload() {
+        let (mut bytes, expected) = legacy_rsa_developer_fixture();
+        let package = VerifiedCrx3Package::parse_and_verify(&bytes, Some(&expected)).unwrap();
+        assert_eq!(package.extension_id(), &expected);
+        assert_eq!(package.signature_proof_count(), 1);
+
+        *bytes.last_mut().unwrap() ^= 1;
+        assert_eq!(
+            VerifiedCrx3Package::parse_and_verify(&bytes, Some(&expected)).unwrap_err(),
+            Crx3PackageError::Signature
+        );
     }
 
     #[test]
