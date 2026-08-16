@@ -479,13 +479,28 @@ physical view and eight process-wide, bound to the exact profile, item,
 physical-view permit, and committed navigation epoch. Shell settlement,
 navigation, close/profile retirement, and a 30-second watchdog use an
 independent fixed terminal channel; an `Allow` is downgraded to denial after
-any identity or epoch change. Current Shell policy explicitly denies every
-delivered request, including pre-bootstrap and quarantined-profile events.
-The durable catalog therefore remains inactive authority until the bounded
-prompt/store coordinator lands; this seam does not yet claim user-visible page
-permission support. Unit and actor integration tests cover the typed boundary
-and cleanup delivery. A real WKWebView camera/microphone gate remains required
-before changing the product policy from deny-only.
+any identity or epoch change.
+
+The Shell-side coordinator is also built, but remains a release-gated dormant
+path (`zephium-app/macos-page-permission-prompts` is not enabled by desktop).
+It loads the exact profile catalog only after a supported request from the
+focused resident tab, retains at most the two relevant rows, and serializes one
+browser-owned process-wide prompt. Navigation, tab/profile loss, window hide,
+shutdown, a 25-second Shell deadline, Store refusal, or identity mismatch all
+deny. One-time choices never write policy. A remembered denial dominates an
+atomic camera-and-microphone request; a remembered Allow reaches WebKit only
+after an atomic CAS mutation and a second exact catalog read observe every
+requested capability as allowed. Conflict and outcome-unknown results are
+reconciled but never blindly retried. The frame receives opaque echo identities,
+a canonical origin, and a closed camera/microphone vocabulary; it cannot supply
+an origin or permission name. Incognito profiles bypass Store entirely, expose
+only one-time choices, and cannot be coerced into durable policy through IPC.
+Default product builds therefore continue to
+deny every request, including pre-bootstrap and quarantined-profile events.
+Unit, actor, IPC-binding, and frontend projection tests cover this dormant
+path. A real WKWebView camera/microphone gate on the supported security floor
+and packaged build remains required before desktop may enable the feature and
+claim user-visible page permission support.
 
 Session restore state (§7) rides on lifecycle (`opts` carries restore state).
 

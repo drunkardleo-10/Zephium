@@ -203,10 +203,19 @@ the native completion on the main thread, and binds it to the exact profile, ite
 physical view generation, and committed navigation. It has independent exact
 Shell, navigation, close/retirement, and 30-second timeout completion paths; malformed
 origin data, unsupported capabilities, overflow, stale identities, callback panic,
-and teardown all deny. Shell still denies every request immediately and does not read
-or mutate the durable catalog, so this infrastructure has not enabled a capability or
-native prompt. A live WKWebView media gate plus the crash-consistent prompt/store
-coordinator are required before that policy can change. All downloads are disabled,
+and teardown all deny. A bounded Shell prompt/store coordinator now exists behind the
+disabled `zephium-app/macos-page-permission-prompts` release feature. It admits only the
+focused resident tab, loads no catalog at startup, retains at most two exact rows,
+serializes one browser-owned prompt, and has a shorter 25-second Shell deadline.
+One-time choices do not write policy. Remembered choices use atomic catalog CAS and an
+exact post-mutation read; native Allow is impossible until every capability in the
+atomic request is durably observed as allowed. Navigation, focus loss, window hide,
+shutdown, Store ambiguity, or stale echo identity closes the prompt and denies. The
+ephemeral-profile projection offers no remember control, and Shell rejects a forged
+durable response without entering Store. The desktop product does not enable this
+feature, so shipped behavior remains deny-only.
+A live WKWebView media gate on the supported security floor and packaged build is
+required before that release capability can change. All downloads are disabled,
 so Zephium does not currently claim destination validation,
 dangerous-file handling, Windows
 Mark-of-the-Web, or macOS quarantine. Linux also cancels privileged file-picker
@@ -1085,8 +1094,9 @@ coverage, and release-build resource/endurance measurements also pass.
 
 The following are roadmap items or disabled backends, not current security guarantees:
 
-- a user-facing permission broker or native enforcement of remembered per-origin
-  grants;
+- release-enabled page permission prompts or native enforcement of remembered
+  per-origin grants (the bounded coordinator is built but the desktop feature gate is
+  disabled pending live WKWebView and packaged-build evidence);
 - downloads, safe filenames, destination mediation, quarantine/MOTW, or download
   scanning;
 - extension installation, extension API mediation, or Chrome/Firefox extension
