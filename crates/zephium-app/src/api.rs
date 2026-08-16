@@ -16,8 +16,8 @@ use zephium_core::ports::engine::{DiscardProbeId, Engine, EngineEvent, Navigatio
 use zephium_core::ports::extensions::ExtensionServiceLifecycle;
 use zephium_core::ports::extensions::{
     ExtensionInstallOutcome, ExtensionManagementCatalogOutcome, ExtensionManagementSettlement,
-    ExtensionRuntimeGrantOutcome, ExtensionRuntimeGrantRequestId, ExtensionSetEnabledOutcome,
-    ExtensionUninstallOutcome,
+    ExtensionRepositoryMaintenanceOutcome, ExtensionRuntimeGrantOutcome,
+    ExtensionRuntimeGrantRequestId, ExtensionSetEnabledOutcome, ExtensionUninstallOutcome,
 };
 use zephium_core::ports::store::Store;
 use zephium_core::split::Axis;
@@ -280,6 +280,9 @@ pub enum Command {
         request: ExtensionRuntimeGrantRequestId,
         settlement: Box<ExtensionManagementSettlement<ExtensionRuntimeGrantOutcome>>,
     },
+    /// Internal exactly-once callback from one bounded repository-maintenance
+    /// turn. It is never accepted through public operation dispatch.
+    ExtensionRepositoryMaintenanceSettled(ExtensionRepositoryMaintenanceOutcome),
     Search(String),
     OpenUrl(String),
     SetAppSetting {

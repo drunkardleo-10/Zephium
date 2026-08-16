@@ -24,11 +24,16 @@ use zephium_core::ports::extensions::{
     ExtensionInstallCandidateSelector, ExtensionInstallOutcome, ExtensionInstallSelector,
     ExtensionManagementAdmission, ExtensionManagementCatalogAdmission,
     ExtensionManagementCatalogCallback, ExtensionManagementCatalogOutcome,
-    ExtensionManagementSettlement, ExtensionRuntimeGrantCallback, ExtensionRuntimeGrantOutcome,
-    ExtensionRuntimeGrantRequest, ExtensionSetEnabledCallback, ExtensionSetEnabledOutcome,
-    ExtensionUninstallCallback, ExtensionUninstallOutcome,
-    MAX_EXTENSION_RUNTIME_GRANT_REQUEST_RETAINED_BYTES,
+    ExtensionManagementSettlement, ExtensionRepositoryMaintenanceAdmission,
+    ExtensionRepositoryMaintenanceCallback, ExtensionRepositoryMaintenanceOutcome,
+    ExtensionRuntimeGrantCallback, ExtensionRuntimeGrantOutcome, ExtensionRuntimeGrantRequest,
+    ExtensionSetEnabledCallback, ExtensionSetEnabledOutcome, ExtensionUninstallCallback,
+    ExtensionUninstallOutcome, MAX_EXTENSION_RUNTIME_GRANT_REQUEST_RETAINED_BYTES,
 };
+use zephium_extension_repository::{
+    BundledPackageGarbageCollectionOutcome, ExtensionRepositoryError,
+};
+use zephium_private_fs::PrivateFsError;
 
 use crate::cleanup::{
     reconcile_startup, CancellationCheck, CleanupAttempt, CleanupFailure, CleanupProgress,
@@ -163,6 +168,32 @@ impl Drop for RuntimeGrantRequestPermit {
     }
 }
 
+/// Single process-local maintenance ownership token.
+///
+/// The token lives inside the admitted worker command, so every refusal,
+/// worker loss, panic unwind, and ordinary completion releases it without a
+/// second coordination channel.
+struct RepositoryMaintenancePermit {
+    pending: Arc<AtomicBool>,
+}
+
+impl RepositoryMaintenancePermit {
+    fn try_acquire(pending: &Arc<AtomicBool>) -> Option<Self> {
+        pending
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()?;
+        Some(Self {
+            pending: Arc::clone(pending),
+        })
+    }
+}
+
+impl Drop for RepositoryMaintenancePermit {
+    fn drop(&mut self) {
+        self.pending.store(false, Ordering::Release);
+    }
+}
+
 #[cfg(feature = "acquired-packages")]
 #[derive(Debug, Default, Eq, PartialEq)]
 struct AcquiredProvisioningAdmission {
@@ -293,6 +324,11 @@ enum WorkerCommand {
         deadline: Instant,
         settlement: ManagementCatalogSettlementSink,
     },
+    MaintainRepository {
+        deadline: Instant,
+        _permit: RepositoryMaintenancePermit,
+        settlement: RepositoryMaintenanceSettlementSink,
+    },
     #[cfg(test)]
     Drive,
     #[cfg(test)]
@@ -367,6 +403,37 @@ impl<T> Drop for ProvisioningSettlementSink<T> {
 
 struct ManagementCatalogSettlementSink {
     done: Option<ExtensionManagementCatalogCallback>,
+}
+
+struct RepositoryMaintenanceSettlementSink {
+    done: Option<ExtensionRepositoryMaintenanceCallback>,
+}
+
+impl RepositoryMaintenanceSettlementSink {
+    fn new(done: ExtensionRepositoryMaintenanceCallback) -> Self {
+        Self { done: Some(done) }
+    }
+
+    fn settle(mut self, outcome: ExtensionRepositoryMaintenanceOutcome) {
+        if let Some(done) = self.done.take() {
+            let _ = panic::catch_unwind(AssertUnwindSafe(|| done(outcome)));
+        }
+    }
+
+    fn cancel(mut self) {
+        drop(self.done.take());
+    }
+}
+
+impl Drop for RepositoryMaintenanceSettlementSink {
+    fn drop(&mut self) {
+        let Some(done) = self.done.take() else {
+            return;
+        };
+        let _ = panic::catch_unwind(AssertUnwindSafe(|| {
+            done(ExtensionRepositoryMaintenanceOutcome::FailedClosed)
+        }));
+    }
 }
 
 impl ManagementCatalogSettlementSink {
@@ -485,6 +552,7 @@ fn cancel_unadmitted_management(command: WorkerCommand) {
         WorkerCommand::Uninstall { settlement, .. } => settlement.cancel(),
         WorkerCommand::RequestRuntimeGrants { settlement, .. } => settlement.cancel(),
         WorkerCommand::LoadManagementCatalog { settlement, .. } => settlement.cancel(),
+        WorkerCommand::MaintainRepository { settlement, .. } => settlement.cancel(),
         _ => debug_assert!(false, "management admission returned a different command"),
     }
 }
@@ -619,6 +687,7 @@ pub struct ExtensionServiceOwner {
     startup: Arc<SharedStartupOutcome>,
     cancellation: Arc<WorkerCancellation>,
     runtime_grant_admission: Arc<Mutex<RuntimeGrantRequestAdmission>>,
+    repository_maintenance_pending: Arc<AtomicBool>,
     #[cfg(feature = "acquired-packages")]
     acquired_provisioning_admission: Arc<Mutex<AcquiredProvisioningAdmission>>,
     completion: Receiver<ExtensionServiceShutdownEvidence>,
@@ -738,6 +807,7 @@ impl ExtensionServiceOwner {
         let startup = Arc::new(SharedStartupOutcome::new(initial_attempt));
         let cancellation = Arc::new(WorkerCancellation::new());
         let runtime_grant_admission = Arc::new(Mutex::new(RuntimeGrantRequestAdmission::default()));
+        let repository_maintenance_pending = Arc::new(AtomicBool::new(false));
         #[cfg(feature = "acquired-packages")]
         let acquired_provisioning_admission =
             Arc::new(Mutex::new(AcquiredProvisioningAdmission::default()));
@@ -865,6 +935,7 @@ impl ExtensionServiceOwner {
             startup,
             cancellation,
             runtime_grant_admission,
+            repository_maintenance_pending,
             #[cfg(feature = "acquired-packages")]
             acquired_provisioning_admission,
             completion,
@@ -1635,6 +1706,46 @@ impl ExtensionServiceOwner {
         }
     }
 
+    /// Admits one coalesced, bounded repository-maintenance turn.
+    #[must_use = "repository maintenance admission determines callback ownership"]
+    pub fn begin_repository_maintenance(
+        &mut self,
+        deadline: Instant,
+        done: ExtensionRepositoryMaintenanceCallback,
+    ) -> ExtensionRepositoryMaintenanceAdmission {
+        if Instant::now() >= deadline {
+            drop(done);
+            return ExtensionRepositoryMaintenanceAdmission::Busy;
+        }
+        let Some(permit) =
+            RepositoryMaintenancePermit::try_acquire(&self.repository_maintenance_pending)
+        else {
+            drop(done);
+            return ExtensionRepositoryMaintenanceAdmission::Pending;
+        };
+        let command = WorkerCommand::MaintainRepository {
+            deadline,
+            _permit: permit,
+            settlement: RepositoryMaintenanceSettlementSink::new(done),
+        };
+        match self.mailbox.try_push_normal(command) {
+            NormalAdmission::Accepted => ExtensionRepositoryMaintenanceAdmission::Accepted,
+            NormalAdmission::Full(command) => {
+                cancel_unadmitted_management(command);
+                ExtensionRepositoryMaintenanceAdmission::Busy
+            }
+            NormalAdmission::Sealed(command) | NormalAdmission::Closed(command) => {
+                cancel_unadmitted_management(command);
+                ExtensionRepositoryMaintenanceAdmission::Unavailable
+            }
+            NormalAdmission::CounterExhausted(command) => {
+                cancel_unadmitted_management(command);
+                self.status.publish(ExtensionServicePhase::ShutdownQueued);
+                ExtensionRepositoryMaintenanceAdmission::Unavailable
+            }
+        }
+    }
+
     /// Permanently fences one profile in this worker and tries to prove that
     /// all extension-owned state for it has been retired by `deadline`.
     ///
@@ -2103,6 +2214,23 @@ fn runtime_ingress_readiness(
     }
 }
 
+fn project_repository_maintenance_result(
+    result: Result<BundledPackageGarbageCollectionOutcome, ExtensionRepositoryError>,
+) -> ExtensionRepositoryMaintenanceOutcome {
+    match result {
+        Ok(BundledPackageGarbageCollectionOutcome::NoGarbage) => {
+            ExtensionRepositoryMaintenanceOutcome::NoGarbage
+        }
+        Ok(BundledPackageGarbageCollectionOutcome::Collected { more_garbage, .. }) => {
+            ExtensionRepositoryMaintenanceOutcome::Collected { more_garbage }
+        }
+        Err(ExtensionRepositoryError::FileSystem(
+            PrivateFsError::LockUnavailable | PrivateFsError::InUse | PrivateFsError::Io,
+        )) => ExtensionRepositoryMaintenanceOutcome::Unavailable,
+        Err(_) => ExtensionRepositoryMaintenanceOutcome::FailedClosed,
+    }
+}
+
 impl WorkerState {
     fn new(startup: Option<(WorkerStartupState, Instant, StartupAttempt)>) -> Self {
         let (startup, initial_startup) = match startup {
@@ -2510,6 +2638,23 @@ impl WorkerState {
                     startup_outcome,
                     cancellation,
                     profile,
+                    deadline,
+                );
+                settlement.settle(outcome);
+                if !continue_running {
+                    return false;
+                }
+            }
+            WorkerCommand::MaintainRepository {
+                deadline,
+                _permit,
+                settlement,
+            } => {
+                let (outcome, continue_running) = self.complete_repository_maintenance(
+                    worker,
+                    status,
+                    startup_outcome,
+                    cancellation,
                     deadline,
                 );
                 settlement.settle(outcome);
@@ -2930,6 +3075,43 @@ impl WorkerState {
         };
         let outcome = management_catalog::load(startup, &self.runtime, profile, deadline);
         if matches!(outcome, ExtensionManagementCatalogOutcome::FailedClosed) {
+            status.publish(ExtensionServicePhase::Failed);
+        }
+        (outcome, true)
+    }
+
+    fn complete_repository_maintenance(
+        &mut self,
+        worker: ExtensionServiceWorkerIdentity,
+        status: &SharedStatus,
+        startup_outcome: &SharedStartupOutcome,
+        cancellation: &WorkerCancellation,
+        deadline: Instant,
+    ) -> (ExtensionRepositoryMaintenanceOutcome, bool) {
+        if cancellation.is_requested() || Instant::now() >= deadline {
+            return (ExtensionRepositoryMaintenanceOutcome::Unavailable, true);
+        }
+        match runtime_ingress_readiness(worker, startup_outcome, self.startup.is_some()) {
+            RuntimeIngressReadiness::Ready => {}
+            RuntimeIngressReadiness::NotReady => {
+                return (ExtensionRepositoryMaintenanceOutcome::Unavailable, true)
+            }
+            RuntimeIngressReadiness::StartupFailed(_) => {
+                return (ExtensionRepositoryMaintenanceOutcome::FailedClosed, true)
+            }
+            RuntimeIngressReadiness::ProtocolViolation => {
+                status.publish(ExtensionServicePhase::Failed);
+                return (ExtensionRepositoryMaintenanceOutcome::FailedClosed, false);
+            }
+        }
+        let Some(startup) = self.startup.as_mut() else {
+            status.publish(ExtensionServicePhase::Failed);
+            return (ExtensionRepositoryMaintenanceOutcome::FailedClosed, false);
+        };
+        let outcome = project_repository_maintenance_result(
+            startup.repository.collect_bundled_package_garbage(),
+        );
+        if matches!(outcome, ExtensionRepositoryMaintenanceOutcome::FailedClosed) {
             status.publish(ExtensionServicePhase::Failed);
         }
         (outcome, true)
@@ -3625,6 +3807,85 @@ mod tests {
     }
 
     #[test]
+    fn dropped_admitted_repository_maintenance_callback_fails_closed_once() {
+        let (completed, observation) = mpsc::sync_channel(1);
+        drop(RepositoryMaintenanceSettlementSink::new(Box::new(
+            move |outcome| completed.send(outcome).unwrap(),
+        )));
+
+        assert_eq!(
+            observation.recv().unwrap(),
+            ExtensionRepositoryMaintenanceOutcome::FailedClosed
+        );
+        assert!(matches!(
+            observation.try_recv(),
+            Err(mpsc::TryRecvError::Disconnected)
+        ));
+    }
+
+    #[test]
+    fn repository_maintenance_projects_only_precommit_filesystem_outages_as_transient() {
+        assert_eq!(
+            project_repository_maintenance_result(Ok(
+                BundledPackageGarbageCollectionOutcome::Collected {
+                    settled_targets: 1,
+                    more_garbage: true,
+                },
+            )),
+            ExtensionRepositoryMaintenanceOutcome::Collected { more_garbage: true }
+        );
+        for error in [
+            PrivateFsError::LockUnavailable,
+            PrivateFsError::InUse,
+            PrivateFsError::Io,
+        ] {
+            assert_eq!(
+                project_repository_maintenance_result(Err(ExtensionRepositoryError::FileSystem(
+                    error
+                ),)),
+                ExtensionRepositoryMaintenanceOutcome::Unavailable
+            );
+        }
+        for error in [
+            PrivateFsError::NotFound,
+            PrivateFsError::Unsafe,
+            PrivateFsError::SettlementUnknown,
+            PrivateFsError::Quarantined,
+            PrivateFsError::PrimitiveUnavailable,
+        ] {
+            assert_eq!(
+                project_repository_maintenance_result(Err(ExtensionRepositoryError::FileSystem(
+                    error
+                ),)),
+                ExtensionRepositoryMaintenanceOutcome::FailedClosed
+            );
+        }
+        assert_eq!(
+            project_repository_maintenance_result(Err(ExtensionRepositoryError::StateCorrupt)),
+            ExtensionRepositoryMaintenanceOutcome::FailedClosed
+        );
+    }
+
+    #[test]
+    fn unadmitted_repository_maintenance_releases_permit_without_callback() {
+        let pending = Arc::new(AtomicBool::new(false));
+        let permit = RepositoryMaintenancePermit::try_acquire(&pending).unwrap();
+        let invoked = Arc::new(AtomicBool::new(false));
+        let callback_invoked = Arc::clone(&invoked);
+        cancel_unadmitted_management(WorkerCommand::MaintainRepository {
+            deadline: Instant::now() + Duration::from_secs(1),
+            _permit: permit,
+            settlement: RepositoryMaintenanceSettlementSink::new(Box::new(move |_| {
+                callback_invoked.store(true, Ordering::Release)
+            })),
+        });
+
+        assert!(!invoked.load(Ordering::Acquire));
+        assert!(!pending.load(Ordering::Acquire));
+        assert!(RepositoryMaintenancePermit::try_acquire(&pending).is_some());
+    }
+
+    #[test]
     fn unadmitted_runtime_grant_callback_releases_exact_memory_permit() {
         let admission = Arc::new(Mutex::new(RuntimeGrantRequestAdmission::default()));
         let request = ExtensionRuntimeGrantRequest::new(
@@ -3854,6 +4115,7 @@ mod tests {
             startup,
             cancellation: Arc::new(WorkerCancellation::new()),
             runtime_grant_admission: Arc::new(Mutex::new(RuntimeGrantRequestAdmission::default())),
+            repository_maintenance_pending: Arc::new(AtomicBool::new(false)),
             #[cfg(feature = "acquired-packages")]
             acquired_provisioning_admission: Arc::new(Mutex::new(
                 AcquiredProvisioningAdmission::default(),
@@ -4285,6 +4547,57 @@ mod tests {
             owner.shutdown(),
             ExtensionServiceShutdownOutcome::Complete(_)
         ));
+        assert_eq!(
+            store.shutdown_until(Instant::now() + Duration::from_secs(5)),
+            StoreShutdownOutcome::Clean
+        );
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn production_repository_maintenance_is_serialized_coalesced_and_bounded() {
+        let (_app_data, store, mut owner) =
+            production_launch_fixture(Instant::now() + Duration::from_secs(5));
+        assert!(matches!(
+            owner.wait_for_startup_until(Instant::now() + Duration::from_secs(5)),
+            ExtensionServiceStartupWait::Settled(ExtensionServiceStartupOutcome::Ready(_))
+        ));
+
+        let (release, blocked) = mpsc::sync_channel(1);
+        assert!(matches!(
+            owner.try_block_for_test(blocked),
+            NormalAdmission::Accepted
+        ));
+        let (completed, observation) = mpsc::sync_channel(1);
+        assert_eq!(
+            owner.begin_repository_maintenance(
+                Instant::now() + Duration::from_secs(5),
+                Box::new(move |outcome| completed.send(outcome).unwrap()),
+            ),
+            ExtensionRepositoryMaintenanceAdmission::Accepted
+        );
+        let duplicate_called = Arc::new(AtomicBool::new(false));
+        let duplicate_observer = Arc::clone(&duplicate_called);
+        assert_eq!(
+            owner.begin_repository_maintenance(
+                Instant::now() + Duration::from_secs(5),
+                Box::new(move |_| duplicate_observer.store(true, Ordering::Release)),
+            ),
+            ExtensionRepositoryMaintenanceAdmission::Pending
+        );
+        assert!(!duplicate_called.load(Ordering::Acquire));
+
+        release.send(()).unwrap();
+        assert_eq!(
+            observation.recv_timeout(Duration::from_secs(5)).unwrap(),
+            ExtensionRepositoryMaintenanceOutcome::NoGarbage
+        );
+
+        let ExtensionServiceShutdownOutcome::Complete(evidence) = owner.shutdown() else {
+            panic!("bounded repository maintenance must drain before shutdown evidence")
+        };
+        assert_eq!(evidence.accepted_commands(), 2);
+        assert_eq!(evidence.completed_commands(), 2);
         assert_eq!(
             store.shutdown_until(Instant::now() + Duration::from_secs(5)),
             StoreShutdownOutcome::Clean

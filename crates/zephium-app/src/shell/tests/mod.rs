@@ -35,6 +35,8 @@ type HeldExtensionUninstall = zephium_core::ports::extensions::ExtensionUninstal
 type HeldExtensionManagementCatalog =
     zephium_core::ports::extensions::ExtensionManagementCatalogCallback;
 type HeldExtensionRuntimeGrant = zephium_core::ports::extensions::ExtensionRuntimeGrantCallback;
+type HeldExtensionRepositoryMaintenance =
+    zephium_core::ports::extensions::ExtensionRepositoryMaintenanceCallback;
 
 pub(crate) struct ImmediateAllowAllCompiler;
 
@@ -197,6 +199,11 @@ pub(super) struct FakeExtensionLifecycleState {
         )>,
     >,
     pub(super) runtime_grant_callbacks: Mutex<Vec<HeldExtensionRuntimeGrant>>,
+    pub(super) repository_maintenance_available: std::sync::atomic::AtomicBool,
+    pub(super) repository_maintenance_admission:
+        Mutex<Option<zephium_core::ports::extensions::ExtensionRepositoryMaintenanceAdmission>>,
+    pub(super) repository_maintenance_calls: Mutex<Vec<std::time::Instant>>,
+    pub(super) repository_maintenance_callbacks: Mutex<Vec<HeldExtensionRepositoryMaintenance>>,
     pub(super) shutdown_calls: std::sync::atomic::AtomicUsize,
     pub(super) panic_on_shutdown: std::sync::atomic::AtomicBool,
     pub(super) dropped_without_shutdown: std::sync::atomic::AtomicBool,
@@ -448,6 +455,44 @@ impl zephium_core::ports::extensions::ExtensionServiceLifecycle for FakeExtensio
         if admission == zephium_core::ports::extensions::ExtensionManagementAdmission::Accepted {
             self.state
                 .runtime_grant_callbacks
+                .lock()
+                .unwrap()
+                .push(done);
+        } else {
+            drop(done);
+        }
+        admission
+    }
+
+    fn repository_maintenance_is_available(&self) -> bool {
+        self.state
+            .repository_maintenance_available
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn begin_repository_maintenance(
+        &mut self,
+        deadline: std::time::Instant,
+        done: zephium_core::ports::extensions::ExtensionRepositoryMaintenanceCallback,
+    ) -> zephium_core::ports::extensions::ExtensionRepositoryMaintenanceAdmission {
+        self.state
+            .repository_maintenance_calls
+            .lock()
+            .unwrap()
+            .push(deadline);
+        let admission = self
+            .state
+            .repository_maintenance_admission
+            .lock()
+            .unwrap()
+            .unwrap_or(
+                zephium_core::ports::extensions::ExtensionRepositoryMaintenanceAdmission::Accepted,
+            );
+        if admission
+            == zephium_core::ports::extensions::ExtensionRepositoryMaintenanceAdmission::Accepted
+        {
+            self.state
+                .repository_maintenance_callbacks
                 .lock()
                 .unwrap()
                 .push(done);
@@ -1714,6 +1759,7 @@ mod extension_actions;
 mod extension_browser_requests;
 mod extension_browser_surface;
 mod extension_compatibility_broker;
+mod extension_repository_maintenance;
 mod extension_runtime_grants;
 mod favicons;
 #[path = "navigation.rs"]

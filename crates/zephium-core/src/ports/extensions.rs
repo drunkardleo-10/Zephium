@@ -554,6 +554,41 @@ pub enum ExtensionManagementCatalogAdmission {
     Unavailable,
 }
 
+/// Result of one bounded repository-maintenance turn.
+///
+/// This projection deliberately exposes no package identities or filesystem
+/// details. Maintenance is an internal availability concern, not extension or
+/// browser-chrome authority.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExtensionRepositoryMaintenanceOutcome {
+    /// A fresh authenticated inventory contained no unreachable package data.
+    NoGarbage,
+    /// One bounded durable batch was collected successfully.
+    Collected {
+        /// A later low-frequency turn should inspect another bounded batch.
+        more_garbage: bool,
+    },
+    /// Startup, the deadline, or a transient filesystem condition refused the
+    /// turn without weakening repository integrity.
+    Unavailable,
+    /// Repository or service integrity could not be established.
+    FailedClosed,
+}
+
+/// Non-blocking admission result for repository maintenance.
+///
+/// `Accepted` transfers exactly-once callback ownership. A `Pending` result
+/// means an earlier maintenance turn already owns the single process-local
+/// permit; callers should wait for their ordinary low-frequency wakeup rather
+/// than scheduling a hot retry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExtensionRepositoryMaintenanceAdmission {
+    Accepted,
+    Pending,
+    Busy,
+    Unavailable,
+}
+
 /// Exactly-once completion callback for an admitted enable/disable request.
 pub type ExtensionSetEnabledCallback =
     Box<dyn FnOnce(ExtensionManagementSettlement<ExtensionSetEnabledOutcome>) + Send>;
@@ -569,6 +604,10 @@ pub type ExtensionRuntimeGrantCallback =
 /// Exactly-once completion callback for an admitted management-catalog read.
 pub type ExtensionManagementCatalogCallback =
     Box<dyn FnOnce(ExtensionManagementCatalogOutcome) + Send>;
+/// Exactly-once completion callback for an admitted repository-maintenance
+/// turn.
+pub type ExtensionRepositoryMaintenanceCallback =
+    Box<dyn FnOnce(ExtensionRepositoryMaintenanceOutcome) + Send>;
 
 impl<T> ExtensionManagementSettlement<T> {
     pub const fn new(outcome: T, active_profiles: Option<ExtensionActiveProfiles>) -> Self {
@@ -808,6 +847,28 @@ pub trait ExtensionServiceLifecycle: Send {
         ExtensionManagementCatalogAdmission::Unavailable
     }
 
+    /// Whether this lifecycle owns a repository worker that can accept
+    /// maintenance. The inert implementation remains allocation-free by
+    /// returning `false` before Shell constructs a callback.
+    fn repository_maintenance_is_available(&self) -> bool {
+        false
+    }
+
+    /// Admits at most one bounded repository garbage-collection turn.
+    ///
+    /// Implementations must serialize the turn with all other repository work
+    /// and coalesce duplicate wakeups. The default refuses without invoking
+    /// the callback, so inert and compatibility implementations cannot claim
+    /// maintenance they do not own.
+    fn begin_repository_maintenance(
+        &mut self,
+        _deadline: Instant,
+        done: ExtensionRepositoryMaintenanceCallback,
+    ) -> ExtensionRepositoryMaintenanceAdmission {
+        drop(done);
+        ExtensionRepositoryMaintenanceAdmission::Unavailable
+    }
+
     /// Permanently fences `profile`, proves every extension-owned durable,
     /// package, and native obligation absent, then invokes `continuation`
     /// exactly once before returning [`ExtensionProfileRetirementDisposition::Continued`].
@@ -972,6 +1033,17 @@ mod tests {
             lifecycle.uninstall_until(selector, Instant::now()),
             ExtensionManagementSettlement::new(ExtensionUninstallOutcome::FailedClosed, None)
         );
+        assert!(!lifecycle.repository_maintenance_is_available());
+        let maintenance_callback_called = Arc::new(AtomicBool::new(false));
+        let maintenance_callback_observer = Arc::clone(&maintenance_callback_called);
+        assert_eq!(
+            lifecycle.begin_repository_maintenance(
+                Instant::now(),
+                Box::new(move |_| { maintenance_callback_observer.store(true, Ordering::Release) }),
+            ),
+            ExtensionRepositoryMaintenanceAdmission::Unavailable
+        );
+        assert!(!maintenance_callback_called.load(Ordering::Acquire));
         let continued = Arc::new(AtomicBool::new(false));
         let continued_by_callback = Arc::clone(&continued);
         assert_eq!(

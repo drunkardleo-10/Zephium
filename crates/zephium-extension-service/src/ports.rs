@@ -11,6 +11,7 @@ use zephium_core::ports::extensions::{
     ExtensionManagementCatalogAdmission, ExtensionManagementCatalogCallback,
     ExtensionManagementSettlement,
     ExtensionProfileRetirementDisposition as CoreExtensionProfileRetirementDisposition,
+    ExtensionRepositoryMaintenanceAdmission, ExtensionRepositoryMaintenanceCallback,
     ExtensionRuntimeActivationDisposition as CoreExtensionRuntimeActivationDisposition,
     ExtensionRuntimeGrantCallback, ExtensionRuntimeGrantOutcome, ExtensionRuntimeGrantRequest,
     ExtensionRuntimeRetirementDisposition as CoreExtensionRuntimeRetirementDisposition,
@@ -279,6 +280,18 @@ impl ExtensionServiceLifecycle for ExtensionServiceOwner {
         done: ExtensionManagementCatalogCallback,
     ) -> ExtensionManagementCatalogAdmission {
         ExtensionServiceOwner::begin_load_management_catalog(self, profile, deadline, done)
+    }
+
+    fn repository_maintenance_is_available(&self) -> bool {
+        true
+    }
+
+    fn begin_repository_maintenance(
+        &mut self,
+        deadline: Instant,
+        done: ExtensionRepositoryMaintenanceCallback,
+    ) -> ExtensionRepositoryMaintenanceAdmission {
+        ExtensionServiceOwner::begin_repository_maintenance(self, deadline, done)
     }
 
     fn shutdown_until(self: Box<Self>, deadline: Instant) -> CoreExtensionServiceShutdownOutcome {

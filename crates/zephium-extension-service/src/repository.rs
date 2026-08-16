@@ -8,9 +8,10 @@ use zephium_extension_repository::{
     BundledCurrentInstallCandidates, BundledCurrentManifestBindings,
     BundledManagementManifestsError, BundledManifestBindingsError,
     BundledPackageBuildSettlementError, BundledPackageBuildSettlementOutcome,
-    BundledPackageLeaseReleaseError, BundledPackageLeaseReleaseOutcome, ExtensionRepository,
-    ExtensionRepositoryError, ProfilePackageAbsenceEvidence,
-    ProfilePackageAbsenceRevalidationError, ProfilePackageObligation,
+    BundledPackageGarbageCollectionOutcome, BundledPackageLeaseReleaseError,
+    BundledPackageLeaseReleaseOutcome, ExtensionRepository, ExtensionRepositoryError,
+    ProfilePackageAbsenceEvidence, ProfilePackageAbsenceRevalidationError,
+    ProfilePackageObligation,
 };
 use zephium_private_fs::{LockedPrivateNamespace, PrivateFsError};
 
@@ -143,6 +144,20 @@ impl ServiceRepository {
             return Err(ExtensionRepositoryError::Sealed.into());
         };
         repository.authenticate_current_bundled_manifest_bindings(catalog)
+    }
+
+    /// Collects one bounded, fresh pin-rooted package-garbage cohort.
+    ///
+    /// The repository owns crash settlement and integrity sealing. This
+    /// worker-private wrapper exists only to keep filesystem authority from
+    /// crossing the actor mailbox.
+    pub(crate) fn collect_bundled_package_garbage(
+        &mut self,
+    ) -> Result<BundledPackageGarbageCollectionOutcome, ExtensionRepositoryError> {
+        let Some(repository) = self.repository.as_mut() else {
+            return Err(ExtensionRepositoryError::Sealed);
+        };
+        repository.collect_bundled_package_garbage()
     }
 
     pub(crate) fn audit_profile_package_obligations(

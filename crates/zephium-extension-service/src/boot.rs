@@ -244,6 +244,7 @@ mod tests {
                 zephium_core::ports::extensions::ExtensionActiveProfiles::EMPTY,
             )
         );
+        assert!(!lifecycle.repository_maintenance_is_available());
         let continued = std::cell::Cell::new(false);
         assert_eq!(
             lifecycle.with_profile_retired_until(

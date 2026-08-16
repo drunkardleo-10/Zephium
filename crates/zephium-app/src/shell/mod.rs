@@ -9,6 +9,7 @@ mod extension_browser_requests;
 mod extension_browser_surface;
 mod extension_compatibility_broker;
 mod extension_management;
+mod extension_repository_maintenance;
 mod extension_runtime_grants;
 mod favicons;
 mod operations;
@@ -182,6 +183,10 @@ pub struct Shell {
     extension_actions: ExtensionActionState,
     extension_management: ExtensionManagementState,
     extension_runtime_grants: ExtensionRuntimeGrantPromptState,
+    /// A terminal maintenance settlement disables further periodic repository
+    /// work until process restart; transient refusals retain the ordinary
+    /// heartbeat retry path.
+    extension_repository_maintenance_failed_closed: bool,
     /// Any terminal extension lifecycle failure permanently closes bootstrap
     /// and profile-deletion progress for this process while the desktop
     /// composition root converges on orderly shutdown.
@@ -386,6 +391,7 @@ impl Shell {
             extension_actions: ExtensionActionState::default(),
             extension_management: ExtensionManagementState::default(),
             extension_runtime_grants: ExtensionRuntimeGrantPromptState::default(),
+            extension_repository_maintenance_failed_closed: false,
             extension_lifecycle_terminal: false,
             extension_startup_retry_exponent: 0,
             extension_startup_not_before: None,
@@ -620,6 +626,9 @@ impl Shell {
                 request,
                 settlement,
             } => self.settle_extension_runtime_grant(runtime, request, *settlement),
+            Command::ExtensionRepositoryMaintenanceSettled(outcome) => {
+                self.settle_extension_repository_maintenance(outcome)
+            }
             Command::Search(query) => self.search(&query),
             Command::OpenUrl(input) => {
                 let _ = self.operation_open_url(input);
@@ -716,6 +725,7 @@ impl Shell {
                 if extension_actions.rejected {
                     crate::diagnostic!("extensions: maintenance could not refresh toolbar actions");
                 }
+                self.maintain_extension_repository();
                 if self.maintain_views() {
                     self.project_items();
                 }
