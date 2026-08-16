@@ -501,18 +501,25 @@ only one-time choices, and cannot be coerced into durable policy through IPC.
 Default product builds therefore continue to
 deny every request, including pre-bootstrap and quarantined-profile events.
 Unit, actor, IPC-binding, and frontend projection tests cover this dormant
-path. The feature-only `macos-page-permission-probe` adds a deterministic
-loopback-origin WKWebView gate to `cargo xtask ci`: it observes one atomic
-camera-and-microphone request, defers it, resolves exact Deny once, rejects a
-duplicate settlement, and requires JavaScript `NotAllowedError`. It never
-resolves Allow, so it neither claims device access nor closes the TCC gate. Run
-that focused gate with:
+path. The feature-only `macos-page-permission-probe` provides a loopback-origin
+WKWebView gate that observes one atomic camera-and-microphone request, defers
+it, resolves exact Deny once, rejects a duplicate settlement, and requires
+JavaScript `NotAllowedError`. It is deliberately compiled and linted, but not
+executed, by `cargo xtask ci`: [WebKit requests system validation before it
+enters the UI-client policy decision](https://github.com/WebKit/WebKit/blob/main/Source/WebKit/UIProcess/UserMediaPermissionRequestManagerProxy.cpp),
+and its [mock-capture setting is test tooling rather than a shipping
+WKWebView API](https://github.com/WebKit/WebKit/blob/main/Tools/MiniBrowser/mac/WK2BrowserWindowController.m).
+An unattended run can
+therefore prompt, wait on, or mutate camera/microphone consent before Zephium
+receives the request, even though Zephium later resolves Deny. The focused
+command is a developer diagnostic only when the responsible host process is
+already TCC-authorized; it is not packaged-release evidence:
 
 ```sh
 cargo run --locked -p zephium-engine --features native-page-permission-probes --bin macos-page-permission-probe
 ```
 
-The macOS bundle now carries human-readable `NSCameraUsageDescription` and
+The macOS bundle carries human-readable `NSCameraUsageDescription` and
 `NSMicrophoneUsageDescription` values, but metadata is not capability. A
 signed packaged build on the supported security floor must still prove camera,
 microphone, and atomic combined Allow/Deny, OS consent ordering, navigation and
@@ -1065,7 +1072,10 @@ Chromium id and whose inner ZIP byte length and SHA-256 exactly match an
 `AcquiredZip` catalog identity. The production-shaped release-row constructor
 also requires the complete 256-bit CRX developer-key digest from the row's
 Chromium identity; the shorter derived extension id is not treated as complete
-key authority. Before constructing the ZIP parser, an
+key authority. Chrome Web Store packages signed by legacy 1024-bit RSA
+developer keys remain admissible only when that exact proof derives the signed
+CRX id; unrelated RSA proofs retain the 2048-bit floor, and ECDSA behavior is
+unchanged. Before constructing the ZIP parser, an
 allocation-free terminal-record preflight bounds the entry count and central
 directory. Complete preflight then admits only stored or deflated ordinary
 files/directories, canonical ASCII portable paths, one root `manifest.json`,
@@ -1074,8 +1084,11 @@ ceilings. It rejects ZIP64/multi-disk framing, encryption, links and special
 files, duplicate/case/device/file-directory aliases, ambiguous local headers,
 and overlapping payload regions. Files can leave the boundary only through a
 bounded streaming copy that reaches EOF and therefore checks decompression,
-exact length, and ZIP CRC; the boundary opens no paths itself. Every successful
-copy returns one non-cloneable receipt containing the digest of the exact byte
+exact length, and ZIP CRC; the boundary opens no paths itself. A Chrome-produced
+empty deflated directory is accepted only with a zero declared expansion and at
+most 64 compressed bytes, and its reader must reach EOF without producing a
+byte. Every successful file copy returns one non-cloneable receipt containing
+the digest of the exact byte
 prefix the destination writer accepted. An exact, duplicate-free receipt cohort
 derives canonical tree-index bytes, reparses them through the shared bounded
 canonical index boundary, and retains both forms under one named memory
@@ -1201,18 +1214,29 @@ classifications before they become floor-wide claims.
 
 The native gate also carries a separate Zephium-owned ordinary-extension
 contract. It declares `bookmarks`, `favicon`, `history`, `search`, `sessions`,
-and `storage`, mirroring only the browser-owned API delta present in the
+`storage`, and `webNavigation`, mirroring only the browser-owned API delta present in the
 official [Vimium manifest](https://github.com/philc/vimium/blob/master/manifest.json);
 it does not download or execute Vimium and is not a package-compatibility
 claim. On the exercised runtime WebKit parses that MV3 manifest with no errors,
-publishes only `storage` in `requestedPermissions`, and exposes the
-`runtime`, `storage.local`, and `tabs` JavaScript controls while
+publishes `storage` and `webNavigation` in `requestedPermissions`, and exposes
+the `action`, `runtime`, `storage.local`, `storage.session`, `storage.sync`,
+`tabs`, and `webNavigation.onCommitted` JavaScript controls. The storage
+session get/set/access-level and storage sync get/set methods are functions, as
+is `action.setIcon`. However, `webNavigation.onHistoryStateUpdated` and
+`webNavigation.onReferenceFragmentUpdated` are absent, while
 `bookmarks`, `history`, `search`, and `sessions` are `undefined`. The
 `favicon` token has neither a native permission key nor a namespace. The probe
 uses a distinct nonpersistent controller and store, applies only the exact
-native `storage` grant, validates controller/store binding, and requires its
-view, context, controller, and store to release during the same bounded
-teardown gate.
+native `storage` and `webNavigation` grants, validates controller/store
+binding, and requires its view, context, controller, and store to release
+during the same bounded teardown gate.
+An independent product-tab behavior gate executes a real main-world
+`history.pushState`. `tabs.onUpdated` accepts registration but emits no
+same-document URL update on the exercised WebKit runtime. A content-script
+message reaching the worker does carry a non-negative integer `frameId` plus
+HTTP `sender.url` and `sender.tab.url`; the generic endpoint therefore has
+native sender identities to bind, but cannot inherit same-document observation
+from `tabs.onUpdated`.
 
 This closes an important admission ambiguity: parser acceptance is not runtime
 support. The current `macos.wkwebextension.v1` grant schema therefore rejects
@@ -1227,10 +1251,11 @@ controller/context resources; the profile is retained independently in the
 authenticated package record and admitted manifest. It is not a fifth
 persistence backend or controller namespace. A generic page-world or generic
 native-messaging bridge remains prohibited. Packages that need broader emulated
-APIs still belong on the separate macOS compatibility-runtime target. In
-particular, neither native profile currently classifies Vimium as compatible;
-tabs/storage plus one history operation do not establish its keyboard-
-navigation, Vomnibar, bookmark, session, notification, or search workflows.
+APIs still belong on the separate macOS compatibility-runtime target. The
+ordinary native profile does not classify Vimium as compatible. The exact
+authenticated Vimium gate described below is a non-authorizing compatibility-
+artifact result; it does not silently broaden the native profile or establish
+its Vomnibar, bookmark, session, notification, and search workflows.
 
 WebKit does expose a narrower compatibility seam through
 `WKWebExtensionControllerDelegate`, and the live gate now classifies it without
@@ -1419,11 +1444,11 @@ tree re-verification, atomic repository publication, and a live lease remain
 separate requirements.
 
 The second stock-manager gate uses the unmodified Chrome Web Store CRX for
-[Proton Pass 1.38.2](https://chromewebstore.google.com/detail/proton-pass-free-password/ghmbeldphafepmbegfdlkpapadhbakde)
+[Proton Pass 1.39.0](https://chromewebstore.google.com/detail/proton-pass-free-password/ghmbeldphafepmbegfdlkpapadhbakde)
 (`ghmbeldphafepmbegfdlkpapadhbakde`). Its authenticated CRX
 SHA-256 is
-`2cc54d72218fe09081e8e38261ae0f16aca51c62722828f46a33109f88c7c679`;
-the exact 275-file, 20,124,326-byte tree is fixed by the probe contract. WebKit
+`bbdb442bbc9d1232650bcef18ae586d72d929c3eb8bc4415049054c4cac99916`;
+the exact 276-file, 21,512,233-byte tree is fixed by the probe contract. WebKit
 parses and loads the manifest, creates the context and action popover, and
 executes enough stock popup JavaScript to populate the application root.
 However, it reports `WKWebExtensionContextErrorDomain` code 6 (background
@@ -1431,7 +1456,7 @@ content failed to load), the stock content scripts produce no login-field or
 inline-root effect, and the popup does not establish a usable runtime contract
 under the probe. Controller, context, page, popup, and routing objects release
 after unload, but the nonpersistent website data store remains retained beyond
-the five-second error-path teardown budget; repeated failing activation must
+the bounded error-path teardown budget; repeated failing activation must
 therefore stay disabled until that lifecycle is bounded. This proves that this
 raw stock Chrome package is not usable on the exercised WKWebExtension runtime.
 It does **not** prove that Safari-authored packages or a reviewed
@@ -1462,7 +1487,7 @@ non-authorizing boundary. `cargo xtask
 materialize-macos-extension-compatibility --extension PATH --tree-index PATH
 --output PATH` reopens an exact closed MV3 tree, rejects source drift and
 reserved-namespace collisions, and emits a separately indexed artifact. Its
-versioned WebKit adapter preserves and locks native namespace identities,
+`webkit-macos-native-v3` adapter preserves and locks native namespace identities,
 supplies only the inert catalog-update event owned by Zephium, wraps classic or
 module background workers, prepends isolated content scripts, leaves `MAIN`
 scripts unchanged, and inserts the local prelude only into an explicit leading
@@ -1471,15 +1496,33 @@ showed that proxy replacement accepts listener registration but breaks native
 message delivery. Ambiguous HTML, nonportable or absent resources, links,
 special files, unsupported worlds, and every file/tree budget violation fail
 closed.
+Because file-URL access requires a separate user grant that does not yet exist,
+the transform removes only `file:` match patterns and omits an entry only when
+that leaves no runnable match. Exact removed-pattern and omitted-entry counts
+are sealed into the artifact metadata.
+
+When a background extension declares `webNavigation`, v3 also emits one
+deduplicated document-start isolated endpoint for each retained content route,
+including routes mirrored from untouched `MAIN` or CSS-only entries. It imports
+the same endpoint before the original worker and supplies only WebKit's missing
+`onHistoryStateUpdated` and `onReferenceFragmentUpdated` event objects. The
+endpoint uses no polling, generic native messaging, network shim, or page-world
+extension API. It derives changes from the frame's real location, bounds and
+validates extension-local messages plus native tab/frame sender identities,
+and accepts only HTTP(S) or exact blank/srcdoc URLs. Hash and popstate changes
+are native DOM inputs. History API changes require a fixed browser-owned DOM
+signal from Zephium's already-observed committed URL; that production signal is
+not connected yet, so the metadata discloses the limitation rather than
+claiming complete same-document observation.
 The emitted metadata binds source and output manifest/tree/index identities and
 states `product_authority=false`; it is not a release sealer, catalog entry, or
 redistribution decision. A Node contract gate exercises native identity,
 locked-global and alias behavior, idempotence, unadaptable-native fail-closure,
 and the deliberate absence of page/network bridges.
 
-The exact Proton source transformed through that generic boundary produces a
-277-file, 20,126,819-byte tree with tree SHA-256
-`92bc016384e69ab91a1166b3c84a1c6ac0cd9aaf0d83bdbff6949c6f49b5a810`.
+The exact Proton 1.39.0 source transformed through that generic boundary
+produces a 279-file, 21,520,099-byte tree with tree SHA-256
+`faa9115baeaabe8206168b9896dde0136e4e76ca05abaa07c7d636320692653f`.
 The feature-gated native probe independently pins the source and output
 identities before WebKit. After publishing the exact native window/tab surface,
 it requires WebKit's public background-load completion, executes the real
@@ -1488,8 +1531,10 @@ same extension's isolated world in the active tab. That attestation observes
 the package-neutral prelude, mode `native-preserved`, and both native runtime
 identities without exposing a marker to the page world. The popup independently
 observes the package-neutral compatibility world and renders, and every native
-object releases. The synthetic unauthenticated login page still shows no Proton
-inline-autofill effect. The extension's own orchestrator beyond prelude
+object releases. The v3 artifact contains two deduplicated isolated navigation
+routes because the untouched MAIN-world WebAuthn entry has a narrower exclusion
+set than the ordinary orchestrator. The synthetic unauthenticated login page
+still shows no Proton inline-autofill effect. The extension's own orchestrator beyond prelude
 initialization, login, vault, save, autofill, and user workflows therefore
 remain unassessed; this result proves reusable background, isolated-content,
 and popup adaptation seams, not Proton compatibility.
@@ -1524,6 +1569,41 @@ fill semantics, and teardown; it is not evidence of physical input hardware,
 real vault behavior, or stock-extension compatibility. Real stock login,
 vault, save, autofill, and complete user workflows remain product evidence
 before any package is presented as installable.
+
+The first authenticated ordinary-extension workflow uses stock
+[Vimium 2.4.2](https://chromewebstore.google.com/detail/vimium/dbepggeogbaibhgnhhndojpepiihcmeb)
+from its signed Chrome Web Store CRX. The external CRX SHA-256 is
+`3198c26aa719be462dea585050fbed9b8b80628d57ea88a113babf5334c5517c`;
+its authenticated source contains 79 files and 558,837 bytes with tree SHA-256
+`5015a2e84b2007f0e9cfc670c06b327787bf55a3129fa382534e8a462748eb23`.
+The generic v3 transform emits 82 files and 566,373 bytes with tree SHA-256
+`63726bb7feb7195bcafb9d605abf3fc48b56f79eafc1c44fbcd1ce7dfe0563ec`.
+Neither tree is committed, downloaded by product code, or granted catalog,
+install, profile, or release authority.
+
+The feature-gated release probe independently reopens both exact identities,
+loads the module worker through WebKit's public background completion API, and
+publishes a real native window/tab/controller surface. A separate plain WebView
+first proves that the queued AppKit key becomes a trusted DOM event without
+letting the diagnostic input alter Vimium state. In the extension view, Vimium
+then intercepts the stock `j` command, drives its real link-hint selection into
+an HTTP navigation, and executes its native action popup through the same
+controller and profile store. The generated adapter and privileged extension
+API remain absent from the page world. The link click is deliberately observed
+as untrusted because Vimium dispatches it from JavaScript; WebKit must not
+upgrade that synthetic click even though the initiating key was trusted.
+Popup, page, control view, context, controller, data store, and native routing
+objects must all release after the Objective-C autorelease pool drains.
+
+This gate establishes a reusable stock Chrome-extension path and core Vimium
+keyboard/link/action behavior on the exercised macOS runtime. It does not yet
+classify bookmarks, history, search, sessions, notifications, Vomnibar, options
+persistence, enable/disable/restart, or multi-profile behavior. The unbundled
+accessory probe is not granted foreground animation frames consistently, so it
+records whether smooth scrolling was visibly observed but gates on ordered
+trusted delivery plus Vimium interception; a packaged product-app E2E gate must
+cover foreground smooth scrolling before Vimium is presented as fully
+compatible.
 
 ---
 

@@ -214,10 +214,16 @@ shutdown, Store ambiguity, or stale echo identity closes the prompt and denies. 
 ephemeral-profile projection offers no remember control, and Shell rejects a forged
 durable response without entering Store. The desktop default does not enable this
 feature, so shipped behavior remains deny-only. Its explicit forwarding feature
-exists solely to build the packaged release-gate candidate. Unattended macOS CI runs
-a feature-only loopback probe that defers one atomic camera-and-microphone request,
-resolves exact Deny once, rejects duplicate settlement, and observes JavaScript
-`NotAllowedError`; it never supplies native Allow or accesses a device. The bundle
+exists solely to build the packaged release-gate candidate. Unattended macOS CI
+compiles and lints the feature-only loopback probe but does not execute its media
+request. [WebKit requests system validation before its UI-client policy
+decision](https://github.com/WebKit/WebKit/blob/main/Source/WebKit/UIProcess/UserMediaPermissionRequestManagerProxy.cpp);
+even an eventual native Deny can first prompt or wait on device consent, and the
+[mock-capture setting used by WebKit tooling](https://github.com/WebKit/WebKit/blob/main/Tools/MiniBrowser/mac/WK2BrowserWindowController.m)
+is not a shipping WKWebView API. Treating that path as unattended would make the
+gate interactive and could mutate host privacy state.
+The probe can still verify exact deferred Deny, duplicate-settlement rejection, and
+JavaScript `NotAllowedError` under a pre-authorized responsible process. The bundle
 includes camera and microphone usage descriptions, but those strings grant no
 authority. A signed packaged WKWebView/TCC gate on the supported security floor is
 still required before the release capability can change. All downloads are disabled,
@@ -511,11 +517,15 @@ proof components, and total payload before cryptography; verifies every
 recognized RSA/ECDSA proof; and requires one unambiguous developer proof whose
 key digest derives both the signed CRX identifier and the catalog-expected
 identifier. A valid unrelated publisher proof cannot substitute for that
-developer identity. The offline probe materializer consumes only the verified
+developer identity. The legacy 1024-bit RSA verifier is selected only for that
+identity-deriving developer proof; unrelated RSA proofs retain the 2048-bit
+minimum. The offline probe materializer consumes only the verified
 ZIP payload and preflights the complete central-directory inventory before
 writing: encryption, links, special entries, nonportable names, duplicate or
 case-colliding paths, file/directory shape conflicts, and file/tree expansion
-budget violations fail closed. Its private output retains an incomplete marker
+budget violations fail closed. A deflated empty directory must declare zero
+expanded bytes, contain at most 64 compressed bytes, reach decompressor EOF,
+and emit no byte. Its private output retains an incomplete marker
 until every bounded ordinary file is durably written. These commands remain
 diagnostic and cannot mint a catalog release, materialization receipt, lease,
 grant, or runtime authority.
@@ -1058,6 +1068,31 @@ These inherited properties must not be overstated:
   portable package path.
   The GTK4/WebKitGTK 6 migration must retire the explicitly allowlisted GTK3 advisories
   and re-audit the vendored Wry patch.
+
+### Offline macOS extension adaptation
+
+The package-neutral macOS compatibility materializer is offline and
+non-authorizing. It accepts only an already authenticated closed MV3 tree plus
+its canonical index, rejects source drift and reserved-path collisions, and
+emits a distinct closed tree and metadata with `product_authority=false`. It
+cannot mint a catalog row, install, profile grant, runtime witness, controller,
+or redistribution decision. Generated resources live under a reserved
+namespace; source and output manifest/tree/index identities are all rebound.
+
+The adapter preserves native extension principals and namespace objects. It
+does not expose a generic page-world API, fetch port, or native-message channel,
+and it leaves upstream `MAIN` scripts unchanged. File match patterns are
+removed until a separate per-extension file-URL grant exists; exact removals
+are part of the sealed surface contract. The webNavigation endpoint is injected
+only into an isolated content world and supplies only two absent same-document
+event objects to that extension's own worker. Messages have a fixed channel and
+kind, bounded URL, validated native tab/frame identities, and a restricted URL
+scheme; reported changes come from the endpoint frame's actual location. A
+hostile page may dispatch the fixed DOM signal, but it cannot supply a URL or
+cross the isolated-world runtime boundary, and unchanged locations are ignored.
+The production History API signal may originate only from Zephium's native
+committed-URL observer. Until that host signal is connected and live-gated,
+history-state observation remains an explicit artifact limitation.
 
 ### Extension compatibility broker
 
