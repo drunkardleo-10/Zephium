@@ -417,7 +417,10 @@ pub use cookie;
 pub use dpi;
 pub use error::*;
 pub use http;
-pub use permissions::{PermissionKind, PermissionResponse};
+pub use permissions::{
+  PermissionKind, PermissionOrigin, PermissionRequest, PermissionRequestDisposition,
+  PermissionRequestId, PermissionRequestKind, PermissionResponse,
+};
 pub use proxy::{ProxyConfig, ProxyEndpoint};
 pub use web_context::WebContext;
 
@@ -1497,6 +1500,10 @@ impl<'a> WebViewBuilder<'a> {
     F: Fn(PermissionKind) -> PermissionResponse + Send + Sync + 'static,
   {
     self.attrs.permission_handler = Some(Box::new(handler));
+    #[cfg(target_os = "macos")]
+    {
+      self.platform_specific.permission_request_handler = None;
+    }
     self
   }
 
@@ -1797,6 +1804,9 @@ pub(crate) struct PlatformSpecificWebViewAttributes {
   limit_navigations_to_app_bound_domains: bool,
   #[cfg(target_os = "macos")]
   webview_configuration: Option<Retained<objc2_web_kit::WKWebViewConfiguration>>,
+  #[cfg(target_os = "macos")]
+  permission_request_handler:
+    Option<Box<dyn Fn(PermissionRequest) -> PermissionRequestDisposition>>,
 }
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -1814,6 +1824,8 @@ impl Default for PlatformSpecificWebViewAttributes {
       limit_navigations_to_app_bound_domains: false,
       #[cfg(target_os = "macos")]
       webview_configuration: None,
+      #[cfg(target_os = "macos")]
+      permission_request_handler: None,
     }
   }
 }
@@ -1875,6 +1887,18 @@ pub trait WebViewBuilderExtMacos {
     self,
     configuration: Retained<objc2_web_kit::WKWebViewConfiguration>,
   ) -> Self;
+  /// Installs an origin-labelled permission broker capable of deferring the
+  /// native completion without blocking WebKit's main thread.
+  ///
+  /// At most a small fixed cohort is retained per WebView. Overflow,
+  /// malformed native origin metadata, handler panic, teardown, and unknown
+  /// settlement ids all fail closed. Calling this replaces the simpler
+  /// kind-only permission handler. The closure and later settlement both run
+  /// on WebKit's owning main thread.
+  fn with_permission_request_handler(
+    self,
+    handler: impl Fn(PermissionRequest) -> PermissionRequestDisposition + 'static,
+  ) -> Self;
 }
 
 #[cfg(target_os = "macos")]
@@ -1887,6 +1911,15 @@ impl WebViewBuilderExtMacos for WebViewBuilder<'_> {
       .platform_specific
       .webview_configuration
       .replace(configuration);
+    self
+  }
+
+  fn with_permission_request_handler(
+    mut self,
+    handler: impl Fn(PermissionRequest) -> PermissionRequestDisposition + 'static,
+  ) -> Self {
+    self.attrs.permission_handler = None;
+    self.platform_specific.permission_request_handler = Some(Box::new(handler));
     self
   }
 }
@@ -2775,6 +2808,15 @@ pub trait WebViewExtMacOS {
   /// Warning: Do not use this if your chosen window library does not support traffic light insets.
   /// Warning: Only use this in **decorated** windows with a **hidden titlebar**!
   fn set_traffic_light_inset<P: Into<dpi::Position>>(&self, position: P) -> Result<()>;
+  /// Resolves one exact deferred permission request owned by this WebView.
+  ///
+  /// Returns `true` only when the request was still pending. `Default` is
+  /// treated as denial; native prompting is never re-enabled by settlement.
+  fn resolve_permission_request(
+    &self,
+    request: PermissionRequestId,
+    response: PermissionResponse,
+  ) -> bool;
 }
 
 #[cfg(target_os = "macos")]
@@ -2801,6 +2843,14 @@ impl WebViewExtMacOS for WebView {
 
   fn set_traffic_light_inset<P: Into<dpi::Position>>(&self, position: P) -> Result<()> {
     self.webview.set_traffic_light_inset(position.into())
+  }
+
+  fn resolve_permission_request(
+    &self,
+    request: PermissionRequestId,
+    response: PermissionResponse,
+  ) -> bool {
+    self.webview.resolve_permission_request(request, response)
   }
 }
 
@@ -2947,6 +2997,26 @@ pub struct InitializationScript {
 mod tests {
   use super::*;
   use std::sync::{Arc, Mutex};
+
+  #[cfg(target_os = "macos")]
+  #[test]
+  fn macos_permission_handlers_are_mutually_exclusive_and_last_writer_wins() {
+    let brokered = WebViewBuilder::new()
+      .with_permission_handler(|_| PermissionResponse::Allow)
+      .with_permission_request_handler(|_| PermissionRequestDisposition::Defer);
+    assert!(brokered.attrs.permission_handler.is_none());
+    assert!(brokered
+      .platform_specific
+      .permission_request_handler
+      .is_some());
+
+    let deny_only = brokered.with_permission_handler(|_| PermissionResponse::Deny);
+    assert!(deny_only.attrs.permission_handler.is_some());
+    assert!(deny_only
+      .platform_specific
+      .permission_request_handler
+      .is_none());
+  }
 
   #[test]
   fn async_responder_completes_explicit_response_exactly_once() {

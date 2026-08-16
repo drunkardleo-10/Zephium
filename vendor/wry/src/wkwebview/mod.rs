@@ -101,6 +101,8 @@ use crate::{
   native_bounds::{bounded_nsstring, PAGE_URL_LIMIT},
   BackgroundThrottlingPolicy, Error, Rect, RequestAsyncResponder, Result, WebViewAttributes, RGBA,
 };
+#[cfg(target_os = "macos")]
+use crate::{PermissionRequestId, PermissionResponse};
 
 use http::Request;
 
@@ -213,6 +215,15 @@ pub(crate) struct InnerWebView {
 }
 
 impl InnerWebView {
+  #[cfg(target_os = "macos")]
+  pub(crate) fn resolve_permission_request(
+    &self,
+    request: PermissionRequestId,
+    response: PermissionResponse,
+  ) -> bool {
+    self.ui_delegate.resolve_permission_request(request, response)
+  }
+
   pub fn new(
     window: &impl HasWindowHandle,
     attributes: WebViewAttributes,
@@ -677,6 +688,8 @@ impl InnerWebView {
         mtm,
         attributes.new_window_req_handler,
         attributes.permission_handler,
+        #[cfg(target_os = "macos")]
+        pl_attrs.permission_request_handler,
       );
       let proto_ui_delegate = ProtocolObject::from_ref(&*ui_delegate);
       webview.setUIDelegate(Some(proto_ui_delegate));

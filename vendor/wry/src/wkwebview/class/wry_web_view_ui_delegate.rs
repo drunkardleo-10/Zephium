@@ -3,9 +3,18 @@
 // SPDX-License-Identifier: MIT
 
 #[cfg(target_os = "macos")]
-use std::{cell::RefCell, ptr::null_mut, rc::Rc};
+use std::{
+  cell::RefCell,
+  num::NonZeroU64,
+  panic::{catch_unwind, AssertUnwindSafe},
+  ptr::null_mut,
+  rc::Rc,
+  sync::atomic::{AtomicU64, Ordering},
+};
 
 use block2::Block;
+#[cfg(target_os = "macos")]
+use block2::RcBlock;
 use objc2::{
   define_class, msg_send,
   rc::Retained,
@@ -28,6 +37,65 @@ use crate::{
   native_bounds::{bounded_nsstring, PAGE_URL_LIMIT},
   NewWindowFeatures, NewWindowResponse, PermissionKind, PermissionResponse, WryWebView,
 };
+#[cfg(target_os = "macos")]
+use crate::{
+  native_bounds::NativeStringLimit, PermissionOrigin, PermissionRequest,
+  PermissionRequestDisposition, PermissionRequestId, PermissionRequestKind,
+};
+
+#[cfg(target_os = "macos")]
+const MAX_PENDING_PERMISSION_REQUESTS: usize = 4;
+#[cfg(target_os = "macos")]
+const PERMISSION_ORIGIN_COMPONENT_LIMIT: NativeStringLimit = NativeStringLimit {
+  max_utf16_units: 512,
+  max_utf8_bytes: 512,
+};
+#[cfg(target_os = "macos")]
+static NEXT_PERMISSION_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+
+#[cfg(target_os = "macos")]
+type PermissionDecisionHandler = RcBlock<dyn Fn(WKPermissionDecision)>;
+
+#[cfg(target_os = "macos")]
+struct PendingPermissionRequest {
+  decision_handler: PermissionDecisionHandler,
+}
+
+#[cfg(target_os = "macos")]
+struct BoundedPendingPermissionRequests<T> {
+  entries: Vec<(PermissionRequestId, T)>,
+}
+
+#[cfg(target_os = "macos")]
+impl<T> BoundedPendingPermissionRequests<T> {
+  const fn new() -> Self {
+    Self {
+      entries: Vec::new(),
+    }
+  }
+
+  fn insert(&mut self, id: PermissionRequestId, value: T) -> Result<(), T> {
+    if self.entries.len() >= MAX_PENDING_PERMISSION_REQUESTS
+      || self.entries.iter().any(|(candidate, _)| *candidate == id)
+    {
+      return Err(value);
+    }
+    self.entries.push((id, value));
+    Ok(())
+  }
+
+  fn take(&mut self, id: PermissionRequestId) -> Option<T> {
+    let index = self
+      .entries
+      .iter()
+      .position(|(candidate, _)| *candidate == id)?;
+    Some(self.entries.swap_remove(index).1)
+  }
+
+  fn drain(&mut self) -> impl Iterator<Item = T> + '_ {
+    self.entries.drain(..).map(|(_, value)| value)
+  }
+}
 
 fn permission_decision(response: PermissionResponse) -> WKPermissionDecision {
   match response {
@@ -85,6 +153,23 @@ pub struct WryWebViewUIDelegateIvars {
   #[cfg(target_os = "macos")]
   new_windows: Rc<RefCell<Vec<NewWindow>>>,
   permission_handler: Option<Box<dyn Fn(PermissionKind) -> PermissionResponse + Send + Sync>>,
+  #[cfg(target_os = "macos")]
+  permission_request_handler:
+    Option<Box<dyn Fn(PermissionRequest) -> PermissionRequestDisposition>>,
+  #[cfg(target_os = "macos")]
+  pending_permission_requests:
+    RefCell<BoundedPendingPermissionRequests<PendingPermissionRequest>>,
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for WryWebViewUIDelegateIvars {
+  fn drop(&mut self) {
+    for pending in self.pending_permission_requests.get_mut().drain() {
+      pending
+        .decision_handler
+        .call((WKPermissionDecision::Deny,));
+    }
+  }
 }
 
 define_class!(
@@ -152,11 +237,26 @@ define_class!(
     fn request_media_capture_permission(
       &self,
       _webview: &WryWebView,
-      _origin: &WKSecurityOrigin,
+      origin: &WKSecurityOrigin,
       _frame: &WKFrameInfo,
       capture_type: WKMediaCaptureType,
       decision_handler: &Block<dyn Fn(WKPermissionDecision)>,
     ) {
+      #[cfg(target_os = "macos")]
+      {
+        let request_kind = match capture_type {
+          WKMediaCaptureType::Camera => PermissionRequestKind::Single(PermissionKind::Camera),
+          WKMediaCaptureType::Microphone => {
+            PermissionRequestKind::Single(PermissionKind::Microphone)
+          }
+          WKMediaCaptureType::CameraAndMicrophone => PermissionRequestKind::CameraAndMicrophone,
+          _ => PermissionRequestKind::Single(PermissionKind::Other),
+        };
+        if self.broker_permission_request(origin, request_kind, decision_handler) {
+          return;
+        }
+      }
+
       // Call user's permission handler if set
       let decision = if let Some(handler) = &self.ivars().permission_handler {
         match capture_type {
@@ -346,10 +446,114 @@ define_class!(
 );
 
 impl WryWebViewUIDelegate {
+  #[cfg(target_os = "macos")]
+  fn next_permission_request_id() -> Option<PermissionRequestId> {
+    let value = NEXT_PERMISSION_REQUEST_ID
+      .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        current.checked_add(1)
+      })
+      .ok()?;
+    NonZeroU64::new(value).map(PermissionRequestId::new)
+  }
+
+  #[cfg(target_os = "macos")]
+  fn permission_origin(origin: &WKSecurityOrigin) -> Option<PermissionOrigin> {
+    // SAFETY: WebKit supplied a live `WKSecurityOrigin` reference for this
+    // delegate invocation. The generated accessors return retained immutable
+    // values, which we bound before copying into Rust.
+    let (native_scheme, native_host, raw_port) = unsafe {
+      (origin.protocol(), origin.host(), origin.port())
+    };
+    let scheme = bounded_nsstring(&native_scheme, PERMISSION_ORIGIN_COMPONENT_LIMIT)?;
+    let host = bounded_nsstring(&native_host, PERMISSION_ORIGIN_COMPONENT_LIMIT)?;
+    if scheme.is_empty() || host.is_empty() {
+      return None;
+    }
+    let port = if raw_port == 0 {
+      None
+    } else {
+      Some(u16::try_from(raw_port).ok()?)
+    };
+    Some(PermissionOrigin::new(scheme, host, port))
+  }
+
+  #[cfg(target_os = "macos")]
+  fn broker_permission_request(
+    &self,
+    origin: &WKSecurityOrigin,
+    kind: PermissionRequestKind,
+    decision_handler: &Block<dyn Fn(WKPermissionDecision)>,
+  ) -> bool {
+    let Some(handler) = &self.ivars().permission_request_handler else {
+      return false;
+    };
+    let Some(id) = Self::next_permission_request_id() else {
+      decision_handler.call((WKPermissionDecision::Deny,));
+      return true;
+    };
+    let Some(origin) = Self::permission_origin(origin) else {
+      decision_handler.call((WKPermissionDecision::Deny,));
+      return true;
+    };
+    let Ok(mut pending) = self.ivars().pending_permission_requests.try_borrow_mut() else {
+      decision_handler.call((WKPermissionDecision::Deny,));
+      return true;
+    };
+    if pending
+      .insert(
+        id,
+        PendingPermissionRequest {
+          decision_handler: decision_handler.copy(),
+        },
+      )
+      .is_err()
+    {
+      drop(pending);
+      decision_handler.call((WKPermissionDecision::Deny,));
+      return true;
+    }
+    drop(pending);
+
+    let disposition = catch_unwind(AssertUnwindSafe(|| {
+      handler(PermissionRequest::new(id, origin, kind))
+    }))
+    .unwrap_or(PermissionRequestDisposition::Deny);
+    match disposition {
+      PermissionRequestDisposition::Allow => {
+        self.resolve_permission_request(id, PermissionResponse::Allow);
+      }
+      PermissionRequestDisposition::Deny => {
+        self.resolve_permission_request(id, PermissionResponse::Deny);
+      }
+      PermissionRequestDisposition::Defer => {}
+    }
+    true
+  }
+
+  #[cfg(target_os = "macos")]
+  pub fn resolve_permission_request(
+    &self,
+    request: PermissionRequestId,
+    response: PermissionResponse,
+  ) -> bool {
+    let Ok(mut requests) = self.ivars().pending_permission_requests.try_borrow_mut() else {
+      return false;
+    };
+    let Some(pending) = requests.take(request) else {
+      return false;
+    };
+    drop(requests);
+    pending.decision_handler.call((permission_decision(response),));
+    true
+  }
+
   pub fn new(
     mtm: MainThreadMarker,
     new_window_req_handler: Option<Box<dyn Fn(String, NewWindowFeatures) -> NewWindowResponse>>,
     permission_handler: Option<Box<dyn Fn(PermissionKind) -> PermissionResponse + Send + Sync>>,
+    #[cfg(target_os = "macos")] permission_request_handler: Option<
+      Box<dyn Fn(PermissionRequest) -> PermissionRequestDisposition>,
+    >,
   ) -> Retained<Self> {
     #[cfg(target_os = "ios")]
     let _new_window_req_handler = new_window_req_handler;
@@ -362,6 +566,10 @@ impl WryWebViewUIDelegate {
         #[cfg(target_os = "macos")]
         new_windows: Rc::new(RefCell::new(vec![])),
         permission_handler,
+        #[cfg(target_os = "macos")]
+        permission_request_handler,
+        #[cfg(target_os = "macos")]
+        pending_permission_requests: RefCell::new(BoundedPendingPermissionRequests::new()),
       });
     unsafe { msg_send![super(delegate), init] }
   }
@@ -385,5 +593,42 @@ mod tests {
       permission_decision(PermissionResponse::Allow),
       WKPermissionDecision::Grant
     );
+  }
+
+  #[cfg(target_os = "macos")]
+  #[test]
+  fn deferred_permission_registry_is_exact_bounded_and_reusable() {
+    fn id(value: u64) -> PermissionRequestId {
+      PermissionRequestId::new(NonZeroU64::new(value).unwrap())
+    }
+
+    let mut pending = BoundedPendingPermissionRequests::new();
+    for value in 1..=MAX_PENDING_PERMISSION_REQUESTS as u64 {
+      assert_eq!(pending.insert(id(value), value), Ok(()));
+    }
+    assert_eq!(pending.insert(id(1), 99), Err(99));
+    assert_eq!(pending.insert(id(99), 100), Err(100));
+    assert_eq!(pending.take(id(2)), Some(2));
+    assert_eq!(pending.take(id(2)), None);
+    assert_eq!(pending.insert(id(99), 99), Ok(()));
+    let mut retained: Vec<_> = pending.drain().collect();
+    retained.sort_unstable();
+    assert_eq!(retained, vec![1, 3, 4, 99]);
+  }
+
+  #[cfg(target_os = "macos")]
+  #[test]
+  fn permission_origin_remains_structured_and_request_identity_is_opaque() {
+    let origin = PermissionOrigin::new("https".into(), "example.com".into(), Some(8443));
+    let request = PermissionRequest::new(
+      PermissionRequestId::new(NonZeroU64::new(7).unwrap()),
+      origin,
+      PermissionRequestKind::CameraAndMicrophone,
+    );
+    assert_eq!(request.id().get(), 7);
+    assert_eq!(request.origin().scheme(), "https");
+    assert_eq!(request.origin().host(), "example.com");
+    assert_eq!(request.origin().port(), Some(8443));
+    assert_eq!(request.kind(), PermissionRequestKind::CameraAndMicrophone);
   }
 }

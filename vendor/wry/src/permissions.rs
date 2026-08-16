@@ -1,3 +1,5 @@
+use std::num::NonZeroU64;
+
 /// Permission types that can be requested by the webview.
 ///
 /// See [`crate::WebViewBuilder::with_permission_handler`].
@@ -100,6 +102,122 @@ pub enum PermissionKind {
   Autoplay,
   /// Other unrecognized permission type.
   Other,
+}
+
+/// Process-local identity of one deferred native permission request.
+///
+/// The identity is minted by the platform adapter, is never derived from web
+/// content, and is meaningful only to the exact live [`crate::WebView`] that
+/// emitted it. Embedders must still bind it to their own view generation and
+/// navigation lifecycle before presenting a prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PermissionRequestId(NonZeroU64);
+
+impl PermissionRequestId {
+  pub(crate) const fn new(value: NonZeroU64) -> Self {
+    Self(value)
+  }
+
+  /// Reconstructs an opaque identity previously obtained from
+  /// [`PermissionRequest::id`]. Unknown identities remain harmless: the
+  /// platform settlement method returns `false` unless the exact WebView
+  /// still owns a matching deferred completion.
+  pub const fn from_u64(value: u64) -> Option<Self> {
+    match NonZeroU64::new(value) {
+      Some(value) => Some(Self(value)),
+      None => None,
+    }
+  }
+
+  /// Returns the opaque process-local integer identity.
+  pub const fn get(self) -> u64 {
+    self.0.get()
+  }
+}
+
+/// Bounded native security-origin components attached to a permission request.
+///
+/// These values come from the platform WebView, not JavaScript. They are still
+/// untrusted page metadata: Wry bounds them before allocation but deliberately
+/// does not claim that they form an embedder-supported or canonical origin.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PermissionOrigin {
+  scheme: Box<str>,
+  host: Box<str>,
+  port: Option<u16>,
+}
+
+impl PermissionOrigin {
+  pub(crate) fn new(scheme: String, host: String, port: Option<u16>) -> Self {
+    Self {
+      scheme: scheme.into_boxed_str(),
+      host: host.into_boxed_str(),
+      port,
+    }
+  }
+
+  pub fn scheme(&self) -> &str {
+    &self.scheme
+  }
+
+  pub fn host(&self) -> &str {
+    &self.host
+  }
+
+  pub const fn port(&self) -> Option<u16> {
+    self.port
+  }
+}
+
+/// Native capability cohort represented by one exactly-once completion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum PermissionRequestKind {
+  Single(PermissionKind),
+  /// WebKit represents a combined camera-and-microphone request with one
+  /// completion. Splitting it into independently settleable prompts would be
+  /// dishonest, so the pair remains atomic at this boundary.
+  CameraAndMicrophone,
+}
+
+/// One bounded, origin-labelled native permission request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionRequest {
+  id: PermissionRequestId,
+  origin: PermissionOrigin,
+  kind: PermissionRequestKind,
+}
+
+impl PermissionRequest {
+  pub(crate) const fn new(
+    id: PermissionRequestId,
+    origin: PermissionOrigin,
+    kind: PermissionRequestKind,
+  ) -> Self {
+    Self { id, origin, kind }
+  }
+
+  pub const fn id(&self) -> PermissionRequestId {
+    self.id
+  }
+
+  pub const fn origin(&self) -> &PermissionOrigin {
+    &self.origin
+  }
+
+  pub const fn kind(&self) -> PermissionRequestKind {
+    self.kind
+  }
+}
+
+/// Initial disposition returned by an origin-labelled permission broker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PermissionRequestDisposition {
+  Allow,
+  Deny,
+  /// Retain the native completion until the exact request is resolved through
+  /// the matching platform [`crate::WebView`] extension method.
+  Defer,
 }
 
 impl std::fmt::Display for PermissionKind {
