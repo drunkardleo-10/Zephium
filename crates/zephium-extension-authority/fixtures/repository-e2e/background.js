@@ -6,10 +6,10 @@ const optionalAccess = {
 };
 const brokerApplication = "app.zephium.extension-broker.v1";
 const brokerRequest = "v1/history.recent/2";
-const brokerExpected = [
-  ["https://second.example/path", "Second visited page"],
+const brokerExpected = new Map([
   ["https://first.example/path", "First visited page"],
-];
+  ["https://second.example/path", "Second visited page"],
+]);
 
 function boundedDetail(error) {
   return String(error?.message ?? error ?? "unknown")
@@ -73,20 +73,28 @@ async function brokerState() {
   if (response?.v !== 1 || !Array.isArray(response.items)) {
     return "broker-response-version-failed";
   }
-  if (response.items.length !== brokerExpected.length) {
+  if (response.items.length !== brokerExpected.size) {
     return "broker-response-count-failed";
   }
-  for (let index = 0; index < brokerExpected.length; index += 1) {
+  const seen = new Set();
+  for (let index = 0; index < response.items.length; index += 1) {
     const item = response.items[index];
-    const [url, title] = brokerExpected[index];
-    if (
-      item?.url !== url ||
-      item?.title !== title ||
-      !Number.isSafeInteger(item?.lastVisit) ||
-      item.lastVisit < 0
-    ) {
-      return "broker-response-content-failed";
+    if (typeof item?.url !== "string" || !brokerExpected.has(item.url)) {
+      return `broker-response-url-${index}-failed`;
     }
+    if (seen.has(item.url)) {
+      return `broker-response-duplicate-${index}-failed`;
+    }
+    seen.add(item.url);
+    if (item?.title !== brokerExpected.get(item.url)) {
+      return `broker-response-title-${index}-failed`;
+    }
+    if (!Number.isSafeInteger(item?.lastVisit) || item.lastVisit < 0) {
+      return `broker-response-last-visit-${index}-failed`;
+    }
+  }
+  if (seen.size !== brokerExpected.size) {
+    return "broker-response-membership-failed";
   }
   return "ready-brokered";
 }
