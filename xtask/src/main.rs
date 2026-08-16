@@ -11,6 +11,7 @@ mod macos_extension_compatibility;
 mod webview2_extension_boundary;
 
 use std::process::{exit, Command};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const NATIVE_ADAPTERS: [(&str, Option<&str>); 3] = [
@@ -37,11 +38,15 @@ const PRIVATE_FS_OPERATION_INSTRUMENTATION_CFG: &str =
 const EXTENSION_PRODUCT_MEASUREMENT_CFG: &str = "zephium_extension_product_measurement";
 const INTERNAL_AUTHORITY_SHIPPING_REJECTION: &str =
     "the internal repository E2E authority may not link into Zephium application code";
+static CI_RESOURCE_PROFILE: AtomicBool = AtomicBool::new(false);
 
 fn main() {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
     match arguments.first().map(String::as_str) {
-        Some("ci") => ci(),
+        Some("ci") => {
+            CI_RESOURCE_PROFILE.store(true, Ordering::Release);
+            ci();
+        }
         Some("check-engine-floors") => check_engine_floors(),
         Some("check-release-engine-security") => check_release_engine_security(),
         Some("check-advisory-exceptions") => check_advisory_exceptions(),
@@ -1725,6 +1730,7 @@ fn run_blocker_feature_gates() {
 
 fn run_blocker_product_gates() {
     for (package, features) in [
+        ("zephium-update-transport", None),
         ("zephium-blocker-update", None),
         ("zephium-blocker-update", Some("tuf")),
         ("zephium-blocker-service", None),
@@ -1821,6 +1827,7 @@ fn check_blocker_dependency_graphs() {
     ]);
     for forbidden in [
         "zephium-blocker-update feature \"tuf\"",
+        "zephium-update-transport v",
         "tough v",
         "reqwest v",
         "rustls-platform-verifier v",
@@ -2039,8 +2046,12 @@ fn run_native_adapter_tests(manifest: &str, features: Option<&str>) {
 
 fn run(cmd: &str, args: &[&str]) {
     eprintln!("> {cmd} {}", args.join(" "));
-    let status = Command::new(cmd)
-        .args(args)
+    let mut command = Command::new(cmd);
+    command.args(args);
+    if cmd == "cargo" && CI_RESOURCE_PROFILE.load(Ordering::Acquire) {
+        apply_ci_cargo_resource_profile(&mut command);
+    }
+    let status = command
         .status()
         .unwrap_or_else(|e| panic!("failed to spawn {cmd}: {e}"));
     if !status.success() {
@@ -2048,12 +2059,59 @@ fn run(cmd: &str, args: &[&str]) {
     }
 }
 
+fn apply_ci_cargo_resource_profile(command: &mut Command) {
+    // The gate intentionally compiles many mutually exclusive feature graphs.
+    // Incremental caches and unpacked debug information cannot be reused
+    // meaningfully across those graphs and previously grew `target/` beyond
+    // 100 GiB on macOS. Tests, Clippy, compile-time policy, and native runtime
+    // behavior are unchanged; release-profile measurements remain governed by
+    // their explicit release profile.
+    command
+        .env("CARGO_INCREMENTAL", "0")
+        .env("CARGO_PROFILE_DEV_DEBUG", "0")
+        .env("CARGO_PROFILE_TEST_DEBUG", "0");
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        rustflags_enable_internal_repository_cfg, validate_advisory_exceptions,
-        validate_security_fork_lock,
+        apply_ci_cargo_resource_profile, rustflags_enable_internal_repository_cfg,
+        validate_advisory_exceptions, validate_security_fork_lock,
     };
+
+    #[test]
+    fn ci_cargo_profile_disables_nonreusable_disk_heavy_artifacts() {
+        let mut command = std::process::Command::new("cargo");
+        apply_ci_cargo_resource_profile(&mut command);
+        let environment = command
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value
+                        .expect("CI resource variables are never removed")
+                        .to_string_lossy()
+                        .into_owned(),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(
+            environment.get("CARGO_INCREMENTAL").map(String::as_str),
+            Some("0")
+        );
+        assert_eq!(
+            environment
+                .get("CARGO_PROFILE_DEV_DEBUG")
+                .map(String::as_str),
+            Some("0")
+        );
+        assert_eq!(
+            environment
+                .get("CARGO_PROFILE_TEST_DEBUG")
+                .map(String::as_str),
+            Some("0")
+        );
+    }
 
     #[test]
     fn internal_repository_cfg_detection_is_exact_across_rustflag_encodings() {

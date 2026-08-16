@@ -748,6 +748,13 @@ and keeps the durable candidate distinct from current until its exact compiler a
 prepared. The feature, including HTTP/TLS transport, update worker, timers, and source
 cache, is absent from the desktop release-bundle dependency graph; an independent CI
 feature matrix prevents that retained implementation from rotting.
+Its redirect-free HTTPS boundary is shared through
+`zephium-update-transport`, which owns no trust root or package policy and
+exposes only untrusted streams. Both origins are exact HTTPS directories;
+credentials, redirects, compressed responses, queries, fragments, encoded
+paths, and cross-origin finals are refused, and diagnostics retain only the
+origin. The ordinary desktop graph still links no network updater through that
+extraction.
 The coordinator then durably commits that candidate before activation revalidates the exact
 prepared recovery state. A stale identity or newly unavailable candidate leaves compiler
 authority unchanged; interrupted transitions remain explicit and recoverable.

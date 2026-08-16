@@ -86,7 +86,9 @@ async fn verify_repository_with_time(
                 FixedOriginTransport::new(
                     config.metadata_base_url.clone(),
                     config.targets_base_url.clone(),
-                    config.limits,
+                    config.limits.request_timeout,
+                    config.limits.connect_timeout,
+                    "Zephium-Filter-Updater/1",
                 )
                 .map_err(|_| VerificationError::Transport)?,
             )

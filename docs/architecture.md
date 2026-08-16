@@ -253,7 +253,9 @@ Single Cargo workspace monorepo, frontend included. Per-platform native code is
 │   │                            unsafe allowlisted here.
 │   ├── zephium-blocker          bounded adblock-rust compiler worker and
 │   │                            immutable platform artifacts.
-│   ├── zephium-blocker-update   fixed-origin TUF authentication, private
+│   ├── zephium-update-transport shared redirect-free fixed-origin HTTPS
+│   │                            boundary; no package or catalog authority.
+│   ├── zephium-blocker-update   TUF authentication, private
 │   │                            package storage, rollback/clock authority.
 │   ├── zephium-blocker-service  candidate preparation, durable commit, and
 │   │                            exact compiler activation coordinator.
@@ -853,7 +855,13 @@ the worker reauthenticates the sealed catalog, CRX, manifest, legal artifact,
 and complete extracted tree before publication. Complete catalog activation is
 separate and source-free. No product transport or catalog coordinator calls
 that ingress yet, and enabling the crate feature alone supplies neither package
-bytes nor network authority. Authenticated catalog management and install UX,
+bytes nor network authority. The blocker's redirect-free fixed-origin HTTPS
+client has been extracted into `zephium-update-transport` for that future
+coordinator. It accepts only plain-ASCII paths below exact HTTPS directories,
+refuses redirects, compression, credentials, queries, fragments, and encoded
+path components, and redacts request failures. The shared crate still returns
+unauthenticated streams and grants no catalog, filesystem, install, or runtime
+authority. Authenticated catalog management and install UX,
 native action projection, and transient popup hosting are implemented; the
 install review always includes required API/host authority, defaults every
 optional declaration to denied, and can return only bounded indexes into the

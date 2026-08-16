@@ -707,6 +707,7 @@ fn validate_zephium_feature_manifests(repository: &Path, root: &toml::Table) -> 
             "zephium-blocker",
             "zephium-blocker-service",
             "zephium-blocker-update",
+            "zephium-update-transport",
         ],
     )?;
     let blocker_workspace = workspace_dependencies
@@ -724,6 +725,10 @@ fn validate_zephium_feature_manifests(repository: &Path, root: &toml::Table) -> 
     for (name, path) in [
         ("zephium-blocker-service", "crates/zephium-blocker-service"),
         ("zephium-blocker-update", "crates/zephium-blocker-update"),
+        (
+            "zephium-update-transport",
+            "crates/zephium-update-transport",
+        ),
     ] {
         let dependency = workspace_dependencies
             .get(name)
@@ -795,6 +800,7 @@ fn validate_zephium_feature_manifests(repository: &Path, root: &toml::Table) -> 
         &["adblock"],
     )?;
     validate_blocker_update_manifest(repository)?;
+    validate_update_transport_manifest(repository)?;
     validate_blocker_service_manifest(repository)?;
     validate_blocker_fuzz_manifest(repository)?;
 
@@ -847,7 +853,10 @@ fn validate_zephium_feature_manifests(repository: &Path, root: &toml::Table) -> 
                 let package = dependency_package(name, value);
                 if matches!(
                     package,
-                    "adblock" | "zephium-blocker-service" | "zephium-blocker-update"
+                    "adblock"
+                        | "zephium-blocker-service"
+                        | "zephium-blocker-update"
+                        | "zephium-update-transport"
                 ) || (package == "zephium-blocker"
                     && (!reviewed_targets.contains(target.as_str())
                         || kind != "dependencies"
@@ -908,12 +917,11 @@ fn validate_blocker_update_manifest(repository: &Path) -> Result<(), String> {
         "tuf",
         &[
             "dep:async-trait",
-            "dep:futures-util",
-            "dep:reqwest",
             "dep:rustix",
             "dep:tokio",
             "dep:tough",
             "dep:windows",
+            "dep:zephium-update-transport",
         ],
     )?;
 
@@ -922,8 +930,6 @@ fn validate_blocker_update_manifest(repository: &Path) -> Result<(), String> {
         dependencies,
         &[
             "async-trait",
-            "futures-util",
-            "reqwest",
             "serde",
             "serde_json",
             "sha2",
@@ -931,6 +937,7 @@ fn validate_blocker_update_manifest(repository: &Path) -> Result<(), String> {
             "tokio",
             "tough",
             "url",
+            "zephium-update-transport",
         ],
         "zephium-blocker-update dependency table",
     )?;
@@ -954,26 +961,14 @@ fn validate_blocker_update_manifest(repository: &Path) -> Result<(), String> {
     )?;
     require_bool(tough, "workspace", true)?;
     require_bool(tough, "optional", true)?;
-    let futures = require_dependency_table(dependencies, "futures-util")?;
+    let transport = require_dependency_table(dependencies, "zephium-update-transport")?;
     require_key_set(
-        futures,
-        &["default-features", "features", "optional", "version"],
-        "zephium-blocker-update futures-util dependency",
+        transport,
+        &["optional", "workspace"],
+        "zephium-blocker-update transport dependency",
     )?;
-    require_string(futures, "version", "=0.3.32")?;
-    require_bool(futures, "default-features", false)?;
-    require_string_array(futures, "features", &["std"])?;
-    require_bool(futures, "optional", true)?;
-    let reqwest = require_dependency_table(dependencies, "reqwest")?;
-    require_key_set(
-        reqwest,
-        &["default-features", "features", "optional", "version"],
-        "zephium-blocker-update reqwest dependency",
-    )?;
-    require_string(reqwest, "version", "=0.13.4")?;
-    require_bool(reqwest, "default-features", false)?;
-    require_string_array(reqwest, "features", &["rustls", "stream", "system-proxy"])?;
-    require_bool(reqwest, "optional", true)?;
+    require_bool(transport, "workspace", true)?;
+    require_bool(transport, "optional", true)?;
     let tokio = require_dependency_table(dependencies, "tokio")?;
     require_key_set(
         tokio,
@@ -1055,6 +1050,54 @@ fn validate_blocker_update_manifest(repository: &Path) -> Result<(), String> {
         ],
     )?;
     require_bool(windows_crate, "optional", true)?;
+    Ok(())
+}
+
+fn validate_update_transport_manifest(repository: &Path) -> Result<(), String> {
+    let transport = parse_table(
+        &read_text(&repository.join("crates/zephium-update-transport/Cargo.toml"))?,
+        "zephium-update-transport Cargo.toml",
+    )?;
+    require_string(
+        require_table(&transport, "package")?,
+        "name",
+        "zephium-update-transport",
+    )?;
+    let dependencies = require_table(&transport, "dependencies")?;
+    require_key_set(
+        dependencies,
+        &[
+            "async-trait",
+            "futures-util",
+            "reqwest",
+            "thiserror",
+            "tough",
+            "url",
+        ],
+        "zephium-update-transport dependency table",
+    )?;
+    require_dependency_version(dependencies, "async-trait", "=0.1.89")?;
+    let futures = require_dependency_table(dependencies, "futures-util")?;
+    require_key_set(
+        futures,
+        &["default-features", "features", "version"],
+        "zephium-update-transport futures-util dependency",
+    )?;
+    require_string(futures, "version", "=0.3.32")?;
+    require_bool(futures, "default-features", false)?;
+    require_string_array(futures, "features", &["std"])?;
+    let reqwest = require_dependency_table(dependencies, "reqwest")?;
+    require_key_set(
+        reqwest,
+        &["default-features", "features", "version"],
+        "zephium-update-transport reqwest dependency",
+    )?;
+    require_string(reqwest, "version", "=0.13.4")?;
+    require_bool(reqwest, "default-features", false)?;
+    require_string_array(reqwest, "features", &["rustls", "stream", "system-proxy"])?;
+    for name in ["thiserror", "tough", "url"] {
+        require_workspace_dependency(dependencies, name, &[])?;
+    }
     Ok(())
 }
 
@@ -1575,7 +1618,11 @@ fn reject_blocker_packages_except(
         let package = dependency_package(name, value);
         if matches!(
             package,
-            "adblock" | "zephium-blocker" | "zephium-blocker-service" | "zephium-blocker-update"
+            "adblock"
+                | "zephium-blocker"
+                | "zephium-blocker-service"
+                | "zephium-blocker-update"
+                | "zephium-update-transport"
         ) && (!allowed.contains(&package) || name != package)
         {
             return Err(format!(
@@ -1987,7 +2034,13 @@ fn verify_desktop_feature_graph(
     )?;
     require_package_features(&tree, target, "zephium-blocker-service", "0.1.0", &[])?;
     require_package_features(&tree, target, "zephium-blocker-update", "0.1.0", &[])?;
-    for package in ["aws-lc-rs", "reqwest", "rustls-platform-verifier", "tough"] {
+    for package in [
+        "aws-lc-rs",
+        "reqwest",
+        "rustls-platform-verifier",
+        "tough",
+        "zephium-update-transport",
+    ] {
         reject_package(&tree, target, package)?;
     }
     Ok(())
@@ -2072,10 +2125,11 @@ fn require_package_features(
 }
 
 fn verify_blocker_product_lock(repository: &Path) -> Result<(), String> {
-    const LOCAL: [(&str, &str); 3] = [
+    const LOCAL: [(&str, &str); 4] = [
         ("zephium-blocker", "0.1.0"),
         ("zephium-blocker-service", "0.1.0"),
         ("zephium-blocker-update", "0.1.0"),
+        ("zephium-update-transport", "0.1.0"),
     ];
     const REGISTRY: [(&str, &str); 5] = [
         ("aws-lc-rs", "1.17.3"),
