@@ -515,11 +515,16 @@ the canonical index, rejects links/special files/path escapes, and reads and
 hashes each bounded regular file before WebKit receives the root. Probe failure
 at popup startup therefore cannot be converted into product authority, and
 probe diagnostics can never enter a release package unnoticed.
-The repository can recover at most eight sealed catalog-set finals and has no
-production materialization GC yet. Repeated distinct catalog selections can
-hard-stop at that bound; a bounded collector that runs only after
-interrupted-build settlement and preserves all slot and owner-pin closures is
-a release blocker, not optional maintenance.
+The repository can recover at most eight sealed catalog-set finals. Production
+reaches its bounded collector only through the serialized service worker, at
+most one batch per existing one-minute Shell heartbeat. Collection runs after
+interrupted-build settlement and preserves every candidate/current/previous
+and owner-pin closure; an atomic permit coalesces duplicate wakeups, and
+neither `more_garbage` nor transient pre-commit filesystem failure creates a
+hot retry. Integrity failures fail closed and disable later periodic turns for
+that process. Repository mutation/recovery and authenticated service admission
+are automated gates; repeated-catalog endurance at the physical ceiling
+remains required release evidence.
 The Core acquisition and release bindings prove only a complete structural
 join; they are not Store freshness capabilities. Acquisition is linear at the
 repository boundary: the move-only binding is consumed into the live lease and

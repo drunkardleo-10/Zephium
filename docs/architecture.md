@@ -964,13 +964,23 @@ Every package-record final discovered during recovery must be rooted by either
 the exact sole build intent or the completed ledger; unrooted commit markers
 are ambiguous durable state, not inert garbage.
 The physical recovery inventory currently permits at most eight sealed
-catalog-set finals. The repository now implements bounded, pin-rooted,
+catalog-set finals. The repository implements bounded, pin-rooted,
 crash-recoverable closure garbage collection ordered after interrupted-build
 settlement and preserving every candidate/current/previous and owner-pin root.
-The serialized service does not yet schedule that collector, so repeated
-distinct product selections can still exhaust the inventory. A low-frequency,
-deadline-bounded service maintenance ingress remains a release blocker; the
-current ceiling is not a claim of indefinite operation.
+The serialized service schedules at most one collector batch from Shell's
+existing one-minute maintenance heartbeat. A process-local atomic permit
+coalesces duplicate wakeups before mailbox admission, the worker applies the
+same absolute deadline and repository serialization as other operations, and
+`more_garbage` never creates a hot follow-up. Callback loss releases the permit
+with the command, transient pre-commit filesystem outages wait for a later
+heartbeat, and integrity failures stop further periodic admission until
+restart. The inert lifecycle reports maintenance unavailable before Shell
+allocates a callback, so an extension-free launch still creates no worker,
+timer, repository, or maintenance work. Repository tests prove real garbage
+mutation/recovery; an authenticated service test proves production admission,
+coalescing, an empty fresh-inventory turn, and clean ordered shutdown. A
+repeated-catalog endurance campaign remains release evidence rather than an
+assumption derived from those component gates.
 Core package-pin bindings are structural joins, not proof that a Store row is
 still current. Fresh acquisition consumes its move-only binding into the live
 repository lease; the lease exposes eligibility only by borrow and destroys
