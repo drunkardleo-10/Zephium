@@ -21,6 +21,19 @@ pub fn run_macos_principal_isolation_probe() -> Result<(), String> {
     platform::macos::run_principal_isolation_probe()
 }
 
+/// Runs the local-origin WKWebView page-permission denial/deferral gate.
+///
+/// The fixture is served only from an ephemeral loopback listener. The probe
+/// observes one combined camera-and-microphone request, resolves it as Deny,
+/// and verifies exactly-once settlement and JavaScript rejection. It never
+/// resolves native Allow or grants device authority and is absent from
+/// ordinary product builds.
+#[cfg(all(target_os = "macos", feature = "native-page-permission-probes"))]
+#[doc(hidden)]
+pub fn run_macos_page_permission_probe() -> Result<(), String> {
+    platform::macos::run_page_permission_probe()
+}
+
 /// Runs the public WKWebExtension feasibility probe on the process main thread.
 ///
 /// `Ok(true)` means the live macOS 15.4+ probe executed and passed. `Ok(false)`

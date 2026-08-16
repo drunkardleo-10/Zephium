@@ -33,6 +33,8 @@ use std::{cell::Cell, cell::RefCell, rc::Rc};
 
 use dispatch2::DispatchObject as _;
 
+#[cfg(feature = "native-page-permission-probes")]
+pub(crate) use native::run_page_permission_probe;
 #[cfg(feature = "native-isolation-probes")]
 pub(crate) use native::run_principal_isolation_probe;
 pub(crate) use native::webkit as native_webview;

@@ -8,6 +8,9 @@ license.workspace = true
 # Builds native, main-thread probe executables used only by platform CI. These
 # binaries are excluded from ordinary desktop builds unless explicitly enabled.
 native-isolation-probes = []
+# Builds the local-origin WKWebView page-permission denial/deferral probe. It
+# never resolves native Allow or grants device authority.
+native-page-permission-probes = []
 # Builds the macOS 15.4+ WKWebExtension behavioral and lifecycle probe. This
 # remains separate from native-isolation-probes so ordinary builds do not carry
 # the probe fixture, delegate graph, HTTP harness, or diagnostic surfaces.
@@ -42,6 +45,11 @@ windows-cdp-spike = []
 name = "macos-principal-isolation-probe"
 path = "src/bin/macos_principal_isolation_probe.rs"
 required-features = ["native-isolation-probes"]
+
+[[bin]]
+name = "macos-page-permission-probe"
+path = "src/bin/macos_page_permission_probe.rs"
+required-features = ["native-page-permission-probes"]
 
 [[bin]]
 name = "macos-web-extension-probe"

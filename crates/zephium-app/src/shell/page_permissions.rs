@@ -20,8 +20,13 @@ use zephium_core::ports::store::{
 use super::*;
 
 const PAGE_PERMISSION_SHELL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25);
-const PAGE_PERMISSION_PROMPTS_ENABLED: bool =
-    cfg!(any(test, feature = "macos-page-permission-prompts"));
+const PAGE_PERMISSION_PROMPTS_ENABLED: bool = cfg!(any(
+    test,
+    all(
+        target_os = "macos",
+        feature = "macos-page-permission-prompts"
+    )
+));
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ReconciliationSource {

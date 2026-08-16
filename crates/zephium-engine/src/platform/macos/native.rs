@@ -529,6 +529,329 @@ pub(crate) fn add_user_script_in_principal_world(
     })
 }
 
+#[cfg(feature = "native-page-permission-probes")]
+mod page_permission_probe {
+    use std::cell::RefCell;
+    use std::ffi::c_void;
+    use std::io::{Read as _, Write as _};
+    use std::net::{SocketAddr, TcpListener, TcpStream};
+    use std::ptr::NonNull;
+    use std::rc::Rc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::thread::JoinHandle;
+    use std::time::{Duration, Instant};
+
+    use objc2::rc::Retained;
+    use objc2_app_kit::{
+        NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSView, NSWindow,
+        NSWindowStyleMask,
+    };
+    use objc2_foundation::{NSDate, NSPoint, NSRect, NSRunLoop, NSSize};
+    use raw_window_handle::{
+        AppKitWindowHandle, HandleError, HasWindowHandle, RawWindowHandle, WindowHandle,
+    };
+    use wry::{
+        PermissionRequest, PermissionRequestDisposition, PermissionRequestKind, PermissionResponse,
+        WebViewBuilderExtMacos as _, WebViewExtMacOS as _,
+    };
+
+    use super::*;
+
+    const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+    const DENIED_TITLE: &str = "zephium-media-denied:NotAllowedError";
+    const FIXTURE: &str = r#"<!doctype html>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'">
+<title>zephium-media-loading</title>
+<script>
+(() => {
+  'use strict';
+  const finish = value => { document.title = value; };
+  if (!globalThis.isSecureContext) {
+    finish('zephium-media-insecure-context');
+    return;
+  }
+  if (typeof navigator.mediaDevices?.getUserMedia !== 'function') {
+    finish('zephium-media-api-unavailable');
+    return;
+  }
+  document.title = 'zephium-media-requesting';
+  navigator.mediaDevices.getUserMedia({ audio: true, video: true }).then(
+    stream => {
+      for (const track of stream.getTracks()) track.stop();
+      finish('zephium-media-unexpectedly-allowed');
+    },
+    error => finish(`zephium-media-denied:${String(error?.name || 'UnknownError')}`),
+  );
+})();
+</script>"#;
+
+    struct ProbeHostView {
+        view: Retained<NSView>,
+    }
+
+    impl HasWindowHandle for ProbeHostView {
+        fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
+            let pointer = NonNull::from(&*self.view).cast::<c_void>();
+            let raw = RawWindowHandle::AppKit(AppKitWindowHandle::new(pointer));
+            // SAFETY: `self.view` owns the exact NSView for this borrow, and
+            // the retained host window outlives the Wry child.
+            Ok(unsafe { WindowHandle::borrow_raw(raw) })
+        }
+    }
+
+    struct FixtureServer {
+        address: SocketAddr,
+        stop: Arc<AtomicBool>,
+        worker: Option<JoinHandle<()>>,
+    }
+
+    impl FixtureServer {
+        fn start() -> Result<Self, String> {
+            let listener = TcpListener::bind(("127.0.0.1", 0))
+                .map_err(|error| format!("cannot bind page-permission fixture: {error}"))?;
+            let address = listener
+                .local_addr()
+                .map_err(|error| format!("cannot read fixture address: {error}"))?;
+            listener
+                .set_nonblocking(true)
+                .map_err(|error| format!("cannot bound fixture acceptance: {error}"))?;
+            let stop = Arc::new(AtomicBool::new(false));
+            let thread_stop = stop.clone();
+            let worker = std::thread::Builder::new()
+                .name("zephium-page-permission-probe-http".into())
+                .spawn(move || serve(listener, thread_stop))
+                .map_err(|error| format!("cannot start page-permission fixture: {error}"))?;
+            Ok(Self {
+                address,
+                stop,
+                worker: Some(worker),
+            })
+        }
+
+        fn url(&self) -> String {
+            format!("http://{}/", self.address)
+        }
+    }
+
+    impl Drop for FixtureServer {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Release);
+            if let Some(worker) = self.worker.take() {
+                let _ = worker.join();
+            }
+        }
+    }
+
+    fn serve(listener: TcpListener, stop: Arc<AtomicBool>) {
+        while !stop.load(Ordering::Acquire) {
+            match listener.accept() {
+                Ok((stream, _)) => serve_once(stream),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                Err(_) => break,
+            }
+        }
+    }
+
+    fn serve_once(mut stream: TcpStream) {
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+        let mut request = [0_u8; 8 * 1_024];
+        let mut received = 0;
+        while received < request.len() {
+            match stream.read(&mut request[received..]) {
+                Ok(0) => return,
+                Ok(read) => {
+                    received += read;
+                    if request[..received]
+                        .windows(4)
+                        .any(|window| window == b"\r\n\r\n")
+                    {
+                        break;
+                    }
+                }
+                Err(_) => return,
+            }
+        }
+        if !request[..received].starts_with(b"GET / HTTP/1.1\r\n") {
+            return;
+        }
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nPermissions-Policy: camera=(self), microphone=(self)\r\nConnection: close\r\n\r\n{}",
+            FIXTURE.len(),
+            FIXTURE,
+        );
+        let _ = stream.write_all(response.as_bytes());
+        let _ = stream.flush();
+    }
+
+    #[derive(Default)]
+    struct ProbeState {
+        title: String,
+        request: Option<PermissionRequest>,
+        duplicate_request: bool,
+    }
+
+    fn run_loop_until(
+        run_loop: &NSRunLoop,
+        state: &RefCell<ProbeState>,
+        predicate: impl Fn(&ProbeState) -> bool,
+        description: &str,
+    ) -> Result<(), String> {
+        let deadline = Instant::now() + PROBE_TIMEOUT;
+        loop {
+            {
+                let state = state.borrow();
+                if predicate(&state) {
+                    return Ok(());
+                }
+                if matches!(
+                    state.title.as_str(),
+                    "zephium-media-insecure-context"
+                        | "zephium-media-api-unavailable"
+                        | "zephium-media-unexpectedly-allowed"
+                ) {
+                    return Err(format!(
+                        "page-permission fixture entered terminal state {:?} while {description}",
+                        state.title
+                    ));
+                }
+            }
+            if Instant::now() >= deadline {
+                let state = state.borrow();
+                return Err(format!(
+                    "timed out {description}; title={:?}; request_observed={}",
+                    state.title,
+                    state.request.is_some(),
+                ));
+            }
+            objc2::rc::autoreleasepool(|_| {
+                run_loop.runUntilDate(&NSDate::dateWithTimeIntervalSinceNow(0.01));
+            });
+        }
+    }
+
+    pub(super) fn run() -> Result<(), String> {
+        objc2::rc::autoreleasepool(|_| run_in_autorelease_pool())
+    }
+
+    fn run_in_autorelease_pool() -> Result<(), String> {
+        let mtm = MainThreadMarker::new()
+            .ok_or_else(|| "page-permission probe must run on process main".to_owned())?;
+        let server = FixtureServer::start()?;
+        let expected_port = server.address.port();
+        let app = NSApplication::sharedApplication(mtm);
+        let _ = app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+        app.finishLaunching();
+
+        // SAFETY: `mtm` proves AppKit affinity. The retained window is
+        // non-autoreleasing and outlives its host view and Wry child.
+        let window = unsafe {
+            NSWindow::initWithContentRect_styleMask_backing_defer(
+                NSWindow::alloc(mtm),
+                NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(640.0, 480.0)),
+                NSWindowStyleMask::Borderless,
+                NSBackingStoreType::Buffered,
+                false,
+            )
+        };
+        // SAFETY: the probe retains the exact window until after child
+        // teardown, so closing must not consume the retained owner.
+        unsafe { window.setReleasedWhenClosed(false) };
+        let host = ProbeHostView {
+            view: window
+                .contentView()
+                .ok_or_else(|| "page-permission probe window has no content view".to_owned())?,
+        };
+
+        let state = Rc::new(RefCell::new(ProbeState::default()));
+        let title_state = state.clone();
+        let request_state = state.clone();
+        let view = wry::WebViewBuilder::new()
+            .with_incognito(true)
+            .with_document_title_changed_handler(move |title| {
+                title_state.borrow_mut().title = title;
+            })
+            .with_permission_request_handler(move |request| {
+                let mut state = request_state.borrow_mut();
+                if state.request.replace(request).is_some() {
+                    state.duplicate_request = true;
+                }
+                PermissionRequestDisposition::Defer
+            })
+            .build_as_child(&host)
+            .map_err(|error| format!("cannot construct page-permission WebView: {error}"))?;
+        window.orderFrontRegardless();
+        view.load_url(&server.url())
+            .map_err(|error| format!("cannot load page-permission fixture: {error}"))?;
+
+        let run_loop = NSRunLoop::mainRunLoop();
+        run_loop_until(
+            &run_loop,
+            &state,
+            |state| state.request.is_some(),
+            "waiting for the native media request",
+        )?;
+        let request = {
+            let state = state.borrow();
+            if state.duplicate_request {
+                return Err(
+                    "WebKit emitted more than one native request for one atomic call".into(),
+                );
+            }
+            state
+                .request
+                .clone()
+                .ok_or_else(|| "native media request disappeared".to_owned())?
+        };
+        let origin = request.origin();
+        if origin.scheme() != "http"
+            || origin.host() != "127.0.0.1"
+            || origin.port() != Some(expected_port)
+        {
+            return Err(format!(
+                "native request reported the wrong structured origin: {}://{}:{:?}",
+                origin.scheme(),
+                origin.host(),
+                origin.port(),
+            ));
+        }
+        if request.kind() != PermissionRequestKind::CameraAndMicrophone {
+            return Err(format!(
+                "combined getUserMedia request lost atomicity: {:?}",
+                request.kind()
+            ));
+        }
+        if !view.resolve_permission_request(request.id(), PermissionResponse::Deny) {
+            return Err("exact deferred media request refused its first denial".into());
+        }
+        if view.resolve_permission_request(request.id(), PermissionResponse::Deny) {
+            return Err("deferred media request accepted a duplicate settlement".into());
+        }
+        run_loop_until(
+            &run_loop,
+            &state,
+            |state| state.title == DENIED_TITLE,
+            "waiting for JavaScript denial",
+        )?;
+
+        drop(view);
+        window.close();
+        drop(server);
+        println!(
+            "native-probe: macOS page permission denial passed; origin=loopback; capability=camera-and-microphone; disposition=deferred; settlement=deny; exactly_once=passed; javascript_rejection=NotAllowedError; native_allow=never"
+        );
+        Ok(())
+    }
+}
+
+#[cfg(feature = "native-page-permission-probes")]
+pub(crate) fn run_page_permission_probe() -> Result<(), String> {
+    page_permission_probe::run()
+}
+
 #[cfg(feature = "native-isolation-probes")]
 mod principal_isolation_probe {
     use std::cell::RefCell;

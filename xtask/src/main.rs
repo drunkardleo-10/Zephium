@@ -698,6 +698,8 @@ fn ci() {
     #[cfg(target_os = "macos")]
     run_macos_principal_isolation_probe();
     #[cfg(target_os = "macos")]
+    run_macos_page_permission_probe();
+    #[cfg(target_os = "macos")]
     run_macos_web_extension_probe();
     #[cfg(target_os = "macos")]
     run_macos_web_extension_resource_probe();
@@ -1389,6 +1391,31 @@ fn run_macos_principal_isolation_probe() {
     clippy.extend(["--", "-D", "warnings"]);
     run("cargo", &clippy);
 
+    let mut execute = vec!["run"];
+    execute.extend(COMMON);
+    run("cargo", &execute);
+}
+
+#[cfg(target_os = "macos")]
+fn run_macos_page_permission_probe() {
+    const COMMON: [&str; 7] = [
+        "--locked",
+        "-p",
+        "zephium-engine",
+        "--features",
+        "native-page-permission-probes",
+        "--bin",
+        "macos-page-permission-probe",
+    ];
+
+    let mut clippy = vec!["clippy"];
+    clippy.extend(COMMON);
+    clippy.extend(["--", "-D", "warnings"]);
+    run("cargo", &clippy);
+
+    // This exercises only an exact deferred Deny against a loopback fixture.
+    // It never resolves Allow or grants camera/microphone authority, so it is
+    // suitable for unattended macOS CI. The packaged Allow/TCC gate is separate.
     let mut execute = vec!["run"];
     execute.extend(COMMON);
     run("cargo", &execute);
