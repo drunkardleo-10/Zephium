@@ -2,9 +2,10 @@
 //!
 //! This source-free fixture does not enable product native messaging. It uses
 //! one fixed internal application identifier, exact bounded payloads, one
-//! message and one port, and a nonpersistent controller/store. Passing proves
-//! a full one-shot request/reply channel and records the currently asymmetric
-//! persistent-port behavior; it grants no generic native-host authority.
+//! read-only history-facade request and one port, and a nonpersistent
+//! controller/store. Passing proves a full facade-to-host-to-facade round trip
+//! and records the currently asymmetric persistent-port behavior; it grants no
+//! generic native-host authority.
 
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
@@ -31,7 +32,7 @@ use serde_json::{json, Value};
 const CONTRACT_PRINCIPAL: &str = "dddddddddddddddddddddddddddddddd";
 const APPLICATION_IDENTIFIER: &str = "app.zephium.extension-broker.v1";
 const ONE_SHOT_REQUEST: &str = "v1/history.recent/2";
-const ONE_SHOT_REPLY: &str = r#"{"v":1,"items":[]}"#;
+const ONE_SHOT_REPLY: &str = r#"{"v":1,"items":[{"url":"https://first.example/path","title":"First visited page","lastVisit":1000},{"url":"https://second.example/path","title":"Second visited page","lastVisit":2000}]}"#;
 const PORT_REQUEST: &str = "zephium-broker-port-request";
 const PORT_REPLY: &str = "zephium-broker-port-reply";
 const PORT_REPLY_UNOBSERVED: &str = "host-reply-unobserved";
@@ -338,30 +339,49 @@ pub(super) fn write_fixture(root: &Path) -> Result<PathBuf, String> {
         "name": "Zephium Native Broker Contract Probe",
         "version": "1.0.0",
         "description": "Zephium-owned principal-bound native broker fixture.",
-        "permissions": ["nativeMessaging"]
+        "permissions": ["history", "nativeMessaging"]
     });
     write(&path, "manifest.json", &manifest.to_string())?;
     write(
         &path,
         "probe.html",
-        "<!doctype html><meta charset=\"utf-8\"><title>zephium-native-broker-contract-pending</title><script src=\"probe.js\"></script>",
+        &format!(
+            "<!doctype html><meta charset=\"utf-8\"><title>zephium-native-broker-contract-pending</title><script src=\"/{}\"></script><script src=\"probe.js\"></script>",
+            super::compatibility_artifact::HISTORY_BRIDGE,
+        ),
+    )?;
+    write(
+        &path,
+        super::compatibility_artifact::HISTORY_BRIDGE,
+        include_str!("../../../../../zephium-extension-package/assets/macos/webkit-history-v1.js"),
     )?;
     let script = format!(
         r#"(() => {{
     'use strict';
-    const api = globalThis.chrome?.runtime;
+    const runtime = globalThis.chrome?.runtime;
+    const history = globalThis.chrome?.history;
+    const historyMode = globalThis[Symbol.for("zephium.webkit-history-compatibility.mode.v1")];
     const settle = (oneShot, port) => {{
-        document.title = JSON.stringify({{ oneShot, port }});
+        document.title = JSON.stringify({{ history: historyMode, oneShot, port }});
     }};
-    if (!api?.sendNativeMessage || !api?.connectNative) {{
+    if (!runtime?.sendNativeMessage || !runtime?.connectNative || !history?.search) {{
         settle("absent", "absent");
         return;
     }}
-    api.sendNativeMessage({application_identifier:?}, {one_shot_request:?}, (reply) => {{
-        const oneShot = api.lastError ? `error:${{api.lastError.message}}` : reply;
+    history.search({{ text: "", maxResults: 2, startTime: 0 }}).then((items) => {{
+        const valid = Array.isArray(items) && items.length === 2 &&
+            items[0]?.id === "https://first.example/path" &&
+            items[0]?.url === "https://first.example/path" &&
+            items[0]?.title === "First visited page" &&
+            items[0]?.lastVisitTime === 1000 &&
+            items[1]?.id === "https://second.example/path" &&
+            items[1]?.lastVisitTime === 2000 &&
+            typeof history.addUrl === "undefined" &&
+            typeof history.deleteAll === "undefined";
+        const oneShot = valid ? "history-search-passed" : "history-search-invalid";
         let nativePort;
         try {{
-            nativePort = api.connectNative({application_identifier:?});
+            nativePort = runtime.connectNative({application_identifier:?});
         }} catch (error) {{
             settle(oneShot, `error:${{String(error?.message ?? error)}}`);
             return;
@@ -376,16 +396,17 @@ pub(super) fn write_fixture(root: &Path) -> Result<PathBuf, String> {
             settle(oneShot, message?.reply ?? "invalid-reply");
         }});
         nativePort.onDisconnect.addListener(() => {{
-            if (api.lastError) {{
+            if (runtime.lastError) {{
                 clearTimeout(timeout);
-                settle(oneShot, `error:${{api.lastError.message}}`);
+                settle(oneShot, `error:${{runtime.lastError.message}}`);
             }}
         }});
         nativePort.postMessage({port_request:?});
+    }}, (error) => {{
+        settle(`error:${{String(error?.message ?? error)}}`, "not-started");
     }});
 }})()"#,
         application_identifier = APPLICATION_IDENTIFIER,
-        one_shot_request = ONE_SHOT_REQUEST,
         port_request = PORT_REQUEST,
         port_reply_unobserved = PORT_REPLY_UNOBSERVED,
     );
@@ -565,7 +586,8 @@ fn wait_for_evidence(
                 })?;
                 if evidence
                     != json!({
-                        "oneShot": ONE_SHOT_REPLY,
+                        "history": "bounded-recent-search",
+                        "oneShot": "history-search-passed",
                         "port": PORT_REPLY_UNOBSERVED
                     })
                 {
@@ -611,7 +633,13 @@ fn probe_error(code: isize) -> Retained<NSError> {
 }
 
 fn write(directory: &Path, name: &str, contents: &str) -> Result<(), String> {
-    std::fs::write(directory.join(name), contents)
+    let path = directory.join(name);
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("native-broker fixture path has no parent: {name}"))?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("cannot create native-broker fixture directory: {error}"))?;
+    std::fs::write(path, contents)
         .map_err(|error| format!("cannot write native-broker contract fixture {name}: {error}"))
 }
 
@@ -627,12 +655,24 @@ mod tests {
             &std::fs::read(fixture.join("manifest.json")).expect("manifest bytes"),
         )
         .expect("manifest JSON");
-        assert_eq!(manifest["permissions"], json!(["nativeMessaging"]));
+        assert_eq!(
+            manifest["permissions"],
+            json!(["history", "nativeMessaging"])
+        );
         let script = std::fs::read_to_string(fixture.join("probe.js")).expect("probe script");
-        assert_eq!(script.matches(APPLICATION_IDENTIFIER).count(), 2);
-        assert!(script.contains("sendNativeMessage"));
+        assert_eq!(script.matches(APPLICATION_IDENTIFIER).count(), 1);
+        assert!(script.contains("history.search"));
         assert!(script.contains("connectNative"));
         assert!(!script.contains("fetch("));
         assert!(!script.contains("XMLHttpRequest"));
+        assert_eq!(
+            std::fs::read_to_string(
+                fixture.join(super::super::compatibility_artifact::HISTORY_BRIDGE)
+            )
+            .unwrap(),
+            include_str!(
+                "../../../../../zephium-extension-package/assets/macos/webkit-history-v1.js"
+            )
+        );
     }
 }

@@ -399,14 +399,16 @@ fn admit_compatibility_artifact(root: &Path) -> Result<AdmittedStockArtifact, St
     ) {
         return Err("stock compatibility artifact identity drifted".into());
     }
-    if artifact.surfaces.background
-        != super::compatibility_artifact::BackgroundAdaptation::ClassicWrapper
+    if artifact.target != super::compatibility_artifact::CompatibilityArtifactTarget::NativeV3
+        || artifact.surfaces.background
+            != super::compatibility_artifact::BackgroundAdaptation::ClassicWrapper
         || artifact.surfaces.isolated_content_scripts != 1
         || artifact.surfaces.action_popup
             != super::compatibility_artifact::ActionPopupAdaptation::ExplicitHeadInjected
         || artifact.surfaces.omitted_file_content_scripts != 0
         || artifact.surfaces.removed_file_match_patterns != 0
         || artifact.surfaces.same_document_navigation_routes != 2
+        || artifact.surfaces.history_search
     {
         return Err("stock compatibility artifact surface contract drifted".into());
     }

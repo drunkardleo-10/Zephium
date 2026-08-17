@@ -1352,16 +1352,17 @@ its Vomnibar, bookmark, session, notification, and search workflows.
 
 WebKit does expose a narrower compatibility seam through
 `WKWebExtensionControllerDelegate`, and the live gate now classifies it without
-enabling it in product policy. A separate Zephium-owned extension declares
-`nativeMessaging`, receives that one exact grant only inside the feature-gated
-probe, and uses the fixed internal identifier
-`app.zephium.extension-broker.v1`. The delegate compares both controller and
-`WKWebExtensionContext` identities before reading a bounded string payload. A
-one-shot `runtime.sendNativeMessage` request completes a full extension-to-host
-and host-to-extension reply round trip. This is a viable primitive for a
-future capability-limited compatibility broker, subject to a versioned
-protocol, per-operation authority, request/response byte ceilings, deadlines,
-overload behavior, and release-build latency/RSS measurement.
+enabling it in ordinary product policy. A separate Zephium-owned extension
+declares `history` and `nativeMessaging`, receives the one native grant only
+inside the feature-gated probe, and loads the exact package-neutral read-only
+history adapter. `chrome.history.search` sends the fixed internal identifier
+`app.zephium.extension-broker.v1` and the closed recent-history operation. The
+delegate compares both controller and `WKWebExtensionContext` identities before
+reading the bounded string payload. The returned two-row response is strictly
+validated and mapped into `HistoryItem` values before the page accepts the
+round trip. Mutation methods remain absent. This proves the facade-to-host-to-
+facade primitive; product authority still comes only from the distinct
+brokered runtime profile and its operation witness.
 
 Persistent native ports are asymmetric on the exercised runtime. The delegate
 receives the exact context-bound connection and one extension message; a
@@ -1394,7 +1395,7 @@ complete the retained one-shot callback with an explicit error. Four extension
 reads yield to a pending browser-owned history/favicon read, so an admitted
 adapter cannot starve ordinary browser UX.
 
-This is not a generic `chrome.history` implementation or a compatibility claim.
+This is not a complete `chrome.history` implementation or a compatibility claim.
 The source-free product gate now runs the same sealed fixture in separate
 ordinary and brokered processes. Ordinary authority keeps `history` and
 `nativeMessaging` denied and must observe native-channel rejection. Brokered
@@ -1404,9 +1405,11 @@ bounded JSON delivery to extension JavaScript, popup continuity, runtime
 retirement, repository cleanup, and clean Store restart. The gate deliberately
 does not instantiate the product Shell actor: it performs the real Store read on
 a dedicated bounded worker, while Shell settlement, stale-result rejection, and
-four-to-one queue fairness remain component/integration gates. An exact reviewed
-adapter plus packaged release-build latency/RSS/endurance evidence remains
-mandatory before any package can depend on this operation.
+four-to-one queue fairness remain component/integration gates. The package-
+neutral adapter and native WebKit seam are independently live-gated; an exact
+reviewed package artifact, its real history-dependent workflow, and packaged
+release-build latency/RSS/endurance evidence remain mandatory before that
+package can depend on this operation.
 
 | Bitwarden surface | macOS native classification | Evidence / boundary |
 |---|---|---|
@@ -1645,6 +1648,24 @@ states `product_authority=false`; it is not a release sealer, catalog entry, or
 redistribution decision. A Node contract gate exercises native identity,
 locked-global and alias behavior, idempotence, unadaptable-native fail-closure,
 and the deliberate absence of page/network bridges.
+
+A separate offline target, `cargo xtask
+materialize-macos-extension-compatibility-brokered`, is deliberately not an
+implicit upgrade of v3. It accepts only an MV3 background extension that already
+requires `history`, refuses source `nativeMessaging` declarations, and adds the
+internal native channel required by `macos.wkwebextension-brokered.v1`. Its
+background and action-popup preludes expose only bounded read-only
+`history.search`; content scripts receive no history authority. Requests are
+clamped to the newest 100 deduplicated rows, response shape and byte ceilings
+are revalidated in JavaScript, time and text filters run only over that bounded
+cohort, and mutating methods remain absent. `onVisited` and `onVisitRemoved`
+accept a bounded listener cohort so dependent extensions can initialize, but
+do not emit until a future browser-owned delta operation is explicitly
+designed. Promise and callback forms are supported; broker rejection remains a
+Promise rejection or callback-local `runtime.lastError`. The artifact metadata
+records all of these degradations and the fixed internal-only native channel.
+The ordinary `webkit-macos-native-v3` output and its authenticated third-party
+hashes remain unchanged.
 
 The exact Proton 1.39.0 source transformed through that generic boundary
 produces a 279-file, 21,520,099-byte tree with tree SHA-256

@@ -16,6 +16,7 @@ use zephium_extension_package::{
 };
 
 pub(super) const API_PRELUDE: &str = "__zephium__/webkit-api-v1.js";
+pub(super) const HISTORY_BRIDGE: &str = "__zephium__/webkit-history-v1.js";
 pub(super) const WEB_NAVIGATION_BRIDGE: &str = "__zephium__/webkit-web-navigation-v1.js";
 pub(super) const BACKGROUND_WRAPPER: &str = "__zephium_background_v1.js";
 
@@ -23,14 +24,15 @@ const ARTIFACT_METADATA: &str = "ZEPHIUM-COMPATIBILITY.json";
 const ARTIFACT_INDEX: &str = "authenticated-extension-tree.json";
 const ARTIFACT_EXTENSION: &str = "extension";
 const ARTIFACT_KIND: &str = "zephium-macos-web-extension-compatibility-artifact";
-const ARTIFACT_TARGET: &str = "webkit-macos-native-v3";
-const ADAPTATIONS: [&str; 4] = [
+const NATIVE_TARGET: &str = "webkit-macos-native-v3";
+const BROKERED_TARGET: &str = "webkit-macos-native-brokered-v1";
+const NATIVE_ADAPTATIONS: [&str; 4] = [
     "native-api-identity-preservation-v1",
     "catalog-update-event-stub-v1",
     "file-scheme-content-script-omission-v1",
     "same-document-web-navigation-endpoint-v1",
 ];
-const LIMITATIONS: [&str; 7] = [
+const NATIVE_LIMITATIONS: [&str; 7] = [
     "not-a-product-package",
     "catalog-update-events-owned-by-zephium",
     "sandbox-pages-not-adapted",
@@ -39,6 +41,33 @@ const LIMITATIONS: [&str; 7] = [
     "same-document-web-navigation-limited-to-injected-frames",
     "history-state-navigation-requires-host-signal",
 ];
+const BROKERED_ADAPTATIONS: [&str; 5] = [
+    "native-api-identity-preservation-v1",
+    "catalog-update-event-stub-v1",
+    "file-scheme-content-script-omission-v1",
+    "same-document-web-navigation-endpoint-v1",
+    "bounded-history-search-broker-v1",
+];
+const BROKERED_LIMITATIONS: [&str; 12] = [
+    "not-a-product-package",
+    "catalog-update-events-owned-by-zephium",
+    "sandbox-pages-not-adapted",
+    "non-action-extension-pages-not-adapted",
+    "file-scheme-content-scripts-omitted",
+    "same-document-web-navigation-limited-to-injected-frames",
+    "history-state-navigation-requires-host-signal",
+    "history-search-recent-100-only",
+    "history-text-search-limited-to-recent-results",
+    "history-events-registered-but-not-emitted",
+    "history-mutations-unsupported",
+    "native-messaging-fixed-internal-broker-only",
+];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum CompatibilityArtifactTarget {
+    NativeV3,
+    NativeBrokeredV1,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum BackgroundAdaptation {
@@ -87,10 +116,12 @@ pub(super) struct ArtifactSurfaces {
     pub(super) omitted_file_content_scripts: usize,
     pub(super) removed_file_match_patterns: usize,
     pub(super) same_document_navigation_routes: usize,
+    pub(super) history_search: bool,
 }
 
 #[derive(Debug)]
 pub(super) struct ValidatedCompatibilityArtifact {
+    pub(super) target: CompatibilityArtifactTarget,
     pub(super) extension_root: PathBuf,
     pub(super) source: ArtifactIdentity,
     pub(super) output: ArtifactIdentity,
@@ -131,6 +162,8 @@ struct Surfaces {
     omitted_file_content_scripts: usize,
     removed_file_match_patterns: usize,
     same_document_navigation_routes: usize,
+    #[serde(default)]
+    history_search: Option<String>,
 }
 
 pub(super) fn validate(root: &Path) -> Result<ValidatedCompatibilityArtifact, String> {
@@ -153,20 +186,27 @@ pub(super) fn validate(root: &Path) -> Result<ValidatedCompatibilityArtifact, St
         .map_err(|error| format!("compatibility artifact metadata is invalid: {error}"))?;
     let metadata: Metadata = serde_json::from_value(bounded.into_value())
         .map_err(|error| format!("compatibility artifact metadata contract is invalid: {error}"))?;
-    if metadata.schema != 1
-        || metadata.kind != ARTIFACT_KIND
-        || metadata.target != ARTIFACT_TARGET
-        || metadata.product_authority
-    {
+    if metadata.schema != 1 || metadata.kind != ARTIFACT_KIND || metadata.product_authority {
         return Err("compatibility artifact authority header drifted".into());
     }
-    if metadata.adaptations != ADAPTATIONS || metadata.limitations != LIMITATIONS {
+    let target = match metadata.target.as_str() {
+        NATIVE_TARGET => CompatibilityArtifactTarget::NativeV3,
+        BROKERED_TARGET => CompatibilityArtifactTarget::NativeBrokeredV1,
+        _ => return Err("compatibility artifact authority header drifted".into()),
+    };
+    let (adaptations, limitations): (&[&str], &[&str]) = match target {
+        CompatibilityArtifactTarget::NativeV3 => (&NATIVE_ADAPTATIONS, &NATIVE_LIMITATIONS),
+        CompatibilityArtifactTarget::NativeBrokeredV1 => {
+            (&BROKERED_ADAPTATIONS, &BROKERED_LIMITATIONS)
+        }
+    };
+    if metadata.adaptations != adaptations || metadata.limitations != limitations {
         return Err("compatibility artifact adaptation contract drifted".into());
     }
 
     let source = validate_identity(metadata.source, "source")?;
     let output = validate_identity(metadata.output, "output")?;
-    let surfaces = validate_surfaces(metadata.surfaces)?;
+    let surfaces = validate_surfaces(metadata.surfaces, target)?;
 
     let index_bytes = read_bounded_file(
         &root.join(ARTIFACT_INDEX),
@@ -187,6 +227,7 @@ pub(super) fn validate(root: &Path) -> Result<ValidatedCompatibilityArtifact, St
     super::artifact_tree::verify_closed_tree(&extension_root, &index, "compatibility artifact")?;
 
     Ok(ValidatedCompatibilityArtifact {
+        target,
         extension_root,
         source,
         output,
@@ -243,7 +284,10 @@ fn validate_identity(identity: Identity, description: &str) -> Result<ArtifactId
     })
 }
 
-fn validate_surfaces(surfaces: Surfaces) -> Result<ArtifactSurfaces, String> {
+fn validate_surfaces(
+    surfaces: Surfaces,
+    target: CompatibilityArtifactTarget,
+) -> Result<ArtifactSurfaces, String> {
     let background = match surfaces.background.as_str() {
         "absent" => BackgroundAdaptation::Absent,
         "classic-wrapper" => BackgroundAdaptation::ClassicWrapper,
@@ -263,6 +307,11 @@ fn validate_surfaces(surfaces: Surfaces) -> Result<ArtifactSurfaces, String> {
     {
         return Err("compatibility artifact content-script surface is invalid".into());
     }
+    let history_search = match (target, surfaces.history_search.as_deref()) {
+        (CompatibilityArtifactTarget::NativeV3, None) => false,
+        (CompatibilityArtifactTarget::NativeBrokeredV1, Some("bounded-native-broker")) => true,
+        _ => return Err("compatibility artifact history surface is invalid".into()),
+    };
     Ok(ArtifactSurfaces {
         background,
         isolated_content_scripts: surfaces.isolated_content_scripts,
@@ -270,6 +319,7 @@ fn validate_surfaces(surfaces: Surfaces) -> Result<ArtifactSurfaces, String> {
         omitted_file_content_scripts: surfaces.omitted_file_content_scripts,
         removed_file_match_patterns: surfaces.removed_file_match_patterns,
         same_document_navigation_routes: surfaces.same_document_navigation_routes,
+        history_search,
     })
 }
 

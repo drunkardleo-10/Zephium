@@ -27,16 +27,39 @@ const ARTIFACT_KIND: &str = "zephium-macos-web-extension-compatibility-artifact"
 const ARTIFACT_METADATA: &str = "ZEPHIUM-COMPATIBILITY.json";
 const ARTIFACT_EXTENSION: &str = "extension";
 const ARTIFACT_TREE_INDEX: &str = "authenticated-extension-tree.json";
-const TARGET: &str = "webkit-macos-native-v3";
+const NATIVE_TARGET: &str = "webkit-macos-native-v3";
+const BROKERED_TARGET: &str = "webkit-macos-native-brokered-v1";
 const API_PRELUDE: &str = "__zephium__/webkit-api-v1.js";
+const HISTORY_BRIDGE: &str = "__zephium__/webkit-history-v1.js";
 const WEB_NAVIGATION_BRIDGE: &str = "__zephium__/webkit-web-navigation-v1.js";
 const BACKGROUND_WRAPPER: &str = "__zephium_background_v1.js";
 const MAX_POPUP_HTML_BYTES: u64 = 2 * 1024 * 1024;
 
 const API_PRELUDE_SOURCE: &str =
     include_str!("../../crates/zephium-extension-package/assets/macos/webkit-api-v1.js");
+const HISTORY_BRIDGE_SOURCE: &str =
+    include_str!("../../crates/zephium-extension-package/assets/macos/webkit-history-v1.js");
 const WEB_NAVIGATION_BRIDGE_SOURCE: &str =
     include_str!("../../crates/zephium-extension-package/assets/macos/webkit-web-navigation-v1.js");
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ArtifactTarget {
+    NativeV3,
+    NativeBrokeredV1,
+}
+
+impl ArtifactTarget {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::NativeV3 => NATIVE_TARGET,
+            Self::NativeBrokeredV1 => BROKERED_TARGET,
+        }
+    }
+
+    const fn requires_history_broker(self) -> bool {
+        matches!(self, Self::NativeBrokeredV1)
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum WorkerKind {
@@ -64,6 +87,7 @@ struct TransformPlan {
     omitted_file_content_scripts: usize,
     removed_file_match_patterns: usize,
     same_document_navigation_routes: usize,
+    history_broker_search: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -84,6 +108,30 @@ pub(crate) fn materialize(
     tree_index: &Path,
     output: &Path,
 ) -> Result<(), String> {
+    materialize_target(extension, tree_index, output, ArtifactTarget::NativeV3)
+}
+
+/// Materializes the distinct brokered profile used by reviewed packages that
+/// require Zephium's bounded read-only history adapter.
+pub(crate) fn materialize_brokered(
+    extension: &Path,
+    tree_index: &Path,
+    output: &Path,
+) -> Result<(), String> {
+    materialize_target(
+        extension,
+        tree_index,
+        output,
+        ArtifactTarget::NativeBrokeredV1,
+    )
+}
+
+fn materialize_target(
+    extension: &Path,
+    tree_index: &Path,
+    output: &Path,
+    target: ArtifactTarget,
+) -> Result<(), String> {
     let (source_root, source_index) = extension_tree::verify_closed_tree(extension, tree_index)?;
     let final_output = absent_output_path(output)?;
     if final_output.starts_with(&source_root) {
@@ -92,7 +140,7 @@ pub(crate) fn materialize(
     reject_reserved_paths(&source_index)?;
 
     let manifest = read_indexed_file(&source_root, manifest_file(&source_index)?)?;
-    let plan = build_plan(&source_root, &source_index, &manifest)?;
+    let plan = build_plan(&source_root, &source_index, &manifest, target)?;
     enforce_output_budgets(&source_index, &plan)?;
 
     let parent = final_output
@@ -129,6 +177,13 @@ pub(crate) fn materialize(
         API_PRELUDE,
         API_PRELUDE_SOURCE.as_bytes(),
     )?;
+    if plan.history_broker_search {
+        write_new_file(
+            &staged_extension,
+            HISTORY_BRIDGE,
+            HISTORY_BRIDGE_SOURCE.as_bytes(),
+        )?;
+    }
     if plan.same_document_navigation_routes != 0 {
         write_new_file(
             &staged_extension,
@@ -142,10 +197,53 @@ pub(crate) fn materialize(
 
     let generated = extension_tree::build_tree_index(&staged_extension)?;
     write_new_file(staging.path(), ARTIFACT_TREE_INDEX, &generated.bytes)?;
+    let mut adaptations = vec![
+        "native-api-identity-preservation-v1",
+        "catalog-update-event-stub-v1",
+        "file-scheme-content-script-omission-v1",
+        "same-document-web-navigation-endpoint-v1",
+    ];
+    let mut limitations = vec![
+        "not-a-product-package",
+        "catalog-update-events-owned-by-zephium",
+        "sandbox-pages-not-adapted",
+        "non-action-extension-pages-not-adapted",
+        "file-scheme-content-scripts-omitted",
+        "same-document-web-navigation-limited-to-injected-frames",
+        "history-state-navigation-requires-host-signal",
+    ];
+    if plan.history_broker_search {
+        adaptations.push("bounded-history-search-broker-v1");
+        limitations.extend([
+            "history-search-recent-100-only",
+            "history-text-search-limited-to-recent-results",
+            "history-events-registered-but-not-emitted",
+            "history-mutations-unsupported",
+            "native-messaging-fixed-internal-broker-only",
+        ]);
+    }
+    let mut surfaces = serde_json::json!({
+        "background": plan.worker.label(),
+        "isolated_content_scripts": plan.isolated_content_scripts,
+        "action_popup": if plan.popup.is_some() { "explicit-head-injected" } else { "absent" },
+        "main_world_content_scripts": "unchanged",
+        "omitted_file_content_scripts": plan.omitted_file_content_scripts,
+        "removed_file_match_patterns": plan.removed_file_match_patterns,
+        "same_document_navigation_routes": plan.same_document_navigation_routes,
+    });
+    if plan.history_broker_search {
+        surfaces
+            .as_object_mut()
+            .expect("compatibility surfaces are an object")
+            .insert(
+                "history_search".to_owned(),
+                Value::String("bounded-native-broker".to_owned()),
+            );
+    }
     let metadata = serde_json::to_vec_pretty(&serde_json::json!({
         "schema": 1,
         "kind": ARTIFACT_KIND,
-        "target": TARGET,
+        "target": target.label(),
         "product_authority": false,
         "source": {
             "manifest_sha256": lower_hex(source_index.manifest_sha256().as_bytes()),
@@ -161,30 +259,9 @@ pub(crate) fn materialize(
             "files": generated.parsed.files().len(),
             "bytes": generated.parsed.total_bytes(),
         },
-        "adaptations": [
-            "native-api-identity-preservation-v1",
-            "catalog-update-event-stub-v1",
-            "file-scheme-content-script-omission-v1",
-            "same-document-web-navigation-endpoint-v1"
-        ],
-        "surfaces": {
-            "background": plan.worker.label(),
-            "isolated_content_scripts": plan.isolated_content_scripts,
-            "action_popup": if plan.popup.is_some() { "explicit-head-injected" } else { "absent" },
-            "main_world_content_scripts": "unchanged",
-            "omitted_file_content_scripts": plan.omitted_file_content_scripts,
-            "removed_file_match_patterns": plan.removed_file_match_patterns,
-            "same_document_navigation_routes": plan.same_document_navigation_routes,
-        },
-        "limitations": [
-            "not-a-product-package",
-            "catalog-update-events-owned-by-zephium",
-            "sandbox-pages-not-adapted",
-            "non-action-extension-pages-not-adapted",
-            "file-scheme-content-scripts-omitted",
-            "same-document-web-navigation-limited-to-injected-frames",
-            "history-state-navigation-requires-host-signal"
-        ],
+        "adaptations": adaptations,
+        "surfaces": surfaces,
+        "limitations": limitations,
     }))
     .map_err(|error| format!("cannot serialize compatibility artifact metadata: {error}"))?;
     write_new_file(staging.path(), ARTIFACT_METADATA, &metadata)?;
@@ -204,7 +281,8 @@ pub(crate) fn materialize(
     })?;
     sync_directory(parent)?;
     println!(
-        "macOS extension compatibility artifact materialized: target={TARGET}; source_tree={}; output_tree={}; files={}; bytes={}; background={}; isolated_content_scripts={}; omitted_file_content_scripts={}; removed_file_match_patterns={}; same_document_navigation_routes={}; action_popup={}; product_authority=false",
+        "macOS extension compatibility artifact materialized: target={}; source_tree={}; output_tree={}; files={}; bytes={}; background={}; isolated_content_scripts={}; omitted_file_content_scripts={}; removed_file_match_patterns={}; same_document_navigation_routes={}; history_search={}; action_popup={}; product_authority=false",
+        target.label(),
         lower_hex(source_index.tree_sha256().as_bytes()),
         lower_hex(generated.parsed.tree_sha256().as_bytes()),
         generated.parsed.files().len(),
@@ -214,6 +292,7 @@ pub(crate) fn materialize(
         plan.omitted_file_content_scripts,
         plan.removed_file_match_patterns,
         plan.same_document_navigation_routes,
+        if plan.history_broker_search { "bounded-native-broker" } else { "absent" },
         if plan.popup.is_some() { "injected" } else { "absent" },
     );
     Ok(())
@@ -223,6 +302,7 @@ fn build_plan(
     source_root: &Path,
     index: &CanonicalExtensionTreeIndex,
     manifest_bytes: &[u8],
+    target: ArtifactTarget,
 ) -> Result<TransformPlan, String> {
     let bounded = parse_bounded_json(manifest_bytes, BoundedJsonLimits::extension_manifest())
         .map_err(|error| format!("cannot adapt invalid extension manifest: {error}"))?;
@@ -234,12 +314,36 @@ fn build_plan(
         return Err("macOS compatibility transform requires Manifest V3".into());
     }
 
+    let history_broker_search = target.requires_history_broker();
+    if history_broker_search {
+        if !declares_permission(&root, "permissions", "history")? {
+            return Err("brokered history compatibility requires the history permission".into());
+        }
+        if root.get("background").is_none() {
+            return Err("brokered history compatibility requires an MV3 background worker".into());
+        }
+        if declares_permission(&root, "permissions", "nativeMessaging")?
+            || declares_permission(&root, "optional_permissions", "nativeMessaging")?
+        {
+            return Err(
+                "brokered history compatibility refuses a source nativeMessaging declaration"
+                    .into(),
+            );
+        }
+        append_required_permission(&mut root, "nativeMessaging")?;
+    }
+
     let bridge_same_document_navigation =
-        declares_permission(&root, "webNavigation") && root.get("background").is_some();
+        declares_permission(&root, "permissions", "webNavigation")?
+            && root.get("background").is_some();
     let content_scripts = adapt_content_scripts(&mut root, index, bridge_same_document_navigation)?;
     let same_document_navigation_routes = content_scripts.same_document_navigation_routes;
-    let (worker, background_wrapper) =
-        adapt_background(&mut root, index, same_document_navigation_routes != 0)?;
+    let (worker, background_wrapper) = adapt_background(
+        &mut root,
+        index,
+        same_document_navigation_routes != 0,
+        history_broker_search,
+    )?;
     let popup_path = action_popup_path(&root)?;
     let popup = popup_path
         .map(|path| {
@@ -252,7 +356,7 @@ fn build_plan(
                 return Err("action popup exceeds the compatibility HTML ceiling".into());
             }
             let source = read_indexed_file(source_root, indexed)?;
-            inject_popup_prelude(&source).map(|bytes| (path, bytes))
+            inject_popup_prelude(&source, history_broker_search).map(|bytes| (path, bytes))
         })
         .transpose()?;
 
@@ -270,17 +374,42 @@ fn build_plan(
         omitted_file_content_scripts: content_scripts.omitted_file_entries,
         removed_file_match_patterns: content_scripts.removed_file_patterns,
         same_document_navigation_routes,
+        history_broker_search,
     })
 }
 
-fn declares_permission(root: &Map<String, Value>, expected: &str) -> bool {
-    root.get("permissions")
-        .and_then(Value::as_array)
-        .is_some_and(|permissions| {
-            permissions
-                .iter()
-                .any(|value| value.as_str() == Some(expected))
-        })
+fn declares_permission(
+    root: &Map<String, Value>,
+    field: &str,
+    expected: &str,
+) -> Result<bool, String> {
+    let Some(permissions) = root.get(field) else {
+        return Ok(false);
+    };
+    let permissions = permissions
+        .as_array()
+        .ok_or_else(|| format!("extension {field} is not an array"))?;
+    for (index, permission) in permissions.iter().enumerate() {
+        if permission.as_str().is_none() {
+            return Err(format!("extension {field}[{index}] is not a string"));
+        }
+    }
+    Ok(permissions
+        .iter()
+        .any(|value| value.as_str() == Some(expected)))
+}
+
+fn append_required_permission(
+    root: &mut Map<String, Value>,
+    permission: &str,
+) -> Result<(), String> {
+    let permissions = root
+        .entry("permissions".to_owned())
+        .or_insert_with(|| Value::Array(Vec::new()))
+        .as_array_mut()
+        .ok_or_else(|| "extension permissions is not an array".to_owned())?;
+    permissions.push(Value::String(permission.to_owned()));
+    Ok(())
 }
 
 fn adapt_content_scripts(
@@ -459,6 +588,7 @@ fn adapt_background(
     root: &mut Map<String, Value>,
     tree: &CanonicalExtensionTreeIndex,
     bridge_same_document_navigation: bool,
+    bridge_history_search: bool,
 ) -> Result<(WorkerKind, Option<Vec<u8>>), String> {
     let Some(background) = root.get_mut("background") else {
         return Ok((WorkerKind::Absent, None));
@@ -486,23 +616,33 @@ fn adapt_background(
     let wrapper = match kind {
         WorkerKind::Classic => {
             let prelude = js_string(&format!("/{API_PRELUDE}"))?;
+            let history = bridge_history_search
+                .then(|| js_string(&format!("/{HISTORY_BRIDGE}")))
+                .transpose()?;
             let navigation = bridge_same_document_navigation
                 .then(|| js_string(&format!("/{WEB_NAVIGATION_BRIDGE}")))
                 .transpose()?;
             let original = js_string(&format!("/{original}"))?;
-            let imports = navigation.map_or_else(
-                || format!("{prelude}, {original}"),
-                |navigation| format!("{prelude}, {navigation}, {original}"),
-            );
+            let imports = [Some(prelude), history, navigation, Some(original)]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(", ");
             format!("importScripts({imports});\n")
         }
         WorkerKind::Module => {
             let prelude = js_string(&format!("./{API_PRELUDE}"))?;
+            let history = bridge_history_search
+                .then(|| js_string(&format!("./{HISTORY_BRIDGE}")))
+                .transpose()?;
             let navigation = bridge_same_document_navigation
                 .then(|| js_string(&format!("./{WEB_NAVIGATION_BRIDGE}")))
                 .transpose()?;
             let original = js_string(&format!("./{original}"))?;
             let mut wrapper = format!("import {prelude};\n");
+            if let Some(history) = history {
+                wrapper.push_str(&format!("import {history};\n"));
+            }
             if let Some(navigation) = navigation {
                 wrapper.push_str(&format!("import {navigation};\n"));
             }
@@ -548,14 +688,17 @@ fn require_indexed_resource(
     Ok(())
 }
 
-fn inject_popup_prelude(source: &[u8]) -> Result<Vec<u8>, String> {
+fn inject_popup_prelude(source: &[u8], bridge_history_search: bool) -> Result<Vec<u8>, String> {
     let source = std::str::from_utf8(source)
         .map_err(|_| "action popup must be UTF-8 for deterministic adaptation".to_owned())?;
     let insertion = explicit_head_end(source)?;
-    let tag = format!("<script src=\"/{API_PRELUDE}\"></script>");
-    let mut output = String::with_capacity(source.len().saturating_add(tag.len()));
+    let mut tags = format!("<script src=\"/{API_PRELUDE}\"></script>");
+    if bridge_history_search {
+        tags.push_str(&format!("<script src=\"/{HISTORY_BRIDGE}\"></script>"));
+    }
+    let mut output = String::with_capacity(source.len().saturating_add(tags.len()));
     output.push_str(&source[..insertion]);
-    output.push_str(&tag);
+    output.push_str(&tags);
     output.push_str(&source[insertion..]);
     Ok(output.into_bytes())
 }
@@ -686,8 +829,11 @@ fn enforce_output_budgets(
 ) -> Result<(), String> {
     let added_files = 1_usize
         + usize::from(plan.background_wrapper.is_some())
+        + usize::from(plan.history_broker_search)
         + usize::from(plan.same_document_navigation_routes != 0);
-    let added_entries = 3_usize + usize::from(plan.same_document_navigation_routes != 0);
+    let added_entries = 3_usize
+        + usize::from(plan.history_broker_search)
+        + usize::from(plan.same_document_navigation_routes != 0);
     if source.files().len().saturating_add(added_files) > MAX_EXTENSION_TREE_FILES
         || source.total_entry_count().saturating_add(added_entries) > MAX_EXTENSION_TREE_ENTRIES
     {
@@ -697,6 +843,8 @@ fn enforce_output_budgets(
         Some(plan.manifest.as_slice()),
         plan.popup.as_ref().map(|(_, bytes)| bytes.as_slice()),
         Some(API_PRELUDE_SOURCE.as_bytes()),
+        plan.history_broker_search
+            .then_some(HISTORY_BRIDGE_SOURCE.as_bytes()),
         (plan.same_document_navigation_routes != 0)
             .then_some(WEB_NAVIGATION_BRIDGE_SOURCE.as_bytes()),
         plan.background_wrapper.as_deref(),
@@ -725,6 +873,13 @@ fn enforce_output_budgets(
                 .map_or(0, |(_, bytes)| bytes.len() as u64),
         )
         .and_then(|bytes| bytes.checked_add(API_PRELUDE_SOURCE.len() as u64))
+        .and_then(|bytes| {
+            bytes.checked_add(if plan.history_broker_search {
+                HISTORY_BRIDGE_SOURCE.len() as u64
+            } else {
+                0
+            })
+        })
         .and_then(|bytes| {
             let navigation_bytes = if plan.same_document_navigation_routes != 0 {
                 WEB_NAVIGATION_BRIDGE_SOURCE.len() as u64
@@ -905,6 +1060,14 @@ mod tests {
         index
     }
 
+    fn reindex(source: &Path, index: &Path) {
+        fs::write(
+            index,
+            extension_tree::build_tree_index(source).unwrap().bytes,
+        )
+        .unwrap();
+    }
+
     #[test]
     fn materializer_is_deterministic_and_keeps_main_world_untouched() {
         let temp = tempfile::tempdir().unwrap();
@@ -1061,12 +1224,138 @@ mod tests {
         );
         let metadata: Value =
             serde_json::from_slice(&fs::read(output.join(ARTIFACT_METADATA)).unwrap()).unwrap();
-        assert_eq!(metadata["target"], serde_json::json!(TARGET));
+        assert_eq!(metadata["target"], serde_json::json!(NATIVE_TARGET));
         assert_eq!(
             metadata["surfaces"]["same_document_navigation_routes"],
             serde_json::json!(2)
         );
         extension_tree::verify_closed_tree(&extension, &output.join(ARTIFACT_TREE_INDEX)).unwrap();
+    }
+
+    #[test]
+    fn brokered_history_target_is_deterministic_permission_gated_and_read_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir(&source).unwrap();
+        let index = fixture(
+            &source,
+            Some("module"),
+            b"<!doctype html><html><head></head><body></body></html>",
+        );
+        let manifest_path = source.join("manifest.json");
+        let mut manifest: Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["permissions"] = serde_json::json!(["history"]);
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        reindex(&source, &index);
+
+        let first = temp.path().join("brokered-first");
+        let second = temp.path().join("brokered-second");
+        materialize_brokered(&source, &index, &first).unwrap();
+        materialize_brokered(&source, &index, &second).unwrap();
+        assert_eq!(
+            fs::read(first.join(ARTIFACT_TREE_INDEX)).unwrap(),
+            fs::read(second.join(ARTIFACT_TREE_INDEX)).unwrap()
+        );
+        assert_eq!(
+            fs::read(first.join(ARTIFACT_METADATA)).unwrap(),
+            fs::read(second.join(ARTIFACT_METADATA)).unwrap()
+        );
+
+        let extension = first.join(ARTIFACT_EXTENSION);
+        let adapted: Value =
+            serde_json::from_slice(&fs::read(extension.join("manifest.json")).unwrap()).unwrap();
+        assert_eq!(
+            adapted["permissions"],
+            serde_json::json!(["history", "nativeMessaging"])
+        );
+        let wrapper = fs::read_to_string(extension.join(BACKGROUND_WRAPPER)).unwrap();
+        assert_eq!(
+            wrapper,
+            format!(
+                "import \"./{API_PRELUDE}\";\nimport \"./{HISTORY_BRIDGE}\";\nimport \"./worker.js\";\n"
+            )
+        );
+        assert_eq!(
+            fs::read(extension.join(HISTORY_BRIDGE)).unwrap(),
+            HISTORY_BRIDGE_SOURCE.as_bytes()
+        );
+        let popup = fs::read_to_string(extension.join("ui/popup.html")).unwrap();
+        assert!(popup.contains(&format!(
+            "<head><script src=\"/{API_PRELUDE}\"></script><script src=\"/{HISTORY_BRIDGE}\"></script>"
+        )));
+        let metadata: Value =
+            serde_json::from_slice(&fs::read(first.join(ARTIFACT_METADATA)).unwrap()).unwrap();
+        assert_eq!(metadata["target"], serde_json::json!(BROKERED_TARGET));
+        assert_eq!(
+            metadata["surfaces"]["history_search"],
+            serde_json::json!("bounded-native-broker")
+        );
+        assert!(metadata["adaptations"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("bounded-history-search-broker-v1")));
+        assert!(metadata["limitations"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("history-mutations-unsupported")));
+        extension_tree::verify_closed_tree(&extension, &first.join(ARTIFACT_TREE_INDEX)).unwrap();
+
+        let native = temp.path().join("native");
+        materialize(&source, &index, &native).unwrap();
+        let native_manifest: Value = serde_json::from_slice(
+            &fs::read(native.join(ARTIFACT_EXTENSION).join("manifest.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            native_manifest["permissions"],
+            serde_json::json!(["history"])
+        );
+        assert!(!native
+            .join(ARTIFACT_EXTENSION)
+            .join(HISTORY_BRIDGE)
+            .exists());
+    }
+
+    #[test]
+    fn brokered_history_target_rejects_ambiguous_or_unneeded_native_authority() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir(&source).unwrap();
+        let index = fixture(
+            &source,
+            Some("module"),
+            b"<!doctype html><html><head></head><body></body></html>",
+        );
+        assert!(materialize_brokered(&source, &index, &temp.path().join("no-history")).is_err());
+
+        let manifest_path = source.join("manifest.json");
+        let mut manifest: Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["optional_permissions"] = serde_json::json!(["history"]);
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        reindex(&source, &index);
+        assert!(
+            materialize_brokered(&source, &index, &temp.path().join("optional-history")).is_err()
+        );
+
+        manifest["permissions"] = serde_json::json!(["history", "nativeMessaging"]);
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        reindex(&source, &index);
+        assert!(materialize_brokered(
+            &source,
+            &index,
+            &temp.path().join("source-native-messaging")
+        )
+        .is_err());
+
+        manifest["permissions"] = serde_json::json!(["history"]);
+        manifest.as_object_mut().unwrap().remove("background");
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        reindex(&source, &index);
+        assert!(
+            materialize_brokered(&source, &index, &temp.path().join("missing-background")).is_err()
+        );
     }
 
     #[test]
@@ -1110,14 +1399,14 @@ mod tests {
             "background".into(),
             serde_json::json!({"service_worker":"workers/original.js"}),
         );
-        let (kind, wrapper) = adapt_background(&mut root, &tree, false).unwrap();
+        let (kind, wrapper) = adapt_background(&mut root, &tree, false, false).unwrap();
         assert_eq!(kind, WorkerKind::Classic);
         assert_eq!(
             String::from_utf8(wrapper.unwrap()).unwrap(),
             "importScripts(\"/__zephium__/webkit-api-v1.js\", \"/workers/original.js\");\n"
         );
         let html = b"<!-- lead --><html lang='en'><head data-value='>'><title>x</title></head>";
-        let adapted = String::from_utf8(inject_popup_prelude(html).unwrap()).unwrap();
+        let adapted = String::from_utf8(inject_popup_prelude(html, false).unwrap()).unwrap();
         assert!(adapted.contains(&format!(
             "<head data-value='>'><script src=\"/{API_PRELUDE}\"></script><title>"
         )));

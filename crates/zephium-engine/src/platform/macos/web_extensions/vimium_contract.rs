@@ -241,12 +241,14 @@ fn admit(
     ) {
         return Err("Vimium compatibility artifact identity drifted".into());
     }
-    if admitted.surfaces.background != BackgroundAdaptation::ModuleWrapper
+    if admitted.target != compatibility_artifact::CompatibilityArtifactTarget::NativeV3
+        || admitted.surfaces.background != BackgroundAdaptation::ModuleWrapper
         || admitted.surfaces.isolated_content_scripts != 1
         || admitted.surfaces.action_popup != ActionPopupAdaptation::ExplicitHeadInjected
         || admitted.surfaces.omitted_file_content_scripts != 1
         || admitted.surfaces.removed_file_match_patterns != 2
         || admitted.surfaces.same_document_navigation_routes != 1
+        || admitted.surfaces.history_search
     {
         return Err("Vimium compatibility artifact surface contract drifted".into());
     }
