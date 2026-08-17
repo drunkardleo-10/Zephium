@@ -40,6 +40,7 @@
 
   let profileId = $derived(tabs.profile()?.id ?? null);
   let management = $derived(extensions.management(profileId));
+  let distributionNotice = $derived(extensions.distributionNotice());
   let mutation = $derived(extensions.activeManagementMutation());
   let notice = $derived(extensions.managementFailure());
   let catalogRevision = $derived(
@@ -266,6 +267,17 @@
           <Icon icon={Cancel01Icon} size={14} />
         </button>
       </div>
+
+      {#if distributionNotice !== null}
+        <p
+          class="mb-2 rounded-md bg-fill px-2.5 py-2 text-[10.5px] leading-4 text-muted"
+          class:text-warning={distributionNotice.tone === "warning"}
+          role={distributionNotice.tone === "warning" ? "alert" : "status"}
+          aria-live={distributionNotice.tone === "warning" ? "assertive" : "polite"}
+        >
+          {distributionNotice.message}
+        </p>
+      {/if}
 
       {#if requestFailed || management === null || management.phase !== "ready"}
         <div class="rounded-md bg-fill px-2.5 py-3 text-[11.5px] leading-4 text-muted">

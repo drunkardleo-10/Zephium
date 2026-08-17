@@ -10,6 +10,7 @@ import {
   ExtensionManagementProjectionModel,
   ExtensionProjectionModel,
   ExtensionRuntimeGrantPromptProjectionModel,
+  extensionDistributionNotice,
   failureForContext,
   initialExtensionActions,
   initialExtensionManagement,
@@ -211,6 +212,48 @@ describe("extension distribution projection admission", () => {
       }),
     ).toBe(false);
     expect(model.view?.state.phase).toBe("synchronizing");
+  });
+
+  it("keeps absent and idle workers silent and exposes only redacted status copy", () => {
+    expect(extensionDistributionNotice(null)).toBeNull();
+    expect(
+      extensionDistributionNotice({
+        projection_revision: revision(1),
+        state: { phase: "idle" },
+      }),
+    ).toBeNull();
+    expect(
+      extensionDistributionNotice({
+        projection_revision: revision(2),
+        state: { phase: "synchronizing" },
+      }),
+    ).toEqual({ tone: "progress", message: "Checking for extension updates…" });
+    expect(
+      extensionDistributionNotice({
+        projection_revision: revision(3),
+        state: {
+          phase: "ready",
+          package_count: 1,
+          materialized_packages: 1,
+          reused_packages: 0,
+          exact_retries: 0,
+          newly_activated: true,
+        },
+      }),
+    ).toEqual({ tone: "success", message: "Extension updates were installed." });
+    expect(
+      extensionDistributionNotice({
+        projection_revision: revision(4),
+        state: {
+          phase: "quarantined",
+          stage: { type: "catalog_activation" },
+          reason: "outcome_unresolved",
+        },
+      }),
+    ).toEqual({
+      tone: "warning",
+      message: "Extension updates are paused until Zephium restarts.",
+    });
   });
 });
 

@@ -21,6 +21,7 @@ import {
   ExtensionManagementProjectionModel,
   ExtensionProjectionModel,
   ExtensionRuntimeGrantPromptProjectionModel,
+  extensionDistributionNotice,
   failureForContext,
   initialExtensionManagement,
   managementForProfile,
@@ -68,6 +69,7 @@ export const isInvoking = (installId: string) => invoking.has(installId);
 export const management = (profileId: string | null) =>
   managementForProfile(managementState, profileId);
 export const distribution = () => distributionState;
+export const distributionNotice = () => extensionDistributionNotice(distributionState);
 export const activeManagementMutation = () => managementMutation;
 export const managementFailure = () => managementNotice;
 export const permissionPrompt = () => runtimeGrantState.prompt;

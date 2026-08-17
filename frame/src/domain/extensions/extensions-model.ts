@@ -129,6 +129,46 @@ export class ExtensionDistributionProjectionModel {
   }
 }
 
+export type ExtensionDistributionNotice = {
+  tone: "progress" | "success" | "warning";
+  message: string;
+};
+
+/**
+ * Maps the closed, redacted worker state to equally redacted product copy.
+ * Idle and shutdown are deliberately silent: an ordinary or unavailable
+ * updater must not look like a successful update channel.
+ */
+export function extensionDistributionNotice(
+  view: ExtensionDistributionView | null,
+): ExtensionDistributionNotice | null {
+  if (view === null) return null;
+  switch (view.state.phase) {
+    case "idle":
+    case "shutdown":
+      return null;
+    case "synchronizing":
+      return { tone: "progress", message: "Checking for extension updates…" };
+    case "ready":
+      return {
+        tone: "success",
+        message: view.state.newly_activated
+          ? "Extension updates were installed."
+          : "Extensions are up to date.",
+      };
+    case "failed":
+      return {
+        tone: "warning",
+        message: "Extension updates could not be checked. Installed extensions were not changed.",
+      };
+    case "quarantined":
+      return {
+        tone: "warning",
+        message: "Extension updates are paused until Zephium restarts.",
+      };
+  }
+}
+
 /**
  * Independent revision admission for the process-wide native permission
  * prompt. A replacement carrying `null` is authoritative closure; retaining
