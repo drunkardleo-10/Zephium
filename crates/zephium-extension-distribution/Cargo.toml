@@ -12,7 +12,7 @@ zephium-core.workspace = true
 zephium-extension-authority.workspace = true
 zephium-extension-package = { path = "../zephium-extension-package", version = "=0.1.0" }
 zephium-update-transport.workspace = true
+tokio = { workspace = true, features = ["sync", "time"] }
 
 [dev-dependencies]
 ring.workspace = true
-tokio = { workspace = true, features = ["rt"] }

@@ -865,10 +865,21 @@ before the larger CRX, each response requires one bounded exact
 `Content-Length`, and CRX signature, developer identity, inner ZIP identity,
 and legal digest are checked before a path-free service request is created.
 The serialized service deliberately reauthenticates all of that evidence at
-the durable boundary. There is still no product endpoint/configuration,
-startup/update coordinator, or desktop dependency on this client, so this
-source alone performs no I/O and supplies neither package bytes nor network
-authority to an ordinary build.
+the durable boundary. A single-flight distribution coordinator now joins the
+two without borrowing Shell across network awaits: it fetches and submits one
+move-owned package, waits for the non-blocking service callback, and only then
+fetches the next. One completed outcome-unknown settlement permits one exact
+refetch/retry; a repeated unknown, callback loss, callback timeout, submission
+panic, or service invariant failure quarantines that coordinator until process
+restart. The service releases its one-request retained-byte permit before the
+callback can reenter, so retry and forward progress cannot overlap owned CRX
+buffers. Dropping the async run during an accepted but unsettled callback also
+quarantines; dropping it during network acquisition safely releases the
+single-flight slot. Complete activation remains source-free and occurs only
+after every selected row settles. There is still no product endpoint/configuration or
+desktop scheduling adapter, and the desktop has no dependency on this client,
+so the coordinator alone performs no I/O and supplies neither package bytes
+nor network authority to an ordinary build.
 
 The redirect-free fixed-origin HTTPS boundary shared with the blocker lives in
 `zephium-update-transport`. It accepts only plain-ASCII paths below exact HTTPS
@@ -899,9 +910,9 @@ generation-bound service mutation, and native settlement; absent, stale,
 over-capacity, or unavailable paths deny rather than grant. This extension
 grant broker is distinct from page-origin permission events, whose general
 Shell policy remains unfinished. Remaining release gaps include product-sealed
-distribution endpoints and the serialized startup/update coordinator that
-settles one acquired request before fetching the next, the complete permission
-and API matrix, quotas,
+distribution endpoints and the Shell scheduling adapter that starts and
+projects the serialized coordinator, the complete permission and API matrix,
+quotas,
 complete cross-process release-build resource evidence, and endurance. Older admitted
 macOS versions and Linux require a Zephium
 compatibility runtime only after per-principal world/handler isolation, exact

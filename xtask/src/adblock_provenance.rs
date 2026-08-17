@@ -1148,6 +1148,7 @@ fn validate_extension_distribution_manifest(repository: &Path) -> Result<(), Str
         &[
             "sha2",
             "thiserror",
+            "tokio",
             "url",
             "zephium-core",
             "zephium-extension-authority",
@@ -1166,6 +1167,7 @@ fn validate_extension_distribution_manifest(repository: &Path) -> Result<(), Str
     ] {
         require_workspace_dependency(dependencies, name, &[])?;
     }
+    require_workspace_dependency(dependencies, "tokio", &["sync", "time"])?;
     let package = require_dependency_table(dependencies, "zephium-extension-package")?;
     require_key_set(
         package,
@@ -1178,11 +1180,10 @@ fn validate_extension_distribution_manifest(repository: &Path) -> Result<(), Str
     let dev_dependencies = require_table(&distribution, "dev-dependencies")?;
     require_key_set(
         dev_dependencies,
-        &["ring", "tokio"],
+        &["ring"],
         "zephium-extension-distribution dev-dependency table",
     )?;
     require_workspace_dependency(dev_dependencies, "ring", &[])?;
-    require_workspace_dependency(dev_dependencies, "tokio", &["rt"])?;
     Ok(())
 }
 

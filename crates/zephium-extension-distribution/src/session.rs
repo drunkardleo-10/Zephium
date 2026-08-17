@@ -112,6 +112,16 @@ impl ExtensionDistributionSession {
             self.selections.into_vec(),
         )
     }
+
+    pub(crate) fn activation_request(
+        &self,
+    ) -> Result<ExtensionAcquiredCatalogActivationRequest, ExtensionAcquiredProvisioningRequestError>
+    {
+        ExtensionAcquiredCatalogActivationRequest::new(
+            self.catalog_bytes.to_vec(),
+            self.selections.to_vec(),
+        )
+    }
 }
 
 impl fmt::Debug for ExtensionDistributionSession {

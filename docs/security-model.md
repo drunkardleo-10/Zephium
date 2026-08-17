@@ -772,11 +772,25 @@ private staging and source-free catalog activation. No endpoint or package is
 currently provisioned, the desktop graph excludes both distribution and HTTPS
 transport, and no generic network capability is reachable from pages or
 extensions.
-The coordinator then durably commits that candidate before activation revalidates the exact
-prepared recovery state. A stale identity or newly unavailable candidate leaves compiler
-authority unchanged; interrupted transitions remain explicit and recoverable.
-Compiled/source caches and native WebKit namespaces have bounded identity-safe garbage
-collection.
+
+The distribution coordinator is a one-run, one-request-at-a-time state
+machine. Network execution talks to Shell only through non-blocking move-only
+submission callbacks. The service drops the admitted request's exact byte
+charge before invoking settlement, and the coordinator never fetches a later
+package before observing that settlement. Only one exact retry follows a
+completed outcome-unknown result. A missing or late accepted callback is not a
+retry signal: it quarantines the coordinator until restart because the prior
+request may still own memory or mutation authority. Async cancellation during
+that interval follows the same quarantine path. Submission panics,
+repeated unknown outcomes, service invariant failures, and accounting failures
+also quarantine. This bounds overlap and prevents a transport retry loop from
+amplifying memory, disk, or network work under uncertain durable state.
+
+The blocker update coordinator then durably commits its candidate before
+activation revalidates the exact prepared recovery state. A stale identity or
+newly unavailable candidate leaves compiler authority unchanged; interrupted
+transitions remain explicit and recoverable. Compiled/source caches and native
+WebKit namespaces have bounded identity-safe garbage collection.
 
 Only privileged main chrome receives the revisioned focused-profile diagnostics and bounded
 enable/disable and exact-generation retry controls; refresh is exposed only for TUF

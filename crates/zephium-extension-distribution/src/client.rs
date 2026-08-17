@@ -83,7 +83,7 @@ pub enum ExtensionDistributionError {
     RequestRejected,
 }
 
-trait ArtifactTransport {
+pub(crate) trait ArtifactTransport {
     async fn fetch_bounded(
         &self,
         url: Url,
@@ -101,11 +101,11 @@ impl ArtifactTransport for FixedOriginTransport {
     }
 }
 
-struct DistributionClient<T, A> {
-    transport: T,
-    authenticator: A,
-    catalog_url: Url,
-    targets_base: Url,
+pub(crate) struct DistributionClient<T, A> {
+    pub(crate) transport: T,
+    pub(crate) authenticator: A,
+    pub(crate) catalog_url: Url,
+    pub(crate) targets_base: Url,
 }
 
 impl<T, A> DistributionClient<T, A>
@@ -113,7 +113,7 @@ where
     T: ArtifactTransport + Sync,
     A: CatalogAuthenticator,
 {
-    async fn begin(
+    pub(crate) async fn begin(
         &self,
         selections: Vec<ExtensionAcquiredRuntimeSelection>,
     ) -> Result<ExtensionDistributionSession, ExtensionDistributionError> {
@@ -132,7 +132,7 @@ where
             .map_err(|_| ExtensionDistributionError::InvalidSelection)
     }
 
-    async fn fetch_package(
+    pub(crate) async fn fetch_package(
         &self,
         session: &ExtensionDistributionSession,
         index: usize,
@@ -220,7 +220,7 @@ fn authenticate_crx(
 /// no compiled product authority. Therefore an unprovisioned ordinary build
 /// preserves the extension subsystem's inert startup path.
 pub struct ExtensionDistributionClient {
-    inner: DistributionClient<FixedOriginTransport, ProductCatalogAuthenticator>,
+    pub(crate) inner: DistributionClient<FixedOriginTransport, ProductCatalogAuthenticator>,
 }
 
 impl ExtensionDistributionClient {
@@ -301,4 +301,4 @@ fn classify_transport_config(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

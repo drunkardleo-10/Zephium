@@ -18,14 +18,14 @@ const P256_ALGORITHM_IDENTIFIER: &[u8] = &[
     0x03, 0x01, 0x07,
 ];
 
-struct ExpectedFetch {
-    url: Url,
-    max_bytes: usize,
-    bytes: Box<[u8]>,
+pub(crate) struct ExpectedFetch {
+    pub(crate) url: Url,
+    pub(crate) max_bytes: usize,
+    pub(crate) bytes: Box<[u8]>,
 }
 
-struct FakeTransport {
-    expected: Mutex<VecDeque<ExpectedFetch>>,
+pub(crate) struct FakeTransport {
+    pub(crate) expected: Mutex<VecDeque<ExpectedFetch>>,
 }
 
 impl ArtifactTransport for FakeTransport {
@@ -41,14 +41,14 @@ impl ArtifactTransport for FakeTransport {
     }
 }
 
-struct Fixture {
-    catalog: Box<[u8]>,
-    crx: Box<[u8]>,
-    legal: Box<[u8]>,
-    package_key: ExtensionPackageKey,
-    archive_length: usize,
-    archive_sha256: [u8; 32],
-    legal_sha256: [u8; 32],
+pub(crate) struct Fixture {
+    pub(crate) catalog: Box<[u8]>,
+    pub(crate) crx: Box<[u8]>,
+    pub(crate) legal: Box<[u8]>,
+    pub(crate) package_key: ExtensionPackageKey,
+    pub(crate) archive_length: usize,
+    pub(crate) archive_sha256: [u8; 32],
+    pub(crate) legal_sha256: [u8; 32],
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -295,7 +295,7 @@ fn client_construction_tracks_product_authority_availability() {
     }
 }
 
-fn fixture() -> Fixture {
+pub(crate) fn fixture() -> Fixture {
     let archive = b"PK\x03\x04zephium-extension-distribution-fixture".to_vec();
     let archive_sha256: [u8; 32] = Sha256::digest(&archive).into();
     let legal = Box::<[u8]>::from(b"x".as_slice());

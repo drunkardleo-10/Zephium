@@ -16,11 +16,18 @@
 
 mod authentication;
 mod client;
+mod coordinator;
 mod layout;
 mod session;
 
 pub use client::{
     ExtensionDistributionClient, ExtensionDistributionClientError, ExtensionDistributionError,
+};
+pub use coordinator::{
+    ExtensionDistributionCompletion, ExtensionDistributionCoordinator,
+    ExtensionDistributionFailure, ExtensionDistributionFailurePhase,
+    ExtensionDistributionFailureReason, ExtensionDistributionServicePort,
+    MAX_EXTENSION_DISTRIBUTION_COORDINATOR_RETAINED_BYTES,
 };
 pub use session::{
     ExtensionDistributionSession, MAX_EXTENSION_DISTRIBUTION_SESSION_RETAINED_BYTES,

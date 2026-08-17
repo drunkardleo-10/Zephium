@@ -401,6 +401,20 @@ impl<T> Drop for ProvisioningSettlementSink<T> {
     }
 }
 
+#[cfg(feature = "acquired-packages")]
+fn settle_admitted_provisioning<T>(
+    permit: AcquiredProvisioningPermit,
+    settlement: ProvisioningSettlementSink<T>,
+    outcome: T,
+) {
+    // The move-owned request has already been consumed and no package bytes
+    // remain in the command. Release its single-flight byte charge before the
+    // callback can ask the transport coordinator to submit an exact retry or
+    // the next package.
+    drop(permit);
+    settlement.settle(outcome);
+}
+
 struct ManagementCatalogSettlementSink {
     done: Option<ExtensionManagementCatalogCallback>,
 }
@@ -2446,7 +2460,7 @@ impl WorkerState {
             WorkerCommand::ProvisionAcquiredPackage {
                 request,
                 deadline,
-                _permit,
+                _permit: permit,
                 settlement,
             } => {
                 let (outcome, continue_running) = self.complete_acquired_package_provisioning(
@@ -2457,7 +2471,7 @@ impl WorkerState {
                     *request,
                     deadline,
                 );
-                settlement.settle(outcome);
+                settle_admitted_provisioning(permit, settlement, outcome);
                 if !continue_running {
                     return false;
                 }
@@ -2466,7 +2480,7 @@ impl WorkerState {
             WorkerCommand::ActivateAcquiredCatalog {
                 request,
                 deadline,
-                _permit,
+                _permit: permit,
                 settlement,
             } => {
                 let (outcome, continue_running) = self.complete_acquired_catalog_activation(
@@ -2477,7 +2491,7 @@ impl WorkerState {
                     *request,
                     deadline,
                 );
-                settlement.settle(outcome);
+                settle_admitted_provisioning(permit, settlement, outcome);
                 if !continue_running {
                     return false;
                 }
@@ -3966,6 +3980,43 @@ mod tests {
         )
         .is_none());
         drop(second);
+        assert_eq!(
+            *admission
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            AcquiredProvisioningAdmission::default()
+        );
+    }
+
+    #[cfg(feature = "acquired-packages")]
+    #[test]
+    fn acquired_provisioning_releases_its_byte_slot_before_callback_reentry() {
+        let admission = Arc::new(Mutex::new(AcquiredProvisioningAdmission::default()));
+        let request = acquired_provisioning_request(4);
+        let permit = AcquiredProvisioningPermit::try_acquire(&admission, request.retained_bytes())
+            .expect("first bounded request must own the provisioning slot");
+        let callback_admission = Arc::clone(&admission);
+        let (observed, observation) = mpsc::sync_channel(1);
+        let settlement = ProvisioningSettlementSink::callback(
+            Box::new(move |outcome| {
+                assert_eq!(
+                    outcome,
+                    ExtensionAcquiredPackageProvisioningOutcome::Materialized
+                );
+                let reentered =
+                    AcquiredProvisioningPermit::try_acquire(&callback_admission, 1).is_some();
+                observed.send(reentered).unwrap();
+            }),
+            acquired_package_worker_lost,
+        );
+
+        settle_admitted_provisioning(
+            permit,
+            settlement,
+            ExtensionAcquiredPackageProvisioningOutcome::Materialized,
+        );
+
+        assert!(observation.recv().unwrap());
         assert_eq!(
             *admission
                 .lock()
