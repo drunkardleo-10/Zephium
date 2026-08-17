@@ -1406,10 +1406,11 @@ retirement, repository cleanup, and clean Store restart. The gate deliberately
 does not instantiate the product Shell actor: it performs the real Store read on
 a dedicated bounded worker, while Shell settlement, stale-result rejection, and
 four-to-one queue fairness remain component/integration gates. The package-
-neutral adapter and native WebKit seam are independently live-gated; an exact
-reviewed package artifact, its real history-dependent workflow, and packaged
-release-build latency/RSS/endurance evidence remain mandatory before that
-package can depend on this operation.
+neutral adapter and native WebKit seam are independently live-gated. The exact
+Vimium artifact and its real history-dependent Vomnibar workflow now close the
+first package-level behavioral gate; that result does not generalize to other
+packages. Packaged release-build latency/RSS/endurance evidence remains
+mandatory before Vimium is presented as compatible.
 
 | Bitwarden surface | macOS native classification | Evidence / boundary |
 |---|---|---|
@@ -1652,18 +1653,43 @@ and the deliberate absence of page/network bridges.
 A separate offline target, `cargo xtask
 materialize-macos-extension-compatibility-brokered`, is deliberately not an
 implicit upgrade of v3. It accepts only an MV3 background extension that already
-requires `history`, refuses source `nativeMessaging` declarations, and adds the
-internal native channel required by `macos.wkwebextension-brokered.v1`. Its
-background and action-popup preludes expose only bounded read-only
-`history.search`; content scripts receive no history authority. Requests are
+requires both `history` and `storage`, refuses source `nativeMessaging`
+declarations, and adds the internal native channel required by
+`macos.wkwebextension-brokered.v1`. Its background and every non-sandbox
+extension page receive the exact versioned compatibility assets; ordinary
+content scripts receive neither history nor extension-page message-response
+authority. Sandboxed pages remain byte-identical. Requests are
 clamped to the newest 100 deduplicated rows, response shape and byte ceilings
 are revalidated in JavaScript, time and text filters run only over that bounded
 cohort, and mutating methods remain absent. `onVisited` and `onVisitRemoved`
 accept a bounded listener cohort so dependent extensions can initialize, but
 do not emit until a future browser-owned delta operation is explicitly
-designed. Promise and callback forms are supported; broker rejection remains a
-Promise rejection or callback-local `runtime.lastError`. The artifact metadata
-records all of these degradations and the fixed internal-only native channel.
+designed.
+
+WebKit returns `undefined` for asynchronous `runtime.sendMessage` responses to
+an extension-origin iframe even while the same request reaches the MV3 worker.
+The brokered profile therefore uses a narrow hybrid transport only in extension
+pages: a reserved same-extension runtime port carries the request and preserves
+WebKit's native `port.sender`; a random-ID response is JSON-normalized under a
+1 MiB ceiling, placed temporarily in the extension's in-memory
+`storage.session`, consumed through `storage.onChanged` plus bounded-backoff
+reads, and removed on receipt or timeout. At most 128 listeners and 256 pending
+requests exist per realm, each request has a 30-second deadline, cross-extension
+signatures stay native, internal wake/port traffic is hidden from extension
+listeners, and no hidden WebView or persistent worker is created. Promise and
+callback call forms are supported; callback failures cannot synthesize
+`runtime.lastError` and are disclosed as a degradation. The transform rejects
+packages without a declared `storage` permission rather than silently adding
+that authority.
+
+When a brokered source declares `bookmarks` on a WebKit floor where that
+namespace is absent, the artifact exposes an explicit empty read-only tree so
+aggregate completion handlers terminate; bookmark mutations and events remain
+unsupported and no Zephium item is invented. When it declares `favicon`, only
+Chrome's unsupported `_favicon/` pseudo-URL is mapped to a sealed transparent
+SVG; all other `runtime.getURL` calls remain native. Both adaptations are typed
+in the receipt and install disclosure. The artifact metadata records all of
+these degradations and the fixed internal-only native channel.
 The ordinary `webkit-macos-native-v3` output and its authenticated third-party
 hashes remain unchanged.
 
@@ -1725,6 +1751,12 @@ its authenticated source contains 79 files and 558,837 bytes with tree SHA-256
 `5015a2e84b2007f0e9cfc670c06b327787bf55a3129fa382534e8a462748eb23`.
 The generic v3 transform emits 82 files and 566,373 bytes with tree SHA-256
 `63726bb7feb7195bcafb9d605abf3fc48b56f79eafc1c44fbcd1ce7dfe0563ec`.
+The distinct brokered transform emits 87 files and 599,488 bytes with manifest
+SHA-256 `c2b503f1593b173305889abbe7c06eb0bf060c1d038aa4434a05a0564433c8b3`,
+tree SHA-256
+`729d6c172eb9e23ec4ed67ed2876a1a2de444145bceb1142ead00d4f7858e804`,
+and canonical index SHA-256
+`97c7c673368485c3ca3ee82d7bd759e7af342f5d47f72d8df40a0d4a2c340731`.
 Neither tree is committed, downloaded by product code, or granted catalog,
 install, profile, or release authority.
 
@@ -1742,10 +1774,25 @@ upgrade that synthetic click even though the initiating key was trusted.
 Popup, page, control view, context, controller, data store, and native routing
 objects must all release after the Objective-C autorelease pool drains.
 
+The separately pinned brokered artifact follows the same native lifecycle and
+opens Vimium's real extension-origin Vomnibar iframe with a trusted AppKit `o`
+command. A deterministic probe input then exercises Vimium's stock input
+handler and aggregate completion pipeline. The worker requests the exact
+bounded history cohort through the principal-bound native delegate; the hybrid
+extension-page response path returns the sanitized completion set; and the
+rendered rows contain the exact brokered title and URL alongside any legitimate
+tab completion. The same run proves action-popup execution, all seven
+non-sandbox extension pages adapted, the empty-bookmarks degradation, the
+transparent favicon fallback, exact native-message cardinality, and bounded
+native teardown. The deterministic input event is not evidence of physical
+typing; the trusted `o` command and real rendered result are separate gates.
+
 This gate establishes a reusable stock Chrome-extension path and core Vimium
 keyboard/link/action behavior on the exercised macOS runtime. It does not yet
-classify bookmarks, history, search, sessions, notifications, Vomnibar, options
-persistence, enable/disable/restart, or multi-profile behavior. The unbundled
+provide real bookmark results: bookmarks are explicitly empty/read-only, and
+page favicons are transparent. Search, sessions, notifications, options
+persistence, enable/disable/restart, and multi-profile behavior remain
+unassessed. The unbundled
 accessory probe is not granted foreground animation frames consistently, so it
 records whether smooth scrolling was visibly observed but gates on ordered
 trusted delivery plus Vimium interception; a packaged product-app E2E gate must
