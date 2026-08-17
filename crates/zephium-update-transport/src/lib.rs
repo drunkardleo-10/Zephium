@@ -11,14 +11,17 @@
 use std::fmt;
 use std::time::Duration;
 
+#[cfg(feature = "tough")]
 use async_trait::async_trait;
 use futures_util::TryStreamExt;
 use reqwest::header::{
     HeaderMap, HeaderValue, ACCEPT, ACCEPT_ENCODING, CACHE_CONTROL, CONTENT_ENCODING,
+    CONTENT_LENGTH, TRANSFER_ENCODING,
 };
 use reqwest::redirect::Policy;
-use reqwest::{Client, StatusCode};
+use reqwest::{Client, Response, StatusCode};
 use thiserror::Error;
+#[cfg(feature = "tough")]
 use tough::{Transport, TransportError, TransportErrorKind, TransportStream};
 use url::Url;
 
@@ -39,6 +42,55 @@ pub enum FixedOriginTransportConfigError {
     ClientUnavailable,
 }
 
+/// Stable, URL-free failure while reading one fixed-origin response.
+///
+/// Diagnostics deliberately retain no response body, request path, query, or
+/// transport-library error. Callers may classify availability without making
+/// attacker-controlled network text part of logs or user-visible failures.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+#[non_exhaustive]
+pub enum FixedOriginFetchError {
+    /// The request escaped the two exact configured HTTPS directories.
+    #[error("repository request is outside its fixed origin boundary")]
+    Boundary,
+    /// The request or response body exceeded the configured deadline.
+    #[error("repository request timed out")]
+    Timeout,
+    /// A connection could not be established.
+    #[error("repository connection failed")]
+    Connect,
+    /// Request construction or transmission failed.
+    #[error("repository request failed")]
+    Request,
+    /// The requested immutable object is absent.
+    #[error("repository object was not found")]
+    NotFound,
+    /// The server returned another non-success status.
+    #[error("repository returned a non-success status")]
+    Status,
+    /// The final response URL did not remain exact and fixed-origin.
+    #[error("repository response crossed its fixed origin boundary")]
+    FinalUrl,
+    /// The server returned a compressed or ambiguously encoded response.
+    #[error("repository response encoding is unsupported")]
+    ResponseEncoding,
+    /// A bounded immutable-object read lacked one exact decimal length.
+    #[error("repository response length is missing or ambiguous")]
+    ResponseLength,
+    /// The declared or observed response body exceeded the caller's ceiling.
+    #[error("repository response exceeded its byte limit")]
+    ResponseTooLarge,
+    /// The body ended at a different length than the exact HTTP declaration.
+    #[error("repository response length changed during transfer")]
+    ResponseLengthMismatch,
+    /// Memory for the already-bounded response could not be reserved.
+    #[error("repository response memory is unavailable")]
+    CapacityUnavailable,
+    /// Streaming the admitted response body failed.
+    #[error("repository response body failed")]
+    Body,
+}
+
 /// Redirect-free HTTPS transport confined to two exact repository directories.
 ///
 /// Metadata and target origins may differ, but each request must remain below
@@ -50,20 +102,6 @@ pub struct FixedOriginTransport {
     client: Client,
     metadata_base: Url,
     targets_base: Url,
-}
-
-#[derive(Debug, Error)]
-enum RedactedNetworkError {
-    #[error("repository request timed out")]
-    Timeout,
-    #[error("repository connection failed")]
-    Connect,
-    #[error("repository request failed")]
-    Request,
-    #[error("repository response body failed")]
-    Body,
-    #[error("repository transport failed")]
-    Other,
 }
 
 impl fmt::Debug for FixedOriginTransport {
@@ -121,19 +159,60 @@ impl FixedOriginTransport {
         is_below_fixed_base(url, &self.metadata_base)
             || is_below_fixed_base(url, &self.targets_base)
     }
-}
 
-#[async_trait]
-impl Transport for FixedOriginTransport {
-    async fn fetch(&self, url: Url) -> Result<TransportStream, TransportError> {
-        if !self.admits(&url) {
-            return Err(TransportError::new(
-                TransportErrorKind::UnsupportedUrlScheme,
-                redacted_origin(&url),
-            ));
+    /// Fetches one immutable object into an exact-size allocation.
+    ///
+    /// This stricter API is intended for package/catalog domains that already
+    /// know a hard object ceiling. It requires one uncompressed response with
+    /// exactly one decimal `Content-Length`, rejects transfer framing that can
+    /// contradict that declaration, reserves only the declared bounded size,
+    /// and verifies the observed body length before returning bytes.
+    pub async fn fetch_bounded(
+        &self,
+        url: Url,
+        max_bytes: usize,
+    ) -> Result<Box<[u8]>, FixedOriginFetchError> {
+        if max_bytes == 0 {
+            return Err(FixedOriginFetchError::ResponseTooLarge);
+        }
+        let response = self.send(url).await?;
+        let declared = exact_content_length(response.headers())?;
+        if declared > max_bytes {
+            return Err(FixedOriginFetchError::ResponseTooLarge);
         }
 
-        let diagnostic_url = redacted_origin(&url);
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(declared)
+            .map_err(|_| FixedOriginFetchError::CapacityUnavailable)?;
+        if bytes.capacity() > max_bytes {
+            return Err(FixedOriginFetchError::ResponseTooLarge);
+        }
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream
+            .try_next()
+            .await
+            .map_err(|error| classify_network_error(&error))?
+        {
+            let observed = bytes
+                .len()
+                .checked_add(chunk.len())
+                .ok_or(FixedOriginFetchError::ResponseTooLarge)?;
+            if observed > declared || observed > max_bytes {
+                return Err(FixedOriginFetchError::ResponseTooLarge);
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        if bytes.len() != declared {
+            return Err(FixedOriginFetchError::ResponseLengthMismatch);
+        }
+        Ok(bytes.into_boxed_slice())
+    }
+
+    async fn send(&self, url: Url) -> Result<Response, FixedOriginFetchError> {
+        if !self.admits(&url) {
+            return Err(FixedOriginFetchError::Boundary);
+        }
         let response = self
             .client
             .get(url.clone())
@@ -147,52 +226,81 @@ impl Transport for FixedOriginTransport {
             .header(CACHE_CONTROL, HeaderValue::from_static("no-cache"))
             .send()
             .await
-            .map_err(|error| {
-                TransportError::new_with_cause(
-                    TransportErrorKind::Other,
-                    &diagnostic_url,
-                    redact_network_error(&error),
-                )
-            })?;
+            .map_err(|error| classify_network_error(&error))?;
 
-        // Redirects are disabled. Revalidate both the final boundary and exact
-        // URL so a future client configuration change cannot silently weaken
-        // this policy.
         if !self.admits(response.url()) || response.url() != &url {
-            return Err(TransportError::new(
-                TransportErrorKind::Other,
-                diagnostic_url,
-            ));
+            return Err(FixedOriginFetchError::FinalUrl);
+        }
+        if !response_encoding_admitted(response.headers()) {
+            return Err(FixedOriginFetchError::ResponseEncoding);
         }
         let status = response.status();
         if !status.is_success() {
-            let kind = if matches!(
-                status,
-                StatusCode::FORBIDDEN | StatusCode::NOT_FOUND | StatusCode::GONE
-            ) {
+            return Err(
+                if matches!(
+                    status,
+                    StatusCode::FORBIDDEN | StatusCode::NOT_FOUND | StatusCode::GONE
+                ) {
+                    FixedOriginFetchError::NotFound
+                } else {
+                    FixedOriginFetchError::Status
+                },
+            );
+        }
+        Ok(response)
+    }
+}
+
+#[cfg(feature = "tough")]
+#[async_trait]
+impl Transport for FixedOriginTransport {
+    async fn fetch(&self, url: Url) -> Result<TransportStream, TransportError> {
+        let diagnostic_url = redacted_origin(&url);
+        let response = self.send(url).await.map_err(|error| {
+            let kind = if error == FixedOriginFetchError::Boundary {
+                TransportErrorKind::UnsupportedUrlScheme
+            } else if error == FixedOriginFetchError::NotFound {
                 TransportErrorKind::FileNotFound
             } else {
                 TransportErrorKind::Other
             };
-            return Err(TransportError::new(kind, diagnostic_url));
-        }
-        if !response_encoding_admitted(response.headers()) {
-            return Err(TransportError::new(
-                TransportErrorKind::Other,
-                diagnostic_url,
-            ));
-        }
+            TransportError::new_with_cause(kind, &diagnostic_url, error)
+        })?;
 
         let stream_url = diagnostic_url.clone();
         let stream = response.bytes_stream().map_err(move |error| {
             TransportError::new_with_cause(
                 TransportErrorKind::Other,
                 &stream_url,
-                redact_network_error(&error),
+                classify_network_error(&error),
             )
         });
         Ok(Box::pin(stream))
     }
+}
+
+fn exact_content_length(headers: &HeaderMap) -> Result<usize, FixedOriginFetchError> {
+    if headers.contains_key(TRANSFER_ENCODING) {
+        return Err(FixedOriginFetchError::ResponseLength);
+    }
+    let mut values = headers.get_all(CONTENT_LENGTH).iter();
+    let value = match (values.next(), values.next()) {
+        (Some(value), None) => value.as_bytes(),
+        _ => return Err(FixedOriginFetchError::ResponseLength),
+    };
+    if value.is_empty()
+        || (value.len() > 1 && value[0] == b'0')
+        || !value.iter().all(u8::is_ascii_digit)
+    {
+        return Err(FixedOriginFetchError::ResponseLength);
+    }
+    let value = std::str::from_utf8(value)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .and_then(|value| usize::try_from(value).ok())
+        .filter(|value| *value != 0)
+        .ok_or(FixedOriginFetchError::ResponseLength)?;
+    Ok(value)
 }
 
 fn response_encoding_admitted(headers: &HeaderMap) -> bool {
@@ -204,17 +312,17 @@ fn response_encoding_admitted(headers: &HeaderMap) -> bool {
     }
 }
 
-fn redact_network_error(error: &reqwest::Error) -> RedactedNetworkError {
+fn classify_network_error(error: &reqwest::Error) -> FixedOriginFetchError {
     if error.is_timeout() {
-        RedactedNetworkError::Timeout
+        FixedOriginFetchError::Timeout
     } else if error.is_connect() {
-        RedactedNetworkError::Connect
+        FixedOriginFetchError::Connect
     } else if error.is_request() {
-        RedactedNetworkError::Request
+        FixedOriginFetchError::Request
     } else if error.is_body() {
-        RedactedNetworkError::Body
+        FixedOriginFetchError::Body
     } else {
-        RedactedNetworkError::Other
+        FixedOriginFetchError::Request
     }
 }
 
@@ -356,5 +464,39 @@ mod tests {
         assert!(!response_encoding_admitted(&headers));
         headers.append(CONTENT_ENCODING, HeaderValue::from_static("identity"));
         assert!(!response_encoding_admitted(&headers));
+    }
+
+    #[test]
+    fn bounded_reads_require_one_canonical_nonzero_content_length() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(
+            exact_content_length(&headers),
+            Err(FixedOriginFetchError::ResponseLength)
+        );
+        headers.insert(CONTENT_LENGTH, HeaderValue::from_static("17"));
+        assert_eq!(exact_content_length(&headers), Ok(17));
+        headers.insert(CONTENT_LENGTH, HeaderValue::from_static("0"));
+        assert_eq!(
+            exact_content_length(&headers),
+            Err(FixedOriginFetchError::ResponseLength)
+        );
+        headers.insert(CONTENT_LENGTH, HeaderValue::from_static("017"));
+        assert_eq!(
+            exact_content_length(&headers),
+            Err(FixedOriginFetchError::ResponseLength)
+        );
+        headers.insert(CONTENT_LENGTH, HeaderValue::from_static("17"));
+        headers.append(CONTENT_LENGTH, HeaderValue::from_static("17"));
+        assert_eq!(
+            exact_content_length(&headers),
+            Err(FixedOriginFetchError::ResponseLength)
+        );
+        headers = HeaderMap::new();
+        headers.insert(CONTENT_LENGTH, HeaderValue::from_static("17"));
+        headers.insert(TRANSFER_ENCODING, HeaderValue::from_static("chunked"));
+        assert_eq!(
+            exact_content_length(&headers),
+            Err(FixedOriginFetchError::ResponseLength)
+        );
     }
 }

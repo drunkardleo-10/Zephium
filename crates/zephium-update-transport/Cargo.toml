@@ -4,10 +4,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+tough = ["dep:async-trait", "dep:tough"]
+
 [dependencies]
-async-trait = "=0.1.89"
+async-trait = { version = "=0.1.89", optional = true }
 futures-util = { version = "=0.3.32", default-features = false, features = ["std"] }
 reqwest = { version = "=0.13.4", default-features = false, features = ["rustls", "stream", "system-proxy"] }
 thiserror.workspace = true
-tough.workspace = true
+tough = { workspace = true, optional = true }
 url.workspace = true

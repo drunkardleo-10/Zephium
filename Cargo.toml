@@ -21,6 +21,7 @@ zephium-blocker-service = { path = "crates/zephium-blocker-service", version = "
 zephium-blocker-update = { path = "crates/zephium-blocker-update", version = "=0.1.0", default-features = false }
 zephium-core = { path = "crates/zephium-core", version = "=0.1.0" }
 zephium-extension-authority = { path = "crates/zephium-extension-authority", version = "=0.1.0" }
+zephium-extension-distribution = { path = "crates/zephium-extension-distribution", version = "=0.1.0", default-features = false }
 zephium-extension-repository = { path = "crates/zephium-extension-repository", version = "=0.1.0" }
 zephium-extension-runtime-api = { path = "crates/zephium-extension-runtime-api", version = "=0.1.0" }
 zephium-extension-service = { path = "crates/zephium-extension-service", version = "=0.1.0" }

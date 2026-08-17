@@ -1,0 +1,18 @@
+[package]
+name = "zephium-extension-distribution"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sha2 = "=0.10.9"
+thiserror.workspace = true
+url.workspace = true
+zephium-core.workspace = true
+zephium-extension-authority.workspace = true
+zephium-extension-package = { path = "../zephium-extension-package", version = "=0.1.0" }
+zephium-update-transport.workspace = true
+
+[dev-dependencies]
+ring.workspace = true
+tokio = { workspace = true, features = ["rt"] }

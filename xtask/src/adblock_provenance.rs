@@ -707,6 +707,7 @@ fn validate_zephium_feature_manifests(repository: &Path, root: &toml::Table) -> 
             "zephium-blocker",
             "zephium-blocker-service",
             "zephium-blocker-update",
+            "zephium-extension-distribution",
             "zephium-update-transport",
         ],
     )?;
@@ -728,6 +729,10 @@ fn validate_zephium_feature_manifests(repository: &Path, root: &toml::Table) -> 
         (
             "zephium-update-transport",
             "crates/zephium-update-transport",
+        ),
+        (
+            "zephium-extension-distribution",
+            "crates/zephium-extension-distribution",
         ),
     ] {
         let dependency = workspace_dependencies
@@ -801,6 +806,7 @@ fn validate_zephium_feature_manifests(repository: &Path, root: &toml::Table) -> 
     )?;
     validate_blocker_update_manifest(repository)?;
     validate_update_transport_manifest(repository)?;
+    validate_extension_distribution_manifest(repository)?;
     validate_blocker_service_manifest(repository)?;
     validate_blocker_fuzz_manifest(repository)?;
 
@@ -856,6 +862,7 @@ fn validate_zephium_feature_manifests(repository: &Path, root: &toml::Table) -> 
                     "adblock"
                         | "zephium-blocker-service"
                         | "zephium-blocker-update"
+                        | "zephium-extension-distribution"
                         | "zephium-update-transport"
                 ) || (package == "zephium-blocker"
                     && (!reviewed_targets.contains(target.as_str())
@@ -964,11 +971,12 @@ fn validate_blocker_update_manifest(repository: &Path) -> Result<(), String> {
     let transport = require_dependency_table(dependencies, "zephium-update-transport")?;
     require_key_set(
         transport,
-        &["optional", "workspace"],
+        &["features", "optional", "workspace"],
         "zephium-blocker-update transport dependency",
     )?;
     require_bool(transport, "workspace", true)?;
     require_bool(transport, "optional", true)?;
+    require_string_array(transport, "features", &["tough"])?;
     let tokio = require_dependency_table(dependencies, "tokio")?;
     require_key_set(
         tokio,
@@ -1063,6 +1071,14 @@ fn validate_update_transport_manifest(repository: &Path) -> Result<(), String> {
         "name",
         "zephium-update-transport",
     )?;
+    let features = require_table(&transport, "features")?;
+    require_key_set(
+        features,
+        &["default", "tough"],
+        "zephium-update-transport feature table",
+    )?;
+    require_string_array(features, "default", &[])?;
+    require_string_array(features, "tough", &["dep:async-trait", "dep:tough"])?;
     let dependencies = require_table(&transport, "dependencies")?;
     require_key_set(
         dependencies,
@@ -1076,7 +1092,14 @@ fn validate_update_transport_manifest(repository: &Path) -> Result<(), String> {
         ],
         "zephium-update-transport dependency table",
     )?;
-    require_dependency_version(dependencies, "async-trait", "=0.1.89")?;
+    let async_trait = require_dependency_table(dependencies, "async-trait")?;
+    require_key_set(
+        async_trait,
+        &["optional", "version"],
+        "zephium-update-transport async-trait dependency",
+    )?;
+    require_string(async_trait, "version", "=0.1.89")?;
+    require_bool(async_trait, "optional", true)?;
     let futures = require_dependency_table(dependencies, "futures-util")?;
     require_key_set(
         futures,
@@ -1095,9 +1118,71 @@ fn validate_update_transport_manifest(repository: &Path) -> Result<(), String> {
     require_string(reqwest, "version", "=0.13.4")?;
     require_bool(reqwest, "default-features", false)?;
     require_string_array(reqwest, "features", &["rustls", "stream", "system-proxy"])?;
-    for name in ["thiserror", "tough", "url"] {
+    for name in ["thiserror", "url"] {
         require_workspace_dependency(dependencies, name, &[])?;
     }
+    let tough = require_dependency_table(dependencies, "tough")?;
+    require_key_set(
+        tough,
+        &["optional", "workspace"],
+        "zephium-update-transport tough dependency",
+    )?;
+    require_bool(tough, "workspace", true)?;
+    require_bool(tough, "optional", true)?;
+    Ok(())
+}
+
+fn validate_extension_distribution_manifest(repository: &Path) -> Result<(), String> {
+    let distribution = parse_table(
+        &read_text(&repository.join("crates/zephium-extension-distribution/Cargo.toml"))?,
+        "zephium-extension-distribution Cargo.toml",
+    )?;
+    require_string(
+        require_table(&distribution, "package")?,
+        "name",
+        "zephium-extension-distribution",
+    )?;
+    let dependencies = require_table(&distribution, "dependencies")?;
+    require_key_set(
+        dependencies,
+        &[
+            "sha2",
+            "thiserror",
+            "url",
+            "zephium-core",
+            "zephium-extension-authority",
+            "zephium-extension-package",
+            "zephium-update-transport",
+        ],
+        "zephium-extension-distribution dependency table",
+    )?;
+    require_dependency_version(dependencies, "sha2", "=0.10.9")?;
+    for name in [
+        "thiserror",
+        "url",
+        "zephium-core",
+        "zephium-extension-authority",
+        "zephium-update-transport",
+    ] {
+        require_workspace_dependency(dependencies, name, &[])?;
+    }
+    let package = require_dependency_table(dependencies, "zephium-extension-package")?;
+    require_key_set(
+        package,
+        &["path", "version"],
+        "zephium-extension-distribution package dependency",
+    )?;
+    require_string(package, "path", "../zephium-extension-package")?;
+    require_string(package, "version", "=0.1.0")?;
+
+    let dev_dependencies = require_table(&distribution, "dev-dependencies")?;
+    require_key_set(
+        dev_dependencies,
+        &["ring", "tokio"],
+        "zephium-extension-distribution dev-dependency table",
+    )?;
+    require_workspace_dependency(dev_dependencies, "ring", &[])?;
+    require_workspace_dependency(dev_dependencies, "tokio", &["rt"])?;
     Ok(())
 }
 
@@ -2039,6 +2124,7 @@ fn verify_desktop_feature_graph(
         "reqwest",
         "rustls-platform-verifier",
         "tough",
+        "zephium-extension-distribution",
         "zephium-update-transport",
     ] {
         reject_package(&tree, target, package)?;

@@ -755,6 +755,23 @@ credentials, redirects, compressed responses, queries, fragments, encoded
 paths, and cross-origin finals are refused, and diagnostics retain only the
 origin. The ordinary desktop graph still links no network updater through that
 extraction.
+
+Curated acquired extensions reuse that network boundary without inheriting its
+TUF adapter. `zephium-extension-distribution` cannot be constructed until the
+compiled product extension authority is valid. It authenticates the exact
+fixed-name catalog before any secondary request, requires a complete ordered
+runtime projection, and derives immutable CRX/legal object paths only from the
+authenticated package key, revision, inner-ZIP digest, or legal digest; the
+catalog's provenance URL and legal target path are never fetch authority.
+Bounded object reads require one nonzero canonical `Content-Length`, refuse
+transfer encoding, allocate fallibly, and check the observed length. The client
+then independently verifies the CRX signature, developer key, inner ZIP
+length/digest, and legal bytes before constructing the existing path-free
+move-only service request. The service reauthenticates the same evidence before
+private staging and source-free catalog activation. No endpoint or package is
+currently provisioned, the desktop graph excludes both distribution and HTTPS
+transport, and no generic network capability is reachable from pages or
+extensions.
 The coordinator then durably commits that candidate before activation revalidates the exact
 prepared recovery state. A stale identity or newly unavailable candidate leaves compiler
 authority unchanged; interrupted transitions remain explicit and recoverable.

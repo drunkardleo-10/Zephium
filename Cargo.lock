@@ -6298,6 +6298,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "zephium-extension-distribution"
+version = "0.1.0"
+dependencies = [
+ "ring",
+ "sha2",
+ "thiserror 2.0.18",
+ "tokio",
+ "url",
+ "zephium-core",
+ "zephium-extension-authority",
+ "zephium-extension-package",
+ "zephium-update-transport",
+]
+
+[[package]]
 name = "zephium-extension-package"
 version = "0.1.0"
 dependencies = [

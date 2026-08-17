@@ -264,6 +264,8 @@ Single Cargo workspace monorepo, frontend included. Per-platform native code is
 │   ├── zephium-extension-acquisition catalog-bound hostile ZIP preflight and
 │   │                            bounded streaming decompression.
 │   ├── zephium-extension-authority product-sealed catalog/manifest policy.
+│   ├── zephium-extension-distribution fixed-origin authenticated catalog and
+│   │                            one-at-a-time CRX/legal object acquisition.
 │   ├── zephium-extension-repository immutable package materialization, atomic
 │   │                            catalog sets, leases, rollback, recovery, GC.
 │   ├── zephium-extension-runtime-api move-only native host authority.
@@ -853,15 +855,31 @@ provisioning ingress: one move-owned, path-free request may be retained at a
 time; its actual vector capacities are charged against the shared ceiling; and
 the worker reauthenticates the sealed catalog, CRX, manifest, legal artifact,
 and complete extracted tree before publication. Complete catalog activation is
-separate and source-free. No product transport or catalog coordinator calls
-that ingress yet, and enabling the crate feature alone supplies neither package
-bytes nor network authority. The blocker's redirect-free fixed-origin HTTPS
-client has been extracted into `zephium-update-transport` for that future
-coordinator. It accepts only plain-ASCII paths below exact HTTPS directories,
-refuses redirects, compression, credentials, queries, fragments, and encoded
-path components, and redacts request failures. The shared crate still returns
-unauthenticated streams and grants no catalog, filesystem, install, or runtime
-authority. Authenticated catalog management and install UX,
+separate and source-free. `zephium-extension-distribution` now owns the narrow
+product-neutral source for that ingress. Construction first requires a valid
+compiled product authority; it then fetches one fixed `catalog-v1.json`,
+authenticates the exact bytes before requesting any package object, binds one
+complete ordered runtime selection, and derives CRX and legal URLs only from
+authenticated package/revision/digest fields. The legal object is fetched
+before the larger CRX, each response requires one bounded exact
+`Content-Length`, and CRX signature, developer identity, inner ZIP identity,
+and legal digest are checked before a path-free service request is created.
+The serialized service deliberately reauthenticates all of that evidence at
+the durable boundary. There is still no product endpoint/configuration,
+startup/update coordinator, or desktop dependency on this client, so this
+source alone performs no I/O and supplies neither package bytes nor network
+authority to an ordinary build.
+
+The redirect-free fixed-origin HTTPS boundary shared with the blocker lives in
+`zephium-update-transport`. It accepts only plain-ASCII paths below exact HTTPS
+directories, refuses redirects, compression, credentials, queries, fragments,
+and encoded path components, and redacts request failures. Its stricter bounded
+object operation additionally refuses missing/ambiguous lengths and transfer
+framing, reserves the declared capacity fallibly, and verifies the final body
+length. TUF adaptation is optional and absent from the extension-distribution
+graph. The shared crate grants no catalog, filesystem, install, or runtime
+authority and neither it nor the distribution client is exposed to extension
+or page content. Authenticated catalog management and install UX,
 native action projection, and transient popup hosting are implemented; the
 install review always includes required API/host authority, defaults every
 optional declaration to denied, and can return only bounded indexes into the
@@ -880,8 +898,10 @@ prompt per admitted runtime, a Shell-owned consent projection, an exact
 generation-bound service mutation, and native settlement; absent, stale,
 over-capacity, or unavailable paths deny rather than grant. This extension
 grant broker is distinct from page-origin permission events, whose general
-Shell policy remains unfinished. Remaining release gaps include the product
-acquisition coordinator, the complete permission and API matrix, quotas,
+Shell policy remains unfinished. Remaining release gaps include product-sealed
+distribution endpoints and the serialized startup/update coordinator that
+settles one acquired request before fetching the next, the complete permission
+and API matrix, quotas,
 complete cross-process release-build resource evidence, and endurance. Older admitted
 macOS versions and Linux require a Zephium
 compatibility runtime only after per-principal world/handler isolation, exact

@@ -740,6 +740,7 @@ fn ci() {
         ],
     );
     run_acquired_extension_repository_gates();
+    run_extension_distribution_gates();
     for (manifest, features) in NATIVE_ADAPTERS {
         run_native_adapter_clippy(manifest, features, "--all-targets");
         run_native_adapter_clippy(manifest, features, "--lib");
@@ -802,6 +803,37 @@ fn run_acquired_extension_repository_gates() {
             "--features",
             "acquired-packages",
             "--lib",
+        ],
+    );
+}
+
+/// Keeps network acquisition absent from the ordinary desktop while testing
+/// the explicit product distribution graph without pulling the TUF adapter.
+fn run_extension_distribution_gates() {
+    for target in ["--all-targets", "--lib"] {
+        run(
+            "cargo",
+            &[
+                "clippy",
+                "--locked",
+                "-p",
+                "zephium-extension-distribution",
+                "--no-default-features",
+                target,
+                "--",
+                "-D",
+                "warnings",
+            ],
+        );
+    }
+    run(
+        "cargo",
+        &[
+            "test",
+            "--locked",
+            "-p",
+            "zephium-extension-distribution",
+            "--no-default-features",
         ],
     );
 }
@@ -1827,6 +1859,7 @@ fn check_blocker_dependency_graphs() {
     ]);
     for forbidden in [
         "zephium-blocker-update feature \"tuf\"",
+        "zephium-extension-distribution v",
         "zephium-update-transport v",
         "tough v",
         "reqwest v",
@@ -1860,6 +1893,7 @@ fn check_blocker_dependency_graphs() {
     ]);
     for required in [
         "zephium-blocker-update v",
+        "zephium-update-transport v",
         "tough v",
         "reqwest v",
         "rustls-platform-verifier v",
@@ -1867,6 +1901,34 @@ fn check_blocker_dependency_graphs() {
     ] {
         if !tuf.lines().any(|line| line.starts_with(required)) {
             eprintln!("TUF verification graph is missing `{required}`");
+            exit(1);
+        }
+    }
+
+    let distribution = cargo_tree(&[
+        "-p",
+        "zephium-extension-distribution",
+        "--no-default-features",
+        "--locked",
+        "-e",
+        "features",
+        "--prefix",
+        "none",
+    ]);
+    for required in [
+        "zephium-extension-distribution v",
+        "zephium-update-transport v",
+        "reqwest v",
+        "rustls-platform-verifier v",
+    ] {
+        if !distribution.lines().any(|line| line.starts_with(required)) {
+            eprintln!("extension distribution graph is missing `{required}`");
+            exit(1);
+        }
+    }
+    for forbidden in ["tough v", "zephium-update-transport feature \"tough\""] {
+        if distribution.lines().any(|line| line.starts_with(forbidden)) {
+            eprintln!("extension distribution graph unexpectedly contains `{forbidden}`");
             exit(1);
         }
     }
