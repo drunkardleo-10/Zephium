@@ -576,8 +576,22 @@ pub(crate) fn validate_ancestor_node(
     Ok(())
 }
 
-pub(crate) fn lock_exclusive(file: &File) -> bool {
-    rustix::fs::flock(file, rustix::fs::FlockOperation::NonBlockingLockExclusive).is_ok()
+pub(crate) fn lock_exclusive(file: &File) -> Result<(), PrivateFsError> {
+    // A signal can interrupt flock before the kernel has made a locking
+    // decision. Retry a small, deterministic number of times rather than
+    // reporting a competing owner or spinning under a signal storm.
+    const MAX_ATTEMPTS: usize = 4;
+    for attempt in 0..MAX_ATTEMPTS {
+        match rustix::fs::flock(file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
+            Ok(()) => return Ok(()),
+            Err(rustix::io::Errno::INTR) if attempt + 1 < MAX_ATTEMPTS => continue,
+            Err(rustix::io::Errno::WOULDBLOCK) => {
+                return Err(PrivateFsError::LockUnavailable);
+            }
+            Err(_) => return Err(PrivateFsError::Io),
+        }
+    }
+    Err(PrivateFsError::Io)
 }
 
 pub(crate) fn atomic_replace(

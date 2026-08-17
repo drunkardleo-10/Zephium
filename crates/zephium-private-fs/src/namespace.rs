@@ -2472,9 +2472,7 @@ fn admit_existing_lock(
     mut lock: VerifiedRegular,
 ) -> Result<VerifiedRegular, PrivateFsError> {
     revalidate_exact_lock_regular(directory, lock_name, &lock)?;
-    if !platform::lock_exclusive(&lock.file) {
-        return Err(PrivateFsError::LockUnavailable);
-    }
+    platform::lock_exclusive(&lock.file)?;
     // The descriptor-relative lock entry and root identity must still bind to
     // the held handles after flock succeeds, before the shared lease exists.
     revalidate_exact_lock_regular(directory, lock_name, &lock)?;
@@ -2579,9 +2577,7 @@ fn prepare_staged_lock(
     mutated: &mut bool,
 ) -> Result<(), PrivateFsError> {
     revalidate_exact_lock_regular(directory, staging_name, staging)?;
-    if !platform::lock_exclusive(&staging.file) {
-        return Err(PrivateFsError::LockUnavailable);
-    }
+    platform::lock_exclusive(&staging.file)?;
     revalidate_exact_lock_regular(directory, staging_name, staging)?;
 
     let bytes = read_lock_content(&mut staging.file)?;
@@ -2638,9 +2634,7 @@ fn inspect_and_cleanup_lock_staging(
         Err(error) => return Err(error),
     };
     revalidate_exact_lock_regular(directory, lock_staging_name, &staging)?;
-    if !platform::lock_exclusive(&staging.file) {
-        return Err(PrivateFsError::LockUnavailable);
-    }
+    platform::lock_exclusive(&staging.file)?;
     revalidate_exact_lock_regular(directory, lock_staging_name, &staging)?;
     let bytes = read_lock_content(&mut staging.file)?;
     revalidate_exact_lock_regular(directory, lock_staging_name, &staging)?;

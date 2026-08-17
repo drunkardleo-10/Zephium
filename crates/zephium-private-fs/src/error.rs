@@ -12,7 +12,7 @@ pub enum PrivateFsError {
     /// A configured path or observed node could not establish the boundary.
     #[error("private filesystem path or node is unsafe")]
     Unsafe,
-    /// Another process owns the exact namespace lock, or locking failed.
+    /// Another process owns the exact namespace lock.
     #[error("private filesystem namespace lock is unavailable")]
     LockUnavailable,
     /// A caller or observed file exceeded its fixed operation byte bound.

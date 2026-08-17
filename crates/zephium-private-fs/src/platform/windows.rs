@@ -9,8 +9,8 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::Path;
 
 use windows::Win32::Foundation::{
-    GetLastError, LocalFree, ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS, ERROR_SUCCESS, GENERIC_ALL,
-    GENERIC_WRITE, HANDLE, HLOCAL,
+    GetLastError, LocalFree, ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS, ERROR_LOCK_VIOLATION,
+    ERROR_SUCCESS, GENERIC_ALL, GENERIC_WRITE, HANDLE, HLOCAL,
 };
 use windows::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
 use windows::Win32::Security::{
@@ -339,12 +339,12 @@ pub(crate) fn validate_ancestor_node(
     Ok(())
 }
 
-pub(crate) fn lock_exclusive(file: &File) -> bool {
+pub(crate) fn lock_exclusive(file: &File) -> Result<(), PrivateFsError> {
     let mut overlapped = OVERLAPPED::default();
     // SAFETY: `file` owns a valid synchronous handle; the nonblocking call
     // borrows the live OVERLAPPED only for this invocation. Closing the file
     // releases the full-range lock.
-    unsafe {
+    let result = unsafe {
         LockFileEx(
             HANDLE(file.as_raw_handle()),
             LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
@@ -353,7 +353,16 @@ pub(crate) fn lock_exclusive(file: &File) -> bool {
             u32::MAX,
             &raw mut overlapped,
         )
-        .is_ok()
+    };
+    if result.is_ok() {
+        return Ok(());
+    }
+    // SAFETY: queried immediately after the failed Win32 call on this thread.
+    let error = unsafe { GetLastError() };
+    if error == ERROR_LOCK_VIOLATION {
+        Err(PrivateFsError::LockUnavailable)
+    } else {
+        Err(PrivateFsError::Io)
     }
 }
 
