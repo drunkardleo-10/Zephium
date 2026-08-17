@@ -836,7 +836,13 @@ fn validate_zephium_feature_manifests(repository: &Path, root: &toml::Table) -> 
     for kind in ["dependencies", "build-dependencies", "dev-dependencies"] {
         if let Some(dependencies) = desktop.get(kind).and_then(toml::Value::as_table) {
             let allowed = if kind == "dependencies" {
-                ["zephium-blocker-service"].as_slice()
+                [
+                    "zephium-blocker-service",
+                    "zephium-extension-authority",
+                    "zephium-extension-distribution",
+                    "zephium-extension-updater",
+                ]
+                .as_slice()
             } else {
                 [].as_slice()
             };
@@ -860,6 +866,35 @@ fn validate_zephium_feature_manifests(repository: &Path, root: &toml::Table) -> 
         "desktop zephium-blocker-service dependency",
     )?;
     require_bool(service, "workspace", true)?;
+    for name in [
+        "url",
+        "zephium-extension-authority",
+        "zephium-extension-distribution",
+        "zephium-extension-updater",
+    ] {
+        let dependency = desktop_dependencies
+            .get(name)
+            .and_then(toml::Value::as_table)
+            .ok_or_else(|| format!("desktop has no structured optional {name} dependency"))?;
+        require_key_set(
+            dependency,
+            &["optional", "workspace"],
+            &format!("desktop optional {name} dependency"),
+        )?;
+        require_bool(dependency, "workspace", true)?;
+        require_bool(dependency, "optional", true)?;
+    }
+    let desktop_features = require_table(&desktop, "features")?;
+    require_string_array(
+        desktop_features,
+        "curated-extension-distribution",
+        &[
+            "dep:url",
+            "dep:zephium-extension-authority",
+            "dep:zephium-extension-distribution",
+            "dep:zephium-extension-updater",
+        ],
+    )?;
     let targets = require_table(&desktop, "target")?;
     let reviewed_targets = BTreeSet::from([
         "cfg(target_os = \"windows\")",

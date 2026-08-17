@@ -8,6 +8,14 @@ license.workspace = true
 # Explicit release-gate forwarding only. Default product builds remain
 # deny-only until the packaged WKWebView/TCC gate is recorded as passing.
 macos-page-permission-prompts = ["zephium-app/macos-page-permission-prompts"]
+# Product-only curated acquisition. The default desktop graph deliberately
+# excludes its HTTP client, async runtime, and updater worker.
+curated-extension-distribution = [
+    "dep:url",
+    "dep:zephium-extension-authority",
+    "dep:zephium-extension-distribution",
+    "dep:zephium-extension-updater",
+]
 
 [lib]
 name = "zephium_desktop_lib"
@@ -26,6 +34,10 @@ zephium-ipc.workspace = true
 zephium-app.workspace = true
 zephium-engine.workspace = true
 zephium-extension-service.workspace = true
+url = { workspace = true, optional = true }
+zephium-extension-authority = { workspace = true, optional = true }
+zephium-extension-distribution = { workspace = true, optional = true }
+zephium-extension-updater = { workspace = true, optional = true }
 zephium-store.workspace = true
 zephium-blocker-service.workspace = true
 tauri-plugin-single-instance.workspace = true

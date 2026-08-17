@@ -900,10 +900,15 @@ retryable failures reopen admission, while coordinator quarantine remains
 terminal until restart. Status is coalesced into Shell and projected with a
 closed redacted vocabulary to privileged extension UI; ordinary builds that
 never construct the worker correctly expose no distribution state. There is
-still no product endpoint/configuration, desktop composition owner, platform
-runtime-target policy, or refresh schedule. The desktop has no dependency on
-either the updater or distribution client, so this path supplies neither
-package bytes nor network authority to an ordinary build.
+still no product endpoint/configuration, platform runtime-target policy, or
+refresh schedule. The opt-in desktop `curated-extension-distribution` graph now
+constructs a dormant worker only after the suspended Shell callback exists,
+linearizes its unique owner against Shell admission, and cancels plus joins it
+before Shell can retire the extension service under the same absolute shutdown
+deadline. Native-failure exit drains it independently. The feature's sealed
+configuration slot remains empty, and the default desktop graph still has no
+dependency on the updater, distribution client, HTTP, or TLS stack; neither
+graph currently supplies package bytes or network authority.
 
 The redirect-free fixed-origin HTTPS boundary shared with the blocker lives in
 `zephium-update-transport`. It accepts only plain-ASCII paths below exact HTTPS

@@ -805,6 +805,13 @@ replacement from clearing a restart-required coordinator state.
 Status is a fixed-size generation-checked value, coalesced by Shell and mapped
 to a closed privileged-UI vocabulary without URLs, package identities, error
 strings, or native authority.
+The optional desktop composition graph owns the unique worker only after a
+suspended Shell callback exists and before startup admission becomes
+irrevocable. Terminal shutdown consumes one absolute deadline: it cancels and
+joins distribution first, then submits Shell's extension-service, Store,
+native, and blocker teardown with the remaining time. The sealed endpoint slot
+is empty, and the default desktop graph excludes the worker and its HTTP/TLS
+dependencies entirely.
 
 The blocker update coordinator then durably commits its candidate before
 activation revalidates the exact prepared recovery state. A stale identity or

@@ -6226,6 +6226,7 @@ dependencies = [
  "tauri-specta",
  "tauri-utils",
  "tempfile",
+ "url",
  "webkit2gtk",
  "webview2-com",
  "window-vibrancy 0.7.1",
@@ -6238,7 +6239,10 @@ dependencies = [
  "zephium-blocker-service",
  "zephium-core",
  "zephium-engine",
+ "zephium-extension-authority",
+ "zephium-extension-distribution",
  "zephium-extension-service",
+ "zephium-extension-updater",
  "zephium-ipc",
  "zephium-store",
 ]

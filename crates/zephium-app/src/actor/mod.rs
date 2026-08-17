@@ -706,11 +706,30 @@ impl Handle {
     /// caller (normally the UI thread). Only `RetryableFailure` leaves the
     /// actor and native engine available for another attempt.
     pub fn shutdown(&self) -> ShutdownRequest {
+        self.shutdown_with_deadline(self.shutdown_deadline())
+    }
+
+    /// Creates the single absolute deadline for composition-owned preflight
+    /// and the actor's complete ordered shutdown.
+    ///
+    /// A composition root that owns a weak-callback producer must stop and
+    /// join it before calling [`Self::shutdown_with_deadline`] with this exact
+    /// value. This prevents late submissions from racing service retirement
+    /// without restarting the process-wide shutdown budget.
+    pub fn shutdown_deadline(&self) -> std::time::Instant {
+        std::time::Instant::now() + END_TO_END_SHUTDOWN_TIMEOUT
+    }
+
+    /// Requests ordered shutdown under a caller-started absolute deadline.
+    ///
+    /// Deadlines beyond Zephium's fixed process budget are clamped; callers
+    /// cannot extend teardown by supplying a later instant.
+    pub fn shutdown_with_deadline(&self, deadline: std::time::Instant) -> ShutdownRequest {
         let (ack, done) = sync_channel(1);
-        // The one process-boundary budget starts at caller admission. Time
-        // spent behind already-accepted FIFO work is real shutdown latency
-        // and must not be hidden by restarting the clock in the actor.
-        let deadline = std::time::Instant::now() + END_TO_END_SHUTDOWN_TIMEOUT;
+        let deadline = deadline.min(self.shutdown_deadline());
+        // The one process-boundary budget may start before actor admission.
+        // Time spent stopping composition-owned callback producers or behind
+        // accepted FIFO work must not be hidden by restarting the clock here.
         // A terminal request may overtake desktop admission. Wake the actor in
         // cancelled mode before publishing the barrier so it can drain that
         // exact request without entering an external startup port.

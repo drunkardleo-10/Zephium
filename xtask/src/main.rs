@@ -855,6 +855,35 @@ fn run_extension_distribution_gates() {
         "cargo",
         &["test", "--locked", "-p", "zephium-extension-updater"],
     );
+    for target in ["--all-targets", "--lib"] {
+        run(
+            "cargo",
+            &[
+                "clippy",
+                "--locked",
+                "-p",
+                "zephium-desktop",
+                "--features",
+                "curated-extension-distribution",
+                target,
+                "--",
+                "-D",
+                "warnings",
+            ],
+        );
+    }
+    run(
+        "cargo",
+        &[
+            "test",
+            "--locked",
+            "-p",
+            "zephium-desktop",
+            "--features",
+            "curated-extension-distribution",
+            "--lib",
+        ],
+    );
 }
 
 fn check_macos_extension_compatibility_asset() {
@@ -1983,6 +2012,45 @@ fn check_blocker_dependency_graphs() {
     for forbidden in ["tough v", "zephium-update-transport feature \"tough\""] {
         if updater.lines().any(|line| line.starts_with(forbidden)) {
             eprintln!("extension updater graph unexpectedly contains `{forbidden}`");
+            exit(1);
+        }
+    }
+
+    let curated_desktop = cargo_tree(&[
+        "-p",
+        "zephium-desktop",
+        "--no-default-features",
+        "--features",
+        "curated-extension-distribution",
+        "--locked",
+        "-e",
+        "features",
+        "--prefix",
+        "none",
+    ]);
+    for required in [
+        "zephium-desktop v",
+        "zephium-extension-authority v",
+        "zephium-extension-distribution v",
+        "zephium-extension-updater v",
+        "zephium-update-transport v",
+        "reqwest v",
+        "rustls-platform-verifier v",
+    ] {
+        if !curated_desktop
+            .lines()
+            .any(|line| line.starts_with(required))
+        {
+            eprintln!("curated desktop extension graph is missing `{required}`");
+            exit(1);
+        }
+    }
+    for forbidden in ["tough v", "zephium-update-transport feature \"tough\""] {
+        if curated_desktop
+            .lines()
+            .any(|line| line.starts_with(forbidden))
+        {
+            eprintln!("curated desktop extension graph unexpectedly contains `{forbidden}`");
             exit(1);
         }
     }

@@ -653,3 +653,20 @@ fn shutdown_on_a_permanently_closed_actor_is_terminal() {
 
     assert_eq!(handle.shutdown().recv().unwrap(), ShutdownOutcome::Unclean);
 }
+
+#[test]
+fn composition_shutdown_preserves_an_earlier_deadline_and_clamps_a_later_one() {
+    let earlier = std::time::Instant::now() + std::time::Duration::from_millis(5);
+    let queue = CommandQueue::new();
+    let handle = Handle::new(queue);
+    let request = handle.shutdown_with_deadline(earlier);
+    assert_eq!(request.deadline(), earlier);
+    drop(request);
+    drop(handle);
+
+    let too_late = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    let queue = CommandQueue::new();
+    let handle = Handle::new(queue);
+    let request = handle.shutdown_with_deadline(too_late);
+    assert!(request.deadline() < too_late);
+}

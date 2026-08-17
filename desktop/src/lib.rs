@@ -5,6 +5,8 @@
 compile_error!("the internal repository E2E authority may not link into the Zephium desktop");
 
 mod blocker_service;
+#[cfg(feature = "curated-extension-distribution")]
+mod extension_distribution;
 #[cfg(target_os = "linux")]
 mod linux_global_shortcuts;
 #[cfg(any(target_os = "linux", test))]
@@ -55,6 +57,10 @@ use zephium_engine::{InitialUserContent, MainThreadDispatch, WebviewEngine};
 use zephium_extension_service::{
     prepare_extension_service_boot, ExtensionRepositoryRoot, ExtensionServiceBootPlan,
     ExtensionServiceOwner,
+};
+#[cfg(feature = "curated-extension-distribution")]
+use zephium_extension_updater::{
+    ExtensionDistributionShutdownOutcome, ExtensionDistributionWorker,
 };
 use zephium_ipc::Projection;
 use zephium_store::SqliteStore;
@@ -126,6 +132,8 @@ struct ShutdownCoordinator {
     terminal_failure: Arc<AtomicBool>,
     authorized_exit_code: Arc<AtomicI32>,
     watchdog: Arc<HardExitWatchdog>,
+    #[cfg(feature = "curated-extension-distribution")]
+    extension_distribution: Arc<Mutex<Option<ExtensionDistributionWorker>>>,
 }
 
 /// Retains the move-only extension-service lifecycle authority between worker
@@ -418,6 +426,19 @@ fn shutdown_startup_extension_service_until(
     )
 }
 
+#[cfg(feature = "curated-extension-distribution")]
+fn shutdown_extension_distribution_until(
+    worker: ExtensionDistributionWorker,
+    deadline: std::time::Instant,
+) -> bool {
+    matches!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            worker.shutdown_until(deadline)
+        })),
+        Ok(ExtensionDistributionShutdownOutcome::Clean)
+    )
+}
+
 fn cleanup_pre_shell_resources_until(
     resources: ClaimedTerminalStartupResources,
     deadline: std::time::Instant,
@@ -595,6 +616,8 @@ impl Default for ShutdownCoordinator {
             terminal_failure: Arc::new(AtomicBool::new(false)),
             authorized_exit_code: Arc::new(AtomicI32::new(NO_AUTHORIZED_EXIT_CODE)),
             watchdog: Arc::new(HardExitWatchdog::default()),
+            #[cfg(feature = "curated-extension-distribution")]
+            extension_distribution: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -624,6 +647,38 @@ impl ShutdownCoordinator {
 
     fn try_admit_shell(&self, shell: &Handle) -> bool {
         self.try_startup_admission(|| shell.admit_startup())
+    }
+
+    #[cfg(feature = "curated-extension-distribution")]
+    fn try_install_extension_distribution(
+        &self,
+        worker: ExtensionDistributionWorker,
+    ) -> Result<(), ExtensionDistributionWorker> {
+        let mut pending = Some(worker);
+        let installed = self.try_startup_admission(|| {
+            let mut owner = self
+                .extension_distribution
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if owner.is_some() {
+                return false;
+            }
+            *owner = pending.take();
+            true
+        });
+        if installed {
+            Ok(())
+        } else {
+            Err(pending.expect("a refused extension distribution owner remains local"))
+        }
+    }
+
+    #[cfg(feature = "curated-extension-distribution")]
+    fn take_extension_distribution(&self) -> Option<ExtensionDistributionWorker> {
+        self.extension_distribution
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
     }
 
     fn prepare_hard_exit_watchdog(&self) -> std::io::Result<()> {
@@ -661,45 +716,62 @@ impl ShutdownCoordinator {
             self.schedule_authorized_exit(app, 1);
             return;
         }
+        #[cfg(feature = "curated-extension-distribution")]
+        if let Some(extension_distribution) = self.take_extension_distribution() {
+            let deadline = shell.shutdown_deadline();
+            let coordinator = self.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                let extension_distribution_clean =
+                    shutdown_extension_distribution_until(extension_distribution, deadline);
+                if !extension_distribution_clean {
+                    diagnostic!(
+                        "shutdown: extension distribution worker termination was not proven"
+                    );
+                }
+                let completion = shell.shutdown_with_deadline(deadline);
+                let shell_outcome = shutdown_receive_outcome(completion.recv_until_deadline());
+                let outcome = if extension_distribution_clean {
+                    shell_outcome
+                } else {
+                    ShutdownOutcome::Unclean
+                };
+                coordinator.finish_requested_shutdown(app, outcome);
+            });
+            return;
+        }
+
         let completion = shell.shutdown();
         let coordinator = self.clone();
         // SQLite and the shell actor are blocking by design. Wait away from
         // the event loop, then schedule a permitted exit back onto it.
         tauri::async_runtime::spawn_blocking(move || {
             let outcome = shutdown_receive_outcome(completion.recv_until_deadline());
-            match outcome {
-                ShutdownOutcome::RetryableFailure => {
-                    // The shell has not started native teardown, so an
-                    // embedding host could safely retry. A user-originated
-                    // desktop close is nevertheless a terminal request: the
-                    // same end-to-end deadline must cover UI exit as well as
-                    // storage admission. Exit non-zero instead of leaving a
-                    // permanently unclosable window when the actor or
-                    // filesystem is stuck.
-                    diagnostic!(
-                        "shutdown: final session durability was not proven before the deadline; exiting unsuccessfully"
-                    );
-                }
-                ShutdownOutcome::Clean => {}
-                ShutdownOutcome::Unclean => {
-                    // The actor may be dead or native teardown may already be
-                    // partial, so resuming is unsafe. A non-zero terminal
-                    // status prevents supervisors and tests from recording
-                    // private-data cleanup as clean.
-                    diagnostic!(
-                        "shutdown: clean completion was not proven; exiting unsuccessfully"
-                    );
-                }
-            }
-            // Startup admission failure is sticky. Even a subsequently clean
-            // shell/store teardown must never turn a failed initialization
-            // into a successful process status.
-            let exit_code = coordinated_exit_code(
-                outcome,
-                coordinator.terminal_failure.load(Ordering::Acquire),
-            );
-            coordinator.schedule_authorized_exit(app, exit_code);
+            coordinator.finish_requested_shutdown(app, outcome);
         });
+    }
+
+    fn finish_requested_shutdown(&self, app: tauri::AppHandle, outcome: ShutdownOutcome) {
+        match outcome {
+            ShutdownOutcome::RetryableFailure => {
+                // The shell has not started native teardown, so an embedding
+                // host could safely retry. A desktop close is terminal: exit
+                // non-zero instead of leaving an unclosable process.
+                diagnostic!(
+                    "shutdown: final session durability was not proven before the deadline; exiting unsuccessfully"
+                );
+            }
+            ShutdownOutcome::Clean => {}
+            ShutdownOutcome::Unclean => {
+                // The actor may be dead or native teardown may already be
+                // partial, so resuming is unsafe.
+                diagnostic!("shutdown: clean completion was not proven; exiting unsuccessfully");
+            }
+        }
+        // Startup admission failure is sticky. Even a subsequently clean
+        // shell/store teardown cannot turn failed initialization successful.
+        let exit_code =
+            coordinated_exit_code(outcome, self.terminal_failure.load(Ordering::Acquire));
+        self.schedule_authorized_exit(app, exit_code);
     }
 
     fn request_terminal_startup_failure(
@@ -792,6 +864,21 @@ impl ShutdownCoordinator {
             write_diagnostic(format_args!(
                 "security: hard-exit watchdog was not prepared; requesting immediate unsuccessful event-loop exit"
             ));
+        }
+        #[cfg(feature = "curated-extension-distribution")]
+        if let Some(extension_distribution) = self.take_extension_distribution() {
+            let coordinator = self.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                let now = std::time::Instant::now();
+                let deadline = now.checked_add(PRE_SHELL_CLEANUP_TIMEOUT).unwrap_or(now);
+                if !shutdown_extension_distribution_until(extension_distribution, deadline) {
+                    diagnostic!(
+                        "security: extension distribution worker termination was not proven after native failure"
+                    );
+                }
+                coordinator.schedule_authorized_exit(app, 1);
+            });
+            return;
         }
         self.schedule_authorized_exit(app, 1);
     }
@@ -4100,6 +4187,28 @@ pub fn run() {
                 );
                 return Err(error.into());
             }
+            #[cfg(feature = "curated-extension-distribution")]
+            if let Some(extension_distribution) =
+                extension_distribution::launch(shell.callback_handle())?
+            {
+                if let Err(extension_distribution) =
+                    shutdown.try_install_extension_distribution(extension_distribution)
+                {
+                    let now = std::time::Instant::now();
+                    let deadline = now
+                        .checked_add(PRE_SHELL_CLEANUP_TIMEOUT)
+                        .unwrap_or(now);
+                    if !shutdown_extension_distribution_until(extension_distribution, deadline) {
+                        write_diagnostic(format_args!(
+                            "startup: refused extension distribution worker cleanup was not proven"
+                        ));
+                    }
+                    return Err(std::io::Error::other(
+                        "terminal shutdown overtook extension distribution ownership",
+                    )
+                    .into());
+                }
+            }
             if !startup_engine.transfer_to(&engine) {
                 return Err(std::io::Error::other(
                     "startup engine ownership did not transfer to the shell",
@@ -5761,6 +5870,55 @@ mod tests {
             !production.contains("std::process::exit(70)"),
             "terminal native failures must preserve App/run_return finalization"
         );
+    }
+
+    #[cfg(feature = "curated-extension-distribution")]
+    #[test]
+    fn curated_distribution_is_owned_before_admission_and_stops_before_shell_shutdown() {
+        let source = include_str!("lib.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("desktop production source");
+        let request = production
+            .split("fn request(&self, app: tauri::AppHandle, shell: Handle)")
+            .nth(1)
+            .and_then(|body| body.split("fn finish_requested_shutdown").next())
+            .expect("bounded terminal request");
+        let take = request
+            .find("self.take_extension_distribution()")
+            .expect("unique distribution owner take");
+        let deadline = request
+            .find("shell.shutdown_deadline()")
+            .expect("shared shutdown deadline");
+        let updater_shutdown = request
+            .find("shutdown_extension_distribution_until(extension_distribution, deadline)")
+            .expect("bounded distribution shutdown");
+        let shell_shutdown = request
+            .find("shell.shutdown_with_deadline(deadline)")
+            .expect("Shell shutdown under the same deadline");
+        assert!(
+            take < deadline && deadline < updater_shutdown && updater_shutdown < shell_shutdown
+        );
+
+        let setup = production
+            .split(".setup(move |app| {")
+            .nth(1)
+            .and_then(|body| body.split(".build(tauri::generate_context!())").next())
+            .expect("bounded desktop setup hook");
+        let shell_owner = setup
+            .find("if !app.manage(shell.clone())")
+            .expect("published suspended Shell owner");
+        let launch = setup
+            .find("extension_distribution::launch(shell.callback_handle())")
+            .expect("product worker launch");
+        let install = setup
+            .find("shutdown.try_install_extension_distribution")
+            .expect("coordinator ownership transfer");
+        let admission = setup
+            .find("shutdown.try_admit_shell(&shell)")
+            .expect("Shell startup admission");
+        assert!(shell_owner < launch && launch < install && install < admission);
     }
 
     #[test]
