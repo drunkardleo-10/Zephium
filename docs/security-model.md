@@ -775,7 +775,13 @@ extensions.
 
 The distribution coordinator is a one-run, one-request-at-a-time state
 machine. Network execution talks to Shell only through non-blocking move-only
-submission callbacks. The service drops the admitted request's exact byte
+submission callbacks. The Shell ingress is an opaque shared one-shot solely so
+its cloneable command vocabulary cannot duplicate move-only authority. Only the
+first actor consumer can extract the request; later copies are inert. Refusal
+before mailbox admission drops the callback without claiming it, while an
+admitted command receives an explicit unavailable or failed-closed settlement
+if Shell cannot reach the lifecycle. Product callbacks are invoked outside the
+one-shot lock and panic-contained. The service drops the admitted request's exact byte
 charge before invoking settlement, and the coordinator never fetches a later
 package before observing that settlement. Only one exact retry follows a
 completed outcome-unknown result. A missing or late accepted callback is not a

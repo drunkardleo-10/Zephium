@@ -40,6 +40,16 @@ type HeldExtensionManagementCatalog =
 type HeldExtensionRuntimeGrant = zephium_core::ports::extensions::ExtensionRuntimeGrantCallback;
 type HeldExtensionRepositoryMaintenance =
     zephium_core::ports::extensions::ExtensionRepositoryMaintenanceCallback;
+type HeldAcquiredPackage = (
+    zephium_core::ports::extensions::ExtensionAcquiredPackageProvisioningRequest,
+    std::time::Instant,
+    zephium_core::ports::extensions::ExtensionAcquiredPackageProvisioningCallback,
+);
+type HeldAcquiredCatalog = (
+    zephium_core::ports::extensions::ExtensionAcquiredCatalogActivationRequest,
+    std::time::Instant,
+    zephium_core::ports::extensions::ExtensionAcquiredCatalogActivationCallback,
+);
 
 pub(crate) struct ImmediateAllowAllCompiler;
 
@@ -166,6 +176,9 @@ pub(super) struct FakeExtensionLifecycleState {
     pub(super) panic_after_retirement_continuation: std::sync::atomic::AtomicBool,
     pub(super) management_admission:
         Mutex<Option<zephium_core::ports::extensions::ExtensionManagementAdmission>>,
+    pub(super) acquired_package_calls: Mutex<Vec<HeldAcquiredPackage>>,
+    pub(super) acquired_catalog_calls: Mutex<Vec<HeldAcquiredCatalog>>,
+    pub(super) panic_on_acquired_distribution: std::sync::atomic::AtomicBool,
     pub(super) management_catalog_admission:
         Mutex<Option<zephium_core::ports::extensions::ExtensionManagementCatalogAdmission>>,
     pub(super) management_catalog_calls: Mutex<Vec<(ProfileId, std::time::Instant)>>,
@@ -268,6 +281,68 @@ impl zephium_core::ports::extensions::ExtensionServiceLifecycle for FakeExtensio
                     zephium_core::ports::extensions::ExtensionActiveProfiles::EMPTY,
                 ),
             )
+    }
+
+    fn begin_provision_acquired_package(
+        &mut self,
+        request: zephium_core::ports::extensions::ExtensionAcquiredPackageProvisioningRequest,
+        deadline: std::time::Instant,
+        done: zephium_core::ports::extensions::ExtensionAcquiredPackageProvisioningCallback,
+    ) -> zephium_core::ports::extensions::ExtensionManagementAdmission {
+        assert!(
+            !self
+                .state
+                .panic_on_acquired_distribution
+                .load(std::sync::atomic::Ordering::Acquire),
+            "injected acquired-package distribution panic"
+        );
+        let admission = self
+            .state
+            .management_admission
+            .lock()
+            .unwrap()
+            .unwrap_or(zephium_core::ports::extensions::ExtensionManagementAdmission::Accepted);
+        if admission == zephium_core::ports::extensions::ExtensionManagementAdmission::Accepted {
+            self.state
+                .acquired_package_calls
+                .lock()
+                .unwrap()
+                .push((request, deadline, done));
+        } else {
+            drop((request, done));
+        }
+        admission
+    }
+
+    fn begin_activate_acquired_catalog(
+        &mut self,
+        request: zephium_core::ports::extensions::ExtensionAcquiredCatalogActivationRequest,
+        deadline: std::time::Instant,
+        done: zephium_core::ports::extensions::ExtensionAcquiredCatalogActivationCallback,
+    ) -> zephium_core::ports::extensions::ExtensionManagementAdmission {
+        assert!(
+            !self
+                .state
+                .panic_on_acquired_distribution
+                .load(std::sync::atomic::Ordering::Acquire),
+            "injected acquired-catalog distribution panic"
+        );
+        let admission = self
+            .state
+            .management_admission
+            .lock()
+            .unwrap()
+            .unwrap_or(zephium_core::ports::extensions::ExtensionManagementAdmission::Accepted);
+        if admission == zephium_core::ports::extensions::ExtensionManagementAdmission::Accepted {
+            self.state
+                .acquired_catalog_calls
+                .lock()
+                .unwrap()
+                .push((request, deadline, done));
+        } else {
+            drop((request, done));
+        }
+        admission
     }
 
     fn with_profile_retired_until(
@@ -1845,6 +1920,7 @@ mod extension_actions;
 mod extension_browser_requests;
 mod extension_browser_surface;
 mod extension_compatibility_broker;
+mod extension_distribution;
 mod extension_repository_maintenance;
 mod extension_runtime_grants;
 mod favicons;

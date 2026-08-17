@@ -8,6 +8,7 @@ mod extension_actions;
 mod extension_browser_requests;
 mod extension_browser_surface;
 mod extension_compatibility_broker;
+mod extension_distribution;
 mod extension_management;
 mod extension_repository_maintenance;
 mod extension_runtime_grants;
@@ -672,6 +673,12 @@ impl Shell {
             } => self.settle_extension_runtime_grant(runtime, request, *settlement),
             Command::ExtensionRepositoryMaintenanceSettled(outcome) => {
                 self.settle_extension_repository_maintenance(outcome)
+            }
+            Command::ProvisionAcquiredExtensionPackage(submission) => {
+                self.provision_acquired_extension_package(submission)
+            }
+            Command::ActivateAcquiredExtensionCatalog(submission) => {
+                self.activate_acquired_extension_catalog(submission)
             }
             Command::Search(query) => self.search(&query),
             Command::OpenUrl(input) => {

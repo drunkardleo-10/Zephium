@@ -1,8 +1,13 @@
 use super::*;
 use zephium_core::blocker::ContentPolicyGeneration;
+use zephium_core::extensions::{ExtensionPackageKey, ExtensionRuntimeBackendTarget};
 use zephium_core::ids::{ItemId, ProfileId};
 use zephium_core::ports::engine::EngineEvent;
-use zephium_core::ports::extensions::{ExtensionServiceLifecycle, ExtensionServiceShutdownOutcome};
+use zephium_core::ports::extensions::{
+    ExtensionAcquiredCatalogActivationRequest, ExtensionAcquiredPackageProvisioningOutcome,
+    ExtensionAcquiredPackageProvisioningRequest, ExtensionAcquiredRuntimeSelection,
+    ExtensionManagementAdmission, ExtensionServiceLifecycle, ExtensionServiceShutdownOutcome,
+};
 
 use crate::shell::tests::{FakeChrome, FakeEngine, FakeStore, ImmediateAllowAllCompiler};
 
@@ -96,6 +101,97 @@ impl ExtensionServiceLifecycle for TerminalStartupProbeLifecycle {
 fn lifecycle_probe() -> (ExtensionLifecycle, Arc<LifecycleProbe>) {
     let probe = Arc::new(LifecycleProbe::default());
     (Box::new(ProbeLifecycle(Arc::clone(&probe))), probe)
+}
+
+fn acquired_package_request() -> ExtensionAcquiredPackageProvisioningRequest {
+    ExtensionAcquiredPackageProvisioningRequest::new(
+        vec![1],
+        ExtensionPackageKey::from_bytes([7; 32]),
+        ExtensionRuntimeBackendTarget::MacosNative,
+        vec![2],
+        vec![3],
+    )
+    .unwrap()
+}
+
+fn acquired_catalog_request() -> ExtensionAcquiredCatalogActivationRequest {
+    ExtensionAcquiredCatalogActivationRequest::new(
+        vec![1],
+        vec![ExtensionAcquiredRuntimeSelection::new(
+            ExtensionPackageKey::from_bytes([7; 32]),
+            ExtensionRuntimeBackendTarget::MacosNative,
+        )],
+    )
+    .unwrap()
+}
+
+#[test]
+fn acquired_distribution_ingress_transfers_callback_only_after_queue_admission() {
+    let queue = CommandQueue::new();
+    let handle = Handle::new(queue.clone());
+    let callback = handle.callback_handle();
+    let (package_done, package_outcome) = std::sync::mpsc::sync_channel(1);
+
+    assert_eq!(
+        callback.begin_provision_acquired_extension_package(
+            acquired_package_request(),
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+            Box::new(move |outcome| {
+                package_done.send(outcome).unwrap();
+            }),
+        ),
+        ExtensionManagementAdmission::Accepted
+    );
+    finish_unprocessed_command(queue.recv().unwrap(), ShutdownOutcome::Unclean);
+    assert_eq!(
+        package_outcome.recv().unwrap(),
+        ExtensionAcquiredPackageProvisioningOutcome::Unavailable
+    );
+
+    let (catalog_done, catalog_outcome) = std::sync::mpsc::sync_channel(1);
+    assert_eq!(
+        callback.begin_activate_acquired_extension_catalog(
+            acquired_catalog_request(),
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+            Box::new(move |outcome| {
+                catalog_done.send(outcome).unwrap();
+            }),
+        ),
+        ExtensionManagementAdmission::Accepted
+    );
+    finish_unprocessed_command(queue.recv().unwrap(), ShutdownOutcome::Unclean);
+    assert_eq!(
+        catalog_outcome.recv().unwrap(),
+        zephium_core::ports::extensions::ExtensionAcquiredCatalogActivationOutcome::Unavailable
+    );
+}
+
+#[test]
+fn acquired_distribution_ingress_refusal_does_not_claim_callback_ownership() {
+    let queue = CommandQueue::new();
+    let handle = Handle::new(queue.clone());
+    let callback = handle.callback_handle();
+    let (shutdown_ack, _shutdown_done) = std::sync::mpsc::sync_channel(1);
+    assert!(queue
+        .try_push(Command::Shutdown {
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(1),
+            ack: shutdown_ack,
+        })
+        .is_ok());
+    let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let callback_called = Arc::clone(&called);
+
+    assert_eq!(
+        callback.begin_provision_acquired_extension_package(
+            acquired_package_request(),
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+            Box::new(move |_| {
+                callback_called.store(true, std::sync::atomic::Ordering::Release);
+            }),
+        ),
+        ExtensionManagementAdmission::Unavailable
+    );
+    assert!(!called.load(std::sync::atomic::Ordering::Acquire));
 }
 
 fn spawn_with_test_workers(

@@ -25,7 +25,8 @@ pub use actor::{
     FocusedContentPolicyStatusRequest, Handle, ShutdownRequest, SpawnError, SpawnFailure,
 };
 pub use api::{
-    ChromePresentation, ChromePresentationCallback, ChromePresentationDispatch, Command,
+    AcquiredExtensionCatalogSubmission, AcquiredExtensionPackageSubmission, ChromePresentation,
+    ChromePresentationCallback, ChromePresentationDispatch, Command,
     ContentPolicyStatusQueryOutcome, EmitFn, ExtensionLifecycle, PagePermissionPromptDecision,
     PresentationChrome, SharedBlocker, SharedChrome, SharedEngine, SharedStore,
     ShellTerminalFailure, ShellTerminalFailureCallback, ShutdownOutcome,

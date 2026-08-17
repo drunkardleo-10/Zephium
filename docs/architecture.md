@@ -876,10 +876,17 @@ callback can reenter, so retry and forward progress cannot overlap owned CRX
 buffers. Dropping the async run during an accepted but unsettled callback also
 quarantines; dropping it during network acquisition safely releases the
 single-flight slot. Complete activation remains source-free and occurs only
-after every selected row settles. There is still no product endpoint/configuration or
-desktop scheduling adapter, and the desktop has no dependency on this client,
-so the coordinator alone performs no I/O and supplies neither package bytes
-nor network authority to an ordinary build.
+after every selected row settles. The application actor now provides the
+non-blocking end of that port: an opaque shared one-shot envelope moves each
+bounded request through the existing Shell mailbox, Shell consumes it exactly
+once, and a shared settlement cell preserves exactly-once completion across
+service refusal or boundary panic. Network work and package parsing never run
+on Shell, and the mutable lifecycle owner never crosses an await. Mailbox
+refusal does not claim callback ownership; an already-admitted command drained
+during terminal shutdown settles unavailable rather than disappearing. There
+is still no product endpoint/configuration or desktop scheduler, and the
+desktop has no dependency on this client, so this bridge performs no I/O and
+supplies neither package bytes nor network authority to an ordinary build.
 
 The redirect-free fixed-origin HTTPS boundary shared with the blocker lives in
 `zephium-update-transport`. It accepts only plain-ASCII paths below exact HTTPS
@@ -910,8 +917,8 @@ generation-bound service mutation, and native settlement; absent, stale,
 over-capacity, or unavailable paths deny rather than grant. This extension
 grant broker is distinct from page-origin permission events, whose general
 Shell policy remains unfinished. Remaining release gaps include product-sealed
-distribution endpoints and the Shell scheduling adapter that starts and
-projects the serialized coordinator, the complete permission and API matrix,
+distribution endpoints and the background scheduler/status adapter that starts
+and projects the serialized coordinator, the complete permission and API matrix,
 quotas,
 complete cross-process release-build resource evidence, and endurance. Older admitted
 macOS versions and Linux require a Zephium

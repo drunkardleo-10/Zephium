@@ -21,6 +21,11 @@ use crate::{
     SharedChrome, SharedEngine, SharedStore, ShellTerminalFailureCallback, ShutdownOutcome,
 };
 use zephium_core::ids::ProfileId;
+use zephium_core::ports::extensions::{
+    ExtensionAcquiredCatalogActivationCallback, ExtensionAcquiredCatalogActivationRequest,
+    ExtensionAcquiredPackageProvisioningCallback, ExtensionAcquiredPackageProvisioningRequest,
+    ExtensionManagementAdmission,
+};
 use zephium_ipc::BlockerStatusView;
 
 const FAILED_SPAWN_CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
@@ -500,6 +505,57 @@ impl CallbackHandle {
         };
         CommandQueue { inner }.try_push(command).is_ok()
     }
+
+    /// Transfers one authenticated acquired package into the Shell actor
+    /// without blocking the caller or exposing the Shell-owned lifecycle.
+    ///
+    /// `Accepted` means the actor owns both the request and callback. Queue
+    /// refusal consumes both without invoking the callback, matching the
+    /// extension-distribution port contract.
+    #[must_use = "admission determines acquired-package callback ownership"]
+    pub fn begin_provision_acquired_extension_package(
+        &self,
+        request: ExtensionAcquiredPackageProvisioningRequest,
+        deadline: std::time::Instant,
+        done: ExtensionAcquiredPackageProvisioningCallback,
+    ) -> ExtensionManagementAdmission {
+        let Some(inner) = self.queue.upgrade() else {
+            drop((request, done));
+            return ExtensionManagementAdmission::Unavailable;
+        };
+        let command = Command::ProvisionAcquiredExtensionPackage(
+            crate::api::AcquiredExtensionPackageSubmission::new(request, deadline, done),
+        );
+        match (CommandQueue { inner }).try_push(command) {
+            Ok(()) => ExtensionManagementAdmission::Accepted,
+            Err(TryPushError::Full(_) | TryPushError::Sealed(_) | TryPushError::Closed(_)) => {
+                ExtensionManagementAdmission::Unavailable
+            }
+        }
+    }
+
+    /// Transfers one source-free catalog activation into the Shell actor.
+    #[must_use = "admission determines acquired-catalog callback ownership"]
+    pub fn begin_activate_acquired_extension_catalog(
+        &self,
+        request: ExtensionAcquiredCatalogActivationRequest,
+        deadline: std::time::Instant,
+        done: ExtensionAcquiredCatalogActivationCallback,
+    ) -> ExtensionManagementAdmission {
+        let Some(inner) = self.queue.upgrade() else {
+            drop((request, done));
+            return ExtensionManagementAdmission::Unavailable;
+        };
+        let command = Command::ActivateAcquiredExtensionCatalog(
+            crate::api::AcquiredExtensionCatalogSubmission::new(request, deadline, done),
+        );
+        match (CommandQueue { inner }).try_push(command) {
+            Ok(()) => ExtensionManagementAdmission::Accepted,
+            Err(TryPushError::Full(_) | TryPushError::Sealed(_) | TryPushError::Closed(_)) => {
+                ExtensionManagementAdmission::Unavailable
+            }
+        }
+    }
 }
 
 impl Clone for Handle {
@@ -682,6 +738,12 @@ fn finish_unprocessed_command(command: Command, outcome: ShutdownOutcome) {
         }
         Command::FocusedContentPolicyStatus { reply } => {
             let _ = reply.send(BlockerStatusView::unavailable());
+        }
+        Command::ProvisionAcquiredExtensionPackage(submission) => {
+            submission.settle_unavailable();
+        }
+        Command::ActivateAcquiredExtensionCatalog(submission) => {
+            submission.settle_unavailable();
         }
         _ => {}
     }

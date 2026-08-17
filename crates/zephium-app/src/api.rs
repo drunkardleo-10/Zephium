@@ -1,7 +1,8 @@
 //! Stable application-shell protocol exposed to the desktop composition root.
 
+use std::fmt;
 use std::sync::mpsc::SyncSender;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use zephium_core::blocker::{ContentPolicyGeneration, ProfileContentPolicyStatus};
 use zephium_core::extensions::{
@@ -15,6 +16,9 @@ use zephium_core::ports::chrome::Chrome as GeometryChrome;
 use zephium_core::ports::engine::{DiscardProbeId, Engine, EngineEvent, NavigationPresentationId};
 use zephium_core::ports::extensions::ExtensionServiceLifecycle;
 use zephium_core::ports::extensions::{
+    ExtensionAcquiredCatalogActivationCallback, ExtensionAcquiredCatalogActivationOutcome,
+    ExtensionAcquiredCatalogActivationRequest, ExtensionAcquiredPackageProvisioningCallback,
+    ExtensionAcquiredPackageProvisioningOutcome, ExtensionAcquiredPackageProvisioningRequest,
     ExtensionInstallOutcome, ExtensionManagementCatalogOutcome, ExtensionManagementSettlement,
     ExtensionRepositoryMaintenanceOutcome, ExtensionRuntimeGrantOutcome,
     ExtensionRuntimeGrantRequestId, ExtensionSetEnabledOutcome, ExtensionUninstallOutcome,
@@ -27,6 +31,141 @@ use zephium_core::split::Axis;
 use zephium_ipc::{BlockerStatusView, Projection, TabView};
 
 use crate::store_reads::StoreReadResult;
+
+struct AcquiredPackageSubmissionInner {
+    request: ExtensionAcquiredPackageProvisioningRequest,
+    deadline: std::time::Instant,
+    done: ExtensionAcquiredPackageProvisioningCallback,
+}
+
+/// Opaque, exactly-once transfer of one authenticated acquired package into
+/// the Shell-owned extension lifecycle.
+///
+/// Cloning shares the same one-shot slot solely because [`Command`] is
+/// cloneable for post-shutdown recovery. Product composition cannot inspect,
+/// replace, or duplicate the move-only package bytes.
+#[derive(Clone)]
+pub struct AcquiredExtensionPackageSubmission {
+    inner: Arc<Mutex<Option<AcquiredPackageSubmissionInner>>>,
+}
+
+impl AcquiredExtensionPackageSubmission {
+    pub(crate) fn new(
+        request: ExtensionAcquiredPackageProvisioningRequest,
+        deadline: std::time::Instant,
+        done: ExtensionAcquiredPackageProvisioningCallback,
+    ) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(Some(AcquiredPackageSubmissionInner {
+                request,
+                deadline,
+                done,
+            }))),
+        }
+    }
+
+    pub(crate) fn take(
+        &self,
+    ) -> Option<(
+        ExtensionAcquiredPackageProvisioningRequest,
+        std::time::Instant,
+        ExtensionAcquiredPackageProvisioningCallback,
+    )> {
+        let inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()?;
+        Some((inner.request, inner.deadline, inner.done))
+    }
+
+    pub(crate) fn settle_unavailable(&self) {
+        if let Some((_request, _deadline, done)) = self.take() {
+            settle_callback(
+                done,
+                ExtensionAcquiredPackageProvisioningOutcome::Unavailable,
+            );
+        }
+    }
+}
+
+impl fmt::Debug for AcquiredExtensionPackageSubmission {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AcquiredExtensionPackageSubmission")
+            .field(
+                "pending",
+                &self.inner.lock().map_or(true, |slot| slot.is_some()),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+struct AcquiredCatalogSubmissionInner {
+    request: ExtensionAcquiredCatalogActivationRequest,
+    deadline: std::time::Instant,
+    done: ExtensionAcquiredCatalogActivationCallback,
+}
+
+/// Opaque, exactly-once transfer of one source-free catalog activation into
+/// the Shell-owned extension lifecycle.
+#[derive(Clone)]
+pub struct AcquiredExtensionCatalogSubmission {
+    inner: Arc<Mutex<Option<AcquiredCatalogSubmissionInner>>>,
+}
+
+impl AcquiredExtensionCatalogSubmission {
+    pub(crate) fn new(
+        request: ExtensionAcquiredCatalogActivationRequest,
+        deadline: std::time::Instant,
+        done: ExtensionAcquiredCatalogActivationCallback,
+    ) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(Some(AcquiredCatalogSubmissionInner {
+                request,
+                deadline,
+                done,
+            }))),
+        }
+    }
+
+    pub(crate) fn take(
+        &self,
+    ) -> Option<(
+        ExtensionAcquiredCatalogActivationRequest,
+        std::time::Instant,
+        ExtensionAcquiredCatalogActivationCallback,
+    )> {
+        let inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()?;
+        Some((inner.request, inner.deadline, inner.done))
+    }
+
+    pub(crate) fn settle_unavailable(&self) {
+        if let Some((_request, _deadline, done)) = self.take() {
+            settle_callback(done, ExtensionAcquiredCatalogActivationOutcome::Unavailable);
+        }
+    }
+}
+
+impl fmt::Debug for AcquiredExtensionCatalogSubmission {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AcquiredExtensionCatalogSubmission")
+            .field(
+                "pending",
+                &self.inner.lock().map_or(true, |slot| slot.is_some()),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+fn settle_callback<T>(done: Box<dyn FnOnce(T) + Send>, outcome: T) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| done(outcome)));
+}
 
 pub type SharedEngine = Arc<dyn Engine + Send + Sync>;
 pub type SharedStore = Arc<dyn Store + Send + Sync>;
@@ -61,6 +200,8 @@ pub enum ShellTerminalFailure {
     ExtensionProfileRetirementLifecycleMissing,
     ExtensionProfileRetirementContractViolated,
     ExtensionProfileDeletionInvariant,
+    ExtensionDistributionLifecyclePanicked,
+    ExtensionDistributionLifecycleMissing,
     ActorExitedUnexpectedly,
 }
 
@@ -87,6 +228,12 @@ impl std::fmt::Display for ShellTerminalFailure {
             }
             Self::ExtensionProfileDeletionInvariant => {
                 "profile deletion violated a post-retirement invariant"
+            }
+            Self::ExtensionDistributionLifecyclePanicked => {
+                "extension distribution lifecycle panicked"
+            }
+            Self::ExtensionDistributionLifecycleMissing => {
+                "extension distribution lifecycle owner is missing"
             }
             Self::ActorExitedUnexpectedly => "application shell actor exited unexpectedly",
         })
@@ -325,6 +472,12 @@ pub enum Command {
     /// Internal exactly-once callback from one bounded repository-maintenance
     /// turn. It is never accepted through public operation dispatch.
     ExtensionRepositoryMaintenanceSettled(ExtensionRepositoryMaintenanceOutcome),
+    /// Internal move-only package handoff from the product distribution
+    /// worker. Public operation dispatch never admits this command.
+    ProvisionAcquiredExtensionPackage(AcquiredExtensionPackageSubmission),
+    /// Internal source-free catalog activation handoff from the product
+    /// distribution worker. Public operation dispatch never admits it.
+    ActivateAcquiredExtensionCatalog(AcquiredExtensionCatalogSubmission),
     Search(String),
     OpenUrl(String),
     SetAppSetting {
