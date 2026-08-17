@@ -13,6 +13,7 @@ use std::io::{Read as _, Write as _};
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 
+use serde::Deserialize;
 use serde_json::{Map, Value};
 use sha2::{Digest as _, Sha256};
 use zephium_extension_package::{
@@ -106,6 +107,63 @@ struct TransformPlan {
     empty_favicon: bool,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompatibilityReceipt {
+    schema: u32,
+    kind: String,
+    target: String,
+    product_authority: bool,
+    source: CompatibilityIdentity,
+    output: CompatibilityIdentity,
+    adaptations: Vec<String>,
+    surfaces: CompatibilitySurfaces,
+    limitations: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompatibilityIdentity {
+    manifest_sha256: String,
+    tree_sha256: String,
+    tree_index_sha256: String,
+    files: usize,
+    bytes: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompatibilitySurfaces {
+    background: String,
+    isolated_content_scripts: usize,
+    action_popup: String,
+    main_world_content_scripts: String,
+    omitted_file_content_scripts: usize,
+    removed_file_match_patterns: usize,
+    same_document_navigation_routes: usize,
+    #[serde(default)]
+    history_search: Option<String>,
+    #[serde(default)]
+    extension_pages: Option<usize>,
+    #[serde(default)]
+    bookmarks: Option<String>,
+    #[serde(default)]
+    favicon: Option<String>,
+}
+
+pub(crate) struct ValidatedCompatibilityReleaseInput {
+    pub(crate) extension_root: PathBuf,
+    pub(crate) tree_index: PathBuf,
+    pub(crate) receipt_bytes: Vec<u8>,
+    pub(crate) target: String,
+    pub(crate) receipt_sha256: [u8; 32],
+    pub(crate) output_manifest_sha256: String,
+    pub(crate) output_tree_sha256: String,
+    pub(crate) output_tree_index_sha256: String,
+    pub(crate) output_files: usize,
+    pub(crate) output_bytes: u64,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct ContentScriptAdaptation {
     isolated: usize,
@@ -140,6 +198,231 @@ pub(crate) fn materialize_brokered(
         output,
         ArtifactTarget::NativeBrokeredV1,
     )
+}
+
+/// Reopens one non-authorizing compatibility artifact as an exact release
+/// preparation input. This validates and captures evidence only; it grants no
+/// catalog, signing, install, or runtime authority.
+pub(crate) fn validate_release_input(
+    root: &Path,
+) -> Result<ValidatedCompatibilityReleaseInput, String> {
+    let metadata = fs::symlink_metadata(root)
+        .map_err(|error| format!("cannot inspect compatibility release input: {error}"))?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err("compatibility release input is not an ordinary directory".into());
+    }
+    let root = root
+        .canonicalize()
+        .map_err(|error| format!("cannot canonicalize compatibility release input: {error}"))?;
+    let mut entries = fs::read_dir(&root)
+        .map_err(|error| format!("cannot enumerate compatibility release input: {error}"))?
+        .map(|entry| {
+            entry
+                .map_err(|error| format!("cannot enumerate compatibility entry: {error}"))
+                .and_then(|entry| {
+                    entry
+                        .file_name()
+                        .into_string()
+                        .map_err(|_| "compatibility release input has a non-UTF-8 entry".to_owned())
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    entries.sort_unstable();
+    if entries
+        != [
+            ARTIFACT_METADATA.to_owned(),
+            ARTIFACT_TREE_INDEX.to_owned(),
+            ARTIFACT_EXTENSION.to_owned(),
+        ]
+    {
+        return Err("compatibility release input inventory drifted".into());
+    }
+
+    let receipt_bytes = read_ordinary_bounded_file(
+        &root.join(ARTIFACT_METADATA),
+        BoundedJsonLimits::extension_manifest().max_bytes() as u64,
+        "compatibility receipt",
+    )?;
+    let bounded = parse_bounded_json(&receipt_bytes, BoundedJsonLimits::extension_manifest())
+        .map_err(|error| format!("compatibility receipt is invalid: {error}"))?;
+    let receipt: CompatibilityReceipt = serde_json::from_value(bounded.into_value())
+        .map_err(|error| format!("compatibility receipt contract is invalid: {error}"))?;
+    if receipt.schema != 1 || receipt.kind != ARTIFACT_KIND || receipt.product_authority {
+        return Err("compatibility receipt authority header drifted".into());
+    }
+    let target = match receipt.target.as_str() {
+        NATIVE_TARGET => ArtifactTarget::NativeV3,
+        BROKERED_TARGET => ArtifactTarget::NativeBrokeredV1,
+        _ => return Err("compatibility receipt authority header drifted".into()),
+    };
+    validate_compatibility_identity(&receipt.source, "source")?;
+    validate_compatibility_identity(&receipt.output, "output")?;
+    let (empty_bookmarks, empty_favicon) = validate_receipt_surfaces(&receipt.surfaces, target)?;
+    let (expected_adaptations, expected_limitations) =
+        receipt_contract(target, empty_bookmarks, empty_favicon);
+    if receipt.adaptations != expected_adaptations || receipt.limitations != expected_limitations {
+        return Err("compatibility receipt adaptation contract drifted".into());
+    }
+
+    let tree_index = root.join(ARTIFACT_TREE_INDEX);
+    let extension = root.join(ARTIFACT_EXTENSION);
+    let (extension_root, index) = extension_tree::verify_closed_tree(&extension, &tree_index)?;
+    if receipt.output.files != index.files().len()
+        || receipt.output.bytes != index.total_bytes()
+        || receipt.output.manifest_sha256 != lower_hex(index.manifest_sha256().as_bytes())
+        || receipt.output.tree_sha256 != lower_hex(index.tree_sha256().as_bytes())
+        || receipt.output.tree_index_sha256 != lower_hex(index.index_sha256().as_bytes())
+    {
+        return Err("compatibility receipt output identity drifted".into());
+    }
+    let receipt_sha256 = Sha256::digest(&receipt_bytes).into();
+    Ok(ValidatedCompatibilityReleaseInput {
+        extension_root,
+        tree_index,
+        receipt_bytes,
+        target: receipt.target,
+        receipt_sha256,
+        output_manifest_sha256: receipt.output.manifest_sha256,
+        output_tree_sha256: receipt.output.tree_sha256,
+        output_tree_index_sha256: receipt.output.tree_index_sha256,
+        output_files: receipt.output.files,
+        output_bytes: receipt.output.bytes,
+    })
+}
+
+fn validate_compatibility_identity(
+    identity: &CompatibilityIdentity,
+    description: &str,
+) -> Result<(), String> {
+    if identity.files == 0
+        || identity.files > MAX_EXTENSION_TREE_FILES
+        || identity.bytes == 0
+        || identity.bytes > MAX_EXTENSION_TREE_BYTES
+        || !is_lower_hex_digest(&identity.manifest_sha256)
+        || !is_lower_hex_digest(&identity.tree_sha256)
+        || !is_lower_hex_digest(&identity.tree_index_sha256)
+    {
+        return Err(format!(
+            "compatibility receipt {description} identity is invalid"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_receipt_surfaces(
+    surfaces: &CompatibilitySurfaces,
+    target: ArtifactTarget,
+) -> Result<(bool, bool), String> {
+    let background_valid = matches!(
+        surfaces.background.as_str(),
+        "absent" | "classic-wrapper" | "module-wrapper"
+    );
+    let popup_valid = matches!(
+        surfaces.action_popup.as_str(),
+        "absent" | "explicit-head-injected"
+    );
+    if !background_valid
+        || !popup_valid
+        || surfaces.main_world_content_scripts != "unchanged"
+        || surfaces.isolated_content_scripts > MAX_EXTENSION_TREE_FILES
+        || surfaces.omitted_file_content_scripts > MAX_EXTENSION_TREE_FILES
+        || surfaces.removed_file_match_patterns > MAX_EXTENSION_TREE_FILES
+        || surfaces.same_document_navigation_routes > MAX_EXTENSION_TREE_FILES
+    {
+        return Err("compatibility receipt surfaces are invalid".into());
+    }
+    match target {
+        ArtifactTarget::NativeV3 => {
+            if surfaces.history_search.is_some()
+                || surfaces.extension_pages.is_some()
+                || surfaces.bookmarks.is_some()
+                || surfaces.favicon.is_some()
+            {
+                return Err("native compatibility receipt declared brokered surfaces".into());
+            }
+            Ok((false, false))
+        }
+        ArtifactTarget::NativeBrokeredV1 => {
+            if surfaces.background == "absent"
+                || surfaces.history_search.as_deref() != Some("bounded-native-broker")
+                || !surfaces
+                    .extension_pages
+                    .is_some_and(|pages| (1..=MAX_EXTENSION_TREE_FILES).contains(&pages))
+            {
+                return Err("brokered compatibility receipt surfaces are invalid".into());
+            }
+            let empty_bookmarks = match surfaces.bookmarks.as_deref() {
+                None => false,
+                Some("empty-read-only") => true,
+                _ => return Err("compatibility receipt bookmark surface is invalid".into()),
+            };
+            let empty_favicon = match surfaces.favicon.as_deref() {
+                None => false,
+                Some("transparent-fallback") => true,
+                _ => return Err("compatibility receipt favicon surface is invalid".into()),
+            };
+            Ok((empty_bookmarks, empty_favicon))
+        }
+    }
+}
+
+fn receipt_contract(
+    target: ArtifactTarget,
+    empty_bookmarks: bool,
+    empty_favicon: bool,
+) -> (Vec<&'static str>, Vec<&'static str>) {
+    let mut adaptations = vec![
+        "native-api-identity-preservation-v1",
+        "catalog-update-event-stub-v1",
+        "file-scheme-content-script-omission-v1",
+        "same-document-web-navigation-endpoint-v1",
+    ];
+    let mut limitations = vec![
+        "not-a-product-package",
+        "catalog-update-events-owned-by-zephium",
+        "sandbox-pages-not-adapted",
+        "non-action-extension-pages-not-adapted",
+        "file-scheme-content-scripts-omitted",
+        "same-document-web-navigation-limited-to-injected-frames",
+        "history-state-navigation-requires-host-signal",
+    ];
+    if empty_bookmarks {
+        adaptations.push("empty-bookmarks-read-facade-v1");
+        limitations.extend([
+            "bookmarks-read-results-empty",
+            "bookmarks-events-registered-but-not-emitted",
+            "bookmarks-mutations-unsupported",
+        ]);
+    }
+    if empty_favicon {
+        adaptations.push("transparent-favicon-url-fallback-v1");
+        limitations.push("page-favicons-render-transparent");
+    }
+    if target.requires_history_broker() {
+        limitations.retain(|limitation| *limitation != "non-action-extension-pages-not-adapted");
+        adaptations.extend([
+            "extension-page-runtime-messaging-session-v1",
+            "bounded-history-search-broker-v1",
+        ]);
+        limitations.extend([
+            "extension-page-runtime-messaging-current-extension-only",
+            "extension-page-runtime-callback-errors-have-no-last-error",
+            "extension-page-runtime-messaging-requires-promise-session-storage",
+            "history-search-recent-100-only",
+            "history-text-search-limited-to-recent-results",
+            "history-events-registered-but-not-emitted",
+            "history-mutations-unsupported",
+            "native-messaging-fixed-internal-broker-only",
+        ]);
+    }
+    (adaptations, limitations)
+}
+
+fn is_lower_hex_digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn materialize_target(
@@ -236,48 +519,8 @@ fn materialize_target(
 
     let generated = extension_tree::build_tree_index(&staged_extension)?;
     write_new_file(staging.path(), ARTIFACT_TREE_INDEX, &generated.bytes)?;
-    let mut adaptations = vec![
-        "native-api-identity-preservation-v1",
-        "catalog-update-event-stub-v1",
-        "file-scheme-content-script-omission-v1",
-        "same-document-web-navigation-endpoint-v1",
-    ];
-    let mut limitations = vec![
-        "not-a-product-package",
-        "catalog-update-events-owned-by-zephium",
-        "sandbox-pages-not-adapted",
-        "non-action-extension-pages-not-adapted",
-        "file-scheme-content-scripts-omitted",
-        "same-document-web-navigation-limited-to-injected-frames",
-        "history-state-navigation-requires-host-signal",
-    ];
-    if plan.empty_bookmarks {
-        adaptations.push("empty-bookmarks-read-facade-v1");
-        limitations.extend([
-            "bookmarks-read-results-empty",
-            "bookmarks-events-registered-but-not-emitted",
-            "bookmarks-mutations-unsupported",
-        ]);
-    }
-    if plan.empty_favicon {
-        adaptations.push("transparent-favicon-url-fallback-v1");
-        limitations.push("page-favicons-render-transparent");
-    }
-    if plan.history_broker_search {
-        limitations.retain(|limitation| *limitation != "non-action-extension-pages-not-adapted");
-        adaptations.push("extension-page-runtime-messaging-session-v1");
-        adaptations.push("bounded-history-search-broker-v1");
-        limitations.extend([
-            "extension-page-runtime-messaging-current-extension-only",
-            "extension-page-runtime-callback-errors-have-no-last-error",
-            "extension-page-runtime-messaging-requires-promise-session-storage",
-            "history-search-recent-100-only",
-            "history-text-search-limited-to-recent-results",
-            "history-events-registered-but-not-emitted",
-            "history-mutations-unsupported",
-            "native-messaging-fixed-internal-broker-only",
-        ]);
-    }
+    let (adaptations, limitations) =
+        receipt_contract(target, plan.empty_bookmarks, plan.empty_favicon);
     let mut surfaces = serde_json::json!({
         "background": plan.worker.label(),
         "isolated_content_scripts": plan.isolated_content_scripts,
@@ -1205,6 +1448,33 @@ fn manifest_file(
     index
         .file(&path)
         .ok_or_else(|| "extension tree omitted manifest.json".into())
+}
+
+fn read_ordinary_bounded_file(
+    path: &Path,
+    max_bytes: u64,
+    description: &str,
+) -> Result<Vec<u8>, String> {
+    let path_metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("cannot inspect {description}: {error}"))?;
+    if !path_metadata.is_file() || path_metadata.file_type().is_symlink() {
+        return Err(format!("{description} is not an ordinary file"));
+    }
+    if path_metadata.len() == 0 || path_metadata.len() > max_bytes {
+        return Err(format!("{description} is not bounded"));
+    }
+    let capacity = usize::try_from(path_metadata.len())
+        .map_err(|_| format!("{description} does not fit this process"))?;
+    let mut bytes = Vec::with_capacity(capacity);
+    File::open(path)
+        .map_err(|error| format!("cannot open {description}: {error}"))?
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("cannot read {description}: {error}"))?;
+    if bytes.len() as u64 != path_metadata.len() {
+        return Err(format!("{description} changed while being read"));
+    }
+    Ok(bytes)
 }
 
 fn read_indexed_file(

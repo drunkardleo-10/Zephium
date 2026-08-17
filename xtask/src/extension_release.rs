@@ -32,6 +32,7 @@ const ARTIFACT_EXTENSION: &str = "extension";
 const ARTIFACT_TREE_INDEX: &str = "authenticated-extension-tree.json";
 const ARTIFACT_ARCHIVE: &str = "extension.zip";
 const ARTIFACT_METADATA: &str = "ZEPHIUM-RELEASE-ARCHIVE.json";
+const ARTIFACT_COMPATIBILITY_RECEIPT: &str = "ZEPHIUM-COMPATIBILITY.json";
 const INCOMPLETE_MARKER: &str = ".zephium-incomplete";
 const ZIP_COMPRESSION_LEVEL: i64 = 9;
 const REMOVABLE_STORE_METADATA: [&str; 2] = [
@@ -101,6 +102,21 @@ struct ReleaseArchiveEvidence {
     archive: ArchiveEvidence,
     signing_identity: SigningIdentityEvidence,
     manifest_rewrite: ManifestRewriteEvidence,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    compatibility: Option<CompatibilityReceiptEvidence>,
+}
+
+#[derive(Serialize)]
+struct CompatibilityReceiptEvidence {
+    binding: &'static str,
+    target: String,
+    bytes: u64,
+    sha256: String,
+    input_manifest_sha256: String,
+    input_tree_sha256: String,
+    input_tree_index_sha256: String,
+    input_files: usize,
+    input_bytes: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -137,7 +153,50 @@ pub(crate) fn prepare(
     public_key: &Path,
     output: &Path,
 ) -> Result<(), String> {
+    prepare_inner(extension, tree_index, public_key, output, None)
+}
+
+/// Prepares a deterministic CRX3 release archive from one exact
+/// non-authorizing compatibility artifact while preserving its receipt as a
+/// separately hashed release input. This still grants no product authority.
+pub(crate) fn prepare_compatibility(
+    compatibility_artifact: &Path,
+    public_key: &Path,
+    output: &Path,
+) -> Result<(), String> {
+    let compatibility =
+        crate::macos_extension_compatibility::validate_release_input(compatibility_artifact)?;
+    prepare_inner(
+        &compatibility.extension_root,
+        &compatibility.tree_index,
+        public_key,
+        output,
+        Some(&compatibility),
+    )
+}
+
+fn prepare_inner(
+    extension: &Path,
+    tree_index: &Path,
+    public_key: &Path,
+    output: &Path,
+    compatibility: Option<
+        &crate::macos_extension_compatibility::ValidatedCompatibilityReleaseInput,
+    >,
+) -> Result<(), String> {
     let (source_root, source_index) = extension_tree::verify_closed_tree(extension, tree_index)?;
+    if let Some(compatibility) = compatibility {
+        if compatibility.output_files != source_index.files().len()
+            || compatibility.output_bytes != source_index.total_bytes()
+            || compatibility.output_manifest_sha256
+                != lower_hex(source_index.manifest_sha256().as_bytes())
+            || compatibility.output_tree_sha256 != lower_hex(source_index.tree_sha256().as_bytes())
+            || compatibility.output_tree_index_sha256
+                != lower_hex(source_index.index_sha256().as_bytes())
+        {
+            return Err("compatibility receipt changed before release preparation".into());
+        }
+    }
     let final_output = absent_output_path(output)?;
     if final_output.starts_with(&source_root) {
         return Err("release archive may not be nested inside its source tree".into());
@@ -186,6 +245,13 @@ pub(crate) fn prepare(
 
     let generated = extension_tree::build_tree_index(&staged_extension)?;
     write_new_file(staging.path(), ARTIFACT_TREE_INDEX, &generated.bytes)?;
+    if let Some(compatibility) = compatibility {
+        write_new_file(
+            staging.path(),
+            ARTIFACT_COMPATIBILITY_RECEIPT,
+            &compatibility.receipt_bytes,
+        )?;
+    }
     let archive_path = staging.path().join(ARTIFACT_ARCHIVE);
     write_deterministic_zip(&staged_extension, &generated.parsed, &archive_path)?;
     let archive = read_regular_bounded(
@@ -233,21 +299,33 @@ pub(crate) fn prepare(
             update_url_removed: rewrite.update_url_removed,
             removed_store_metadata: removed_store_metadata.clone(),
         },
+        compatibility: compatibility.map(|compatibility| CompatibilityReceiptEvidence {
+            binding: "exact-non-authorizing-receipt-v1",
+            target: compatibility.target.clone(),
+            bytes: compatibility.receipt_bytes.len() as u64,
+            sha256: lower_hex(&compatibility.receipt_sha256),
+            input_manifest_sha256: compatibility.output_manifest_sha256.clone(),
+            input_tree_sha256: compatibility.output_tree_sha256.clone(),
+            input_tree_index_sha256: compatibility.output_tree_index_sha256.clone(),
+            input_files: compatibility.output_files,
+            input_bytes: compatibility.output_bytes,
+        }),
     };
     let evidence = serde_json::to_vec_pretty(&evidence)
         .map_err(|error| format!("cannot serialize release archive evidence: {error}"))?;
     write_new_file(staging.path(), ARTIFACT_METADATA, &evidence)?;
     sync_directory(staging.path())?;
 
-    publish_no_replace(staging, &final_output)?;
+    publish_no_replace(staging, &final_output, compatibility.is_some())?;
     println!(
-        "extension release archive prepared: extension_id={}; source_tree={}; output_tree={}; archive_bytes={}; archive_sha256={}; removed_store_metadata={}; output={}; signature_settled=false; catalog_bound=false; product_authority=false",
+        "extension release archive prepared: extension_id={}; source_tree={}; output_tree={}; archive_bytes={}; archive_sha256={}; removed_store_metadata={}; compatibility_receipt={}; output={}; signature_settled=false; catalog_bound=false; product_authority=false",
         manifest_key.extension_id(),
         lower_hex(source_index.tree_sha256().as_bytes()),
         lower_hex(generated.parsed.tree_sha256().as_bytes()),
         archive.len(),
         lower_hex(&archive_sha256),
         removed_store_metadata.len(),
+        if compatibility.is_some() { "bound" } else { "absent" },
         final_output.display(),
     );
     Ok(())
@@ -460,7 +538,11 @@ fn absent_output_path(output: &Path) -> Result<PathBuf, String> {
     Ok(output)
 }
 
-fn publish_no_replace(staging: tempfile::TempDir, output: &Path) -> Result<(), String> {
+fn publish_no_replace(
+    staging: tempfile::TempDir,
+    output: &Path,
+    compatibility_receipt: bool,
+) -> Result<(), String> {
     create_restricted_directory(output)
         .map_err(|error| format!("cannot reserve no-replace release archive output: {error}"))?;
     let marker = output.join(INCOMPLETE_MARKER);
@@ -477,12 +559,7 @@ fn publish_no_replace(staging: tempfile::TempDir, output: &Path) -> Result<(), S
         .map_err(|error| format!("cannot sync release publication marker: {error}"))?;
     sync_directory(output)?;
 
-    for name in [
-        ARTIFACT_EXTENSION,
-        ARTIFACT_TREE_INDEX,
-        ARTIFACT_ARCHIVE,
-        ARTIFACT_METADATA,
-    ] {
+    for name in [ARTIFACT_EXTENSION, ARTIFACT_TREE_INDEX, ARTIFACT_ARCHIVE] {
         fs::rename(staging.path().join(name), output.join(name)).map_err(|error| {
             format!(
                 "cannot publish release artifact component {name}; incomplete output retained at {}: {error}",
@@ -490,6 +567,28 @@ fn publish_no_replace(staging: tempfile::TempDir, output: &Path) -> Result<(), S
             )
         })?;
     }
+    if compatibility_receipt {
+        fs::rename(
+            staging.path().join(ARTIFACT_COMPATIBILITY_RECEIPT),
+            output.join(ARTIFACT_COMPATIBILITY_RECEIPT),
+        )
+        .map_err(|error| {
+            format!(
+                "cannot publish compatibility receipt; incomplete output retained at {}: {error}",
+                output.display()
+            )
+        })?;
+    }
+    fs::rename(
+        staging.path().join(ARTIFACT_METADATA),
+        output.join(ARTIFACT_METADATA),
+    )
+    .map_err(|error| {
+        format!(
+            "cannot publish release artifact metadata; incomplete output retained at {}: {error}",
+            output.display()
+        )
+    })?;
     sync_directory(output)?;
     fs::remove_file(&marker).map_err(|error| {
         format!(
@@ -647,6 +746,37 @@ mod tests {
         spki
     }
 
+    fn compatibility_fixture(root: &Path) -> PathBuf {
+        fs::create_dir_all(root).unwrap();
+        let source = root.join("compatibility-source");
+        fs::create_dir(&source).unwrap();
+        write(
+            &source,
+            "manifest.json",
+            br#"{"action":{"default_popup":"popup.html"},"background":{"service_worker":"worker.js","type":"module"},"manifest_version":3,"name":"Compatibility release fixture","permissions":["history","storage"],"version":"1.0.0"}"#,
+        );
+        write(&source, "worker.js", b"globalThis.ready = true;");
+        write(
+            &source,
+            "popup.html",
+            b"<!doctype html><html><head></head><body>popup</body></html>",
+        );
+        let source_index = root.join("compatibility-source-tree.json");
+        fs::write(
+            &source_index,
+            extension_tree::build_tree_index(&source).unwrap().bytes,
+        )
+        .unwrap();
+        let artifact = root.join("compatibility-artifact");
+        crate::macos_extension_compatibility::materialize_brokered(
+            &source,
+            &source_index,
+            &artifact,
+        )
+        .unwrap();
+        artifact
+    }
+
     #[test]
     fn release_archive_is_deterministic_identity_bound_and_closed() {
         let temporary = tempfile::tempdir().unwrap();
@@ -709,6 +839,113 @@ mod tests {
         }
         assert_eq!(observed, expected);
         assert!(prepare(&source, &index, &public_key_path, &first).is_err());
+    }
+
+    #[test]
+    fn compatibility_release_archive_binds_exact_receipt_without_minting_authority() {
+        let temporary = tempfile::tempdir().unwrap();
+        let artifact = compatibility_fixture(temporary.path());
+        let public_key_path = temporary.path().join("compatibility-public-key.der");
+        signing_public_key(&public_key_path);
+        let first = temporary.path().join("compatibility-first");
+        let second = temporary.path().join("compatibility-second");
+
+        prepare_compatibility(&artifact, &public_key_path, &first).unwrap();
+        prepare_compatibility(&artifact, &public_key_path, &second).unwrap();
+
+        for relative in [
+            ARTIFACT_TREE_INDEX,
+            ARTIFACT_ARCHIVE,
+            ARTIFACT_METADATA,
+            ARTIFACT_COMPATIBILITY_RECEIPT,
+        ] {
+            assert_eq!(
+                fs::read(first.join(relative)).unwrap(),
+                fs::read(second.join(relative)).unwrap()
+            );
+        }
+        let receipt_bytes = fs::read(artifact.join(ARTIFACT_COMPATIBILITY_RECEIPT)).unwrap();
+        assert_eq!(
+            fs::read(first.join(ARTIFACT_COMPATIBILITY_RECEIPT)).unwrap(),
+            receipt_bytes
+        );
+        let receipt: Value = serde_json::from_slice(&receipt_bytes).unwrap();
+        let evidence: Value =
+            serde_json::from_slice(&fs::read(first.join(ARTIFACT_METADATA)).unwrap()).unwrap();
+        assert_eq!(evidence["product_authority"], Value::Bool(false));
+        assert_eq!(evidence["signature_settled"], Value::Bool(false));
+        assert_eq!(evidence["catalog_bound"], Value::Bool(false));
+        assert_eq!(
+            evidence["compatibility"]["binding"],
+            Value::String("exact-non-authorizing-receipt-v1".into())
+        );
+        assert_eq!(evidence["compatibility"]["target"], receipt["target"]);
+        assert_eq!(
+            evidence["compatibility"]["input_tree_sha256"],
+            receipt["output"]["tree_sha256"]
+        );
+        assert_eq!(
+            evidence["compatibility"]["sha256"],
+            Value::String(lower_hex(&Sha256::digest(&receipt_bytes)))
+        );
+        let mut root_entries = fs::read_dir(&first)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect::<Vec<_>>();
+        root_entries.sort_unstable();
+        assert_eq!(
+            root_entries,
+            [
+                ARTIFACT_COMPATIBILITY_RECEIPT,
+                ARTIFACT_METADATA,
+                ARTIFACT_TREE_INDEX,
+                ARTIFACT_EXTENSION,
+                ARTIFACT_ARCHIVE,
+            ]
+            .map(str::to_owned)
+        );
+        extension_tree::verify_closed_tree(
+            &first.join(ARTIFACT_EXTENSION),
+            &first.join(ARTIFACT_TREE_INDEX),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn compatibility_release_input_rejects_authority_and_inventory_drift() {
+        let temporary = tempfile::tempdir().unwrap();
+        let artifact = compatibility_fixture(temporary.path());
+        let receipt_path = artifact.join(ARTIFACT_COMPATIBILITY_RECEIPT);
+        let mut receipt: Value = serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+        receipt["product_authority"] = Value::Bool(true);
+        fs::write(&receipt_path, serde_json::to_vec_pretty(&receipt).unwrap()).unwrap();
+        let public_key = temporary.path().join("public-key.der");
+        signing_public_key(&public_key);
+        let output = temporary.path().join("rejected-authority");
+        let error = prepare_compatibility(&artifact, &public_key, &output).unwrap_err();
+        assert!(error.contains("authority header"));
+        assert!(!output.exists());
+
+        let clean = compatibility_fixture(&temporary.path().join("second"));
+        fs::write(clean.join("foreign-entry"), b"foreign").unwrap();
+        let inventory_output = temporary.path().join("rejected-inventory");
+        let error = prepare_compatibility(&clean, &public_key, &inventory_output).unwrap_err();
+        assert!(error.contains("inventory drifted"));
+        assert!(!inventory_output.exists());
+
+        let relabeled = compatibility_fixture(&temporary.path().join("third"));
+        let receipt_path = relabeled.join(ARTIFACT_COMPATIBILITY_RECEIPT);
+        let mut receipt: Value = serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+        receipt["limitations"]
+            .as_array_mut()
+            .unwrap()
+            .pop()
+            .unwrap();
+        fs::write(&receipt_path, serde_json::to_vec_pretty(&receipt).unwrap()).unwrap();
+        let relabeled_output = temporary.path().join("rejected-relabeling");
+        let error = prepare_compatibility(&relabeled, &public_key, &relabeled_output).unwrap_err();
+        assert!(error.contains("adaptation contract drifted"));
+        assert!(!relabeled_output.exists());
     }
 
     #[test]
