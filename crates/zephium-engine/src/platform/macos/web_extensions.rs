@@ -19,7 +19,7 @@ mod resource_transport;
 mod stock_password_manager;
 mod vimium_contract;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::io::{Read, Write};
@@ -34,7 +34,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use objc2::rc::{Retained, Weak};
-use objc2::runtime::{NSObject, ProtocolObject};
+use objc2::runtime::{AnyObject, NSObject, ProtocolObject};
 use objc2::{define_class, msg_send, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSView, NSWindow,
@@ -256,7 +256,111 @@ impl Drop for ProbeWindow {
 struct ProbeControllerDelegateIvars {
     window: Retained<ProbeWindow>,
     permission_requests: Rc<permission_requests::PermissionRequestProbe>,
+    native_message: Option<Rc<ProbeNativeMessageContract>>,
     lifecycle_drops: Arc<AtomicUsize>,
+}
+
+/// One exact, read-only native-message exchange used by product-shaped
+/// compatibility probes. The contract is bound to native object identity and
+/// cardinality before WebKit can execute extension code. It deliberately has
+/// no generic dispatch surface and grants no product or external-host
+/// authority.
+struct ProbeNativeMessageContract {
+    controller: NonNull<WKWebExtensionController>,
+    context: NonNull<WKWebExtensionContext>,
+    application_identifier: String,
+    request: String,
+    response: String,
+    calls: Cell<usize>,
+    exact: Cell<bool>,
+    failure: RefCell<Option<String>>,
+}
+
+impl ProbeNativeMessageContract {
+    fn new(
+        controller: &WKWebExtensionController,
+        context: &WKWebExtensionContext,
+        application_identifier: impl Into<String>,
+        request: impl Into<String>,
+        response: impl Into<String>,
+    ) -> Rc<Self> {
+        Rc::new(Self {
+            controller: NonNull::from(controller),
+            context: NonNull::from(context),
+            application_identifier: application_identifier.into(),
+            request: request.into(),
+            response: response.into(),
+            calls: Cell::new(0),
+            exact: Cell::new(false),
+            failure: RefCell::new(None),
+        })
+    }
+
+    fn handle(
+        &self,
+        controller: &WKWebExtensionController,
+        message: &AnyObject,
+        application_identifier: Option<&NSString>,
+        context: &WKWebExtensionContext,
+        reply: &block2::DynBlock<dyn Fn(*mut AnyObject, *mut NSError)>,
+    ) {
+        let calls = self.calls.get().saturating_add(1);
+        self.calls.set(calls);
+        let exact = calls == 1
+            && NonNull::from(controller) == self.controller
+            && NonNull::from(context) == self.context
+            && application_identifier.is_some_and(|actual| {
+                actual.isEqualToString(&NSString::from_str(&self.application_identifier))
+            })
+            && message
+                .downcast_ref::<NSString>()
+                .is_some_and(|actual| actual.isEqualToString(&NSString::from_str(&self.request)));
+        self.exact.set(exact);
+        if exact {
+            let response = NSString::from_str(&self.response);
+            reply.call((
+                Retained::as_ptr(&response).cast_mut().cast(),
+                std::ptr::null_mut(),
+            ));
+        } else {
+            let mut failure = self.failure.borrow_mut();
+            if failure.is_none() {
+                *failure = Some(
+                    "native-message controller, principal, identifier, payload, or cardinality drifted"
+                        .into(),
+                );
+            }
+            complete_probe_native_message_error(reply);
+        }
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if let Some(failure) = self.failure.borrow().as_ref() {
+            return Err(format!("native-message contract failed closed: {failure}"));
+        }
+        if self.calls.get() != 1 || !self.exact.get() {
+            return Err(format!(
+                "native-message contract did not settle exactly once: calls={}, exact={}",
+                self.calls.get(),
+                self.exact.get(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn settlement(&self) -> Result<bool, String> {
+        if let Some(failure) = self.failure.borrow().as_ref() {
+            return Err(format!("native-message contract failed closed: {failure}"));
+        }
+        match self.calls.get() {
+            0 => Ok(false),
+            1 if self.exact.get() => Ok(true),
+            calls => Err(format!(
+                "native-message contract cardinality drifted: calls={calls}, exact={}",
+                self.exact.get(),
+            )),
+        }
+    }
 }
 
 define_class!(
@@ -365,6 +469,22 @@ define_class!(
                 complete_probe_popup_error(completion);
             }
         }
+
+        #[unsafe(method(webExtensionController:sendMessage:toApplicationWithIdentifier:forExtensionContext:replyHandler:))]
+        unsafe fn send_message(
+            &self,
+            controller: &WKWebExtensionController,
+            message: &AnyObject,
+            application_identifier: Option<&NSString>,
+            context: &WKWebExtensionContext,
+            reply: &block2::DynBlock<dyn Fn(*mut AnyObject, *mut NSError)>,
+        ) {
+            if let Some(contract) = self.ivars().native_message.as_ref() {
+                contract.handle(controller, message, application_identifier, context, reply);
+            } else {
+                complete_probe_native_message_error(reply);
+            }
+        }
     }
 );
 
@@ -372,6 +492,14 @@ fn complete_probe_popup_error(completion: &block2::DynBlock<dyn Fn(*mut NSError)
     let domain = NSString::from_str("app.zephium.web-extension-probe");
     let error = unsafe { NSError::errorWithDomain_code_userInfo(&domain, 1, None) };
     completion.call((Retained::as_ptr(&error).cast_mut(),));
+}
+
+fn complete_probe_native_message_error(
+    completion: &block2::DynBlock<dyn Fn(*mut AnyObject, *mut NSError)>,
+) {
+    let domain = NSString::from_str("app.zephium.web-extension-probe.native-message");
+    let error = unsafe { NSError::errorWithDomain_code_userInfo(&domain, 1, None) };
+    completion.call((std::ptr::null_mut(), Retained::as_ptr(&error).cast_mut()));
 }
 
 impl ProbeControllerDelegate {
@@ -388,15 +516,41 @@ impl ProbeControllerDelegate {
         )
     }
 
+    fn new_with_native_message(
+        mtm: MainThreadMarker,
+        window: Retained<ProbeWindow>,
+        native_message: Rc<ProbeNativeMessageContract>,
+        lifecycle_drops: Arc<AtomicUsize>,
+    ) -> Retained<Self> {
+        Self::new_configured(
+            mtm,
+            window,
+            Rc::new(permission_requests::PermissionRequestProbe::default()),
+            Some(native_message),
+            lifecycle_drops,
+        )
+    }
+
     fn new_with_permission_requests(
         mtm: MainThreadMarker,
         window: Retained<ProbeWindow>,
         permission_requests: Rc<permission_requests::PermissionRequestProbe>,
         lifecycle_drops: Arc<AtomicUsize>,
     ) -> Retained<Self> {
+        Self::new_configured(mtm, window, permission_requests, None, lifecycle_drops)
+    }
+
+    fn new_configured(
+        mtm: MainThreadMarker,
+        window: Retained<ProbeWindow>,
+        permission_requests: Rc<permission_requests::PermissionRequestProbe>,
+        native_message: Option<Rc<ProbeNativeMessageContract>>,
+        lifecycle_drops: Arc<AtomicUsize>,
+    ) -> Retained<Self> {
         let object = Self::alloc(mtm).set_ivars(ProbeControllerDelegateIvars {
             window,
             permission_requests,
+            native_message,
             lifecycle_drops,
         });
         // SAFETY: NSObject is the declared superclass and the ivars are fully
@@ -561,6 +715,7 @@ struct ProbeTeardown {
     major_extension_namespaces: Box<str>,
     native_broker_port: Weak<objc2_web_kit::WKWebExtensionMessagePort>,
     native_broker_delegate_drops: Arc<AtomicUsize>,
+    native_broker_surface_drops: Arc<AtomicUsize>,
     runtime_permission_status: &'static str,
     runtime_permission_readback: String,
     runtime_permission_callbacks_coalesced_before_settlement: bool,
@@ -1488,6 +1643,7 @@ fn run_supported_probe(
         major_extension_namespaces: major_extension_teardown.namespace_summary,
         native_broker_port: native_broker_teardown.port,
         native_broker_delegate_drops: native_broker_teardown.delegate_drops,
+        native_broker_surface_drops: native_broker_teardown.surface_drops,
         runtime_permission_status: match permission_mode {
             RuntimePermissionProbeMode::None => "interactive-not-run",
             RuntimePermissionProbeMode::Full => "passed",
@@ -2228,13 +2384,14 @@ fn wait_for_teardown(teardown: &ProbeTeardown) -> Result<(), String> {
                 .native_broker_delegate_drops
                 .load(Ordering::Acquire)
                 == 1
+            && teardown.native_broker_surface_drops.load(Ordering::Acquire) == 2
             && teardown.lifecycle_drops.load(Ordering::Acquire) == 3
         {
             return Ok(());
         }
         if Instant::now() >= deadline {
             return Err(format!(
-                "native teardown did not converge: view={}, extension_product_views_released={}/{}, extension_product_stores_released={}/{}, extension_ui_views_released={}/{}, capability_views_released={}/{}, capability_stores_released={}/{}, controllers_released={}/{}, contexts_released={}/{}, profile_views_released={}/{}, profile_contexts_released={}/{}, profile_controllers_released={}/{}, profile_stores_released={}/{}, native_broker_port_released={}, native_broker_delegate_drops={}/1, lifecycle_drops={}/3, profile_lifecycle_drops={profile_lifecycle_counts:?}/{:?}",
+                "native teardown did not converge: view={}, extension_product_views_released={}/{}, extension_product_stores_released={}/{}, extension_ui_views_released={}/{}, capability_views_released={}/{}, capability_stores_released={}/{}, controllers_released={}/{}, contexts_released={}/{}, profile_views_released={}/{}, profile_contexts_released={}/{}, profile_controllers_released={}/{}, profile_stores_released={}/{}, native_broker_port_released={}, native_broker_delegate_drops={}/1, native_broker_surface_drops={}/2, lifecycle_drops={}/3, profile_lifecycle_drops={profile_lifecycle_counts:?}/{:?}",
                 teardown.view.load().is_none(),
                 teardown.extension_product_views.iter().filter(|view| view.load().is_none()).count(),
                 teardown.extension_product_views.len(),
@@ -2260,6 +2417,7 @@ fn wait_for_teardown(teardown: &ProbeTeardown) -> Result<(), String> {
                 teardown.profile_stores.len(),
                 teardown.native_broker_port.load().is_none(),
                 teardown.native_broker_delegate_drops.load(Ordering::Acquire),
+                teardown.native_broker_surface_drops.load(Ordering::Acquire),
                 teardown.lifecycle_drops.load(Ordering::Acquire),
                 profile_isolation::EXPECTED_BROWSER_SURFACE_LIFECYCLE_DROPS,
             ));

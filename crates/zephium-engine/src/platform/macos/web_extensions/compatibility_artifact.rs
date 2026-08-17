@@ -16,6 +16,10 @@ use zephium_extension_package::{
 };
 
 pub(super) const API_PRELUDE: &str = "__zephium__/webkit-api-v1.js";
+pub(super) const RUNTIME_MESSAGING_BRIDGE: &str = "__zephium__/webkit-runtime-messaging-v1.js";
+pub(super) const BOOKMARKS_BRIDGE: &str = "__zephium__/webkit-bookmarks-v1.js";
+pub(super) const FAVICON_BRIDGE: &str = "__zephium__/webkit-favicon-v1.js";
+pub(super) const EMPTY_FAVICON: &str = "__zephium__/favicon-empty-v1.svg";
 pub(super) const HISTORY_BRIDGE: &str = "__zephium__/webkit-history-v1.js";
 pub(super) const WEB_NAVIGATION_BRIDGE: &str = "__zephium__/webkit-web-navigation-v1.js";
 pub(super) const BACKGROUND_WRAPPER: &str = "__zephium_background_v1.js";
@@ -40,27 +44,6 @@ const NATIVE_LIMITATIONS: [&str; 7] = [
     "file-scheme-content-scripts-omitted",
     "same-document-web-navigation-limited-to-injected-frames",
     "history-state-navigation-requires-host-signal",
-];
-const BROKERED_ADAPTATIONS: [&str; 5] = [
-    "native-api-identity-preservation-v1",
-    "catalog-update-event-stub-v1",
-    "file-scheme-content-script-omission-v1",
-    "same-document-web-navigation-endpoint-v1",
-    "bounded-history-search-broker-v1",
-];
-const BROKERED_LIMITATIONS: [&str; 12] = [
-    "not-a-product-package",
-    "catalog-update-events-owned-by-zephium",
-    "sandbox-pages-not-adapted",
-    "non-action-extension-pages-not-adapted",
-    "file-scheme-content-scripts-omitted",
-    "same-document-web-navigation-limited-to-injected-frames",
-    "history-state-navigation-requires-host-signal",
-    "history-search-recent-100-only",
-    "history-text-search-limited-to-recent-results",
-    "history-events-registered-but-not-emitted",
-    "history-mutations-unsupported",
-    "native-messaging-fixed-internal-broker-only",
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -117,6 +100,9 @@ pub(super) struct ArtifactSurfaces {
     pub(super) removed_file_match_patterns: usize,
     pub(super) same_document_navigation_routes: usize,
     pub(super) history_search: bool,
+    pub(super) extension_pages: usize,
+    pub(super) empty_bookmarks: bool,
+    pub(super) empty_favicon: bool,
 }
 
 #[derive(Debug)]
@@ -164,6 +150,12 @@ struct Surfaces {
     same_document_navigation_routes: usize,
     #[serde(default)]
     history_search: Option<String>,
+    #[serde(default)]
+    extension_pages: Option<usize>,
+    #[serde(default)]
+    bookmarks: Option<String>,
+    #[serde(default)]
+    favicon: Option<String>,
 }
 
 pub(super) fn validate(root: &Path) -> Result<ValidatedCompatibilityArtifact, String> {
@@ -194,12 +186,9 @@ pub(super) fn validate(root: &Path) -> Result<ValidatedCompatibilityArtifact, St
         BROKERED_TARGET => CompatibilityArtifactTarget::NativeBrokeredV1,
         _ => return Err("compatibility artifact authority header drifted".into()),
     };
-    let (adaptations, limitations): (&[&str], &[&str]) = match target {
-        CompatibilityArtifactTarget::NativeV3 => (&NATIVE_ADAPTATIONS, &NATIVE_LIMITATIONS),
-        CompatibilityArtifactTarget::NativeBrokeredV1 => {
-            (&BROKERED_ADAPTATIONS, &BROKERED_LIMITATIONS)
-        }
-    };
+    let bookmarked = metadata.surfaces.bookmarks.as_deref() == Some("empty-read-only");
+    let favicon = metadata.surfaces.favicon.as_deref() == Some("transparent-fallback");
+    let (adaptations, limitations) = expected_contract(target, bookmarked, favicon)?;
     if metadata.adaptations != adaptations || metadata.limitations != limitations {
         return Err("compatibility artifact adaptation contract drifted".into());
     }
@@ -233,6 +222,60 @@ pub(super) fn validate(root: &Path) -> Result<ValidatedCompatibilityArtifact, St
         output,
         surfaces,
     })
+}
+
+fn expected_contract(
+    target: CompatibilityArtifactTarget,
+    bookmarked: bool,
+    favicon: bool,
+) -> Result<(Vec<&'static str>, Vec<&'static str>), String> {
+    if target == CompatibilityArtifactTarget::NativeV3 {
+        if bookmarked || favicon {
+            return Err("native compatibility artifact declared a brokered surface".into());
+        }
+        return Ok((NATIVE_ADAPTATIONS.to_vec(), NATIVE_LIMITATIONS.to_vec()));
+    }
+    let mut adaptations = vec![
+        "native-api-identity-preservation-v1",
+        "catalog-update-event-stub-v1",
+        "file-scheme-content-script-omission-v1",
+        "same-document-web-navigation-endpoint-v1",
+    ];
+    let mut limitations = vec![
+        "not-a-product-package",
+        "catalog-update-events-owned-by-zephium",
+        "sandbox-pages-not-adapted",
+        "file-scheme-content-scripts-omitted",
+        "same-document-web-navigation-limited-to-injected-frames",
+        "history-state-navigation-requires-host-signal",
+    ];
+    if bookmarked {
+        adaptations.push("empty-bookmarks-read-facade-v1");
+        limitations.extend([
+            "bookmarks-read-results-empty",
+            "bookmarks-events-registered-but-not-emitted",
+            "bookmarks-mutations-unsupported",
+        ]);
+    }
+    if favicon {
+        adaptations.push("transparent-favicon-url-fallback-v1");
+        limitations.push("page-favicons-render-transparent");
+    }
+    adaptations.extend([
+        "extension-page-runtime-messaging-session-v1",
+        "bounded-history-search-broker-v1",
+    ]);
+    limitations.extend([
+        "extension-page-runtime-messaging-current-extension-only",
+        "extension-page-runtime-callback-errors-have-no-last-error",
+        "extension-page-runtime-messaging-requires-promise-session-storage",
+        "history-search-recent-100-only",
+        "history-text-search-limited-to-recent-results",
+        "history-events-registered-but-not-emitted",
+        "history-mutations-unsupported",
+        "native-messaging-fixed-internal-broker-only",
+    ]);
+    Ok((adaptations, limitations))
 }
 
 fn validate_root_inventory(root: &Path) -> Result<(), String> {
@@ -312,6 +355,27 @@ fn validate_surfaces(
         (CompatibilityArtifactTarget::NativeBrokeredV1, Some("bounded-native-broker")) => true,
         _ => return Err("compatibility artifact history surface is invalid".into()),
     };
+    let extension_pages = match (target, surfaces.extension_pages) {
+        (CompatibilityArtifactTarget::NativeV3, None) => 0,
+        (CompatibilityArtifactTarget::NativeBrokeredV1, Some(pages))
+            if (1..=MAX_EXTENSION_TREE_FILES).contains(&pages) =>
+        {
+            pages
+        }
+        _ => return Err("compatibility artifact extension-page surface is invalid".into()),
+    };
+    let empty_bookmarks = match (target, surfaces.bookmarks.as_deref()) {
+        (CompatibilityArtifactTarget::NativeV3, None)
+        | (CompatibilityArtifactTarget::NativeBrokeredV1, None) => false,
+        (CompatibilityArtifactTarget::NativeBrokeredV1, Some("empty-read-only")) => true,
+        _ => return Err("compatibility artifact bookmark surface is invalid".into()),
+    };
+    let empty_favicon = match (target, surfaces.favicon.as_deref()) {
+        (CompatibilityArtifactTarget::NativeV3, None)
+        | (CompatibilityArtifactTarget::NativeBrokeredV1, None) => false,
+        (CompatibilityArtifactTarget::NativeBrokeredV1, Some("transparent-fallback")) => true,
+        _ => return Err("compatibility artifact favicon surface is invalid".into()),
+    };
     Ok(ArtifactSurfaces {
         background,
         isolated_content_scripts: surfaces.isolated_content_scripts,
@@ -320,6 +384,9 @@ fn validate_surfaces(
         removed_file_match_patterns: surfaces.removed_file_match_patterns,
         same_document_navigation_routes: surfaces.same_document_navigation_routes,
         history_search,
+        extension_pages,
+        empty_bookmarks,
+        empty_favicon,
     })
 }
 

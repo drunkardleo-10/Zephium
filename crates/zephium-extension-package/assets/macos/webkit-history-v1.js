@@ -192,26 +192,44 @@
     onVisited: inertEvent(),
     onVisitRemoved: inertEvent(),
   });
-  const nativeHistory = namespaces.map((namespace) => namespace.history).find(Boolean);
-  const surface = nativeHistory ?? facade;
   for (const namespace of namespaces) {
-    if (namespace.history != null) continue;
     const descriptor = Reflect.getOwnPropertyDescriptor(namespace, "history");
-    if (descriptor != null || !Object.isExtensible(namespace)) {
+    if (
+      (descriptor != null && descriptor.configurable !== true) ||
+      (descriptor == null && !Object.isExtensible(namespace))
+    ) {
       throw new Error("Zephium WebKit history compatibility cannot install safely");
     }
   }
   for (const namespace of namespaces) {
-    if (namespace.history != null) continue;
+    // A service-worker realm can expose WebKit's native history object while
+    // extension-page realms do not. That object is bound to WebKit's private
+    // data store, not Zephium's product history authority. Shadow it with one
+    // consistent read-only surface, but never mutate the native object.
     Object.defineProperty(namespace, "history", {
-      value: surface,
+      value: facade,
       writable: false,
       enumerable: true,
       configurable: false,
     });
   }
+  for (const namespace of namespaces) {
+    const installedSurface = namespace.history;
+    if (
+      installedSurface?.search !== search ||
+      installedSurface?.onVisited == null ||
+      installedSurface?.onVisitRemoved == null ||
+      installedSurface?.addUrl !== undefined ||
+      installedSurface?.deleteAll !== undefined ||
+      installedSurface?.deleteRange !== undefined ||
+      installedSurface?.deleteUrl !== undefined ||
+      installedSurface?.getVisits !== undefined
+    ) {
+      throw new Error("Zephium WebKit history compatibility did not settle exactly");
+    }
+  }
   Object.defineProperty(globalThis, modeMarker, {
-    value: nativeHistory == null ? "bounded-recent-search" : "native-preserved",
+    value: "bounded-recent-search",
     writable: false,
     enumerable: false,
     configurable: false,

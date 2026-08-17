@@ -3,9 +3,11 @@
 //! This source-free fixture does not enable product native messaging. It uses
 //! one fixed internal application identifier, exact bounded payloads, one
 //! read-only history-facade request and one port, and a nonpersistent
-//! controller/store. Passing proves a full facade-to-host-to-facade round trip
-//! and records the currently asymmetric persistent-port behavior; it grants no
-//! generic native-host authority.
+//! controller/store. It publishes a real regular window/tab surface before a
+//! document-idle content script asks a module worker for an asynchronous
+//! response. Passing proves that response and the full facade-to-host-to-facade
+//! round trip, while separately recording the asymmetric persistent-port
+//! behavior. It grants no generic native-host authority.
 
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
@@ -20,12 +22,12 @@ use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, NSObject, ProtocolObject};
 use objc2::{define_class, msg_send, DefinedClass, MainThreadOnly};
 use objc2_foundation::{
-    MainThreadMarker, NSDictionary, NSError, NSObjectProtocol, NSRunLoop, NSString,
+    MainThreadMarker, NSArray, NSDictionary, NSError, NSObjectProtocol, NSRunLoop, NSString,
 };
 use objc2_web_kit::{
     WKWebExtension, WKWebExtensionContext, WKWebExtensionContextPermissionStatus,
     WKWebExtensionController, WKWebExtensionControllerDelegate, WKWebExtensionMessagePort,
-    WKWebView, WKWebsiteDataStore,
+    WKWebExtensionWindow, WKWebView, WKWebsiteDataStore,
 };
 use serde_json::{json, Value};
 
@@ -36,7 +38,6 @@ const ONE_SHOT_REPLY: &str = r#"{"v":1,"items":[{"url":"https://first.example/pa
 const PORT_REQUEST: &str = "zephium-broker-port-request";
 const PORT_REPLY: &str = "zephium-broker-port-reply";
 const PORT_REPLY_UNOBSERVED: &str = "host-reply-unobserved";
-const PENDING_TITLE: &str = "zephium-native-broker-contract-pending";
 
 #[derive(Default)]
 struct BrokerState {
@@ -118,6 +119,7 @@ impl BrokerState {
 }
 
 struct BrokerDelegateIvars {
+    window: Retained<super::ProbeWindow>,
     state: Rc<BrokerState>,
     port: RefCell<Option<Retained<WKWebExtensionMessagePort>>>,
     lifecycle_drops: Arc<AtomicUsize>,
@@ -133,6 +135,25 @@ define_class!(
     unsafe impl NSObjectProtocol for BrokerDelegate {}
 
     unsafe impl WKWebExtensionControllerDelegate for BrokerDelegate {
+        #[unsafe(method_id(webExtensionController:openWindowsForExtensionContext:))]
+        fn open_windows(
+            &self,
+            _controller: &WKWebExtensionController,
+            _context: &WKWebExtensionContext,
+        ) -> Retained<NSArray<ProtocolObject<dyn WKWebExtensionWindow>>> {
+            let window = ProtocolObject::from_retained(self.ivars().window.clone());
+            NSArray::arrayWithObject(&*window)
+        }
+
+        #[unsafe(method_id(webExtensionController:focusedWindowForExtensionContext:))]
+        fn focused_window(
+            &self,
+            _controller: &WKWebExtensionController,
+            _context: &WKWebExtensionContext,
+        ) -> Option<Retained<ProtocolObject<dyn WKWebExtensionWindow>>> {
+            Some(ProtocolObject::from_retained(self.ivars().window.clone()))
+        }
+
         #[unsafe(method(webExtensionController:sendMessage:toApplicationWithIdentifier:forExtensionContext:replyHandler:))]
         unsafe fn send_message(
             &self,
@@ -281,10 +302,12 @@ define_class!(
 impl BrokerDelegate {
     fn new(
         mtm: MainThreadMarker,
+        window: Retained<super::ProbeWindow>,
         state: Rc<BrokerState>,
         lifecycle_drops: Arc<AtomicUsize>,
     ) -> Retained<Self> {
         let object = Self::alloc(mtm).set_ivars(BrokerDelegateIvars {
+            window,
             state,
             port: RefCell::new(None),
             lifecycle_drops,
@@ -328,6 +351,7 @@ pub(super) struct RuntimeEvidence {
     pub(super) store: Weak<WKWebsiteDataStore>,
     pub(super) port: Weak<WKWebExtensionMessagePort>,
     pub(super) delegate_drops: Arc<AtomicUsize>,
+    pub(super) surface_drops: Arc<AtomicUsize>,
 }
 
 pub(super) fn write_fixture(root: &Path) -> Result<PathBuf, String> {
@@ -339,75 +363,82 @@ pub(super) fn write_fixture(root: &Path) -> Result<PathBuf, String> {
         "name": "Zephium Native Broker Contract Probe",
         "version": "1.0.0",
         "description": "Zephium-owned principal-bound native broker fixture.",
-        "permissions": ["history", "nativeMessaging"]
+        "permissions": ["history", "nativeMessaging"],
+        "content_scripts": [{
+            "matches": [super::HOST_MATCH_PATTERN],
+            "js": ["probe.js"],
+            "run_at": "document_idle",
+            "all_frames": false
+        }],
+        "background": {
+            "service_worker": "worker.js",
+            "type": "module"
+        }
     });
     write(&path, "manifest.json", &manifest.to_string())?;
-    write(
-        &path,
-        "probe.html",
-        &format!(
-            "<!doctype html><meta charset=\"utf-8\"><title>zephium-native-broker-contract-pending</title><script src=\"/{}\"></script><script src=\"probe.js\"></script>",
-            super::compatibility_artifact::HISTORY_BRIDGE,
-        ),
-    )?;
     write(
         &path,
         super::compatibility_artifact::HISTORY_BRIDGE,
         include_str!("../../../../../zephium-extension-package/assets/macos/webkit-history-v1.js"),
     )?;
+    write(
+        &path,
+        "worker.js",
+        &format!(
+            r#"import "./{}";
+const historyEvidence = () => globalThis.chrome.history.search({{ text: "", maxResults: 2, startTime: 0 }})
+  .then((items) => Array.isArray(items) && items.length === 2 &&
+    items[0]?.id === "https://first.example/path" &&
+    items[0]?.title === "First visited page" &&
+    items[1]?.id === "https://second.example/path" &&
+    items[1]?.lastVisitTime === 2000 &&
+    typeof globalThis.chrome.history.addUrl === "undefined" &&
+    typeof globalThis.chrome.history.deleteAll === "undefined"
+      ? "history-search-passed"
+      : "history-search-invalid")
+  .catch((error) => `error:${{String(error?.message ?? error)}}`);
+globalThis.chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {{
+  if (message?.kind !== "zephium-native-broker-worker-evidence-v1") return false;
+  const senderValid = Number.isInteger(sender?.frameId) &&
+    Number.isInteger(sender?.tab?.id) &&
+    /^http:\/\//.test(sender?.url ?? "") &&
+    /^http:\/\//.test(sender?.tab?.url ?? "");
+  historyEvidence().then((history) => {{
+    const evidence = senderValid ? history : "sender-invalid";
+    const port = globalThis.chrome.runtime.connectNative({application_identifier:?});
+    port.postMessage({port_request:?});
+    setTimeout(() => {{
+      port.disconnect();
+      sendResponse(evidence);
+    }}, 100);
+  }});
+  return true;
+}});
+"#,
+            super::compatibility_artifact::HISTORY_BRIDGE,
+            application_identifier = APPLICATION_IDENTIFIER,
+            port_request = PORT_REQUEST,
+        ),
+    )?;
     let script = format!(
         r#"(() => {{
     'use strict';
     const runtime = globalThis.chrome?.runtime;
-    const history = globalThis.chrome?.history;
-    const historyMode = globalThis[Symbol.for("zephium.webkit-history-compatibility.mode.v1")];
     const settle = (oneShot, port) => {{
-        document.title = JSON.stringify({{ history: historyMode, oneShot, port }});
+        document.title = JSON.stringify({{ history: "worker-bounded-recent-search", oneShot, port }});
     }};
-    if (!runtime?.sendNativeMessage || !runtime?.connectNative || !history?.search) {{
+    if (!runtime?.sendMessage) {{
         settle("absent", "absent");
         return;
     }}
-    history.search({{ text: "", maxResults: 2, startTime: 0 }}).then((items) => {{
-        const valid = Array.isArray(items) && items.length === 2 &&
-            items[0]?.id === "https://first.example/path" &&
-            items[0]?.url === "https://first.example/path" &&
-            items[0]?.title === "First visited page" &&
-            items[0]?.lastVisitTime === 1000 &&
-            items[1]?.id === "https://second.example/path" &&
-            items[1]?.lastVisitTime === 2000 &&
-            typeof history.addUrl === "undefined" &&
-            typeof history.deleteAll === "undefined";
-        const oneShot = valid ? "history-search-passed" : "history-search-invalid";
-        let nativePort;
-        try {{
-            nativePort = runtime.connectNative({application_identifier:?});
-        }} catch (error) {{
-            settle(oneShot, `error:${{String(error?.message ?? error)}}`);
-            return;
-        }}
-        const timeout = setTimeout(() => {{
-            nativePort.disconnect();
-            settle(oneShot, {port_reply_unobserved:?});
-        }}, 2000);
-        nativePort.onMessage.addListener((message) => {{
-            clearTimeout(timeout);
-            nativePort.disconnect();
-            settle(oneShot, message?.reply ?? "invalid-reply");
-        }});
-        nativePort.onDisconnect.addListener(() => {{
-            if (runtime.lastError) {{
-                clearTimeout(timeout);
-                settle(oneShot, `error:${{runtime.lastError.message}}`);
-            }}
-        }});
-        nativePort.postMessage({port_request:?});
-    }}, (error) => {{
-        settle(`error:${{String(error?.message ?? error)}}`, "not-started");
-    }});
+    setTimeout(() => {{
+      Promise.resolve(runtime.sendMessage({{
+      kind: "zephium-native-broker-worker-evidence-v1",
+      }})).then((oneShot) => {{
+        settle(oneShot, {port_reply_unobserved:?});
+      }}, (error) => settle(`error:${{String(error?.message ?? error)}}`, "not-started"));
+    }}, 100);
 }})()"#,
-        application_identifier = APPLICATION_IDENTIFIER,
-        port_request = PORT_REQUEST,
         port_reply_unobserved = PORT_REPLY_UNOBSERVED,
     );
     write(&path, "probe.js", &script)?;
@@ -420,36 +451,41 @@ pub(super) fn run(
     mtm: MainThreadMarker,
 ) -> Result<RuntimeEvidence, String> {
     inspect_parse_contract(extension)?;
+    let server = super::FixtureServer::start(None)?;
     let bundle = super::new_nonpersistent_controller(mtm)?;
+    // SAFETY: the controller and browsing configuration share the exact
+    // nonpersistent data store retained by `bundle` for the full probe.
+    unsafe {
+        bundle
+            .webview_configuration
+            .setWebExtensionController(Some(&bundle.controller));
+    }
     let controller = bundle.controller.clone();
     let store = bundle._data_store.clone();
     let context = super::new_context(extension, CONTRACT_PRINCIPAL)?;
     let state = Rc::new(BrokerState::default());
     state.bind(&controller, &context)?;
+    let grants = super::super::extensions::apply_probe_grants(
+        &context,
+        &[super::super::extensions::MacosNativeApiPermission::NativeMessaging],
+        &[super::HOST_MATCH_PATTERN],
+        true,
+    )
+    .map_err(|error| format!("native broker exact grants failed: {error}"))?;
     let permission = NSString::from_str("nativeMessaging");
-    // SAFETY: this feature-only gate applies one exact parser-returned token
-    // before context load. Product compilation continues to prohibit it.
-    unsafe {
-        context.setPermissionStatus_forPermission(
-            WKWebExtensionContextPermissionStatus::GrantedExplicitly,
-            &permission,
-        );
-    }
     if unsafe { context.permissionStatusForPermission(&permission) }
         != WKWebExtensionContextPermissionStatus::GrantedExplicitly
         || unsafe { context.grantedPermissions() }.count() != 1
     {
-        super::super::extensions::clear_all_probe_grants(&context)
+        grants
+            .clear_and_verify(&context)
             .map_err(|error| format!("native broker grant rollback failed: {error}"))?;
         return Err("native broker exact grant readback failed".into());
     }
 
     let delegate_drops = Arc::new(AtomicUsize::new(0));
-    let delegate = BrokerDelegate::new(mtm, state.clone(), delegate_drops.clone());
-    let delegate_protocol = ProtocolObject::from_ref(&*delegate);
-    // SAFETY: controller and delegate are main-thread retained objects; the
-    // delegate remains alive until after context unload and port release.
-    unsafe { controller.setDelegate(Some(delegate_protocol)) };
+    let surface_drops = Arc::new(AtomicUsize::new(0));
+    let webview_requests = Arc::new(AtomicUsize::new(0));
 
     let controller_weak = Weak::from_retained(&controller);
     let context_weak = Weak::from_retained(&context);
@@ -457,13 +493,13 @@ pub(super) fn run(
     let mut window = None;
     let mut view = None;
     let mut view_weak = None;
+    let mut delegate = None;
+    let mut surface_tab = None;
+    let mut surface_window = None;
+    let mut surface_published = false;
     let mut loaded = false;
     let gate = (|| {
-        super::load_context(&controller, &context, "native-broker contract")?;
-        loaded = true;
-        let configuration = unsafe { context.webViewConfiguration() }.ok_or_else(|| {
-            "loaded native-broker contract returned no extension-page configuration".to_owned()
-        })?;
+        let configuration = bundle.webview_configuration.clone();
         let probe_window = super::new_window(mtm)?;
         let host =
             super::profile_isolation::host_for_window(&probe_window, "native-broker contract")?;
@@ -473,12 +509,54 @@ pub(super) fn run(
         super::assert_attached_controller(&native_view, &controller)?;
         super::profile_isolation::assert_attached_store(&native_view, &store)?;
         view_weak = Some(Weak::from_retained(&native_view));
+        let tab = super::ProbeTab::new(
+            mtm,
+            native_view.clone(),
+            webview_requests.clone(),
+            surface_drops.clone(),
+        );
+        let extension_window =
+            super::ProbeWindow::new(mtm, tab.clone(), false, surface_drops.clone());
+        tab.set_window(&extension_window);
+        let installed_delegate = BrokerDelegate::new(
+            mtm,
+            extension_window.clone(),
+            state.clone(),
+            delegate_drops.clone(),
+        );
+        let delegate_protocol = ProtocolObject::from_ref(&*installed_delegate);
+        let window_protocol = ProtocolObject::from_ref(&*extension_window);
+        let tab_protocol = ProtocolObject::from_ref(&*tab);
+        // SAFETY: the delegate is retained below before extension code can run.
+        unsafe { controller.setDelegate(Some(delegate_protocol)) };
+        delegate = Some(installed_delegate.clone());
+        surface_tab = Some(tab.clone());
+        surface_window = Some(extension_window.clone());
+        super::load_context(&controller, &context, "native-broker contract")?;
+        loaded = true;
+        // SAFETY: every published identity remains retained until the exact
+        // close notifications and native delegate teardown below.
+        unsafe {
+            controller.didOpenWindow(window_protocol);
+            controller.didOpenTab(tab_protocol);
+            controller.didFocusWindow(Some(window_protocol));
+            controller.didActivateTab_previousActiveTab(tab_protocol, None);
+        }
+        surface_published = true;
+        super::persistent_runtime::load_background_content(
+            &context,
+            run_loop,
+            "native-broker contract",
+        )?;
         drop(native_view);
-        let page = unsafe { context.baseURL() }
-            .URLByAppendingPathComponent(&NSString::from_str("probe.html"))
-            .and_then(|url| url.absoluteString())
-            .ok_or_else(|| "native-broker contract produced no probe URL".to_owned())?
-            .to_string();
+        let page = server.url("/keyboard", "native-broker-contract");
+        let native_page = super::native_url(&page)?;
+        super::assert_context_access(
+            &context,
+            &native_page,
+            true,
+            "native-broker content-script grant",
+        )?;
         probe_view
             .load_url(&page)
             .map_err(|error| format!("cannot navigate native-broker contract: {error}"))?;
@@ -491,27 +569,56 @@ pub(super) fn run(
             &state,
         )
     })();
-    let port_weak = delegate.port_weak();
+    let port_weak = delegate.as_ref().and_then(|delegate| delegate.port_weak());
 
     let mut cleanup_failures = Vec::new();
+    if surface_published {
+        let tab_protocol = ProtocolObject::from_ref(
+            &**surface_tab
+                .as_ref()
+                .expect("published native-broker surface retains its tab"),
+        );
+        let window_protocol = ProtocolObject::from_ref(
+            &**surface_window
+                .as_ref()
+                .expect("published native-broker surface retains its window"),
+        );
+        // SAFETY: close notifications balance the exact retained identities
+        // published above and run before context/delegate teardown.
+        unsafe {
+            controller.didFocusWindow(None);
+            controller.didCloseTab_windowIsClosing(tab_protocol, true);
+            controller.didCloseWindow(window_protocol);
+        }
+    }
+    if let Some(delegate) = delegate.as_ref() {
+        delegate.release_port();
+    }
+    // SAFETY: native callbacks are quiesced before context unload.
+    unsafe { controller.setDelegate(None) };
     if loaded {
         if let Err(error) = super::unload_context(&controller, &context, "native-broker contract") {
             cleanup_failures.push(error);
         }
     }
-    delegate.release_port();
-    if let Err(error) = super::super::extensions::clear_all_probe_grants(&context) {
+    if let Err(error) = grants.clear_and_verify(&context) {
         cleanup_failures.push(format!("native-broker grant cleanup failed: {error}"));
     }
-    // SAFETY: the context is unloaded and the native port handlers are clear.
-    unsafe { controller.setDelegate(None) };
     drop(view.take());
     if let Some(window) = window.take() {
         window.close();
         drop(window);
     }
+    drop(surface_tab.take());
+    drop(surface_window.take());
     drop(context);
-    drop(delegate);
+    drop(delegate.take());
+    let webview_request_count = webview_requests.load(Ordering::Acquire);
+    if !(1..=16).contains(&webview_request_count) {
+        cleanup_failures.push(format!(
+            "native-broker surface requested its WebView {webview_request_count} times (expected 1..=16)"
+        ));
+    }
     drop(controller);
     drop(store);
     drop(bundle);
@@ -529,6 +636,7 @@ pub(super) fn run(
             store: store_weak,
             port: port_weak.expect("successful native-broker gate retained its exact port"),
             delegate_drops,
+            surface_drops,
         }),
         (Err(gate), Ok(())) => Err(gate),
         (Ok(()), Err(cleanup)) => Err(format!("native-broker cleanup failed: {cleanup}")),
@@ -577,16 +685,13 @@ fn wait_for_evidence(
             let title = view
                 .document_title()
                 .map_err(|error| format!("cannot inspect native-broker probe title: {error}"))?;
-            if let Some(title) = title
-                .as_deref()
-                .filter(|title| !title.is_empty() && *title != PENDING_TITLE)
-            {
+            if let Some(title) = title.as_deref().filter(|title| title.starts_with('{')) {
                 let evidence: Value = serde_json::from_str(title).map_err(|error| {
                     format!("native-broker probe returned invalid evidence {title:?}: {error}")
                 })?;
                 if evidence
                     != json!({
-                        "history": "bounded-recent-search",
+                        "history": "worker-bounded-recent-search",
                         "oneShot": "history-search-passed",
                         "port": PORT_REPLY_UNOBSERVED
                     })
@@ -648,7 +753,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fixture_has_one_closed_internal_identifier_and_no_network_surface() {
+    fn fixture_has_one_closed_internal_identifier_and_no_script_network_surface() {
         let temp = tempfile::tempdir().expect("temporary contract root");
         let fixture = write_fixture(temp.path()).expect("native-broker contract fixture");
         let manifest: Value = serde_json::from_slice(
@@ -659,12 +764,26 @@ mod tests {
             manifest["permissions"],
             json!(["history", "nativeMessaging"])
         );
+        assert_eq!(
+            manifest["background"],
+            json!({"service_worker":"worker.js","type":"module"})
+        );
+        assert_eq!(
+            manifest["content_scripts"][0]["run_at"],
+            json!("document_idle")
+        );
         let script = std::fs::read_to_string(fixture.join("probe.js")).expect("probe script");
-        assert_eq!(script.matches(APPLICATION_IDENTIFIER).count(), 1);
-        assert!(script.contains("history.search"));
-        assert!(script.contains("connectNative"));
-        assert!(!script.contains("fetch("));
-        assert!(!script.contains("XMLHttpRequest"));
+        let worker = std::fs::read_to_string(fixture.join("worker.js")).expect("worker script");
+        assert_eq!(script.matches(APPLICATION_IDENTIFIER).count(), 0);
+        assert_eq!(worker.matches(APPLICATION_IDENTIFIER).count(), 1);
+        assert!(worker.contains("historyEvidence().then((history)"));
+        assert!(!fixture.join("background-host.html").exists());
+        assert!(worker.contains("history.search"));
+        assert!(worker.contains("connectNative"));
+        for source in [&script, &worker] {
+            assert!(!source.contains("fetch("));
+            assert!(!source.contains("XMLHttpRequest"));
+        }
         assert_eq!(
             std::fs::read_to_string(
                 fixture.join(super::super::compatibility_artifact::HISTORY_BRIDGE)

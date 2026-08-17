@@ -14,17 +14,21 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use objc2::rc::Weak;
-use objc2::runtime::ProtocolObject;
+use objc2::rc::{Retained, Weak};
+use objc2::runtime::{AnyObject, NSObject, ProtocolObject};
+use objc2::{define_class, msg_send, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSEvent, NSEventMask, NSEventModifierFlags,
     NSEventType, NSWindow, NSWindowStyleMask,
 };
 use objc2_foundation::{
-    MainThreadMarker, NSDate, NSDefaultRunLoopMode, NSPoint, NSProcessInfo, NSRunLoop, NSString,
+    MainThreadMarker, NSDate, NSDefaultRunLoopMode, NSError, NSObjectProtocol, NSPoint,
+    NSProcessInfo, NSRunLoop, NSString,
 };
 use objc2_web_kit::{
-    WKWebExtensionContext, WKWebExtensionController, WKWebView, WKWebsiteDataStore,
+    WKContentWorld, WKFrameInfo, WKNavigationAction, WKNavigationActionPolicy,
+    WKNavigationDelegate, WKWebExtensionContext, WKWebExtensionController, WKWebView,
+    WKWebsiteDataStore,
 };
 use serde::Deserialize;
 use wry::WebViewBuilderExtMacos as _;
@@ -41,11 +45,15 @@ use super::compatibility_artifact::{
 const DISPLAY_NAME: &str = "Vimium";
 const VERSION: &str = "2.4.2";
 const CONTEXT_IDENTIFIER: &str = "zephium-stock-vimium-2-4-2-probe";
+const BROKERED_CONTEXT_IDENTIFIER: &str = "zephium-stock-vimium-2-4-2-brokered-v1-probe";
 const HOST_MATCH_PATTERN: &str = "http://127.0.0.1/*";
 const PAGE_STATE_PREFIX: &str = "ZEPHIUM_VIMIUM_PAGE_STATE:";
 const POPUP_STATE_PREFIX: &str = "ZEPHIUM_VIMIUM_POPUP_STATE:";
 const COMPATIBILITY_SYMBOL: &str = "zephium.webkit-api-compatibility.v1";
 const LINK_CLICK_ATTRIBUTE: &str = "data-zephium-keyboard-link-click";
+const BROKER_APPLICATION_IDENTIFIER: &str = "app.zephium.extension-broker.v1";
+const BROKER_HISTORY_REQUEST: &str = "v1/history.recent/100";
+const BROKER_HISTORY_TITLE: &str = "Zephium brokered history needle";
 const MAX_DIAGNOSTIC_TITLE_BYTES: usize = 4 * 1_024;
 
 const NATIVE_PERMISSIONS: [Permission; 5] = [
@@ -63,13 +71,27 @@ const SOURCE_MANIFEST_SHA256: &str =
 const SOURCE_TREE_SHA256: &str = "5015a2e84b2007f0e9cfc670c06b327787bf55a3129fa382534e8a462748eb23";
 const SOURCE_INDEX_SHA256: &str =
     "94cf08d3aa4dd5026bb5557b18d36a17cb1d42aef24fd17e5fd46044531c4cff";
-const OUTPUT_FILES: usize = 82;
-const OUTPUT_BYTES: u64 = 566_373;
-const OUTPUT_MANIFEST_SHA256: &str =
+const NATIVE_OUTPUT_FILES: usize = 82;
+const NATIVE_OUTPUT_BYTES: u64 = 566_373;
+const NATIVE_OUTPUT_MANIFEST_SHA256: &str =
     "45cdd17de4df6aef071052fdaae2397e428b7f9dbc72a42188c2a69677e7bf58";
-const OUTPUT_TREE_SHA256: &str = "63726bb7feb7195bcafb9d605abf3fc48b56f79eafc1c44fbcd1ce7dfe0563ec";
-const OUTPUT_INDEX_SHA256: &str =
+const NATIVE_OUTPUT_TREE_SHA256: &str =
+    "63726bb7feb7195bcafb9d605abf3fc48b56f79eafc1c44fbcd1ce7dfe0563ec";
+const NATIVE_OUTPUT_INDEX_SHA256: &str =
     "ee651c6b57e460662ce3cd0a4952df1c4ff722122f195a95379598e289fabc7e";
+const BROKERED_OUTPUT_FILES: usize = 87;
+const BROKERED_OUTPUT_BYTES: u64 = 599_488;
+const BROKERED_OUTPUT_MANIFEST_SHA256: &str =
+    "c2b503f1593b173305889abbe7c06eb0bf060c1d038aa4434a05a0564433c8b3";
+const BROKERED_OUTPUT_TREE_SHA256: &str =
+    "729d6c172eb9e23ec4ed67ed2876a1a2de444145bceb1142ead00d4f7858e804";
+const BROKERED_OUTPUT_INDEX_SHA256: &str =
+    "97c7c673368485c3ca3ee82d7bd759e7af342f5d47f72d8df40a0d4a2c340731";
+
+struct AdmittedVimiumArtifact {
+    artifact: compatibility_artifact::ValidatedCompatibilityArtifact,
+    brokered: bool,
+}
 
 struct Teardown {
     window: Weak<NSWindow>,
@@ -86,6 +108,7 @@ struct Teardown {
     webview_requests: usize,
     popup_options_url: String,
     scroll_observed: bool,
+    brokered_history: bool,
     failure: Option<String>,
 }
 
@@ -96,6 +119,7 @@ enum PageExpectation {
     TrustedKeyboardControl,
     CommandArmed,
     CommandHandled,
+    VomnibarVisible,
     LinkActivated,
 }
 
@@ -111,6 +135,9 @@ struct PageState {
     command_dispatch: String,
     active_element: String,
     keyboard_control_value: String,
+    vomnibar_visible: bool,
+    vomnibar_focused: bool,
+    vomnibar_src: String,
     page_privileged_extension_api: bool,
     page_adapter: bool,
 }
@@ -123,6 +150,7 @@ impl PageExpectation {
             Self::TrustedKeyboardControl => "trusted-keyboard-control",
             Self::CommandArmed => "command-armed",
             Self::CommandHandled => "command-handled",
+            Self::VomnibarVisible => "vomnibar-visible",
             Self::LinkActivated => "link-activated",
         }
     }
@@ -152,6 +180,14 @@ impl PageExpectation {
                     && state.last_key == "command-armed"
                     && state.command_dispatch == "complete"
             }
+            Self::VomnibarVisible => {
+                isolated
+                    && state.vomnibar_visible
+                    && state.vomnibar_focused
+                    && (state.vomnibar_src == "webkit-masked-url://hidden/"
+                        || (state.vomnibar_src.starts_with("webkit-extension://")
+                            && state.vomnibar_src.ends_with("/pages/vomnibar_page.html")))
+            }
             Self::LinkActivated => {
                 isolated && state.ready == "complete" && state.link_click == "untrusted"
             }
@@ -166,9 +202,73 @@ struct PopupState {
     chrome_runtime: bool,
     chrome_runtime_id: bool,
     adapter: bool,
+    runtime_messaging: bool,
+    bookmarks_mode: String,
+    favicon_mode: String,
+    history_mode: String,
     options_url: String,
     dialog_visible: bool,
     missing_content_error_visible: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct HistoryCompletionState {
+    count: usize,
+    text: String,
+}
+
+struct VomnibarFrameCaptureIvars {
+    frame: std::cell::RefCell<Option<Retained<WKFrameInfo>>>,
+}
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "ZephiumVimiumVomnibarFrameCapture"]
+    #[ivars = VomnibarFrameCaptureIvars]
+    struct VomnibarFrameCapture;
+
+    unsafe impl NSObjectProtocol for VomnibarFrameCapture {}
+
+    unsafe impl WKNavigationDelegate for VomnibarFrameCapture {
+        #[unsafe(method(webView:decidePolicyForNavigationAction:decisionHandler:))]
+        unsafe fn decide_navigation(
+            &self,
+            _webview: &WKWebView,
+            action: &WKNavigationAction,
+            decision: &block2::DynBlock<dyn Fn(WKNavigationActionPolicy)>,
+        ) {
+            let url = action
+                .request()
+                .URL()
+                .and_then(|url| url.absoluteString())
+                .map(|url| url.to_string());
+            if url.as_deref().is_some_and(|url| {
+                url.starts_with("webkit-extension://") && url.ends_with("/pages/vomnibar_page.html")
+            }) {
+                if let Some(frame) = action.targetFrame().filter(|frame| !frame.isMainFrame()) {
+                    self.ivars().frame.replace(Some(frame));
+                }
+            }
+            decision.call((WKNavigationActionPolicy::Allow,));
+        }
+    }
+);
+
+impl VomnibarFrameCapture {
+    fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        let object = Self::alloc(mtm).set_ivars(VomnibarFrameCaptureIvars {
+            frame: std::cell::RefCell::new(None),
+        });
+        // SAFETY: NSObject is the declared superclass and the ivars are fully
+        // initialized before invoking its initializer.
+        unsafe { msg_send![super(object), init] }
+    }
+
+    fn frame(&self) -> Option<Retained<WKFrameInfo>> {
+        self.ivars().frame.borrow().clone()
+    }
 }
 
 pub(super) fn run(artifact: &Path) -> Result<bool, String> {
@@ -185,7 +285,12 @@ pub(super) fn run(artifact: &Path) -> Result<bool, String> {
         let _ = app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
         app.finishLaunching();
         let teardown = objc2::rc::autoreleasepool(|_| {
-            run_native(&admitted.extension_root, operating_system, mtm)
+            run_native(
+                &admitted.artifact.extension_root,
+                admitted.brokered,
+                operating_system,
+                mtm,
+            )
         })?;
         super::set_phase("vimium-teardown-wait");
         let released = wait_for_teardown(&teardown);
@@ -204,13 +309,38 @@ pub(super) fn run(artifact: &Path) -> Result<bool, String> {
             (None, Ok(())) => {}
         }
         println!(
-            "native-probe: stock Vimium compatibility passed; version={VERSION}; os={}; exact_source_tree=passed; exact_output_tree=passed; module_background_wrapper=passed; background_preload_ms={}; keyboard_trust_control=passed; keyboard_scroll={}; link_hint_navigation=extension-dispatched-untrusted-click; popup_execution=passed; popup_options_url={:?}; page_world_adapter_absent=passed; page_world_privileged_extension_api_absent=passed; controller_visible_scripts={}; webview_callbacks={}; unsupported_browser_apis=unassessed; product_authority=false; native_objects_released=passed",
+            "native-probe: stock Vimium compatibility passed; version={VERSION}; os={}; exact_source_tree=passed; exact_output_tree=passed; module_background_wrapper=passed; background_preload_ms={}; keyboard_trust_control=passed; keyboard_scroll={}; brokered_history={}; extension_page_messaging={}; bookmarks={}; favicon={}; link_hint_navigation={}; popup_execution=passed; popup_options_url={:?}; page_world_adapter_absent=passed; page_world_privileged_extension_api_absent=passed; controller_visible_scripts={}; webview_callbacks={}; remaining_browser_apis=unassessed; product_authority=false; native_objects_released=passed",
             teardown.operating_system,
             teardown.background_preload_ms,
             if teardown.scroll_observed {
                 "observed-from-trusted-native-event"
             } else {
                 "command-intercepted-foreground-animation-unassessed"
+            },
+            if teardown.brokered_history {
+                "vomnibar-visible-background-completion-native-round-trip"
+            } else {
+                "not-present-in-artifact"
+            },
+            if teardown.brokered_history {
+                "bounded-session-relay"
+            } else {
+                "native"
+            },
+            if teardown.brokered_history {
+                "empty-read-only-degraded"
+            } else {
+                "native-unassessed"
+            },
+            if teardown.brokered_history {
+                "transparent-fallback-degraded"
+            } else {
+                "native-unassessed"
+            },
+            if teardown.brokered_history {
+                "covered-by-exact-native-v3-gate"
+            } else {
+                "extension-dispatched-untrusted-click"
             },
             teardown.popup_options_url,
             teardown.extension_script_count,
@@ -222,9 +352,7 @@ pub(super) fn run(artifact: &Path) -> Result<bool, String> {
     result
 }
 
-fn admit(
-    artifact: &Path,
-) -> Result<compatibility_artifact::ValidatedCompatibilityArtifact, String> {
+fn admit(artifact: &Path) -> Result<AdmittedVimiumArtifact, String> {
     let admitted = compatibility_artifact::validate(artifact)?;
     if !admitted.source.matches(
         SOURCE_FILES,
@@ -232,31 +360,77 @@ fn admit(
         SOURCE_MANIFEST_SHA256,
         SOURCE_TREE_SHA256,
         SOURCE_INDEX_SHA256,
-    ) || !admitted.output.matches(
-        OUTPUT_FILES,
-        OUTPUT_BYTES,
-        OUTPUT_MANIFEST_SHA256,
-        OUTPUT_TREE_SHA256,
-        OUTPUT_INDEX_SHA256,
     ) {
         return Err("Vimium compatibility artifact identity drifted".into());
     }
-    if admitted.target != compatibility_artifact::CompatibilityArtifactTarget::NativeV3
-        || admitted.surfaces.background != BackgroundAdaptation::ModuleWrapper
+    let brokered = match admitted.target {
+        compatibility_artifact::CompatibilityArtifactTarget::NativeV3
+            if admitted.output.matches(
+                NATIVE_OUTPUT_FILES,
+                NATIVE_OUTPUT_BYTES,
+                NATIVE_OUTPUT_MANIFEST_SHA256,
+                NATIVE_OUTPUT_TREE_SHA256,
+                NATIVE_OUTPUT_INDEX_SHA256,
+            ) =>
+        {
+            false
+        }
+        compatibility_artifact::CompatibilityArtifactTarget::NativeBrokeredV1
+            if admitted.output.matches(
+                BROKERED_OUTPUT_FILES,
+                BROKERED_OUTPUT_BYTES,
+                BROKERED_OUTPUT_MANIFEST_SHA256,
+                BROKERED_OUTPUT_TREE_SHA256,
+                BROKERED_OUTPUT_INDEX_SHA256,
+            ) =>
+        {
+            true
+        }
+        _ => return Err("Vimium compatibility artifact identity drifted".into()),
+    };
+    if admitted.surfaces.background != BackgroundAdaptation::ModuleWrapper
         || admitted.surfaces.isolated_content_scripts != 1
         || admitted.surfaces.action_popup != ActionPopupAdaptation::ExplicitHeadInjected
         || admitted.surfaces.omitted_file_content_scripts != 1
         || admitted.surfaces.removed_file_match_patterns != 2
         || admitted.surfaces.same_document_navigation_routes != 1
-        || admitted.surfaces.history_search
+        || admitted.surfaces.history_search != brokered
+        || admitted.surfaces.extension_pages != if brokered { 7 } else { 0 }
+        || admitted.surfaces.empty_bookmarks != brokered
+        || admitted.surfaces.empty_favicon != brokered
     {
         return Err("Vimium compatibility artifact surface contract drifted".into());
     }
-    validate_manifest(&admitted.extension_root.join("manifest.json"))?;
-    Ok(admitted)
+    validate_manifest(&admitted.extension_root.join("manifest.json"), brokered)?;
+    if brokered {
+        for (path, description) in [
+            (
+                compatibility_artifact::RUNTIME_MESSAGING_BRIDGE,
+                "runtime messaging",
+            ),
+            (compatibility_artifact::BOOKMARKS_BRIDGE, "bookmarks"),
+            (compatibility_artifact::FAVICON_BRIDGE, "favicon"),
+            (
+                compatibility_artifact::EMPTY_FAVICON,
+                "empty favicon resource",
+            ),
+        ] {
+            let metadata = fs::symlink_metadata(admitted.extension_root.join(path))
+                .map_err(|error| format!("cannot inspect Vimium {description} bridge: {error}"))?;
+            if !metadata.is_file() || metadata.file_type().is_symlink() {
+                return Err(format!(
+                    "Vimium {description} bridge is not an ordinary file"
+                ));
+            }
+        }
+    }
+    Ok(AdmittedVimiumArtifact {
+        artifact: admitted,
+        brokered,
+    })
 }
 
-fn validate_manifest(path: &Path) -> Result<(), String> {
+fn validate_manifest(path: &Path, brokered: bool) -> Result<(), String> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|error| format!("cannot inspect Vimium manifest: {error}"))?;
     if !metadata.is_file()
@@ -334,7 +508,7 @@ fn validate_manifest(path: &Path) -> Result<(), String> {
         })
         .collect::<Result<Vec<_>, _>>()?;
     permissions.sort_unstable();
-    let mut expected = [
+    let mut expected = vec![
         "bookmarks",
         "favicon",
         "history",
@@ -346,6 +520,9 @@ fn validate_manifest(path: &Path) -> Result<(), String> {
         "tabs",
         "webNavigation",
     ];
+    if brokered {
+        expected.push("nativeMessaging");
+    }
     expected.sort_unstable();
     if permissions != expected {
         return Err("Vimium permission contract drifted".into());
@@ -358,6 +535,7 @@ fn validate_manifest(path: &Path) -> Result<(), String> {
 
 fn run_native(
     extension_root: &Path,
+    brokered: bool,
     operating_system: String,
     mtm: MainThreadMarker,
 ) -> Result<Teardown, String> {
@@ -371,19 +549,25 @@ fn run_native(
     }
     let extension = super::load_extension(extension_root, &run_loop, mtm)?;
     super::validate_extension(&extension, DISPLAY_NAME)?;
-    let context = super::new_context(&extension, CONTEXT_IDENTIFIER)?;
+    let context = super::new_context(
+        &extension,
+        if brokered {
+            BROKERED_CONTEXT_IDENTIFIER
+        } else {
+            CONTEXT_IDENTIFIER
+        },
+    )?;
+    let mut native_permissions = NATIVE_PERMISSIONS.to_vec();
+    if brokered {
+        native_permissions.push(Permission::NativeMessaging);
+    }
     let grants = super::super::extensions::apply_probe_grants(
         &context,
-        &NATIVE_PERMISSIONS,
+        &native_permissions,
         &[HOST_MATCH_PATTERN],
         true,
     )
     .map_err(|error| format!("cannot apply Vimium native grants: {error}"))?;
-    super::load_context(&bundle.controller, &context, DISPLAY_NAME)?;
-    let preload_started = Instant::now();
-    super::persistent_runtime::load_background_content(&context, &run_loop, "stock Vimium")?;
-    let background_preload_ms = preload_started.elapsed().as_millis();
-
     let window = super::new_window(mtm)?;
     // A key-eligible responder chain is required for AppKit to route queued
     // key events, even when the unbundled accessory probe is not foreground.
@@ -398,9 +582,6 @@ fn run_native(
             .contentView()
             .ok_or_else(|| "Vimium probe window has no content view".to_owned())?,
     };
-    let keyboard_control =
-        verify_trusted_keyboard_transport(mtm, &window, &host, &run_loop, &context, &server)?;
-
     let protected_specs = crate::host::protected_script_specs_for_native_probe();
     let mut builder =
         wry::WebViewBuilder::new().with_webview_configuration(bundle.webview_configuration.clone());
@@ -414,9 +595,6 @@ fn run_native(
     let native_page = super::super::native::webkit(&page);
     super::assert_attached_controller(&native_page, &bundle.controller)?;
     super::profile_isolation::assert_attached_store(&native_page, &bundle._data_store)?;
-    let baseline = super::user_script_inventory(&native_page);
-    super::validate_protected_inventory(&baseline)?;
-
     let lifecycle_drops = Arc::new(AtomicUsize::new(0));
     let webview_requests = Arc::new(AtomicUsize::new(0));
     let tab = super::ProbeTab::new(
@@ -428,16 +606,45 @@ fn run_native(
     let extension_window =
         super::ProbeWindow::new(mtm, tab.clone(), false, Arc::clone(&lifecycle_drops));
     tab.set_window(&extension_window);
-    let delegate = super::ProbeControllerDelegate::new(
-        mtm,
-        extension_window.clone(),
-        Arc::clone(&lifecycle_drops),
-    );
+    let history_target_url = server.url("/keyboard", "zephium-brokered-history-needle");
+    let native_message = brokered.then(|| {
+        let response = serde_json::json!({
+            "v": 1,
+            "items": [{
+                "url": history_target_url.clone(),
+                "title": BROKER_HISTORY_TITLE,
+                "lastVisit": 1_700_000_000_000_u64,
+            }],
+        })
+        .to_string();
+        super::ProbeNativeMessageContract::new(
+            &bundle.controller,
+            &context,
+            BROKER_APPLICATION_IDENTIFIER,
+            BROKER_HISTORY_REQUEST,
+            response,
+        )
+    });
+    let delegate = if let Some(native_message) = native_message.as_ref() {
+        super::ProbeControllerDelegate::new_with_native_message(
+            mtm,
+            extension_window.clone(),
+            native_message.clone(),
+            Arc::clone(&lifecycle_drops),
+        )
+    } else {
+        super::ProbeControllerDelegate::new(
+            mtm,
+            extension_window.clone(),
+            Arc::clone(&lifecycle_drops),
+        )
+    };
     let delegate_protocol = ProtocolObject::from_ref(&*delegate);
     let window_protocol = ProtocolObject::from_ref(&*extension_window);
     let tab_protocol = ProtocolObject::from_ref(&*tab);
+    unsafe { bundle.controller.setDelegate(Some(delegate_protocol)) };
+    super::load_context(&bundle.controller, &context, DISPLAY_NAME)?;
     unsafe {
-        bundle.controller.setDelegate(Some(delegate_protocol));
         bundle.controller.didOpenWindow(window_protocol);
         bundle.controller.didOpenTab(tab_protocol);
         bundle.controller.didFocusWindow(Some(window_protocol));
@@ -452,6 +659,13 @@ fn run_native(
         true,
         "Vimium published surface",
     )?;
+    let preload_started = Instant::now();
+    super::persistent_runtime::load_background_content(&context, &run_loop, "stock Vimium")?;
+    let background_preload_ms = preload_started.elapsed().as_millis();
+    let keyboard_control =
+        verify_trusted_keyboard_transport(mtm, &window, &host, &run_loop, &context, &server)?;
+    let baseline = super::user_script_inventory(&native_page);
+    super::validate_protected_inventory(&baseline)?;
 
     super::set_phase("vimium-keyboard-workflow");
     let page_url = server.url("/keyboard", "vimium-2-4-2-workflow");
@@ -485,17 +699,23 @@ fn run_native(
         PageExpectation::CommandHandled,
     )?;
     let scroll_observed = command_state.scroll_y > 1.0;
-    dispatch_key(mtm, &window, &native_page, &run_loop, "f", "f", 3)?;
-    super::drain_run_loop_once(&run_loop);
-    dispatch_key(mtm, &window, &native_page, &run_loop, "s", "s", 1)?;
     let activated_url = server.url("/activated", "vimium-2-4-2-workflow");
-    let link_result = wait_for_page_state(
-        &native_page,
-        &context,
-        &run_loop,
-        &activated_url,
-        PageExpectation::LinkActivated,
-    );
+    let link_result = if brokered {
+        Ok(())
+    } else {
+        dispatch_key(mtm, &window, &native_page, &run_loop, "f", "f", 3)?;
+        super::drain_run_loop_once(&run_loop);
+        dispatch_key(mtm, &window, &native_page, &run_loop, "s", "s", 1)?;
+        wait_for_page_state(
+            &native_page,
+            &context,
+            &run_loop,
+            &activated_url,
+            PageExpectation::LinkActivated,
+        )
+        .map(|_| ())
+    };
+    let history_page_url = if brokered { &page_url } else { &activated_url };
 
     super::set_phase("vimium-popup-workflow");
     let action = unsafe { context.actionForTab(Some(tab_protocol)) }
@@ -509,7 +729,7 @@ fn run_native(
             .ok_or_else(|| "Vimium action returned no popup view".to_owned())?;
         super::assert_attached_controller(&popup, &bundle.controller)?;
         super::profile_isolation::assert_attached_store(&popup, &bundle._data_store)?;
-        let state = wait_for_popup_state(&popup, &run_loop)?;
+        let state = wait_for_popup_state(&popup, &run_loop, brokered)?;
         Ok((popup, state))
     });
     let (popup_weak, popup_options_url, popup_failure) = match popup_result {
@@ -522,6 +742,47 @@ fn run_native(
     unsafe { action.closePopup() };
     wait_for_popup_closed(&action, &run_loop)?;
     drop(action);
+
+    let history_result = if native_message.is_some() {
+        if let Err(error) = &link_result {
+            Err(format!(
+                "Vimium history workflow requires successful link navigation: {error}"
+            ))
+        } else {
+            let original_navigation_delegate = unsafe { native_page.navigationDelegate() };
+            let frame_capture = VomnibarFrameCapture::new(mtm);
+            let frame_capture_protocol = ProtocolObject::from_ref(&*frame_capture);
+            unsafe { native_page.setNavigationDelegate(Some(frame_capture_protocol)) };
+            let result = (|| -> Result<(), String> {
+                super::set_phase("vimium-history-workflow");
+                dispatch_key(mtm, &window, &native_page, &run_loop, "o", "o", 31)?;
+                wait_for_page_state(
+                    &native_page,
+                    &context,
+                    &run_loop,
+                    history_page_url,
+                    PageExpectation::VomnibarVisible,
+                )?;
+                let frame = wait_for_vomnibar_frame(&frame_capture, &context, &run_loop)?;
+                run_vimium_history_completion(
+                    mtm,
+                    &native_page,
+                    &frame,
+                    &context,
+                    &run_loop,
+                    native_message
+                        .as_ref()
+                        .expect("brokered Vimium carries a native-message contract"),
+                    &history_target_url,
+                )?;
+                Ok(())
+            })();
+            unsafe { native_page.setNavigationDelegate(original_navigation_delegate.as_deref()) };
+            result
+        }
+    } else {
+        Ok(())
+    };
 
     let context_errors = unsafe { context.errors() };
     let context_failure = (context_errors.count() != 0).then(|| {
@@ -544,10 +805,15 @@ fn run_native(
         .clear_and_verify(&context)
         .map_err(|error| format!("cannot clear Vimium native grants: {error}"))?;
 
-    let failure = [link_result.err(), popup_failure, context_failure]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
+    let failure = [
+        link_result.err(),
+        history_result.err(),
+        popup_failure,
+        context_failure,
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
     let failure = (!failure.is_empty()).then(|| failure.join("; "));
     let teardown = Teardown {
         window: Weak::from_retained(&window),
@@ -564,6 +830,7 @@ fn run_native(
         webview_requests: webview_requests.load(Ordering::Acquire),
         popup_options_url,
         scroll_observed,
+        brokered_history: brokered,
         failure,
     };
     drop(delegate);
@@ -701,6 +968,22 @@ fn dispatch_key(
     }
     window.makeKeyAndOrderFront(None);
     super::drain_run_loop_once(run_loop);
+    dispatch_key_events(
+        &app,
+        window,
+        characters,
+        characters_ignoring_modifiers,
+        key_code,
+    )
+}
+
+fn dispatch_key_events(
+    app: &NSApplication,
+    window: &NSWindow,
+    characters: &str,
+    characters_ignoring_modifiers: &str,
+    key_code: u16,
+) -> Result<(), String> {
     let route_through_window = app.isActive() && window.isKeyWindow();
     let _first_responder = window
         .firstResponder()
@@ -762,6 +1045,9 @@ fn wait_for_page_state(
 ) -> Result<PageState, String> {
     let script = format!(
         r#"(() => {{
+          const vimiumFrame = [...document.querySelectorAll('div.vimium-reset')]
+            .map((host) => host.shadowRoot?.querySelector('iframe.vomnibar-frame'))
+            .find(Boolean);
           const state = {{
             ready: document.readyState,
             scrollY: Number(globalThis.scrollY),
@@ -772,6 +1058,9 @@ fn wait_for_page_state(
             commandDispatch: document.documentElement?.getAttribute('data-zephium-keyboard-command-dispatch') ?? 'missing',
             activeElement: document.activeElement?.id ?? '',
             keyboardControlValue: document.querySelector('#zephium-keyboard-trust-control')?.value ?? 'missing',
+            vomnibarVisible: vimiumFrame?.classList.contains('vimium-ui-component-visible') === true,
+            vomnibarFocused: vimiumFrame?.getRootNode()?.activeElement === vimiumFrame,
+            vomnibarSrc: vimiumFrame?.src ?? '',
             pagePrivilegedExtensionApi: document.documentElement?.getAttribute('data-zephium-page-privileged-extension-api') === 'present',
             pageAdapter: document.documentElement?.getAttribute('data-zephium-page-adapter') === 'present',
           }};
@@ -806,6 +1095,144 @@ fn wait_for_page_state(
                 expectation.label(),
                 actual_url,
             ));
+        }
+        super::drain_run_loop_once(run_loop);
+    }
+}
+
+fn wait_for_vomnibar_frame(
+    capture: &VomnibarFrameCapture,
+    context: &WKWebExtensionContext,
+    run_loop: &NSRunLoop,
+) -> Result<Retained<WKFrameInfo>, String> {
+    let deadline = Instant::now() + super::PROBE_TIMEOUT;
+    loop {
+        if let Some(frame) = capture.frame() {
+            return Ok(frame);
+        }
+        super::validate_context_errors(context, "Vimium Vomnibar frame capture")?;
+        if Instant::now() >= deadline {
+            return Err("WebKit did not expose Vimium's extension-origin Vomnibar frame".into());
+        }
+        super::drain_run_loop_once(run_loop);
+    }
+}
+
+fn run_vimium_history_completion(
+    mtm: MainThreadMarker,
+    page: &WKWebView,
+    frame: &WKFrameInfo,
+    context: &WKWebExtensionContext,
+    run_loop: &NSRunLoop,
+    contract: &super::ProbeNativeMessageContract,
+    expected_url: &str,
+) -> Result<(), String> {
+    let body = NSString::from_str(
+        r#"if (
+          globalThis[Symbol.for('zephium.webkit-runtime-messaging-compatibility.v1')] !== true ||
+          globalThis[Symbol.for('zephium.webkit-bookmarks-compatibility.mode.v1')] !== 'empty-read-only' ||
+          globalThis[Symbol.for('zephium.webkit-favicon-compatibility.mode.v1')] !== 'transparent-fallback' ||
+          globalThis[Symbol.for('zephium.webkit-history-compatibility.mode.v1')] !== 'bounded-recent-search'
+        ) {
+          throw new Error('Vimium extension-page compatibility modes drifted');
+        }
+        const input = document.querySelector('#vomnibar input');
+        if (!(input instanceof HTMLInputElement)) {
+          throw new Error('Vimium Vomnibar input is absent');
+        }
+        input.value = 'zephium';
+        input.dispatchEvent(new InputEvent('input', {
+          bubbles: true,
+          data: 'zephium',
+          inputType: 'insertText',
+        }));
+        const deadline = Date.now() + 4000;
+        let items = [];
+        do {
+          items = [...document.querySelectorAll('#vomnibar ul > li')];
+          if (items.length !== 0) break;
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        } while (Date.now() < deadline);
+        return JSON.stringify({
+          count: items.length,
+          text: items.map((item) => item.textContent ?? '').join('\n'),
+        });"#,
+    );
+    let result = std::rc::Rc::new(std::cell::RefCell::new(None::<Result<String, String>>));
+    let settlements = std::rc::Rc::new(std::cell::Cell::new(0_usize));
+    let callback_result = result.clone();
+    let callback_settlements = settlements.clone();
+    let completion = block2::RcBlock::new(move |value: *mut AnyObject, error: *mut NSError| {
+        let count = callback_settlements.get().saturating_add(1);
+        callback_settlements.set(count);
+        let settlement = if count != 1 {
+            Err("Vimium frame completion settled more than once".to_owned())
+        } else if let Some(error) = unsafe { error.as_ref() } {
+            Err(format!(
+                "Vimium frame completion failed: domain={}, code={}, description={}",
+                error.domain(),
+                error.code(),
+                error.localizedDescription(),
+            ))
+        } else {
+            unsafe { value.as_ref() }
+                .and_then(AnyObject::downcast_ref::<NSString>)
+                .map(ToString::to_string)
+                .ok_or_else(|| "Vimium frame completion returned a non-string".to_owned())
+        };
+        callback_result.replace(Some(settlement));
+    });
+    let world = unsafe { WKContentWorld::pageWorld(mtm) };
+    unsafe {
+        page.callAsyncJavaScript_arguments_inFrame_inContentWorld_completionHandler(
+            &body,
+            None,
+            Some(frame),
+            &world,
+            Some(&completion),
+        );
+    }
+
+    let deadline = Instant::now() + super::PROBE_TIMEOUT;
+    let encoded = loop {
+        if let Some(result) = result.borrow().clone() {
+            break result?;
+        }
+        let _ = contract.settlement()?;
+        super::validate_context_errors(context, "Vimium history completion")?;
+        if Instant::now() >= deadline {
+            return Err("Vimium extension-frame completion timed out".into());
+        }
+        super::drain_run_loop_once(run_loop);
+    };
+    let state: HistoryCompletionState = serde_json::from_str(&encoded)
+        .map_err(|error| format!("Vimium history completion evidence is invalid: {error}"))?;
+    let expected_display_url = expected_url.strip_prefix("http://").unwrap_or(expected_url);
+    if state.count == 0
+        || !state.text.contains(BROKER_HISTORY_TITLE)
+        || !state.text.contains(expected_display_url)
+    {
+        let native_message_settled = contract.settlement()?;
+        return Err(format!(
+            "Vimium history completion result drifted: {state:?}; native_message_settled={native_message_settled}"
+        ));
+    }
+    wait_for_native_message_contract(contract, context, run_loop)
+}
+
+fn wait_for_native_message_contract(
+    contract: &super::ProbeNativeMessageContract,
+    context: &WKWebExtensionContext,
+    run_loop: &NSRunLoop,
+) -> Result<(), String> {
+    let deadline = Instant::now() + super::PROBE_TIMEOUT;
+    loop {
+        if contract.settlement()? {
+            return contract.validate();
+        }
+        super::validate_context_errors(context, "Vimium history workflow")?;
+        if Instant::now() >= deadline {
+            return Err("Vimium did not request its bounded native history cohort".into());
         }
         super::drain_run_loop_once(run_loop);
     }
@@ -849,7 +1276,11 @@ fn wait_for_popup_closed(
     }
 }
 
-fn wait_for_popup_state(popup: &WKWebView, run_loop: &NSRunLoop) -> Result<PopupState, String> {
+fn wait_for_popup_state(
+    popup: &WKWebView,
+    run_loop: &NSRunLoop,
+    brokered: bool,
+) -> Result<PopupState, String> {
     let script = format!(
         r#"(() => {{
           const state = {{
@@ -857,6 +1288,10 @@ fn wait_for_popup_state(popup: &WKWebView, run_loop: &NSRunLoop) -> Result<Popup
             chromeRuntime: Boolean(globalThis.chrome?.runtime),
             chromeRuntimeId: Boolean(globalThis.chrome?.runtime?.id),
             adapter: globalThis[Symbol.for({COMPATIBILITY_SYMBOL:?})] === true,
+            runtimeMessaging: globalThis[Symbol.for('zephium.webkit-runtime-messaging-compatibility.v1')] === true,
+            bookmarksMode: globalThis[Symbol.for('zephium.webkit-bookmarks-compatibility.mode.v1')] ?? '',
+            faviconMode: globalThis[Symbol.for('zephium.webkit-favicon-compatibility.mode.v1')] ?? '',
+            historyMode: globalThis[Symbol.for('zephium.webkit-history-compatibility.mode.v1')] ?? '',
             optionsUrl: document.querySelector('#optionsLink')?.href ?? '',
             dialogVisible: getComputedStyle(document.querySelector('#dialog-body')).display !== 'none',
             missingContentErrorVisible: getComputedStyle(document.querySelector('#not-enabled-error')).display !== 'none',
@@ -875,10 +1310,16 @@ fn wait_for_popup_state(popup: &WKWebView, run_loop: &NSRunLoop) -> Result<Popup
                 if payload.len() <= MAX_DIAGNOSTIC_TITLE_BYTES {
                     let state: PopupState = serde_json::from_str(payload)
                         .map_err(|error| format!("Vimium popup evidence is invalid: {error}"))?;
+                    let brokered_ready = !brokered
+                        || (state.runtime_messaging
+                            && state.bookmarks_mode == "empty-read-only"
+                            && state.favicon_mode == "transparent-fallback"
+                            && state.history_mode == "bounded-recent-search");
                     if state.ready == "complete"
                         && state.chrome_runtime
                         && state.chrome_runtime_id
                         && state.adapter
+                        && brokered_ready
                         && state.options_url.starts_with("webkit-extension://")
                         && state.dialog_visible
                         && !state.missing_content_error_visible
@@ -953,6 +1394,9 @@ mod tests {
             command_dispatch: "missing".to_owned(),
             active_element: String::new(),
             keyboard_control_value: "missing".to_owned(),
+            vomnibar_visible: false,
+            vomnibar_focused: false,
+            vomnibar_src: String::new(),
             page_privileged_extension_api: false,
             page_adapter: false,
         };

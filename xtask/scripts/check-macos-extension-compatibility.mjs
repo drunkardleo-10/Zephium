@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { webcrypto } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
@@ -17,6 +18,30 @@ const historySource = await readFile(fileURLToPath(historyAssetUrl), "utf8");
 const historyScript = new vm.Script(historySource, {
   filename: fileURLToPath(historyAssetUrl),
 });
+const runtimeMessagingAssetUrl = new URL(
+  "../../crates/zephium-extension-package/assets/macos/webkit-runtime-messaging-v1.js",
+  import.meta.url,
+);
+const runtimeMessagingSource = await readFile(fileURLToPath(runtimeMessagingAssetUrl), "utf8");
+const runtimeMessagingScript = new vm.Script(runtimeMessagingSource, {
+  filename: fileURLToPath(runtimeMessagingAssetUrl),
+});
+const bookmarksAssetUrl = new URL(
+  "../../crates/zephium-extension-package/assets/macos/webkit-bookmarks-v1.js",
+  import.meta.url,
+);
+const bookmarksSource = await readFile(fileURLToPath(bookmarksAssetUrl), "utf8");
+const bookmarksScript = new vm.Script(bookmarksSource, {
+  filename: fileURLToPath(bookmarksAssetUrl),
+});
+const faviconAssetUrl = new URL(
+  "../../crates/zephium-extension-package/assets/macos/webkit-favicon-v1.js",
+  import.meta.url,
+);
+const faviconSource = await readFile(fileURLToPath(faviconAssetUrl), "utf8");
+const faviconScript = new vm.Script(faviconSource, {
+  filename: fileURLToPath(faviconAssetUrl),
+});
 
 for (const forbidden of ["document", "window", "fetch", "XMLHttpRequest", "WebSocket"]) {
   assert.equal(source.includes(forbidden), false, `compatibility asset exposes ${forbidden}`);
@@ -30,6 +55,23 @@ for (const forbidden of [
   "connectNative",
 ]) {
   assert.equal(historySource.includes(forbidden), false, `history asset exposes ${forbidden}`);
+}
+for (const forbidden of ["document", "window", "fetch(", "XMLHttpRequest", "WebSocket"]) {
+  assert.equal(bookmarksSource.includes(forbidden), false, `bookmarks asset exposes ${forbidden}`);
+  assert.equal(faviconSource.includes(forbidden), false, `favicon asset exposes ${forbidden}`);
+}
+for (const forbidden of [
+  "fetch(",
+  "XMLHttpRequest",
+  "WebSocket",
+  "sendNativeMessage",
+  "connectNative",
+]) {
+  assert.equal(
+    runtimeMessagingSource.includes(forbidden),
+    false,
+    `runtime messaging asset exposes ${forbidden}`,
+  );
 }
 assert.equal(
   historySource.match(/app\.zephium\.extension-broker\.v1/g)?.length,
@@ -273,15 +315,38 @@ assert.throws(() => onVisited.addListener("not-a-function"), /must be a function
 historyScript.runInContext(history, { timeout: 1_000 });
 assert.equal(history.chrome.history, history.browser.history, "idempotent run replaced history");
 
-const nativeHistory = Object.freeze({ search() {} });
-const preservedNamespace = historyNamespace(() => {
-  throw new Error("native history preservation called the Zephium broker");
+let nativeHistoryCalls = 0;
+const nativeHistory = Object.freeze({
+  search() {
+    nativeHistoryCalls += 1;
+  },
 });
-preservedNamespace.history = nativeHistory;
-const preserved = runHistory(preservedNamespace);
-assert.equal(preserved.chrome.history, nativeHistory);
-assert.equal(preserved.browser.history, nativeHistory);
-assert.equal(preserved[historyMode], "native-preserved");
+const shadowRequests = [];
+const shadowedNamespace = historyNamespace(({ application, request, callback }) => {
+  shadowRequests.push({ application, request });
+  callback('{"v":1,"items":[]}');
+});
+shadowedNamespace.history = nativeHistory;
+const shadowed = runHistory(shadowedNamespace);
+assert.notEqual(shadowed.chrome.history, nativeHistory);
+assert.equal(shadowed.chrome.history, shadowed.browser.history);
+assert.equal(shadowed[historyMode], "bounded-recent-search");
+await shadowed.chrome.history.search({ text: "", maxResults: 1, startTime: 0 });
+assert.equal(nativeHistoryCalls, 0, "brokered search reached WebKit's private history object");
+assert.deepEqual(shadowRequests, [
+  {
+    application: "app.zephium.extension-broker.v1",
+    request: "v1/history.recent/1",
+  },
+]);
+
+const unshadowableNamespace = historyNamespace(() => {});
+Object.defineProperty(unshadowableNamespace, "history", {
+  value: nativeHistory,
+  configurable: false,
+  writable: false,
+});
+assert.throws(() => runHistory(unshadowableNamespace), /cannot install safely/);
 
 const missingBroker = nativeNamespace("missing-broker");
 const missingBrokerContext = vm.createContext({ chrome: missingBroker });
@@ -297,6 +362,324 @@ const malformed = runHistory(
 await assert.rejects(
   malformed.chrome.history.search({ text: "", startTime: 0 }),
   /invalid history item/,
+);
+
+const bookmarksNamespace = nativeNamespace("bookmarks-fixture");
+const bookmarksContext = vm.createContext({
+  chrome: bookmarksNamespace,
+  queueMicrotask,
+});
+script.runInContext(bookmarksContext, { timeout: 1_000 });
+bookmarksScript.runInContext(bookmarksContext, { timeout: 1_000 });
+const bookmarksInstalled = Symbol.for("zephium.webkit-bookmarks-compatibility.v1");
+const bookmarksMode = Symbol.for("zephium.webkit-bookmarks-compatibility.mode.v1");
+assert.equal(bookmarksContext[bookmarksInstalled], true);
+assert.equal(bookmarksContext[bookmarksMode], "empty-read-only");
+assert.equal(bookmarksContext.chrome.bookmarks, bookmarksContext.browser.bookmarks);
+assert.deepEqual(
+  JSON.parse(JSON.stringify(await bookmarksContext.chrome.bookmarks.getTree())),
+  [{ id: "0", title: "", children: [] }],
+);
+assert.deepEqual(
+  JSON.parse(JSON.stringify(await bookmarksContext.chrome.bookmarks.search("anything"))),
+  [],
+);
+assert.deepEqual(
+  JSON.parse(JSON.stringify(await bookmarksContext.chrome.bookmarks.getSubTree("missing"))),
+  [],
+);
+let bookmarkCallback;
+assert.equal(
+  bookmarksContext.chrome.bookmarks.getTree((tree) => {
+    bookmarkCallback = JSON.parse(JSON.stringify(tree));
+  }),
+  undefined,
+);
+await new Promise((resolve) => queueMicrotask(resolve));
+assert.deepEqual(bookmarkCallback, [{ id: "0", title: "", children: [] }]);
+assert.equal(typeof bookmarksContext.chrome.bookmarks.create, "undefined");
+const bookmarkListener = () => {};
+bookmarksContext.chrome.bookmarks.onCreated.addListener(bookmarkListener);
+assert.equal(bookmarksContext.chrome.bookmarks.onCreated.hasListener(bookmarkListener), true);
+bookmarksContext.chrome.bookmarks.onCreated.removeListener(bookmarkListener);
+assert.equal(bookmarksContext.chrome.bookmarks.onCreated.hasListeners(), false);
+assert.throws(
+  () => bookmarksContext.chrome.bookmarks.getRecent(-1),
+  /count is invalid/,
+);
+bookmarksScript.runInContext(bookmarksContext, { timeout: 1_000 });
+assert.equal(bookmarksContext.chrome.bookmarks, bookmarksContext.browser.bookmarks);
+
+const preservedBookmarks = Object.freeze({ getTree() {} });
+const preservedBookmarksNamespace = nativeNamespace("native-bookmarks");
+preservedBookmarksNamespace.bookmarks = preservedBookmarks;
+const preservedBookmarksContext = vm.createContext({
+  chrome: preservedBookmarksNamespace,
+  queueMicrotask,
+});
+script.runInContext(preservedBookmarksContext, { timeout: 1_000 });
+bookmarksScript.runInContext(preservedBookmarksContext, { timeout: 1_000 });
+assert.equal(preservedBookmarksContext.chrome.bookmarks, preservedBookmarks);
+assert.equal(preservedBookmarksContext[bookmarksMode], "native-preserved");
+
+const faviconNamespace = nativeNamespace("favicon-fixture");
+const faviconContext = vm.createContext({ chrome: faviconNamespace });
+script.runInContext(faviconContext, { timeout: 1_000 });
+faviconScript.runInContext(faviconContext, { timeout: 1_000 });
+const faviconInstalled = Symbol.for("zephium.webkit-favicon-compatibility.v1");
+const faviconMode = Symbol.for("zephium.webkit-favicon-compatibility.mode.v1");
+assert.equal(faviconContext[faviconInstalled], true);
+assert.equal(faviconContext[faviconMode], "transparent-fallback");
+assert.equal(
+  faviconContext.chrome.runtime.getURL("_favicon/?pageUrl=https%3A%2F%2Fexample.com"),
+  "native-extension://favicon-fixture/__zephium__/favicon-empty-v1.svg",
+);
+assert.equal(
+  faviconContext.chrome.runtime.getURL("/favicon/icon.svg"),
+  "native-extension://favicon-fixture//favicon/icon.svg",
+);
+faviconScript.runInContext(faviconContext, { timeout: 1_000 });
+assert.equal(
+  faviconContext.chrome.runtime.getURL("_favicon/"),
+  "native-extension://favicon-fixture/__zephium__/favicon-empty-v1.svg",
+);
+
+function nativeEvent() {
+  const listeners = new Set();
+  return {
+    addListener(listener) {
+      listeners.add(listener);
+    },
+    removeListener(listener) {
+      listeners.delete(listener);
+    },
+    hasListener(listener) {
+      return listeners.has(listener);
+    },
+    hasListeners() {
+      return listeners.size !== 0;
+    },
+    emit(...args) {
+      return [...listeners].map((listener) => listener(...args));
+    },
+  };
+}
+
+function linkedPorts(name, sender) {
+  const pageMessages = nativeEvent();
+  const backgroundMessages = nativeEvent();
+  const pageDisconnect = nativeEvent();
+  const backgroundDisconnect = nativeEvent();
+  let disconnected = false;
+  const disconnect = () => {
+    if (disconnected) return;
+    disconnected = true;
+    pageDisconnect.emit();
+    backgroundDisconnect.emit();
+  };
+  const page = {
+    name,
+    onMessage: pageMessages,
+    onDisconnect: pageDisconnect,
+    postMessage(message) {
+      if (disconnected) throw new Error("port disconnected");
+      backgroundMessages.emit(message);
+    },
+    disconnect,
+  };
+  const background = {
+    name,
+    sender,
+    onMessage: backgroundMessages,
+    onDisconnect: backgroundDisconnect,
+    postMessage(message) {
+      if (disconnected) throw new Error("port disconnected");
+      pageMessages.emit(message);
+    },
+    disconnect,
+  };
+  return { page, background };
+}
+
+function sessionStorageFixture() {
+  const values = new Map();
+  const onChanged = nativeEvent();
+  return {
+    onChanged,
+    session: {
+      async get(key) {
+        return values.has(key) ? { [key]: values.get(key) } : {};
+      },
+      async set(entries) {
+        const changes = {};
+        for (const [key, value] of Object.entries(entries)) {
+          changes[key] = { oldValue: values.get(key), newValue: value };
+          values.set(key, value);
+        }
+        onChanged.emit(changes, "session");
+      },
+      async remove(key) {
+        if (!values.has(key)) return;
+        const oldValue = values.get(key);
+        values.delete(key);
+        onChanged.emit({ [key]: { oldValue } }, "session");
+      },
+    },
+  };
+}
+
+function runtimeMessagingFixture() {
+  const backgroundOnMessage = nativeEvent();
+  const backgroundOnConnect = nativeEvent();
+  const pageOnMessage = nativeEvent();
+  const pageOnConnect = nativeEvent();
+  const sender = Object.freeze({
+    frameId: 7,
+    url: "webkit-extension://fixture/pages/vomnibar.html",
+    tab: Object.freeze({ id: 41, url: "https://page.example/path" }),
+  });
+  let externalCalls = 0;
+  const storage = sessionStorageFixture();
+  const backgroundRuntime = {
+    id: "runtime-messaging-fixture",
+    onMessage: backgroundOnMessage,
+    onConnect: backgroundOnConnect,
+    connect() {
+      throw new Error("background connect must not be used");
+    },
+    sendMessage() {
+      throw new Error("background sendMessage must not be used");
+    },
+  };
+  const pageRuntime = {
+    id: "runtime-messaging-fixture",
+    onMessage: pageOnMessage,
+    onConnect: pageOnConnect,
+    connect(options) {
+      const ports = linkedPorts(options?.name ?? "", sender);
+      backgroundOnConnect.emit(ports.background);
+      return ports.page;
+    },
+    sendMessage(...args) {
+      if (typeof args[0] === "string" && args.length >= 2) {
+        externalCalls += 1;
+        return "native-external-result";
+      }
+      const callback = typeof args.at(-1) === "function" ? args.at(-1) : undefined;
+      backgroundOnMessage.emit(args[0], sender, () => {});
+      callback?.(undefined);
+      return undefined;
+    },
+  };
+  return {
+    backgroundRuntime,
+    pageRuntime,
+    storage,
+    sender,
+    externalCalls: () => externalCalls,
+  };
+}
+
+const messaging = runtimeMessagingFixture();
+const messagingGlobals = {
+  setTimeout,
+  clearTimeout,
+  queueMicrotask,
+  crypto: webcrypto,
+  TextEncoder,
+};
+const backgroundMessagingContext = vm.createContext({
+  ...messagingGlobals,
+  chrome: { runtime: messaging.backgroundRuntime, storage: messaging.storage },
+});
+runtimeMessagingScript.runInContext(backgroundMessagingContext, { timeout: 1_000 });
+const pageMessagingContext = vm.createContext({
+  ...messagingGlobals,
+  chrome: { runtime: messaging.pageRuntime, storage: messaging.storage },
+  document: {},
+  location: { protocol: "webkit-extension:" },
+});
+runtimeMessagingScript.runInContext(pageMessagingContext, { timeout: 1_000 });
+
+const asyncListener = (message, sender, sendResponse) => {
+  assert.deepEqual(JSON.parse(JSON.stringify(sender)), messaging.sender);
+  if (message?.kind !== "async") return false;
+  queueMicrotask(() => sendResponse({ value: message.value + 1 }));
+  return true;
+};
+messaging.backgroundRuntime.onMessage.addListener(asyncListener);
+assert.equal(messaging.backgroundRuntime.onMessage.hasListener(asyncListener), true);
+assert.equal(messaging.backgroundRuntime.onMessage.hasListeners(), true);
+assert.deepEqual(
+  JSON.parse(
+    JSON.stringify(await messaging.pageRuntime.sendMessage({ kind: "async", value: 6 })),
+  ),
+  { value: 7 },
+);
+
+let callbackValue;
+assert.equal(
+  messaging.pageRuntime.sendMessage({ kind: "async", value: 8 }, (value) => {
+    callbackValue = JSON.parse(JSON.stringify(value));
+  }),
+  undefined,
+);
+await new Promise((resolve) => setTimeout(resolve, 0));
+assert.deepEqual(callbackValue, { value: 9 });
+
+messaging.backgroundRuntime.onMessage.removeListener(asyncListener);
+assert.equal(messaging.backgroundRuntime.onMessage.hasListener(asyncListener), false);
+const promiseListener = (message) =>
+  message?.kind === "promise" ? Promise.resolve({ promised: true }) : false;
+messaging.backgroundRuntime.onMessage.addListener(promiseListener);
+assert.deepEqual(
+  JSON.parse(
+    JSON.stringify(await messaging.pageRuntime.sendMessage({ kind: "promise" })),
+  ),
+  { promised: true },
+);
+assert.equal(await messaging.pageRuntime.sendMessage({ kind: "unhandled" }), undefined);
+
+let publicConnects = 0;
+const publicConnectListener = () => {
+  publicConnects += 1;
+};
+messaging.backgroundRuntime.onConnect.addListener(publicConnectListener);
+await messaging.pageRuntime.sendMessage({ kind: "promise" });
+assert.equal(publicConnects, 0, "reserved compatibility port reached extension listeners");
+const publicPort = messaging.pageRuntime.connect({ name: "public-extension-port" });
+assert.equal(publicConnects, 1);
+publicPort.disconnect();
+messaging.backgroundRuntime.onConnect.removeListener(publicConnectListener);
+assert.equal(messaging.backgroundRuntime.onConnect.hasListener(publicConnectListener), false);
+
+assert.equal(
+  messaging.pageRuntime.sendMessage("other-extension", { kind: "external" }),
+  "native-external-result",
+);
+assert.equal(messaging.externalCalls(), 1);
+runtimeMessagingScript.runInContext(backgroundMessagingContext, { timeout: 1_000 });
+runtimeMessagingScript.runInContext(pageMessagingContext, { timeout: 1_000 });
+assert.equal(
+  backgroundMessagingContext[
+    Symbol.for("zephium.webkit-runtime-messaging-compatibility.v1")
+  ],
+  true,
+);
+assert.equal(
+  pageMessagingContext[Symbol.for("zephium.webkit-runtime-messaging-compatibility.v1")],
+  true,
+);
+
+const missingRuntimeMessaging = vm.createContext({
+  ...messagingGlobals,
+  chrome: { runtime: { id: "missing-events" } },
+  document: {},
+  location: { protocol: "webkit-extension:" },
+});
+assert.throws(
+  () => runtimeMessagingScript.runInContext(missingRuntimeMessaging, { timeout: 1_000 }),
+  /surface is unavailable/,
 );
 
 console.log("macOS extension compatibility asset contract passed");

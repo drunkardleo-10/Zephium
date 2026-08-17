@@ -30,6 +30,10 @@ const ARTIFACT_TREE_INDEX: &str = "authenticated-extension-tree.json";
 const NATIVE_TARGET: &str = "webkit-macos-native-v3";
 const BROKERED_TARGET: &str = "webkit-macos-native-brokered-v1";
 const API_PRELUDE: &str = "__zephium__/webkit-api-v1.js";
+const RUNTIME_MESSAGING_BRIDGE: &str = "__zephium__/webkit-runtime-messaging-v1.js";
+const BOOKMARKS_BRIDGE: &str = "__zephium__/webkit-bookmarks-v1.js";
+const FAVICON_BRIDGE: &str = "__zephium__/webkit-favicon-v1.js";
+const EMPTY_FAVICON: &str = "__zephium__/favicon-empty-v1.svg";
 const HISTORY_BRIDGE: &str = "__zephium__/webkit-history-v1.js";
 const WEB_NAVIGATION_BRIDGE: &str = "__zephium__/webkit-web-navigation-v1.js";
 const BACKGROUND_WRAPPER: &str = "__zephium_background_v1.js";
@@ -37,6 +41,15 @@ const MAX_POPUP_HTML_BYTES: u64 = 2 * 1024 * 1024;
 
 const API_PRELUDE_SOURCE: &str =
     include_str!("../../crates/zephium-extension-package/assets/macos/webkit-api-v1.js");
+const RUNTIME_MESSAGING_BRIDGE_SOURCE: &str = include_str!(
+    "../../crates/zephium-extension-package/assets/macos/webkit-runtime-messaging-v1.js"
+);
+const BOOKMARKS_BRIDGE_SOURCE: &str =
+    include_str!("../../crates/zephium-extension-package/assets/macos/webkit-bookmarks-v1.js");
+const FAVICON_BRIDGE_SOURCE: &str =
+    include_str!("../../crates/zephium-extension-package/assets/macos/webkit-favicon-v1.js");
+const EMPTY_FAVICON_SOURCE: &str =
+    include_str!("../../crates/zephium-extension-package/assets/macos/favicon-empty-v1.svg");
 const HISTORY_BRIDGE_SOURCE: &str =
     include_str!("../../crates/zephium-extension-package/assets/macos/webkit-history-v1.js");
 const WEB_NAVIGATION_BRIDGE_SOURCE: &str =
@@ -80,7 +93,8 @@ impl WorkerKind {
 
 struct TransformPlan {
     manifest: Vec<u8>,
-    popup: Option<(String, Vec<u8>)>,
+    extension_pages: Vec<(String, Vec<u8>)>,
+    action_popup: bool,
     background_wrapper: Option<Vec<u8>>,
     worker: WorkerKind,
     isolated_content_scripts: usize,
@@ -88,6 +102,8 @@ struct TransformPlan {
     removed_file_match_patterns: usize,
     same_document_navigation_routes: usize,
     history_broker_search: bool,
+    empty_bookmarks: bool,
+    empty_favicon: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -158,15 +174,12 @@ fn materialize_target(
         let source = read_indexed_file(&source_root, indexed)?;
         let bytes = if indexed.path().as_str() == "manifest.json" {
             plan.manifest.as_slice()
-        } else if plan
-            .popup
-            .as_ref()
-            .is_some_and(|(path, _)| path == indexed.path().as_str())
+        } else if let Some((_, bytes)) = plan
+            .extension_pages
+            .iter()
+            .find(|(path, _)| path == indexed.path().as_str())
         {
-            plan.popup
-                .as_ref()
-                .map(|(_, bytes)| bytes.as_slice())
-                .expect("checked popup replacement")
+            bytes.as_slice()
         } else {
             source.as_slice()
         };
@@ -177,6 +190,32 @@ fn materialize_target(
         API_PRELUDE,
         API_PRELUDE_SOURCE.as_bytes(),
     )?;
+    if plan.empty_bookmarks {
+        write_new_file(
+            &staged_extension,
+            BOOKMARKS_BRIDGE,
+            BOOKMARKS_BRIDGE_SOURCE.as_bytes(),
+        )?;
+    }
+    if plan.empty_favicon {
+        write_new_file(
+            &staged_extension,
+            FAVICON_BRIDGE,
+            FAVICON_BRIDGE_SOURCE.as_bytes(),
+        )?;
+        write_new_file(
+            &staged_extension,
+            EMPTY_FAVICON,
+            EMPTY_FAVICON_SOURCE.as_bytes(),
+        )?;
+    }
+    if plan.history_broker_search {
+        write_new_file(
+            &staged_extension,
+            RUNTIME_MESSAGING_BRIDGE,
+            RUNTIME_MESSAGING_BRIDGE_SOURCE.as_bytes(),
+        )?;
+    }
     if plan.history_broker_search {
         write_new_file(
             &staged_extension,
@@ -212,9 +251,26 @@ fn materialize_target(
         "same-document-web-navigation-limited-to-injected-frames",
         "history-state-navigation-requires-host-signal",
     ];
+    if plan.empty_bookmarks {
+        adaptations.push("empty-bookmarks-read-facade-v1");
+        limitations.extend([
+            "bookmarks-read-results-empty",
+            "bookmarks-events-registered-but-not-emitted",
+            "bookmarks-mutations-unsupported",
+        ]);
+    }
+    if plan.empty_favicon {
+        adaptations.push("transparent-favicon-url-fallback-v1");
+        limitations.push("page-favicons-render-transparent");
+    }
     if plan.history_broker_search {
+        limitations.retain(|limitation| *limitation != "non-action-extension-pages-not-adapted");
+        adaptations.push("extension-page-runtime-messaging-session-v1");
         adaptations.push("bounded-history-search-broker-v1");
         limitations.extend([
+            "extension-page-runtime-messaging-current-extension-only",
+            "extension-page-runtime-callback-errors-have-no-last-error",
+            "extension-page-runtime-messaging-requires-promise-session-storage",
             "history-search-recent-100-only",
             "history-text-search-limited-to-recent-results",
             "history-events-registered-but-not-emitted",
@@ -225,20 +281,36 @@ fn materialize_target(
     let mut surfaces = serde_json::json!({
         "background": plan.worker.label(),
         "isolated_content_scripts": plan.isolated_content_scripts,
-        "action_popup": if plan.popup.is_some() { "explicit-head-injected" } else { "absent" },
+        "action_popup": if plan.action_popup { "explicit-head-injected" } else { "absent" },
         "main_world_content_scripts": "unchanged",
         "omitted_file_content_scripts": plan.omitted_file_content_scripts,
         "removed_file_match_patterns": plan.removed_file_match_patterns,
         "same_document_navigation_routes": plan.same_document_navigation_routes,
     });
     if plan.history_broker_search {
-        surfaces
+        let surfaces = surfaces
             .as_object_mut()
-            .expect("compatibility surfaces are an object")
-            .insert(
-                "history_search".to_owned(),
-                Value::String("bounded-native-broker".to_owned()),
+            .expect("compatibility surfaces are an object");
+        surfaces.insert(
+            "history_search".to_owned(),
+            Value::String("bounded-native-broker".to_owned()),
+        );
+        surfaces.insert(
+            "extension_pages".to_owned(),
+            Value::from(plan.extension_pages.len()),
+        );
+        if plan.empty_bookmarks {
+            surfaces.insert(
+                "bookmarks".to_owned(),
+                Value::String("empty-read-only".to_owned()),
             );
+        }
+        if plan.empty_favicon {
+            surfaces.insert(
+                "favicon".to_owned(),
+                Value::String("transparent-fallback".to_owned()),
+            );
+        }
     }
     let metadata = serde_json::to_vec_pretty(&serde_json::json!({
         "schema": 1,
@@ -293,7 +365,7 @@ fn materialize_target(
         plan.removed_file_match_patterns,
         plan.same_document_navigation_routes,
         if plan.history_broker_search { "bounded-native-broker" } else { "absent" },
-        if plan.popup.is_some() { "injected" } else { "absent" },
+        if plan.action_popup { "injected" } else { "absent" },
     );
     Ok(())
 }
@@ -315,9 +387,16 @@ fn build_plan(
     }
 
     let history_broker_search = target.requires_history_broker();
+    let empty_bookmarks =
+        history_broker_search && declares_permission(&root, "permissions", "bookmarks")?;
+    let empty_favicon =
+        history_broker_search && declares_permission(&root, "permissions", "favicon")?;
     if history_broker_search {
         if !declares_permission(&root, "permissions", "history")? {
             return Err("brokered history compatibility requires the history permission".into());
+        }
+        if !declares_permission(&root, "permissions", "storage")? {
+            return Err("extension-page runtime messaging requires the storage permission".into());
         }
         if root.get("background").is_none() {
             return Err("brokered history compatibility requires an MV3 background worker".into());
@@ -336,29 +415,52 @@ fn build_plan(
     let bridge_same_document_navigation =
         declares_permission(&root, "permissions", "webNavigation")?
             && root.get("background").is_some();
-    let content_scripts = adapt_content_scripts(&mut root, index, bridge_same_document_navigation)?;
+    let content_scripts = adapt_content_scripts(
+        &mut root,
+        index,
+        bridge_same_document_navigation,
+        empty_favicon,
+    )?;
     let same_document_navigation_routes = content_scripts.same_document_navigation_routes;
     let (worker, background_wrapper) = adapt_background(
         &mut root,
         index,
         same_document_navigation_routes != 0,
         history_broker_search,
+        history_broker_search,
+        empty_bookmarks,
+        empty_favicon,
     )?;
     let popup_path = action_popup_path(&root)?;
-    let popup = popup_path
-        .map(|path| {
-            let portable = PortableRelativePath::parse(&path)
-                .map_err(|error| format!("action popup path is not portable: {error}"))?;
-            let indexed = index
-                .file(&portable)
-                .ok_or_else(|| "action popup is absent from the closed source tree".to_owned())?;
-            if indexed.length() > MAX_POPUP_HTML_BYTES {
-                return Err("action popup exceeds the compatibility HTML ceiling".into());
-            }
-            let source = read_indexed_file(source_root, indexed)?;
-            inject_popup_prelude(&source, history_broker_search).map(|bytes| (path, bytes))
-        })
-        .transpose()?;
+    let action_popup = popup_path.is_some();
+    let extension_pages = if history_broker_search {
+        adapt_extension_pages(source_root, index, &root, empty_bookmarks, empty_favicon)?
+    } else {
+        popup_path
+            .clone()
+            .map(|path| {
+                let portable = PortableRelativePath::parse(&path)
+                    .map_err(|error| format!("action popup path is not portable: {error}"))?;
+                let indexed = index.file(&portable).ok_or_else(|| {
+                    "action popup is absent from the closed source tree".to_owned()
+                })?;
+                if indexed.length() > MAX_POPUP_HTML_BYTES {
+                    return Err("action popup exceeds the compatibility HTML ceiling".into());
+                }
+                let source = read_indexed_file(source_root, indexed)?;
+                inject_extension_page_preludes(&source, false, false, false, false)
+                    .map(|bytes| (path, bytes))
+            })
+            .transpose()?
+            .into_iter()
+            .collect()
+    };
+    if popup_path
+        .as_ref()
+        .is_some_and(|popup| !extension_pages.iter().any(|(path, _)| path == popup))
+    {
+        return Err("action popup was not admitted as an extension page".into());
+    }
 
     let manifest = serde_json::to_vec(&Value::Object(root))
         .map_err(|error| format!("cannot serialize adapted extension manifest: {error}"))?;
@@ -367,7 +469,8 @@ fn build_plan(
     }
     Ok(TransformPlan {
         manifest,
-        popup,
+        extension_pages,
+        action_popup,
         background_wrapper,
         worker,
         isolated_content_scripts: content_scripts.isolated,
@@ -375,6 +478,8 @@ fn build_plan(
         removed_file_match_patterns: content_scripts.removed_file_patterns,
         same_document_navigation_routes,
         history_broker_search,
+        empty_bookmarks,
+        empty_favicon,
     })
 }
 
@@ -416,6 +521,7 @@ fn adapt_content_scripts(
     root: &mut Map<String, Value>,
     tree: &CanonicalExtensionTreeIndex,
     bridge_same_document_navigation: bool,
+    bridge_empty_favicon: bool,
 ) -> Result<ContentScriptAdaptation, String> {
     let Some(scripts) = root.get_mut("content_scripts") else {
         return Ok(ContentScriptAdaptation::default());
@@ -501,6 +607,9 @@ fn adapt_content_scripts(
             )?;
         }
         javascript.insert(0, Value::String(API_PRELUDE.to_owned()));
+        if bridge_empty_favicon {
+            javascript.insert(1, Value::String(FAVICON_BRIDGE.to_owned()));
+        }
         result.isolated = result
             .isolated
             .checked_add(1)
@@ -589,6 +698,9 @@ fn adapt_background(
     tree: &CanonicalExtensionTreeIndex,
     bridge_same_document_navigation: bool,
     bridge_history_search: bool,
+    bridge_extension_page_messaging: bool,
+    bridge_empty_bookmarks: bool,
+    bridge_empty_favicon: bool,
 ) -> Result<(WorkerKind, Option<Vec<u8>>), String> {
     let Some(background) = root.get_mut("background") else {
         return Ok((WorkerKind::Absent, None));
@@ -616,6 +728,15 @@ fn adapt_background(
     let wrapper = match kind {
         WorkerKind::Classic => {
             let prelude = js_string(&format!("/{API_PRELUDE}"))?;
+            let messaging = bridge_extension_page_messaging
+                .then(|| js_string(&format!("/{RUNTIME_MESSAGING_BRIDGE}")))
+                .transpose()?;
+            let bookmarks = bridge_empty_bookmarks
+                .then(|| js_string(&format!("/{BOOKMARKS_BRIDGE}")))
+                .transpose()?;
+            let favicon = bridge_empty_favicon
+                .then(|| js_string(&format!("/{FAVICON_BRIDGE}")))
+                .transpose()?;
             let history = bridge_history_search
                 .then(|| js_string(&format!("/{HISTORY_BRIDGE}")))
                 .transpose()?;
@@ -623,15 +744,32 @@ fn adapt_background(
                 .then(|| js_string(&format!("/{WEB_NAVIGATION_BRIDGE}")))
                 .transpose()?;
             let original = js_string(&format!("/{original}"))?;
-            let imports = [Some(prelude), history, navigation, Some(original)]
-                .into_iter()
-                .flatten()
-                .collect::<Vec<_>>()
-                .join(", ");
+            let imports = [
+                Some(prelude),
+                bookmarks,
+                favicon,
+                messaging,
+                history,
+                navigation,
+                Some(original),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(", ");
             format!("importScripts({imports});\n")
         }
         WorkerKind::Module => {
             let prelude = js_string(&format!("./{API_PRELUDE}"))?;
+            let messaging = bridge_extension_page_messaging
+                .then(|| js_string(&format!("./{RUNTIME_MESSAGING_BRIDGE}")))
+                .transpose()?;
+            let bookmarks = bridge_empty_bookmarks
+                .then(|| js_string(&format!("./{BOOKMARKS_BRIDGE}")))
+                .transpose()?;
+            let favicon = bridge_empty_favicon
+                .then(|| js_string(&format!("./{FAVICON_BRIDGE}")))
+                .transpose()?;
             let history = bridge_history_search
                 .then(|| js_string(&format!("./{HISTORY_BRIDGE}")))
                 .transpose()?;
@@ -640,6 +778,15 @@ fn adapt_background(
                 .transpose()?;
             let original = js_string(&format!("./{original}"))?;
             let mut wrapper = format!("import {prelude};\n");
+            if let Some(bookmarks) = bookmarks {
+                wrapper.push_str(&format!("import {bookmarks};\n"));
+            }
+            if let Some(favicon) = favicon {
+                wrapper.push_str(&format!("import {favicon};\n"));
+            }
+            if let Some(messaging) = messaging {
+                wrapper.push_str(&format!("import {messaging};\n"));
+            }
             if let Some(history) = history {
                 wrapper.push_str(&format!("import {history};\n"));
             }
@@ -688,11 +835,103 @@ fn require_indexed_resource(
     Ok(())
 }
 
-fn inject_popup_prelude(source: &[u8], bridge_history_search: bool) -> Result<Vec<u8>, String> {
+fn adapt_extension_pages(
+    source_root: &Path,
+    tree: &CanonicalExtensionTreeIndex,
+    manifest: &Map<String, Value>,
+    bridge_empty_bookmarks: bool,
+    bridge_empty_favicon: bool,
+) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let sandboxed = sandbox_page_keys(manifest, tree)?;
+    let mut pages = Vec::new();
+    for indexed in tree.files() {
+        let path = indexed.path().as_str();
+        if !path.to_ascii_lowercase().ends_with(".html")
+            || sandboxed.contains(indexed.path().collision_key().as_ref())
+        {
+            continue;
+        }
+        if indexed.length() > MAX_POPUP_HTML_BYTES {
+            return Err(format!(
+                "extension page {path} exceeds the compatibility HTML ceiling"
+            ));
+        }
+        let source = read_indexed_file(source_root, indexed)?;
+        let adapted = inject_extension_page_preludes(
+            &source,
+            bridge_empty_bookmarks,
+            bridge_empty_favicon,
+            true,
+            true,
+        )
+        .map_err(|error| format!("cannot adapt extension page {path}: {error}"))?;
+        pages.push((path.to_owned(), adapted));
+    }
+    if pages.is_empty() {
+        return Err("brokered extension has no adaptable non-sandbox HTML pages".into());
+    }
+    Ok(pages)
+}
+
+fn sandbox_page_keys(
+    manifest: &Map<String, Value>,
+    tree: &CanonicalExtensionTreeIndex,
+) -> Result<BTreeSet<Box<str>>, String> {
+    let Some(sandbox) = manifest.get("sandbox") else {
+        return Ok(BTreeSet::new());
+    };
+    let sandbox = sandbox
+        .as_object()
+        .ok_or_else(|| "extension sandbox is not an object".to_owned())?;
+    let Some(pages) = sandbox.get("pages") else {
+        return Ok(BTreeSet::new());
+    };
+    let pages = pages
+        .as_array()
+        .ok_or_else(|| "extension sandbox.pages is not an array".to_owned())?;
+    let mut result = BTreeSet::new();
+    for (index, page) in pages.iter().enumerate() {
+        let page = page
+            .as_str()
+            .filter(|page| !page.is_empty())
+            .ok_or_else(|| format!("extension sandbox.pages[{index}] is not a path"))?;
+        let path = PortableRelativePath::parse(page).map_err(|error| {
+            format!("extension sandbox.pages[{index}] is not portable: {error}")
+        })?;
+        if tree.file(&path).is_none() {
+            return Err(format!(
+                "extension sandbox.pages[{index}] is absent from the closed source tree"
+            ));
+        }
+        if !result.insert(path.collision_key()) {
+            return Err("extension sandbox.pages contains a duplicate path".into());
+        }
+    }
+    Ok(result)
+}
+
+fn inject_extension_page_preludes(
+    source: &[u8],
+    bridge_empty_bookmarks: bool,
+    bridge_empty_favicon: bool,
+    bridge_runtime_messaging: bool,
+    bridge_history_search: bool,
+) -> Result<Vec<u8>, String> {
     let source = std::str::from_utf8(source)
-        .map_err(|_| "action popup must be UTF-8 for deterministic adaptation".to_owned())?;
+        .map_err(|_| "extension page must be UTF-8 for deterministic adaptation".to_owned())?;
     let insertion = explicit_head_end(source)?;
     let mut tags = format!("<script src=\"/{API_PRELUDE}\"></script>");
+    if bridge_empty_bookmarks {
+        tags.push_str(&format!("<script src=\"/{BOOKMARKS_BRIDGE}\"></script>"));
+    }
+    if bridge_empty_favicon {
+        tags.push_str(&format!("<script src=\"/{FAVICON_BRIDGE}\"></script>"));
+    }
+    if bridge_runtime_messaging {
+        tags.push_str(&format!(
+            "<script src=\"/{RUNTIME_MESSAGING_BRIDGE}\"></script>"
+        ));
+    }
     if bridge_history_search {
         tags.push_str(&format!("<script src=\"/{HISTORY_BRIDGE}\"></script>"));
     }
@@ -829,9 +1068,15 @@ fn enforce_output_budgets(
 ) -> Result<(), String> {
     let added_files = 1_usize
         + usize::from(plan.background_wrapper.is_some())
+        + usize::from(plan.empty_bookmarks)
+        + (usize::from(plan.empty_favicon) * 2)
+        + usize::from(plan.history_broker_search)
         + usize::from(plan.history_broker_search)
         + usize::from(plan.same_document_navigation_routes != 0);
     let added_entries = 3_usize
+        + usize::from(plan.empty_bookmarks)
+        + (usize::from(plan.empty_favicon) * 2)
+        + usize::from(plan.history_broker_search)
         + usize::from(plan.history_broker_search)
         + usize::from(plan.same_document_navigation_routes != 0);
     if source.files().len().saturating_add(added_files) > MAX_EXTENSION_TREE_FILES
@@ -841,8 +1086,15 @@ fn enforce_output_budgets(
     }
     for bytes in [
         Some(plan.manifest.as_slice()),
-        plan.popup.as_ref().map(|(_, bytes)| bytes.as_slice()),
         Some(API_PRELUDE_SOURCE.as_bytes()),
+        plan.empty_bookmarks
+            .then_some(BOOKMARKS_BRIDGE_SOURCE.as_bytes()),
+        plan.empty_favicon
+            .then_some(FAVICON_BRIDGE_SOURCE.as_bytes()),
+        plan.empty_favicon
+            .then_some(EMPTY_FAVICON_SOURCE.as_bytes()),
+        plan.history_broker_search
+            .then_some(RUNTIME_MESSAGING_BRIDGE_SOURCE.as_bytes()),
         plan.history_broker_search
             .then_some(HISTORY_BRIDGE_SOURCE.as_bytes()),
         (plan.same_document_navigation_routes != 0)
@@ -856,23 +1108,61 @@ fn enforce_output_budgets(
             return Err("adapted extension resource exceeds the per-file ceiling".into());
         }
     }
+    for (_, bytes) in &plan.extension_pages {
+        if bytes.len() as u64 > MAX_EXTENSION_TREE_FILE_BYTES {
+            return Err("adapted extension page exceeds the per-file ceiling".into());
+        }
+    }
+    let replaced_page_bytes = plan
+        .extension_pages
+        .iter()
+        .try_fold(0_u64, |total, (path, _)| {
+            let path = PortableRelativePath::parse(path)
+                .map_err(|error| format!("adapted extension page path is not portable: {error}"))?;
+            let length = source
+                .file(&path)
+                .ok_or_else(|| "adapted extension page left the source tree".to_owned())?
+                .length();
+            total
+                .checked_add(length)
+                .ok_or_else(|| "adapted extension page accounting overflowed".to_owned())
+        })?;
     let replaced_source_bytes = manifest_file(source)?
         .length()
-        .checked_add(
-            plan.popup
-                .as_ref()
-                .and_then(|(path, _)| PortableRelativePath::parse(path).ok())
-                .and_then(|path| source.file(&path))
-                .map_or(0, |file| file.length()),
-        )
+        .checked_add(replaced_page_bytes)
         .ok_or_else(|| "adapted extension byte accounting overflowed".to_owned())?;
+    let replacement_page_bytes =
+        plan.extension_pages
+            .iter()
+            .try_fold(0_u64, |total, (_, bytes)| {
+                total
+                    .checked_add(bytes.len() as u64)
+                    .ok_or_else(|| "adapted extension page accounting overflowed".to_owned())
+            })?;
     let replacement_bytes = (plan.manifest.len() as u64)
-        .checked_add(
-            plan.popup
-                .as_ref()
-                .map_or(0, |(_, bytes)| bytes.len() as u64),
-        )
+        .checked_add(replacement_page_bytes)
         .and_then(|bytes| bytes.checked_add(API_PRELUDE_SOURCE.len() as u64))
+        .and_then(|bytes| {
+            bytes.checked_add(if plan.empty_bookmarks {
+                BOOKMARKS_BRIDGE_SOURCE.len() as u64
+            } else {
+                0
+            })
+        })
+        .and_then(|bytes| {
+            bytes.checked_add(if plan.empty_favicon {
+                (FAVICON_BRIDGE_SOURCE.len() + EMPTY_FAVICON_SOURCE.len()) as u64
+            } else {
+                0
+            })
+        })
+        .and_then(|bytes| {
+            bytes.checked_add(if plan.history_broker_search {
+                RUNTIME_MESSAGING_BRIDGE_SOURCE.len() as u64
+            } else {
+                0
+            })
+        })
         .and_then(|bytes| {
             bytes.checked_add(if plan.history_broker_search {
                 HISTORY_BRIDGE_SOURCE.len() as u64
@@ -1245,8 +1535,19 @@ mod tests {
         let manifest_path = source.join("manifest.json");
         let mut manifest: Value =
             serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
-        manifest["permissions"] = serde_json::json!(["history"]);
+        manifest["permissions"] = serde_json::json!(["history", "storage", "bookmarks", "favicon"]);
+        manifest["sandbox"] = serde_json::json!({"pages":["ui/sandbox.html"]});
         fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        write(
+            &source,
+            "ui/options.html",
+            b"<!doctype html><html><head></head><body>options</body></html>",
+        );
+        write(
+            &source,
+            "ui/sandbox.html",
+            b"<!doctype html><body>sandbox</body>",
+        );
         reindex(&source, &index);
 
         let first = temp.path().join("brokered-first");
@@ -1267,14 +1568,36 @@ mod tests {
             serde_json::from_slice(&fs::read(extension.join("manifest.json")).unwrap()).unwrap();
         assert_eq!(
             adapted["permissions"],
-            serde_json::json!(["history", "nativeMessaging"])
+            serde_json::json!([
+                "history",
+                "storage",
+                "bookmarks",
+                "favicon",
+                "nativeMessaging"
+            ])
         );
         let wrapper = fs::read_to_string(extension.join(BACKGROUND_WRAPPER)).unwrap();
         assert_eq!(
             wrapper,
             format!(
-                "import \"./{API_PRELUDE}\";\nimport \"./{HISTORY_BRIDGE}\";\nimport \"./worker.js\";\n"
+                "import \"./{API_PRELUDE}\";\nimport \"./{BOOKMARKS_BRIDGE}\";\nimport \"./{FAVICON_BRIDGE}\";\nimport \"./{RUNTIME_MESSAGING_BRIDGE}\";\nimport \"./{HISTORY_BRIDGE}\";\nimport \"./worker.js\";\n"
             )
+        );
+        assert_eq!(
+            fs::read(extension.join(BOOKMARKS_BRIDGE)).unwrap(),
+            BOOKMARKS_BRIDGE_SOURCE.as_bytes()
+        );
+        assert_eq!(
+            fs::read(extension.join(FAVICON_BRIDGE)).unwrap(),
+            FAVICON_BRIDGE_SOURCE.as_bytes()
+        );
+        assert_eq!(
+            fs::read(extension.join(EMPTY_FAVICON)).unwrap(),
+            EMPTY_FAVICON_SOURCE.as_bytes()
+        );
+        assert_eq!(
+            fs::read(extension.join(RUNTIME_MESSAGING_BRIDGE)).unwrap(),
+            RUNTIME_MESSAGING_BRIDGE_SOURCE.as_bytes()
         );
         assert_eq!(
             fs::read(extension.join(HISTORY_BRIDGE)).unwrap(),
@@ -1282,14 +1605,34 @@ mod tests {
         );
         let popup = fs::read_to_string(extension.join("ui/popup.html")).unwrap();
         assert!(popup.contains(&format!(
-            "<head><script src=\"/{API_PRELUDE}\"></script><script src=\"/{HISTORY_BRIDGE}\"></script>"
+            "<head><script src=\"/{API_PRELUDE}\"></script><script src=\"/{BOOKMARKS_BRIDGE}\"></script><script src=\"/{FAVICON_BRIDGE}\"></script><script src=\"/{RUNTIME_MESSAGING_BRIDGE}\"></script><script src=\"/{HISTORY_BRIDGE}\"></script>"
         )));
+        let options = fs::read_to_string(extension.join("ui/options.html")).unwrap();
+        assert!(options.contains(&format!(
+            "<head><script src=\"/{API_PRELUDE}\"></script><script src=\"/{BOOKMARKS_BRIDGE}\"></script><script src=\"/{FAVICON_BRIDGE}\"></script><script src=\"/{RUNTIME_MESSAGING_BRIDGE}\"></script><script src=\"/{HISTORY_BRIDGE}\"></script>"
+        )));
+        assert_eq!(
+            fs::read_to_string(extension.join("ui/sandbox.html")).unwrap(),
+            "<!doctype html><body>sandbox</body>"
+        );
         let metadata: Value =
             serde_json::from_slice(&fs::read(first.join(ARTIFACT_METADATA)).unwrap()).unwrap();
         assert_eq!(metadata["target"], serde_json::json!(BROKERED_TARGET));
         assert_eq!(
             metadata["surfaces"]["history_search"],
             serde_json::json!("bounded-native-broker")
+        );
+        assert_eq!(
+            metadata["surfaces"]["extension_pages"],
+            serde_json::json!(2)
+        );
+        assert_eq!(
+            metadata["surfaces"]["bookmarks"],
+            serde_json::json!("empty-read-only")
+        );
+        assert_eq!(
+            metadata["surfaces"]["favicon"],
+            serde_json::json!("transparent-fallback")
         );
         assert!(metadata["adaptations"]
             .as_array()
@@ -1309,7 +1652,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             native_manifest["permissions"],
-            serde_json::json!(["history"])
+            serde_json::json!(["history", "storage", "bookmarks", "favicon"])
         );
         assert!(!native
             .join(ARTIFACT_EXTENSION)
@@ -1399,14 +1742,18 @@ mod tests {
             "background".into(),
             serde_json::json!({"service_worker":"workers/original.js"}),
         );
-        let (kind, wrapper) = adapt_background(&mut root, &tree, false, false).unwrap();
+        let (kind, wrapper) =
+            adapt_background(&mut root, &tree, false, false, false, false, false).unwrap();
         assert_eq!(kind, WorkerKind::Classic);
         assert_eq!(
             String::from_utf8(wrapper.unwrap()).unwrap(),
             "importScripts(\"/__zephium__/webkit-api-v1.js\", \"/workers/original.js\");\n"
         );
         let html = b"<!-- lead --><html lang='en'><head data-value='>'><title>x</title></head>";
-        let adapted = String::from_utf8(inject_popup_prelude(html, false).unwrap()).unwrap();
+        let adapted = String::from_utf8(
+            inject_extension_page_preludes(html, false, false, false, false).unwrap(),
+        )
+        .unwrap();
         assert!(adapted.contains(&format!(
             "<head data-value='>'><script src=\"/{API_PRELUDE}\"></script><title>"
         )));
@@ -1437,7 +1784,7 @@ mod tests {
         .unwrap()
         .clone();
 
-        let adaptation = adapt_content_scripts(&mut root, &tree, false).unwrap();
+        let adaptation = adapt_content_scripts(&mut root, &tree, false, false).unwrap();
         assert_eq!(
             adaptation,
             ContentScriptAdaptation {
