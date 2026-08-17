@@ -1175,6 +1175,14 @@ cannot mint a catalog row, install, profile grant, runtime witness, controller,
 or redistribution decision. Generated resources live under a reserved
 namespace; source and output manifest/tree/index identities are all rebound.
 
+Compatibility release preparation must consume that complete artifact, not an
+extension directory detached from its receipt. The release boundary requires
+the exact root inventory, revalidates the receipt's non-authorizing header and
+closed output identity, copies the captured receipt without re-reading it, and
+binds its digest, target, and input identity into deterministic CRX3 release
+evidence. This closes receipt-loss and tree-substitution seams but still grants
+no signature, legal, catalog, install, runtime, or product authority.
+
 The adapter preserves native extension principals and namespace objects. It
 does not expose a generic page-world API, fetch port, or native-message channel,
 and it leaves upstream `MAIN` scripts unchanged. File match patterns are

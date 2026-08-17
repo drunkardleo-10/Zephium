@@ -1555,6 +1555,20 @@ tree identities, the ZIP identity, the derived extension id, and the exact
 rewrites while explicitly declaring that signature, legal policy, catalog, and
 product authority remain unsettled.
 
+Adapted trees use the distinct
+`cargo xtask prepare-extension-compatibility-crx3-release-archive` boundary.
+It accepts the complete compatibility-artifact directory rather than caller-
+selected extension/index paths, requires the exact three-entry root inventory,
+revalidates the non-authorizing receipt and both source/output identities,
+reopens the closed output tree, and then runs the same deterministic CRX3
+release preparation. The exact compatibility receipt is copied byte-for-byte
+beside the release archive; its length, SHA-256, target, and input
+manifest/tree/index identities are bound into release evidence. Receipt capture
+does not settle signing, licensing, catalog membership, redistribution, or
+product authority. Ordinary unadapted release preparation remains unchanged,
+and later Windows/Linux adapters can consume the same receipt-bound release
+boundary without becoming macOS package-name special cases.
+
 `Crx3SigningRequest` borrows that bounded ZIP plus the canonical P-256 public
 SPKI, derives its stable Chromium identity, and exposes the CRX3 signature
 preimage as four ordered slices without copying the archive.
