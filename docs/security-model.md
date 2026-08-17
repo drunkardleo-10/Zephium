@@ -1183,6 +1183,19 @@ binds its digest, target, and input identity into deterministic CRX3 release
 evidence. This closes receipt-loss and tree-substitution seams but still grants
 no signature, legal, catalog, install, runtime, or product authority.
 
+Catalog authority is a separate mandatory transition. Schema 2 signs a
+strictly ordered, unique compatibility-receipt cohort per package and binds
+each receipt's exact bytes to the same manifest/tree/index/count/size identity
+as the containing release tree. Receipts are capped at 64 KiB and eight targets
+per package. Schema 1 cannot carry them, and schema-2 inventory hashing uses a
+new domain that covers every receipt field. Brokered macOS manifest admission
+fails closed unless the catalog contains its exact versioned target. The
+product gate then verifies the supplied receipt bytes and canonical tree index
+before repository activation; a digest-only row cannot stand in for the
+receipt body. These checks authenticate reviewed adaptation evidence but do
+not make that evidence a signature, redistribution decision, user grant, live
+lease, or native controller capability.
+
 The adapter preserves native extension principals and namespace objects. It
 does not expose a generic page-world API, fetch port, or native-message channel,
 and it leaves upstream `MAIN` scripts unchanged. File match patterns are
