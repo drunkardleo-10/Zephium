@@ -836,6 +836,25 @@ fn run_extension_distribution_gates() {
             "--no-default-features",
         ],
     );
+    for target in ["--all-targets", "--lib"] {
+        run(
+            "cargo",
+            &[
+                "clippy",
+                "--locked",
+                "-p",
+                "zephium-extension-updater",
+                target,
+                "--",
+                "-D",
+                "warnings",
+            ],
+        );
+    }
+    run(
+        "cargo",
+        &["test", "--locked", "-p", "zephium-extension-updater"],
+    );
 }
 
 fn check_macos_extension_compatibility_asset() {
@@ -1860,6 +1879,7 @@ fn check_blocker_dependency_graphs() {
     for forbidden in [
         "zephium-blocker-update feature \"tuf\"",
         "zephium-extension-distribution v",
+        "zephium-extension-updater v",
         "zephium-update-transport v",
         "tough v",
         "reqwest v",
@@ -1929,6 +1949,34 @@ fn check_blocker_dependency_graphs() {
     for forbidden in ["tough v", "zephium-update-transport feature \"tough\""] {
         if distribution.lines().any(|line| line.starts_with(forbidden)) {
             eprintln!("extension distribution graph unexpectedly contains `{forbidden}`");
+            exit(1);
+        }
+    }
+
+    let updater = cargo_tree(&[
+        "-p",
+        "zephium-extension-updater",
+        "--locked",
+        "-e",
+        "features",
+        "--prefix",
+        "none",
+    ]);
+    for required in [
+        "zephium-extension-updater v",
+        "zephium-extension-distribution v",
+        "zephium-update-transport v",
+        "reqwest v",
+        "rustls-platform-verifier v",
+    ] {
+        if !updater.lines().any(|line| line.starts_with(required)) {
+            eprintln!("extension updater graph is missing `{required}`");
+            exit(1);
+        }
+    }
+    for forbidden in ["tough v", "zephium-update-transport feature \"tough\""] {
+        if updater.lines().any(|line| line.starts_with(forbidden)) {
+            eprintln!("extension updater graph unexpectedly contains `{forbidden}`");
             exit(1);
         }
     }

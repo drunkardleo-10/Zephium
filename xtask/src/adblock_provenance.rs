@@ -708,6 +708,7 @@ fn validate_zephium_feature_manifests(repository: &Path, root: &toml::Table) -> 
             "zephium-blocker-service",
             "zephium-blocker-update",
             "zephium-extension-distribution",
+            "zephium-extension-updater",
             "zephium-update-transport",
         ],
     )?;
@@ -748,6 +749,23 @@ fn validate_zephium_feature_manifests(repository: &Path, root: &toml::Table) -> 
         require_string(dependency, "version", "=0.1.0")?;
         require_bool(dependency, "default-features", false)?;
     }
+    let updater_workspace = workspace_dependencies
+        .get("zephium-extension-updater")
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| {
+            "root workspace has no structured zephium-extension-updater dependency".to_owned()
+        })?;
+    require_key_set(
+        updater_workspace,
+        &["path", "version"],
+        "root zephium-extension-updater dependency",
+    )?;
+    require_string(
+        updater_workspace,
+        "path",
+        "crates/zephium-extension-updater",
+    )?;
+    require_string(updater_workspace, "version", "=0.1.0")?;
     let tough = workspace_dependencies
         .get("tough")
         .and_then(toml::Value::as_table)
@@ -807,6 +825,7 @@ fn validate_zephium_feature_manifests(repository: &Path, root: &toml::Table) -> 
     validate_blocker_update_manifest(repository)?;
     validate_update_transport_manifest(repository)?;
     validate_extension_distribution_manifest(repository)?;
+    validate_extension_updater_manifest(repository)?;
     validate_blocker_service_manifest(repository)?;
     validate_blocker_fuzz_manifest(repository)?;
 
@@ -863,6 +882,7 @@ fn validate_zephium_feature_manifests(repository: &Path, root: &toml::Table) -> 
                         | "zephium-blocker-service"
                         | "zephium-blocker-update"
                         | "zephium-extension-distribution"
+                        | "zephium-extension-updater"
                         | "zephium-update-transport"
                 ) || (package == "zephium-blocker"
                     && (!reviewed_targets.contains(target.as_str())
@@ -1184,6 +1204,38 @@ fn validate_extension_distribution_manifest(repository: &Path) -> Result<(), Str
         "zephium-extension-distribution dev-dependency table",
     )?;
     require_workspace_dependency(dev_dependencies, "ring", &[])?;
+    Ok(())
+}
+
+fn validate_extension_updater_manifest(repository: &Path) -> Result<(), String> {
+    let updater = parse_table(
+        &read_text(&repository.join("crates/zephium-extension-updater/Cargo.toml"))?,
+        "zephium-extension-updater Cargo.toml",
+    )?;
+    require_string(
+        require_table(&updater, "package")?,
+        "name",
+        "zephium-extension-updater",
+    )?;
+    let dependencies = require_table(&updater, "dependencies")?;
+    require_key_set(
+        dependencies,
+        &[
+            "tokio",
+            "zephium-app",
+            "zephium-core",
+            "zephium-extension-distribution",
+        ],
+        "zephium-extension-updater dependency table",
+    )?;
+    require_workspace_dependency(dependencies, "tokio", &["rt", "sync", "time"])?;
+    for name in [
+        "zephium-app",
+        "zephium-core",
+        "zephium-extension-distribution",
+    ] {
+        require_workspace_dependency(dependencies, name, &[])?;
+    }
     Ok(())
 }
 
@@ -1708,6 +1760,8 @@ fn reject_blocker_packages_except(
                 | "zephium-blocker"
                 | "zephium-blocker-service"
                 | "zephium-blocker-update"
+                | "zephium-extension-distribution"
+                | "zephium-extension-updater"
                 | "zephium-update-transport"
         ) && (!allowed.contains(&package) || name != package)
         {

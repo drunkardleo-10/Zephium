@@ -883,10 +883,20 @@ once, and a shared settlement cell preserves exactly-once completion across
 service refusal or boundary panic. Network work and package parsing never run
 on Shell, and the mutable lifecycle owner never crosses an await. Mailbox
 refusal does not claim callback ownership; an already-admitted command drained
-during terminal shutdown settles unavailable rather than disappearing. There
-is still no product endpoint/configuration or desktop scheduler, and the
-desktop has no dependency on this client, so this bridge performs no I/O and
-supplies neither package bytes nor network authority to an ordinary build.
+during terminal shutdown settles unavailable rather than disappearing. The
+separate `zephium-extension-updater` now owns the dormant product scheduler:
+one explicitly constructed current-thread async runtime, one bounded request
+slot, cancellation-aware shutdown, and a fixed-size monotonic status stream.
+It performs no automatic polling and issues no I/O before an explicit request.
+Invalid or overallocated runtime selections fail before catalog acquisition;
+retryable failures reopen admission, while coordinator quarantine remains
+terminal until restart. Status is coalesced into Shell and projected with a
+closed redacted vocabulary to privileged extension UI; ordinary builds that
+never construct the worker correctly expose no distribution state. There is
+still no product endpoint/configuration, desktop composition owner, catalog
+selection policy, or refresh schedule. The desktop has no dependency on either
+the updater or distribution client, so this path supplies neither package bytes
+nor network authority to an ordinary build.
 
 The redirect-free fixed-origin HTTPS boundary shared with the blocker lives in
 `zephium-update-transport`. It accepts only plain-ASCII paths below exact HTTPS
@@ -917,8 +927,8 @@ generation-bound service mutation, and native settlement; absent, stale,
 over-capacity, or unavailable paths deny rather than grant. This extension
 grant broker is distinct from page-origin permission events, whose general
 Shell policy remains unfinished. Remaining release gaps include product-sealed
-distribution endpoints and the background scheduler/status adapter that starts
-and projects the serialized coordinator, the complete permission and API matrix,
+distribution endpoints, desktop ownership/shutdown composition and refresh
+policy for the dormant scheduler, the complete permission and API matrix,
 quotas,
 complete cross-process release-build resource evidence, and endurance. Older admitted
 macOS versions and Linux require a Zephium

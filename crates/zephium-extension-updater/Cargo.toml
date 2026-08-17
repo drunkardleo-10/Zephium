@@ -1,0 +1,11 @@
+[package]
+name = "zephium-extension-updater"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
+zephium-app.workspace = true
+zephium-core.workspace = true
+zephium-extension-distribution.workspace = true

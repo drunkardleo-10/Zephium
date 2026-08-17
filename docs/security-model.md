@@ -769,9 +769,10 @@ then independently verifies the CRX signature, developer key, inner ZIP
 length/digest, and legal bytes before constructing the existing path-free
 move-only service request. The service reauthenticates the same evidence before
 private staging and source-free catalog activation. No endpoint or package is
-currently provisioned, the desktop graph excludes both distribution and HTTPS
-transport, and no generic network capability is reachable from pages or
-extensions.
+currently provisioned. The separately audited worker contains no endpoint or
+automatic polling policy, and the ordinary desktop graph excludes the worker,
+distribution client, and HTTPS transport. No generic network capability is
+reachable from pages or extensions.
 
 The distribution coordinator is a one-run, one-request-at-a-time state
 machine. Network execution talks to Shell only through non-blocking move-only
@@ -791,6 +792,13 @@ that interval follows the same quarantine path. Submission panics,
 repeated unknown outcomes, service invariant failures, and accounting failures
 also quarantine. This bounds overlap and prevents a transport retry loop from
 amplifying memory, disk, or network work under uncertain durable state.
+The dormant worker adds one bounded command slot and a dedicated current-thread
+async runtime only when product composition explicitly constructs it. Shutdown
+cancels network acquisition or settlement observation before joining the
+thread; it does not claim service cleanup, which remains ordered under Shell.
+Status is a fixed-size generation-checked value, coalesced by Shell and mapped
+to a closed privileged-UI vocabulary without URLs, package identities, error
+strings, or native authority.
 
 The blocker update coordinator then durably commits its candidate before
 activation revalidates the exact prepared recovery state. A stale identity or
