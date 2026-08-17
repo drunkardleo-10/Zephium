@@ -21,6 +21,10 @@ use zephium_core::extensions::{
     ExtensionPackageRevision, ExtensionTreeDigest, MACOS_NATIVE_BROKERED_COMPATIBILITY_TARGET,
     MAX_EXTENSION_MANIFEST_DECLARATIONS, MAX_EXTENSION_MANIFEST_RETAINED_BYTES,
 };
+use zephium_core::ports::extensions::{
+    acquired_runtime_selections_are_canonical, ExtensionAcquiredRuntimeProfile,
+    ExtensionAcquiredRuntimeSelection, MAX_ACQUIRED_CATALOG_SELECTIONS,
+};
 #[cfg(zephium_internal_repository_e2e)]
 use zephium_extension_package::ExtensionReleaseCatalog;
 use zephium_extension_package::{
@@ -129,6 +133,17 @@ impl ProductExtensionRuntimeTarget {
             Self::WindowsNative => WINDOWS_NATIVE_COMPATIBILITY_TARGET,
         }
     }
+
+    /// Returns the exact non-authorizing acquired-package profile projection.
+    pub const fn acquired_runtime_profile(self) -> ExtensionAcquiredRuntimeProfile {
+        match self {
+            Self::MacosNative => ExtensionAcquiredRuntimeProfile::MacosNative,
+            Self::MacosNativeBrokered => ExtensionAcquiredRuntimeProfile::MacosNativeBrokered,
+            Self::MacosCompatibility => ExtensionAcquiredRuntimeProfile::MacosCompatibility,
+            Self::LinuxCompatibility => ExtensionAcquiredRuntimeProfile::LinuxCompatibility,
+            Self::WindowsNative => ExtensionAcquiredRuntimeProfile::WindowsNative,
+        }
+    }
 }
 
 /// Availability of product-sealed manifest compatibility authority.
@@ -151,6 +166,17 @@ pub enum ProductExtensionManifestAuthorityError {
     Unprovisioned,
     /// Compiled policy or anchor data is inconsistent or exceeds a bound.
     #[error("extension manifest product authority configuration is invalid")]
+    InvalidProductConfiguration,
+}
+
+/// Failure to derive one complete immutable acquired-catalog runtime plan.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum ProductExtensionRuntimeSelectionError {
+    /// The product has no active-catalog profile for this runtime target.
+    #[error("extension runtime target is not product-provisioned")]
+    RuntimeTargetNotProvisioned,
+    /// Sealed profiles cannot form the bounded canonical distribution plan.
+    #[error("extension runtime selection product configuration is invalid")]
     InvalidProductConfiguration,
 }
 
@@ -249,6 +275,42 @@ impl ProductExtensionManifestAuthority {
                 ProductExtensionManifestAuthorityStatus::InvalidProvisioning
             }
         }
+    }
+
+    /// Derives the complete active-catalog selection for one reviewed target.
+    ///
+    /// Package identities and target profiles come only from sealed authority;
+    /// callers cannot supply or replace either dimension. The distribution
+    /// session later checks this projection against the exact authenticated
+    /// catalog before any package object is requested.
+    pub fn active_acquired_runtime_selections(
+        &self,
+        runtime_target: ProductExtensionRuntimeTarget,
+    ) -> Result<Vec<ExtensionAcquiredRuntimeSelection>, ProductExtensionRuntimeSelectionError> {
+        let matching = self.profiles.iter().filter(|profile| {
+            profile.catalog == self.active_catalog && profile.runtime_target == runtime_target
+        });
+        let count = matching.clone().count();
+        if count == 0 {
+            return Err(ProductExtensionRuntimeSelectionError::RuntimeTargetNotProvisioned);
+        }
+        if count > MAX_ACQUIRED_CATALOG_SELECTIONS {
+            return Err(ProductExtensionRuntimeSelectionError::InvalidProductConfiguration);
+        }
+        let mut selections = Vec::new();
+        selections
+            .try_reserve_exact(count)
+            .map_err(|_| ProductExtensionRuntimeSelectionError::InvalidProductConfiguration)?;
+        selections.extend(matching.map(|profile| {
+            ExtensionAcquiredRuntimeSelection::new_for_profile(
+                profile.package.key,
+                runtime_target.acquired_runtime_profile(),
+            )
+        }));
+        if !acquired_runtime_selections_are_canonical(&selections) {
+            return Err(ProductExtensionRuntimeSelectionError::InvalidProductConfiguration);
+        }
+        Ok(selections)
     }
 
     /// Admits exact manifest bytes for one authenticated catalog package.

@@ -796,6 +796,10 @@ The dormant worker adds one bounded command slot and a dedicated current-thread
 async runtime only when product composition explicitly constructs it. Shutdown
 cancels network acquisition or settlement observation before joining the
 thread; it does not claim service cleanup, which remains ordered under Shell.
+The worker binds one immutable runtime selection derived from product-sealed
+manifest profiles at launch. Refresh admission carries no caller-selected
+package, backend, profile, endpoint, or catalog bytes, so a compromised UI
+command cannot retarget the authenticated transport.
 The process launch claim survives shutdown and quarantine, preventing in-process
 replacement from clearing a restart-required coordinator state.
 Status is a fixed-size generation-checked value, coalesced by Shell and mapped

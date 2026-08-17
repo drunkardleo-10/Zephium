@@ -30,10 +30,74 @@ const ADMISSION_SHUTDOWN: u8 = 4;
 const COMMAND_CAPACITY: usize = 1;
 static PROCESS_LAUNCH_CLAIMED: AtomicBool = AtomicBool::new(false);
 
+/// Failure to bind one immutable product distribution plan.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExtensionDistributionPlanError {
+    /// The selection was empty, oversized, overallocated, or unordered.
+    InvalidSelection,
+}
+
+impl std::fmt::Display for ExtensionDistributionPlanError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("extension distribution runtime selection is invalid")
+    }
+}
+
+impl std::error::Error for ExtensionDistributionPlanError {}
+
+/// Product-authenticated client plus one immutable reviewed runtime selection.
+///
+/// Construction performs no I/O. Binding the complete selection here prevents
+/// UI, timers, and callback paths from replacing package or backend choices on
+/// a later refresh request.
+pub struct ExtensionDistributionPlan {
+    client: ExtensionDistributionClient,
+    selections: BoundRuntimeSelections,
+}
+
+impl ExtensionDistributionPlan {
+    /// Binds one product client to a complete canonical runtime selection.
+    pub fn new(
+        client: ExtensionDistributionClient,
+        selections: Vec<ExtensionAcquiredRuntimeSelection>,
+    ) -> Result<Self, ExtensionDistributionPlanError> {
+        Ok(Self {
+            client,
+            selections: BoundRuntimeSelections::new(selections)?,
+        })
+    }
+}
+
+impl std::fmt::Debug for ExtensionDistributionPlan {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ExtensionDistributionPlan")
+            .field("client", &self.client)
+            .field("selection_count", &self.selections.0.len())
+            .finish()
+    }
+}
+
+struct BoundRuntimeSelections(Vec<ExtensionAcquiredRuntimeSelection>);
+
+impl BoundRuntimeSelections {
+    fn new(
+        selections: Vec<ExtensionAcquiredRuntimeSelection>,
+    ) -> Result<Self, ExtensionDistributionPlanError> {
+        acquired_runtime_selections_are_canonical(&selections)
+            .then_some(Self(selections))
+            .ok_or(ExtensionDistributionPlanError::InvalidSelection)
+    }
+
+    fn exact_clone(&self) -> Vec<ExtensionAcquiredRuntimeSelection> {
+        self.0.clone()
+    }
+}
+
 /// Admission result for one explicit product update request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExtensionDistributionRefreshAdmission {
-    /// The bounded worker now owns the complete runtime selection.
+    /// The bounded worker accepted a refresh of its immutable runtime selection.
     Accepted,
     /// A run is queued or active; no later request was retained.
     Busy,
@@ -41,8 +105,6 @@ pub enum ExtensionDistributionRefreshAdmission {
     Quarantined,
     /// The worker is exiting or has exited.
     Shutdown,
-    /// The runtime selection was empty, oversized, overallocated, or unordered.
-    InvalidRequest,
 }
 
 /// Bounded result of consuming the unique worker owner.
@@ -90,19 +152,13 @@ impl std::error::Error for ExtensionDistributionWorkerLaunchError {
 #[derive(Clone)]
 pub struct ExtensionDistributionHandle {
     shared: Arc<Shared>,
-    commands: async_mpsc::Sender<Vec<ExtensionAcquiredRuntimeSelection>>,
+    commands: async_mpsc::Sender<()>,
 }
 
 impl ExtensionDistributionHandle {
     /// Requests one complete synchronization without blocking the caller.
     #[must_use = "refresh admission determines request ownership"]
-    pub fn request_synchronize(
-        &self,
-        selections: Vec<ExtensionAcquiredRuntimeSelection>,
-    ) -> ExtensionDistributionRefreshAdmission {
-        if !acquired_runtime_selections_are_canonical(&selections) {
-            return ExtensionDistributionRefreshAdmission::InvalidRequest;
-        }
+    pub fn request_synchronize(&self) -> ExtensionDistributionRefreshAdmission {
         let _gate = self
             .shared
             .admission_gate
@@ -121,7 +177,7 @@ impl ExtensionDistributionHandle {
         self.shared
             .admission
             .store(ADMISSION_QUEUED, Ordering::Release);
-        match self.commands.try_send(selections) {
+        match self.commands.try_send(()) {
             Ok(()) => ExtensionDistributionRefreshAdmission::Accepted,
             Err(async_mpsc::error::TrySendError::Full(_)) => {
                 self.shared
@@ -163,7 +219,7 @@ impl ExtensionDistributionWorker {
     /// already published Shell callback. No synchronization occurs until an
     /// explicit request is admitted through [`ExtensionDistributionHandle`].
     pub fn launch(
-        client: ExtensionDistributionClient,
+        plan: ExtensionDistributionPlan,
         shell: CallbackHandle,
     ) -> Result<Self, ExtensionDistributionWorkerLaunchError> {
         if !claim_process_launch(&PROCESS_LAUNCH_CLAIMED) {
@@ -171,9 +227,10 @@ impl ExtensionDistributionWorker {
         }
         let port: Arc<dyn ExtensionDistributionServicePort> =
             Arc::new(ShellExtensionDistributionPort::new(shell.clone()));
+        let ExtensionDistributionPlan { client, selections } = plan;
         let coordinator = ExtensionDistributionCoordinator::new(client, port);
         let worker = launch_runner(
-            coordinator_runner(coordinator),
+            coordinator_runner(coordinator, selections),
             Arc::new(ShellStatusPort(shell)),
         );
         if worker.is_err() {
@@ -341,25 +398,29 @@ enum RunOutcome {
 }
 
 trait DistributionRunner: Send + Sync + 'static {
-    fn synchronize<'a>(
-        &'a self,
-        selections: Vec<ExtensionAcquiredRuntimeSelection>,
-    ) -> Pin<Box<dyn Future<Output = RunOutcome> + Send + 'a>>;
+    fn synchronize(&self) -> Pin<Box<dyn Future<Output = RunOutcome> + Send + '_>>;
 }
 
-struct CoordinatorRunner(ExtensionDistributionCoordinator);
+struct CoordinatorRunner {
+    coordinator: ExtensionDistributionCoordinator,
+    selections: BoundRuntimeSelections,
+}
 
-fn coordinator_runner(coordinator: ExtensionDistributionCoordinator) -> CoordinatorRunner {
-    CoordinatorRunner(coordinator)
+fn coordinator_runner(
+    coordinator: ExtensionDistributionCoordinator,
+    selections: BoundRuntimeSelections,
+) -> CoordinatorRunner {
+    CoordinatorRunner {
+        coordinator,
+        selections,
+    }
 }
 
 impl DistributionRunner for CoordinatorRunner {
-    fn synchronize<'a>(
-        &'a self,
-        selections: Vec<ExtensionAcquiredRuntimeSelection>,
-    ) -> Pin<Box<dyn Future<Output = RunOutcome> + Send + 'a>> {
+    fn synchronize(&self) -> Pin<Box<dyn Future<Output = RunOutcome> + Send + '_>> {
+        let selections = self.selections.exact_clone();
         Box::pin(async move {
-            match self.0.synchronize(selections).await {
+            match self.coordinator.synchronize(selections).await {
                 Ok(completion) => completion_status(completion).map_or(
                     RunOutcome::Failed {
                         stage: StatusStage::Catalog,
@@ -371,7 +432,7 @@ impl DistributionRunner for CoordinatorRunner {
                 Err(failure) => RunOutcome::Failed {
                     stage: failure_stage(failure),
                     reason: failure_reason(failure),
-                    quarantined: self.0.is_quarantined(),
+                    quarantined: self.coordinator.is_quarantined(),
                 },
             }
         })
@@ -423,7 +484,7 @@ fn launch_runner<R: DistributionRunner>(
 
 fn run_worker<R: DistributionRunner>(
     runner: R,
-    commands: async_mpsc::Receiver<Vec<ExtensionAcquiredRuntimeSelection>>,
+    commands: async_mpsc::Receiver<()>,
     shutdown: watch::Receiver<bool>,
     shared: &Arc<Shared>,
 ) -> WorkerExit {
@@ -448,12 +509,12 @@ fn run_worker<R: DistributionRunner>(
 
 async fn run_loop<R: DistributionRunner>(
     runner: R,
-    mut commands: async_mpsc::Receiver<Vec<ExtensionAcquiredRuntimeSelection>>,
+    mut commands: async_mpsc::Receiver<()>,
     mut shutdown: watch::Receiver<bool>,
     shared: &Arc<Shared>,
 ) -> WorkerExit {
     loop {
-        let selections = tokio::select! {
+        tokio::select! {
             biased;
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
@@ -486,7 +547,7 @@ async fn run_loop<R: DistributionRunner>(
         if !shared.publish(ExtensionDistributionState::Synchronizing) {
             return WorkerExit::FailedClosed;
         }
-        let run = runner.synchronize(selections);
+        let run = runner.synchronize();
         tokio::pin!(run);
         let outcome = tokio::select! {
             biased;

@@ -59,10 +59,7 @@ impl Drop for PendingDrop {
 }
 
 impl DistributionRunner for Arc<FakeRunner> {
-    fn synchronize<'a>(
-        &'a self,
-        _selections: Vec<ExtensionAcquiredRuntimeSelection>,
-    ) -> Pin<Box<dyn Future<Output = RunOutcome> + Send + 'a>> {
+    fn synchronize(&self) -> Pin<Box<dyn Future<Output = RunOutcome> + Send + '_>> {
         self.calls.fetch_add(1, Ordering::AcqRel);
         let directive = self.directives.lock().unwrap().pop_front().unwrap();
         Box::pin(async move {
@@ -133,11 +130,11 @@ fn explicit_request_is_single_flight_and_publishes_monotonic_status() {
     let handle = worker.handle();
 
     assert_eq!(
-        handle.request_synchronize(vec![selection(1)]),
+        handle.request_synchronize(),
         ExtensionDistributionRefreshAdmission::Accepted
     );
     assert_eq!(
-        handle.request_synchronize(vec![selection(1)]),
+        handle.request_synchronize(),
         ExtensionDistributionRefreshAdmission::Busy
     );
     let ready = wait_for(&handle, |state| {
@@ -169,26 +166,18 @@ fn explicit_request_is_single_flight_and_publishes_monotonic_status() {
 }
 
 #[test]
-fn invalid_or_overallocated_selection_never_reaches_the_runner() {
-    let runner = Arc::new(FakeRunner::new([]));
-    let (worker, _) = launch_fake(Arc::clone(&runner));
-    let handle = worker.handle();
+fn immutable_plan_rejects_invalid_or_overallocated_selection() {
     let mut overallocated =
         Vec::with_capacity(zephium_core::ports::extensions::MAX_ACQUIRED_CATALOG_SELECTIONS + 1);
     overallocated.push(selection(1));
 
     assert_eq!(
-        handle.request_synchronize(Vec::new()),
-        ExtensionDistributionRefreshAdmission::InvalidRequest
+        BoundRuntimeSelections::new(Vec::new()).err(),
+        Some(ExtensionDistributionPlanError::InvalidSelection)
     );
     assert_eq!(
-        handle.request_synchronize(overallocated),
-        ExtensionDistributionRefreshAdmission::InvalidRequest
-    );
-    assert_eq!(runner.calls.load(Ordering::Acquire), 0);
-    assert_eq!(
-        worker.shutdown_until(Instant::now() + std::time::Duration::from_secs(1)),
-        ExtensionDistributionShutdownOutcome::Clean
+        BoundRuntimeSelections::new(overallocated).err(),
+        Some(ExtensionDistributionPlanError::InvalidSelection)
     );
 }
 
@@ -210,21 +199,21 @@ fn retryable_failure_reopens_admission_but_quarantine_does_not() {
     let handle = worker.handle();
 
     assert_eq!(
-        handle.request_synchronize(vec![selection(1)]),
+        handle.request_synchronize(),
         ExtensionDistributionRefreshAdmission::Accepted
     );
     wait_for(&handle, |state| {
         matches!(state, ExtensionDistributionState::Failed { .. })
     });
     assert_eq!(
-        handle.request_synchronize(vec![selection(1)]),
+        handle.request_synchronize(),
         ExtensionDistributionRefreshAdmission::Accepted
     );
     wait_for(&handle, |state| {
         matches!(state, ExtensionDistributionState::Quarantined { .. })
     });
     assert_eq!(
-        handle.request_synchronize(vec![selection(1)]),
+        handle.request_synchronize(),
         ExtensionDistributionRefreshAdmission::Quarantined
     );
     assert_eq!(runner.calls.load(Ordering::Acquire), 2);
@@ -241,7 +230,7 @@ fn shutdown_cancels_an_active_future_and_joins_the_worker() {
     let (worker, _) = launch_fake(runner);
     let handle = worker.handle();
     assert_eq!(
-        handle.request_synchronize(vec![selection(1)]),
+        handle.request_synchronize(),
         ExtensionDistributionRefreshAdmission::Accepted
     );
     wait_for(&handle, |state| {
@@ -254,7 +243,7 @@ fn shutdown_cancels_an_active_future_and_joins_the_worker() {
     );
     assert!(dropped.load(Ordering::Acquire));
     assert_eq!(
-        handle.request_synchronize(vec![selection(1)]),
+        handle.request_synchronize(),
         ExtensionDistributionRefreshAdmission::Shutdown
     );
 }
@@ -275,6 +264,7 @@ fn public_worker_handles_are_send_and_sync() {
     fn assert_send_sync<T: Send + Sync>() {}
     fn assert_send<T: Send>() {}
     assert_send_sync::<ExtensionDistributionHandle>();
+    assert_send::<ExtensionDistributionPlan>();
     assert_send::<ExtensionDistributionWorker>();
 }
 

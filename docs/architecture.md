@@ -887,18 +887,23 @@ during terminal shutdown settles unavailable rather than disappearing. The
 separate `zephium-extension-updater` now owns the dormant product scheduler:
 one explicitly constructed current-thread async runtime, one bounded request
 slot, cancellation-aware shutdown, and a fixed-size monotonic status stream.
+Its launch plan binds the authenticated client to one complete immutable
+runtime selection derived from sealed manifest profiles. Refresh callers carry
+no package key, backend, profile, endpoint, or catalog bytes; they can only ask
+the worker to synchronize that reviewed plan.
 Its process-singleton launch claim is never released by shutdown or quarantine,
 so a failed worker cannot be replaced to bypass restart-required state.
 It performs no automatic polling and issues no I/O before an explicit request.
-Invalid or overallocated runtime selections fail before catalog acquisition;
+Invalid or overallocated runtime selections fail during plan construction,
+before worker launch or catalog acquisition;
 retryable failures reopen admission, while coordinator quarantine remains
 terminal until restart. Status is coalesced into Shell and projected with a
 closed redacted vocabulary to privileged extension UI; ordinary builds that
 never construct the worker correctly expose no distribution state. There is
-still no product endpoint/configuration, desktop composition owner, catalog
-selection policy, or refresh schedule. The desktop has no dependency on either
-the updater or distribution client, so this path supplies neither package bytes
-nor network authority to an ordinary build.
+still no product endpoint/configuration, desktop composition owner, platform
+runtime-target policy, or refresh schedule. The desktop has no dependency on
+either the updater or distribution client, so this path supplies neither
+package bytes nor network authority to an ordinary build.
 
 The redirect-free fixed-origin HTTPS boundary shared with the blocker lives in
 `zephium-update-transport`. It accepts only plain-ASCII paths below exact HTTPS

@@ -14,7 +14,7 @@ mod worker;
 
 pub use port::ShellExtensionDistributionPort;
 pub use worker::{
-    ExtensionDistributionHandle, ExtensionDistributionRefreshAdmission,
-    ExtensionDistributionShutdownOutcome, ExtensionDistributionWorker,
-    ExtensionDistributionWorkerLaunchError,
+    ExtensionDistributionHandle, ExtensionDistributionPlan, ExtensionDistributionPlanError,
+    ExtensionDistributionRefreshAdmission, ExtensionDistributionShutdownOutcome,
+    ExtensionDistributionWorker, ExtensionDistributionWorkerLaunchError,
 };

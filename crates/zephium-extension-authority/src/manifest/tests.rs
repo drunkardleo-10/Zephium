@@ -316,6 +316,33 @@ fn production_authority_is_explicitly_unprovisioned() {
 }
 
 #[test]
+fn active_distribution_selection_is_derived_only_from_sealed_profiles() {
+    let fixture = minimal_fixture();
+    let runtime_target = ProductExtensionRuntimeTarget::MacosNativeBrokered;
+    let authority = authority(profile(
+        &fixture,
+        runtime_target,
+        runtime_target.compatibility_target_id(),
+        ExtensionCompatibilityLevel::Compatible,
+    ));
+
+    let selections = authority
+        .active_acquired_runtime_selections(runtime_target)
+        .unwrap();
+    assert_eq!(selections.len(), 1);
+    assert_eq!(selections.capacity(), 1);
+    assert_eq!(selections[0].package_key(), key(&fixture));
+    assert_eq!(
+        selections[0].runtime_profile(),
+        ExtensionAcquiredRuntimeProfile::MacosNativeBrokered
+    );
+    assert_eq!(
+        authority.active_acquired_runtime_selections(ProductExtensionRuntimeTarget::WindowsNative),
+        Err(ProductExtensionRuntimeSelectionError::RuntimeTargetNotProvisioned)
+    );
+}
+
+#[test]
 fn caller_owned_policy_can_mint_only_structural_output() {
     let fixture = minimal_fixture();
     let policy = UniformPolicy {
