@@ -6,13 +6,18 @@ use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Number, Value};
 
 use crate::{
+    MAX_EXTENSION_COMPATIBILITY_RECEIPTS_PER_PACKAGE, MAX_EXTENSION_COMPATIBILITY_RECEIPT_BYTES,
     MAX_EXTENSION_JSON_COLLECTION_ENTRIES, MAX_EXTENSION_JSON_DEPTH, MAX_EXTENSION_JSON_NODES,
     MAX_EXTENSION_JSON_STRING_BYTES, MAX_EXTENSION_LOCALE_MESSAGES_BYTES,
-    MAX_EXTENSION_MANIFEST_BYTES, MAX_EXTENSION_RELEASE_CATALOG_BYTES, MAX_EXTENSION_TREE_FILES,
-    MAX_EXTENSION_TREE_INDEX_BYTES,
+    MAX_EXTENSION_MANIFEST_BYTES, MAX_EXTENSION_PACKAGE_LINES, MAX_EXTENSION_RELEASE_CATALOG_BYTES,
+    MAX_EXTENSION_TREE_FILES, MAX_EXTENSION_TREE_INDEX_BYTES,
 };
 
-const MAX_RELEASE_CATALOG_JSON_NODES: usize = 512;
+// Root and package/provenance slack plus every scalar and container in the
+// largest schema-two receipt cohort. Deriving this budget keeps the typed
+// maximum reachable when either public shape ceiling changes.
+const MAX_RELEASE_CATALOG_JSON_NODES: usize =
+    32 + MAX_EXTENSION_PACKAGE_LINES * (64 + MAX_EXTENSION_COMPATIBILITY_RECEIPTS_PER_PACKAGE * 16);
 const MAX_RELEASE_CATALOG_COLLECTION_ENTRIES: usize = 32;
 const MAX_TREE_INDEX_JSON_NODES: usize = MAX_EXTENSION_TREE_FILES * 5 + 16;
 
@@ -52,6 +57,11 @@ impl BoundedJsonLimits {
     /// Limits for a source extension manifest.
     pub const fn extension_manifest() -> Self {
         Self::for_bytes(MAX_EXTENSION_MANIFEST_BYTES)
+    }
+
+    /// Limits for one non-authorizing compatibility-review receipt.
+    pub const fn compatibility_receipt() -> Self {
+        Self::for_bytes(MAX_EXTENSION_COMPATIBILITY_RECEIPT_BYTES)
     }
 
     /// Limits for one authenticated default-locale `messages.json` document.

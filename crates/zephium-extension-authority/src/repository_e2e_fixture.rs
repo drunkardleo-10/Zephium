@@ -63,6 +63,18 @@ pub(crate) const TREE_INDEX_SHA256_HEX: &str =
 pub(crate) const TREE_SHA256_HEX: &str =
     "98d899c226eec0f53503b067aa0f84e93c5b51d60a43c145a102060158a8ca55";
 
+/// Exact non-authorizing compatibility receipt used by the brokered product gate.
+#[allow(dead_code)] // Consumed by the path-including product probe.
+pub(crate) const COMPATIBILITY_RECEIPT_BYTES: &[u8] =
+    include_bytes!("../fixtures/repository-e2e/compatibility-receipt.json");
+/// Independently pinned compatibility-receipt length.
+#[allow(dead_code)] // Consumed by the path-including product probe.
+pub(crate) const COMPATIBILITY_RECEIPT_LENGTH: usize = 128;
+/// Independently pinned compatibility-receipt SHA-256.
+#[allow(dead_code)] // Consumed by the path-including product probe.
+pub(crate) const COMPATIBILITY_RECEIPT_SHA256_HEX: &str =
+    "aecaa293655c88ba08d6f9c5034bd777a16b7f2958ae59b3d6058698ed4e5786";
+
 /// Exact one-byte legal-notice object bound into both package generations.
 pub(crate) const LEGAL_NOTICE_BYTES: &[u8] = b"L";
 /// Independently pinned byte length of [`LEGAL_NOTICE_BYTES`].
@@ -79,7 +91,7 @@ pub(crate) const LEGAL_NOTICE_SHA256_HEX: &str =
         reason = "the alternate acquired authority replaces this active fixture"
     )
 )]
-pub(crate) const ACTIVE_CATALOG_BYTES: &[u8] = br#"{"schema_version":1,"catalog_revision":2,"created_unix":2,"authority_id":"0101010101010101010101010101010101010101010101010101010101010101","admission_policy_sha256":"0202020202020202020202020202020202020202020202020202020202020202","packages":[{"package_key":"0303030303030303030303030303030303030303030303030303030303030303","revision":1,"payload":{"kind":"bundled_tree"},"manifest_sha256":"b5f158c8be41ea68c2411c21994b7607c1dc803355e077bedbdb8632d45ef96a","tree_sha256":"98d899c226eec0f53503b067aa0f84e93c5b51d60a43c145a102060158a8ca55","tree_index_sha256":"25bf9a72458e1634967ccd0bf361459ad6cf0bd35d854cdce38a4a2b35697220","tree_index_length":591,"tree_file_count":5,"tree_bytes":9296,"chromium":{"manifest_key_sha256":"2b9b96a5bd3301baa6bf279ce3fd8c497c641b24541a5523b393b99875690c45"},"provenance":{"source_url":"https://example.com/releases/v1/source","upstream_version":"1.0.0","upstream_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","license_expression":"MPL-2.0","attribution":"Fixture contributors","redistribution":"Test-only reviewed fixture","legal_notice":{"target":"licenses/fixture.txt","kind":"notice_bundle","length":1,"sha256":"72dfcfb0c470ac255cde83fb8fe38de8a128188e03ea5ba5b2a93adbea1062fa"},"corresponding_source":null}}]}"#;
+pub(crate) const ACTIVE_CATALOG_BYTES: &[u8] = br#"{"schema_version":2,"catalog_revision":2,"created_unix":2,"authority_id":"0101010101010101010101010101010101010101010101010101010101010101","admission_policy_sha256":"0202020202020202020202020202020202020202020202020202020202020202","packages":[{"package_key":"0303030303030303030303030303030303030303030303030303030303030303","revision":1,"payload":{"kind":"bundled_tree"},"manifest_sha256":"b5f158c8be41ea68c2411c21994b7607c1dc803355e077bedbdb8632d45ef96a","tree_sha256":"98d899c226eec0f53503b067aa0f84e93c5b51d60a43c145a102060158a8ca55","tree_index_sha256":"25bf9a72458e1634967ccd0bf361459ad6cf0bd35d854cdce38a4a2b35697220","tree_index_length":591,"tree_file_count":5,"tree_bytes":9296,"chromium":{"manifest_key_sha256":"2b9b96a5bd3301baa6bf279ce3fd8c497c641b24541a5523b393b99875690c45"},"compatibility_receipts":[{"format":"zephium-compatibility-receipt-v1","target":"macos.wkwebextension-brokered.v1","length":128,"sha256":"aecaa293655c88ba08d6f9c5034bd777a16b7f2958ae59b3d6058698ed4e5786","input_manifest_sha256":"b5f158c8be41ea68c2411c21994b7607c1dc803355e077bedbdb8632d45ef96a","input_tree_sha256":"98d899c226eec0f53503b067aa0f84e93c5b51d60a43c145a102060158a8ca55","input_tree_index_sha256":"25bf9a72458e1634967ccd0bf361459ad6cf0bd35d854cdce38a4a2b35697220","input_file_count":5,"input_bytes":9296}],"provenance":{"source_url":"https://example.com/releases/v1/source","upstream_version":"1.0.0","upstream_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","license_expression":"MPL-2.0","attribution":"Fixture contributors","redistribution":"Test-only reviewed fixture","legal_notice":{"target":"licenses/fixture.txt","kind":"notice_bundle","length":1,"sha256":"72dfcfb0c470ac255cde83fb8fe38de8a128188e03ea5ba5b2a93adbea1062fa"},"corresponding_source":null}}]}"#;
 /// Independently pinned byte length of [`ACTIVE_CATALOG_BYTES`].
 #[cfg_attr(
     zephium_internal_acquired_repository_e2e,
@@ -88,7 +100,7 @@ pub(crate) const ACTIVE_CATALOG_BYTES: &[u8] = br#"{"schema_version":1,"catalog_
         reason = "the alternate acquired authority replaces this active fixture"
     )
 )]
-pub(crate) const ACTIVE_CATALOG_LENGTH: usize = 1253;
+pub(crate) const ACTIVE_CATALOG_LENGTH: usize = 1770;
 /// Independently pinned lowercase SHA-256 of [`ACTIVE_CATALOG_BYTES`].
 #[cfg_attr(
     zephium_internal_acquired_repository_e2e,
@@ -98,19 +110,19 @@ pub(crate) const ACTIVE_CATALOG_LENGTH: usize = 1253;
     )
 )]
 pub(crate) const ACTIVE_CATALOG_SHA256_HEX: &str =
-    "a7df93b6d93ede7794aeefc6d9fae5aacb7ad8a9ce0d8525d9e77828d025b459";
+    "196ac20313a27534cfa45d917c7bbe66dc4d76ff207e4242e09b214c88f497bb";
 
 /// Exact canonical explicitly approved rollback catalog at revision one.
-pub(crate) const ROLLBACK_CATALOG_BYTES: &[u8] = br#"{"schema_version":1,"catalog_revision":1,"created_unix":1,"authority_id":"0101010101010101010101010101010101010101010101010101010101010101","admission_policy_sha256":"0202020202020202020202020202020202020202020202020202020202020202","packages":[{"package_key":"0303030303030303030303030303030303030303030303030303030303030303","revision":1,"payload":{"kind":"bundled_tree"},"manifest_sha256":"b5f158c8be41ea68c2411c21994b7607c1dc803355e077bedbdb8632d45ef96a","tree_sha256":"98d899c226eec0f53503b067aa0f84e93c5b51d60a43c145a102060158a8ca55","tree_index_sha256":"25bf9a72458e1634967ccd0bf361459ad6cf0bd35d854cdce38a4a2b35697220","tree_index_length":591,"tree_file_count":5,"tree_bytes":9296,"chromium":{"manifest_key_sha256":"2b9b96a5bd3301baa6bf279ce3fd8c497c641b24541a5523b393b99875690c45"},"provenance":{"source_url":"https://example.com/releases/v1/source","upstream_version":"1.0.0","upstream_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","license_expression":"MPL-2.0","attribution":"Fixture contributors","redistribution":"Test-only reviewed fixture","legal_notice":{"target":"licenses/fixture.txt","kind":"notice_bundle","length":1,"sha256":"72dfcfb0c470ac255cde83fb8fe38de8a128188e03ea5ba5b2a93adbea1062fa"},"corresponding_source":null}}]}"#;
+pub(crate) const ROLLBACK_CATALOG_BYTES: &[u8] = br#"{"schema_version":2,"catalog_revision":1,"created_unix":1,"authority_id":"0101010101010101010101010101010101010101010101010101010101010101","admission_policy_sha256":"0202020202020202020202020202020202020202020202020202020202020202","packages":[{"package_key":"0303030303030303030303030303030303030303030303030303030303030303","revision":1,"payload":{"kind":"bundled_tree"},"manifest_sha256":"b5f158c8be41ea68c2411c21994b7607c1dc803355e077bedbdb8632d45ef96a","tree_sha256":"98d899c226eec0f53503b067aa0f84e93c5b51d60a43c145a102060158a8ca55","tree_index_sha256":"25bf9a72458e1634967ccd0bf361459ad6cf0bd35d854cdce38a4a2b35697220","tree_index_length":591,"tree_file_count":5,"tree_bytes":9296,"chromium":{"manifest_key_sha256":"2b9b96a5bd3301baa6bf279ce3fd8c497c641b24541a5523b393b99875690c45"},"compatibility_receipts":[{"format":"zephium-compatibility-receipt-v1","target":"macos.wkwebextension-brokered.v1","length":128,"sha256":"aecaa293655c88ba08d6f9c5034bd777a16b7f2958ae59b3d6058698ed4e5786","input_manifest_sha256":"b5f158c8be41ea68c2411c21994b7607c1dc803355e077bedbdb8632d45ef96a","input_tree_sha256":"98d899c226eec0f53503b067aa0f84e93c5b51d60a43c145a102060158a8ca55","input_tree_index_sha256":"25bf9a72458e1634967ccd0bf361459ad6cf0bd35d854cdce38a4a2b35697220","input_file_count":5,"input_bytes":9296}],"provenance":{"source_url":"https://example.com/releases/v1/source","upstream_version":"1.0.0","upstream_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","license_expression":"MPL-2.0","attribution":"Fixture contributors","redistribution":"Test-only reviewed fixture","legal_notice":{"target":"licenses/fixture.txt","kind":"notice_bundle","length":1,"sha256":"72dfcfb0c470ac255cde83fb8fe38de8a128188e03ea5ba5b2a93adbea1062fa"},"corresponding_source":null}}]}"#;
 /// Independently pinned byte length of [`ROLLBACK_CATALOG_BYTES`].
-pub(crate) const ROLLBACK_CATALOG_LENGTH: usize = 1253;
+pub(crate) const ROLLBACK_CATALOG_LENGTH: usize = 1770;
 /// Independently pinned lowercase SHA-256 of [`ROLLBACK_CATALOG_BYTES`].
 pub(crate) const ROLLBACK_CATALOG_SHA256_HEX: &str =
-    "9ad425db3527d6a1486cfb679ba35a2f6c78d8a32acaf1fb7197e7e88b247f97";
+    "f9b82a9cbf9c34c02d9019c9d408735901339741fe1d769623c7e3bba0484c93";
 
 /// Independently pinned lowercase SHA-256 of the closed catalog inventory.
 pub(crate) const CATALOG_INVENTORY_SHA256_HEX: &str =
-    "32facfbec63aa8a0814a6cdb0914289ad2bc49283e7fc4ddf73b5be455dba54a";
+    "e356358123326297be8a70b525b3bf47b581e20c6ba2404dec65b8a9e515eac5";
 
 /// Exact manifest used only by the acquired-package authority configuration.
 #[cfg(zephium_internal_acquired_repository_e2e)]
@@ -141,18 +153,18 @@ pub(crate) const ACQUIRED_TREE_SHA256_HEX: &str =
 
 /// Canonical acquired active catalog at revision two.
 #[cfg(zephium_internal_acquired_repository_e2e)]
-pub(crate) const ACQUIRED_ACTIVE_CATALOG_BYTES: &[u8] = br#"{"schema_version":1,"catalog_revision":2,"created_unix":2,"authority_id":"0101010101010101010101010101010101010101010101010101010101010101","admission_policy_sha256":"0202020202020202020202020202020202020202020202020202020202020202","packages":[{"package_key":"0303030303030303030303030303030303030303030303030303030303030303","revision":1,"payload":{"kind":"acquired_zip","length":3229,"sha256":"2f6b8ec980e46933f453d62e784c16450e53800770d6eea47be7bd6622aee323"},"manifest_sha256":"0acc4aea5b040993637181e6e264cfe0879b2ada71c936cdb08bdaaffb83e587","tree_sha256":"c65d2e6bf670ab0665d6b546a169fe14d80fb0eb75c13a6f73669cb73ed470e4","tree_index_sha256":"626a53d0d360b1b868b64d3ffa499344f0d31f3466d8b88fb4f6a06b7b54b3fa","tree_index_length":590,"tree_file_count":5,"tree_bytes":6471,"chromium":{"manifest_key_sha256":"2fb53eb506d3e430a618f11c31c75bf4533ee34a2a3b4f98bfe796dd56b8673f"},"provenance":{"source_url":"https://example.com/releases/v1/acquired-fixture.crx","upstream_version":"1.0.0","upstream_revision":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","license_expression":"MPL-2.0","attribution":"Fixture contributors","redistribution":"Test-only reviewed acquired fixture","legal_notice":{"target":"licenses/fixture.txt","kind":"notice_bundle","length":1,"sha256":"72dfcfb0c470ac255cde83fb8fe38de8a128188e03ea5ba5b2a93adbea1062fa"},"corresponding_source":null}}]}"#;
+pub(crate) const ACQUIRED_ACTIVE_CATALOG_BYTES: &[u8] = br#"{"schema_version":2,"catalog_revision":2,"created_unix":2,"authority_id":"0101010101010101010101010101010101010101010101010101010101010101","admission_policy_sha256":"0202020202020202020202020202020202020202020202020202020202020202","packages":[{"package_key":"0303030303030303030303030303030303030303030303030303030303030303","revision":1,"payload":{"kind":"acquired_zip","length":3229,"sha256":"2f6b8ec980e46933f453d62e784c16450e53800770d6eea47be7bd6622aee323"},"manifest_sha256":"0acc4aea5b040993637181e6e264cfe0879b2ada71c936cdb08bdaaffb83e587","tree_sha256":"c65d2e6bf670ab0665d6b546a169fe14d80fb0eb75c13a6f73669cb73ed470e4","tree_index_sha256":"626a53d0d360b1b868b64d3ffa499344f0d31f3466d8b88fb4f6a06b7b54b3fa","tree_index_length":590,"tree_file_count":5,"tree_bytes":6471,"chromium":{"manifest_key_sha256":"2fb53eb506d3e430a618f11c31c75bf4533ee34a2a3b4f98bfe796dd56b8673f"},"compatibility_receipts":[{"format":"zephium-compatibility-receipt-v1","target":"macos.wkwebextension-brokered.v1","length":128,"sha256":"aecaa293655c88ba08d6f9c5034bd777a16b7f2958ae59b3d6058698ed4e5786","input_manifest_sha256":"0acc4aea5b040993637181e6e264cfe0879b2ada71c936cdb08bdaaffb83e587","input_tree_sha256":"c65d2e6bf670ab0665d6b546a169fe14d80fb0eb75c13a6f73669cb73ed470e4","input_tree_index_sha256":"626a53d0d360b1b868b64d3ffa499344f0d31f3466d8b88fb4f6a06b7b54b3fa","input_file_count":5,"input_bytes":6471}],"provenance":{"source_url":"https://example.com/releases/v1/acquired-fixture.crx","upstream_version":"1.0.0","upstream_revision":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","license_expression":"MPL-2.0","attribution":"Fixture contributors","redistribution":"Test-only reviewed acquired fixture","legal_notice":{"target":"licenses/fixture.txt","kind":"notice_bundle","length":1,"sha256":"72dfcfb0c470ac255cde83fb8fe38de8a128188e03ea5ba5b2a93adbea1062fa"},"corresponding_source":null}}]}"#;
 /// Independently pinned acquired active-catalog length.
 #[cfg(zephium_internal_acquired_repository_e2e)]
-pub(crate) const ACQUIRED_ACTIVE_CATALOG_LENGTH: usize = 1366;
+pub(crate) const ACQUIRED_ACTIVE_CATALOG_LENGTH: usize = 1883;
 /// Independently pinned lowercase SHA-256 of the acquired active catalog.
 #[cfg(zephium_internal_acquired_repository_e2e)]
 pub(crate) const ACQUIRED_ACTIVE_CATALOG_SHA256_HEX: &str =
-    "55b70646069c110359bbd856a9ba33b14b85d7063122c0a8229d93182a539710";
+    "ba9585b8462bad9398f872c1f1e3418b2ed1c4f2eafe173a11c88bd9c5acab9d";
 /// Independently pinned lowercase SHA-256 of the acquired catalog inventory.
 #[cfg(zephium_internal_acquired_repository_e2e)]
 pub(crate) const ACQUIRED_CATALOG_INVENTORY_SHA256_HEX: &str =
-    "c270eefb471c60b26dd698a74a0b76045044ed46862d568e096ef60072a39a95";
+    "bf1a4c8f95638c6ed53f0392c17dda9ddcaf216b82eff51500522e90b87da8f0";
 
 /// Base64 of the exact authenticated ZIP payload in the acquired fixture.
 ///

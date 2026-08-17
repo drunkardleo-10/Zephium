@@ -18,8 +18,9 @@ use serde_json::{Map, Value};
 use sha2::{Digest as _, Sha256};
 use zephium_extension_package::{
     parse_bounded_json, BoundedJsonLimits, CanonicalExtensionTreeIndex, PortableRelativePath,
-    MAX_EXTENSION_MANIFEST_BYTES, MAX_EXTENSION_TREE_BYTES, MAX_EXTENSION_TREE_ENTRIES,
-    MAX_EXTENSION_TREE_FILES, MAX_EXTENSION_TREE_FILE_BYTES,
+    MAX_EXTENSION_COMPATIBILITY_RECEIPT_BYTES, MAX_EXTENSION_MANIFEST_BYTES,
+    MAX_EXTENSION_TREE_BYTES, MAX_EXTENSION_TREE_ENTRIES, MAX_EXTENSION_TREE_FILES,
+    MAX_EXTENSION_TREE_FILE_BYTES,
 };
 
 use crate::extension_tree;
@@ -155,7 +156,8 @@ pub(crate) struct ValidatedCompatibilityReleaseInput {
     pub(crate) extension_root: PathBuf,
     pub(crate) tree_index: PathBuf,
     pub(crate) receipt_bytes: Vec<u8>,
-    pub(crate) target: String,
+    pub(crate) artifact_target: String,
+    pub(crate) compatibility_target: String,
     pub(crate) receipt_sha256: [u8; 32],
     pub(crate) output_manifest_sha256: String,
     pub(crate) output_tree_sha256: String,
@@ -240,10 +242,10 @@ pub(crate) fn validate_release_input(
 
     let receipt_bytes = read_ordinary_bounded_file(
         &root.join(ARTIFACT_METADATA),
-        BoundedJsonLimits::extension_manifest().max_bytes() as u64,
+        MAX_EXTENSION_COMPATIBILITY_RECEIPT_BYTES as u64,
         "compatibility receipt",
     )?;
-    let bounded = parse_bounded_json(&receipt_bytes, BoundedJsonLimits::extension_manifest())
+    let bounded = parse_bounded_json(&receipt_bytes, BoundedJsonLimits::compatibility_receipt())
         .map_err(|error| format!("compatibility receipt is invalid: {error}"))?;
     let receipt: CompatibilityReceipt = serde_json::from_value(bounded.into_value())
         .map_err(|error| format!("compatibility receipt contract is invalid: {error}"))?;
@@ -254,6 +256,10 @@ pub(crate) fn validate_release_input(
         NATIVE_TARGET => ArtifactTarget::NativeV3,
         BROKERED_TARGET => ArtifactTarget::NativeBrokeredV1,
         _ => return Err("compatibility receipt authority header drifted".into()),
+    };
+    let compatibility_target = match target {
+        ArtifactTarget::NativeV3 => "macos.wkwebextension.v1",
+        ArtifactTarget::NativeBrokeredV1 => "macos.wkwebextension-brokered.v1",
     };
     validate_compatibility_identity(&receipt.source, "source")?;
     validate_compatibility_identity(&receipt.output, "output")?;
@@ -280,7 +286,8 @@ pub(crate) fn validate_release_input(
         extension_root,
         tree_index,
         receipt_bytes,
-        target: receipt.target,
+        artifact_target: receipt.target,
+        compatibility_target: compatibility_target.to_owned(),
         receipt_sha256,
         output_manifest_sha256: receipt.output.manifest_sha256,
         output_tree_sha256: receipt.output.tree_sha256,

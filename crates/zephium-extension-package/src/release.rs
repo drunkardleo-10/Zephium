@@ -7,9 +7,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use url::{Host, Url};
 use zephium_core::extensions::{
-    ExtensionArchiveDigest, ExtensionAuthorityId, ExtensionManifestDigest,
-    ExtensionPackageIdentity, ExtensionPackageKey, ExtensionPackagePayloadIdentity,
-    ExtensionPackageRevision, ExtensionTreeDigest,
+    ExtensionArchiveDigest, ExtensionAuthorityId, ExtensionCompatibilityTargetId,
+    ExtensionManifestDigest, ExtensionPackageIdentity, ExtensionPackageKey,
+    ExtensionPackagePayloadIdentity, ExtensionPackageRevision, ExtensionTreeDigest,
 };
 
 use crate::digest::decode_lower_hex_32;
@@ -17,13 +17,16 @@ use crate::relative_path::portable_path_shape_conflicts;
 use crate::{
     parse_bounded_json, BoundedJsonError, BoundedJsonLimits, CanonicalExtensionTreeIndex,
     ChromiumExtensionId, ChromiumManifestKey, ChromiumManifestKeyDigest, ExtensionTreeIndexDigest,
-    PortableRelativePath, MAX_EXTENSION_ARCHIVE_BYTES, MAX_EXTENSION_LEGAL_NOTICE_BYTES,
-    MAX_EXTENSION_LICENSE_RULES, MAX_EXTENSION_PACKAGE_LINES,
+    PortableRelativePath, MAX_EXTENSION_ARCHIVE_BYTES,
+    MAX_EXTENSION_COMPATIBILITY_RECEIPTS_PER_PACKAGE, MAX_EXTENSION_COMPATIBILITY_RECEIPT_BYTES,
+    MAX_EXTENSION_LEGAL_NOTICE_BYTES, MAX_EXTENSION_LICENSE_RULES, MAX_EXTENSION_PACKAGE_LINES,
     MAX_EXTENSION_RELEASE_CATALOG_RETAINED_BYTES, MAX_EXTENSION_RELEASE_CATALOG_TREE_BYTES,
     MAX_EXTENSION_TREE_BYTES, MAX_EXTENSION_TREE_FILES, MAX_EXTENSION_TREE_INDEX_BYTES,
 };
 
-const RELEASE_CATALOG_SCHEMA_VERSION: u32 = 1;
+const LEGACY_RELEASE_CATALOG_SCHEMA_VERSION: u32 = 1;
+const RELEASE_CATALOG_SCHEMA_VERSION: u32 = 2;
+const COMPATIBILITY_RECEIPT_FORMAT: &str = "zephium-compatibility-receipt-v1";
 const MAX_RELEASE_UNIX: u64 = 7_258_118_400;
 const MAX_SOURCE_URL_BYTES: usize = 2 * 1024;
 const MAX_UPSTREAM_VERSION_BYTES: usize = 128;
@@ -75,6 +78,10 @@ release_digest!(
 release_digest!(
     ExtensionPackageAdmissionPolicyDigest,
     "Digest of the product-owned parser, compatibility, limit, and license policy."
+);
+release_digest!(
+    ExtensionCompatibilityReceiptDigest,
+    "SHA-256 of one exact non-authorizing extension compatibility receipt."
 );
 
 /// Strictly positive durable sequence for authenticated release catalogs.
@@ -426,6 +433,88 @@ pub enum ExtensionReleaseLegalArtifactKind {
     NoticeBundle,
 }
 
+/// Signed binding for one non-authorizing compatibility receipt and the exact
+/// pre-signing tree it assessed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExtensionReleaseCompatibilityReceipt {
+    target: ExtensionCompatibilityTargetId,
+    length: u64,
+    sha256: ExtensionCompatibilityReceiptDigest,
+    input_manifest_sha256: ExtensionManifestDigest,
+    input_tree_sha256: ExtensionTreeDigest,
+    input_tree_index_sha256: ExtensionTreeIndexDigest,
+    input_file_count: usize,
+    input_bytes: u64,
+}
+
+impl ExtensionReleaseCompatibilityReceipt {
+    /// Returns the exact versioned backend compatibility target.
+    pub const fn target(&self) -> &ExtensionCompatibilityTargetId {
+        &self.target
+    }
+
+    /// Returns exact receipt byte length.
+    pub const fn length(&self) -> u64 {
+        self.length
+    }
+
+    /// Returns SHA-256 of exact receipt bytes.
+    pub const fn sha256(&self) -> ExtensionCompatibilityReceiptDigest {
+        self.sha256
+    }
+
+    /// Returns the assessed input manifest digest.
+    pub const fn input_manifest_sha256(&self) -> ExtensionManifestDigest {
+        self.input_manifest_sha256
+    }
+
+    /// Returns the assessed input tree digest.
+    pub const fn input_tree_sha256(&self) -> ExtensionTreeDigest {
+        self.input_tree_sha256
+    }
+
+    /// Returns the assessed canonical input-index digest.
+    pub const fn input_tree_index_sha256(&self) -> ExtensionTreeIndexDigest {
+        self.input_tree_index_sha256
+    }
+
+    /// Returns the assessed input file count.
+    pub const fn input_file_count(&self) -> usize {
+        self.input_file_count
+    }
+
+    /// Returns the assessed input byte count.
+    pub const fn input_bytes(&self) -> u64 {
+        self.input_bytes
+    }
+
+    /// Verifies exact receipt bytes supplied by the signed release channel.
+    pub fn verify_bytes(&self, bytes: &[u8]) -> Result<(), ExtensionReleaseCatalogError> {
+        if u64::try_from(bytes.len()).ok() != Some(self.length)
+            || <[u8; 32]>::from(Sha256::digest(bytes)) != self.sha256.bytes()
+        {
+            return Err(ExtensionReleaseCatalogError::CompatibilityReceiptMismatch);
+        }
+        Ok(())
+    }
+
+    /// Cross-validates the exact pre-signing compatibility tree.
+    pub fn verify_input_tree_index(
+        &self,
+        index: &CanonicalExtensionTreeIndex,
+    ) -> Result<(), ExtensionReleaseCatalogError> {
+        if self.input_manifest_sha256 != index.manifest_sha256()
+            || self.input_tree_sha256 != index.tree_sha256()
+            || self.input_tree_index_sha256 != index.index_sha256()
+            || self.input_file_count != index.files().len()
+            || self.input_bytes != index.total_bytes()
+        {
+            return Err(ExtensionReleaseCatalogError::CompatibilityInputTreeMismatch);
+        }
+        Ok(())
+    }
+}
+
 /// One exact extension package named by a signed release catalog.
 ///
 /// The tagged payload distinguishes an authenticated bundled tree from a
@@ -440,6 +529,7 @@ pub struct ExtensionReleasePackage {
     tree_file_count: usize,
     tree_bytes: u64,
     chromium: Option<ExpectedChromiumIdentity>,
+    compatibility_receipts: Box<[ExtensionReleaseCompatibilityReceipt]>,
     provenance: ExtensionReleasePackageProvenance,
 }
 
@@ -477,6 +567,22 @@ impl ExtensionReleasePackage {
     /// Returns signed expected Chromium identity when this package may target WebView2.
     pub const fn chromium(&self) -> Option<&ExpectedChromiumIdentity> {
         self.chromium.as_ref()
+    }
+
+    /// Returns compatibility receipts in strict target order.
+    pub fn compatibility_receipts(&self) -> &[ExtensionReleaseCompatibilityReceipt] {
+        &self.compatibility_receipts
+    }
+
+    /// Finds one exact compatibility target without allocating.
+    pub fn compatibility_receipt(
+        &self,
+        target: &ExtensionCompatibilityTargetId,
+    ) -> Option<&ExtensionReleaseCompatibilityReceipt> {
+        self.compatibility_receipts
+            .binary_search_by(|receipt| receipt.target.cmp(target))
+            .ok()
+            .map(|index| &self.compatibility_receipts[index])
     }
 
     /// Returns signed source and license provenance.
@@ -534,6 +640,7 @@ impl<'a> ExtensionReleaseTreeBinding<'a> {
 /// any package can be leased or activated.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExtensionReleaseCatalog {
+    schema_version: u32,
     revision: ExtensionReleaseCatalogRevision,
     created_unix: u64,
     authority: ExtensionAuthorityId,
@@ -555,7 +662,10 @@ impl ExtensionReleaseCatalog {
         if encoded.as_slice() != bytes {
             return Err(ExtensionReleaseCatalogError::NonCanonical);
         }
-        if raw.schema_version != RELEASE_CATALOG_SCHEMA_VERSION {
+        if !matches!(
+            raw.schema_version,
+            LEGACY_RELEASE_CATALOG_SCHEMA_VERSION | RELEASE_CATALOG_SCHEMA_VERSION
+        ) {
             return Err(ExtensionReleaseCatalogError::UnsupportedSchema);
         }
         let revision = ExtensionReleaseCatalogRevision::new(raw.catalog_revision)
@@ -669,6 +779,19 @@ impl ExtensionReleaseCatalog {
                     ))
                 })
                 .transpose()?;
+            let compatibility_receipts = validate_compatibility_receipts(
+                raw_package.compatibility_receipts,
+                raw.schema_version,
+            )?;
+            if compatibility_receipts.iter().any(|receipt| {
+                receipt.input_manifest_sha256 != manifest_sha256
+                    || receipt.input_tree_sha256 != tree_sha256
+                    || receipt.input_tree_index_sha256 != tree_index_sha256
+                    || receipt.input_file_count != tree_file_count
+                    || receipt.input_bytes != raw_package.tree_bytes
+            }) {
+                return Err(ExtensionReleaseCatalogError::CompatibilityInputTreeMismatch);
+            }
             let provenance = validate_provenance(raw_package.provenance)?;
             if chromium.as_ref().is_some_and(|candidate| {
                 packages.iter().any(|existing: &ExtensionReleasePackage| {
@@ -715,6 +838,7 @@ impl ExtensionReleaseCatalog {
                 tree_file_count,
                 tree_bytes: raw_package.tree_bytes,
                 chromium,
+                compatibility_receipts,
                 provenance,
             });
         }
@@ -745,6 +869,21 @@ impl ExtensionReleaseCatalog {
                                 .map_or(0, |identity| identity.extension_id.as_str().len()),
                         )
                     })
+                    .and_then(|value| {
+                        package
+                            .compatibility_receipts
+                            .len()
+                            .checked_mul(size_of::<ExtensionReleaseCompatibilityReceipt>())
+                            .and_then(|bytes| value.checked_add(bytes))
+                    })
+                    .and_then(|value| {
+                        package
+                            .compatibility_receipts
+                            .iter()
+                            .try_fold(value, |total, receipt| {
+                                total.checked_add(receipt.target.as_str().len())
+                            })
+                    })
                     .ok_or(ExtensionReleaseCatalogError::AccountingOverflow)
             },
         )?;
@@ -756,6 +895,7 @@ impl ExtensionReleaseCatalog {
         }
 
         Ok(Self {
+            schema_version: raw.schema_version,
             revision,
             created_unix: raw.created_unix,
             authority,
@@ -764,6 +904,11 @@ impl ExtensionReleaseCatalog {
             digest: ExtensionReleaseCatalogDigest(Sha256::digest(bytes).into()),
             retained_bytes,
         })
+    }
+
+    /// Returns the canonical release-catalog schema version.
+    pub const fn schema_version(&self) -> u32 {
+        self.schema_version
     }
 
     /// Returns the strictly positive release-catalog revision.
@@ -922,6 +1067,76 @@ fn validate_provenance(
     })
 }
 
+fn validate_compatibility_receipts(
+    raw: Vec<RawCompatibilityReceipt>,
+    schema_version: u32,
+) -> Result<Box<[ExtensionReleaseCompatibilityReceipt]>, ExtensionReleaseCatalogError> {
+    if schema_version == LEGACY_RELEASE_CATALOG_SCHEMA_VERSION && !raw.is_empty() {
+        return Err(ExtensionReleaseCatalogError::CompatibilityReceiptsRequireSchema2);
+    }
+    if raw.len() > MAX_EXTENSION_COMPATIBILITY_RECEIPTS_PER_PACKAGE {
+        return Err(ExtensionReleaseCatalogError::CompatibilityReceiptCount {
+            count: raw.len(),
+            max: MAX_EXTENSION_COMPATIBILITY_RECEIPTS_PER_PACKAGE,
+        });
+    }
+    let mut receipts = Vec::with_capacity(raw.len());
+    let mut previous_target: Option<String> = None;
+    for raw in raw {
+        if raw.format != COMPATIBILITY_RECEIPT_FORMAT {
+            return Err(ExtensionReleaseCatalogError::InvalidCompatibilityReceipt);
+        }
+        if previous_target
+            .as_ref()
+            .is_some_and(|previous| previous >= &raw.target)
+        {
+            return Err(ExtensionReleaseCatalogError::NonCanonicalCompatibilityReceiptOrder);
+        }
+        let target = ExtensionCompatibilityTargetId::parse_exact(&raw.target)
+            .map_err(|_| ExtensionReleaseCatalogError::InvalidCompatibilityReceipt)?;
+        if raw.length == 0 || raw.length > MAX_EXTENSION_COMPATIBILITY_RECEIPT_BYTES as u64 {
+            return Err(ExtensionReleaseCatalogError::InvalidCompatibilityReceipt);
+        }
+        let input_file_count = usize::try_from(raw.input_file_count)
+            .map_err(|_| ExtensionReleaseCatalogError::InvalidCompatibilityReceipt)?;
+        if input_file_count == 0
+            || input_file_count > MAX_EXTENSION_TREE_FILES
+            || raw.input_bytes == 0
+            || raw.input_bytes > MAX_EXTENSION_TREE_BYTES
+        {
+            return Err(ExtensionReleaseCatalogError::InvalidCompatibilityReceipt);
+        }
+        let sha256 = ExtensionCompatibilityReceiptDigest::from_bytes(
+            decode_lower_hex_32(&raw.sha256)
+                .map_err(|_| ExtensionReleaseCatalogError::InvalidCompatibilityReceipt)?,
+        );
+        let input_manifest_sha256 = ExtensionManifestDigest::from_bytes(
+            decode_lower_hex_32(&raw.input_manifest_sha256)
+                .map_err(|_| ExtensionReleaseCatalogError::InvalidCompatibilityReceipt)?,
+        );
+        let input_tree_sha256 = ExtensionTreeDigest::from_bytes(
+            decode_lower_hex_32(&raw.input_tree_sha256)
+                .map_err(|_| ExtensionReleaseCatalogError::InvalidCompatibilityReceipt)?,
+        );
+        let input_tree_index_sha256 = ExtensionTreeIndexDigest::from_bytes(
+            decode_lower_hex_32(&raw.input_tree_index_sha256)
+                .map_err(|_| ExtensionReleaseCatalogError::InvalidCompatibilityReceipt)?,
+        );
+        previous_target = Some(raw.target);
+        receipts.push(ExtensionReleaseCompatibilityReceipt {
+            target,
+            length: raw.length,
+            sha256,
+            input_manifest_sha256,
+            input_tree_sha256,
+            input_tree_index_sha256,
+            input_file_count,
+            input_bytes: raw.input_bytes,
+        });
+    }
+    Ok(receipts.into_boxed_slice())
+}
+
 fn valid_git_revision(value: &str) -> bool {
     matches!(value.len(), 40 | 64)
         && value
@@ -980,6 +1195,8 @@ struct RawReleasePackage {
     tree_file_count: u32,
     tree_bytes: u64,
     chromium: Option<RawChromiumIdentity>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    compatibility_receipts: Vec<RawCompatibilityReceipt>,
     provenance: RawProvenance,
 }
 
@@ -995,6 +1212,20 @@ enum RawPackagePayload {
 #[serde(deny_unknown_fields)]
 struct RawChromiumIdentity {
     manifest_key_sha256: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RawCompatibilityReceipt {
+    format: String,
+    target: String,
+    length: u64,
+    sha256: String,
+    input_manifest_sha256: String,
+    input_tree_sha256: String,
+    input_tree_index_sha256: String,
+    input_file_count: u32,
+    input_bytes: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -1099,6 +1330,23 @@ pub enum ExtensionReleaseCatalogError {
     ChromiumIdentity,
     /// Distinct update lines claim the same Chromium native identity.
     DuplicateChromiumIdentity,
+    /// Schema 1 attempted to carry compatibility-receipt authority.
+    CompatibilityReceiptsRequireSchema2,
+    /// Compatibility receipt count exceeds its fixed per-package ceiling.
+    CompatibilityReceiptCount {
+        /// Observed receipts.
+        count: usize,
+        /// Maximum receipts.
+        max: usize,
+    },
+    /// A receipt format, target, size, digest, or input-tree identity is invalid.
+    InvalidCompatibilityReceipt,
+    /// Compatibility receipts are not strictly ordered by unique target.
+    NonCanonicalCompatibilityReceiptOrder,
+    /// Supplied receipt bytes do not match signed length and digest.
+    CompatibilityReceiptMismatch,
+    /// Supplied compatibility input index does not match signed identity.
+    CompatibilityInputTreeMismatch,
     /// Catalog policy digest does not match the product-owned expected policy.
     AdmissionPolicyMismatch,
     /// A package license expression is absent from trusted product policy.
@@ -1191,6 +1439,23 @@ impl fmt::Display for ExtensionReleaseCatalogError {
             }
             Self::DuplicateChromiumIdentity => {
                 formatter.write_str("extension release Chromium identities are not unique")
+            }
+            Self::CompatibilityReceiptsRequireSchema2 => formatter
+                .write_str("extension release compatibility receipts require catalog schema 2"),
+            Self::CompatibilityReceiptCount { count, max } => write!(
+                formatter,
+                "extension release package has {count} compatibility receipts; maximum is {max}"
+            ),
+            Self::InvalidCompatibilityReceipt => {
+                formatter.write_str("extension release compatibility receipt is invalid")
+            }
+            Self::NonCanonicalCompatibilityReceiptOrder => formatter
+                .write_str("extension release compatibility receipts are not strictly ordered"),
+            Self::CompatibilityReceiptMismatch => {
+                formatter.write_str("extension release compatibility receipt bytes do not match")
+            }
+            Self::CompatibilityInputTreeMismatch => {
+                formatter.write_str("extension release compatibility input tree does not match")
             }
             Self::AdmissionPolicyMismatch => {
                 formatter.write_str("extension release admission policy does not match")
@@ -1293,6 +1558,7 @@ mod tests {
                 chromium: Some(RawChromiumIdentity {
                     manifest_key_sha256: hex(key.digest().bytes()),
                 }),
+                compatibility_receipts: Vec::new(),
                 provenance: RawProvenance {
                     source_url:
                         "https://github.com/example/project/releases/download/v1/package.zip"
@@ -1315,6 +1581,24 @@ mod tests {
                     }),
                 },
             }],
+        }
+    }
+
+    fn raw_compatibility_receipt(
+        tree: &CanonicalExtensionTreeIndex,
+        target: &str,
+        receipt_bytes: &[u8],
+    ) -> RawCompatibilityReceipt {
+        RawCompatibilityReceipt {
+            format: COMPATIBILITY_RECEIPT_FORMAT.to_owned(),
+            target: target.to_owned(),
+            length: receipt_bytes.len() as u64,
+            sha256: hex(Sha256::digest(receipt_bytes).into()),
+            input_manifest_sha256: hex(tree.manifest_sha256().bytes()),
+            input_tree_sha256: hex(tree.tree_sha256().bytes()),
+            input_tree_index_sha256: hex(tree.index_sha256().bytes()),
+            input_file_count: tree.files().len() as u32,
+            input_bytes: tree.total_bytes(),
         }
     }
 
@@ -1347,6 +1631,133 @@ mod tests {
         assert_eq!(binding.package().identity(), package.identity());
         assert_eq!(binding.index(), &tree);
         assert!(catalog.retained_bytes() <= MAX_EXTENSION_RELEASE_CATALOG_RETAINED_BYTES);
+    }
+
+    #[test]
+    fn schema_two_binds_ordered_compatibility_receipts_and_input_tree() {
+        let tree = canonical_tree();
+        let receipt_bytes = br#"{"product_authority":false}"#;
+        let target = "macos.wkwebextension-brokered.v1";
+        let mut raw = raw_catalog(&tree);
+        raw.packages[0].compatibility_receipts =
+            vec![raw_compatibility_receipt(&tree, target, receipt_bytes)];
+        let catalog =
+            ExtensionReleaseCatalog::parse_canonical(&serde_json::to_vec(&raw).unwrap()).unwrap();
+        assert_eq!(catalog.schema_version(), RELEASE_CATALOG_SCHEMA_VERSION);
+        let package = &catalog.packages()[0];
+        assert_eq!(package.compatibility_receipts().len(), 1);
+        let target = ExtensionCompatibilityTargetId::parse_exact(target).unwrap();
+        let receipt = package.compatibility_receipt(&target).unwrap();
+        assert_eq!(receipt.target(), &target);
+        assert_eq!(receipt.verify_bytes(receipt_bytes), Ok(()));
+        assert_eq!(receipt.verify_input_tree_index(&tree), Ok(()));
+        assert_eq!(
+            receipt.verify_bytes(b"wrong"),
+            Err(ExtensionReleaseCatalogError::CompatibilityReceiptMismatch)
+        );
+
+        let mut changed = raw_compatibility_receipt(&tree, target.as_str(), receipt_bytes);
+        changed.input_bytes += 1;
+        raw.packages[0].compatibility_receipts = vec![changed];
+        assert_eq!(
+            ExtensionReleaseCatalog::parse_canonical(&serde_json::to_vec(&raw).unwrap()),
+            Err(ExtensionReleaseCatalogError::CompatibilityInputTreeMismatch)
+        );
+    }
+
+    #[test]
+    fn schema_two_maximum_receipt_shape_is_lexically_and_structurally_reachable() {
+        let tree = canonical_tree();
+        let mut raw = raw_catalog(&tree);
+        let template = raw.packages.pop().unwrap();
+        raw.packages = (0..MAX_EXTENSION_PACKAGE_LINES)
+            .map(|package_index| {
+                let mut package = template.clone();
+                package.package_key = hex([package_index as u8 + 1; 32]);
+                package.chromium = None;
+                package.provenance.legal_notice.target =
+                    format!("licenses/package-{package_index}.txt");
+                package.compatibility_receipts = (0
+                    ..MAX_EXTENSION_COMPATIBILITY_RECEIPTS_PER_PACKAGE)
+                    .map(|receipt_index| {
+                        raw_compatibility_receipt(
+                            &tree,
+                            &format!("test.platform-{receipt_index:02}.v1"),
+                            b"receipt",
+                        )
+                    })
+                    .collect();
+                package
+            })
+            .collect();
+
+        let catalog =
+            ExtensionReleaseCatalog::parse_canonical(&serde_json::to_vec(&raw).unwrap()).unwrap();
+        assert_eq!(catalog.packages().len(), MAX_EXTENSION_PACKAGE_LINES);
+        assert!(catalog.packages().iter().all(|package| {
+            package.compatibility_receipts().len()
+                == MAX_EXTENSION_COMPATIBILITY_RECEIPTS_PER_PACKAGE
+        }));
+        assert!(catalog.retained_bytes() <= MAX_EXTENSION_RELEASE_CATALOG_RETAINED_BYTES);
+    }
+
+    #[test]
+    fn legacy_catalogs_cannot_smuggle_compatibility_receipts() {
+        let tree = canonical_tree();
+        let mut raw = raw_catalog(&tree);
+        raw.schema_version = LEGACY_RELEASE_CATALOG_SCHEMA_VERSION;
+        raw.packages[0].compatibility_receipts = vec![raw_compatibility_receipt(
+            &tree,
+            "macos.wkwebextension-brokered.v1",
+            b"receipt",
+        )];
+        assert_eq!(
+            ExtensionReleaseCatalog::parse_canonical(&serde_json::to_vec(&raw).unwrap()),
+            Err(ExtensionReleaseCatalogError::CompatibilityReceiptsRequireSchema2)
+        );
+    }
+
+    #[test]
+    fn compatibility_receipt_cohort_is_bounded_canonical_and_typed() {
+        let tree = canonical_tree();
+        let mut raw = raw_catalog(&tree);
+        let first = raw_compatibility_receipt(&tree, "macos.wkwebextension-brokered.v1", b"first");
+        let second = raw_compatibility_receipt(&tree, "windows.webview2.v1", b"second");
+        raw.packages[0].compatibility_receipts = vec![second.clone(), first.clone()];
+        assert_eq!(
+            ExtensionReleaseCatalog::parse_canonical(&serde_json::to_vec(&raw).unwrap()),
+            Err(ExtensionReleaseCatalogError::NonCanonicalCompatibilityReceiptOrder)
+        );
+        raw.packages[0].compatibility_receipts = vec![first.clone(), first];
+        assert_eq!(
+            ExtensionReleaseCatalog::parse_canonical(&serde_json::to_vec(&raw).unwrap()),
+            Err(ExtensionReleaseCatalogError::NonCanonicalCompatibilityReceiptOrder)
+        );
+        raw.packages[0].compatibility_receipts =
+            vec![second; MAX_EXTENSION_COMPATIBILITY_RECEIPTS_PER_PACKAGE + 1];
+        assert_eq!(
+            ExtensionReleaseCatalog::parse_canonical(&serde_json::to_vec(&raw).unwrap()),
+            Err(ExtensionReleaseCatalogError::CompatibilityReceiptCount {
+                count: MAX_EXTENSION_COMPATIBILITY_RECEIPTS_PER_PACKAGE + 1,
+                max: MAX_EXTENSION_COMPATIBILITY_RECEIPTS_PER_PACKAGE,
+            })
+        );
+
+        raw.packages[0].compatibility_receipts =
+            vec![raw_compatibility_receipt(&tree, "not a target", b"receipt")];
+        assert_eq!(
+            ExtensionReleaseCatalog::parse_canonical(&serde_json::to_vec(&raw).unwrap()),
+            Err(ExtensionReleaseCatalogError::InvalidCompatibilityReceipt)
+        );
+
+        let mut oversized =
+            raw_compatibility_receipt(&tree, "macos.wkwebextension-brokered.v1", b"receipt");
+        oversized.length = MAX_EXTENSION_COMPATIBILITY_RECEIPT_BYTES as u64 + 1;
+        raw.packages[0].compatibility_receipts = vec![oversized];
+        assert_eq!(
+            ExtensionReleaseCatalog::parse_canonical(&serde_json::to_vec(&raw).unwrap()),
+            Err(ExtensionReleaseCatalogError::InvalidCompatibilityReceipt)
+        );
     }
 
     #[test]

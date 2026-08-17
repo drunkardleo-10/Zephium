@@ -84,8 +84,8 @@ fn make_fixture(
     let tree = CanonicalExtensionTreeIndex::parse_canonical(&tree_bytes).unwrap();
     let catalog_bytes = format!(
         concat!(
-            r#"{{"schema_version":1,"catalog_revision":{},"created_unix":{},"authority_id":"{}","admission_policy_sha256":"{}","packages":["#,
-            r#"{{"package_key":"{}","revision":{},"payload":{{"kind":"bundled_tree"}},"manifest_sha256":"{}","tree_sha256":"{}","tree_index_sha256":"{}","tree_index_length":{},"tree_file_count":{},"tree_bytes":{},"chromium":null,"provenance":{{"source_url":"https://example.com/releases/v1/source","upstream_version":"1.0.0","upstream_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","license_expression":"MPL-2.0","attribution":"Fixture contributors","redistribution":"Test-only reviewed fixture","legal_notice":{{"target":"licenses/fixture.txt","kind":"notice_bundle","length":1,"sha256":"{}"}},"corresponding_source":null}}}}]}}"#,
+            r#"{{"schema_version":2,"catalog_revision":{},"created_unix":{},"authority_id":"{}","admission_policy_sha256":"{}","packages":["#,
+            r#"{{"package_key":"{}","revision":{},"payload":{{"kind":"bundled_tree"}},"manifest_sha256":"{}","tree_sha256":"{}","tree_index_sha256":"{}","tree_index_length":{},"tree_file_count":{},"tree_bytes":{},"chromium":null,"compatibility_receipts":[{{"format":"zephium-compatibility-receipt-v1","target":"macos.wkwebextension-brokered.v1","length":1,"sha256":"{}","input_manifest_sha256":"{}","input_tree_sha256":"{}","input_tree_index_sha256":"{}","input_file_count":{},"input_bytes":{}}}],"provenance":{{"source_url":"https://example.com/releases/v1/source","upstream_version":"1.0.0","upstream_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","license_expression":"MPL-2.0","attribution":"Fixture contributors","redistribution":"Test-only reviewed fixture","legal_notice":{{"target":"licenses/fixture.txt","kind":"notice_bundle","length":1,"sha256":"{}"}},"corresponding_source":null}}}}]}}"#,
         ),
         catalog_revision,
         created_unix,
@@ -97,6 +97,12 @@ fn make_fixture(
         hex(tree.tree_sha256().bytes()),
         hex(tree.index_sha256().bytes()),
         tree.index_bytes(),
+        tree.files().len(),
+        tree.total_bytes(),
+        hex([8; 32]),
+        hex(tree.manifest_sha256().bytes()),
+        hex(tree.tree_sha256().bytes()),
+        hex(tree.index_sha256().bytes()),
         tree.files().len(),
         tree.total_bytes(),
         hex([9; 32]),
@@ -340,6 +346,48 @@ fn active_distribution_selection_is_derived_only_from_sealed_profiles() {
         authority.active_acquired_runtime_selections(ProductExtensionRuntimeTarget::WindowsNative),
         Err(ProductExtensionRuntimeSelectionError::RuntimeTargetNotProvisioned)
     );
+}
+
+#[test]
+fn brokered_manifest_admission_requires_its_exact_signed_receipt() {
+    let fixture = minimal_fixture();
+    let mut catalog_json = String::from_utf8(fixture.catalog_bytes.clone()).unwrap();
+    let receipt_start = catalog_json
+        .find(r#","compatibility_receipts":["#)
+        .expect("fixture carries one compatibility receipt");
+    let receipt_end = catalog_json[receipt_start..]
+        .find(r#"],"provenance":"#)
+        .map(|offset| receipt_start + offset + 1)
+        .expect("fixture receipt is followed by provenance");
+    catalog_json.replace_range(receipt_start..receipt_end, "");
+    let catalog =
+        BundledPackageAuthority::admit_fixture_catalog(catalog_json.as_bytes(), release_policy())
+            .unwrap();
+    let runtime_target = ProductExtensionRuntimeTarget::MacosNativeBrokered;
+    let profile = profile_for_catalog(
+        catalog.catalog(),
+        catalog.authority(),
+        catalog.revision(),
+        catalog.catalog_length(),
+        catalog.catalog_digest(),
+        catalog.inventory_digest(),
+        &fixture.tree,
+        &fixture.manifest,
+        runtime_target,
+        runtime_target.compatibility_target_id(),
+        ExtensionCompatibilityLevel::Compatible,
+    );
+
+    assert!(matches!(
+        authority(profile).admit_manifest(
+            &catalog,
+            runtime_target,
+            catalog.catalog().packages()[0].identity().key(),
+            &fixture.tree,
+            &fixture.manifest,
+        ),
+        Err(ProductExtensionManifestAdmissionError::CompatibilityReceiptMissing)
+    ));
 }
 
 #[test]

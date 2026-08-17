@@ -6,6 +6,12 @@ pub const MAX_EXTENSION_RELEASE_CATALOG_BYTES: usize = 256 * 1024;
 pub const MAX_EXTENSION_TREE_INDEX_BYTES: usize = 4 * 1024 * 1024;
 /// Maximum source `manifest.json` size admitted by the manifest parser.
 pub const MAX_EXTENSION_MANIFEST_BYTES: usize = 1024 * 1024;
+/// Maximum exact bytes in one compatibility-review receipt.
+///
+/// Receipts carry identities and bounded compatibility classifications rather
+/// than extension resources. Keeping this substantially below the manifest
+/// ceiling bounds release-channel reads without constraining package trees.
+pub const MAX_EXTENSION_COMPATIBILITY_RECEIPT_BYTES: usize = 64 * 1024;
 /// Maximum heap charge retained by one admitted manifest resource plan.
 pub const MAX_EXTENSION_MANIFEST_PLAN_RETAINED_BYTES: usize = 2 * 1024 * 1024;
 /// Maximum bytes in one content-script include/exclude glob.
@@ -39,6 +45,8 @@ pub const MAX_EXTENSION_TREE_ENTRIES: usize = 4_096;
 pub const MAX_EXTENSION_TREE_FILES: usize = MAX_EXTENSION_TREE_ENTRIES;
 /// Maximum supported package update lines in one release catalog.
 pub const MAX_EXTENSION_PACKAGE_LINES: usize = 8;
+/// Maximum compatibility-review receipts bound to one package update line.
+pub const MAX_EXTENSION_COMPATIBILITY_RECEIPTS_PER_PACKAGE: usize = 8;
 /// Maximum exact license expressions in one product admission policy.
 pub const MAX_EXTENSION_LICENSE_RULES: usize = 32;
 /// Maximum UTF-8 bytes in one portable package-relative path.
@@ -76,9 +84,11 @@ const _: () = assert!(MAX_EXTENSION_TREE_FILE_BYTES <= MAX_EXTENSION_TREE_BYTES)
 const _: () = assert!(MAX_EXTENSION_TREE_BYTES <= MAX_EXTENSION_RELEASE_CATALOG_TREE_BYTES);
 const _: () = assert!(MAX_EXTENSION_TREE_FILES <= MAX_EXTENSION_TREE_ENTRIES);
 const _: () = assert!(MAX_EXTENSION_PACKAGE_LINES <= MAX_EXTENSION_TREE_FILES);
+const _: () = assert!(MAX_EXTENSION_COMPATIBILITY_RECEIPTS_PER_PACKAGE <= MAX_EXTENSION_TREE_FILES);
 const _: () = assert!(MAX_EXTENSION_PATH_COMPONENT_BYTES <= MAX_EXTENSION_RELATIVE_PATH_BYTES);
 const _: () = assert!(MAX_CHROMIUM_MANIFEST_KEY_BASE64_BYTES <= MAX_EXTENSION_MANIFEST_BYTES);
 const _: () = assert!(MAX_CRX3_HEADER_BYTES <= MAX_EXTENSION_MANIFEST_BYTES);
+const _: () = assert!(MAX_EXTENSION_COMPATIBILITY_RECEIPT_BYTES <= MAX_EXTENSION_MANIFEST_BYTES);
 const _: () = assert!(MAX_EXTENSION_LOCALE_MESSAGES_BYTES <= MAX_EXTENSION_TREE_FILE_BYTES);
 const _: () =
     assert!(MAX_EXTENSION_LOCALE_MESSAGE_KEY_BYTES <= MAX_EXTENSION_METADATA_STRING_BYTES);

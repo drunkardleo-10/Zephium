@@ -85,7 +85,7 @@ fn main() {
     match outcome {
         Ok(ProbeDisposition::Passed(measurements)) => {
             println!(
-                "extension-product-probe: passed; runtime={}; authenticated_startup_ms={}; durable_grant_rebind_ms={}; profile_view_ms={}; popup_presentation_ms={}; extension_live_idle_window_ms={}; extension_live_main_process_user_cpu_ms={}; extension_live_main_process_system_cpu_ms={}; extension_live_main_process_voluntary_context_switches={}; extension_live_main_process_involuntary_context_switches={}; runtime_retired_idle_window_ms={}; runtime_retired_main_process_user_cpu_ms={}; runtime_retired_main_process_system_cpu_ms={}; runtime_retired_main_process_voluntary_context_switches={}; runtime_retired_main_process_involuntary_context_switches={}; service_shutdown_ms={}; engine_shutdown_ms={}; main_process_peak_rss_bytes={}; process_user_cpu_ms={}; process_system_cpu_ms={}; voluntary_context_switches={}; involuntary_context_switches={}; optional_api_host_grant_rebind=passed; tabs_create_activate_update_remove=passed; same_document_history_signal=passed; brokered_recent_history={}; popup_capacity_discard_reopen=passed; repository_cleanup=passed; store_restart_cleanup=passed",
+                "extension-product-probe: passed; runtime={}; authenticated_startup_ms={}; durable_grant_rebind_ms={}; profile_view_ms={}; popup_presentation_ms={}; extension_live_idle_window_ms={}; extension_live_main_process_user_cpu_ms={}; extension_live_main_process_system_cpu_ms={}; extension_live_main_process_voluntary_context_switches={}; extension_live_main_process_involuntary_context_switches={}; runtime_retired_idle_window_ms={}; runtime_retired_main_process_user_cpu_ms={}; runtime_retired_main_process_system_cpu_ms={}; runtime_retired_main_process_voluntary_context_switches={}; runtime_retired_main_process_involuntary_context_switches={}; service_shutdown_ms={}; engine_shutdown_ms={}; main_process_peak_rss_bytes={}; process_user_cpu_ms={}; process_system_cpu_ms={}; voluntary_context_switches={}; involuntary_context_switches={}; optional_api_host_grant_rebind=passed; tabs_create_activate_update_remove=passed; same_document_history_signal=passed; signed_compatibility_receipt={}; brokered_recent_history={}; popup_capacity_discard_reopen=passed; repository_cleanup=passed; store_restart_cleanup=passed",
                 runtime_target_argument(runtime_target),
                 measurements.authenticated_startup.as_millis(),
                 measurements.durable_grant_rebind.as_millis(),
@@ -120,6 +120,11 @@ fn main() {
                 measurements.process_usage.system_cpu_ms,
                 measurements.process_usage.voluntary_context_switches,
                 measurements.process_usage.involuntary_context_switches,
+                if is_brokered_runtime(runtime_target) {
+                    "passed"
+                } else {
+                    "not-required"
+                },
                 if is_brokered_runtime(runtime_target) {
                     "passed"
                 } else {

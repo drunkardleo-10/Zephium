@@ -56,11 +56,13 @@ pub use manifest::{
 };
 pub use relative_path::{PortableRelativePath, PortableRelativePathError};
 pub use release::{
-    ExpectedChromiumIdentity, ExtensionPackageAdmissionPolicyDigest,
-    ExtensionReleaseAdmissionPolicy, ExtensionReleaseAdmissionPolicyError, ExtensionReleaseCatalog,
-    ExtensionReleaseCatalogDigest, ExtensionReleaseCatalogError, ExtensionReleaseCatalogRevision,
-    ExtensionReleaseLegalArtifactKind, ExtensionReleaseLegalNotice, ExtensionReleaseLicenseRule,
-    ExtensionReleasePackage, ExtensionReleasePackageProvenance, ExtensionReleasePolicyBinding,
+    ExpectedChromiumIdentity, ExtensionCompatibilityReceiptDigest,
+    ExtensionPackageAdmissionPolicyDigest, ExtensionReleaseAdmissionPolicy,
+    ExtensionReleaseAdmissionPolicyError, ExtensionReleaseCatalog, ExtensionReleaseCatalogDigest,
+    ExtensionReleaseCatalogError, ExtensionReleaseCatalogRevision,
+    ExtensionReleaseCompatibilityReceipt, ExtensionReleaseLegalArtifactKind,
+    ExtensionReleaseLegalNotice, ExtensionReleaseLicenseRule, ExtensionReleasePackage,
+    ExtensionReleasePackageProvenance, ExtensionReleasePolicyBinding,
     ExtensionReleaseSourceReference, ExtensionReleaseTreeBinding,
 };
 pub use tree::{

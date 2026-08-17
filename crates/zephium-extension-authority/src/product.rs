@@ -1843,6 +1843,31 @@ mod tests {
     }
 
     #[test]
+    fn schema_two_inventory_redundantly_binds_compatibility_receipts() {
+        let receipt = format!(
+            concat!(
+                r#""compatibility_receipts":[{{"format":"zephium-compatibility-receipt-v1","target":"macos.wkwebextension-brokered.v1","length":1,"sha256":"{}","input_manifest_sha256":"{}","input_tree_sha256":"{}","input_tree_index_sha256":"{}","input_file_count":1,"input_bytes":4}}],"#
+            ),
+            hex(11),
+            hex(3),
+            hex(4),
+            hex(5),
+        );
+        let first = String::from_utf8(catalog_bytes())
+            .unwrap()
+            .replacen(r#""schema_version":1"#, r#""schema_version":2"#, 1)
+            .replacen(r#""provenance":"#, &format!(r#"{receipt}"provenance":"#), 1);
+        let second = first.replacen(&hex(11), &hex(15), 1);
+        let first = ExtensionReleaseCatalog::parse_canonical(first.as_bytes()).unwrap();
+        let second = ExtensionReleaseCatalog::parse_canonical(second.as_bytes()).unwrap();
+        assert_ne!(
+            digest_catalog_inventory(&first),
+            digest_catalog_inventory(&second),
+            "sealed inventory framing must bind compatibility receipt identity"
+        );
+    }
+
+    #[test]
     fn inventory_golden_covers_optional_fields_and_multiple_rows() {
         let optional_package = package_json(8, r#"{"kind":"bundled_tree"}"#)
             .replace(

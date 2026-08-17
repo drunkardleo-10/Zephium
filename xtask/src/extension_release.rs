@@ -109,7 +109,8 @@ struct ReleaseArchiveEvidence {
 #[derive(Serialize)]
 struct CompatibilityReceiptEvidence {
     binding: &'static str,
-    target: String,
+    artifact_target: String,
+    compatibility_target: String,
     bytes: u64,
     sha256: String,
     input_manifest_sha256: String,
@@ -301,7 +302,8 @@ fn prepare_inner(
         },
         compatibility: compatibility.map(|compatibility| CompatibilityReceiptEvidence {
             binding: "exact-non-authorizing-receipt-v1",
-            target: compatibility.target.clone(),
+            artifact_target: compatibility.artifact_target.clone(),
+            compatibility_target: compatibility.compatibility_target.clone(),
             bytes: compatibility.receipt_bytes.len() as u64,
             sha256: lower_hex(&compatibility.receipt_sha256),
             input_manifest_sha256: compatibility.output_manifest_sha256.clone(),
@@ -879,7 +881,14 @@ mod tests {
             evidence["compatibility"]["binding"],
             Value::String("exact-non-authorizing-receipt-v1".into())
         );
-        assert_eq!(evidence["compatibility"]["target"], receipt["target"]);
+        assert_eq!(
+            evidence["compatibility"]["artifact_target"],
+            receipt["target"]
+        );
+        assert_eq!(
+            evidence["compatibility"]["compatibility_target"],
+            Value::String("macos.wkwebextension-brokered.v1".into())
+        );
         assert_eq!(
             evidence["compatibility"]["input_tree_sha256"],
             receipt["output"]["tree_sha256"]

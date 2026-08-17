@@ -10,8 +10,9 @@ use std::time::{Duration, Instant};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use zephium_core::extensions::{
-    ExtensionGrantAuthority, ExtensionInstall, ExtensionInstallCatalogRevision,
-    ExtensionManifestDescriptor, ExtensionPackageKey,
+    ExtensionCompatibilityTargetId, ExtensionGrantAuthority, ExtensionInstall,
+    ExtensionInstallCatalogRevision, ExtensionManifestDescriptor, ExtensionPackageKey,
+    MACOS_NATIVE_BROKERED_COMPATIBILITY_TARGET,
 };
 use zephium_core::ids::{ExtensionInstallId, ProfileId};
 use zephium_core::ports::store::{
@@ -217,6 +218,7 @@ fn provision_authenticated_repository(
 ) -> Result<Arc<ExtensionManifestDescriptor>, String> {
     let repository_path = root.join(EXTENSION_REPOSITORY_DIRECTORY_NAME);
     let active = admitted_active_catalog()?;
+    validate_catalog_compatibility_receipt(&active, runtime_target)?;
     let manifest = admitted_manifest(&active, runtime_target)?;
     let mut repository = ExtensionRepository::open(
         LockedPrivateNamespace::open_or_create(&repository_path)
@@ -226,6 +228,57 @@ fn provision_authenticated_repository(
     establish_active(&mut repository, &active, runtime_target)?;
     drop(repository);
     Ok(manifest)
+}
+
+fn validate_catalog_compatibility_receipt(
+    catalog: &AdmittedBundledCatalog,
+    runtime_target: ProductExtensionRuntimeTarget,
+) -> Result<(), String> {
+    if runtime_target != ProductExtensionRuntimeTarget::MacosNativeBrokered {
+        return Ok(());
+    }
+    let package = catalog.catalog().package(package_key()).ok_or_else(|| {
+        "brokered product package disappeared from authenticated catalog".to_owned()
+    })?;
+    let target =
+        ExtensionCompatibilityTargetId::parse_exact(MACOS_NATIVE_BROKERED_COMPATIBILITY_TARGET)
+            .map_err(|_| "brokered compatibility target is invalid".to_owned())?;
+    let receipt = package.compatibility_receipt(&target).ok_or_else(|| {
+        "brokered product package omitted its signed compatibility receipt".to_owned()
+    })?;
+    let bytes = fixture::COMPATIBILITY_RECEIPT_BYTES;
+    if bytes.len() != fixture::COMPATIBILITY_RECEIPT_LENGTH
+        || lower_hex(&Sha256::digest(bytes)) != fixture::COMPATIBILITY_RECEIPT_SHA256_HEX
+    {
+        return Err("brokered compatibility receipt fixture identity drifted".into());
+    }
+    receipt
+        .verify_bytes(bytes)
+        .map_err(|error| format!("brokered compatibility receipt was rejected: {error}"))?;
+    let tree = CanonicalExtensionTreeIndex::parse_canonical(compatibility_input_tree_bytes())
+        .map_err(|error| format!("brokered compatibility input index was rejected: {error}"))?;
+    receipt
+        .verify_input_tree_index(&tree)
+        .map_err(|error| format!("brokered compatibility input tree was rejected: {error}"))
+}
+
+#[cfg(not(zephium_internal_acquired_repository_e2e))]
+const fn compatibility_input_tree_bytes() -> &'static [u8] {
+    fixture::TREE_INDEX_BYTES
+}
+
+#[cfg(zephium_internal_acquired_repository_e2e)]
+const fn compatibility_input_tree_bytes() -> &'static [u8] {
+    fixture::ACQUIRED_TREE_INDEX_BYTES
+}
+
+fn lower_hex(bytes: &[u8]) -> String {
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        write!(&mut output, "{byte:02x}").expect("writing into a String cannot fail");
+    }
+    output
 }
 
 fn provision_profile(store: &impl Store, profile: ProfileId) -> Result<(), String> {

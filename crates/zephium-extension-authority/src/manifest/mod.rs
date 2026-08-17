@@ -221,6 +221,9 @@ pub enum ProductExtensionManifestAdmissionError {
     /// Exact manifest bytes differ from the sealed manifest digest.
     #[error("extension manifest bytes differ from the manifest profile")]
     ManifestDigestMismatch,
+    /// A runtime that requires reviewed adaptation lacks its signed receipt.
+    #[error("extension package lacks the required signed compatibility receipt")]
+    CompatibilityReceiptMissing,
     /// Structural manifest parsing or exact resource binding failed.
     #[error("extension manifest is structurally inadmissible: {0}")]
     Structural(#[source] ExtensionManifestAdmissionError),
@@ -559,6 +562,13 @@ fn admit_manifest_data(
     }
     if package.identity() != &profile.package.identity {
         return Err(ProductExtensionManifestAdmissionError::PackageIdentityMismatch);
+    }
+    if runtime_target == ProductExtensionRuntimeTarget::MacosNativeBrokered
+        && package
+            .compatibility_receipt(&profile.package.compatibility_target)
+            .is_none()
+    {
+        return Err(ProductExtensionManifestAdmissionError::CompatibilityReceiptMissing);
     }
     if tree_index.index_sha256() != profile.package.tree_index_digest
         || tree_index.index_bytes() != profile.package.tree_index_length

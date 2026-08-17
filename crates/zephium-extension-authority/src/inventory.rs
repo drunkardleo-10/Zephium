@@ -6,13 +6,25 @@ use zephium_extension_package::{ExtensionReleaseCatalog, ExtensionReleaseLegalAr
 
 use crate::BundledCatalogInventoryDigest;
 
-const INVENTORY_DOMAIN: &[u8] = b"zephium.bundled-extension-inventory.v2\0";
+const LEGACY_INVENTORY_DOMAIN: &[u8] = b"zephium.bundled-extension-inventory.v2\0";
+const RECEIPT_INVENTORY_DOMAIN: &[u8] = b"zephium.bundled-extension-inventory.v3\0";
 
 pub(crate) fn digest_catalog_inventory(
     catalog: &ExtensionReleaseCatalog,
 ) -> Option<BundledCatalogInventoryDigest> {
     let mut digest = Sha256::new();
-    digest.update(INVENTORY_DOMAIN);
+    let receipt_schema = match catalog.schema_version() {
+        1 => {
+            digest.update(LEGACY_INVENTORY_DOMAIN);
+            false
+        }
+        2 => {
+            digest.update(RECEIPT_INVENTORY_DOMAIN);
+            update_u64(&mut digest, 2);
+            true
+        }
+        _ => return None,
+    };
     update_usize(&mut digest, catalog.packages().len())?;
 
     for package in catalog.packages() {
@@ -41,6 +53,20 @@ pub(crate) fn digest_catalog_inventory(
                 digest.update(chromium.manifest_key_sha256().as_bytes());
             }
             None => digest.update([0]),
+        }
+
+        if receipt_schema {
+            update_usize(&mut digest, package.compatibility_receipts().len())?;
+            for receipt in package.compatibility_receipts() {
+                update_str(&mut digest, receipt.target().as_str())?;
+                update_u64(&mut digest, receipt.length());
+                digest.update(receipt.sha256().as_bytes());
+                digest.update(receipt.input_manifest_sha256().as_bytes());
+                digest.update(receipt.input_tree_sha256().as_bytes());
+                digest.update(receipt.input_tree_index_sha256().as_bytes());
+                update_usize(&mut digest, receipt.input_file_count())?;
+                update_u64(&mut digest, receipt.input_bytes());
+            }
         }
 
         let provenance = package.provenance();
