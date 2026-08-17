@@ -1,6 +1,6 @@
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -28,6 +28,7 @@ const ADMISSION_RUNNING: u8 = 2;
 const ADMISSION_QUARANTINED: u8 = 3;
 const ADMISSION_SHUTDOWN: u8 = 4;
 const COMMAND_CAPACITY: usize = 1;
+static PROCESS_LAUNCH_CLAIMED: AtomicBool = AtomicBool::new(false);
 
 /// Admission result for one explicit product update request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -53,6 +54,36 @@ pub enum ExtensionDistributionShutdownOutcome {
     FailedClosed,
     /// The deadline elapsed; the detached worker still owns its cancellation path.
     TimedOut,
+}
+
+/// Failure to construct the process-unique product distribution worker.
+#[derive(Debug)]
+pub enum ExtensionDistributionWorkerLaunchError {
+    /// A product worker was already launched in this process. Its quarantine
+    /// or shutdown state cannot be bypassed by constructing a replacement.
+    AlreadyLaunched,
+    /// The dedicated worker thread could not be created.
+    Thread(std::io::Error),
+}
+
+impl std::fmt::Display for ExtensionDistributionWorkerLaunchError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AlreadyLaunched => {
+                formatter.write_str("extension distribution worker was already launched")
+            }
+            Self::Thread(error) => write!(formatter, "extension distribution worker: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for ExtensionDistributionWorkerLaunchError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::AlreadyLaunched => None,
+            Self::Thread(error) => Some(error),
+        }
+    }
 }
 
 /// Cloneable, observation-and-admission-only handle for the dormant worker.
@@ -134,14 +165,23 @@ impl ExtensionDistributionWorker {
     pub fn launch(
         client: ExtensionDistributionClient,
         shell: CallbackHandle,
-    ) -> std::io::Result<Self> {
+    ) -> Result<Self, ExtensionDistributionWorkerLaunchError> {
+        if !claim_process_launch(&PROCESS_LAUNCH_CLAIMED) {
+            return Err(ExtensionDistributionWorkerLaunchError::AlreadyLaunched);
+        }
         let port: Arc<dyn ExtensionDistributionServicePort> =
             Arc::new(ShellExtensionDistributionPort::new(shell.clone()));
         let coordinator = ExtensionDistributionCoordinator::new(client, port);
-        launch_runner(
+        let worker = launch_runner(
             coordinator_runner(coordinator),
             Arc::new(ShellStatusPort(shell)),
-        )
+        );
+        if worker.is_err() {
+            // No worker thread exists and no request could have been accepted,
+            // so this construction-only failure is safe to retry.
+            PROCESS_LAUNCH_CLAIMED.store(false, Ordering::Release);
+        }
+        worker.map_err(ExtensionDistributionWorkerLaunchError::Thread)
     }
 
     /// Returns a cloneable non-owning update/status handle.
@@ -187,6 +227,12 @@ impl ExtensionDistributionWorker {
             .store(ADMISSION_SHUTDOWN, Ordering::Release);
         let _ = self.shutdown.send(true);
     }
+}
+
+fn claim_process_launch(claimed: &AtomicBool) -> bool {
+    claimed
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
 }
 
 impl Drop for ExtensionDistributionWorker {

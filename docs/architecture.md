@@ -887,6 +887,8 @@ during terminal shutdown settles unavailable rather than disappearing. The
 separate `zephium-extension-updater` now owns the dormant product scheduler:
 one explicitly constructed current-thread async runtime, one bounded request
 slot, cancellation-aware shutdown, and a fixed-size monotonic status stream.
+Its process-singleton launch claim is never released by shutdown or quarantine,
+so a failed worker cannot be replaced to bypass restart-required state.
 It performs no automatic polling and issues no I/O before an explicit request.
 Invalid or overallocated runtime selections fail before catalog acquisition;
 retryable failures reopen admission, while coordinator quarantine remains

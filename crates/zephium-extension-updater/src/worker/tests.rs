@@ -277,3 +277,11 @@ fn public_worker_handles_are_send_and_sync() {
     assert_send_sync::<ExtensionDistributionHandle>();
     assert_send::<ExtensionDistributionWorker>();
 }
+
+#[test]
+fn process_launch_claim_cannot_replace_a_worker_incarnation() {
+    let claimed = AtomicBool::new(false);
+
+    assert!(claim_process_launch(&claimed));
+    assert!(!claim_process_launch(&claimed));
+}
