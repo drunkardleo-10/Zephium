@@ -2,6 +2,29 @@ use super::*;
 use crate::actor::Handle;
 use std::sync::mpsc::sync_channel;
 use zephium_core::ids::WindowId;
+
+fn distribution_status(generation: u64) -> Command {
+    Command::ExtensionDistributionStatusChanged(
+        zephium_core::ports::extensions::ExtensionDistributionStatus::new(
+            generation,
+            zephium_core::ports::extensions::ExtensionDistributionState::Idle,
+        )
+        .unwrap(),
+    )
+}
+
+#[test]
+fn distribution_status_is_one_replaceable_process_global_fact() {
+    let queue = CommandQueue::new();
+    assert!(queue.try_push(distribution_status(1)).is_ok());
+    assert!(queue.try_push(distribution_status(2)).is_ok());
+
+    assert!(matches!(
+        queue.try_recv(),
+        Some(Command::ExtensionDistributionStatusChanged(status)) if status.generation() == 2
+    ));
+    assert!(queue.try_recv().is_none());
+}
 use zephium_core::ports::engine::{
     ContentScope, NativeAction, UserContentApplyFailure, UserContentGeneration,
     UserContentSettlement, ZoomRequestId,

@@ -100,9 +100,10 @@ use zephium_core::ports::engine::{
     NavigationPresentationId, Partition, ProfileDataErasureOutcome, ZoomRequestId,
 };
 use zephium_core::ports::extensions::{
-    ExtensionManagementCompatibility, ExtensionManagementGrantState, ExtensionManagementLimitation,
-    ExtensionManagementRuntimeState, ExtensionProfileRetirementDisposition,
-    ExtensionServiceShutdownOutcome, ExtensionServiceStartupOutcome,
+    ExtensionDistributionState, ExtensionDistributionStatus, ExtensionManagementCompatibility,
+    ExtensionManagementGrantState, ExtensionManagementLimitation, ExtensionManagementRuntimeState,
+    ExtensionProfileRetirementDisposition, ExtensionServiceShutdownOutcome,
+    ExtensionServiceStartupOutcome,
 };
 #[cfg(test)]
 use zephium_core::ports::store::Store;
@@ -120,16 +121,17 @@ use zephium_ipc::{
     BlockerFailure, BlockerPhase, BlockerPreferenceState, BlockerProtection, BlockerRuleCoverage,
     BlockerRuntimeDiagnostics, BlockerSourceFailure, BlockerSourceIdentities, BlockerSourcePhase,
     BlockerSourceProvenance, BlockerStatusView, DividerView, ExtensionActionFailedView,
-    ExtensionActionFailure, ExtensionActionsView, ExtensionInstallCandidateView,
-    ExtensionManagementCompatibilityView, ExtensionManagementEntryView,
-    ExtensionManagementGrantView, ExtensionManagementLimitationView, ExtensionManagementPhase,
-    ExtensionManagementRuntimeView, ExtensionManagementView, ExtensionRuntimeGrantPromptEntryView,
-    ExtensionRuntimeGrantPromptView, ItemsState, LayoutState, OperationDisposition,
-    OperationOutcome, OperationReason, PagePermissionKindView, PagePermissionPromptEntryView,
-    PagePermissionPromptView, ProfileKindView, ProfileView, Projection, RuntimeSecurityAdvisory,
-    RuntimeSecurityAdvisoryKind, RuntimeSecurityUpdateTarget, RuntimeStatus, SearchAction,
-    SearchResult, SearchResults, SidebarNodeKindView, SidebarNodeView, SidebarSectionView,
-    SpaceView, SplitGroupView, TabView,
+    ExtensionActionFailure, ExtensionActionsView, ExtensionDistributionFailureReasonView,
+    ExtensionDistributionFailureStageView, ExtensionDistributionStateView,
+    ExtensionDistributionView, ExtensionInstallCandidateView, ExtensionManagementCompatibilityView,
+    ExtensionManagementEntryView, ExtensionManagementGrantView, ExtensionManagementLimitationView,
+    ExtensionManagementPhase, ExtensionManagementRuntimeView, ExtensionManagementView,
+    ExtensionRuntimeGrantPromptEntryView, ExtensionRuntimeGrantPromptView, ItemsState, LayoutState,
+    OperationDisposition, OperationOutcome, OperationReason, PagePermissionKindView,
+    PagePermissionPromptEntryView, PagePermissionPromptView, ProfileKindView, ProfileView,
+    Projection, RuntimeSecurityAdvisory, RuntimeSecurityAdvisoryKind, RuntimeSecurityUpdateTarget,
+    RuntimeStatus, SearchAction, SearchResult, SearchResults, SidebarNodeKindView, SidebarNodeView,
+    SidebarSectionView, SpaceView, SplitGroupView, TabView,
 };
 
 // More simultaneous native renderers are neither usable in the current tiled
@@ -188,6 +190,7 @@ pub struct Shell {
     extension_actions: ExtensionActionState,
     extension_management: ExtensionManagementState,
     extension_runtime_grants: ExtensionRuntimeGrantPromptState,
+    extension_distribution_status: Option<ExtensionDistributionStatus>,
     page_permissions: PagePermissionPromptState,
     /// A terminal maintenance settlement disables further periodic repository
     /// work until process restart; transient refusals retain the ordinary
@@ -397,6 +400,7 @@ impl Shell {
             extension_actions: ExtensionActionState::default(),
             extension_management: ExtensionManagementState::default(),
             extension_runtime_grants: ExtensionRuntimeGrantPromptState::default(),
+            extension_distribution_status: None,
             page_permissions: PagePermissionPromptState::default(),
             extension_repository_maintenance_failed_closed: false,
             extension_lifecycle_terminal: false,
@@ -679,6 +683,9 @@ impl Shell {
             }
             Command::ActivateAcquiredExtensionCatalog(submission) => {
                 self.activate_acquired_extension_catalog(submission)
+            }
+            Command::ExtensionDistributionStatusChanged(status) => {
+                self.observe_extension_distribution_status(status)
             }
             Command::Search(query) => self.search(&query),
             Command::OpenUrl(input) => {

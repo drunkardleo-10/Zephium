@@ -60,6 +60,61 @@ impl<T: Send + 'static> SharedSettlement<T> {
 }
 
 impl Shell {
+    pub(super) fn observe_extension_distribution_status(
+        &mut self,
+        status: ExtensionDistributionStatus,
+    ) {
+        if self
+            .extension_distribution_status
+            .is_some_and(|current| status.generation() <= current.generation())
+        {
+            crate::diagnostic!("extensions: stale distribution status ignored");
+            return;
+        }
+        self.extension_distribution_status = Some(status);
+        self.project_extension_distribution_status();
+    }
+
+    pub(super) fn project_extension_distribution_status(&self) {
+        let Some(status) = self.extension_distribution_status else {
+            return;
+        };
+        let state = match status.state() {
+            ExtensionDistributionState::Idle => ExtensionDistributionStateView::Idle,
+            ExtensionDistributionState::Synchronizing => {
+                ExtensionDistributionStateView::Synchronizing
+            }
+            ExtensionDistributionState::Ready(completion) => {
+                ExtensionDistributionStateView::Ready {
+                    package_count: completion.package_count(),
+                    materialized_packages: completion.materialized_packages(),
+                    reused_packages: completion.reused_packages(),
+                    exact_retries: completion.exact_retries(),
+                    newly_activated: completion.newly_activated(),
+                }
+            }
+            ExtensionDistributionState::Failed { stage, reason } => {
+                ExtensionDistributionStateView::Failed {
+                    stage: distribution_stage_view(stage),
+                    reason: distribution_reason_view(reason),
+                }
+            }
+            ExtensionDistributionState::Quarantined { stage, reason } => {
+                ExtensionDistributionStateView::Quarantined {
+                    stage: distribution_stage_view(stage),
+                    reason: distribution_reason_view(reason),
+                }
+            }
+            ExtensionDistributionState::Shutdown => ExtensionDistributionStateView::Shutdown,
+        };
+        (self.emit)(Projection::ExtensionDistribution(
+            ExtensionDistributionView {
+                projection_revision: format!("{:032x}", self.next_projection_revision()),
+                state,
+            },
+        ));
+    }
+
     pub(super) fn provision_acquired_extension_package(
         &mut self,
         submission: AcquiredExtensionPackageSubmission,
@@ -163,6 +218,39 @@ impl Shell {
         self.extension_lifecycle_terminal = true;
         crate::diagnostic!("extensions: acquired distribution lifecycle failed closed");
         self.report_terminal_failure(failure);
+    }
+}
+
+fn distribution_stage_view(
+    stage: zephium_core::ports::extensions::ExtensionDistributionFailureStage,
+) -> ExtensionDistributionFailureStageView {
+    use zephium_core::ports::extensions::ExtensionDistributionFailureStage as Stage;
+    match stage {
+        Stage::Catalog => ExtensionDistributionFailureStageView::Catalog,
+        Stage::PackageFetch(index) => ExtensionDistributionFailureStageView::PackageFetch { index },
+        Stage::PackageProvision(index) => {
+            ExtensionDistributionFailureStageView::PackageProvision { index }
+        }
+        Stage::CatalogActivation => ExtensionDistributionFailureStageView::CatalogActivation,
+    }
+}
+
+fn distribution_reason_view(
+    reason: zephium_core::ports::extensions::ExtensionDistributionFailureReason,
+) -> ExtensionDistributionFailureReasonView {
+    use zephium_core::ports::extensions::ExtensionDistributionFailureReason as Reason;
+    match reason {
+        Reason::Acquisition => ExtensionDistributionFailureReasonView::Acquisition,
+        Reason::Busy => ExtensionDistributionFailureReasonView::Busy,
+        Reason::ServiceUnavailable => ExtensionDistributionFailureReasonView::ServiceUnavailable,
+        Reason::ServiceRejected => ExtensionDistributionFailureReasonView::ServiceRejected,
+        Reason::ServiceFailedClosed => ExtensionDistributionFailureReasonView::ServiceFailedClosed,
+        Reason::SettlementTimedOut => ExtensionDistributionFailureReasonView::SettlementTimedOut,
+        Reason::SettlementLost => ExtensionDistributionFailureReasonView::SettlementLost,
+        Reason::SubmissionPanicked => ExtensionDistributionFailureReasonView::SubmissionPanicked,
+        Reason::OutcomeUnresolved => ExtensionDistributionFailureReasonView::OutcomeUnresolved,
+        Reason::ActivationRejected => ExtensionDistributionFailureReasonView::ActivationRejected,
+        Reason::Accounting => ExtensionDistributionFailureReasonView::Accounting,
     }
 }
 

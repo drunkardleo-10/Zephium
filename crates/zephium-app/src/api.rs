@@ -19,9 +19,10 @@ use zephium_core::ports::extensions::{
     ExtensionAcquiredCatalogActivationCallback, ExtensionAcquiredCatalogActivationOutcome,
     ExtensionAcquiredCatalogActivationRequest, ExtensionAcquiredPackageProvisioningCallback,
     ExtensionAcquiredPackageProvisioningOutcome, ExtensionAcquiredPackageProvisioningRequest,
-    ExtensionInstallOutcome, ExtensionManagementCatalogOutcome, ExtensionManagementSettlement,
-    ExtensionRepositoryMaintenanceOutcome, ExtensionRuntimeGrantOutcome,
-    ExtensionRuntimeGrantRequestId, ExtensionSetEnabledOutcome, ExtensionUninstallOutcome,
+    ExtensionDistributionStatus, ExtensionInstallOutcome, ExtensionManagementCatalogOutcome,
+    ExtensionManagementSettlement, ExtensionRepositoryMaintenanceOutcome,
+    ExtensionRuntimeGrantOutcome, ExtensionRuntimeGrantRequestId, ExtensionSetEnabledOutcome,
+    ExtensionUninstallOutcome,
 };
 use zephium_core::ports::store::Store;
 use zephium_core::ports::store::{
@@ -478,6 +479,9 @@ pub enum Command {
     /// Internal source-free catalog activation handoff from the product
     /// distribution worker. Public operation dispatch never admits it.
     ActivateAcquiredExtensionCatalog(AcquiredExtensionCatalogSubmission),
+    /// Latest redacted state from the explicitly constructed product
+    /// distribution worker. This is replaceable observation, not authority.
+    ExtensionDistributionStatusChanged(ExtensionDistributionStatus),
     Search(String),
     OpenUrl(String),
     SetAppSetting {

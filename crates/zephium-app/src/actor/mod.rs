@@ -24,7 +24,7 @@ use zephium_core::ids::ProfileId;
 use zephium_core::ports::extensions::{
     ExtensionAcquiredCatalogActivationCallback, ExtensionAcquiredCatalogActivationRequest,
     ExtensionAcquiredPackageProvisioningCallback, ExtensionAcquiredPackageProvisioningRequest,
-    ExtensionManagementAdmission,
+    ExtensionDistributionStatus, ExtensionManagementAdmission,
 };
 use zephium_ipc::BlockerStatusView;
 
@@ -555,6 +555,15 @@ impl CallbackHandle {
                 ExtensionManagementAdmission::Unavailable
             }
         }
+    }
+
+    /// Publishes one monotonic, redacted distribution status replacement.
+    /// Queue coalescing makes this non-blocking under rapid state transitions.
+    pub fn publish_extension_distribution_status(
+        &self,
+        status: ExtensionDistributionStatus,
+    ) -> bool {
+        self.dispatch(Command::ExtensionDistributionStatusChanged(status))
     }
 }
 

@@ -2,6 +2,7 @@ import type {
   ExtensionActionFailedView,
   ExtensionActionFailure,
   ExtensionActionsView,
+  ExtensionDistributionView,
   ExtensionManagementView,
   ExtensionRuntimeGrantPromptView,
 } from "../../shared/ipc/bindings";
@@ -103,6 +104,27 @@ export class ExtensionManagementProjectionModel {
     if (candidate.projection_revision <= this.#appliedRevision) return false;
     this.#appliedRevision = candidate.projection_revision;
     this.#management = candidate;
+    return true;
+  }
+}
+
+/**
+ * Independent revision admission for the optional product distribution
+ * worker. `null` is meaningful: ordinary builds do not construct the worker
+ * and must not imply that an update channel is idle or available.
+ */
+export class ExtensionDistributionProjectionModel {
+  #view: ExtensionDistributionView | null = null;
+  #appliedRevision = ZERO_PROJECTION_REVISION;
+
+  get view(): ExtensionDistributionView | null {
+    return this.#view;
+  }
+
+  apply(candidate: ExtensionDistributionView): boolean {
+    if (candidate.projection_revision <= this.#appliedRevision) return false;
+    this.#appliedRevision = candidate.projection_revision;
+    this.#view = candidate;
     return true;
   }
 }

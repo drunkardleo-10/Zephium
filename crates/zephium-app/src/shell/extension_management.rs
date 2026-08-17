@@ -269,6 +269,7 @@ impl Shell {
         let Some(profile) = profile else {
             return;
         };
+        self.project_extension_distribution_status();
         self.project_extension_management_phase(
             profile,
             zephium_ipc::ExtensionManagementPhase::Loading,

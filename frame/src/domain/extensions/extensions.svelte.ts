@@ -3,6 +3,7 @@ import type {
   ExtensionActionFailure,
   ExtensionActionView,
   ExtensionActionsView,
+  ExtensionDistributionView,
   ExtensionInstallCandidateView,
   ExtensionManagementEntryView,
   ExtensionManagementView,
@@ -16,6 +17,7 @@ import { commands } from "../../shared/ipc/bindings";
 import { events } from "../../shared/ipc/native-events";
 import * as operations from "../operations/operations";
 import {
+  ExtensionDistributionProjectionModel,
   ExtensionManagementProjectionModel,
   ExtensionProjectionModel,
   ExtensionRuntimeGrantPromptProjectionModel,
@@ -30,9 +32,11 @@ const MANAGEMENT_SETTLEMENT_TIMEOUT_MS = 30_000;
 
 const model = new ExtensionProjectionModel();
 const managementModel = new ExtensionManagementProjectionModel();
+const distributionModel = new ExtensionDistributionProjectionModel();
 const runtimeGrantModel = new ExtensionRuntimeGrantPromptProjectionModel();
 let state = $state.raw<ExtensionActionsView>(model.actions);
 let managementState = $state.raw<ExtensionManagementView>(managementModel.management);
+let distributionState = $state.raw<ExtensionDistributionView | null>(distributionModel.view);
 let runtimeGrantState = $state.raw<ExtensionRuntimeGrantPromptView>(runtimeGrantModel.view);
 type VisibleFailure = Omit<ExtensionActionFailedView, "projection_revision"> & {
   projectionRevision?: string;
@@ -63,6 +67,7 @@ export const failureReason = (profileId: string | null, tabId: string | null) =>
 export const isInvoking = (installId: string) => invoking.has(installId);
 export const management = (profileId: string | null) =>
   managementForProfile(managementState, profileId);
+export const distribution = () => distributionState;
 export const activeManagementMutation = () => managementMutation;
 export const managementFailure = () => managementNotice;
 export const permissionPrompt = () => runtimeGrantState.prompt;
@@ -154,6 +159,10 @@ async function initialize(generation: number) {
     events.extensionManagementChanged.listen((event) => {
       if (generation !== lifecycle || !managementModel.apply(event.payload)) return;
       managementState = managementModel.management;
+    }),
+    events.extensionDistributionChanged.listen((event) => {
+      if (generation !== lifecycle || !distributionModel.apply(event.payload)) return;
+      distributionState = distributionModel.view;
     }),
     events.extensionRuntimeGrantPromptChanged.listen((event) => {
       if (generation !== lifecycle || !runtimeGrantModel.apply(event.payload)) return;

@@ -73,6 +73,7 @@ export const events = {
 	blockerStatusChanged: makeEvent<BlockerStatusChanged>("blocker-status-changed"),
 	extensionActionFailed: makeEvent<ExtensionActionFailed>("extension-action-failed"),
 	extensionActionsChanged: makeEvent<ExtensionActionsChanged>("extension-actions-changed"),
+	extensionDistributionChanged: makeEvent<ExtensionDistributionChanged>("extension-distribution-changed"),
 	extensionManagementChanged: makeEvent<ExtensionManagementChanged>("extension-management-changed"),
 	extensionRuntimeGrantPromptChanged: makeEvent<ExtensionRuntimeGrantPromptChanged>("extension-runtime-grant-prompt-changed"),
 	itemsChanged: makeEvent<ItemsChanged>("items-changed"),
@@ -305,6 +306,26 @@ export type ExtensionActionsView = {
 	profile_id: string,
 	tab_id: string | null,
 	actions: ExtensionActionView[],
+};
+
+export type ExtensionDistributionChanged = ExtensionDistributionView;
+
+/**
+ *  Redacted product-distribution failure reason. Network and native error
+ *  strings never cross the privileged IPC boundary.
+ */
+export type ExtensionDistributionFailureReasonView = "acquisition" | "busy" | "service_unavailable" | "service_rejected" | "service_failed_closed" | "settlement_timed_out" | "settlement_lost" | "submission_panicked" | "outcome_unresolved" | "activation_rejected" | "accounting";
+
+/**  Stable distribution failure stage exposed only to privileged chrome. */
+export type ExtensionDistributionFailureStageView = { type: "catalog" } | { type: "package_fetch"; index: number } | { type: "package_provision"; index: number } | { type: "catalog_activation" };
+
+/**  Exact replacement state for the dormant product distribution worker. */
+export type ExtensionDistributionStateView = { phase: "idle" } | { phase: "synchronizing" } | { phase: "ready"; package_count: number; materialized_packages: number; reused_packages: number; exact_retries: number; newly_activated: boolean } | { phase: "failed"; stage: ExtensionDistributionFailureStageView; reason: ExtensionDistributionFailureReasonView } | { phase: "quarantined"; stage: ExtensionDistributionFailureStageView; reason: ExtensionDistributionFailureReasonView } | { phase: "shutdown" };
+
+/**  Shell-revisioned product-distribution status for privileged extension UI. */
+export type ExtensionDistributionView = {
+	projection_revision: string,
+	state: ExtensionDistributionStateView,
 };
 
 /**

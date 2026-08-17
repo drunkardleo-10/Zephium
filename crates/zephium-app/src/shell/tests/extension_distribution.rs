@@ -3,7 +3,8 @@ use zephium_core::extensions::{ExtensionPackageKey, ExtensionRuntimeBackendTarge
 use zephium_core::ports::extensions::{
     ExtensionAcquiredCatalogActivationOutcome, ExtensionAcquiredCatalogActivationRequest,
     ExtensionAcquiredPackageProvisioningOutcome, ExtensionAcquiredPackageProvisioningRequest,
-    ExtensionAcquiredRuntimeSelection, ExtensionManagementAdmission,
+    ExtensionAcquiredRuntimeSelection, ExtensionDistributionCompletionStatus,
+    ExtensionDistributionState, ExtensionDistributionStatus, ExtensionManagementAdmission,
 };
 
 fn package_request() -> ExtensionAcquiredPackageProvisioningRequest {
@@ -178,4 +179,55 @@ fn lifecycle_panic_settles_failed_closed_and_starts_terminal_handoff() {
         failures.lock().unwrap().as_slice(),
         &[ShellTerminalFailure::ExtensionDistributionLifecyclePanicked]
     );
+}
+
+#[test]
+fn distribution_status_is_monotonic_and_projects_only_redacted_state() {
+    let (lifecycle, _) = extension_lifecycle_with_outcome(ExtensionServiceShutdownOutcome::Clean);
+    let projections = Arc::new(Mutex::new(Vec::new()));
+    let projection_sink = Arc::clone(&projections);
+    let mut shell = Shell::new_with_extension_lifecycle(
+        Arc::new(FakeEngine::default()),
+        Arc::new(FakeStore::default()),
+        Arc::new(ImmediateAllowAllCompiler),
+        lifecycle,
+        Arc::new(FakeChrome),
+        Box::new(move |projection| projection_sink.lock().unwrap().push(projection)),
+    );
+    let completion = ExtensionDistributionCompletionStatus::new(
+        zephium_core::extensions::ExtensionCatalogSetDigest::from_bytes([5; 32]),
+        2,
+        1,
+        1,
+        1,
+        true,
+    )
+    .unwrap();
+    let current =
+        ExtensionDistributionStatus::new(2, ExtensionDistributionState::Ready(completion)).unwrap();
+    let stale = ExtensionDistributionStatus::new(1, ExtensionDistributionState::Idle).unwrap();
+
+    shell.handle(Command::ExtensionDistributionStatusChanged(current));
+    shell.handle(Command::ExtensionDistributionStatusChanged(stale));
+
+    assert_eq!(shell.extension_distribution_status, Some(current));
+    let projections = projections.lock().unwrap();
+    let distribution: Vec<_> = projections
+        .iter()
+        .filter_map(|projection| match projection {
+            Projection::ExtensionDistribution(view) => Some(view),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(distribution.len(), 1);
+    assert!(matches!(
+        distribution[0].state,
+        ExtensionDistributionStateView::Ready {
+            package_count: 2,
+            materialized_packages: 1,
+            reused_packages: 1,
+            exact_retries: 1,
+            newly_activated: true,
+        }
+    ));
 }

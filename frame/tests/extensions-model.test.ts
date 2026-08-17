@@ -6,6 +6,7 @@ import type {
   ExtensionRuntimeGrantPromptView,
 } from "../src/shared/ipc/bindings";
 import {
+  ExtensionDistributionProjectionModel,
   ExtensionManagementProjectionModel,
   ExtensionProjectionModel,
   ExtensionRuntimeGrantPromptProjectionModel,
@@ -188,6 +189,28 @@ describe("extension management projection admission", () => {
     expect(managementForProfile(current, "profile-a")).toBe(current);
     expect(managementForProfile(current, "profile-b")).toBeNull();
     expect(managementForProfile(current, null)).toBeNull();
+  });
+});
+
+describe("extension distribution projection admission", () => {
+  it("starts absent and accepts only newer Shell revisions", () => {
+    const model = new ExtensionDistributionProjectionModel();
+    expect(model.view).toBeNull();
+
+    expect(
+      model.apply({
+        projection_revision: revision(2),
+        state: { phase: "synchronizing" },
+      }),
+    ).toBe(true);
+    expect(model.view?.state.phase).toBe("synchronizing");
+    expect(
+      model.apply({
+        projection_revision: revision(1),
+        state: { phase: "idle" },
+      }),
+    ).toBe(false);
+    expect(model.view?.state.phase).toBe("synchronizing");
   });
 });
 

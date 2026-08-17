@@ -207,6 +207,65 @@ pub struct ExtensionManagementView {
     pub candidates: Vec<ExtensionInstallCandidateView>,
 }
 
+/// Stable distribution failure stage exposed only to privileged chrome.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ExtensionDistributionFailureStageView {
+    Catalog,
+    PackageFetch { index: u8 },
+    PackageProvision { index: u8 },
+    CatalogActivation,
+}
+
+/// Redacted product-distribution failure reason. Network and native error
+/// strings never cross the privileged IPC boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionDistributionFailureReasonView {
+    Acquisition,
+    Busy,
+    ServiceUnavailable,
+    ServiceRejected,
+    ServiceFailedClosed,
+    SettlementTimedOut,
+    SettlementLost,
+    SubmissionPanicked,
+    OutcomeUnresolved,
+    ActivationRejected,
+    Accounting,
+}
+
+/// Exact replacement state for the dormant product distribution worker.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "phase", rename_all = "snake_case")]
+pub enum ExtensionDistributionStateView {
+    Idle,
+    Synchronizing,
+    Ready {
+        package_count: u8,
+        materialized_packages: u8,
+        reused_packages: u8,
+        exact_retries: u8,
+        newly_activated: bool,
+    },
+    Failed {
+        stage: ExtensionDistributionFailureStageView,
+        reason: ExtensionDistributionFailureReasonView,
+    },
+    Quarantined {
+        stage: ExtensionDistributionFailureStageView,
+        reason: ExtensionDistributionFailureReasonView,
+    },
+    Shutdown,
+}
+
+/// Shell-revisioned product-distribution status for privileged extension UI.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct ExtensionDistributionView {
+    pub projection_revision: String,
+    pub state: ExtensionDistributionStateView,
+}
+
 /// One browser-owned optional-permission consent surface. Every identity is a
 /// short-lived echo token only; the Shell rejoins it to its retained native
 /// request before a user response can reach the serialized grant service.
@@ -764,6 +823,7 @@ pub enum Projection {
     ExtensionActions(ExtensionActionsView),
     ExtensionActionFailed(ExtensionActionFailedView),
     ExtensionManagement(ExtensionManagementView),
+    ExtensionDistribution(ExtensionDistributionView),
     ExtensionRuntimeGrantPrompt(ExtensionRuntimeGrantPromptView),
     PagePermissionPrompt(PagePermissionPromptView),
     UiCommand(String),

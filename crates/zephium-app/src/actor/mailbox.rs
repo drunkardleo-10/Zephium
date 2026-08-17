@@ -45,6 +45,7 @@ enum CoalescedKey {
     Zoom(ItemId),
     NativeAction(ItemId),
     ExtensionActions(ProfileId),
+    ExtensionDistributionStatus,
     Split(zephium_core::ids::WindowId),
     WindowSize,
     WindowVisible,
@@ -1105,6 +1106,9 @@ fn command_coalesced_key(command: &Command) -> Option<CoalescedKey> {
         Command::DragOver { .. } => Some(CoalescedKey::DragOver),
         Command::DividerDrag { .. } => Some(CoalescedKey::DividerDrag),
         Command::Search(_) => Some(CoalescedKey::Search),
+        Command::ExtensionDistributionStatusChanged(_) => {
+            Some(CoalescedKey::ExtensionDistributionStatus)
+        }
         Command::FaviconPoll { id, .. } => Some(CoalescedKey::FaviconPoll(*id)),
         Command::PresentationFallback { id, .. } => Some(CoalescedKey::PresentationFallback(*id)),
         Command::ChromePresentationApplied { id, .. } => {
