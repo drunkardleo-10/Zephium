@@ -949,7 +949,11 @@ macOS product-path measurement gate. It rejects ambient internal authority,
 enables the sealed fixture and a separate measurement cfg only for the probe
 crate graph, compiles private-filesystem operations without their debug
 counters, runs the bounded process-usage conversion tests, and then executes
-both native and native-brokered authenticated paths. Application code still
+three alternating repetitions of both native and native-brokered authenticated
+paths. Each measurement-only run compares a five-second live-extension window
+with a five-second same-process control after the native extension owner has
+retired while the same page and engine remain alive. These idle windows are
+compile-time absent from the ordinary CI probe. Application code still
 compile-time rejects the base fixture authority. Two consecutive arm64 macOS
 26.6.1 campaigns on 2026-08-16 passed the full package-to-popup lifecycle. The
 native path measured 79--83 ms authenticated startup, 257--291 ms profile-view
@@ -960,6 +964,20 @@ RSS and 601--660 ms combined user/system CPU. These are preliminary,
 machine-local observations, not release budgets: `RUSAGE_SELF` excludes WebKit
 helper-process RSS and the campaign does not measure steady-state idle wakeups,
 battery impact, tab-scale behavior, or 24-hour endurance.
+
+A three-pair arm64 macOS 26.6.1 campaign on 2026-08-17 also passed. Native
+measured 75--82 ms authenticated startup, 262--266 ms profile-view creation,
+270--294 ms popup presentation, and 94,240,768--94,781,440 bytes peak
+main-process RSS; native-brokered measured 76--83 ms, 260--270 ms, 275--291 ms,
+and 94,273,536--94,502,912 bytes respectively. The live-extension intervals
+consumed 155--171 ms native and 154--168 ms brokered main-process CPU versus
+102--104 ms and 101--103 ms after runtime retirement. They also recorded
+1,304--1,379 and 1,313--1,361 additional involuntary context switches versus
+their sequential controls. This establishes a repeatable measurement gate and
+a measurable live-runtime delta; it does not yet attribute cause or define an
+acceptable product budget. The active AppKit harness, sequential control,
+machine contention, WebKit helper processes, idle wakeups, and energy impact
+still require clean release-runner and process-family instrumentation.
 
 The remaining compatibility work needs additional foundations rather than
 merely consuming existing ports: the page-origin permission policy, per-install

@@ -1665,11 +1665,17 @@ fn measure_macos_extension_product() {
     tests.extend(COMMON);
     run_with_extension_product_measurement_cfg(&tests);
 
-    for runtime in ["macos-native", "macos-native-brokered"] {
-        let mut execute = vec!["run"];
-        execute.extend(COMMON);
-        execute.extend(["--", "--runtime", runtime]);
-        run_with_extension_product_measurement_cfg(&execute);
+    const REPETITIONS: usize = 3;
+    for repetition in 1..=REPETITIONS {
+        for runtime in ["macos-native", "macos-native-brokered"] {
+            eprintln!(
+                "extension product measurement repetition {repetition}/{REPETITIONS}: {runtime}"
+            );
+            let mut execute = vec!["run"];
+            execute.extend(COMMON);
+            execute.extend(["--", "--runtime", runtime]);
+            run_with_extension_product_measurement_cfg(&execute);
+        }
     }
 }
 

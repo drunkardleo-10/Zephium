@@ -56,6 +56,9 @@ use page_server::PageServer;
 
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(20);
 const PROCESS_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(75);
+const EXTENSION_LIVE_IDLE_WINDOW: Duration = Duration::from_secs(5);
+const RUNTIME_RETIRED_SETTLE_WINDOW: Duration = Duration::from_millis(500);
+const IDLE_MEASUREMENT_ENABLED: bool = cfg!(zephium_extension_product_measurement);
 const NATIVE_RUNTIME_ARGUMENT: &str = "macos-native";
 const BROKERED_RUNTIME_ARGUMENT: &str = "macos-native-brokered";
 const NATIVE_READY_MARKER: &str = "ready:1";
@@ -82,12 +85,34 @@ fn main() {
     match outcome {
         Ok(ProbeDisposition::Passed(measurements)) => {
             println!(
-                "extension-product-probe: passed; runtime={}; authenticated_startup_ms={}; durable_grant_rebind_ms={}; profile_view_ms={}; popup_presentation_ms={}; service_shutdown_ms={}; engine_shutdown_ms={}; main_process_peak_rss_bytes={}; process_user_cpu_ms={}; process_system_cpu_ms={}; voluntary_context_switches={}; involuntary_context_switches={}; optional_api_host_grant_rebind=passed; tabs_create_activate_update_remove=passed; same_document_history_signal=passed; brokered_recent_history={}; popup_capacity_discard_reopen=passed; repository_cleanup=passed; store_restart_cleanup=passed",
+                "extension-product-probe: passed; runtime={}; authenticated_startup_ms={}; durable_grant_rebind_ms={}; profile_view_ms={}; popup_presentation_ms={}; extension_live_idle_window_ms={}; extension_live_main_process_user_cpu_ms={}; extension_live_main_process_system_cpu_ms={}; extension_live_main_process_voluntary_context_switches={}; extension_live_main_process_involuntary_context_switches={}; runtime_retired_idle_window_ms={}; runtime_retired_main_process_user_cpu_ms={}; runtime_retired_main_process_system_cpu_ms={}; runtime_retired_main_process_voluntary_context_switches={}; runtime_retired_main_process_involuntary_context_switches={}; service_shutdown_ms={}; engine_shutdown_ms={}; main_process_peak_rss_bytes={}; process_user_cpu_ms={}; process_system_cpu_ms={}; voluntary_context_switches={}; involuntary_context_switches={}; optional_api_host_grant_rebind=passed; tabs_create_activate_update_remove=passed; same_document_history_signal=passed; brokered_recent_history={}; popup_capacity_discard_reopen=passed; repository_cleanup=passed; store_restart_cleanup=passed",
                 runtime_target_argument(runtime_target),
                 measurements.authenticated_startup.as_millis(),
                 measurements.durable_grant_rebind.as_millis(),
                 measurements.profile_view.as_millis(),
                 measurements.popup_presentation.as_millis(),
+                measurements.extension_live_idle.elapsed.as_millis(),
+                measurements.extension_live_idle.usage.user_cpu_ms,
+                measurements.extension_live_idle.usage.system_cpu_ms,
+                measurements
+                    .extension_live_idle
+                    .usage
+                    .voluntary_context_switches,
+                measurements
+                    .extension_live_idle
+                    .usage
+                    .involuntary_context_switches,
+                measurements.runtime_retired_idle.elapsed.as_millis(),
+                measurements.runtime_retired_idle.usage.user_cpu_ms,
+                measurements.runtime_retired_idle.usage.system_cpu_ms,
+                measurements
+                    .runtime_retired_idle
+                    .usage
+                    .voluntary_context_switches,
+                measurements
+                    .runtime_retired_idle
+                    .usage
+                    .involuntary_context_switches,
                 measurements.service_shutdown.as_millis(),
                 measurements.engine_shutdown.as_millis(),
                 measurements.process_usage.peak_rss_bytes,
@@ -144,7 +169,7 @@ const fn runtime_target_argument(runtime_target: ProductExtensionRuntimeTarget) 
 }
 
 enum ProbeDisposition {
-    Passed(ProbeMeasurements),
+    Passed(Box<ProbeMeasurements>),
     UnsupportedRuntime(String),
 }
 
@@ -153,17 +178,72 @@ struct ProbeMeasurements {
     durable_grant_rebind: Duration,
     profile_view: Duration,
     popup_presentation: Duration,
+    extension_live_idle: IdleMeasurement,
+    runtime_retired_idle: IdleMeasurement,
     service_shutdown: Duration,
     engine_shutdown: Duration,
     process_usage: ProcessUsage,
 }
 
+struct IdleMeasurement {
+    elapsed: Duration,
+    usage: ProcessUsageDelta,
+}
+
+impl IdleMeasurement {
+    const NOT_MEASURED: Self = Self {
+        elapsed: Duration::ZERO,
+        usage: ProcessUsageDelta::ZERO,
+    };
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ProcessUsage {
     peak_rss_bytes: u64,
     user_cpu_ms: u64,
     system_cpu_ms: u64,
     voluntary_context_switches: u64,
     involuntary_context_switches: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ProcessUsageDelta {
+    user_cpu_ms: u64,
+    system_cpu_ms: u64,
+    voluntary_context_switches: u64,
+    involuntary_context_switches: u64,
+}
+
+impl ProcessUsageDelta {
+    const ZERO: Self = Self {
+        user_cpu_ms: 0,
+        system_cpu_ms: 0,
+        voluntary_context_switches: 0,
+        involuntary_context_switches: 0,
+    };
+}
+
+impl ProcessUsage {
+    fn delta_since(self, earlier: Self) -> Result<ProcessUsageDelta, String> {
+        Ok(ProcessUsageDelta {
+            user_cpu_ms: monotonic_delta("user CPU", self.user_cpu_ms, earlier.user_cpu_ms)?,
+            system_cpu_ms: monotonic_delta(
+                "system CPU",
+                self.system_cpu_ms,
+                earlier.system_cpu_ms,
+            )?,
+            voluntary_context_switches: monotonic_delta(
+                "voluntary context switches",
+                self.voluntary_context_switches,
+                earlier.voluntary_context_switches,
+            )?,
+            involuntary_context_switches: monotonic_delta(
+                "involuntary context switches",
+                self.involuntary_context_switches,
+                earlier.involuntary_context_switches,
+            )?,
+        })
+    }
 }
 
 struct ProductBrowserModel {
@@ -966,6 +1046,17 @@ fn run(runtime_target: ProductExtensionRuntimeTarget) -> Result<ProbeDisposition
     engine.wait_for_popup_execution(item, 2, deadline())?;
     let popup_presentation = popup_started.elapsed();
 
+    // This is deliberately a main-process delta, not a system-wide wakeup or
+    // battery claim: public WebKit APIs do not expose the complete helper
+    // process family. Keeping the real AppKit/WebKit loop active makes the
+    // observation representative of an installed, live, quiescent runtime.
+    let extension_live_idle = if IDLE_MEASUREMENT_ENABLED {
+        set_phase("extension-live-idle");
+        measure_main_process_idle(&mut engine, "extension-live idle measurement")?
+    } else {
+        IdleMeasurement::NOT_MEASURED
+    };
+
     // Service shutdown must run off the native main thread. It blocks until
     // the engine retires the exact WKWebExtension owner, so this thread keeps
     // pumping both the host queue and WebKit run loop until evidence arrives.
@@ -1011,6 +1102,24 @@ fn run(runtime_target: ProductExtensionRuntimeTarget) -> Result<ProbeDisposition
     }
     let service_shutdown = service_shutdown_started.elapsed();
 
+    // Compare against the same page and engine after the exact native
+    // extension owner has retired. A short unmeasured settling interval keeps
+    // asynchronous teardown from being mislabeled as steady-state control
+    // activity. This sequential control is still machine-local evidence, not
+    // a release budget; clean-runner repetitions remain mandatory.
+    let runtime_retired_idle = if IDLE_MEASUREMENT_ENABLED {
+        set_phase("runtime-retired-idle-settle");
+        engine.pump_idle_for(
+            "runtime-retired idle settling",
+            RUNTIME_RETIRED_SETTLE_WINDOW,
+            deadline(),
+        )?;
+        set_phase("runtime-retired-idle");
+        measure_main_process_idle(&mut engine, "runtime-retired idle measurement")?
+    } else {
+        IdleMeasurement::NOT_MEASURED
+    };
+
     set_phase("engine-shutdown");
     let engine_shutdown_started = Instant::now();
     engine.shutdown(deadline())?;
@@ -1023,15 +1132,36 @@ fn run(runtime_target: ProductExtensionRuntimeTarget) -> Result<ProbeDisposition
     set_phase("complete");
     let process_usage = process_usage()?;
 
-    Ok(ProbeDisposition::Passed(ProbeMeasurements {
+    Ok(ProbeDisposition::Passed(Box::new(ProbeMeasurements {
         authenticated_startup,
         durable_grant_rebind,
         profile_view,
         popup_presentation,
+        extension_live_idle,
+        runtime_retired_idle,
         service_shutdown,
         engine_shutdown,
         process_usage,
-    }))
+    })))
+}
+
+fn measure_main_process_idle(
+    engine: &mut MacosEngineHarness,
+    phase: &'static str,
+) -> Result<IdleMeasurement, String> {
+    let usage_before = process_usage()?;
+    let started = Instant::now();
+    engine.pump_idle_for(phase, EXTENSION_LIVE_IDLE_WINDOW, deadline())?;
+    Ok(IdleMeasurement {
+        elapsed: started.elapsed(),
+        usage: process_usage()?.delta_since(usage_before)?,
+    })
+}
+
+fn monotonic_delta(label: &str, later: u64, earlier: u64) -> Result<u64, String> {
+    later.checked_sub(earlier).ok_or_else(|| {
+        format!("product-probe {label} counter moved backwards: {earlier} -> {later}")
+    })
 }
 
 fn process_usage() -> Result<ProcessUsage, String> {
@@ -1138,7 +1268,36 @@ fn arm_process_watchdog() -> Arc<AtomicBool> {
 
 #[cfg(test)]
 mod tests {
-    use super::timeval_millis;
+    use super::{monotonic_delta, timeval_millis, ProcessUsage, ProcessUsageDelta};
+
+    #[test]
+    fn process_usage_delta_excludes_peak_rss_and_requires_monotonic_counters() {
+        let earlier = ProcessUsage {
+            peak_rss_bytes: 8_192,
+            user_cpu_ms: 10,
+            system_cpu_ms: 20,
+            voluntary_context_switches: 30,
+            involuntary_context_switches: 40,
+        };
+        let later = ProcessUsage {
+            peak_rss_bytes: 4_096,
+            user_cpu_ms: 17,
+            system_cpu_ms: 29,
+            voluntary_context_switches: 41,
+            involuntary_context_switches: 53,
+        };
+
+        assert_eq!(
+            later.delta_since(earlier),
+            Ok(ProcessUsageDelta {
+                user_cpu_ms: 7,
+                system_cpu_ms: 9,
+                voluntary_context_switches: 11,
+                involuntary_context_switches: 13,
+            })
+        );
+        assert!(monotonic_delta("test", 1, 2).is_err());
+    }
 
     #[test]
     fn timeval_conversion_is_bounded_and_truncates_submilliseconds() {

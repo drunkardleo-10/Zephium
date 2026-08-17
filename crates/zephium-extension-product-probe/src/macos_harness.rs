@@ -810,6 +810,51 @@ impl MacosEngineHarness {
         Ok(())
     }
 
+    pub(crate) fn pump_idle_for(
+        &mut self,
+        phase: &'static str,
+        duration: Duration,
+        deadline: Instant,
+    ) -> Result<(), String> {
+        let idle_until = Instant::now()
+            .checked_add(duration)
+            .ok_or_else(|| format!("{phase} deadline overflowed"))?;
+        if idle_until > deadline {
+            return Err(format!("{phase} window exceeds its bounded deadline"));
+        }
+
+        self.pump_until(phase, deadline, |harness| {
+            loop {
+                match harness.events.try_recv() {
+                    Ok(EngineEvent::ViewCreationFailed { id }) => {
+                        return Err(format!("view {id} failed during {phase}"));
+                    }
+                    Ok(EngineEvent::Crashed { id }) => {
+                        return Err(format!("view {id} crashed during {phase}"));
+                    }
+                    Ok(EngineEvent::ExtensionBrowserRequested { request }) => {
+                        return Err(format!(
+                            "extension requested browser mutation while expected idle: {:?}",
+                            request.action()
+                        ));
+                    }
+                    Ok(EngineEvent::ExtensionCompatibilityBrokerRequested { request }) => {
+                        return Err(format!(
+                            "extension requested compatibility broker operation while expected idle: {:?}",
+                            request.operation()
+                        ));
+                    }
+                    Ok(_) => {}
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        return Err("engine event ingress disconnected".to_owned());
+                    }
+                }
+            }
+            Ok(Instant::now() >= idle_until)
+        })
+    }
+
     fn check_ingress(&self, phase: &'static str) -> Result<(), String> {
         if let Ok(failure) = self.fatal_failures.try_recv() {
             return Err(format!(
