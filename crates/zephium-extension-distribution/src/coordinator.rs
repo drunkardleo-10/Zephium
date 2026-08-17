@@ -9,11 +9,11 @@ use thiserror::Error;
 use tokio::sync::oneshot;
 use zephium_core::extensions::ExtensionCatalogSetDigest;
 use zephium_core::ports::extensions::{
-    ExtensionAcquiredCatalogActivationCallback, ExtensionAcquiredCatalogActivationOutcome,
-    ExtensionAcquiredCatalogActivationRequest, ExtensionAcquiredPackageProvisioningCallback,
-    ExtensionAcquiredPackageProvisioningOutcome, ExtensionAcquiredPackageProvisioningRequest,
-    ExtensionAcquiredRuntimeSelection, ExtensionManagementAdmission,
-    MAX_EXTENSION_ACQUIRED_PROVISIONING_RETAINED_BYTES,
+    acquired_runtime_selections_are_canonical, ExtensionAcquiredCatalogActivationCallback,
+    ExtensionAcquiredCatalogActivationOutcome, ExtensionAcquiredCatalogActivationRequest,
+    ExtensionAcquiredPackageProvisioningCallback, ExtensionAcquiredPackageProvisioningOutcome,
+    ExtensionAcquiredPackageProvisioningRequest, ExtensionAcquiredRuntimeSelection,
+    ExtensionManagementAdmission, MAX_EXTENSION_ACQUIRED_PROVISIONING_RETAINED_BYTES,
 };
 use zephium_extension_package::{ExtensionReleaseCatalogDigest, ExtensionReleaseCatalogRevision};
 
@@ -388,6 +388,14 @@ where
     T: ArtifactTransport + Sync,
     A: CatalogAuthenticator,
 {
+    if !acquired_runtime_selections_are_canonical(&selections) {
+        return Err(ExtensionDistributionFailure::new(
+            ExtensionDistributionFailurePhase::Catalog,
+            ExtensionDistributionFailureReason::Acquisition(
+                ExtensionDistributionError::InvalidSelection,
+            ),
+        ));
+    }
     let session = client.begin(selections).await.map_err(|error| {
         ExtensionDistributionFailure::new(
             ExtensionDistributionFailurePhase::Catalog,
@@ -837,6 +845,31 @@ mod tests {
         assert_eq!(service.package_calls.load(AtomicOrdering::Acquire), 1);
         assert_eq!(service.activation_calls.load(AtomicOrdering::Acquire), 1);
         assert!(client.transport.expected.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn invalid_selection_is_rejected_before_catalog_network_io() {
+        let (client, _) = client_with_package_attempts(0);
+        let service = FakeService::new([], []);
+
+        let failure = synchronize_test(
+            &client,
+            &service,
+            Vec::new(),
+            CoordinatorTiming::production(),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            failure.reason(),
+            ExtensionDistributionFailureReason::Acquisition(
+                ExtensionDistributionError::InvalidSelection
+            )
+        );
+        assert_eq!(client.transport.expected.lock().unwrap().len(), 1);
+        assert_eq!(service.package_calls.load(AtomicOrdering::Acquire), 0);
+        assert_eq!(service.activation_calls.load(AtomicOrdering::Acquire), 0);
     }
 
     #[tokio::test(flavor = "current_thread")]

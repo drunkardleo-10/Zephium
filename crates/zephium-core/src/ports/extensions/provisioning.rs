@@ -26,7 +26,21 @@ pub const MAX_EXTENSION_ACQUIRED_PROVISIONING_RETAINED_BYTES: usize =
         + MAX_EXTENSION_ACQUIRED_LEGAL_NOTICE_BYTES
         + 1024;
 
-const MAX_ACQUIRED_CATALOG_SELECTIONS: usize = 8;
+/// Maximum runtime rows in one complete acquired catalog activation.
+pub const MAX_ACQUIRED_CATALOG_SELECTIONS: usize = 8;
+
+/// Validates the allocation and canonical ordering of an acquired runtime
+/// projection before any catalog or package I/O is authorized.
+pub fn acquired_runtime_selections_are_canonical(
+    selections: &Vec<ExtensionAcquiredRuntimeSelection>,
+) -> bool {
+    !selections.is_empty()
+        && selections.len() <= MAX_ACQUIRED_CATALOG_SELECTIONS
+        && selections.capacity() <= MAX_ACQUIRED_CATALOG_SELECTIONS
+        && !selections
+            .windows(2)
+            .any(|pair| pair[0].package_key().bytes() >= pair[1].package_key().bytes())
+}
 
 /// Closed reviewed package profile requested at the untrusted transport edge.
 ///
@@ -268,13 +282,7 @@ impl ExtensionAcquiredCatalogActivationRequest {
         {
             return Err(ExtensionAcquiredProvisioningRequestError::InvalidCatalogBytes);
         }
-        if selections.is_empty()
-            || selections.len() > MAX_ACQUIRED_CATALOG_SELECTIONS
-            || selections.capacity() > MAX_ACQUIRED_CATALOG_SELECTIONS
-            || selections
-                .windows(2)
-                .any(|pair| pair[0].package_key().bytes() >= pair[1].package_key().bytes())
-        {
+        if !acquired_runtime_selections_are_canonical(&selections) {
             return Err(ExtensionAcquiredProvisioningRequestError::InvalidSelection);
         }
         let retained_bytes = size_of::<Self>()

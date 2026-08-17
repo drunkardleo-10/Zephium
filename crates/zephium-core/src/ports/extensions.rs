@@ -7,6 +7,8 @@ use crate::extensions::{
 };
 use crate::ids::{ExtensionInstallId, ProfileId};
 
+#[path = "extensions/distribution.rs"]
+mod distribution;
 #[path = "extensions/management.rs"]
 mod management;
 #[path = "extensions/provisioning.rs"]
@@ -14,6 +16,10 @@ mod provisioning;
 #[path = "extensions/runtime_grants.rs"]
 mod runtime_grants;
 
+pub use distribution::{
+    ExtensionDistributionCompletionStatus, ExtensionDistributionFailureReason,
+    ExtensionDistributionFailureStage, ExtensionDistributionState, ExtensionDistributionStatus,
+};
 pub use management::{
     ExtensionInstallCandidateEntry, ExtensionManagementCatalog, ExtensionManagementCompatibility,
     ExtensionManagementEntry, ExtensionManagementGrantState, ExtensionManagementLimitation,
@@ -22,11 +28,12 @@ pub use management::{
     MAX_EXTENSION_MANAGEMENT_LIMITATIONS,
 };
 pub use provisioning::{
-    ExtensionAcquiredCatalogActivationCallback, ExtensionAcquiredCatalogActivationOutcome,
-    ExtensionAcquiredCatalogActivationRequest, ExtensionAcquiredPackageProvisioningCallback,
-    ExtensionAcquiredPackageProvisioningOutcome, ExtensionAcquiredPackageProvisioningRequest,
-    ExtensionAcquiredProvisioningRequestError, ExtensionAcquiredRuntimeProfile,
-    ExtensionAcquiredRuntimeSelection, MAX_EXTENSION_ACQUIRED_CATALOG_BYTES,
+    acquired_runtime_selections_are_canonical, ExtensionAcquiredCatalogActivationCallback,
+    ExtensionAcquiredCatalogActivationOutcome, ExtensionAcquiredCatalogActivationRequest,
+    ExtensionAcquiredPackageProvisioningCallback, ExtensionAcquiredPackageProvisioningOutcome,
+    ExtensionAcquiredPackageProvisioningRequest, ExtensionAcquiredProvisioningRequestError,
+    ExtensionAcquiredRuntimeProfile, ExtensionAcquiredRuntimeSelection,
+    MAX_ACQUIRED_CATALOG_SELECTIONS, MAX_EXTENSION_ACQUIRED_CATALOG_BYTES,
     MAX_EXTENSION_ACQUIRED_CRX_BYTES, MAX_EXTENSION_ACQUIRED_LEGAL_NOTICE_BYTES,
     MAX_EXTENSION_ACQUIRED_PROVISIONING_RETAINED_BYTES,
 };
