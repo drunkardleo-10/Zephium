@@ -356,8 +356,8 @@ impl Shared {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let Some(generation) = status.generation().checked_add(1) else {
-                self.admission
-                    .store(ADMISSION_QUARANTINED, Ordering::Release);
+                drop(status);
+                self.quarantine_unless_shutdown();
                 return false;
             };
             let next = ExtensionDistributionStatus::new(generation, state)
@@ -367,6 +367,42 @@ impl Shared {
         };
         self.status_port.publish(status);
         true
+    }
+
+    /// Seals admission after an internal failure without revoking a terminal
+    /// transition that already won the shared gate.
+    fn quarantine_unless_shutdown(&self) -> bool {
+        let _gate = self
+            .admission_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self.admission.load(Ordering::Acquire) == ADMISSION_SHUTDOWN {
+            false
+        } else {
+            self.admission
+                .store(ADMISSION_QUARANTINED, Ordering::Release);
+            true
+        }
+    }
+
+    /// Completes one running request without reopening over shutdown.
+    fn settle_run_admission(&self, next: PostRunAdmission) -> RunAdmissionSettlement {
+        let _gate = self
+            .admission_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match self.admission.load(Ordering::Acquire) {
+            ADMISSION_RUNNING => {
+                self.admission.store(next.code(), Ordering::Release);
+                RunAdmissionSettlement::Continue
+            }
+            ADMISSION_SHUTDOWN => RunAdmissionSettlement::Shutdown,
+            _ => {
+                self.admission
+                    .store(ADMISSION_QUARANTINED, Ordering::Release);
+                RunAdmissionSettlement::FailedClosed
+            }
+        }
     }
 }
 
@@ -385,6 +421,27 @@ impl DistributionStatusPort for ShellStatusPort {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum WorkerExit {
     Clean,
+    FailedClosed,
+}
+
+#[derive(Clone, Copy)]
+enum PostRunAdmission {
+    Idle,
+    Quarantined,
+}
+
+impl PostRunAdmission {
+    fn code(self) -> u8 {
+        match self {
+            Self::Idle => ADMISSION_IDLE,
+            Self::Quarantined => ADMISSION_QUARANTINED,
+        }
+    }
+}
+
+enum RunAdmissionSettlement {
+    Continue,
+    Shutdown,
     FailedClosed,
 }
 
@@ -456,19 +513,21 @@ fn launch_runner<R: DistributionRunner>(
                 run_worker(runner, command_rx, shutdown_rx, &thread_shared)
             }))
             .unwrap_or_else(|_| {
-                thread_shared
-                    .admission
-                    .store(ADMISSION_QUARANTINED, Ordering::Release);
+                let quarantined = thread_shared.quarantine_unless_shutdown();
                 // Status projection is an observation boundary, not trusted
                 // worker control flow. If that boundary caused the original
                 // panic, a second publication may panic too; contain it so
                 // the unique owner still receives a terminal exit and can
                 // join the thread deterministically.
                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let _ = thread_shared.publish(ExtensionDistributionState::Quarantined {
-                        stage: StatusStage::Catalog,
-                        reason: StatusReason::SubmissionPanicked,
-                    });
+                    if quarantined {
+                        let _ = thread_shared.publish(ExtensionDistributionState::Quarantined {
+                            stage: StatusStage::Catalog,
+                            reason: StatusReason::SubmissionPanicked,
+                        });
+                    } else {
+                        publish_shutdown(&thread_shared);
+                    }
                 }));
                 WorkerExit::FailedClosed
             });
@@ -494,13 +553,14 @@ fn run_worker<R: DistributionRunner>(
     {
         Ok(runtime) => runtime,
         Err(_) => {
-            shared
-                .admission
-                .store(ADMISSION_QUARANTINED, Ordering::Release);
-            let _ = shared.publish(ExtensionDistributionState::Quarantined {
-                stage: StatusStage::Catalog,
-                reason: StatusReason::Accounting,
-            });
+            if shared.quarantine_unless_shutdown() {
+                let _ = shared.publish(ExtensionDistributionState::Quarantined {
+                    stage: StatusStage::Catalog,
+                    reason: StatusReason::Accounting,
+                });
+            } else {
+                publish_shutdown(shared);
+            }
             return WorkerExit::FailedClosed;
         }
     };
@@ -560,30 +620,47 @@ async fn run_loop<R: DistributionRunner>(
             }
             outcome = &mut run => outcome,
         };
-        match outcome {
-            RunOutcome::Complete(completion) => {
-                shared.admission.store(ADMISSION_IDLE, Ordering::Release);
-                if !shared.publish(ExtensionDistributionState::Ready(completion)) {
-                    return WorkerExit::FailedClosed;
-                }
-            }
+        let (state, next_admission) = match outcome {
+            RunOutcome::Complete(completion) => (
+                ExtensionDistributionState::Ready(completion),
+                PostRunAdmission::Idle,
+            ),
             RunOutcome::Failed {
                 stage,
                 reason,
                 quarantined,
             } => {
-                let state = if quarantined {
-                    shared
-                        .admission
-                        .store(ADMISSION_QUARANTINED, Ordering::Release);
-                    ExtensionDistributionState::Quarantined { stage, reason }
+                if quarantined {
+                    (
+                        ExtensionDistributionState::Quarantined { stage, reason },
+                        PostRunAdmission::Quarantined,
+                    )
                 } else {
-                    shared.admission.store(ADMISSION_IDLE, Ordering::Release);
-                    ExtensionDistributionState::Failed { stage, reason }
-                };
-                if !shared.publish(state) {
-                    return WorkerExit::FailedClosed;
+                    (
+                        ExtensionDistributionState::Failed { stage, reason },
+                        PostRunAdmission::Idle,
+                    )
                 }
+            }
+        };
+        // Publish the terminal state before reopening admission. A reentrant
+        // or concurrent refresh therefore sees Busy until observers can
+        // distinguish the completed generation from the next one.
+        if !shared.publish(state) {
+            return WorkerExit::FailedClosed;
+        }
+        match shared.settle_run_admission(next_admission) {
+            RunAdmissionSettlement::Continue => {}
+            RunAdmissionSettlement::Shutdown => {
+                publish_shutdown(shared);
+                return WorkerExit::Clean;
+            }
+            RunAdmissionSettlement::FailedClosed => {
+                let _ = shared.publish(ExtensionDistributionState::Quarantined {
+                    stage: StatusStage::Catalog,
+                    reason: StatusReason::Accounting,
+                });
+                return WorkerExit::FailedClosed;
             }
         }
     }

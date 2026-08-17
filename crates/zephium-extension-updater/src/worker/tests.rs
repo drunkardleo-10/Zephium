@@ -10,11 +10,25 @@ use super::*;
 #[derive(Default)]
 struct RecordingStatusPort {
     statuses: Mutex<Vec<ExtensionDistributionStatus>>,
+    ready_gate: Option<StatusPublicationGate>,
+}
+
+struct StatusPublicationGate {
+    entered: Arc<AtomicBool>,
+    release: Arc<AtomicBool>,
 }
 
 impl DistributionStatusPort for RecordingStatusPort {
     fn publish(&self, status: ExtensionDistributionStatus) {
         self.statuses.lock().unwrap().push(status);
+        if matches!(status.state(), ExtensionDistributionState::Ready(_)) {
+            if let Some(gate) = &self.ready_gate {
+                gate.entered.store(true, Ordering::Release);
+                while !gate.release.load(Ordering::Acquire) {
+                    std::thread::yield_now();
+                }
+            }
+        }
     }
 }
 
@@ -123,20 +137,38 @@ fn wait_for(
     }
 }
 
+fn wait_for_flag(flag: &AtomicBool) {
+    let deadline = Instant::now() + std::time::Duration::from_secs(1);
+    while !flag.load(Ordering::Acquire) {
+        assert!(Instant::now() < deadline, "worker gate was not reached");
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
 #[test]
 fn explicit_request_is_single_flight_and_publishes_monotonic_status() {
     let runner = Arc::new(FakeRunner::new([Directive::Complete(completion())]));
-    let (worker, statuses) = launch_fake(Arc::clone(&runner));
+    let ready_entered = Arc::new(AtomicBool::new(false));
+    let ready_release = Arc::new(AtomicBool::new(false));
+    let _release_on_unwind = PendingDrop(Arc::clone(&ready_release));
+    let statuses = Arc::new(RecordingStatusPort {
+        statuses: Mutex::new(Vec::new()),
+        ready_gate: Some(StatusPublicationGate {
+            entered: Arc::clone(&ready_entered),
+            release: Arc::clone(&ready_release),
+        }),
+    });
+    let worker = launch_runner(Arc::clone(&runner), statuses.clone()).unwrap();
     let handle = worker.handle();
 
     assert_eq!(
         handle.request_synchronize(),
         ExtensionDistributionRefreshAdmission::Accepted
     );
-    assert_eq!(
-        handle.request_synchronize(),
-        ExtensionDistributionRefreshAdmission::Busy
-    );
+    wait_for_flag(&ready_entered);
+    let overlapping = handle.request_synchronize();
+    ready_release.store(true, Ordering::Release);
+    assert_eq!(overlapping, ExtensionDistributionRefreshAdmission::Busy);
     let ready = wait_for(&handle, |state| {
         matches!(state, ExtensionDistributionState::Ready(_))
     });
@@ -266,6 +298,29 @@ fn public_worker_handles_are_send_and_sync() {
     assert_send_sync::<ExtensionDistributionHandle>();
     assert_send::<ExtensionDistributionPlan>();
     assert_send::<ExtensionDistributionWorker>();
+}
+
+#[test]
+fn run_settlement_never_reopens_over_shutdown_or_an_invalid_state() {
+    let shared = Shared::new(Arc::new(RecordingStatusPort::default()));
+    shared
+        .admission
+        .store(ADMISSION_SHUTDOWN, Ordering::Release);
+    assert!(matches!(
+        shared.settle_run_admission(PostRunAdmission::Idle),
+        RunAdmissionSettlement::Shutdown
+    ));
+    assert_eq!(shared.admission.load(Ordering::Acquire), ADMISSION_SHUTDOWN);
+
+    shared.admission.store(ADMISSION_QUEUED, Ordering::Release);
+    assert!(matches!(
+        shared.settle_run_admission(PostRunAdmission::Idle),
+        RunAdmissionSettlement::FailedClosed
+    ));
+    assert_eq!(
+        shared.admission.load(Ordering::Acquire),
+        ADMISSION_QUARANTINED
+    );
 }
 
 #[test]
