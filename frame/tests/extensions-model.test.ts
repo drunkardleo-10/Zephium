@@ -11,6 +11,7 @@ import {
   ExtensionProjectionModel,
   ExtensionRuntimeGrantPromptProjectionModel,
   extensionDistributionNotice,
+  extensionDistributionRefreshMessage,
   failureForContext,
   initialExtensionActions,
   initialExtensionManagement,
@@ -254,6 +255,22 @@ describe("extension distribution projection admission", () => {
       tone: "warning",
       message: "Extension updates are paused until Zephium restarts.",
     });
+  });
+
+  it("keeps immediate refresh admission separate from asynchronous completion", () => {
+    expect(extensionDistributionRefreshMessage("accepted")).toBeNull();
+    expect(extensionDistributionRefreshMessage("busy")).toBe(
+      "An extension update check is already running.",
+    );
+    expect(extensionDistributionRefreshMessage("quarantined")).toBe(
+      "Extension updates are paused until Zephium restarts.",
+    );
+    expect(extensionDistributionRefreshMessage("unavailable")).toBe(
+      "Extension updates are unavailable in this build.",
+    );
+    expect(extensionDistributionRefreshMessage("shutting_down")).toBe(
+      "Extensions are unavailable while Zephium is closing.",
+    );
   });
 });
 

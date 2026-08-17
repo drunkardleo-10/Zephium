@@ -23,6 +23,12 @@ export const commands = {
 	 *  displaying it and performs no extension repository work at browser startup.
 	 */
 	extensionManagementSetVisible: (visible: boolean) => __TAURI_INVOKE<boolean>("extension_management_set_visible", { visible }),
+	/**
+	 *  Requests the one product-sealed extension catalog synchronization. The
+	 *  caller supplies no URL, profile, package, runtime target, or selection;
+	 *  those authorities were bound immutably before the worker was launched.
+	 */
+	extensionDistributionRefresh: () => __TAURI_INVOKE<ExtensionDistributionRefreshAdmissionView>("extension_distribution_refresh"),
 	extensionManagementInstall: (candidateIndex: number, catalogRevision: string, selection: ExtensionInstallGrantSelectionInput) => __TAURI_INVOKE<OperationAdmission>("extension_management_install", { candidateIndex, catalogRevision, selection }),
 	extensionManagementSetEnabled: (installId: string, catalogRevision: string, installRevision: string, enabled: boolean) => __TAURI_INVOKE<OperationAdmission>("extension_management_set_enabled", { installId, catalogRevision, installRevision, enabled }),
 	extensionManagementUninstall: (installId: string, catalogRevision: string, installRevision: string) => __TAURI_INVOKE<OperationAdmission>("extension_management_uninstall", { installId, catalogRevision, installRevision }),
@@ -318,6 +324,13 @@ export type ExtensionDistributionFailureReasonView = "acquisition" | "busy" | "s
 
 /**  Stable distribution failure stage exposed only to privileged chrome. */
 export type ExtensionDistributionFailureStageView = { type: "catalog" } | { type: "package_fetch"; index: number } | { type: "package_provision"; index: number } | { type: "catalog_activation" };
+
+/**
+ *  Closed response for the argument-free product update trigger. This is an
+ *  admission result, not completion; authoritative progress and settlement
+ *  continue to arrive through `ExtensionDistributionChanged`.
+ */
+export type ExtensionDistributionRefreshAdmissionView = "accepted" | "busy" | "quarantined" | "unavailable" | "shutting_down";
 
 /**  Exact replacement state for the dormant product distribution worker. */
 export type ExtensionDistributionStateView = { phase: "idle" } | { phase: "synchronizing" } | { phase: "ready"; package_count: number; materialized_packages: number; reused_packages: number; exact_retries: number; newly_activated: boolean } | { phase: "failed"; stage: ExtensionDistributionFailureStageView; reason: ExtensionDistributionFailureReasonView } | { phase: "quarantined"; stage: ExtensionDistributionFailureStageView; reason: ExtensionDistributionFailureReasonView } | { phase: "shutdown" };

@@ -40,7 +40,16 @@
 
   let profileId = $derived(tabs.profile()?.id ?? null);
   let management = $derived(extensions.management(profileId));
+  let distribution = $derived(extensions.distribution());
   let distributionNotice = $derived(extensions.distributionNotice());
+  let distributionRefreshBusy = $derived(extensions.distributionRefreshBusy());
+  let distributionRefreshFailure = $derived(extensions.distributionRefreshFailure());
+  let distributionRefreshVisible = $derived(
+    distribution !== null && distribution.state.phase !== "shutdown",
+  );
+  let distributionRefreshDisabled = $derived(
+    distributionRefreshBusy || distribution?.state.phase === "quarantined",
+  );
   let mutation = $derived(extensions.activeManagementMutation());
   let notice = $derived(extensions.managementFailure());
   let catalogRevision = $derived(
@@ -102,6 +111,10 @@
     requestFailed = false;
     subscribedProfile = profileId;
     void load();
+  }
+
+  function refreshDistribution() {
+    void extensions.refreshDistribution();
   }
 
   function handleWindowPointerDown(event: PointerEvent) {
@@ -256,16 +269,35 @@
           </h2>
           <p class="mt-0.5 text-[10.5px] leading-4 text-faint">Current profile</p>
         </div>
-        <button
-          bind:this={closeButton}
-          type="button"
-          aria-label="Close extension manager"
-          class="icon-button shrink-0"
-          style:--icon-button-size="24px"
-          onclick={() => hide(true)}
-        >
-          <Icon icon={Cancel01Icon} size={14} />
-        </button>
+        <div class="flex shrink-0 items-center gap-1">
+          {#if distributionRefreshVisible}
+            <button
+              type="button"
+              aria-label="Check for extension updates"
+              title="Check for extension updates"
+              disabled={distributionRefreshDisabled}
+              class="hover:bg-fill-strong inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[10.5px] font-medium text-muted hover:text-text disabled:opacity-45"
+              onclick={refreshDistribution}
+            >
+              <Icon
+                icon={Refresh01Icon}
+                size={12}
+                class={distributionRefreshBusy ? "animate-spin" : undefined}
+              />
+              {distributionRefreshBusy ? "Checking…" : "Check updates"}
+            </button>
+          {/if}
+          <button
+            bind:this={closeButton}
+            type="button"
+            aria-label="Close extension manager"
+            class="icon-button shrink-0"
+            style:--icon-button-size="24px"
+            onclick={() => hide(true)}
+          >
+            <Icon icon={Cancel01Icon} size={14} />
+          </button>
+        </div>
       </div>
 
       {#if distributionNotice !== null}
@@ -276,6 +308,14 @@
           aria-live={distributionNotice.tone === "warning" ? "assertive" : "polite"}
         >
           {distributionNotice.message}
+        </p>
+      {:else if distributionRefreshFailure !== null}
+        <p
+          class="mb-2 rounded-md bg-fill px-2.5 py-2 text-[10.5px] leading-4 text-warning"
+          role="alert"
+          aria-live="assertive"
+        >
+          {distributionRefreshFailure}
         </p>
       {/if}
 

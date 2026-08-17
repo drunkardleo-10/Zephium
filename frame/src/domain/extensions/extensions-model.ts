@@ -2,6 +2,7 @@ import type {
   ExtensionActionFailedView,
   ExtensionActionFailure,
   ExtensionActionsView,
+  ExtensionDistributionRefreshAdmissionView,
   ExtensionDistributionView,
   ExtensionManagementView,
   ExtensionRuntimeGrantPromptView,
@@ -166,6 +167,27 @@ export function extensionDistributionNotice(
         tone: "warning",
         message: "Extension updates are paused until Zephium restarts.",
       };
+  }
+}
+
+/**
+ * Maps only immediate refresh admission. Completion remains authoritative in
+ * the independently revisioned distribution projection above.
+ */
+export function extensionDistributionRefreshMessage(
+  admission: ExtensionDistributionRefreshAdmissionView,
+): string | null {
+  switch (admission) {
+    case "accepted":
+      return null;
+    case "busy":
+      return "An extension update check is already running.";
+    case "quarantined":
+      return "Extension updates are paused until Zephium restarts.";
+    case "unavailable":
+      return "Extension updates are unavailable in this build.";
+    case "shutting_down":
+      return "Extensions are unavailable while Zephium is closing.";
   }
 }
 

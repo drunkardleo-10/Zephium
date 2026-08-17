@@ -22,6 +22,7 @@ import {
   ExtensionProjectionModel,
   ExtensionRuntimeGrantPromptProjectionModel,
   extensionDistributionNotice,
+  extensionDistributionRefreshMessage,
   failureForContext,
   initialExtensionManagement,
   managementForProfile,
@@ -50,6 +51,8 @@ type ManagementMutation = {
 };
 let managementMutation = $state.raw<ManagementMutation | null>(null);
 let managementNotice = $state<string | null>(null);
+let distributionRefreshPending = $state(false);
+let distributionRefreshNotice = $state<string | null>(null);
 let managementVisible = false;
 let runtimeGrantResponding = $state(false);
 let runtimeGrantNotice = $state<string | null>(null);
@@ -70,6 +73,9 @@ export const management = (profileId: string | null) =>
   managementForProfile(managementState, profileId);
 export const distribution = () => distributionState;
 export const distributionNotice = () => extensionDistributionNotice(distributionState);
+export const distributionRefreshBusy = () =>
+  distributionRefreshPending || distributionState?.state.phase === "synchronizing";
+export const distributionRefreshFailure = () => distributionRefreshNotice;
 export const activeManagementMutation = () => managementMutation;
 export const managementFailure = () => managementNotice;
 export const permissionPrompt = () => runtimeGrantState.prompt;
@@ -165,6 +171,8 @@ async function initialize(generation: number) {
     events.extensionDistributionChanged.listen((event) => {
       if (generation !== lifecycle || !distributionModel.apply(event.payload)) return;
       distributionState = distributionModel.view;
+      distributionRefreshPending = false;
+      distributionRefreshNotice = null;
     }),
     events.extensionRuntimeGrantPromptChanged.listen((event) => {
       if (generation !== lifecycle || !runtimeGrantModel.apply(event.payload)) return;
@@ -213,6 +221,8 @@ export function dispose() {
   invoking.clear();
   managementMutation = null;
   managementNotice = null;
+  distributionRefreshPending = false;
+  distributionRefreshNotice = null;
   runtimeGrantResponding = false;
   runtimeGrantNotice = null;
   failure = null;
@@ -338,6 +348,7 @@ export async function invoke(
 
 export async function setManagementVisible(visible: boolean): Promise<boolean> {
   managementNotice = null;
+  distributionRefreshNotice = null;
   // Selectors from the previous subscription generation are never rendered
   // while a new visibility command is in flight (or after close).
   managementState = initialExtensionManagement();
@@ -353,6 +364,23 @@ export async function setManagementVisible(visible: boolean): Promise<boolean> {
     managementVisible = false;
     if (visible) managementNotice = "Zephium couldn't load extensions.";
     return false;
+  }
+}
+
+export async function refreshDistribution(): Promise<void> {
+  if (distributionState === null || distributionRefreshBusy()) return;
+  distributionRefreshPending = true;
+  distributionRefreshNotice = null;
+  try {
+    const admission = await boundedIpc(
+      commands.extensionDistributionRefresh(),
+      MANAGEMENT_IPC_TIMEOUT_MS,
+    );
+    distributionRefreshNotice = extensionDistributionRefreshMessage(admission);
+  } catch {
+    distributionRefreshNotice = "Extension updates are temporarily unavailable.";
+  } finally {
+    distributionRefreshPending = false;
   }
 }
 

@@ -802,6 +802,10 @@ package, backend, profile, endpoint, or catalog bytes, so a compromised UI
 command cannot retarget the authenticated transport.
 The process launch claim survives shutdown and quarantine, preventing in-process
 replacement from clearing a restart-required coordinator state.
+Run completion publishes its terminal status before admission can reopen, and
+the worker settles that admission under the same gate used by cancellation. A
+shutdown that wins the gate cannot be overwritten by a late success or
+retryable failure; any other contradictory state quarantines fail-closed.
 Status is a fixed-size generation-checked value, coalesced by Shell and mapped
 to a closed privileged-UI vocabulary without URLs, package identities, error
 strings, or native authority.
@@ -811,7 +815,11 @@ irrevocable. Terminal shutdown consumes one absolute deadline: it cancels and
 joins distribution first, then submits Shell's extension-service, Store,
 native, and blocker teardown with the remaining time. The sealed endpoint slot
 is empty, and the default desktop graph excludes the worker and its HTTP/TLS
-dependencies entirely.
+dependencies entirely. Only privileged main chrome may request a refresh, and
+that request carries no caller-controlled endpoint, package, profile, runtime,
+or selection. Unique-owner removal and refresh admission share one lock, while
+terminal intent is rechecked inside it, so shutdown cannot lose or bypass an
+admitted worker request.
 
 The blocker update coordinator then durably commits its candidate before
 activation revalidates the exact prepared recovery state. A stale identity or

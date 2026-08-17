@@ -60,7 +60,8 @@ use zephium_extension_service::{
 };
 #[cfg(feature = "curated-extension-distribution")]
 use zephium_extension_updater::{
-    ExtensionDistributionShutdownOutcome, ExtensionDistributionWorker,
+    ExtensionDistributionRefreshAdmission, ExtensionDistributionShutdownOutcome,
+    ExtensionDistributionWorker,
 };
 use zephium_ipc::Projection;
 use zephium_store::SqliteStore;
@@ -649,6 +650,34 @@ impl ShutdownCoordinator {
         self.try_startup_admission(|| shell.admit_startup())
     }
 
+    fn request_extension_distribution_refresh(&self) -> ExtensionDistributionRefreshAdmissionView {
+        if self.terminal_started() {
+            return ExtensionDistributionRefreshAdmissionView::ShuttingDown;
+        }
+        #[cfg(feature = "curated-extension-distribution")]
+        {
+            // Serialize refresh admission with unique-owner removal. The
+            // second terminal check makes a shutdown that won before this
+            // lock authoritative; one that starts afterward observes the
+            // admitted request and cancels it while consuming the owner.
+            let owner = self
+                .extension_distribution
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if self.terminal_started() {
+                return ExtensionDistributionRefreshAdmissionView::ShuttingDown;
+            }
+            let Some(worker) = owner.as_ref() else {
+                return ExtensionDistributionRefreshAdmissionView::Unavailable;
+            };
+            extension_distribution_refresh_view(worker.handle().request_synchronize())
+        }
+        #[cfg(not(feature = "curated-extension-distribution"))]
+        {
+            ExtensionDistributionRefreshAdmissionView::Unavailable
+        }
+    }
+
     #[cfg(feature = "curated-extension-distribution")]
     fn try_install_extension_distribution(
         &self,
@@ -1235,6 +1264,42 @@ struct ExtensionManagementChanged(zephium_ipc::ExtensionManagementView);
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
 struct ExtensionDistributionChanged(zephium_ipc::ExtensionDistributionView);
 
+/// Closed response for the argument-free product update trigger. This is an
+/// admission result, not completion; authoritative progress and settlement
+/// continue to arrive through `ExtensionDistributionChanged`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, specta::Type)]
+#[serde(rename_all = "snake_case")]
+// Keep one stable IPC schema in default builds even though the three live
+// worker admissions are reachable only when the optional product graph links.
+#[cfg_attr(not(feature = "curated-extension-distribution"), allow(dead_code))]
+enum ExtensionDistributionRefreshAdmissionView {
+    Accepted,
+    Busy,
+    Quarantined,
+    Unavailable,
+    ShuttingDown,
+}
+
+#[cfg(feature = "curated-extension-distribution")]
+fn extension_distribution_refresh_view(
+    admission: ExtensionDistributionRefreshAdmission,
+) -> ExtensionDistributionRefreshAdmissionView {
+    match admission {
+        ExtensionDistributionRefreshAdmission::Accepted => {
+            ExtensionDistributionRefreshAdmissionView::Accepted
+        }
+        ExtensionDistributionRefreshAdmission::Busy => {
+            ExtensionDistributionRefreshAdmissionView::Busy
+        }
+        ExtensionDistributionRefreshAdmission::Quarantined => {
+            ExtensionDistributionRefreshAdmissionView::Quarantined
+        }
+        ExtensionDistributionRefreshAdmission::Shutdown => {
+            ExtensionDistributionRefreshAdmissionView::ShuttingDown
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
 struct ExtensionRuntimeGrantPromptChanged(zephium_ipc::ExtensionRuntimeGrantPromptView);
 
@@ -1412,6 +1477,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             tabs_unsplit,
             extension_action_invoke,
             extension_management_set_visible,
+            extension_distribution_refresh,
             extension_management_install,
             extension_management_set_enabled,
             extension_management_uninstall,
@@ -2305,6 +2371,25 @@ fn extension_management_set_visible(
         "extension_management_set_visible",
     ) && !shutdown_started(caller.app_handle())
         && shell.dispatch(Command::SetExtensionManagementVisible(visible))
+}
+
+/// Requests the one product-sealed extension catalog synchronization. The
+/// caller supplies no URL, profile, package, runtime target, or selection;
+/// those authorities were bound immutably before the worker was launched.
+#[tauri::command]
+#[specta::specta]
+fn extension_distribution_refresh(
+    caller: WebviewWindow,
+    shutdown: State<'_, ShutdownCoordinator>,
+) -> ExtensionDistributionRefreshAdmissionView {
+    if !authorize(
+        &caller,
+        CallerPolicy::Main,
+        "extension_distribution_refresh",
+    ) {
+        return ExtensionDistributionRefreshAdmissionView::Unavailable;
+    }
+    shutdown.request_extension_distribution_refresh()
 }
 
 /// Answers only the exact Shell-projected native permission prompt. The four
@@ -4840,6 +4925,70 @@ mod tests {
         assert!(delivery.contains("MAIN_LABEL"));
         assert!(delivery.contains("EVENT_EXTENSION_MANAGEMENT"));
         assert!(!delivery.contains("PANEL_LABEL"));
+    }
+
+    #[test]
+    fn extension_distribution_refresh_is_argument_free_and_terminal_bounded() {
+        let coordinator = super::ShutdownCoordinator::default();
+        assert_eq!(
+            coordinator.request_extension_distribution_refresh(),
+            super::ExtensionDistributionRefreshAdmissionView::Unavailable
+        );
+        coordinator.mark_terminal_start();
+        assert_eq!(
+            coordinator.request_extension_distribution_refresh(),
+            super::ExtensionDistributionRefreshAdmissionView::ShuttingDown
+        );
+
+        let source = include_str!("lib.rs");
+        let command = source
+            .split("fn extension_distribution_refresh(")
+            .nth(1)
+            .expect("extension distribution refresh command")
+            .split("#[tauri::command]")
+            .next()
+            .expect("bounded extension distribution refresh command");
+        assert!(command.contains("CallerPolicy::Main"));
+        for forbidden_authority in [
+            "profile_id",
+            "install_id",
+            "runtime_target",
+            "metadata_base",
+            "targets_base",
+            "selection",
+        ] {
+            assert!(!command.contains(forbidden_authority));
+        }
+    }
+
+    #[cfg(feature = "curated-extension-distribution")]
+    #[test]
+    fn extension_distribution_refresh_maps_every_worker_admission() {
+        use zephium_extension_updater::ExtensionDistributionRefreshAdmission as Core;
+
+        for (admission, expected) in [
+            (
+                Core::Accepted,
+                super::ExtensionDistributionRefreshAdmissionView::Accepted,
+            ),
+            (
+                Core::Busy,
+                super::ExtensionDistributionRefreshAdmissionView::Busy,
+            ),
+            (
+                Core::Quarantined,
+                super::ExtensionDistributionRefreshAdmissionView::Quarantined,
+            ),
+            (
+                Core::Shutdown,
+                super::ExtensionDistributionRefreshAdmissionView::ShuttingDown,
+            ),
+        ] {
+            assert_eq!(
+                super::extension_distribution_refresh_view(admission),
+                expected
+            );
+        }
     }
 
     #[test]

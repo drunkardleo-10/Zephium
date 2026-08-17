@@ -897,9 +897,12 @@ It performs no automatic polling and issues no I/O before an explicit request.
 Invalid or overallocated runtime selections fail during plan construction,
 before worker launch or catalog acquisition;
 retryable failures reopen admission, while coordinator quarantine remains
-terminal until restart. Status is coalesced into Shell and projected with a
-closed redacted vocabulary to privileged extension UI; ordinary builds that
-never construct the worker correctly expose no distribution state. There is
+terminal until restart. A run publishes its terminal generation before
+reopening admission, and settlement shares the shutdown gate so it cannot
+overwrite a terminal state with `Idle`. Status is coalesced into Shell and
+projected with a closed redacted vocabulary to privileged extension UI;
+ordinary builds that never construct the worker correctly expose no
+distribution state. There is
 still no product endpoint/configuration, platform runtime-target policy, or
 refresh schedule. The opt-in desktop `curated-extension-distribution` graph now
 constructs a dormant worker only after the suspended Shell callback exists,
@@ -908,7 +911,11 @@ before Shell can retire the extension service under the same absolute shutdown
 deadline. Native-failure exit drains it independently. The feature's sealed
 configuration slot remains empty, and the default desktop graph still has no
 dependency on the updater, distribution client, HTTP, or TLS stack; neither
-graph currently supplies package bytes or network authority.
+graph currently supplies package bytes or network authority. Privileged main
+chrome exposes a refresh control only after that worker projects its presence.
+The command is argument-free: it can request the already sealed plan once, but
+cannot select a profile, package, runtime target, URL, or artifact. Its bounded
+admission result is distinct from the generation-ordered completion status.
 
 The redirect-free fixed-origin HTTPS boundary shared with the blocker lives in
 `zephium-update-transport`. It accepts only plain-ASCII paths below exact HTTPS
