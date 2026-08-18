@@ -1,9 +1,18 @@
+mod diagnostics;
 mod erasure;
 mod host;
 mod layout_queue;
 mod navigation_epoch;
 mod pane_geometry;
 mod platform;
+
+macro_rules! diagnostic {
+    ($($argument:tt)*) => {{
+        crate::diagnostics::write(format_args!($($argument)*));
+    }};
+}
+
+pub(crate) use diagnostic;
 
 #[cfg(target_os = "windows")]
 pub use platform::windows::{

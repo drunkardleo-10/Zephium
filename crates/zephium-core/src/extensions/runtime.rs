@@ -347,6 +347,14 @@ fn sessions_api_permission() -> &'static ApiPermissionName {
     })
 }
 
+fn native_messaging_api_permission() -> &'static ApiPermissionName {
+    static NATIVE_MESSAGING: OnceLock<ApiPermissionName> = OnceLock::new();
+    NATIVE_MESSAGING.get_or_init(|| {
+        ApiPermissionName::parse_exact("nativeMessaging")
+            .expect("the closed native-messaging permission token must remain valid")
+    })
+}
+
 fn compatibility_broker_api_permission(
     purpose: ExtensionCompatibilityBrokerPurpose,
 ) -> &'static ApiPermissionName {
@@ -354,6 +362,7 @@ fn compatibility_broker_api_permission(
         ExtensionCompatibilityBrokerPurpose::RecentHistory => history_api_permission(),
         ExtensionCompatibilityBrokerPurpose::DefaultSearch => search_api_permission(),
         ExtensionCompatibilityBrokerPurpose::RestoreRecentSession => sessions_api_permission(),
+        ExtensionCompatibilityBrokerPurpose::OpenOptionsPage => native_messaging_api_permission(),
     }
 }
 

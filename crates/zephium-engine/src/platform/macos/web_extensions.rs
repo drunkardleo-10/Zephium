@@ -370,6 +370,10 @@ impl ProbeNativeMessageContract {
             )),
         }
     }
+
+    fn call_count(&self) -> usize {
+        self.calls.get()
+    }
 }
 
 define_class!(

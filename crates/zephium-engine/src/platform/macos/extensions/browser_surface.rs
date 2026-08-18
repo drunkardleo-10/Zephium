@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(feature = "native-web-extension-probes")]
 use std::sync::Arc;
 
+use block2::RcBlock;
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, NSObject, ProtocolObject};
 use objc2::{define_class, msg_send, DefinedClass, MainThreadOnly};
@@ -724,6 +725,28 @@ define_class!(
                 broker.reject_tab(completion, ExtensionBrowserRequestRejection::InvalidContext);
                 return;
             }
+            // A plain extension-page link to the exact manifest options URL
+            // arrives through the generic new-tab delegate rather than
+            // runtime.openOptionsPage(). Present it in the dedicated
+            // extension-only surface, while truthfully rejecting the tab
+            // creation because no Shell tab was minted.
+            let exact_options_request = unsafe { configuration.url() }.is_some_and(|requested| {
+                unsafe { context.optionsPageURL() }.is_some_and(|options| {
+                    requested.absoluteString().is_some_and(|requested| {
+                        options
+                            .absoluteString()
+                            .is_some_and(|options| requested.isEqualToString(&options))
+                    })
+                })
+            });
+            if exact_options_request {
+                let ignored: RcBlock<dyn Fn(*mut NSError)> = RcBlock::new(|_| {});
+                self.ivars()
+                    .action_popup
+                    .open_options_page(controller, context, &ignored);
+                broker.reject_tab(completion, ExtensionBrowserRequestRejection::Unsupported);
+                return;
+            }
             // SAFETY: all configuration properties are immutable snapshots
             // supplied to this main-thread delegate callback.
             let unsupported = unsafe {
@@ -789,6 +812,25 @@ define_class!(
                 },
                 completion,
             );
+        }
+
+        #[unsafe(method(webExtensionController:openOptionsPageForExtensionContext:completionHandler:))]
+        fn open_options_page(
+            &self,
+            controller: &WKWebExtensionController,
+            context: &WKWebExtensionContext,
+            completion: &block2::DynBlock<dyn Fn(*mut NSError)>,
+        ) {
+            crate::diagnostic!("extensions: native options-page request received");
+            if !self.ivars().broker.accepts(Some(controller), context) {
+                self.ivars()
+                    .broker
+                    .reject_unit(completion, ExtensionBrowserRequestRejection::InvalidContext);
+                return;
+            }
+            self.ivars()
+                .action_popup
+                .open_options_page(controller, context, completion);
         }
 
         #[unsafe(method(webExtensionController:didUpdateAction:forExtensionContext:))]
@@ -1029,6 +1071,10 @@ impl MacosExtensionBrowserSurfaceHost {
         let expected = ProtocolObject::from_ref(&*self.delegate);
         // SAFETY: delegate readback is a public main-thread WebKit property.
         unsafe { controller.delegate() }.is_some_and(|actual| &*actual == expected)
+    }
+
+    pub(super) const fn generation(&self) -> Option<ExtensionBrowserSurfaceGeneration> {
+        self.generation
     }
 
     pub(super) fn apply(
@@ -1336,7 +1382,9 @@ impl MacosExtensionBrowserSurfaceHost {
         settlement: ExtensionCompatibilityBrokerSettlement,
     ) -> CompatibilityBrokerSettlementOutcome {
         self.compatibility_broker
-            .settle(runtime, request, settlement)
+            .settle(runtime, request, settlement, |context| {
+                self.action_popup.open_options_page_authorized(context)
+            })
     }
 
     pub(super) fn timeout_compatibility_broker_request(

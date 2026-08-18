@@ -23,6 +23,7 @@ pub(super) const EMPTY_FAVICON: &str = "__zephium__/favicon-empty-v1.svg";
 pub(super) const HISTORY_BRIDGE: &str = "__zephium__/webkit-history-v1.js";
 pub(super) const SEARCH_BRIDGE: &str = "__zephium__/webkit-search-v1.js";
 pub(super) const SESSIONS_BRIDGE: &str = "__zephium__/webkit-sessions-v1.js";
+pub(super) const OPTIONS_PAGE_BRIDGE: &str = "__zephium__/webkit-options-page-v1.js";
 pub(super) const WEB_NAVIGATION_BRIDGE: &str = "__zephium__/webkit-web-navigation-v1.js";
 pub(super) const BACKGROUND_WRAPPER: &str = "__zephium_background_v1.js";
 
@@ -107,6 +108,7 @@ pub(super) struct ArtifactSurfaces {
     pub(super) empty_favicon: bool,
     pub(super) default_search: bool,
     pub(super) recent_sessions: bool,
+    pub(super) options_page: bool,
 }
 
 #[derive(Debug)]
@@ -164,6 +166,8 @@ struct Surfaces {
     search: Option<String>,
     #[serde(default)]
     sessions: Option<String>,
+    #[serde(default)]
+    options_page: Option<String>,
 }
 
 pub(super) fn validate(root: &Path) -> Result<ValidatedCompatibilityArtifact, String> {
@@ -198,8 +202,10 @@ pub(super) fn validate(root: &Path) -> Result<ValidatedCompatibilityArtifact, St
     let favicon = metadata.surfaces.favicon.as_deref() == Some("transparent-fallback");
     let search = metadata.surfaces.search.as_deref() == Some("browser-default-current-or-new-tab");
     let sessions = metadata.surfaces.sessions.as_deref() == Some("recent-current-space-tab-only");
+    let options_page =
+        metadata.surfaces.options_page.as_deref() == Some("runtime-open-options-page-window");
     let (adaptations, limitations) =
-        expected_contract(target, bookmarked, favicon, search, sessions)?;
+        expected_contract(target, bookmarked, favicon, search, sessions, options_page)?;
     if metadata.adaptations != adaptations || metadata.limitations != limitations {
         return Err("compatibility artifact adaptation contract drifted".into());
     }
@@ -241,12 +247,19 @@ fn expected_contract(
     favicon: bool,
     search: bool,
     sessions: bool,
+    options_page: bool,
 ) -> Result<(Vec<&'static str>, Vec<&'static str>), String> {
     if target == CompatibilityArtifactTarget::NativeV3 {
         if bookmarked || favicon || search || sessions {
             return Err("native compatibility artifact declared a brokered surface".into());
         }
-        return Ok((NATIVE_ADAPTATIONS.to_vec(), NATIVE_LIMITATIONS.to_vec()));
+        let mut adaptations = NATIVE_ADAPTATIONS.to_vec();
+        let mut limitations = NATIVE_LIMITATIONS.to_vec();
+        if options_page {
+            adaptations.push("extension-options-page-routing-v1");
+            limitations.push("options-page-opens-in-dedicated-window");
+        }
+        return Ok((adaptations, limitations));
     }
     let mut adaptations = vec![
         "native-api-identity-preservation-v1",
@@ -287,6 +300,10 @@ fn expected_contract(
             "sessions-restore-most-recent-current-space-tab-only",
             "sessions-enumeration-unsupported",
         ]);
+    }
+    if options_page {
+        adaptations.push("extension-options-page-routing-v1");
+        limitations.push("options-page-opens-in-dedicated-window");
     }
     adaptations.extend([
         "extension-page-runtime-messaging-session-v1",
@@ -420,6 +437,11 @@ fn validate_surfaces(
         }
         _ => return Err("compatibility artifact sessions surface is invalid".into()),
     };
+    let options_page = match surfaces.options_page.as_deref() {
+        None => false,
+        Some("runtime-open-options-page-window") => true,
+        _ => return Err("compatibility artifact options-page surface is invalid".into()),
+    };
     Ok(ArtifactSurfaces {
         background,
         isolated_content_scripts: surfaces.isolated_content_scripts,
@@ -433,6 +455,7 @@ fn validate_surfaces(
         empty_favicon,
         default_search,
         recent_sessions,
+        options_page,
     })
 }
 

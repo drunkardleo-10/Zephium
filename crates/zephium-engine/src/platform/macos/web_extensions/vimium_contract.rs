@@ -56,6 +56,7 @@ const BROKER_APPLICATION_IDENTIFIER: &str = "app.zephium.extension-broker.v1";
 const BROKER_HISTORY_REQUEST: &str = "v1/history.recent/100";
 const BROKER_SEARCH_REQUEST: &str = "v1/search.default/current/emVwaGl1bSBleHRlbnNpb24gc2VhcmNo";
 const BROKER_SESSION_REQUEST: &str = "v1/sessions.restore/recent";
+const BROKER_OPTIONS_REQUEST: &str = "v1/options.open";
 const BROKER_HISTORY_TITLE: &str = "Zephium brokered history needle";
 const MAX_DIAGNOSTIC_TITLE_BYTES: usize = 4 * 1_024;
 
@@ -82,14 +83,14 @@ const NATIVE_OUTPUT_TREE_SHA256: &str =
     "63726bb7feb7195bcafb9d605abf3fc48b56f79eafc1c44fbcd1ce7dfe0563ec";
 const NATIVE_OUTPUT_INDEX_SHA256: &str =
     "ee651c6b57e460662ce3cd0a4952df1c4ff722122f195a95379598e289fabc7e";
-const BROKERED_OUTPUT_FILES: usize = 89;
-const BROKERED_OUTPUT_BYTES: u64 = 608_905;
+const BROKERED_OUTPUT_FILES: usize = 90;
+const BROKERED_OUTPUT_BYTES: u64 = 614_936;
 const BROKERED_OUTPUT_MANIFEST_SHA256: &str =
     "c2b503f1593b173305889abbe7c06eb0bf060c1d038aa4434a05a0564433c8b3";
 const BROKERED_OUTPUT_TREE_SHA256: &str =
-    "7b6e1e880764752114504824854e87e901e46716be2832ba5f1372b1d790e305";
+    "9285fa9ad16e220a366644355f1d2434dfba05dcab921765936b295723d05ff6";
 const BROKERED_OUTPUT_INDEX_SHA256: &str =
-    "aa448afcf327e1cf388148ac810f468ec3a2c9ec65c6c131d82f27299ceb44ce";
+    "88917d255a2914fdc0a2a6f9e7fdb3faa46523be1ccda5c73331a127775da286";
 
 struct AdmittedVimiumArtifact {
     artifact: compatibility_artifact::ValidatedCompatibilityArtifact,
@@ -211,6 +212,8 @@ struct PopupState {
     history_mode: String,
     search_mode: String,
     sessions_mode: String,
+    options_mode: String,
+    options_control_bound: bool,
     options_url: String,
     dialog_visible: bool,
     missing_content_error_visible: bool,
@@ -415,10 +418,20 @@ fn admit(artifact: &Path) -> Result<AdmittedVimiumArtifact, String> {
         || admitted.surfaces.empty_favicon != brokered
         || admitted.surfaces.default_search != brokered
         || admitted.surfaces.recent_sessions != brokered
+        || !admitted.surfaces.options_page
     {
         return Err("Vimium compatibility artifact surface contract drifted".into());
     }
     validate_manifest(&admitted.extension_root.join("manifest.json"), brokered)?;
+    let options = fs::symlink_metadata(
+        admitted
+            .extension_root
+            .join(compatibility_artifact::OPTIONS_PAGE_BRIDGE),
+    )
+    .map_err(|error| format!("cannot inspect Vimium options-page bridge: {error}"))?;
+    if !options.is_file() || options.file_type().is_symlink() {
+        return Err("Vimium options-page bridge is not an ordinary file".into());
+    }
     if brokered {
         for (path, description) in [
             (
@@ -649,6 +662,10 @@ fn run_native(
                     BROKER_SESSION_REQUEST.into(),
                     "{\"v\":1,\"restored\":true}".into(),
                 ),
+                (
+                    BROKER_OPTIONS_REQUEST.into(),
+                    "{\"v\":1,\"opened\":true}".into(),
+                ),
                 (BROKER_HISTORY_REQUEST.into(), response),
             ],
         )
@@ -760,6 +777,14 @@ fn run_native(
         let state = wait_for_popup_state(&popup, &run_loop, brokered)?;
         if brokered {
             verify_brokered_command_facades(&popup, &context, &run_loop)?;
+            verify_brokered_options_control(
+                &popup,
+                &context,
+                &run_loop,
+                native_message
+                    .as_ref()
+                    .expect("brokered Vimium carries a native-message contract"),
+            )?;
         }
         Ok((popup, state))
     });
@@ -1327,7 +1352,15 @@ fn wait_for_popup_state(
             historyMode: globalThis[Symbol.for('zephium.webkit-history-compatibility.mode.v1')] ?? '',
             searchMode: globalThis[Symbol.for('zephium.webkit-search-compatibility.mode.v1')] ?? '',
             sessionsMode: globalThis[Symbol.for('zephium.webkit-sessions-compatibility.mode.v1')] ?? '',
-            optionsUrl: document.querySelector('#optionsLink')?.href ?? '',
+            optionsMode: globalThis[Symbol.for('zephium.webkit-options-page-compatibility.mode.v1')] ?? '',
+            optionsControlBound: (() => {{
+              const link = document.querySelector('#optionsLink');
+              return link?.getAttribute('role') === 'button' && !link.hasAttribute('href');
+            }})(),
+            optionsUrl: (() => {{
+              const path = document.querySelector('meta[name="zephium-extension-options-page"]')?.content;
+              return typeof path === 'string' ? chrome.runtime.getURL(path) : '';
+            }})(),
             dialogVisible: getComputedStyle(document.querySelector('#dialog-body')).display !== 'none',
             missingContentErrorVisible: getComputedStyle(document.querySelector('#not-enabled-error')).display !== 'none',
           }};
@@ -1351,7 +1384,9 @@ fn wait_for_popup_state(
                             && state.favicon_mode == "transparent-fallback"
                             && state.history_mode == "bounded-recent-search"
                             && state.search_mode == "browser-default-current-or-new-tab"
-                            && state.sessions_mode == "recent-current-space-tab-only");
+                            && state.sessions_mode == "recent-current-space-tab-only"
+                            && state.options_mode == "runtime-open-options-page-window"
+                            && state.options_control_bound);
                     if state.ready == "complete"
                         && state.chrome_runtime
                         && state.chrome_runtime_id
@@ -1425,6 +1460,41 @@ fn verify_brokered_command_facades(
             return Err("Vimium brokered command facades timed out".into());
         }
         super::drain_run_loop_once(run_loop);
+    }
+}
+
+fn verify_brokered_options_control(
+    popup: &WKWebView,
+    context: &WKWebExtensionContext,
+    run_loop: &NSRunLoop,
+    contract: &super::ProbeNativeMessageContract,
+) -> Result<(), String> {
+    let script = r#"(() => {
+      const control = document.querySelector('#optionsLink');
+      if (control?.getAttribute('role') !== 'button' || control.hasAttribute('href')) return false;
+      return control.dispatchEvent(new KeyboardEvent('keydown', {
+        key: 'Enter',
+        bubbles: true,
+        cancelable: true,
+      })) === false;
+    })()"#;
+    unsafe {
+        popup.evaluateJavaScript_completionHandler(&NSString::from_str(script), None);
+    }
+    let deadline = Instant::now() + super::PROBE_TIMEOUT;
+    loop {
+        super::validate_context_errors(context, "Vimium options compatibility control")?;
+        contract.settlement()?;
+        match contract.call_count() {
+            3 => return Ok(()),
+            count if count > 3 => {
+                return Err("Vimium options compatibility control sent duplicate requests".into())
+            }
+            _ if Instant::now() >= deadline => {
+                return Err("Vimium options compatibility control did not reach native code".into())
+            }
+            _ => super::drain_run_loop_once(run_loop),
+        }
     }
 }
 

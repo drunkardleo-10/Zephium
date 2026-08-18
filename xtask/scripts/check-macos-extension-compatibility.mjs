@@ -42,6 +42,14 @@ const faviconSource = await readFile(fileURLToPath(faviconAssetUrl), "utf8");
 const faviconScript = new vm.Script(faviconSource, {
   filename: fileURLToPath(faviconAssetUrl),
 });
+const optionsAssetUrl = new URL(
+  "../../crates/zephium-extension-package/assets/macos/webkit-options-page-v1.js",
+  import.meta.url,
+);
+const optionsSource = await readFile(fileURLToPath(optionsAssetUrl), "utf8");
+const optionsScript = new vm.Script(optionsSource, {
+  filename: fileURLToPath(optionsAssetUrl),
+});
 
 for (const forbidden of ["document", "window", "fetch", "XMLHttpRequest", "WebSocket"]) {
   assert.equal(source.includes(forbidden), false, `compatibility asset exposes ${forbidden}`);
@@ -59,6 +67,9 @@ for (const forbidden of [
 for (const forbidden of ["document", "window", "fetch(", "XMLHttpRequest", "WebSocket"]) {
   assert.equal(bookmarksSource.includes(forbidden), false, `bookmarks asset exposes ${forbidden}`);
   assert.equal(faviconSource.includes(forbidden), false, `favicon asset exposes ${forbidden}`);
+}
+for (const forbidden of ["fetch(", "XMLHttpRequest", "WebSocket", "connectNative"]) {
+  assert.equal(optionsSource.includes(forbidden), false, `options asset exposes ${forbidden}`);
 }
 for (const forbidden of [
   "fetch(",
@@ -175,6 +186,165 @@ assert.throws(
   () => run({}),
   /Zephium WebKit extension API surface is unavailable/,
   "missing native authority did not fail closed",
+);
+
+let optionsClick;
+let optionsTargetClick;
+let optionsTargetKeydown;
+let optionsContentLoaded;
+let optionsMutation;
+let optionsObserverDisconnected = 0;
+let optionsOpened = 0;
+class OptionsElement {
+  closest() {
+    return this;
+  }
+}
+class OptionsAnchor extends OptionsElement {
+  constructor(href) {
+    super();
+    this.href = href;
+  }
+  setAttribute(name, value) {
+    assert.ok(name === "role" || name === "tabindex");
+    assert.equal(value, name === "role" ? "button" : "0");
+    this[name] = value;
+  }
+  removeAttribute(name) {
+    assert.ok(name === "href" || name === "target");
+    if (name === "href") this.href = "";
+  }
+  addEventListener(type, listener, capture) {
+    assert.equal(capture, true);
+    if (type === "click") optionsTargetClick = listener;
+    else {
+      assert.equal(type, "keydown");
+      optionsTargetKeydown = listener;
+    }
+  }
+}
+const optionsNative = nativeNamespace("options-fixture");
+optionsNative.runtime.getURL = function (path) {
+  assert.equal(this, optionsNative.runtime, "options runtime receiver was not preserved");
+  return `webkit-extension://options-fixture/${path}`;
+};
+optionsNative.runtime.sendNativeMessage = (application, operation, callback) => {
+  assert.equal(application, "app.zephium.extension-broker.v1");
+  assert.equal(operation, "v1/options.open");
+  optionsOpened += 1;
+  callback('{"v":1,"opened":true}');
+};
+const optionsDocument = {
+  readyState: "loading",
+  documentElement: {},
+  querySelectorAll(selector) {
+    if (selector === 'meta[name="zephium-extension-options-page"]') {
+      return [{ getAttribute: (name) => (name === "content" ? "pages/options.html" : null) }];
+    }
+    assert.equal(selector, "a[href]");
+    return [optionsAnchor];
+  },
+  addEventListener(type, listener, options) {
+    if (type === "click") {
+      assert.equal(options, true);
+      optionsClick = listener;
+      return;
+    }
+    assert.equal(type, "DOMContentLoaded");
+    assert.equal(options?.once, true);
+    assert.deepEqual(Object.keys(options), ["once"]);
+    optionsContentLoaded = listener;
+  },
+};
+const optionsAnchor = new OptionsAnchor(
+  "",
+);
+class OptionsMutationObserver {
+  constructor(callback) {
+    optionsMutation = callback;
+  }
+  observe(target, options) {
+    assert.equal(target, optionsDocument.documentElement);
+    assert.equal(options.attributes, true);
+    assert.equal(options.subtree, true);
+    assert.deepEqual(Array.from(options.attributeFilter), ["href"]);
+  }
+  disconnect() {
+    optionsObserverDisconnected += 1;
+  }
+}
+const optionsContext = vm.createContext({
+  chrome: optionsNative,
+  document: optionsDocument,
+  Element: OptionsElement,
+  HTMLAnchorElement: OptionsAnchor,
+  MutationObserver: OptionsMutationObserver,
+  setTimeout: () => 1,
+  clearTimeout: () => {},
+});
+script.runInContext(optionsContext, { timeout: 1_000 });
+optionsScript.runInContext(optionsContext, { timeout: 1_000 });
+optionsContentLoaded();
+assert.equal(typeof optionsMutation, "function");
+assert.equal(optionsTargetClick, undefined);
+optionsAnchor.href = "webkit-extension://options-fixture/pages/options.html";
+optionsMutation([{ type: "attributes", target: optionsAnchor }]);
+assert.equal(typeof optionsTargetClick, "function");
+assert.equal(typeof optionsTargetKeydown, "function");
+assert.equal(optionsAnchor.role, "button");
+assert.equal(optionsAnchor.tabindex, "0");
+assert.equal(optionsAnchor.href, "");
+assert.equal(optionsObserverDisconnected, 1);
+let optionsPrevented = 0;
+let optionsPropagationStopped = 0;
+optionsTargetClick({
+  isTrusted: true,
+  defaultPrevented: true,
+  button: 0,
+  target: optionsAnchor,
+  preventDefault() {
+    optionsPrevented += 1;
+  },
+  stopImmediatePropagation() {
+    optionsPropagationStopped += 1;
+  },
+});
+await Promise.resolve();
+assert.equal(optionsPrevented, 1);
+assert.equal(optionsPropagationStopped, 1);
+assert.equal(optionsOpened, 1);
+optionsTargetKeydown({
+  key: "Enter",
+  currentTarget: optionsAnchor,
+  preventDefault() {
+    optionsPrevented += 1;
+  },
+  stopImmediatePropagation() {
+    optionsPropagationStopped += 1;
+  },
+});
+await Promise.resolve();
+assert.equal(optionsPrevented, 2);
+assert.equal(optionsPropagationStopped, 2);
+assert.equal(optionsOpened, 2);
+optionsClick({
+  isTrusted: false,
+  defaultPrevented: false,
+  button: 0,
+  target: new OptionsAnchor("webkit-extension://options-fixture/pages/other.html"),
+  preventDefault() {
+    optionsPrevented += 1;
+  },
+  stopImmediatePropagation() {
+    optionsPropagationStopped += 1;
+  },
+});
+assert.equal(optionsPrevented, 2, "another extension link reached the options bridge");
+assert.equal(optionsPropagationStopped, 2, "another extension link was intercepted");
+assert.equal(optionsOpened, 2, "another extension link opened the options page");
+assert.equal(
+  optionsContext[Symbol.for("zephium.webkit-options-page-compatibility.mode.v1")],
+  "runtime-open-options-page-window",
 );
 
 const lockedNative = nativeNamespace("locked-fixture");

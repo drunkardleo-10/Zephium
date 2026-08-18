@@ -59,6 +59,16 @@ impl Shell {
                 );
                 return;
             }
+            ExtensionCompatibilityBrokerOperation::OpenOptionsPage => {
+                self.settle_extension_compatibility_broker(
+                    runtime,
+                    id,
+                    ExtensionCompatibilityBrokerSettlement::Applied(
+                        ExtensionCompatibilityBrokerResult::OptionsPageOpenAuthorized,
+                    ),
+                );
+                return;
+            }
         };
         if !admitted {
             self.settle_extension_compatibility_broker(

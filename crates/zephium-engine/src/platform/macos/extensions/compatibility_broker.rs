@@ -332,6 +332,7 @@ impl CompatibilityBroker {
         runtime: zephium_core::extensions::ExtensionRuntimeInstance,
         id: ExtensionCompatibilityBrokerRequestId,
         settlement: ExtensionCompatibilityBrokerSettlement,
+        open_options_page: impl FnOnce(&WKWebExtensionContext) -> bool,
     ) -> CompatibilityBrokerSettlementOutcome {
         let Some(pending) = self.take(id) else {
             return CompatibilityBrokerSettlementOutcome::Stale;
@@ -345,6 +346,22 @@ impl CompatibilityBroker {
             return CompatibilityBrokerSettlementOutcome::IntegrityFailed;
         }
         let response = match settlement {
+            ExtensionCompatibilityBrokerSettlement::Applied(
+                ExtensionCompatibilityBrokerResult::OptionsPageOpenAuthorized,
+            ) if matches!(
+                &pending.operation,
+                ExtensionCompatibilityBrokerOperation::OpenOptionsPage
+            ) =>
+            {
+                let opened = pending
+                    .context
+                    .load()
+                    .is_some_and(|context| open_options_page(&context));
+                Ok(format!(
+                    "{{\"v\":1,\"opened\":{}}}",
+                    if opened { "true" } else { "false" }
+                ))
+            }
             ExtensionCompatibilityBrokerSettlement::Applied(result) => encode_result(result),
             ExtensionCompatibilityBrokerSettlement::Rejected(reason) => Err(reason),
         };
@@ -458,6 +475,9 @@ fn encode_result(
                 "{{\"v\":1,\"restored\":{}}}",
                 if restored { "true" } else { "false" }
             ));
+        }
+        ExtensionCompatibilityBrokerResult::OptionsPageOpenAuthorized => {
+            return Err(ExtensionCompatibilityBrokerRejection::InvalidRequest);
         }
         ExtensionCompatibilityBrokerResult::RecentHistory(entries) => entries,
     };

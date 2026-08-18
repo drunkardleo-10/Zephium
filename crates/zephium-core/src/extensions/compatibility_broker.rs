@@ -31,6 +31,7 @@ const RECENT_HISTORY_PREFIX: &str = "v1/history.recent/";
 const DEFAULT_SEARCH_CURRENT_PREFIX: &str = "v1/search.default/current/";
 const DEFAULT_SEARCH_NEW_PREFIX: &str = "v1/search.default/new/";
 const RESTORE_RECENT_SESSION: &str = "v1/sessions.restore/recent";
+const OPEN_OPTIONS_PAGE: &str = "v1/options.open";
 
 /// Closed compatibility operation whose product grant must be proven.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -38,6 +39,7 @@ pub enum ExtensionCompatibilityBrokerPurpose {
     RecentHistory,
     DefaultSearch,
     RestoreRecentSession,
+    OpenOptionsPage,
 }
 
 /// Move-only proof that one exact published runtime holds the API authority
@@ -116,6 +118,7 @@ pub enum ExtensionCompatibilityBrokerOperation {
         query: Box<str>,
     },
     RestoreRecentSession,
+    OpenOptionsPage,
 }
 
 impl ExtensionCompatibilityBrokerOperation {
@@ -124,6 +127,7 @@ impl ExtensionCompatibilityBrokerOperation {
             Self::RecentHistory { .. } => ExtensionCompatibilityBrokerPurpose::RecentHistory,
             Self::DefaultSearch { .. } => ExtensionCompatibilityBrokerPurpose::DefaultSearch,
             Self::RestoreRecentSession => ExtensionCompatibilityBrokerPurpose::RestoreRecentSession,
+            Self::OpenOptionsPage => ExtensionCompatibilityBrokerPurpose::OpenOptionsPage,
         }
     }
 
@@ -134,6 +138,9 @@ impl ExtensionCompatibilityBrokerOperation {
         }
         if value == RESTORE_RECENT_SESSION {
             return Ok(Self::RestoreRecentSession);
+        }
+        if value == OPEN_OPTIONS_PAGE {
+            return Ok(Self::OpenOptionsPage);
         }
         if let Some(encoded) = value.strip_prefix(DEFAULT_SEARCH_CURRENT_PREFIX) {
             return parse_search(encoded, ExtensionCompatibilitySearchDisposition::CurrentTab);
@@ -261,8 +268,15 @@ pub struct ExtensionCompatibilityHistoryEntry {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ExtensionCompatibilityBrokerResult {
     RecentHistory(Box<[ExtensionCompatibilityHistoryEntry]>),
-    DefaultSearch { opened: bool },
-    RecentSessionRestore { restored: bool },
+    DefaultSearch {
+        opened: bool,
+    },
+    RecentSessionRestore {
+        restored: bool,
+    },
+    /// Shell authorized the exact runtime/context request. Native settlement
+    /// still determines whether the options surface was actually presented.
+    OptionsPageOpenAuthorized,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -306,6 +320,10 @@ mod tests {
         assert_eq!(
             ExtensionCompatibilityBrokerOperation::parse_wire(RESTORE_RECENT_SESSION),
             Ok(ExtensionCompatibilityBrokerOperation::RestoreRecentSession)
+        );
+        assert_eq!(
+            ExtensionCompatibilityBrokerOperation::parse_wire(OPEN_OPTIONS_PAGE),
+            Ok(ExtensionCompatibilityBrokerOperation::OpenOptionsPage)
         );
         let maximum = "a".repeat(MAX_EXTENSION_COMPATIBILITY_SEARCH_QUERY_BYTES);
         let maximum_wire = format!(

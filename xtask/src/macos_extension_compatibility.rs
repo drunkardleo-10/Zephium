@@ -39,6 +39,7 @@ const EMPTY_FAVICON: &str = "__zephium__/favicon-empty-v1.svg";
 const HISTORY_BRIDGE: &str = "__zephium__/webkit-history-v1.js";
 const SEARCH_BRIDGE: &str = "__zephium__/webkit-search-v1.js";
 const SESSIONS_BRIDGE: &str = "__zephium__/webkit-sessions-v1.js";
+const OPTIONS_PAGE_BRIDGE: &str = "__zephium__/webkit-options-page-v1.js";
 const WEB_NAVIGATION_BRIDGE: &str = "__zephium__/webkit-web-navigation-v1.js";
 const BACKGROUND_WRAPPER: &str = "__zephium_background_v1.js";
 const MAX_POPUP_HTML_BYTES: u64 = 2 * 1024 * 1024;
@@ -60,6 +61,8 @@ const SEARCH_BRIDGE_SOURCE: &str =
     include_str!("../../crates/zephium-extension-package/assets/macos/webkit-search-v1.js");
 const SESSIONS_BRIDGE_SOURCE: &str =
     include_str!("../../crates/zephium-extension-package/assets/macos/webkit-sessions-v1.js");
+const OPTIONS_PAGE_BRIDGE_SOURCE: &str =
+    include_str!("../../crates/zephium-extension-package/assets/macos/webkit-options-page-v1.js");
 const WEB_NAVIGATION_BRIDGE_SOURCE: &str =
     include_str!("../../crates/zephium-extension-package/assets/macos/webkit-web-navigation-v1.js");
 
@@ -114,6 +117,7 @@ struct TransformPlan {
     empty_favicon: bool,
     default_search: bool,
     recent_sessions: bool,
+    options_page: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -173,6 +177,8 @@ struct CompatibilitySurfaces {
     search: Option<String>,
     #[serde(default)]
     sessions: Option<String>,
+    #[serde(default)]
+    options_page: Option<String>,
 }
 
 pub(crate) struct ValidatedCompatibilityReleaseInput {
@@ -286,7 +292,7 @@ pub(crate) fn validate_release_input(
     };
     validate_compatibility_identity(&receipt.source, "source")?;
     validate_compatibility_identity(&receipt.output, "output")?;
-    let (empty_bookmarks, empty_favicon, default_search, recent_sessions) =
+    let (empty_bookmarks, empty_favicon, default_search, recent_sessions, options_page) =
         validate_receipt_surfaces(&receipt.surfaces, target)?;
     let (expected_adaptations, expected_limitations) = receipt_contract(
         target,
@@ -294,6 +300,7 @@ pub(crate) fn validate_release_input(
         empty_favicon,
         default_search,
         recent_sessions,
+        options_page,
     );
     if receipt.adaptations != expected_adaptations || receipt.limitations != expected_limitations {
         return Err("compatibility receipt adaptation contract drifted".into());
@@ -348,7 +355,7 @@ fn validate_compatibility_identity(
 fn validate_receipt_surfaces(
     surfaces: &CompatibilitySurfaces,
     target: ArtifactTarget,
-) -> Result<(bool, bool, bool, bool), String> {
+) -> Result<(bool, bool, bool, bool, bool), String> {
     let background_valid = matches!(
         surfaces.background.as_str(),
         "absent" | "classic-wrapper" | "module-wrapper"
@@ -367,6 +374,11 @@ fn validate_receipt_surfaces(
     {
         return Err("compatibility receipt surfaces are invalid".into());
     }
+    let options_page = match surfaces.options_page.as_deref() {
+        None => false,
+        Some("runtime-open-options-page-window") => true,
+        _ => return Err("compatibility receipt options-page surface is invalid".into()),
+    };
     match target {
         ArtifactTarget::NativeV3 => {
             if surfaces.history_search.is_some()
@@ -378,7 +390,7 @@ fn validate_receipt_surfaces(
             {
                 return Err("native compatibility receipt declared brokered surfaces".into());
             }
-            Ok((false, false, false, false))
+            Ok((false, false, false, false, options_page))
         }
         ArtifactTarget::NativeBrokeredV1 => {
             if surfaces.background == "absent"
@@ -414,6 +426,7 @@ fn validate_receipt_surfaces(
                 empty_favicon,
                 default_search,
                 recent_sessions,
+                options_page,
             ))
         }
     }
@@ -425,6 +438,7 @@ fn receipt_contract(
     empty_favicon: bool,
     default_search: bool,
     recent_sessions: bool,
+    options_page: bool,
 ) -> (Vec<&'static str>, Vec<&'static str>) {
     let mut adaptations = vec![
         "native-api-identity-preservation-v1",
@@ -466,6 +480,10 @@ fn receipt_contract(
             "sessions-restore-most-recent-current-space-tab-only",
             "sessions-enumeration-unsupported",
         ]);
+    }
+    if options_page {
+        adaptations.push("extension-options-page-routing-v1");
+        limitations.push("options-page-opens-in-dedicated-window");
     }
     if target.requires_history_broker() {
         limitations.retain(|limitation| *limitation != "non-action-extension-pages-not-adapted");
@@ -582,6 +600,13 @@ fn materialize_target(
             SESSIONS_BRIDGE_SOURCE.as_bytes(),
         )?;
     }
+    if plan.options_page.is_some() {
+        write_new_file(
+            &staged_extension,
+            OPTIONS_PAGE_BRIDGE,
+            OPTIONS_PAGE_BRIDGE_SOURCE.as_bytes(),
+        )?;
+    }
     if plan.history_broker_search {
         write_new_file(
             &staged_extension,
@@ -608,6 +633,7 @@ fn materialize_target(
         plan.empty_favicon,
         plan.default_search,
         plan.recent_sessions,
+        plan.options_page.is_some(),
     );
     let mut surfaces = serde_json::json!({
         "background": plan.worker.label(),
@@ -654,6 +680,20 @@ fn materialize_target(
                 Value::String("recent-current-space-tab-only".to_owned()),
             );
         }
+        if plan.options_page.is_some() {
+            surfaces.insert(
+                "options_page".to_owned(),
+                Value::String("runtime-open-options-page-window".to_owned()),
+            );
+        }
+    } else if plan.options_page.is_some() {
+        surfaces
+            .as_object_mut()
+            .expect("compatibility surfaces are an object")
+            .insert(
+                "options_page".to_owned(),
+                Value::String("runtime-open-options-page-window".to_owned()),
+            );
     }
     let metadata = serde_json::to_vec_pretty(&serde_json::json!({
         "schema": 1,
@@ -738,6 +778,7 @@ fn build_plan(
         history_broker_search && declares_permission(&root, "permissions", "search")?;
     let recent_sessions =
         history_broker_search && declares_permission(&root, "permissions", "sessions")?;
+    let options_page = options_page_path(&root, index)?;
     if history_broker_search {
         if !declares_permission(&root, "permissions", "history")? {
             return Err("brokered history compatibility requires the history permission".into());
@@ -786,7 +827,7 @@ fn build_plan(
     let popup_path = action_popup_path(&root)?;
     let action_popup = popup_path.is_some();
     let extension_pages = if history_broker_search {
-        adapt_extension_pages(source_root, index, &root, bridges)?
+        adapt_extension_pages(source_root, index, &root, bridges, options_page.as_deref())?
     } else {
         popup_path
             .clone()
@@ -800,8 +841,12 @@ fn build_plan(
                     return Err("action popup exceeds the compatibility HTML ceiling".into());
                 }
                 let source = read_indexed_file(source_root, indexed)?;
-                inject_extension_page_preludes(&source, ExtensionBridgePlan::default())
-                    .map(|bytes| (path, bytes))
+                inject_extension_page_preludes(
+                    &source,
+                    ExtensionBridgePlan::default(),
+                    options_page.as_deref(),
+                )
+                .map(|bytes| (path, bytes))
             })
             .transpose()?
             .into_iter()
@@ -834,6 +879,7 @@ fn build_plan(
         empty_favicon,
         default_search,
         recent_sessions,
+        options_page,
     })
 }
 
@@ -1204,6 +1250,30 @@ fn action_popup_path(root: &Map<String, Value>) -> Result<Option<String>, String
         .transpose()
 }
 
+fn options_page_path(
+    root: &Map<String, Value>,
+    tree: &CanonicalExtensionTreeIndex,
+) -> Result<Option<String>, String> {
+    let legacy = root.get("options_page");
+    let modern = root.get("options_ui");
+    let path = match (legacy, modern) {
+        (None, None) => return Ok(None),
+        (Some(_), Some(_)) => return Err("manifest declares both options page formats".into()),
+        (Some(value), None) => value
+            .as_str()
+            .filter(|path| !path.is_empty())
+            .ok_or_else(|| "manifest options_page is invalid".to_owned())?,
+        (None, Some(value)) => value
+            .as_object()
+            .and_then(|options| options.get("page"))
+            .and_then(Value::as_str)
+            .filter(|path| !path.is_empty())
+            .ok_or_else(|| "manifest options_ui.page is invalid".to_owned())?,
+    };
+    require_indexed_resource(tree, path, "options page")?;
+    Ok(Some(path.to_owned()))
+}
+
 fn require_indexed_resource(
     tree: &CanonicalExtensionTreeIndex,
     path: &str,
@@ -1224,6 +1294,7 @@ fn adapt_extension_pages(
     tree: &CanonicalExtensionTreeIndex,
     manifest: &Map<String, Value>,
     mut bridges: ExtensionBridgePlan,
+    options_page: Option<&str>,
 ) -> Result<Vec<(String, Vec<u8>)>, String> {
     bridges.extension_page_messaging = true;
     bridges.history_search = true;
@@ -1242,7 +1313,7 @@ fn adapt_extension_pages(
             ));
         }
         let source = read_indexed_file(source_root, indexed)?;
-        let adapted = inject_extension_page_preludes(&source, bridges)
+        let adapted = inject_extension_page_preludes(&source, bridges, options_page)
             .map_err(|error| format!("cannot adapt extension page {path}: {error}"))?;
         pages.push((path.to_owned(), adapted));
     }
@@ -1292,6 +1363,7 @@ fn sandbox_page_keys(
 fn inject_extension_page_preludes(
     source: &[u8],
     bridges: ExtensionBridgePlan,
+    options_page: Option<&str>,
 ) -> Result<Vec<u8>, String> {
     let source = std::str::from_utf8(source)
         .map_err(|_| "extension page must be UTF-8 for deterministic adaptation".to_owned())?;
@@ -1317,11 +1389,31 @@ fn inject_extension_page_preludes(
     if bridges.recent_sessions {
         tags.push_str(&format!("<script src=\"/{SESSIONS_BRIDGE}\"></script>"));
     }
+    if let Some(options_page) = options_page {
+        let options_page = escape_html_attribute(options_page);
+        tags.push_str(&format!(
+            "<meta name=\"zephium-extension-options-page\" content=\"{options_page}\"><script src=\"/{OPTIONS_PAGE_BRIDGE}\"></script>"
+        ));
+    }
     let mut output = String::with_capacity(source.len().saturating_add(tags.len()));
     output.push_str(&source[..insertion]);
     output.push_str(&tags);
     output.push_str(&source[insertion..]);
     Ok(output.into_bytes())
+}
+
+fn escape_html_attribute(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '"' => escaped.push_str("&quot;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            _ => escaped.push(character),
+        }
+    }
+    escaped
 }
 
 fn explicit_head_end(source: &str) -> Result<usize, String> {
@@ -1456,6 +1548,7 @@ fn enforce_output_budgets(
         + usize::from(plan.history_broker_search)
         + usize::from(plan.default_search)
         + usize::from(plan.recent_sessions)
+        + usize::from(plan.options_page.is_some())
         + usize::from(plan.same_document_navigation_routes != 0);
     let added_entries = 3_usize
         + usize::from(plan.empty_bookmarks)
@@ -1464,6 +1557,7 @@ fn enforce_output_budgets(
         + usize::from(plan.history_broker_search)
         + usize::from(plan.default_search)
         + usize::from(plan.recent_sessions)
+        + usize::from(plan.options_page.is_some())
         + usize::from(plan.same_document_navigation_routes != 0);
     if source.files().len().saturating_add(added_files) > MAX_EXTENSION_TREE_FILES
         || source.total_entry_count().saturating_add(added_entries) > MAX_EXTENSION_TREE_ENTRIES
@@ -1487,6 +1581,9 @@ fn enforce_output_budgets(
             .then_some(SEARCH_BRIDGE_SOURCE.as_bytes()),
         plan.recent_sessions
             .then_some(SESSIONS_BRIDGE_SOURCE.as_bytes()),
+        plan.options_page
+            .as_ref()
+            .map(|_| OPTIONS_PAGE_BRIDGE_SOURCE.as_bytes()),
         (plan.same_document_navigation_routes != 0)
             .then_some(WEB_NAVIGATION_BRIDGE_SOURCE.as_bytes()),
         plan.background_wrapper.as_deref(),
@@ -1570,6 +1667,13 @@ fn enforce_output_budgets(
         .and_then(|bytes| {
             bytes.checked_add(if plan.recent_sessions {
                 SESSIONS_BRIDGE_SOURCE.len() as u64
+            } else {
+                0
+            })
+        })
+        .and_then(|bytes| {
+            bytes.checked_add(if plan.options_page.is_some() {
+                OPTIONS_PAGE_BRIDGE_SOURCE.len() as u64
             } else {
                 0
             })
@@ -1975,6 +2079,7 @@ mod tests {
             "sessions"
         ]);
         manifest["sandbox"] = serde_json::json!({"pages":["ui/sandbox.html"]});
+        manifest["options_ui"] = serde_json::json!({"page":"ui/options.html","open_in_tab":true});
         fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
         write(
             &source,
@@ -2051,10 +2156,18 @@ mod tests {
             fs::read(extension.join(SESSIONS_BRIDGE)).unwrap(),
             SESSIONS_BRIDGE_SOURCE.as_bytes()
         );
+        assert_eq!(
+            fs::read(extension.join(OPTIONS_PAGE_BRIDGE)).unwrap(),
+            OPTIONS_PAGE_BRIDGE_SOURCE.as_bytes()
+        );
         let popup = fs::read_to_string(extension.join("ui/popup.html")).unwrap();
         assert!(popup.contains(&format!(
             "<head><script src=\"/{API_PRELUDE}\"></script><script src=\"/{BOOKMARKS_BRIDGE}\"></script><script src=\"/{FAVICON_BRIDGE}\"></script><script src=\"/{RUNTIME_MESSAGING_BRIDGE}\"></script><script src=\"/{HISTORY_BRIDGE}\"></script><script src=\"/{SEARCH_BRIDGE}\"></script><script src=\"/{SESSIONS_BRIDGE}\"></script>"
         )));
+        assert!(popup.contains(
+            "<meta name=\"zephium-extension-options-page\" content=\"ui/options.html\">"
+        ));
+        assert!(popup.contains(&format!("<script src=\"/{OPTIONS_PAGE_BRIDGE}\"></script>")));
         let options = fs::read_to_string(extension.join("ui/options.html")).unwrap();
         assert!(options.contains(&format!(
             "<head><script src=\"/{API_PRELUDE}\"></script><script src=\"/{BOOKMARKS_BRIDGE}\"></script><script src=\"/{FAVICON_BRIDGE}\"></script><script src=\"/{RUNTIME_MESSAGING_BRIDGE}\"></script><script src=\"/{HISTORY_BRIDGE}\"></script><script src=\"/{SEARCH_BRIDGE}\"></script><script src=\"/{SESSIONS_BRIDGE}\"></script>"
@@ -2089,6 +2202,10 @@ mod tests {
         assert_eq!(
             metadata["surfaces"]["sessions"],
             serde_json::json!("recent-current-space-tab-only")
+        );
+        assert_eq!(
+            metadata["surfaces"]["options_page"],
+            serde_json::json!("runtime-open-options-page-window")
         );
         assert!(metadata["adaptations"]
             .as_array()
@@ -2219,7 +2336,7 @@ mod tests {
         );
         let html = b"<!-- lead --><html lang='en'><head data-value='>'><title>x</title></head>";
         let adapted = String::from_utf8(
-            inject_extension_page_preludes(html, ExtensionBridgePlan::default()).unwrap(),
+            inject_extension_page_preludes(html, ExtensionBridgePlan::default(), None).unwrap(),
         )
         .unwrap();
         assert!(adapted.contains(&format!(
