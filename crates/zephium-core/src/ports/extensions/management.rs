@@ -212,6 +212,7 @@ pub enum ExtensionManagementLimitation {
     Commands,
     SidePanel,
     ManagedStorage,
+    OptionsPage,
 }
 
 impl ExtensionManagementLimitation {

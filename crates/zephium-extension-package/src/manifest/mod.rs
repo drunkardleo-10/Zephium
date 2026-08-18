@@ -576,16 +576,9 @@ fn validate_known_unmodeled_resource(
     resources: &mut Vec<ExtensionManifestResource>,
 ) -> Result<(), ExtensionManifestAdmissionError> {
     match name {
-        "options_page" | "devtools_page" => {
+        "devtools_page" => {
             let source = value.as_str().ok_or_else(|| invalid(name))?;
             resources.push(bind_resource(binding, source, name)?);
-        }
-        "options_ui" => {
-            let object = value.as_object().ok_or_else(|| invalid(name))?;
-            if let Some(page) = object.get("page") {
-                let source = page.as_str().ok_or_else(|| invalid(name))?;
-                resources.push(bind_resource(binding, source, name)?);
-            }
         }
         "side_panel" => {
             let object = value.as_object().ok_or_else(|| invalid(name))?;

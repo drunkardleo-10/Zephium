@@ -23,6 +23,7 @@ const COMMANDS_DIGEST_DOMAIN: &[u8] = b"zephium:extension-commands:v1\0";
 const SIDE_PANEL_RESOURCE_DIGEST_DOMAIN: &[u8] = b"zephium:extension-side-panel-resource:v1\0";
 const MANAGED_STORAGE_RESOURCE_DIGEST_DOMAIN: &[u8] =
     b"zephium:extension-managed-storage-resource:v1\0";
+const OPTIONS_PAGE_DESCRIPTOR_DIGEST_DOMAIN: &[u8] = b"zephium:extension-options-page:v1\0";
 const MAX_COMMAND_NAME_BYTES: usize = 128;
 const MAX_COMMAND_DESCRIPTION_BYTES: usize = 512;
 const MAX_COMMAND_SHORTCUT_BYTES: usize = 64;
@@ -54,13 +55,80 @@ pub(super) fn parse_browser_declarations(
         binding,
         auxiliary_resources,
     )?;
+    let options_page_descriptor = parse_options_page(root, binding, auxiliary_resources)?;
 
     Ok(ExtensionManifestAdditionalDeclarations::new(
         minimum_chromium_version,
         commands,
         side_panel_resource,
         managed_storage_schema_resource,
-    ))
+    )
+    .with_options_page_descriptor(options_page_descriptor))
+}
+
+fn parse_options_page(
+    root: &mut Map<String, Value>,
+    binding: ExtensionReleaseTreeBinding<'_>,
+    auxiliary_resources: &mut Vec<ExtensionManifestResource>,
+) -> Result<Option<ExtensionManifestResourceDigest>, ExtensionManifestAdmissionError> {
+    let legacy = root.remove("options_page");
+    let modern = root.remove("options_ui");
+    let (source, open_in_tab, browser_style, schema_tag) = match (legacy, modern) {
+        (None, None) => return Ok(None),
+        (Some(_), Some(_)) => return Err(invalid("options_ui")),
+        (Some(value), None) => (
+            value
+                .as_str()
+                .ok_or_else(|| invalid("options_page"))?
+                .to_owned(),
+            false,
+            None,
+            1_u8,
+        ),
+        (None, Some(value)) => {
+            let mut object = into_object(value, "options_ui")?;
+            let source = object
+                .remove("page")
+                .ok_or_else(|| missing("options_ui.page"))?
+                .as_str()
+                .ok_or_else(|| invalid("options_ui.page"))?
+                .to_owned();
+            let open_in_tab = object
+                .remove("open_in_tab")
+                .map(|value| {
+                    value
+                        .as_bool()
+                        .ok_or_else(|| invalid("options_ui.open_in_tab"))
+                })
+                .transpose()?
+                .unwrap_or(false);
+            let browser_style = object
+                .remove("browser_style")
+                .map(|value| {
+                    value
+                        .as_bool()
+                        .ok_or_else(|| invalid("options_ui.browser_style"))
+                })
+                .transpose()?;
+            if !object.is_empty() {
+                return Err(invalid("options_ui"));
+            }
+            (source, open_in_tab, browser_style, 2_u8)
+        }
+    };
+    let resource = bind_resource(binding, &source, "options_ui")?;
+    let mut digest = Sha256::new();
+    digest.update(OPTIONS_PAGE_DESCRIPTOR_DIGEST_DOMAIN);
+    digest.update([schema_tag, u8::from(open_in_tab)]);
+    match browser_style {
+        Some(value) => digest.update([1, u8::from(value)]),
+        None => digest.update([0]),
+    }
+    resource.update_digest(&mut digest);
+    auxiliary_resources.push(resource);
+    Ok(Some(ExtensionManifestResourceDigest::from_bytes(
+        digest.finalize().into(),
+    )))
 }
 
 fn parse_minimum_chromium_version(

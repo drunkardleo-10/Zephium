@@ -324,6 +324,9 @@ fn compatibility(
             ExtensionManifestDeclaration::ManagedStorageSchema { .. } => {
                 ExtensionManagementLimitation::ManagedStorage
             }
+            ExtensionManifestDeclaration::OptionsPage { .. } => {
+                ExtensionManagementLimitation::OptionsPage
+            }
             ExtensionManifestDeclaration::UnmodeledAuthority(_) => return None,
         };
         limitations.push(limitation);

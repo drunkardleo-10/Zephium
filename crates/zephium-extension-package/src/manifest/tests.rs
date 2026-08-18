@@ -747,6 +747,40 @@ fn unknown_authority_is_preserved_blocking_and_never_defaulted_runnable() {
 }
 
 #[test]
+fn options_ui_is_typed_resource_bound_and_no_longer_unmodeled_authority() {
+    let fixture = make_fixture(
+        json!({
+            "manifest_version":3,"name":"X","version":"1",
+            "options_ui": {
+                "page": "options.html",
+                "open_in_tab": true,
+                "browser_style": false
+            }
+        }),
+        &[("options.html", b"<!doctype html><title>Options</title>")],
+        false,
+    );
+    let policy = CompletePolicy::new(ExtensionCompatibilityLevel::Compatible);
+    let admitted = admit_extension_manifest(fixture.binding(), &fixture.manifest, &policy).unwrap();
+    assert!(admitted.descriptor().declarations().unmodeled().is_empty());
+    assert!(admitted
+        .descriptor()
+        .compatibility()
+        .iter()
+        .any(|classification| matches!(
+            classification.declaration(),
+            ExtensionManifestDeclaration::OptionsPage { .. }
+        )));
+    assert_eq!(admitted.resources().auxiliary_resources().len(), 1);
+    assert_eq!(
+        admitted.resources().auxiliary_resources()[0]
+            .path()
+            .as_str(),
+        "options.html"
+    );
+}
+
+#[test]
 fn every_declaration_requires_an_explicit_product_policy_decision() {
     struct MissingBackgroundPolicy(ExtensionCompatibilityTargetId);
     impl ExtensionManifestCompatibilityPolicy for MissingBackgroundPolicy {

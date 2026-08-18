@@ -383,6 +383,9 @@ enum ManifestDeclarationReviewKey {
     ManagedStorageSchema {
         resource_sha256: String,
     },
+    OptionsPage {
+        descriptor_sha256: String,
+    },
     UnmodeledAuthority {
         name: String,
     },
@@ -949,6 +952,11 @@ fn manifest_declaration_review_key(
         ExtensionManifestDeclaration::ManagedStorageSchema { resource } => {
             ManifestDeclarationReviewKey::ManagedStorageSchema {
                 resource_sha256: lower_hex(resource.as_bytes()),
+            }
+        }
+        ExtensionManifestDeclaration::OptionsPage { descriptor } => {
+            ManifestDeclarationReviewKey::OptionsPage {
+                descriptor_sha256: lower_hex(descriptor.as_bytes()),
             }
         }
         ExtensionManifestDeclaration::UnmodeledAuthority(name) => {

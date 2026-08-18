@@ -74,5 +74,7 @@ export function compatibilityLimitationLabel(
       return "The extension side panel is limited";
     case "managed_storage":
       return "Administrator-managed extension storage is limited";
+    case "options_page":
+      return "Some extension settings-page behavior is limited";
   }
 }

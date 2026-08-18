@@ -1005,6 +1005,7 @@ pub struct ExtensionManifestAdditionalDeclarations {
     commands: Option<ExtensionCommandsDeclaration>,
     side_panel_resource: Option<ExtensionManifestResourceDigest>,
     managed_storage_schema_resource: Option<ExtensionManifestResourceDigest>,
+    options_page_descriptor: Option<ExtensionManifestResourceDigest>,
 }
 
 impl ExtensionManifestAdditionalDeclarations {
@@ -1019,7 +1020,16 @@ impl ExtensionManifestAdditionalDeclarations {
             commands,
             side_panel_resource,
             managed_storage_schema_resource,
+            options_page_descriptor: None,
         }
+    }
+
+    pub const fn with_options_page_descriptor(
+        mut self,
+        descriptor: Option<ExtensionManifestResourceDigest>,
+    ) -> Self {
+        self.options_page_descriptor = descriptor;
+        self
     }
 
     pub const fn minimum_chromium_version(self) -> Option<ExtensionMinimumChromiumVersion> {
@@ -1038,11 +1048,16 @@ impl ExtensionManifestAdditionalDeclarations {
         self.managed_storage_schema_resource
     }
 
+    pub const fn options_page_descriptor(self) -> Option<ExtensionManifestResourceDigest> {
+        self.options_page_descriptor
+    }
+
     const fn declaration_count(self) -> usize {
         self.minimum_chromium_version.is_some() as usize
             + self.commands.is_some() as usize
             + self.side_panel_resource.is_some() as usize
             + self.managed_storage_schema_resource.is_some() as usize
+            + self.options_page_descriptor.is_some() as usize
     }
 }
 
@@ -1445,6 +1460,9 @@ impl ExtensionManifestDeclarations {
         if let Some(resource) = self.additional.managed_storage_schema_resource {
             declarations.push(ExtensionManifestDeclaration::ManagedStorageSchema { resource });
         }
+        if let Some(descriptor) = self.additional.options_page_descriptor {
+            declarations.push(ExtensionManifestDeclaration::OptionsPage { descriptor });
+        }
         declarations.push(ExtensionManifestDeclaration::ExtensionPagesCsp);
         if self.execution.sandbox().is_some() {
             declarations.push(ExtensionManifestDeclaration::Sandbox);
@@ -1547,6 +1565,9 @@ pub enum ExtensionManifestDeclaration {
     ManagedStorageSchema {
         resource: ExtensionManifestResourceDigest,
     },
+    OptionsPage {
+        descriptor: ExtensionManifestResourceDigest,
+    },
     UnmodeledAuthority(ExtensionUnmodeledDeclarationName),
 }
 
@@ -1573,6 +1594,7 @@ impl ExtensionManifestDeclaration {
             | Self::Commands(_)
             | Self::SidePanel { .. }
             | Self::ManagedStorageSchema { .. } => None,
+            Self::OptionsPage { .. } => None,
         }
     }
 
@@ -1598,6 +1620,7 @@ impl ExtensionManifestDeclaration {
             Self::Commands(_) => 18,
             Self::SidePanel { .. } => 19,
             Self::ManagedStorageSchema { .. } => 20,
+            Self::OptionsPage { .. } => 21,
         }
     }
 
@@ -1630,6 +1653,7 @@ impl ExtensionManifestDeclaration {
             Self::SidePanel { resource } | Self::ManagedStorageSchema { resource } => {
                 digest.update(resource.as_bytes());
             }
+            Self::OptionsPage { descriptor } => digest.update(descriptor.as_bytes()),
             _ => {}
         }
     }
@@ -1677,6 +1701,9 @@ impl ExtensionManifestDeclaration {
                 Self::ManagedStorageSchema { resource: left },
                 Self::ManagedStorageSchema { resource: right },
             ) => left.cmp(right),
+            (Self::OptionsPage { descriptor: left }, Self::OptionsPage { descriptor: right }) => {
+                left.cmp(right)
+            }
             _ => self
                 .canonical_value()
                 .unwrap_or("")

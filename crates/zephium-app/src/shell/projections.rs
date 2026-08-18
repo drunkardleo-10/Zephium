@@ -684,6 +684,9 @@ fn extension_management_limitation_view(
         ExtensionManagementLimitation::ManagedStorage => {
             ExtensionManagementLimitationView::ManagedStorage
         }
+        ExtensionManagementLimitation::OptionsPage => {
+            ExtensionManagementLimitationView::OptionsPage
+        }
     }
 }
 
