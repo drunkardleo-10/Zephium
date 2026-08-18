@@ -21,6 +21,7 @@
   } from "../../../domain/extensions/permission-labels";
   import {
     adjacentExtensionCenterSection,
+    extensionProvenanceHost,
     extensionSourcePresentation,
     initialExtensionCenterSection,
     type ExtensionCenterSection,
@@ -484,6 +485,19 @@
                             >
                               {sourceLabel(entry.source, entry.verified_catalog_unix)}
                             </span>
+                            {#if entry.provenance !== null}
+                              <p class="mt-1 text-[10.5px] leading-4 text-muted">
+                                {entry.provenance.attribution} ·
+                                {entry.provenance.license_expression}
+                              </p>
+                              <p
+                                class="truncate text-[10px] leading-4 text-faint"
+                                title={entry.provenance.source_url}
+                              >
+                                Source: {extensionProvenanceHost(entry.provenance) ??
+                                  "Authenticated catalog"}
+                              </p>
+                            {/if}
                           </div>
                           <button
                             type="button"
@@ -608,6 +622,19 @@
                           >
                             {sourceLabel(candidate.source, candidate.verified_catalog_unix)}
                           </span>
+                          {#if candidate.provenance !== null}
+                            <p class="mt-1 text-[10.5px] leading-4 text-muted">
+                              {candidate.provenance.attribution} ·
+                              {candidate.provenance.license_expression}
+                            </p>
+                            <p
+                              class="truncate text-[10px] leading-4 text-faint"
+                              title={candidate.provenance.source_url}
+                            >
+                              Source: {extensionProvenanceHost(candidate.provenance) ??
+                                "Authenticated catalog"}
+                            </p>
+                          {/if}
                           {#if candidate.description !== null}
                             <p class="mt-1 text-[10.5px] leading-4 text-muted">
                               {candidate.description}

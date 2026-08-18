@@ -92,6 +92,12 @@ function management(value: number, profileId = "profile-a"): ExtensionManagement
         version: "2026.7.0",
         source: "zephium_verified",
         verified_catalog_unix: "1786924800",
+        provenance: {
+          source_url: "https://example.com/releases/bitwarden",
+          upstream_version: "2026.7.0",
+          license_expression: "GPL-3.0-only",
+          attribution: "Bitwarden contributors",
+        },
         runtime: "active",
         runtime_generation: "0000000000000001",
         grants: {

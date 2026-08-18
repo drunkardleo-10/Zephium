@@ -156,6 +156,7 @@ impl Shell {
                     verified_catalog_unix: entry
                         .verified_catalog_unix()
                         .map(|value| value.to_string()),
+                    provenance: entry.provenance().map(extension_management_provenance_view),
                     runtime,
                     runtime_generation,
                     grants,
@@ -190,6 +191,9 @@ impl Shell {
                 verified_catalog_unix: candidate
                     .verified_catalog_unix()
                     .map(|value| value.to_string()),
+                provenance: candidate
+                    .provenance()
+                    .map(extension_management_provenance_view),
                 required_api: candidate
                     .required_api()
                     .iter()
@@ -584,6 +588,17 @@ const fn extension_management_source_view(
             ExtensionManagementSourceView::ExternalCompatibility
         }
         ExtensionManagementSource::DeveloperLocal => ExtensionManagementSourceView::DeveloperLocal,
+    }
+}
+
+fn extension_management_provenance_view(
+    provenance: &ExtensionManagementProvenance,
+) -> ExtensionManagementProvenanceView {
+    ExtensionManagementProvenanceView {
+        source_url: provenance.source_url().to_owned(),
+        upstream_version: provenance.upstream_version().to_owned(),
+        license_expression: provenance.license_expression().to_owned(),
+        attribution: provenance.attribution().to_owned(),
     }
 }
 

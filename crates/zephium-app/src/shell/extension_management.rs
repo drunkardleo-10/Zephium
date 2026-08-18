@@ -848,6 +848,15 @@ mod state_tests {
             "1.0.0",
             ExtensionManagementSource::ZephiumVerified,
             Some(1),
+            Some(
+                zephium_core::ports::extensions::ExtensionManagementProvenance::new(
+                    "https://example.com/releases/fixture",
+                    "1.0.0",
+                    "MIT",
+                    "Example contributors",
+                )
+                .unwrap(),
+            ),
             ExtensionManagementRuntimeState::Disabled,
             ExtensionManagementGrantState::Uninitialized,
             ExtensionManagementCompatibility::Compatible,

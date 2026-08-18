@@ -94,6 +94,10 @@ pub struct BundledCurrentManagementManifests {
 pub struct BundledInstallCandidate {
     package: ExtensionPackageIdentity,
     catalog_created_unix: u64,
+    source_url: Box<str>,
+    upstream_version: Box<str>,
+    license_expression: Box<str>,
+    attribution: Box<str>,
     manifest: Arc<ExtensionManifestDescriptor>,
     presentation: BundledManagementManifest,
 }
@@ -107,6 +111,26 @@ impl BundledInstallCandidate {
     /// Returns the authenticated release-catalog creation timestamp.
     pub const fn catalog_created_unix(&self) -> u64 {
         self.catalog_created_unix
+    }
+
+    /// Returns the reviewed canonical upstream source reference.
+    pub fn source_url(&self) -> &str {
+        &self.source_url
+    }
+
+    /// Returns the exact reviewed upstream product version.
+    pub fn upstream_version(&self) -> &str {
+        &self.upstream_version
+    }
+
+    /// Returns the exact reviewed license expression.
+    pub fn license_expression(&self) -> &str {
+        &self.license_expression
+    }
+
+    /// Returns the reviewed human-readable upstream attribution.
+    pub fn attribution(&self) -> &str {
+        &self.attribution
     }
 
     /// Returns the freshly admitted manifest descriptor.
@@ -141,6 +165,15 @@ impl BundledInstallCandidate {
 pub struct BundledCurrentInstallCandidates {
     current: BundledCurrentCatalogSet,
     candidates: Box<[BundledInstallCandidate]>,
+}
+
+struct AuthenticatedInstallCandidatePackage {
+    identity: ExtensionPackageIdentity,
+    catalog_created_unix: u64,
+    source_url: Box<str>,
+    upstream_version: Box<str>,
+    license_expression: Box<str>,
+    attribution: Box<str>,
 }
 
 impl BundledCurrentInstallCandidates {
@@ -250,7 +283,9 @@ impl ExtensionRepository {
                             catalog
                                 .packages()
                                 .iter()
-                                .map(|package| (package.identity().clone(), created_unix))
+                                .map(|package| {
+                                    authenticated_candidate_package(package, created_unix)
+                                })
                                 .collect::<Vec<_>>()
                         })
                 }
@@ -262,7 +297,7 @@ impl ExtensionRepository {
                         catalog
                             .packages()
                             .iter()
-                            .map(|package| (package.identity().clone(), created_unix))
+                            .map(|package| authenticated_candidate_package(package, created_unix))
                             .collect::<Vec<_>>()
                     }),
             }
@@ -275,9 +310,9 @@ impl ExtensionRepository {
         };
 
         let mut installs = Vec::with_capacity(packages.len());
-        for (index, (package, _created_unix)) in packages.iter().enumerate() {
+        for (index, package) in packages.iter().enumerate() {
             let id = ExtensionInstallId::from(index as u128 + 1);
-            installs.push(ExtensionInstall::new(id, package.clone()));
+            installs.push(ExtensionInstall::new(id, package.identity.clone()));
         }
         let high_water = installs.last().map(ExtensionInstall::id);
         let synthetic = ExtensionInstallCatalog::from_persisted(
@@ -298,7 +333,7 @@ impl ExtensionRepository {
             ));
         }
         let mut candidates = Vec::with_capacity(packages.len());
-        for ((index, (package, catalog_created_unix)), presentation) in packages
+        for ((index, package), presentation) in packages
             .into_iter()
             .enumerate()
             .zip(presentations.into_vec())
@@ -309,14 +344,19 @@ impl ExtensionRepository {
                     BundledManifestBindingsError::CapacityExhausted,
                 ));
             };
-            if presentation.install_id() != id || binding.manifest().package() != &package {
+            if presentation.install_id() != id || binding.manifest().package() != &package.identity
+            {
                 return Err(BundledManagementManifestsError::Authentication(
                     BundledManifestBindingsError::InstallPackageMismatch,
                 ));
             }
             candidates.push(BundledInstallCandidate {
-                package,
-                catalog_created_unix,
+                package: package.identity,
+                catalog_created_unix: package.catalog_created_unix,
+                source_url: package.source_url,
+                upstream_version: package.upstream_version,
+                license_expression: package.license_expression,
+                attribution: package.attribution,
                 manifest: Arc::clone(binding.manifest_arc()),
                 presentation,
             });
@@ -412,6 +452,21 @@ impl ExtensionRepository {
             self.writer_seal();
         }
         BundledManagementManifestsError::Authentication(mapped)
+    }
+}
+
+fn authenticated_candidate_package(
+    package: &zephium_extension_package::ExtensionReleasePackage,
+    catalog_created_unix: u64,
+) -> AuthenticatedInstallCandidatePackage {
+    let provenance = package.provenance();
+    AuthenticatedInstallCandidatePackage {
+        identity: package.identity().clone(),
+        catalog_created_unix,
+        source_url: provenance.source_url().into(),
+        upstream_version: provenance.upstream_version().into(),
+        license_expression: provenance.license_expression().into(),
+        attribution: provenance.attribution().into(),
     }
 }
 

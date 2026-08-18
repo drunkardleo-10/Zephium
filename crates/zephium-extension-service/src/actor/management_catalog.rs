@@ -13,12 +13,15 @@ use zephium_core::ports::extensions::{
     ExtensionInstallCandidateEntry, ExtensionInstallCandidateSelector, ExtensionInstallSelector,
     ExtensionManagementCatalog, ExtensionManagementCatalogOutcome,
     ExtensionManagementCompatibility, ExtensionManagementEntry, ExtensionManagementGrantState,
-    ExtensionManagementLimitation, ExtensionManagementRuntimeState, ExtensionManagementSource,
+    ExtensionManagementLimitation, ExtensionManagementProvenance, ExtensionManagementRuntimeState,
+    ExtensionManagementSource,
 };
 use zephium_core::ports::store::{
     ExtensionGrantCohortLoadOutcome, ExtensionInstallCatalogLoadOutcome,
 };
-use zephium_extension_repository::{BundledManagementManifestsError, BundledManifestBindingsError};
+use zephium_extension_repository::{
+    BundledInstallCandidate, BundledManagementManifestsError, BundledManifestBindingsError,
+};
 use zephium_store::ExtensionServiceStoreCallOutcome;
 
 use super::WorkerStartupState;
@@ -148,6 +151,9 @@ pub(super) fn load(
         let Some((compatibility, limitations)) = compatibility(candidate.manifest_arc()) else {
             return ExtensionManagementCatalogOutcome::FailedClosed;
         };
+        let Some(provenance) = verified_provenance(candidate) else {
+            return ExtensionManagementCatalogOutcome::FailedClosed;
+        };
         let selector = ExtensionInstallSelector::new(
             profile,
             install.id(),
@@ -162,6 +168,7 @@ pub(super) fn load(
             candidate.version(),
             ExtensionManagementSource::ZephiumVerified,
             Some(candidate.catalog_created_unix()),
+            Some(provenance),
             runtime_state,
             grants,
             compatibility,
@@ -182,6 +189,9 @@ pub(super) fn load(
         let Some((compatibility, limitations)) = compatibility(candidate.manifest_arc()) else {
             return ExtensionManagementCatalogOutcome::FailedClosed;
         };
+        let Some(provenance) = verified_provenance(candidate) else {
+            return ExtensionManagementCatalogOutcome::FailedClosed;
+        };
         let declarations = candidate.manifest_arc().declarations();
         let selector = ExtensionInstallCandidateSelector::new(
             profile,
@@ -197,6 +207,7 @@ pub(super) fn load(
             candidate.version(),
             ExtensionManagementSource::ZephiumVerified,
             Some(candidate.catalog_created_unix()),
+            Some(provenance),
             declarations
                 .required_api()
                 .names()
@@ -245,6 +256,18 @@ pub(super) fn load(
         Ok(catalog) => ExtensionManagementCatalogOutcome::Loaded(catalog),
         Err(_) => ExtensionManagementCatalogOutcome::FailedClosed,
     }
+}
+
+fn verified_provenance(
+    candidate: &BundledInstallCandidate,
+) -> Option<ExtensionManagementProvenance> {
+    ExtensionManagementProvenance::new(
+        candidate.source_url(),
+        candidate.upstream_version(),
+        candidate.license_expression(),
+        candidate.attribution(),
+    )
+    .ok()
 }
 
 fn compatibility(

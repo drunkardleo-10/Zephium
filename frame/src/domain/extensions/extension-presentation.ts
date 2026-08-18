@@ -1,4 +1,7 @@
-import type { ExtensionManagementSourceView } from "../../shared/ipc/bindings";
+import type {
+  ExtensionManagementProvenanceView,
+  ExtensionManagementSourceView,
+} from "../../shared/ipc/bindings";
 
 export type ExtensionSourcePresentation = {
   label: string;
@@ -59,4 +62,16 @@ export function parseVerifiedCatalogDate(value: string | null): Date | null {
   if (!Number.isSafeInteger(seconds) || seconds <= 0 || String(seconds) !== value) return null;
   const date = new Date(seconds * 1_000);
   return Number.isNaN(date.getTime()) ? null : date;
+}
+
+export function extensionProvenanceHost(
+  provenance: ExtensionManagementProvenanceView | null,
+): string | null {
+  if (provenance === null) return null;
+  try {
+    const source = new URL(provenance.source_url);
+    return source.protocol === "https:" && source.hostname.length > 0 ? source.hostname : null;
+  } catch {
+    return null;
+  }
 }

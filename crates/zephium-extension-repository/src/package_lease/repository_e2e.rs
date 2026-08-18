@@ -1723,6 +1723,13 @@ fn manifest_binding_bootstrap_is_complete_nominal_read_only_and_fail_closed() {
         panic!("one authenticated install candidate expected");
     };
     assert_eq!(candidate.catalog_created_unix(), 2);
+    assert_eq!(
+        candidate.source_url(),
+        "https://example.com/releases/v1/source"
+    );
+    assert_eq!(candidate.upstream_version(), "1.0.0");
+    assert_eq!(candidate.license_expression(), "MPL-2.0");
+    assert_eq!(candidate.attribution(), "Fixture contributors");
     assert_eq!(candidate.package(), active_eligibility.package());
     assert_eq!(
         candidate.manifest_arc().as_ref(),

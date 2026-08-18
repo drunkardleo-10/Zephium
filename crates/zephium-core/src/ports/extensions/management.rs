@@ -4,6 +4,8 @@ use std::error::Error;
 use std::fmt;
 use std::mem::size_of;
 
+use url::{Host, Url};
+
 use crate::extensions::{
     ApiPermissionName, ExtensionCompatibilityLevel, ExtensionGrantRevision,
     ExtensionInstallCatalogRevision, ExtensionRuntimeGeneration, MAX_EXTENSION_API_PERMISSIONS,
@@ -18,6 +20,12 @@ use super::{ExtensionInstallCandidateSelector, ExtensionInstallSelector};
 
 /// Maximum bytes in one browser-rendered extension metadata field.
 pub const MAX_EXTENSION_MANAGEMENT_DISPLAY_TEXT_BYTES: usize = 4 * 1024;
+/// Maximum canonical upstream source URL projected into management UI.
+pub const MAX_EXTENSION_MANAGEMENT_SOURCE_URL_BYTES: usize = 2 * 1024;
+/// Maximum exact upstream version text retained beside manifest metadata.
+pub const MAX_EXTENSION_MANAGEMENT_UPSTREAM_VERSION_BYTES: usize = 128;
+/// Maximum exact SPDX/project license expression shown in management UI.
+pub const MAX_EXTENSION_MANAGEMENT_LICENSE_EXPRESSION_BYTES: usize = 256;
 /// Maximum distinct reviewed degradation disclosures retained for one row.
 ///
 /// Every API permission can retain its own label; all other declaration kinds
@@ -28,10 +36,17 @@ pub const MAX_EXTENSION_MANAGEMENT_CATALOG_RETAINED_BYTES: usize = size_of::<
     ExtensionManagementCatalog,
 >()
     + MAX_EXTENSION_INSTALLS_PER_PROFILE
-        * (size_of::<ExtensionManagementEntry>() + 4 * MAX_EXTENSION_MANAGEMENT_DISPLAY_TEXT_BYTES)
+        * (size_of::<ExtensionManagementEntry>()
+            + 5 * MAX_EXTENSION_MANAGEMENT_DISPLAY_TEXT_BYTES
+            + MAX_EXTENSION_MANAGEMENT_SOURCE_URL_BYTES
+            + MAX_EXTENSION_MANAGEMENT_UPSTREAM_VERSION_BYTES
+            + MAX_EXTENSION_MANAGEMENT_LICENSE_EXPRESSION_BYTES)
     + MAX_EXTENSION_INSTALLS_PER_PROFILE
         * (size_of::<ExtensionInstallCandidateEntry>()
             + 4 * MAX_EXTENSION_MANAGEMENT_DISPLAY_TEXT_BYTES
+            + MAX_EXTENSION_MANAGEMENT_SOURCE_URL_BYTES
+            + MAX_EXTENSION_MANAGEMENT_UPSTREAM_VERSION_BYTES
+            + MAX_EXTENSION_MANAGEMENT_LICENSE_EXPRESSION_BYTES
             + MAX_EXTENSION_API_PERMISSIONS * MAX_EXTENSION_API_PERMISSION_NAME_BYTES
             + MAX_EXTENSION_HOST_GRANTS * MAX_MATCH_PATTERN_BYTES)
     + 2 * MAX_EXTENSION_INSTALLS_PER_PROFILE
@@ -72,6 +87,85 @@ pub enum ExtensionManagementSource {
     ExternalCompatibility,
     /// Explicit local developer-mode package with no production update promise.
     DeveloperLocal,
+}
+
+/// Bounded, browser-authenticated upstream identity for management UI.
+///
+/// This is inert display/provenance data, not a download URL or publisher
+/// authority. Opening a source page remains a separate privileged browser
+/// action and must never treat this value as an executable navigation request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExtensionManagementProvenance {
+    source_url: Box<str>,
+    upstream_version: Box<str>,
+    license_expression: Box<str>,
+    attribution: Box<str>,
+    retained_bytes: usize,
+}
+
+impl ExtensionManagementProvenance {
+    pub fn new(
+        source_url: impl Into<Box<str>>,
+        upstream_version: impl Into<Box<str>>,
+        license_expression: impl Into<Box<str>>,
+        attribution: impl Into<Box<str>>,
+    ) -> Result<Self, ExtensionManagementProjectionError> {
+        let source_url = source_url.into();
+        let upstream_version = upstream_version.into();
+        let license_expression = license_expression.into();
+        let attribution = attribution.into();
+        if !valid_source_url(&source_url)
+            || !valid_ascii_display_text(
+                &upstream_version,
+                MAX_EXTENSION_MANAGEMENT_UPSTREAM_VERSION_BYTES,
+            )
+            || !valid_ascii_display_text(
+                &license_expression,
+                MAX_EXTENSION_MANAGEMENT_LICENSE_EXPRESSION_BYTES,
+            )
+            || validate_display_text(
+                &attribution,
+                MAX_EXTENSION_MANAGEMENT_DISPLAY_TEXT_BYTES,
+                true,
+            )
+            .is_err()
+        {
+            return Err(ExtensionManagementProjectionError::InvalidProvenance);
+        }
+        let retained_bytes = source_url
+            .len()
+            .checked_add(upstream_version.len())
+            .and_then(|bytes| bytes.checked_add(license_expression.len()))
+            .and_then(|bytes| bytes.checked_add(attribution.len()))
+            .ok_or(ExtensionManagementProjectionError::AccountingOverflow)?;
+        Ok(Self {
+            source_url,
+            upstream_version,
+            license_expression,
+            attribution,
+            retained_bytes,
+        })
+    }
+
+    pub fn source_url(&self) -> &str {
+        &self.source_url
+    }
+
+    pub fn upstream_version(&self) -> &str {
+        &self.upstream_version
+    }
+
+    pub fn license_expression(&self) -> &str {
+        &self.license_expression
+    }
+
+    pub fn attribution(&self) -> &str {
+        &self.attribution
+    }
+
+    const fn retained_bytes(&self) -> usize {
+        self.retained_bytes
+    }
 }
 
 impl ExtensionManagementCompatibility {
@@ -177,6 +271,7 @@ pub struct ExtensionManagementEntry {
     version: Box<str>,
     source: ExtensionManagementSource,
     verified_catalog_unix: Option<u64>,
+    provenance: Option<ExtensionManagementProvenance>,
     runtime: ExtensionManagementRuntimeState,
     grants: ExtensionManagementGrantState,
     compatibility: ExtensionManagementCompatibility,
@@ -199,6 +294,7 @@ impl ExtensionManagementEntry {
         version: impl Into<Box<str>>,
         source: ExtensionManagementSource,
         verified_catalog_unix: Option<u64>,
+        provenance: Option<ExtensionManagementProvenance>,
         runtime: ExtensionManagementRuntimeState,
         grants: ExtensionManagementGrantState,
         compatibility: ExtensionManagementCompatibility,
@@ -211,7 +307,7 @@ impl ExtensionManagementEntry {
         if version.is_empty() || !version.is_ascii() {
             return Err(ExtensionManagementProjectionError::InvalidDisplayText);
         }
-        validate_source(source, verified_catalog_unix)?;
+        validate_source(source, verified_catalog_unix, provenance.as_ref())?;
         if let Some(description) = description.as_deref() {
             validate_display_text(description, 132, false)?;
         }
@@ -225,6 +321,13 @@ impl ExtensionManagementEntry {
                 bytes.checked_add(description.as_ref().map_or(0, |value| value.len()))
             })
             .and_then(|bytes| bytes.checked_add(author.as_ref().map_or(0, |value| value.len())))
+            .and_then(|bytes| {
+                bytes.checked_add(
+                    provenance
+                        .as_ref()
+                        .map_or(0, |value| value.retained_bytes()),
+                )
+            })
             .ok_or(ExtensionManagementProjectionError::AccountingOverflow)?;
         let limitations = canonical_limitations(compatibility, limitations)?;
         let limitation_bytes = limitations
@@ -251,6 +354,7 @@ impl ExtensionManagementEntry {
             version,
             source,
             verified_catalog_unix,
+            provenance,
             runtime,
             grants,
             compatibility,
@@ -287,6 +391,10 @@ impl ExtensionManagementEntry {
         self.verified_catalog_unix
     }
 
+    pub const fn provenance(&self) -> Option<&ExtensionManagementProvenance> {
+        self.provenance.as_ref()
+    }
+
     pub const fn runtime(&self) -> ExtensionManagementRuntimeState {
         self.runtime
     }
@@ -319,6 +427,7 @@ pub struct ExtensionInstallCandidateEntry {
     version: Box<str>,
     source: ExtensionManagementSource,
     verified_catalog_unix: Option<u64>,
+    provenance: Option<ExtensionManagementProvenance>,
     required_api: Box<[Box<str>]>,
     required_hosts: Box<[Box<str>]>,
     optional_api: Box<[Box<str>]>,
@@ -340,6 +449,7 @@ impl ExtensionInstallCandidateEntry {
         version: impl Into<Box<str>>,
         source: ExtensionManagementSource,
         verified_catalog_unix: Option<u64>,
+        provenance: Option<ExtensionManagementProvenance>,
         required_api: Vec<Box<str>>,
         required_hosts: Vec<Box<str>>,
         optional_api: Vec<Box<str>>,
@@ -354,7 +464,7 @@ impl ExtensionInstallCandidateEntry {
         if version.is_empty() || !version.is_ascii() {
             return Err(ExtensionManagementProjectionError::InvalidDisplayText);
         }
-        validate_source(source, verified_catalog_unix)?;
+        validate_source(source, verified_catalog_unix, provenance.as_ref())?;
         if let Some(description) = description.as_deref() {
             validate_display_text(description, 132, false)?;
         }
@@ -400,6 +510,13 @@ impl ExtensionInstallCandidateEntry {
             })
             .and_then(|bytes| bytes.checked_add(author.as_ref().map_or(0, |value| value.len())))
             .and_then(|bytes| {
+                bytes.checked_add(
+                    provenance
+                        .as_ref()
+                        .map_or(0, |value| value.retained_bytes()),
+                )
+            })
+            .and_then(|bytes| {
                 required_api
                     .iter()
                     .chain(required_hosts.iter())
@@ -444,6 +561,7 @@ impl ExtensionInstallCandidateEntry {
             version,
             source,
             verified_catalog_unix,
+            provenance,
             required_api: required_api.into_boxed_slice(),
             required_hosts: required_hosts.into_boxed_slice(),
             optional_api: optional_api.into_boxed_slice(),
@@ -481,6 +599,10 @@ impl ExtensionInstallCandidateEntry {
 
     pub const fn verified_catalog_unix(&self) -> Option<u64> {
         self.verified_catalog_unix
+    }
+
+    pub const fn provenance(&self) -> Option<&ExtensionManagementProvenance> {
+        self.provenance.as_ref()
     }
 
     pub fn required_api(&self) -> &[Box<str>] {
@@ -555,13 +677,18 @@ fn canonical_limitations(
 fn validate_source(
     source: ExtensionManagementSource,
     verified_catalog_unix: Option<u64>,
+    provenance: Option<&ExtensionManagementProvenance>,
 ) -> Result<(), ExtensionManagementProjectionError> {
     let valid = match source {
         ExtensionManagementSource::ZephiumVerified => {
-            verified_catalog_unix.is_some_and(|value| value > 0)
+            verified_catalog_unix.is_some_and(|value| value > 0) && provenance.is_some()
         }
-        ExtensionManagementSource::ExternalCompatibility
-        | ExtensionManagementSource::DeveloperLocal => verified_catalog_unix.is_none(),
+        ExtensionManagementSource::ExternalCompatibility => {
+            verified_catalog_unix.is_none() && provenance.is_some()
+        }
+        ExtensionManagementSource::DeveloperLocal => {
+            verified_catalog_unix.is_none() && provenance.is_none()
+        }
     };
     if !valid {
         return Err(ExtensionManagementProjectionError::InvalidSource);
@@ -717,6 +844,7 @@ pub enum ExtensionManagementProjectionError {
     InvalidPermission,
     InvalidCompatibility,
     InvalidSource,
+    InvalidProvenance,
     InvalidDisplayText,
     AccountingOverflow,
     RetainedBytesExceeded,
@@ -733,6 +861,7 @@ impl fmt::Display for ExtensionManagementProjectionError {
             Self::InvalidPermission => "invalid extension install permission",
             Self::InvalidCompatibility => "invalid extension compatibility disclosure",
             Self::InvalidSource => "invalid extension management source",
+            Self::InvalidProvenance => "invalid extension management provenance",
             Self::InvalidDisplayText => "invalid extension management display text",
             Self::AccountingOverflow => "extension management accounting overflow",
             Self::RetainedBytesExceeded => "extension management retained-byte bound exceeded",
@@ -761,6 +890,34 @@ fn has_identity_display_scalar(value: &str) -> bool {
     value
         .chars()
         .any(|character| character.is_alphanumeric() && !is_default_ignorable(character))
+}
+
+fn valid_ascii_display_text(value: &str, max_bytes: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= max_bytes
+        && value.is_ascii()
+        && value.bytes().all(|byte| matches!(byte, b' '..=b'~'))
+}
+
+fn valid_source_url(value: &str) -> bool {
+    if value.is_empty()
+        || value.len() > MAX_EXTENSION_MANAGEMENT_SOURCE_URL_BYTES
+        || !value.is_ascii()
+    {
+        return false;
+    }
+    let Ok(parsed) = Url::parse(value) else {
+        return false;
+    };
+    parsed.as_str() == value
+        && parsed.scheme() == "https"
+        && parsed.username().is_empty()
+        && parsed.password().is_none()
+        && parsed.port().is_none()
+        && matches!(parsed.host(), Some(Host::Domain(_)))
+        && parsed.query().is_none()
+        && parsed.fragment().is_none()
+        && parsed.path() != "/"
 }
 
 fn is_default_ignorable(character: char) -> bool {
@@ -819,6 +976,16 @@ mod tests {
         )
     }
 
+    fn provenance() -> ExtensionManagementProvenance {
+        ExtensionManagementProvenance::new(
+            "https://example.com/releases/fixture",
+            "1.0.0",
+            "MIT",
+            "Example contributors",
+        )
+        .unwrap()
+    }
+
     fn entry(profile: ProfileId, install: u128) -> ExtensionManagementEntry {
         ExtensionManagementEntry::new(
             selector(profile, install),
@@ -828,6 +995,7 @@ mod tests {
             "1.0.0",
             ExtensionManagementSource::ZephiumVerified,
             Some(1),
+            Some(provenance()),
             ExtensionManagementRuntimeState::PendingActivation,
             ExtensionManagementGrantState::Uninitialized,
             ExtensionManagementCompatibility::Compatible,
@@ -863,6 +1031,7 @@ mod tests {
             "1.0.0",
             ExtensionManagementSource::ZephiumVerified,
             Some(1),
+            Some(provenance()),
             required_api,
             required_hosts,
             Vec::new(),
@@ -913,6 +1082,7 @@ mod tests {
                     "1.0.0",
                     ExtensionManagementSource::ZephiumVerified,
                     Some(1),
+                    Some(provenance()),
                     ExtensionManagementRuntimeState::Disabled,
                     ExtensionManagementGrantState::Uninitialized,
                     ExtensionManagementCompatibility::Compatible,
@@ -950,6 +1120,8 @@ mod tests {
         ] {
             let verified_catalog_unix =
                 matches!(source, ExtensionManagementSource::ZephiumVerified).then_some(1);
+            let provenance =
+                (!matches!(source, ExtensionManagementSource::DeveloperLocal)).then(provenance);
             let entry = ExtensionManagementEntry::new(
                 selector(profile, install),
                 "Fixture",
@@ -958,6 +1130,7 @@ mod tests {
                 "1.0.0",
                 source,
                 verified_catalog_unix,
+                provenance,
                 ExtensionManagementRuntimeState::Disabled,
                 ExtensionManagementGrantState::Uninitialized,
                 ExtensionManagementCompatibility::Compatible,
@@ -971,11 +1144,23 @@ mod tests {
                 ExtensionManagementCompatibility::Compatible
             );
         }
-        for (source, verified_catalog_unix) in [
-            (ExtensionManagementSource::ZephiumVerified, None),
-            (ExtensionManagementSource::ZephiumVerified, Some(0)),
-            (ExtensionManagementSource::ExternalCompatibility, Some(1)),
-            (ExtensionManagementSource::DeveloperLocal, Some(1)),
+        for (source, verified_catalog_unix, provenance) in [
+            (ExtensionManagementSource::ZephiumVerified, None, None),
+            (
+                ExtensionManagementSource::ZephiumVerified,
+                Some(0),
+                Some(provenance()),
+            ),
+            (
+                ExtensionManagementSource::ExternalCompatibility,
+                Some(1),
+                Some(provenance()),
+            ),
+            (
+                ExtensionManagementSource::DeveloperLocal,
+                None,
+                Some(provenance()),
+            ),
         ] {
             assert!(matches!(
                 ExtensionManagementEntry::new(
@@ -986,6 +1171,7 @@ mod tests {
                     "1.0.0",
                     source,
                     verified_catalog_unix,
+                    provenance,
                     ExtensionManagementRuntimeState::Disabled,
                     ExtensionManagementGrantState::Uninitialized,
                     ExtensionManagementCompatibility::Compatible,
@@ -993,6 +1179,52 @@ mod tests {
                 ),
                 Err(ExtensionManagementProjectionError::InvalidSource)
             ));
+        }
+    }
+
+    #[test]
+    fn provenance_is_canonical_bounded_and_inert() {
+        let provenance = provenance();
+        assert_eq!(
+            provenance.source_url(),
+            "https://example.com/releases/fixture"
+        );
+        assert_eq!(provenance.upstream_version(), "1.0.0");
+        assert_eq!(provenance.license_expression(), "MIT");
+        assert_eq!(provenance.attribution(), "Example contributors");
+
+        for source_url in [
+            "http://example.com/releases/fixture",
+            "https://user@example.com/releases/fixture",
+            "https://example.com:443/releases/fixture",
+            "https://example.com/",
+            "https://example.com/releases/fixture?mutable=1",
+            "https://example.com/releases/fixture#fragment",
+        ] {
+            assert_eq!(
+                ExtensionManagementProvenance::new(
+                    source_url,
+                    "1.0.0",
+                    "MIT",
+                    "Example contributors",
+                ),
+                Err(ExtensionManagementProjectionError::InvalidProvenance)
+            );
+        }
+        for (version, license, attribution) in [
+            ("1.0.0\nforged", "MIT", "Example contributors"),
+            ("1.0.0", "MIT\nGPL-3.0", "Example contributors"),
+            ("1.0.0", "MIT", "Example\u{202e}txt"),
+        ] {
+            assert_eq!(
+                ExtensionManagementProvenance::new(
+                    "https://example.com/releases/fixture",
+                    version,
+                    license,
+                    attribution,
+                ),
+                Err(ExtensionManagementProjectionError::InvalidProvenance)
+            );
         }
     }
 
@@ -1007,6 +1239,7 @@ mod tests {
             "1.0.0",
             ExtensionManagementSource::ExternalCompatibility,
             None,
+            Some(provenance()),
             ExtensionManagementRuntimeState::Disabled,
             ExtensionManagementGrantState::Uninitialized,
             ExtensionManagementCompatibility::Degraded,
@@ -1047,6 +1280,7 @@ mod tests {
                     None,
                     "1.0.0",
                     ExtensionManagementSource::DeveloperLocal,
+                    None,
                     None,
                     ExtensionManagementRuntimeState::Disabled,
                     ExtensionManagementGrantState::Uninitialized,
@@ -1102,6 +1336,7 @@ mod tests {
             "1.0.0",
             ExtensionManagementSource::ExternalCompatibility,
             None,
+            Some(provenance()),
             vec!["storage".into()],
             vec!["https://required.example/*".into()],
             vec!["tabs".into(), "notifications".into()],
@@ -1141,6 +1376,7 @@ mod tests {
                 "1.0.0",
                 ExtensionManagementSource::ExternalCompatibility,
                 None,
+                Some(provenance()),
                 vec!["storage".into(), "storage".into()],
                 Vec::new(),
                 Vec::new(),
@@ -1160,6 +1396,7 @@ mod tests {
                 None,
                 "1.0.0",
                 ExtensionManagementSource::DeveloperLocal,
+                None,
                 None,
                 vec!["storage".into()],
                 Vec::new(),

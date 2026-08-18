@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   adjacentExtensionCenterSection,
+  extensionProvenanceHost,
   extensionSourcePresentation,
   initialExtensionCenterSection,
   parseVerifiedCatalogDate,
@@ -42,5 +43,22 @@ describe("extension center section selection", () => {
   it("moves between the two currently actionable sections", () => {
     expect(adjacentExtensionCenterSection("installed")).toBe("verified");
     expect(adjacentExtensionCenterSection("verified")).toBe("installed");
+  });
+});
+
+describe("extension provenance presentation", () => {
+  it("projects only an HTTPS hostname", () => {
+    const provenance = {
+      source_url: "https://github.com/philc/vimium/tree/revision",
+      upstream_version: "2.4.2",
+      license_expression: "MIT",
+      attribution: "Vimium contributors",
+    };
+    expect(extensionProvenanceHost(provenance)).toBe("github.com");
+    expect(
+      extensionProvenanceHost({ ...provenance, source_url: "http://example.com/release" }),
+    ).toBe(null);
+    expect(extensionProvenanceHost({ ...provenance, source_url: "not a URL" })).toBeNull();
+    expect(extensionProvenanceHost(null)).toBeNull();
   });
 });

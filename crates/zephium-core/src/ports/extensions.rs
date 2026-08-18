@@ -23,9 +23,11 @@ pub use distribution::{
 pub use management::{
     ExtensionInstallCandidateEntry, ExtensionManagementCatalog, ExtensionManagementCompatibility,
     ExtensionManagementEntry, ExtensionManagementGrantState, ExtensionManagementLimitation,
-    ExtensionManagementProjectionError, ExtensionManagementRuntimeState, ExtensionManagementSource,
+    ExtensionManagementProjectionError, ExtensionManagementProvenance,
+    ExtensionManagementRuntimeState, ExtensionManagementSource,
     MAX_EXTENSION_MANAGEMENT_CATALOG_RETAINED_BYTES, MAX_EXTENSION_MANAGEMENT_DISPLAY_TEXT_BYTES,
-    MAX_EXTENSION_MANAGEMENT_LIMITATIONS,
+    MAX_EXTENSION_MANAGEMENT_LICENSE_EXPRESSION_BYTES, MAX_EXTENSION_MANAGEMENT_LIMITATIONS,
+    MAX_EXTENSION_MANAGEMENT_SOURCE_URL_BYTES, MAX_EXTENSION_MANAGEMENT_UPSTREAM_VERSION_BYTES,
 };
 pub use provisioning::{
     acquired_runtime_selections_are_canonical, ExtensionAcquiredCatalogActivationCallback,

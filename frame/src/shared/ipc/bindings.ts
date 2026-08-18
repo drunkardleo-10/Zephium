@@ -356,6 +356,7 @@ export type ExtensionInstallCandidateView = {
 	source: ExtensionManagementSourceView,
 	/**  Decimal Unix seconds of the authenticated Verified catalog release. */
 	verified_catalog_unix: string | null,
+	provenance: ExtensionManagementProvenanceView | null,
 	required_api: string[],
 	required_hosts: string[],
 	/**
@@ -398,6 +399,7 @@ export type ExtensionManagementEntryView = {
 	source: ExtensionManagementSourceView,
 	/**  Decimal Unix seconds of the authenticated Verified catalog release. */
 	verified_catalog_unix: string | null,
+	provenance: ExtensionManagementProvenanceView | null,
 	runtime: ExtensionManagementRuntimeView,
 	/**  Present only when `runtime` is `active`. */
 	runtime_generation: string | null,
@@ -421,6 +423,14 @@ export type ExtensionManagementLimitationView = { type: "api_permission"; name: 
 
 /**  Settlement of the focused profile's lazy installed-extension projection. */
 export type ExtensionManagementPhase = "loading" | "ready" | "unavailable" | "rejected" | "failed_closed";
+
+/**  Browser-authenticated, inert upstream identity for extension management UI. */
+export type ExtensionManagementProvenanceView = {
+	source_url: string,
+	upstream_version: string,
+	license_expression: string,
+	attribution: string,
+};
 
 /**  Process-local regular-runtime state for one installed extension. */
 export type ExtensionManagementRuntimeView = "disabled" | "pending_activation" | "active";

@@ -32,6 +32,15 @@ fn extension_management_catalog(
         "1.0.0",
         zephium_core::ports::extensions::ExtensionManagementSource::ZephiumVerified,
         Some(1),
+        Some(
+            zephium_core::ports::extensions::ExtensionManagementProvenance::new(
+                "https://example.com/releases/fixture",
+                "1.0.0",
+                "MIT",
+                "Example contributors",
+            )
+            .unwrap(),
+        ),
         runtime,
         zephium_core::ports::extensions::ExtensionManagementGrantState::Uninitialized,
         zephium_core::ports::extensions::ExtensionManagementCompatibility::Compatible,
@@ -92,6 +101,15 @@ fn extension_install_candidate_catalog(
         "1.0.0",
         zephium_core::ports::extensions::ExtensionManagementSource::ExternalCompatibility,
         None,
+        Some(
+            zephium_core::ports::extensions::ExtensionManagementProvenance::new(
+                "https://example.com/store/fixture",
+                "1.0.0",
+                "MIT",
+                "External publisher",
+            )
+            .unwrap(),
+        ),
         vec!["storage".into(), "webRequest".into()],
         vec!["<all_urls>".into()],
         vec!["notifications".into(), "tabs".into()],
@@ -677,6 +695,13 @@ fn extension_install_uses_only_the_retained_authenticated_candidate() {
         zephium_ipc::ExtensionManagementSourceView::ExternalCompatibility
     );
     assert_eq!(ready.candidates[0].verified_catalog_unix, None);
+    assert_eq!(
+        ready.candidates[0]
+            .provenance
+            .as_ref()
+            .map(|value| value.source_url.as_str()),
+        Some("https://example.com/store/fixture")
+    );
     assert!(ready.candidates[0].supports_file_access);
     assert_eq!(ready.candidates[0].required_api, ["storage", "webRequest"]);
     assert_eq!(ready.candidates[0].required_hosts, ["<all_urls>"]);

@@ -131,6 +131,15 @@ pub enum ExtensionManagementSourceView {
     DeveloperLocal,
 }
 
+/// Browser-authenticated, inert upstream identity for extension management UI.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct ExtensionManagementProvenanceView {
+    pub source_url: String,
+    pub upstream_version: String,
+    pub license_expression: String,
+    pub attribution: String,
+}
+
 /// One browser-owned explanation for a reviewed platform degradation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -175,6 +184,7 @@ pub struct ExtensionManagementEntryView {
     pub source: ExtensionManagementSourceView,
     /// Decimal Unix seconds of the authenticated Verified catalog release.
     pub verified_catalog_unix: Option<String>,
+    pub provenance: Option<ExtensionManagementProvenanceView>,
     pub runtime: ExtensionManagementRuntimeView,
     /// Present only when `runtime` is `active`.
     pub runtime_generation: Option<String>,
@@ -197,6 +207,7 @@ pub struct ExtensionInstallCandidateView {
     pub source: ExtensionManagementSourceView,
     /// Decimal Unix seconds of the authenticated Verified catalog release.
     pub verified_catalog_unix: Option<String>,
+    pub provenance: Option<ExtensionManagementProvenanceView>,
     pub required_api: Vec<String>,
     pub required_hosts: Vec<String>,
     /// Canonically ordered optional API grants. The frontend returns only

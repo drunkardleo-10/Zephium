@@ -113,6 +113,12 @@ fn actor_provisions_acquired_package_from_empty_repository_then_installs_and_run
         ExtensionManagementSource::ZephiumVerified
     );
     assert_eq!(candidate.verified_catalog_unix(), Some(2));
+    let provenance = candidate.provenance().unwrap();
+    assert_eq!(
+        provenance.source_url(),
+        "https://example.com/releases/v1/acquired-fixture.crx"
+    );
+    assert_eq!(provenance.license_expression(), "MPL-2.0");
 
     let installed = ExtensionServiceLifecycle::install_until(
         &mut owner,
@@ -591,6 +597,13 @@ fn actor_installs_authenticated_candidate_atomically_then_activates_it() {
         ExtensionManagementSource::ZephiumVerified
     );
     assert_eq!(candidate.verified_catalog_unix(), Some(2));
+    let provenance = candidate.provenance().unwrap();
+    #[cfg(zephium_internal_acquired_repository_e2e)]
+    let expected_source_url = "https://example.com/releases/v1/acquired-fixture.crx";
+    #[cfg(not(zephium_internal_acquired_repository_e2e))]
+    let expected_source_url = "https://example.com/releases/v1/source";
+    assert_eq!(provenance.source_url(), expected_source_url);
+    assert_eq!(provenance.license_expression(), "MPL-2.0");
     assert!(!candidate.supports_file_access());
     assert!(candidate
         .required_api()
