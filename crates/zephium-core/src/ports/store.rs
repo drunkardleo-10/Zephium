@@ -304,6 +304,30 @@ pub enum ExtensionInstallProvisionOutcome {
     Failed,
 }
 
+/// Atomic settlement for one authenticated package replacement and its
+/// package-bound grant root.
+///
+/// The caller must retire every native context before admission. Store then
+/// compares catalog/install/grant revisions, verifies both manifests, carries
+/// forward only still-declared grants, and advances all three durable
+/// revisions in one SQLite transaction.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ExtensionInstallUpdateOutcome {
+    Applied(ExtensionGrantMutationApplied),
+    Conflict(ExtensionGrantConflict),
+    NotRegistered,
+    DegradedProfile,
+    Uninitialized,
+    /// The replacement adds required API or host authority that the existing
+    /// grant root does not cover. No durable state changed.
+    AdditionalConsentRequired,
+    Invalid,
+    RevisionExhausted,
+    RuntimeOwnershipConflict,
+    OutcomeUnknown,
+    Failed,
+}
+
 /// Bounded grant write payload. Initialization persists a complete selected
 /// grant set in one transaction; later settings changes remain per-install
 /// CAS operations.

@@ -379,6 +379,12 @@ pub(super) struct RetiredContexts {
     private: bool,
 }
 
+impl RetiredContexts {
+    pub(super) const fn is_empty(self) -> bool {
+        !self.regular && !self.private
+    }
+}
+
 pub(super) fn retire_all_contexts(
     startup: &mut WorkerStartupState,
     runtime: &mut RuntimeCoordinator,

@@ -299,6 +299,28 @@ pub(crate) fn current_catalog_set_projection(
     let Some(identity) = runtime._state.current_catalog_set_id else {
         return Ok(None);
     };
+    catalog_set_projection(runtime, identity, build_in_progress).map(Some)
+}
+
+pub(crate) fn previous_catalog_set_projection(
+    runtime: &MaterializationRuntime,
+) -> Result<Option<CurrentCatalogSetProjection>, SnapshotLoadError> {
+    let build_in_progress = validated_resumable_build_in_progress(runtime)?;
+    let Some(identity) = runtime._state.previous_catalog_set_id else {
+        return Ok(None);
+    };
+    let projection = catalog_set_projection(runtime, identity, build_in_progress)?;
+    if projection.role() != VerifiedCatalogRole::Rollback {
+        return Err(SnapshotLoadError::WrongRole);
+    }
+    Ok(Some(projection))
+}
+
+fn catalog_set_projection(
+    runtime: &MaterializationRuntime,
+    identity: Digest32,
+    build_in_progress: bool,
+) -> Result<CurrentCatalogSetProjection, SnapshotLoadError> {
     let expected = runtime
         ._catalog_sets
         .get(&identity)
@@ -322,7 +344,7 @@ pub(crate) fn current_catalog_set_projection(
         ProductBundledCatalogGenerationRole::Active => VerifiedCatalogRole::Active,
         ProductBundledCatalogGenerationRole::Rollback => VerifiedCatalogRole::Rollback,
     };
-    Ok(Some(CurrentCatalogSetProjection {
+    Ok(CurrentCatalogSetProjection {
         identity,
         role,
         record,
@@ -332,7 +354,7 @@ pub(crate) fn current_catalog_set_projection(
             trees: runtime._trees.identity(),
         },
         build_in_progress,
-    }))
+    })
 }
 
 pub(crate) fn validated_resumable_build_in_progress(
@@ -1305,7 +1327,10 @@ fn load_repository_package(
     current: &CurrentCatalogSetProjection,
     package_key: ExtensionPackageKey,
 ) -> Result<LoadedRepositoryPackage, SnapshotLoadError> {
-    if runtime._state.current_catalog_set_id != Some(current.identity)
+    let selected = runtime._state.current_catalog_set_id == Some(current.identity)
+        || (current.role == VerifiedCatalogRole::Rollback
+            && runtime._state.previous_catalog_set_id == Some(current.identity));
+    if !selected
         || runtime._root.identity() != current.repository.root
         || runtime._records.identity() != current.repository.records
         || runtime._trees.identity() != current.repository.trees

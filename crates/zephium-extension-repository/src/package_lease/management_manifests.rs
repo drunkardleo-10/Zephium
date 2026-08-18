@@ -20,8 +20,9 @@ use super::manifest_bindings::{
 };
 use crate::materialization::{
     current_catalog_set_projection, load_active_management_manifests,
-    load_rollback_management_manifests, AuthenticatedManagementManifest,
-    ManagementManifestLoadError, SnapshotLoadError, VerifiedCatalogRole,
+    load_rollback_management_manifests, load_rollback_manifest_bindings,
+    previous_catalog_set_projection, AuthenticatedManagementManifest, ManagementManifestLoadError,
+    SnapshotLoadError, VerifiedCatalogRole,
 };
 use crate::{ExtensionRepository, ExtensionRepositoryError};
 
@@ -165,6 +166,65 @@ impl BundledInstallCandidate {
 pub struct BundledCurrentInstallCandidates {
     current: BundledCurrentCatalogSet,
     candidates: Box<[BundledInstallCandidate]>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+/// One stable installed row joined to authenticated old and replacement
+/// manifests on the same strictly advancing update line.
+pub struct BundledInstallUpdate {
+    install: ExtensionInstall,
+    current_manifest: Arc<ExtensionManifestDescriptor>,
+    replacement_manifest: Arc<ExtensionManifestDescriptor>,
+}
+
+impl BundledInstallUpdate {
+    /// Returns the exact pre-update durable install snapshot.
+    pub const fn install(&self) -> &ExtensionInstall {
+        &self.install
+    }
+
+    /// Returns the previous-generation manifest bound to the installed row.
+    pub const fn current_manifest(&self) -> &Arc<ExtensionManifestDescriptor> {
+        &self.current_manifest
+    }
+
+    /// Returns the current-catalog replacement manifest.
+    pub const fn replacement_manifest(&self) -> &Arc<ExtensionManifestDescriptor> {
+        &self.replacement_manifest
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[must_use = "authenticated install updates must be settled or deliberately deferred"]
+/// Exact current catalog identity plus every authenticated replacement needed
+/// to bring a supplied install catalog onto that generation.
+pub struct BundledCurrentInstallUpdates {
+    current: BundledCurrentCatalogSet,
+    bindings: ExtensionGrantManifestBindings,
+    updates: Box<[BundledInstallUpdate]>,
+}
+
+impl BundledCurrentInstallUpdates {
+    /// Returns the current selection these replacements were derived from.
+    pub const fn current_catalog_set(&self) -> BundledCurrentCatalogSet {
+        self.current
+    }
+
+    /// Borrows the stable-install-ordered replacement cohort.
+    pub fn updates(&self) -> &[BundledInstallUpdate] {
+        &self.updates
+    }
+
+    /// Borrows the complete mixed-generation manifest cohort for one atomic
+    /// pre-update Store grant read.
+    pub const fn bindings(&self) -> &ExtensionGrantManifestBindings {
+        &self.bindings
+    }
+
+    /// Consumes the projection into Store bindings and replacements.
+    pub fn into_parts(self) -> (ExtensionGrantManifestBindings, Box<[BundledInstallUpdate]>) {
+        (self.bindings, self.updates)
+    }
 }
 
 struct AuthenticatedInstallCandidatePackage {
@@ -364,6 +424,177 @@ impl ExtensionRepository {
         Ok(BundledCurrentInstallCandidates {
             current,
             candidates: candidates.into_boxed_slice(),
+        })
+    }
+
+    /// Authenticates strictly newer current-catalog replacements together
+    /// with each installed package's exact previous-generation manifest.
+    /// No Store row, package pin, or runtime authority is mutated here.
+    pub fn authenticate_current_bundled_install_updates(
+        &mut self,
+        installs: &ExtensionInstallCatalog,
+    ) -> Result<BundledCurrentInstallUpdates, BundledManagementManifestsError> {
+        let candidates = self.authenticate_current_bundled_install_candidates()?;
+        let (current, candidates) = candidates.into_parts();
+        let mut pending = Vec::new();
+        for install in installs.installs() {
+            if candidates
+                .iter()
+                .any(|candidate| candidate.package() == install.package())
+            {
+                continue;
+            }
+            let (authority, key) = install.package().update_line();
+            let Some(replacement) = candidates
+                .iter()
+                .find(|candidate| candidate.package().update_line() == (authority, key))
+            else {
+                return Err(BundledManagementManifestsError::Authentication(
+                    BundledManifestBindingsError::PackageNotSelected,
+                ));
+            };
+            if replacement.package().revision() <= install.package().revision() {
+                return Err(BundledManagementManifestsError::Authentication(
+                    BundledManifestBindingsError::InstallPackageMismatch,
+                ));
+            }
+            pending.push((install.clone(), Arc::clone(replacement.manifest_arc())));
+        }
+        if pending.is_empty() {
+            let mut exact = Vec::with_capacity(installs.installs().len());
+            for install in installs.installs() {
+                let Some(candidate) = candidates
+                    .iter()
+                    .find(|candidate| candidate.package() == install.package())
+                else {
+                    return Err(BundledManagementManifestsError::Authentication(
+                        BundledManifestBindingsError::InstallPackageMismatch,
+                    ));
+                };
+                exact.push(ExtensionGrantManifestBinding::new(
+                    install.id(),
+                    Arc::clone(candidate.manifest_arc()),
+                ));
+            }
+            let bindings = ExtensionGrantManifestBindings::new(exact).map_err(|_| {
+                BundledManagementManifestsError::Authentication(
+                    BundledManifestBindingsError::CapacityExhausted,
+                )
+            })?;
+            return Ok(BundledCurrentInstallUpdates {
+                current,
+                bindings,
+                updates: Box::new([]),
+            });
+        }
+
+        let subset = ExtensionInstallCatalog::from_persisted(
+            installs.revision(),
+            installs.install_id_high_water(),
+            pending.iter().map(|(install, _)| install.clone()).collect(),
+        )
+        .map_err(|_| {
+            BundledManagementManifestsError::Authentication(
+                BundledManifestBindingsError::CapacityExhausted,
+            )
+        })?;
+        let rollback_bindings = {
+            let runtime = self.runtime.clone();
+            let _operation = runtime.enter().map_err(|error| {
+                BundledManagementManifestsError::Authentication(
+                    BundledManifestBindingsError::Repository(error.repository_error()),
+                )
+            })?;
+            let previous = previous_catalog_set_projection(self.writer_materialization()?)
+                .map_err(|error| self.finish_management_manifest_snapshot_error(error))?
+                .ok_or(BundledManagementManifestsError::Authentication(
+                    BundledManifestBindingsError::PackageNotSelected,
+                ))?;
+            if previous.build_in_progress() {
+                return Err(BundledManagementManifestsError::Authentication(
+                    BundledManifestBindingsError::BuildInProgress,
+                ));
+            }
+            let exact_catalog =
+                self.read_authenticated_catalog_object(previous.catalog_digest())?;
+            let bindings = load_rollback_manifest_bindings(
+                self.writer_materialization()?,
+                &previous,
+                &exact_catalog,
+                &subset,
+            )
+            .map_err(|error| self.finish_management_manifest_snapshot_error(error))?;
+            let observed = current_catalog_set_projection(self.writer_materialization()?)
+                .map_err(|error| self.finish_management_manifest_snapshot_error(error))?
+                .ok_or(BundledManagementManifestsError::Authentication(
+                    BundledManifestBindingsError::StaleSelection,
+                ))?;
+            let role = match observed.role() {
+                VerifiedCatalogRole::Active => BundledCatalogGenerationRole::Active,
+                VerifiedCatalogRole::Rollback => BundledCatalogGenerationRole::Rollback,
+            };
+            if current
+                != (BundledCurrentCatalogSet {
+                    identity: observed.identity().into(),
+                    role,
+                })
+            {
+                return Err(BundledManagementManifestsError::Authentication(
+                    BundledManifestBindingsError::StaleSelection,
+                ));
+            }
+            bindings
+        };
+        let mut updates = Vec::with_capacity(pending.len());
+        for (install, replacement_manifest) in pending {
+            let Some(binding) = rollback_bindings
+                .iter()
+                .find(|binding| binding.install_id() == install.id())
+            else {
+                return Err(BundledManagementManifestsError::Authentication(
+                    BundledManifestBindingsError::InstallPackageMismatch,
+                ));
+            };
+            if binding.manifest().package() != install.package() {
+                return Err(BundledManagementManifestsError::Authentication(
+                    BundledManifestBindingsError::InstallPackageMismatch,
+                ));
+            }
+            updates.push(BundledInstallUpdate {
+                install,
+                current_manifest: Arc::clone(binding.manifest_arc()),
+                replacement_manifest,
+            });
+        }
+        let mut complete = Vec::with_capacity(installs.installs().len());
+        for install in installs.installs() {
+            let manifest = if let Some(update) = updates
+                .iter()
+                .find(|update| update.install.id() == install.id())
+            {
+                Arc::clone(&update.current_manifest)
+            } else {
+                let Some(candidate) = candidates
+                    .iter()
+                    .find(|candidate| candidate.package() == install.package())
+                else {
+                    return Err(BundledManagementManifestsError::Authentication(
+                        BundledManifestBindingsError::InstallPackageMismatch,
+                    ));
+                };
+                Arc::clone(candidate.manifest_arc())
+            };
+            complete.push(ExtensionGrantManifestBinding::new(install.id(), manifest));
+        }
+        let bindings = ExtensionGrantManifestBindings::new(complete).map_err(|_| {
+            BundledManagementManifestsError::Authentication(
+                BundledManifestBindingsError::CapacityExhausted,
+            )
+        })?;
+        Ok(BundledCurrentInstallUpdates {
+            current,
+            bindings,
+            updates: updates.into_boxed_slice(),
         })
     }
 

@@ -34,12 +34,13 @@ use zephium_core::ports::store::{
     BlockerConfigLoadOutcome, BlockerConfigUpdateOutcome, ExtensionGrantCohortLoadOutcome,
     ExtensionGrantMutationOutcome, ExtensionGrantWrite, ExtensionInstallCatalogLoadOutcome,
     ExtensionInstallCatalogMutationOutcome, ExtensionInstallProvisionOutcome,
-    ExtensionNativeOwnershipActivationOutcome, ExtensionNativeOwnershipJournalLoadOutcome,
-    ExtensionNativeOwnershipJournalMutationOutcome, HistoryHit, PagePermissionCatalogLoadOutcome,
-    PagePermissionCatalogMutationOutcome, ProfileDeletionAuthorizeOutcome,
-    ProfileDeletionFinalizeOutcome, ProfileDeletionLoad, SessionLoad, Store, StoreShutdownOutcome,
-    UserscriptCatalogLoadOutcome, UserscriptCatalogMutationOutcome,
-    MAX_EXTENSION_GRANT_WRITE_RETAINED_BYTES, MAX_FAVICON_BATCH_ORIGINS,
+    ExtensionInstallUpdateOutcome, ExtensionNativeOwnershipActivationOutcome,
+    ExtensionNativeOwnershipJournalLoadOutcome, ExtensionNativeOwnershipJournalMutationOutcome,
+    HistoryHit, PagePermissionCatalogLoadOutcome, PagePermissionCatalogMutationOutcome,
+    ProfileDeletionAuthorizeOutcome, ProfileDeletionFinalizeOutcome, ProfileDeletionLoad,
+    SessionLoad, Store, StoreShutdownOutcome, UserscriptCatalogLoadOutcome,
+    UserscriptCatalogMutationOutcome, MAX_EXTENSION_GRANT_WRITE_RETAINED_BYTES,
+    MAX_FAVICON_BATCH_ORIGINS,
 };
 use zephium_core::profiles::ProfileKind;
 use zephium_core::session::{
@@ -74,12 +75,22 @@ const MAX_EXTENSION_GRANT_MUTATION_REQUEST_RETAINED_BYTES: usize = checked_const
     MAX_EXTENSION_MANIFEST_RETAINED_BYTES,
     MAX_EXTENSION_GRANT_WRITE_RETAINED_BYTES,
 );
+const MAX_EXTENSION_INSTALL_UPDATE_REQUEST_RETAINED_BYTES: usize =
+    checked_const_mul(MAX_EXTENSION_MANIFEST_RETAINED_BYTES, 2);
+const MAX_EXTENSION_SERVICE_GRANT_REQUEST_RETAINED_BYTES: usize =
+    if MAX_EXTENSION_INSTALL_UPDATE_REQUEST_RETAINED_BYTES
+        > MAX_EXTENSION_GRANT_MUTATION_REQUEST_RETAINED_BYTES
+    {
+        MAX_EXTENSION_INSTALL_UPDATE_REQUEST_RETAINED_BYTES
+    } else {
+        MAX_EXTENSION_GRANT_MUTATION_REQUEST_RETAINED_BYTES
+    };
 // Permit one worst-case cohort load plus one worst-case mutation. A second
 // worst-case cohort waits until the first permit drops instead of allowing a
 // ~64 MiB privileged mailbox spike.
 const MAX_PENDING_EXTENSION_GRANT_RETAINED_BYTES: usize = checked_const_add(
     MAX_EXTENSION_GRANT_MANIFEST_BINDINGS_RETAINED_BYTES,
-    MAX_EXTENSION_GRANT_MUTATION_REQUEST_RETAINED_BYTES,
+    MAX_EXTENSION_SERVICE_GRANT_REQUEST_RETAINED_BYTES,
 );
 const MAX_PENDING_EXTENSION_NATIVE_OWNERSHIP_RETAINED_BYTES: usize = checked_const_mul(
     MAX_PENDING_EXTENSION_NATIVE_OWNERSHIP_MUTATIONS,
@@ -126,6 +137,7 @@ type ExtensionInstallCatalogMutationDone =
 type ExtensionGrantCohortLoadDone = Box<dyn FnOnce(ExtensionGrantCohortLoadOutcome) + Send>;
 type ExtensionGrantMutationDone = Box<dyn FnOnce(ExtensionGrantMutationOutcome) + Send>;
 type ExtensionInstallProvisionDone = Box<dyn FnOnce(ExtensionInstallProvisionOutcome) + Send>;
+type ExtensionInstallUpdateDone = Box<dyn FnOnce(ExtensionInstallUpdateOutcome) + Send>;
 type ExtensionNativeOwnershipJournalLoadDone =
     Box<dyn FnOnce(ExtensionNativeOwnershipJournalLoadOutcome) + Send>;
 type ExtensionRuntimeStartupInventoryLoadDone =
@@ -639,6 +651,18 @@ enum Cmd {
         ExtensionGrantRequestPermit,
         ExtensionInstallProvisionDone,
     ),
+    UpdateExtensionInstall(
+        ProfileId,
+        ExtensionInstallCatalogRevision,
+        ExtensionInstallId,
+        ExtensionInstallRevision,
+        ExtensionGrantRevision,
+        Arc<ExtensionManifestDescriptor>,
+        Arc<ExtensionManifestDescriptor>,
+        ExtensionInstallMutationPermit,
+        ExtensionGrantRequestPermit,
+        ExtensionInstallUpdateDone,
+    ),
     LoadExtensionNativeOwnershipJournal(ExtensionNativeOwnershipJournalLoadDone),
     LoadExtensionRuntimeStartupInventory(ExtensionRuntimeStartupInventoryLoadDone),
     MutateExtensionNativeOwnershipJournal(
@@ -1112,6 +1136,43 @@ impl ExtensionServiceStoreAuthority {
             install,
             manifest,
             authority,
+            deadline,
+            done,
+        ) {
+            return ExtensionServiceStoreCallOutcome::NotAdmitted;
+        }
+        observe_extension_service_store_call(result, deadline)
+    }
+
+    /// Atomically replaces one installed package and reconciles its complete
+    /// grant root after the extension service has retired native ownership.
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_install_until(
+        &self,
+        profile: ProfileId,
+        expected_catalog: ExtensionInstallCatalogRevision,
+        install: ExtensionInstallId,
+        expected_install: ExtensionInstallRevision,
+        expected_grant: ExtensionGrantRevision,
+        current_manifest: Arc<ExtensionManifestDescriptor>,
+        replacement_manifest: Arc<ExtensionManifestDescriptor>,
+        deadline: Instant,
+    ) -> ExtensionServiceStoreCallOutcome<ExtensionInstallUpdateOutcome> {
+        if Instant::now() >= deadline {
+            return ExtensionServiceStoreCallOutcome::NotAdmitted;
+        }
+        let (reply, result) = mpsc::sync_channel(1);
+        let done = Box::new(move |outcome| {
+            let _ = reply.send(outcome);
+        });
+        if !self.store.try_update_extension_install(
+            profile,
+            expected_catalog,
+            install,
+            expected_install,
+            expected_grant,
+            current_manifest,
+            replacement_manifest,
             deadline,
             done,
         ) {
@@ -1717,6 +1778,69 @@ impl SqliteStore {
                 install,
                 manifest,
                 authority,
+                install_permit,
+                grant_permit,
+                done,
+            ))
+            .is_ok()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_update_extension_install(
+        &self,
+        profile: ProfileId,
+        expected_catalog: ExtensionInstallCatalogRevision,
+        install: ExtensionInstallId,
+        expected_install: ExtensionInstallRevision,
+        expected_grant: ExtensionGrantRevision,
+        current_manifest: Arc<ExtensionManifestDescriptor>,
+        replacement_manifest: Arc<ExtensionManifestDescriptor>,
+        deadline: Instant,
+        done: ExtensionInstallUpdateDone,
+    ) -> bool {
+        let lifecycle = match self.lifecycle.try_lock() {
+            Ok(lifecycle) => lifecycle,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => return false,
+        };
+        if Instant::now() >= deadline
+            || lifecycle.terminal_admitted
+            || self.shutdown_clean.load(Ordering::Acquire)
+        {
+            return false;
+        }
+        let Some(retained_bytes) = current_manifest
+            .retained_bytes()
+            .checked_add(replacement_manifest.retained_bytes())
+        else {
+            return false;
+        };
+        if retained_bytes > MAX_EXTENSION_INSTALL_UPDATE_REQUEST_RETAINED_BYTES {
+            return false;
+        }
+        let Some(install_permit) =
+            ExtensionInstallMutationPermit::try_acquire(&self.extension_install_mutation_admission)
+        else {
+            return false;
+        };
+        let Some(grant_permit) = ExtensionGrantRequestPermit::try_acquire(
+            &self.extension_grant_request_admission,
+            retained_bytes,
+        ) else {
+            return false;
+        };
+        if Instant::now() >= deadline {
+            return false;
+        }
+        self.tx
+            .try_send(Cmd::UpdateExtensionInstall(
+                profile,
+                expected_catalog,
+                install,
+                expected_install,
+                expected_grant,
+                current_manifest,
+                replacement_manifest,
                 install_permit,
                 grant_permit,
                 done,
@@ -2936,6 +3060,35 @@ fn actor(
                     Err(error) => {
                         eprintln!("store: profile {profile} extension provision failed: {error}");
                         ExtensionInstallProvisionOutcome::Failed
+                    }
+                };
+                done(outcome);
+            }
+            Some(Cmd::UpdateExtensionInstall(
+                profile,
+                expected_catalog,
+                install,
+                expected_install,
+                expected_grant,
+                current_manifest,
+                replacement_manifest,
+                _install_permit,
+                _grant_permit,
+                done,
+            )) => {
+                let outcome = match hub.update_extension_install(
+                    profile,
+                    expected_catalog,
+                    install,
+                    expected_install,
+                    expected_grant,
+                    current_manifest,
+                    replacement_manifest,
+                ) {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        eprintln!("store: profile {profile} extension update failed: {error}");
+                        ExtensionInstallUpdateOutcome::Failed
                     }
                 };
                 done(outcome);

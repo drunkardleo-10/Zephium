@@ -358,6 +358,46 @@ impl ExtensionInstallCatalog {
                     changed: true,
                 })
             }
+            ExtensionInstallCatalogMutation::ReplacePackage {
+                id,
+                expected,
+                replacement,
+            } => {
+                let index = self
+                    .installs
+                    .binary_search_by_key(&id, |install| install.id)
+                    .map_err(|_| ExtensionInstallCatalogApplyError::InstallNotFound(id))?;
+                let current = &self.installs[index];
+                if current.revision != expected {
+                    return Err(ExtensionInstallCatalogApplyError::InstallRevisionConflict {
+                        id,
+                        expected,
+                        current: current.revision,
+                    });
+                }
+                if current.package.update_line() != replacement.update_line() {
+                    return Err(ExtensionInstallCatalogApplyError::DifferentUpdateLine { id });
+                }
+                if replacement.revision() <= current.package.revision() {
+                    return Err(ExtensionInstallCatalogApplyError::ReplacementNotNewer { id });
+                }
+                let next_catalog = self
+                    .revision
+                    .next()
+                    .ok_or(ExtensionInstallCatalogApplyError::CatalogRevisionExhausted)?;
+                let next_install = current
+                    .revision
+                    .next()
+                    .ok_or(ExtensionInstallCatalogApplyError::InstallRevisionExhausted { id })?;
+                self.revision = next_catalog;
+                self.installs[index].revision = next_install;
+                self.installs[index].package = replacement;
+                Ok(ExtensionInstallCatalogApplication {
+                    catalog: self,
+                    id,
+                    changed: true,
+                })
+            }
             ExtensionInstallCatalogMutation::Delete { id, expected } => {
                 let index = self
                     .installs
@@ -391,9 +431,9 @@ impl ExtensionInstallCatalog {
 
 /// Source-free, path-free mutation vocabulary for the install catalog.
 ///
-/// Package replacement is intentionally absent. An update can add required
-/// declarations and therefore needs a later transaction that joins package
-/// admission with explicit grants and rollback-safe native settlement.
+/// Package replacement is structural only at this layer. The Store exposes it
+/// exclusively through a stronger transaction that atomically rebinds the
+/// package-bound grant root after native ownership has been retired.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExtensionInstallCatalogMutation {
     /// Adds one new install in the disabled state.
@@ -407,6 +447,14 @@ pub enum ExtensionInstallCatalogMutation {
         expected: ExtensionInstallRevision,
         desired_enabled: bool,
     },
+    /// Rebinds one stable install identity to a strictly newer package on the
+    /// same authenticated update line. Callers cannot persist this mutation
+    /// without the Store's package-and-grant replacement capability.
+    ReplacePackage {
+        id: ExtensionInstallId,
+        expected: ExtensionInstallRevision,
+        replacement: ExtensionPackageIdentity,
+    },
     /// Removes one exact install after comparing its revision.
     Delete {
         id: ExtensionInstallId,
@@ -419,6 +467,7 @@ impl ExtensionInstallCatalogMutation {
         match self {
             Self::Install { id, .. }
             | Self::SetDesiredEnabled { id, .. }
+            | Self::ReplacePackage { id, .. }
             | Self::Delete { id, .. } => *id,
         }
     }
@@ -480,6 +529,12 @@ pub enum ExtensionInstallCatalogApplyError {
         authority: ExtensionAuthorityId,
         key: ExtensionPackageKey,
         installed_as: ExtensionInstallId,
+    },
+    DifferentUpdateLine {
+        id: ExtensionInstallId,
+    },
+    ReplacementNotNewer {
+        id: ExtensionInstallId,
     },
     LimitReached {
         max: usize,
@@ -588,6 +643,12 @@ impl fmt::Display for ExtensionInstallCatalogApplyError {
                 formatter,
                 "extension package {authority:?}/{key:?} is already installed as {installed_as}"
             ),
+            Self::DifferentUpdateLine { id } => {
+                write!(formatter, "extension install {id} update line changed")
+            }
+            Self::ReplacementNotNewer { id } => {
+                write!(formatter, "extension install {id} replacement is not newer")
+            }
             Self::LimitReached { max } => {
                 write!(formatter, "extension install limit of {max} was reached")
             }
@@ -850,7 +911,7 @@ mod tests {
     }
 
     #[test]
-    fn mutation_vocabulary_carries_no_enabled_install_or_package_replacement() {
+    fn mutation_vocabulary_carries_stable_install_identity() {
         let id = ExtensionInstallId::from(1);
         let install = ExtensionInstallCatalogMutation::Install {
             id,
@@ -861,13 +922,110 @@ mod tests {
             expected: ExtensionInstallRevision::INITIAL,
             desired_enabled: true,
         };
+        let replace = ExtensionInstallCatalogMutation::ReplacePackage {
+            id,
+            expected: ExtensionInstallRevision::INITIAL,
+            replacement: package(1, 1, 2),
+        };
         let delete = ExtensionInstallCatalogMutation::Delete {
             id,
             expected: ExtensionInstallRevision::INITIAL,
         };
         assert_eq!(install.id(), id);
         assert_eq!(enable.id(), id);
+        assert_eq!(replace.id(), id);
         assert_eq!(delete.id(), id);
+    }
+
+    #[test]
+    fn package_replacement_preserves_identity_and_intent_and_advances_both_revisions() {
+        let id = ExtensionInstallId::from(12);
+        let catalog_revision = ExtensionInstallCatalogRevision::new(7).unwrap();
+        let install_revision = ExtensionInstallRevision::new(9).unwrap();
+        let current_package = package(1, 2, 3);
+        let replacement = package(1, 2, 4);
+        let current = ExtensionInstallCatalog::from_persisted(
+            catalog_revision,
+            Some(id),
+            vec![ExtensionInstall::from_persisted(
+                id,
+                install_revision,
+                current_package,
+                true,
+            )],
+        )
+        .unwrap();
+
+        let applied = current
+            .apply(
+                catalog_revision,
+                ExtensionInstallCatalogMutation::ReplacePackage {
+                    id,
+                    expected: install_revision,
+                    replacement: replacement.clone(),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            applied.catalog().revision(),
+            ExtensionInstallCatalogRevision::new(8).unwrap()
+        );
+        let updated = applied.install().unwrap();
+        assert_eq!(updated.id(), id);
+        assert_eq!(
+            updated.revision(),
+            ExtensionInstallRevision::new(10).unwrap()
+        );
+        assert_eq!(updated.package(), &replacement);
+        assert!(updated.desired_enabled());
+        assert_eq!(applied.catalog().install_id_high_water(), Some(id));
+    }
+
+    #[test]
+    fn package_replacement_refuses_downgrade_cross_line_and_stale_row() {
+        let id = ExtensionInstallId::from(13);
+        let revision = ExtensionInstallCatalogRevision::INITIAL;
+        let current = ExtensionInstallCatalog::from_persisted(
+            revision,
+            Some(id),
+            vec![ExtensionInstall::new(id, package(1, 2, 3))],
+        )
+        .unwrap();
+
+        for (replacement, expected) in [
+            (
+                package(1, 2, 3),
+                ExtensionInstallCatalogApplyError::ReplacementNotNewer { id },
+            ),
+            (
+                package(9, 2, 4),
+                ExtensionInstallCatalogApplyError::DifferentUpdateLine { id },
+            ),
+        ] {
+            assert_eq!(
+                current.clone().apply(
+                    revision,
+                    ExtensionInstallCatalogMutation::ReplacePackage {
+                        id,
+                        expected: ExtensionInstallRevision::INITIAL,
+                        replacement,
+                    },
+                ),
+                Err(expected)
+            );
+        }
+        assert!(matches!(
+            current.apply(
+                revision,
+                ExtensionInstallCatalogMutation::ReplacePackage {
+                    id,
+                    expected: ExtensionInstallRevision::new(2).unwrap(),
+                    replacement: package(1, 2, 4),
+                },
+            ),
+            Err(ExtensionInstallCatalogApplyError::InstallRevisionConflict { .. })
+        ));
     }
 
     #[test]

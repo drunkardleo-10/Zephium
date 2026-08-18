@@ -83,12 +83,13 @@ use crate::materialization::{
     add_owner_package_pin, begin_rollback_package_build, completed_package_verification_count,
     current_catalog_set_projection, gc_legal_object, gc_tree_object, gc_tree_retired,
     install_orphan_package_record_stage_for_e2e, install_resumable_package_record_stage_for_e2e,
-    load_active_package_pin_admission, open_product_manifest_authority,
-    plan_current_catalog_package_pin, plan_owner_package_pin_removal,
-    preflight_package_object_capacity, prepare_rollback_package, remove_owner_package_pin,
-    repository_package_io_count, reset_completed_package_verification_count,
-    reset_repository_package_io_count, MaterializationTransitionError, OwnerPackagePinPlan,
-    OwnerPackagePinRemovalPlan, PackageObjectIntentDisposition,
+    load_active_package_pin_admission, load_rollback_manifest_bindings,
+    open_product_manifest_authority, plan_current_catalog_package_pin,
+    plan_owner_package_pin_removal, preflight_package_object_capacity, prepare_rollback_package,
+    previous_catalog_set_projection, remove_owner_package_pin, repository_package_io_count,
+    reset_completed_package_verification_count, reset_repository_package_io_count,
+    MaterializationTransitionError, OwnerPackagePinPlan, OwnerPackagePinRemovalPlan,
+    PackageObjectIntentDisposition,
 };
 use crate::state::Digest32;
 use crate::{
@@ -1861,6 +1862,73 @@ fn manifest_binding_bootstrap_is_complete_nominal_read_only_and_fail_closed() {
     ));
     assert!(repository_package_io_count() > 0);
     assert!(repository.writer_is_sealed());
+}
+
+#[test]
+fn install_update_authentication_treats_identical_cross_generation_package_as_current() {
+    let (active, rollback) = catalogs();
+    let harness = Harness::new();
+    let mut repository = harness.open();
+    let rollback_current = establish_rollback(&mut repository, &active, &rollback);
+    let active_current = establish_active(&mut repository, &active);
+    assert_ne!(active_current, rollback_current);
+
+    let install_id = ExtensionInstallId::from(0x771);
+    let rollback_fixture =
+        EligibilityFixture::rollback(&rollback, ProfileId::from(0x772), install_id);
+    let active_fixture = EligibilityFixture::active(&active, ProfileId::from(0x772), install_id);
+    assert_eq!(
+        rollback_fixture.eligibility().package().update_line(),
+        active_fixture.eligibility().package().update_line()
+    );
+    assert_eq!(
+        rollback_fixture.eligibility().package().revision(),
+        active_fixture.eligibility().package().revision()
+    );
+    let catalog = install_catalog(
+        install_id,
+        rollback_fixture.eligibility().package().clone(),
+        true,
+    );
+    let before = harness.snapshot();
+
+    let previous = previous_catalog_set_projection(repository.writer_materialization().unwrap())
+        .unwrap()
+        .expect("the promoted active catalog retains the rollback selection");
+    let historical = load_rollback_manifest_bindings(
+        repository.writer_materialization().unwrap(),
+        &previous,
+        fixture::ROLLBACK_CATALOG_BYTES,
+        &catalog,
+    )
+    .unwrap();
+    assert_eq!(
+        historical.get(install_id),
+        Some(rollback_fixture.eligibility().manifest())
+    );
+
+    let update = repository
+        .authenticate_current_bundled_install_updates(&catalog)
+        .unwrap();
+    assert_eq!(
+        update.current_catalog_set(),
+        BundledCurrentCatalogSet {
+            identity: active_current,
+            role: BundledCatalogGenerationRole::Active,
+        }
+    );
+    assert!(update.updates().is_empty());
+    assert_eq!(
+        update.bindings().get(install_id),
+        Some(active_fixture.eligibility().manifest())
+    );
+    assert_eq!(harness.snapshot(), before);
+    assert!(repository
+        .writer_materialization()
+        .unwrap()
+        ._state
+        .package_pins
+        .is_empty());
 }
 
 #[test]

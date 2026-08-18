@@ -5,7 +5,7 @@ use std::sync::Arc;
 use zephium_core::extensions::{ExtensionInstallCatalog, ExtensionPackagePinReleaseBinding};
 use zephium_core::ids::ProfileId;
 use zephium_extension_repository::{
-    BundledCurrentInstallCandidates, BundledCurrentManifestBindings,
+    BundledCurrentInstallCandidates, BundledCurrentInstallUpdates, BundledCurrentManifestBindings,
     BundledManagementManifestsError, BundledManifestBindingsError,
     BundledPackageBuildSettlementError, BundledPackageBuildSettlementOutcome,
     BundledPackageGarbageCollectionOutcome, BundledPackageLeaseReleaseError,
@@ -132,6 +132,18 @@ impl ServiceRepository {
             return Err(ExtensionRepositoryError::Sealed.into());
         };
         repository.authenticate_current_bundled_install_candidates()
+    }
+
+    /// Authenticates strictly newer replacements and the exact previous
+    /// manifests needed for an atomic install/grant update.
+    pub(crate) fn authenticate_install_updates(
+        &mut self,
+        catalog: &ExtensionInstallCatalog,
+    ) -> Result<BundledCurrentInstallUpdates, BundledManagementManifestsError> {
+        let Some(repository) = self.repository.as_mut() else {
+            return Err(ExtensionRepositoryError::Sealed.into());
+        };
+        repository.authenticate_current_bundled_install_updates(catalog)
     }
 
     /// Authenticates one complete installed-manifest cohort without acquiring

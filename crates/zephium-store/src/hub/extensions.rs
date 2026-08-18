@@ -11,14 +11,14 @@ use std::sync::Arc;
 
 use crate::actor::ExtensionRuntimeStartupInventory;
 use zephium_core::extensions::{
-    ExtensionArchiveDigest, ExtensionAuthorityId, ExtensionGrantAuthority,
-    ExtensionGrantBrowsingContext, ExtensionInstall, ExtensionInstallCatalog,
-    ExtensionInstallCatalogApplyError, ExtensionInstallCatalogMutation,
-    ExtensionInstallCatalogRevision, ExtensionInstallRevision, ExtensionManifestDescriptor,
-    ExtensionManifestDigest, ExtensionNativeOwnershipKey, ExtensionPackageIdentity,
-    ExtensionPackageKey, ExtensionPackagePayloadIdentity, ExtensionPackageRevision,
-    ExtensionTreeDigest, EXTENSION_SHA256_BYTES, MAX_EXTENSION_ARCHIVE_BYTES,
-    MAX_EXTENSION_INSTALLS_PER_PROFILE,
+    ExtensionArchiveDigest, ExtensionAuthorityId, ExtensionGrantApplyError,
+    ExtensionGrantAuthority, ExtensionGrantBrowsingContext, ExtensionGrantRevision,
+    ExtensionInstall, ExtensionInstallCatalog, ExtensionInstallCatalogApplyError,
+    ExtensionInstallCatalogMutation, ExtensionInstallCatalogRevision, ExtensionInstallRevision,
+    ExtensionManifestDescriptor, ExtensionManifestDigest, ExtensionNativeOwnershipKey,
+    ExtensionPackageIdentity, ExtensionPackageKey, ExtensionPackagePayloadIdentity,
+    ExtensionPackageRevision, ExtensionTreeDigest, EXTENSION_SHA256_BYTES,
+    MAX_EXTENSION_ARCHIVE_BYTES, MAX_EXTENSION_INSTALLS_PER_PROFILE,
 };
 use zephium_core::session::MAX_SESSION_PROFILES;
 
@@ -83,9 +83,9 @@ pub(super) fn decode_package_payload(
 }
 use zephium_core::ids::ExtensionInstallId;
 use zephium_core::ports::store::{
-    ExtensionGrantMutationApplied, ExtensionInstallCatalogLoadOutcome,
+    ExtensionGrantConflict, ExtensionGrantMutationApplied, ExtensionInstallCatalogLoadOutcome,
     ExtensionInstallCatalogMutationApplied, ExtensionInstallCatalogMutationOutcome,
-    ExtensionInstallProvisionOutcome,
+    ExtensionInstallProvisionOutcome, ExtensionInstallUpdateOutcome,
 };
 
 impl Hub {
@@ -165,6 +165,14 @@ impl Hub {
         if self.degraded_profiles.contains(&profile) {
             return Ok(ExtensionInstallCatalogMutationOutcome::DegradedProfile);
         }
+        if matches!(
+            &mutation,
+            ExtensionInstallCatalogMutation::ReplacePackage { .. }
+        ) {
+            // Package replacement must atomically rebind the grant root. The
+            // generic install mutation capability is intentionally weaker.
+            return Ok(ExtensionInstallCatalogMutationOutcome::Invalid);
+        }
         #[cfg(test)]
         let ambiguous_commit = std::mem::take(&mut self.ambiguous_extension_install_commit_once);
 
@@ -200,6 +208,8 @@ impl Hub {
                 | ExtensionInstallCatalogApplyError::InstallIdNotAboveHighWater { .. }
                 | ExtensionInstallCatalogApplyError::InstallNotFound(_)
                 | ExtensionInstallCatalogApplyError::PackageAlreadyInstalled { .. }
+                | ExtensionInstallCatalogApplyError::DifferentUpdateLine { .. }
+                | ExtensionInstallCatalogApplyError::ReplacementNotNewer { .. }
                 | ExtensionInstallCatalogApplyError::CatalogRejected(_),
             ) => return Ok(ExtensionInstallCatalogMutationOutcome::Invalid),
         };
@@ -281,6 +291,9 @@ impl Hub {
                         "extension install changed during enablement compare-and-swap",
                     ));
                 }
+            }
+            ExtensionInstallCatalogMutation::ReplacePackage { .. } => {
+                unreachable!("package replacement was refused before aggregate application")
             }
             ExtensionInstallCatalogMutation::Delete { id, expected } => {
                 if application.install().is_some() {
@@ -391,6 +404,8 @@ impl Hub {
                 | ExtensionInstallCatalogApplyError::InstallRevisionExhausted { .. }
                 | ExtensionInstallCatalogApplyError::InstallNotFound(_)
                 | ExtensionInstallCatalogApplyError::PackageAlreadyInstalled { .. }
+                | ExtensionInstallCatalogApplyError::DifferentUpdateLine { .. }
+                | ExtensionInstallCatalogApplyError::ReplacementNotNewer { .. }
                 | ExtensionInstallCatalogApplyError::CatalogRejected(_),
             ) => return Ok(ExtensionInstallProvisionOutcome::Invalid),
         };
@@ -454,6 +469,176 @@ impl Hub {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn update_extension_install(
+        &mut self,
+        profile: ProfileId,
+        expected_catalog: ExtensionInstallCatalogRevision,
+        install_id: ExtensionInstallId,
+        expected_install: ExtensionInstallRevision,
+        expected_grant: ExtensionGrantRevision,
+        current_manifest: Arc<ExtensionManifestDescriptor>,
+        replacement_manifest: Arc<ExtensionManifestDescriptor>,
+    ) -> rusqlite::Result<ExtensionInstallUpdateOutcome> {
+        if self.recovery_required.is_some() {
+            return Err(invalid_data("session recovery mode is read-only"));
+        }
+        if !self.registry.contains(&profile) {
+            return Ok(ExtensionInstallUpdateOutcome::NotRegistered);
+        }
+        if self.degraded_profiles.contains(&profile) {
+            return Ok(ExtensionInstallUpdateOutcome::DegradedProfile);
+        }
+        #[cfg(test)]
+        let ambiguous_commit = std::mem::take(&mut self.ambiguous_extension_install_commit_once)
+            | std::mem::take(&mut self.ambiguous_extension_grant_commit_once);
+
+        self.profile_conn(profile)?;
+        let meta = &self.meta;
+        let conn = self
+            .profiles
+            .get_mut(&profile)
+            .ok_or_else(|| invalid_data("registered extension profile connection is absent"))?;
+        let tx = conn.transaction()?;
+        let catalog = load_catalog(&tx)?;
+        super::extension_grants::validate_global_grant_integrity(&tx)?;
+        let current_install = catalog.get(install_id);
+        let current_grant = super::extension_grants::load_grant_revision(&tx, install_id)?;
+        if catalog.revision() != expected_catalog
+            || current_install.map(ExtensionInstall::revision) != Some(expected_install)
+            || current_grant != Some(expected_grant)
+        {
+            return Ok(ExtensionInstallUpdateOutcome::Conflict(
+                ExtensionGrantConflict::new(
+                    catalog.revision(),
+                    current_install.map(ExtensionInstall::revision),
+                    current_grant,
+                ),
+            ));
+        }
+        let install = current_install
+            .cloned()
+            .ok_or_else(|| invalid_data("extension update install disappeared"))?;
+        if install.package() != current_manifest.package() {
+            return Ok(ExtensionInstallUpdateOutcome::Invalid);
+        }
+        let Some(authority) =
+            super::extension_grants::load_authority(&tx, &install, &current_manifest)?
+        else {
+            return Ok(ExtensionInstallUpdateOutcome::Uninitialized);
+        };
+        let reconciled = match authority.reconcile_manifest(
+            expected_grant,
+            &current_manifest,
+            &replacement_manifest,
+        ) {
+            Ok(application) => application.into_authority(),
+            Err(ExtensionGrantApplyError::RevisionConflict { current, .. }) => {
+                return Ok(ExtensionInstallUpdateOutcome::Conflict(
+                    ExtensionGrantConflict::new(
+                        catalog.revision(),
+                        Some(install.revision()),
+                        Some(current),
+                    ),
+                ));
+            }
+            Err(ExtensionGrantApplyError::RevisionExhausted) => {
+                return Ok(ExtensionInstallUpdateOutcome::RevisionExhausted)
+            }
+            Err(_) => return Ok(ExtensionInstallUpdateOutcome::Invalid),
+        };
+        if !reconciled.has_required_api_and_host_grants_for(&replacement_manifest) {
+            return Ok(ExtensionInstallUpdateOutcome::AdditionalConsentRequired);
+        }
+        if super::native_ownership::has_unresolved_native_ownership_for_install(
+            meta, profile, install_id,
+        )? {
+            return Ok(ExtensionInstallUpdateOutcome::RuntimeOwnershipConflict);
+        }
+
+        let current_revision = catalog.revision();
+        let current_high_water = catalog.install_id_high_water();
+        let application = match catalog.apply(
+            expected_catalog,
+            ExtensionInstallCatalogMutation::ReplacePackage {
+                id: install_id,
+                expected: expected_install,
+                replacement: replacement_manifest.package().clone(),
+            },
+        ) {
+            Ok(application) => application,
+            Err(
+                ExtensionInstallCatalogApplyError::CatalogRevisionConflict { .. }
+                | ExtensionInstallCatalogApplyError::InstallRevisionConflict { .. },
+            ) => {
+                return Ok(ExtensionInstallUpdateOutcome::Conflict(
+                    ExtensionGrantConflict::new(
+                        current_revision,
+                        Some(install.revision()),
+                        Some(expected_grant),
+                    ),
+                ));
+            }
+            Err(
+                ExtensionInstallCatalogApplyError::CatalogRevisionExhausted
+                | ExtensionInstallCatalogApplyError::InstallRevisionExhausted { .. },
+            ) => return Ok(ExtensionInstallUpdateOutcome::RevisionExhausted),
+            Err(_) => return Ok(ExtensionInstallUpdateOutcome::Invalid),
+        };
+        let updated = application
+            .install()
+            .ok_or_else(|| invalid_data("extension update transition has no install row"))?;
+        if updated.id() != install_id
+            || updated.desired_enabled() != install.desired_enabled()
+            || reconciled.install_id() != install_id
+            || reconciled.package() != updated.package()
+        {
+            return Err(invalid_data(
+                "extension update transition changed stable authority",
+            ));
+        }
+
+        persist_install_package_replacement(&tx, &install, updated)?;
+        super::extension_grants::persist_reconciled_authority(
+            &tx,
+            expected_grant,
+            install.package(),
+            &reconciled,
+        )?;
+        update_catalog_header(
+            &tx,
+            current_revision,
+            current_high_water,
+            application.catalog().revision(),
+            application.catalog().install_id_high_water(),
+        )?;
+        let applied = ExtensionGrantMutationApplied::new(
+            application.catalog().revision(),
+            Box::new(updated.clone()),
+            Box::new(reconciled),
+        );
+
+        let committed = tx.commit();
+        #[cfg(test)]
+        if ambiguous_commit {
+            if let Err(error) = committed {
+                eprintln!(
+                    "store: injected profile {profile} extension update commit ambiguity: {error}"
+                );
+            }
+            return Ok(ExtensionInstallUpdateOutcome::OutcomeUnknown);
+        }
+        match committed {
+            Ok(()) => Ok(ExtensionInstallUpdateOutcome::Applied(applied)),
+            Err(error) => {
+                eprintln!(
+                    "store: profile {profile} extension update commit outcome is unknown: {error}"
+                );
+                Ok(ExtensionInstallUpdateOutcome::OutcomeUnknown)
+            }
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn make_next_extension_install_commit_ambiguous(&mut self) {
         self.ambiguous_extension_install_commit_once = true;
@@ -491,6 +676,67 @@ fn insert_install(conn: &Connection, install: &ExtensionInstall) -> rusqlite::Re
     if inserted != 1 {
         return Err(invalid_data(
             "extension install row was not inserted exactly once",
+        ));
+    }
+    Ok(())
+}
+
+fn persist_install_package_replacement(
+    conn: &Connection,
+    current: &ExtensionInstall,
+    replacement: &ExtensionInstall,
+) -> rusqlite::Result<()> {
+    let id = current.id().bytes();
+    let current_package = current.package();
+    let current_authority = current_package.authority().bytes();
+    let current_key = current_package.key().bytes();
+    let current_payload = encode_package_payload(current_package.payload())?;
+    let current_manifest = current_package.manifest_sha256().bytes();
+    let current_tree = current_package.tree_sha256().bytes();
+    let package = replacement.package();
+    let authority = package.authority().bytes();
+    let key = package.key().bytes();
+    let payload = encode_package_payload(package.payload())?;
+    let manifest = package.manifest_sha256().bytes();
+    let tree = package.tree_sha256().bytes();
+    let updated = conn.execute(
+        "UPDATE extension_installs
+         SET revision = ?3,
+             authority = ?4, package_key = ?5, package_revision = ?6,
+             payload_kind = ?7, archive_length = ?8, archive_sha256 = ?9,
+             manifest_sha256 = ?10, tree_sha256 = ?11
+         WHERE id = ?1 AND revision = ?2
+           AND authority = ?12 AND package_key = ?13 AND package_revision = ?14
+           AND payload_kind = ?15 AND archive_length IS ?16 AND archive_sha256 IS ?17
+           AND manifest_sha256 = ?18 AND tree_sha256 = ?19",
+        params![
+            &id[..],
+            revision_i64(current.revision().get())?,
+            revision_i64(replacement.revision().get())?,
+            &authority[..],
+            &key[..],
+            revision_i64(package.revision().get())?,
+            payload.kind,
+            payload.archive_length,
+            payload.archive_sha256.as_ref().map(|digest| &digest[..]),
+            &manifest[..],
+            &tree[..],
+            &current_authority[..],
+            &current_key[..],
+            revision_i64(current_package.revision().get())?,
+            current_payload.kind,
+            current_payload.archive_length,
+            current_payload
+                .archive_sha256
+                .as_ref()
+                .map(|digest| &digest[..]),
+            &current_manifest[..],
+            &current_tree[..],
+        ],
+    )?;
+    if updated != 1 {
+        return Err(invalid_data(
+            "extension install package changed during replacement compare-and-swap",
         ));
     }
     Ok(())

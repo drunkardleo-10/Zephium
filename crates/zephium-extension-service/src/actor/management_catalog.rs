@@ -5,8 +5,8 @@ use std::time::Instant;
 
 use zephium_core::extensions::{
     ExtensionCatalogSetDigest, ExtensionGrantBrowsingContext, ExtensionGrantManifestBinding,
-    ExtensionGrantManifestBindings, ExtensionManifestDeclaration, ExtensionNativeOwnershipKey,
-    MAX_EXTENSION_INSTALLS_PER_PROFILE,
+    ExtensionGrantManifestBindings, ExtensionInstallCatalog, ExtensionManifestDeclaration,
+    ExtensionNativeOwnershipKey, MAX_EXTENSION_INSTALLS_PER_PROFILE,
 };
 use zephium_core::ids::ProfileId;
 use zephium_core::ports::extensions::{
@@ -18,6 +18,7 @@ use zephium_core::ports::extensions::{
 };
 use zephium_core::ports::store::{
     ExtensionGrantCohortLoadOutcome, ExtensionInstallCatalogLoadOutcome,
+    ExtensionInstallUpdateOutcome,
 };
 use zephium_extension_repository::{
     BundledInstallCandidate, BundledManagementManifestsError, BundledManifestBindingsError,
@@ -25,11 +26,13 @@ use zephium_extension_repository::{
 use zephium_store::ExtensionServiceStoreCallOutcome;
 
 use super::WorkerStartupState;
-use crate::runtime_coordinator::RuntimeCoordinator;
+use crate::runtime_coordinator::{RuntimeActivationOutcome, RuntimeCoordinator};
+
+use super::management::{resources, restore_contexts, retire_all_contexts};
 
 pub(super) fn load(
     startup: &mut WorkerStartupState,
-    runtime: &RuntimeCoordinator,
+    runtime: &mut RuntimeCoordinator,
     profile: ProfileId,
     deadline: Instant,
 ) -> ExtensionManagementCatalogOutcome {
@@ -39,7 +42,7 @@ pub(super) fn load(
     if runtime.is_fail_stopped() {
         return ExtensionManagementCatalogOutcome::FailedClosed;
     }
-    let catalog = match startup.store.load_install_catalog_until(profile, deadline) {
+    let mut catalog = match startup.store.load_install_catalog_until(profile, deadline) {
         ExtensionServiceStoreCallOutcome::Completed(
             ExtensionInstallCatalogLoadOutcome::Loaded(catalog),
         ) => catalog,
@@ -57,6 +60,32 @@ pub(super) fn load(
             return ExtensionManagementCatalogOutcome::FailedClosed;
         }
     };
+    for _ in 0..MAX_EXTENSION_INSTALLS_PER_PROFILE {
+        match reconcile_one_install_update(startup, runtime, profile, &catalog, deadline) {
+            InstallUpdateReconciliation::Current => break,
+            InstallUpdateReconciliation::Updated => {
+                catalog = match startup.store.load_install_catalog_until(profile, deadline) {
+                    ExtensionServiceStoreCallOutcome::Completed(
+                        ExtensionInstallCatalogLoadOutcome::Loaded(catalog),
+                    ) => catalog,
+                    ExtensionServiceStoreCallOutcome::Completed(
+                        ExtensionInstallCatalogLoadOutcome::NotRegistered,
+                    ) => return ExtensionManagementCatalogOutcome::Rejected,
+                    ExtensionServiceStoreCallOutcome::Completed(
+                        ExtensionInstallCatalogLoadOutcome::DegradedProfile,
+                    )
+                    | ExtensionServiceStoreCallOutcome::NotAdmitted
+                    | ExtensionServiceStoreCallOutcome::TimedOutAfterAdmission => {
+                        return ExtensionManagementCatalogOutcome::Unavailable;
+                    }
+                    ExtensionServiceStoreCallOutcome::Completed(
+                        ExtensionInstallCatalogLoadOutcome::Failed,
+                    ) => return ExtensionManagementCatalogOutcome::FailedClosed,
+                };
+            }
+            InstallUpdateReconciliation::Return(outcome) => return outcome,
+        }
+    }
 
     let authenticated = match startup.repository.authenticate_install_candidates() {
         Ok(authenticated) => authenticated,
@@ -256,6 +285,332 @@ pub(super) fn load(
         Ok(catalog) => ExtensionManagementCatalogOutcome::Loaded(catalog),
         Err(_) => ExtensionManagementCatalogOutcome::FailedClosed,
     }
+}
+
+enum InstallUpdateReconciliation {
+    Current,
+    Updated,
+    Return(ExtensionManagementCatalogOutcome),
+}
+
+fn reconcile_one_install_update(
+    startup: &mut WorkerStartupState,
+    runtime: &mut RuntimeCoordinator,
+    profile: ProfileId,
+    catalog: &ExtensionInstallCatalog,
+    deadline: Instant,
+) -> InstallUpdateReconciliation {
+    if Instant::now() >= deadline {
+        return InstallUpdateReconciliation::Return(ExtensionManagementCatalogOutcome::Unavailable);
+    }
+    let authenticated = match startup.repository.authenticate_install_updates(catalog) {
+        Ok(authenticated) => authenticated,
+        Err(error) => {
+            crate::diagnostic!(
+                "extensions: install-update authentication deferred with typed error {error}"
+            );
+            return InstallUpdateReconciliation::Return(classify_repository_error(error));
+        }
+    };
+    let (bindings, updates) = authenticated.into_parts();
+    let Some(update) = updates.into_vec().into_iter().next() else {
+        return InstallUpdateReconciliation::Current;
+    };
+    let cohort = match startup
+        .store
+        .load_grant_cohort_until(profile, bindings, deadline)
+    {
+        ExtensionServiceStoreCallOutcome::Completed(ExtensionGrantCohortLoadOutcome::Loaded(
+            cohort,
+        )) => cohort,
+        ExtensionServiceStoreCallOutcome::Completed(ExtensionGrantCohortLoadOutcome::Invalid)
+        | ExtensionServiceStoreCallOutcome::NotAdmitted
+        | ExtensionServiceStoreCallOutcome::TimedOutAfterAdmission => {
+            crate::diagnostic!("extensions: install-update grant cohort was unavailable");
+            return InstallUpdateReconciliation::Return(
+                ExtensionManagementCatalogOutcome::Unavailable,
+            );
+        }
+        ExtensionServiceStoreCallOutcome::Completed(
+            ExtensionGrantCohortLoadOutcome::NotRegistered
+            | ExtensionGrantCohortLoadOutcome::DegradedProfile,
+        ) => {
+            crate::diagnostic!("extensions: install-update grant cohort was rejected");
+            return InstallUpdateReconciliation::Return(
+                ExtensionManagementCatalogOutcome::Rejected,
+            );
+        }
+        ExtensionServiceStoreCallOutcome::Completed(ExtensionGrantCohortLoadOutcome::Failed) => {
+            crate::diagnostic!("extensions: install-update grant cohort failed closed");
+            return InstallUpdateReconciliation::Return(
+                ExtensionManagementCatalogOutcome::FailedClosed,
+            );
+        }
+    };
+    if cohort.profile() != profile || cohort.install_catalog() != catalog {
+        return InstallUpdateReconciliation::Return(ExtensionManagementCatalogOutcome::Unavailable);
+    }
+    let install = update.install().clone();
+    let Some(authority) = cohort
+        .resolve_entry(install.id())
+        .and_then(|entry| entry.authority_arc())
+        .cloned()
+    else {
+        return InstallUpdateReconciliation::Return(ExtensionManagementCatalogOutcome::Rejected);
+    };
+    let selector = ExtensionInstallSelector::new(
+        profile,
+        install.id(),
+        catalog.revision(),
+        install.revision(),
+    );
+    let retired = match retire_all_contexts(startup, runtime, selector, deadline) {
+        Ok(retired) => retired,
+        Err(outcome) => {
+            crate::diagnostic!(
+                "extensions: install-update retirement deferred with typed outcome {outcome:?}"
+            );
+            return InstallUpdateReconciliation::Return(match outcome {
+                zephium_core::ports::extensions::ExtensionSetEnabledOutcome::FailedClosed => {
+                    ExtensionManagementCatalogOutcome::FailedClosed
+                }
+                _ => ExtensionManagementCatalogOutcome::Unavailable,
+            });
+        }
+    };
+    if !install.desired_enabled() && !retired.is_empty() {
+        return restore_update_refusal(
+            startup,
+            runtime,
+            selector,
+            retired,
+            deadline,
+            ExtensionManagementCatalogOutcome::FailedClosed,
+        );
+    }
+    let outcome = startup.store.update_install_until(
+        profile,
+        catalog.revision(),
+        install.id(),
+        install.revision(),
+        authority.revision(),
+        Arc::clone(update.current_manifest()),
+        Arc::clone(update.replacement_manifest()),
+        deadline,
+    );
+    crate::diagnostic!(
+        "extensions: install-update Store settlement={}",
+        install_update_outcome_label(&outcome)
+    );
+    match outcome {
+        ExtensionServiceStoreCallOutcome::Completed(ExtensionInstallUpdateOutcome::Applied(
+            applied,
+        )) if catalog.revision().next() == Some(applied.catalog_revision)
+            && applied.install.id() == install.id()
+            && install.revision().next() == Some(applied.install.revision())
+            && applied.install.package() == update.replacement_manifest().package()
+            && applied.authority.install_id() == install.id()
+            && authority.revision().next() == Some(applied.authority.revision())
+            && applied.authority.package() == applied.install.package()
+            && applied.install.desired_enabled() == install.desired_enabled() =>
+        {
+            if !activate_updated_install(startup, runtime, &install, selector, retired, deadline) {
+                return InstallUpdateReconciliation::Return(
+                    ExtensionManagementCatalogOutcome::FailedClosed,
+                );
+            }
+            InstallUpdateReconciliation::Updated
+        }
+        ExtensionServiceStoreCallOutcome::Completed(
+            ExtensionInstallUpdateOutcome::OutcomeUnknown,
+        )
+        | ExtensionServiceStoreCallOutcome::TimedOutAfterAdmission => {
+            reconcile_uncertain_install_update(
+                startup,
+                runtime,
+                profile,
+                &install,
+                update.replacement_manifest().package(),
+                selector,
+                retired,
+                deadline,
+            )
+        }
+        ExtensionServiceStoreCallOutcome::Completed(ExtensionInstallUpdateOutcome::Conflict(_)) => {
+            restore_update_refusal(
+                startup,
+                runtime,
+                selector,
+                retired,
+                deadline,
+                ExtensionManagementCatalogOutcome::Unavailable,
+            )
+        }
+        ExtensionServiceStoreCallOutcome::Completed(
+            ExtensionInstallUpdateOutcome::AdditionalConsentRequired
+            | ExtensionInstallUpdateOutcome::Invalid
+            | ExtensionInstallUpdateOutcome::Uninitialized,
+        ) => restore_update_refusal(
+            startup,
+            runtime,
+            selector,
+            retired,
+            deadline,
+            ExtensionManagementCatalogOutcome::Rejected,
+        ),
+        ExtensionServiceStoreCallOutcome::Completed(
+            ExtensionInstallUpdateOutcome::NotRegistered
+            | ExtensionInstallUpdateOutcome::DegradedProfile,
+        )
+        | ExtensionServiceStoreCallOutcome::NotAdmitted => restore_update_refusal(
+            startup,
+            runtime,
+            selector,
+            retired,
+            deadline,
+            ExtensionManagementCatalogOutcome::Unavailable,
+        ),
+        ExtensionServiceStoreCallOutcome::Completed(
+            ExtensionInstallUpdateOutcome::RevisionExhausted
+            | ExtensionInstallUpdateOutcome::RuntimeOwnershipConflict
+            | ExtensionInstallUpdateOutcome::Failed,
+        )
+        | ExtensionServiceStoreCallOutcome::Completed(ExtensionInstallUpdateOutcome::Applied(_)) => {
+            InstallUpdateReconciliation::Return(ExtensionManagementCatalogOutcome::FailedClosed)
+        }
+    }
+}
+
+fn install_update_outcome_label(
+    outcome: &ExtensionServiceStoreCallOutcome<ExtensionInstallUpdateOutcome>,
+) -> &'static str {
+    match outcome {
+        ExtensionServiceStoreCallOutcome::Completed(ExtensionInstallUpdateOutcome::Applied(_)) => {
+            "applied"
+        }
+        ExtensionServiceStoreCallOutcome::Completed(ExtensionInstallUpdateOutcome::Conflict(_)) => {
+            "conflict"
+        }
+        ExtensionServiceStoreCallOutcome::Completed(
+            ExtensionInstallUpdateOutcome::NotRegistered,
+        ) => "not-registered",
+        ExtensionServiceStoreCallOutcome::Completed(
+            ExtensionInstallUpdateOutcome::DegradedProfile,
+        ) => "degraded-profile",
+        ExtensionServiceStoreCallOutcome::Completed(
+            ExtensionInstallUpdateOutcome::Uninitialized,
+        ) => "uninitialized",
+        ExtensionServiceStoreCallOutcome::Completed(
+            ExtensionInstallUpdateOutcome::AdditionalConsentRequired,
+        ) => "additional-consent-required",
+        ExtensionServiceStoreCallOutcome::Completed(ExtensionInstallUpdateOutcome::Invalid) => {
+            "invalid"
+        }
+        ExtensionServiceStoreCallOutcome::Completed(
+            ExtensionInstallUpdateOutcome::RevisionExhausted,
+        ) => "revision-exhausted",
+        ExtensionServiceStoreCallOutcome::Completed(
+            ExtensionInstallUpdateOutcome::RuntimeOwnershipConflict,
+        ) => "runtime-ownership-conflict",
+        ExtensionServiceStoreCallOutcome::Completed(
+            ExtensionInstallUpdateOutcome::OutcomeUnknown,
+        ) => "outcome-unknown",
+        ExtensionServiceStoreCallOutcome::Completed(ExtensionInstallUpdateOutcome::Failed) => {
+            "failed"
+        }
+        ExtensionServiceStoreCallOutcome::NotAdmitted => "not-admitted",
+        ExtensionServiceStoreCallOutcome::TimedOutAfterAdmission => "timed-out-after-admission",
+    }
+}
+
+fn restore_update_refusal(
+    startup: &mut WorkerStartupState,
+    runtime: &mut RuntimeCoordinator,
+    selector: ExtensionInstallSelector,
+    retired: super::management::RetiredContexts,
+    deadline: Instant,
+    outcome: ExtensionManagementCatalogOutcome,
+) -> InstallUpdateReconciliation {
+    if restore_contexts(startup, runtime, selector, retired, deadline) {
+        InstallUpdateReconciliation::Return(outcome)
+    } else {
+        InstallUpdateReconciliation::Return(ExtensionManagementCatalogOutcome::FailedClosed)
+    }
+}
+
+fn activate_updated_install(
+    startup: &mut WorkerStartupState,
+    runtime: &mut RuntimeCoordinator,
+    install: &zephium_core::extensions::ExtensionInstall,
+    selector: ExtensionInstallSelector,
+    retired: super::management::RetiredContexts,
+    deadline: Instant,
+) -> bool {
+    if !install.desired_enabled() {
+        return retired.is_empty();
+    }
+    if !restore_contexts(startup, runtime, selector, retired, deadline) {
+        return false;
+    }
+    let key = ExtensionNativeOwnershipKey::new(
+        selector.profile(),
+        install.id(),
+        ExtensionGrantBrowsingContext::Regular,
+    );
+    matches!(
+        runtime.activate_until(resources(startup), key, false, deadline),
+        RuntimeActivationOutcome::Activated(_) | RuntimeActivationOutcome::AlreadyActive(_)
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reconcile_uncertain_install_update(
+    startup: &mut WorkerStartupState,
+    runtime: &mut RuntimeCoordinator,
+    profile: ProfileId,
+    prior: &zephium_core::extensions::ExtensionInstall,
+    replacement: &zephium_core::extensions::ExtensionPackageIdentity,
+    selector: ExtensionInstallSelector,
+    retired: super::management::RetiredContexts,
+    deadline: Instant,
+) -> InstallUpdateReconciliation {
+    let catalog = match startup.store.load_install_catalog_until(profile, deadline) {
+        ExtensionServiceStoreCallOutcome::Completed(
+            ExtensionInstallCatalogLoadOutcome::Loaded(catalog),
+        ) => catalog,
+        _ => {
+            return InstallUpdateReconciliation::Return(
+                ExtensionManagementCatalogOutcome::FailedClosed,
+            )
+        }
+    };
+    let Some(observed) = catalog.get(prior.id()) else {
+        return InstallUpdateReconciliation::Return(
+            ExtensionManagementCatalogOutcome::FailedClosed,
+        );
+    };
+    if observed.package() == replacement
+        && prior.revision().next() == Some(observed.revision())
+        && observed.desired_enabled() == prior.desired_enabled()
+    {
+        if !activate_updated_install(startup, runtime, prior, selector, retired, deadline) {
+            return InstallUpdateReconciliation::Return(
+                ExtensionManagementCatalogOutcome::FailedClosed,
+            );
+        }
+        return InstallUpdateReconciliation::Updated;
+    }
+    if observed == prior {
+        return restore_update_refusal(
+            startup,
+            runtime,
+            selector,
+            retired,
+            deadline,
+            ExtensionManagementCatalogOutcome::Unavailable,
+        );
+    }
+    InstallUpdateReconciliation::Return(ExtensionManagementCatalogOutcome::FailedClosed)
 }
 
 fn verified_provenance(

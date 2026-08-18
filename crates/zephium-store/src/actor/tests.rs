@@ -330,6 +330,14 @@ fn bundled_extension_package(authority: u8, key: u8, revision: u64) -> Extension
 }
 
 fn extension_manifest(package: ExtensionPackageIdentity) -> Arc<ExtensionManifestDescriptor> {
+    extension_manifest_with_api(package, &["storage"], &["tabs"])
+}
+
+fn extension_manifest_with_api(
+    package: ExtensionPackageIdentity,
+    required_api: &[&str],
+    optional_api: &[&str],
+) -> Arc<ExtensionManifestDescriptor> {
     let api = |names: &[&str]| {
         ExtensionApiPermissionSet::new(
             names
@@ -351,8 +359,8 @@ fn extension_manifest(package: ExtensionPackageIdentity) -> Arc<ExtensionManifes
         .unwrap()
     };
     let declarations = ExtensionManifestDeclarations::new(
-        api(&["storage"]),
-        api(&["tabs"]),
+        api(required_api),
+        api(optional_api),
         Some(hosts(&["https://example.com/*"])),
         Some(hosts(&["https://optional.example/*", "file:///*"])),
         None,
@@ -3426,6 +3434,7 @@ fn extension_service_store_authority_has_one_closed_public_surface() {
         "pub fn rebind_native_ownership_grants_until(",
         "pub fn load_install_catalog_until(",
         "pub fn provision_install_until(",
+        "pub fn update_install_until(",
         "pub fn set_install_enabled_until(",
         "pub fn delete_install_until(",
         "pub fn load_grant_cohort_until(",
@@ -3446,7 +3455,7 @@ fn extension_service_store_authority_has_one_closed_public_surface() {
         })
         .count();
     assert_eq!(
-        public_items, 14,
+        public_items, 15,
         "the service Store authority gained an unreviewed public item"
     );
     assert!(!surface.contains("pub fn mutate_extension_install"));
@@ -3620,6 +3629,241 @@ fn extension_service_store_authority_atomically_provisions_disabled_install_and_
             .map(Arc::as_ref),
         Some(&grants)
     );
+}
+
+#[test]
+fn extension_service_store_authority_atomically_updates_install_and_grant_identity() {
+    let profile = ProfileId::from(1);
+    let install_id = ExtensionInstallId::from(0x5009);
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    store.save_session(sample());
+    assert!(store.flush());
+    let service = store.claim_extension_service_store_authority().unwrap();
+    let current = extension_manifest(bundled_extension_package(51, 52, 1));
+    let replacement = extension_manifest(bundled_extension_package(51, 52, 2));
+    let provisional = ExtensionInstall::new(install_id, current.package().clone());
+    let grants = ExtensionGrantAuthority::initialize(
+        &provisional,
+        vec![ApiPermissionName::parse_exact("storage").unwrap()],
+        vec![MatchPattern::parse("https://example.com/*").unwrap()],
+        false,
+        false,
+        &current,
+    )
+    .unwrap();
+    let ExtensionServiceStoreCallOutcome::Completed(ExtensionInstallProvisionOutcome::Applied(
+        provisioned,
+    )) = service.provision_install_until(
+        profile,
+        ExtensionInstallCatalogRevision::INITIAL,
+        install_id,
+        Arc::clone(&current),
+        Box::new(grants),
+        Instant::now() + STORE_RPC_TIMEOUT,
+    )
+    else {
+        panic!("extension update fixture did not provision");
+    };
+    let ExtensionServiceStoreCallOutcome::Completed(
+        ExtensionInstallCatalogMutationOutcome::Applied(enabled),
+    ) = service.set_install_enabled_until(
+        profile,
+        provisioned.catalog_revision,
+        install_id,
+        provisioned.install.revision(),
+        true,
+        Instant::now() + STORE_RPC_TIMEOUT,
+    )
+    else {
+        panic!("extension update fixture did not enable");
+    };
+    let enabled_catalog_revision = enabled.catalog_revision;
+    let enabled = enabled.install.unwrap();
+
+    let ExtensionServiceStoreCallOutcome::Completed(ExtensionInstallUpdateOutcome::Applied(
+        applied,
+    )) = service.update_install_until(
+        profile,
+        enabled_catalog_revision,
+        install_id,
+        enabled.revision(),
+        ExtensionGrantRevision::INITIAL,
+        Arc::clone(&current),
+        Arc::clone(&replacement),
+        Instant::now() + STORE_RPC_TIMEOUT,
+    )
+    else {
+        panic!("service Store authority did not atomically update the install");
+    };
+    assert_eq!(applied.install.id(), install_id);
+    assert_eq!(applied.install.package(), replacement.package());
+    assert!(applied.install.desired_enabled());
+    assert_eq!(applied.authority.package(), replacement.package());
+    assert_eq!(applied.authority.revision().get(), 2);
+
+    let ExtensionInstallCatalogLoadOutcome::Loaded(catalog) =
+        load_extension_installs(store.as_ref(), profile)
+    else {
+        panic!("updated install catalog did not reload");
+    };
+    assert_eq!(catalog.get(install_id), Some(applied.install.as_ref()));
+    let ExtensionGrantCohortLoadOutcome::Loaded(cohort) = load_extension_grants(
+        store.as_ref(),
+        profile,
+        extension_grant_bindings(&[(install_id, replacement)]),
+    ) else {
+        panic!("updated grant cohort did not reload");
+    };
+    assert_eq!(
+        cohort
+            .resolve_entry(install_id)
+            .and_then(|entry| entry.authority_arc())
+            .map(Arc::as_ref),
+        Some(applied.authority.as_ref())
+    );
+}
+
+#[test]
+fn extension_update_requiring_new_authority_preserves_the_old_atomic_cohort() {
+    let profile = ProfileId::from(1);
+    let install_id = ExtensionInstallId::from(0x5010);
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    store.save_session(sample());
+    assert!(store.flush());
+    let service = store.claim_extension_service_store_authority().unwrap();
+    let current = extension_manifest(bundled_extension_package(53, 54, 1));
+    let replacement = extension_manifest_with_api(
+        bundled_extension_package(53, 54, 2),
+        &["storage", "tabs"],
+        &[],
+    );
+    let provisional = ExtensionInstall::new(install_id, current.package().clone());
+    let grants = ExtensionGrantAuthority::initialize(
+        &provisional,
+        vec![ApiPermissionName::parse_exact("storage").unwrap()],
+        vec![MatchPattern::parse("https://example.com/*").unwrap()],
+        false,
+        false,
+        &current,
+    )
+    .unwrap();
+    let ExtensionServiceStoreCallOutcome::Completed(ExtensionInstallProvisionOutcome::Applied(
+        provisioned,
+    )) = service.provision_install_until(
+        profile,
+        ExtensionInstallCatalogRevision::INITIAL,
+        install_id,
+        Arc::clone(&current),
+        Box::new(grants.clone()),
+        Instant::now() + STORE_RPC_TIMEOUT,
+    )
+    else {
+        panic!("extension consent fixture did not provision");
+    };
+
+    assert_eq!(
+        service.update_install_until(
+            profile,
+            provisioned.catalog_revision,
+            install_id,
+            provisioned.install.revision(),
+            grants.revision(),
+            Arc::clone(&current),
+            replacement,
+            Instant::now() + STORE_RPC_TIMEOUT,
+        ),
+        ExtensionServiceStoreCallOutcome::Completed(
+            ExtensionInstallUpdateOutcome::AdditionalConsentRequired
+        )
+    );
+    let ExtensionInstallCatalogLoadOutcome::Loaded(catalog) =
+        load_extension_installs(store.as_ref(), profile)
+    else {
+        panic!("refused update catalog did not reload");
+    };
+    assert_eq!(catalog.get(install_id), Some(provisioned.install.as_ref()));
+    let ExtensionGrantCohortLoadOutcome::Loaded(cohort) = load_extension_grants(
+        store.as_ref(),
+        profile,
+        extension_grant_bindings(&[(install_id, current)]),
+    ) else {
+        panic!("refused update grant cohort did not reload");
+    };
+    assert_eq!(
+        cohort
+            .resolve_entry(install_id)
+            .and_then(|entry| entry.authority_arc())
+            .map(Arc::as_ref),
+        Some(&grants)
+    );
+}
+
+#[test]
+fn ambiguous_extension_update_never_commits_half_a_package_rebind() {
+    let profile = ProfileId::from(1);
+    let install_id = ExtensionInstallId::from(0x5011);
+    let current = extension_manifest(bundled_extension_package(55, 56, 1));
+    let replacement = extension_manifest(bundled_extension_package(55, 56, 2));
+    let provisional = ExtensionInstall::new(install_id, current.package().clone());
+    let grants = ExtensionGrantAuthority::initialize(
+        &provisional,
+        vec![ApiPermissionName::parse_exact("storage").unwrap()],
+        vec![MatchPattern::parse("https://example.com/*").unwrap()],
+        false,
+        false,
+        &current,
+    )
+    .unwrap();
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&sample()).unwrap();
+    let ExtensionInstallProvisionOutcome::Applied(provisioned) = hub
+        .provision_extension_install(
+            profile,
+            ExtensionInstallCatalogRevision::INITIAL,
+            install_id,
+            Arc::clone(&current),
+            Box::new(grants),
+        )
+        .unwrap()
+    else {
+        panic!("ambiguous update fixture did not provision");
+    };
+    hub.make_next_extension_install_commit_ambiguous();
+
+    assert_eq!(
+        hub.update_extension_install(
+            profile,
+            provisioned.catalog_revision,
+            install_id,
+            provisioned.install.revision(),
+            provisioned.authority.revision(),
+            current,
+            Arc::clone(&replacement),
+        )
+        .unwrap(),
+        ExtensionInstallUpdateOutcome::OutcomeUnknown
+    );
+    let ExtensionInstallCatalogLoadOutcome::Loaded(catalog) =
+        hub.load_extension_install_catalog(profile).unwrap()
+    else {
+        panic!("ambiguous update catalog did not reload");
+    };
+    let ExtensionGrantCohortLoadOutcome::Loaded(cohort) = hub
+        .load_extension_grant_cohort(
+            profile,
+            extension_grant_bindings(&[(install_id, replacement.clone())]),
+        )
+        .unwrap()
+    else {
+        panic!("ambiguous update grant cohort did not reload");
+    };
+    let installed = catalog.get(install_id).unwrap();
+    let authority = cohort
+        .resolve_entry(install_id)
+        .and_then(|entry| entry.authority_arc())
+        .unwrap();
+    assert_eq!(installed.package(), replacement.package());
+    assert_eq!(authority.package(), replacement.package());
 }
 
 #[test]

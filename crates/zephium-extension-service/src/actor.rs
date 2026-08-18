@@ -3087,7 +3087,7 @@ impl WorkerState {
             status.publish(ExtensionServicePhase::Failed);
             return (ExtensionManagementCatalogOutcome::FailedClosed, false);
         };
-        let outcome = management_catalog::load(startup, &self.runtime, profile, deadline);
+        let outcome = management_catalog::load(startup, &mut self.runtime, profile, deadline);
         if matches!(outcome, ExtensionManagementCatalogOutcome::FailedClosed) {
             status.publish(ExtensionServicePhase::Failed);
         }

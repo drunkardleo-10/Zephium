@@ -501,7 +501,7 @@ pub(super) fn validate_global_grant_integrity(conn: &Connection) -> rusqlite::Re
     Ok(())
 }
 
-fn load_grant_revision(
+pub(super) fn load_grant_revision(
     conn: &Connection,
     install_id: ExtensionInstallId,
 ) -> rusqlite::Result<Option<ExtensionGrantRevision>> {
@@ -534,7 +534,7 @@ pub(super) fn load_validated_runtime_authority(
     load_authority(conn, install, manifest)
 }
 
-fn load_authority(
+pub(super) fn load_authority(
     conn: &Connection,
     install: &ExtensionInstall,
     manifest: &ExtensionManifestDescriptor,
@@ -945,6 +945,86 @@ fn persist_authority_patch(
         ));
     }
     insert_authority_members(conn, authority, "replaced")
+}
+
+pub(super) fn persist_reconciled_authority(
+    conn: &Connection,
+    expected: ExtensionGrantRevision,
+    current_package: &ExtensionPackageIdentity,
+    authority: &ExtensionGrantAuthority,
+) -> rusqlite::Result<()> {
+    let projection = authority.persistence_projection();
+    let id = projection.install_id().bytes();
+    let current_authority = current_package.authority().bytes();
+    let current_key = current_package.key().bytes();
+    let current_payload = super::extensions::encode_package_payload(current_package.payload())?;
+    let current_manifest = current_package.manifest_sha256().bytes();
+    let current_tree = current_package.tree_sha256().bytes();
+    let package = projection.package();
+    let package_authority = package.authority().bytes();
+    let key = package.key().bytes();
+    let payload = super::extensions::encode_package_payload(package.payload())?;
+    let manifest = package.manifest_sha256().bytes();
+    let tree = package.tree_sha256().bytes();
+    let digest = projection.digest().bytes();
+    let updated = conn.execute(
+        "UPDATE extension_grants
+         SET revision = ?3,
+             authority = ?4, package_key = ?5, package_revision = ?6,
+             payload_kind = ?7, archive_length = ?8, archive_sha256 = ?9,
+             manifest_sha256 = ?10, tree_sha256 = ?11,
+             grant_sha256 = ?12, file_access = ?13, private_access = ?14
+         WHERE install_id = ?1 AND revision = ?2
+           AND authority = ?15 AND package_key = ?16 AND package_revision = ?17
+           AND payload_kind = ?18 AND archive_length IS ?19 AND archive_sha256 IS ?20
+           AND manifest_sha256 = ?21 AND tree_sha256 = ?22",
+        params![
+            &id[..],
+            super::extensions::revision_i64(expected.get())?,
+            super::extensions::revision_i64(projection.revision().get())?,
+            &package_authority[..],
+            &key[..],
+            super::extensions::revision_i64(package.revision().get())?,
+            payload.kind,
+            payload.archive_length,
+            payload.archive_sha256.as_ref().map(|digest| &digest[..]),
+            &manifest[..],
+            &tree[..],
+            &digest[..],
+            i64::from(projection.persisted_file_access()),
+            i64::from(projection.persisted_private_access()),
+            &current_authority[..],
+            &current_key[..],
+            super::extensions::revision_i64(current_package.revision().get())?,
+            current_payload.kind,
+            current_payload.archive_length,
+            current_payload
+                .archive_sha256
+                .as_ref()
+                .map(|digest| &digest[..]),
+            &current_manifest[..],
+            &current_tree[..],
+        ],
+    )?;
+    if updated != 1 {
+        return Err(invalid_data(
+            "extension grant package changed during replacement compare-and-swap",
+        ));
+    }
+    let deleted_api = conn.execute(
+        "DELETE FROM extension_grant_api_permissions WHERE install_id = ?1",
+        [&id[..]],
+    )?;
+    let deleted_hosts = conn.execute(
+        "DELETE FROM extension_grant_host_permissions WHERE install_id = ?1",
+        [&id[..]],
+    )?;
+    if deleted_api > MAX_EXTENSION_API_PERMISSIONS || deleted_hosts > MAX_EXTENSION_HOST_GRANTS {
+        return Err(invalid_data(
+            "extension package replacement removed an over-limit authority",
+        ));
+    }
+    insert_authority_members(conn, authority, "reconciled")
 }
 
 fn persist_authority_mutation(
