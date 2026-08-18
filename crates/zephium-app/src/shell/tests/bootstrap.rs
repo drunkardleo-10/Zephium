@@ -1,6 +1,26 @@
 use super::*;
 
 #[test]
+fn first_run_profile_is_persisted_before_profile_scoped_management_is_exposed() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, _engine, _screen) = setup_with(store.clone());
+
+    shell.handle(Command::Bootstrap);
+
+    assert!(shell.bootstrapped);
+    let focused = shell.windows.focused().unwrap();
+    let saved = store.saved.lock().unwrap().clone().unwrap();
+    assert!(saved
+        .profiles
+        .iter()
+        .any(|profile| profile.id == focused.profile));
+    assert!(saved
+        .spaces
+        .iter()
+        .any(|space| space.id == focused.space && space.profile == focused.profile));
+}
+
+#[test]
 fn restart_preserves_ids_actives_and_splits() {
     let store = Arc::new(FakeStore::default());
     let (mut shell, _engine, screen) = setup_with(store.clone());

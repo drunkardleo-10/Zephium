@@ -1424,3 +1424,97 @@ fn real_timer_thread_retries_transient_extension_startup_once() {
     );
     assert_eq!(handle.shutdown().recv().unwrap(), ShutdownOutcome::Clean);
 }
+
+#[test]
+fn activated_distribution_reloads_visible_management_and_ignores_the_overtaken_read() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (extension_service, extension_state) =
+        extension_lifecycle_with_outcome(ExtensionServiceShutdownOutcome::Clean);
+    let handle = spawn(
+        Arc::new(FakeEngine::default()),
+        Arc::new(FakeStore::default()),
+        Arc::new(ImmediateAllowAllCompiler),
+        extension_service,
+        Box::new(|_| {}),
+        Arc::new(FakeChrome),
+        Box::new(move |projection| {
+            let _ = tx.send(projection);
+        }),
+    )
+    .expect("spawn test shell");
+    assert!(handle.dispatch(Command::SetWindowSize(Size::new(1200.0, 800.0))));
+    assert!(handle.dispatch(Command::Bootstrap));
+    let profile = std::iter::from_fn(|| rx.recv_timeout(std::time::Duration::from_secs(2)).ok())
+        .find_map(|projection| match projection {
+            Projection::Items(items) => items.profile.map(|profile| profile.id),
+            _ => None,
+        })
+        .and_then(|profile| ProfileId::parse(&profile))
+        .expect("bootstrap must publish the focused profile");
+    let _ = rx.try_iter().count();
+
+    assert!(handle.dispatch(Command::SetExtensionManagementVisible(true)));
+    assert!(wait_for_actor_condition(
+        std::time::Duration::from_secs(2),
+        || extension_state
+            .management_catalog_calls
+            .lock()
+            .unwrap()
+            .len()
+            == 1
+    ));
+    let completion = zephium_core::ports::extensions::ExtensionDistributionCompletionStatus::new(
+        zephium_core::extensions::ExtensionCatalogSetDigest::from_bytes([7; 32]),
+        1,
+        1,
+        0,
+        0,
+        true,
+    )
+    .unwrap();
+    assert!(handle.dispatch(Command::ExtensionDistributionStatusChanged(
+        zephium_core::ports::extensions::ExtensionDistributionStatus::new(
+            2,
+            zephium_core::ports::extensions::ExtensionDistributionState::Ready(completion),
+        )
+        .unwrap(),
+    )));
+    assert!(wait_for_actor_condition(
+        std::time::Duration::from_secs(2),
+        || extension_state
+            .management_catalog_calls
+            .lock()
+            .unwrap()
+            .len()
+            == 2
+    ));
+
+    let overtaken = extension_state
+        .management_catalog_callbacks
+        .lock()
+        .unwrap()
+        .remove(0);
+    overtaken(zephium_core::ports::extensions::ExtensionManagementCatalogOutcome::Rejected);
+    settle_next_management_catalog(
+        &extension_state,
+        empty_extension_management_catalog(
+            profile,
+            zephium_core::extensions::ExtensionInstallCatalogRevision::INITIAL,
+        ),
+    );
+    let ready = wait_for_ready_management_catalog(
+        &rx,
+        profile,
+        zephium_core::extensions::ExtensionInstallCatalogRevision::INITIAL,
+        0,
+    );
+    assert_eq!(ready.phase, zephium_ipc::ExtensionManagementPhase::Ready);
+
+    assert_eq!(
+        handle
+            .shutdown()
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap(),
+        ShutdownOutcome::Clean
+    );
+}

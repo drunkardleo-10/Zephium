@@ -208,6 +208,11 @@ impl ExtensionManagementState {
         self.catalog = None;
     }
 
+    fn invalidate_catalog_subscription(&mut self) {
+        self.catalog_request = None;
+        self.catalog = None;
+    }
+
     pub(super) fn catalog(&self) -> Option<&ExtensionManagementCatalog> {
         self.catalog.as_ref()
     }
@@ -431,6 +436,13 @@ impl Shell {
                     );
                 }
             }
+            ExtensionManagementCatalogOutcome::CatalogNotSynchronized => {
+                self.extension_management.clear_catalog();
+                self.project_extension_management_phase(
+                    profile,
+                    zephium_ipc::ExtensionManagementPhase::CatalogNotSynchronized,
+                );
+            }
             ExtensionManagementCatalogOutcome::Unavailable => {
                 self.extension_management.clear_catalog();
                 self.project_extension_management_phase(
@@ -455,11 +467,14 @@ impl Shell {
         }
     }
 
-    fn refresh_extension_management_catalog(&mut self, profile: ProfileId) {
+    pub(super) fn refresh_extension_management_catalog(&mut self, profile: ProfileId) {
         if self.extension_management.visible_profile() != Some(profile) {
             return;
         }
-        self.extension_management.clear_catalog();
+        // Catalog activation can overtake a management read already inside the
+        // service. Invalidate its exact token and start a new generation; the
+        // late callback is then ignored rather than repainting stale rows.
+        self.extension_management.invalidate_catalog_subscription();
         self.begin_extension_management_catalog_if_visible();
     }
 

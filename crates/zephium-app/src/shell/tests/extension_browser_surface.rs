@@ -295,10 +295,15 @@ fn final_runtime_retirement_publishes_an_empty_surface_and_releases_shell_state(
 
     assert!(retired.native.scheduled);
     assert!(!shell.extension_browser_surfaces.is_active(profile));
-    assert!(shell
+    let retired_surface = shell
         .extension_browser_surfaces
         .published_surface(profile)
-        .is_none());
+        .expect("the empty generation remains as the monotonic reactivation floor");
+    assert_eq!(
+        retired_surface.generation(),
+        ExtensionBrowserSurfaceGeneration::new(2).unwrap()
+    );
+    assert!(retired_surface.windows().is_empty());
     let surfaces = engine.extension_browser_surfaces();
     assert_eq!(surfaces.len(), 2);
     assert_eq!(
@@ -348,7 +353,7 @@ fn rejected_final_runtime_surface_retirement_is_bounded_and_retryable() {
     assert!(shell
         .extension_browser_surfaces
         .published_surface(profile)
-        .is_none());
+        .is_some_and(|surface| surface.windows().is_empty()));
     assert!(engine
         .extension_browser_surfaces()
         .last()
@@ -359,6 +364,46 @@ fn rejected_final_runtime_surface_retirement_is_bounded_and_retryable() {
         shell.retry_extension_browser_surfaces().native,
         NativeWork::default()
     );
+}
+
+#[test]
+fn reactivation_advances_past_the_empty_retirement_generation() {
+    let (mut shell, engine, _) = setup();
+    let profile = ProfileId::from(54_000);
+    let space = SpaceId::from(54_001);
+    install_profile(&mut shell, profile, &[space]);
+    shell
+        .windows
+        .create(WindowKind::Main, profile, space, Size::new(1200.0, 800.0));
+    activate_profile(&mut shell, profile);
+    assert!(shell.items.insert_tab(
+        ItemId::from(54_002),
+        Placement::Space {
+            space,
+            section: SpaceSection::Today,
+        },
+    ));
+    assert!(shell.sync_extension_browser_surfaces().native.scheduled);
+
+    assert!(shell
+        .extension_browser_surfaces
+        .replace_active_profiles(zephium_core::ports::extensions::ExtensionActiveProfiles::EMPTY));
+    assert!(shell.sync_extension_browser_surfaces().native.scheduled);
+
+    let mut active = zephium_core::ports::extensions::ExtensionActiveProfiles::EMPTY;
+    assert!(active.try_insert(profile));
+    assert!(shell
+        .extension_browser_surfaces
+        .replace_active_profiles(active));
+    assert!(shell.sync_extension_browser_surfaces().native.scheduled);
+
+    let surfaces = engine.extension_browser_surfaces();
+    assert_eq!(surfaces.len(), 3);
+    assert_eq!(
+        surfaces[2].generation(),
+        ExtensionBrowserSurfaceGeneration::new(3).unwrap()
+    );
+    assert_eq!(surfaces[2].windows().len(), 1);
 }
 
 #[test]

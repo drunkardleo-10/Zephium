@@ -44,6 +44,7 @@ fn profile_deletion_completes_once_only_after_native_and_store_phases() {
     let (mut shell, engine, _screen, operations) =
         setup_with_operation_log_and_lifecycle(store.clone(), extension_service, Box::new(|_| {}));
     shell.handle(Command::Bootstrap);
+    store.events.lock().unwrap().clear();
     let profile = add_inactive_named_profile(&mut shell, 20_000);
     engine.push_erasure_outcomes([ProfileDataErasureOutcome::Verified]);
 

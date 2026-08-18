@@ -162,11 +162,16 @@ impl Shell {
             };
             let surface = ExtensionBrowserSurface::new(profile, generation, None, Vec::new())
                 .expect("empty extension browser surface is bounded and valid");
-            let admission = self.engine.set_extension_browser_surface(surface);
+            let admission = self.engine.set_extension_browser_surface(surface.clone());
             settlement.native.record(admission);
             match admission {
                 NativeDispatch::Scheduled => {
-                    self.extension_browser_surfaces.published.remove(&profile);
+                    // Retain the accepted empty generation as a compact
+                    // monotonic floor. Re-enabling the first runtime in this
+                    // profile must publish generation N+1, never restart at
+                    // INITIAL against an engine/controller that already saw
+                    // the retirement generation.
+                    self.extension_browser_surfaces.record_published(surface);
                     self.extension_browser_surfaces
                         .retry_profiles
                         .remove(profile);

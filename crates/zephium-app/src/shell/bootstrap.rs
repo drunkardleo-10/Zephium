@@ -263,6 +263,12 @@ impl Shell {
         let _ = self.relayout();
         self.project_items();
         self.bootstrapped = true;
+        if session_absent {
+            // Register the first-run profile with Store immediately. Extension
+            // management and other profile-scoped actors must never observe a
+            // chrome-visible profile that exists only in volatile Shell state.
+            self.persist();
+        }
     }
 
     pub(super) fn create_default_space(&mut self) -> Option<SpaceId> {

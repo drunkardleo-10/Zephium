@@ -543,6 +543,9 @@ pub enum ExtensionManagementCatalogOutcome {
     /// Authenticated package identity, atomic grants, and live runtime state
     /// were joined for the complete profile catalog.
     Loaded(ExtensionManagementCatalog),
+    /// Product authority is configured, but no authenticated catalog
+    /// generation has been activated in the local repository yet.
+    CatalogNotSynchronized,
     /// The request was coherent but could not complete before its deadline or
     /// while startup/profile state temporarily refused it.
     Unavailable,

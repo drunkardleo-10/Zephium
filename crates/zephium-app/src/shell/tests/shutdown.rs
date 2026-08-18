@@ -211,6 +211,7 @@ fn shutdown_deadline_includes_time_spent_waiting_before_actor_processing() {
     let (mut shell, _engine, _screen) =
         setup_with_extension_lifecycle(store.clone(), extension_service);
     shell.handle(Command::Bootstrap);
+    store.events.lock().unwrap().clear();
     let (ack, done) = sync_channel(1);
 
     shell.handle(Command::Shutdown {
@@ -563,6 +564,7 @@ fn every_panicking_terminal_barrier_runs_and_acknowledges_unclean_once() {
         Box::new(|_| {}),
     );
     shell.handle(Command::Bootstrap);
+    order.lock().unwrap().clear();
 
     store
         .panic_on_save

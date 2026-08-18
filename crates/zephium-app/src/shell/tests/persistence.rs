@@ -25,6 +25,18 @@ fn hostile_url_churn_cannot_force_repeated_full_session_snapshots() {
         })
         .expect("bootstrap snapshot");
     let id = ItemId::parse(state.active.as_deref().unwrap()).unwrap();
+    // First-run bootstrap durably registers the chrome-visible profile before
+    // profile-scoped services can observe it. This test measures only the
+    // subsequent URL-churn cadence.
+    let first_run_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !store.events.lock().unwrap().contains(&"save") {
+        assert!(
+            std::time::Instant::now() < first_run_deadline,
+            "first-run profile registration did not settle"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    store.events.lock().unwrap().clear();
 
     for value in 0..100 {
         assert!(handle.dispatch(Command::Engine(EngineEvent::UrlChanged {

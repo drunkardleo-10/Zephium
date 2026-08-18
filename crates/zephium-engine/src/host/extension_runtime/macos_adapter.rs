@@ -464,7 +464,7 @@ fn report_product_probe_failure(phase: &'static str, failure: impl std::fmt::Dis
 fn report_product_probe_failure(_phase: &'static str, _failure: impl std::fmt::Display) {}
 
 fn map_controller_failure(error: ControllerRegistryError) -> ExtensionRuntimeFailure {
-    match error {
+    let mapped = match error {
         ControllerRegistryError::CapacityExceeded => ExtensionRuntimeFailure::CapacityExceeded,
         ControllerRegistryError::InvalidRuntimeVersion
         | ControllerRegistryError::IncompleteRuntime
@@ -476,11 +476,17 @@ fn map_controller_failure(error: ControllerRegistryError) -> ExtensionRuntimeFai
             ExtensionRuntimeFailure::BackendUnavailable
         }
         _ => ExtensionRuntimeFailure::Internal,
+    };
+    if mapped == ExtensionRuntimeFailure::Internal {
+        crate::diagnostic!(
+            "extensions: macOS controller registry failed with closed reason {error:?}"
+        );
     }
+    mapped
 }
 
 fn map_native_failure(failure: MacosNativeRuntimeFailure) -> ExtensionRuntimeFailure {
-    match failure {
+    let mapped = match failure {
         MacosNativeRuntimeFailure::UnsupportedRuntime => ExtensionRuntimeFailure::UnsupportedTarget,
         MacosNativeRuntimeFailure::PackageRootAccess(_)
         | MacosNativeRuntimeFailure::PackageRootRejected(_)
@@ -495,5 +501,11 @@ fn map_native_failure(failure: MacosNativeRuntimeFailure) -> ExtensionRuntimeFai
             ExtensionRuntimeFailure::BackendUnavailable
         }
         _ => ExtensionRuntimeFailure::Internal,
+    };
+    if mapped == ExtensionRuntimeFailure::Internal {
+        crate::diagnostic!(
+            "extensions: macOS native runtime failed with closed reason {failure:?}"
+        );
     }
+    mapped
 }

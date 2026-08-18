@@ -220,6 +220,9 @@ impl Shell {
                     reason,
                 } = observation
                 {
+                    crate::diagnostic!(
+                        "extensions: toolbar action rejected with typed reason {reason:?}"
+                    );
                     self.project_extension_action_failure(profile, Some(tab), reason);
                     if matches!(
                         reason,

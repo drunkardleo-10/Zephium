@@ -47,6 +47,16 @@
 
 pub(crate) use zephium_extension_runtime_api::MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES;
 
+mod diagnostics;
+
+macro_rules! diagnostic {
+    ($($argument:tt)*) => {{
+        crate::diagnostics::write(format_args!($($argument)*));
+    }};
+}
+
+pub(crate) use diagnostic;
+
 mod actor;
 mod boot;
 mod cleanup;

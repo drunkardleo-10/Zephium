@@ -52,6 +52,14 @@ pub(super) fn set_enabled_until(
             ExtensionGrantBrowsingContext::Regular,
         );
         let activation = runtime.activate_until(resources(startup), key, false, deadline);
+        if !matches!(
+            activation,
+            RuntimeActivationOutcome::Activated(_) | RuntimeActivationOutcome::AlreadyActive(_)
+        ) {
+            crate::diagnostic!(
+                "extensions: requested runtime activation remained pending: {activation:?}"
+            );
+        }
         let outcome = match activation {
             RuntimeActivationOutcome::Activated(generation) => {
                 ExtensionSetEnabledOutcome::Enabled {

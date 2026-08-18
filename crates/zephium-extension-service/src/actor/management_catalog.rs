@@ -344,13 +344,36 @@ fn classify_repository_error(
             | BundledManifestBindingsError::StaleSelection => {
                 ExtensionManagementCatalogOutcome::Unavailable
             }
-            BundledManifestBindingsError::NoCurrentSelection
-            | BundledManifestBindingsError::PackageNotSelected
+            BundledManifestBindingsError::NoCurrentSelection => {
+                ExtensionManagementCatalogOutcome::CatalogNotSynchronized
+            }
+            BundledManifestBindingsError::PackageNotSelected
             | BundledManifestBindingsError::InstallPackageMismatch => {
                 ExtensionManagementCatalogOutcome::Rejected
             }
             _ => ExtensionManagementCatalogOutcome::FailedClosed,
         },
         _ => ExtensionManagementCatalogOutcome::FailedClosed,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn absent_current_catalog_is_distinct_from_authentication_rejection() {
+        assert_eq!(
+            classify_repository_error(BundledManagementManifestsError::Authentication(
+                BundledManifestBindingsError::NoCurrentSelection,
+            )),
+            ExtensionManagementCatalogOutcome::CatalogNotSynchronized
+        );
+        assert_eq!(
+            classify_repository_error(BundledManagementManifestsError::Authentication(
+                BundledManifestBindingsError::PackageNotSelected,
+            )),
+            ExtensionManagementCatalogOutcome::Rejected
+        );
     }
 }

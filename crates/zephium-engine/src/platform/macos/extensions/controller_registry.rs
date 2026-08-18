@@ -442,6 +442,14 @@ impl PersistentControllerRegistry {
         let PersistentControllerSlot::Prepared(entry) = slot else {
             return Err(ControllerRegistryError::ErasureInFlight);
         };
+        if entry.browser_surface.generation() == Some(surface.generation()) {
+            // EngineHost accepts one immutable value for a generation before
+            // reaching this registry. Reconciliation of that exact retained
+            // value is idempotent and must not be reclassified as stale by the
+            // lower native graph.
+            validate_entry_identity(entry)?;
+            return Ok(ControllerSurfaceApplication::Applied);
+        }
         let result = catch_native(|| {
             validate_entry_identity(entry)?;
             entry

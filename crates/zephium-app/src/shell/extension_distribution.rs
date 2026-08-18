@@ -73,6 +73,11 @@ impl Shell {
         }
         self.extension_distribution_status = Some(status);
         self.project_extension_distribution_status();
+        if matches!(status.state(), ExtensionDistributionState::Ready(_)) {
+            if let Some(profile) = self.extension_management.visible_profile() {
+                self.refresh_extension_management_catalog(profile);
+            }
+        }
     }
 
     pub(super) fn project_extension_distribution_status(&self) {

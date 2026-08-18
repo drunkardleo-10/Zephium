@@ -3,6 +3,7 @@ import type { ExtensionManagementLimitationView } from "../../shared/ipc/binding
 const API_PERMISSION_LABELS: Readonly<Record<string, string>> = {
   activeTab: "Access the current tab after you use the extension",
   alarms: "Schedule background tasks",
+  bookmarks: "Read your bookmarks",
   clipboardRead: "Read copied content",
   clipboardWrite: "Copy content to the clipboard",
   contextMenus: "Add items to page context menus",
@@ -12,13 +13,18 @@ const API_PERMISSION_LABELS: Readonly<Record<string, string>> = {
   "declarativeNetRequest.withHostAccess": "Apply blocking rules to requests on allowed sites",
   declarativeNetRequestWithHostAccess: "Apply blocking rules to requests on allowed sites",
   fontSettings: "Read and change browser font settings",
+  favicon: "Display site icons",
+  history: "Search recent browsing history",
   idle: "Detect when the device is idle",
   menus: "Add items to browser and page menus",
+  nativeMessaging: "Use Zephium's restricted compatibility broker",
   notifications: "Show notifications",
   offscreen: "Run an offscreen extension document",
   privacy: "Read and change supported browser privacy settings",
   sidePanel: "Show content in the browser side panel",
   scripting: "Run extension scripts on allowed sites",
+  search: "Search using your default search engine",
+  sessions: "Restore the most recently closed tab",
   storage: "Store extension settings and data",
   tabs: "Read tab titles and addresses",
   unlimitedStorage: "Store data without the normal extension quota",
@@ -55,7 +61,7 @@ export function compatibilityLimitationLabel(
     case "offscreen":
       return "Offscreen extension documents are limited";
     case "native_messaging":
-      return "Connections to native apps are limited";
+      return "Arbitrary native app connections are unavailable";
     case "browser_override":
       return "Replacing built-in browser pages is limited";
     case "extension_pages_csp":

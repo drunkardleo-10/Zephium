@@ -101,6 +101,7 @@ pub enum ExtensionManagementPhase {
     Loading,
     Ready,
     NotConfigured,
+    CatalogNotSynchronized,
     Unavailable,
     Rejected,
     FailedClosed,

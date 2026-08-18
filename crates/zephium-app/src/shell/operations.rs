@@ -58,6 +58,9 @@ impl Shell {
             Err(
                 reason @ zephium_core::extensions::ExtensionActionRejection::NativeAdmissionFailed,
             ) => {
+                crate::diagnostic!(
+                    "extensions: toolbar action synchronously rejected with typed reason {reason:?}"
+                );
                 self.project_extension_action_failure(runtime.profile(), None, reason);
                 operation_result(
                     OperationOutcome::NativeAdmissionFailed,
@@ -68,6 +71,9 @@ impl Shell {
                 reason @ (zephium_core::extensions::ExtensionActionRejection::UnsupportedPlatform
                 | zephium_core::extensions::ExtensionActionRejection::PopupUnavailable),
             ) => {
+                crate::diagnostic!(
+                    "extensions: toolbar action synchronously rejected with typed reason {reason:?}"
+                );
                 self.project_extension_action_failure(runtime.profile(), None, reason);
                 operation_result(
                     OperationOutcome::Rejected,
@@ -75,6 +81,9 @@ impl Shell {
                 )
             }
             Err(reason) => {
+                crate::diagnostic!(
+                    "extensions: toolbar action synchronously rejected with typed reason {reason:?}"
+                );
                 self.project_extension_action_failure(runtime.profile(), None, reason);
                 operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope)
             }

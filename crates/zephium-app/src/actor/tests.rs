@@ -406,6 +406,22 @@ fn divider_release_is_a_tracked_operation() {
 }
 
 #[test]
+fn extension_action_is_a_tracked_operation() {
+    assert!(tracked_operation_command(&Command::InvokeExtensionAction {
+        runtime: zephium_core::extensions::ExtensionRuntimeInstance::new(
+            ProfileId::from(29),
+            zephium_core::ids::ExtensionInstallId::from(31),
+            zephium_core::extensions::ExtensionRuntimeGeneration::INITIAL,
+        ),
+        revision: zephium_core::extensions::ExtensionActionRevision::INITIAL,
+        anchor: zephium_core::extensions::ExtensionPopupAnchor::new(
+            zephium_core::geometry::Rect::new(8.0, 12.0, 28.0, 28.0),
+        )
+        .unwrap(),
+    }));
+}
+
+#[test]
 fn exact_content_policy_retry_is_a_tracked_operation() {
     assert!(tracked_operation_command(&Command::RetryContentPolicy {
         profile: ProfileId::from(17),

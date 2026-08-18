@@ -18,6 +18,10 @@ describe("extension permission copy", () => {
 
   it("uses browser-owned copy instead of presenting unknown tokens as identity", () => {
     expect(apiPermissionLabel("clipboardRead")).toBe("Read copied content");
+    expect(apiPermissionLabel("nativeMessaging")).toBe(
+      "Use Zephium's restricted compatibility broker",
+    );
+    expect(apiPermissionLabel("sessions")).toBe("Restore the most recently closed tab");
     expect(apiPermissionLabel("futureCapability")).toBe(
       "Use the futureCapability browser capability",
     );
@@ -31,7 +35,7 @@ describe("extension permission copy", () => {
       "Some page scripts have platform limitations",
     );
     expect(compatibilityLimitationLabel({ type: "native_messaging" })).toBe(
-      "Connections to native apps are limited",
+      "Arbitrary native app connections are unavailable",
     );
   });
 });

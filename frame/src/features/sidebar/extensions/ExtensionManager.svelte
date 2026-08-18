@@ -443,13 +443,15 @@
                 The installed extension catalog could not be authenticated.
               {:else if management?.phase === "not_configured"}
                 Extensions are not configured in this build.
+              {:else if management?.phase === "catalog_not_synchronized"}
+                No verified extension catalog has been synchronized yet.
               {:else if management?.phase === "failed_closed"}
                 Extension management stopped to protect this profile.
               {:else}
                 Extension management is unavailable right now.
               {/if}
             </p>
-            {#if management?.phase !== "not_configured"}
+            {#if management?.phase !== "not_configured" && management?.phase !== "catalog_not_synchronized"}
               <button
                 type="button"
                 class="hover:bg-fill-strong mt-2 inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[11.5px] font-medium text-text"
@@ -602,7 +604,9 @@
           {:else}
             {#if management.candidates.length === 0}
               <p class="rounded-md bg-fill px-2.5 py-3 text-[11.5px] leading-4 text-muted">
-                No verified extensions are available in this catalog.
+                {management.entries.some((entry) => entry.source === "zephium_verified")
+                  ? "All verified extensions in this catalog are installed."
+                  : "No verified extensions are available in this catalog."}
               </p>
             {:else}
               <div>
