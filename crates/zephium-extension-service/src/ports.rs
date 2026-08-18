@@ -8,8 +8,8 @@ use zephium_core::ports::extensions::{
     ExtensionAcquiredPackageProvisioningOutcome, ExtensionAcquiredPackageProvisioningRequest,
     ExtensionInitialGrantSelection, ExtensionInstallCallback, ExtensionInstallCandidateSelector,
     ExtensionInstallOutcome, ExtensionInstallSelector, ExtensionManagementAdmission,
-    ExtensionManagementCatalogAdmission, ExtensionManagementCatalogCallback,
-    ExtensionManagementSettlement,
+    ExtensionManagementAvailability, ExtensionManagementCatalogAdmission,
+    ExtensionManagementCatalogCallback, ExtensionManagementSettlement,
     ExtensionProfileRetirementDisposition as CoreExtensionProfileRetirementDisposition,
     ExtensionRepositoryMaintenanceAdmission, ExtensionRepositoryMaintenanceCallback,
     ExtensionRuntimeActivationDisposition as CoreExtensionRuntimeActivationDisposition,
@@ -95,6 +95,10 @@ impl ExtensionServiceLifecycle for ExtensionServiceOwner {
             observed
         };
         project_lifecycle_startup_outcome(observed)
+    }
+
+    fn extension_management_availability(&self) -> ExtensionManagementAvailability {
+        ExtensionManagementAvailability::Configured
     }
 
     fn provision_acquired_package_until(

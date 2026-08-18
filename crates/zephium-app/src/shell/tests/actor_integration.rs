@@ -1055,6 +1055,70 @@ fn extension_management_stays_pending_until_serialized_service_settlement() {
 }
 
 #[test]
+fn unprovisioned_management_is_truthful_and_never_probes_the_inert_service() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (extension_service, extension_state) =
+        extension_lifecycle_with_outcome(ExtensionServiceShutdownOutcome::Clean);
+    extension_state
+        .management_not_configured
+        .store(true, std::sync::atomic::Ordering::Release);
+    let handle = spawn(
+        Arc::new(FakeEngine::default()),
+        Arc::new(FakeStore::default()),
+        Arc::new(ImmediateAllowAllCompiler),
+        extension_service,
+        Box::new(|_| {}),
+        Arc::new(FakeChrome),
+        Box::new(move |projection| {
+            let _ = tx.send(projection);
+        }),
+    )
+    .expect("spawn test shell");
+    assert!(handle.dispatch(Command::SetWindowSize(Size::new(1200.0, 800.0))));
+    assert!(handle.dispatch(Command::Bootstrap));
+    let profile = std::iter::from_fn(|| rx.recv_timeout(std::time::Duration::from_secs(2)).ok())
+        .find_map(|projection| match projection {
+            Projection::Items(items) => items.profile.map(|profile| profile.id),
+            _ => None,
+        })
+        .and_then(|profile| ProfileId::parse(&profile))
+        .expect("bootstrap must publish the focused profile");
+    let _ = rx.try_iter().count();
+
+    assert!(handle.dispatch(Command::SetExtensionManagementVisible(true)));
+    let unavailable =
+        std::iter::from_fn(|| rx.recv_timeout(std::time::Duration::from_secs(2)).ok())
+            .find_map(|projection| match projection {
+                Projection::ExtensionManagement(view)
+                    if view.phase == zephium_ipc::ExtensionManagementPhase::NotConfigured =>
+                {
+                    Some(view)
+                }
+                _ => None,
+            })
+            .expect("inert product must publish an explicit not-configured phase");
+    assert_eq!(unavailable.profile_id, profile.to_string());
+    assert!(extension_state
+        .management_catalog_calls
+        .lock()
+        .unwrap()
+        .is_empty());
+    assert!(extension_state
+        .management_catalog_callbacks
+        .lock()
+        .unwrap()
+        .is_empty());
+
+    assert_eq!(
+        handle
+            .shutdown()
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap(),
+        ShutdownOutcome::Clean
+    );
+}
+
+#[test]
 fn ambiguous_extension_management_write_fences_later_writes_until_restart() {
     let (tx, rx) = std::sync::mpsc::channel();
     let (extension_service, extension_state) =

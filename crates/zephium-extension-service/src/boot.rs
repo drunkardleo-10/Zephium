@@ -8,8 +8,8 @@ use std::time::Instant;
 
 use zephium_core::ids::ProfileId;
 use zephium_core::ports::extensions::{
-    ExtensionProfileRetirementDisposition, ExtensionServiceLifecycle,
-    ExtensionServiceShutdownOutcome, ExtensionServiceStartupOutcome,
+    ExtensionManagementAvailability, ExtensionProfileRetirementDisposition,
+    ExtensionServiceLifecycle, ExtensionServiceShutdownOutcome, ExtensionServiceStartupOutcome,
 };
 use zephium_extension_authority::{
     BundledPackageAuthority, BundledProductAuthorityStatus, ProductExtensionManifestAuthority,
@@ -151,6 +151,10 @@ impl ExtensionServiceLifecycle for InertExtensionServiceLifecycle {
         )
     }
 
+    fn extension_management_availability(&self) -> ExtensionManagementAvailability {
+        ExtensionManagementAvailability::NotConfigured
+    }
+
     fn with_profile_retired_until(
         &mut self,
         _profile: ProfileId,
@@ -243,6 +247,10 @@ mod tests {
             ExtensionServiceStartupOutcome::Ready(
                 zephium_core::ports::extensions::ExtensionActiveProfiles::EMPTY,
             )
+        );
+        assert_eq!(
+            lifecycle.extension_management_availability(),
+            ExtensionManagementAvailability::NotConfigured
         );
         assert!(!lifecycle.repository_maintenance_is_available());
         let continued = std::cell::Cell::new(false);

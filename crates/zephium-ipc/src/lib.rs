@@ -100,6 +100,7 @@ pub struct ExtensionActionFailedView {
 pub enum ExtensionManagementPhase {
     Loading,
     Ready,
+    NotConfigured,
     Unavailable,
     Rejected,
     FailedClosed,

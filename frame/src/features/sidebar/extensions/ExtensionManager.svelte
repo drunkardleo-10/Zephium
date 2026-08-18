@@ -321,16 +321,15 @@
       role="dialog"
       aria-modal="true"
       aria-labelledby="extension-manager-title"
-      class="fixed top-1/2 left-1/2 z-50 max-h-[min(680px,calc(100vh-32px))] min-h-[min(520px,calc(100vh-32px))] w-[min(760px,calc(100vw-32px))] -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-xl border border-border-strong bg-raised p-4 text-start shadow-[var(--shadow-overlay)]"
+      class="fixed top-1/2 left-1/2 z-50 max-h-[min(680px,calc(100vh-24px))] w-[min(760px,calc(100vw-24px))] -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-xl border border-border-strong bg-raised p-4 text-start shadow-[var(--shadow-overlay)]"
+      class:min-h-[min(520px,calc(100vh-24px))]={management?.phase === "ready"}
     >
       <div class="mb-3 flex items-center justify-between gap-3 border-b border-border pb-3">
         <div class="min-w-0">
           <h2 id="extension-manager-title" class="text-[15px] leading-5 font-semibold text-text">
             Extensions Center
           </h2>
-          <p class="mt-0.5 text-[11px] leading-4 text-faint">
-            Installed extensions and verified packages for the current profile
-          </p>
+          <p class="mt-0.5 text-[11px] leading-4 text-faint">Extensions for the current profile</p>
         </div>
         <div class="flex shrink-0 items-center gap-1">
           {#if distributionRefreshVisible}
@@ -429,20 +428,24 @@
             <p role="alert">
               {#if management?.phase === "rejected"}
                 The installed extension catalog could not be authenticated.
+              {:else if management?.phase === "not_configured"}
+                Extensions are not configured in this build.
               {:else if management?.phase === "failed_closed"}
                 Extension management stopped to protect this profile.
               {:else}
                 Extension management is unavailable right now.
               {/if}
             </p>
-            <button
-              type="button"
-              class="hover:bg-fill-strong mt-2 inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[11.5px] font-medium text-text"
-              onclick={retry}
-            >
-              <Icon icon={Refresh01Icon} size={13} />
-              Retry
-            </button>
+            {#if management?.phase !== "not_configured"}
+              <button
+                type="button"
+                class="hover:bg-fill-strong mt-2 inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[11.5px] font-medium text-text"
+                onclick={retry}
+              >
+                <Icon icon={Refresh01Icon} size={13} />
+                Retry
+              </button>
+            {/if}
           {/if}
         </div>
       {:else}

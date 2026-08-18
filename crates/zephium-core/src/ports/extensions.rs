@@ -563,6 +563,23 @@ pub enum ExtensionManagementCatalogAdmission {
     Unavailable,
 }
 
+/// Non-authorizing product capability exposed solely for management UX.
+///
+/// This value never grants repository, package, Store, or native-runtime
+/// access. It lets privileged chrome distinguish an intentionally inert build
+/// from a configured worker that is temporarily unavailable, without probing
+/// the worker or creating extension resources.
+#[must_use = "extension management availability must be projected truthfully"]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExtensionManagementAvailability {
+    /// Product authority exists and the lifecycle owns a management worker.
+    Configured,
+    /// This exact product build intentionally contains no extension authority.
+    NotConfigured,
+    /// The lifecycle cannot currently make a trustworthy capability claim.
+    Unavailable,
+}
+
 /// Result of one bounded repository-maintenance turn.
 ///
 /// This projection deliberately exposes no package identities or filesystem
@@ -655,6 +672,13 @@ pub trait ExtensionServiceLifecycle: Send {
     /// [`ExtensionServiceStartupOutcome::Ready`] permits extension-sensitive
     /// application bootstrap.
     fn settle_startup_until(&mut self, deadline: Instant) -> ExtensionServiceStartupOutcome;
+
+    /// Reports whether management is configured without touching repository
+    /// state or starting work. The conservative default prevents compatibility
+    /// and test lifecycles from accidentally advertising product authority.
+    fn extension_management_availability(&self) -> ExtensionManagementAvailability {
+        ExtensionManagementAvailability::Unavailable
+    }
 
     /// Authenticates and durably materializes one exact package from the
     /// product-sealed acquired catalog.
@@ -991,6 +1015,10 @@ mod tests {
         assert_eq!(
             lifecycle.settle_startup_until(Instant::now()),
             ExtensionServiceStartupOutcome::Ready(ExtensionActiveProfiles::EMPTY)
+        );
+        assert_eq!(
+            lifecycle.extension_management_availability(),
+            ExtensionManagementAvailability::Unavailable
         );
         let key = ExtensionNativeOwnershipKey::new(
             ProfileId::from(7),

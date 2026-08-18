@@ -5,8 +5,9 @@ use std::collections::HashMap;
 use zephium_core::ports::extensions::{
     ExtensionInitialGrantSelection, ExtensionInstallCandidateSelector, ExtensionInstallOutcome,
     ExtensionInstallSelector, ExtensionInstalledRuntimeState, ExtensionManagementAdmission,
-    ExtensionManagementCatalog, ExtensionManagementCatalogAdmission,
-    ExtensionManagementCatalogOutcome, ExtensionSetEnabledOutcome, ExtensionUninstallOutcome,
+    ExtensionManagementAvailability, ExtensionManagementCatalog,
+    ExtensionManagementCatalogAdmission, ExtensionManagementCatalogOutcome,
+    ExtensionSetEnabledOutcome, ExtensionUninstallOutcome,
 };
 
 use super::*;
@@ -266,14 +267,10 @@ impl Shell {
             None
         };
         self.extension_management.set_visible(profile);
-        let Some(profile) = profile else {
+        if profile.is_none() {
             return;
-        };
+        }
         self.project_extension_distribution_status();
-        self.project_extension_management_phase(
-            profile,
-            zephium_ipc::ExtensionManagementPhase::Loading,
-        );
         self.begin_extension_management_catalog_if_visible();
     }
 
@@ -281,6 +278,44 @@ impl Shell {
         let Some(profile) = self.extension_management.visible_profile() else {
             return;
         };
+        if self.extension_lifecycle_terminal {
+            self.project_extension_management_phase(
+                profile,
+                zephium_ipc::ExtensionManagementPhase::FailedClosed,
+            );
+            return;
+        }
+        if !self.extension_startup_ready {
+            self.project_extension_management_phase(
+                profile,
+                zephium_ipc::ExtensionManagementPhase::Unavailable,
+            );
+            return;
+        }
+        let Some(service) = self.extension_service.as_ref() else {
+            self.project_extension_management_phase(
+                profile,
+                zephium_ipc::ExtensionManagementPhase::FailedClosed,
+            );
+            return;
+        };
+        match service.extension_management_availability() {
+            ExtensionManagementAvailability::Configured => {}
+            ExtensionManagementAvailability::NotConfigured => {
+                self.project_extension_management_phase(
+                    profile,
+                    zephium_ipc::ExtensionManagementPhase::NotConfigured,
+                );
+                return;
+            }
+            ExtensionManagementAvailability::Unavailable => {
+                self.project_extension_management_phase(
+                    profile,
+                    zephium_ipc::ExtensionManagementPhase::Unavailable,
+                );
+                return;
+            }
+        }
         let request = match self.extension_management.begin_catalog(profile) {
             Ok(Some(request)) => request,
             Ok(None) => return,
@@ -292,14 +327,10 @@ impl Shell {
                 return;
             }
         };
-        if !self.extension_startup_ready || self.extension_lifecycle_terminal {
-            self.extension_management.cancel_catalog(request, profile);
-            self.project_extension_management_phase(
-                profile,
-                zephium_ipc::ExtensionManagementPhase::Unavailable,
-            );
-            return;
-        }
+        self.project_extension_management_phase(
+            profile,
+            zephium_ipc::ExtensionManagementPhase::Loading,
+        );
         let Some(queue) = self.self_queue.as_ref() else {
             self.extension_management.cancel_catalog(request, profile);
             self.project_extension_management_phase(
@@ -345,7 +376,14 @@ impl Shell {
                     zephium_ipc::ExtensionManagementPhase::Unavailable,
                 );
             }
-            Ok(ExtensionManagementCatalogAdmission::Unavailable) | Err(_) => {
+            Ok(ExtensionManagementCatalogAdmission::Unavailable) => {
+                self.extension_management.cancel_catalog(request, profile);
+                self.project_extension_management_phase(
+                    profile,
+                    zephium_ipc::ExtensionManagementPhase::Unavailable,
+                );
+            }
+            Err(_) => {
                 self.extension_management.cancel_catalog(request, profile);
                 self.project_extension_management_phase(
                     profile,
@@ -414,10 +452,6 @@ impl Shell {
             return;
         }
         self.extension_management.clear_catalog();
-        self.project_extension_management_phase(
-            profile,
-            zephium_ipc::ExtensionManagementPhase::Loading,
-        );
         self.begin_extension_management_catalog_if_visible();
     }
 

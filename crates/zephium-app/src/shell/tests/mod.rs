@@ -159,6 +159,7 @@ pub(super) struct FakeExtensionLifecycleState {
     pub(super) startup_outcomes: Mutex<
         std::collections::VecDeque<zephium_core::ports::extensions::ExtensionServiceStartupOutcome>,
     >,
+    pub(super) management_not_configured: std::sync::atomic::AtomicBool,
     pub(super) retirement_calls: std::sync::atomic::AtomicUsize,
     pub(super) retirement_continuation_calls: std::sync::atomic::AtomicUsize,
     pub(super) retirement_profiles: Mutex<Vec<ProfileId>>,
@@ -281,6 +282,20 @@ impl zephium_core::ports::extensions::ExtensionServiceLifecycle for FakeExtensio
                     zephium_core::ports::extensions::ExtensionActiveProfiles::EMPTY,
                 ),
             )
+    }
+
+    fn extension_management_availability(
+        &self,
+    ) -> zephium_core::ports::extensions::ExtensionManagementAvailability {
+        if self
+            .state
+            .management_not_configured
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            zephium_core::ports::extensions::ExtensionManagementAvailability::NotConfigured
+        } else {
+            zephium_core::ports::extensions::ExtensionManagementAvailability::Configured
+        }
     }
 
     fn begin_provision_acquired_package(
