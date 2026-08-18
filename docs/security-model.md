@@ -1234,17 +1234,24 @@ versioned string request, and a loaded context belonging to the exact retained
 controller. Product authority must have admitted the distinct brokered
 compatibility profile, and the published runtime must consume an operation-
 specific witness proving the effective API grant before Shell sees a request.
-The initial operation is read-only recent history; it carries no SQL, path,
-hostname, arbitrary application identifier, generic fetch, or page-world
+The closed operations are read-only recent history, browser-default search in
+the current or a new tab, and restoration of the newest closed current-space
+tab. They carry no SQL, path, provider, arbitrary URL, hostname, window/native
+tab identity, arbitrary application identifier, generic fetch, or page-world
 payload.
 
-Native, Shell, and Store enforce independent bounds: 128 request bytes, 64 KiB
-response bytes, 100 result rows, a five-second native deadline, 8 pending
-requests per profile, and 32 process-wide. Reads remain profile-scoped, reject
+Native, Shell, and Store enforce independent bounds: 1,536 request bytes, a
+1,024-byte search query, 64 KiB response bytes, 100 history rows, 32 durable
+recently-closed regular tabs, a five-second native deadline, 8 pending requests
+per profile, and 32 process-wide. History reads remain profile-scoped, reject
 degraded/recovery-required storage, inspect only a bounded recent window,
-deduplicate URLs, validate navigation schemes, and sanitize titles. Retirement
-and shutdown cancel retained callbacks; late Store results can settle only the
-exact runtime generation and request identity. The ordinary
+deduplicate URLs, validate navigation schemes, and sanitize titles. Search
+passes only through the browser's default-provider classifier and existing
+navigation lifecycle. Restore requires the exact focused profile and space,
+excludes incognito state, validates the durable record again, and creates a
+fresh item/native identity. Retirement and shutdown cancel retained callbacks;
+late Store results can settle only the exact runtime generation and request
+identity. The ordinary
 `macos.wkwebextension.v1` profile still prohibits `nativeMessaging` and cannot
 mint broker witnesses. Persistent ports and arbitrary native hosts remain
 unsupported.
@@ -1258,7 +1265,7 @@ delivery back to extension JavaScript, runtime retirement, repository cleanup,
 and clean Store restart. The non-shipping gate coordinator uses a dedicated
 bounded reader rather than the product Shell's fair read queue; Shell settlement
 and queue fairness remain independently tested. No extension compatibility
-claim may rely on this operation until an exact reviewed adapter, packaged-app
+claim may rely on these operations until an exact reviewed adapter, packaged-app
 coverage, and release-build resource/endurance measurements also pass.
 
 ## Features deliberately not claimed

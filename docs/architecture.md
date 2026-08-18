@@ -940,7 +940,10 @@ collapse into browser-owned feature categories; compatible rows cannot carry
 limitations and degraded rows cannot omit them. The install review renders the
 complete cohort before consent, while installed rows show a bounded summary;
 neither surface receives native error strings or invents compatibility from a
-package name. Dynamic optional-grant requests now traverse one bounded native
+package name. Legacy `options_page` and MV3 `options_ui` declarations are
+schema-validated and bound to the exact authenticated page resource and option
+flags; they no longer survive as unmodeled authority. Dynamic optional-grant
+requests now traverse one bounded native
 prompt per admitted runtime, a Shell-owned consent projection, an exact
 generation-bound service mutation, and native settlement; absent, stale,
 over-capacity, or unavailable paths deny rather than grant. This extension
@@ -1348,7 +1351,9 @@ APIs still belong on the separate macOS compatibility-runtime target. The
 ordinary native profile does not classify Vimium as compatible. The exact
 authenticated Vimium gate described below is a non-authorizing compatibility-
 artifact result; it does not silently broaden the native profile or establish
-its Vomnibar, bookmark, session, notification, and search workflows.
+its workflows. The separate brokered gate proves only its explicitly named
+history, default-search, and most-recent-session compatibility slices;
+bookmarks remain empty/read-only and notifications remain unassessed.
 
 WebKit does expose a narrower compatibility seam through
 `WKWebExtensionControllerDelegate`, and the live gate now classifies it without
@@ -1378,22 +1383,38 @@ unmodified extension call this identifier. Any reviewed adapter using the
 one-shot channel belongs to a new compatibility/grant schema; it cannot silently
 change `macos.wkwebextension.v1` or expose arbitrary native application names.
 
-The first production-shaped operation on that new profile is bounded recent
-history. The extension side can send only the canonical
-`v1/history.recent/<limit>` string to the fixed internal application identifier;
-the parser accepts `1..=100` and at most 128 UTF-8 bytes. Native code joins the
-callback to the exact controller and loaded context, resolves the exact
-published runtime, consumes a move-only witness that proves both the brokered
-profile and an effective `history` grant, and then emits a typed Shell request.
-Shell performs a profile-scoped Store read through a bounded fair queue. The
-query considers at most the newest 4,096 history rows, deduplicates by URL,
-validates URLs, sanitizes titles, and returns at most 100 rows. The native reply
-is capped at 64 KiB, every request has a five-second watchdog, and pending work
-is capped at 8 per profile and 32 process-wide. Context retirement, timeout,
-shutdown, stale runtime settlement, overload, and malformed responses all
-complete the retained one-shot callback with an explicit error. Four extension
-reads yield to a pending browser-owned history/favicon read, so an admitted
-adapter cannot starve ordinary browser UX.
+The first production-shaped operations on that new profile are bounded recent
+history, default search, and restoration of the newest closed tab. The
+extension side can send only `v1/history.recent/<limit>`,
+`v1/search.default/{current,new}/<canonical-base64url-query>`, or the fixed
+`v1/sessions.restore/recent` string to the internal application identifier.
+History accepts `1..=100`; search accepts a nonempty UTF-8 query of at most
+1,024 bytes and no control characters; the complete request is capped at 1,536
+bytes. Native code joins the callback to the exact controller and loaded
+context, resolves the exact published runtime, and consumes a move-only witness
+for the operation's independently effective `history`, `search`, or `sessions`
+grant before emitting a typed Shell request.
+
+History performs a profile-scoped Store read through a bounded fair queue. It
+considers at most the newest 4,096 rows, deduplicates by URL, validates URLs,
+sanitizes titles, and returns at most 100 entries. Search enters Shell's normal
+default-provider classifier and current/new-tab navigation path only when the
+requesting profile owns the focused window; it carries no provider, arbitrary
+URL, window, or native tab identity. Session restore consumes only the newest
+regular tab owned by the focused profile and space from a browser-owned durable
+cohort capped at 32. Unsafe URLs, incognito state, invalid ownership, control
+characters, and invalid zoom are removed during canonicalization, and restore
+always allocates a fresh item/native identity rather than reviving stale
+authority. It does not expose session enumeration or cross-space restore.
+
+The native reply is capped at 64 KiB, every request has a five-second watchdog,
+and pending work is capped at 8 per profile and 32 process-wide. Context
+retirement, timeout, shutdown, stale runtime settlement, overload, and malformed
+responses all complete the retained one-shot callback with an explicit error.
+Four extension history reads yield to a pending browser-owned history/favicon
+read, so an admitted adapter cannot starve ordinary browser UX; search and
+restore execute synchronously through the already-bounded Shell operations and
+create no worker or polling loop.
 
 This is not a complete `chrome.history` implementation or a compatibility claim.
 The source-free product gate now runs the same sealed fixture in separate
@@ -1726,7 +1747,14 @@ unsupported and no Zephium item is invented. When it declares `favicon`, only
 Chrome's unsupported `_favicon/` pseudo-URL is mapped to a sealed transparent
 SVG; all other `runtime.getURL` calls remain native. Both adaptations are typed
 in the receipt and install disclosure. The artifact metadata records all of
-these degradations and the fixed internal-only native channel.
+these degradations and the fixed internal-only native channel. Declared
+`search` installs only `search.query` with current/new-tab dispositions and a
+canonical bounded query; explicit window selection is rejected. Declared
+`sessions` installs only `sessions.restore` for the most recent tab and reports
+`MAX_SESSION_RESULTS = 1`; enumeration and explicit session identities are
+absent. Both facades require their distinct effective permission and exact
+native broker operation, validate the typed response, and create no timer,
+worker, hidden view, or page-world bridge.
 The ordinary `webkit-macos-native-v3` output and its authenticated third-party
 hashes remain unchanged.
 
@@ -1788,12 +1816,12 @@ its authenticated source contains 79 files and 558,837 bytes with tree SHA-256
 `5015a2e84b2007f0e9cfc670c06b327787bf55a3129fa382534e8a462748eb23`.
 The generic v3 transform emits 82 files and 566,373 bytes with tree SHA-256
 `63726bb7feb7195bcafb9d605abf3fc48b56f79eafc1c44fbcd1ce7dfe0563ec`.
-The distinct brokered transform emits 87 files and 599,488 bytes with manifest
+The distinct brokered transform emits 89 files and 608,905 bytes with manifest
 SHA-256 `c2b503f1593b173305889abbe7c06eb0bf060c1d038aa4434a05a0564433c8b3`,
 tree SHA-256
-`729d6c172eb9e23ec4ed67ed2876a1a2de444145bceb1142ead00d4f7858e804`,
+`7b6e1e880764752114504824854e87e901e46716be2832ba5f1372b1d790e305`,
 and canonical index SHA-256
-`97c7c673368485c3ca3ee82d7bd759e7af342f5d47f72d8df40a0d4a2c340731`.
+`aa448afcf327e1cf388148ac810f468ec3a2c9ec65c6c131d82f27299ceb44ce`.
 Neither tree is committed, downloaded by product code, or granted catalog,
 install, profile, or release authority.
 
@@ -1821,15 +1849,22 @@ rendered rows contain the exact brokered title and URL alongside any legitimate
 tab completion. The same run proves action-popup execution, all seven
 non-sandbox extension pages adapted, the empty-bookmarks degradation, the
 transparent favicon fallback, exact native-message cardinality, and bounded
-native teardown. The deterministic input event is not evidence of physical
+native teardown. The same exact callback sequence invokes Vimium's adapted
+`search.query` current-tab path and `sessions.restore(null)` facade before the
+history request. Their real Shell effects are covered separately by
+profile-bound integration tests: the accessory WebKit probe returns typed
+success settlements and does not mutate the developer's browser session. The
+deterministic input event is not evidence of physical
 typing; the trusted `o` command and real rendered result are separate gates.
 
 This gate establishes a reusable stock Chrome-extension path and core Vimium
 keyboard/link/action behavior on the exercised macOS runtime. It does not yet
 provide real bookmark results: bookmarks are explicitly empty/read-only, and
-page favicons are transparent. Search, sessions, notifications, options
-persistence, enable/disable/restart, and multi-profile behavior remain
-unassessed. The unbundled
+page favicons are transparent. Search is deliberately limited to the browser's
+default provider in the current or a new tab, and session support restores only
+the newest current-space tab; enumeration and explicit session identifiers are
+unsupported. Notifications, options persistence, enable/disable/restart, and
+multi-profile packaged behavior remain unassessed. The unbundled
 accessory probe is not granted foreground animation frames consistently, so it
 records whether smooth scrolling was visibly observed but gates on ordered
 trusted delivery plus Vimium interception; a packaged product-app E2E gate must
