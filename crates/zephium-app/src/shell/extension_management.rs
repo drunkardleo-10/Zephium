@@ -166,7 +166,7 @@ impl ExtensionManagementState {
         self.catalog = None;
     }
 
-    fn visible_profile(&self) -> Option<ProfileId> {
+    pub(super) fn visible_profile(&self) -> Option<ProfileId> {
         self.visible_profile
     }
 
@@ -261,12 +261,20 @@ impl ExtensionManagementState {
 
 impl Shell {
     pub(super) fn set_extension_management_visible(&mut self, visible: bool) {
+        let was_visible = self.extension_management.visible_profile().is_some();
         let profile = if visible {
             self.windows.focused().map(|window| window.profile)
         } else {
             None
         };
         self.extension_management.set_visible(profile);
+        let is_visible = self.extension_management.visible_profile().is_some();
+        if was_visible != is_visible {
+            // A retained native divider target cannot stay authoritative while
+            // privileged chrome owns the full window and page views are absent.
+            self.divider = None;
+            let _ = self.relayout();
+        }
         if profile.is_none() {
             return;
         }
