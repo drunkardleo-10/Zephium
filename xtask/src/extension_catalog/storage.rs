@@ -81,12 +81,24 @@ pub(super) fn absent_output_path(output: &Path) -> Result<PathBuf, String> {
 }
 
 pub(super) fn publish_no_replace(staging: tempfile::TempDir, output: &Path) -> Result<(), String> {
+    publish_named_components_no_replace(
+        staging,
+        output,
+        &["metadata", "targets", "product", "evidence"],
+    )
+}
+
+pub(super) fn publish_named_components_no_replace(
+    staging: tempfile::TempDir,
+    output: &Path,
+    components: &[&str],
+) -> Result<(), String> {
     create_restricted_directory(output)
         .map_err(|error| format!("cannot reserve catalog publication output: {error}"))?;
     let marker = output.join(INCOMPLETE_MARKER);
     write_marker(&marker)?;
     sync_directory(output)?;
-    for name in ["metadata", "targets", "product", "evidence"] {
+    for &name in components {
         fs::rename(staging.path().join(name), output.join(name)).map_err(|error| {
             format!(
                 "cannot publish catalog component {name}; incomplete output retained at {}: {error}",

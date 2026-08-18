@@ -13,15 +13,22 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
+use zephium_core::extensions::{
+    ExtensionCompatibilityLevel, ExtensionCompatibilityTargetId, ExtensionManifestDeclaration,
+    ExtensionOverrideTarget, ExtensionPackageKey,
+};
 use zephium_extension_package::{
-    parse_bounded_json, BoundedJsonLimits, CanonicalExtensionTreeIndex, ChromiumManifestKey,
-    ExtensionReleaseCatalog, PortableRelativePath, VerifiedCrx3Package, MAX_CRX3_HEADER_BYTES,
-    MAX_EXTENSION_ARCHIVE_BYTES, MAX_EXTENSION_LEGAL_NOTICE_BYTES, MAX_EXTENSION_MANIFEST_BYTES,
-    MAX_EXTENSION_PACKAGE_LINES, MAX_EXTENSION_RELEASE_CATALOG_BYTES,
+    admit_extension_manifest, parse_bounded_json, BoundedJsonLimits, CanonicalExtensionTreeIndex,
+    ChromiumManifestKey, ExtensionManifestCompatibilityPolicy,
+    ExtensionManifestCompatibilitySubject, ExtensionReleaseCatalog, PortableRelativePath,
+    VerifiedCrx3Package, MAX_CRX3_HEADER_BYTES, MAX_EXTENSION_ARCHIVE_BYTES,
+    MAX_EXTENSION_LEGAL_NOTICE_BYTES, MAX_EXTENSION_MANIFEST_BYTES, MAX_EXTENSION_PACKAGE_LINES,
+    MAX_EXTENSION_RELEASE_CATALOG_BYTES,
 };
 
 use crate::extension_tree;
 
+mod profiles;
 mod storage;
 #[cfg(test)]
 mod tests;
@@ -39,6 +46,7 @@ const PREPARED_RELEASE_PROFILE: &str = "deterministic-crx3-zip-v1";
 const PUBLICATION_KIND: &str = "zephium-extension-catalog-publication";
 const PRODUCT_ANCHORS_KIND: &str = "zephium-extension-product-anchor-inputs";
 const MANIFEST_INPUTS_KIND: &str = "zephium-extension-manifest-profile-inputs";
+const MANIFEST_REVIEW_KIND: &str = "zephium-extension-manifest-profile-review";
 const CATALOG_TARGET: &str = "metadata/catalog-v1.json";
 const PRODUCT_ANCHORS_TARGET: &str = "product/product-anchors-v1.json";
 const MANIFEST_INPUTS_TARGET: &str = "product/manifest-profile-inputs-v1.json";
@@ -169,16 +177,19 @@ struct ValidatedPreparedRelease {
     manifest_key_sha256: [u8; 32],
     extension_id: String,
     compatibility: Option<CompatibilityEvidence>,
+    manifest_bytes: Vec<u8>,
+    tree_index_bytes: Vec<u8>,
+    tree_index: CanonicalExtensionTreeIndex,
 }
 
 #[derive(Serialize)]
-struct CatalogDocument {
+struct CatalogDocument<'a> {
     schema_version: u32,
     catalog_revision: u64,
     created_unix: u64,
     authority_id: String,
     admission_policy_sha256: String,
-    packages: Vec<CatalogPackage>,
+    packages: Vec<&'a CatalogPackage>,
 }
 
 #[derive(Serialize)]
@@ -246,6 +257,8 @@ struct PublishedPackage {
     catalog: CatalogPackage,
     profile: ManifestProfileInput,
     objects: Vec<PublishedObject>,
+    profile_index: CanonicalExtensionTreeIndex,
+    profile_manifest: Vec<u8>,
 }
 
 #[derive(Serialize)]
@@ -274,17 +287,19 @@ struct ProductAnchorInputs {
     rollback: Vec<CatalogAnchorEvidence>,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct ManifestProfileInputs {
     schema: u32,
-    kind: &'static str,
+    kind: String,
     product_authority: bool,
     classification_settled: bool,
     catalog_sha256: String,
     profiles: Vec<ManifestProfileInput>,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct ManifestProfileInput {
     package_key: String,
     package_revision: u64,
@@ -292,8 +307,85 @@ struct ManifestProfileInput {
     tree_sha256: String,
     tree_index_sha256: String,
     tree_index_length: u64,
+    manifest_target: String,
+    tree_index_target: String,
     compatibility_target: Option<String>,
     compatibility_receipt_sha256: Option<String>,
+    declarations: Vec<ManifestDeclarationReviewRow>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ManifestDeclarationReviewRow {
+    declaration: ManifestDeclarationReviewKey,
+    level: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum ManifestDeclarationReviewKey {
+    RequiredApi {
+        name: String,
+    },
+    OptionalApi {
+        name: String,
+    },
+    RequiredHost {
+        pattern: String,
+    },
+    OptionalHost {
+        pattern: String,
+    },
+    Background,
+    Action,
+    Offscreen,
+    NativeMessaging,
+    Override {
+        target: String,
+    },
+    ExtensionPagesCsp,
+    Sandbox,
+    ContentScript {
+        index: u16,
+        descriptor_sha256: String,
+    },
+    WebAccessibleResources {
+        index: u16,
+        resources_sha256: String,
+    },
+    MinimumChromiumVersion {
+        version: String,
+    },
+    Commands {
+        count: usize,
+        descriptor_sha256: String,
+    },
+    SidePanel {
+        resource_sha256: String,
+    },
+    ManagedStorageSchema {
+        resource_sha256: String,
+    },
+    UnmodeledAuthority {
+        name: String,
+    },
+}
+
+struct UnassessedCompatibilityPolicy {
+    target: ExtensionCompatibilityTargetId,
+}
+
+impl ExtensionManifestCompatibilityPolicy for UnassessedCompatibilityPolicy {
+    fn target(&self) -> &ExtensionCompatibilityTargetId {
+        &self.target
+    }
+
+    fn classify(
+        &self,
+        _subject: ExtensionManifestCompatibilitySubject<'_>,
+    ) -> Option<ExtensionCompatibilityLevel> {
+        Some(ExtensionCompatibilityLevel::Unassessed)
+    }
 }
 
 #[derive(Serialize)]
@@ -365,14 +457,6 @@ pub(crate) fn publish(review_path: &Path, output: &Path) -> Result<(), String> {
     published
         .sort_unstable_by(|left, right| left.catalog.package_key.cmp(&right.catalog.package_key));
     let published_count = published.len();
-    let mut catalog_packages = Vec::with_capacity(published_count);
-    let mut profile_inputs = Vec::with_capacity(published_count);
-    let mut objects = Vec::with_capacity(published_count.saturating_mul(2));
-    for package in published {
-        catalog_packages.push(package.catalog);
-        profile_inputs.push(package.profile);
-        objects.extend(package.objects);
-    }
 
     let catalog_document = CatalogDocument {
         schema_version: CATALOG_SCHEMA,
@@ -380,7 +464,7 @@ pub(crate) fn publish(review_path: &Path, output: &Path) -> Result<(), String> {
         created_unix: review.created_unix,
         authority_id: review.authority_id.clone(),
         admission_policy_sha256: review.admission_policy_sha256.clone(),
-        packages: catalog_packages,
+        packages: published.iter().map(|package| &package.catalog).collect(),
     };
     let catalog_bytes = serde_json::to_vec(&catalog_document)
         .map_err(|error| format!("cannot serialize canonical catalog: {error}"))?;
@@ -389,6 +473,7 @@ pub(crate) fn publish(review_path: &Path, output: &Path) -> Result<(), String> {
     if catalog.packages().len() != published_count {
         return Err("published catalog package count drifted".into());
     }
+    populate_manifest_declaration_reviews(&catalog, &mut published)?;
     write_new_file(staging.path(), CATALOG_TARGET, &catalog_bytes)?;
 
     let catalog_sha256: [u8; 32] = Sha256::digest(&catalog_bytes).into();
@@ -409,9 +494,15 @@ pub(crate) fn publish(review_path: &Path, output: &Path) -> Result<(), String> {
     };
     write_json(staging.path(), PRODUCT_ANCHORS_TARGET, &anchors)?;
 
+    let mut profile_inputs = Vec::with_capacity(published_count);
+    let mut objects = Vec::with_capacity(published_count.saturating_mul(4));
+    for package in published {
+        profile_inputs.push(package.profile);
+        objects.extend(package.objects);
+    }
     let profiles = ManifestProfileInputs {
         schema: PUBLICATION_SCHEMA,
-        kind: MANIFEST_INPUTS_KIND,
+        kind: MANIFEST_INPUTS_KIND.into(),
         product_authority: false,
         classification_settled: false,
         catalog_sha256: lower_hex(&catalog_sha256),
@@ -442,6 +533,16 @@ pub(crate) fn publish(review_path: &Path, output: &Path) -> Result<(), String> {
         final_output.display(),
     );
     Ok(())
+}
+
+/// Finalizes exact declaration-level compatibility reviews without granting
+/// product authority or mutating the immutable publication.
+pub(crate) fn finalize_manifest_profiles(
+    publication: &Path,
+    review: &Path,
+    output: &Path,
+) -> Result<(), String> {
+    profiles::finalize(publication, review, output)
 }
 
 fn publish_package(
@@ -498,6 +599,31 @@ fn publish_package(
         sha256: legal_sha256_hex.clone(),
     };
 
+    let profile_root = format!(
+        "product/profile-inputs/{}/{}",
+        package_key, review.package_revision
+    );
+    let manifest_target = format!(
+        "{profile_root}/{}.manifest.json",
+        lower_hex(&prepared.manifest_sha256)
+    );
+    let tree_index_target = format!(
+        "{profile_root}/{}.tree-index.json",
+        lower_hex(&prepared.tree_index_sha256)
+    );
+    write_new_file(staging, &manifest_target, &prepared.manifest_bytes)?;
+    write_new_file(staging, &tree_index_target, &prepared.tree_index_bytes)?;
+    let manifest_object = PublishedObject {
+        target: manifest_target.clone(),
+        bytes: prepared.manifest_bytes.len() as u64,
+        sha256: lower_hex(&Sha256::digest(&prepared.manifest_bytes)),
+    };
+    let tree_index_object = PublishedObject {
+        target: tree_index_target.clone(),
+        bytes: prepared.tree_index_bytes.len() as u64,
+        sha256: lower_hex(&Sha256::digest(&prepared.tree_index_bytes)),
+    };
+
     let compatibility_receipts = prepared
         .compatibility
         .as_ref()
@@ -522,6 +648,8 @@ fn publish_package(
         tree_sha256: lower_hex(&prepared.tree_sha256),
         tree_index_sha256: lower_hex(&prepared.tree_index_sha256),
         tree_index_length: prepared.tree_index_length,
+        manifest_target,
+        tree_index_target,
         compatibility_target: prepared
             .compatibility
             .as_ref()
@@ -530,6 +658,7 @@ fn publish_package(
             .compatibility
             .as_ref()
             .map(|compatibility| compatibility.sha256.clone()),
+        declarations: Vec::new(),
     };
     let catalog = CatalogPackage {
         package_key: package_key.to_owned(),
@@ -567,7 +696,9 @@ fn publish_package(
     Ok(PublishedPackage {
         catalog,
         profile,
-        objects: vec![crx_object, legal_object],
+        objects: vec![crx_object, legal_object, manifest_object, tree_index_object],
+        profile_index: prepared.tree_index,
+        profile_manifest: prepared.manifest_bytes,
     })
 }
 
@@ -615,6 +746,16 @@ fn validate_prepared_release(root: &Path) -> Result<ValidatedPreparedRelease, St
     let tree_index_path = root.join("authenticated-extension-tree.json");
     let (extension_root, index) =
         extension_tree::verify_closed_tree(&extension_root, &tree_index_path)?;
+    let tree_index_bytes = read_regular_bounded(
+        &tree_index_path,
+        zephium_extension_package::MAX_EXTENSION_TREE_INDEX_BYTES as u64,
+        "prepared extension tree index",
+    )?;
+    if tree_index_bytes.len() as u64 != index.index_bytes()
+        || <[u8; 32]>::from(Sha256::digest(&tree_index_bytes)) != index.index_sha256().bytes()
+    {
+        return Err("prepared extension tree index changed after verification".into());
+    }
     validate_tree_evidence(&evidence.output, &index, "prepared output")?;
     let archive = read_regular_bounded(
         &root.join("extension.zip"),
@@ -661,7 +802,139 @@ fn validate_prepared_release(root: &Path) -> Result<ValidatedPreparedRelease, St
         manifest_key_sha256: key.digest().bytes(),
         extension_id: key.extension_id().as_str().to_owned(),
         compatibility: evidence.compatibility,
+        manifest_bytes: manifest,
+        tree_index_bytes,
+        tree_index: index,
     })
+}
+
+fn populate_manifest_declaration_reviews(
+    catalog: &ExtensionReleaseCatalog,
+    published: &mut [PublishedPackage],
+) -> Result<(), String> {
+    for package in published {
+        let Some(target) = package.profile.compatibility_target.as_deref() else {
+            continue;
+        };
+        let key = ExtensionPackageKey::from_bytes(decode_lower_hex_32(
+            &package.profile.package_key,
+            "published package key",
+        )?);
+        let release = catalog
+            .package(key)
+            .ok_or_else(|| "published manifest profile lost its catalog package".to_owned())?;
+        let binding = release
+            .bind_tree_index(&package.profile_index)
+            .map_err(|error| format!("published manifest profile tree binding failed: {error}"))?;
+        let target = ExtensionCompatibilityTargetId::parse_exact(target)
+            .map_err(|error| format!("published compatibility target is invalid: {error}"))?;
+        let policy = UnassessedCompatibilityPolicy { target };
+        let admitted = admit_extension_manifest(binding, &package.profile_manifest, &policy)
+            .map_err(|error| format!("published manifest profile inspection failed: {error}"))?;
+        package.profile.declarations = admitted
+            .descriptor()
+            .compatibility()
+            .iter()
+            .map(|classification| ManifestDeclarationReviewRow {
+                declaration: manifest_declaration_review_key(classification.declaration()),
+                level: "unassessed".into(),
+            })
+            .collect();
+        if package.profile.declarations.is_empty() {
+            return Err("published manifest profile has no authority declarations".into());
+        }
+    }
+    Ok(())
+}
+
+fn manifest_declaration_review_key(
+    declaration: &ExtensionManifestDeclaration,
+) -> ManifestDeclarationReviewKey {
+    match declaration {
+        ExtensionManifestDeclaration::RequiredApiPermission(name) => {
+            ManifestDeclarationReviewKey::RequiredApi {
+                name: name.as_str().to_owned(),
+            }
+        }
+        ExtensionManifestDeclaration::OptionalApiPermission(name) => {
+            ManifestDeclarationReviewKey::OptionalApi {
+                name: name.as_str().to_owned(),
+            }
+        }
+        ExtensionManifestDeclaration::RequiredHostPermission(pattern) => {
+            ManifestDeclarationReviewKey::RequiredHost {
+                pattern: pattern.to_string(),
+            }
+        }
+        ExtensionManifestDeclaration::OptionalHostPermission(pattern) => {
+            ManifestDeclarationReviewKey::OptionalHost {
+                pattern: pattern.to_string(),
+            }
+        }
+        ExtensionManifestDeclaration::Background => ManifestDeclarationReviewKey::Background,
+        ExtensionManifestDeclaration::Action => ManifestDeclarationReviewKey::Action,
+        ExtensionManifestDeclaration::Offscreen => ManifestDeclarationReviewKey::Offscreen,
+        ExtensionManifestDeclaration::NativeMessaging => {
+            ManifestDeclarationReviewKey::NativeMessaging
+        }
+        ExtensionManifestDeclaration::Override(target) => ManifestDeclarationReviewKey::Override {
+            target: match target {
+                ExtensionOverrideTarget::NewTab => "new_tab",
+                ExtensionOverrideTarget::Bookmarks => "bookmarks",
+                ExtensionOverrideTarget::History => "history",
+            }
+            .into(),
+        },
+        ExtensionManifestDeclaration::ExtensionPagesCsp => {
+            ManifestDeclarationReviewKey::ExtensionPagesCsp
+        }
+        ExtensionManifestDeclaration::Sandbox => ManifestDeclarationReviewKey::Sandbox,
+        ExtensionManifestDeclaration::ContentScript {
+            index,
+            descriptor_digest,
+        } => ManifestDeclarationReviewKey::ContentScript {
+            index: *index,
+            descriptor_sha256: lower_hex(descriptor_digest.as_bytes()),
+        },
+        ExtensionManifestDeclaration::WebAccessibleResources {
+            index,
+            resources_digest,
+        } => ManifestDeclarationReviewKey::WebAccessibleResources {
+            index: *index,
+            resources_sha256: lower_hex(resources_digest.as_bytes()),
+        },
+        ExtensionManifestDeclaration::MinimumChromiumVersion(version) => {
+            ManifestDeclarationReviewKey::MinimumChromiumVersion {
+                version: version
+                    .components()
+                    .iter()
+                    .map(u16::to_string)
+                    .collect::<Vec<_>>()
+                    .join("."),
+            }
+        }
+        ExtensionManifestDeclaration::Commands(commands) => {
+            ManifestDeclarationReviewKey::Commands {
+                count: commands.command_count(),
+                descriptor_sha256: lower_hex(commands.descriptor_digest().as_bytes()),
+            }
+        }
+        ExtensionManifestDeclaration::SidePanel { resource } => {
+            ManifestDeclarationReviewKey::SidePanel {
+                resource_sha256: lower_hex(resource.as_bytes()),
+            }
+        }
+        ExtensionManifestDeclaration::ManagedStorageSchema { resource } => {
+            ManifestDeclarationReviewKey::ManagedStorageSchema {
+                resource_sha256: lower_hex(resource.as_bytes()),
+            }
+        }
+        ExtensionManifestDeclaration::UnmodeledAuthority(name) => {
+            ManifestDeclarationReviewKey::UnmodeledAuthority {
+                name: name.as_str().to_owned(),
+            }
+        }
+    }
 }
 
 fn validate_prepared_evidence_header(evidence: &PreparedReleaseEvidence) -> Result<(), String> {

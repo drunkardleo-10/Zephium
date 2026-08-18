@@ -44,8 +44,11 @@ fn fixture(root: &Path) -> (PathBuf, PathBuf, PathBuf) {
     let public_key = p256_spki(pair.public_key().as_ref());
     let public_key_path = root.join("public-key.der");
     fs::write(&public_key_path, &public_key).unwrap();
+    let compatibility = root.join("compatibility");
+    crate::macos_extension_compatibility::materialize(&source, &index, &compatibility).unwrap();
     let prepared = root.join("prepared");
-    crate::extension_release::prepare(&source, &index, &public_key_path, &prepared).unwrap();
+    crate::extension_release::prepare_compatibility(&compatibility, &public_key_path, &prepared)
+        .unwrap();
     let archive = fs::read(prepared.join("extension.zip")).unwrap();
     let request =
         zephium_extension_package::Crx3SigningRequest::new_ecdsa_p256_sha256(&archive, &public_key)
@@ -133,10 +136,62 @@ fn publication_is_deterministic_content_addressed_and_non_authorizing() {
         fs::read(first.join(legal_target)).unwrap(),
         b"Publisher fixture legal notice\n"
     );
-    let manifest_inputs: serde_json::Value =
+    let mut manifest_inputs: serde_json::Value =
         serde_json::from_slice(&fs::read(first.join(MANIFEST_INPUTS_TARGET)).unwrap()).unwrap();
     assert_eq!(manifest_inputs["product_authority"], false);
     assert_eq!(manifest_inputs["classification_settled"], false);
+    let profile = &manifest_inputs["profiles"][0];
+    let manifest_target = profile["manifest_target"].as_str().unwrap();
+    let tree_index_target = profile["tree_index_target"].as_str().unwrap();
+    assert_eq!(
+        lower_hex(&Sha256::digest(
+            fs::read(first.join(manifest_target)).unwrap()
+        )),
+        profile["manifest_sha256"].as_str().unwrap()
+    );
+    assert_eq!(
+        lower_hex(&Sha256::digest(
+            fs::read(first.join(tree_index_target)).unwrap()
+        )),
+        profile["tree_index_sha256"].as_str().unwrap()
+    );
+    assert_eq!(profile["declarations"][0]["level"], "unassessed");
+    assert!(profile["declarations"]
+        .as_array()
+        .is_some_and(|rows| rows.len() >= 2));
+    manifest_inputs["kind"] = serde_json::Value::String(MANIFEST_REVIEW_KIND.into());
+    manifest_inputs["classification_settled"] = serde_json::Value::Bool(true);
+    for profile in manifest_inputs["profiles"].as_array_mut().unwrap() {
+        for row in profile["declarations"].as_array_mut().unwrap() {
+            row["level"] = serde_json::Value::String("compatible".into());
+        }
+    }
+    let profile_review = temporary.path().join("profile-review.json");
+    fs::write(
+        &profile_review,
+        serde_json::to_vec(&manifest_inputs).unwrap(),
+    )
+    .unwrap();
+    let classified_first = temporary.path().join("classified-first");
+    let classified_second = temporary.path().join("classified-second");
+    finalize_manifest_profiles(&first, &profile_review, &classified_first).unwrap();
+    finalize_manifest_profiles(&first, &profile_review, &classified_second).unwrap();
+    for relative in [
+        "classified-manifest-profiles-v1.json",
+        "review-evidence-v1.json",
+    ] {
+        assert_eq!(
+            fs::read(classified_first.join(relative)).unwrap(),
+            fs::read(classified_second.join(relative)).unwrap()
+        );
+    }
+    let classified: serde_json::Value = serde_json::from_slice(
+        &fs::read(classified_first.join("classified-manifest-profiles-v1.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(classified["product_authority"], false);
+    assert_eq!(classified["all_activatable"], true);
+    assert_eq!(classified["profiles"][0]["activatable"], true);
     assert!(!first.join(INCOMPLETE_MARKER).exists());
 }
 
@@ -162,4 +217,40 @@ fn publication_rejects_noncanonical_reviews_and_mismatched_crx_archives() {
     )
     .unwrap();
     assert!(publish(&review_path, &temporary.path().join("mismatch")).is_err());
+}
+
+#[test]
+fn manifest_profile_finalization_rejects_unassessed_and_identity_drift() {
+    let temporary = tempfile::tempdir().unwrap();
+    fixture(temporary.path());
+    let review_path = review(temporary.path());
+    let publication = temporary.path().join("publication");
+    publish(&review_path, &publication).unwrap();
+    let mut review: serde_json::Value =
+        serde_json::from_slice(&fs::read(publication.join(MANIFEST_INPUTS_TARGET)).unwrap())
+            .unwrap();
+    review["kind"] = serde_json::Value::String(MANIFEST_REVIEW_KIND.into());
+    review["classification_settled"] = serde_json::Value::Bool(true);
+    let profile_review = temporary.path().join("profile-review.json");
+    fs::write(&profile_review, serde_json::to_vec(&review).unwrap()).unwrap();
+    assert!(finalize_manifest_profiles(
+        &publication,
+        &profile_review,
+        &temporary.path().join("unassessed")
+    )
+    .is_err());
+
+    for profile in review["profiles"].as_array_mut().unwrap() {
+        for row in profile["declarations"].as_array_mut().unwrap() {
+            row["level"] = serde_json::Value::String("compatible".into());
+        }
+    }
+    review["profiles"][0]["manifest_sha256"] = serde_json::Value::String("ff".repeat(32));
+    fs::write(&profile_review, serde_json::to_vec(&review).unwrap()).unwrap();
+    assert!(finalize_manifest_profiles(
+        &publication,
+        &profile_review,
+        &temporary.path().join("identity-drift")
+    )
+    .is_err());
 }
