@@ -1562,7 +1562,10 @@ selected extension/index paths, requires the exact three-entry root inventory,
 revalidates the non-authorizing receipt and both source/output identities,
 reopens the closed output tree, and then runs the same deterministic CRX3
 release preparation. The exact compatibility receipt is copied byte-for-byte
-beside the release archive; its length, SHA-256, target, and input
+beside the release archive and inserted into the staged extension at the sole
+digest-derived path
+`__zephium__/compatibility-receipts/<sha256>.json` before the release tree is
+re-indexed and zipped. Its length, SHA-256, target, and adapted pre-signing
 manifest/tree/index identities are bound into release evidence. Receipt capture
 does not settle signing, licensing, catalog membership, redistribution, or
 product authority. Ordinary unadapted release preparation remains unchanged,
@@ -1572,16 +1575,18 @@ boundary without becoming macOS package-name special cases.
 Release-catalog schema 2 closes the next authority seam. Each package may bind
 an ordered, unique cohort of at most eight compatibility targets. Every row
 fixes the receipt byte length and SHA-256 plus the exact release-input
-manifest, tree, canonical index, file count, and byte count; those input fields
-must equal the containing package row during catalog parsing. Receipt bodies
-have a separate 64 KiB ceiling. Schema 1 remains readable for unadapted legacy
+manifest, tree, canonical index, file count, and byte count. The package row
+separately binds the post-rewrite release tree, because stable-key insertion and
+store-metadata removal legitimately change that identity. Receipt bodies have
+a separate 64 KiB ceiling. Schema 1 remains readable for unadapted legacy
 catalogs but cannot carry receipts, so changing a schema number cannot smuggle
 adaptation authority. The redundant bundled-inventory digest uses a new domain
 for schema 2 and covers the complete receipt cohort while preserving the fixed
 schema-1 golden. The sealed macOS brokered manifest profile requires the exact
 `macos.wkwebextension-brokered.v1` receipt before it can mint an admitted
 manifest. The non-shipping product gate additionally authenticates the exact
-receipt body and canonical input index before repository publication, then
+receipt body and requires the digest-derived inert resource in the canonical
+release index before repository publication, then
 proves the ordinary and brokered native lifecycles independently. This fixture
 authority does not provision ordinary product builds; production still needs a
 signed catalog, authenticated receipt transport, legal policy, and packaged

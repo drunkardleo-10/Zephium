@@ -964,29 +964,30 @@ These inherited properties must not be overstated:
   terminal and prevents an empty in-memory map from being mistaken for native absence.
 - Before Tauri creates a view, the runtime version must parse as a stable four-component
   WebView2 version and meet the reviewed Microsoft Stable security floor. The current
-  hard floor is `151.0.4129.59`, published July 31, 2026. The latest reviewed
-  recommendation is `151.0.4129.78`, published August 10, 2026; an admitted runtime
+  hard floor is `151.0.4129.86`, published August 14, 2026. The latest reviewed
+  recommendation is `151.0.4129.93`, published August 17, 2026; an admitted runtime
   between those versions receives an update advisory. A newer stable major receives
   an unreviewed-runtime advisory. Preview-channel and malformed strings fail closed.
   The process also rejects documented WebView2
   environment overrides that
   can replace runtime/UDF selection, append browser flags such as `--no-sandbox`, select
   another channel, or attach script debuggers. CI and release publication
-  expire this review after August 17; runtime reports an overdue-review
+  expire this review after August 24; runtime reports an overdue-review
   advisory instead. A clock before the hard-floor publication still fails
   closed. Per-view Environment7/UDF/runtime, Environment10, Settings7, and
   CoreWebView2_18 checks remain independent capability gates.
 - Microsoft acknowledged on July 14 that additional Chromium security fixes
   were not yet available in Edge/WebView2 Stable. Stable `150.0.4078.80`
   incorporated the update on July 16, and the reviewed floor now names the later
-  July 31 security release above. Microsoft's Edge Stable security notes report
-  15 Edge-specific CVE fixes for that release, but Microsoft publishes no
+  August 14 security release above. Microsoft identifies CVE-2026-72970 for
+  that release, but publishes no
   WebView2-specific per-CVE applicability matrix; Zephium therefore treats the
   shared Edge/WebView2 runtime release as a conservative floor rather than claiming
   each listed CVE applies to WebView2. Microsoft's first-party WebView2 download
   selector independently confirmed the exact runtime build for x86, x64, and ARM64
-  during the August 4 review. The August 12 follow-up retained that hard floor and
-  reviewed Microsoft's August 10 Stable security update as the current recommendation.
+  during the August 18 review. That review raised the hard floor to the August 14
+  security release and confirmed Microsoft's August 17 Stable `151.0.4129.93`
+  release as the current downloadable recommendation.
   The release gate preserves the
   historical notice and requires both a cleared blocker and a floor published
   after it, so changing a boolean cannot turn a known vendor patch gap into
@@ -1180,21 +1181,25 @@ extension directory detached from its receipt. The release boundary requires
 the exact root inventory, revalidates the receipt's non-authorizing header and
 closed output identity, copies the captured receipt without re-reading it, and
 binds its digest, target, and input identity into deterministic CRX3 release
-evidence. This closes receipt-loss and tree-substitution seams but still grants
+evidence. It also inserts those exact bytes at a digest-derived reserved path
+before re-indexing and zipping the release tree. This closes receipt-loss and
+tree-substitution seams but still grants
 no signature, legal, catalog, install, runtime, or product authority.
 
 Catalog authority is a separate mandatory transition. Schema 2 signs a
 strictly ordered, unique compatibility-receipt cohort per package and binds
-each receipt's exact bytes to the same manifest/tree/index/count/size identity
-as the containing release tree. Receipts are capped at 64 KiB and eight targets
-per package. Schema 1 cannot carry them, and schema-2 inventory hashing uses a
-new domain that covers every receipt field. Brokered macOS manifest admission
-fails closed unless the catalog contains its exact versioned target. The
-product gate then verifies the supplied receipt bytes and canonical tree index
-before repository activation; a digest-only row cannot stand in for the
-receipt body. These checks authenticate reviewed adaptation evidence but do
-not make that evidence a signature, redistribution decision, user grant, live
-lease, or native controller capability.
+each receipt's exact bytes and adapted pre-signing
+manifest/tree/index/count/size identity. The containing package row separately
+binds the post-rewrite release tree. Receipts are capped at 64 KiB and eight
+targets per package. Schema 1 cannot carry them, and schema-2 inventory hashing
+uses a new domain that covers every receipt field. Brokered macOS manifest
+admission fails closed unless the catalog contains its exact versioned target
+and the canonical release tree contains its exact digest-derived resource. The
+product gate verifies those embedded bytes before repository activation; a
+digest-only row cannot stand in for the receipt body. These checks authenticate
+reviewed adaptation evidence but do not make that evidence a signature,
+redistribution decision, user grant, live lease, or native controller
+capability.
 
 The adapter preserves native extension principals and namespace objects. It
 does not expose a generic page-world API, fetch port, or native-message channel,
