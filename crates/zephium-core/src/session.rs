@@ -17,6 +17,7 @@ use crate::split::Pane;
 pub const MAX_SESSION_PROFILES: usize = 64;
 pub const MAX_SESSION_SPACES: usize = 512;
 pub const MAX_SESSION_ITEMS: usize = 1024;
+pub const MAX_RECENTLY_CLOSED_TABS: usize = 32;
 pub const MAX_SESSION_NAME_CHARS: usize = 256;
 pub const MAX_ITEM_TREE_DEPTH: usize = 64;
 pub const MAX_SPLIT_DEPTH: usize = 64;
@@ -30,6 +31,8 @@ pub struct SessionState {
     pub active_space: Option<SpaceId>,
     pub active_item: Option<ItemId>,
     pub splits: Option<Pane>,
+    #[serde(default)]
+    pub recently_closed: Vec<PersistedClosedTab>,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -66,6 +69,18 @@ pub enum PersistedKind {
     },
 }
 
+/// Bounded browser-owned state for restoring a recently closed regular tab.
+/// A fresh [`ItemId`] is allocated on restore, so stale native/item authority
+/// can never be resurrected with the presentation record.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PersistedClosedTab {
+    pub profile: ProfileId,
+    pub space: SpaceId,
+    pub url: String,
+    pub title: String,
+    pub zoom: f64,
+}
+
 pub fn snapshot(
     profiles: &Profiles,
     spaces: &Spaces,
@@ -73,6 +88,27 @@ pub fn snapshot(
     active_space: Option<SpaceId>,
     active_item: Option<ItemId>,
     splits: Option<&Pane>,
+) -> SessionState {
+    snapshot_with_recently_closed(
+        profiles,
+        spaces,
+        items,
+        active_space,
+        active_item,
+        splits,
+        &[],
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn snapshot_with_recently_closed(
+    profiles: &Profiles,
+    spaces: &Spaces,
+    items: &Items,
+    active_space: Option<SpaceId>,
+    active_item: Option<ItemId>,
+    splits: Option<&Pane>,
+    recently_closed: &[PersistedClosedTab],
 ) -> SessionState {
     let mut state = SessionState::default();
 
@@ -129,6 +165,15 @@ pub fn snapshot(
             })
         })
         .cloned();
+    state.recently_closed =
+        canonical_recently_closed(recently_closed, |entry| {
+            state.profiles.iter().any(|profile| {
+                profile.id == entry.profile && profile.kind != ProfileKind::Incognito
+            }) && state
+                .spaces
+                .iter()
+                .any(|space| space.id == entry.space && space.profile == entry.profile)
+        });
     state
 }
 
@@ -171,6 +216,7 @@ pub struct Restored {
     pub active_space: Option<SpaceId>,
     pub active_item: Option<ItemId>,
     pub splits: Option<Pane>,
+    pub recently_closed: Vec<PersistedClosedTab>,
 }
 
 /// Rebuilds a persistence snapshot through the same validation path used at
@@ -178,13 +224,14 @@ pub struct Restored {
 /// dangerous URLs, and oversized legacy display data never land on disk.
 pub fn canonicalize(state: SessionState) -> SessionState {
     let restored = restore(state);
-    snapshot(
+    snapshot_with_recently_closed(
         &restored.profiles,
         &restored.spaces,
         &restored.items,
         restored.active_space,
         restored.active_item,
         restored.splits.as_ref(),
+        &restored.recently_closed,
     )
 }
 
@@ -260,6 +307,14 @@ pub fn restore(state: SessionState) -> Restored {
     let splits = state.splits.filter(|tree| {
         active_space.is_some_and(|space| valid_split_tree(tree, &items, &spaces, space))
     });
+    let recently_closed = canonical_recently_closed(&state.recently_closed, |entry| {
+        profiles
+            .get(entry.profile)
+            .is_some_and(|profile| profile.kind != ProfileKind::Incognito)
+            && spaces
+                .get(entry.space)
+                .is_some_and(|space| space.profile == entry.profile)
+    });
 
     Restored {
         profiles,
@@ -268,7 +323,38 @@ pub fn restore(state: SessionState) -> Restored {
         active_space,
         active_item,
         splits,
+        recently_closed,
     }
+}
+
+fn canonical_recently_closed(
+    input: &[PersistedClosedTab],
+    owns_entry: impl Fn(&PersistedClosedTab) -> bool,
+) -> Vec<PersistedClosedTab> {
+    let mut output = input
+        .iter()
+        .rev()
+        .filter_map(|entry| {
+            if !owns_entry(entry) {
+                return None;
+            }
+            let url = Url::parse(&entry.url).ok().filter(navigation::is_allowed)?;
+            Some(PersistedClosedTab {
+                profile: entry.profile,
+                space: entry.space,
+                url: url.to_string(),
+                title: sanitize_page_title(&entry.title),
+                zoom: if entry.zoom.is_finite() {
+                    entry.zoom.clamp(0.3, 3.0)
+                } else {
+                    1.0
+                },
+            })
+        })
+        .take(MAX_RECENTLY_CLOSED_TABS)
+        .collect::<Vec<_>>();
+    output.reverse();
+    output
 }
 
 fn item_in_space_scope(items: &Items, spaces: &Spaces, id: ItemId, space: SpaceId) -> bool {
@@ -400,6 +486,55 @@ mod tests {
     }
 
     #[test]
+    fn recently_closed_tabs_are_bounded_sanitized_and_profile_scoped() {
+        let (profiles, spaces, items, profile, space) = seed();
+        let mut recent = (0..(MAX_RECENTLY_CLOSED_TABS + 3))
+            .map(|index| PersistedClosedTab {
+                profile,
+                space,
+                url: format!("https://example.com/{index}"),
+                title: format!("Title {index}\u{202e}"),
+                zoom: 2.0,
+            })
+            .collect::<Vec<_>>();
+        recent.push(PersistedClosedTab {
+            profile: ProfileId::from(999),
+            space,
+            url: "https://foreign.example/".into(),
+            title: "Foreign".into(),
+            zoom: 1.0,
+        });
+        recent.push(PersistedClosedTab {
+            profile,
+            space,
+            url: "file:///private.txt".into(),
+            title: "Local".into(),
+            zoom: 1.0,
+        });
+
+        let state = snapshot_with_recently_closed(
+            &profiles,
+            &spaces,
+            &items,
+            Some(space),
+            None,
+            None,
+            &recent,
+        );
+        assert_eq!(state.recently_closed.len(), MAX_RECENTLY_CLOSED_TABS);
+        assert_eq!(state.recently_closed[0].url, "https://example.com/3");
+        assert!(state
+            .recently_closed
+            .iter()
+            .all(|entry| !entry.title.contains('\u{202e}')));
+        assert_eq!(
+            restore(state.clone()).recently_closed,
+            state.recently_closed
+        );
+        assert_eq!(canonicalize(state.clone()), state);
+    }
+
+    #[test]
     fn snapshot_skips_incognito_and_urlless_tabs() {
         let (mut profiles, spaces, mut items, _profile, space) = seed();
         let incognito = ProfileId::from(9);
@@ -445,6 +580,7 @@ mod tests {
             active_space: Some(SpaceId::from(2)),
             active_item: Some(ItemId::from(10)),
             splits: Some(Pane::leaf(ItemId::from(10))),
+            recently_closed: Vec::new(),
         };
         let restored = restore(state);
         assert!(restored.spaces.is_empty());
@@ -527,6 +663,7 @@ mod tests {
                 a: Box::new(Pane::Leaf(kept)),
                 b: Box::new(Pane::Leaf(kept)),
             }),
+            recently_closed: Vec::new(),
         };
 
         let clean = canonicalize(state);

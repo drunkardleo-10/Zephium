@@ -34,7 +34,9 @@ use zephium_core::ports::store::{
     ExtensionNativeOwnershipJournalMutationApplied,
 };
 use zephium_core::profiles::ProfileKind;
-use zephium_core::session::{PersistedItem, PersistedKind, PersistedProfile, PersistedSpace};
+use zephium_core::session::{
+    PersistedClosedTab, PersistedItem, PersistedKind, PersistedProfile, PersistedSpace,
+};
 use zephium_core::split::{Axis, Pane};
 use zephium_core::userscripts::{
     UserscriptCatalogMutation, UserscriptCatalogRevision, UserscriptRevision,
@@ -174,6 +176,7 @@ fn sample() -> SessionState {
             a: Box::new(Pane::Leaf(ItemId::from(10))),
             b: Box::new(Pane::Leaf(ItemId::from(11))),
         }),
+        recently_closed: Vec::new(),
     }
 }
 
@@ -5495,6 +5498,21 @@ fn roundtrip_tree_folders_focus_and_splits() {
 }
 
 #[test]
+fn recently_closed_tabs_roundtrip_in_the_authoritative_bounded_snapshot() {
+    let store = SqliteStore::in_memory().unwrap();
+    let mut session = sample();
+    session.recently_closed.push(PersistedClosedTab {
+        profile: session.profiles[0].id,
+        space: session.spaces[0].id,
+        url: "https://closed.example/path".into(),
+        title: "Closed tab".into(),
+        zoom: 1.25,
+    });
+    store.save_session(session.clone());
+    assert_eq!(loaded(&store), session);
+}
+
+#[test]
 fn blocker_preferences_load_with_the_authoritative_session_and_default_disabled() {
     let store = SqliteStore::in_memory().unwrap();
     let session = two_profile_sample();
@@ -7196,6 +7214,7 @@ fn maximum_valid_session_fits_snapshot_budget() {
         active_space: Some(space),
         active_item: Some(ItemId::from(100)),
         splits: None,
+        recently_closed: Vec::new(),
     });
     let encoded = serde_json::to_vec(&state).unwrap();
     assert!(
@@ -7621,6 +7640,7 @@ fn profile_deletion_rejects_a_hard_link_to_another_profile_database() {
         active_space: Some(SpaceId::from(4)),
         active_item: None,
         splits: None,
+        recently_closed: Vec::new(),
     };
     assert_eq!(
         hub.authorize_profile_deletion(deleted, &filtered).unwrap(),

@@ -43,8 +43,8 @@ use zephium_core::ports::store::{
 };
 use zephium_core::profiles::ProfileKind;
 use zephium_core::session::{
-    PersistedKind, SessionState, MAX_SESSION_ITEMS, MAX_SESSION_NAME_CHARS, MAX_SESSION_PROFILES,
-    MAX_SESSION_SPACES, MAX_SPLIT_DEPTH,
+    PersistedKind, SessionState, MAX_RECENTLY_CLOSED_TABS, MAX_SESSION_ITEMS,
+    MAX_SESSION_NAME_CHARS, MAX_SESSION_PROFILES, MAX_SESSION_SPACES, MAX_SPLIT_DEPTH,
 };
 use zephium_core::split::Pane;
 use zephium_core::userscripts::{UserscriptCatalogMutation, UserscriptCatalogRevision};
@@ -2627,6 +2627,13 @@ fn admissible_session(session: &SessionState) -> bool {
                     && zoom.is_finite()
                     && (0.3..=3.0).contains(zoom)
             }
+        })
+        && session.recently_closed.len() <= MAX_RECENTLY_CLOSED_TABS
+        && session.recently_closed.iter().all(|entry| {
+            entry.url.len() <= MAX_URL_BYTES
+                && entry.title.len() <= MAX_TITLE_BYTES
+                && entry.zoom.is_finite()
+                && (0.3..=3.0).contains(&entry.zoom)
         })
         && session.splits.as_ref().is_none_or(admissible_split)
 }

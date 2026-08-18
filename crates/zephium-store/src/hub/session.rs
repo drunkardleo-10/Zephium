@@ -24,6 +24,8 @@ struct BoundedSessionState {
     active_space: Option<SpaceId>,
     active_item: Option<ItemId>,
     splits: Option<bounded_json::BoundedPane>,
+    #[serde(default, deserialize_with = "deserialize_bounded_recently_closed")]
+    recently_closed: Vec<BoundedClosedTab>,
 }
 
 #[derive(serde::Deserialize)]
@@ -49,6 +51,16 @@ struct BoundedItem {
     parent: Option<ItemId>,
     placement: BoundedPlacement,
     kind: BoundedKind,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BoundedClosedTab {
+    profile: ProfileId,
+    space: SpaceId,
+    url: String,
+    title: String,
+    zoom: f64,
 }
 
 #[derive(serde::Deserialize)]
@@ -111,6 +123,20 @@ where
     })
 }
 
+fn deserialize_bounded_recently_closed<'de, D>(
+    deserializer: D,
+) -> Result<Vec<BoundedClosedTab>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    bounded_json::deserialize_bounded_vec(deserializer, MAX_RECENTLY_CLOSED_TABS, |entry| {
+        entry.url.len() <= MAX_URL_BYTES
+            && entry.title.len() <= MAX_TITLE_BYTES
+            && entry.zoom.is_finite()
+            && (0.3..=3.0).contains(&entry.zoom)
+    })
+}
+
 impl From<BoundedSessionState> for SessionState {
     fn from(value: BoundedSessionState) -> Self {
         Self {
@@ -155,6 +181,17 @@ impl From<BoundedSessionState> for SessionState {
             active_space: value.active_space,
             active_item: value.active_item,
             splits: value.splits.map(|pane| pane.0),
+            recently_closed: value
+                .recently_closed
+                .into_iter()
+                .map(|entry| PersistedClosedTab {
+                    profile: entry.profile,
+                    space: entry.space,
+                    url: entry.url,
+                    title: entry.title,
+                    zoom: entry.zoom,
+                })
+                .collect(),
         }
     }
 }

@@ -753,6 +753,7 @@ mod tests {
             active_space: None,
             active_item: None,
             splits: None,
+            recently_closed: Vec::new(),
         };
         let mut full = filtered.clone();
         full.profiles.push(deleted);

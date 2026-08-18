@@ -131,6 +131,7 @@ fn items_projection_is_one_ordered_authoritative_focused_sidebar_snapshot() {
                 a: Box::new(Pane::Leaf(pinned_child)),
                 b: Box::new(Pane::Leaf(today_root)),
             }),
+            recently_closed: Vec::new(),
         })),
         ..Default::default()
     });

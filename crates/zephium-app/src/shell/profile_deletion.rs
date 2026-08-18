@@ -194,13 +194,14 @@ impl Shell {
         }
 
         let window = self.windows.focused();
-        let mut filtered = session::snapshot(
+        let mut filtered = session::snapshot_with_recently_closed(
             &self.profiles,
             &self.spaces,
             &self.items,
             window.map(|window| window.space),
             window.and_then(|window| window.active),
             window.and_then(|window| window.splits.as_ref()),
+            &self.recently_closed,
         );
         if !filtered
             .profiles
@@ -218,6 +219,9 @@ impl Shell {
         filtered
             .profiles
             .retain(|candidate| candidate.id != profile);
+        filtered
+            .recently_closed
+            .retain(|entry| entry.profile != profile);
         filtered.spaces.retain(|space| space.profile != profile);
         filtered.items.retain(|item| match item.placement {
             Placement::Favorites {
@@ -233,6 +237,8 @@ impl Shell {
     /// Native `Close` effects are deliberately suppressed: the engine's
     /// profile erasure owns closure and exact retirement of every view.
     pub(super) fn apply_profile_tombstone(&mut self, profile: ProfileId) {
+        self.recently_closed
+            .retain(|entry| entry.profile != profile);
         self.extension_browser_surfaces.retire_profile(profile);
         self.extension_actions.retire_profile(profile);
         // Retire compiler admission and erase any callback result before the

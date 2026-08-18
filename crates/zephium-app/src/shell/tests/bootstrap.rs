@@ -98,6 +98,7 @@ fn bootstrap_never_creates_views_for_foreign_focus_or_split_references() {
                 a: Box::new(Pane::Leaf(local)),
                 b: Box::new(Pane::Leaf(sibling)),
             }),
+            recently_closed: Vec::new(),
         })),
         ..Default::default()
     });

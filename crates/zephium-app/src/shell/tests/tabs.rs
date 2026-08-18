@@ -22,6 +22,43 @@ fn switching_tabs_shows_only_active() {
 }
 
 #[test]
+fn recently_closed_tab_restores_with_a_fresh_identity_and_durable_metadata() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, engine, screen) = setup_with(store.clone());
+    shell.handle(Command::Bootstrap);
+    let closed = active_id(&screen);
+    navigate_and_commit(&mut shell, closed, "restore.example/path");
+    shell.items.set_title(closed, "Restorable title".into());
+    shell.items.set_zoom(closed, 1.25);
+
+    shell.handle(Command::Close(closed));
+    assert_eq!(shell.recently_closed.len(), 1);
+    let profile = shell.windows.focused().unwrap().profile;
+    let (restored, native) = shell
+        .restore_recently_closed_tab(profile)
+        .expect("recent tab must restore in its original focused space");
+    assert_ne!(restored, closed);
+    assert!(!native.rejected);
+    assert!(shell.recently_closed.is_empty());
+    let tab = shell.items.tab(restored).unwrap();
+    assert_eq!(
+        tab.url.as_ref().map(url::Url::as_str),
+        Some("https://restore.example/path")
+    );
+    assert_eq!(tab.title, "Restorable title");
+    assert_eq!(tab.zoom, 1.25);
+    assert!(engine.calls().iter().any(|call| {
+        call == &format!("create {restored} https://restore.example/path [default]")
+    }));
+    assert!(store
+        .saved
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|session| session.recently_closed.is_empty()));
+}
+
+#[test]
 fn forged_runtime_ids_cannot_cross_the_focused_space_or_profile() {
     let (mut shell, engine, screen) = setup();
     shell.handle(Command::Bootstrap);

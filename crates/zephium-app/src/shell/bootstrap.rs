@@ -59,6 +59,7 @@ impl Shell {
                 blocker_configs: loaded_blocker_configs,
             } => {
                 let restored = session::restore(state);
+                self.recently_closed = restored.recently_closed;
                 self.profiles = restored.profiles;
                 self.spaces = restored.spaces;
                 self.items = restored.items;
@@ -95,6 +96,7 @@ impl Shell {
                 self.degraded_storage_profiles = degraded;
 
                 let restored = session::restore(state);
+                self.recently_closed = restored.recently_closed;
                 self.profiles = restored.profiles;
                 self.spaces = restored.spaces;
                 self.items = restored.items;

@@ -297,6 +297,7 @@ fn decode_v2(stored: StoredSession) -> Option<SessionState> {
         active_space,
         active_item,
         splits,
+        recently_closed: Vec::new(),
     })
 }
 
@@ -382,6 +383,7 @@ fn decode_v1(v1: V1Session) -> Option<SessionState> {
         active_space: Some(space),
         active_item,
         splits: None,
+        recently_closed: Vec::new(),
     })
 }
 

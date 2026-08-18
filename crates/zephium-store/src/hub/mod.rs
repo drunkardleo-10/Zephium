@@ -30,9 +30,9 @@ use zephium_core::item::{Placement, SpaceSection};
 use zephium_core::navigation;
 use zephium_core::profiles::ProfileKind;
 use zephium_core::session::{
-    self as core_session, PersistedItem, PersistedKind, PersistedProfile, PersistedSpace,
-    SessionState, MAX_SESSION_ITEMS, MAX_SESSION_NAME_CHARS, MAX_SESSION_PROFILES,
-    MAX_SESSION_SPACES,
+    self as core_session, PersistedClosedTab, PersistedItem, PersistedKind, PersistedProfile,
+    PersistedSpace, SessionState, MAX_RECENTLY_CLOSED_TABS, MAX_SESSION_ITEMS,
+    MAX_SESSION_NAME_CHARS, MAX_SESSION_PROFILES, MAX_SESSION_SPACES,
 };
 
 use crate::{bounded_json, migrations};

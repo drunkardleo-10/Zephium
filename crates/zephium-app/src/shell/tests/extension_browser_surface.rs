@@ -55,6 +55,7 @@ fn startup_profile_projection_drives_the_ordinary_shell_bootstrap_path() {
             active_space: Some(space),
             active_item: Some(item),
             splits: None,
+            recently_closed: Vec::new(),
         })),
         ..FakeStore::default()
     });

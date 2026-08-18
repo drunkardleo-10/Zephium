@@ -60,6 +60,19 @@ impl Shell {
         if !self.item_in_focused_scope(id) {
             return NativeWork::default();
         }
+        let closed = self.windows.focused().and_then(|window| {
+            self.items.tab(id).and_then(|tab| {
+                tab.url
+                    .as_ref()
+                    .map(|url| zephium_core::session::PersistedClosedTab {
+                        profile: window.profile,
+                        space: window.space,
+                        url: url.to_string(),
+                        title: tab.title.clone(),
+                        zoom: tab.zoom,
+                    })
+            })
+        });
         self.cancel_page_permission_for_item(id);
         self.cancel_pending_presentation(id);
         self.cancel_favicon_attempt(id);
@@ -91,6 +104,12 @@ impl Shell {
         let tabs_before = self.today_tabs(space);
         let pos = tabs_before.iter().position(|x| *x == id);
         let mut fx = self.items.remove(id);
+        if let Some(closed) = closed {
+            if self.recently_closed.len() == zephium_core::session::MAX_RECENTLY_CLOSED_TABS {
+                self.recently_closed.remove(0);
+            }
+            self.recently_closed.push(closed);
+        }
         if was_active {
             let tabs = self.today_tabs(space);
             if let (Some(pos), false) = (pos, tabs.is_empty()) {
@@ -98,6 +117,46 @@ impl Shell {
             }
         }
         self.commit(fx)
+    }
+
+    /// Restores the newest closed tab owned by the focused profile and space.
+    /// A fresh item/native identity is always allocated; the closed record is
+    /// removed only after the logical item has been inserted successfully.
+    pub(super) fn restore_recently_closed_tab(
+        &mut self,
+        profile: ProfileId,
+    ) -> Option<(ItemId, NativeWork)> {
+        let space = self
+            .windows
+            .focused()
+            .filter(|window| window.profile == profile)
+            .map(|window| window.space)?;
+        let position = self
+            .recently_closed
+            .iter()
+            .rposition(|entry| entry.profile == profile && entry.space == space)?;
+        let entry = self.recently_closed[position].clone();
+        let id = (0..8).find_map(|_| {
+            let candidate = ItemId::generate();
+            self.items
+                .insert_tab(
+                    candidate,
+                    Placement::Space {
+                        space,
+                        section: SpaceSection::Today,
+                    },
+                )
+                .then_some(candidate)
+        })?;
+        if !self.items.set_committed_url_str(id, &entry.url) {
+            let _ = self.items.remove(id);
+            return None;
+        }
+        self.items.set_title(id, entry.title);
+        self.items.set_zoom(id, entry.zoom);
+        self.recently_closed.remove(position);
+        let effects = self.focus_tab(id);
+        Some((id, self.commit(effects)))
     }
 
     /// Removes a failed native leaf from the retained split immediately. A
