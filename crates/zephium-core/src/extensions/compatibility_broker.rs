@@ -8,13 +8,17 @@
 
 use std::fmt;
 
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine as _;
+
 use super::{ExtensionRuntimeFingerprint, ExtensionRuntimeInstance};
 
 /// The only application identifier accepted by Zephium's internal broker.
 pub const EXTENSION_COMPATIBILITY_BROKER_APPLICATION_ID: &str = "app.zephium.extension-broker.v1";
 
 /// Maximum encoded request accepted from an extension adapter.
-pub const MAX_EXTENSION_COMPATIBILITY_BROKER_REQUEST_BYTES: usize = 128;
+pub const MAX_EXTENSION_COMPATIBILITY_SEARCH_QUERY_BYTES: usize = 1024;
+pub const MAX_EXTENSION_COMPATIBILITY_BROKER_REQUEST_BYTES: usize = 1536;
 /// Maximum encoded response returned to an extension adapter.
 pub const MAX_EXTENSION_COMPATIBILITY_BROKER_RESPONSE_BYTES: usize = 64 * 1024;
 /// Maximum recent-history rows returned by one broker request.
@@ -24,11 +28,16 @@ pub const MAX_PENDING_EXTENSION_COMPATIBILITY_BROKER_REQUESTS: usize = 32;
 pub const MAX_PENDING_EXTENSION_COMPATIBILITY_BROKER_REQUESTS_PER_PROFILE: usize = 8;
 
 const RECENT_HISTORY_PREFIX: &str = "v1/history.recent/";
+const DEFAULT_SEARCH_CURRENT_PREFIX: &str = "v1/search.default/current/";
+const DEFAULT_SEARCH_NEW_PREFIX: &str = "v1/search.default/new/";
+const RESTORE_RECENT_SESSION: &str = "v1/sessions.restore/recent";
 
 /// Closed compatibility operation whose product grant must be proven.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ExtensionCompatibilityBrokerPurpose {
     RecentHistory,
+    DefaultSearch,
+    RestoreRecentSession,
 }
 
 /// Move-only proof that one exact published runtime holds the API authority
@@ -92,14 +101,29 @@ impl ExtensionCompatibilityBrokerRequestId {
 /// Validated request semantics. JavaScript supplies only the bounded wire
 /// representation; the native adapter allocates the correlation identity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExtensionCompatibilitySearchDisposition {
+    CurrentTab,
+    NewTab,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ExtensionCompatibilityBrokerOperation {
-    RecentHistory { limit: u16 },
+    RecentHistory {
+        limit: u16,
+    },
+    DefaultSearch {
+        disposition: ExtensionCompatibilitySearchDisposition,
+        query: Box<str>,
+    },
+    RestoreRecentSession,
 }
 
 impl ExtensionCompatibilityBrokerOperation {
-    pub const fn purpose(self) -> ExtensionCompatibilityBrokerPurpose {
+    pub const fn purpose(&self) -> ExtensionCompatibilityBrokerPurpose {
         match self {
             Self::RecentHistory { .. } => ExtensionCompatibilityBrokerPurpose::RecentHistory,
+            Self::DefaultSearch { .. } => ExtensionCompatibilityBrokerPurpose::DefaultSearch,
+            Self::RestoreRecentSession => ExtensionCompatibilityBrokerPurpose::RestoreRecentSession,
         }
     }
 
@@ -107,6 +131,15 @@ impl ExtensionCompatibilityBrokerOperation {
     pub fn parse_wire(value: &str) -> Result<Self, ExtensionCompatibilityBrokerRequestError> {
         if value.is_empty() || value.len() > MAX_EXTENSION_COMPATIBILITY_BROKER_REQUEST_BYTES {
             return Err(ExtensionCompatibilityBrokerRequestError::InvalidWireRequest);
+        }
+        if value == RESTORE_RECENT_SESSION {
+            return Ok(Self::RestoreRecentSession);
+        }
+        if let Some(encoded) = value.strip_prefix(DEFAULT_SEARCH_CURRENT_PREFIX) {
+            return parse_search(encoded, ExtensionCompatibilitySearchDisposition::CurrentTab);
+        }
+        if let Some(encoded) = value.strip_prefix(DEFAULT_SEARCH_NEW_PREFIX) {
+            return parse_search(encoded, ExtensionCompatibilitySearchDisposition::NewTab);
         }
         let Some(limit) = value.strip_prefix(RECENT_HISTORY_PREFIX) else {
             return Err(ExtensionCompatibilityBrokerRequestError::UnsupportedOperation);
@@ -125,6 +158,36 @@ impl ExtensionCompatibilityBrokerOperation {
         }
         Ok(Self::RecentHistory { limit })
     }
+}
+
+fn parse_search(
+    encoded: &str,
+    disposition: ExtensionCompatibilitySearchDisposition,
+) -> Result<ExtensionCompatibilityBrokerOperation, ExtensionCompatibilityBrokerRequestError> {
+    if encoded.is_empty()
+        || encoded.contains('=')
+        || !encoded
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(ExtensionCompatibilityBrokerRequestError::InvalidWireRequest);
+    }
+    let mut decoded = [0_u8; MAX_EXTENSION_COMPATIBILITY_SEARCH_QUERY_BYTES];
+    let length = URL_SAFE_NO_PAD
+        .decode_slice(encoded, &mut decoded)
+        .map_err(|_| ExtensionCompatibilityBrokerRequestError::InvalidWireRequest)?;
+    let query = std::str::from_utf8(&decoded[..length])
+        .map_err(|_| ExtensionCompatibilityBrokerRequestError::InvalidWireRequest)?;
+    if query.trim().is_empty()
+        || query.chars().any(char::is_control)
+        || URL_SAFE_NO_PAD.encode(query.as_bytes()) != encoded
+    {
+        return Err(ExtensionCompatibilityBrokerRequestError::InvalidWireRequest);
+    }
+    Ok(ExtensionCompatibilityBrokerOperation::DefaultSearch {
+        disposition,
+        query: query.into(),
+    })
 }
 
 /// One authority-bound request delivered to Shell.
@@ -162,8 +225,8 @@ impl ExtensionCompatibilityBrokerRequest {
         self.id
     }
 
-    pub const fn operation(&self) -> ExtensionCompatibilityBrokerOperation {
-        self.operation
+    pub const fn operation(&self) -> &ExtensionCompatibilityBrokerOperation {
+        &self.operation
     }
 }
 
@@ -198,6 +261,8 @@ pub struct ExtensionCompatibilityHistoryEntry {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ExtensionCompatibilityBrokerResult {
     RecentHistory(Box<[ExtensionCompatibilityHistoryEntry]>),
+    DefaultSearch { opened: bool },
+    RecentSessionRestore { restored: bool },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -228,6 +293,43 @@ mod tests {
             ExtensionCompatibilityBrokerOperation::parse_wire("v1/history.recent/100"),
             Ok(ExtensionCompatibilityBrokerOperation::RecentHistory { limit: 100 })
         );
+        let encoded = URL_SAFE_NO_PAD.encode("hello π".as_bytes());
+        assert_eq!(
+            ExtensionCompatibilityBrokerOperation::parse_wire(&format!(
+                "{DEFAULT_SEARCH_CURRENT_PREFIX}{encoded}"
+            )),
+            Ok(ExtensionCompatibilityBrokerOperation::DefaultSearch {
+                disposition: ExtensionCompatibilitySearchDisposition::CurrentTab,
+                query: "hello π".into(),
+            })
+        );
+        assert_eq!(
+            ExtensionCompatibilityBrokerOperation::parse_wire(RESTORE_RECENT_SESSION),
+            Ok(ExtensionCompatibilityBrokerOperation::RestoreRecentSession)
+        );
+        let maximum = "a".repeat(MAX_EXTENSION_COMPATIBILITY_SEARCH_QUERY_BYTES);
+        let maximum_wire = format!(
+            "{DEFAULT_SEARCH_NEW_PREFIX}{}",
+            URL_SAFE_NO_PAD.encode(maximum.as_bytes())
+        );
+        assert!(matches!(
+            ExtensionCompatibilityBrokerOperation::parse_wire(&maximum_wire),
+            Ok(ExtensionCompatibilityBrokerOperation::DefaultSearch {
+                disposition: ExtensionCompatibilitySearchDisposition::NewTab,
+                query,
+            }) if query.as_ref() == maximum
+        ));
+        let oversized = "a".repeat(MAX_EXTENSION_COMPATIBILITY_SEARCH_QUERY_BYTES + 1);
+        assert!(ExtensionCompatibilityBrokerOperation::parse_wire(&format!(
+            "{DEFAULT_SEARCH_CURRENT_PREFIX}{}",
+            URL_SAFE_NO_PAD.encode(oversized.as_bytes())
+        ))
+        .is_err());
+        assert!(ExtensionCompatibilityBrokerOperation::parse_wire(&format!(
+            "{DEFAULT_SEARCH_CURRENT_PREFIX}{}",
+            URL_SAFE_NO_PAD.encode(b"line\nbreak")
+        ))
+        .is_err());
         for invalid in [
             "",
             "v1/history.recent/0",
@@ -236,6 +338,11 @@ mod tests {
             "v1/history.recent/-1",
             "v1/history.search/1",
             "v2/history.recent/1",
+            "v1/search.default/current/",
+            "v1/search.default/current/%%%%",
+            "v1/search.default/current/SGVsbG8=",
+            "v1/search.default/other/SGVsbG8",
+            "v1/sessions.restore/other",
         ] {
             assert!(ExtensionCompatibilityBrokerOperation::parse_wire(invalid).is_err());
         }

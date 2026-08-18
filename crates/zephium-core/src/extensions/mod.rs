@@ -52,9 +52,10 @@ pub use compatibility_broker::{
     ExtensionCompatibilityBrokerRequestError, ExtensionCompatibilityBrokerRequestId,
     ExtensionCompatibilityBrokerResult, ExtensionCompatibilityBrokerSettlement,
     ExtensionCompatibilityBrokerWitness, ExtensionCompatibilityHistoryEntry,
-    EXTENSION_COMPATIBILITY_BROKER_APPLICATION_ID,
+    ExtensionCompatibilitySearchDisposition, EXTENSION_COMPATIBILITY_BROKER_APPLICATION_ID,
     MAX_EXTENSION_COMPATIBILITY_BROKER_REQUEST_BYTES,
     MAX_EXTENSION_COMPATIBILITY_BROKER_RESPONSE_BYTES, MAX_EXTENSION_COMPATIBILITY_HISTORY_RESULTS,
+    MAX_EXTENSION_COMPATIBILITY_SEARCH_QUERY_BYTES,
     MAX_PENDING_EXTENSION_COMPATIBILITY_BROKER_REQUESTS,
     MAX_PENDING_EXTENSION_COMPATIBILITY_BROKER_REQUESTS_PER_PROFILE,
 };

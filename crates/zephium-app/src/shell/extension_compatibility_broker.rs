@@ -5,6 +5,7 @@ use zephium_core::extensions::{
     ExtensionCompatibilityBrokerOperation, ExtensionCompatibilityBrokerRejection,
     ExtensionCompatibilityBrokerRequest, ExtensionCompatibilityBrokerResult,
     ExtensionCompatibilityBrokerSettlement, ExtensionCompatibilityHistoryEntry,
+    ExtensionCompatibilitySearchDisposition,
 };
 
 impl Shell {
@@ -27,11 +28,37 @@ impl Shell {
             );
             return;
         }
-        let admitted = match request.operation() {
+        let operation = request.operation().clone();
+        let admitted = match operation {
             ExtensionCompatibilityBrokerOperation::RecentHistory { limit } => self
                 .store_reads
                 .as_ref()
                 .is_some_and(|reads| reads.request_extension_recent_history(runtime, id, limit)),
+            ExtensionCompatibilityBrokerOperation::DefaultSearch { disposition, query } => {
+                let result =
+                    self.extension_default_search(runtime.profile(), disposition, query.into());
+                self.settle_extension_compatibility_broker(
+                    runtime,
+                    id,
+                    ExtensionCompatibilityBrokerSettlement::Applied(
+                        ExtensionCompatibilityBrokerResult::DefaultSearch { opened: result },
+                    ),
+                );
+                return;
+            }
+            ExtensionCompatibilityBrokerOperation::RestoreRecentSession => {
+                let restored = self
+                    .restore_recently_closed_tab(runtime.profile())
+                    .is_some();
+                self.settle_extension_compatibility_broker(
+                    runtime,
+                    id,
+                    ExtensionCompatibilityBrokerSettlement::Applied(
+                        ExtensionCompatibilityBrokerResult::RecentSessionRestore { restored },
+                    ),
+                );
+                return;
+            }
         };
         if !admitted {
             self.settle_extension_compatibility_broker(
@@ -42,6 +69,39 @@ impl Shell {
                 ),
             );
         }
+    }
+
+    pub(super) fn extension_default_search(
+        &mut self,
+        profile: ProfileId,
+        disposition: ExtensionCompatibilitySearchDisposition,
+        query: String,
+    ) -> bool {
+        let Some(target) = navigation::search_query(&query) else {
+            return false;
+        };
+        let Some(window) = self
+            .windows
+            .focused()
+            .filter(|window| window.profile == profile)
+        else {
+            return false;
+        };
+        let active = window.active;
+        let outcome = match disposition {
+            ExtensionCompatibilitySearchDisposition::CurrentTab => active
+                .map(|item| self.operation_navigate(item, target.to_string()))
+                .unwrap_or_else(|| {
+                    operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope)
+                }),
+            ExtensionCompatibilitySearchDisposition::NewTab => {
+                self.operation_open_url(target.to_string())
+            }
+        };
+        matches!(
+            outcome.outcome,
+            OperationOutcome::Applied | OperationOutcome::NoOp | OperationOutcome::Deferred
+        )
     }
 
     pub(super) fn on_extension_recent_history_read(

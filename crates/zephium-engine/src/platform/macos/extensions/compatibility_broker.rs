@@ -260,7 +260,7 @@ impl CompatibilityBroker {
         &self,
         id: ExtensionCompatibilityBrokerRequestId,
     ) -> Option<ExtensionCompatibilityBrokerOperation> {
-        Some(self.pending.borrow().get(&id)?.operation)
+        Some(self.pending.borrow().get(&id)?.operation.clone())
     }
 
     pub(super) fn finalize(
@@ -291,8 +291,11 @@ impl CompatibilityBroker {
             if !context_is_current {
                 Err(ExtensionCompatibilityBrokerRejection::InvalidContext)
             } else {
-                match ExtensionCompatibilityBrokerRequest::authorize(id, pending.operation, witness)
-                {
+                match ExtensionCompatibilityBrokerRequest::authorize(
+                    id,
+                    pending.operation.clone(),
+                    witness,
+                ) {
                     Ok(request) => {
                         pending.dispatched = true;
                         pending.runtime = Some(request.runtime());
@@ -443,7 +446,21 @@ fn retain_weak(context: &WKWebExtensionContext) -> Option<Weak<WKWebExtensionCon
 fn encode_result(
     result: ExtensionCompatibilityBrokerResult,
 ) -> Result<String, ExtensionCompatibilityBrokerRejection> {
-    let ExtensionCompatibilityBrokerResult::RecentHistory(entries) = result;
+    let entries = match result {
+        ExtensionCompatibilityBrokerResult::DefaultSearch { opened } => {
+            return Ok(format!(
+                "{{\"v\":1,\"opened\":{}}}",
+                if opened { "true" } else { "false" }
+            ));
+        }
+        ExtensionCompatibilityBrokerResult::RecentSessionRestore { restored } => {
+            return Ok(format!(
+                "{{\"v\":1,\"restored\":{}}}",
+                if restored { "true" } else { "false" }
+            ));
+        }
+        ExtensionCompatibilityBrokerResult::RecentHistory(entries) => entries,
+    };
     if entries.len()
         > usize::from(zephium_core::extensions::MAX_EXTENSION_COMPATIBILITY_HISTORY_RESULTS)
         || entries.iter().any(|entry| {
@@ -530,6 +547,20 @@ mod tests {
         assert_eq!(
             parsed["items"][0]["title"],
             "quoted \"title\" with \\ slash"
+        );
+    }
+
+    #[test]
+    fn closed_mutation_results_have_exact_minimal_envelopes() {
+        assert_eq!(
+            encode_result(ExtensionCompatibilityBrokerResult::DefaultSearch { opened: true }),
+            Ok("{\"v\":1,\"opened\":true}".into())
+        );
+        assert_eq!(
+            encode_result(ExtensionCompatibilityBrokerResult::RecentSessionRestore {
+                restored: false,
+            }),
+            Ok("{\"v\":1,\"restored\":false}".into())
         );
     }
 

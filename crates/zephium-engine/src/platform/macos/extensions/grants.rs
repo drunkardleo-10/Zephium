@@ -453,7 +453,9 @@ impl MacosNativeGrantSchema {
         name: &str,
     ) -> Result<MacosNativeApiPermissionDisposition, MacosNativeGrantPlanError> {
         match name {
-            "history" => Ok(MacosNativeApiPermissionDisposition::NotInNativePermissionSet),
+            "bookmarks" | "favicon" | "history" | "search" | "sessions" => {
+                Ok(MacosNativeApiPermissionDisposition::NotInNativePermissionSet)
+            }
             "nativeMessaging" => Ok(MacosNativeApiPermissionDisposition::Native(
                 MacosNativeApiPermission::NativeMessaging,
             )),

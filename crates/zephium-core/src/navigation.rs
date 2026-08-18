@@ -25,6 +25,24 @@ pub fn is_query(input: &str) -> bool {
     !s.is_empty() && matches!(classify_input(s), InputKind::Search(_))
 }
 
+/// Converts an explicit browser-search request into the configured provider
+/// URL without reinterpreting host-shaped text as navigation. Dangerous
+/// absolute schemes, credentials, and local paths retain the omnibox's
+/// exfiltration guard even when supplied by an extension search API.
+pub fn search_query(input: &str) -> Option<Url> {
+    let value = input.trim();
+    if value.is_empty() || looks_like_local_path(value) {
+        return None;
+    }
+    if value.contains("://") || Url::parse(value).is_ok() {
+        let parsed = Url::parse(value).ok()?;
+        if !is_allowed(&parsed) {
+            return None;
+        }
+    }
+    search_url(value)
+}
+
 enum InputKind {
     Direct(Url),
     Search(Url),
@@ -58,18 +76,15 @@ fn classify_input(s: &str) -> InputKind {
             .map_or(InputKind::Rejected, InputKind::Direct);
     }
 
-    let Ok(mut url) = Url::parse(SEARCH_BASE) else {
-        return InputKind::Rejected;
-    };
-    url.query_pairs_mut().append_pair("q", s);
-    if is_allowed(&url) {
-        InputKind::Search(url)
-    } else {
-        // Percent-encoding can expand an otherwise bounded omnibox string.
-        // Apply the native URL ceiling to the final request so core never
-        // commits a URL that the engine will reject later.
-        InputKind::Rejected
-    }
+    search_url(s).map_or(InputKind::Rejected, InputKind::Search)
+}
+
+fn search_url(value: &str) -> Option<Url> {
+    let mut url = Url::parse(SEARCH_BASE).ok()?;
+    url.query_pairs_mut().append_pair("q", value);
+    // Percent-encoding can expand an otherwise bounded input. Apply the
+    // native URL ceiling to the final request.
+    is_allowed(&url).then_some(url)
 }
 
 fn looks_like_local_path(s: &str) -> bool {
@@ -170,6 +185,17 @@ mod tests {
         let u = classify("hello world").unwrap();
         assert_eq!(u.host_str(), Some("duckduckgo.com"));
         assert_eq!(u.query(), Some("q=hello+world"));
+    }
+
+    #[test]
+    fn explicit_search_never_turns_host_shaped_text_into_navigation() {
+        assert_eq!(
+            search_query("example.com").unwrap().as_str(),
+            "https://duckduckgo.com/?q=example.com"
+        );
+        assert!(search_query("https://user:secret@example.com/").is_none());
+        assert!(search_query("file:///private.txt").is_none());
+        assert!(search_query("/Users/alice/private.txt").is_none());
     }
 
     #[test]

@@ -331,11 +331,29 @@ fn history_api_permission() -> &'static ApiPermissionName {
     })
 }
 
+fn search_api_permission() -> &'static ApiPermissionName {
+    static SEARCH: OnceLock<ApiPermissionName> = OnceLock::new();
+    SEARCH.get_or_init(|| {
+        ApiPermissionName::parse_exact("search")
+            .expect("the closed search permission token must remain valid")
+    })
+}
+
+fn sessions_api_permission() -> &'static ApiPermissionName {
+    static SESSIONS: OnceLock<ApiPermissionName> = OnceLock::new();
+    SESSIONS.get_or_init(|| {
+        ApiPermissionName::parse_exact("sessions")
+            .expect("the closed sessions permission token must remain valid")
+    })
+}
+
 fn compatibility_broker_api_permission(
     purpose: ExtensionCompatibilityBrokerPurpose,
 ) -> &'static ApiPermissionName {
     match purpose {
         ExtensionCompatibilityBrokerPurpose::RecentHistory => history_api_permission(),
+        ExtensionCompatibilityBrokerPurpose::DefaultSearch => search_api_permission(),
+        ExtensionCompatibilityBrokerPurpose::RestoreRecentSession => sessions_api_permission(),
     }
 }
 
@@ -1858,6 +1876,70 @@ mod tests {
             ),
             Err(ExtensionOperationAuthorityDenial::RequiredAuthorityMissing)
         ));
+    }
+
+    #[test]
+    fn compatibility_broker_search_and_session_witnesses_require_distinct_grants() {
+        let profile = ProfileId::from(83);
+        let install_id = ExtensionInstallId::from(89);
+        for (offset, permission, purpose) in [
+            (
+                0,
+                "search",
+                ExtensionCompatibilityBrokerPurpose::DefaultSearch,
+            ),
+            (
+                1,
+                "sessions",
+                ExtensionCompatibilityBrokerPurpose::RestoreRecentSession,
+            ),
+        ] {
+            let generation = ExtensionRuntimeGeneration::new(97 + offset).unwrap();
+            let manifest = projection_manifest_for_target(
+                &[permission],
+                &[],
+                &[],
+                &[],
+                &[],
+                MACOS_NATIVE_BROKERED_COMPATIBILITY_TARGET,
+            );
+            let (authority, runtime) = eligible_runtime_with_manifest(
+                profile,
+                install_id,
+                generation,
+                manifest,
+                &[permission],
+                &[],
+                false,
+                false,
+            );
+            let witness = authority
+                .mint_compatibility_broker_witness(&runtime, purpose)
+                .unwrap();
+            assert_eq!(witness.purpose(), purpose);
+
+            let (without, without_runtime) = eligible_runtime_with_manifest(
+                profile,
+                install_id,
+                generation.next().unwrap(),
+                projection_manifest_for_target(
+                    &[],
+                    &[permission],
+                    &[],
+                    &[],
+                    &[],
+                    MACOS_NATIVE_BROKERED_COMPATIBILITY_TARGET,
+                ),
+                &[],
+                &[],
+                false,
+                false,
+            );
+            assert!(matches!(
+                without.mint_compatibility_broker_witness(&without_runtime, purpose),
+                Err(ExtensionOperationAuthorityDenial::RequiredAuthorityMissing)
+            ));
+        }
     }
 
     #[test]

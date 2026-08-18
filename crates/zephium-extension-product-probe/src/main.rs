@@ -637,7 +637,14 @@ impl ProductCompatibilityBrokerModel {
                 "brokered product fixture issued more than one compatibility request".into(),
             );
         }
-        let ExtensionCompatibilityBrokerOperation::RecentHistory { limit } = request.operation();
+        let limit = match request.operation() {
+            ExtensionCompatibilityBrokerOperation::RecentHistory { limit } => *limit,
+            _ => {
+                return Err(
+                    "brokered product fixture issued an unexpected compatibility operation".into(),
+                )
+            }
+        };
         if request.runtime().profile() != self.profile || limit != 2 {
             return Err("brokered history request escaped its exact product profile".into());
         }

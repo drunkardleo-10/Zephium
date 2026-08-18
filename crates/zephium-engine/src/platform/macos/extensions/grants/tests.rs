@@ -110,10 +110,14 @@ fn compiled_host_patterns(plan: &MacosNativeGrantPlan) -> Vec<&str> {
 }
 
 #[test]
-fn brokered_schema_adds_only_history_and_the_fixed_native_channel_grant() {
+fn brokered_schema_keeps_compatibility_only_permissions_out_of_native_sets() {
     let grants = [
+        api("bookmarks", REQUIRED, GRANTED),
+        api("favicon", REQUIRED, GRANTED),
         api("history", REQUIRED, GRANTED),
         api("nativeMessaging", REQUIRED, GRANTED),
+        api("search", REQUIRED, GRANTED),
+        api("sessions", REQUIRED, GRANTED),
         api("storage", REQUIRED, GRANTED),
     ];
     let plan = compile_projection(CompilerInput {
