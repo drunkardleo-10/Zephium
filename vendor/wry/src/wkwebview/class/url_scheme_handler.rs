@@ -118,24 +118,30 @@ fn check_task_is_valid(pending: &PendingResponse) -> crate::Result<()> {
 }
 
 fn insert_pending_response(pending: PendingResponse) -> Option<u64> {
-  PENDING_RESPONSES.with(|responses| {
-    let mut responses = responses.try_borrow_mut().ok()?;
-    loop {
-      let token = NEXT_PENDING_RESPONSE.fetch_add(1, Ordering::Relaxed);
-      if token != 0 && !responses.contains_key(&token) {
-        responses.insert(token, pending);
-        return Some(token);
+  PENDING_RESPONSES
+    .try_with(|responses| {
+      let mut responses = responses.try_borrow_mut().ok()?;
+      loop {
+        let token = NEXT_PENDING_RESPONSE.fetch_add(1, Ordering::Relaxed);
+        if token != 0 && !responses.contains_key(&token) {
+          responses.insert(token, pending);
+          return Some(token);
+        }
       }
-    }
-  })
+    })
+    .ok()
+    .flatten()
 }
 
 fn take_pending_response(token: u64) -> Option<PendingResponse> {
-  PENDING_RESPONSES.with(|responses| responses.try_borrow_mut().ok()?.remove(&token))
+  PENDING_RESPONSES
+    .try_with(|responses| responses.try_borrow_mut().ok()?.remove(&token))
+    .ok()
+    .flatten()
 }
 
 fn cancel_pending_task(webview_id: &str, task_key: usize) {
-  PENDING_RESPONSES.with(|responses| {
+  let _ = PENDING_RESPONSES.try_with(|responses| {
     if let Ok(mut responses) = responses.try_borrow_mut() {
       responses
         .retain(|_, pending| pending.webview_id != webview_id || pending.task_key != task_key);
@@ -144,7 +150,7 @@ fn cancel_pending_task(webview_id: &str, task_key: usize) {
 }
 
 pub(crate) fn cancel_pending_for_webview(webview_id: &str) {
-  PENDING_RESPONSES.with(|responses| {
+  let _ = PENDING_RESPONSES.try_with(|responses| {
     if let Ok(mut responses) = responses.try_borrow_mut() {
       responses.retain(|_, pending| pending.webview_id != webview_id);
     }
@@ -463,4 +469,34 @@ extern "C" fn stop_task(
   let task_key = task.hash();
   cancel_pending_task(&webview.ivars().webview_id, task_key);
   webview.remove_custom_task_key(task_key);
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  struct CancelAfterPendingResponsesDrops;
+
+  impl Drop for CancelAfterPendingResponsesDrops {
+    fn drop(&mut self) {
+      cancel_pending_for_webview("already-dropped");
+    }
+  }
+
+  thread_local! {
+    static CANCEL_AFTER: CancelAfterPendingResponsesDrops = const { CancelAfterPendingResponsesDrops };
+  }
+
+  #[test]
+  fn webview_cleanup_is_safe_during_thread_local_destruction() {
+    std::thread::spawn(|| {
+      // TLS destructors run in reverse initialization order. Initialize the
+      // caller first so PENDING_RESPONSES is gone when its destructor calls
+      // the public cleanup path.
+      CANCEL_AFTER.with(|_| {});
+      PENDING_RESPONSES.with(|_| {});
+    })
+    .join()
+    .unwrap();
+  }
 }
