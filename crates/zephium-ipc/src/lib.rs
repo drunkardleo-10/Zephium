@@ -122,6 +122,15 @@ pub enum ExtensionManagementCompatibilityView {
     Degraded,
 }
 
+/// Browser-authenticated acquisition/support lane for extension management UI.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionManagementSourceView {
+    ZephiumVerified,
+    ExternalCompatibility,
+    DeveloperLocal,
+}
+
 /// One browser-owned explanation for a reviewed platform degradation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -163,6 +172,7 @@ pub struct ExtensionManagementEntryView {
     pub description: Option<String>,
     pub author: Option<String>,
     pub version: String,
+    pub source: ExtensionManagementSourceView,
     pub runtime: ExtensionManagementRuntimeView,
     /// Present only when `runtime` is `active`.
     pub runtime_generation: Option<String>,
@@ -182,6 +192,7 @@ pub struct ExtensionInstallCandidateView {
     pub description: Option<String>,
     pub author: Option<String>,
     pub version: String,
+    pub source: ExtensionManagementSourceView,
     pub required_api: Vec<String>,
     pub required_hosts: Vec<String>,
     /// Canonically ordered optional API grants. The frontend returns only

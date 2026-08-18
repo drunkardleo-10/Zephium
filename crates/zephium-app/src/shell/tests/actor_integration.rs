@@ -30,6 +30,7 @@ fn extension_management_catalog(
         Some("Authenticated fixture metadata".into()),
         Some("Zephium tests".into()),
         "1.0.0",
+        zephium_core::ports::extensions::ExtensionManagementSource::ZephiumVerified,
         runtime,
         zephium_core::ports::extensions::ExtensionManagementGrantState::Uninitialized,
         zephium_core::ports::extensions::ExtensionManagementCompatibility::Compatible,
@@ -88,6 +89,7 @@ fn extension_install_candidate_catalog(
         Some("Authenticated candidate metadata".into()),
         Some("Zephium tests".into()),
         "1.0.0",
+        zephium_core::ports::extensions::ExtensionManagementSource::ExternalCompatibility,
         vec!["storage".into(), "webRequest".into()],
         vec!["<all_urls>".into()],
         vec!["notifications".into(), "tabs".into()],
@@ -668,6 +670,10 @@ fn extension_install_uses_only_the_retained_authenticated_candidate() {
     let ready = wait_for_ready_management_catalog(&rx, profile, catalog_revision, 0);
     assert_eq!(ready.candidates.len(), 1);
     assert_eq!(ready.candidates[0].candidate_index, 0);
+    assert_eq!(
+        ready.candidates[0].source,
+        zephium_ipc::ExtensionManagementSourceView::ExternalCompatibility
+    );
     assert!(ready.candidates[0].supports_file_access);
     assert_eq!(ready.candidates[0].required_api, ["storage", "webRequest"]);
     assert_eq!(ready.candidates[0].required_hosts, ["<all_urls>"]);

@@ -13,7 +13,7 @@ use zephium_core::ports::extensions::{
     ExtensionInitialGrantSelection, ExtensionInstallCandidateSelector, ExtensionInstallOutcome,
     ExtensionInstallSelector, ExtensionInstalledRuntimeState, ExtensionManagementAdmission,
     ExtensionManagementCatalogAdmission, ExtensionManagementCatalogOutcome,
-    ExtensionManagementGrantState, ExtensionManagementRuntimeState,
+    ExtensionManagementGrantState, ExtensionManagementRuntimeState, ExtensionManagementSource,
     ExtensionRuntimeActivationDisposition, ExtensionRuntimeGrantOutcome,
     ExtensionRuntimeGrantRequest, ExtensionRuntimeGrantRuntimeState,
     ExtensionRuntimeRetirementDisposition, ExtensionServiceLifecycle, ExtensionSetEnabledOutcome,
@@ -108,6 +108,10 @@ fn actor_provisions_acquired_package_from_empty_repository_then_installs_and_run
     };
     assert_eq!(candidate.selector().catalog_set(), catalog_set);
     assert_eq!(candidate.selector().package(), &harness.package);
+    assert_eq!(
+        candidate.source(),
+        ExtensionManagementSource::ZephiumVerified
+    );
 
     let installed = ExtensionServiceLifecycle::install_until(
         &mut owner,
@@ -581,6 +585,10 @@ fn actor_installs_authenticated_candidate_atomically_then_activates_it() {
     };
     assert_eq!(candidate.name(), fixture_display_name());
     assert_eq!(candidate.version(), "1.0.0");
+    assert_eq!(
+        candidate.source(),
+        ExtensionManagementSource::ZephiumVerified
+    );
     assert!(!candidate.supports_file_access());
     assert!(candidate
         .required_api()

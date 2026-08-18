@@ -58,6 +58,22 @@ pub enum ExtensionManagementCompatibility {
     Degraded,
 }
 
+/// Browser-authenticated acquisition/support lane for one extension package.
+///
+/// Compatibility and source are deliberately orthogonal: a Zephium Verified
+/// package may still have a disclosed platform degradation, while an external
+/// package does not become Verified merely because all of its declarations are
+/// structurally compatible.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExtensionManagementSource {
+    /// Exact package/version admitted by Zephium's reviewed release catalog.
+    ZephiumVerified,
+    /// User-initiated package from a supported external compatibility source.
+    ExternalCompatibility,
+    /// Explicit local developer-mode package with no production update promise.
+    DeveloperLocal,
+}
+
 impl ExtensionManagementCompatibility {
     /// Reduces a complete authenticated compatibility map to user-visible state.
     ///
@@ -159,6 +175,7 @@ pub struct ExtensionManagementEntry {
     description: Option<Box<str>>,
     author: Option<Box<str>>,
     version: Box<str>,
+    source: ExtensionManagementSource,
     runtime: ExtensionManagementRuntimeState,
     grants: ExtensionManagementGrantState,
     compatibility: ExtensionManagementCompatibility,
@@ -179,6 +196,7 @@ impl ExtensionManagementEntry {
         description: Option<Box<str>>,
         author: Option<Box<str>>,
         version: impl Into<Box<str>>,
+        source: ExtensionManagementSource,
         runtime: ExtensionManagementRuntimeState,
         grants: ExtensionManagementGrantState,
         compatibility: ExtensionManagementCompatibility,
@@ -228,6 +246,7 @@ impl ExtensionManagementEntry {
             description,
             author,
             version,
+            source,
             runtime,
             grants,
             compatibility,
@@ -254,6 +273,10 @@ impl ExtensionManagementEntry {
 
     pub fn version(&self) -> &str {
         &self.version
+    }
+
+    pub const fn source(&self) -> ExtensionManagementSource {
+        self.source
     }
 
     pub const fn runtime(&self) -> ExtensionManagementRuntimeState {
@@ -286,6 +309,7 @@ pub struct ExtensionInstallCandidateEntry {
     description: Option<Box<str>>,
     author: Option<Box<str>>,
     version: Box<str>,
+    source: ExtensionManagementSource,
     required_api: Box<[Box<str>]>,
     required_hosts: Box<[Box<str>]>,
     optional_api: Box<[Box<str>]>,
@@ -305,6 +329,7 @@ impl ExtensionInstallCandidateEntry {
         description: Option<Box<str>>,
         author: Option<Box<str>>,
         version: impl Into<Box<str>>,
+        source: ExtensionManagementSource,
         required_api: Vec<Box<str>>,
         required_hosts: Vec<Box<str>>,
         optional_api: Vec<Box<str>>,
@@ -406,6 +431,7 @@ impl ExtensionInstallCandidateEntry {
             description,
             author,
             version,
+            source,
             required_api: required_api.into_boxed_slice(),
             required_hosts: required_hosts.into_boxed_slice(),
             optional_api: optional_api.into_boxed_slice(),
@@ -435,6 +461,10 @@ impl ExtensionInstallCandidateEntry {
 
     pub fn version(&self) -> &str {
         &self.version
+    }
+
+    pub const fn source(&self) -> ExtensionManagementSource {
+        self.source
     }
 
     pub fn required_api(&self) -> &[Box<str>] {
@@ -761,6 +791,7 @@ mod tests {
             Some("Description".into()),
             None,
             "1.0.0",
+            ExtensionManagementSource::ZephiumVerified,
             ExtensionManagementRuntimeState::PendingActivation,
             ExtensionManagementGrantState::Uninitialized,
             ExtensionManagementCompatibility::Compatible,
@@ -794,6 +825,7 @@ mod tests {
             Some("Authenticated candidate metadata".into()),
             Some("Zephium tests".into()),
             "1.0.0",
+            ExtensionManagementSource::ZephiumVerified,
             required_api,
             required_hosts,
             Vec::new(),
@@ -842,6 +874,7 @@ mod tests {
                     None,
                     None,
                     "1.0.0",
+                    ExtensionManagementSource::ZephiumVerified,
                     ExtensionManagementRuntimeState::Disabled,
                     ExtensionManagementGrantState::Uninitialized,
                     ExtensionManagementCompatibility::Compatible,
@@ -870,6 +903,35 @@ mod tests {
     }
 
     #[test]
+    fn source_lane_is_explicit_and_orthogonal_to_compatibility() {
+        let profile = ProfileId::from(1);
+        for (install, source) in [
+            (1, ExtensionManagementSource::ZephiumVerified),
+            (2, ExtensionManagementSource::ExternalCompatibility),
+            (3, ExtensionManagementSource::DeveloperLocal),
+        ] {
+            let entry = ExtensionManagementEntry::new(
+                selector(profile, install),
+                "Fixture",
+                None,
+                None,
+                "1.0.0",
+                source,
+                ExtensionManagementRuntimeState::Disabled,
+                ExtensionManagementGrantState::Uninitialized,
+                ExtensionManagementCompatibility::Compatible,
+                Vec::new(),
+            )
+            .unwrap();
+            assert_eq!(entry.source(), source);
+            assert_eq!(
+                entry.compatibility(),
+                ExtensionManagementCompatibility::Compatible
+            );
+        }
+    }
+
+    #[test]
     fn compatibility_disclosures_are_exact_canonical_and_consistent() {
         let profile = ProfileId::from(1);
         let degraded = ExtensionManagementEntry::new(
@@ -878,6 +940,7 @@ mod tests {
             None,
             None,
             "1.0.0",
+            ExtensionManagementSource::ExternalCompatibility,
             ExtensionManagementRuntimeState::Disabled,
             ExtensionManagementGrantState::Uninitialized,
             ExtensionManagementCompatibility::Degraded,
@@ -888,6 +951,10 @@ mod tests {
             ],
         )
         .unwrap();
+        assert_eq!(
+            degraded.source(),
+            ExtensionManagementSource::ExternalCompatibility
+        );
         assert_eq!(
             degraded.limitations(),
             &[
@@ -913,6 +980,7 @@ mod tests {
                     None,
                     None,
                     "1.0.0",
+                    ExtensionManagementSource::DeveloperLocal,
                     ExtensionManagementRuntimeState::Disabled,
                     ExtensionManagementGrantState::Uninitialized,
                     compatibility,
@@ -965,6 +1033,7 @@ mod tests {
             None,
             None,
             "1.0.0",
+            ExtensionManagementSource::ExternalCompatibility,
             vec!["storage".into()],
             vec!["https://required.example/*".into()],
             vec!["tabs".into(), "notifications".into()],
@@ -1002,6 +1071,7 @@ mod tests {
                 None,
                 None,
                 "1.0.0",
+                ExtensionManagementSource::ExternalCompatibility,
                 vec!["storage".into(), "storage".into()],
                 Vec::new(),
                 Vec::new(),
@@ -1020,6 +1090,7 @@ mod tests {
                 None,
                 None,
                 "1.0.0",
+                ExtensionManagementSource::DeveloperLocal,
                 vec!["storage".into()],
                 Vec::new(),
                 vec!["storage".into()],

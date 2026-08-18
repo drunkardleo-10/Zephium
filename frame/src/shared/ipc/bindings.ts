@@ -353,6 +353,7 @@ export type ExtensionInstallCandidateView = {
 	description: string | null,
 	author: string | null,
 	version: string,
+	source: ExtensionManagementSourceView,
 	required_api: string[],
 	required_hosts: string[],
 	/**
@@ -392,6 +393,7 @@ export type ExtensionManagementEntryView = {
 	description: string | null,
 	author: string | null,
 	version: string,
+	source: ExtensionManagementSourceView,
 	runtime: ExtensionManagementRuntimeView,
 	/**  Present only when `runtime` is `active`. */
 	runtime_generation: string | null,
@@ -418,6 +420,9 @@ export type ExtensionManagementPhase = "loading" | "ready" | "unavailable" | "re
 
 /**  Process-local regular-runtime state for one installed extension. */
 export type ExtensionManagementRuntimeView = "disabled" | "pending_activation" | "active";
+
+/**  Browser-authenticated acquisition/support lane for extension management UI. */
+export type ExtensionManagementSourceView = "zephium_verified" | "external_compatibility" | "developer_local";
 
 /**
  *  Exact replacement management cohort for the focused profile.

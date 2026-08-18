@@ -846,6 +846,7 @@ mod state_tests {
             None,
             None,
             "1.0.0",
+            ExtensionManagementSource::ZephiumVerified,
             ExtensionManagementRuntimeState::Disabled,
             ExtensionManagementGrantState::Uninitialized,
             ExtensionManagementCompatibility::Compatible,

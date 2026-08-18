@@ -152,6 +152,7 @@ impl Shell {
                     description: entry.description().map(str::to_owned),
                     author: entry.author().map(str::to_owned),
                     version: entry.version().to_owned(),
+                    source: extension_management_source_view(entry.source()),
                     runtime,
                     runtime_generation,
                     grants,
@@ -182,6 +183,7 @@ impl Shell {
                 description: candidate.description().map(str::to_owned),
                 author: candidate.author().map(str::to_owned),
                 version: candidate.version().to_owned(),
+                source: extension_management_source_view(candidate.source()),
                 required_api: candidate
                     .required_api()
                     .iter()
@@ -562,6 +564,20 @@ impl Shell {
     pub(super) fn favicon_key_for_url(&self, profile: ProfileId, url: &str) -> Option<String> {
         let parsed = url::Url::parse(url).ok()?;
         self.favicon_key_for(profile, &origin_of(&parsed)?)
+    }
+}
+
+const fn extension_management_source_view(
+    source: ExtensionManagementSource,
+) -> ExtensionManagementSourceView {
+    match source {
+        ExtensionManagementSource::ZephiumVerified => {
+            ExtensionManagementSourceView::ZephiumVerified
+        }
+        ExtensionManagementSource::ExternalCompatibility => {
+            ExtensionManagementSourceView::ExternalCompatibility
+        }
+        ExtensionManagementSource::DeveloperLocal => ExtensionManagementSourceView::DeveloperLocal,
     }
 }
 

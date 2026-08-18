@@ -23,7 +23,7 @@ pub use distribution::{
 pub use management::{
     ExtensionInstallCandidateEntry, ExtensionManagementCatalog, ExtensionManagementCompatibility,
     ExtensionManagementEntry, ExtensionManagementGrantState, ExtensionManagementLimitation,
-    ExtensionManagementProjectionError, ExtensionManagementRuntimeState,
+    ExtensionManagementProjectionError, ExtensionManagementRuntimeState, ExtensionManagementSource,
     MAX_EXTENSION_MANAGEMENT_CATALOG_RETAINED_BYTES, MAX_EXTENSION_MANAGEMENT_DISPLAY_TEXT_BYTES,
     MAX_EXTENSION_MANAGEMENT_LIMITATIONS,
 };

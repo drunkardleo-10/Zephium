@@ -11,6 +11,7 @@
     ExtensionManagementEntryView,
     ExtensionManagementLimitationView,
     ExtensionManagementRuntimeView,
+    ExtensionManagementSourceView,
   } from "../../../shared/ipc/bindings";
   import * as extensions from "../../../domain/extensions/extensions.svelte";
   import {
@@ -221,6 +222,17 @@
     }
   };
 
+  const sourceLabel = (source: ExtensionManagementSourceView) => {
+    switch (source) {
+      case "zephium_verified":
+        return "Zephium Verified";
+      case "external_compatibility":
+        return "External compatibility";
+      case "developer_local":
+        return "Developer local";
+    }
+  };
+
   const limitationKey = (limitation: ExtensionManagementLimitationView) =>
     limitation.type === "api_permission"
       ? `${limitation.type}:${limitation.name}`
@@ -368,6 +380,13 @@
                         <p class="truncate text-[10.5px] leading-4 text-faint">
                           {entry.version} · {runtimeLabel(entry.runtime)}
                         </p>
+                        <span
+                          class="mt-1 inline-flex rounded-full bg-raised px-1.5 py-0.5 text-[9.5px] leading-3 font-medium text-muted"
+                          class:text-accent={entry.source === "zephium_verified"}
+                          class:text-warning={entry.source === "developer_local"}
+                        >
+                          {sourceLabel(entry.source)}
+                        </span>
                       </div>
                       <button
                         type="button"
@@ -473,6 +492,13 @@
                           ? ""
                           : ` · ${candidate.author}`}
                       </p>
+                      <span
+                        class="mt-1 inline-flex rounded-full bg-raised px-1.5 py-0.5 text-[9.5px] leading-3 font-medium text-muted"
+                        class:text-accent={candidate.source === "zephium_verified"}
+                        class:text-warning={candidate.source === "developer_local"}
+                      >
+                        {sourceLabel(candidate.source)}
+                      </span>
                       {#if candidate.description !== null}
                         <p class="mt-1 text-[10.5px] leading-4 text-muted">
                           {candidate.description}

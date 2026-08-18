@@ -102,8 +102,8 @@ use zephium_core::ports::engine::{
 use zephium_core::ports::extensions::{
     ExtensionDistributionState, ExtensionDistributionStatus, ExtensionManagementCompatibility,
     ExtensionManagementGrantState, ExtensionManagementLimitation, ExtensionManagementRuntimeState,
-    ExtensionProfileRetirementDisposition, ExtensionServiceShutdownOutcome,
-    ExtensionServiceStartupOutcome,
+    ExtensionManagementSource, ExtensionProfileRetirementDisposition,
+    ExtensionServiceShutdownOutcome, ExtensionServiceStartupOutcome,
 };
 #[cfg(test)]
 use zephium_core::ports::store::Store;
@@ -125,13 +125,13 @@ use zephium_ipc::{
     ExtensionDistributionFailureStageView, ExtensionDistributionStateView,
     ExtensionDistributionView, ExtensionInstallCandidateView, ExtensionManagementCompatibilityView,
     ExtensionManagementEntryView, ExtensionManagementGrantView, ExtensionManagementLimitationView,
-    ExtensionManagementPhase, ExtensionManagementRuntimeView, ExtensionManagementView,
-    ExtensionRuntimeGrantPromptEntryView, ExtensionRuntimeGrantPromptView, ItemsState, LayoutState,
-    OperationDisposition, OperationOutcome, OperationReason, PagePermissionKindView,
-    PagePermissionPromptEntryView, PagePermissionPromptView, ProfileKindView, ProfileView,
-    Projection, RuntimeSecurityAdvisory, RuntimeSecurityAdvisoryKind, RuntimeSecurityUpdateTarget,
-    RuntimeStatus, SearchAction, SearchResult, SearchResults, SidebarNodeKindView, SidebarNodeView,
-    SidebarSectionView, SpaceView, SplitGroupView, TabView,
+    ExtensionManagementPhase, ExtensionManagementRuntimeView, ExtensionManagementSourceView,
+    ExtensionManagementView, ExtensionRuntimeGrantPromptEntryView, ExtensionRuntimeGrantPromptView,
+    ItemsState, LayoutState, OperationDisposition, OperationOutcome, OperationReason,
+    PagePermissionKindView, PagePermissionPromptEntryView, PagePermissionPromptView,
+    ProfileKindView, ProfileView, Projection, RuntimeSecurityAdvisory, RuntimeSecurityAdvisoryKind,
+    RuntimeSecurityUpdateTarget, RuntimeStatus, SearchAction, SearchResult, SearchResults,
+    SidebarNodeKindView, SidebarNodeView, SidebarSectionView, SpaceView, SplitGroupView, TabView,
 };
 
 // More simultaneous native renderers are neither usable in the current tiled

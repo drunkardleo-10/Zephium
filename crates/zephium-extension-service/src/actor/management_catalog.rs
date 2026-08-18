@@ -13,7 +13,7 @@ use zephium_core::ports::extensions::{
     ExtensionInstallCandidateEntry, ExtensionInstallCandidateSelector, ExtensionInstallSelector,
     ExtensionManagementCatalog, ExtensionManagementCatalogOutcome,
     ExtensionManagementCompatibility, ExtensionManagementEntry, ExtensionManagementGrantState,
-    ExtensionManagementLimitation, ExtensionManagementRuntimeState,
+    ExtensionManagementLimitation, ExtensionManagementRuntimeState, ExtensionManagementSource,
 };
 use zephium_core::ports::store::{
     ExtensionGrantCohortLoadOutcome, ExtensionInstallCatalogLoadOutcome,
@@ -160,6 +160,7 @@ pub(super) fn load(
             candidate.description().map(Into::into),
             candidate.author().map(Into::into),
             candidate.version(),
+            ExtensionManagementSource::ZephiumVerified,
             runtime_state,
             grants,
             compatibility,
@@ -193,6 +194,7 @@ pub(super) fn load(
             candidate.description().map(Into::into),
             candidate.author().map(Into::into),
             candidate.version(),
+            ExtensionManagementSource::ZephiumVerified,
             declarations
                 .required_api()
                 .names()
