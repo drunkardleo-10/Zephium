@@ -21,9 +21,10 @@ use super::storage::{
     restrict_directory, sync_directory_tree, write_new_file,
 };
 use super::{
-    decode_lower_hex_32, lower_hex, manifest_declaration_review_key, ManifestDeclarationReviewKey,
-    ManifestProfileInput, ManifestProfileInputs, CATALOG_TARGET, MANIFEST_INPUTS_KIND,
-    MANIFEST_INPUTS_TARGET, MANIFEST_REVIEW_KIND, PUBLICATION_SCHEMA,
+    build_admission_policy, decode_lower_hex_32, lower_hex, manifest_declaration_review_key,
+    ManifestDeclarationReviewKey, ManifestProfileInput, ManifestProfileInputs,
+    ReviewedAdmissionPolicy, CATALOG_TARGET, MANIFEST_INPUTS_KIND, MANIFEST_INPUTS_TARGET,
+    MANIFEST_REVIEW_KIND, PUBLICATION_SCHEMA,
 };
 
 const CLASSIFIED_KIND: &str = "zephium-extension-classified-manifest-profiles";
@@ -37,6 +38,7 @@ struct ClassifiedManifestProfiles {
     kind: &'static str,
     product_authority: bool,
     catalog_sha256: String,
+    admission_policy: ReviewedAdmissionPolicy,
     all_activatable: bool,
     profiles: Vec<ClassifiedManifestProfile>,
 }
@@ -113,6 +115,7 @@ pub(super) fn finalize(
         || review.product_authority
         || !review.classification_settled
         || review.catalog_sha256 != generated.catalog_sha256
+        || review.admission_policy != generated.admission_policy
         || review.profiles.len() != generated.profiles.len()
     {
         return Err("manifest compatibility review header is invalid".into());
@@ -129,6 +132,10 @@ pub(super) fn finalize(
     }
     let catalog = ExtensionReleaseCatalog::parse_canonical(&catalog_bytes)
         .map_err(|error| format!("published extension catalog is invalid: {error}"))?;
+    let admission_policy = build_admission_policy(&generated.admission_policy)?;
+    catalog
+        .bind_admission_policy(&admission_policy)
+        .map_err(|error| format!("published catalog admission policy is invalid: {error}"))?;
 
     let mut classified = Vec::with_capacity(review.profiles.len());
     for (generated, reviewed) in generated.profiles.iter().zip(review.profiles) {
@@ -141,6 +148,7 @@ pub(super) fn finalize(
         kind: CLASSIFIED_KIND,
         product_authority: false,
         catalog_sha256: generated.catalog_sha256,
+        admission_policy: generated.admission_policy,
         all_activatable,
         profiles: classified,
     };

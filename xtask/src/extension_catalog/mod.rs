@@ -20,8 +20,9 @@ use zephium_core::extensions::{
 use zephium_extension_package::{
     admit_extension_manifest, parse_bounded_json, BoundedJsonLimits, CanonicalExtensionTreeIndex,
     ChromiumManifestKey, ExtensionManifestCompatibilityPolicy,
-    ExtensionManifestCompatibilitySubject, ExtensionReleaseCatalog, PortableRelativePath,
-    VerifiedCrx3Package, MAX_CRX3_HEADER_BYTES, MAX_EXTENSION_ARCHIVE_BYTES,
+    ExtensionManifestCompatibilitySubject, ExtensionPackageAdmissionPolicyDigest,
+    ExtensionReleaseAdmissionPolicy, ExtensionReleaseCatalog, ExtensionReleaseLicenseRule,
+    PortableRelativePath, VerifiedCrx3Package, MAX_CRX3_HEADER_BYTES, MAX_EXTENSION_ARCHIVE_BYTES,
     MAX_EXTENSION_LEGAL_NOTICE_BYTES, MAX_EXTENSION_MANIFEST_BYTES, MAX_EXTENSION_PACKAGE_LINES,
     MAX_EXTENSION_RELEASE_CATALOG_BYTES,
 };
@@ -63,8 +64,22 @@ struct PublicationReview {
     catalog_revision: u64,
     created_unix: u64,
     authority_id: String,
-    admission_policy_sha256: String,
+    admission_policy: ReviewedAdmissionPolicy,
     packages: Vec<ReviewedPackage>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ReviewedAdmissionPolicy {
+    digest_sha256: String,
+    license_rules: Vec<ReviewedLicenseRule>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ReviewedLicenseRule {
+    expression: String,
+    corresponding_source_required: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -276,6 +291,7 @@ struct CatalogAnchorEvidence {
     catalog_sha256: String,
     catalog_inventory_sha256: String,
     admission_policy_sha256: String,
+    license_rules: Vec<ReviewedLicenseRule>,
 }
 
 #[derive(Serialize)]
@@ -295,6 +311,7 @@ struct ManifestProfileInputs {
     product_authority: bool,
     classification_settled: bool,
     catalog_sha256: String,
+    admission_policy: ReviewedAdmissionPolicy,
     profiles: Vec<ManifestProfileInput>,
 }
 
@@ -417,7 +434,7 @@ pub(crate) fn publish(review_path: &Path, output: &Path) -> Result<(), String> {
     restrict_directory(staging.path())?;
 
     let authority = decode_lower_hex_32(&review.authority_id, "authority id")?;
-    decode_lower_hex_32(&review.admission_policy_sha256, "admission policy digest")?;
+    let admission_policy = build_admission_policy(&review.admission_policy)?;
     let mut package_keys = BTreeSet::new();
     let mut object_targets = BTreeSet::new();
     let mut published = Vec::with_capacity(review.packages.len());
@@ -463,7 +480,7 @@ pub(crate) fn publish(review_path: &Path, output: &Path) -> Result<(), String> {
         catalog_revision: review.catalog_revision,
         created_unix: review.created_unix,
         authority_id: review.authority_id.clone(),
-        admission_policy_sha256: review.admission_policy_sha256.clone(),
+        admission_policy_sha256: review.admission_policy.digest_sha256.clone(),
         packages: published.iter().map(|package| &package.catalog).collect(),
     };
     let catalog_bytes = serde_json::to_vec(&catalog_document)
@@ -473,6 +490,9 @@ pub(crate) fn publish(review_path: &Path, output: &Path) -> Result<(), String> {
     if catalog.packages().len() != published_count {
         return Err("published catalog package count drifted".into());
     }
+    catalog
+        .bind_admission_policy(&admission_policy)
+        .map_err(|error| format!("published catalog failed admission-policy binding: {error}"))?;
     populate_manifest_declaration_reviews(&catalog, &mut published)?;
     write_new_file(staging.path(), CATALOG_TARGET, &catalog_bytes)?;
 
@@ -483,7 +503,8 @@ pub(crate) fn publish(review_path: &Path, output: &Path) -> Result<(), String> {
         catalog_bytes: catalog_bytes.len() as u64,
         catalog_sha256: lower_hex(&catalog_sha256),
         catalog_inventory_sha256: lower_hex(&catalog.inventory_sha256()),
-        admission_policy_sha256: review.admission_policy_sha256,
+        admission_policy_sha256: review.admission_policy.digest_sha256.clone(),
+        license_rules: review.admission_policy.license_rules.clone(),
     };
     let anchors = ProductAnchorInputs {
         schema: PUBLICATION_SCHEMA,
@@ -506,6 +527,7 @@ pub(crate) fn publish(review_path: &Path, output: &Path) -> Result<(), String> {
         product_authority: false,
         classification_settled: false,
         catalog_sha256: lower_hex(&catalog_sha256),
+        admission_policy: review.admission_policy,
         profiles: profile_inputs,
     };
     write_json(staging.path(), MANIFEST_INPUTS_TARGET, &profiles)?;
@@ -1138,6 +1160,25 @@ fn derive_package_key(authority: [u8; 32], package_line: &str) -> Result<[u8; 32
     Ok(digest.finalize().into())
 }
 
+fn build_admission_policy(
+    reviewed: &ReviewedAdmissionPolicy,
+) -> Result<ExtensionReleaseAdmissionPolicy, String> {
+    let digest = ExtensionPackageAdmissionPolicyDigest::from_bytes(decode_lower_hex_32(
+        &reviewed.digest_sha256,
+        "admission policy digest",
+    )?);
+    let rules = reviewed
+        .license_rules
+        .iter()
+        .map(|rule| {
+            ExtensionReleaseLicenseRule::new(&rule.expression, rule.corresponding_source_required)
+                .map_err(|error| format!("reviewed extension license rule is invalid: {error}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    ExtensionReleaseAdmissionPolicy::new(digest, rules)
+        .map_err(|error| format!("reviewed extension admission policy is invalid: {error}"))
+}
+
 fn valid_package_line(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= MAX_PACKAGE_LINE_BYTES
@@ -1202,6 +1243,7 @@ fn duplicate_anchor(anchor: &CatalogAnchorEvidence) -> CatalogAnchorEvidence {
         catalog_sha256: anchor.catalog_sha256.clone(),
         catalog_inventory_sha256: anchor.catalog_inventory_sha256.clone(),
         admission_policy_sha256: anchor.admission_policy_sha256.clone(),
+        license_rules: anchor.license_rules.clone(),
     }
 }
 

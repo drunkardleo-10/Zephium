@@ -72,7 +72,13 @@ fn review(root: &Path) -> PathBuf {
         catalog_revision: 1,
         created_unix: 1,
         authority_id: "11".repeat(32),
-        admission_policy_sha256: "22".repeat(32),
+        admission_policy: ReviewedAdmissionPolicy {
+            digest_sha256: "22".repeat(32),
+            license_rules: vec![ReviewedLicenseRule {
+                expression: "MIT".into(),
+                corresponding_source_required: false,
+            }],
+        },
         packages: vec![ReviewedPackage {
             package_line: "publisher-fixture".into(),
             package_revision: 1,
@@ -207,6 +213,11 @@ fn publication_rejects_noncanonical_reviews_and_mismatched_crx_archives() {
     spaced.extend_from_slice(&bytes[1..]);
     fs::write(&review_path, &spaced).unwrap();
     assert!(publish(&review_path, &temporary.path().join("noncanonical")).is_err());
+
+    let mut policy_drift: PublicationReview = serde_json::from_slice(&bytes).unwrap();
+    policy_drift.admission_policy.license_rules[0].expression = "Apache-2.0".into();
+    fs::write(&review_path, serde_json::to_vec(&policy_drift).unwrap()).unwrap();
+    assert!(publish(&review_path, &temporary.path().join("policy-drift")).is_err());
 
     let other = tempfile::tempdir().unwrap();
     fixture(other.path());
