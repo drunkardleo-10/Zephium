@@ -76,7 +76,13 @@ fn make_fixture(
 ) -> Fixture {
     let manifest_digest: [u8; 32] = Sha256::digest(manifest).into();
     let tree_bytes = format!(
-        r#"{{"schema_version":1,"files":[{{"path":"manifest.json","length":{},"sha256":"{}"}}]}}"#,
+        concat!(
+            r#"{{"schema_version":1,"files":["#,
+            r#"{{"path":"__zephium__/compatibility-receipts/{}.json","length":1,"sha256":"{}"}},"#,
+            r#"{{"path":"manifest.json","length":{},"sha256":"{}"}}]}}"#
+        ),
+        hex([8; 32]),
+        hex([8; 32]),
         manifest.len(),
         hex(manifest_digest),
     )
@@ -387,6 +393,46 @@ fn brokered_manifest_admission_requires_its_exact_signed_receipt() {
             &fixture.manifest,
         ),
         Err(ProductExtensionManifestAdmissionError::CompatibilityReceiptMissing)
+    ));
+}
+
+#[test]
+fn brokered_manifest_admission_rejects_a_receipt_detached_from_the_release_tree() {
+    let fixture = minimal_fixture();
+    let catalog_json = String::from_utf8(fixture.catalog_bytes.clone())
+        .unwrap()
+        .replacen(
+            &format!(r#""sha256":"{}""#, hex([8; 32])),
+            &format!(r#""sha256":"{}""#, hex([7; 32])),
+            1,
+        );
+    let catalog =
+        BundledPackageAuthority::admit_fixture_catalog(catalog_json.as_bytes(), release_policy())
+            .unwrap();
+    let runtime_target = ProductExtensionRuntimeTarget::MacosNativeBrokered;
+    let profile = profile_for_catalog(
+        catalog.catalog(),
+        catalog.authority(),
+        catalog.revision(),
+        catalog.catalog_length(),
+        catalog.catalog_digest(),
+        catalog.inventory_digest(),
+        &fixture.tree,
+        &fixture.manifest,
+        runtime_target,
+        runtime_target.compatibility_target_id(),
+        ExtensionCompatibilityLevel::Compatible,
+    );
+
+    assert!(matches!(
+        authority(profile).admit_manifest(
+            &catalog,
+            runtime_target,
+            catalog.catalog().packages()[0].identity().key(),
+            &fixture.tree,
+            &fixture.manifest,
+        ),
+        Err(ProductExtensionManifestAdmissionError::CompatibilityReceiptResourceMismatch)
     ));
 }
 

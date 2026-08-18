@@ -18,8 +18,9 @@ use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 use zephium_extension_package::{
     parse_bounded_json, BoundedJsonLimits, CanonicalExtensionTreeIndex, ChromiumManifestKey,
-    Crx3SigningRequest, ExtensionTreeFile, PortableRelativePath, MAX_CRX3_PROOF_COMPONENT_BYTES,
-    MAX_EXTENSION_ARCHIVE_BYTES, MAX_EXTENSION_MANIFEST_BYTES,
+    Crx3SigningRequest, ExtensionCompatibilityReceiptDigest, ExtensionTreeFile,
+    PortableRelativePath, MAX_CRX3_PROOF_COMPONENT_BYTES, MAX_EXTENSION_ARCHIVE_BYTES,
+    MAX_EXTENSION_MANIFEST_BYTES,
 };
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, DateTime, System, ZipWriter};
@@ -111,6 +112,7 @@ struct CompatibilityReceiptEvidence {
     binding: &'static str,
     artifact_target: String,
     compatibility_target: String,
+    release_resource: String,
     bytes: u64,
     sha256: String,
     input_manifest_sha256: String,
@@ -158,8 +160,9 @@ pub(crate) fn prepare(
 }
 
 /// Prepares a deterministic CRX3 release archive from one exact
-/// non-authorizing compatibility artifact while preserving its receipt as a
-/// separately hashed release input. This still grants no product authority.
+/// non-authorizing compatibility artifact while preserving its receipt both as
+/// a separately hashed release input and an inert content-addressed tree
+/// resource. This still grants no product authority.
 pub(crate) fn prepare_compatibility(
     compatibility_artifact: &Path,
     public_key: &Path,
@@ -214,6 +217,18 @@ fn prepare_inner(
     let manifest = read_indexed_file(&source_root, manifest_file(&source_index)?)?;
     let rewrite = rewrite_manifest(&manifest, &manifest_key_base64)?;
     let removed_store_metadata = classify_store_metadata(&source_index)?;
+    let compatibility_resource = compatibility.map(|compatibility| {
+        ExtensionCompatibilityReceiptDigest::from_bytes(compatibility.receipt_sha256)
+            .resource_path()
+    });
+    if compatibility_resource.as_ref().is_some_and(|resource| {
+        source_index
+            .files()
+            .binary_search_by(|file| file.path().as_str().cmp(resource.as_str()))
+            .is_ok()
+    }) {
+        return Err("compatibility receipt release resource already exists".into());
+    }
 
     let parent = final_output
         .parent()
@@ -241,6 +256,14 @@ fn prepare_inner(
             source.as_slice()
         };
         write_new_file(&staged_extension, indexed.path().as_str(), bytes)?;
+    }
+    if let (Some(compatibility), Some(resource)) = (compatibility, compatibility_resource.as_ref())
+    {
+        write_new_file(
+            &staged_extension,
+            resource.as_str(),
+            &compatibility.receipt_bytes,
+        )?;
     }
     sync_directory_tree(&staged_extension)?;
 
@@ -304,6 +327,11 @@ fn prepare_inner(
             binding: "exact-non-authorizing-receipt-v1",
             artifact_target: compatibility.artifact_target.clone(),
             compatibility_target: compatibility.compatibility_target.clone(),
+            release_resource: compatibility_resource
+                .as_ref()
+                .expect("compatibility resource is derived with its receipt")
+                .as_str()
+                .to_owned(),
             bytes: compatibility.receipt_bytes.len() as u64,
             sha256: lower_hex(&compatibility.receipt_sha256),
             input_manifest_sha256: compatibility.output_manifest_sha256.clone(),
@@ -896,6 +924,19 @@ mod tests {
         assert_eq!(
             evidence["compatibility"]["sha256"],
             Value::String(lower_hex(&Sha256::digest(&receipt_bytes)))
+        );
+        let receipt_resource = evidence["compatibility"]["release_resource"]
+            .as_str()
+            .unwrap();
+        assert_eq!(
+            receipt_resource,
+            ExtensionCompatibilityReceiptDigest::from_bytes(Sha256::digest(&receipt_bytes).into())
+                .resource_path()
+                .as_str()
+        );
+        assert_eq!(
+            fs::read(first.join(ARTIFACT_EXTENSION).join(receipt_resource)).unwrap(),
+            receipt_bytes
         );
         let mut root_entries = fs::read_dir(&first)
             .unwrap()

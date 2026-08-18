@@ -1112,7 +1112,9 @@ impl BundledReleaseByteSource for FixtureSource {
 }
 
 const fn runtime_target() -> ProductExtensionRuntimeTarget {
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", zephium_internal_acquired_repository_e2e))]
+    return ProductExtensionRuntimeTarget::MacosNativeBrokered;
+    #[cfg(all(target_os = "macos", not(zephium_internal_acquired_repository_e2e)))]
     return ProductExtensionRuntimeTarget::MacosNative;
     #[cfg(target_os = "linux")]
     return ProductExtensionRuntimeTarget::LinuxCompatibility;

@@ -431,6 +431,8 @@ struct MaximumCohortFixture {
     legal_artifact_ids: BTreeSet<Digest32>,
     tree_object_ids: BTreeSet<Digest32>,
     actual_tree_entries: usize,
+    actual_tree_regular_files: usize,
+    actual_tree_directories: usize,
 }
 
 fn install_maximum_cohort(repository: &mut ExtensionRepository) -> MaximumCohortFixture {
@@ -488,18 +490,20 @@ fn install_maximum_cohort(repository: &mut ExtensionRepository) -> MaximumCohort
     let authenticated_tree =
         CanonicalExtensionTreeIndex::parse_canonical(fixture::TREE_INDEX_BYTES).unwrap();
     let authenticated_file_count = u32::try_from(authenticated_tree.files().len()).unwrap();
-    assert!(authenticated_tree
-        .files()
-        .iter()
-        .all(|file| !file.path().as_str().contains('/')));
+    let authenticated_directory_count =
+        u32::try_from(authenticated_tree.implicit_directory_count()).unwrap();
+    let authenticated_entry_count = u32::try_from(authenticated_tree.total_entry_count()).unwrap();
     assert_eq!(
         template_package.tree_index.file_count,
         authenticated_file_count
     );
-    assert_eq!(template_package.tree_index.directory_count, 0);
+    assert_eq!(
+        template_package.tree_index.directory_count,
+        authenticated_directory_count
+    );
     assert_eq!(
         template_package.tree_index.total_entry_count,
-        authenticated_file_count
+        authenticated_entry_count
     );
 
     let mut trees = vec![MaximumCohortTree {
@@ -690,6 +694,12 @@ fn install_maximum_cohort(repository: &mut ExtensionRepository) -> MaximumCohort
         .iter()
         .map(|tree| tree.total_entry_count as usize)
         .sum();
+    let actual_tree_regular_files = trees.iter().map(|tree| tree.file_count as usize).sum();
+    let actual_tree_directories = MAX_GC_TREE_JOBS
+        + trees
+            .iter()
+            .map(|tree| tree.directory_count as usize)
+            .sum::<usize>();
     let fixture = MaximumCohortFixture {
         active_catalog,
         garbage_catalog,
@@ -699,6 +709,8 @@ fn install_maximum_cohort(repository: &mut ExtensionRepository) -> MaximumCohort
         legal_artifact_ids,
         tree_object_ids,
         actual_tree_entries,
+        actual_tree_regular_files,
+        actual_tree_directories,
     };
     assert_maximum_cohort_is_intact(repository, &fixture);
     fixture
@@ -1170,10 +1182,16 @@ fn real_maximum_cohort_has_constant_bounded_durability_and_operation_amplificati
     assert_eq!(operation.work.tree_entries, fixture.actual_tree_entries);
     assert_eq!(
         operation.work.tree_regular_files_removed,
-        fixture.actual_tree_entries
+        fixture.actual_tree_regular_files
     );
-    assert_eq!(operation.work.tree_directories_removed, MAX_GC_TREE_JOBS);
-    assert_eq!(operation.work.tree_directories_unsealed, MAX_GC_TREE_JOBS);
+    assert_eq!(
+        operation.work.tree_directories_removed,
+        fixture.actual_tree_directories
+    );
+    assert_eq!(
+        operation.work.tree_directories_unsealed,
+        fixture.actual_tree_directories
+    );
     assert_eq!(operation.work.tree_directory_syncs, MAX_GC_TREE_JOBS);
     operation.work.validate(2).unwrap();
     assert_eq!(operation.work.durability_syncs(), Some(107));
@@ -1182,11 +1200,17 @@ fn real_maximum_cohort_has_constant_bounded_durability_and_operation_amplificati
     assert_eq!(filesystem.regular_creates(), 6);
     assert_eq!(
         filesystem.regular_unlinks(),
-        MAX_GC_REGULAR_TARGETS + fixture.actual_tree_entries + 2
+        MAX_GC_REGULAR_TARGETS + fixture.actual_tree_regular_files + 2
     );
-    assert_eq!(filesystem.directory_unlinks(), MAX_GC_TREE_JOBS);
+    assert_eq!(
+        filesystem.directory_unlinks(),
+        fixture.actual_tree_directories
+    );
     assert_eq!(filesystem.renames(), 14);
-    assert_eq!(filesystem.directory_mode_changes(), MAX_GC_TREE_JOBS);
+    assert_eq!(
+        filesystem.directory_mode_changes(),
+        fixture.actual_tree_directories
+    );
     assert!(filesystem.bytes_written() <= MAX_GC_FRESH_CONTROL_BYTES_WRITTEN);
     assert_eq!(
         compose_maximum_cohort_operations(filesystem, operation.work),
@@ -1241,10 +1265,16 @@ fn real_maximum_cohort_pending_intent_settles_inside_the_mutation_operation_ceil
     assert_eq!(settlement.work.tree_entries, fixture.actual_tree_entries);
     assert_eq!(
         settlement.work.tree_regular_files_removed,
-        fixture.actual_tree_entries
+        fixture.actual_tree_regular_files
     );
-    assert_eq!(settlement.work.tree_directories_removed, MAX_GC_TREE_JOBS);
-    assert_eq!(settlement.work.tree_directories_unsealed, MAX_GC_TREE_JOBS);
+    assert_eq!(
+        settlement.work.tree_directories_removed,
+        fixture.actual_tree_directories
+    );
+    assert_eq!(
+        settlement.work.tree_directories_unsealed,
+        fixture.actual_tree_directories
+    );
     assert_eq!(settlement.work.tree_directory_syncs, MAX_GC_TREE_JOBS);
     settlement.work.validate(1).unwrap();
     assert_eq!(settlement.work.durability_syncs(), Some(94));
@@ -1253,11 +1283,17 @@ fn real_maximum_cohort_pending_intent_settles_inside_the_mutation_operation_ceil
     assert_eq!(filesystem.regular_creates(), 3);
     assert_eq!(
         filesystem.regular_unlinks(),
-        MAX_GC_REGULAR_TARGETS + fixture.actual_tree_entries + 1
+        MAX_GC_REGULAR_TARGETS + fixture.actual_tree_regular_files + 1
     );
-    assert_eq!(filesystem.directory_unlinks(), MAX_GC_TREE_JOBS);
+    assert_eq!(
+        filesystem.directory_unlinks(),
+        fixture.actual_tree_directories
+    );
     assert_eq!(filesystem.renames(), 11);
-    assert_eq!(filesystem.directory_mode_changes(), MAX_GC_TREE_JOBS);
+    assert_eq!(
+        filesystem.directory_mode_changes(),
+        fixture.actual_tree_directories
+    );
     assert!(filesystem.bytes_written() <= MAX_GC_PENDING_CONTROL_BYTES_WRITTEN);
     assert_eq!(
         compose_maximum_cohort_operations(filesystem, settlement.work),

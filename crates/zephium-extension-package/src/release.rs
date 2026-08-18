@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt;
+use std::fmt::Write as _;
 use std::mem::size_of;
 
 use serde::{Deserialize, Serialize};
@@ -27,6 +28,7 @@ use crate::{
 const LEGACY_RELEASE_CATALOG_SCHEMA_VERSION: u32 = 1;
 const RELEASE_CATALOG_SCHEMA_VERSION: u32 = 2;
 const COMPATIBILITY_RECEIPT_FORMAT: &str = "zephium-compatibility-receipt-v1";
+const COMPATIBILITY_RECEIPT_RESOURCE_DIRECTORY: &str = "__zephium__/compatibility-receipts";
 const MAX_RELEASE_UNIX: u64 = 7_258_118_400;
 const MAX_SOURCE_URL_BYTES: usize = 2 * 1024;
 const MAX_UPSTREAM_VERSION_BYTES: usize = 128;
@@ -83,6 +85,23 @@ release_digest!(
     ExtensionCompatibilityReceiptDigest,
     "SHA-256 of one exact non-authorizing extension compatibility receipt."
 );
+
+impl ExtensionCompatibilityReceiptDigest {
+    /// Derives the only release-tree resource path allowed for these bytes.
+    pub fn resource_path(self) -> PortableRelativePath {
+        let mut path = String::with_capacity(
+            COMPATIBILITY_RECEIPT_RESOURCE_DIRECTORY.len() + 1 + 64 + ".json".len(),
+        );
+        path.push_str(COMPATIBILITY_RECEIPT_RESOURCE_DIRECTORY);
+        path.push('/');
+        for byte in self.as_bytes() {
+            write!(&mut path, "{byte:02x}").expect("writing into a String cannot fail");
+        }
+        path.push_str(".json");
+        PortableRelativePath::parse(&path)
+            .expect("fixed receipt resource path and lowercase digest are portable")
+    }
+}
 
 /// Strictly positive durable sequence for authenticated release catalogs.
 ///
@@ -438,6 +457,7 @@ pub enum ExtensionReleaseLegalArtifactKind {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExtensionReleaseCompatibilityReceipt {
     target: ExtensionCompatibilityTargetId,
+    resource_path: PortableRelativePath,
     length: u64,
     sha256: ExtensionCompatibilityReceiptDigest,
     input_manifest_sha256: ExtensionManifestDigest,
@@ -451,6 +471,11 @@ impl ExtensionReleaseCompatibilityReceipt {
     /// Returns the exact versioned backend compatibility target.
     pub const fn target(&self) -> &ExtensionCompatibilityTargetId {
         &self.target
+    }
+
+    /// Returns the deterministic inert resource carrying the exact receipt.
+    pub const fn resource_path(&self) -> &PortableRelativePath {
+        &self.resource_path
     }
 
     /// Returns exact receipt byte length.
@@ -510,6 +535,28 @@ impl ExtensionReleaseCompatibilityReceipt {
             || self.input_bytes != index.total_bytes()
         {
             return Err(ExtensionReleaseCatalogError::CompatibilityInputTreeMismatch);
+        }
+        Ok(())
+    }
+
+    /// Verifies that the signed release tree carries the exact receipt body.
+    ///
+    /// The receipt assesses the adapted pre-signing input, while this resource
+    /// belongs to the post-rewrite release tree. These identities are
+    /// deliberately distinct and joined by the signed catalog row.
+    pub fn verify_release_tree_index(
+        &self,
+        index: &CanonicalExtensionTreeIndex,
+    ) -> Result<(), ExtensionReleaseCatalogError> {
+        let file = index
+            .files()
+            .binary_search_by(|file| file.path().as_str().cmp(self.resource_path.as_str()))
+            .ok()
+            .map(|position| &index.files()[position]);
+        if file
+            .is_none_or(|file| file.length() != self.length || file.sha256() != self.sha256.bytes())
+        {
+            return Err(ExtensionReleaseCatalogError::CompatibilityReceiptResourceMismatch);
         }
         Ok(())
     }
@@ -783,15 +830,6 @@ impl ExtensionReleaseCatalog {
                 raw_package.compatibility_receipts,
                 raw.schema_version,
             )?;
-            if compatibility_receipts.iter().any(|receipt| {
-                receipt.input_manifest_sha256 != manifest_sha256
-                    || receipt.input_tree_sha256 != tree_sha256
-                    || receipt.input_tree_index_sha256 != tree_index_sha256
-                    || receipt.input_file_count != tree_file_count
-                    || receipt.input_bytes != raw_package.tree_bytes
-            }) {
-                return Err(ExtensionReleaseCatalogError::CompatibilityInputTreeMismatch);
-            }
             let provenance = validate_provenance(raw_package.provenance)?;
             if chromium.as_ref().is_some_and(|candidate| {
                 packages.iter().any(|existing: &ExtensionReleasePackage| {
@@ -881,7 +919,11 @@ impl ExtensionReleaseCatalog {
                             .compatibility_receipts
                             .iter()
                             .try_fold(value, |total, receipt| {
-                                total.checked_add(receipt.target.as_str().len())
+                                total
+                                    .checked_add(receipt.target.as_str().len())
+                                    .and_then(|value| {
+                                        value.checked_add(receipt.resource_path.as_str().len())
+                                    })
                             })
                     })
                     .ok_or(ExtensionReleaseCatalogError::AccountingOverflow)
@@ -1106,10 +1148,10 @@ fn validate_compatibility_receipts(
         {
             return Err(ExtensionReleaseCatalogError::InvalidCompatibilityReceipt);
         }
-        let sha256 = ExtensionCompatibilityReceiptDigest::from_bytes(
-            decode_lower_hex_32(&raw.sha256)
-                .map_err(|_| ExtensionReleaseCatalogError::InvalidCompatibilityReceipt)?,
-        );
+        let receipt_digest = decode_lower_hex_32(&raw.sha256)
+            .map_err(|_| ExtensionReleaseCatalogError::InvalidCompatibilityReceipt)?;
+        let sha256 = ExtensionCompatibilityReceiptDigest::from_bytes(receipt_digest);
+        let resource_path = sha256.resource_path();
         let input_manifest_sha256 = ExtensionManifestDigest::from_bytes(
             decode_lower_hex_32(&raw.input_manifest_sha256)
                 .map_err(|_| ExtensionReleaseCatalogError::InvalidCompatibilityReceipt)?,
@@ -1125,6 +1167,7 @@ fn validate_compatibility_receipts(
         previous_target = Some(raw.target);
         receipts.push(ExtensionReleaseCompatibilityReceipt {
             target,
+            resource_path,
             length: raw.length,
             sha256,
             input_manifest_sha256,
@@ -1347,6 +1390,8 @@ pub enum ExtensionReleaseCatalogError {
     CompatibilityReceiptMismatch,
     /// Supplied compatibility input index does not match signed identity.
     CompatibilityInputTreeMismatch,
+    /// Release tree omits or mutates the exact embedded receipt resource.
+    CompatibilityReceiptResourceMismatch,
     /// Catalog policy digest does not match the product-owned expected policy.
     AdmissionPolicyMismatch,
     /// A package license expression is absent from trusted product policy.
@@ -1457,6 +1502,8 @@ impl fmt::Display for ExtensionReleaseCatalogError {
             Self::CompatibilityInputTreeMismatch => {
                 formatter.write_str("extension release compatibility input tree does not match")
             }
+            Self::CompatibilityReceiptResourceMismatch => formatter
+                .write_str("extension release compatibility receipt resource does not match"),
             Self::AdmissionPolicyMismatch => {
                 formatter.write_str("extension release admission policy does not match")
             }
@@ -1652,6 +1699,26 @@ mod tests {
         assert_eq!(receipt.verify_bytes(receipt_bytes), Ok(()));
         assert_eq!(receipt.verify_input_tree_index(&tree), Ok(()));
         assert_eq!(
+            receipt.verify_release_tree_index(&tree),
+            Err(ExtensionReleaseCatalogError::CompatibilityReceiptResourceMismatch)
+        );
+        let release_tree_bytes = format!(
+            concat!(
+                r#"{{"schema_version":1,"files":["#,
+                r#"{{"path":"{}","length":{},"sha256":"{}"}},"#,
+                r#"{{"path":"manifest.json","length":4,"sha256":"{}"}},"#,
+                r#"{{"path":"script.js","length":7,"sha256":"{}"}}]}}"#
+            ),
+            receipt.resource_path().as_str(),
+            receipt_bytes.len(),
+            hex(Sha256::digest(receipt_bytes).into()),
+            hex([3; 32]),
+            hex([4; 32]),
+        );
+        let release_tree =
+            CanonicalExtensionTreeIndex::parse_canonical(release_tree_bytes.as_bytes()).unwrap();
+        assert_eq!(receipt.verify_release_tree_index(&release_tree), Ok(()));
+        assert_eq!(
             receipt.verify_bytes(b"wrong"),
             Err(ExtensionReleaseCatalogError::CompatibilityReceiptMismatch)
         );
@@ -1659,8 +1726,10 @@ mod tests {
         let mut changed = raw_compatibility_receipt(&tree, target.as_str(), receipt_bytes);
         changed.input_bytes += 1;
         raw.packages[0].compatibility_receipts = vec![changed];
+        let changed =
+            ExtensionReleaseCatalog::parse_canonical(&serde_json::to_vec(&raw).unwrap()).unwrap();
         assert_eq!(
-            ExtensionReleaseCatalog::parse_canonical(&serde_json::to_vec(&raw).unwrap()),
+            changed.packages()[0].compatibility_receipts()[0].verify_input_tree_index(&tree),
             Err(ExtensionReleaseCatalogError::CompatibilityInputTreeMismatch)
         );
     }

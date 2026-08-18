@@ -224,6 +224,9 @@ pub enum ProductExtensionManifestAdmissionError {
     /// A runtime that requires reviewed adaptation lacks its signed receipt.
     #[error("extension package lacks the required signed compatibility receipt")]
     CompatibilityReceiptMissing,
+    /// The admitted release tree omits or mutates its exact receipt resource.
+    #[error("extension package compatibility receipt resource does not match")]
+    CompatibilityReceiptResourceMismatch,
     /// Structural manifest parsing or exact resource binding failed.
     #[error("extension manifest is structurally inadmissible: {0}")]
     Structural(#[source] ExtensionManifestAdmissionError),
@@ -563,12 +566,13 @@ fn admit_manifest_data(
     if package.identity() != &profile.package.identity {
         return Err(ProductExtensionManifestAdmissionError::PackageIdentityMismatch);
     }
-    if runtime_target == ProductExtensionRuntimeTarget::MacosNativeBrokered
-        && package
+    if runtime_target == ProductExtensionRuntimeTarget::MacosNativeBrokered {
+        let receipt = package
             .compatibility_receipt(&profile.package.compatibility_target)
-            .is_none()
-    {
-        return Err(ProductExtensionManifestAdmissionError::CompatibilityReceiptMissing);
+            .ok_or(ProductExtensionManifestAdmissionError::CompatibilityReceiptMissing)?;
+        receipt.verify_release_tree_index(tree_index).map_err(|_| {
+            ProductExtensionManifestAdmissionError::CompatibilityReceiptResourceMismatch
+        })?;
     }
     if tree_index.index_sha256() != profile.package.tree_index_digest
         || tree_index.index_bytes() != profile.package.tree_index_length

@@ -166,7 +166,7 @@ impl AcquiredReleaseLegalSource for LegalSource {
 
 fn runtime_target() -> ProductExtensionRuntimeTarget {
     #[cfg(target_os = "macos")]
-    return ProductExtensionRuntimeTarget::MacosNative;
+    return ProductExtensionRuntimeTarget::MacosNativeBrokered;
     #[cfg(target_os = "linux")]
     return ProductExtensionRuntimeTarget::LinuxCompatibility;
 }
@@ -225,7 +225,9 @@ fn acquired_eligibility(catalog: &AdmittedAcquiredCatalog) -> ExtensionRuntimeEl
 
 fn runtime_backend() -> ExtensionRuntimeBackendTarget {
     match runtime_target() {
-        ProductExtensionRuntimeTarget::MacosNative => ExtensionRuntimeBackendTarget::MacosNative,
+        ProductExtensionRuntimeTarget::MacosNativeBrokered => {
+            ExtensionRuntimeBackendTarget::MacosNative
+        }
         ProductExtensionRuntimeTarget::LinuxCompatibility => {
             ExtensionRuntimeBackendTarget::LinuxCompatibility
         }

@@ -533,10 +533,14 @@ fn preparation_requests() -> [ServedResource; 2] {
     ]
 }
 
-fn full_requests() -> [ServedResource; 7] {
+fn full_requests() -> [ServedResource; 8] {
     [
         ServedResource::TreeIndex,
         ServedResource::TreeFile("manifest.json".to_owned()),
+        ServedResource::TreeFile(
+            "__zephium__/compatibility-receipts/aecaa293655c88ba08d6f9c5034bd777a16b7f2958ae59b3d6058698ed4e5786.json"
+                .to_owned(),
+        ),
         ServedResource::TreeFile("background.js".to_owned()),
         ServedResource::TreeFile("content.js".to_owned()),
         ServedResource::TreeFile("popup.html".to_owned()),
@@ -2726,6 +2730,15 @@ fn malformed_release_resources_are_clean_path_free_failures() {
                 bytes
             },
             BundledPackageMaterializationError::ResourceDigestMismatch,
+        ),
+        (
+            3,
+            {
+                let mut bytes = fixture::COMPATIBILITY_RECEIPT_BYTES.to_vec();
+                bytes[0] ^= 1;
+                bytes
+            },
+            BundledPackageMaterializationError::ResourceIntegrityMismatch,
         ),
     ];
 

@@ -255,20 +255,20 @@ fn validate_catalog_compatibility_receipt(
     receipt
         .verify_bytes(bytes)
         .map_err(|error| format!("brokered compatibility receipt was rejected: {error}"))?;
-    let tree = CanonicalExtensionTreeIndex::parse_canonical(compatibility_input_tree_bytes())
-        .map_err(|error| format!("brokered compatibility input index was rejected: {error}"))?;
+    let tree = CanonicalExtensionTreeIndex::parse_canonical(compatibility_release_tree_bytes())
+        .map_err(|error| format!("brokered compatibility release index was rejected: {error}"))?;
     receipt
-        .verify_input_tree_index(&tree)
-        .map_err(|error| format!("brokered compatibility input tree was rejected: {error}"))
+        .verify_release_tree_index(&tree)
+        .map_err(|error| format!("brokered compatibility release resource was rejected: {error}"))
 }
 
 #[cfg(not(zephium_internal_acquired_repository_e2e))]
-const fn compatibility_input_tree_bytes() -> &'static [u8] {
+const fn compatibility_release_tree_bytes() -> &'static [u8] {
     fixture::TREE_INDEX_BYTES
 }
 
 #[cfg(zephium_internal_acquired_repository_e2e)]
-const fn compatibility_input_tree_bytes() -> &'static [u8] {
+const fn compatibility_release_tree_bytes() -> &'static [u8] {
     fixture::ACQUIRED_TREE_INDEX_BYTES
 }
 
