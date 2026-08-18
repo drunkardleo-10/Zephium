@@ -80,6 +80,7 @@ export const events = {
 	extensionActionFailed: makeEvent<ExtensionActionFailed>("extension-action-failed"),
 	extensionActionsChanged: makeEvent<ExtensionActionsChanged>("extension-actions-changed"),
 	extensionDistributionChanged: makeEvent<ExtensionDistributionChanged>("extension-distribution-changed"),
+	extensionManagementAvailabilityChanged: makeEvent<ExtensionManagementAvailabilityChanged>("extension-management-availability-changed"),
 	extensionManagementChanged: makeEvent<ExtensionManagementChanged>("extension-management-changed"),
 	extensionRuntimeGrantPromptChanged: makeEvent<ExtensionRuntimeGrantPromptChanged>("extension-runtime-grant-prompt-changed"),
 	itemsChanged: makeEvent<ItemsChanged>("items-changed"),
@@ -382,6 +383,21 @@ export type ExtensionInstallGrantSelectionInput = {
 	file_access: boolean,
 	private_access: boolean,
 };
+
+export type ExtensionManagementAvailabilityChanged = ExtensionManagementAvailabilityChangedView;
+
+/**  Actor-ordered projection of extension-management product availability. */
+export type ExtensionManagementAvailabilityChangedView = {
+	projection_revision: string,
+	availability: ExtensionManagementAvailabilityView,
+};
+
+/**
+ *  Process-immutable product availability for the extension-management UX.
+ *  This is a non-authorizing presentation fact. It carries no catalog,
+ *  package, profile, repository, or runtime identity.
+ */
+export type ExtensionManagementAvailabilityView = "configured" | "not_configured" | "unavailable";
 
 export type ExtensionManagementChanged = ExtensionManagementView;
 

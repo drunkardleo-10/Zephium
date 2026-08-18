@@ -11,6 +11,10 @@ impl Shell {
         if !self.extension_service_ready_for_bootstrap() {
             return;
         }
+        // Product provisioning is immutable for the process. Project the
+        // non-authorizing fact on every trusted frontend bootstrap so ordinary
+        // inert builds stay silent without probing or constructing a worker.
+        self.project_extension_management_availability();
         // Runtime update state is independent of session recovery and chrome
         // reloads. Querying the sticky engine state also repairs a callback
         // that arrived before the shell callback ingress was installed.

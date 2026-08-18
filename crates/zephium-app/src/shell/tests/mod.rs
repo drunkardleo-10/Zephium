@@ -1682,6 +1682,7 @@ fn apply_projection(view: &mut ItemsState, p: Projection) {
         }
         Projection::ExtensionActions(_) => {}
         Projection::ExtensionActionFailed(_) => {}
+        Projection::ExtensionManagementAvailability(_) => {}
         Projection::ExtensionManagement(_) => {}
         Projection::ExtensionDistribution(_) => {}
         Projection::ExtensionRuntimeGrantPrompt(_) => {}

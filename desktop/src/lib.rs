@@ -100,6 +100,7 @@ const EVENT_ITEMS: &str = "zephium:items";
 const EVENT_TAB: &str = "zephium:tab";
 const EVENT_EXTENSION_ACTIONS: &str = "zephium:extension-actions";
 const EVENT_EXTENSION_ACTION_FAILED: &str = "zephium:extension-action-failed";
+const EVENT_EXTENSION_MANAGEMENT_AVAILABILITY: &str = "zephium:extension-management-availability";
 const EVENT_EXTENSION_MANAGEMENT: &str = "zephium:extension-management";
 const EVENT_EXTENSION_DISTRIBUTION: &str = "zephium:extension-distribution";
 const EVENT_EXTENSION_RUNTIME_GRANT_PROMPT: &str = "zephium:extension-runtime-grant-prompt";
@@ -1259,6 +1260,11 @@ struct ExtensionActionsChanged(zephium_ipc::ExtensionActionsView);
 struct ExtensionActionFailed(zephium_ipc::ExtensionActionFailedView);
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
+struct ExtensionManagementAvailabilityChanged(
+    zephium_ipc::ExtensionManagementAvailabilityChangedView,
+);
+
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
 struct ExtensionManagementChanged(zephium_ipc::ExtensionManagementView);
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
@@ -1516,6 +1522,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             TabChanged,
             ExtensionActionsChanged,
             ExtensionActionFailed,
+            ExtensionManagementAvailabilityChanged,
             ExtensionManagementChanged,
             ExtensionDistributionChanged,
             ExtensionRuntimeGrantPromptChanged,
@@ -4068,6 +4075,12 @@ pub fn run() {
                     MAIN_LABEL,
                     EVENT_EXTENSION_ACTION_FAILED,
                     &failure,
+                ),
+                Projection::ExtensionManagementAvailability(availability) => emit_to_privileged(
+                    &emit_handle,
+                    MAIN_LABEL,
+                    EVENT_EXTENSION_MANAGEMENT_AVAILABILITY,
+                    &availability,
                 ),
                 Projection::ExtensionManagement(management) => emit_to_privileged(
                     &emit_handle,

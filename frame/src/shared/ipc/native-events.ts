@@ -2,6 +2,7 @@ import type {
   BlockerStatusChanged,
   ExtensionActionFailed,
   ExtensionActionsChanged,
+  ExtensionManagementAvailabilityChanged,
   ExtensionManagementChanged,
   ExtensionDistributionChanged,
   ExtensionRuntimeGrantPromptChanged,
@@ -37,6 +38,9 @@ export const events = {
   tabChanged: scopedEvent<TabChanged>("zephium:tab"),
   extensionActionsChanged: scopedEvent<ExtensionActionsChanged>("zephium:extension-actions"),
   extensionActionFailed: scopedEvent<ExtensionActionFailed>("zephium:extension-action-failed"),
+  extensionManagementAvailabilityChanged: scopedEvent<ExtensionManagementAvailabilityChanged>(
+    "zephium:extension-management-availability",
+  ),
   extensionManagementChanged: scopedEvent<ExtensionManagementChanged>(
     "zephium:extension-management",
   ),

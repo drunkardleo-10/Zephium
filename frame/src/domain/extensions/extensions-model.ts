@@ -4,6 +4,7 @@ import type {
   ExtensionActionsView,
   ExtensionDistributionRefreshAdmissionView,
   ExtensionDistributionView,
+  ExtensionManagementAvailabilityChangedView,
   ExtensionManagementView,
   ExtensionRuntimeGrantPromptView,
 } from "../../shared/ipc/bindings";
@@ -27,6 +28,37 @@ export function initialExtensionManagement(): ExtensionManagementView {
     entries: [],
     candidates: [],
   };
+}
+
+export function initialExtensionManagementAvailability(): ExtensionManagementAvailabilityChangedView {
+  return {
+    projection_revision: ZERO_PROJECTION_REVISION,
+    availability: "unavailable",
+  };
+}
+
+/** Independent revision admission for the process-immutable product fact. */
+export class ExtensionManagementAvailabilityProjectionModel {
+  #view: ExtensionManagementAvailabilityChangedView;
+  #appliedRevision: string;
+
+  constructor(
+    initial: ExtensionManagementAvailabilityChangedView = initialExtensionManagementAvailability(),
+  ) {
+    this.#view = initial;
+    this.#appliedRevision = initial.projection_revision;
+  }
+
+  get view(): ExtensionManagementAvailabilityChangedView {
+    return this.#view;
+  }
+
+  apply(candidate: ExtensionManagementAvailabilityChangedView): boolean {
+    if (candidate.projection_revision <= this.#appliedRevision) return false;
+    this.#appliedRevision = candidate.projection_revision;
+    this.#view = candidate;
+    return true;
+  }
 }
 
 export function initialExtensionRuntimeGrantPrompt(): ExtensionRuntimeGrantPromptView {

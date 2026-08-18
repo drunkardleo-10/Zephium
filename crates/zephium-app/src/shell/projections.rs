@@ -13,6 +13,33 @@ struct SidebarProjection {
 }
 
 impl Shell {
+    pub(super) fn project_extension_management_availability(&self) {
+        let availability = if self.extension_lifecycle_terminal || !self.extension_startup_ready {
+            ExtensionManagementAvailabilityView::Unavailable
+        } else {
+            self.extension_service
+                .as_ref()
+                .map(|service| match service.extension_management_availability() {
+                    zephium_core::ports::extensions::ExtensionManagementAvailability::Configured => {
+                        ExtensionManagementAvailabilityView::Configured
+                    }
+                    zephium_core::ports::extensions::ExtensionManagementAvailability::NotConfigured => {
+                        ExtensionManagementAvailabilityView::NotConfigured
+                    }
+                    zephium_core::ports::extensions::ExtensionManagementAvailability::Unavailable => {
+                        ExtensionManagementAvailabilityView::Unavailable
+                    }
+                })
+                .unwrap_or(ExtensionManagementAvailabilityView::Unavailable)
+        };
+        (self.emit)(Projection::ExtensionManagementAvailability(
+            ExtensionManagementAvailabilityChangedView {
+                projection_revision: format!("{:032x}", self.next_projection_revision()),
+                availability,
+            },
+        ));
+    }
+
     pub(super) fn project_page_permission_prompt(&self) {
         let prompt =
             self.page_permissions

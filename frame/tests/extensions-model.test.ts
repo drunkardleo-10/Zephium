@@ -2,11 +2,13 @@ import { describe, expect, it } from "vitest";
 import type {
   ExtensionActionFailedView,
   ExtensionActionsView,
+  ExtensionManagementAvailabilityChangedView,
   ExtensionManagementView,
   ExtensionRuntimeGrantPromptView,
 } from "../src/shared/ipc/bindings";
 import {
   ExtensionDistributionProjectionModel,
+  ExtensionManagementAvailabilityProjectionModel,
   ExtensionManagementProjectionModel,
   ExtensionProjectionModel,
   ExtensionRuntimeGrantPromptProjectionModel,
@@ -15,6 +17,7 @@ import {
   failureForContext,
   initialExtensionActions,
   initialExtensionManagement,
+  initialExtensionManagementAvailability,
   initialExtensionRuntimeGrantPrompt,
   managementForProfile,
 } from "../src/domain/extensions/extensions-model";
@@ -173,6 +176,24 @@ describe("extension projection admission", () => {
 });
 
 describe("extension management projection admission", () => {
+  it("keeps the product entry point hidden until a newer availability fact arrives", () => {
+    expect(initialExtensionManagementAvailability()).toEqual({
+      projection_revision: ZERO_PROJECTION_REVISION,
+      availability: "unavailable",
+    });
+    const model = new ExtensionManagementAvailabilityProjectionModel();
+    const configured: ExtensionManagementAvailabilityChangedView = {
+      projection_revision: revision(2),
+      availability: "configured",
+    };
+    expect(model.apply(configured)).toBe(true);
+    expect(model.view).toBe(configured);
+    expect(model.apply({ projection_revision: revision(1), availability: "not_configured" })).toBe(
+      false,
+    );
+    expect(model.view).toBe(configured);
+  });
+
   it("starts unavailable without retaining selectors", () => {
     expect(initialExtensionManagement()).toEqual({
       projection_revision: ZERO_PROJECTION_REVISION,

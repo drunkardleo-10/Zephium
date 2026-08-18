@@ -106,6 +106,24 @@ pub enum ExtensionManagementPhase {
     FailedClosed,
 }
 
+/// Process-immutable product availability for the extension-management UX.
+/// This is a non-authorizing presentation fact. It carries no catalog,
+/// package, profile, repository, or runtime identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionManagementAvailabilityView {
+    Configured,
+    NotConfigured,
+    Unavailable,
+}
+
+/// Actor-ordered projection of extension-management product availability.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct ExtensionManagementAvailabilityChangedView {
+    pub projection_revision: String,
+    pub availability: ExtensionManagementAvailabilityView,
+}
+
 /// Process-local regular-runtime state for one installed extension.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "snake_case")]
@@ -849,6 +867,7 @@ pub enum Projection {
     Tab(TabView),
     ExtensionActions(ExtensionActionsView),
     ExtensionActionFailed(ExtensionActionFailedView),
+    ExtensionManagementAvailability(ExtensionManagementAvailabilityChangedView),
     ExtensionManagement(ExtensionManagementView),
     ExtensionDistribution(ExtensionDistributionView),
     ExtensionRuntimeGrantPrompt(ExtensionRuntimeGrantPromptView),

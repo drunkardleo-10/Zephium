@@ -1076,13 +1076,30 @@ fn unprovisioned_management_is_truthful_and_never_probes_the_inert_service() {
     .expect("spawn test shell");
     assert!(handle.dispatch(Command::SetWindowSize(Size::new(1200.0, 800.0))));
     assert!(handle.dispatch(Command::Bootstrap));
-    let profile = std::iter::from_fn(|| rx.recv_timeout(std::time::Duration::from_secs(2)).ok())
-        .find_map(|projection| match projection {
-            Projection::Items(items) => items.profile.map(|profile| profile.id),
-            _ => None,
-        })
-        .and_then(|profile| ProfileId::parse(&profile))
-        .expect("bootstrap must publish the focused profile");
+    let mut startup_availability = None;
+    let profile = loop {
+        match rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("bootstrap must publish extension availability and focused items")
+        {
+            Projection::ExtensionManagementAvailability(view) => {
+                startup_availability = Some(view.availability);
+            }
+            Projection::Items(items) => {
+                if let Some(profile) = items
+                    .profile
+                    .and_then(|profile| ProfileId::parse(&profile.id))
+                {
+                    break profile;
+                }
+            }
+            _ => {}
+        }
+    };
+    assert_eq!(
+        startup_availability,
+        Some(zephium_ipc::ExtensionManagementAvailabilityView::NotConfigured)
+    );
     let _ = rx.try_iter().count();
 
     assert!(handle.dispatch(Command::SetExtensionManagementVisible(true)));

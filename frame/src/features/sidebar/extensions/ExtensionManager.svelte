@@ -50,6 +50,7 @@
 
   let profileId = $derived(tabs.profile()?.id ?? null);
   let management = $derived(extensions.management(profileId));
+  let managementAvailability = $derived(extensions.managementAvailability());
   let distribution = $derived(extensions.distribution());
   let distributionNotice = $derived(extensions.distributionNotice());
   let distributionRefreshBusy = $derived(extensions.distributionRefreshBusy());
@@ -69,6 +70,12 @@
   async function load() {
     requestFailed = !(await extensions.setManagementVisible(true));
   }
+
+  $effect(() => {
+    if (managementAvailability !== "configured" && open) {
+      untrack(() => hide());
+    }
+  });
 
   $effect(() => {
     if (!open) return;
@@ -289,7 +296,12 @@
 
 <svelte:window onkeydown={handleWindowKeydown} onpointerdown={handleWindowPointerDown} />
 
-<div bind:this={root} class="relative flex shrink-0" data-compact={compact}>
+<div
+  bind:this={root}
+  class="relative flex shrink-0"
+  class:hidden={managementAvailability !== "configured"}
+  data-compact={compact}
+>
   <button
     bind:this={trigger}
     type="button"
@@ -297,6 +309,7 @@
     aria-haspopup="dialog"
     aria-expanded={open}
     aria-controls="extension-manager"
+    disabled={managementAvailability !== "configured"}
     title="Extensions Center"
     class="icon-button"
     class:bg-fill={open}

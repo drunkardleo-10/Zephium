@@ -18,6 +18,7 @@ import { events } from "../../shared/ipc/native-events";
 import * as operations from "../operations/operations";
 import {
   ExtensionDistributionProjectionModel,
+  ExtensionManagementAvailabilityProjectionModel,
   ExtensionManagementProjectionModel,
   ExtensionProjectionModel,
   ExtensionRuntimeGrantPromptProjectionModel,
@@ -25,6 +26,7 @@ import {
   extensionDistributionRefreshMessage,
   failureForContext,
   initialExtensionManagement,
+  initialExtensionManagementAvailability,
   managementForProfile,
 } from "./extensions-model";
 
@@ -34,10 +36,12 @@ const MANAGEMENT_SETTLEMENT_TIMEOUT_MS = 30_000;
 
 const model = new ExtensionProjectionModel();
 const managementModel = new ExtensionManagementProjectionModel();
+const managementAvailabilityModel = new ExtensionManagementAvailabilityProjectionModel();
 const distributionModel = new ExtensionDistributionProjectionModel();
 const runtimeGrantModel = new ExtensionRuntimeGrantPromptProjectionModel();
 let state = $state.raw<ExtensionActionsView>(model.actions);
 let managementState = $state.raw<ExtensionManagementView>(managementModel.management);
+let managementAvailabilityState = $state.raw(managementAvailabilityModel.view);
 let distributionState = $state.raw<ExtensionDistributionView | null>(distributionModel.view);
 let runtimeGrantState = $state.raw<ExtensionRuntimeGrantPromptView>(runtimeGrantModel.view);
 type VisibleFailure = Omit<ExtensionActionFailedView, "projection_revision"> & {
@@ -71,6 +75,7 @@ export const failureReason = (profileId: string | null, tabId: string | null) =>
 export const isInvoking = (installId: string) => invoking.has(installId);
 export const management = (profileId: string | null) =>
   managementForProfile(managementState, profileId);
+export const managementAvailability = () => managementAvailabilityState.availability;
 export const distribution = () => distributionState;
 export const distributionNotice = () => extensionDistributionNotice(distributionState);
 export const distributionRefreshBusy = () =>
@@ -168,6 +173,10 @@ async function initialize(generation: number) {
       if (generation !== lifecycle || !managementModel.apply(event.payload)) return;
       managementState = managementModel.management;
     }),
+    events.extensionManagementAvailabilityChanged.listen((event) => {
+      if (generation !== lifecycle || !managementAvailabilityModel.apply(event.payload)) return;
+      managementAvailabilityState = managementAvailabilityModel.view;
+    }),
     events.extensionDistributionChanged.listen((event) => {
       if (generation !== lifecycle || !distributionModel.apply(event.payload)) return;
       distributionState = distributionModel.view;
@@ -220,6 +229,7 @@ export function dispose() {
   noticeTimer = null;
   invoking.clear();
   managementMutation = null;
+  managementAvailabilityState = initialExtensionManagementAvailability();
   managementNotice = null;
   distributionRefreshPending = false;
   distributionRefreshNotice = null;
@@ -349,6 +359,10 @@ export async function invoke(
 export async function setManagementVisible(visible: boolean): Promise<boolean> {
   managementNotice = null;
   distributionRefreshNotice = null;
+  if (visible && managementAvailabilityState.availability !== "configured") {
+    managementVisible = false;
+    return false;
+  }
   // Selectors from the previous subscription generation are never rendered
   // while a new visibility command is in flight (or after close).
   managementState = initialExtensionManagement();
