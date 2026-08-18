@@ -19,6 +19,8 @@ mod client;
 mod coordinator;
 mod layout;
 mod session;
+#[cfg(feature = "staging-extension-catalog")]
+mod staging;
 
 pub use client::{
     ExtensionDistributionClient, ExtensionDistributionClientError, ExtensionDistributionError,

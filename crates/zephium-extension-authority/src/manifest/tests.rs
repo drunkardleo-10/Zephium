@@ -29,7 +29,7 @@ struct Fixture {
 struct RollbackFixture {
     manifest: Vec<u8>,
     tree: CanonicalExtensionTreeIndex,
-    catalog: AdmittedRollbackBundledCatalog,
+    catalog: AdmittedRollbackCatalog,
 }
 
 struct UniformPolicy {
@@ -308,7 +308,10 @@ fn authority_with_rollback(
     .unwrap()
 }
 
-#[cfg(not(zephium_internal_repository_e2e))]
+#[cfg(all(
+    not(zephium_internal_repository_e2e),
+    not(feature = "staging-extension-catalog")
+))]
 #[test]
 fn production_authority_is_explicitly_unprovisioned() {
     assert_eq!(MAX_PRODUCT_EXTENSION_MANIFEST_PROFILES_PER_GENERATION, 40);
@@ -455,8 +458,71 @@ fn caller_owned_policy_can_mint_only_structural_output() {
         structural.descriptor().compatibility_target().as_str(),
         "external-policy-v1"
     );
-    #[cfg(not(zephium_internal_repository_e2e))]
+    #[cfg(all(
+        not(zephium_internal_repository_e2e),
+        not(feature = "staging-extension-catalog")
+    ))]
     assert!(ProductExtensionManifestAuthority::product().is_err());
+}
+
+#[cfg(all(
+    feature = "staging-extension-catalog",
+    not(zephium_internal_repository_e2e)
+))]
+#[test]
+fn staging_manifest_authority_admits_the_exact_brokered_profile() {
+    let package_authority = BundledPackageAuthority::product().unwrap();
+    let catalog = package_authority
+        .admit_acquired_catalog(crate::staging_catalog::CATALOG_BYTES)
+        .unwrap();
+    let tree =
+        CanonicalExtensionTreeIndex::parse_canonical(crate::staging_catalog::TREE_INDEX_BYTES)
+            .unwrap();
+    let authority = ProductExtensionManifestAuthority::product().unwrap();
+    assert_eq!(
+        ProductExtensionManifestAuthority::product_status(),
+        ProductExtensionManifestAuthorityStatus::Configured
+    );
+    let admitted = authority
+        .admit_acquired_manifest(
+            &catalog,
+            ProductExtensionRuntimeTarget::MacosNativeBrokered,
+            ExtensionPackageKey::from_bytes(crate::staging_catalog::PACKAGE_KEY),
+            &tree,
+            crate::staging_catalog::MANIFEST_BYTES,
+        )
+        .unwrap();
+    assert_eq!(
+        admitted.admission_digest().as_bytes(),
+        &crate::staging_catalog::ADMISSION_SHA256
+    );
+    assert_eq!(
+        authority
+            .active_acquired_runtime_selections(ProductExtensionRuntimeTarget::MacosNativeBrokered)
+            .unwrap()
+            .len(),
+        1
+    );
+    let rollback_catalog = package_authority
+        .admit_rollback_catalog(crate::staging_catalog::ROLLBACK_CATALOG_BYTES)
+        .unwrap();
+    let rollback_tree = CanonicalExtensionTreeIndex::parse_canonical(
+        crate::staging_catalog::ROLLBACK_TREE_INDEX_BYTES,
+    )
+    .unwrap();
+    let rollback = authority
+        .admit_rollback_manifest(
+            &rollback_catalog,
+            ProductExtensionRuntimeTarget::MacosNativeBrokered,
+            ExtensionPackageKey::from_bytes(crate::staging_catalog::PACKAGE_KEY),
+            &rollback_tree,
+            crate::staging_catalog::ROLLBACK_MANIFEST_BYTES,
+        )
+        .unwrap();
+    assert_eq!(
+        rollback.admission_digest().as_bytes(),
+        &crate::staging_catalog::ROLLBACK_ADMISSION_SHA256
+    );
 }
 
 #[test]

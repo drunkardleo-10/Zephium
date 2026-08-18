@@ -893,6 +893,7 @@ fn validate_zephium_feature_manifests(repository: &Path, root: &toml::Table) -> 
             "dep:zephium-extension-authority",
             "dep:zephium-extension-distribution",
             "dep:zephium-extension-updater",
+            "zephium-extension-service/acquired-packages",
         ],
     )?;
     let targets = require_table(&desktop, "target")?;

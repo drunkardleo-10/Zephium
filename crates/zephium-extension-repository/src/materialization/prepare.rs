@@ -10,7 +10,7 @@ use zephium_extension_acquisition::AcquiredExtensionTreeReceipt;
 #[cfg(feature = "acquired-packages")]
 use zephium_extension_authority::AdmittedAcquiredCatalog;
 use zephium_extension_authority::{
-    AdmittedBundledCatalog, AdmittedRollbackBundledCatalog, ProductAdmittedExtensionManifest,
+    AdmittedBundledCatalog, AdmittedRollbackCatalog, ProductAdmittedExtensionManifest,
     ProductAdmittedRollbackExtensionManifest, ProductExtensionManifestAdmissionError,
     ProductExtensionManifestAuthority, ProductExtensionManifestAuthorityError,
     ProductExtensionRuntimeTarget,
@@ -450,7 +450,7 @@ fn prepare_acquired_loaded(
 }
 
 pub(crate) fn prepare_rollback_package<S: BundledReleaseByteSource>(
-    catalog: &AdmittedRollbackBundledCatalog,
+    catalog: &AdmittedRollbackCatalog,
     exact_catalog_bytes: &[u8],
     manifest_authority: &ProductExtensionManifestAuthority,
     runtime_target: ProductExtensionRuntimeTarget,
@@ -476,7 +476,7 @@ pub(crate) fn prepare_rollback_package<S: BundledReleaseByteSource>(
 }
 
 pub(crate) fn prepare_rollback_package_from_preparsed(
-    catalog: &AdmittedRollbackBundledCatalog,
+    catalog: &AdmittedRollbackCatalog,
     manifest_authority: &ProductExtensionManifestAuthority,
     runtime_target: ProductExtensionRuntimeTarget,
     package_key: ExtensionPackageKey,
@@ -487,11 +487,24 @@ pub(crate) fn prepare_rollback_package_from_preparsed(
     let catalog_source =
         BundledReleaseCatalogSourceIdentity::from_generation(catalog.generation_anchor())
             .ok_or(PreparationError::AccountingOverflow)?;
+    let package = catalog
+        .catalog()
+        .package(package_key)
+        .ok_or(PreparationError::PackageMissing)?;
+    let expected_payload = match package.payload() {
+        ExtensionPackagePayloadIdentity::BundledTree => ExpectedPayloadClass::BundledTree,
+        #[cfg(feature = "acquired-packages")]
+        ExtensionPackagePayloadIdentity::AcquiredZip { .. } => ExpectedPayloadClass::AcquiredZip,
+        #[cfg(not(feature = "acquired-packages"))]
+        ExtensionPackagePayloadIdentity::AcquiredZip { .. } => {
+            return Err(PreparationError::UnsupportedPayload)
+        }
+    };
     let loaded = bind_preparsed_package_bytes(
         catalog.catalog(),
         catalog_source,
         package_key,
-        ExpectedPayloadClass::BundledTree,
+        expected_payload,
         tree_index,
         tree_index_bytes,
         manifest_bytes,
@@ -506,7 +519,7 @@ pub(crate) fn prepare_rollback_package_from_preparsed(
 }
 
 fn prepare_rollback_loaded(
-    catalog: &AdmittedRollbackBundledCatalog,
+    catalog: &AdmittedRollbackCatalog,
     manifest_authority: &ProductExtensionManifestAuthority,
     runtime_target: ProductExtensionRuntimeTarget,
     package_key: ExtensionPackageKey,

@@ -3,6 +3,8 @@
 
 #[cfg(zephium_internal_repository_e2e)]
 compile_error!("the internal repository E2E authority may not link into the Zephium desktop");
+#[cfg(all(feature = "staging-extension-catalog", not(target_os = "macos")))]
+compile_error!("the embedded extension staging catalog is a macOS-only product gate");
 
 mod blocker_service;
 #[cfg(feature = "curated-extension-distribution")]
@@ -2300,45 +2302,45 @@ fn extension_action_invoke(
         || !bounded(&profile_id, MAX_ITEM_ID_BYTES)
         || !bounded(&install_id, MAX_ITEM_ID_BYTES)
     {
-        return rejected_operation();
+        return rejected_extension_action("caller-or-identity-boundary");
     }
     let Some(profile) =
         ProfileId::parse(&profile_id).filter(|profile| profile.to_string() == profile_id)
     else {
-        return rejected_operation();
+        return rejected_extension_action("profile-identity");
     };
     let Some(install) =
         ExtensionInstallId::parse(&install_id).filter(|install| install.to_string() == install_id)
     else {
-        return rejected_operation();
+        return rejected_extension_action("install-identity");
     };
     let Some(generation) =
         fixed_nonzero_hex(&runtime_generation).and_then(ExtensionRuntimeGeneration::new)
     else {
-        return rejected_operation();
+        return rejected_extension_action("runtime-generation");
     };
     let Some(revision) = fixed_nonzero_hex(&action_revision).and_then(ExtensionActionRevision::new)
     else {
-        return rejected_operation();
+        return rejected_extension_action("action-revision");
     };
     let Ok(inner_size) = caller.inner_size() else {
-        return rejected_operation();
+        return rejected_extension_action("window-size");
     };
     let Ok(scale_factor) = caller.scale_factor() else {
-        return rejected_operation();
+        return rejected_extension_action("window-scale");
     };
     if !scale_factor.is_finite() || scale_factor <= 0.0 {
-        return rejected_operation();
+        return rejected_extension_action("window-scale-value");
     }
     // DOMRect is relative to the positioned privileged chrome WebView, while
     // the native popup parent is the window content view. Apply the same
     // generation-checked chrome origin used by drag/menu coordinates; never
     // let a negative CSS coordinate become valid merely because of the inset.
     if anchor_x < 0.0 || anchor_y < 0.0 {
-        return rejected_operation();
+        return rejected_extension_action("negative-anchor");
     }
     let Some((window_anchor_x, window_anchor_y)) = window_point(anchor_x, anchor_y) else {
-        return rejected_operation();
+        return rejected_extension_action("chrome-origin");
     };
     let Some(anchor) = extension_popup_anchor_in_bounds(
         window_anchor_x,
@@ -2348,9 +2350,9 @@ fn extension_action_invoke(
         f64::from(inner_size.width) / scale_factor,
         f64::from(inner_size.height) / scale_factor,
     ) else {
-        return rejected_operation();
+        return rejected_extension_action("window-anchor-bounds");
     };
-    dispatch_operation(
+    let admission = dispatch_operation(
         caller.app_handle(),
         &shell,
         Command::InvokeExtensionAction {
@@ -2358,7 +2360,16 @@ fn extension_action_invoke(
             revision,
             anchor,
         },
-    )
+    );
+    if !admission.accepted {
+        diagnostic!("extensions: toolbar action IPC rejected at actor-queue-admission");
+    }
+    admission
+}
+
+fn rejected_extension_action(stage: &'static str) -> zephium_ipc::OperationAdmission {
+    diagnostic!("extensions: toolbar action IPC rejected at {stage}");
+    rejected_operation()
 }
 
 /// Opens or closes the one focused-profile management subscription.

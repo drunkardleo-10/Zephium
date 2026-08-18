@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Non-shipping, compile-time-only authority for the reviewed local macOS
+# catalog. Ordinary and production builds retain an empty authority slot.
+staging-extension-catalog = []
+
 [dependencies]
 sha2 = "=0.10.9"
 thiserror.workspace = true

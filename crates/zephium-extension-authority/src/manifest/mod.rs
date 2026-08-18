@@ -25,7 +25,7 @@ use zephium_core::ports::extensions::{
     acquired_runtime_selections_are_canonical, ExtensionAcquiredRuntimeProfile,
     ExtensionAcquiredRuntimeSelection, MAX_ACQUIRED_CATALOG_SELECTIONS,
 };
-#[cfg(zephium_internal_repository_e2e)]
+#[cfg(any(zephium_internal_repository_e2e, feature = "staging-extension-catalog"))]
 use zephium_extension_package::ExtensionReleaseCatalog;
 use zephium_extension_package::{
     admit_extension_manifest, AdmittedExtensionManifest, CanonicalExtensionTreeIndex,
@@ -44,7 +44,7 @@ use crate::repository_e2e_fixture::{
     PRODUCT_ACTIVE_TREE_INDEX_BYTES, ROLLBACK_CATALOG_BYTES, TREE_INDEX_BYTES,
 };
 use crate::{
-    AdmittedAcquiredCatalog, AdmittedBundledCatalog, AdmittedRollbackBundledCatalog,
+    AdmittedAcquiredCatalog, AdmittedBundledCatalog, AdmittedRollbackCatalog,
     BundledCatalogInventoryDigest, MAX_PRODUCT_BUNDLED_CATALOG_GENERATIONS,
     MAX_PRODUCT_ROLLBACK_BUNDLED_CATALOGS,
 };
@@ -387,7 +387,7 @@ impl ProductExtensionManifestAuthority {
     /// with ordinary active activation at a type-correct call site.
     pub fn admit_rollback_manifest(
         &self,
-        catalog: &AdmittedRollbackBundledCatalog,
+        catalog: &AdmittedRollbackCatalog,
         runtime_target: ProductExtensionRuntimeTarget,
         package_key: ExtensionPackageKey,
         tree_index: &CanonicalExtensionTreeIndex,
@@ -1078,7 +1078,11 @@ struct SealedManifestCompatibilityPolicy {
 }
 
 impl SealedManifestCompatibilityPolicy {
-    #[cfg(any(test, zephium_internal_repository_e2e))]
+    #[cfg(any(
+        test,
+        zephium_internal_repository_e2e,
+        feature = "staging-extension-catalog"
+    ))]
     fn new(
         target: ExtensionCompatibilityTargetId,
         rows: Box<[SealedManifestCompatibilityRow]>,
@@ -1205,10 +1209,231 @@ fn validate_catalog_generations(
 // per-profile compatibility matrices, and admission digests are available.
 // This is the only production provisioning slot; never populate it from
 // runtime bytes, configuration, or environment variables.
-#[cfg(not(zephium_internal_repository_e2e))]
+#[cfg(all(
+    not(zephium_internal_repository_e2e),
+    not(feature = "staging-extension-catalog")
+))]
 fn sealed_product_manifest_provisioning(
 ) -> Result<Option<SealedManifestAuthorityProvisioning>, ProductExtensionManifestAuthorityError> {
     Ok(None)
+}
+
+#[cfg(all(
+    feature = "staging-extension-catalog",
+    not(zephium_internal_repository_e2e)
+))]
+fn sealed_product_manifest_provisioning(
+) -> Result<Option<SealedManifestAuthorityProvisioning>, ProductExtensionManifestAuthorityError> {
+    use crate::staging_catalog as staging;
+
+    let active = staging_manifest_profile(StagingManifestInputs {
+        catalog_bytes: staging::CATALOG_BYTES,
+        catalog_sha256: staging::CATALOG_SHA256,
+        inventory_sha256: staging::INVENTORY_SHA256,
+        manifest_bytes: staging::MANIFEST_BYTES,
+        manifest_sha256: staging::MANIFEST_SHA256,
+        tree_index_bytes: staging::TREE_INDEX_BYTES,
+        tree_index_sha256: staging::TREE_INDEX_SHA256,
+        tree_index_length: staging::TREE_INDEX_LENGTH,
+        tree_sha256: staging::TREE_SHA256,
+        compatibility_sha256: staging::COMPATIBILITY_SHA256,
+        admission_sha256: staging::ADMISSION_SHA256,
+    })?;
+    let rollback = staging_manifest_profile(StagingManifestInputs {
+        catalog_bytes: staging::ROLLBACK_CATALOG_BYTES,
+        catalog_sha256: staging::ROLLBACK_CATALOG_SHA256,
+        inventory_sha256: staging::ROLLBACK_INVENTORY_SHA256,
+        manifest_bytes: staging::ROLLBACK_MANIFEST_BYTES,
+        manifest_sha256: staging::ROLLBACK_MANIFEST_SHA256,
+        tree_index_bytes: staging::ROLLBACK_TREE_INDEX_BYTES,
+        tree_index_sha256: staging::ROLLBACK_TREE_INDEX_SHA256,
+        tree_index_length: staging::ROLLBACK_TREE_INDEX_LENGTH,
+        tree_sha256: staging::ROLLBACK_TREE_SHA256,
+        compatibility_sha256: staging::ROLLBACK_COMPATIBILITY_SHA256,
+        admission_sha256: staging::ROLLBACK_ADMISSION_SHA256,
+    })?;
+    let active_catalog = active.catalog;
+    let rollback_catalogs = vec![rollback.catalog].into_boxed_slice();
+    let mut profiles = vec![active, rollback];
+    profiles.sort_unstable_by(|left, right| {
+        (left.catalog, left.runtime_target, left.package.key).cmp(&(
+            right.catalog,
+            right.runtime_target,
+            right.package.key,
+        ))
+    });
+    Ok(Some(SealedManifestAuthorityProvisioning {
+        active_catalog,
+        rollback_catalogs,
+        profiles: profiles.into_boxed_slice(),
+    }))
+}
+
+#[cfg(all(
+    feature = "staging-extension-catalog",
+    not(zephium_internal_repository_e2e)
+))]
+struct StagingManifestInputs<'a> {
+    catalog_bytes: &'a [u8],
+    catalog_sha256: [u8; 32],
+    inventory_sha256: [u8; 32],
+    manifest_bytes: &'a [u8],
+    manifest_sha256: [u8; 32],
+    tree_index_bytes: &'a [u8],
+    tree_index_sha256: [u8; 32],
+    tree_index_length: usize,
+    tree_sha256: [u8; 32],
+    compatibility_sha256: [u8; 32],
+    admission_sha256: [u8; 32],
+}
+
+#[cfg(all(
+    feature = "staging-extension-catalog",
+    not(zephium_internal_repository_e2e)
+))]
+fn staging_manifest_profile(
+    input: StagingManifestInputs<'_>,
+) -> Result<SealedManifestProfile, ProductExtensionManifestAuthorityError> {
+    use sha2::{Digest as _, Sha256};
+
+    if input.manifest_bytes.len() > MAX_EXTENSION_MANIFEST_BYTES
+        || input.tree_index_bytes.len() != input.tree_index_length
+        || <[u8; 32]>::from(Sha256::digest(input.catalog_bytes)) != input.catalog_sha256
+        || <[u8; 32]>::from(Sha256::digest(input.manifest_bytes)) != input.manifest_sha256
+        || <[u8; 32]>::from(Sha256::digest(input.tree_index_bytes)) != input.tree_index_sha256
+    {
+        return Err(ProductExtensionManifestAuthorityError::InvalidProductConfiguration);
+    }
+    let catalog = ExtensionReleaseCatalog::parse_canonical(input.catalog_bytes)
+        .map_err(invalid_staging_configuration)?;
+    let inventory = crate::inventory::digest_catalog_inventory(&catalog)
+        .ok_or(ProductExtensionManifestAuthorityError::InvalidProductConfiguration)?;
+    if catalog.digest().as_bytes() != &input.catalog_sha256
+        || inventory.as_bytes() != &input.inventory_sha256
+    {
+        return Err(ProductExtensionManifestAuthorityError::InvalidProductConfiguration);
+    }
+    let tree = CanonicalExtensionTreeIndex::parse_canonical(input.tree_index_bytes)
+        .map_err(invalid_staging_configuration)?;
+    if tree.manifest_sha256().as_bytes() != &input.manifest_sha256
+        || tree.tree_sha256().as_bytes() != &input.tree_sha256
+        || tree.index_sha256().as_bytes() != &input.tree_index_sha256
+    {
+        return Err(ProductExtensionManifestAuthorityError::InvalidProductConfiguration);
+    }
+    let package_key = ExtensionPackageKey::from_bytes(crate::staging_catalog::PACKAGE_KEY);
+    let package = catalog
+        .package(package_key)
+        .ok_or(ProductExtensionManifestAuthorityError::InvalidProductConfiguration)?;
+    let target = ExtensionCompatibilityTargetId::parse_exact(
+        ProductExtensionRuntimeTarget::MacosNativeBrokered.compatibility_target_id(),
+    )
+    .map_err(invalid_staging_configuration)?;
+    let classifier = StagingVimiumCompatibilityPolicy {
+        target: target.clone(),
+    };
+    let admitted = admit_extension_manifest(
+        package
+            .bind_tree_index(&tree)
+            .map_err(invalid_staging_configuration)?,
+        input.manifest_bytes,
+        &classifier,
+    )
+    .map_err(invalid_staging_configuration)?;
+    if admitted.descriptor().compatibility_digest().as_bytes() != &input.compatibility_sha256
+        || admitted.admission_digest().as_bytes() != &input.admission_sha256
+    {
+        return Err(ProductExtensionManifestAuthorityError::InvalidProductConfiguration);
+    }
+    let rows = admitted
+        .descriptor()
+        .compatibility()
+        .iter()
+        .map(|classification| SealedManifestCompatibilityRow {
+            declaration: classification.declaration().clone(),
+            level: classification.level(),
+        })
+        .collect::<Vec<_>>()
+        .into_boxed_slice();
+    let policy = SealedManifestCompatibilityPolicy::new(target.clone(), rows)?;
+    Ok(SealedManifestProfile {
+        runtime_target: ProductExtensionRuntimeTarget::MacosNativeBrokered,
+        catalog: SealedManifestCatalogAnchor {
+            authority: catalog.authority(),
+            revision: catalog.revision(),
+            length: input.catalog_bytes.len() as u64,
+            digest: catalog.digest(),
+            inventory_digest: inventory,
+        },
+        package: SealedManifestPackageAnchor {
+            key: package_key,
+            revision: package.identity().revision(),
+            identity: package.identity().clone(),
+            tree_index_digest: tree.index_sha256(),
+            tree_index_length: tree.index_bytes(),
+            tree_digest: tree.tree_sha256(),
+            manifest_digest: tree.manifest_sha256(),
+            compatibility_target: target,
+            compatibility_digest: admitted.descriptor().compatibility_digest(),
+            admission_digest: admitted.admission_digest(),
+        },
+        policy,
+    })
+}
+
+#[cfg(all(
+    feature = "staging-extension-catalog",
+    not(zephium_internal_repository_e2e)
+))]
+fn invalid_staging_configuration<Error>(_error: Error) -> ProductExtensionManifestAuthorityError {
+    ProductExtensionManifestAuthorityError::InvalidProductConfiguration
+}
+
+#[cfg(all(
+    feature = "staging-extension-catalog",
+    not(zephium_internal_repository_e2e)
+))]
+struct StagingVimiumCompatibilityPolicy {
+    target: ExtensionCompatibilityTargetId,
+}
+
+#[cfg(all(
+    feature = "staging-extension-catalog",
+    not(zephium_internal_repository_e2e)
+))]
+impl ExtensionManifestCompatibilityPolicy for StagingVimiumCompatibilityPolicy {
+    fn target(&self) -> &ExtensionCompatibilityTargetId {
+        &self.target
+    }
+
+    fn classify(
+        &self,
+        subject: ExtensionManifestCompatibilitySubject<'_>,
+    ) -> Option<ExtensionCompatibilityLevel> {
+        use ExtensionCompatibilityLevel::{Compatible, Degraded};
+        use ExtensionManifestDeclaration as Declaration;
+
+        match subject.declaration() {
+            Declaration::RequiredApiPermission(name) => match name.as_str() {
+                "scripting" | "storage" | "tabs" => Some(Compatible),
+                "bookmarks" | "favicon" | "history" | "nativeMessaging" | "notifications"
+                | "search" | "sessions" | "webNavigation" => Some(Degraded),
+                _ => None,
+            },
+            Declaration::RequiredHostPermission(pattern) if pattern.as_ref() == "<all_urls>" => {
+                Some(Degraded)
+            }
+            Declaration::Background
+            | Declaration::Action
+            | Declaration::ExtensionPagesCsp
+            | Declaration::WebAccessibleResources { .. }
+            | Declaration::OptionsPage { .. } => Some(Compatible),
+            Declaration::NativeMessaging
+            | Declaration::ContentScript { .. }
+            | Declaration::MinimumChromiumVersion(_) => Some(Degraded),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(zephium_internal_repository_e2e)]

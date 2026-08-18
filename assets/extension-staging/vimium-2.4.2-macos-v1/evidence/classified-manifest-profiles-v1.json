@@ -1,0 +1,183 @@
+{
+  "schema": 1,
+  "kind": "zephium-extension-classified-manifest-profiles",
+  "product_authority": false,
+  "catalog_sha256": "b27962b45ecb1f85df1afbed626dc42a92c11230a8a7ac162a40511f1aa24b56",
+  "admission_policy": {
+    "digest_sha256": "d05d6d14b6c2c81fa0dbefd350e547fe6e269156b0bef5ff5d77e5be5d0a3225",
+    "license_rules": [
+      {
+        "expression": "MIT",
+        "corresponding_source_required": false
+      }
+    ]
+  },
+  "all_activatable": true,
+  "profiles": [
+    {
+      "input": {
+        "package_key": "4b2ab3abd19a8b3abe05f49956e96dd214a6d164bcda8f43e7d52102ffe58fd3",
+        "package_revision": 2,
+        "manifest_sha256": "886d008e4d79a1441f3e6c7e836abff7ed4f8d70d3405c742d36429caacd885b",
+        "tree_sha256": "1aeb98ac8f13495c52a7e8c0d5719c2b40eceaaf3ab8297f05d82eab9891c429",
+        "tree_index_sha256": "4bd15bcf176912edee8eb43ccea1710d69affcbe9fae068821bbf8bfa594957c",
+        "tree_index_length": 11635,
+        "manifest_target": "product/profile-inputs/4b2ab3abd19a8b3abe05f49956e96dd214a6d164bcda8f43e7d52102ffe58fd3/2/886d008e4d79a1441f3e6c7e836abff7ed4f8d70d3405c742d36429caacd885b.manifest.json",
+        "tree_index_target": "product/profile-inputs/4b2ab3abd19a8b3abe05f49956e96dd214a6d164bcda8f43e7d52102ffe58fd3/2/4bd15bcf176912edee8eb43ccea1710d69affcbe9fae068821bbf8bfa594957c.tree-index.json",
+        "compatibility_target": "macos.wkwebextension-brokered.v1",
+        "compatibility_receipt_sha256": "142c41645a0eb3ddc8b8b884214230d93ffbbe63d6f5f6dddaa91dc4b3516b1a",
+        "declarations": [
+          {
+            "declaration": {
+              "kind": "required_api",
+              "name": "bookmarks"
+            },
+            "level": "degraded"
+          },
+          {
+            "declaration": {
+              "kind": "required_api",
+              "name": "favicon"
+            },
+            "level": "degraded"
+          },
+          {
+            "declaration": {
+              "kind": "required_api",
+              "name": "history"
+            },
+            "level": "degraded"
+          },
+          {
+            "declaration": {
+              "kind": "required_api",
+              "name": "nativeMessaging"
+            },
+            "level": "degraded"
+          },
+          {
+            "declaration": {
+              "kind": "required_api",
+              "name": "notifications"
+            },
+            "level": "degraded"
+          },
+          {
+            "declaration": {
+              "kind": "required_api",
+              "name": "scripting"
+            },
+            "level": "compatible"
+          },
+          {
+            "declaration": {
+              "kind": "required_api",
+              "name": "search"
+            },
+            "level": "degraded"
+          },
+          {
+            "declaration": {
+              "kind": "required_api",
+              "name": "sessions"
+            },
+            "level": "degraded"
+          },
+          {
+            "declaration": {
+              "kind": "required_api",
+              "name": "storage"
+            },
+            "level": "compatible"
+          },
+          {
+            "declaration": {
+              "kind": "required_api",
+              "name": "tabs"
+            },
+            "level": "compatible"
+          },
+          {
+            "declaration": {
+              "kind": "required_api",
+              "name": "webNavigation"
+            },
+            "level": "degraded"
+          },
+          {
+            "declaration": {
+              "kind": "required_host",
+              "pattern": "<all_urls>"
+            },
+            "level": "degraded"
+          },
+          {
+            "declaration": {
+              "kind": "background"
+            },
+            "level": "compatible"
+          },
+          {
+            "declaration": {
+              "kind": "action"
+            },
+            "level": "compatible"
+          },
+          {
+            "declaration": {
+              "kind": "native_messaging"
+            },
+            "level": "degraded"
+          },
+          {
+            "declaration": {
+              "kind": "extension_pages_csp"
+            },
+            "level": "compatible"
+          },
+          {
+            "declaration": {
+              "kind": "content_script",
+              "index": 0,
+              "descriptor_sha256": "02794599bc4b17b4da2f61965b2cb4630e39e4b4462023418c4d1e4442f5e962"
+            },
+            "level": "degraded"
+          },
+          {
+            "declaration": {
+              "kind": "content_script",
+              "index": 1,
+              "descriptor_sha256": "d1368624d6cac319ad4b328e278468e31108a2b609e819488d2ff430f2080633"
+            },
+            "level": "degraded"
+          },
+          {
+            "declaration": {
+              "kind": "web_accessible_resources",
+              "index": 0,
+              "resources_sha256": "9284d586fcdbf06ba1dff23c904c8490c7e0cc5e6ee74cbb37f4fb198a6b274c"
+            },
+            "level": "compatible"
+          },
+          {
+            "declaration": {
+              "kind": "minimum_chromium_version",
+              "version": "117.0"
+            },
+            "level": "degraded"
+          },
+          {
+            "declaration": {
+              "kind": "options_page",
+              "descriptor_sha256": "0c163e5a34b5d1a1f1f371545940ddd2a11b76dd0ecd9d3b35d0533cddbe81ae"
+            },
+            "level": "compatible"
+          }
+        ]
+      },
+      "compatibility_digest": "b1f49c55a538ea75cbd5de3bd969df3200a302f8b14d88d5194f6996dd14ed16",
+      "admission_digest": "556128c7d9be9f267ced554a491797585454e3a2da169e7aaa3880e009816404",
+      "activatable": true
+    }
+  ]
+}

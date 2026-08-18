@@ -5,6 +5,8 @@ use tauri_utils::platform::Target;
 
 const MAIN_LABEL: &str = "main";
 const LINUX_APP_ID: &str = "app.zephium";
+const EXTENSIONS_STAGING_PRODUCT_NAME: &str = "Zephium Extensions Staging";
+const EXTENSIONS_STAGING_IDENTIFIER: &str = "app.zephium.extensions-staging";
 const LINUX_DESKTOP_TEMPLATE: &str = "linux/zephium.desktop.hbs";
 const PACKAGE_LICENSE: &str = "MPL-2.0 AND CC-BY-SA-3.0";
 const LEGAL_RESOURCES: [(&str, &str); 3] = [
@@ -52,6 +54,16 @@ fn validate_privileged_window_ownership() -> Result<(), Box<dyn Error>> {
         Err(env::VarError::NotPresent) => None,
         Err(error) => return Err(Box::new(error)),
     };
+    let extensions_staging = env::var_os("CARGO_FEATURE_STAGING_EXTENSION_CATALOG").is_some();
+    if extensions_staging {
+        if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
+            return Err("the extension staging catalog may be built only for macOS".into());
+        }
+        let override_config = config_override.as_ref().ok_or(
+            "the extension staging feature requires its isolated Tauri configuration override",
+        )?;
+        validate_extensions_staging_override(override_config)?;
+    }
 
     for target in [Target::MacOS, Target::Linux, Target::Windows] {
         let (mut config, paths) = tauri_utils::config::parse::read_from(target, &root)?;
@@ -68,10 +80,25 @@ fn validate_privileged_window_ownership() -> Result<(), Box<dyn Error>> {
             json_patch::merge(&mut config, config_override);
             validate_target_window(target, "effective", &config)?;
             validate_legal_resources("effective", &config, &root)?;
-            if matches!(target, Target::Linux) {
+            if matches!(target, Target::Linux) && !extensions_staging {
                 validate_linux_identity("effective", &config, &root)?;
             }
         }
+    }
+    Ok(())
+}
+
+fn validate_extensions_staging_override(config: &Value) -> io::Result<()> {
+    if config.get("productName").and_then(Value::as_str) != Some(EXTENSIONS_STAGING_PRODUCT_NAME)
+        || config.get("identifier").and_then(Value::as_str) != Some(EXTENSIONS_STAGING_IDENTIFIER)
+        || config
+            .pointer("/app/windows/0/title")
+            .and_then(Value::as_str)
+            != Some(EXTENSIONS_STAGING_PRODUCT_NAME)
+    {
+        return Err(io::Error::other(
+            "the extension staging build must use its exact isolated product identity",
+        ));
     }
     Ok(())
 }

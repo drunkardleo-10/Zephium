@@ -19,7 +19,7 @@ use zephium_core::extensions::{
 };
 use zephium_core::ids::{ExtensionInstallId, ProfileId};
 use zephium_extension_authority::{
-    AdmittedBundledCatalog, AdmittedRollbackBundledCatalog, BundledPackageAuthority,
+    AdmittedBundledCatalog, AdmittedRollbackCatalog, BundledPackageAuthority,
     ProductExtensionRuntimeTarget,
 };
 use zephium_extension_package::CanonicalExtensionTreeIndex;
@@ -73,7 +73,7 @@ impl FixtureSource {
         Self::new(catalog.generation_anchor())
     }
 
-    fn rollback(catalog: &AdmittedRollbackBundledCatalog) -> Self {
+    fn rollback(catalog: &AdmittedRollbackCatalog) -> Self {
         Self::new(catalog.generation_anchor())
     }
 
@@ -320,7 +320,7 @@ impl PinBindingFixture {
     }
 
     fn rollback(
-        catalog: &AdmittedRollbackBundledCatalog,
+        catalog: &AdmittedRollbackCatalog,
         profile: ProfileId,
         install: ExtensionInstallId,
     ) -> Self {
@@ -473,7 +473,7 @@ fn active_pin_admission(
 
 fn rollback_pin_admission(
     repository: &mut ExtensionRepository,
-    rollback: &AdmittedRollbackBundledCatalog,
+    rollback: &AdmittedRollbackCatalog,
     current: BundledCatalogSetIdentity,
     profile: ProfileId,
     install: ExtensionInstallId,
@@ -499,7 +499,7 @@ fn rollback_pin_admission(
 fn fixture_authority() -> (
     BundledPackageAuthority,
     AdmittedBundledCatalog,
-    AdmittedRollbackBundledCatalog,
+    AdmittedRollbackCatalog,
 ) {
     let authority = BundledPackageAuthority::product().unwrap();
     let active = authority
@@ -561,10 +561,7 @@ fn digest_hex(bytes: [u8; 32]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn assert_fixture_goldens(
-    active: &AdmittedBundledCatalog,
-    rollback: &AdmittedRollbackBundledCatalog,
-) {
+fn assert_fixture_goldens(active: &AdmittedBundledCatalog, rollback: &AdmittedRollbackCatalog) {
     assert_eq!(fixture::MANIFEST_BYTES.len(), fixture::MANIFEST_LENGTH);
     assert_eq!(
         digest_hex(Sha256::digest(fixture::MANIFEST_BYTES).into()),
@@ -733,7 +730,7 @@ fn derive_active_catalog_set_proof(
 
 fn derive_rollback_catalog_set_proof(
     repository: &mut ExtensionRepository,
-    catalog: &AdmittedRollbackBundledCatalog,
+    catalog: &AdmittedRollbackCatalog,
 ) -> (MaterializationRuntime, VerifiedRollbackCatalogSet) {
     let authority = open_product_manifest_authority().unwrap();
     let mut source = FixtureSource::rollback(catalog);
@@ -839,7 +836,7 @@ fn establish_active_current(
 fn establish_rollback_ready(
     repository: &mut ExtensionRepository,
     active: &AdmittedBundledCatalog,
-    rollback: &AdmittedRollbackBundledCatalog,
+    rollback: &AdmittedRollbackCatalog,
 ) -> (BundledCatalogSetIdentity, BundledCatalogSetIdentity) {
     assert!(matches!(
         repository.record_bundled_catalog(active, fixture::ACTIVE_CATALOG_BYTES),

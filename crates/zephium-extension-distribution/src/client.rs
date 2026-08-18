@@ -101,6 +101,69 @@ impl ArtifactTransport for FixedOriginTransport {
     }
 }
 
+pub(crate) enum ProductArtifactTransport {
+    Fixed(FixedOriginTransport),
+    #[cfg(feature = "staging-extension-catalog")]
+    EmbeddedStaging,
+}
+
+impl ArtifactTransport for ProductArtifactTransport {
+    async fn fetch_bounded(
+        &self,
+        url: Url,
+        max_bytes: usize,
+    ) -> Result<Box<[u8]>, FixedOriginFetchError> {
+        match self {
+            Self::Fixed(transport) => transport.fetch_bounded(url, max_bytes).await,
+            #[cfg(feature = "staging-extension-catalog")]
+            Self::EmbeddedStaging => EmbeddedStagingArtifactTransport.fetch_bounded(url, max_bytes),
+        }
+    }
+}
+
+impl fmt::Debug for ProductArtifactTransport {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Fixed(transport) => transport.fmt(formatter),
+            #[cfg(feature = "staging-extension-catalog")]
+            Self::EmbeddedStaging => formatter
+                .debug_struct("EmbeddedStagingArtifactTransport")
+                .finish_non_exhaustive(),
+        }
+    }
+}
+
+#[cfg(feature = "staging-extension-catalog")]
+struct EmbeddedStagingArtifactTransport;
+
+#[cfg(feature = "staging-extension-catalog")]
+impl EmbeddedStagingArtifactTransport {
+    fn fetch_bounded(
+        &self,
+        url: Url,
+        max_bytes: usize,
+    ) -> Result<Box<[u8]>, FixedOriginFetchError> {
+        let bytes = match url.as_str() {
+            crate::staging::CATALOG_URL => crate::staging::CATALOG_BYTES,
+            crate::staging::CRX3_URL => crate::staging::CRX3_BYTES,
+            crate::staging::LEGAL_URL => crate::staging::LEGAL_BYTES,
+            _ => return Err(FixedOriginFetchError::Boundary),
+        };
+        if max_bytes == 0 || bytes.len() > max_bytes {
+            return Err(FixedOriginFetchError::ResponseTooLarge);
+        }
+        let mut output = Vec::new();
+        output
+            .try_reserve_exact(bytes.len())
+            .map_err(|_| FixedOriginFetchError::CapacityUnavailable)?;
+        if output.capacity() > max_bytes {
+            return Err(FixedOriginFetchError::ResponseTooLarge);
+        }
+        output.extend_from_slice(bytes);
+        Ok(output.into_boxed_slice())
+    }
+}
+
 pub(crate) struct DistributionClient<T, A> {
     pub(crate) transport: T,
     pub(crate) authenticator: A,
@@ -220,7 +283,7 @@ fn authenticate_crx(
 /// no compiled product authority. Therefore an unprovisioned ordinary build
 /// preserves the extension subsystem's inert startup path.
 pub struct ExtensionDistributionClient {
-    pub(crate) inner: DistributionClient<FixedOriginTransport, ProductCatalogAuthenticator>,
+    pub(crate) inner: DistributionClient<ProductArtifactTransport, ProductCatalogAuthenticator>,
 }
 
 impl ExtensionDistributionClient {
@@ -244,7 +307,31 @@ impl ExtensionDistributionClient {
             .map_err(|()| ExtensionDistributionClientError::TransportConfiguration)?;
         Ok(Self {
             inner: DistributionClient {
-                transport,
+                transport: ProductArtifactTransport::Fixed(transport),
+                authenticator,
+                catalog_url,
+                targets_base,
+            },
+        })
+    }
+
+    /// Opens the exact embedded client for the explicit non-shipping staging
+    /// catalog without constructing an HTTP client or performing I/O.
+    #[cfg(feature = "staging-extension-catalog")]
+    pub fn staging() -> Result<Self, ExtensionDistributionClientError> {
+        let authenticator = ProductCatalogAuthenticator::new().map_err(classify_authority_error)?;
+        let metadata_base = Url::parse(crate::staging::METADATA_BASE)
+            .map_err(|_| ExtensionDistributionClientError::TransportConfiguration)?;
+        let targets_base = Url::parse(crate::staging::TARGETS_BASE)
+            .map_err(|_| ExtensionDistributionClientError::TransportConfiguration)?;
+        let catalog_url = catalog_url(&metadata_base)
+            .map_err(|()| ExtensionDistributionClientError::TransportConfiguration)?;
+        if catalog_url.as_str() != crate::staging::CATALOG_URL {
+            return Err(ExtensionDistributionClientError::TransportConfiguration);
+        }
+        Ok(Self {
+            inner: DistributionClient {
+                transport: ProductArtifactTransport::EmbeddedStaging,
                 authenticator,
                 catalog_url,
                 targets_base,

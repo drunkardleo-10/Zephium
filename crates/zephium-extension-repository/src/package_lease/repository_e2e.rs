@@ -30,7 +30,7 @@ use zephium_core::extensions::{
 };
 use zephium_core::ids::{ExtensionInstallId, ProfileId};
 use zephium_extension_authority::{
-    AdmittedBundledCatalog, AdmittedRollbackBundledCatalog, BundledPackageAuthority,
+    AdmittedBundledCatalog, AdmittedRollbackCatalog, BundledPackageAuthority,
     ProductExtensionManifestAuthority, ProductExtensionRuntimeTarget,
 };
 use zephium_extension_package::{
@@ -112,7 +112,7 @@ impl FixtureSource {
         Self::new(catalog.generation_anchor())
     }
 
-    fn rollback(catalog: &AdmittedRollbackBundledCatalog) -> Self {
+    fn rollback(catalog: &AdmittedRollbackCatalog) -> Self {
         Self::new(catalog.generation_anchor())
     }
 
@@ -311,7 +311,7 @@ fn package_key() -> ExtensionPackageKey {
     ExtensionPackageKey::from_bytes(fixture::PACKAGE_KEY_BYTES)
 }
 
-fn catalogs() -> (AdmittedBundledCatalog, AdmittedRollbackBundledCatalog) {
+fn catalogs() -> (AdmittedBundledCatalog, AdmittedRollbackCatalog) {
     let authority = BundledPackageAuthority::product().unwrap();
     (
         authority
@@ -378,7 +378,7 @@ fn establish_active(
 fn establish_rollback(
     repository: &mut ExtensionRepository,
     active: &AdmittedBundledCatalog,
-    rollback: &AdmittedRollbackBundledCatalog,
+    rollback: &AdmittedRollbackCatalog,
 ) -> BundledCatalogSetIdentity {
     let _ = repository
         .record_bundled_catalog(active, fixture::ACTIVE_CATALOG_BYTES)
@@ -450,7 +450,7 @@ impl EligibilityFixture {
     }
 
     fn rollback(
-        catalog: &AdmittedRollbackBundledCatalog,
+        catalog: &AdmittedRollbackCatalog,
         profile: ProfileId,
         install: ExtensionInstallId,
     ) -> Self {

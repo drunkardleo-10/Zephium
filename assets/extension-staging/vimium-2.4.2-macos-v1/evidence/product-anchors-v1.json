@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "kind": "zephium-extension-product-anchor-inputs",
+  "product_authority": false,
+  "active": {
+    "authority_id": "81a343638e49df23245a9f99121a6be7a5501b19205015341203941e43188abc",
+    "catalog_revision": 2,
+    "catalog_bytes": 2169,
+    "catalog_sha256": "b27962b45ecb1f85df1afbed626dc42a92c11230a8a7ac162a40511f1aa24b56",
+    "catalog_inventory_sha256": "9228821afbca066e1cc1929c0162f28985187d8bef01905e98325064b0717f5f",
+    "admission_policy_sha256": "d05d6d14b6c2c81fa0dbefd350e547fe6e269156b0bef5ff5d77e5be5d0a3225",
+    "license_rules": [
+      {
+        "expression": "MIT",
+        "corresponding_source_required": false
+      }
+    ]
+  },
+  "rollback": []
+}

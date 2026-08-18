@@ -15,6 +15,15 @@ curated-extension-distribution = [
     "dep:zephium-extension-authority",
     "dep:zephium-extension-distribution",
     "dep:zephium-extension-updater",
+    "zephium-extension-service/acquired-packages",
+]
+# Explicit local product gate. This embeds one reviewed public catalog and its
+# immutable objects; it is never enabled by the ordinary or release feature
+# set and accepts no runtime configuration.
+staging-extension-catalog = [
+    "curated-extension-distribution",
+    "zephium-extension-authority/staging-extension-catalog",
+    "zephium-extension-distribution/staging-extension-catalog",
 ]
 
 [lib]

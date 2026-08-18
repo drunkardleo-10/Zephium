@@ -10,7 +10,7 @@ use zephium_core::extensions::ExtensionPackageKey;
 #[cfg(feature = "acquired-packages")]
 use zephium_extension_authority::AdmittedAcquiredCatalog;
 use zephium_extension_authority::{
-    AdmittedBundledCatalog, AdmittedRollbackBundledCatalog, ProductExtensionRuntimeTarget,
+    AdmittedBundledCatalog, AdmittedRollbackCatalog, ProductExtensionRuntimeTarget,
 };
 
 #[cfg(feature = "acquired-packages")]
@@ -244,7 +244,7 @@ impl ExtensionRepository {
     /// preserving its nominal rollback authority.
     pub fn stage_rollback_bundled_catalog_set<S: BundledReleaseByteSource>(
         &mut self,
-        catalog: &AdmittedRollbackBundledCatalog,
+        catalog: &AdmittedRollbackCatalog,
         exact_catalog_bytes: &[u8],
         selections: &[BundledPackageRuntimeSelection],
         source: &mut S,
@@ -408,7 +408,7 @@ impl ExtensionRepository {
     /// it without erasing its nominal rollback role.
     pub fn promote_rollback_bundled_catalog_set<S: BundledReleaseByteSource>(
         &mut self,
-        catalog: &AdmittedRollbackBundledCatalog,
+        catalog: &AdmittedRollbackCatalog,
         exact_catalog_bytes: &[u8],
         selections: &[BundledPackageRuntimeSelection],
         expected_candidate: BundledCatalogSetIdentity,
@@ -471,7 +471,7 @@ impl ExtensionRepository {
     /// swaps the exact expected current/previous pair. No candidate may exist.
     pub fn rollback_bundled_catalog_set<S: BundledReleaseByteSource>(
         &mut self,
-        catalog: &AdmittedRollbackBundledCatalog,
+        catalog: &AdmittedRollbackCatalog,
         exact_catalog_bytes: &[u8],
         selections: &[BundledPackageRuntimeSelection],
         expected_current: BundledCatalogSetIdentity,
@@ -639,7 +639,7 @@ impl ExtensionRepository {
 
     fn produce_rollback_catalog_set<S: BundledReleaseByteSource>(
         &mut self,
-        catalog: &AdmittedRollbackBundledCatalog,
+        catalog: &AdmittedRollbackCatalog,
         exact_catalog_bytes: &[u8],
         selections: &[BundledPackageRuntimeSelection],
         source: &mut S,

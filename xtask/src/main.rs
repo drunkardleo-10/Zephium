@@ -1972,6 +1972,7 @@ fn check_blocker_dependency_graphs() {
     for forbidden in [
         "zephium-blocker-update feature \"tuf\"",
         "zephium-extension-distribution v",
+        "zephium-extension-service feature \"acquired-packages\"",
         "zephium-extension-updater v",
         "zephium-update-transport v",
         "tough v",

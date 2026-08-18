@@ -295,6 +295,47 @@ fn client_construction_tracks_product_authority_availability() {
     }
 }
 
+#[cfg(feature = "staging-extension-catalog")]
+#[tokio::test(flavor = "current_thread")]
+async fn staging_client_fetches_only_the_exact_embedded_catalog_objects() {
+    let authority =
+        zephium_extension_authority::ProductExtensionManifestAuthority::product().unwrap();
+    let selections = authority
+        .active_acquired_runtime_selections(
+            zephium_extension_authority::ProductExtensionRuntimeTarget::MacosNativeBrokered,
+        )
+        .unwrap();
+    let client = ExtensionDistributionClient::staging().unwrap();
+    let session = client.begin(selections).await.unwrap();
+    assert_eq!(session.package_count(), 1);
+    let selected_package = session.selection(0).unwrap().package_key();
+    let request = client.fetch_package(&session, 0).await.unwrap();
+    assert_eq!(
+        request.runtime_profile(),
+        ExtensionAcquiredRuntimeProfile::MacosNativeBrokered
+    );
+    let (catalog, package, profile, crx, legal) = request.into_parts();
+    assert_eq!(catalog, crate::staging::CATALOG_BYTES);
+    assert_eq!(package, selected_package);
+    assert_eq!(
+        profile,
+        ExtensionAcquiredRuntimeProfile::MacosNativeBrokered
+    );
+    assert_eq!(crx, crate::staging::CRX3_BYTES);
+    assert_eq!(legal, crate::staging::LEGAL_BYTES);
+
+    let transport = EmbeddedStagingArtifactTransport;
+    assert_eq!(
+        transport
+            .fetch_bounded(
+                Url::parse("https://staging.extensions.zephium.invalid/v1/targets/other").unwrap(),
+                1,
+            )
+            .unwrap_err(),
+        FixedOriginFetchError::Boundary
+    );
+}
+
 pub(crate) fn fixture() -> Fixture {
     let archive = b"PK\x03\x04zephium-extension-distribution-fixture".to_vec();
     let archive_sha256: [u8; 32] = Sha256::digest(&archive).into();

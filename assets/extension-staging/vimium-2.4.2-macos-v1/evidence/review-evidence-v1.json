@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "kind": "zephium-extension-manifest-review-evidence",
+  "product_authority": false,
+  "publication_profile_inputs_sha256": "3b83cba9600040acf6a6b77d8436998711ef48aad773451038e4a20033a8a217",
+  "review_sha256": "662e1b3e16eb25eb025c158787eea10695a724720f1555c91af5306479a6360d",
+  "catalog_sha256": "b27962b45ecb1f85df1afbed626dc42a92c11230a8a7ac162a40511f1aa24b56",
+  "classified_profiles_sha256": "ffb931f872f9633aec025d75f9d686c573a22beef579dd93721dc8110556b2f6",
+  "all_activatable": true
+}

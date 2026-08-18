@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+staging-extension-catalog = ["zephium-extension-authority/staging-extension-catalog"]
+
 [dependencies]
 sha2 = "=0.10.9"
 thiserror.workspace = true

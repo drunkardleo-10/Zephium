@@ -13,7 +13,7 @@ use zephium_core::extensions::{
 };
 use zephium_core::ids::ExtensionInstallId;
 use zephium_extension_authority::{
-    AdmittedActiveCatalog, AdmittedRollbackBundledCatalog, BundledCatalogAdmissionError,
+    AdmittedActiveCatalog, AdmittedRollbackCatalog, BundledCatalogAdmissionError,
     BundledPackageAuthority, ProductAdmittedExtensionManifest,
     ProductAdmittedRollbackExtensionManifest, ProductBundledCatalogGenerationRole,
     ProductExtensionManifestAdmissionError, ProductExtensionManifestAuthority,
@@ -1065,7 +1065,7 @@ fn load_active_manifest_from_admitted(
 fn load_rollback_manifest_from_admitted(
     runtime: &MaterializationRuntime,
     current: &CurrentCatalogSetProjection,
-    catalog: &AdmittedRollbackBundledCatalog,
+    catalog: &AdmittedRollbackCatalog,
     manifest_authority: &ProductExtensionManifestAuthority,
     install: &ExtensionInstall,
 ) -> Result<Arc<ExtensionManifestDescriptor>, SnapshotLoadError> {
@@ -1150,7 +1150,7 @@ fn load_active_management_manifest_from_admitted(
 fn load_rollback_management_manifest_from_admitted(
     runtime: &MaterializationRuntime,
     current: &CurrentCatalogSetProjection,
-    catalog: &AdmittedRollbackBundledCatalog,
+    catalog: &AdmittedRollbackCatalog,
     manifest_authority: &ProductExtensionManifestAuthority,
     install: &ExtensionInstall,
 ) -> Result<AuthenticatedManagementManifest, ManagementManifestLoadError> {

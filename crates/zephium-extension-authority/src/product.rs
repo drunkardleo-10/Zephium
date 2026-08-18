@@ -6,7 +6,9 @@ use std::mem::size_of;
 use sha2::{Digest, Sha256};
 use zephium_core::extensions::{ExtensionAuthorityId, ExtensionPackagePayloadIdentity};
 #[cfg(zephium_internal_repository_e2e)]
-use zephium_extension_package::{CanonicalExtensionTreeIndex, ExtensionReleaseLicenseRule};
+use zephium_extension_package::CanonicalExtensionTreeIndex;
+#[cfg(any(zephium_internal_repository_e2e, feature = "staging-extension-catalog"))]
+use zephium_extension_package::ExtensionReleaseLicenseRule;
 use zephium_extension_package::{
     ExtensionPackageAdmissionPolicyDigest, ExtensionReleaseAdmissionPolicy,
     ExtensionReleaseCatalog, ExtensionReleaseCatalogDigest, ExtensionReleaseCatalogRevision,
@@ -68,7 +70,7 @@ pub const MAX_ADMITTED_ACQUIRED_CATALOG_RETAINED_BYTES: usize =
     MAX_ADMITTED_BUNDLED_CATALOG_RETAINED_BYTES;
 
 /// Maximum logical memory retained by one admitted rollback-catalog witness.
-pub const MAX_ADMITTED_ROLLBACK_BUNDLED_CATALOG_RETAINED_BYTES: usize =
+pub const MAX_ADMITTED_ROLLBACK_CATALOG_RETAINED_BYTES: usize =
     MAX_ADMITTED_BUNDLED_CATALOG_RETAINED_BYTES;
 
 /// Availability of the product-sealed bundled extension authority.
@@ -195,7 +197,7 @@ impl BundledPackageAuthority {
     pub fn admit_rollback_catalog(
         &self,
         catalog_bytes: &[u8],
-    ) -> Result<AdmittedRollbackBundledCatalog, BundledCatalogAdmissionError> {
+    ) -> Result<AdmittedRollbackCatalog, BundledCatalogAdmissionError> {
         if self.rollback.is_empty() {
             return Err(BundledCatalogAdmissionError::RollbackCatalogNotProvisioned);
         }
@@ -216,16 +218,13 @@ impl BundledPackageAuthority {
                     && generation.anchor.catalog_digest == observed_digest
             })
             .ok_or(BundledCatalogAdmissionError::CatalogDigestMismatch)?;
-        generation
-            .admit_prehashed(
-                catalog_bytes,
-                observed_digest,
-                CatalogPayloadClass::BundledTree,
-            )
-            .map(|data| AdmittedRollbackBundledCatalog {
-                data,
-                _seal: RollbackCatalogWitnessSeal(()),
-            })
+        let data = generation.admit_common_prehashed(catalog_bytes, observed_digest)?;
+        classify_catalog_payload(&data.catalog)
+            .ok_or(BundledCatalogAdmissionError::UnsupportedPayload)?;
+        Ok(AdmittedRollbackCatalog {
+            data,
+            _seal: RollbackCatalogWitnessSeal(()),
+        })
     }
 
     /// Returns the authority's explicit logical retained-memory charge.
@@ -361,7 +360,7 @@ impl BundledPackageAuthority {
         active_policy: ExtensionReleaseAdmissionPolicy,
         rollback_catalog_bytes: &[u8],
         rollback_policy: ExtensionReleaseAdmissionPolicy,
-    ) -> Result<AdmittedRollbackBundledCatalog, BundledCatalogAdmissionError> {
+    ) -> Result<AdmittedRollbackCatalog, BundledCatalogAdmissionError> {
         let active = SealedBundledCatalogGeneration {
             anchor: anchor_for_fixture(active_catalog_bytes)?,
             policy: active_policy,
@@ -641,42 +640,45 @@ impl AdmittedAcquiredCatalog {
 
 /// Authenticated metadata for one explicitly approved rollback catalog.
 ///
-/// This capability is deliberately distinct from [`AdmittedBundledCatalog`].
+/// This capability is deliberately distinct from both active catalog
+/// witnesses. The authenticated catalog may contain either homogeneous
+/// bundled-tree or acquired-CRX payloads; payload-specific repository methods
+/// still accept only the shape they implement.
 /// It has no durable checkpoint or monotonic-disposition API and cannot be
 /// passed to the repository's active-catalog recording method. It is also
 /// non-serializable, non-cloneable, and has no public constructor.
 ///
 /// ```compile_fail
-/// use zephium_extension_authority::AdmittedRollbackBundledCatalog;
+/// use zephium_extension_authority::AdmittedRollbackCatalog;
 /// fn require_clone<T: Clone>() {}
 /// fn duplicate() {
-///     require_clone::<AdmittedRollbackBundledCatalog>();
+///     require_clone::<AdmittedRollbackCatalog>();
 /// }
 /// ```
 ///
 /// ```compile_fail
-/// use zephium_extension_authority::AdmittedRollbackBundledCatalog;
-/// fn forge() -> AdmittedRollbackBundledCatalog {
-///     AdmittedRollbackBundledCatalog {}
+/// use zephium_extension_authority::AdmittedRollbackCatalog;
+/// fn forge() -> AdmittedRollbackCatalog {
+///     AdmittedRollbackCatalog {}
 /// }
 /// ```
 ///
 /// ```compile_fail
-/// use zephium_extension_authority::AdmittedRollbackBundledCatalog;
-/// fn lower_high_water(rollback: &AdmittedRollbackBundledCatalog) {
+/// use zephium_extension_authority::AdmittedRollbackCatalog;
+/// fn lower_high_water(rollback: &AdmittedRollbackCatalog) {
 ///     let _ = rollback.checkpoint();
 /// }
 /// ```
 #[must_use = "rollback metadata must be materialized for explicit recovery or discarded"]
-pub struct AdmittedRollbackBundledCatalog {
+pub struct AdmittedRollbackCatalog {
     data: AdmittedCatalogData,
     _seal: RollbackCatalogWitnessSeal,
 }
 
-impl fmt::Debug for AdmittedRollbackBundledCatalog {
+impl fmt::Debug for AdmittedRollbackCatalog {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("AdmittedRollbackBundledCatalog")
+            .debug_struct("AdmittedRollbackCatalog")
             .field("authority", &self.authority())
             .field("revision", &self.revision())
             .field("catalog_length", &self.catalog_length())
@@ -688,7 +690,7 @@ impl fmt::Debug for AdmittedRollbackBundledCatalog {
     }
 }
 
-impl AdmittedRollbackBundledCatalog {
+impl AdmittedRollbackCatalog {
     /// Returns authenticated, structurally parsed rollback-catalog metadata.
     pub const fn catalog(&self) -> &ExtensionReleaseCatalog {
         &self.data.catalog
@@ -958,13 +960,86 @@ fn classify_catalog_payload(catalog: &ExtensionReleaseCatalog) -> Option<Catalog
 // This private compile-time slot is the only production trust root; it must
 // never be populated from runtime configuration, an environment variable, or
 // caller-provided bytes.
-#[cfg(not(zephium_internal_repository_e2e))]
+#[cfg(all(
+    not(zephium_internal_repository_e2e),
+    not(feature = "staging-extension-catalog")
+))]
 fn sealed_product_bundled_catalog_generations(
 ) -> Result<Option<SealedBundledCatalogGenerations>, BundledCatalogAdmissionError> {
     // Active and rollback generations, including each exact per-generation
     // policy, must land atomically once reviewed release artifacts exist.
     // Returning `None` preserves an explicit fail-closed production build.
     Ok(None)
+}
+
+#[cfg(all(
+    feature = "staging-extension-catalog",
+    not(zephium_internal_repository_e2e)
+))]
+fn sealed_product_bundled_catalog_generations(
+) -> Result<Option<SealedBundledCatalogGenerations>, BundledCatalogAdmissionError> {
+    use crate::staging_catalog as staging;
+
+    let active = staging_generation(
+        staging::CATALOG_BYTES,
+        staging::CATALOG_LENGTH,
+        staging::CATALOG_SHA256,
+        staging::INVENTORY_SHA256,
+    )?;
+    let rollback = staging_generation(
+        staging::ROLLBACK_CATALOG_BYTES,
+        staging::ROLLBACK_CATALOG_LENGTH,
+        staging::ROLLBACK_CATALOG_SHA256,
+        staging::ROLLBACK_INVENTORY_SHA256,
+    )?;
+    Ok(Some((active, vec![rollback].into_boxed_slice())))
+}
+
+#[cfg(all(
+    feature = "staging-extension-catalog",
+    not(zephium_internal_repository_e2e)
+))]
+fn staging_generation(
+    bytes: &[u8],
+    expected_length: usize,
+    expected_sha256: [u8; 32],
+    expected_inventory: [u8; 32],
+) -> Result<SealedBundledCatalogGeneration, BundledCatalogAdmissionError> {
+    use crate::staging_catalog as staging;
+
+    if bytes.len() != expected_length || <[u8; 32]>::from(Sha256::digest(bytes)) != expected_sha256
+    {
+        return Err(BundledCatalogAdmissionError::InvalidProductConfiguration);
+    }
+    let catalog = ExtensionReleaseCatalog::parse_canonical(bytes)
+        .map_err(BundledCatalogAdmissionError::Catalog)?;
+    let inventory_digest = digest_catalog_inventory(&catalog)
+        .ok_or(BundledCatalogAdmissionError::AccountingOverflow)?;
+    if catalog.digest().as_bytes() != &expected_sha256
+        || inventory_digest.as_bytes() != &expected_inventory
+        || catalog.admission_policy_sha256().as_bytes() != &staging::ADMISSION_POLICY_SHA256
+        || catalog.packages().len() != 1
+        || catalog.packages()[0].identity().key().as_bytes() != &staging::PACKAGE_KEY
+    {
+        return Err(BundledCatalogAdmissionError::InvalidProductConfiguration);
+    }
+    let policy = ExtensionReleaseAdmissionPolicy::new(
+        ExtensionPackageAdmissionPolicyDigest::from_bytes(staging::ADMISSION_POLICY_SHA256),
+        vec![ExtensionReleaseLicenseRule::new("MIT", false)
+            .map_err(|_| BundledCatalogAdmissionError::InvalidProductConfiguration)?],
+    )
+    .map_err(|_| BundledCatalogAdmissionError::InvalidProductConfiguration)?;
+    Ok(SealedBundledCatalogGeneration {
+        anchor: SealedBundledCatalogAnchor {
+            catalog_length: expected_length,
+            catalog_digest: catalog.digest(),
+            authority: catalog.authority(),
+            catalog_revision: catalog.revision(),
+            admission_policy_digest: catalog.admission_policy_sha256(),
+            inventory_digest,
+        },
+        policy,
+    })
 }
 
 #[cfg(zephium_internal_repository_e2e)]
@@ -1224,7 +1299,10 @@ mod tests {
         }
     }
 
-    #[cfg(not(zephium_internal_repository_e2e))]
+    #[cfg(all(
+        not(zephium_internal_repository_e2e),
+        not(feature = "staging-extension-catalog")
+    ))]
     #[test]
     fn production_authority_is_explicitly_unprovisioned() {
         assert_eq!(MAX_PRODUCT_ROLLBACK_BUNDLED_CATALOGS, 2);
@@ -1236,6 +1314,42 @@ mod tests {
         assert_eq!(
             BundledPackageAuthority::product_status(),
             BundledProductAuthorityStatus::Unprovisioned
+        );
+    }
+
+    #[cfg(all(
+        feature = "staging-extension-catalog",
+        not(zephium_internal_repository_e2e)
+    ))]
+    #[test]
+    fn staging_authority_admits_only_the_embedded_acquired_catalog() {
+        let authority = BundledPackageAuthority::product().unwrap();
+        assert_eq!(
+            BundledPackageAuthority::product_status(),
+            BundledProductAuthorityStatus::Configured
+        );
+        let admitted = authority
+            .admit_acquired_catalog(crate::staging_catalog::CATALOG_BYTES)
+            .unwrap();
+        assert_eq!(admitted.catalog().packages().len(), 1);
+        assert_eq!(
+            admitted.catalog().packages()[0].identity().key().as_bytes(),
+            &crate::staging_catalog::PACKAGE_KEY
+        );
+        let rollback = authority
+            .admit_rollback_catalog(crate::staging_catalog::ROLLBACK_CATALOG_BYTES)
+            .unwrap();
+        assert_eq!(admitted.revision().get(), 2);
+        assert_eq!(rollback.revision().get(), 1);
+        assert_eq!(
+            authority.recognize_generation(&rollback.generation_anchor()),
+            Some(ProductBundledCatalogGenerationRole::Rollback)
+        );
+        let mut altered = crate::staging_catalog::CATALOG_BYTES.to_vec();
+        altered[0] ^= 1;
+        assert_eq!(
+            authority.admit_acquired_catalog(&altered).unwrap_err(),
+            BundledCatalogAdmissionError::CatalogDigestMismatch
         );
     }
 
@@ -1345,9 +1459,7 @@ mod tests {
         assert_eq!(admitted_one.revision().get(), 1);
         assert_eq!(admitted_two.revision().get(), 2);
         assert_ne!(admitted_one.catalog_digest(), admitted_two.catalog_digest());
-        assert!(
-            admitted_one.retained_bytes() <= MAX_ADMITTED_ROLLBACK_BUNDLED_CATALOG_RETAINED_BYTES
-        );
+        assert!(admitted_one.retained_bytes() <= MAX_ADMITTED_ROLLBACK_CATALOG_RETAINED_BYTES);
         assert!(authority.retained_bytes() <= MAX_BUNDLED_PACKAGE_AUTHORITY_RETAINED_BYTES);
 
         assert_eq!(

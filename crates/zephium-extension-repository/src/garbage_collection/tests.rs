@@ -10,7 +10,7 @@ use sha2::{Digest as _, Sha256};
 use tempfile::TempDir;
 use zephium_core::extensions::ExtensionPackageKey;
 use zephium_extension_authority::{
-    AdmittedBundledCatalog, AdmittedRollbackBundledCatalog, BundledPackageAuthority,
+    AdmittedBundledCatalog, AdmittedRollbackCatalog, BundledPackageAuthority,
     ProductExtensionRuntimeTarget,
 };
 use zephium_extension_package::CanonicalExtensionTreeIndex;
@@ -39,7 +39,7 @@ impl FixtureSource {
         }
     }
 
-    fn rollback(catalog: &AdmittedRollbackBundledCatalog) -> Self {
+    fn rollback(catalog: &AdmittedRollbackCatalog) -> Self {
         Self {
             catalog: crate::BundledReleaseCatalogSourceIdentity::from_generation(
                 catalog.generation_anchor(),

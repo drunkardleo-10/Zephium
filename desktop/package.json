@@ -3,6 +3,7 @@
   "private": true,
   "scripts": {
     "dev": "tauri dev",
+    "dev:extensions-staging": "tauri dev --config tauri.extensions-staging.conf.json --features staging-extension-catalog",
     "build": "tauri build"
   },
   "devDependencies": {

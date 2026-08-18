@@ -49,6 +49,11 @@ mod manifest;
 mod product;
 #[cfg(zephium_internal_repository_e2e)]
 mod repository_e2e_fixture;
+#[cfg(all(
+    feature = "staging-extension-catalog",
+    not(zephium_internal_repository_e2e)
+))]
+mod staging_catalog;
 
 pub use checkpoint::{
     BundledCatalogCheckpoint, BundledCatalogDisposition, BundledCatalogGenerationAnchor,
@@ -69,10 +74,9 @@ pub use manifest::{
 };
 pub use product::{
     AdmittedAcquiredCatalog, AdmittedActiveCatalog, AdmittedBundledCatalog,
-    AdmittedRollbackBundledCatalog, BundledPackageAuthority, BundledProductAuthorityStatus,
+    AdmittedRollbackCatalog, BundledPackageAuthority, BundledProductAuthorityStatus,
     ProductBundledCatalogGenerationRole, MAX_ADMITTED_ACQUIRED_CATALOG_RETAINED_BYTES,
-    MAX_ADMITTED_BUNDLED_CATALOG_RETAINED_BYTES,
-    MAX_ADMITTED_ROLLBACK_BUNDLED_CATALOG_RETAINED_BYTES,
+    MAX_ADMITTED_BUNDLED_CATALOG_RETAINED_BYTES, MAX_ADMITTED_ROLLBACK_CATALOG_RETAINED_BYTES,
     MAX_BUNDLED_PACKAGE_AUTHORITY_RETAINED_BYTES, MAX_PRODUCT_BUNDLED_CATALOG_GENERATIONS,
     MAX_PRODUCT_ROLLBACK_BUNDLED_CATALOGS,
 };

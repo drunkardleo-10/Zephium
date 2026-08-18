@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 #[cfg(feature = "acquired-packages")]
 use zephium_extension_authority::AdmittedAcquiredCatalog;
 use zephium_extension_authority::{
-    AdmittedBundledCatalog, AdmittedRollbackBundledCatalog, BundledCatalogCheckpoint,
+    AdmittedBundledCatalog, AdmittedRollbackCatalog, BundledCatalogCheckpoint,
 };
 use zephium_extension_package::{ExtensionReleaseCatalog, MAX_EXTENSION_RELEASE_CATALOG_BYTES};
 use zephium_private_fs::{FileIdentity, LockedPrivateNamespace, PrivateDirectory, PrivateFsError};
@@ -415,7 +415,7 @@ impl ExtensionRepository {
 
     pub(crate) fn writer_ensure_rollback_catalog(
         &mut self,
-        admitted: &AdmittedRollbackBundledCatalog,
+        admitted: &AdmittedRollbackCatalog,
         exact_catalog_bytes: &[u8],
     ) -> Result<(), ExtensionRepositoryError> {
         if self.writer_is_sealed() {
@@ -514,7 +514,7 @@ impl ExtensionRepository {
     /// previously published beneath the active high-water.
     pub(crate) fn writer_validate_rollback_catalog_materialized(
         &mut self,
-        admitted: &AdmittedRollbackBundledCatalog,
+        admitted: &AdmittedRollbackCatalog,
         exact_catalog_bytes: &[u8],
     ) -> Result<bool, ExtensionRepositoryError> {
         if self.writer_is_sealed() {
@@ -853,7 +853,7 @@ impl ExtensionRepository {
 
     fn writer_seed_rollback_catalog(
         &mut self,
-        admitted: &AdmittedRollbackBundledCatalog,
+        admitted: &AdmittedRollbackCatalog,
     ) -> Result<(), ExtensionRepositoryError> {
         let digest = Digest32::from_bytes(admitted.catalog_digest().bytes());
         let identity = self
@@ -1027,7 +1027,7 @@ fn validate_exact_catalog(
 }
 
 fn validate_exact_rollback_catalog(
-    admitted: &AdmittedRollbackBundledCatalog,
+    admitted: &AdmittedRollbackCatalog,
     bytes: &[u8],
 ) -> Result<(), ExtensionRepositoryError> {
     if bytes.is_empty()

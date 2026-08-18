@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "kind": "zephium-extension-catalog-publication",
+  "product_authority": false,
+  "source_paths_retained": false,
+  "review_sha256": "6b7a105f50676cc092b34fc9b83e4bddcad00bf71ae295e86a95aa0cca36961e",
+  "catalog": {
+    "authority_id": "81a343638e49df23245a9f99121a6be7a5501b19205015341203941e43188abc",
+    "catalog_revision": 2,
+    "catalog_bytes": 2169,
+    "catalog_sha256": "b27962b45ecb1f85df1afbed626dc42a92c11230a8a7ac162a40511f1aa24b56",
+    "catalog_inventory_sha256": "9228821afbca066e1cc1929c0162f28985187d8bef01905e98325064b0717f5f",
+    "admission_policy_sha256": "d05d6d14b6c2c81fa0dbefd350e547fe6e269156b0bef5ff5d77e5be5d0a3225",
+    "license_rules": [
+      {
+        "expression": "MIT",
+        "corresponding_source_required": false
+      }
+    ]
+  },
+  "objects": [
+    {
+      "target": "product/profile-inputs/4b2ab3abd19a8b3abe05f49956e96dd214a6d164bcda8f43e7d52102ffe58fd3/2/4bd15bcf176912edee8eb43ccea1710d69affcbe9fae068821bbf8bfa594957c.tree-index.json",
+      "bytes": 11635,
+      "sha256": "4bd15bcf176912edee8eb43ccea1710d69affcbe9fae068821bbf8bfa594957c"
+    },
+    {
+      "target": "product/profile-inputs/4b2ab3abd19a8b3abe05f49956e96dd214a6d164bcda8f43e7d52102ffe58fd3/2/886d008e4d79a1441f3e6c7e836abff7ed4f8d70d3405c742d36429caacd885b.manifest.json",
+      "bytes": 2148,
+      "sha256": "886d008e4d79a1441f3e6c7e836abff7ed4f8d70d3405c742d36429caacd885b"
+    },
+    {
+      "target": "targets/crx3/4b2ab3abd19a8b3abe05f49956e96dd214a6d164bcda8f43e7d52102ffe58fd3/2/d78441192b493d8ca40ce17690e4a71bcdb024d02410ebaac33243c7329b381e.crx3",
+      "bytes": 219853,
+      "sha256": "4bc71181804ec8aed8385bf2bd3db6df488c0b4e4bfffc20a7dc0ddeb131a9f6"
+    },
+    {
+      "target": "targets/legal/bc52afe9916014c3fe1d9244b65a1c0293d1ccf7507af317b3b63c49a452dcbc.notice",
+      "bytes": 1068,
+      "sha256": "bc52afe9916014c3fe1d9244b65a1c0293d1ccf7507af317b3b63c49a452dcbc"
+    }
+  ],
+  "manifest_profiles_classified": false
+}

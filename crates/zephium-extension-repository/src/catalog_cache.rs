@@ -5,7 +5,7 @@ use std::mem::size_of;
 #[cfg(feature = "acquired-packages")]
 use zephium_extension_authority::AdmittedAcquiredCatalog;
 use zephium_extension_authority::{
-    AdmittedActiveCatalog, AdmittedBundledCatalog, AdmittedRollbackBundledCatalog,
+    AdmittedActiveCatalog, AdmittedBundledCatalog, AdmittedRollbackCatalog,
     BundledPackageAuthority, ProductBundledCatalogGenerationRole,
     MAX_BUNDLED_PACKAGE_AUTHORITY_RETAINED_BYTES, MAX_PRODUCT_BUNDLED_CATALOG_GENERATIONS,
 };
@@ -407,7 +407,7 @@ impl ProductCatalogAdmissionCache {
     pub(crate) fn seed_rollback(
         &mut self,
         identity: FileIdentity,
-        admitted: &AdmittedRollbackBundledCatalog,
+        admitted: &AdmittedRollbackCatalog,
     ) -> Result<(), ExtensionRepositoryError> {
         self.insert(
             rollback_anchor(admitted),
@@ -516,7 +516,7 @@ fn acquired_active_anchor(admitted: &AdmittedAcquiredCatalog) -> CatalogAnchor {
     }
 }
 
-fn rollback_anchor(admitted: &AdmittedRollbackBundledCatalog) -> CatalogAnchor {
+fn rollback_anchor(admitted: &AdmittedRollbackCatalog) -> CatalogAnchor {
     CatalogAnchor {
         authority_id: Digest32::from_bytes(admitted.authority().bytes()),
         revision: admitted.revision().get(),

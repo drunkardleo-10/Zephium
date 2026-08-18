@@ -13,7 +13,7 @@ use zephium_core::extensions::ExtensionPackageKey;
 use zephium_extension_authority::{
     AdmittedAcquiredCatalog, ProductExtensionManifestAuthority, ProductExtensionRuntimeTarget,
 };
-use zephium_extension_authority::{AdmittedBundledCatalog, AdmittedRollbackBundledCatalog};
+use zephium_extension_authority::{AdmittedBundledCatalog, AdmittedRollbackCatalog};
 use zephium_extension_package::ExtensionReleaseCatalog;
 #[cfg(feature = "acquired-packages")]
 use zephium_extension_package::{
@@ -252,7 +252,7 @@ fn map_tree_artifact_error(error: TreeResourceError) -> AcquiredCatalogPackageVe
 
 pub(crate) fn derive_rollback_catalog_set(
     runtime: &MaterializationRuntime,
-    catalog: &AdmittedRollbackBundledCatalog,
+    catalog: &AdmittedRollbackCatalog,
     packages: Vec<VerifiedCompletedRollbackPackage>,
 ) -> Result<VerifiedRollbackCatalogSet, PackageObjectError> {
     let packages = packages
@@ -308,7 +308,7 @@ impl<'catalog> CatalogView<'catalog> {
         }
     }
 
-    fn rollback(catalog: &'catalog AdmittedRollbackBundledCatalog) -> Self {
+    fn rollback(catalog: &'catalog AdmittedRollbackCatalog) -> Self {
         Self {
             catalog: catalog.catalog(),
             anchor: CatalogAnchor {

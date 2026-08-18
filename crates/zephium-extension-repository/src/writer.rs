@@ -13,7 +13,7 @@ use zephium_extension_acquisition::{AcquiredExtensionArchive, AcquiredExtensionA
 #[cfg(feature = "acquired-packages")]
 use zephium_extension_authority::AdmittedAcquiredCatalog;
 use zephium_extension_authority::{
-    AdmittedBundledCatalog, AdmittedRollbackBundledCatalog, ProductExtensionManifestAdmissionError,
+    AdmittedBundledCatalog, AdmittedRollbackCatalog, ProductExtensionManifestAdmissionError,
     ProductExtensionManifestAuthorityError, ProductExtensionRuntimeTarget,
 };
 use zephium_extension_package::ExtensionTreeIndexError;
@@ -440,7 +440,7 @@ impl ExtensionRepository {
     /// has been validated. Success still grants no activation authority.
     pub fn materialize_rollback_bundled_package<S: BundledReleaseByteSource>(
         &mut self,
-        catalog: &AdmittedRollbackBundledCatalog,
+        catalog: &AdmittedRollbackCatalog,
         exact_catalog_bytes: &[u8],
         runtime_target: ProductExtensionRuntimeTarget,
         package_key: ExtensionPackageKey,
