@@ -49,10 +49,13 @@ const BROKERED_CONTEXT_IDENTIFIER: &str = "zephium-stock-vimium-2-4-2-brokered-v
 const HOST_MATCH_PATTERN: &str = "http://127.0.0.1/*";
 const PAGE_STATE_PREFIX: &str = "ZEPHIUM_VIMIUM_PAGE_STATE:";
 const POPUP_STATE_PREFIX: &str = "ZEPHIUM_VIMIUM_POPUP_STATE:";
+const BROKER_COMMAND_STATE_PREFIX: &str = "ZEPHIUM_VIMIUM_BROKER_COMMAND_STATE:";
 const COMPATIBILITY_SYMBOL: &str = "zephium.webkit-api-compatibility.v1";
 const LINK_CLICK_ATTRIBUTE: &str = "data-zephium-keyboard-link-click";
 const BROKER_APPLICATION_IDENTIFIER: &str = "app.zephium.extension-broker.v1";
 const BROKER_HISTORY_REQUEST: &str = "v1/history.recent/100";
+const BROKER_SEARCH_REQUEST: &str = "v1/search.default/current/emVwaGl1bSBleHRlbnNpb24gc2VhcmNo";
+const BROKER_SESSION_REQUEST: &str = "v1/sessions.restore/recent";
 const BROKER_HISTORY_TITLE: &str = "Zephium brokered history needle";
 const MAX_DIAGNOSTIC_TITLE_BYTES: usize = 4 * 1_024;
 
@@ -79,14 +82,14 @@ const NATIVE_OUTPUT_TREE_SHA256: &str =
     "63726bb7feb7195bcafb9d605abf3fc48b56f79eafc1c44fbcd1ce7dfe0563ec";
 const NATIVE_OUTPUT_INDEX_SHA256: &str =
     "ee651c6b57e460662ce3cd0a4952df1c4ff722122f195a95379598e289fabc7e";
-const BROKERED_OUTPUT_FILES: usize = 87;
-const BROKERED_OUTPUT_BYTES: u64 = 599_488;
+const BROKERED_OUTPUT_FILES: usize = 89;
+const BROKERED_OUTPUT_BYTES: u64 = 608_905;
 const BROKERED_OUTPUT_MANIFEST_SHA256: &str =
     "c2b503f1593b173305889abbe7c06eb0bf060c1d038aa4434a05a0564433c8b3";
 const BROKERED_OUTPUT_TREE_SHA256: &str =
-    "729d6c172eb9e23ec4ed67ed2876a1a2de444145bceb1142ead00d4f7858e804";
+    "7b6e1e880764752114504824854e87e901e46716be2832ba5f1372b1d790e305";
 const BROKERED_OUTPUT_INDEX_SHA256: &str =
-    "97c7c673368485c3ca3ee82d7bd759e7af342f5d47f72d8df40a0d4a2c340731";
+    "aa448afcf327e1cf388148ac810f468ec3a2c9ec65c6c131d82f27299ceb44ce";
 
 struct AdmittedVimiumArtifact {
     artifact: compatibility_artifact::ValidatedCompatibilityArtifact,
@@ -206,6 +209,8 @@ struct PopupState {
     bookmarks_mode: String,
     favicon_mode: String,
     history_mode: String,
+    search_mode: String,
+    sessions_mode: String,
     options_url: String,
     dialog_visible: bool,
     missing_content_error_visible: bool,
@@ -309,7 +314,7 @@ pub(super) fn run(artifact: &Path) -> Result<bool, String> {
             (None, Ok(())) => {}
         }
         println!(
-            "native-probe: stock Vimium compatibility passed; version={VERSION}; os={}; exact_source_tree=passed; exact_output_tree=passed; module_background_wrapper=passed; background_preload_ms={}; keyboard_trust_control=passed; keyboard_scroll={}; brokered_history={}; extension_page_messaging={}; bookmarks={}; favicon={}; link_hint_navigation={}; popup_execution=passed; popup_options_url={:?}; page_world_adapter_absent=passed; page_world_privileged_extension_api_absent=passed; controller_visible_scripts={}; webview_callbacks={}; remaining_browser_apis=unassessed; product_authority=false; native_objects_released=passed",
+            "native-probe: stock Vimium compatibility passed; version={VERSION}; os={}; exact_source_tree=passed; exact_output_tree=passed; module_background_wrapper=passed; background_preload_ms={}; keyboard_trust_control=passed; keyboard_scroll={}; brokered_history={}; extension_page_messaging={}; bookmarks={}; favicon={}; search={}; sessions={}; link_hint_navigation={}; popup_execution=passed; popup_options_url={:?}; page_world_adapter_absent=passed; page_world_privileged_extension_api_absent=passed; controller_visible_scripts={}; webview_callbacks={}; remaining_browser_apis=unassessed; product_authority=false; native_objects_released=passed",
             teardown.operating_system,
             teardown.background_preload_ms,
             if teardown.scroll_observed {
@@ -334,6 +339,16 @@ pub(super) fn run(artifact: &Path) -> Result<bool, String> {
             },
             if teardown.brokered_history {
                 "transparent-fallback-degraded"
+            } else {
+                "native-unassessed"
+            },
+            if teardown.brokered_history {
+                "browser-default-current-or-new-tab"
+            } else {
+                "native-unassessed"
+            },
+            if teardown.brokered_history {
+                "recent-current-space-tab-only"
             } else {
                 "native-unassessed"
             },
@@ -398,6 +413,8 @@ fn admit(artifact: &Path) -> Result<AdmittedVimiumArtifact, String> {
         || admitted.surfaces.extension_pages != if brokered { 7 } else { 0 }
         || admitted.surfaces.empty_bookmarks != brokered
         || admitted.surfaces.empty_favicon != brokered
+        || admitted.surfaces.default_search != brokered
+        || admitted.surfaces.recent_sessions != brokered
     {
         return Err("Vimium compatibility artifact surface contract drifted".into());
     }
@@ -410,6 +427,8 @@ fn admit(artifact: &Path) -> Result<AdmittedVimiumArtifact, String> {
             ),
             (compatibility_artifact::BOOKMARKS_BRIDGE, "bookmarks"),
             (compatibility_artifact::FAVICON_BRIDGE, "favicon"),
+            (compatibility_artifact::SEARCH_BRIDGE, "search"),
+            (compatibility_artifact::SESSIONS_BRIDGE, "sessions"),
             (
                 compatibility_artifact::EMPTY_FAVICON,
                 "empty favicon resource",
@@ -617,12 +636,21 @@ fn run_native(
             }],
         })
         .to_string();
-        super::ProbeNativeMessageContract::new(
+        super::ProbeNativeMessageContract::new_sequence(
             &bundle.controller,
             &context,
             BROKER_APPLICATION_IDENTIFIER,
-            BROKER_HISTORY_REQUEST,
-            response,
+            vec![
+                (
+                    BROKER_SEARCH_REQUEST.into(),
+                    "{\"v\":1,\"opened\":true}".into(),
+                ),
+                (
+                    BROKER_SESSION_REQUEST.into(),
+                    "{\"v\":1,\"restored\":true}".into(),
+                ),
+                (BROKER_HISTORY_REQUEST.into(), response),
+            ],
         )
     });
     let delegate = if let Some(native_message) = native_message.as_ref() {
@@ -730,6 +758,9 @@ fn run_native(
         super::assert_attached_controller(&popup, &bundle.controller)?;
         super::profile_isolation::assert_attached_store(&popup, &bundle._data_store)?;
         let state = wait_for_popup_state(&popup, &run_loop, brokered)?;
+        if brokered {
+            verify_brokered_command_facades(&popup, &context, &run_loop)?;
+        }
         Ok((popup, state))
     });
     let (popup_weak, popup_options_url, popup_failure) = match popup_result {
@@ -1133,6 +1164,8 @@ fn run_vimium_history_completion(
           globalThis[Symbol.for('zephium.webkit-bookmarks-compatibility.mode.v1')] !== 'empty-read-only' ||
           globalThis[Symbol.for('zephium.webkit-favicon-compatibility.mode.v1')] !== 'transparent-fallback' ||
           globalThis[Symbol.for('zephium.webkit-history-compatibility.mode.v1')] !== 'bounded-recent-search'
+          || globalThis[Symbol.for('zephium.webkit-search-compatibility.mode.v1')] !== 'browser-default-current-or-new-tab'
+          || globalThis[Symbol.for('zephium.webkit-sessions-compatibility.mode.v1')] !== 'recent-current-space-tab-only'
         ) {
           throw new Error('Vimium extension-page compatibility modes drifted');
         }
@@ -1292,6 +1325,8 @@ fn wait_for_popup_state(
             bookmarksMode: globalThis[Symbol.for('zephium.webkit-bookmarks-compatibility.mode.v1')] ?? '',
             faviconMode: globalThis[Symbol.for('zephium.webkit-favicon-compatibility.mode.v1')] ?? '',
             historyMode: globalThis[Symbol.for('zephium.webkit-history-compatibility.mode.v1')] ?? '',
+            searchMode: globalThis[Symbol.for('zephium.webkit-search-compatibility.mode.v1')] ?? '',
+            sessionsMode: globalThis[Symbol.for('zephium.webkit-sessions-compatibility.mode.v1')] ?? '',
             optionsUrl: document.querySelector('#optionsLink')?.href ?? '',
             dialogVisible: getComputedStyle(document.querySelector('#dialog-body')).display !== 'none',
             missingContentErrorVisible: getComputedStyle(document.querySelector('#not-enabled-error')).display !== 'none',
@@ -1314,7 +1349,9 @@ fn wait_for_popup_state(
                         || (state.runtime_messaging
                             && state.bookmarks_mode == "empty-read-only"
                             && state.favicon_mode == "transparent-fallback"
-                            && state.history_mode == "bounded-recent-search");
+                            && state.history_mode == "bounded-recent-search"
+                            && state.search_mode == "browser-default-current-or-new-tab"
+                            && state.sessions_mode == "recent-current-space-tab-only");
                     if state.ready == "complete"
                         && state.chrome_runtime
                         && state.chrome_runtime_id
@@ -1337,6 +1374,55 @@ fn wait_for_popup_state(
                     .and_then(|url| url.absoluteString())
                     .map(|url| url.to_string()),
             ));
+        }
+        super::drain_run_loop_once(run_loop);
+    }
+}
+
+fn verify_brokered_command_facades(
+    popup: &WKWebView,
+    context: &WKWebExtensionContext,
+    run_loop: &NSRunLoop,
+) -> Result<(), String> {
+    let script = format!(
+        r#"void (async () => {{
+          try {{
+            await globalThis.chrome.search.query({{
+              text: 'zephium extension search',
+              disposition: 'CURRENT_TAB',
+            }});
+            const restored = await globalThis.chrome.sessions.restore(null);
+            document.title = {BROKER_COMMAND_STATE_PREFIX:?} + JSON.stringify({{
+              search: true,
+              sessions: restored === undefined,
+            }});
+          }} catch (error) {{
+            document.title = {BROKER_COMMAND_STATE_PREFIX:?} + JSON.stringify({{
+              search: false,
+              sessions: false,
+            }});
+          }}
+        }})()"#
+    );
+    unsafe {
+        popup.evaluateJavaScript_completionHandler(&NSString::from_str(&script), None);
+    }
+    let deadline = Instant::now() + super::PROBE_TIMEOUT;
+    loop {
+        super::validate_context_errors(context, "Vimium brokered command facade")?;
+        if let Some(title) = unsafe { popup.title() }.map(|title| title.to_string()) {
+            if let Some(payload) = title.strip_prefix(BROKER_COMMAND_STATE_PREFIX) {
+                let state: serde_json::Value = serde_json::from_str(payload).map_err(|error| {
+                    format!("Vimium brokered command state is invalid: {error}")
+                })?;
+                if state == serde_json::json!({"search": true, "sessions": true}) {
+                    return Ok(());
+                }
+                return Err(format!("Vimium brokered command facades failed: {state}"));
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err("Vimium brokered command facades timed out".into());
         }
         super::drain_run_loop_once(run_loop);
     }

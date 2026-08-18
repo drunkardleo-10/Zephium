@@ -269,27 +269,24 @@ struct ProbeNativeMessageContract {
     controller: NonNull<WKWebExtensionController>,
     context: NonNull<WKWebExtensionContext>,
     application_identifier: String,
-    request: String,
-    response: String,
+    exchanges: Box<[(String, String)]>,
     calls: Cell<usize>,
     exact: Cell<bool>,
     failure: RefCell<Option<String>>,
 }
 
 impl ProbeNativeMessageContract {
-    fn new(
+    fn new_sequence(
         controller: &WKWebExtensionController,
         context: &WKWebExtensionContext,
         application_identifier: impl Into<String>,
-        request: impl Into<String>,
-        response: impl Into<String>,
+        exchanges: Vec<(String, String)>,
     ) -> Rc<Self> {
         Rc::new(Self {
             controller: NonNull::from(controller),
             context: NonNull::from(context),
             application_identifier: application_identifier.into(),
-            request: request.into(),
-            response: response.into(),
+            exchanges: exchanges.into_boxed_slice(),
             calls: Cell::new(0),
             exact: Cell::new(false),
             failure: RefCell::new(None),
@@ -304,24 +301,35 @@ impl ProbeNativeMessageContract {
         context: &WKWebExtensionContext,
         reply: &block2::DynBlock<dyn Fn(*mut AnyObject, *mut NSError)>,
     ) {
-        let calls = self.calls.get().saturating_add(1);
-        self.calls.set(calls);
-        let exact = calls == 1
+        let index = self.calls.get();
+        self.calls.set(index.saturating_add(1));
+        let expected = self.exchanges.get(index);
+        let exact = expected.is_some()
             && NonNull::from(controller) == self.controller
             && NonNull::from(context) == self.context
             && application_identifier.is_some_and(|actual| {
                 actual.isEqualToString(&NSString::from_str(&self.application_identifier))
             })
-            && message
-                .downcast_ref::<NSString>()
-                .is_some_and(|actual| actual.isEqualToString(&NSString::from_str(&self.request)));
-        self.exact.set(exact);
+            && message.downcast_ref::<NSString>().is_some_and(|actual| {
+                expected.is_some_and(|(request, _)| {
+                    actual.isEqualToString(&NSString::from_str(request))
+                })
+            });
+        self.exact.set(if index == 0 {
+            exact
+        } else {
+            self.exact.get() && exact
+        });
         if exact {
-            let response = NSString::from_str(&self.response);
-            reply.call((
-                Retained::as_ptr(&response).cast_mut().cast(),
-                std::ptr::null_mut(),
-            ));
+            if let Some((_, response)) = expected {
+                let response = NSString::from_str(response);
+                reply.call((
+                    Retained::as_ptr(&response).cast_mut().cast(),
+                    std::ptr::null_mut(),
+                ));
+            } else {
+                complete_probe_native_message_error(reply);
+            }
         } else {
             let mut failure = self.failure.borrow_mut();
             if failure.is_none() {
@@ -338,10 +346,11 @@ impl ProbeNativeMessageContract {
         if let Some(failure) = self.failure.borrow().as_ref() {
             return Err(format!("native-message contract failed closed: {failure}"));
         }
-        if self.calls.get() != 1 || !self.exact.get() {
+        if self.calls.get() != self.exchanges.len() || !self.exact.get() {
             return Err(format!(
-                "native-message contract did not settle exactly once: calls={}, exact={}",
+                "native-message contract did not settle exact sequence: calls={}, expected={}, exact={}",
                 self.calls.get(),
+                self.exchanges.len(),
                 self.exact.get(),
             ));
         }
@@ -353,8 +362,8 @@ impl ProbeNativeMessageContract {
             return Err(format!("native-message contract failed closed: {failure}"));
         }
         match self.calls.get() {
-            0 => Ok(false),
-            1 if self.exact.get() => Ok(true),
+            calls if calls < self.exchanges.len() && self.exact.get() => Ok(false),
+            calls if calls == self.exchanges.len() && self.exact.get() => Ok(true),
             calls => Err(format!(
                 "native-message contract cardinality drifted: calls={calls}, exact={}",
                 self.exact.get(),

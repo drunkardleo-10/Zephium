@@ -37,6 +37,8 @@ const BOOKMARKS_BRIDGE: &str = "__zephium__/webkit-bookmarks-v1.js";
 const FAVICON_BRIDGE: &str = "__zephium__/webkit-favicon-v1.js";
 const EMPTY_FAVICON: &str = "__zephium__/favicon-empty-v1.svg";
 const HISTORY_BRIDGE: &str = "__zephium__/webkit-history-v1.js";
+const SEARCH_BRIDGE: &str = "__zephium__/webkit-search-v1.js";
+const SESSIONS_BRIDGE: &str = "__zephium__/webkit-sessions-v1.js";
 const WEB_NAVIGATION_BRIDGE: &str = "__zephium__/webkit-web-navigation-v1.js";
 const BACKGROUND_WRAPPER: &str = "__zephium_background_v1.js";
 const MAX_POPUP_HTML_BYTES: u64 = 2 * 1024 * 1024;
@@ -54,6 +56,10 @@ const EMPTY_FAVICON_SOURCE: &str =
     include_str!("../../crates/zephium-extension-package/assets/macos/favicon-empty-v1.svg");
 const HISTORY_BRIDGE_SOURCE: &str =
     include_str!("../../crates/zephium-extension-package/assets/macos/webkit-history-v1.js");
+const SEARCH_BRIDGE_SOURCE: &str =
+    include_str!("../../crates/zephium-extension-package/assets/macos/webkit-search-v1.js");
+const SESSIONS_BRIDGE_SOURCE: &str =
+    include_str!("../../crates/zephium-extension-package/assets/macos/webkit-sessions-v1.js");
 const WEB_NAVIGATION_BRIDGE_SOURCE: &str =
     include_str!("../../crates/zephium-extension-package/assets/macos/webkit-web-navigation-v1.js");
 
@@ -106,6 +112,19 @@ struct TransformPlan {
     history_broker_search: bool,
     empty_bookmarks: bool,
     empty_favicon: bool,
+    default_search: bool,
+    recent_sessions: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct ExtensionBridgePlan {
+    same_document_navigation: bool,
+    history_search: bool,
+    extension_page_messaging: bool,
+    empty_bookmarks: bool,
+    empty_favicon: bool,
+    default_search: bool,
+    recent_sessions: bool,
 }
 
 #[derive(Deserialize)]
@@ -150,6 +169,10 @@ struct CompatibilitySurfaces {
     bookmarks: Option<String>,
     #[serde(default)]
     favicon: Option<String>,
+    #[serde(default)]
+    search: Option<String>,
+    #[serde(default)]
+    sessions: Option<String>,
 }
 
 pub(crate) struct ValidatedCompatibilityReleaseInput {
@@ -263,9 +286,15 @@ pub(crate) fn validate_release_input(
     };
     validate_compatibility_identity(&receipt.source, "source")?;
     validate_compatibility_identity(&receipt.output, "output")?;
-    let (empty_bookmarks, empty_favicon) = validate_receipt_surfaces(&receipt.surfaces, target)?;
-    let (expected_adaptations, expected_limitations) =
-        receipt_contract(target, empty_bookmarks, empty_favicon);
+    let (empty_bookmarks, empty_favicon, default_search, recent_sessions) =
+        validate_receipt_surfaces(&receipt.surfaces, target)?;
+    let (expected_adaptations, expected_limitations) = receipt_contract(
+        target,
+        empty_bookmarks,
+        empty_favicon,
+        default_search,
+        recent_sessions,
+    );
     if receipt.adaptations != expected_adaptations || receipt.limitations != expected_limitations {
         return Err("compatibility receipt adaptation contract drifted".into());
     }
@@ -319,7 +348,7 @@ fn validate_compatibility_identity(
 fn validate_receipt_surfaces(
     surfaces: &CompatibilitySurfaces,
     target: ArtifactTarget,
-) -> Result<(bool, bool), String> {
+) -> Result<(bool, bool, bool, bool), String> {
     let background_valid = matches!(
         surfaces.background.as_str(),
         "absent" | "classic-wrapper" | "module-wrapper"
@@ -344,10 +373,12 @@ fn validate_receipt_surfaces(
                 || surfaces.extension_pages.is_some()
                 || surfaces.bookmarks.is_some()
                 || surfaces.favicon.is_some()
+                || surfaces.search.is_some()
+                || surfaces.sessions.is_some()
             {
                 return Err("native compatibility receipt declared brokered surfaces".into());
             }
-            Ok((false, false))
+            Ok((false, false, false, false))
         }
         ArtifactTarget::NativeBrokeredV1 => {
             if surfaces.background == "absent"
@@ -368,7 +399,22 @@ fn validate_receipt_surfaces(
                 Some("transparent-fallback") => true,
                 _ => return Err("compatibility receipt favicon surface is invalid".into()),
             };
-            Ok((empty_bookmarks, empty_favicon))
+            let default_search = match surfaces.search.as_deref() {
+                None => false,
+                Some("browser-default-current-or-new-tab") => true,
+                _ => return Err("compatibility receipt search surface is invalid".into()),
+            };
+            let recent_sessions = match surfaces.sessions.as_deref() {
+                None => false,
+                Some("recent-current-space-tab-only") => true,
+                _ => return Err("compatibility receipt sessions surface is invalid".into()),
+            };
+            Ok((
+                empty_bookmarks,
+                empty_favicon,
+                default_search,
+                recent_sessions,
+            ))
         }
     }
 }
@@ -377,6 +423,8 @@ fn receipt_contract(
     target: ArtifactTarget,
     empty_bookmarks: bool,
     empty_favicon: bool,
+    default_search: bool,
+    recent_sessions: bool,
 ) -> (Vec<&'static str>, Vec<&'static str>) {
     let mut adaptations = vec![
         "native-api-identity-preservation-v1",
@@ -404,6 +452,20 @@ fn receipt_contract(
     if empty_favicon {
         adaptations.push("transparent-favicon-url-fallback-v1");
         limitations.push("page-favicons-render-transparent");
+    }
+    if default_search {
+        adaptations.push("browser-default-search-broker-v1");
+        limitations.extend([
+            "search-query-current-or-new-tab-only",
+            "search-query-explicit-window-unsupported",
+        ]);
+    }
+    if recent_sessions {
+        adaptations.push("recent-tab-session-restore-broker-v1");
+        limitations.extend([
+            "sessions-restore-most-recent-current-space-tab-only",
+            "sessions-enumeration-unsupported",
+        ]);
     }
     if target.requires_history_broker() {
         limitations.retain(|limitation| *limitation != "non-action-extension-pages-not-adapted");
@@ -506,6 +568,20 @@ fn materialize_target(
             RUNTIME_MESSAGING_BRIDGE_SOURCE.as_bytes(),
         )?;
     }
+    if plan.default_search {
+        write_new_file(
+            &staged_extension,
+            SEARCH_BRIDGE,
+            SEARCH_BRIDGE_SOURCE.as_bytes(),
+        )?;
+    }
+    if plan.recent_sessions {
+        write_new_file(
+            &staged_extension,
+            SESSIONS_BRIDGE,
+            SESSIONS_BRIDGE_SOURCE.as_bytes(),
+        )?;
+    }
     if plan.history_broker_search {
         write_new_file(
             &staged_extension,
@@ -526,8 +602,13 @@ fn materialize_target(
 
     let generated = extension_tree::build_tree_index(&staged_extension)?;
     write_new_file(staging.path(), ARTIFACT_TREE_INDEX, &generated.bytes)?;
-    let (adaptations, limitations) =
-        receipt_contract(target, plan.empty_bookmarks, plan.empty_favicon);
+    let (adaptations, limitations) = receipt_contract(
+        target,
+        plan.empty_bookmarks,
+        plan.empty_favicon,
+        plan.default_search,
+        plan.recent_sessions,
+    );
     let mut surfaces = serde_json::json!({
         "background": plan.worker.label(),
         "isolated_content_scripts": plan.isolated_content_scripts,
@@ -559,6 +640,18 @@ fn materialize_target(
             surfaces.insert(
                 "favicon".to_owned(),
                 Value::String("transparent-fallback".to_owned()),
+            );
+        }
+        if plan.default_search {
+            surfaces.insert(
+                "search".to_owned(),
+                Value::String("browser-default-current-or-new-tab".to_owned()),
+            );
+        }
+        if plan.recent_sessions {
+            surfaces.insert(
+                "sessions".to_owned(),
+                Value::String("recent-current-space-tab-only".to_owned()),
             );
         }
     }
@@ -641,6 +734,10 @@ fn build_plan(
         history_broker_search && declares_permission(&root, "permissions", "bookmarks")?;
     let empty_favicon =
         history_broker_search && declares_permission(&root, "permissions", "favicon")?;
+    let default_search =
+        history_broker_search && declares_permission(&root, "permissions", "search")?;
+    let recent_sessions =
+        history_broker_search && declares_permission(&root, "permissions", "sessions")?;
     if history_broker_search {
         if !declares_permission(&root, "permissions", "history")? {
             return Err("brokered history compatibility requires the history permission".into());
@@ -665,26 +762,31 @@ fn build_plan(
     let bridge_same_document_navigation =
         declares_permission(&root, "permissions", "webNavigation")?
             && root.get("background").is_some();
+    let bridges = ExtensionBridgePlan {
+        same_document_navigation: bridge_same_document_navigation,
+        history_search: history_broker_search,
+        extension_page_messaging: history_broker_search,
+        empty_bookmarks,
+        empty_favicon,
+        default_search,
+        recent_sessions,
+    };
     let content_scripts = adapt_content_scripts(
         &mut root,
         index,
-        bridge_same_document_navigation,
-        empty_favicon,
+        bridges.same_document_navigation,
+        bridges.empty_favicon,
     )?;
     let same_document_navigation_routes = content_scripts.same_document_navigation_routes;
-    let (worker, background_wrapper) = adapt_background(
-        &mut root,
-        index,
-        same_document_navigation_routes != 0,
-        history_broker_search,
-        history_broker_search,
-        empty_bookmarks,
-        empty_favicon,
-    )?;
+    let background_bridges = ExtensionBridgePlan {
+        same_document_navigation: same_document_navigation_routes != 0,
+        ..bridges
+    };
+    let (worker, background_wrapper) = adapt_background(&mut root, index, background_bridges)?;
     let popup_path = action_popup_path(&root)?;
     let action_popup = popup_path.is_some();
     let extension_pages = if history_broker_search {
-        adapt_extension_pages(source_root, index, &root, empty_bookmarks, empty_favicon)?
+        adapt_extension_pages(source_root, index, &root, bridges)?
     } else {
         popup_path
             .clone()
@@ -698,7 +800,7 @@ fn build_plan(
                     return Err("action popup exceeds the compatibility HTML ceiling".into());
                 }
                 let source = read_indexed_file(source_root, indexed)?;
-                inject_extension_page_preludes(&source, false, false, false, false)
+                inject_extension_page_preludes(&source, ExtensionBridgePlan::default())
                     .map(|bytes| (path, bytes))
             })
             .transpose()?
@@ -730,6 +832,8 @@ fn build_plan(
         history_broker_search,
         empty_bookmarks,
         empty_favicon,
+        default_search,
+        recent_sessions,
     })
 }
 
@@ -946,11 +1050,7 @@ fn remove_file_scheme_patterns(
 fn adapt_background(
     root: &mut Map<String, Value>,
     tree: &CanonicalExtensionTreeIndex,
-    bridge_same_document_navigation: bool,
-    bridge_history_search: bool,
-    bridge_extension_page_messaging: bool,
-    bridge_empty_bookmarks: bool,
-    bridge_empty_favicon: bool,
+    bridges: ExtensionBridgePlan,
 ) -> Result<(WorkerKind, Option<Vec<u8>>), String> {
     let Some(background) = root.get_mut("background") else {
         return Ok((WorkerKind::Absent, None));
@@ -978,19 +1078,32 @@ fn adapt_background(
     let wrapper = match kind {
         WorkerKind::Classic => {
             let prelude = js_string(&format!("/{API_PRELUDE}"))?;
-            let messaging = bridge_extension_page_messaging
+            let messaging = bridges
+                .extension_page_messaging
                 .then(|| js_string(&format!("/{RUNTIME_MESSAGING_BRIDGE}")))
                 .transpose()?;
-            let bookmarks = bridge_empty_bookmarks
+            let bookmarks = bridges
+                .empty_bookmarks
                 .then(|| js_string(&format!("/{BOOKMARKS_BRIDGE}")))
                 .transpose()?;
-            let favicon = bridge_empty_favicon
+            let favicon = bridges
+                .empty_favicon
                 .then(|| js_string(&format!("/{FAVICON_BRIDGE}")))
                 .transpose()?;
-            let history = bridge_history_search
+            let history = bridges
+                .history_search
                 .then(|| js_string(&format!("/{HISTORY_BRIDGE}")))
                 .transpose()?;
-            let navigation = bridge_same_document_navigation
+            let search = bridges
+                .default_search
+                .then(|| js_string(&format!("/{SEARCH_BRIDGE}")))
+                .transpose()?;
+            let sessions = bridges
+                .recent_sessions
+                .then(|| js_string(&format!("/{SESSIONS_BRIDGE}")))
+                .transpose()?;
+            let navigation = bridges
+                .same_document_navigation
                 .then(|| js_string(&format!("/{WEB_NAVIGATION_BRIDGE}")))
                 .transpose()?;
             let original = js_string(&format!("/{original}"))?;
@@ -1000,6 +1113,8 @@ fn adapt_background(
                 favicon,
                 messaging,
                 history,
+                search,
+                sessions,
                 navigation,
                 Some(original),
             ]
@@ -1011,19 +1126,32 @@ fn adapt_background(
         }
         WorkerKind::Module => {
             let prelude = js_string(&format!("./{API_PRELUDE}"))?;
-            let messaging = bridge_extension_page_messaging
+            let messaging = bridges
+                .extension_page_messaging
                 .then(|| js_string(&format!("./{RUNTIME_MESSAGING_BRIDGE}")))
                 .transpose()?;
-            let bookmarks = bridge_empty_bookmarks
+            let bookmarks = bridges
+                .empty_bookmarks
                 .then(|| js_string(&format!("./{BOOKMARKS_BRIDGE}")))
                 .transpose()?;
-            let favicon = bridge_empty_favicon
+            let favicon = bridges
+                .empty_favicon
                 .then(|| js_string(&format!("./{FAVICON_BRIDGE}")))
                 .transpose()?;
-            let history = bridge_history_search
+            let history = bridges
+                .history_search
                 .then(|| js_string(&format!("./{HISTORY_BRIDGE}")))
                 .transpose()?;
-            let navigation = bridge_same_document_navigation
+            let search = bridges
+                .default_search
+                .then(|| js_string(&format!("./{SEARCH_BRIDGE}")))
+                .transpose()?;
+            let sessions = bridges
+                .recent_sessions
+                .then(|| js_string(&format!("./{SESSIONS_BRIDGE}")))
+                .transpose()?;
+            let navigation = bridges
+                .same_document_navigation
                 .then(|| js_string(&format!("./{WEB_NAVIGATION_BRIDGE}")))
                 .transpose()?;
             let original = js_string(&format!("./{original}"))?;
@@ -1039,6 +1167,12 @@ fn adapt_background(
             }
             if let Some(history) = history {
                 wrapper.push_str(&format!("import {history};\n"));
+            }
+            if let Some(search) = search {
+                wrapper.push_str(&format!("import {search};\n"));
+            }
+            if let Some(sessions) = sessions {
+                wrapper.push_str(&format!("import {sessions};\n"));
             }
             if let Some(navigation) = navigation {
                 wrapper.push_str(&format!("import {navigation};\n"));
@@ -1089,9 +1223,10 @@ fn adapt_extension_pages(
     source_root: &Path,
     tree: &CanonicalExtensionTreeIndex,
     manifest: &Map<String, Value>,
-    bridge_empty_bookmarks: bool,
-    bridge_empty_favicon: bool,
+    mut bridges: ExtensionBridgePlan,
 ) -> Result<Vec<(String, Vec<u8>)>, String> {
+    bridges.extension_page_messaging = true;
+    bridges.history_search = true;
     let sandboxed = sandbox_page_keys(manifest, tree)?;
     let mut pages = Vec::new();
     for indexed in tree.files() {
@@ -1107,14 +1242,8 @@ fn adapt_extension_pages(
             ));
         }
         let source = read_indexed_file(source_root, indexed)?;
-        let adapted = inject_extension_page_preludes(
-            &source,
-            bridge_empty_bookmarks,
-            bridge_empty_favicon,
-            true,
-            true,
-        )
-        .map_err(|error| format!("cannot adapt extension page {path}: {error}"))?;
+        let adapted = inject_extension_page_preludes(&source, bridges)
+            .map_err(|error| format!("cannot adapt extension page {path}: {error}"))?;
         pages.push((path.to_owned(), adapted));
     }
     if pages.is_empty() {
@@ -1162,28 +1291,31 @@ fn sandbox_page_keys(
 
 fn inject_extension_page_preludes(
     source: &[u8],
-    bridge_empty_bookmarks: bool,
-    bridge_empty_favicon: bool,
-    bridge_runtime_messaging: bool,
-    bridge_history_search: bool,
+    bridges: ExtensionBridgePlan,
 ) -> Result<Vec<u8>, String> {
     let source = std::str::from_utf8(source)
         .map_err(|_| "extension page must be UTF-8 for deterministic adaptation".to_owned())?;
     let insertion = explicit_head_end(source)?;
     let mut tags = format!("<script src=\"/{API_PRELUDE}\"></script>");
-    if bridge_empty_bookmarks {
+    if bridges.empty_bookmarks {
         tags.push_str(&format!("<script src=\"/{BOOKMARKS_BRIDGE}\"></script>"));
     }
-    if bridge_empty_favicon {
+    if bridges.empty_favicon {
         tags.push_str(&format!("<script src=\"/{FAVICON_BRIDGE}\"></script>"));
     }
-    if bridge_runtime_messaging {
+    if bridges.extension_page_messaging {
         tags.push_str(&format!(
             "<script src=\"/{RUNTIME_MESSAGING_BRIDGE}\"></script>"
         ));
     }
-    if bridge_history_search {
+    if bridges.history_search {
         tags.push_str(&format!("<script src=\"/{HISTORY_BRIDGE}\"></script>"));
+    }
+    if bridges.default_search {
+        tags.push_str(&format!("<script src=\"/{SEARCH_BRIDGE}\"></script>"));
+    }
+    if bridges.recent_sessions {
+        tags.push_str(&format!("<script src=\"/{SESSIONS_BRIDGE}\"></script>"));
     }
     let mut output = String::with_capacity(source.len().saturating_add(tags.len()));
     output.push_str(&source[..insertion]);
@@ -1322,12 +1454,16 @@ fn enforce_output_budgets(
         + (usize::from(plan.empty_favicon) * 2)
         + usize::from(plan.history_broker_search)
         + usize::from(plan.history_broker_search)
+        + usize::from(plan.default_search)
+        + usize::from(plan.recent_sessions)
         + usize::from(plan.same_document_navigation_routes != 0);
     let added_entries = 3_usize
         + usize::from(plan.empty_bookmarks)
         + (usize::from(plan.empty_favicon) * 2)
         + usize::from(plan.history_broker_search)
         + usize::from(plan.history_broker_search)
+        + usize::from(plan.default_search)
+        + usize::from(plan.recent_sessions)
         + usize::from(plan.same_document_navigation_routes != 0);
     if source.files().len().saturating_add(added_files) > MAX_EXTENSION_TREE_FILES
         || source.total_entry_count().saturating_add(added_entries) > MAX_EXTENSION_TREE_ENTRIES
@@ -1347,6 +1483,10 @@ fn enforce_output_budgets(
             .then_some(RUNTIME_MESSAGING_BRIDGE_SOURCE.as_bytes()),
         plan.history_broker_search
             .then_some(HISTORY_BRIDGE_SOURCE.as_bytes()),
+        plan.default_search
+            .then_some(SEARCH_BRIDGE_SOURCE.as_bytes()),
+        plan.recent_sessions
+            .then_some(SESSIONS_BRIDGE_SOURCE.as_bytes()),
         (plan.same_document_navigation_routes != 0)
             .then_some(WEB_NAVIGATION_BRIDGE_SOURCE.as_bytes()),
         plan.background_wrapper.as_deref(),
@@ -1416,6 +1556,20 @@ fn enforce_output_budgets(
         .and_then(|bytes| {
             bytes.checked_add(if plan.history_broker_search {
                 HISTORY_BRIDGE_SOURCE.len() as u64
+            } else {
+                0
+            })
+        })
+        .and_then(|bytes| {
+            bytes.checked_add(if plan.default_search {
+                SEARCH_BRIDGE_SOURCE.len() as u64
+            } else {
+                0
+            })
+        })
+        .and_then(|bytes| {
+            bytes.checked_add(if plan.recent_sessions {
+                SESSIONS_BRIDGE_SOURCE.len() as u64
             } else {
                 0
             })
@@ -1812,7 +1966,14 @@ mod tests {
         let manifest_path = source.join("manifest.json");
         let mut manifest: Value =
             serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
-        manifest["permissions"] = serde_json::json!(["history", "storage", "bookmarks", "favicon"]);
+        manifest["permissions"] = serde_json::json!([
+            "history",
+            "storage",
+            "bookmarks",
+            "favicon",
+            "search",
+            "sessions"
+        ]);
         manifest["sandbox"] = serde_json::json!({"pages":["ui/sandbox.html"]});
         fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
         write(
@@ -1850,6 +2011,8 @@ mod tests {
                 "storage",
                 "bookmarks",
                 "favicon",
+                "search",
+                "sessions",
                 "nativeMessaging"
             ])
         );
@@ -1857,7 +2020,7 @@ mod tests {
         assert_eq!(
             wrapper,
             format!(
-                "import \"./{API_PRELUDE}\";\nimport \"./{BOOKMARKS_BRIDGE}\";\nimport \"./{FAVICON_BRIDGE}\";\nimport \"./{RUNTIME_MESSAGING_BRIDGE}\";\nimport \"./{HISTORY_BRIDGE}\";\nimport \"./worker.js\";\n"
+                "import \"./{API_PRELUDE}\";\nimport \"./{BOOKMARKS_BRIDGE}\";\nimport \"./{FAVICON_BRIDGE}\";\nimport \"./{RUNTIME_MESSAGING_BRIDGE}\";\nimport \"./{HISTORY_BRIDGE}\";\nimport \"./{SEARCH_BRIDGE}\";\nimport \"./{SESSIONS_BRIDGE}\";\nimport \"./worker.js\";\n"
             )
         );
         assert_eq!(
@@ -1880,13 +2043,21 @@ mod tests {
             fs::read(extension.join(HISTORY_BRIDGE)).unwrap(),
             HISTORY_BRIDGE_SOURCE.as_bytes()
         );
+        assert_eq!(
+            fs::read(extension.join(SEARCH_BRIDGE)).unwrap(),
+            SEARCH_BRIDGE_SOURCE.as_bytes()
+        );
+        assert_eq!(
+            fs::read(extension.join(SESSIONS_BRIDGE)).unwrap(),
+            SESSIONS_BRIDGE_SOURCE.as_bytes()
+        );
         let popup = fs::read_to_string(extension.join("ui/popup.html")).unwrap();
         assert!(popup.contains(&format!(
-            "<head><script src=\"/{API_PRELUDE}\"></script><script src=\"/{BOOKMARKS_BRIDGE}\"></script><script src=\"/{FAVICON_BRIDGE}\"></script><script src=\"/{RUNTIME_MESSAGING_BRIDGE}\"></script><script src=\"/{HISTORY_BRIDGE}\"></script>"
+            "<head><script src=\"/{API_PRELUDE}\"></script><script src=\"/{BOOKMARKS_BRIDGE}\"></script><script src=\"/{FAVICON_BRIDGE}\"></script><script src=\"/{RUNTIME_MESSAGING_BRIDGE}\"></script><script src=\"/{HISTORY_BRIDGE}\"></script><script src=\"/{SEARCH_BRIDGE}\"></script><script src=\"/{SESSIONS_BRIDGE}\"></script>"
         )));
         let options = fs::read_to_string(extension.join("ui/options.html")).unwrap();
         assert!(options.contains(&format!(
-            "<head><script src=\"/{API_PRELUDE}\"></script><script src=\"/{BOOKMARKS_BRIDGE}\"></script><script src=\"/{FAVICON_BRIDGE}\"></script><script src=\"/{RUNTIME_MESSAGING_BRIDGE}\"></script><script src=\"/{HISTORY_BRIDGE}\"></script>"
+            "<head><script src=\"/{API_PRELUDE}\"></script><script src=\"/{BOOKMARKS_BRIDGE}\"></script><script src=\"/{FAVICON_BRIDGE}\"></script><script src=\"/{RUNTIME_MESSAGING_BRIDGE}\"></script><script src=\"/{HISTORY_BRIDGE}\"></script><script src=\"/{SEARCH_BRIDGE}\"></script><script src=\"/{SESSIONS_BRIDGE}\"></script>"
         )));
         assert_eq!(
             fs::read_to_string(extension.join("ui/sandbox.html")).unwrap(),
@@ -1911,6 +2082,14 @@ mod tests {
             metadata["surfaces"]["favicon"],
             serde_json::json!("transparent-fallback")
         );
+        assert_eq!(
+            metadata["surfaces"]["search"],
+            serde_json::json!("browser-default-current-or-new-tab")
+        );
+        assert_eq!(
+            metadata["surfaces"]["sessions"],
+            serde_json::json!("recent-current-space-tab-only")
+        );
         assert!(metadata["adaptations"]
             .as_array()
             .unwrap()
@@ -1929,11 +2108,23 @@ mod tests {
         .unwrap();
         assert_eq!(
             native_manifest["permissions"],
-            serde_json::json!(["history", "storage", "bookmarks", "favicon"])
+            serde_json::json!([
+                "history",
+                "storage",
+                "bookmarks",
+                "favicon",
+                "search",
+                "sessions"
+            ])
         );
         assert!(!native
             .join(ARTIFACT_EXTENSION)
             .join(HISTORY_BRIDGE)
+            .exists());
+        assert!(!native.join(ARTIFACT_EXTENSION).join(SEARCH_BRIDGE).exists());
+        assert!(!native
+            .join(ARTIFACT_EXTENSION)
+            .join(SESSIONS_BRIDGE)
             .exists());
     }
 
@@ -2020,7 +2211,7 @@ mod tests {
             serde_json::json!({"service_worker":"workers/original.js"}),
         );
         let (kind, wrapper) =
-            adapt_background(&mut root, &tree, false, false, false, false, false).unwrap();
+            adapt_background(&mut root, &tree, ExtensionBridgePlan::default()).unwrap();
         assert_eq!(kind, WorkerKind::Classic);
         assert_eq!(
             String::from_utf8(wrapper.unwrap()).unwrap(),
@@ -2028,7 +2219,7 @@ mod tests {
         );
         let html = b"<!-- lead --><html lang='en'><head data-value='>'><title>x</title></head>";
         let adapted = String::from_utf8(
-            inject_extension_page_preludes(html, false, false, false, false).unwrap(),
+            inject_extension_page_preludes(html, ExtensionBridgePlan::default()).unwrap(),
         )
         .unwrap();
         assert!(adapted.contains(&format!(

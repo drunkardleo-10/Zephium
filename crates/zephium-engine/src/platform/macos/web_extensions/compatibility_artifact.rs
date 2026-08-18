@@ -21,6 +21,8 @@ pub(super) const BOOKMARKS_BRIDGE: &str = "__zephium__/webkit-bookmarks-v1.js";
 pub(super) const FAVICON_BRIDGE: &str = "__zephium__/webkit-favicon-v1.js";
 pub(super) const EMPTY_FAVICON: &str = "__zephium__/favicon-empty-v1.svg";
 pub(super) const HISTORY_BRIDGE: &str = "__zephium__/webkit-history-v1.js";
+pub(super) const SEARCH_BRIDGE: &str = "__zephium__/webkit-search-v1.js";
+pub(super) const SESSIONS_BRIDGE: &str = "__zephium__/webkit-sessions-v1.js";
 pub(super) const WEB_NAVIGATION_BRIDGE: &str = "__zephium__/webkit-web-navigation-v1.js";
 pub(super) const BACKGROUND_WRAPPER: &str = "__zephium_background_v1.js";
 
@@ -103,6 +105,8 @@ pub(super) struct ArtifactSurfaces {
     pub(super) extension_pages: usize,
     pub(super) empty_bookmarks: bool,
     pub(super) empty_favicon: bool,
+    pub(super) default_search: bool,
+    pub(super) recent_sessions: bool,
 }
 
 #[derive(Debug)]
@@ -156,6 +160,10 @@ struct Surfaces {
     bookmarks: Option<String>,
     #[serde(default)]
     favicon: Option<String>,
+    #[serde(default)]
+    search: Option<String>,
+    #[serde(default)]
+    sessions: Option<String>,
 }
 
 pub(super) fn validate(root: &Path) -> Result<ValidatedCompatibilityArtifact, String> {
@@ -188,7 +196,10 @@ pub(super) fn validate(root: &Path) -> Result<ValidatedCompatibilityArtifact, St
     };
     let bookmarked = metadata.surfaces.bookmarks.as_deref() == Some("empty-read-only");
     let favicon = metadata.surfaces.favicon.as_deref() == Some("transparent-fallback");
-    let (adaptations, limitations) = expected_contract(target, bookmarked, favicon)?;
+    let search = metadata.surfaces.search.as_deref() == Some("browser-default-current-or-new-tab");
+    let sessions = metadata.surfaces.sessions.as_deref() == Some("recent-current-space-tab-only");
+    let (adaptations, limitations) =
+        expected_contract(target, bookmarked, favicon, search, sessions)?;
     if metadata.adaptations != adaptations || metadata.limitations != limitations {
         return Err("compatibility artifact adaptation contract drifted".into());
     }
@@ -228,9 +239,11 @@ fn expected_contract(
     target: CompatibilityArtifactTarget,
     bookmarked: bool,
     favicon: bool,
+    search: bool,
+    sessions: bool,
 ) -> Result<(Vec<&'static str>, Vec<&'static str>), String> {
     if target == CompatibilityArtifactTarget::NativeV3 {
-        if bookmarked || favicon {
+        if bookmarked || favicon || search || sessions {
             return Err("native compatibility artifact declared a brokered surface".into());
         }
         return Ok((NATIVE_ADAPTATIONS.to_vec(), NATIVE_LIMITATIONS.to_vec()));
@@ -260,6 +273,20 @@ fn expected_contract(
     if favicon {
         adaptations.push("transparent-favicon-url-fallback-v1");
         limitations.push("page-favicons-render-transparent");
+    }
+    if search {
+        adaptations.push("browser-default-search-broker-v1");
+        limitations.extend([
+            "search-query-current-or-new-tab-only",
+            "search-query-explicit-window-unsupported",
+        ]);
+    }
+    if sessions {
+        adaptations.push("recent-tab-session-restore-broker-v1");
+        limitations.extend([
+            "sessions-restore-most-recent-current-space-tab-only",
+            "sessions-enumeration-unsupported",
+        ]);
     }
     adaptations.extend([
         "extension-page-runtime-messaging-session-v1",
@@ -376,6 +403,23 @@ fn validate_surfaces(
         (CompatibilityArtifactTarget::NativeBrokeredV1, Some("transparent-fallback")) => true,
         _ => return Err("compatibility artifact favicon surface is invalid".into()),
     };
+    let default_search = match (target, surfaces.search.as_deref()) {
+        (CompatibilityArtifactTarget::NativeV3, None)
+        | (CompatibilityArtifactTarget::NativeBrokeredV1, None) => false,
+        (
+            CompatibilityArtifactTarget::NativeBrokeredV1,
+            Some("browser-default-current-or-new-tab"),
+        ) => true,
+        _ => return Err("compatibility artifact search surface is invalid".into()),
+    };
+    let recent_sessions = match (target, surfaces.sessions.as_deref()) {
+        (CompatibilityArtifactTarget::NativeV3, None)
+        | (CompatibilityArtifactTarget::NativeBrokeredV1, None) => false,
+        (CompatibilityArtifactTarget::NativeBrokeredV1, Some("recent-current-space-tab-only")) => {
+            true
+        }
+        _ => return Err("compatibility artifact sessions surface is invalid".into()),
+    };
     Ok(ArtifactSurfaces {
         background,
         isolated_content_scripts: surfaces.isolated_content_scripts,
@@ -387,6 +431,8 @@ fn validate_surfaces(
         extension_pages,
         empty_bookmarks,
         empty_favicon,
+        default_search,
+        recent_sessions,
     })
 }
 
