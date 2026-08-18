@@ -222,10 +222,25 @@
     }
   };
 
-  const sourceLabel = (source: ExtensionManagementSourceView) => {
+  const verifiedDateFormatter = new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeZone: "UTC",
+  });
+
+  const verifiedCatalogDate = (value: string | null) => {
+    if (value === null || !/^\d+$/.test(value)) return null;
+    const seconds = Number(value);
+    if (!Number.isSafeInteger(seconds) || seconds <= 0) return null;
+    const date = new Date(seconds * 1_000);
+    return Number.isNaN(date.getTime()) ? null : verifiedDateFormatter.format(date);
+  };
+
+  const sourceLabel = (source: ExtensionManagementSourceView, verifiedUnix: string | null) => {
     switch (source) {
-      case "zephium_verified":
-        return "Zephium Verified";
+      case "zephium_verified": {
+        const date = verifiedCatalogDate(verifiedUnix);
+        return date === null ? "Zephium Verified" : `Zephium Verified · ${date}`;
+      }
       case "external_compatibility":
         return "External compatibility";
       case "developer_local":
@@ -385,7 +400,7 @@
                           class:text-accent={entry.source === "zephium_verified"}
                           class:text-warning={entry.source === "developer_local"}
                         >
-                          {sourceLabel(entry.source)}
+                          {sourceLabel(entry.source, entry.verified_catalog_unix)}
                         </span>
                       </div>
                       <button
@@ -497,7 +512,7 @@
                         class:text-accent={candidate.source === "zephium_verified"}
                         class:text-warning={candidate.source === "developer_local"}
                       >
-                        {sourceLabel(candidate.source)}
+                        {sourceLabel(candidate.source, candidate.verified_catalog_unix)}
                       </span>
                       {#if candidate.description !== null}
                         <p class="mt-1 text-[10.5px] leading-4 text-muted">

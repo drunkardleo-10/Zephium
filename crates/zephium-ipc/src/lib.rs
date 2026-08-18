@@ -173,6 +173,8 @@ pub struct ExtensionManagementEntryView {
     pub author: Option<String>,
     pub version: String,
     pub source: ExtensionManagementSourceView,
+    /// Decimal Unix seconds of the authenticated Verified catalog release.
+    pub verified_catalog_unix: Option<String>,
     pub runtime: ExtensionManagementRuntimeView,
     /// Present only when `runtime` is `active`.
     pub runtime_generation: Option<String>,
@@ -193,6 +195,8 @@ pub struct ExtensionInstallCandidateView {
     pub author: Option<String>,
     pub version: String,
     pub source: ExtensionManagementSourceView,
+    /// Decimal Unix seconds of the authenticated Verified catalog release.
+    pub verified_catalog_unix: Option<String>,
     pub required_api: Vec<String>,
     pub required_hosts: Vec<String>,
     /// Canonically ordered optional API grants. The frontend returns only

@@ -31,6 +31,7 @@ fn extension_management_catalog(
         Some("Zephium tests".into()),
         "1.0.0",
         zephium_core::ports::extensions::ExtensionManagementSource::ZephiumVerified,
+        Some(1),
         runtime,
         zephium_core::ports::extensions::ExtensionManagementGrantState::Uninitialized,
         zephium_core::ports::extensions::ExtensionManagementCompatibility::Compatible,
@@ -90,6 +91,7 @@ fn extension_install_candidate_catalog(
         Some("Zephium tests".into()),
         "1.0.0",
         zephium_core::ports::extensions::ExtensionManagementSource::ExternalCompatibility,
+        None,
         vec!["storage".into(), "webRequest".into()],
         vec!["<all_urls>".into()],
         vec!["notifications".into(), "tabs".into()],
@@ -674,6 +676,7 @@ fn extension_install_uses_only_the_retained_authenticated_candidate() {
         ready.candidates[0].source,
         zephium_ipc::ExtensionManagementSourceView::ExternalCompatibility
     );
+    assert_eq!(ready.candidates[0].verified_catalog_unix, None);
     assert!(ready.candidates[0].supports_file_access);
     assert_eq!(ready.candidates[0].required_api, ["storage", "webRequest"]);
     assert_eq!(ready.candidates[0].required_hosts, ["<all_urls>"]);

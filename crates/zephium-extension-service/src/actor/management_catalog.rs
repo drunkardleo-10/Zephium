@@ -161,6 +161,7 @@ pub(super) fn load(
             candidate.author().map(Into::into),
             candidate.version(),
             ExtensionManagementSource::ZephiumVerified,
+            Some(candidate.catalog_created_unix()),
             runtime_state,
             grants,
             compatibility,
@@ -195,6 +196,7 @@ pub(super) fn load(
             candidate.author().map(Into::into),
             candidate.version(),
             ExtensionManagementSource::ZephiumVerified,
+            Some(candidate.catalog_created_unix()),
             declarations
                 .required_api()
                 .names()

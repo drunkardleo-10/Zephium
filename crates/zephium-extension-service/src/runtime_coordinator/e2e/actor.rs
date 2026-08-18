@@ -112,6 +112,7 @@ fn actor_provisions_acquired_package_from_empty_repository_then_installs_and_run
         candidate.source(),
         ExtensionManagementSource::ZephiumVerified
     );
+    assert_eq!(candidate.verified_catalog_unix(), Some(2));
 
     let installed = ExtensionServiceLifecycle::install_until(
         &mut owner,
@@ -589,6 +590,7 @@ fn actor_installs_authenticated_candidate_atomically_then_activates_it() {
         candidate.source(),
         ExtensionManagementSource::ZephiumVerified
     );
+    assert_eq!(candidate.verified_catalog_unix(), Some(2));
     assert!(!candidate.supports_file_access());
     assert!(candidate
         .required_api()

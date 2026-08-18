@@ -1722,6 +1722,7 @@ fn manifest_binding_bootstrap_is_complete_nominal_read_only_and_fail_closed() {
     let [candidate] = install_candidates.candidates() else {
         panic!("one authenticated install candidate expected");
     };
+    assert_eq!(candidate.catalog_created_unix(), 2);
     assert_eq!(candidate.package(), active_eligibility.package());
     assert_eq!(
         candidate.manifest_arc().as_ref(),

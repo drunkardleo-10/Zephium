@@ -354,6 +354,8 @@ export type ExtensionInstallCandidateView = {
 	author: string | null,
 	version: string,
 	source: ExtensionManagementSourceView,
+	/**  Decimal Unix seconds of the authenticated Verified catalog release. */
+	verified_catalog_unix: string | null,
 	required_api: string[],
 	required_hosts: string[],
 	/**
@@ -394,6 +396,8 @@ export type ExtensionManagementEntryView = {
 	author: string | null,
 	version: string,
 	source: ExtensionManagementSourceView,
+	/**  Decimal Unix seconds of the authenticated Verified catalog release. */
+	verified_catalog_unix: string | null,
 	runtime: ExtensionManagementRuntimeView,
 	/**  Present only when `runtime` is `active`. */
 	runtime_generation: string | null,

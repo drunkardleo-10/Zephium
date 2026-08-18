@@ -176,6 +176,7 @@ pub struct ExtensionManagementEntry {
     author: Option<Box<str>>,
     version: Box<str>,
     source: ExtensionManagementSource,
+    verified_catalog_unix: Option<u64>,
     runtime: ExtensionManagementRuntimeState,
     grants: ExtensionManagementGrantState,
     compatibility: ExtensionManagementCompatibility,
@@ -197,6 +198,7 @@ impl ExtensionManagementEntry {
         author: Option<Box<str>>,
         version: impl Into<Box<str>>,
         source: ExtensionManagementSource,
+        verified_catalog_unix: Option<u64>,
         runtime: ExtensionManagementRuntimeState,
         grants: ExtensionManagementGrantState,
         compatibility: ExtensionManagementCompatibility,
@@ -209,6 +211,7 @@ impl ExtensionManagementEntry {
         if version.is_empty() || !version.is_ascii() {
             return Err(ExtensionManagementProjectionError::InvalidDisplayText);
         }
+        validate_source(source, verified_catalog_unix)?;
         if let Some(description) = description.as_deref() {
             validate_display_text(description, 132, false)?;
         }
@@ -247,6 +250,7 @@ impl ExtensionManagementEntry {
             author,
             version,
             source,
+            verified_catalog_unix,
             runtime,
             grants,
             compatibility,
@@ -277,6 +281,10 @@ impl ExtensionManagementEntry {
 
     pub const fn source(&self) -> ExtensionManagementSource {
         self.source
+    }
+
+    pub const fn verified_catalog_unix(&self) -> Option<u64> {
+        self.verified_catalog_unix
     }
 
     pub const fn runtime(&self) -> ExtensionManagementRuntimeState {
@@ -310,6 +318,7 @@ pub struct ExtensionInstallCandidateEntry {
     author: Option<Box<str>>,
     version: Box<str>,
     source: ExtensionManagementSource,
+    verified_catalog_unix: Option<u64>,
     required_api: Box<[Box<str>]>,
     required_hosts: Box<[Box<str>]>,
     optional_api: Box<[Box<str>]>,
@@ -330,6 +339,7 @@ impl ExtensionInstallCandidateEntry {
         author: Option<Box<str>>,
         version: impl Into<Box<str>>,
         source: ExtensionManagementSource,
+        verified_catalog_unix: Option<u64>,
         required_api: Vec<Box<str>>,
         required_hosts: Vec<Box<str>>,
         optional_api: Vec<Box<str>>,
@@ -344,6 +354,7 @@ impl ExtensionInstallCandidateEntry {
         if version.is_empty() || !version.is_ascii() {
             return Err(ExtensionManagementProjectionError::InvalidDisplayText);
         }
+        validate_source(source, verified_catalog_unix)?;
         if let Some(description) = description.as_deref() {
             validate_display_text(description, 132, false)?;
         }
@@ -432,6 +443,7 @@ impl ExtensionInstallCandidateEntry {
             author,
             version,
             source,
+            verified_catalog_unix,
             required_api: required_api.into_boxed_slice(),
             required_hosts: required_hosts.into_boxed_slice(),
             optional_api: optional_api.into_boxed_slice(),
@@ -465,6 +477,10 @@ impl ExtensionInstallCandidateEntry {
 
     pub const fn source(&self) -> ExtensionManagementSource {
         self.source
+    }
+
+    pub const fn verified_catalog_unix(&self) -> Option<u64> {
+        self.verified_catalog_unix
     }
 
     pub fn required_api(&self) -> &[Box<str>] {
@@ -534,6 +550,23 @@ fn canonical_limitations(
     }
     limitations.shrink_to_fit();
     Ok(limitations.into_boxed_slice())
+}
+
+fn validate_source(
+    source: ExtensionManagementSource,
+    verified_catalog_unix: Option<u64>,
+) -> Result<(), ExtensionManagementProjectionError> {
+    let valid = match source {
+        ExtensionManagementSource::ZephiumVerified => {
+            verified_catalog_unix.is_some_and(|value| value > 0)
+        }
+        ExtensionManagementSource::ExternalCompatibility
+        | ExtensionManagementSource::DeveloperLocal => verified_catalog_unix.is_none(),
+    };
+    if !valid {
+        return Err(ExtensionManagementProjectionError::InvalidSource);
+    }
+    Ok(())
 }
 
 fn canonical_api_permissions(
@@ -683,6 +716,7 @@ pub enum ExtensionManagementProjectionError {
     TooManyPermissions,
     InvalidPermission,
     InvalidCompatibility,
+    InvalidSource,
     InvalidDisplayText,
     AccountingOverflow,
     RetainedBytesExceeded,
@@ -698,6 +732,7 @@ impl fmt::Display for ExtensionManagementProjectionError {
             Self::TooManyPermissions => "too many extension install permissions",
             Self::InvalidPermission => "invalid extension install permission",
             Self::InvalidCompatibility => "invalid extension compatibility disclosure",
+            Self::InvalidSource => "invalid extension management source",
             Self::InvalidDisplayText => "invalid extension management display text",
             Self::AccountingOverflow => "extension management accounting overflow",
             Self::RetainedBytesExceeded => "extension management retained-byte bound exceeded",
@@ -792,6 +827,7 @@ mod tests {
             None,
             "1.0.0",
             ExtensionManagementSource::ZephiumVerified,
+            Some(1),
             ExtensionManagementRuntimeState::PendingActivation,
             ExtensionManagementGrantState::Uninitialized,
             ExtensionManagementCompatibility::Compatible,
@@ -826,6 +862,7 @@ mod tests {
             Some("Zephium tests".into()),
             "1.0.0",
             ExtensionManagementSource::ZephiumVerified,
+            Some(1),
             required_api,
             required_hosts,
             Vec::new(),
@@ -875,6 +912,7 @@ mod tests {
                     None,
                     "1.0.0",
                     ExtensionManagementSource::ZephiumVerified,
+                    Some(1),
                     ExtensionManagementRuntimeState::Disabled,
                     ExtensionManagementGrantState::Uninitialized,
                     ExtensionManagementCompatibility::Compatible,
@@ -910,6 +948,8 @@ mod tests {
             (2, ExtensionManagementSource::ExternalCompatibility),
             (3, ExtensionManagementSource::DeveloperLocal),
         ] {
+            let verified_catalog_unix =
+                matches!(source, ExtensionManagementSource::ZephiumVerified).then_some(1);
             let entry = ExtensionManagementEntry::new(
                 selector(profile, install),
                 "Fixture",
@@ -917,6 +957,7 @@ mod tests {
                 None,
                 "1.0.0",
                 source,
+                verified_catalog_unix,
                 ExtensionManagementRuntimeState::Disabled,
                 ExtensionManagementGrantState::Uninitialized,
                 ExtensionManagementCompatibility::Compatible,
@@ -924,10 +965,34 @@ mod tests {
             )
             .unwrap();
             assert_eq!(entry.source(), source);
+            assert_eq!(entry.verified_catalog_unix(), verified_catalog_unix);
             assert_eq!(
                 entry.compatibility(),
                 ExtensionManagementCompatibility::Compatible
             );
+        }
+        for (source, verified_catalog_unix) in [
+            (ExtensionManagementSource::ZephiumVerified, None),
+            (ExtensionManagementSource::ZephiumVerified, Some(0)),
+            (ExtensionManagementSource::ExternalCompatibility, Some(1)),
+            (ExtensionManagementSource::DeveloperLocal, Some(1)),
+        ] {
+            assert!(matches!(
+                ExtensionManagementEntry::new(
+                    selector(profile, 4),
+                    "Fixture",
+                    None,
+                    None,
+                    "1.0.0",
+                    source,
+                    verified_catalog_unix,
+                    ExtensionManagementRuntimeState::Disabled,
+                    ExtensionManagementGrantState::Uninitialized,
+                    ExtensionManagementCompatibility::Compatible,
+                    Vec::new(),
+                ),
+                Err(ExtensionManagementProjectionError::InvalidSource)
+            ));
         }
     }
 
@@ -941,6 +1006,7 @@ mod tests {
             None,
             "1.0.0",
             ExtensionManagementSource::ExternalCompatibility,
+            None,
             ExtensionManagementRuntimeState::Disabled,
             ExtensionManagementGrantState::Uninitialized,
             ExtensionManagementCompatibility::Degraded,
@@ -981,6 +1047,7 @@ mod tests {
                     None,
                     "1.0.0",
                     ExtensionManagementSource::DeveloperLocal,
+                    None,
                     ExtensionManagementRuntimeState::Disabled,
                     ExtensionManagementGrantState::Uninitialized,
                     compatibility,
@@ -1034,6 +1101,7 @@ mod tests {
             None,
             "1.0.0",
             ExtensionManagementSource::ExternalCompatibility,
+            None,
             vec!["storage".into()],
             vec!["https://required.example/*".into()],
             vec!["tabs".into(), "notifications".into()],
@@ -1072,6 +1140,7 @@ mod tests {
                 None,
                 "1.0.0",
                 ExtensionManagementSource::ExternalCompatibility,
+                None,
                 vec!["storage".into(), "storage".into()],
                 Vec::new(),
                 Vec::new(),
@@ -1091,6 +1160,7 @@ mod tests {
                 None,
                 "1.0.0",
                 ExtensionManagementSource::DeveloperLocal,
+                None,
                 vec!["storage".into()],
                 Vec::new(),
                 vec!["storage".into()],

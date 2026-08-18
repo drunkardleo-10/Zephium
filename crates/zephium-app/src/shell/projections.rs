@@ -153,6 +153,9 @@ impl Shell {
                     author: entry.author().map(str::to_owned),
                     version: entry.version().to_owned(),
                     source: extension_management_source_view(entry.source()),
+                    verified_catalog_unix: entry
+                        .verified_catalog_unix()
+                        .map(|value| value.to_string()),
                     runtime,
                     runtime_generation,
                     grants,
@@ -184,6 +187,9 @@ impl Shell {
                 author: candidate.author().map(str::to_owned),
                 version: candidate.version().to_owned(),
                 source: extension_management_source_view(candidate.source()),
+                verified_catalog_unix: candidate
+                    .verified_catalog_unix()
+                    .map(|value| value.to_string()),
                 required_api: candidate
                     .required_api()
                     .iter()

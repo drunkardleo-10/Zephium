@@ -93,6 +93,7 @@ pub struct BundledCurrentManagementManifests {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BundledInstallCandidate {
     package: ExtensionPackageIdentity,
+    catalog_created_unix: u64,
     manifest: Arc<ExtensionManifestDescriptor>,
     presentation: BundledManagementManifest,
 }
@@ -101,6 +102,11 @@ impl BundledInstallCandidate {
     /// Returns the exact authenticated structural package identity.
     pub const fn package(&self) -> &ExtensionPackageIdentity {
         &self.package
+    }
+
+    /// Returns the authenticated release-catalog creation timestamp.
+    pub const fn catalog_created_unix(&self) -> u64 {
+        self.catalog_created_unix
     }
 
     /// Returns the freshly admitted manifest descriptor.
@@ -239,22 +245,24 @@ impl ExtensionRepository {
                     authority
                         .admit_active_catalog(&exact_catalog)
                         .map(|admitted| {
-                            admitted
-                                .catalog()
+                            let catalog = admitted.catalog();
+                            let created_unix = catalog.created_unix();
+                            catalog
                                 .packages()
                                 .iter()
-                                .map(|package| package.identity().clone())
+                                .map(|package| (package.identity().clone(), created_unix))
                                 .collect::<Vec<_>>()
                         })
                 }
                 VerifiedCatalogRole::Rollback => authority
                     .admit_rollback_catalog(&exact_catalog)
                     .map(|admitted| {
-                        admitted
-                            .catalog()
+                        let catalog = admitted.catalog();
+                        let created_unix = catalog.created_unix();
+                        catalog
                             .packages()
                             .iter()
-                            .map(|package| package.identity().clone())
+                            .map(|package| (package.identity().clone(), created_unix))
                             .collect::<Vec<_>>()
                     }),
             }
@@ -267,7 +275,7 @@ impl ExtensionRepository {
         };
 
         let mut installs = Vec::with_capacity(packages.len());
-        for (index, package) in packages.iter().enumerate() {
+        for (index, (package, _created_unix)) in packages.iter().enumerate() {
             let id = ExtensionInstallId::from(index as u128 + 1);
             installs.push(ExtensionInstall::new(id, package.clone()));
         }
@@ -290,7 +298,7 @@ impl ExtensionRepository {
             ));
         }
         let mut candidates = Vec::with_capacity(packages.len());
-        for ((index, package), presentation) in packages
+        for ((index, (package, catalog_created_unix)), presentation) in packages
             .into_iter()
             .enumerate()
             .zip(presentations.into_vec())
@@ -308,6 +316,7 @@ impl ExtensionRepository {
             }
             candidates.push(BundledInstallCandidate {
                 package,
+                catalog_created_unix,
                 manifest: Arc::clone(binding.manifest_arc()),
                 presentation,
             });
