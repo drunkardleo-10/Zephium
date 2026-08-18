@@ -1015,10 +1015,112 @@ impl ExtensionReleaseCatalog {
         self.digest
     }
 
+    /// Returns the deterministic digest of the complete authenticated catalog
+    /// inventory.
+    ///
+    /// This is structural evidence only: it does not authenticate catalog
+    /// bytes or grant package authority. Product sealing binds it together
+    /// with the exact canonical catalog length and digest.
+    pub fn inventory_sha256(&self) -> [u8; 32] {
+        const LEGACY_DOMAIN: &[u8] = b"zephium.bundled-extension-inventory.v2\0";
+        const RECEIPT_DOMAIN: &[u8] = b"zephium.bundled-extension-inventory.v3\0";
+
+        let mut digest = Sha256::new();
+        let receipt_schema = self.schema_version == 2;
+        if receipt_schema {
+            digest.update(RECEIPT_DOMAIN);
+            inventory_update_u64(&mut digest, 2);
+        } else {
+            digest.update(LEGACY_DOMAIN);
+        }
+        inventory_update_usize(&mut digest, self.packages.len());
+        for package in &self.packages {
+            let identity = package.identity();
+            digest.update(identity.authority().as_bytes());
+            digest.update(identity.key().as_bytes());
+            inventory_update_u64(&mut digest, identity.revision().get());
+            match identity.payload() {
+                ExtensionPackagePayloadIdentity::BundledTree => digest.update([1]),
+                ExtensionPackagePayloadIdentity::AcquiredZip { length, sha256 } => {
+                    digest.update([2]);
+                    inventory_update_u64(&mut digest, length.get());
+                    digest.update(sha256.as_bytes());
+                }
+            }
+            digest.update(identity.manifest_sha256().as_bytes());
+            digest.update(identity.tree_sha256().as_bytes());
+            digest.update(package.tree_index_sha256().as_bytes());
+            inventory_update_u64(&mut digest, package.tree_index_length());
+            inventory_update_usize(&mut digest, package.tree_file_count());
+            inventory_update_u64(&mut digest, package.tree_bytes());
+
+            match package.chromium() {
+                Some(chromium) => {
+                    digest.update([1]);
+                    digest.update(chromium.manifest_key_sha256().as_bytes());
+                }
+                None => digest.update([0]),
+            }
+            if receipt_schema {
+                inventory_update_usize(&mut digest, package.compatibility_receipts().len());
+                for receipt in package.compatibility_receipts() {
+                    inventory_update_str(&mut digest, receipt.target().as_str());
+                    inventory_update_u64(&mut digest, receipt.length());
+                    digest.update(receipt.sha256().as_bytes());
+                    digest.update(receipt.input_manifest_sha256().as_bytes());
+                    digest.update(receipt.input_tree_sha256().as_bytes());
+                    digest.update(receipt.input_tree_index_sha256().as_bytes());
+                    inventory_update_usize(&mut digest, receipt.input_file_count());
+                    inventory_update_u64(&mut digest, receipt.input_bytes());
+                }
+            }
+
+            let provenance = package.provenance();
+            inventory_update_str(&mut digest, provenance.source_url());
+            inventory_update_str(&mut digest, provenance.upstream_version());
+            inventory_update_str(&mut digest, provenance.upstream_revision());
+            inventory_update_str(&mut digest, provenance.license_expression());
+            inventory_update_str(&mut digest, provenance.attribution());
+            inventory_update_str(&mut digest, provenance.redistribution());
+            let notice = provenance.legal_notice();
+            inventory_update_str(&mut digest, notice.target().as_str());
+            match notice.kind() {
+                ExtensionReleaseLegalArtifactKind::NoticeBundle => digest.update([1]),
+            }
+            inventory_update_u64(&mut digest, notice.length());
+            digest.update(notice.sha256());
+            match provenance.corresponding_source() {
+                Some(source) => {
+                    digest.update([1]);
+                    inventory_update_str(&mut digest, source.url());
+                    inventory_update_str(&mut digest, source.revision());
+                }
+                None => digest.update([0]),
+            }
+        }
+        digest.finalize().into()
+    }
+
     /// Returns logical retained-memory charge.
     pub const fn retained_bytes(&self) -> usize {
         self.retained_bytes
     }
+}
+
+fn inventory_update_str(digest: &mut Sha256, value: &str) {
+    inventory_update_usize(digest, value.len());
+    digest.update(value.as_bytes());
+}
+
+fn inventory_update_usize(digest: &mut Sha256, value: usize) {
+    inventory_update_u64(
+        digest,
+        u64::try_from(value).expect("parsed catalog sizes always fit u64"),
+    );
+}
+
+fn inventory_update_u64(digest: &mut Sha256, value: u64) {
+    digest.update(value.to_be_bytes());
 }
 
 /// Structural catalog paired with the exact expected admission policy.
