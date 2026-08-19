@@ -947,12 +947,11 @@ requests now traverse one bounded native
 prompt per admitted runtime, a Shell-owned consent projection, an exact
 generation-bound service mutation, and native settlement; absent, stale,
 over-capacity, or unavailable paths deny rather than grant. This extension
-grant broker is distinct from page-origin permission events, whose general
-Shell policy remains unfinished. Remaining release gaps include product-sealed
-distribution endpoints, desktop ownership/shutdown composition and refresh
-policy for the dormant scheduler, the complete permission and API matrix,
-quotas,
-complete cross-process release-build resource evidence, and endurance. Older admitted
+grant broker is distinct from page-origin permission events; camera/microphone
+prompts now have their own Store-backed Shell policy and UI. Remaining release
+gaps include product-sealed distribution endpoints, the complete permission
+and API matrix, changed-permission update consent, quotas, complete
+cross-process release-build resource evidence, and endurance. Older admitted
 macOS versions and Linux require a Zephium
 compatibility runtime only after per-principal world/handler isolation, exact
 match enforcement, protected-script installed state, and native hostile tests
@@ -999,13 +998,24 @@ acceptable product budget. The active AppKit harness, sequential control,
 machine contention, WebKit helper processes, idle wakeups, and energy impact
 still require clean release-runner and process-family instrumentation.
 
-The remaining compatibility work needs additional foundations rather than
-merely consuming existing ports: the page-origin permission policy, per-install
-extension scheme and unprivileged extension-UI trust zone, capability-scoped
-messaging, a bounded
-compatibility MV3 event-runtime state machine inside
-`MAX_NATIVE_VIEW_RESOURCES = 48`, a separate Windows-native admission/resource
-policy, storage quotas, and authenticated immutable package activation.
+A three-pair optimized campaign on 2026-08-19 passed after the packaged
+install/update/options lifecycle landed. Native measured 78--87 ms
+authenticated startup, 268--318 ms profile-view creation, 287--297 ms popup
+presentation, and 93,601,792--94,863,360 bytes peak main-process RSS;
+native-brokered measured 75--88 ms, 266--268 ms, 284--291 ms, and
+93,716,480--94,666,752 bytes respectively. Five-second live-runtime windows
+used 177--186 ms native and 183--190 ms brokered main-process CPU, versus
+119--141 ms and 115--120 ms after retirement. The delta remains measurable and
+is not yet a release threshold; the probe intentionally reports only
+`RUSAGE_SELF`, so WebKit helper RSS/CPU and energy remain outside this evidence.
+
+Remaining macOS work is now product/API breadth rather than a missing runtime
+foundation: changed-permission update consent, extension notifications and
+additional browser APIs, storage quotas, private/file execution gates,
+password-manager workflows, process-family/energy evidence, and packaged
+multi-profile endurance. Windows still needs its separate native
+admission/resource policy, while Linux needs the package-neutral compatibility
+runtime built on the already-proven principal and injection boundaries.
 Distribution reuses the blocker stack's generic package-authority model—fixed origins,
 authenticated content-addressed packages, monotonic candidate/current/previous
 state, staged activation, rollback, and crash recovery—without coupling
@@ -1829,7 +1839,9 @@ under catalog SHA-256
 `b27962b45ecb1f85df1afbed626dc42a92c11230a8a7ac162a40511f1aa24b56`.
 That feature has a separate application identifier and a fixed three-object
 in-process transport; ordinary builds compile neither the catalog bytes nor a
-distribution worker.
+distribution worker. On macOS, `cargo xtask ci` separately authenticates the
+embedded authority/distribution objects and lints the complete staging desktop
+feature graph under the exact isolated Tauri configuration.
 
 The feature-gated release probe independently reopens both exact identities,
 loads the module worker through WebKit's public background completion API, and
@@ -1893,10 +1905,12 @@ provide real bookmark results: bookmarks are explicitly empty/read-only, and
 page favicons are transparent. Search is deliberately limited to the browser's
 default provider in the current or a new tab, and session support restores only
 the newest current-space tab; enumeration and explicit session identifiers are
-unsupported. Notifications, changed-permission update UX, options persistence
-after edited settings, and multi-profile packaged management behavior remain
-unassessed. Enable/disable, package update, popup/options presentation,
-shutdown, and restart are covered by the isolated packaged gate. The unbundled
+unsupported. Notifications, changed-permission update UX, and multi-profile
+packaged management behavior remain unassessed. The exact native Vimium gate
+now edits, saves, closes, recreates, and rereads a real option through WebKit's
+extension storage before proving both settings views release with the context.
+Enable/disable, package update, popup/options presentation, shutdown, and
+restart are covered by the isolated packaged gate. The unbundled
 accessory probe is not granted foreground animation frames consistently, so it
 records whether smooth scrolling was visibly observed but gates on ordered
 trusted delivery plus Vimium interception; a packaged product-app E2E gate must
