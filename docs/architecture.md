@@ -1675,6 +1675,54 @@ Both third-party contracts stay feature-gated and confer
 `product_authority=false`. Zephium must not hardcode either manager into the
 production runtime or redistribute modified third-party bytes by accident.
 
+The representative-extension gate applies the same rule to ordinary major
+extensions without adding a package-name branch. `cargo run --locked -p
+zephium-engine --features native-web-extension-probes --bin
+macos-representative-extension-probe` accepts either one exact canonical stock
+tree/index or one non-authorizing compatibility artifact. It grants only the
+closed native permission cohort required by its page-theme/action scenario,
+loads a light top document plus same-origin and `about:srcdoc` descendants,
+requires dynamic CSS transformation, proves that the page world receives no
+extension authority, executes the native action popup, and waits for the
+controller, context, page, popup, store, and delegate graph to release. The
+input identities are emitted with every result; the probe has no downloader,
+catalog, installation, or product-authority path.
+
+The first external input exercised through that gate is unmodified
+[Dark Reader 4.9.129](https://github.com/darkreader/darkreader/releases/tag/v4.9.129).
+The official Chrome MV3 release ZIP has SHA-256
+`20e7993eee8015f7db18748eea366616dfd05ec477efb7be6ae52d2b221b0a64`.
+The Chrome Web Store CRX has SHA-256
+`9dcb1bd6dcad43892ddc028ff65f982df3edba135a9a6445e4fa71671e37aa13`,
+developer-key SHA-256
+`48c03f1215dc1aefee954a7da73184471db3f77fc2b34c9cb65e40cbc60e87d2`,
+and materializes to the exact 89-file, 3,143,625-byte tree
+`3a132ead591fcd395ff4090d888d0637715c253efe1508bbaffa04ff5164ee93`.
+On the exercised WebKit runtime, the stock package and the package-neutral v3
+transform both darken the top document, dynamic styles, and a same-origin
+frame; render an executable popup with native runtime identity; report zero
+context errors; and release every native owner. Stock therefore needs no
+Zephium adapter for that core workflow. An `about:srcdoc` descendant remains
+light even though the source requests `match_about_blank`; the result is
+`usable-with-about-srcdoc-frame-degradation`, not full parity. No Dark Reader
+byte is stored in this repository and this evidence grants no redistribution
+or catalog authority.
+
+That run also settles the `fontSettings` declaration boundary. WebKit parses
+the required token without error, omits it from `requestedPermissions`, and
+exposes no `chrome.fontSettings` namespace. macOS therefore treats it as a
+manifest-only degraded declaration: consent remains mandatory when required,
+but no fictitious native grant key is applied. Unknown tokens remain rejected.
+
+One macOS catalog may contain both unmodified `MacosNative` packages and
+reviewed `MacosNativeBrokered` packages. Product composition requests a sealed,
+strictly ordered target cohort and the authority derives one bounded canonical
+selection across it. A duplicate package key across selected targets is an
+invalid product configuration, because one durable install identity cannot
+activate competing runtime profiles. This keeps runtime choice in compiled
+product authority while allowing packages such as stock Dark Reader and
+brokered Vimium to share one distribution worker and one catalog transaction.
+
 The first package-neutral macOS transform now exists as an offline,
 non-authorizing boundary. `cargo xtask
 materialize-macos-extension-compatibility --extension PATH --tree-index PATH
@@ -1873,8 +1921,12 @@ native teardown. The same exact callback sequence invokes Vimium's adapted
 context rebind the options request to the exact live runtime and transfer the
 already-admitted popup lease into one standalone unprivileged settings
 WKWebView. The adapter converts the exact late-bound manifest options URL into
-an inert keyboard-accessible control, so WebKit cannot bypass the broker via
-native link navigation. The settings view has no Tauri/Wry bridge, permits
+an inert keyboard-accessible control. Ordinary DOM and keyboard activation use
+the closed compatibility broker. The exact authenticated href remains on that
+control as an accessibility fallback because WebKit can service `AXPress`
+without delivering the page's DOM listener; the controller delegate admits
+only `context.optionsPageURL()` into the same settings surface and rejects the
+synthetic tab request. The settings view has no Tauri/Wry bridge, permits
 navigation only within its exact `webkit-extension` origin, and routes only
 user-activated HTTP(S) links through the ordinary bounded tab-creation broker.
 Their real Shell effects are covered separately by
@@ -1882,6 +1934,16 @@ profile-bound integration tests: the accessory WebKit probe returns typed
 success settlements and does not mutate the developer's browser session. The
 deterministic input event is not evidence of physical
 typing; the trusted `o` command and real rendered result are separate gates.
+
+The bundled revision-2 staging artifact predates the preserved-href fallback.
+Its real popup keyboard route (`Return` on the focused Options control) reaches
+Shell authorization, opens the settings window, saves a changed scroll-step
+value, and reads that value from a newly opened settings view. Direct
+accessibility `AXPress` closes that old popup without emitting its DOM broker
+request. The package-neutral adapter and Node contract now preserve the exact
+href, but staging must publish a newly signed immutable revision before it may
+claim the accessibility path. A source-asset change alone does not mutate an
+already authenticated catalog package.
 
 The isolated packaged staging application exercises the complete profile path:
 first-run profile registration, authenticated catalog synchronization,
