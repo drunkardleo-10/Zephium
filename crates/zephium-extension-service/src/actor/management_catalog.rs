@@ -453,9 +453,17 @@ fn reconcile_one_install_update(
             )
         }
         ExtensionServiceStoreCallOutcome::Completed(
-            ExtensionInstallUpdateOutcome::AdditionalConsentRequired
-            | ExtensionInstallUpdateOutcome::Invalid
-            | ExtensionInstallUpdateOutcome::Uninitialized,
+            ExtensionInstallUpdateOutcome::AdditionalConsentRequired,
+        ) => restore_update_refusal(
+            startup,
+            runtime,
+            selector,
+            retired,
+            deadline,
+            ExtensionManagementCatalogOutcome::UpdateConsentRequired,
+        ),
+        ExtensionServiceStoreCallOutcome::Completed(
+            ExtensionInstallUpdateOutcome::Invalid | ExtensionInstallUpdateOutcome::Uninitialized,
         ) => restore_update_refusal(
             startup,
             runtime,

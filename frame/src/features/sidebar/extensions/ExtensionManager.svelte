@@ -445,13 +445,15 @@
                 Extensions are not configured in this build.
               {:else if management?.phase === "catalog_not_synchronized"}
                 No verified extension catalog has been synchronized yet.
+              {:else if management?.phase === "update_consent_required"}
+                An extension update needs permission review. The installed version remains active.
               {:else if management?.phase === "failed_closed"}
                 Extension management stopped to protect this profile.
               {:else}
                 Extension management is unavailable right now.
               {/if}
             </p>
-            {#if management?.phase !== "not_configured" && management?.phase !== "catalog_not_synchronized"}
+            {#if management?.phase !== "not_configured" && management?.phase !== "catalog_not_synchronized" && management?.phase !== "update_consent_required"}
               <button
                 type="button"
                 class="hover:bg-fill-strong mt-2 inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[11.5px] font-medium text-text"

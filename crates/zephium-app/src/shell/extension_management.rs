@@ -448,6 +448,13 @@ impl Shell {
                     zephium_ipc::ExtensionManagementPhase::CatalogNotSynchronized,
                 );
             }
+            ExtensionManagementCatalogOutcome::UpdateConsentRequired => {
+                self.extension_management.clear_catalog();
+                self.project_extension_management_phase(
+                    profile,
+                    zephium_ipc::ExtensionManagementPhase::UpdateConsentRequired,
+                );
+            }
             ExtensionManagementCatalogOutcome::Unavailable => {
                 self.extension_management.clear_catalog();
                 self.project_extension_management_phase(

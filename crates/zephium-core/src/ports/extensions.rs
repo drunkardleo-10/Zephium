@@ -546,6 +546,9 @@ pub enum ExtensionManagementCatalogOutcome {
     /// Product authority is configured, but no authenticated catalog
     /// generation has been activated in the local repository yet.
     CatalogNotSynchronized,
+    /// A newer authenticated package adds required authority. The old package
+    /// and runtime remain intact until a dedicated consent transaction exists.
+    UpdateConsentRequired,
     /// The request was coherent but could not complete before its deadline or
     /// while startup/profile state temporarily refused it.
     Unavailable,
