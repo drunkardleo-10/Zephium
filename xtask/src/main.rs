@@ -799,6 +799,8 @@ fn ci() {
     );
     run_acquired_extension_repository_gates();
     run_extension_distribution_gates();
+    #[cfg(target_os = "macos")]
+    run_macos_extension_staging_catalog_gate();
     for (manifest, features) in NATIVE_ADAPTERS {
         run_native_adapter_clippy(manifest, features, "--all-targets");
         run_native_adapter_clippy(manifest, features, "--lib");
@@ -829,6 +831,61 @@ fn ci() {
         run_native_adapter_tests(manifest, features);
     }
     run("pnpm", &["--dir", "frame", "run", "check"]);
+}
+
+#[cfg(target_os = "macos")]
+fn run_macos_extension_staging_catalog_gate() {
+    for package in [
+        "zephium-extension-authority",
+        "zephium-extension-distribution",
+    ] {
+        run(
+            "cargo",
+            &[
+                "test",
+                "--locked",
+                "-p",
+                package,
+                "--features",
+                "staging-extension-catalog",
+                "--lib",
+            ],
+        );
+    }
+
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let config_path = repository.join("desktop/tauri.extensions-staging.conf.json");
+    let config = std::fs::read_to_string(&config_path).unwrap_or_else(|error| {
+        eprintln!("cannot read {}: {error}", config_path.display());
+        exit(1);
+    });
+    let args = [
+        "clippy",
+        "--locked",
+        "-p",
+        "zephium-desktop",
+        "--features",
+        "staging-extension-catalog",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings",
+    ];
+    eprintln!(
+        "> [macOS extension staging catalog] cargo {}",
+        args.join(" ")
+    );
+    let mut command = Command::new("cargo");
+    command.args(args).env("TAURI_CONFIG", config);
+    if CI_RESOURCE_PROFILE.load(Ordering::Acquire) {
+        apply_ci_cargo_resource_profile(&mut command);
+    }
+    let status = command
+        .status()
+        .unwrap_or_else(|error| panic!("failed to spawn staging catalog gate: {error}"));
+    if !status.success() {
+        exit(status.code().unwrap_or(1));
+    }
 }
 
 /// Keeps the archive stack out of the default product graph while making its

@@ -23,7 +23,7 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{
     MainThreadMarker, NSDate, NSDefaultRunLoopMode, NSError, NSObjectProtocol, NSPoint,
-    NSProcessInfo, NSRunLoop, NSString,
+    NSProcessInfo, NSRect, NSRunLoop, NSSize, NSString, NSURLRequest,
 };
 use objc2_web_kit::{
     WKContentWorld, WKFrameInfo, WKNavigationAction, WKNavigationActionPolicy,
@@ -50,6 +50,7 @@ const HOST_MATCH_PATTERN: &str = "http://127.0.0.1/*";
 const PAGE_STATE_PREFIX: &str = "ZEPHIUM_VIMIUM_PAGE_STATE:";
 const POPUP_STATE_PREFIX: &str = "ZEPHIUM_VIMIUM_POPUP_STATE:";
 const BROKER_COMMAND_STATE_PREFIX: &str = "ZEPHIUM_VIMIUM_BROKER_COMMAND_STATE:";
+const OPTIONS_STATE_PREFIX: &str = "ZEPHIUM_VIMIUM_OPTIONS_STATE:";
 const COMPATIBILITY_SYMBOL: &str = "zephium.webkit-api-compatibility.v1";
 const LINK_CLICK_ATTRIBUTE: &str = "data-zephium-keyboard-link-click";
 const BROKER_APPLICATION_IDENTIFIER: &str = "app.zephium.extension-broker.v1";
@@ -104,6 +105,7 @@ struct Teardown {
     keyboard_control: Weak<WKWebView>,
     page: Weak<WKWebView>,
     popup: Option<Weak<WKWebView>>,
+    options: OptionsTeardown,
     store: Weak<WKWebsiteDataStore>,
     lifecycle_drops: Arc<AtomicUsize>,
     operating_system: String,
@@ -114,6 +116,20 @@ struct Teardown {
     scroll_observed: bool,
     brokered_history: bool,
     failure: Option<String>,
+}
+
+struct OptionsTeardown {
+    windows: Box<[Weak<NSWindow>]>,
+    views: Box<[Weak<WKWebView>]>,
+}
+
+impl OptionsTeardown {
+    fn empty() -> Self {
+        Self {
+            windows: Box::new([]),
+            views: Box::new([]),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -226,6 +242,14 @@ struct HistoryCompletionState {
     text: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct OptionsState {
+    ready: String,
+    value: String,
+    save: String,
+}
+
 struct VomnibarFrameCaptureIvars {
     frame: std::cell::RefCell<Option<Retained<WKFrameInfo>>>,
 }
@@ -317,7 +341,7 @@ pub(super) fn run(artifact: &Path) -> Result<bool, String> {
             (None, Ok(())) => {}
         }
         println!(
-            "native-probe: stock Vimium compatibility passed; version={VERSION}; os={}; exact_source_tree=passed; exact_output_tree=passed; module_background_wrapper=passed; background_preload_ms={}; keyboard_trust_control=passed; keyboard_scroll={}; brokered_history={}; extension_page_messaging={}; bookmarks={}; favicon={}; search={}; sessions={}; link_hint_navigation={}; popup_execution=passed; popup_options_url={:?}; page_world_adapter_absent=passed; page_world_privileged_extension_api_absent=passed; controller_visible_scripts={}; webview_callbacks={}; remaining_browser_apis=unassessed; product_authority=false; native_objects_released=passed",
+            "native-probe: stock Vimium compatibility passed; version={VERSION}; os={}; exact_source_tree=passed; exact_output_tree=passed; module_background_wrapper=passed; background_preload_ms={}; keyboard_trust_control=passed; keyboard_scroll={}; brokered_history={}; extension_page_messaging={}; bookmarks={}; favicon={}; search={}; sessions={}; link_hint_navigation={}; popup_execution=passed; options_persistence=passed; popup_options_url={:?}; page_world_adapter_absent=passed; page_world_privileged_extension_api_absent=passed; controller_visible_scripts={}; webview_callbacks={}; remaining_browser_apis=unassessed; product_authority=false; native_objects_released=passed",
             teardown.operating_system,
             teardown.background_preload_ms,
             if teardown.scroll_observed {
@@ -799,6 +823,17 @@ fn run_native(
     wait_for_popup_closed(&action, &run_loop)?;
     drop(action);
 
+    let (options, options_failure) = match verify_vimium_options_persistence(
+        &context,
+        &bundle.controller,
+        &bundle._data_store,
+        &run_loop,
+        mtm,
+    ) {
+        Ok(options) => (options, None),
+        Err(error) => (OptionsTeardown::empty(), Some(error)),
+    };
+
     let history_result = if native_message.is_some() {
         if let Err(error) = &link_result {
             Err(format!(
@@ -864,6 +899,7 @@ fn run_native(
     let failure = [
         link_result.err(),
         history_result.err(),
+        options_failure,
         popup_failure,
         context_failure,
     ]
@@ -878,6 +914,7 @@ fn run_native(
         keyboard_control,
         page: Weak::from_retained(&native_page),
         popup: popup_weak,
+        options,
         store: Weak::from_retained(&bundle._data_store),
         lifecycle_drops: Arc::clone(&lifecycle_drops),
         operating_system,
@@ -1498,6 +1535,136 @@ fn verify_brokered_options_control(
     }
 }
 
+fn verify_vimium_options_persistence(
+    context: &WKWebExtensionContext,
+    controller: &WKWebExtensionController,
+    store: &WKWebsiteDataStore,
+    run_loop: &NSRunLoop,
+    mtm: MainThreadMarker,
+) -> Result<OptionsTeardown, String> {
+    super::set_phase("vimium-options-persistence");
+    let (first_window, first) = open_vimium_options_view(context, controller, store, mtm)?;
+    let first_result: Result<(), String> = (|| {
+        let initial = wait_for_options_state(&first, context, run_loop, None, Some("No changes"))?;
+        if initial.value == "61" {
+            return Err("Vimium options fixture unexpectedly started at the probe value".into());
+        }
+        let mutate = r#"(() => {
+          const input = document.querySelector('input[name="scrollStepSize"]');
+          const save = document.querySelector('#save');
+          if (!(input instanceof HTMLInputElement) || !(save instanceof HTMLButtonElement)) return;
+          input.value = '61';
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          save.click();
+        })()"#;
+        unsafe {
+            first.evaluateJavaScript_completionHandler(&NSString::from_str(mutate), None);
+        }
+        wait_for_options_state(&first, context, run_loop, Some("61"), Some("Saved"))?;
+        Ok(())
+    })();
+    let (first_window, first_view) = close_options_probe_view(first_window, first);
+    first_result?;
+
+    let (second_window, second) = open_vimium_options_view(context, controller, store, mtm)?;
+    let second_result =
+        wait_for_options_state(&second, context, run_loop, Some("61"), Some("No changes"))
+            .map(drop);
+    let (second_window, second_view) = close_options_probe_view(second_window, second);
+    second_result?;
+    Ok(OptionsTeardown {
+        windows: vec![first_window, second_window].into_boxed_slice(),
+        views: vec![first_view, second_view].into_boxed_slice(),
+    })
+}
+
+fn open_vimium_options_view(
+    context: &WKWebExtensionContext,
+    controller: &WKWebExtensionController,
+    store: &WKWebsiteDataStore,
+    mtm: MainThreadMarker,
+) -> Result<(Retained<NSWindow>, Retained<WKWebView>), String> {
+    let configuration = unsafe { context.webViewConfiguration() }
+        .ok_or_else(|| "Vimium context has no options WebView configuration".to_owned())?;
+    let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(800.0, 600.0));
+    let view = unsafe {
+        WKWebView::initWithFrame_configuration(WKWebView::alloc(mtm), frame, &configuration)
+    };
+    super::assert_attached_controller(&view, controller)?;
+    super::profile_isolation::assert_attached_store(&view, store)?;
+    let url = unsafe { context.optionsPageURL() }
+        .ok_or_else(|| "Vimium context has no authenticated options URL".to_owned())?;
+    let request = NSURLRequest::requestWithURL(&url);
+    if unsafe { view.loadRequest(&request) }.is_none() {
+        return Err("Vimium options navigation was not admitted".into());
+    }
+    let window = super::new_window(mtm)?;
+    window.setContentView(Some(&view));
+    window.orderFrontRegardless();
+    Ok((window, view))
+}
+
+fn wait_for_options_state(
+    view: &WKWebView,
+    context: &WKWebExtensionContext,
+    run_loop: &NSRunLoop,
+    expected_value: Option<&str>,
+    expected_save: Option<&str>,
+) -> Result<OptionsState, String> {
+    let script = format!(
+        r#"(() => {{
+          const input = document.querySelector('input[name="scrollStepSize"]');
+          const save = document.querySelector('#save');
+          document.title = {OPTIONS_STATE_PREFIX:?} + JSON.stringify({{
+            ready: document.readyState,
+            value: input instanceof HTMLInputElement ? input.value : '',
+            save: save instanceof HTMLButtonElement ? save.textContent : '',
+          }});
+        }})()"#
+    );
+    let deadline = Instant::now() + super::PROBE_TIMEOUT;
+    let mut last = None;
+    loop {
+        unsafe {
+            view.evaluateJavaScript_completionHandler(&NSString::from_str(&script), None);
+        }
+        if let Some(title) = unsafe { view.title() }.map(|title| title.to_string()) {
+            if let Some(payload) = title.strip_prefix(OPTIONS_STATE_PREFIX) {
+                if payload.len() <= MAX_DIAGNOSTIC_TITLE_BYTES {
+                    let state: OptionsState = serde_json::from_str(payload)
+                        .map_err(|error| format!("Vimium options evidence is invalid: {error}"))?;
+                    let value_ready = expected_value.is_none_or(|expected| state.value == expected);
+                    let save_ready = expected_save.is_none_or(|expected| state.save == expected);
+                    if state.ready == "complete" && value_ready && save_ready {
+                        return Ok(state);
+                    }
+                    last = Some(state);
+                }
+            }
+        }
+        super::validate_context_errors(context, "Vimium options persistence")?;
+        if Instant::now() >= deadline {
+            return Err(format!("Vimium options persistence timed out: {last:?}"));
+        }
+        super::drain_run_loop_once(run_loop);
+    }
+}
+
+fn close_options_probe_view(
+    window: Retained<NSWindow>,
+    view: Retained<WKWebView>,
+) -> (Weak<NSWindow>, Weak<WKWebView>) {
+    let weak_window = Weak::from_retained(&window);
+    let weak_view = Weak::from_retained(&view);
+    unsafe { view.stopLoading() };
+    window.setContentView(None);
+    window.orderOut(None);
+    window.close();
+    drop(view);
+    drop(window);
+    (weak_window, weak_view)
+}
+
 fn wait_for_teardown(teardown: &Teardown) -> Result<(), String> {
     let run_loop = NSRunLoop::mainRunLoop();
     let deadline = Instant::now() + super::TEARDOWN_TIMEOUT;
@@ -1511,6 +1678,16 @@ fn wait_for_teardown(teardown: &Teardown) -> Result<(), String> {
             .popup
             .as_ref()
             .is_none_or(|popup| popup.load().is_none());
+        let options_windows = teardown
+            .options
+            .windows
+            .iter()
+            .all(|window| window.load().is_none());
+        let options_views = teardown
+            .options
+            .views
+            .iter()
+            .all(|view| view.load().is_none());
         let store = teardown.store.load().is_none();
         let lifecycle = teardown.lifecycle_drops.load(Ordering::Acquire) == 3;
         if window
@@ -1519,6 +1696,8 @@ fn wait_for_teardown(teardown: &Teardown) -> Result<(), String> {
             && keyboard_control
             && page
             && popup
+            && options_windows
+            && options_views
             && store
             && lifecycle
         {
@@ -1526,7 +1705,7 @@ fn wait_for_teardown(teardown: &Teardown) -> Result<(), String> {
         }
         if Instant::now() >= deadline {
             return Err(format!(
-                "Vimium native teardown did not settle: window={window}, controller={controller}, context={context}, keyboard_control={keyboard_control}, page={page}, popup={popup}, store={store}, lifecycle={}/3",
+                "Vimium native teardown did not settle: window={window}, controller={controller}, context={context}, keyboard_control={keyboard_control}, page={page}, popup={popup}, options_windows={options_windows}, options_views={options_views}, store={store}, lifecycle={}/3",
                 teardown.lifecycle_drops.load(Ordering::Acquire),
             ));
         }
