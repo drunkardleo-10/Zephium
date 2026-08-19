@@ -26,7 +26,7 @@ struct SealedProductDistributionConfiguration {
     metadata_base: &'static str,
     #[cfg(not(feature = "staging-extension-catalog"))]
     targets_base: &'static str,
-    runtime_target: ProductExtensionRuntimeTarget,
+    runtime_targets: &'static [ProductExtensionRuntimeTarget],
 }
 
 /// Constructs the dormant product worker without issuing I/O.
@@ -39,7 +39,7 @@ pub(super) fn launch(
     let authority = ProductExtensionManifestAuthority::product()
         .map_err(|_| invalid_configuration("manifest authority"))?;
     let selections = authority
-        .active_acquired_runtime_selections(configuration.runtime_target)
+        .active_acquired_runtime_selections_for_targets(configuration.runtime_targets)
         .map_err(|_| invalid_configuration("runtime selection"))?;
     #[cfg(not(feature = "staging-extension-catalog"))]
     let client = {
@@ -82,8 +82,12 @@ fn sealed_product_distribution_configuration() -> Option<SealedProductDistributi
 
 #[cfg(feature = "staging-extension-catalog")]
 fn sealed_product_distribution_configuration() -> Option<SealedProductDistributionConfiguration> {
+    const MACOS_STAGING_TARGETS: &[ProductExtensionRuntimeTarget] = &[
+        ProductExtensionRuntimeTarget::MacosNative,
+        ProductExtensionRuntimeTarget::MacosNativeBrokered,
+    ];
     Some(SealedProductDistributionConfiguration {
-        runtime_target: ProductExtensionRuntimeTarget::MacosNativeBrokered,
+        runtime_targets: MACOS_STAGING_TARGETS,
     })
 }
 
@@ -97,11 +101,14 @@ mod tests {
 
     #[test]
     #[cfg(feature = "staging-extension-catalog")]
-    fn staging_build_selects_only_the_embedded_brokered_catalog() {
+    fn staging_build_selects_the_complete_native_macos_profile_cohort() {
         let configuration = super::sealed_product_distribution_configuration().unwrap();
         assert_eq!(
-            configuration.runtime_target,
-            zephium_extension_authority::ProductExtensionRuntimeTarget::MacosNativeBrokered
+            configuration.runtime_targets,
+            [
+                zephium_extension_authority::ProductExtensionRuntimeTarget::MacosNative,
+                zephium_extension_authority::ProductExtensionRuntimeTarget::MacosNativeBrokered,
+            ]
         );
     }
 }

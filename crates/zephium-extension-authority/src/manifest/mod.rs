@@ -319,6 +319,55 @@ impl ProductExtensionManifestAuthority {
         Ok(selections)
     }
 
+    /// Derives one complete active-catalog selection across a sealed platform
+    /// target cohort.
+    ///
+    /// A platform can legitimately host multiple compatibility profiles (for
+    /// example unmodified and brokered WKWebExtension packages). The cohort is
+    /// accepted only when its target list is non-empty, strictly canonical,
+    /// the total projection remains bounded, and every package key resolves to
+    /// exactly one profile. This prevents target composition from creating two
+    /// competing payloads for one durable install identity.
+    pub fn active_acquired_runtime_selections_for_targets(
+        &self,
+        runtime_targets: &[ProductExtensionRuntimeTarget],
+    ) -> Result<Vec<ExtensionAcquiredRuntimeSelection>, ProductExtensionRuntimeSelectionError> {
+        if runtime_targets.is_empty()
+            || runtime_targets.len() > MAX_ACQUIRED_CATALOG_SELECTIONS
+            || runtime_targets.windows(2).any(|pair| pair[0] >= pair[1])
+        {
+            return Err(ProductExtensionRuntimeSelectionError::InvalidProductConfiguration);
+        }
+        let matching = self.profiles.iter().filter(|profile| {
+            profile.catalog == self.active_catalog
+                && runtime_targets
+                    .binary_search(&profile.runtime_target)
+                    .is_ok()
+        });
+        let count = matching.clone().count();
+        if count == 0 {
+            return Err(ProductExtensionRuntimeSelectionError::RuntimeTargetNotProvisioned);
+        }
+        if count > MAX_ACQUIRED_CATALOG_SELECTIONS {
+            return Err(ProductExtensionRuntimeSelectionError::InvalidProductConfiguration);
+        }
+        let mut selections = Vec::new();
+        selections
+            .try_reserve_exact(count)
+            .map_err(|_| ProductExtensionRuntimeSelectionError::InvalidProductConfiguration)?;
+        selections.extend(matching.map(|profile| {
+            ExtensionAcquiredRuntimeSelection::new_for_profile(
+                profile.package.key,
+                profile.runtime_target.acquired_runtime_profile(),
+            )
+        }));
+        selections.sort_unstable_by_key(|selection| selection.package_key());
+        if !acquired_runtime_selections_are_canonical(&selections) {
+            return Err(ProductExtensionRuntimeSelectionError::InvalidProductConfiguration);
+        }
+        Ok(selections)
+    }
+
     /// Admits exact manifest bytes for one authenticated catalog package.
     ///
     /// The caller supplies only a package key, never a release package or tree

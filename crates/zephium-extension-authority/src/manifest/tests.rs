@@ -355,6 +355,30 @@ fn active_distribution_selection_is_derived_only_from_sealed_profiles() {
         authority.active_acquired_runtime_selections(ProductExtensionRuntimeTarget::WindowsNative),
         Err(ProductExtensionRuntimeSelectionError::RuntimeTargetNotProvisioned)
     );
+
+    let cohort = authority
+        .active_acquired_runtime_selections_for_targets(&[
+            ProductExtensionRuntimeTarget::MacosNative,
+            ProductExtensionRuntimeTarget::MacosNativeBrokered,
+        ])
+        .unwrap();
+    assert_eq!(cohort, selections);
+    for invalid in [
+        Vec::new(),
+        vec![
+            ProductExtensionRuntimeTarget::MacosNativeBrokered,
+            ProductExtensionRuntimeTarget::MacosNative,
+        ],
+        vec![
+            ProductExtensionRuntimeTarget::MacosNativeBrokered,
+            ProductExtensionRuntimeTarget::MacosNativeBrokered,
+        ],
+    ] {
+        assert_eq!(
+            authority.active_acquired_runtime_selections_for_targets(&invalid),
+            Err(ProductExtensionRuntimeSelectionError::InvalidProductConfiguration)
+        );
+    }
 }
 
 #[test]
@@ -913,6 +937,15 @@ fn one_package_can_have_distinct_exact_backend_profiles() {
         vec![native, compatibility].into_boxed_slice(),
     )
     .unwrap();
+
+    assert_eq!(
+        authority.active_acquired_runtime_selections_for_targets(&[
+            ProductExtensionRuntimeTarget::MacosNative,
+            ProductExtensionRuntimeTarget::MacosCompatibility,
+        ]),
+        Err(ProductExtensionRuntimeSelectionError::InvalidProductConfiguration),
+        "one install identity cannot select two competing runtime profiles",
+    );
 
     let native = authority
         .admit_manifest(
