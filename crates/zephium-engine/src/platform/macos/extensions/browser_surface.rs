@@ -499,7 +499,7 @@ fn native_url_matches(native: Option<&NSURL>, expected: Option<&str>) -> bool {
     }
 }
 
-fn request_url(url: &NSURL) -> Result<std::sync::Arc<str>, ()> {
+pub(super) fn request_url(url: &NSURL) -> Result<std::sync::Arc<str>, ()> {
     let value = url.absoluteString().ok_or(())?;
     if value.lengthOfBytesUsingEncoding(NSUTF8StringEncoding)
         > MAX_EXTENSION_BROWSER_REQUEST_URL_BYTES
@@ -1026,10 +1026,10 @@ impl MacosExtensionBrowserSurfaceHost {
         compatibility_broker_pool: Rc<CompatibilityBrokerPool>,
     ) -> Result<Self, BrowserSurfaceError> {
         let mtm = MainThreadMarker::new().ok_or(BrowserSurfaceError::MainThreadRequired)?;
-        let action_popup = ActionPopupBroker::new(profile, sink.clone());
+        let broker = BrowserRequestBroker::new(profile, sink.clone(), request_pool);
+        let action_popup = ActionPopupBroker::new(profile, sink.clone(), Rc::clone(&broker));
         let runtime_grants =
             RuntimeGrantRequestBroker::new(profile, sink.clone(), runtime_grant_pool);
-        let broker = BrowserRequestBroker::new(profile, sink.clone(), request_pool);
         let compatibility_broker =
             CompatibilityBroker::new(profile, sink, compatibility_broker_pool);
         #[cfg(feature = "native-web-extension-probes")]

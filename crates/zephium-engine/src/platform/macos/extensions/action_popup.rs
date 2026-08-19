@@ -22,15 +22,17 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{
     MainThreadMarker, NSError, NSNotification, NSNotificationCenter, NSObjectProtocol, NSPoint,
-    NSRect, NSRectEdge, NSSize, NSString, NSURLRequest,
+    NSRect, NSRectEdge, NSSize, NSString, NSURLRequest, NSURL,
 };
 use objc2_web_kit::{
+    WKNavigationAction, WKNavigationActionPolicy, WKNavigationDelegate, WKNavigationType,
     WKWebExtensionAction, WKWebExtensionContext, WKWebExtensionController, WKWebExtensionTab,
     WKWebView,
 };
 use zephium_core::extensions::{
     ExtensionActionRejection, ExtensionActionRequest, ExtensionActionRequestId,
-    ExtensionActionSettlement, MAX_EXTENSION_POPUP_HEIGHT, MAX_EXTENSION_POPUP_WIDTH,
+    ExtensionActionSettlement, ExtensionBrowserRequestAction,
+    MAX_EXTENSION_BROWSER_REQUEST_URL_BYTES, MAX_EXTENSION_POPUP_HEIGHT, MAX_EXTENSION_POPUP_WIDTH,
     MIN_EXTENSION_POPUP_HEIGHT, MIN_EXTENSION_POPUP_WIDTH,
 };
 use zephium_core::geometry::{Rect, Size};
@@ -39,6 +41,9 @@ use zephium_core::ports::engine::EngineEvent;
 
 use crate::host::NativeResourceLease;
 use crate::{EngineEventIngress, EngineEventIngressSink};
+
+use super::browser_request_broker::BrowserRequestBroker;
+use super::browser_surface::request_url;
 
 const POPUP_LOAD_TIMEOUT: Duration = Duration::from_secs(10);
 const POPUP_ERROR_DOMAIN: &str = "app.zephium.extension-action";
@@ -68,7 +73,7 @@ struct ActivePopup {
 struct ActiveOptionsPage {
     context: Retained<WKWebExtensionContext>,
     window: Retained<NSWindow>,
-    _webview: Retained<WKWebView>,
+    webview: Retained<WKWebView>,
     delegate: Retained<OptionsWindowDelegate>,
     _lease: NativeResourceLease,
 }
@@ -158,6 +163,9 @@ impl ActionPopoverDelegate {
 
 struct OptionsWindowDelegateIvars {
     broker: RcWeak<ActionPopupBroker>,
+    browser_requests: Rc<BrowserRequestBroker>,
+    context: Retained<WKWebExtensionContext>,
+    extension_origin: Box<str>,
 }
 
 define_class!(
@@ -177,14 +185,88 @@ define_class!(
             }
         }
     }
+
+    unsafe impl WKNavigationDelegate for OptionsWindowDelegate {
+        #[unsafe(method(webView:decidePolicyForNavigationAction:decisionHandler:))]
+        unsafe fn decide_navigation(
+            &self,
+            _webview: &WKWebView,
+            action: &WKNavigationAction,
+            decision: &DynBlock<dyn Fn(WKNavigationActionPolicy)>,
+        ) {
+            let Some(url) = action.request().URL() else {
+                decision.call((WKNavigationActionPolicy::Cancel,));
+                return;
+            };
+            let absolute = url.absoluteString();
+            let classification = absolute.as_ref().and_then(|absolute| {
+                (absolute.lengthOfBytesUsingEncoding(objc2_foundation::NSUTF8StringEncoding)
+                    <= MAX_EXTENSION_BROWSER_REQUEST_URL_BYTES)
+                    .then(|| {
+                        objc2::rc::autoreleasepool(|pool| {
+                            classify_options_navigation(
+                                self.ivars().extension_origin.as_ref(),
+                                unsafe { absolute.to_str(pool) },
+                                unsafe { action.navigationType() }
+                                    == WKNavigationType::LinkActivated,
+                            )
+                        })
+                    })
+            });
+            match classification.flatten() {
+                Some(OptionsNavigation::Extension) => {
+                    decision.call((WKNavigationActionPolicy::Allow,));
+                }
+                Some(OptionsNavigation::External) => {
+                    self.route_external_link(&url);
+                    decision.call((WKNavigationActionPolicy::Cancel,));
+                }
+                None => decision.call((WKNavigationActionPolicy::Cancel,)),
+            }
+        }
+    }
 );
 
 impl OptionsWindowDelegate {
-    fn new(mtm: MainThreadMarker, broker: RcWeak<ActionPopupBroker>) -> Retained<Self> {
-        let object = Self::alloc(mtm).set_ivars(OptionsWindowDelegateIvars { broker });
+    fn new(
+        mtm: MainThreadMarker,
+        broker: RcWeak<ActionPopupBroker>,
+        browser_requests: Rc<BrowserRequestBroker>,
+        context: Retained<WKWebExtensionContext>,
+        extension_origin: Box<str>,
+    ) -> Retained<Self> {
+        let object = Self::alloc(mtm).set_ivars(OptionsWindowDelegateIvars {
+            broker,
+            browser_requests,
+            context,
+            extension_origin,
+        });
         // SAFETY: NSObject is the declared superclass and the sole ivar is
         // initialized before its initializer runs.
         unsafe { msg_send![super(object), init] }
+    }
+
+    fn route_external_link(&self, url: &NSURL) {
+        if !self
+            .ivars()
+            .browser_requests
+            .accepts(None, &self.ivars().context)
+        {
+            return;
+        }
+        let Ok(url) = request_url(url) else {
+            return;
+        };
+        let completion: RcBlock<dyn Fn(*mut ProtocolObject<dyn WKWebExtensionTab>, *mut NSError)> =
+            RcBlock::new(|_, _| {});
+        self.ivars().browser_requests.begin_tab(
+            ExtensionBrowserRequestAction::CreateTab {
+                window: None,
+                url: Some(url),
+                active: true,
+            },
+            &completion,
+        );
     }
 }
 
@@ -192,6 +274,7 @@ impl OptionsWindowDelegate {
 pub(super) struct ActionPopupBroker {
     profile: ProfileId,
     sink: Option<EngineEventIngressSink>,
+    browser_requests: Rc<BrowserRequestBroker>,
     pending: RefCell<Option<PendingPopup>>,
     active: RefCell<Option<ActivePopup>>,
     closing: RefCell<Option<ClosingPopup>>,
@@ -201,10 +284,15 @@ pub(super) struct ActionPopupBroker {
 }
 
 impl ActionPopupBroker {
-    pub(super) fn new(profile: ProfileId, sink: Option<EngineEventIngressSink>) -> Rc<Self> {
+    pub(super) fn new(
+        profile: ProfileId,
+        sink: Option<EngineEventIngressSink>,
+        browser_requests: Rc<BrowserRequestBroker>,
+    ) -> Rc<Self> {
         Rc::new(Self {
             profile,
             sink,
+            browser_requests,
             pending: RefCell::new(None),
             active: RefCell::new(None),
             closing: RefCell::new(None),
@@ -673,6 +761,7 @@ impl ActionPopupBroker {
             return;
         };
         options.window.setDelegate(None);
+        unsafe { options.webview.setNavigationDelegate(None) };
         let _keep_delegate_alive_through_close = options.delegate;
     }
 
@@ -681,6 +770,7 @@ impl ActionPopupBroker {
             return;
         };
         options.window.setDelegate(None);
+        unsafe { options.webview.setNavigationDelegate(None) };
         let _keep_delegate_alive_through_close = options.delegate;
         options.window.close();
     }
@@ -691,6 +781,8 @@ impl ActionPopupBroker {
     ) -> Result<(), ExtensionActionRejection> {
         let url = unsafe { transition.context.optionsPageURL() }
             .ok_or(ExtensionActionRejection::PopupUnavailable)?;
+        let extension_origin =
+            options_extension_origin(&url).ok_or(ExtensionActionRejection::PopupUnavailable)?;
         let configuration = unsafe { transition.context.webViewConfiguration() }
             .ok_or(ExtensionActionRejection::PopupUnavailable)?;
         let mtm = MainThreadMarker::new().ok_or(ExtensionActionRejection::NativeAdmissionFailed)?;
@@ -709,6 +801,16 @@ impl ActionPopupBroker {
             NSAutoresizingMaskOptions::ViewWidthSizable
                 | NSAutoresizingMaskOptions::ViewHeightSizable,
         );
+        let delegate = OptionsWindowDelegate::new(
+            mtm,
+            Rc::downgrade(self),
+            Rc::clone(&self.browser_requests),
+            transition.context.clone(),
+            extension_origin,
+        );
+        unsafe {
+            webview.setNavigationDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+        }
         let request = NSURLRequest::requestWithURL(&url);
         if unsafe { webview.loadRequest(&request) }.is_none() {
             return Err(ExtensionActionRejection::PopupUnavailable);
@@ -730,7 +832,6 @@ impl ActionPopupBroker {
             window.setTitle(&NSString::from_str("Extension Settings"));
         }
         window.setContentView(Some(&webview));
-        let delegate = OptionsWindowDelegate::new(mtm, Rc::downgrade(self));
         window.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
         // SAFETY: both retained windows belong to this main-thread
         // application and the options owner removes/closes the child before
@@ -741,7 +842,7 @@ impl ActionPopupBroker {
         *self.options.borrow_mut() = Some(ActiveOptionsPage {
             context: transition.context,
             window,
-            _webview: webview,
+            webview,
             delegate,
             _lease: transition.lease,
         });
@@ -852,6 +953,48 @@ impl Drop for ActionPopupBroker {
     fn drop(&mut self) {
         self.seal_and_close();
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OptionsNavigation {
+    Extension,
+    External,
+}
+
+fn options_extension_origin(url: &NSURL) -> Option<Box<str>> {
+    let absolute = url.absoluteString()?;
+    if absolute.lengthOfBytesUsingEncoding(objc2_foundation::NSUTF8StringEncoding)
+        > MAX_EXTENSION_BROWSER_REQUEST_URL_BYTES
+    {
+        return None;
+    }
+    objc2::rc::autoreleasepool(|pool| {
+        let parsed = url::Url::parse(unsafe { absolute.to_str(pool) }).ok()?;
+        if parsed.scheme() != "webkit-extension"
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.port().is_some()
+        {
+            return None;
+        }
+        let host = parsed.host_str()?;
+        Some(format!("webkit-extension://{host}/").into_boxed_str())
+    })
+}
+
+fn classify_options_navigation(
+    extension_origin: &str,
+    requested: &str,
+    link_activated: bool,
+) -> Option<OptionsNavigation> {
+    if requested.len() > MAX_EXTENSION_BROWSER_REQUEST_URL_BYTES {
+        return None;
+    }
+    if requested.starts_with(extension_origin) {
+        return Some(OptionsNavigation::Extension);
+    }
+    (link_activated && zephium_core::navigation::is_allowed_str(requested))
+        .then_some(OptionsNavigation::External)
 }
 
 fn popup_anchor_rect(request: ExtensionActionRequest, parent: &NSView) -> Option<NSRect> {
@@ -978,5 +1121,43 @@ mod tests {
         assert_eq!(error.code(), 10);
         assert_eq!(error.domain().to_string(), POPUP_ERROR_DOMAIN);
         assert_eq!(error.userInfo().count(), 0);
+    }
+
+    #[test]
+    fn options_navigation_is_origin_exact_and_external_links_require_a_user_gesture() {
+        let origin = "webkit-extension://00000000-0000-0000-0000-000000000001/";
+        assert_eq!(
+            classify_options_navigation(
+                origin,
+                "webkit-extension://00000000-0000-0000-0000-000000000001/pages/options.html#x",
+                false,
+            ),
+            Some(OptionsNavigation::Extension)
+        );
+        assert_eq!(
+            classify_options_navigation(origin, "https://example.com/docs", true),
+            Some(OptionsNavigation::External)
+        );
+        for (url, user_gesture) in [
+            ("https://example.com/programmatic", false),
+            ("javascript:alert(1)", true),
+            ("file:///tmp/secret", true),
+            (
+                "webkit-extension://00000000-0000-0000-0000-000000000002/pages/options.html",
+                true,
+            ),
+        ] {
+            assert_eq!(classify_options_navigation(origin, url, user_gesture), None);
+        }
+        assert_eq!(
+            classify_options_navigation(
+                origin,
+                &"https://example.com/".repeat(
+                    MAX_EXTENSION_BROWSER_REQUEST_URL_BYTES / "https://example.com/".len() + 1
+                ),
+                true,
+            ),
+            None
+        );
     }
 }
