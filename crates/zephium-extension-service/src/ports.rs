@@ -398,7 +398,13 @@ fn project_lifecycle_startup_outcome(
         ExtensionServiceStartupWait::Settled(ExtensionServiceStartupOutcome::CleanupRequired(
             _,
         )) => CoreExtensionServiceStartupOutcome::CleanupRequired,
-        ExtensionServiceStartupWait::Settled(ExtensionServiceStartupOutcome::Unavailable(_)) => {
+        ExtensionServiceStartupWait::Settled(ExtensionServiceStartupOutcome::Unavailable(
+            unavailable,
+        )) => {
+            crate::diagnostic!(
+                "extensions: startup unavailable with typed reason {:?}",
+                unavailable.reason()
+            );
             CoreExtensionServiceStartupOutcome::Unavailable
         }
         ExtensionServiceStartupWait::Settled(ExtensionServiceStartupOutcome::FailedClosed(_)) => {
