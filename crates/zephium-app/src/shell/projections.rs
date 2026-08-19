@@ -242,6 +242,8 @@ impl Shell {
                     .map(|pattern| pattern.to_string())
                     .collect(),
                 supports_file_access: candidate.supports_file_access(),
+                file_access_available: candidate.file_access_available(),
+                private_access_available: candidate.private_access_available(),
                 compatibility: match candidate.compatibility() {
                     ExtensionManagementCompatibility::Compatible => {
                         ExtensionManagementCompatibilityView::Compatible

@@ -1903,6 +1903,13 @@ trusted delivery plus Vimium interception; a packaged product-app E2E gate must
 cover foreground smooth scrolling before Vimium is presented as fully
 compatible.
 
+Install candidates project file-URL and private-window availability separately
+from manifest declaration. Both controls remain visibly unavailable on the
+current product runtime, and Shell rejects forged `true` selections, because
+file-scheme execution has not passed its live gate and the browser has not yet
+provided a separately isolated private browsing context. Persisting either flag
+and failing only during native activation is not an accepted degradation.
+
 ---
 
 ## 11. Frontend (frame)

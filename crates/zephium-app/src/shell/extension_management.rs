@@ -243,7 +243,12 @@ impl ExtensionManagementState {
             return None;
         }
         let candidate = catalog.candidates().get(usize::from(candidate_index))?;
-        if request.file_access && !candidate.supports_file_access() {
+        if request.file_access
+            && (!candidate.supports_file_access() || !candidate.file_access_available())
+        {
+            return None;
+        }
+        if request.private_access && !candidate.private_access_available() {
             return None;
         }
         let selection = ExtensionInitialGrantSelection::new(

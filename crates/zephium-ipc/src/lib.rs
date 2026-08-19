@@ -237,6 +237,8 @@ pub struct ExtensionInstallCandidateView {
     /// Canonically ordered optional host grants.
     pub optional_hosts: Vec<String>,
     pub supports_file_access: bool,
+    pub file_access_available: bool,
+    pub private_access_available: bool,
     pub compatibility: ExtensionManagementCompatibilityView,
     pub limitations: Vec<ExtensionManagementLimitationView>,
 }

@@ -59,6 +59,10 @@ Chromium's full site-isolation model.
    link may request one ordinary Shell tab through the bounded browser-request
    broker. Opening options consumes the existing popup-class native resource
    lease rather than allocating outside the process ceiling.
+   Manifest support for file URLs or private browsing does not imply product
+   availability. The current management projection marks both unavailable and
+   Shell rejects a forged grant selection before Store admission; those flags
+   stay closed until their native data-isolation and execution gates pass.
 
 The structural boundary between zones 2 and 3 is the most important application-owned
 control. A tab is a separate raw WebView, never a navigation of the privileged chrome.

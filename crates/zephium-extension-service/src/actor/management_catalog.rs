@@ -260,6 +260,12 @@ pub(super) fn load(
                 .flat_map(|hosts| hosts.patterns())
                 .map(|pattern| Box::<str>::from(pattern.as_str()))
                 .collect(),
+            // No selected runtime target has yet passed the complete
+            // file-scheme grant plus execution gate.
+            false,
+            // Private browsing requires a separately isolated browser data
+            // context, which is not part of the current product runtime.
+            false,
             compatibility,
             limitations,
         ) {

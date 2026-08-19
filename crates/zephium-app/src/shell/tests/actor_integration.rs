@@ -70,6 +70,8 @@ fn empty_extension_management_catalog(
 fn extension_install_candidate_catalog(
     profile: ProfileId,
     catalog_revision: zephium_core::extensions::ExtensionInstallCatalogRevision,
+    file_access_available: bool,
+    private_access_available: bool,
 ) -> (
     zephium_core::ports::extensions::ExtensionManagementCatalog,
     zephium_core::extensions::ExtensionPackageIdentity,
@@ -114,6 +116,8 @@ fn extension_install_candidate_catalog(
         vec!["<all_urls>".into()],
         vec!["notifications".into(), "tabs".into()],
         vec!["https://optional.example/*".into()],
+        file_access_available,
+        private_access_available,
         zephium_core::ports::extensions::ExtensionManagementCompatibility::Degraded,
         vec![
             zephium_core::ports::extensions::ExtensionManagementLimitation::api_permission(
@@ -684,7 +688,8 @@ fn extension_install_uses_only_the_retained_authenticated_candidate() {
     let _ = rx.try_iter().count();
 
     let catalog_revision = zephium_core::extensions::ExtensionInstallCatalogRevision::INITIAL;
-    let (catalog, package) = extension_install_candidate_catalog(profile, catalog_revision);
+    let (catalog, package) =
+        extension_install_candidate_catalog(profile, catalog_revision, true, true);
     assert!(handle.dispatch(Command::SetExtensionManagementVisible(true)));
     settle_next_management_catalog(&extension_state, catalog);
     let ready = wait_for_ready_management_catalog(&rx, profile, catalog_revision, 0);
@@ -703,6 +708,8 @@ fn extension_install_uses_only_the_retained_authenticated_candidate() {
         Some("https://example.com/store/fixture")
     );
     assert!(ready.candidates[0].supports_file_access);
+    assert!(ready.candidates[0].file_access_available);
+    assert!(ready.candidates[0].private_access_available);
     assert_eq!(ready.candidates[0].required_api, ["storage", "webRequest"]);
     assert_eq!(ready.candidates[0].required_hosts, ["<all_urls>"]);
     assert_eq!(ready.candidates[0].optional_api, ["notifications", "tabs"]);
@@ -856,6 +863,80 @@ fn extension_install_uses_only_the_retained_authenticated_candidate() {
         1,
     );
 
+    assert_eq!(
+        handle
+            .shutdown()
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap(),
+        ShutdownOutcome::Clean
+    );
+}
+
+#[test]
+fn unavailable_file_and_private_grants_are_rejected_before_service_admission() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (extension_service, extension_state) =
+        extension_lifecycle_with_outcome(ExtensionServiceShutdownOutcome::Clean);
+    let handle = spawn(
+        Arc::new(FakeEngine::default()),
+        Arc::new(FakeStore::default()),
+        Arc::new(ImmediateAllowAllCompiler),
+        extension_service,
+        Box::new(|_| {}),
+        Arc::new(FakeChrome),
+        Box::new(move |projection| {
+            let _ = tx.send(projection);
+        }),
+    )
+    .expect("spawn test shell");
+    assert!(handle.dispatch(Command::SetWindowSize(Size::new(1200.0, 800.0))));
+    assert!(handle.dispatch(Command::Bootstrap));
+    let profile = std::iter::from_fn(|| rx.recv_timeout(std::time::Duration::from_secs(2)).ok())
+        .find_map(|projection| match projection {
+            Projection::Items(items) => items.profile.map(|profile| profile.id),
+            _ => None,
+        })
+        .and_then(|profile| ProfileId::parse(&profile))
+        .expect("bootstrap must publish the focused profile");
+    let _ = rx.try_iter().count();
+    let catalog_revision = zephium_core::extensions::ExtensionInstallCatalogRevision::INITIAL;
+    let (catalog, _) = extension_install_candidate_catalog(profile, catalog_revision, false, false);
+    assert!(handle.dispatch(Command::SetExtensionManagementVisible(true)));
+    settle_next_management_catalog(&extension_state, catalog);
+    let ready = wait_for_ready_management_catalog(&rx, profile, catalog_revision, 0);
+    assert!(!ready.candidates[0].file_access_available);
+    assert!(!ready.candidates[0].private_access_available);
+
+    for (operation_id, file_access, private_access) in [
+        ("unavailable-file-access", true, false),
+        ("unavailable-private-access", false, true),
+    ] {
+        assert!(handle.dispatch_operation(
+            operation_id.into(),
+            Command::InstallFocusedExtension {
+                candidate_index: 0,
+                expected_catalog: catalog_revision,
+                optional_api_indices: Vec::new(),
+                optional_host_indices: Vec::new(),
+                file_access,
+                private_access,
+            },
+        ));
+        let rejected =
+            std::iter::from_fn(|| rx.recv_timeout(std::time::Duration::from_secs(2)).ok())
+                .find_map(|projection| match projection {
+                    Projection::OperationProcessed(completion)
+                        if completion.operation_id == operation_id =>
+                    {
+                        Some(completion)
+                    }
+                    _ => None,
+                })
+                .expect("unavailable grant selection must settle immediately");
+        assert_eq!(rejected.outcome, OperationOutcome::Rejected);
+        assert_eq!(rejected.reason, OperationReason::StoreConflict);
+    }
+    assert!(extension_state.install_calls.lock().unwrap().is_empty());
     assert_eq!(
         handle
             .shutdown()

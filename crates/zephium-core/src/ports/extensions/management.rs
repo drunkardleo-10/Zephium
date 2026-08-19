@@ -434,6 +434,8 @@ pub struct ExtensionInstallCandidateEntry {
     optional_api: Box<[Box<str>]>,
     optional_hosts: Box<[Box<str>]>,
     supports_file_access: bool,
+    file_access_available: bool,
+    private_access_available: bool,
     compatibility: ExtensionManagementCompatibility,
     limitations: Box<[ExtensionManagementLimitation]>,
     retained_bytes: usize,
@@ -455,6 +457,8 @@ impl ExtensionInstallCandidateEntry {
         required_hosts: Vec<Box<str>>,
         optional_api: Vec<Box<str>>,
         optional_hosts: Vec<Box<str>>,
+        file_access_available: bool,
+        private_access_available: bool,
         compatibility: ExtensionManagementCompatibility,
         limitations: Vec<ExtensionManagementLimitation>,
     ) -> Result<Self, ExtensionManagementProjectionError> {
@@ -568,6 +572,8 @@ impl ExtensionInstallCandidateEntry {
             optional_api: optional_api.into_boxed_slice(),
             optional_hosts: optional_hosts.into_boxed_slice(),
             supports_file_access,
+            file_access_available,
+            private_access_available,
             compatibility,
             limitations,
             retained_bytes,
@@ -624,6 +630,18 @@ impl ExtensionInstallCandidateEntry {
 
     pub const fn supports_file_access(&self) -> bool {
         self.supports_file_access
+    }
+
+    /// Whether the selected runtime target has passed the complete native
+    /// file-scheme grant and execution gate.
+    pub const fn file_access_available(&self) -> bool {
+        self.file_access_available
+    }
+
+    /// Whether the selected runtime target can isolate and execute private
+    /// browsing contexts for this package.
+    pub const fn private_access_available(&self) -> bool {
+        self.private_access_available
     }
 
     /// Whether required hosts plus the exact selected optional indexes expose
@@ -1037,6 +1055,8 @@ mod tests {
             required_hosts,
             Vec::new(),
             Vec::new(),
+            false,
+            false,
             ExtensionManagementCompatibility::Compatible,
             Vec::new(),
         )
@@ -1303,6 +1323,8 @@ mod tests {
             vec!["<all_urls>".into()],
         );
         assert!(with_files.supports_file_access());
+        assert!(!with_files.file_access_available());
+        assert!(!with_files.private_access_available());
         assert_eq!(
             with_files.required_api(),
             &[Box::<str>::from("storage"), Box::<str>::from("tabs")]
@@ -1342,6 +1364,8 @@ mod tests {
             vec!["https://required.example/*".into()],
             vec!["tabs".into(), "notifications".into()],
             vec!["file:///*".into(), "https://optional.example/*".into()],
+            true,
+            true,
             ExtensionManagementCompatibility::Compatible,
             Vec::new(),
         )
@@ -1358,6 +1382,8 @@ mod tests {
             ]
         );
         assert!(optional.supports_file_access());
+        assert!(optional.file_access_available());
+        assert!(optional.private_access_available());
         assert!(!optional.selected_hosts_support_file_access(&[]));
         assert!(optional.selected_hosts_support_file_access(&[0]));
         assert!(!optional.selected_hosts_support_file_access(&[2]));
@@ -1382,6 +1408,8 @@ mod tests {
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
+                false,
+                false,
                 ExtensionManagementCompatibility::Compatible,
                 Vec::new(),
             ),
@@ -1403,6 +1431,8 @@ mod tests {
                 Vec::new(),
                 vec!["storage".into()],
                 Vec::new(),
+                false,
+                false,
                 ExtensionManagementCompatibility::Compatible,
                 Vec::new(),
             ),

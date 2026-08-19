@@ -368,6 +368,8 @@ export type ExtensionInstallCandidateView = {
 	/**  Canonically ordered optional host grants. */
 	optional_hosts: string[],
 	supports_file_access: boolean,
+	file_access_available: boolean,
+	private_access_available: boolean,
 	compatibility: ExtensionManagementCompatibilityView,
 	limitations: ExtensionManagementLimitationView[],
 };

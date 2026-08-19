@@ -230,8 +230,8 @@
       catalogRevision,
       selectedOptionalApi,
       selectedOptionalHosts,
-      allowFileAccess,
-      allowPrivateAccess,
+      allowFileAccess && candidate.file_access_available,
+      allowPrivateAccess && candidate.private_access_available,
     );
     reviewingCandidate = null;
   }
@@ -250,7 +250,7 @@
     selectedOptionalHosts = selected
       ? [...selectedOptionalHosts, index].sort((left, right) => left - right)
       : selectedOptionalHosts.filter((entry) => entry !== index);
-    if (!fileAccessAvailable(candidate)) allowFileAccess = false;
+    if (!fileScopeSelected(candidate)) allowFileAccess = false;
   }
 
   const COLLAPSED_REQUIRED_HOST_COUNT = 6;
@@ -258,7 +258,7 @@
   const patternIncludesFiles = (pattern: string) =>
     pattern === "<all_urls>" || pattern.startsWith("file://");
 
-  const fileAccessAvailable = (candidate: ExtensionInstallCandidateView) =>
+  const fileScopeSelected = (candidate: ExtensionInstallCandidateView) =>
     candidate.required_hosts.some(patternIncludesFiles) ||
     selectedOptionalHosts.some((index) => {
       const pattern = candidate.optional_hosts[index];
@@ -754,28 +754,42 @@
                           {#if candidate.supports_file_access}
                             <label
                               class="mt-2 flex cursor-pointer items-start gap-2 text-[10.5px] leading-4 text-muted"
-                              class:cursor-not-allowed={!fileAccessAvailable(candidate)}
-                              class:opacity-55={!fileAccessAvailable(candidate)}
+                              class:cursor-not-allowed={!candidate.file_access_available ||
+                                !fileScopeSelected(candidate)}
+                              class:opacity-55={!candidate.file_access_available ||
+                                !fileScopeSelected(candidate)}
                             >
                               <input
                                 type="checkbox"
                                 class="mt-0.5 accent-accent"
                                 bind:checked={allowFileAccess}
-                                disabled={mutation !== null || !fileAccessAvailable(candidate)}
+                                disabled={mutation !== null ||
+                                  !candidate.file_access_available ||
+                                  !fileScopeSelected(candidate)}
                               />
-                              <span>Allow access to local file URLs</span>
+                              <span>
+                                {candidate.file_access_available
+                                  ? "Allow access to local file URLs"
+                                  : "Local file URL access is unavailable on this platform"}
+                              </span>
                             </label>
                           {/if}
                           <label
                             class="mt-1.5 flex cursor-pointer items-start gap-2 text-[10.5px] leading-4 text-muted"
+                            class:cursor-not-allowed={!candidate.private_access_available}
+                            class:opacity-55={!candidate.private_access_available}
                           >
                             <input
                               type="checkbox"
                               class="mt-0.5 accent-accent"
                               bind:checked={allowPrivateAccess}
-                              disabled={mutation !== null}
+                              disabled={mutation !== null || !candidate.private_access_available}
                             />
-                            <span>Allow in private windows</span>
+                            <span>
+                              {candidate.private_access_available
+                                ? "Allow in private windows"
+                                : "Private-window access is unavailable on this platform"}
+                            </span>
                           </label>
                           <div class="mt-2 flex justify-end gap-1">
                             <button
