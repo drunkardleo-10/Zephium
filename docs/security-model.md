@@ -29,7 +29,7 @@ Chromium's full site-isolation model.
    page-world bootstraps for discard-safety observation, bounded HTML extraction, and
    scripted-print denial. Those scripts expose no native bridge or application
    authority; all injected page-world code has exactly the page's trust level.
-4. **Extension execution (unprivileged; product-disabled).** The architecture reserves
+4. **Extension execution (unprivileged; ordinary-product-disabled).** The architecture reserves
    one non-reusable native principal per installed extension. Content scripts may run
    only in engine-provided isolated worlds scoped to that principal. Extension-owned
    background and UI surfaces do not inherit application-WebView privilege and receive
@@ -49,6 +49,16 @@ Chromium's full site-isolation model.
    pinned package deterministically adopts that topology and its authenticated message
    flow passes hostile tests. Native naming, CSP text, or the `sandbox` attribute alone
    is never accepted as isolation evidence.
+
+   The explicit macOS staging build is the sole current exception to ordinary
+   product provisioning, not an exception to this trust boundary. It uses an
+   isolated bundle identifier and fixed embedded catalog transport. Extension
+   action popups and settings views are native WKWebExtension surfaces with no
+   application bridge. An options view admits only its exact extension origin;
+   programmatic remote navigation is cancelled, while a user-activated HTTP(S)
+   link may request one ordinary Shell tab through the bounded browser-request
+   broker. Opening options consumes the existing popup-class native resource
+   lease rather than allocating outside the process ceiling.
 
 The structural boundary between zones 2 and 3 is the most important application-owned
 control. A tab is a separate raw WebView, never a navigation of the privileged chrome.

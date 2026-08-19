@@ -1816,14 +1816,20 @@ its authenticated source contains 79 files and 558,837 bytes with tree SHA-256
 `5015a2e84b2007f0e9cfc670c06b327787bf55a3129fa382534e8a462748eb23`.
 The generic v3 transform emits 82 files and 566,373 bytes with tree SHA-256
 `63726bb7feb7195bcafb9d605abf3fc48b56f79eafc1c44fbcd1ce7dfe0563ec`.
-The distinct brokered transform emits 89 files and 608,905 bytes with manifest
+The distinct brokered transform emits 90 files and 614,936 bytes with manifest
 SHA-256 `c2b503f1593b173305889abbe7c06eb0bf060c1d038aa4434a05a0564433c8b3`,
 tree SHA-256
-`7b6e1e880764752114504824854e87e901e46716be2832ba5f1372b1d790e305`,
+`9285fa9ad16e220a366644355f1d2434dfba05dcab921765936b295723d05ff6`,
 and canonical index SHA-256
-`aa448afcf327e1cf388148ac810f468ec3a2c9ec65c6c131d82f27299ceb44ce`.
-Neither tree is committed, downloaded by product code, or granted catalog,
-install, profile, or release authority.
+`88917d255a2914fdc0a2a6f9e7fdb3faa46523be1ccda5c73331a127775da286`.
+The transformed source tree is not committed or downloaded by ordinary product
+code. An explicit non-shipping `staging-extension-catalog` build instead embeds
+the externally signed deterministic CRX3 (`4bc71181804ec8aed8385bf2bd3db6df488c0b4e4bfffc20a7dc0ddeb131a9f6`)
+under catalog SHA-256
+`b27962b45ecb1f85df1afbed626dc42a92c11230a8a7ac162a40511f1aa24b56`.
+That feature has a separate application identifier and a fixed three-object
+in-process transport; ordinary builds compile neither the catalog bytes nor a
+distribution worker.
 
 The feature-gated release probe independently reopens both exact identities,
 loads the module worker through WebKit's public background completion API, and
@@ -1850,12 +1856,36 @@ tab completion. The same run proves action-popup execution, all seven
 non-sandbox extension pages adapted, the empty-bookmarks degradation, the
 transparent favicon fallback, exact native-message cardinality, and bounded
 native teardown. The same exact callback sequence invokes Vimium's adapted
-`search.query` current-tab path and `sessions.restore(null)` facade before the
-history request. Their real Shell effects are covered separately by
+`search.query` current-tab path, `sessions.restore(null)` facade, and closed
+`v1/options.open` operation before the history request. Shell and the native
+context rebind the options request to the exact live runtime and transfer the
+already-admitted popup lease into one standalone unprivileged settings
+WKWebView. The adapter converts the exact late-bound manifest options URL into
+an inert keyboard-accessible control, so WebKit cannot bypass the broker via
+native link navigation. The settings view has no Tauri/Wry bridge, permits
+navigation only within its exact `webkit-extension` origin, and routes only
+user-activated HTTP(S) links through the ordinary bounded tab-creation broker.
+Their real Shell effects are covered separately by
 profile-bound integration tests: the accessory WebKit probe returns typed
 success settlements and does not mutate the developer's browser session. The
 deterministic input event is not evidence of physical
 typing; the trusted `o` command and real rendered result are separate gates.
+
+The isolated packaged staging application exercises the complete profile path:
+first-run profile registration, authenticated catalog synchronization,
+permission review, install, enable, content/action execution, popup and options
+presentation, disable/re-enable, uninstall, clean shutdown, and restart. Its
+preserved revision-1 profile also gates live update to revision 2. The service
+retires every regular/private native owner, Store atomically advances the
+catalog, stable install, and package-bound grant revisions, and only then
+reactivates the same install identity. Existing authority is reconciled by
+exact declaration name/pattern; a newly required API or host permission returns
+`AdditionalConsentRequired` with no durable write. An ambiguous SQLite commit
+is resolved by reloading the exact install row before activation or rollback.
+The reviewed migration advanced catalog 5 to 6, install 4 to 5, and grant 1 to
+2, bound both durable rows to release tree
+`1aeb98ac8f13495c52a7e8c0d5719c2b40eceaaf3ab8297f05d82eab9891c429`,
+kept the runtime active, and reopened the popup after a full process restart.
 
 This gate establishes a reusable stock Chrome-extension path and core Vimium
 keyboard/link/action behavior on the exercised macOS runtime. It does not yet
@@ -1863,8 +1893,10 @@ provide real bookmark results: bookmarks are explicitly empty/read-only, and
 page favicons are transparent. Search is deliberately limited to the browser's
 default provider in the current or a new tab, and session support restores only
 the newest current-space tab; enumeration and explicit session identifiers are
-unsupported. Notifications, options persistence, enable/disable/restart, and
-multi-profile packaged behavior remain unassessed. The unbundled
+unsupported. Notifications, changed-permission update UX, options persistence
+after edited settings, and multi-profile packaged management behavior remain
+unassessed. Enable/disable, package update, popup/options presentation,
+shutdown, and restart are covered by the isolated packaged gate. The unbundled
 accessory probe is not granted foreground animation frames consistently, so it
 records whether smooth scrolling was visibly observed but gates on ordered
 trusted delivery plus Vimium interception; a packaged product-app E2E gate must
