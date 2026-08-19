@@ -81,6 +81,11 @@ name = "macos-vimium-probe"
 path = "src/bin/macos_vimium_probe.rs"
 required-features = ["native-web-extension-probes"]
 
+[[bin]]
+name = "macos-representative-extension-probe"
+path = "src/bin/macos_representative_extension_probe.rs"
+required-features = ["native-web-extension-probes"]
+
 [dependencies]
 zephium-core.workspace = true
 zephium-extension-runtime-api.workspace = true

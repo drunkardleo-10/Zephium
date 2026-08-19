@@ -15,6 +15,7 @@ mod native_broker_contract;
 mod permission_requests;
 mod persistent_runtime;
 mod profile_isolation;
+mod representative_extension;
 mod resource_transport;
 mod stock_password_manager;
 mod vimium_contract;
@@ -854,6 +855,17 @@ pub(crate) fn run_extension_compatibility_fixture_probe(artifact: &Path) -> Resu
 
 pub(crate) fn run_vimium_compatibility_artifact_probe(artifact: &Path) -> Result<bool, String> {
     vimium_contract::run(artifact)
+}
+
+pub(crate) fn run_representative_extension_probe(artifact: &Path) -> Result<bool, String> {
+    representative_extension::run_compatibility(artifact)
+}
+
+pub(crate) fn run_representative_stock_extension_probe(
+    extension: &Path,
+    tree_index: &Path,
+) -> Result<bool, String> {
+    representative_extension::run_stock(extension, tree_index)
 }
 
 pub(crate) fn run_resource_transport_probe() -> Result<bool, String> {
@@ -2622,6 +2634,8 @@ fn respond_to_fixture_request(
         "/keyboard" => keyboard_extension_page(run),
         "/activated" => keyboard_activated_page(run),
         "/login" => password_manager_login_page(run),
+        "/theme" => representative_theme_page(run),
+        "/theme/frame" => representative_theme_frame(run),
         "/frame/same" => child_page("same", run),
         "/frame/cross" => child_page("cross", run),
         "/excluded/frame" => child_page("excluded", run),
@@ -2634,6 +2648,8 @@ fn respond_to_fixture_request(
         || path == "/keyboard"
         || path == "/activated"
         || path == "/login"
+        || path == "/theme"
+        || path == "/theme/frame"
         || path == "/frame/same"
         || path == "/frame/cross"
         || path == "/excluded/frame"
@@ -2752,6 +2768,39 @@ fn password_manager_login_page(run: &str) -> String {
             }}
           }}
         }})();</script></body></html>"#
+    )
+}
+
+fn representative_theme_page(run: &str) -> String {
+    let run = serde_json::to_string(run).expect("bounded run identifier is serializable");
+    format!(
+        r#"<!doctype html><html><head><meta charset="utf-8"><title>theme fixture</title>
+        <style>
+          :root {{ color-scheme: light; }}
+          html, body {{ margin: 0; min-height: 100%; background: rgb(248, 249, 250); color: rgb(24, 28, 33); }}
+          main {{ margin: 24px; padding: 24px; background: rgb(255, 255, 255); border: 1px solid rgb(210, 214, 220); }}
+          iframe {{ display: block; width: 320px; height: 96px; margin-top: 12px; border: 0; }}
+        </style></head><body><main id="theme-panel"><h1>Representative theme fixture</h1>
+        <p><a href="https://example.invalid/">Light document content</a></p>
+        <iframe id="same-frame" src="/theme/frame?run=theme-same"></iframe>
+        <iframe id="blank-frame" srcdoc="<!doctype html><style>html,body{{background:rgb(250,250,250);color:rgb(20,20,20)}}</style><body>Blank descendant"></iframe>
+        </main><script>(() => {{
+          'use strict';
+          globalThis.__zephiumRepresentativeThemeRun = {run};
+          const dynamic = document.createElement('style');
+          dynamic.id = 'dynamic-theme-input';
+          dynamic.textContent = '#theme-panel {{ background-color: rgb(252, 252, 252); }}';
+          document.head.append(dynamic);
+        }})()</script></body></html>"#
+    )
+}
+
+fn representative_theme_frame(run: &str) -> String {
+    let run = serde_json::to_string(run).expect("bounded run identifier is serializable");
+    format!(
+        r#"<!doctype html><html><head><meta charset="utf-8"><title>theme child</title>
+        <style>html,body{{margin:0;background:rgb(250,250,250);color:rgb(20,20,20)}}</style></head>
+        <body><p>Same-origin descendant</p><script>globalThis.__zephiumRepresentativeThemeRun={run}</script></body></html>"#
     )
 }
 

@@ -183,6 +183,35 @@ pub fn run_macos_vimium_compatibility_artifact_probe(
     platform::macos::run_vimium_compatibility_artifact_probe(artifact)
 }
 
+/// Executes one authenticated, package-neutral compatibility artifact through
+/// a representative page-theme/action workflow.
+///
+/// This feature-gated diagnostic accepts no package, catalog, installation, or
+/// product authority. It exists to evaluate exact external artifacts without
+/// adding package-specific production code or vendoring third-party bytes.
+#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
+#[doc(hidden)]
+pub fn run_macos_representative_extension_probe(
+    artifact: &std::path::Path,
+) -> Result<bool, String> {
+    platform::macos::run_representative_extension_probe(artifact)
+}
+
+/// Executes one exact, indexed stock extension through the representative
+/// page-theme/action workflow without modifying any third-party byte.
+///
+/// The caller-provided canonical index closes the diagnostic input against
+/// mutation. This still grants no package, catalog, install, or product
+/// authority and is absent from ordinary builds.
+#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
+#[doc(hidden)]
+pub fn run_macos_representative_stock_extension_probe(
+    extension: &std::path::Path,
+    tree_index: &std::path::Path,
+) -> Result<bool, String> {
+    platform::macos::run_representative_stock_extension_probe(extension, tree_index)
+}
+
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
