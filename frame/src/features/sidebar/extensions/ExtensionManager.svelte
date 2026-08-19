@@ -47,6 +47,7 @@
   let allowPrivateAccess = $state(false);
   let section = $state<ExtensionCenterSection>("installed");
   let sectionChosen = $state(false);
+  let catalogSyncAttemptedProfile = $state<string | null>(null);
 
   let profileId = $derived(tabs.profile()?.id ?? null);
   let management = $derived(extensions.management(profileId));
@@ -75,6 +76,21 @@
     if (managementAvailability !== "configured" && open) {
       untrack(() => hide());
     }
+  });
+
+  $effect(() => {
+    if (
+      !open ||
+      profileId === null ||
+      management?.phase !== "catalog_not_synchronized" ||
+      !distributionRefreshVisible ||
+      distributionRefreshDisabled ||
+      catalogSyncAttemptedProfile === profileId
+    ) {
+      return;
+    }
+    catalogSyncAttemptedProfile = profileId;
+    untrack(() => void extensions.refreshDistribution());
   });
 
   $effect(() => {
@@ -115,6 +131,7 @@
     }
     requestFailed = false;
     subscribedProfile = null;
+    catalogSyncAttemptedProfile = null;
     section = "installed";
     sectionChosen = false;
     open = true;
@@ -125,6 +142,7 @@
     if (!open) return;
     open = false;
     subscribedProfile = null;
+    catalogSyncAttemptedProfile = null;
     confirming = null;
     reviewingCandidate = null;
     selectedOptionalApi = [];
