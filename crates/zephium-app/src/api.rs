@@ -411,6 +411,13 @@ pub enum Command {
         expected_catalog: ExtensionInstallCatalogRevision,
         expected_install: ExtensionInstallRevision,
     },
+    /// Opens the exact declared options page for one currently projected
+    /// active install. Shell rejoins all authority from its visible catalog.
+    OpenFocusedExtensionOptions {
+        install: ExtensionInstallId,
+        expected_catalog: ExtensionInstallCatalogRevision,
+        expected_install: ExtensionInstallRevision,
+    },
     /// Opens or closes the focused profile's lazy privileged management
     /// subscription. Opening performs one explicit authenticated read; closing
     /// invalidates late callbacks and retains no polling work.

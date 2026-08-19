@@ -703,6 +703,9 @@ impl RetirementGate {
             event @ EngineEvent::ExtensionActionSettled { profile, .. } => {
                 self.profile_is_active(profile).then_some(event)
             }
+            event @ EngineEvent::ExtensionOptionsPageSettled { runtime, .. } => {
+                self.profile_is_active(runtime.profile()).then_some(event)
+            }
             event @ EngineEvent::ExtensionActionsInvalidated { profile } => {
                 self.profile_is_active(profile).then_some(event)
             }
@@ -1490,6 +1493,50 @@ impl Engine for WebviewEngine {
         #[cfg(not(target_os = "macos"))]
         {
             let _ = request;
+            NativeDispatch::Unsupported
+        }
+    }
+
+    fn open_extension_options(&self, runtime: ExtensionRuntimeInstance) -> NativeDispatch {
+        #[cfg(target_os = "macos")]
+        {
+            let profile = runtime.profile();
+            if !lock_retirement_gate(&self.retirement).profile_is_active(profile) {
+                return NativeDispatch::Rejected;
+            }
+            let queued_retirement = self.retirement.clone();
+            let sink = self.sink.clone();
+            NativeDispatch::from_scheduled(self.run(move || {
+                if !lock_retirement_gate(&queued_retirement).profile_is_active(profile) {
+                    return;
+                }
+                let application_sink = sink.clone();
+                let admitted = host::try_with(move |host| {
+                    let settlement = host.open_extension_options(runtime);
+                    application_sink(EngineEventIngress::global(
+                        EngineEvent::ExtensionOptionsPageSettled {
+                            runtime,
+                            settlement,
+                        },
+                    ));
+                });
+                if !admitted && lock_retirement_gate(&queued_retirement).profile_is_active(profile)
+                {
+                    sink(EngineEventIngress::global(
+                        EngineEvent::ExtensionOptionsPageSettled {
+                            runtime,
+                            settlement:
+                                zephium_core::extensions::ExtensionOptionsPageSettlement::Rejected(
+                                    ExtensionActionRejection::NativeAdmissionFailed,
+                                ),
+                        },
+                    ));
+                }
+            }))
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = runtime;
             NativeDispatch::Unsupported
         }
     }

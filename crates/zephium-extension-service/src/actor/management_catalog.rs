@@ -195,6 +195,12 @@ pub(super) fn load(
             candidate.description().map(Into::into),
             candidate.author().map(Into::into),
             candidate.version(),
+            candidate
+                .manifest_arc()
+                .declarations()
+                .additional()
+                .options_page_descriptor()
+                .is_some(),
             ExtensionManagementSource::ZephiumVerified,
             Some(candidate.catalog_created_unix()),
             Some(provenance),

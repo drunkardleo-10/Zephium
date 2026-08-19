@@ -398,6 +398,8 @@ fn settle_native_activation(
     ticket: NativeCallTicket,
     outcome: MacosNativeRuntimeActivation,
 ) -> Result<bool, ExtensionRuntimeHostBindError> {
+    let profile = ticket.owner().key.profile();
+    let activated = matches!(&outcome, MacosNativeRuntimeActivation::Activated(_));
     let (disposition, owner) = match outcome {
         MacosNativeRuntimeActivation::RejectedWithoutAbsenceProof(failure) => {
             report_product_probe_failure("native activation settlement", failure);
@@ -449,8 +451,20 @@ fn settle_native_activation(
             )
         }
     };
-    host.extension_runtime_registry
-        .complete_native_activation(ticket, disposition, owner)
+    let settled =
+        host.extension_runtime_registry
+            .complete_native_activation(ticket, disposition, owner)?;
+    if settled && activated {
+        if let Err(error) = host
+            .macos_extension_controllers
+            .notify_actions_invalidated(profile)
+        {
+            report_product_probe_failure("action metadata invalidation", error);
+            host.extension_runtime_registry.fail_invariant();
+            return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+        }
+    }
+    Ok(settled)
 }
 
 #[cfg(feature = "native-extension-product-probes")]

@@ -31,6 +31,7 @@ export const commands = {
 	extensionDistributionRefresh: () => __TAURI_INVOKE<ExtensionDistributionRefreshAdmissionView>("extension_distribution_refresh"),
 	extensionManagementInstall: (candidateIndex: number, catalogRevision: string, selection: ExtensionInstallGrantSelectionInput) => __TAURI_INVOKE<OperationAdmission>("extension_management_install", { candidateIndex, catalogRevision, selection }),
 	extensionManagementSetEnabled: (installId: string, catalogRevision: string, installRevision: string, enabled: boolean) => __TAURI_INVOKE<OperationAdmission>("extension_management_set_enabled", { installId, catalogRevision, installRevision, enabled }),
+	extensionManagementOpenOptions: (installId: string, catalogRevision: string, installRevision: string) => __TAURI_INVOKE<boolean>("extension_management_open_options", { installId, catalogRevision, installRevision }),
 	extensionManagementUninstall: (installId: string, catalogRevision: string, installRevision: string) => __TAURI_INVOKE<OperationAdmission>("extension_management_uninstall", { installId, catalogRevision, installRevision }),
 	/**
 	 *  Answers only the exact Shell-projected native permission prompt. The four
@@ -414,6 +415,7 @@ export type ExtensionManagementEntryView = {
 	description: string | null,
 	author: string | null,
 	version: string,
+	has_options_page: boolean,
 	source: ExtensionManagementSourceView,
 	/**  Decimal Unix seconds of the authenticated Verified catalog release. */
 	verified_catalog_unix: string | null,

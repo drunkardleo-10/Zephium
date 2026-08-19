@@ -446,6 +446,39 @@ impl ActionPopupBroker {
         opened.get()
     }
 
+    /// Opens settings from trusted browser chrome without requiring a popup
+    /// to exist first. The caller supplies the same bounded native-view lease
+    /// used by popup-to-options transfer, so this path cannot expand the
+    /// extension resource pool.
+    pub(super) fn open_options_page_from_browser(
+        self: &Rc<Self>,
+        context: Retained<WKWebExtensionContext>,
+        parent: Retained<NSView>,
+        lease: NativeResourceLease,
+    ) -> Result<(), ExtensionActionRejection> {
+        if self.sealed.get() {
+            return Err(ExtensionActionRejection::ShuttingDown);
+        }
+        if let Some(options) = self.options.borrow().as_ref() {
+            if !std::ptr::eq(&*options.context, &*context) {
+                return Err(ExtensionActionRejection::PopupCapacityExceeded);
+            }
+            options.window.makeKeyAndOrderFront(None);
+            return Ok(());
+        }
+        if self.pending.borrow().is_some()
+            || self.active.borrow().is_some()
+            || self.closing.borrow().is_some()
+        {
+            return Err(ExtensionActionRejection::PopupCapacityExceeded);
+        }
+        self.present_options_transition(PopupTransition {
+            context,
+            parent,
+            lease,
+        })
+    }
+
     /// Handles WebKit's loaded-and-ready callback. Only the exact context and
     /// tab reserved by a trusted Shell gesture may consume the pending slot.
     pub(super) fn present(
@@ -760,8 +793,7 @@ impl ActionPopupBroker {
         let Some(options) = self.options.borrow_mut().take() else {
             return;
         };
-        options.window.setDelegate(None);
-        unsafe { options.webview.setNavigationDelegate(None) };
+        retire_options_native_surface(&options);
         let _keep_delegate_alive_through_close = options.delegate;
     }
 
@@ -769,8 +801,7 @@ impl ActionPopupBroker {
         let Some(options) = self.options.borrow_mut().take() else {
             return;
         };
-        options.window.setDelegate(None);
-        unsafe { options.webview.setNavigationDelegate(None) };
+        retire_options_native_surface(&options);
         let _keep_delegate_alive_through_close = options.delegate;
         options.window.close();
     }
@@ -887,6 +918,19 @@ fn teardown_active(mut active: ActivePopup, close_popover: bool) {
             active.popover.close()
         }
     }));
+}
+
+fn retire_options_native_surface(options: &ActiveOptionsPage) {
+    options.window.setDelegate(None);
+    unsafe {
+        options.webview.setNavigationDelegate(None);
+        options.webview.stopLoading();
+    }
+    if let Some(parent) = options.window.parentWindow() {
+        parent.removeChildWindow(&options.window);
+    }
+    options.window.setContentView(None);
+    options.window.orderOut(None);
 }
 
 struct PopupTransition {

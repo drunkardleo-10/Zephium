@@ -93,6 +93,7 @@ function management(value: number, profileId = "profile-a"): ExtensionManagement
         description: "Password manager",
         author: "Bitwarden Inc.",
         version: "2026.7.0",
+        has_options_page: true,
         source: "zephium_verified",
         verified_catalog_unix: "1786924800",
         provenance: {

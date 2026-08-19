@@ -227,6 +227,7 @@ impl Shell {
                     if matches!(
                         reason,
                         zephium_core::extensions::ExtensionActionRejection::RuntimeSuperseded
+                            | zephium_core::extensions::ExtensionActionRejection::RuntimeUnavailable
                             | zephium_core::extensions::ExtensionActionRejection::ActionUnavailable
                             | zephium_core::extensions::ExtensionActionRejection::ActionDisabled
                     ) {
@@ -240,6 +241,25 @@ impl Shell {
                     crate::diagnostic!(
                         "extensions: toolbar action settlement crossed profile authority"
                     );
+                }
+            }
+            EngineEvent::ExtensionOptionsPageSettled {
+                runtime,
+                settlement,
+            } => {
+                if !self
+                    .extension_management
+                    .authorizes_options_runtime(runtime)
+                {
+                    crate::diagnostic!("extensions: stale options-page settlement ignored");
+                } else if let zephium_core::extensions::ExtensionOptionsPageSettlement::Rejected(
+                    reason,
+                ) = settlement
+                {
+                    crate::diagnostic!(
+                        "extensions: browser-owned options page rejected with typed reason {reason:?}"
+                    );
+                    self.project_extension_action_failure(runtime.profile(), None, reason);
                 }
             }
             EngineEvent::ExtensionActionsInvalidated { profile } => {
@@ -475,6 +495,7 @@ impl Shell {
             EngineEvent::ExtensionRuntimeGrantCancelled { .. } => None,
             EngineEvent::ExtensionActionsSnapshotSettled { profile, .. } => Some(*profile),
             EngineEvent::ExtensionActionSettled { profile, .. } => Some(*profile),
+            EngineEvent::ExtensionOptionsPageSettled { runtime, .. } => Some(runtime.profile()),
             EngineEvent::ExtensionActionsInvalidated { profile } => Some(*profile),
             EngineEvent::SplitChanged { window, .. } => {
                 self.windows.get(*window).map(|window| window.profile)

@@ -270,6 +270,7 @@ pub struct ExtensionManagementEntry {
     description: Option<Box<str>>,
     author: Option<Box<str>>,
     version: Box<str>,
+    has_options_page: bool,
     source: ExtensionManagementSource,
     verified_catalog_unix: Option<u64>,
     provenance: Option<ExtensionManagementProvenance>,
@@ -293,6 +294,7 @@ impl ExtensionManagementEntry {
         description: Option<Box<str>>,
         author: Option<Box<str>>,
         version: impl Into<Box<str>>,
+        has_options_page: bool,
         source: ExtensionManagementSource,
         verified_catalog_unix: Option<u64>,
         provenance: Option<ExtensionManagementProvenance>,
@@ -353,6 +355,7 @@ impl ExtensionManagementEntry {
             description,
             author,
             version,
+            has_options_page,
             source,
             verified_catalog_unix,
             provenance,
@@ -382,6 +385,10 @@ impl ExtensionManagementEntry {
 
     pub fn version(&self) -> &str {
         &self.version
+    }
+
+    pub const fn has_options_page(&self) -> bool {
+        self.has_options_page
     }
 
     pub const fn source(&self) -> ExtensionManagementSource {
@@ -1012,6 +1019,7 @@ mod tests {
             Some("Description".into()),
             None,
             "1.0.0",
+            false,
             ExtensionManagementSource::ZephiumVerified,
             Some(1),
             Some(provenance()),
@@ -1021,6 +1029,29 @@ mod tests {
             Vec::new(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn options_page_capability_is_explicit_browser_owned_metadata() {
+        let without = entry(ProfileId::from(1), 1);
+        assert!(!without.has_options_page());
+        let with = ExtensionManagementEntry::new(
+            selector(ProfileId::from(1), 2),
+            "Fixture",
+            None,
+            None,
+            "1.0.0",
+            true,
+            ExtensionManagementSource::ZephiumVerified,
+            Some(1),
+            Some(provenance()),
+            ExtensionManagementRuntimeState::Disabled,
+            ExtensionManagementGrantState::Uninitialized,
+            ExtensionManagementCompatibility::Compatible,
+            Vec::new(),
+        )
+        .unwrap();
+        assert!(with.has_options_page());
     }
 
     fn candidate(
@@ -1101,6 +1132,7 @@ mod tests {
                     None,
                     None,
                     "1.0.0",
+                    false,
                     ExtensionManagementSource::ZephiumVerified,
                     Some(1),
                     Some(provenance()),
@@ -1149,6 +1181,7 @@ mod tests {
                 None,
                 None,
                 "1.0.0",
+                false,
                 source,
                 verified_catalog_unix,
                 provenance,
@@ -1190,6 +1223,7 @@ mod tests {
                     None,
                     None,
                     "1.0.0",
+                    false,
                     source,
                     verified_catalog_unix,
                     provenance,
@@ -1258,6 +1292,7 @@ mod tests {
             None,
             None,
             "1.0.0",
+            false,
             ExtensionManagementSource::ExternalCompatibility,
             None,
             Some(provenance()),
@@ -1300,6 +1335,7 @@ mod tests {
                     None,
                     None,
                     "1.0.0",
+                    false,
                     ExtensionManagementSource::DeveloperLocal,
                     None,
                     None,

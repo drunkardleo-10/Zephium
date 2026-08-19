@@ -3,6 +3,7 @@
 use zephium_core::extensions::{
     ExtensionActionRejection, ExtensionActionRequest, ExtensionActionSettlement,
     ExtensionActionSnapshot, ExtensionActionSnapshotSettlement, ExtensionBrowserSurfaceGeneration,
+    ExtensionOptionsPageSettlement, ExtensionRuntimeInstance,
 };
 use zephium_core::ids::{ItemId, ProfileId};
 use zephium_extension_runtime_api::ExtensionRuntimeHostBindError;
@@ -274,6 +275,69 @@ impl EngineHost {
                 Err(error) => ExtensionActionSettlement::Rejected(map_runtime_error(error)),
             };
         ExtensionActionInvocationOutcome::Settled(settlement)
+    }
+
+    /// Opens an installed extension's exact declared options page from trusted
+    /// browser chrome. Runtime, controller, context, parent view, and resource
+    /// lease are rejoined on the host thread before any native window exists.
+    pub(crate) fn open_extension_options(
+        &mut self,
+        runtime: ExtensionRuntimeInstance,
+    ) -> ExtensionOptionsPageSettlement {
+        let profile = runtime.profile();
+        let runtimes = match self.extension_runtime_registry.published_runtimes(profile) {
+            Ok(runtimes) => runtimes,
+            Err(error) => {
+                return ExtensionOptionsPageSettlement::Rejected(map_runtime_error(error))
+            }
+        };
+        let Some(runtime) = runtimes
+            .into_iter()
+            .find(|candidate| candidate.instance() == runtime)
+        else {
+            return ExtensionOptionsPageSettlement::Rejected(
+                ExtensionActionRejection::RuntimeUnavailable,
+            );
+        };
+        let owner = match self
+            .extension_runtime_registry
+            .with_owned_macos_runtime(&runtime, |owner| owner.action_popup_owner())
+        {
+            Ok(Some(Ok(owner))) => owner,
+            Ok(Some(Err(error))) => {
+                return ExtensionOptionsPageSettlement::Rejected(map_native_error(error))
+            }
+            Ok(None) => {
+                return ExtensionOptionsPageSettlement::Rejected(
+                    ExtensionActionRejection::RuntimeUnavailable,
+                )
+            }
+            Err(error) => {
+                return ExtensionOptionsPageSettlement::Rejected(map_runtime_error(error))
+            }
+        };
+        let Some(parent) = popup_parent_view(&self.parent) else {
+            return ExtensionOptionsPageSettlement::Rejected(
+                ExtensionActionRejection::NativeAdmissionFailed,
+            );
+        };
+        let lease = match self
+            .native_resources
+            .try_acquire(NativeResourceClass::ExtensionPopup)
+        {
+            Ok(lease) => lease,
+            Err(error) => {
+                return ExtensionOptionsPageSettlement::Rejected(map_popup_resource_error(error))
+            }
+        };
+        match self
+            .macos_extension_controllers
+            .open_options_page(profile, owner, parent, lease)
+        {
+            Ok(Ok(())) => ExtensionOptionsPageSettlement::Opened,
+            Ok(Err(reason)) => ExtensionOptionsPageSettlement::Rejected(reason),
+            Err(error) => ExtensionOptionsPageSettlement::Rejected(map_controller_error(error)),
+        }
     }
 
     pub(crate) fn timeout_extension_action_popup(

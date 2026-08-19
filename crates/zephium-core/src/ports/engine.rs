@@ -619,6 +619,11 @@ pub trait Engine {
     ) -> NativeDispatch {
         NativeDispatch::Unsupported
     }
+    /// Opens the exact declared options page for one currently published
+    /// runtime in a browser-owned, capability-limited native surface.
+    fn open_extension_options(&self, _runtime: ExtensionRuntimeInstance) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
     /// Settles one exact native WebExtension browser mutation. The native
     /// adapter retains the platform completion handler behind the
     /// `(profile, request)` correlation pair and invokes it exactly once.
@@ -856,6 +861,12 @@ pub enum EngineEvent {
         profile: ProfileId,
         request: crate::extensions::ExtensionActionRequestId,
         settlement: crate::extensions::ExtensionActionSettlement,
+    },
+    /// Terminal response to one browser-owned installed-extension settings
+    /// request. The runtime identity is echoed only for stale-result rejection.
+    ExtensionOptionsPageSettled {
+        runtime: ExtensionRuntimeInstance,
+        settlement: crate::extensions::ExtensionOptionsPageSettlement,
     },
     /// Coalescible native notification that one or more effective actions for
     /// this profile changed. It carries no native or extension identity; the

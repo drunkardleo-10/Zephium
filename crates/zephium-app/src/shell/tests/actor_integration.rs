@@ -30,6 +30,7 @@ fn extension_management_catalog(
         Some("Authenticated fixture metadata".into()),
         Some("Zephium tests".into()),
         "1.0.0",
+        true,
         zephium_core::ports::extensions::ExtensionManagementSource::ZephiumVerified,
         Some(1),
         Some(
@@ -861,6 +862,27 @@ fn extension_install_uses_only_the_retained_authenticated_candidate() {
         profile,
         catalog_revision.next().unwrap().next().unwrap(),
         1,
+    );
+    let options_catalog = catalog_revision.next().unwrap().next().unwrap();
+    let options_install = zephium_core::extensions::ExtensionInstallRevision::INITIAL
+        .next()
+        .unwrap();
+    assert!(handle.dispatch(Command::OpenFocusedExtensionOptions {
+        install,
+        expected_catalog: options_catalog,
+        expected_install: options_install,
+    }));
+    assert!(wait_for_actor_condition(
+        std::time::Duration::from_secs(2),
+        || engine.extension_options_requests().len() == 1
+    ));
+    assert_eq!(
+        engine.extension_options_requests(),
+        [zephium_core::extensions::ExtensionRuntimeInstance::new(
+            profile,
+            install,
+            zephium_core::extensions::ExtensionRuntimeGeneration::INITIAL,
+        )]
     );
 
     assert_eq!(

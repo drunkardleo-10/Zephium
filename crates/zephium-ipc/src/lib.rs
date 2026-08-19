@@ -203,6 +203,7 @@ pub struct ExtensionManagementEntryView {
     pub description: Option<String>,
     pub author: Option<String>,
     pub version: String,
+    pub has_options_page: bool,
     pub source: ExtensionManagementSourceView,
     /// Decimal Unix seconds of the authenticated Verified catalog release.
     pub verified_catalog_unix: Option<String>,

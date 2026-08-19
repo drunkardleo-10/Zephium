@@ -179,6 +179,7 @@ impl Shell {
                     description: entry.description().map(str::to_owned),
                     author: entry.author().map(str::to_owned),
                     version: entry.version().to_owned(),
+                    has_options_page: entry.has_options_page(),
                     source: extension_management_source_view(entry.source()),
                     verified_catalog_unix: entry
                         .verified_catalog_unix()

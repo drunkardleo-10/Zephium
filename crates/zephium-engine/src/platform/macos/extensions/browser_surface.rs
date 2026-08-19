@@ -1078,6 +1078,22 @@ impl MacosExtensionBrowserSurfaceHost {
         self.generation
     }
 
+    /// Invalidates Shell action metadata after an extension runtime generation
+    /// changes without mutating the browser surface itself.
+    pub(super) fn notify_actions_invalidated_after_activation(&self) {
+        self.broker.notify_actions_invalidated_after_activation();
+    }
+
+    pub(super) fn open_options_page_from_browser(
+        &self,
+        context: Retained<WKWebExtensionContext>,
+        parent: Retained<NSView>,
+        lease: crate::host::NativeResourceLease,
+    ) -> Result<(), ExtensionActionRejection> {
+        self.action_popup
+            .open_options_page_from_browser(context, parent, lease)
+    }
+
     pub(super) fn apply(
         &mut self,
         controller: &WKWebExtensionController,

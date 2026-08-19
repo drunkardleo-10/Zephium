@@ -494,6 +494,24 @@ impl PersistentControllerRegistry {
         result.map(|tab| tab.map(|(tab, resident)| ControllerActionTab { tab, resident }))
     }
 
+    /// Publishes a metadata refresh after an exact runtime generation has
+    /// entered the already-prepared profile controller.
+    pub(crate) fn notify_actions_invalidated(
+        &mut self,
+        profile: ProfileId,
+    ) -> Result<(), ControllerRegistryError> {
+        self.slots.admission(profile)?;
+        let Some(PersistentControllerSlot::Prepared(entry)) = self.slots.entries.get(&profile)
+        else {
+            return Err(ControllerRegistryError::EntryChanged);
+        };
+        validate_entry_identity(entry)?;
+        entry
+            .browser_surface
+            .notify_actions_invalidated_after_activation();
+        Ok(())
+    }
+
     /// Installs the one exact popup callback expectation after the host has
     /// joined runtime, surface, tab and resource authority.
     pub(crate) fn begin_action_popup(
@@ -526,6 +544,28 @@ impl PersistentControllerRegistry {
             parent,
             lease,
         ))
+    }
+
+    pub(crate) fn open_options_page(
+        &mut self,
+        profile: ProfileId,
+        owner: super::native_runtime::MacosNativeActionPopupOwner,
+        parent: Retained<NSView>,
+        lease: crate::host::NativeResourceLease,
+    ) -> Result<Result<(), ExtensionActionRejection>, ControllerRegistryError> {
+        self.slots.admission(profile)?;
+        let Some(PersistentControllerSlot::Prepared(entry)) = self.slots.entries.get(&profile)
+        else {
+            return Ok(Err(ExtensionActionRejection::RuntimeUnavailable));
+        };
+        validate_entry_identity(entry)?;
+        if Retained::as_ptr(&entry.controller) != owner.controller_identity() {
+            return Ok(Err(ExtensionActionRejection::NativeAdmissionFailed));
+        }
+        let context = owner.into_context();
+        Ok(entry
+            .browser_surface
+            .open_options_page_from_browser(context, parent, lease))
     }
 
     pub(crate) fn cancel_action_popup(

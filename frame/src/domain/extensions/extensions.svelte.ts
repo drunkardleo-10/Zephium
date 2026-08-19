@@ -490,6 +490,26 @@ export function uninstall(entry: ExtensionManagementEntryView, catalogRevision: 
   );
 }
 
+export function openOptions(entry: ExtensionManagementEntryView, catalogRevision: string): void {
+  void (async () => {
+    try {
+      const admitted = await boundedIpc(
+        commands.extensionManagementOpenOptions(
+          entry.install_id,
+          catalogRevision,
+          entry.install_revision,
+        ),
+        MANAGEMENT_IPC_TIMEOUT_MS,
+      );
+      if (!admitted) {
+        managementNotice = "The extension settings are no longer available.";
+      }
+    } catch {
+      managementNotice = "Extension settings are temporarily unavailable.";
+    }
+  })();
+}
+
 export function install(
   candidate: ExtensionInstallCandidateView,
   catalogRevision: string,

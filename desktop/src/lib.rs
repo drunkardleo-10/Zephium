@@ -1488,6 +1488,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             extension_distribution_refresh,
             extension_management_install,
             extension_management_set_enabled,
+            extension_management_open_options,
             extension_management_uninstall,
             extension_runtime_grant_respond,
             page_permission_respond,
@@ -2610,6 +2611,35 @@ fn extension_management_set_enabled(
             enabled,
         },
     )
+}
+
+#[tauri::command]
+#[specta::specta]
+fn extension_management_open_options(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    install_id: String,
+    catalog_revision: String,
+    install_revision: String,
+) -> bool {
+    if !authorize(
+        &caller,
+        CallerPolicy::Main,
+        "extension_management_open_options",
+    ) || shutdown_started(caller.app_handle())
+    {
+        return false;
+    }
+    let Some((install, expected_catalog, expected_install)) =
+        extension_management_selector(&install_id, &catalog_revision, &install_revision)
+    else {
+        return false;
+    };
+    shell.dispatch(Command::OpenFocusedExtensionOptions {
+        install,
+        expected_catalog,
+        expected_install,
+    })
 }
 
 #[tauri::command]

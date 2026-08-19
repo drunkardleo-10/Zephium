@@ -348,6 +348,14 @@ pub enum ExtensionActionSettlement {
     Rejected(ExtensionActionRejection),
 }
 
+/// Terminal result for one browser-owned request to show an installed
+/// extension's declared options page.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExtensionOptionsPageSettlement {
+    Opened,
+    Rejected(ExtensionActionRejection),
+}
+
 /// Terminal response to one action-cohort refresh. A rejected refresh must
 /// not erase the Shell's last known-good cohort; an applied empty snapshot
 /// does.

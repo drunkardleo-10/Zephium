@@ -653,6 +653,7 @@ pub(crate) struct FakeEngine {
     extension_browser_surfaces: Mutex<Vec<ExtensionBrowserSurface>>,
     extension_action_requests: Mutex<Vec<(ProfileId, ItemId, ExtensionBrowserSurfaceGeneration)>>,
     extension_action_invocations: Mutex<Vec<ExtensionActionRequest>>,
+    extension_options_requests: Mutex<Vec<ExtensionRuntimeInstance>>,
     extension_browser_settlements: Mutex<
         Vec<(
             ProfileId,
@@ -774,6 +775,10 @@ impl FakeEngine {
 
     fn extension_action_invocations(&self) -> Vec<ExtensionActionRequest> {
         self.extension_action_invocations.lock().unwrap().clone()
+    }
+
+    fn extension_options_requests(&self) -> Vec<ExtensionRuntimeInstance> {
+        self.extension_options_requests.lock().unwrap().clone()
     }
 
     fn extension_browser_settlements(
@@ -901,6 +906,16 @@ impl Engine for FakeEngine {
                 .lock()
                 .unwrap()
                 .push(request);
+        }
+        admission
+    }
+    fn open_extension_options(&self, runtime: ExtensionRuntimeInstance) -> NativeDispatch {
+        let admission = self.native_admission();
+        if admission == NativeDispatch::Scheduled {
+            self.extension_options_requests
+                .lock()
+                .unwrap()
+                .push(runtime);
         }
         admission
     }

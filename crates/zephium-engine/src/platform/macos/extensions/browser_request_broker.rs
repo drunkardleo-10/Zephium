@@ -153,6 +153,31 @@ impl BrowserRequestBroker {
         }));
     }
 
+    /// Lets WebKit publish manifest-derived action state after a newly loaded
+    /// runtime reaches its activation callback. The one delayed notification
+    /// is bounded per activation and disappears with the profile broker.
+    pub(super) fn notify_actions_invalidated_after_activation(self: &Rc<Self>) {
+        let Ok(when) = dispatch2::DispatchTime::try_from(Duration::from_millis(100)) else {
+            self.notify_actions_invalidated();
+            return;
+        };
+        let broker = Rc::downgrade(self);
+        let callback: RcBlock<dyn Fn()> = RcBlock::new(move || {
+            if let Some(broker) = broker.upgrade().filter(|broker| !broker.sealed.get()) {
+                broker.notify_actions_invalidated();
+            }
+        });
+        // SAFETY: dispatch_after copies the heap block onto the main queue.
+        // The weak broker and all native state remain main-thread-only.
+        unsafe {
+            dispatch2::DispatchQueue::exec_after_with_block(
+                when,
+                dispatch2::DispatchQueue::main(),
+                RcBlock::as_ptr(&callback),
+            );
+        }
+    }
+
     pub(super) fn begin_tab(
         &self,
         action: ExtensionBrowserRequestAction,

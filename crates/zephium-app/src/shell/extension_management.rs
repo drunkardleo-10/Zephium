@@ -228,6 +228,41 @@ impl ExtensionManagementState {
         })
     }
 
+    fn options_runtime(
+        &self,
+        selector: ExtensionInstallSelector,
+    ) -> Option<zephium_core::extensions::ExtensionRuntimeInstance> {
+        let entry = self
+            .catalog
+            .as_ref()?
+            .entries()
+            .iter()
+            .find(|entry| entry.selector() == selector && entry.has_options_page())?;
+        let ExtensionManagementRuntimeState::Active(generation) = entry.runtime() else {
+            return None;
+        };
+        Some(zephium_core::extensions::ExtensionRuntimeInstance::new(
+            selector.profile(),
+            selector.install(),
+            generation,
+        ))
+    }
+
+    pub(super) fn authorizes_options_runtime(
+        &self,
+        runtime: zephium_core::extensions::ExtensionRuntimeInstance,
+    ) -> bool {
+        self.catalog.as_ref().is_some_and(|catalog| {
+            catalog.profile() == runtime.profile()
+                && catalog.entries().iter().any(|entry| {
+                    entry.selector().install() == runtime.install_id()
+                        && entry.has_options_page()
+                        && entry.runtime()
+                            == ExtensionManagementRuntimeState::Active(runtime.generation())
+                })
+        })
+    }
+
     fn resolve_candidate(
         &self,
         profile: ProfileId,
@@ -270,6 +305,40 @@ impl ExtensionManagementState {
 }
 
 impl Shell {
+    pub(super) fn open_focused_extension_options(
+        &mut self,
+        install: zephium_core::ids::ExtensionInstallId,
+        expected_catalog: zephium_core::extensions::ExtensionInstallCatalogRevision,
+        expected_install: zephium_core::extensions::ExtensionInstallRevision,
+    ) {
+        let Some(profile) = self.windows.focused().map(|window| window.profile) else {
+            return;
+        };
+        let selector =
+            ExtensionInstallSelector::new(profile, install, expected_catalog, expected_install);
+        let Some(runtime) = self.extension_management.options_runtime(selector) else {
+            self.project_extension_action_failure(
+                profile,
+                None,
+                zephium_core::extensions::ExtensionActionRejection::ActionUnavailable,
+            );
+            return;
+        };
+        match self.engine.open_extension_options(runtime) {
+            NativeDispatch::Scheduled => {}
+            NativeDispatch::Rejected => self.project_extension_action_failure(
+                profile,
+                None,
+                zephium_core::extensions::ExtensionActionRejection::NativeAdmissionFailed,
+            ),
+            NativeDispatch::Unsupported => self.project_extension_action_failure(
+                profile,
+                None,
+                zephium_core::extensions::ExtensionActionRejection::UnsupportedPlatform,
+            ),
+        }
+    }
+
     pub(super) fn set_extension_management_visible(&mut self, visible: bool) {
         let was_visible = self.extension_management.visible_profile().is_some();
         let profile = if visible {
@@ -915,6 +984,7 @@ mod state_tests {
             None,
             None,
             "1.0.0",
+            true,
             ExtensionManagementSource::ZephiumVerified,
             Some(1),
             Some(
@@ -926,7 +996,9 @@ mod state_tests {
                 )
                 .unwrap(),
             ),
-            ExtensionManagementRuntimeState::Disabled,
+            ExtensionManagementRuntimeState::Active(
+                zephium_core::extensions::ExtensionRuntimeGeneration::INITIAL,
+            ),
             ExtensionManagementGrantState::Uninitialized,
             ExtensionManagementCompatibility::Compatible,
             Vec::new(),
@@ -966,6 +1038,14 @@ mod state_tests {
         assert!(state.install_catalog(catalog(profile)));
         let exact = state.catalog().unwrap().entries()[0].selector();
         assert!(state.authorizes(exact));
+        assert_eq!(
+            state.options_runtime(exact),
+            Some(zephium_core::extensions::ExtensionRuntimeInstance::new(
+                profile,
+                exact.install(),
+                zephium_core::extensions::ExtensionRuntimeGeneration::INITIAL,
+            ))
+        );
         assert!(!state.authorizes(ExtensionInstallSelector::new(
             profile,
             ExtensionInstallId::from(2),
@@ -975,5 +1055,6 @@ mod state_tests {
 
         state.set_visible(None);
         assert!(!state.authorizes(exact));
+        assert!(state.options_runtime(exact).is_none());
     }
 }

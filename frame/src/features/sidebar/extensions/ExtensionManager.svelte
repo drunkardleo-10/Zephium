@@ -230,6 +230,11 @@
     confirming = null;
   }
 
+  function openOptions(entry: ExtensionManagementEntryView) {
+    if (catalogRevision === null || mutation !== null) return;
+    extensions.openOptions(entry, catalogRevision);
+  }
+
   function reviewInstall(candidate: ExtensionInstallCandidateView) {
     if (mutation !== null) return;
     confirming = null;
@@ -604,6 +609,16 @@
                           Remove
                         </button>
                       {:else}
+                        {#if entry.has_options_page && entry.runtime === "active"}
+                          <button
+                            type="button"
+                            class="hover:bg-fill-strong h-7 rounded-md px-2 text-[11px] font-medium text-muted hover:text-text"
+                            disabled={mutation !== null}
+                            onclick={() => openOptions(entry)}
+                          >
+                            Settings
+                          </button>
+                        {/if}
                         <button
                           type="button"
                           aria-label={`Remove ${entry.name}`}

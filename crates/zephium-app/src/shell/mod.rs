@@ -640,6 +640,11 @@ impl Shell {
             Command::Run(id) => {
                 let _ = self.operation_run_command(&id);
             }
+            Command::OpenFocusedExtensionOptions {
+                install,
+                expected_catalog,
+                expected_install,
+            } => self.open_focused_extension_options(install, expected_catalog, expected_install),
             // This privileged mutation must carry a desktop operation id.
             Command::InvokeExtensionAction { .. }
             | Command::InstallFocusedExtension { .. }
