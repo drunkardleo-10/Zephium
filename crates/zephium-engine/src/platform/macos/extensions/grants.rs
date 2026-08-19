@@ -491,6 +491,7 @@ impl MacosNativeGrantSchema {
             "webNavigation" => Ok(Native(MacosNativeApiPermission::WebNavigation)),
             "webRequest" => Ok(Native(MacosNativeApiPermission::WebRequest)),
             "clipboardRead"
+            | "fontSettings"
             | "idle"
             | "offscreen"
             | "privacy"

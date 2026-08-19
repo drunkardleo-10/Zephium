@@ -20,9 +20,10 @@ use serde_json::{json, Value};
 
 const CONTRACT_PRINCIPAL: &str = "cccccccccccccccccccccccccccccccc";
 const PENDING_TITLE: &str = "zephium-major-extension-contract-pending";
-const DECLARED_PERMISSIONS: [&str; 7] = [
+const DECLARED_PERMISSIONS: [&str; 8] = [
     "bookmarks",
     "favicon",
+    "fontSettings",
     "history",
     "search",
     "sessions",
@@ -30,10 +31,11 @@ const DECLARED_PERMISSIONS: [&str; 7] = [
     "webNavigation",
 ];
 const EXPECTED_NATIVE_PERMISSIONS: [&str; 2] = ["storage", "webNavigation"];
-const NAMESPACE_NAMES: [&str; 19] = [
+const NAMESPACE_NAMES: [&str; 20] = [
     "action",
     "actionSetIcon",
     "bookmarks",
+    "fontSettings",
     "history",
     "runtime",
     "search",
@@ -51,10 +53,11 @@ const NAMESPACE_NAMES: [&str; 19] = [
     "webNavigationHistoryStateUpdated",
     "webNavigationReferenceFragmentUpdated",
 ];
-const EXPECTED_NAMESPACES: [(&str, &str); 19] = [
+const EXPECTED_NAMESPACES: [(&str, &str); 20] = [
     ("action", "object"),
     ("actionSetIcon", "function"),
     ("bookmarks", "undefined"),
+    ("fontSettings", "undefined"),
     ("history", "undefined"),
     ("runtime", "object"),
     ("search", "undefined"),
@@ -110,6 +113,7 @@ pub(super) fn write_fixture(root: &Path) -> Result<PathBuf, String> {
         action: type(globalThis.chrome?.action),
         actionSetIcon: type(globalThis.chrome?.action?.setIcon),
         bookmarks: type(globalThis.chrome?.bookmarks),
+        fontSettings: type(globalThis.chrome?.fontSettings),
         history: type(globalThis.chrome?.history),
         runtime: type(globalThis.chrome?.runtime),
         search: type(globalThis.chrome?.search),

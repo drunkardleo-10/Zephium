@@ -220,6 +220,7 @@ fn prohibited_unknown_and_manifest_only_api_tokens_remain_distinct() {
 
     for name in [
         "clipboardRead",
+        "fontSettings",
         "idle",
         "offscreen",
         "privacy",
