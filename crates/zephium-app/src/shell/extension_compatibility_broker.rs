@@ -19,6 +19,9 @@ impl Shell {
             || !self.extension_browser_surfaces.is_active(runtime.profile())
             || self.profile_deletion_quarantines(runtime.profile())
         {
+            crate::diagnostic!(
+                "extensions: compatibility broker Shell request rejected for inactive profile context"
+            );
             self.settle_extension_compatibility_broker(
                 runtime,
                 id,
@@ -60,6 +63,9 @@ impl Shell {
                 return;
             }
             ExtensionCompatibilityBrokerOperation::OpenOptionsPage => {
+                crate::diagnostic!(
+                    "extensions: compatibility broker authorized options-page presentation"
+                );
                 self.settle_extension_compatibility_broker(
                     runtime,
                     id,

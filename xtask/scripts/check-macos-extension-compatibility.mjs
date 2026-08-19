@@ -211,8 +211,7 @@ class OptionsAnchor extends OptionsElement {
     this[name] = value;
   }
   removeAttribute(name) {
-    assert.ok(name === "href" || name === "target");
-    if (name === "href") this.href = "";
+    assert.equal(name, "target");
   }
   addEventListener(type, listener, capture) {
     assert.equal(capture, true);
@@ -293,7 +292,7 @@ assert.equal(typeof optionsTargetClick, "function");
 assert.equal(typeof optionsTargetKeydown, "function");
 assert.equal(optionsAnchor.role, "button");
 assert.equal(optionsAnchor.tabindex, "0");
-assert.equal(optionsAnchor.href, "");
+assert.equal(optionsAnchor.href, "webkit-extension://options-fixture/pages/options.html");
 assert.equal(optionsObserverDisconnected, 1);
 let optionsPrevented = 0;
 let optionsPropagationStopped = 0;

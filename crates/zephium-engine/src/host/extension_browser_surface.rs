@@ -69,6 +69,11 @@ impl EngineHost {
                 .ok()
                 .flatten()
         });
+        if witness.is_none() {
+            crate::diagnostic!(
+                "extensions: compatibility broker authorization was unavailable for current runtime"
+            );
+        }
         let _ = self
             .macos_extension_controllers
             .finalize_compatibility_broker_request(profile, request, witness);

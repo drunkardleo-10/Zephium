@@ -1392,7 +1392,10 @@ fn wait_for_popup_state(
             optionsMode: globalThis[Symbol.for('zephium.webkit-options-page-compatibility.mode.v1')] ?? '',
             optionsControlBound: (() => {{
               const link = document.querySelector('#optionsLink');
-              return link?.getAttribute('role') === 'button' && !link.hasAttribute('href');
+              const path = document.querySelector('meta[name="zephium-extension-options-page"]')?.content;
+              return link?.getAttribute('role') === 'button'
+                && typeof path === 'string'
+                && link.href === chrome.runtime.getURL(path);
             }})(),
             optionsUrl: (() => {{
               const path = document.querySelector('meta[name="zephium-extension-options-page"]')?.content;
@@ -1508,7 +1511,10 @@ fn verify_brokered_options_control(
 ) -> Result<(), String> {
     let script = r#"(() => {
       const control = document.querySelector('#optionsLink');
-      if (control?.getAttribute('role') !== 'button' || control.hasAttribute('href')) return false;
+      const path = document.querySelector('meta[name="zephium-extension-options-page"]')?.content;
+      if (control?.getAttribute('role') !== 'button'
+          || typeof path !== 'string'
+          || control.href !== chrome.runtime.getURL(path)) return false;
       return control.dispatchEvent(new KeyboardEvent('keydown', {
         key: 'Enter',
         bubbles: true,

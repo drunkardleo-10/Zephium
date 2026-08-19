@@ -49,6 +49,13 @@
     if (!(element instanceof HTMLAnchorElement) || !boundOptionsLinks.has(element)) return;
     event.preventDefault();
     event.stopImmediatePropagation();
+    // Preserve the exact authenticated href as an accessibility fallback.
+    // WebKit can service AXPress as native link activation without delivering
+    // the page's DOM listener. The controller delegate admits only this exact
+    // context.optionsPageURL(), so a physical/DOM activation uses the narrow
+    // broker while an accessibility-only activation reaches the same native
+    // options surface through the URL path.
+    if (element.href !== expected) return;
     try {
       requestOptions();
     } catch {
@@ -90,7 +97,6 @@
     link.setAttribute("role", "button");
     link.setAttribute("tabindex", "0");
     link.removeAttribute("target");
-    link.removeAttribute("href");
     link.addEventListener("click", openOptions, true);
     link.addEventListener("keydown", openOptionsFromKeyboard, true);
     stopLateLinkObservation();

@@ -948,6 +948,7 @@ define_class!(
                 broker.reject(reply, ExtensionCompatibilityBrokerRejection::Unsupported);
                 return;
             }
+            crate::diagnostic!("extensions: compatibility broker native request received");
             broker.begin(controller, context, message, reply);
         }
     }
