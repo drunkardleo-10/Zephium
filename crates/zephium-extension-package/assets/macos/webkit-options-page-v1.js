@@ -94,8 +94,6 @@
       return false;
     }
     boundOptionsLinks.add(link);
-    link.setAttribute("role", "button");
-    link.setAttribute("tabindex", "0");
     link.removeAttribute("target");
     link.addEventListener("click", openOptions, true);
     link.addEventListener("keydown", openOptionsFromKeyboard, true);

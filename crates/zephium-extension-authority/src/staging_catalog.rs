@@ -24,12 +24,24 @@ pub(crate) const ROLLBACK_TREE_INDEX_BYTES: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../assets/extension-staging/vimium-2.4.2-macos-v1/rollback/tree-index.json"
 ));
+pub(crate) const ROLLBACK_TWO_CATALOG_BYTES: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../assets/extension-staging/vimium-2.4.2-macos-v1/rollback-2/catalog-v1.json"
+));
+pub(crate) const ROLLBACK_TWO_MANIFEST_BYTES: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../assets/extension-staging/vimium-2.4.2-macos-v1/rollback-2/manifest.json"
+));
+pub(crate) const ROLLBACK_TWO_TREE_INDEX_BYTES: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../assets/extension-staging/vimium-2.4.2-macos-v1/rollback-2/tree-index.json"
+));
 
 pub(crate) const CATALOG_LENGTH: usize = 2_169;
 pub(crate) const CATALOG_SHA256: [u8; 32] =
-    decode_lower_hex_32("b27962b45ecb1f85df1afbed626dc42a92c11230a8a7ac162a40511f1aa24b56");
+    decode_lower_hex_32("d15bb0a138379049d933c531b5225ec11c11a216d5d094e8d9c67212fce47638");
 pub(crate) const INVENTORY_SHA256: [u8; 32] =
-    decode_lower_hex_32("9228821afbca066e1cc1929c0162f28985187d8bef01905e98325064b0717f5f");
+    decode_lower_hex_32("e538b0c155d7595be5a3cb4b41dd6692f04af070ada95bfd23ba9f8d4510e9c8");
 pub(crate) const ADMISSION_POLICY_SHA256: [u8; 32] =
     decode_lower_hex_32("d05d6d14b6c2c81fa0dbefd350e547fe6e269156b0bef5ff5d77e5be5d0a3225");
 pub(crate) const PACKAGE_KEY: [u8; 32] =
@@ -37,31 +49,48 @@ pub(crate) const PACKAGE_KEY: [u8; 32] =
 pub(crate) const MANIFEST_SHA256: [u8; 32] =
     decode_lower_hex_32("886d008e4d79a1441f3e6c7e836abff7ed4f8d70d3405c742d36429caacd885b");
 pub(crate) const TREE_SHA256: [u8; 32] =
-    decode_lower_hex_32("1aeb98ac8f13495c52a7e8c0d5719c2b40eceaaf3ab8297f05d82eab9891c429");
+    decode_lower_hex_32("6b0960e703616c920c75a7b3994a4f63c2313234fc3886a764cbdf04d86a2e68");
 pub(crate) const TREE_INDEX_SHA256: [u8; 32] =
-    decode_lower_hex_32("4bd15bcf176912edee8eb43ccea1710d69affcbe9fae068821bbf8bfa594957c");
+    decode_lower_hex_32("d8c686e59525111cd91f51b5ba77ea357106bd7cd1da1cb40d1c0da7bafb5f9a");
 pub(crate) const TREE_INDEX_LENGTH: usize = 11_635;
 pub(crate) const COMPATIBILITY_SHA256: [u8; 32] =
     decode_lower_hex_32("b1f49c55a538ea75cbd5de3bd969df3200a302f8b14d88d5194f6996dd14ed16");
 pub(crate) const ADMISSION_SHA256: [u8; 32] =
-    decode_lower_hex_32("556128c7d9be9f267ced554a491797585454e3a2da169e7aaa3880e009816404");
+    decode_lower_hex_32("310ce75fdb22e8487b6681eebd64a7ce4bc5853ad0410abc9f6e94631010a8ab");
 
 pub(crate) const ROLLBACK_CATALOG_LENGTH: usize = 2_169;
 pub(crate) const ROLLBACK_CATALOG_SHA256: [u8; 32] =
-    decode_lower_hex_32("74d8400c2c0bcf41cf4fe46ce6b95582821bd1aa69fd8f1dd279a9eca9d0f29d");
+    decode_lower_hex_32("7f06d03b7e9f1a3967109481dc2804955236d0e2f2868554624d98397f2aeecb");
 pub(crate) const ROLLBACK_INVENTORY_SHA256: [u8; 32] =
-    decode_lower_hex_32("b61628b191768702ba021b6a2cb9eb649386abc7d9e4cfa683f8b2ccc0253397");
+    decode_lower_hex_32("688f881633543e8efb7a3e6d468e8572aad4de388bedc8d23d0b0e856113dde8");
 pub(crate) const ROLLBACK_MANIFEST_SHA256: [u8; 32] =
     decode_lower_hex_32("886d008e4d79a1441f3e6c7e836abff7ed4f8d70d3405c742d36429caacd885b");
 pub(crate) const ROLLBACK_TREE_SHA256: [u8; 32] =
-    decode_lower_hex_32("d81ddfcbf0d3bdbab8a59e0953d206ac964cc37feb07ee0835e5eb15489a56ba");
+    decode_lower_hex_32("6b0960e703616c920c75a7b3994a4f63c2313234fc3886a764cbdf04d86a2e68");
 pub(crate) const ROLLBACK_TREE_INDEX_SHA256: [u8; 32] =
-    decode_lower_hex_32("9f1a69ec1c8a360531c241b9cef7397aea92e01a15877ae632e948f5e1236ddb");
-pub(crate) const ROLLBACK_TREE_INDEX_LENGTH: usize = 11_494;
+    decode_lower_hex_32("d8c686e59525111cd91f51b5ba77ea357106bd7cd1da1cb40d1c0da7bafb5f9a");
+pub(crate) const ROLLBACK_TREE_INDEX_LENGTH: usize = 11_635;
 pub(crate) const ROLLBACK_COMPATIBILITY_SHA256: [u8; 32] =
-    decode_lower_hex_32("226b97e15156e85ea5c53da6e04b33c256e8bd0354809442c55b5e88d8b96d3d");
+    decode_lower_hex_32("b1f49c55a538ea75cbd5de3bd969df3200a302f8b14d88d5194f6996dd14ed16");
 pub(crate) const ROLLBACK_ADMISSION_SHA256: [u8; 32] =
-    decode_lower_hex_32("6366d23e266fff6cf8a5f57351873336b6ee2b406ebfaac4a84110db96648bdb");
+    decode_lower_hex_32("0279d9edc0fc174993dd59c1be37204b6086e6e73acf883691ca7f2dfdc8fa83");
+
+pub(crate) const ROLLBACK_TWO_CATALOG_LENGTH: usize = 2_169;
+pub(crate) const ROLLBACK_TWO_CATALOG_SHA256: [u8; 32] =
+    decode_lower_hex_32("86b7af189f0882701a457402e8cde0ea415404059a6052f90b10285ba593b4cc");
+pub(crate) const ROLLBACK_TWO_INVENTORY_SHA256: [u8; 32] =
+    decode_lower_hex_32("7b3363b9e183e33187181bf514a1e4a89c7e7f3985e6dd94890920c54d44b158");
+pub(crate) const ROLLBACK_TWO_MANIFEST_SHA256: [u8; 32] =
+    decode_lower_hex_32("886d008e4d79a1441f3e6c7e836abff7ed4f8d70d3405c742d36429caacd885b");
+pub(crate) const ROLLBACK_TWO_TREE_SHA256: [u8; 32] =
+    decode_lower_hex_32("6b0960e703616c920c75a7b3994a4f63c2313234fc3886a764cbdf04d86a2e68");
+pub(crate) const ROLLBACK_TWO_TREE_INDEX_SHA256: [u8; 32] =
+    decode_lower_hex_32("d8c686e59525111cd91f51b5ba77ea357106bd7cd1da1cb40d1c0da7bafb5f9a");
+pub(crate) const ROLLBACK_TWO_TREE_INDEX_LENGTH: usize = 11_635;
+pub(crate) const ROLLBACK_TWO_COMPATIBILITY_SHA256: [u8; 32] =
+    decode_lower_hex_32("b1f49c55a538ea75cbd5de3bd969df3200a302f8b14d88d5194f6996dd14ed16");
+pub(crate) const ROLLBACK_TWO_ADMISSION_SHA256: [u8; 32] =
+    decode_lower_hex_32("63ccf52f015915d288ac8515e600fc191b6272a29de7306e66b53db5eb3e2755");
 
 const fn decode_lower_hex_32(value: &str) -> [u8; 32] {
     let bytes = value.as_bytes();

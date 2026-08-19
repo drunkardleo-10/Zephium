@@ -527,26 +527,35 @@ fn staging_manifest_authority_admits_the_exact_brokered_profile() {
             .len(),
         1
     );
-    let rollback_catalog = package_authority
-        .admit_rollback_catalog(crate::staging_catalog::ROLLBACK_CATALOG_BYTES)
-        .unwrap();
-    let rollback_tree = CanonicalExtensionTreeIndex::parse_canonical(
-        crate::staging_catalog::ROLLBACK_TREE_INDEX_BYTES,
-    )
-    .unwrap();
-    let rollback = authority
-        .admit_rollback_manifest(
-            &rollback_catalog,
-            ProductExtensionRuntimeTarget::MacosNativeBrokered,
-            ExtensionPackageKey::from_bytes(crate::staging_catalog::PACKAGE_KEY),
-            &rollback_tree,
+    for (catalog_bytes, tree_bytes, manifest_bytes, admission_sha256) in [
+        (
+            crate::staging_catalog::ROLLBACK_CATALOG_BYTES,
+            crate::staging_catalog::ROLLBACK_TREE_INDEX_BYTES,
             crate::staging_catalog::ROLLBACK_MANIFEST_BYTES,
-        )
-        .unwrap();
-    assert_eq!(
-        rollback.admission_digest().as_bytes(),
-        &crate::staging_catalog::ROLLBACK_ADMISSION_SHA256
-    );
+            crate::staging_catalog::ROLLBACK_ADMISSION_SHA256,
+        ),
+        (
+            crate::staging_catalog::ROLLBACK_TWO_CATALOG_BYTES,
+            crate::staging_catalog::ROLLBACK_TWO_TREE_INDEX_BYTES,
+            crate::staging_catalog::ROLLBACK_TWO_MANIFEST_BYTES,
+            crate::staging_catalog::ROLLBACK_TWO_ADMISSION_SHA256,
+        ),
+    ] {
+        let rollback_catalog = package_authority
+            .admit_rollback_catalog(catalog_bytes)
+            .unwrap();
+        let rollback_tree = CanonicalExtensionTreeIndex::parse_canonical(tree_bytes).unwrap();
+        let rollback = authority
+            .admit_rollback_manifest(
+                &rollback_catalog,
+                ProductExtensionRuntimeTarget::MacosNativeBrokered,
+                ExtensionPackageKey::from_bytes(crate::staging_catalog::PACKAGE_KEY),
+                &rollback_tree,
+                manifest_bytes,
+            )
+            .unwrap();
+        assert_eq!(rollback.admission_digest().as_bytes(), &admission_sha256);
+    }
 }
 
 #[test]

@@ -206,9 +206,7 @@ class OptionsAnchor extends OptionsElement {
     this.href = href;
   }
   setAttribute(name, value) {
-    assert.ok(name === "role" || name === "tabindex");
-    assert.equal(value, name === "role" ? "button" : "0");
-    this[name] = value;
+    assert.fail(`unexpected options-anchor attribute mutation: ${name}=${value}`);
   }
   removeAttribute(name) {
     assert.equal(name, "target");
@@ -290,8 +288,8 @@ optionsAnchor.href = "webkit-extension://options-fixture/pages/options.html";
 optionsMutation([{ type: "attributes", target: optionsAnchor }]);
 assert.equal(typeof optionsTargetClick, "function");
 assert.equal(typeof optionsTargetKeydown, "function");
-assert.equal(optionsAnchor.role, "button");
-assert.equal(optionsAnchor.tabindex, "0");
+assert.equal(optionsAnchor.role, undefined);
+assert.equal(optionsAnchor.tabindex, undefined);
 assert.equal(optionsAnchor.href, "webkit-extension://options-fixture/pages/options.html");
 assert.equal(optionsObserverDisconnected, 1);
 let optionsPrevented = 0;

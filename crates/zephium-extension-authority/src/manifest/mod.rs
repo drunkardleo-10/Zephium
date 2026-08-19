@@ -1288,7 +1288,7 @@ fn sealed_product_manifest_provisioning(
         compatibility_sha256: staging::COMPATIBILITY_SHA256,
         admission_sha256: staging::ADMISSION_SHA256,
     })?;
-    let rollback = staging_manifest_profile(StagingManifestInputs {
+    let rollback_one = staging_manifest_profile(StagingManifestInputs {
         catalog_bytes: staging::ROLLBACK_CATALOG_BYTES,
         catalog_sha256: staging::ROLLBACK_CATALOG_SHA256,
         inventory_sha256: staging::ROLLBACK_INVENTORY_SHA256,
@@ -1301,9 +1301,22 @@ fn sealed_product_manifest_provisioning(
         compatibility_sha256: staging::ROLLBACK_COMPATIBILITY_SHA256,
         admission_sha256: staging::ROLLBACK_ADMISSION_SHA256,
     })?;
+    let rollback_two = staging_manifest_profile(StagingManifestInputs {
+        catalog_bytes: staging::ROLLBACK_TWO_CATALOG_BYTES,
+        catalog_sha256: staging::ROLLBACK_TWO_CATALOG_SHA256,
+        inventory_sha256: staging::ROLLBACK_TWO_INVENTORY_SHA256,
+        manifest_bytes: staging::ROLLBACK_TWO_MANIFEST_BYTES,
+        manifest_sha256: staging::ROLLBACK_TWO_MANIFEST_SHA256,
+        tree_index_bytes: staging::ROLLBACK_TWO_TREE_INDEX_BYTES,
+        tree_index_sha256: staging::ROLLBACK_TWO_TREE_INDEX_SHA256,
+        tree_index_length: staging::ROLLBACK_TWO_TREE_INDEX_LENGTH,
+        tree_sha256: staging::ROLLBACK_TWO_TREE_SHA256,
+        compatibility_sha256: staging::ROLLBACK_TWO_COMPATIBILITY_SHA256,
+        admission_sha256: staging::ROLLBACK_TWO_ADMISSION_SHA256,
+    })?;
     let active_catalog = active.catalog;
-    let rollback_catalogs = vec![rollback.catalog].into_boxed_slice();
-    let mut profiles = vec![active, rollback];
+    let rollback_catalogs = vec![rollback_one.catalog, rollback_two.catalog].into_boxed_slice();
+    let mut profiles = vec![active, rollback_one, rollback_two];
     profiles.sort_unstable_by(|left, right| {
         (left.catalog, left.runtime_target, left.package.key).cmp(&(
             right.catalog,

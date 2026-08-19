@@ -4,9 +4,23 @@ This directory contains one immutable, non-production Zephium extension
 catalog used to exercise the complete macOS product path. It is compiled only
 when the explicit `staging-extension-catalog` feature is enabled.
 
-Catalog revision 2 is active. Revision 1 and its exact manifest profile are
-retained only as rollback/recovery authority so an existing staging repository
-can authenticate and upgrade without lowering its monotonic high-water mark.
+Catalog revision 6 is active. Revisions 4 and 5 and their exact manifest
+profiles are retained only as ordered rollback/recovery authority so current
+staging repositories can authenticate the upgrade without lowering their
+monotonic high-water marks. Revision 4 keeps the options control as a genuine
+link to the exact options-page URL: ordinary activation remains on the sealed
+native broker, while WebKit accessibility activation retains native link
+semantics. Revisions 5 and 6 intentionally reuse those exact package bytes
+while advancing catalog/install authority to gate live runtime-generation
+action invalidation without conflating metadata freshness with a process
+restart.
+
+On the exercised WebKit runtime, Computer Use `AXPress` still dismisses the
+popup without delivering DOM activation or native link navigation. Keyboard
+activation is live-gated, and the browser-owned Extensions Center now exposes
+an independently authorized Settings action. Direct assistive activation
+inside extension-owned popup content remains unclaimed until a physical
+VoiceOver gate proves that path.
 
 The package is Vimium 2.4.2 at upstream revision
 `eb737abdd65b070c05ef06d39f1d78751aa7f738`, distributed under MIT. The
@@ -23,7 +37,8 @@ extension distribution worker.
 
 Exact primary identities:
 
-- catalog SHA-256: `b27962b45ecb1f85df1afbed626dc42a92c11230a8a7ac162a40511f1aa24b56`
-- CRX3 SHA-256: `4bc71181804ec8aed8385bf2bd3db6df488c0b4e4bfffc20a7dc0ddeb131a9f6`
-- archive SHA-256: `d78441192b493d8ca40ce17690e4a71bcdb024d02410ebaac33243c7329b381e`
+- catalog SHA-256: `d15bb0a138379049d933c531b5225ec11c11a216d5d094e8d9c67212fce47638`
+- CRX3 SHA-256: `5bf9a4d8916959fca6b441b1ded47fa8dd615dffa2d1fb80314e5f9f4ec3187b`
+- archive SHA-256: `0154d07f8378f4e0396d1083941854dc141090680bb58394260ca5bd799e9598`
+- release tree SHA-256: `6b0960e703616c920c75a7b3994a4f63c2313234fc3886a764cbdf04d86a2e68`
 - legal notice SHA-256: `bc52afe9916014c3fe1d9244b65a1c0293d1ccf7507af317b3b63c49a452dcbc`

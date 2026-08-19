@@ -85,13 +85,13 @@ const NATIVE_OUTPUT_TREE_SHA256: &str =
 const NATIVE_OUTPUT_INDEX_SHA256: &str =
     "ee651c6b57e460662ce3cd0a4952df1c4ff722122f195a95379598e289fabc7e";
 const BROKERED_OUTPUT_FILES: usize = 90;
-const BROKERED_OUTPUT_BYTES: u64 = 614_936;
+const BROKERED_OUTPUT_BYTES: u64 = 615_297;
 const BROKERED_OUTPUT_MANIFEST_SHA256: &str =
     "c2b503f1593b173305889abbe7c06eb0bf060c1d038aa4434a05a0564433c8b3";
 const BROKERED_OUTPUT_TREE_SHA256: &str =
-    "9285fa9ad16e220a366644355f1d2434dfba05dcab921765936b295723d05ff6";
+    "1aebf8b429a009e5870e85e921001610e8f2fe13a1ba0e08f3e8d59eb3bc3ff5";
 const BROKERED_OUTPUT_INDEX_SHA256: &str =
-    "88917d255a2914fdc0a2a6f9e7fdb3faa46523be1ccda5c73331a127775da286";
+    "7f512b148fff2250a3e78a2d835944bfe010a4a61fd8b743960669a8f82e15dd";
 
 struct AdmittedVimiumArtifact {
     artifact: compatibility_artifact::ValidatedCompatibilityArtifact,
@@ -931,9 +931,12 @@ fn run_native(
     drop(tab);
     drop(context);
     drop(extension);
+    NSApplication::sharedApplication(mtm).deactivate();
     unsafe { native_page.stopLoading() };
     let _ = window.makeFirstResponder(None);
     window.orderOut(None);
+    native_page.removeFromSuperview();
+    window.setContentView(None);
     drop(native_page);
     drop(page);
     // Restore the shared probe window's non-owning style after the keyboard
@@ -1393,7 +1396,7 @@ fn wait_for_popup_state(
             optionsControlBound: (() => {{
               const link = document.querySelector('#optionsLink');
               const path = document.querySelector('meta[name="zephium-extension-options-page"]')?.content;
-              return link?.getAttribute('role') === 'button'
+              return link instanceof HTMLAnchorElement
                 && typeof path === 'string'
                 && link.href === chrome.runtime.getURL(path);
             }})(),
@@ -1512,7 +1515,7 @@ fn verify_brokered_options_control(
     let script = r#"(() => {
       const control = document.querySelector('#optionsLink');
       const path = document.querySelector('meta[name="zephium-extension-options-page"]')?.content;
-      if (control?.getAttribute('role') !== 'button'
+      if (!(control instanceof HTMLAnchorElement)
           || typeof path !== 'string'
           || control.href !== chrome.runtime.getURL(path)) return false;
       return control.dispatchEvent(new KeyboardEvent('keydown', {
@@ -1676,7 +1679,10 @@ fn wait_for_teardown(teardown: &Teardown) -> Result<(), String> {
     let deadline = Instant::now() + super::TEARDOWN_TIMEOUT;
     loop {
         let controller = teardown.controller.load().is_none();
-        let window = teardown.window.load().is_none();
+        let window_retired = teardown
+            .window
+            .load()
+            .is_none_or(|window| !window.isVisible() && window.contentView().is_none());
         let context = teardown.context.load().is_none();
         let keyboard_control = teardown.keyboard_control.load().is_none();
         let page = teardown.page.load().is_none();
@@ -1684,11 +1690,11 @@ fn wait_for_teardown(teardown: &Teardown) -> Result<(), String> {
             .popup
             .as_ref()
             .is_none_or(|popup| popup.load().is_none());
-        let options_windows = teardown
-            .options
-            .windows
-            .iter()
-            .all(|window| window.load().is_none());
+        let options_windows_retired = teardown.options.windows.iter().all(|window| {
+            window
+                .load()
+                .is_none_or(|window| !window.isVisible() && window.contentView().is_none())
+        });
         let options_views = teardown
             .options
             .views
@@ -1696,13 +1702,13 @@ fn wait_for_teardown(teardown: &Teardown) -> Result<(), String> {
             .all(|view| view.load().is_none());
         let store = teardown.store.load().is_none();
         let lifecycle = teardown.lifecycle_drops.load(Ordering::Acquire) == 3;
-        if window
+        if window_retired
             && controller
             && context
             && keyboard_control
             && page
             && popup
-            && options_windows
+            && options_windows_retired
             && options_views
             && store
             && lifecycle
@@ -1711,7 +1717,7 @@ fn wait_for_teardown(teardown: &Teardown) -> Result<(), String> {
         }
         if Instant::now() >= deadline {
             return Err(format!(
-                "Vimium native teardown did not settle: window={window}, controller={controller}, context={context}, keyboard_control={keyboard_control}, page={page}, popup={popup}, options_windows={options_windows}, options_views={options_views}, store={store}, lifecycle={}/3",
+                "Vimium native teardown did not settle: window_retired={window_retired}, controller={controller}, context={context}, keyboard_control={keyboard_control}, page={page}, popup={popup}, options_windows_retired={options_windows_retired}, options_views={options_views}, store={store}, lifecycle={}/3",
                 teardown.lifecycle_drops.load(Ordering::Acquire),
             ));
         }

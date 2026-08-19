@@ -2,7 +2,7 @@
   "schema": 1,
   "kind": "zephium-extension-classified-manifest-profiles",
   "product_authority": false,
-  "catalog_sha256": "d15bb0a138379049d933c531b5225ec11c11a216d5d094e8d9c67212fce47638",
+  "catalog_sha256": "86b7af189f0882701a457402e8cde0ea415404059a6052f90b10285ba593b4cc",
   "admission_policy": {
     "digest_sha256": "d05d6d14b6c2c81fa0dbefd350e547fe6e269156b0bef5ff5d77e5be5d0a3225",
     "license_rules": [
@@ -17,13 +17,13 @@
     {
       "input": {
         "package_key": "4b2ab3abd19a8b3abe05f49956e96dd214a6d164bcda8f43e7d52102ffe58fd3",
-        "package_revision": 6,
+        "package_revision": 5,
         "manifest_sha256": "886d008e4d79a1441f3e6c7e836abff7ed4f8d70d3405c742d36429caacd885b",
         "tree_sha256": "6b0960e703616c920c75a7b3994a4f63c2313234fc3886a764cbdf04d86a2e68",
         "tree_index_sha256": "d8c686e59525111cd91f51b5ba77ea357106bd7cd1da1cb40d1c0da7bafb5f9a",
         "tree_index_length": 11635,
-        "manifest_target": "product/profile-inputs/4b2ab3abd19a8b3abe05f49956e96dd214a6d164bcda8f43e7d52102ffe58fd3/6/886d008e4d79a1441f3e6c7e836abff7ed4f8d70d3405c742d36429caacd885b.manifest.json",
-        "tree_index_target": "product/profile-inputs/4b2ab3abd19a8b3abe05f49956e96dd214a6d164bcda8f43e7d52102ffe58fd3/6/d8c686e59525111cd91f51b5ba77ea357106bd7cd1da1cb40d1c0da7bafb5f9a.tree-index.json",
+        "manifest_target": "product/profile-inputs/4b2ab3abd19a8b3abe05f49956e96dd214a6d164bcda8f43e7d52102ffe58fd3/5/886d008e4d79a1441f3e6c7e836abff7ed4f8d70d3405c742d36429caacd885b.manifest.json",
+        "tree_index_target": "product/profile-inputs/4b2ab3abd19a8b3abe05f49956e96dd214a6d164bcda8f43e7d52102ffe58fd3/5/d8c686e59525111cd91f51b5ba77ea357106bd7cd1da1cb40d1c0da7bafb5f9a.tree-index.json",
         "compatibility_target": "macos.wkwebextension-brokered.v1",
         "compatibility_receipt_sha256": "04310a75132f0b27c55b43a730eb2b05a93127aeb236d5028701febb8b10c126",
         "declarations": [
@@ -176,7 +176,7 @@
         ]
       },
       "compatibility_digest": "b1f49c55a538ea75cbd5de3bd969df3200a302f8b14d88d5194f6996dd14ed16",
-      "admission_digest": "310ce75fdb22e8487b6681eebd64a7ce4bc5853ad0410abc9f6e94631010a8ab",
+      "admission_digest": "63ccf52f015915d288ac8515e600fc191b6272a29de7306e66b53db5eb3e2755",
       "activatable": true
     }
   ]

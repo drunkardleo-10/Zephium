@@ -986,13 +986,22 @@ fn sealed_product_bundled_catalog_generations(
         staging::CATALOG_SHA256,
         staging::INVENTORY_SHA256,
     )?;
-    let rollback = staging_generation(
+    let rollback_one = staging_generation(
         staging::ROLLBACK_CATALOG_BYTES,
         staging::ROLLBACK_CATALOG_LENGTH,
         staging::ROLLBACK_CATALOG_SHA256,
         staging::ROLLBACK_INVENTORY_SHA256,
     )?;
-    Ok(Some((active, vec![rollback].into_boxed_slice())))
+    let rollback_two = staging_generation(
+        staging::ROLLBACK_TWO_CATALOG_BYTES,
+        staging::ROLLBACK_TWO_CATALOG_LENGTH,
+        staging::ROLLBACK_TWO_CATALOG_SHA256,
+        staging::ROLLBACK_TWO_INVENTORY_SHA256,
+    )?;
+    Ok(Some((
+        active,
+        vec![rollback_one, rollback_two].into_boxed_slice(),
+    )))
 }
 
 #[cfg(all(
@@ -1336,15 +1345,21 @@ mod tests {
             admitted.catalog().packages()[0].identity().key().as_bytes(),
             &crate::staging_catalog::PACKAGE_KEY
         );
-        let rollback = authority
+        let rollback_one = authority
             .admit_rollback_catalog(crate::staging_catalog::ROLLBACK_CATALOG_BYTES)
             .unwrap();
-        assert_eq!(admitted.revision().get(), 2);
-        assert_eq!(rollback.revision().get(), 1);
-        assert_eq!(
-            authority.recognize_generation(&rollback.generation_anchor()),
-            Some(ProductBundledCatalogGenerationRole::Rollback)
-        );
+        let rollback_two = authority
+            .admit_rollback_catalog(crate::staging_catalog::ROLLBACK_TWO_CATALOG_BYTES)
+            .unwrap();
+        assert_eq!(admitted.revision().get(), 6);
+        assert_eq!(rollback_one.revision().get(), 4);
+        assert_eq!(rollback_two.revision().get(), 5);
+        for rollback in [rollback_one, rollback_two] {
+            assert_eq!(
+                authority.recognize_generation(&rollback.generation_anchor()),
+                Some(ProductBundledCatalogGenerationRole::Rollback)
+            );
+        }
         let mut altered = crate::staging_catalog::CATALOG_BYTES.to_vec();
         altered[0] ^= 1;
         assert_eq!(
