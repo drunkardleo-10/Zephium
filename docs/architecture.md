@@ -1935,21 +1935,31 @@ success settlements and does not mutate the developer's browser session. The
 deterministic input event is not evidence of physical
 typing; the trusted `o` command and real rendered result are separate gates.
 
-The bundled revision-2 staging artifact predates the preserved-href fallback.
-Its real popup keyboard route (`Return` on the focused Options control) reaches
-Shell authorization, opens the settings window, saves a changed scroll-step
-value, and reads that value from a newly opened settings view. Direct
-accessibility `AXPress` closes that old popup without emitting its DOM broker
-request. The package-neutral adapter and Node contract now preserve the exact
-href, but staging must publish a newly signed immutable revision before it may
-claim the accessibility path. A source-asset change alone does not mutate an
-already authenticated catalog package.
+The bundled staging artifact now keeps the exact options URL on a genuine link
+instead of rewriting the control's accessibility role. Its real popup keyboard
+route (`Return` on the focused Options control) reaches Shell authorization,
+opens the settings window, saves a changed scroll-step value, and reads that
+value from a newly opened settings view. Computer Use `AXPress` on WebKit's
+link still dismisses the native popup without delivering a DOM broker request
+or a link navigation on the exercised runtime. That remains an accessibility
+gap inside the extension-owned popup. The browser-owned management surface now
+projects `has_options_page` from the authenticated manifest and exposes
+Settings only for an active exact runtime. Shell rejoins catalog, install, and
+runtime generation; Engine rejoins the native owner, controller, parent view,
+and bounded popup-pool lease; and the same unprivileged settings window opens
+and reopens after close. This is the supported assistive route until a physical
+VoiceOver gate proves the extension-page path. A source-asset change never
+mutates an already authenticated catalog package: the link-semantics change
+was republished and re-signed under the same stable staging key.
 
 The isolated packaged staging application exercises the complete profile path:
 first-run profile registration, authenticated catalog synchronization,
 permission review, install, enable, content/action execution, popup and options
-presentation, disable/re-enable, uninstall, clean shutdown, and restart. Its
-preserved revision-1 profile also gates live update to revision 2. The service
+presentation, disable/re-enable, uninstall, clean shutdown, and restart.
+Revision 6 is active, with revisions 4 and 5 retained as the two bounded
+rollback generations. Revisions 5 and 6 deliberately reuse the exact revision-4
+package bytes to isolate the live runtime-generation update contract. The
+service
 retires every regular/private native owner, Store atomically advances the
 catalog, stable install, and package-bound grant revisions, and only then
 reactivates the same install identity. Existing authority is reconciled by
@@ -1960,6 +1970,11 @@ The reviewed migration advanced catalog 5 to 6, install 4 to 5, and grant 1 to
 2, bound both durable rows to release tree
 `1aeb98ac8f13495c52a7e8c0d5719c2b40eceaaf3ab8297f05d82eab9891c429`,
 kept the runtime active, and reopened the popup after a full process restart.
+The newer live revision-5 to revision-6 packaged gate additionally proves that
+activation schedules one bounded post-load action invalidation, the trusted
+toolbar replaces its stale runtime generation, and the popup opens immediately
+without a process restart. A `RuntimeUnavailable` action settlement also
+requests a metadata refresh as a fail-soft repair path.
 
 This gate establishes a reusable stock Chrome-extension path and core Vimium
 keyboard/link/action behavior on the exercised macOS runtime. It does not yet
