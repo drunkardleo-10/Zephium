@@ -962,6 +962,17 @@ over-capacity, or unavailable paths deny rather than grant. This extension
 grant broker is distinct from page-origin permission events; camera/microphone
 prompts now have their own Store-backed Shell policy and UI.
 
+The native macOS gate also proves the mechanism required by a future
+profile-level per-site extension pause. One context receives a broad
+`http://*/*` grant and an exact explicit `http://127.0.0.1/*` denial in the
+same complete replacement. WebKit retains both dictionaries, reports the
+overlapped broad pattern as implicitly denied, blocks real content-script
+execution on the exact host, and keeps a different HTTP host granted. Removing
+the denial restores execution without changing controller-owned script
+inventory. This closes native feasibility only: no product site-policy Store,
+Shell command, or UX is enabled yet, and production grant plans still contain
+no denied patterns.
+
 Installed-package updates compare the exact current grant root and reviewed
 compatibility map with the authenticated replacement before native retirement.
 New required API/host authority or a newly introduced degradation produces one

@@ -77,6 +77,7 @@ const PERSISTENT_PROFILE_B: u128 = 0x6a90_af85_503a_4db6_8359_a082_5da9_07ab;
 const PROFILE_ROUTING_PRINCIPALS: [&str; 2] =
     ["zephium-profile-route-a", "zephium-profile-route-b"];
 const HOST_MATCH_PATTERN: &str = "http://127.0.0.1/*";
+const BROAD_HTTP_MATCH_PATTERN: &str = "http://*/*";
 const EXCLUDED_MATCH_PATTERN: &str = "http://127.0.0.1/excluded/*";
 const EXPECTED_ROLES: [&str; 8] = [
     "main", "same", "cross", "excluded", "about", "srcdoc", "data", "blob",
@@ -790,7 +791,7 @@ fn run_web_extension_probe_with_permissions(
         set_phase("teardown-wait");
         wait_for_teardown(&teardown)?;
         println!(
-            "native-probe: macOS WKWebExtension passed; os={}; mv3=temp-directory; controller_before_wry=passed; default_deny=passed; exact_native_grant_replace_readback=passed; exact_native_grant_live_revocation=passed; exact_native_grant_clear_readback=passed; exact_native_owner_lifecycle=passed; restart_controller_absence=passed; exact_host_grant=passed; dynamic_file_access=unsupported; dynamic_file_grant_readback=accepted; dynamic_file_contexts=3; private_data_default_deny=passed; private_data_explicit_grant=passed; private_data_separation=passed; runtime_permission_request={}; runtime_permission_readback={}; runtime_permission_callbacks_coalesced_before_settlement={}; runtime_permission_replacement_settlement_stranded={}; document_start=passed; isolated_worlds=passed; include_exclude=passed; all_frames=passed; match_about_blank=passed; match_origin_as_fallback=passed; exact_unload_reload=passed; peer_context=passed; nonpersistent_permission_separation=passed; protected_inventory=passed; product_profile_view_store_binding=passed; regular_cookie_isolation=passed; private_cookie_noninheritance=passed; regular_cookie_reconstruction=passed; regular_tab_routing_isolation=passed; browser_mutation_broker=passed; discarded_tab_native_view_refusal=passed; persistent_extension_storage_namespace_isolation=passed; persistent_local_zero_after_reopen=passed; private_extension_storage_noninheritance=passed; mv3_background_execution=passed; major_extension_native_permissions={}; major_extension_namespaces={}; native_broker_history_search=bounded-round-trip; native_broker_port=extension-to-host-only; native_broker_port_host_send=accepted-unobserved; native_broker_principal_binding=passed; native_broker_port_released=1; native_broker_delegate_released={}; bitwarden_web_request_background_registration=passed; bitwarden_web_request_observation={}; bitwarden_scripting_main_world=passed; bitwarden_execution_world_namespace={}; bitwarden_web_navigation_observation=passed; bitwarden_tabs_same_document_observation={}; bitwarden_alarms_lifecycle=passed; bitwarden_commands_readback=passed; bitwarden_commands_native_dispatch=passed; bitwarden_runtime_port_registered=round-trip; bitwarden_runtime_port_early_connect={}; bitwarden_context_menus_lifecycle=passed; bitwarden_context_menus_native_projection=passed; bitwarden_dynamic_resource_execution=passed; bitwarden_dynamic_resource_url={}; bitwarden_sandbox_isolation={}; bitwarden_action_popup_native_lifecycle=passed; bitwarden_http_basic_auth_autofill=degraded; extension_product_views_released={}; extension_product_stores_released={}; extension_ui_views_released={}; capability_views_released={}; capability_stores_released={}; all_type_removal_callbacks_completed={}; baseline_controller_scripts={}; peak_extension_script_delta={}; webview_callbacks={}; protected_scripts=3; lifecycle_objects_released=3; ordinary_native_controllers_released={}; ordinary_native_contexts_released={}; persistent_native_controllers_released={}; persistent_native_contexts_released={}; persistent_native_stores_released={}; profile_views_released={}; profile_contexts_released={}; profile_controllers_released={}; profile_stores_released={}; profile_lifecycle_objects_released={}",
+            "native-probe: macOS WKWebExtension passed; os={}; mv3=temp-directory; controller_before_wry=passed; default_deny=passed; exact_native_grant_replace_readback=passed; exact_native_grant_live_revocation=passed; exact_native_grant_clear_readback=passed; exact_native_owner_lifecycle=passed; restart_controller_absence=passed; exact_host_grant=passed; exact_site_deny_override=passed; dynamic_file_access=unsupported; dynamic_file_grant_readback=accepted; dynamic_file_contexts=3; private_data_default_deny=passed; private_data_explicit_grant=passed; private_data_separation=passed; runtime_permission_request={}; runtime_permission_readback={}; runtime_permission_callbacks_coalesced_before_settlement={}; runtime_permission_replacement_settlement_stranded={}; document_start=passed; isolated_worlds=passed; include_exclude=passed; all_frames=passed; match_about_blank=passed; match_origin_as_fallback=passed; exact_unload_reload=passed; peer_context=passed; nonpersistent_permission_separation=passed; protected_inventory=passed; product_profile_view_store_binding=passed; regular_cookie_isolation=passed; private_cookie_noninheritance=passed; regular_cookie_reconstruction=passed; regular_tab_routing_isolation=passed; browser_mutation_broker=passed; discarded_tab_native_view_refusal=passed; persistent_extension_storage_namespace_isolation=passed; persistent_local_zero_after_reopen=passed; private_extension_storage_noninheritance=passed; mv3_background_execution=passed; major_extension_native_permissions={}; major_extension_namespaces={}; native_broker_history_search=bounded-round-trip; native_broker_port=extension-to-host-only; native_broker_port_host_send=accepted-unobserved; native_broker_principal_binding=passed; native_broker_port_released=1; native_broker_delegate_released={}; bitwarden_web_request_background_registration=passed; bitwarden_web_request_observation={}; bitwarden_scripting_main_world=passed; bitwarden_execution_world_namespace={}; bitwarden_web_navigation_observation=passed; bitwarden_tabs_same_document_observation={}; bitwarden_alarms_lifecycle=passed; bitwarden_commands_readback=passed; bitwarden_commands_native_dispatch=passed; bitwarden_runtime_port_registered=round-trip; bitwarden_runtime_port_early_connect={}; bitwarden_context_menus_lifecycle=passed; bitwarden_context_menus_native_projection=passed; bitwarden_dynamic_resource_execution=passed; bitwarden_dynamic_resource_url={}; bitwarden_sandbox_isolation={}; bitwarden_action_popup_native_lifecycle=passed; bitwarden_http_basic_auth_autofill=degraded; extension_product_views_released={}; extension_product_stores_released={}; extension_ui_views_released={}; capability_views_released={}; capability_stores_released={}; all_type_removal_callbacks_completed={}; baseline_controller_scripts={}; peak_extension_script_delta={}; webview_callbacks={}; protected_scripts=3; lifecycle_objects_released=3; ordinary_native_controllers_released={}; ordinary_native_contexts_released={}; persistent_native_controllers_released={}; persistent_native_contexts_released={}; persistent_native_stores_released={}; profile_views_released={}; profile_contexts_released={}; profile_controllers_released={}; profile_stores_released={}; profile_lifecycle_objects_released={}",
             teardown.operating_system,
             teardown.runtime_permission_status,
             teardown.runtime_permission_readback,
@@ -1340,6 +1341,77 @@ fn run_supported_probe(
     if both_delta.is_empty() {
         return Err("both loaded extension contexts produced no controller-owned scripts".into());
     }
+
+    set_phase("primary-live-exact-site-denial");
+    let primary_site_denied_grants = super::extensions::apply_probe_grants_with_denied_patterns(
+        &primary_context,
+        &[super::extensions::MacosNativeApiPermission::Storage],
+        &[BROAD_HTTP_MATCH_PATTERN],
+        &[HOST_MATCH_PATTERN],
+        true,
+    )
+    .map_err(|error| format!("primary exact-site native denial failed: {error}"))?;
+    drop(primary_applied_grants);
+    let broad_pattern = native_match_pattern(mtm, BROAD_HTTP_MATCH_PATTERN)?;
+    assert_implicitly_denied(
+        &primary_context,
+        &broad_pattern,
+        "primary broad host status during exact-site denial",
+    )?;
+    assert_denied(
+        &primary_context,
+        &match_pattern,
+        "primary exact-site denial",
+    )?;
+    assert_context_access(
+        &primary_context,
+        &admitted_url,
+        false,
+        "primary exact-site denial",
+    )?;
+    assert_url_permission(
+        &primary_context,
+        &wrong_host_url,
+        true,
+        "primary non-denied host during exact-site denial",
+    )?;
+    navigate_and_validate(
+        &view,
+        &state,
+        &run_loop,
+        &primary_server.url("/main", "primary-site-denied"),
+        "primary-site-denied",
+        ExpectedExtensions::PeerOnly,
+    )?;
+
+    set_phase("primary-live-exact-site-restoration");
+    let primary_applied_grants = super::extensions::apply_probe_grants(
+        &primary_context,
+        &[super::extensions::MacosNativeApiPermission::Storage],
+        &[HOST_MATCH_PATTERN],
+        true,
+    )
+    .map_err(|error| format!("primary exact-site native restoration failed: {error}"))?;
+    drop(primary_site_denied_grants);
+    assert_granted(
+        &primary_context,
+        &match_pattern,
+        "primary exact-site restoration",
+    )?;
+    assert_context_access(
+        &primary_context,
+        &admitted_url,
+        true,
+        "primary exact-site restoration",
+    )?;
+    navigate_and_validate(
+        &view,
+        &state,
+        &run_loop,
+        &primary_server.url("/main", "primary-site-restored"),
+        "primary-site-restored",
+        ExpectedExtensions::Both,
+    )?;
 
     set_phase("primary-live-grant-revocation");
     let primary_revoked_grants = super::extensions::apply_probe_grants(
@@ -1910,13 +1982,15 @@ fn unload_context(
 fn exact_host_pattern(
     mtm: MainThreadMarker,
 ) -> Result<Retained<WKWebExtensionMatchPattern>, String> {
-    unsafe {
-        WKWebExtensionMatchPattern::matchPatternWithString(
-            &NSString::from_str(HOST_MATCH_PATTERN),
-            mtm,
-        )
-    }
-    .ok_or_else(|| format!("WebKit rejected exact host pattern {HOST_MATCH_PATTERN}"))
+    native_match_pattern(mtm, HOST_MATCH_PATTERN)
+}
+
+fn native_match_pattern(
+    mtm: MainThreadMarker,
+    pattern: &str,
+) -> Result<Retained<WKWebExtensionMatchPattern>, String> {
+    unsafe { WKWebExtensionMatchPattern::matchPatternWithString(&NSString::from_str(pattern), mtm) }
+        .ok_or_else(|| format!("WebKit rejected host pattern {pattern}"))
 }
 
 fn validate_requested_patterns(extension: &WKWebExtension, name: &str) -> Result<(), String> {
@@ -1988,6 +2062,31 @@ fn assert_context_denied_outside_pattern(
     Ok(())
 }
 
+fn assert_url_permission(
+    context: &WKWebExtensionContext,
+    url: &NSURL,
+    expected: bool,
+    description: &str,
+) -> Result<(), String> {
+    let has_access = unsafe { context.hasAccessToURL(url) };
+    let status = unsafe { context.permissionStatusForURL(url) };
+    let status_granted = is_granted_permission_status(status);
+    if has_access != expected || status_granted != expected {
+        return Err(format!(
+            "{description} effective URL permission mismatch: expected={expected}, has_access={has_access}, status={status:?}"
+        ));
+    }
+    Ok(())
+}
+
+fn is_granted_permission_status(status: WKWebExtensionContextPermissionStatus) -> bool {
+    matches!(
+        status,
+        WKWebExtensionContextPermissionStatus::GrantedExplicitly
+            | WKWebExtensionContextPermissionStatus::GrantedImplicitly
+    )
+}
+
 fn assert_granted(
     context: &WKWebExtensionContext,
     pattern: &WKWebExtensionMatchPattern,
@@ -2012,6 +2111,32 @@ fn assert_not_granted(
         || status == WKWebExtensionContextPermissionStatus::GrantedImplicitly
     {
         return Err(format!("{description} unexpectedly has status {status:?}"));
+    }
+    Ok(())
+}
+
+fn assert_denied(
+    context: &WKWebExtensionContext,
+    pattern: &WKWebExtensionMatchPattern,
+    description: &str,
+) -> Result<(), String> {
+    let status = unsafe { context.permissionStatusForMatchPattern(pattern) };
+    if status != WKWebExtensionContextPermissionStatus::DeniedExplicitly {
+        return Err(format!("{description} has non-denied status {status:?}"));
+    }
+    Ok(())
+}
+
+fn assert_implicitly_denied(
+    context: &WKWebExtensionContext,
+    pattern: &WKWebExtensionMatchPattern,
+    description: &str,
+) -> Result<(), String> {
+    let status = unsafe { context.permissionStatusForMatchPattern(pattern) };
+    if status != WKWebExtensionContextPermissionStatus::DeniedImplicitly {
+        return Err(format!(
+            "{description} has non-implicit-denial status {status:?}"
+        ));
     }
     Ok(())
 }
@@ -2507,6 +2632,7 @@ fn write_primary_extension(path: &Path) -> Result<(), String> {
         "description": "Feature-gated native extension admission fixture.",
         "version": "1.0.0",
         "permissions": ["storage"],
+        "host_permissions": [BROAD_HTTP_MATCH_PATTERN],
         "content_scripts": [
             {
                 "matches": [HOST_MATCH_PATTERN],

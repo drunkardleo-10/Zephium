@@ -28,7 +28,7 @@ pub(crate) use controller_registry::{
 };
 pub(crate) use erasure::{ControllerErasureTicket, ProfileControllerErasure};
 #[cfg(feature = "native-web-extension-probes")]
-pub(crate) use grant_application::apply_probe_grants;
+pub(crate) use grant_application::{apply_probe_grants, apply_probe_grants_with_denied_patterns};
 #[cfg(feature = "native-web-extension-probes")]
 pub(crate) use grants::MacosNativeApiPermission;
 #[cfg(feature = "native-web-extension-probes")]

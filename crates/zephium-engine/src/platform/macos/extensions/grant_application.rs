@@ -133,10 +133,28 @@ pub(crate) fn apply_probe_grants(
     patterns: &[&str],
     private_data_access: bool,
 ) -> Result<AppliedMacosGrantSet, MacosGrantApplicationError> {
-    apply_exact_grants(
+    apply_exact_grants_with_denied_patterns(
         context,
         permissions.iter().copied(),
         patterns.iter().copied(),
+        std::iter::empty(),
+        private_data_access,
+    )
+}
+
+#[cfg(feature = "native-web-extension-probes")]
+pub(crate) fn apply_probe_grants_with_denied_patterns(
+    context: &WKWebExtensionContext,
+    permissions: &[MacosNativeApiPermission],
+    granted_patterns: &[&str],
+    denied_patterns: &[&str],
+    private_data_access: bool,
+) -> Result<AppliedMacosGrantSet, MacosGrantApplicationError> {
+    apply_exact_grants_with_denied_patterns(
+        context,
+        permissions.iter().copied(),
+        granted_patterns.iter().copied(),
+        denied_patterns.iter().copied(),
         private_data_access,
     )
 }
@@ -147,8 +165,28 @@ fn apply_exact_grants<'a>(
     patterns: impl ExactSizeIterator<Item = &'a str>,
     private_data_access: bool,
 ) -> Result<AppliedMacosGrantSet, MacosGrantApplicationError> {
+    apply_exact_grants_with_denied_patterns(
+        context,
+        permissions,
+        patterns,
+        std::iter::empty(),
+        private_data_access,
+    )
+}
+
+fn apply_exact_grants_with_denied_patterns<'a>(
+    context: &WKWebExtensionContext,
+    permissions: impl ExactSizeIterator<Item = MacosNativeApiPermission>,
+    granted_patterns: impl ExactSizeIterator<Item = &'a str>,
+    denied_patterns: impl ExactSizeIterator<Item = &'a str>,
+    private_data_access: bool,
+) -> Result<AppliedMacosGrantSet, MacosGrantApplicationError> {
+    let pattern_count = granted_patterns
+        .len()
+        .checked_add(denied_patterns.len())
+        .ok_or(MacosGrantApplicationError::EntryLimitExceeded)?;
     if permissions.len() > MAX_NATIVE_PERMISSION_ENTRIES
-        || patterns.len() > MAX_NATIVE_PATTERN_ENTRIES
+        || pattern_count > MAX_NATIVE_PATTERN_ENTRIES
     {
         return Err(MacosGrantApplicationError::EntryLimitExceeded);
     }
@@ -167,8 +205,8 @@ fn apply_exact_grants<'a>(
 
     let mtm = objc2_foundation::MainThreadMarker::new()
         .ok_or(MacosGrantApplicationError::MainThreadRequired)?;
-    let mut resolved_patterns = Vec::with_capacity(patterns.len());
-    for pattern in patterns {
+    let mut resolved_patterns = Vec::with_capacity(granted_patterns.len());
+    for pattern in granted_patterns {
         let pattern = unsafe {
             WKWebExtensionMatchPattern::matchPatternWithString(&NSString::from_str(pattern), mtm)
         }
@@ -185,6 +223,25 @@ fn apply_exact_grants<'a>(
         }
         resolved_patterns.push(pattern);
     }
+    let mut resolved_denied_patterns = Vec::with_capacity(denied_patterns.len());
+    for pattern in denied_patterns {
+        let pattern = unsafe {
+            WKWebExtensionMatchPattern::matchPatternWithString(&NSString::from_str(pattern), mtm)
+        }
+        .ok_or(MacosGrantApplicationError::InvalidPattern)?;
+        if resolved_patterns
+            .iter()
+            .chain(resolved_denied_patterns.iter())
+            .any(|existing: &Retained<WKWebExtensionMatchPattern>| {
+                let existing = unsafe { existing.string() };
+                let candidate = unsafe { pattern.string() };
+                existing.isEqualToString(&candidate)
+            })
+        {
+            return Err(MacosGrantApplicationError::DuplicateEntry);
+        }
+        resolved_denied_patterns.push(pattern);
+    }
 
     // Revoke every bounded prior key before applying the replacement. Bulk
     // dictionary assignment canonicalizes persistence but does not notify a
@@ -194,11 +251,13 @@ fn apply_exact_grants<'a>(
         context,
         &resolved_permissions,
         &resolved_patterns,
+        &resolved_denied_patterns,
         private_data_access,
     );
     if let Err(error) = applied {
         let rollback = clear_permission_state(context).and_then(|(cleared, _audit)| {
             verify_empty(context, &resolved_permissions, &resolved_patterns)?;
+            verify_empty(context, &[], &resolved_denied_patterns)?;
             verify_empty(context, &cleared.permissions, &cleared.patterns)
         });
         return match rollback {
@@ -207,6 +266,7 @@ fn apply_exact_grants<'a>(
         };
     }
 
+    resolved_patterns.extend(resolved_denied_patterns);
     Ok(AppliedMacosGrantSet {
         permissions: resolved_permissions.into_boxed_slice(),
         patterns: resolved_patterns.into_boxed_slice(),
@@ -217,6 +277,7 @@ fn apply_and_verify(
     context: &WKWebExtensionContext,
     permissions: &[Retained<NSString>],
     patterns: &[Retained<WKWebExtensionMatchPattern>],
+    denied_patterns: &[Retained<WKWebExtensionMatchPattern>],
     private_data_access: bool,
 ) -> Result<(), MacosGrantApplicationError> {
     let empty_permissions = NSDictionary::<WKWebExtensionPermission, NSDate>::new();
@@ -247,10 +308,22 @@ fn apply_and_verify(
                 pattern,
             );
         }
+        for pattern in denied_patterns {
+            context.setPermissionStatus_forMatchPattern(
+                WKWebExtensionContextPermissionStatus::DeniedExplicitly,
+                pattern,
+            );
+        }
         Ok(())
     })?;
 
-    verify_applied(context, permissions, patterns, private_data_access)
+    verify_applied(
+        context,
+        permissions,
+        patterns,
+        denied_patterns,
+        private_data_access,
+    )
 }
 
 struct ClearedMacosGrantState {
@@ -344,6 +417,7 @@ fn verify_applied(
     context: &WKWebExtensionContext,
     permissions: &[Retained<NSString>],
     patterns: &[Retained<WKWebExtensionMatchPattern>],
+    expected_denied_patterns: &[Retained<WKWebExtensionMatchPattern>],
     private_data_access: bool,
 ) -> Result<(), MacosGrantApplicationError> {
     let exact = catch_native(|| unsafe {
@@ -354,7 +428,7 @@ fn verify_applied(
         Ok(granted_permissions.count() == permissions.len()
             && denied_permissions.count() == 0
             && granted_patterns.count() == patterns.len()
-            && denied_patterns.count() == 0
+            && denied_patterns.count() == expected_denied_patterns.len()
             && !context.hasRequestedOptionalAccessToAllHosts()
             && context.hasAccessToPrivateData() == private_data_access
             && permissions.iter().all(|permission| {
@@ -363,14 +437,28 @@ fn verify_applied(
             })
             && patterns.iter().all(|pattern| {
                 granted_patterns.objectForKey(pattern).is_some()
-                    && is_granted_status(context.permissionStatusForMatchPattern(pattern))
+                    && (is_granted_status(context.permissionStatusForMatchPattern(pattern))
+                        || (!expected_denied_patterns.is_empty()
+                            && context.permissionStatusForMatchPattern(pattern)
+                                == WKWebExtensionContextPermissionStatus::DeniedImplicitly))
+            })
+            && expected_denied_patterns.iter().all(|pattern| {
+                denied_patterns.objectForKey(pattern).is_some()
+                    && context.permissionStatusForMatchPattern(pattern)
+                        == WKWebExtensionContextPermissionStatus::DeniedExplicitly
             }))
     })?;
     if exact {
         Ok(())
     } else {
         #[cfg(feature = "native-web-extension-probes")]
-        emit_applied_readback_diagnostic(context, permissions, patterns, private_data_access);
+        emit_applied_readback_diagnostic(
+            context,
+            permissions,
+            patterns,
+            expected_denied_patterns,
+            private_data_access,
+        );
         Err(MacosGrantApplicationError::AppliedReadbackMismatch)
     }
 }
@@ -388,6 +476,7 @@ fn emit_applied_readback_diagnostic(
     context: &WKWebExtensionContext,
     expected_permissions: &[Retained<NSString>],
     expected_patterns: &[Retained<WKWebExtensionMatchPattern>],
+    expected_denied_patterns: &[Retained<WKWebExtensionMatchPattern>],
     expected_private_data_access: bool,
 ) {
     let diagnostic = catch_native(|| unsafe {
@@ -423,13 +512,21 @@ fn emit_applied_readback_diagnostic(
             .iter()
             .map(|pattern| format!("{:?}", context.permissionStatusForMatchPattern(pattern)))
             .collect::<Vec<_>>();
+        let denied_pattern_statuses = expected_denied_patterns
+            .iter()
+            .map(|pattern| format!("{:?}", context.permissionStatusForMatchPattern(pattern)))
+            .collect::<Vec<_>>();
         Ok(format!(
-            "expected_permissions={:?}; permission_statuses={permission_statuses:?}; granted_permissions={granted_permissions:?}; denied_permissions={denied_permissions:?}; expected_patterns={:?}; pattern_statuses={pattern_statuses:?}; granted_patterns={granted_patterns:?}; denied_patterns={denied_patterns:?}; private={}/{}; optional_all_hosts={}",
+            "expected_permissions={:?}; permission_statuses={permission_statuses:?}; granted_permissions={granted_permissions:?}; denied_permissions={denied_permissions:?}; expected_patterns={:?}; pattern_statuses={pattern_statuses:?}; expected_denied_patterns={:?}; denied_pattern_statuses={denied_pattern_statuses:?}; granted_patterns={granted_patterns:?}; denied_patterns={denied_patterns:?}; private={}/{}; optional_all_hosts={}",
             expected_permissions
                 .iter()
                 .map(|permission| permission.to_string())
                 .collect::<Vec<_>>(),
             expected_patterns
+                .iter()
+                .map(|pattern| pattern.string().to_string())
+                .collect::<Vec<_>>(),
+            expected_denied_patterns
                 .iter()
                 .map(|pattern| pattern.string().to_string())
                 .collect::<Vec<_>>(),

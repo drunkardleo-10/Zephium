@@ -1275,6 +1275,14 @@ restart; a definite pre-commit refusal restores the old runtime. Page content
 cannot name a permission, package, profile, runtime, or native object through
 this path.
 
+The macOS live gate proves that an explicit exact-host denial overrides a
+broader granted host pattern while a different host remains granted, and that
+content-script execution follows the effective denial and later restoration.
+The probe applies and exactly reads back both native dictionaries. This is not
+yet user authority: production has no durable site-pause policy and emits no
+denied-pattern plan until the Store, runtime-journal, lifecycle, and privileged
+UX transaction are implemented together.
+
 ### Extension compatibility broker
 
 The macOS native extension compatibility broker is a narrow zone-1 service,
