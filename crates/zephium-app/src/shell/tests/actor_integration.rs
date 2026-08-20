@@ -1089,6 +1089,61 @@ fn extension_management_stays_pending_until_serialized_service_settlement() {
         ),
     );
     wait_for_ready_management_catalog(&rx, profile, expected_catalog, 1);
+    assert_eq!(engine.extension_action_requests().len(), 1);
+    assert!(handle.dispatch_operation(
+        "extension-enable-noop".into(),
+        Command::SetFocusedExtensionEnabled {
+            install,
+            expected_catalog,
+            expected_install,
+            enabled: true,
+        },
+    ));
+    assert!(wait_for_actor_condition(
+        std::time::Duration::from_secs(2),
+        || extension_state.set_enabled_callbacks.lock().unwrap().len() == 1
+    ));
+    extension_state
+        .set_enabled_callbacks
+        .lock()
+        .unwrap()
+        .pop()
+        .unwrap()(
+        zephium_core::ports::extensions::ExtensionManagementSettlement::new(
+            zephium_core::ports::extensions::ExtensionSetEnabledOutcome::Enabled {
+                generation: zephium_core::extensions::ExtensionRuntimeGeneration::INITIAL,
+                changed: false,
+            },
+            Some(active_profiles),
+        ),
+    );
+    let unchanged = std::iter::from_fn(|| rx.recv_timeout(std::time::Duration::from_secs(2)).ok())
+        .find_map(|projection| match projection {
+            Projection::OperationProcessed(completion)
+                if completion.operation_id == "extension-enable-noop" =>
+            {
+                Some(completion)
+            }
+            _ => None,
+        })
+        .expect("unchanged runtime settlement must complete the original operation");
+    assert_eq!(unchanged.outcome, OperationOutcome::NoOp);
+    assert_eq!(unchanged.reason, OperationReason::StateUnchanged);
+    assert_eq!(engine.extension_browser_surfaces().len(), 1);
+    assert_eq!(engine.extension_action_requests().len(), 2);
+    settle_next_management_catalog(
+        &extension_state,
+        extension_management_catalog(
+            profile,
+            install,
+            expected_catalog,
+            expected_install,
+            zephium_core::ports::extensions::ExtensionManagementRuntimeState::Active(
+                zephium_core::extensions::ExtensionRuntimeGeneration::INITIAL,
+            ),
+        ),
+    );
+    wait_for_ready_management_catalog(&rx, profile, expected_catalog, 1);
     assert!(handle.dispatch_operation(
         "extension-uninstall".into(),
         Command::UninstallFocusedExtension {

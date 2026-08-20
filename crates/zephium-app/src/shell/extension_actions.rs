@@ -140,7 +140,7 @@ impl ExtensionActionState {
         self.retry_profiles
     }
 
-    fn clear_projection(&mut self, profile: ProfileId) -> bool {
+    pub(super) fn clear_projection(&mut self, profile: ProfileId) -> bool {
         self.retry_profiles.remove(profile);
         self.snapshots.remove(&profile).is_some()
     }

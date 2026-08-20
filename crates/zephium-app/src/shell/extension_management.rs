@@ -783,12 +783,17 @@ impl Shell {
             );
             return;
         };
+        let profile = pending.subject.profile();
         let active_profiles = match completion {
             ExtensionManagementCompletion::Install(settlement) => settlement.active_profiles(),
             ExtensionManagementCompletion::SetEnabled(settlement) => settlement.active_profiles(),
             ExtensionManagementCompletion::Uninstall(settlement) => settlement.active_profiles(),
         };
         if let Some(active_profiles) = active_profiles {
+            let previous_surface_generation = self
+                .extension_browser_surfaces
+                .published_surface(profile)
+                .map(ExtensionBrowserSurface::generation);
             if !self
                 .extension_browser_surfaces
                 .replace_active_profiles(active_profiles)
@@ -806,6 +811,26 @@ impl Shell {
                 crate::diagnostic!(
                     "extensions: management applied but browser-surface synchronization awaits retry"
                 );
+            }
+            let current_surface_generation = self
+                .extension_browser_surfaces
+                .published_surface(profile)
+                .map(ExtensionBrowserSurface::generation);
+            if current_surface_generation.is_some()
+                && current_surface_generation == previous_surface_generation
+            {
+                // Enable, disable, install, and uninstall can change the
+                // runtime/action cohort without changing any logical window or
+                // tab. Remove the prior snapshot before the asynchronous read
+                // so a retired extension is never left visible or actionable.
+                if self.extension_actions.clear_projection(profile) {
+                    self.project_extension_actions(profile);
+                }
+                if self.refresh_extension_actions(profile).rejected {
+                    crate::diagnostic!(
+                        "extensions: post-management toolbar refresh awaits maintenance retry"
+                    );
+                }
             }
         }
 
@@ -942,7 +967,6 @@ impl Shell {
         if fail_until_restart {
             self.extension_management.fail_until_restart();
         }
-        let profile = pending.subject.profile();
         self.emit_extension_management_completion(pending.operation_id, outcome, reason);
         self.refresh_extension_management_catalog(profile);
     }
