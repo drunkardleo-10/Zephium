@@ -21,7 +21,7 @@ use zephium_core::extensions::{
     ExtensionInstallCatalogRevision, ExtensionManifestDescriptor, ExtensionNativeOwnershipIntent,
     ExtensionNativeOwnershipJournal, ExtensionNativeOwnershipJournalMutation,
     ExtensionNativeOwnershipKey, ExtensionNativeOwnershipPhase, ExtensionPackageIdentity,
-    ExtensionPackageKey, ExtensionRuntimeEligibility,
+    ExtensionPackageKey, ExtensionProfilePolicyMutation, ExtensionRuntimeEligibility,
 };
 use zephium_core::ids::{ExtensionInstallId, ProfileId};
 #[cfg(all(
@@ -36,7 +36,8 @@ use zephium_core::ports::store::{
     ExtensionGrantCohortLoadOutcome, ExtensionGrantMutationOutcome, ExtensionGrantWrite,
     ExtensionInstallCatalogLoadOutcome, ExtensionInstallCatalogMutationOutcome,
     ExtensionNativeOwnershipJournalLoadOutcome, ExtensionNativeOwnershipJournalMutationOutcome,
-    Store, StoreShutdownOutcome,
+    ExtensionProfilePolicyLoadOutcome, ExtensionProfilePolicyMutationOutcome, Store,
+    StoreShutdownOutcome,
 };
 use zephium_core::profiles::ProfileKind;
 use zephium_core::session::{PersistedProfile, SessionState};
@@ -484,11 +485,55 @@ impl ActorAuthorityHarness {
         profile_count: usize,
         publication_mode: PublicationMode,
     ) -> (Self, ExtensionServiceOwner, ExtensionServiceStartupWait) {
+        Self::launch_with_prestart_policy(profile_count, publication_mode, false)
+    }
+
+    pub(super) fn launch_paused(profile_count: usize) -> (Self, ExtensionServiceOwner) {
+        let (harness, owner, startup) =
+            Self::launch_with_prestart_policy(profile_count, PublicationMode::Immediate, true);
+        let ExtensionServiceStartupWait::Settled(ExtensionServiceStartupOutcome::Ready(evidence)) =
+            startup
+        else {
+            panic!("paused profile startup did not settle ready");
+        };
+        assert_eq!(evidence.active_runtime_count(), 0);
+        assert!(evidence.active_profiles().is_empty());
+        assert_eq!(evidence.rejected_runtime_count(), profile_count as u16);
+        assert_eq!(harness.probe.activation_calls(), 0);
+        (harness, owner)
+    }
+
+    fn launch_with_prestart_policy(
+        profile_count: usize,
+        publication_mode: PublicationMode,
+        paused: bool,
+    ) -> (Self, ExtensionServiceOwner, ExtensionServiceStartupWait) {
         let temporary = RepositoryTemporary::new();
         let (manifest, catalog_set) = provision_authenticated_repository(&temporary);
         let store = Arc::new(SqliteStore::open(temporary.path()).unwrap());
         let (profiles, keys) = provision_store(store.as_ref(), profile_count, &manifest);
         let authority = store.claim_extension_service_store_authority().unwrap();
+        if paused {
+            for profile in &profiles {
+                let ExtensionServiceStoreCallOutcome::Completed(
+                    ExtensionProfilePolicyLoadOutcome::Loaded(policy),
+                ) = authority.load_profile_policy_until(*profile, deadline())
+                else {
+                    panic!("prestart profile policy did not load");
+                };
+                assert!(matches!(
+                    authority.mutate_profile_policy_until(
+                        *profile,
+                        policy.revision(),
+                        ExtensionProfilePolicyMutation::SetPaused(true),
+                        deadline(),
+                    ),
+                    ExtensionServiceStoreCallOutcome::Completed(
+                        ExtensionProfilePolicyMutationOutcome::Applied { changed: true, .. }
+                    )
+                ));
+            }
+        }
         let repository_root =
             ExtensionRepositoryRoot::from_app_data_directory(temporary.path()).unwrap();
         let (host_factory, probe) = scripted_host_factory(publication_mode);

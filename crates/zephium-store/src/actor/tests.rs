@@ -3633,7 +3633,8 @@ fn extension_service_store_authority_loads_exact_runtime_snapshots() {
 #[test]
 fn extension_profile_policy_is_durable_canonical_and_cas_ordered() {
     let profile = ProfileId::from(1);
-    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    let directory = tempfile::tempdir().unwrap();
+    let store = Arc::new(SqliteStore::open(directory.path()).unwrap());
     store.save_session(sample());
     assert!(store.flush());
     let authority = store.claim_extension_service_store_authority().unwrap();
@@ -3708,6 +3709,27 @@ fn extension_profile_policy_is_durable_canonical_and_cas_ordered() {
         panic!("service authority did not reload the extension profile policy");
     };
     assert_eq!(reloaded, denied);
+
+    drop(authority);
+    assert_eq!(
+        store.shutdown_until(Instant::now() + STORE_RPC_TIMEOUT),
+        StoreShutdownOutcome::Clean
+    );
+    drop(store);
+    let reopened = Arc::new(SqliteStore::open(directory.path()).unwrap());
+    let reopened_authority = reopened.claim_extension_service_store_authority().unwrap();
+    let ExtensionServiceStoreCallOutcome::Completed(ExtensionProfilePolicyLoadOutcome::Loaded(
+        restarted,
+    )) = reopened_authority.load_profile_policy_until(profile, Instant::now() + STORE_RPC_TIMEOUT)
+    else {
+        panic!("extension profile policy did not survive Store restart");
+    };
+    assert_eq!(restarted, denied);
+    drop(reopened_authority);
+    assert_eq!(
+        reopened.shutdown_until(Instant::now() + STORE_RPC_TIMEOUT),
+        StoreShutdownOutcome::Clean
+    );
 }
 
 #[test]

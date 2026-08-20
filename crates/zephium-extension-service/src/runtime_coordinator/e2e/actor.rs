@@ -800,6 +800,73 @@ fn actor_profile_policy_pauses_restores_and_rebinds_exact_site_denials() {
     assert_eq!(evidence.accepted_commands(), 4);
     assert_eq!(evidence.completed_commands(), 4);
     harness.finish(evidence);
+
+    let (paused_harness, mut paused_owner) = ActorAuthorityHarness::launch_paused(1);
+    let paused_profile = paused_harness.profiles[0];
+    let (catalog_tx, catalog_rx) = std::sync::mpsc::sync_channel(1);
+    assert_eq!(
+        ExtensionServiceLifecycle::begin_load_management_catalog(
+            &mut paused_owner,
+            paused_profile,
+            deadline(),
+            Box::new(move |outcome| {
+                let _ = catalog_tx.send(outcome);
+            }),
+        ),
+        ExtensionManagementCatalogAdmission::Accepted
+    );
+    let ExtensionManagementCatalogOutcome::Loaded(catalog) = catalog_rx
+        .recv_timeout(std::time::Duration::from_secs(15))
+        .unwrap()
+    else {
+        panic!("restarted paused management catalog did not load");
+    };
+    assert!(catalog.profile_policy().paused());
+    assert!(catalog
+        .entries()
+        .iter()
+        .all(|entry| { entry.runtime() == ExtensionManagementRuntimeState::ProfilePaused }));
+    let (resume_tx, resume_rx) = std::sync::mpsc::sync_channel(1);
+    assert_eq!(
+        ExtensionServiceLifecycle::begin_edit_profile_policy(
+            &mut paused_owner,
+            paused_profile,
+            catalog.profile_policy().revision(),
+            ExtensionProfilePolicyMutation::SetPaused(false),
+            deadline(),
+            Box::new(move |outcome| {
+                let _ = resume_tx.send(outcome);
+            }),
+        ),
+        ExtensionManagementAdmission::Accepted
+    );
+    let resumed = resume_rx
+        .recv_timeout(std::time::Duration::from_secs(15))
+        .unwrap();
+    assert!(matches!(
+        resumed.outcome(),
+        ExtensionProfilePolicyEditOutcome::Applied {
+            changed: true,
+            activation_pending: false,
+            ..
+        }
+    ));
+    assert_eq!(
+        resumed
+            .active_profiles()
+            .unwrap()
+            .iter()
+            .collect::<Vec<_>>(),
+        [paused_profile]
+    );
+    let ExtensionServiceShutdownOutcome::Complete(paused_evidence) =
+        paused_owner.shutdown_until(deadline())
+    else {
+        panic!("restarted paused actor did not prove clean shutdown");
+    };
+    assert_eq!(paused_evidence.accepted_commands(), 2);
+    assert_eq!(paused_evidence.completed_commands(), 2);
+    paused_harness.finish(paused_evidence);
 }
 
 #[test]
