@@ -74,6 +74,11 @@ Chromium's full site-isolation model.
    package plus required grants atomically; optional, file, and private grants
    are never inferred from update consent. Closing the review leaves the old
    package live, and stale tokens cannot authorize a later replacement.
+   Uninstall reauthenticates the stable Chromium identifier, retires matching
+   runtimes, removes only that identifier's bounded WebExtension data record,
+   and proves persistent readback zero before deleting the Store install. A
+   timeout is not absence and prevents later management writes in the process;
+   peer extension records are never included in the removal array.
 
 The structural boundary between zones 2 and 3 is the most important application-owned
 control. A tab is a separate raw WebView, never a navigation of the privileged chrome.

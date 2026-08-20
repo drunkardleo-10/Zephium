@@ -243,6 +243,15 @@ pub enum ExtensionInstallCatalogLoadOutcome {
     Failed,
 }
 
+/// Exact durable native namespace obligation for one registered profile.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExtensionNativeNamespaceLoadOutcome {
+    Loaded(Option<ExtensionNativeNamespaceScope>),
+    NotRegistered,
+    DegradedProfile,
+    Failed,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExtensionInstallCatalogMutationApplied {
     pub catalog_revision: ExtensionInstallCatalogRevision,

@@ -99,6 +99,7 @@ pub struct BundledInstallCandidate {
     upstream_version: Box<str>,
     license_expression: Box<str>,
     attribution: Box<str>,
+    chromium_extension_id: Option<Box<str>>,
     manifest: Arc<ExtensionManifestDescriptor>,
     presentation: BundledManagementManifest,
 }
@@ -132,6 +133,12 @@ impl BundledInstallCandidate {
     /// Returns the reviewed human-readable upstream attribution.
     pub fn attribution(&self) -> &str {
         &self.attribution
+    }
+
+    /// Returns the catalog-authenticated Chromium identity used by native
+    /// macOS/Windows contexts. Compatibility-only packages may omit it.
+    pub fn chromium_extension_id(&self) -> Option<&str> {
+        self.chromium_extension_id.as_deref()
     }
 
     /// Returns the freshly admitted manifest descriptor.
@@ -240,6 +247,7 @@ struct AuthenticatedInstallCandidatePackage {
     upstream_version: Box<str>,
     license_expression: Box<str>,
     attribution: Box<str>,
+    chromium_extension_id: Option<Box<str>>,
 }
 
 impl BundledCurrentInstallCandidates {
@@ -423,6 +431,7 @@ impl ExtensionRepository {
                 upstream_version: package.upstream_version,
                 license_expression: package.license_expression,
                 attribution: package.attribution,
+                chromium_extension_id: package.chromium_extension_id,
                 manifest: Arc::clone(binding.manifest_arc()),
                 presentation,
             });
@@ -704,6 +713,9 @@ fn authenticated_candidate_package(
         upstream_version: provenance.upstream_version().into(),
         license_expression: provenance.license_expression().into(),
         attribution: provenance.attribution().into(),
+        chromium_extension_id: package
+            .chromium()
+            .map(|identity| Box::<str>::from(identity.extension_id().as_str())),
     }
 }
 

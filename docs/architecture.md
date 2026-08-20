@@ -969,6 +969,22 @@ mutation; uncertain commits enter restart reconciliation rather than replaying
 consent. Permission-neutral and non-degrading updates retain the automatic
 atomic path.
 
+Uninstall is also a cross-system transaction rather than a Store-row delete.
+The service first loads the profile's durable native-namespace obligation and
+reauthenticates the current package's Chromium identity, then retires every
+regular/private runtime owner. When a macOS namespace exists, the unique host
+factory may reopen its deterministic controller without loading an extension,
+fetches the bounded record cohort, selects exactly one matching 32-byte native
+identifier, removes all three WebExtension data types for only that record,
+and polls local/synchronized persistent bytes to zero. Other extension records
+are validated and preserved. Only an `Erased` or `NotPresent` settlement
+allows Store to delete the install and grants; native timeout becomes
+outcome-unknown and blocks further management writes until restart, while a
+definite pre-erasure refusal restores the retired runtime. The authenticated
+native and brokered product probes write real `storage.local` data and require
+this erasure before uninstall, clean service shutdown, and Store/repository
+reopen. Reinstall therefore cannot recover the prior extension-origin data.
+
 Remaining release gaps include product-sealed distribution endpoints, the
 complete permission and API matrix, quotas, complete
 cross-process release-build resource evidence, and endurance. Older admitted

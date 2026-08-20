@@ -32,7 +32,10 @@ use zephium_core::extensions::{
     ExtensionCompatibilityBrokerWitness, ExtensionNativeNamespaceScope, ExtensionRuntimeInstance,
 };
 use zephium_core::ids::{ItemId, ProfileId};
-use zephium_extension_runtime_api::ExtensionRuntimeMacosControllerAbsenceAudit;
+use zephium_extension_runtime_api::{
+    ExtensionRuntimeHostDataErasureDisposition, ExtensionRuntimeMacosControllerAbsenceAudit,
+    ExtensionRuntimeNativeOwnerId,
+};
 
 use super::browser_request_broker::{BrowserRequestPool, BrowserRequestSettlementOutcome};
 #[cfg(feature = "native-web-extension-probes")]
@@ -1305,6 +1308,40 @@ impl PersistentControllerRegistry {
             self.slots.poison();
         }
         result
+    }
+
+    /// Starts exact per-extension data erasure without loading a runtime.
+    pub(crate) fn erase_extension_data(
+        &mut self,
+        profile: ProfileId,
+        namespace_scope: ExtensionNativeNamespaceScope,
+        identity: ExtensionRuntimeNativeOwnerId,
+        deadline: std::time::Instant,
+        completion: Box<dyn FnOnce(ExtensionRuntimeHostDataErasureDisposition)>,
+    ) -> Result<ControllerPreparation, ControllerRegistryError> {
+        let preparation = match self.prepare_for_native_runtime(profile, namespace_scope) {
+            Ok(preparation) => preparation,
+            Err(error) => {
+                completion(ExtensionRuntimeHostDataErasureDisposition::FailedClosed);
+                return Err(error);
+            }
+        };
+        match preparation {
+            ControllerPreparation::RuntimeUnavailable => {
+                completion(ExtensionRuntimeHostDataErasureDisposition::Unsupported);
+                return Ok(ControllerPreparation::RuntimeUnavailable);
+            }
+            ControllerPreparation::Prepared => {}
+        }
+        let controller = match self.controller_for_native_runtime(profile, namespace_scope) {
+            Ok(controller) => controller,
+            Err(error) => {
+                completion(ExtensionRuntimeHostDataErasureDisposition::FailedClosed);
+                return Err(error);
+            }
+        };
+        super::record_erasure::begin(controller, identity, deadline, completion);
+        Ok(ControllerPreparation::Prepared)
     }
 
     #[cfg(any(test, feature = "native-web-extension-probes"))]

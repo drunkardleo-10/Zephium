@@ -35,12 +35,13 @@ use zephium_core::ports::store::{
     ExtensionGrantMutationOutcome, ExtensionGrantWrite, ExtensionInstallCatalogLoadOutcome,
     ExtensionInstallCatalogMutationOutcome, ExtensionInstallProvisionOutcome,
     ExtensionInstallUpdateGrantDecision, ExtensionInstallUpdateOutcome,
-    ExtensionNativeOwnershipActivationOutcome, ExtensionNativeOwnershipJournalLoadOutcome,
-    ExtensionNativeOwnershipJournalMutationOutcome, HistoryHit, PagePermissionCatalogLoadOutcome,
-    PagePermissionCatalogMutationOutcome, ProfileDeletionAuthorizeOutcome,
-    ProfileDeletionFinalizeOutcome, ProfileDeletionLoad, SessionLoad, Store, StoreShutdownOutcome,
-    UserscriptCatalogLoadOutcome, UserscriptCatalogMutationOutcome,
-    MAX_EXTENSION_GRANT_WRITE_RETAINED_BYTES, MAX_FAVICON_BATCH_ORIGINS,
+    ExtensionNativeNamespaceLoadOutcome, ExtensionNativeOwnershipActivationOutcome,
+    ExtensionNativeOwnershipJournalLoadOutcome, ExtensionNativeOwnershipJournalMutationOutcome,
+    HistoryHit, PagePermissionCatalogLoadOutcome, PagePermissionCatalogMutationOutcome,
+    ProfileDeletionAuthorizeOutcome, ProfileDeletionFinalizeOutcome, ProfileDeletionLoad,
+    SessionLoad, Store, StoreShutdownOutcome, UserscriptCatalogLoadOutcome,
+    UserscriptCatalogMutationOutcome, MAX_EXTENSION_GRANT_WRITE_RETAINED_BYTES,
+    MAX_FAVICON_BATCH_ORIGINS,
 };
 use zephium_core::profiles::ProfileKind;
 use zephium_core::session::{
@@ -138,6 +139,7 @@ type ExtensionGrantCohortLoadDone = Box<dyn FnOnce(ExtensionGrantCohortLoadOutco
 type ExtensionGrantMutationDone = Box<dyn FnOnce(ExtensionGrantMutationOutcome) + Send>;
 type ExtensionInstallProvisionDone = Box<dyn FnOnce(ExtensionInstallProvisionOutcome) + Send>;
 type ExtensionInstallUpdateDone = Box<dyn FnOnce(ExtensionInstallUpdateOutcome) + Send>;
+type ExtensionNativeNamespaceLoadDone = Box<dyn FnOnce(ExtensionNativeNamespaceLoadOutcome) + Send>;
 type ExtensionNativeOwnershipJournalLoadDone =
     Box<dyn FnOnce(ExtensionNativeOwnershipJournalLoadOutcome) + Send>;
 type ExtensionRuntimeStartupInventoryLoadDone =
@@ -618,6 +620,7 @@ enum Cmd {
         PagePermissionCatalogMutationDone,
     ),
     LoadExtensionInstallCatalog(ProfileId, ExtensionInstallCatalogLoadDone),
+    LoadExtensionNativeNamespace(ProfileId, ExtensionNativeNamespaceLoadDone),
     MutateExtensionInstallCatalog(
         ProfileId,
         ExtensionInstallCatalogRevision,
@@ -1103,6 +1106,28 @@ impl ExtensionServiceStoreAuthority {
         if !self
             .store
             .try_load_extension_install_catalog(profile, deadline, done)
+        {
+            return ExtensionServiceStoreCallOutcome::NotAdmitted;
+        }
+        observe_extension_service_store_call(result, deadline)
+    }
+
+    /// Loads the exact profile-scoped native extension namespace obligation.
+    pub fn load_native_namespace_until(
+        &self,
+        profile: ProfileId,
+        deadline: Instant,
+    ) -> ExtensionServiceStoreCallOutcome<ExtensionNativeNamespaceLoadOutcome> {
+        if Instant::now() >= deadline {
+            return ExtensionServiceStoreCallOutcome::NotAdmitted;
+        }
+        let (reply, result) = mpsc::sync_channel(1);
+        let done = Box::new(move |outcome| {
+            let _ = reply.send(outcome);
+        });
+        if !self
+            .store
+            .try_load_extension_native_namespace(profile, deadline, done)
         {
             return ExtensionServiceStoreCallOutcome::NotAdmitted;
         }
@@ -1603,6 +1628,28 @@ impl SqliteStore {
         }
         self.tx
             .try_send(Cmd::LoadExtensionInstallCatalog(profile, done))
+            .is_ok()
+    }
+
+    fn try_load_extension_native_namespace(
+        &self,
+        profile: ProfileId,
+        deadline: Instant,
+        done: ExtensionNativeNamespaceLoadDone,
+    ) -> bool {
+        let lifecycle = match self.lifecycle.try_lock() {
+            Ok(lifecycle) => lifecycle,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => return false,
+        };
+        if Instant::now() >= deadline
+            || lifecycle.terminal_admitted
+            || self.shutdown_clean.load(Ordering::Acquire)
+        {
+            return false;
+        }
+        self.tx
+            .try_send(Cmd::LoadExtensionNativeNamespace(profile, done))
             .is_ok()
     }
 
@@ -2980,6 +3027,18 @@ fn actor(
                             "store: profile {profile} extension-install catalog load failed: {error}"
                         );
                         ExtensionInstallCatalogLoadOutcome::Failed
+                    }
+                };
+                done(outcome);
+            }
+            Some(Cmd::LoadExtensionNativeNamespace(profile, done)) => {
+                let outcome = match hub.load_extension_native_namespace(profile) {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        eprintln!(
+                            "store: profile {profile} native extension namespace load failed: {error}"
+                        );
+                        ExtensionNativeNamespaceLoadOutcome::Failed
                     }
                 };
                 done(outcome);

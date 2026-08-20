@@ -40,8 +40,10 @@ use zephium_core::geometry::Rect;
 use zephium_core::ids::ItemId;
 use zephium_core::ports::engine::{Engine, NativeDispatch, Partition};
 use zephium_core::ports::extensions::{
-    ExtensionManagementAdmission, ExtensionRuntimeGrantOutcome,
+    ExtensionManagementAdmission, ExtensionManagementCatalogAdmission,
+    ExtensionManagementCatalogOutcome, ExtensionRuntimeGrantOutcome,
     ExtensionRuntimeGrantPromptSettlement, ExtensionRuntimeGrantRuntimeState,
+    ExtensionUninstallOutcome,
 };
 use zephium_core::ports::store::{HistoryHit, Store};
 use zephium_extension_authority::ProductExtensionRuntimeTarget;
@@ -85,7 +87,7 @@ fn main() {
     match outcome {
         Ok(ProbeDisposition::Passed(measurements)) => {
             println!(
-                "extension-product-probe: passed; runtime={}; authenticated_startup_ms={}; durable_grant_rebind_ms={}; profile_view_ms={}; popup_presentation_ms={}; extension_live_idle_window_ms={}; extension_live_main_process_user_cpu_ms={}; extension_live_main_process_system_cpu_ms={}; extension_live_main_process_voluntary_context_switches={}; extension_live_main_process_involuntary_context_switches={}; runtime_retired_idle_window_ms={}; runtime_retired_main_process_user_cpu_ms={}; runtime_retired_main_process_system_cpu_ms={}; runtime_retired_main_process_voluntary_context_switches={}; runtime_retired_main_process_involuntary_context_switches={}; service_shutdown_ms={}; engine_shutdown_ms={}; main_process_peak_rss_bytes={}; process_user_cpu_ms={}; process_system_cpu_ms={}; voluntary_context_switches={}; involuntary_context_switches={}; optional_api_host_grant_rebind=passed; tabs_create_activate_update_remove=passed; same_document_history_signal=passed; signed_compatibility_receipt={}; brokered_recent_history={}; popup_capacity_discard_reopen=passed; repository_cleanup=passed; store_restart_cleanup=passed",
+                "extension-product-probe: passed; runtime={}; authenticated_startup_ms={}; durable_grant_rebind_ms={}; profile_view_ms={}; popup_presentation_ms={}; extension_live_idle_window_ms={}; extension_live_main_process_user_cpu_ms={}; extension_live_main_process_system_cpu_ms={}; extension_live_main_process_voluntary_context_switches={}; extension_live_main_process_involuntary_context_switches={}; runtime_retired_idle_window_ms={}; runtime_retired_main_process_user_cpu_ms={}; runtime_retired_main_process_system_cpu_ms={}; runtime_retired_main_process_voluntary_context_switches={}; runtime_retired_main_process_involuntary_context_switches={}; service_shutdown_ms={}; engine_shutdown_ms={}; main_process_peak_rss_bytes={}; process_user_cpu_ms={}; process_system_cpu_ms={}; voluntary_context_switches={}; involuntary_context_switches={}; optional_api_host_grant_rebind=passed; tabs_create_activate_update_remove=passed; same_document_history_signal=passed; signed_compatibility_receipt={}; brokered_recent_history={}; popup_capacity_discard_reopen=passed; repository_cleanup=passed; uninstall_data_erasure=passed; store_restart_cleanup=passed",
                 runtime_target_argument(runtime_target),
                 measurements.authenticated_startup.as_millis(),
                 measurements.durable_grant_rebind.as_millis(),
@@ -1068,6 +1070,83 @@ fn run(runtime_target: ProductExtensionRuntimeTarget) -> Result<ProbeDisposition
     } else {
         IdleMeasurement::NOT_MEASURED
     };
+
+    set_phase("authenticated-uninstall-erasure");
+    let (catalog_tx, catalog_rx) = mpsc::sync_channel(1);
+    if service.begin_load_management_catalog(
+        profile,
+        deadline(),
+        Box::new(move |outcome| {
+            let _ = catalog_tx.send(outcome);
+        }),
+    ) != ExtensionManagementCatalogAdmission::Accepted
+    {
+        return Err("authenticated uninstall management read was not admitted".into());
+    }
+    let mut management = None;
+    engine.pump_until(
+        "authenticated uninstall management read",
+        deadline(),
+        |_| match catalog_rx.try_recv() {
+            Ok(outcome) => {
+                management = Some(outcome);
+                Ok(true)
+            }
+            Err(mpsc::TryRecvError::Empty) => Ok(false),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Err("authenticated uninstall management callback disconnected".to_owned())
+            }
+        },
+    )?;
+    let ExtensionManagementCatalogOutcome::Loaded(management) = management
+        .ok_or_else(|| "authenticated uninstall management callback was absent".to_owned())?
+    else {
+        return Err("authenticated uninstall management catalog was unavailable".into());
+    };
+    let [entry] = management.entries() else {
+        return Err("authenticated uninstall expected one installed extension".into());
+    };
+    if entry.selector().install() != action.runtime().install_id() {
+        return Err("authenticated uninstall selected a different install".into());
+    }
+    let (uninstall_tx, uninstall_rx) = mpsc::sync_channel(1);
+    if service.begin_uninstall(
+        entry.selector(),
+        deadline(),
+        Box::new(move |settlement| {
+            let _ = uninstall_tx.send(settlement);
+        }),
+    ) != ExtensionManagementAdmission::Accepted
+    {
+        return Err("authenticated uninstall was not admitted".into());
+    }
+    let mut uninstall = None;
+    engine.pump_until(
+        "authenticated uninstall data erasure",
+        deadline(),
+        |_| match uninstall_rx.try_recv() {
+            Ok(settlement) => {
+                uninstall = Some(settlement);
+                Ok(true)
+            }
+            Err(mpsc::TryRecvError::Empty) => Ok(false),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Err("authenticated uninstall callback disconnected".to_owned())
+            }
+        },
+    )?;
+    let uninstall =
+        uninstall.ok_or_else(|| "authenticated uninstall settlement was absent".to_owned())?;
+    if uninstall.outcome() != &ExtensionUninstallOutcome::Uninstalled
+        || uninstall
+            .active_profiles()
+            .is_none_or(|profiles| !profiles.is_empty())
+    {
+        return Err(format!(
+            "authenticated uninstall did not prove data erasure and runtime retirement: {:?}",
+            uninstall.outcome()
+        ));
+    }
 
     // Service shutdown must run off the native main thread. It blocks until
     // the engine retires the exact WKWebExtension owner, so this thread keeps

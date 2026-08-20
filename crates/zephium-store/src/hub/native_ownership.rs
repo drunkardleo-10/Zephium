@@ -246,6 +246,46 @@ impl Hub {
         Ok(ExtensionNativeOwnershipJournalLoadOutcome::Loaded(journal))
     }
 
+    pub(crate) fn load_extension_native_namespace(
+        &mut self,
+        profile: ProfileId,
+    ) -> rusqlite::Result<zephium_core::ports::store::ExtensionNativeNamespaceLoadOutcome> {
+        use zephium_core::ports::store::ExtensionNativeNamespaceLoadOutcome;
+
+        if !self.registry.contains(&profile) {
+            return Ok(ExtensionNativeNamespaceLoadOutcome::NotRegistered);
+        }
+        if self.degraded_profiles.contains(&profile) {
+            return Ok(ExtensionNativeNamespaceLoadOutcome::DegradedProfile);
+        }
+        validate_macos_controller_namespace_join(&self.meta)?;
+        let profile = profile.to_string();
+        let mut statement = self.meta.prepare(
+            "SELECT namespace_version
+             FROM extension_native_namespace_obligations
+             WHERE profile_id = ?1
+             ORDER BY namespace_version",
+        )?;
+        let rows = statement.query_map([&profile], |row| row.get::<_, i64>(0))?;
+        let mut scope = None;
+        for row in rows {
+            if scope.is_some() {
+                return Err(invalid_data(
+                    "profile has multiple native extension namespace obligations",
+                ));
+            }
+            scope = u8::try_from(row?)
+                .ok()
+                .and_then(ExtensionNativeNamespaceScope::from_persisted_version);
+            if scope.is_none() {
+                return Err(invalid_data(
+                    "profile native extension namespace obligation is unsupported",
+                ));
+            }
+        }
+        Ok(ExtensionNativeNamespaceLoadOutcome::Loaded(scope))
+    }
+
     pub(crate) fn mutate_extension_native_ownership_journal(
         &mut self,
         expected: ExtensionNativeOwnershipJournalRevision,

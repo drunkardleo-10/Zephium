@@ -1384,6 +1384,28 @@ pub enum ExtensionRuntimeHostProfileAbsenceDisposition {
     InvariantFailed,
 }
 
+/// Settlement of exact extension-origin data erasure after runtime absence.
+///
+/// The native owner identifier is only a selector into a profile-scoped
+/// controller. It grants no package, Store, runtime, or profile-deletion
+/// authority; the serialized service must derive it from an authenticated
+/// package and prevent matching runtime activation throughout the call.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExtensionRuntimeHostDataErasureDisposition {
+    /// One matching record was removed and persistent readback proved absence.
+    Erased,
+    /// No matching record existed and therefore no persistent data was owned.
+    NotPresent,
+    /// The selected native backend has no reviewed record-erasure operation.
+    Unsupported,
+    /// A retryable native or dispatch boundary refused the operation.
+    Unavailable,
+    /// The caller deadline elapsed without a trustworthy terminal result.
+    TimedOut,
+    /// Native identity, controller, record, or readback integrity was lost.
+    FailedClosed,
+}
+
 struct ExtensionRuntimeHostFactoryEpoch;
 
 /// Linear evidence of one fresh process-local profile-absence observation.
@@ -1532,6 +1554,17 @@ pub trait ExtensionRuntimeHostFactoryPort: Send {
     ) -> Result<(), ExtensionRuntimeHostProfileAbsenceDisposition> {
         Err(ExtensionRuntimeHostProfileAbsenceDisposition::Unavailable)
     }
+
+    /// Removes persistent data for one exact native extension identity after
+    /// the serialized service has retired every matching runtime context.
+    fn erase_extension_data_until(
+        &mut self,
+        _profile: ProfileId,
+        _identity: ExtensionRuntimeNativeOwnerId,
+        _deadline: Instant,
+    ) -> ExtensionRuntimeHostDataErasureDisposition {
+        ExtensionRuntimeHostDataErasureDisposition::Unsupported
+    }
 }
 
 /// Unique move-only engine host factory held by the serialized service.
@@ -1626,6 +1659,32 @@ impl ExtensionRuntimeHostFactory {
             _factory_borrow: PhantomData,
             _worker_private: PhantomData,
         })
+    }
+
+    /// Erases one exact extension-origin data record without constructing or
+    /// activating an extension runtime.
+    pub fn erase_extension_data_until(
+        &mut self,
+        profile: ProfileId,
+        identity: ExtensionRuntimeNativeOwnerId,
+        deadline: Instant,
+    ) -> ExtensionRuntimeHostDataErasureDisposition {
+        if Instant::now() >= deadline {
+            return ExtensionRuntimeHostDataErasureDisposition::TimedOut;
+        }
+        let disposition = self
+            .port
+            .erase_extension_data_until(profile, identity, deadline);
+        if Instant::now() >= deadline
+            && matches!(
+                disposition,
+                ExtensionRuntimeHostDataErasureDisposition::Unavailable
+            )
+        {
+            ExtensionRuntimeHostDataErasureDisposition::TimedOut
+        } else {
+            disposition
+        }
     }
 
     #[cfg(test)]

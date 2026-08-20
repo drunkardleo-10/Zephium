@@ -18,16 +18,17 @@ use zephium_extension_runtime_api::{
     ExtensionRuntimeActivationDisposition, ExtensionRuntimeBoundAbsenceEvidenceIssuer,
     ExtensionRuntimeCompatibilityAbsenceAudit, ExtensionRuntimeFailure,
     ExtensionRuntimeHostActivationContext, ExtensionRuntimeHostActivationPorts,
-    ExtensionRuntimeHostBindError, ExtensionRuntimeHostFactory, ExtensionRuntimeHostFactoryPort,
+    ExtensionRuntimeHostBindError, ExtensionRuntimeHostDataErasureDisposition,
+    ExtensionRuntimeHostFactory, ExtensionRuntimeHostFactoryPort,
     ExtensionRuntimeHostGrantRebindPortRefusal, ExtensionRuntimeHostLifecyclePort,
     ExtensionRuntimeHostOwnershipPort, ExtensionRuntimeHostProfileAbsenceDisposition,
     ExtensionRuntimeHostPublicationPort, ExtensionRuntimeHostPublicationPortRefusal,
     ExtensionRuntimeHostRecoveryContext, ExtensionRuntimeHostRegistryGeneration,
     ExtensionRuntimeLifecyclePort, ExtensionRuntimeMacosAbsenceAudit,
-    ExtensionRuntimeNativeIdentityExpectation, ExtensionRuntimeNativeRootLease,
-    ExtensionRuntimeOwnerAddress, ExtensionRuntimeOwnershipDisposition,
-    ExtensionRuntimeOwnershipEvidence, ExtensionRuntimeOwnershipPort,
-    ExtensionRuntimeRetirementDisposition, ExtensionRuntimeTarget,
+    ExtensionRuntimeNativeIdentityExpectation, ExtensionRuntimeNativeOwnerId,
+    ExtensionRuntimeNativeRootLease, ExtensionRuntimeOwnerAddress,
+    ExtensionRuntimeOwnershipDisposition, ExtensionRuntimeOwnershipEvidence,
+    ExtensionRuntimeOwnershipPort, ExtensionRuntimeRetirementDisposition, ExtensionRuntimeTarget,
     MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES,
 };
 
@@ -667,6 +668,19 @@ impl ExtensionRuntimeHostFactoryPort for ScriptedHostFactory {
             Ok(())
         } else {
             Err(ExtensionRuntimeHostProfileAbsenceDisposition::ObligationsRemain)
+        }
+    }
+
+    fn erase_extension_data_until(
+        &mut self,
+        _profile: ProfileId,
+        _identity: ExtensionRuntimeNativeOwnerId,
+        deadline: Instant,
+    ) -> ExtensionRuntimeHostDataErasureDisposition {
+        if Instant::now() >= deadline {
+            ExtensionRuntimeHostDataErasureDisposition::TimedOut
+        } else {
+            ExtensionRuntimeHostDataErasureDisposition::Erased
         }
     }
 }

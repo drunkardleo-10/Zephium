@@ -2,13 +2,20 @@
 
 use std::time::Instant;
 
-use zephium_core::extensions::{ExtensionGrantBrowsingContext, ExtensionNativeOwnershipKey};
+use zephium_core::extensions::{
+    ExtensionGrantBrowsingContext, ExtensionNativeNamespaceScope, ExtensionNativeOwnershipKey,
+    ExtensionPackageIdentity,
+};
 use zephium_core::ports::extensions::{
     ExtensionActivationPendingReason, ExtensionInstallSelector, ExtensionManagementSettlement,
     ExtensionSetEnabledOutcome, ExtensionUninstallOutcome,
 };
 use zephium_core::ports::store::{
     ExtensionInstallCatalogLoadOutcome, ExtensionInstallCatalogMutationOutcome,
+    ExtensionNativeNamespaceLoadOutcome,
+};
+use zephium_extension_runtime_api::{
+    ExtensionRuntimeHostDataErasureDisposition, ExtensionRuntimeNativeOwnerId,
 };
 use zephium_store::ExtensionServiceStoreCallOutcome;
 
@@ -144,10 +151,90 @@ pub(super) fn uninstall_until(
         Ok(current) => current,
         Err(outcome) => return settle(runtime, map_set_enabled_to_uninstall(outcome)),
     };
+    let namespace = match startup
+        .store
+        .load_native_namespace_until(selector.profile(), deadline)
+    {
+        ExtensionServiceStoreCallOutcome::Completed(
+            ExtensionNativeNamespaceLoadOutcome::Loaded(namespace),
+        ) => namespace,
+        ExtensionServiceStoreCallOutcome::Completed(
+            ExtensionNativeNamespaceLoadOutcome::NotRegistered,
+        ) => return settle(runtime, ExtensionUninstallOutcome::Rejected),
+        ExtensionServiceStoreCallOutcome::Completed(
+            ExtensionNativeNamespaceLoadOutcome::DegradedProfile,
+        )
+        | ExtensionServiceStoreCallOutcome::NotAdmitted => {
+            return settle(runtime, ExtensionUninstallOutcome::Unavailable)
+        }
+        ExtensionServiceStoreCallOutcome::Completed(
+            ExtensionNativeNamespaceLoadOutcome::Failed,
+        )
+        | ExtensionServiceStoreCallOutcome::TimedOutAfterAdmission => {
+            return settle(runtime, ExtensionUninstallOutcome::FailedClosed)
+        }
+    };
+    let erase_identity = if let Some(namespace) = namespace {
+        if namespace != ExtensionNativeNamespaceScope::MacosControllerV1 {
+            return settle(runtime, ExtensionUninstallOutcome::FailedClosed);
+        }
+        let candidates = match startup.repository.authenticate_install_candidates() {
+            Ok(candidates) => candidates,
+            Err(_) => return settle(runtime, ExtensionUninstallOutcome::Unavailable),
+        };
+        let Some(candidate) = candidates
+            .candidates()
+            .iter()
+            .find(|candidate| candidate.package() == &current.package)
+        else {
+            return settle(runtime, ExtensionUninstallOutcome::FailedClosed);
+        };
+        let Some(identity) = candidate
+            .chromium_extension_id()
+            .and_then(|identity| ExtensionRuntimeNativeOwnerId::parse_exact(identity).ok())
+        else {
+            return settle(runtime, ExtensionUninstallOutcome::FailedClosed);
+        };
+        Some(identity)
+    } else {
+        None
+    };
     let retired = match retire_all_contexts(startup, runtime, selector, deadline) {
         Ok(retired) => retired,
         Err(outcome) => return settle(runtime, map_set_enabled_to_uninstall(outcome)),
     };
+    if let Some(identity) = erase_identity {
+        let erasure = startup
+            .native_recovery
+            .idle_factory()
+            .map(|factory| {
+                factory.erase_extension_data_until(selector.profile(), identity, deadline)
+            })
+            .unwrap_or(ExtensionRuntimeHostDataErasureDisposition::FailedClosed);
+        match erasure {
+            ExtensionRuntimeHostDataErasureDisposition::Erased
+            | ExtensionRuntimeHostDataErasureDisposition::NotPresent => {}
+            ExtensionRuntimeHostDataErasureDisposition::Unsupported
+            | ExtensionRuntimeHostDataErasureDisposition::Unavailable => {
+                let outcome = restore_uninstall_refusal(
+                    startup,
+                    runtime,
+                    selector,
+                    &current,
+                    retired,
+                    deadline,
+                    ExtensionUninstallOutcome::Unavailable,
+                );
+                return settle(runtime, outcome);
+            }
+            ExtensionRuntimeHostDataErasureDisposition::TimedOut => {
+                return settle(runtime, ExtensionUninstallOutcome::OutcomeUnknown)
+            }
+            ExtensionRuntimeHostDataErasureDisposition::FailedClosed => {
+                return settle(runtime, ExtensionUninstallOutcome::FailedClosed)
+            }
+        }
+    }
     let outcome = startup.store.delete_install_until(
         selector.profile(),
         selector.catalog_revision(),
@@ -217,13 +304,14 @@ pub(super) fn uninstall_until(
     settle(runtime, result)
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct SelectedInstall {
     desired_enabled: bool,
+    package: ExtensionPackageIdentity,
 }
 
 impl SelectedInstall {
-    const fn desired_enabled(self) -> bool {
+    const fn desired_enabled(&self) -> bool {
         self.desired_enabled
     }
 }
@@ -251,6 +339,7 @@ fn load_selected_install(
             }
             Ok(SelectedInstall {
                 desired_enabled: install.desired_enabled(),
+                package: install.package().clone(),
             })
         }
         ExtensionServiceStoreCallOutcome::Completed(
@@ -461,6 +550,29 @@ pub(super) fn resources(startup: &mut WorkerStartupState) -> RuntimeCoordinatorR
 
 fn settle<T>(runtime: &RuntimeCoordinator, outcome: T) -> ExtensionManagementSettlement<T> {
     ExtensionManagementSettlement::new(outcome, runtime.active_profiles())
+}
+
+fn restore_uninstall_refusal(
+    startup: &mut WorkerStartupState,
+    runtime: &mut RuntimeCoordinator,
+    selector: ExtensionInstallSelector,
+    current: &SelectedInstall,
+    retired: RetiredContexts,
+    deadline: Instant,
+    outcome: ExtensionUninstallOutcome,
+) -> ExtensionUninstallOutcome {
+    if !current.desired_enabled() {
+        return if retired.is_empty() {
+            outcome
+        } else {
+            ExtensionUninstallOutcome::FailedClosed
+        };
+    }
+    if restore_contexts(startup, runtime, selector, retired, deadline) {
+        outcome
+    } else {
+        ExtensionUninstallOutcome::FailedClosed
+    }
 }
 
 const fn map_set_enabled_to_uninstall(

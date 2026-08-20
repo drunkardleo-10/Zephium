@@ -14,6 +14,7 @@ mod erasure;
 mod grant_application;
 mod grants;
 mod native_runtime;
+mod record_erasure;
 mod runtime_grant_broker;
 
 pub(crate) use controller_registry::{

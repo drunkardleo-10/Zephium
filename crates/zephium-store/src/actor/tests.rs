@@ -3433,6 +3433,7 @@ fn extension_service_store_authority_has_one_closed_public_surface() {
         "pub fn transition_native_ownership_to_may_own_until(",
         "pub fn rebind_native_ownership_grants_until(",
         "pub fn load_install_catalog_until(",
+        "pub fn load_native_namespace_until(",
         "pub fn provision_install_until(",
         "pub fn update_install_until(",
         "pub fn set_install_enabled_until(",
@@ -3455,7 +3456,7 @@ fn extension_service_store_authority_has_one_closed_public_surface() {
         })
         .count();
     assert_eq!(
-        public_items, 15,
+        public_items, 16,
         "the service Store authority gained an unreviewed public item"
     );
     assert!(!surface.contains("pub fn mutate_extension_install"));
