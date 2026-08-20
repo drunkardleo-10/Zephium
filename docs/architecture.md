@@ -2089,8 +2089,8 @@ provide real bookmark results: bookmarks are explicitly empty/read-only, and
 page favicons are transparent. Search is deliberately limited to the browser's
 default provider in the current or a new tab, and session support restores only
 the newest current-space tab; enumeration and explicit session identifiers are
-unsupported. Notifications, changed-permission update UX, and multi-profile
-packaged management behavior remain unassessed. The exact native Vimium gate
+unsupported. Notifications and multi-profile packaged management behavior
+remain unassessed. The exact native Vimium gate
 now edits, saves, closes, recreates, and rereads a real option through WebKit's
 extension storage before proving both settings views release with the context.
 Enable/disable, package update, popup/options presentation, shutdown, and
@@ -2104,9 +2104,15 @@ compatible.
 Install candidates project file-URL and private-window availability separately
 from manifest declaration. Both controls remain visibly unavailable on the
 current product runtime, and Shell rejects forged `true` selections, because
-file-scheme execution has not passed its live gate and the browser has not yet
-provided a separately isolated private browsing context. Persisting either flag
-and failing only during native activation is not an accepted degradation.
+post-WebView file-scheme execution fails its live gate and the browser has not
+yet provided a separately isolated private browsing context. The macOS gate
+creates three distinct extension contexts only after the product-shaped
+WKWebView exists. Each exact `file:///*` match-pattern grant is accepted and
+read back, but an `<all_urls>` isolated content script never executes in a real
+local document during the bounded settle window; unload and cleanup also prove
+no stale execution. A future WebKit runtime that begins executing fails this
+negative gate so availability must be reviewed deliberately. Persisting either
+flag and failing only during native activation is not an accepted degradation.
 
 ---
 

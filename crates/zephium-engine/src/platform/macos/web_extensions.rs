@@ -10,6 +10,7 @@ mod bitwarden_contract;
 mod bitwarden_core_artifact;
 mod compatibility_artifact;
 mod compatibility_fixture;
+mod file_access;
 mod major_extension_contract;
 mod native_broker_contract;
 mod permission_requests;
@@ -608,6 +609,7 @@ struct Fixture {
     bitwarden_contract_path: std::path::PathBuf,
     major_extension_contract_path: std::path::PathBuf,
     native_broker_contract_path: std::path::PathBuf,
+    file_access: file_access::FileAccessFixture,
     runtime_paths: persistent_runtime::RuntimeFixturePaths,
 }
 
@@ -631,6 +633,7 @@ impl Fixture {
         let bitwarden_contract_path = bitwarden_contract::write_fixture(temp.path())?;
         let major_extension_contract_path = major_extension_contract::write_fixture(temp.path())?;
         let native_broker_contract_path = native_broker_contract::write_fixture(temp.path())?;
+        let file_access = file_access::write_fixture(temp.path())?;
         let runtime_paths = persistent_runtime::write_runtime_extensions(temp.path())?;
         Ok(Self {
             _temp: temp,
@@ -640,6 +643,7 @@ impl Fixture {
             bitwarden_contract_path,
             major_extension_contract_path,
             native_broker_contract_path,
+            file_access,
             runtime_paths,
         })
     }
@@ -786,7 +790,7 @@ fn run_web_extension_probe_with_permissions(
         set_phase("teardown-wait");
         wait_for_teardown(&teardown)?;
         println!(
-            "native-probe: macOS WKWebExtension passed; os={}; mv3=temp-directory; controller_before_wry=passed; default_deny=passed; exact_native_grant_replace_readback=passed; exact_native_grant_live_revocation=passed; exact_native_grant_clear_readback=passed; exact_native_owner_lifecycle=passed; restart_controller_absence=passed; exact_host_grant=passed; private_data_default_deny=passed; private_data_explicit_grant=passed; private_data_separation=passed; runtime_permission_request={}; runtime_permission_readback={}; runtime_permission_callbacks_coalesced_before_settlement={}; runtime_permission_replacement_settlement_stranded={}; document_start=passed; isolated_worlds=passed; include_exclude=passed; all_frames=passed; match_about_blank=passed; match_origin_as_fallback=passed; exact_unload_reload=passed; peer_context=passed; nonpersistent_permission_separation=passed; protected_inventory=passed; product_profile_view_store_binding=passed; regular_cookie_isolation=passed; private_cookie_noninheritance=passed; regular_cookie_reconstruction=passed; regular_tab_routing_isolation=passed; browser_mutation_broker=passed; discarded_tab_native_view_refusal=passed; persistent_extension_storage_namespace_isolation=passed; persistent_local_zero_after_reopen=passed; private_extension_storage_noninheritance=passed; mv3_background_execution=passed; major_extension_native_permissions={}; major_extension_namespaces={}; native_broker_history_search=bounded-round-trip; native_broker_port=extension-to-host-only; native_broker_port_host_send=accepted-unobserved; native_broker_principal_binding=passed; native_broker_port_released=1; native_broker_delegate_released={}; bitwarden_web_request_background_registration=passed; bitwarden_web_request_observation={}; bitwarden_scripting_main_world=passed; bitwarden_execution_world_namespace={}; bitwarden_web_navigation_observation=passed; bitwarden_tabs_same_document_observation={}; bitwarden_alarms_lifecycle=passed; bitwarden_commands_readback=passed; bitwarden_commands_native_dispatch=passed; bitwarden_runtime_port_registered=round-trip; bitwarden_runtime_port_early_connect={}; bitwarden_context_menus_lifecycle=passed; bitwarden_context_menus_native_projection=passed; bitwarden_dynamic_resource_execution=passed; bitwarden_dynamic_resource_url={}; bitwarden_sandbox_isolation={}; bitwarden_action_popup_native_lifecycle=passed; bitwarden_http_basic_auth_autofill=degraded; extension_product_views_released={}; extension_product_stores_released={}; extension_ui_views_released={}; capability_views_released={}; capability_stores_released={}; all_type_removal_callbacks_completed={}; baseline_controller_scripts={}; peak_extension_script_delta={}; webview_callbacks={}; protected_scripts=3; lifecycle_objects_released=3; ordinary_native_controllers_released={}; ordinary_native_contexts_released={}; persistent_native_controllers_released={}; persistent_native_contexts_released={}; persistent_native_stores_released={}; profile_views_released={}; profile_contexts_released={}; profile_controllers_released={}; profile_stores_released={}; profile_lifecycle_objects_released={}",
+            "native-probe: macOS WKWebExtension passed; os={}; mv3=temp-directory; controller_before_wry=passed; default_deny=passed; exact_native_grant_replace_readback=passed; exact_native_grant_live_revocation=passed; exact_native_grant_clear_readback=passed; exact_native_owner_lifecycle=passed; restart_controller_absence=passed; exact_host_grant=passed; dynamic_file_access=unsupported; dynamic_file_grant_readback=accepted; dynamic_file_contexts=3; private_data_default_deny=passed; private_data_explicit_grant=passed; private_data_separation=passed; runtime_permission_request={}; runtime_permission_readback={}; runtime_permission_callbacks_coalesced_before_settlement={}; runtime_permission_replacement_settlement_stranded={}; document_start=passed; isolated_worlds=passed; include_exclude=passed; all_frames=passed; match_about_blank=passed; match_origin_as_fallback=passed; exact_unload_reload=passed; peer_context=passed; nonpersistent_permission_separation=passed; protected_inventory=passed; product_profile_view_store_binding=passed; regular_cookie_isolation=passed; private_cookie_noninheritance=passed; regular_cookie_reconstruction=passed; regular_tab_routing_isolation=passed; browser_mutation_broker=passed; discarded_tab_native_view_refusal=passed; persistent_extension_storage_namespace_isolation=passed; persistent_local_zero_after_reopen=passed; private_extension_storage_noninheritance=passed; mv3_background_execution=passed; major_extension_native_permissions={}; major_extension_namespaces={}; native_broker_history_search=bounded-round-trip; native_broker_port=extension-to-host-only; native_broker_port_host_send=accepted-unobserved; native_broker_principal_binding=passed; native_broker_port_released=1; native_broker_delegate_released={}; bitwarden_web_request_background_registration=passed; bitwarden_web_request_observation={}; bitwarden_scripting_main_world=passed; bitwarden_execution_world_namespace={}; bitwarden_web_navigation_observation=passed; bitwarden_tabs_same_document_observation={}; bitwarden_alarms_lifecycle=passed; bitwarden_commands_readback=passed; bitwarden_commands_native_dispatch=passed; bitwarden_runtime_port_registered=round-trip; bitwarden_runtime_port_early_connect={}; bitwarden_context_menus_lifecycle=passed; bitwarden_context_menus_native_projection=passed; bitwarden_dynamic_resource_execution=passed; bitwarden_dynamic_resource_url={}; bitwarden_sandbox_isolation={}; bitwarden_action_popup_native_lifecycle=passed; bitwarden_http_basic_auth_autofill=degraded; extension_product_views_released={}; extension_product_stores_released={}; extension_ui_views_released={}; capability_views_released={}; capability_stores_released={}; all_type_removal_callbacks_completed={}; baseline_controller_scripts={}; peak_extension_script_delta={}; webview_callbacks={}; protected_scripts=3; lifecycle_objects_released=3; ordinary_native_controllers_released={}; ordinary_native_contexts_released={}; persistent_native_controllers_released={}; persistent_native_contexts_released={}; persistent_native_stores_released={}; profile_views_released={}; profile_contexts_released={}; profile_controllers_released={}; profile_stores_released={}; profile_lifecycle_objects_released={}",
             teardown.operating_system,
             teardown.runtime_permission_status,
             teardown.runtime_permission_readback,
@@ -999,6 +1003,9 @@ fn run_supported_probe(
     set_phase("native-broker-contract-parse");
     let native_broker_extension =
         load_extension(&fixture.native_broker_contract_path, &run_loop, mtm)?;
+    set_phase("file-access-extension-parse");
+    let file_access_extension =
+        load_extension(&fixture.file_access.extension_root, &run_loop, mtm)?;
     set_phase("native-broker-contract-runtime");
     let native_broker_teardown =
         native_broker_contract::run(&native_broker_extension, &run_loop, mtm)?;
@@ -1009,6 +1016,7 @@ fn run_supported_probe(
     let runtime_empty = load_extension(&fixture.runtime_paths.empty, &run_loop, mtm)?;
     validate_extension(&primary_extension, "primary")?;
     validate_extension(&peer_extension, "peer")?;
+    validate_extension(&file_access_extension, "dynamic file access")?;
     for runtime_extension in [
         &runtime_writer,
         &runtime_verifier_one,
@@ -1198,6 +1206,21 @@ fn run_supported_probe(
         "secondary controller separation",
     )?;
     assert_exact_inventory(&native_view, &baseline_inventory, "context load")?;
+    set_phase("dynamic-file-access-gates");
+    let file_access_evidence = file_access::run(
+        &file_access_extension,
+        &primary_bundle.controller,
+        &native_view,
+        &fixture.file_access,
+        &run_loop,
+        mtm,
+    )?;
+    context_weaks.extend(file_access_evidence.contexts.iter().cloned());
+    assert_exact_inventory(
+        &native_view,
+        &baseline_inventory,
+        "dynamic file-access cleanup",
+    )?;
 
     set_phase("runtime-permission-request-gates");
     let permission_request_evidence = if permission_mode.is_interactive() {
@@ -1610,6 +1633,7 @@ fn run_supported_probe(
     drop(secondary_context);
     drop(primary_extension);
     drop(peer_extension);
+    drop(file_access_extension);
     drop(permission_extension);
     drop(permission_request_state);
     drop(runtime_writer);
@@ -1638,7 +1662,7 @@ fn run_supported_probe(
         capability_stores: vec![major_extension_teardown.store, native_broker_teardown.store],
         controllers: controller_weaks,
         contexts: context_weaks,
-        expected_contexts: 6 + runtime_permission_contexts,
+        expected_contexts: 6 + runtime_permission_contexts + file_access_evidence.dynamic_contexts,
         expected_extension_ui_views: 2 + runtime_permission_views,
         lifecycle_drops,
         baseline_script_count: baseline_inventory.len(),

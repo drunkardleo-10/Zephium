@@ -63,6 +63,10 @@ Chromium's full site-isolation model.
    availability. The current management projection marks both unavailable and
    Shell rejects a forged grant selection before Store admission; those flags
    stay closed until their native data-isolation and execution gates pass.
+   On macOS, three post-WebView contexts accept and read back an exact file
+   match-pattern grant but do not execute their declared isolated script in a
+   real local document. That negative live gate prevents permission metadata
+   from being mistaken for usable file authority.
    A replacement adding required API/host authority or a new compatibility
    degradation cannot silently retire the old runtime. Shell retains an exact
    catalog-set/package/install/grant-bound review and gives chrome only an
