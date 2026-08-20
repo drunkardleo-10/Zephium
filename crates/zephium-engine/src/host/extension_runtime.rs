@@ -4613,11 +4613,16 @@ mod tests {
             &manifest,
         )
         .expect("valid grant authority");
-        let eligibility =
-            ExtensionGrantCohort::from_persisted(profile, catalog, bindings, vec![grant])
-                .expect("valid grant cohort")
-                .runtime_eligibility(install_id, ExtensionGrantBrowsingContext::Regular)
-                .expect("runtime eligibility");
+        let eligibility = ExtensionGrantCohort::from_persisted(
+            profile,
+            zephium_core::extensions::ExtensionProfilePolicy::initial(),
+            catalog,
+            bindings,
+            vec![grant],
+        )
+        .expect("valid grant cohort")
+        .runtime_eligibility(install_id, ExtensionGrantBrowsingContext::Regular)
+        .expect("runtime eligibility");
         let next_catalog = ExtensionInstallCatalog::from_persisted(
             ExtensionInstallCatalogRevision::new(53).expect("catalog revision"),
             Some(install_id),
@@ -4648,6 +4653,7 @@ mod tests {
         .expect("valid next grant authority");
         let next_eligibility = ExtensionGrantCohort::from_persisted(
             profile,
+            zephium_core::extensions::ExtensionProfilePolicy::initial(),
             next_catalog,
             next_bindings,
             vec![next_grant],

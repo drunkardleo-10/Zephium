@@ -330,6 +330,70 @@ impl MacosEngineHarness {
         })
     }
 
+    pub(crate) fn prove_extension_not_armed(
+        &mut self,
+        item: ItemId,
+        duration: Duration,
+        deadline: Instant,
+    ) -> Result<(), String> {
+        let settle_until = Instant::now()
+            .checked_add(duration)
+            .ok_or_else(|| "extension-denial settle deadline overflowed".to_owned())?;
+        if settle_until > deadline {
+            return Err("extension-denial settle window exceeds its deadline".into());
+        }
+        let marker_prefix = format!(r#"{EXTENSION_MARKER}="#);
+        let mut next_observation = Instant::now();
+        self.pump_until(
+            "extension site-denial execution absence",
+            deadline,
+            |harness| {
+                loop {
+                    match harness.events.try_recv() {
+                        Ok(EngineEvent::HtmlExtracted {
+                            id,
+                            html,
+                            truncated,
+                        }) if id == item => {
+                            if truncated {
+                                return Err("site-denial HTML observation was truncated".into());
+                            }
+                            if html.contains(&marker_prefix) {
+                                return Err(
+                                    "extension content executed on an explicitly denied site"
+                                        .into(),
+                                );
+                            }
+                        }
+                        Ok(EngineEvent::ViewCreationFailed { id }) if id == item => {
+                            return Err("profile view failed during site-denial proof".into())
+                        }
+                        Ok(EngineEvent::Crashed { id }) if id == item => {
+                            return Err("profile view crashed during site-denial proof".into())
+                        }
+                        Ok(_) => {}
+                        Err(mpsc::TryRecvError::Empty) => break,
+                        Err(mpsc::TryRecvError::Disconnected) => {
+                            return Err("engine event ingress disconnected".into())
+                        }
+                    }
+                }
+                let now = Instant::now();
+                if now >= next_observation {
+                    if harness.engine.extract_html(item)
+                        != zephium_core::ports::engine::NativeDispatch::Scheduled
+                    {
+                        return Err("site-denial HTML observation was not admitted".into());
+                    }
+                    next_observation = now
+                        .checked_add(HTML_OBSERVATION_INTERVAL)
+                        .ok_or_else(|| "site-denial observation deadline overflowed".to_owned())?;
+                }
+                Ok(now >= settle_until)
+            },
+        )
+    }
+
     pub(crate) fn request_extension_action(
         &mut self,
         profile: ProfileId,

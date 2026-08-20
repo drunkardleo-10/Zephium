@@ -112,6 +112,23 @@ impl RuntimeCoordinator {
             .and_then(RuntimeSlot::generation)
     }
 
+    pub(crate) fn live_keys_for_profile(
+        &self,
+        profile: ProfileId,
+    ) -> [Option<ExtensionNativeOwnershipKey>; MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES] {
+        let mut keys = [None; MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES];
+        for (next, slot) in self
+            .slots
+            .iter()
+            .flatten()
+            .filter(|slot| slot.is_live() && slot.key().profile() == profile)
+            .enumerate()
+        {
+            keys[next] = Some(slot.key());
+        }
+        keys
+    }
+
     /// Exact structural CAS for a fully published owner. Pending grant-rebind
     /// states remain live for routing but cannot authorize a second Store
     /// patch until their first durable edge is reconciled.

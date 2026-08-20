@@ -32,19 +32,19 @@ use zephium_core::extensions::{
     ExtensionCompatibilityBrokerOperation, ExtensionCompatibilityBrokerRequest,
     ExtensionCompatibilityBrokerRequestId, ExtensionCompatibilityBrokerResult,
     ExtensionCompatibilityBrokerSettlement, ExtensionCompatibilityHistoryEntry,
-    ExtensionGrantBrowsingContext, ExtensionPopupAnchor, ExtensionRuntimeInstance,
-    MAX_EXTENSION_POPUP_HEIGHT, MAX_EXTENSION_POPUP_WIDTH, MIN_EXTENSION_POPUP_HEIGHT,
-    MIN_EXTENSION_POPUP_WIDTH,
+    ExtensionGrantBrowsingContext, ExtensionPopupAnchor, ExtensionProfilePolicyMutation,
+    ExtensionRuntimeInstance, ExtensionSiteAccessScope, MAX_EXTENSION_POPUP_HEIGHT,
+    MAX_EXTENSION_POPUP_WIDTH, MIN_EXTENSION_POPUP_HEIGHT, MIN_EXTENSION_POPUP_WIDTH,
 };
 use zephium_core::geometry::Rect;
 use zephium_core::ids::ItemId;
-use zephium_core::ports::engine::{Engine, NativeDispatch, Partition};
+use zephium_core::ports::engine::{Engine, NativeDispatch, NavigationRequestId, Partition};
 use zephium_core::ports::extensions::{
     ExtensionGrantEditOutcome, ExtensionGrantEditRequest, ExtensionGrantEditTarget,
     ExtensionManagementAdmission, ExtensionManagementCatalogAdmission,
-    ExtensionManagementCatalogOutcome, ExtensionRuntimeGrantOutcome,
-    ExtensionRuntimeGrantPromptSettlement, ExtensionRuntimeGrantRuntimeState,
-    ExtensionUninstallOutcome,
+    ExtensionManagementCatalogOutcome, ExtensionProfilePolicyEditOutcome,
+    ExtensionRuntimeGrantOutcome, ExtensionRuntimeGrantPromptSettlement,
+    ExtensionRuntimeGrantRuntimeState, ExtensionUninstallOutcome,
 };
 use zephium_core::ports::store::{HistoryHit, Store};
 use zephium_extension_authority::ProductExtensionRuntimeTarget;
@@ -1060,6 +1060,152 @@ fn run(runtime_target: ProductExtensionRuntimeTarget) -> Result<ProbeDisposition
     validate_popup_size("reopened", reopened_size)?;
     engine.wait_for_popup_execution(item, 2, deadline())?;
     let popup_presentation = popup_started.elapsed();
+
+    set_phase("profile-site-policy");
+    let (policy_catalog_tx, policy_catalog_rx) = mpsc::sync_channel(1);
+    if service.begin_load_management_catalog(
+        profile,
+        deadline(),
+        Box::new(move |outcome| {
+            let _ = policy_catalog_tx.send(outcome);
+        }),
+    ) != ExtensionManagementCatalogAdmission::Accepted
+    {
+        return Err("profile site-policy management read was not admitted".into());
+    }
+    let mut policy_catalog = None;
+    engine.pump_until("profile site-policy management read", deadline(), |_| {
+        match policy_catalog_rx.try_recv() {
+            Ok(outcome) => {
+                policy_catalog = Some(outcome);
+                Ok(true)
+            }
+            Err(mpsc::TryRecvError::Empty) => Ok(false),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Err("profile site-policy management callback disconnected".to_owned())
+            }
+        }
+    })?;
+    let ExtensionManagementCatalogOutcome::Loaded(policy_catalog) = policy_catalog
+        .ok_or_else(|| "profile site-policy management callback was absent".to_owned())?
+    else {
+        return Err("profile site-policy management catalog was unavailable".into());
+    };
+    let policy_page_url = url::Url::parse(page.url())
+        .map_err(|error| format!("cannot parse product page for site policy: {error}"))?;
+    let site_scope = ExtensionSiteAccessScope::from_url(&policy_page_url)
+        .map_err(|_| "product page could not derive an exact extension site scope")?;
+    let (deny_tx, deny_rx) = mpsc::sync_channel(1);
+    if service.begin_edit_profile_policy(
+        profile,
+        policy_catalog.profile_policy().revision(),
+        ExtensionProfilePolicyMutation::SetSiteDenied {
+            scope: site_scope.clone(),
+            denied: true,
+        },
+        deadline(),
+        Box::new(move |settlement| {
+            let _ = deny_tx.send(settlement);
+        }),
+    ) != ExtensionManagementAdmission::Accepted
+    {
+        return Err("profile site denial was not admitted".into());
+    }
+    let mut denied_policy = None;
+    engine.pump_until(
+        "profile site-denial runtime rebind",
+        deadline(),
+        |_| match deny_rx.try_recv() {
+            Ok(settlement) => {
+                denied_policy = Some(settlement);
+                Ok(true)
+            }
+            Err(mpsc::TryRecvError::Empty) => Ok(false),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Err("profile site-denial callback disconnected".to_owned())
+            }
+        },
+    )?;
+    let denied_policy = match denied_policy
+        .ok_or_else(|| "profile site-denial settlement was absent".to_owned())?
+        .into_outcome()
+    {
+        ExtensionProfilePolicyEditOutcome::Applied {
+            policy,
+            changed: true,
+            activation_pending: false,
+        } if policy.denies(&site_scope) => policy,
+        outcome => {
+            return Err(format!(
+                "profile site denial did not rebind exactly: {outcome:?}"
+            ))
+        }
+    };
+    let denied_url = format!("{}?zephium-site-denied=1", page.url());
+    if !engine
+        .engine()
+        .navigate(item, &denied_url, NavigationRequestId(77))
+    {
+        return Err("profile site-denial navigation was not admitted".into());
+    }
+    engine.wait_for_view_commit(item, &denied_url, deadline())?;
+    engine.prove_extension_not_armed(item, Duration::from_millis(500), deadline())?;
+
+    let (restore_tx, restore_rx) = mpsc::sync_channel(1);
+    if service.begin_edit_profile_policy(
+        profile,
+        denied_policy.revision(),
+        ExtensionProfilePolicyMutation::SetSiteDenied {
+            scope: site_scope,
+            denied: false,
+        },
+        deadline(),
+        Box::new(move |settlement| {
+            let _ = restore_tx.send(settlement);
+        }),
+    ) != ExtensionManagementAdmission::Accepted
+    {
+        return Err("profile site restoration was not admitted".into());
+    }
+    let mut restored_policy = None;
+    engine.pump_until(
+        "profile site restoration runtime rebind",
+        deadline(),
+        |_| match restore_rx.try_recv() {
+            Ok(settlement) => {
+                restored_policy = Some(settlement);
+                Ok(true)
+            }
+            Err(mpsc::TryRecvError::Empty) => Ok(false),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Err("profile site-restoration callback disconnected".to_owned())
+            }
+        },
+    )?;
+    match restored_policy
+        .ok_or_else(|| "profile site-restoration settlement was absent".to_owned())?
+        .into_outcome()
+    {
+        ExtensionProfilePolicyEditOutcome::Applied {
+            policy,
+            changed: true,
+            activation_pending: false,
+        } if policy.denied_sites().is_empty() => {}
+        outcome => {
+            return Err(format!(
+                "profile site restoration did not rebind exactly: {outcome:?}"
+            ))
+        }
+    }
+    let restored_url = format!("{}?zephium-site-restored=1", page.url());
+    if !engine
+        .engine()
+        .navigate(item, &restored_url, NavigationRequestId(78))
+    {
+        return Err("profile site-restoration navigation was not admitted".into());
+    }
+    engine.wait_for_view_commit(item, &restored_url, deadline())?;
+    engine.wait_for_extension_armed(item, deadline())?;
 
     // This is deliberately a main-process delta, not a system-wide wakeup or
     // battery claim: public WebKit APIs do not expose the complete helper

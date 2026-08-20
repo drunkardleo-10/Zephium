@@ -53,6 +53,7 @@ impl Shell {
         self.residency.recent.retain(|r| *r != id);
         self.residency.recent.push(id);
         self.touch(id);
+        self.reproject_extension_site_policy_if_visible(profile);
         self.items.ensure_view(id)
     }
 
@@ -114,6 +115,9 @@ impl Shell {
             let tabs = self.today_tabs(space);
             if let (Some(pos), false) = (pos, tabs.is_empty()) {
                 fx.extend(self.focus_tab(tabs[pos.min(tabs.len() - 1)]));
+            }
+            if let Some(profile) = self.windows.focused().map(|window| window.profile) {
+                self.reproject_extension_site_policy_if_visible(profile);
             }
         }
         self.commit(fx)

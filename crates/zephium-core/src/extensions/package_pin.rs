@@ -787,10 +787,16 @@ mod tests {
             &manifest,
         )
         .unwrap();
-        ExtensionGrantCohort::from_persisted(profile, catalog, bindings, vec![authority])
-            .unwrap()
-            .runtime_eligibility(install_id, ExtensionGrantBrowsingContext::Regular)
-            .unwrap()
+        ExtensionGrantCohort::from_persisted(
+            profile,
+            crate::extensions::ExtensionProfilePolicy::initial(),
+            catalog,
+            bindings,
+            vec![authority],
+        )
+        .unwrap()
+        .runtime_eligibility(install_id, ExtensionGrantBrowsingContext::Regular)
+        .unwrap()
     }
 
     fn runtime_eligibility() -> ExtensionRuntimeEligibility {

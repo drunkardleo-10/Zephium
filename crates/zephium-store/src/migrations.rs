@@ -17,6 +17,8 @@ const _: [(); 32] = [(); zephium_core::extensions::EXTENSION_NATIVE_OWNERSHIP_ID
 // Keep META v14's durable obligation capacity tied to Core's complete
 // active-profile plus deletion-tombstone union.
 const _: [(); 128] = [(); zephium_core::extensions::MAX_EXTENSION_NATIVE_NAMESPACE_OBLIGATIONS];
+// Keep PROFILE v13's exact site-denial capacity trigger tied to Core.
+const _: [(); 128] = [(); zephium_core::extensions::MAX_EXTENSION_SITE_DENIALS_PER_PROFILE];
 
 pub struct Migration {
     pub version: i64,
@@ -1687,6 +1689,40 @@ pub static PROFILE: &[Migration] = &[
             )
         },
     },
+    Migration {
+        version: 13,
+        up: |tx| {
+            tx.execute_batch(
+                // Profile-wide extension pause/site policy is a separate
+                // authority domain from per-install grants. The singleton
+                // revision orders complete replacement, while child rows are
+                // canonical exact web-host match patterns.
+                "CREATE TABLE extension_profile_policy (
+                     id INTEGER PRIMARY KEY CHECK (id = 1),
+                     revision INTEGER NOT NULL
+                         CHECK (revision BETWEEN 1 AND 9223372036854775807),
+                     paused INTEGER NOT NULL CHECK (paused IN (0, 1))
+                 ) STRICT;
+                 INSERT INTO extension_profile_policy(id, revision, paused)
+                 VALUES (1, 1, 0);
+                 CREATE TABLE extension_profile_site_denials (
+                     policy_id INTEGER NOT NULL
+                         REFERENCES extension_profile_policy(id) ON DELETE CASCADE
+                         CHECK (policy_id = 1),
+                     pattern TEXT NOT NULL
+                         CHECK (length(CAST(pattern AS BLOB)) BETWEEN 1 AND 2048
+                                AND instr(CAST(pattern AS BLOB), X'00') = 0),
+                     PRIMARY KEY (policy_id, pattern)
+                 ) STRICT, WITHOUT ROWID;
+                 CREATE TRIGGER extension_profile_site_denials_capacity
+                 BEFORE INSERT ON extension_profile_site_denials
+                 WHEN (SELECT count(*) FROM extension_profile_site_denials) >= 128
+                 BEGIN
+                     SELECT RAISE(ABORT, 'extension site-denial capacity exceeded');
+                 END;",
+            )
+        },
+    },
 ];
 
 #[cfg(test)]
@@ -2083,6 +2119,48 @@ mod tests {
                 insert(index as u8 + 10, kind, length, digest).is_err(),
                 "accepted malformed payload evidence case {index}"
             );
+        }
+    }
+
+    #[test]
+    fn profile_v13_adds_bounded_default_allow_extension_policy() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply(&mut conn, &PROFILE[..12]).unwrap();
+        apply(&mut conn, PROFILE).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT revision, paused FROM extension_profile_policy WHERE id = 1",
+                [],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .unwrap(),
+            (1, 0)
+        );
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            13
+        );
+        for index in 0..128 {
+            conn.execute(
+                "INSERT INTO extension_profile_site_denials(policy_id, pattern)
+                 VALUES (1, ?1)",
+                [format!("https://site-{index}.example/*")],
+            )
+            .unwrap();
+        }
+        assert!(conn
+            .execute(
+                "INSERT INTO extension_profile_site_denials(policy_id, pattern)
+                 VALUES (1, 'https://overflow.example/*')",
+                [],
+            )
+            .is_err());
+        for statement in [
+            "UPDATE extension_profile_policy SET revision = 0 WHERE id = 1",
+            "UPDATE extension_profile_policy SET paused = 2 WHERE id = 1",
+        ] {
+            assert!(conn.execute(statement, []).is_err());
         }
     }
 
@@ -2771,7 +2849,7 @@ mod tests {
                 .unwrap(),
             14
         );
-        assert_eq!(PROFILE.last().map(|migration| migration.version), Some(12));
+        assert_eq!(PROFILE.last().map(|migration| migration.version), Some(13));
     }
 
     #[test]

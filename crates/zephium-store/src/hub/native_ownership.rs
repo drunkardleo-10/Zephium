@@ -827,6 +827,21 @@ pub(super) fn has_unresolved_native_ownership_for_install(
     }))
 }
 
+pub(super) fn has_unresolved_native_ownership_for_profile(
+    conn: &Connection,
+    profile: ProfileId,
+) -> rusqlite::Result<bool> {
+    let profile = profile.to_string();
+    conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM extension_native_ownership_journal
+             WHERE profile_id = ?1
+         )",
+        [&profile],
+        |row| row.get(0),
+    )
+}
+
 /// Verifies the narrow authority exception used by a runtime-originated
 /// optional-grant patch.
 ///

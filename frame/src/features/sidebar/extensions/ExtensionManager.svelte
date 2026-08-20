@@ -71,6 +71,7 @@
   let pendingUpdate = $derived(
     management?.phase === "update_consent_required" ? management.pending_update : null,
   );
+  let profilePolicy = $derived(management?.phase === "ready" ? management.profile_policy : null);
 
   async function load() {
     requestFailed = !(await extensions.setManagementVisible(true));
@@ -253,6 +254,17 @@
     extensions.editOptionalGrant(entry, catalogRevision, kind, index, granted);
   }
 
+  function setProfilePaused(paused: boolean) {
+    if (profilePolicy === null || mutation !== null) return;
+    extensions.setProfilePaused(profilePolicy.revision, paused);
+  }
+
+  function setCurrentSiteEnabled(enabled: boolean) {
+    if (profilePolicy === null || !profilePolicy.current_site_available || mutation !== null)
+      return;
+    extensions.setCurrentSiteEnabled(profilePolicy.revision, enabled);
+  }
+
   const requiredApiPermissions = (entry: ExtensionManagementEntryView) =>
     entry.grants.api_permissions.filter((permission) => !entry.optional_api.includes(permission));
 
@@ -321,6 +333,8 @@
         return "Active";
       case "pending_activation":
         return "Waiting to activate";
+      case "profile_paused":
+        return "Paused by profile";
       case "disabled":
         return "Disabled";
     }
@@ -481,6 +495,71 @@
             Verified · {management.candidates.length}
           </button>
         </div>
+        {#if profilePolicy !== null}
+          <div class="mb-3 grid gap-1 rounded-lg bg-fill px-2.5 py-2 text-[10.5px] leading-4">
+            <div class="flex min-h-7 items-center justify-between gap-3">
+              <div class="min-w-0">
+                <p class="font-medium text-text">Pause extensions</p>
+                <p class="text-faint">
+                  Stops every extension in this profile without uninstalling.
+                </p>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-label="Pause extensions in this profile"
+                aria-checked={profilePolicy.paused}
+                disabled={mutation !== null}
+                class="relative h-[18px] w-8 shrink-0 rounded-full bg-border-strong transition-colors disabled:opacity-45"
+                class:bg-accent={profilePolicy.paused}
+                onclick={() => setProfilePaused(!profilePolicy.paused)}
+              >
+                <span
+                  aria-hidden="true"
+                  class="absolute top-[2px] left-[2px] h-3.5 w-3.5 rounded-full bg-white shadow-sm transition-transform"
+                  class:translate-x-3.5={profilePolicy.paused}
+                ></span>
+              </button>
+            </div>
+            {#if profilePolicy.current_site_available}
+              <div
+                class="flex min-h-7 items-center justify-between gap-3 border-t border-border pt-1.5"
+              >
+                <div class="min-w-0">
+                  <p class="font-medium text-text">Extensions on this site</p>
+                  <p class="text-faint">
+                    {profilePolicy.current_site_denied
+                      ? "Paused for the current site."
+                      : "Allowed for the current site."}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-label="Allow extensions on the current site"
+                  aria-checked={!profilePolicy.current_site_denied}
+                  disabled={mutation !== null || profilePolicy.paused}
+                  class="relative h-[18px] w-8 shrink-0 rounded-full bg-border-strong transition-colors disabled:opacity-45"
+                  class:bg-accent={!profilePolicy.current_site_denied}
+                  onclick={() => setCurrentSiteEnabled(profilePolicy.current_site_denied)}
+                >
+                  <span
+                    aria-hidden="true"
+                    class="absolute top-[2px] left-[2px] h-3.5 w-3.5 rounded-full bg-white shadow-sm transition-transform"
+                    class:translate-x-3.5={!profilePolicy.current_site_denied}
+                  ></span>
+                </button>
+              </div>
+            {/if}
+            {#if profilePolicy.denied_site_count > 0}
+              <p class="text-faint">
+                {profilePolicy.denied_site_count} site{profilePolicy.denied_site_count === 1
+                  ? ""
+                  : "s"} paused
+              </p>
+            {/if}
+          </div>
+        {/if}
       {/if}
 
       {#if !requestFailed && pendingUpdate !== null}

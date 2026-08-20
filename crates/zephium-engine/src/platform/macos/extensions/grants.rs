@@ -26,7 +26,11 @@ use zephium_core::injection::{
 };
 
 const MAX_MACOS_NATIVE_API_PERMISSIONS: usize = MAX_EXTENSION_API_PERMISSIONS;
-const MAX_MACOS_NATIVE_HOST_PATTERNS: usize = MAX_EXTENSION_HOST_GRANTS * 2;
+const MAX_MACOS_NATIVE_GRANTED_HOST_PATTERNS: usize = MAX_EXTENSION_HOST_GRANTS * 2;
+const MAX_MACOS_NATIVE_DENIED_SITE_PATTERNS: usize =
+    zephium_core::extensions::MAX_EXTENSION_SITE_DENIALS_PER_PROFILE;
+const MAX_MACOS_NATIVE_HOST_PATTERNS: usize =
+    MAX_MACOS_NATIVE_GRANTED_HOST_PATTERNS + MAX_MACOS_NATIVE_DENIED_SITE_PATTERNS;
 const MAX_MACOS_NATIVE_MATCH_PATTERN_BYTES: usize = MAX_MATCH_PATTERN_BYTES + 4;
 const MAX_MACOS_NATIVE_PATTERN_ARENA_BYTES: usize =
     MAX_MACOS_NATIVE_HOST_PATTERNS * MAX_MACOS_NATIVE_MATCH_PATTERN_BYTES;
@@ -44,7 +48,7 @@ pub(super) const MACOS_NATIVE_GRANT_COMPILER_CONSERVATIVE_TRANSIENT_HEAP_CEILING
         + MAX_MACOS_NATIVE_HOST_PATTERNS * size_of::<WebPatternKey<'static>>()
         + MAX_MACOS_NATIVE_PATTERN_ARENA_BYTES
         + MAX_MACOS_NATIVE_HOST_PATTERNS * size_of::<PatternSpan>()
-        + 5 * RETAINED_HEAP_ALLOCATION_OVERHEAD_BYTES;
+        + 7 * RETAINED_HEAP_ALLOCATION_OVERHEAD_BYTES;
 
 /// Hard logical retained-memory ceiling for one compiled macOS grant plan.
 pub(super) const MAX_MACOS_NATIVE_GRANT_PLAN_RETAINED_BYTES: usize =
@@ -52,7 +56,7 @@ pub(super) const MAX_MACOS_NATIVE_GRANT_PLAN_RETAINED_BYTES: usize =
         + MAX_MACOS_NATIVE_API_PERMISSIONS * size_of::<MacosNativeApiPermission>()
         + MAX_MACOS_NATIVE_HOST_PATTERNS * size_of::<PatternSpan>()
         + MAX_MACOS_NATIVE_PATTERN_ARENA_BYTES
-        + 3 * RETAINED_HEAP_ALLOCATION_OVERHEAD_BYTES;
+        + 4 * RETAINED_HEAP_ALLOCATION_OVERHEAD_BYTES;
 
 const _: () = assert!(MAX_MACOS_NATIVE_PATTERN_ARENA_BYTES <= u32::MAX as usize);
 const _: () = assert!(
@@ -75,6 +79,7 @@ pub(super) struct MacosNativeGrantPlan {
     granted_api_permissions: Box<[MacosNativeApiPermission]>,
     host_pattern_arena: Box<str>,
     host_pattern_spans: Box<[PatternSpan]>,
+    denied_site_pattern_spans: Box<[PatternSpan]>,
     retained_bytes: usize,
 }
 
@@ -110,6 +115,12 @@ impl MacosNativeGrantPlan {
             .map(|span| span.resolve(&self.host_pattern_arena))
     }
 
+    pub(super) fn denied_site_patterns(&self) -> impl ExactSizeIterator<Item = &str> + '_ {
+        self.denied_site_pattern_spans
+            .iter()
+            .map(|span| span.resolve(&self.host_pattern_arena))
+    }
+
     /// Exact logical bytes retained by this compact representation.
     pub(super) const fn retained_bytes(&self) -> usize {
         self.retained_bytes
@@ -129,6 +140,10 @@ impl fmt::Debug for MacosNativeGrantPlan {
                 &self.granted_api_permissions.len(),
             )
             .field("host_pattern_count", &self.host_pattern_spans.len())
+            .field(
+                "denied_site_pattern_count",
+                &self.denied_site_pattern_spans.len(),
+            )
             .field("retained_bytes", &self.retained_bytes)
             .finish()
     }
@@ -213,7 +228,7 @@ pub(super) fn compile_native_grant_plan(
         identity: PlanIdentity {
             schema,
             apply_mode:
-                MacosNativeGrantApplyMode::ReplaceCompleteGrantedSetsClearDeniedAndVerifyReadback,
+                MacosNativeGrantApplyMode::ReplaceCompleteGrantedAndDeniedSetsVerifyReadback,
             runtime: runtime.instance(),
             grant_revision: snapshot.grant_revision(),
             grant_digest: snapshot.grant_digest(),
@@ -233,6 +248,8 @@ pub(super) fn compile_native_grant_plan(
             requirement: grant.requirement(),
             decision: grant.decision(),
         }),
+        denied_site_count: snapshot.denied_sites().len(),
+        denied_sites: snapshot.denied_sites().map(|scope| scope.pattern()),
     })
 }
 
@@ -259,7 +276,7 @@ struct HostGrantInput<'a> {
     decision: ExtensionNativeGrantDecision,
 }
 
-struct CompilerInput<A, H> {
+struct CompilerInput<A, H, D> {
     identity: PlanIdentity,
     browsing_context: ExtensionGrantBrowsingContext,
     file_access_granted: bool,
@@ -268,14 +285,17 @@ struct CompilerInput<A, H> {
     api_grants: A,
     host_count: usize,
     host_grants: H,
+    denied_site_count: usize,
+    denied_sites: D,
 }
 
-fn compile_projection<'a, A, H>(
-    input: CompilerInput<A, H>,
+fn compile_projection<'a, A, H, D>(
+    input: CompilerInput<A, H, D>,
 ) -> Result<MacosNativeGrantPlan, MacosNativeGrantPlanError>
 where
     A: IntoIterator<Item = ApiGrantInput<'a>>,
     H: IntoIterator<Item = HostGrantInput<'a>>,
+    D: IntoIterator<Item = &'a MatchPattern>,
 {
     if input.browsing_context == ExtensionGrantBrowsingContext::Private
         || input.private_access_granted
@@ -338,7 +358,7 @@ where
         .host_count
         .checked_mul(2)
         .ok_or(MacosNativeGrantPlanError::HostEntryLimitExceeded)?;
-    if transient_host_capacity > MAX_MACOS_NATIVE_HOST_PATTERNS {
+    if transient_host_capacity > MAX_MACOS_NATIVE_GRANTED_HOST_PATTERNS {
         return Err(MacosNativeGrantPlanError::HostEntryLimitExceeded);
     }
     let mut granted_host_patterns: Vec<WebPatternKey<'a>> =
@@ -364,7 +384,7 @@ where
         {
             return Err(MacosNativeGrantPlanError::RequiredHostGrantDenied);
         }
-        if granted_host_patterns.len() > MAX_MACOS_NATIVE_HOST_PATTERNS {
+        if granted_host_patterns.len() > MAX_MACOS_NATIVE_GRANTED_HOST_PATTERNS {
             return Err(MacosNativeGrantPlanError::HostEntryLimitExceeded);
         }
     }
@@ -374,10 +394,41 @@ where
     granted_host_patterns.sort_unstable();
     granted_host_patterns.dedup();
 
+    if input.denied_site_count > MAX_MACOS_NATIVE_DENIED_SITE_PATTERNS {
+        return Err(MacosNativeGrantPlanError::HostEntryLimitExceeded);
+    }
+    let mut denied_site_patterns = Vec::with_capacity(input.denied_site_count);
+    let mut seen_denied_sites = 0_usize;
+    for pattern in input.denied_sites {
+        seen_denied_sites = seen_denied_sites
+            .checked_add(1)
+            .ok_or(MacosNativeGrantPlanError::HostEntryLimitExceeded)?;
+        if seen_denied_sites > input.denied_site_count {
+            return Err(MacosNativeGrantPlanError::DeclaredCountMismatch);
+        }
+        translate_host_pattern(pattern, true, &mut denied_site_patterns)?;
+        if denied_site_patterns.len() > MAX_MACOS_NATIVE_DENIED_SITE_PATTERNS {
+            return Err(MacosNativeGrantPlanError::HostEntryLimitExceeded);
+        }
+    }
+    if seen_denied_sites != input.denied_site_count {
+        return Err(MacosNativeGrantPlanError::DeclaredCountMismatch);
+    }
+    denied_site_patterns.sort_unstable();
+    denied_site_patterns.dedup();
+    if denied_site_patterns.len() != input.denied_site_count {
+        return Err(MacosNativeGrantPlanError::DeclaredCountMismatch);
+    }
+    // Native granted/denied dictionaries must be disjoint. A profile policy
+    // denial equal to one exact manifest grant dominates that native entry;
+    // broader grants remain so WebKit can apply the proven narrow override.
+    granted_host_patterns.retain(|granted| denied_site_patterns.binary_search(granted).is_err());
+
     compact_plan(
         input.identity,
         granted_api_permissions,
         granted_host_patterns,
+        denied_site_patterns,
     )
 }
 
@@ -435,7 +486,7 @@ pub(super) enum MacosNativeGrantSchema {
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum MacosNativeGrantApplyMode {
-    ReplaceCompleteGrantedSetsClearDeniedAndVerifyReadback = 1,
+    ReplaceCompleteGrantedAndDeniedSetsVerifyReadback = 1,
 }
 
 impl MacosNativeGrantSchema {
@@ -539,7 +590,7 @@ pub(super) fn compile_runtime_host_permission_response(
         .len()
         .checked_mul(2)
         .ok_or(MacosNativeGrantPlanError::HostEntryLimitExceeded)?;
-    if capacity > MAX_MACOS_NATIVE_HOST_PATTERNS {
+    if capacity > MAX_MACOS_NATIVE_GRANTED_HOST_PATTERNS {
         return Err(MacosNativeGrantPlanError::HostEntryLimitExceeded);
     }
     let mut translated = Vec::with_capacity(capacity);
@@ -905,9 +956,11 @@ fn compact_plan(
     identity: PlanIdentity,
     granted_api_permissions: Vec<MacosNativeApiPermission>,
     granted_host_patterns: Vec<WebPatternKey<'_>>,
+    denied_site_patterns: Vec<WebPatternKey<'_>>,
 ) -> Result<MacosNativeGrantPlan, MacosNativeGrantPlanError> {
     let arena_bytes = granted_host_patterns
         .iter()
+        .chain(denied_site_patterns.iter())
         .try_fold(0_usize, |bytes, pattern| {
             bytes
                 .checked_add(pattern.rendered_len()?)
@@ -929,15 +982,28 @@ fn compact_plan(
         debug_assert_eq!(arena.len(), start as usize + pattern_length);
         spans.push(PatternSpan { start, length });
     }
+    let mut denied_spans = Vec::with_capacity(denied_site_patterns.len());
+    for pattern in denied_site_patterns {
+        let start = u32::try_from(arena.len())
+            .map_err(|_| MacosNativeGrantPlanError::PatternArenaOverflow)?;
+        let pattern_length = pattern.rendered_len()?;
+        let length =
+            u32::try_from(pattern_length).map_err(|_| MacosNativeGrantPlanError::PatternTooLong)?;
+        pattern.append_to(&mut arena);
+        debug_assert_eq!(arena.len(), start as usize + pattern_length);
+        denied_spans.push(PatternSpan { start, length });
+    }
     debug_assert_eq!(arena.len(), arena_bytes);
 
     let granted_api_permissions = granted_api_permissions.into_boxed_slice();
     let host_pattern_arena = arena.into_boxed_str();
     let host_pattern_spans = spans.into_boxed_slice();
+    let denied_site_pattern_spans = denied_spans.into_boxed_slice();
     let retained_bytes = calculate_retained_bytes(
         granted_api_permissions.len(),
         host_pattern_arena.len(),
         host_pattern_spans.len(),
+        denied_site_pattern_spans.len(),
     )?;
     if retained_bytes > MAX_MACOS_NATIVE_GRANT_PLAN_RETAINED_BYTES {
         return Err(MacosNativeGrantPlanError::RetainedBytesExceeded);
@@ -952,6 +1018,7 @@ fn compact_plan(
         granted_api_permissions,
         host_pattern_arena,
         host_pattern_spans,
+        denied_site_pattern_spans,
         retained_bytes,
     })
 }
@@ -959,21 +1026,27 @@ fn compact_plan(
 fn calculate_retained_bytes(
     api_count: usize,
     arena_bytes: usize,
-    span_count: usize,
+    granted_span_count: usize,
+    denied_span_count: usize,
 ) -> Result<usize, MacosNativeGrantPlanError> {
     let api_bytes = api_count
         .checked_mul(size_of::<MacosNativeApiPermission>())
         .ok_or(MacosNativeGrantPlanError::RetainedBytesOverflow)?;
-    let span_bytes = span_count
+    let granted_span_bytes = granted_span_count
+        .checked_mul(size_of::<PatternSpan>())
+        .ok_or(MacosNativeGrantPlanError::RetainedBytesOverflow)?;
+    let denied_span_bytes = denied_span_count
         .checked_mul(size_of::<PatternSpan>())
         .ok_or(MacosNativeGrantPlanError::RetainedBytesOverflow)?;
     let api_allocation = retained_boxed_allocation_bytes(api_bytes)?;
     let arena_allocation = retained_boxed_allocation_bytes(arena_bytes)?;
-    let span_allocation = retained_boxed_allocation_bytes(span_bytes)?;
+    let granted_span_allocation = retained_boxed_allocation_bytes(granted_span_bytes)?;
+    let denied_span_allocation = retained_boxed_allocation_bytes(denied_span_bytes)?;
     size_of::<MacosNativeGrantPlan>()
         .checked_add(api_allocation)
         .and_then(|bytes| bytes.checked_add(arena_allocation))
-        .and_then(|bytes| bytes.checked_add(span_allocation))
+        .and_then(|bytes| bytes.checked_add(granted_span_allocation))
+        .and_then(|bytes| bytes.checked_add(denied_span_allocation))
         .ok_or(MacosNativeGrantPlanError::RetainedBytesOverflow)
 }
 

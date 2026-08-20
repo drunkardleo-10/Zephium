@@ -10,6 +10,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use zephium_core::extensions::ExtensionNativeOwnershipKey;
+use zephium_core::extensions::{ExtensionProfilePolicyMutation, ExtensionProfilePolicyRevision};
 use zephium_core::ids::ProfileId;
 #[cfg(feature = "acquired-packages")]
 use zephium_core::ports::extensions::MAX_EXTENSION_ACQUIRED_PROVISIONING_RETAINED_BYTES;
@@ -26,6 +27,7 @@ use zephium_core::ports::extensions::{
     ExtensionInstallUpdateSelector, ExtensionManagementAdmission,
     ExtensionManagementCatalogAdmission, ExtensionManagementCatalogCallback,
     ExtensionManagementCatalogOutcome, ExtensionManagementSettlement,
+    ExtensionProfilePolicyEditCallback, ExtensionProfilePolicyEditOutcome,
     ExtensionRepositoryMaintenanceAdmission, ExtensionRepositoryMaintenanceCallback,
     ExtensionRepositoryMaintenanceOutcome, ExtensionRuntimeGrantCallback,
     ExtensionRuntimeGrantOutcome, ExtensionRuntimeGrantRequest, ExtensionSetEnabledCallback,
@@ -80,6 +82,7 @@ mod installation;
 mod management;
 mod management_catalog;
 mod optional_grant_edit;
+mod profile_policy;
 mod runtime_grants;
 mod runtime_operations;
 
@@ -333,6 +336,13 @@ enum WorkerCommand {
         deadline: Instant,
         settlement: ManagementSettlementSink<ExtensionGrantEditOutcome>,
     },
+    EditProfilePolicy {
+        profile: ProfileId,
+        expected: ExtensionProfilePolicyRevision,
+        mutation: ExtensionProfilePolicyMutation,
+        deadline: Instant,
+        settlement: ManagementSettlementSink<ExtensionProfilePolicyEditOutcome>,
+    },
     LoadManagementCatalog {
         profile: ProfileId,
         deadline: Instant,
@@ -562,6 +572,11 @@ fn optional_grant_edit_worker_lost() -> ExtensionManagementSettlement<ExtensionG
     ExtensionManagementSettlement::new(ExtensionGrantEditOutcome::FailedClosed, None)
 }
 
+fn profile_policy_edit_worker_lost(
+) -> ExtensionManagementSettlement<ExtensionProfilePolicyEditOutcome> {
+    ExtensionManagementSettlement::new(ExtensionProfilePolicyEditOutcome::FailedClosed, None)
+}
+
 #[cfg(feature = "acquired-packages")]
 fn acquired_package_worker_lost() -> ExtensionAcquiredPackageProvisioningOutcome {
     ExtensionAcquiredPackageProvisioningOutcome::FailedClosed
@@ -589,6 +604,7 @@ fn cancel_unadmitted_management(command: WorkerCommand) {
         WorkerCommand::Uninstall { settlement, .. } => settlement.cancel(),
         WorkerCommand::RequestRuntimeGrants { settlement, .. } => settlement.cancel(),
         WorkerCommand::EditOptionalGrant { settlement, .. } => settlement.cancel(),
+        WorkerCommand::EditProfilePolicy { settlement, .. } => settlement.cancel(),
         WorkerCommand::LoadManagementCatalog { settlement, .. } => settlement.cancel(),
         WorkerCommand::MaintainRepository { settlement, .. } => settlement.cancel(),
         _ => debug_assert!(false, "management admission returned a different command"),
@@ -1388,6 +1404,7 @@ impl ExtensionServiceOwner {
     /// Admits a non-blocking enable/disable transaction. Accepted callbacks
     /// settle on the service worker and must immediately hand off to their
     /// application actor rather than performing UI or native-loop work.
+    /// Admits one profile-wide safe-mode or exact-site policy transition.
     #[must_use = "management admission determines callback ownership"]
     pub fn begin_set_install_enabled(
         &mut self,
@@ -1808,6 +1825,45 @@ impl ExtensionServiceOwner {
             request,
             deadline,
             settlement: ManagementSettlementSink::callback(done, optional_grant_edit_worker_lost),
+        };
+        match self.mailbox.try_push_normal(command) {
+            NormalAdmission::Accepted => ExtensionManagementAdmission::Accepted,
+            NormalAdmission::Full(command) => {
+                cancel_unadmitted_management(command);
+                ExtensionManagementAdmission::Busy
+            }
+            NormalAdmission::Sealed(command) | NormalAdmission::Closed(command) => {
+                cancel_unadmitted_management(command);
+                ExtensionManagementAdmission::Unavailable
+            }
+            NormalAdmission::CounterExhausted(command) => {
+                cancel_unadmitted_management(command);
+                self.status.publish(ExtensionServicePhase::ShutdownQueued);
+                ExtensionManagementAdmission::Unavailable
+            }
+        }
+    }
+
+    /// Admits one profile-wide safe-mode or exact-site policy transition.
+    #[must_use = "management admission determines callback ownership"]
+    pub fn begin_edit_profile_policy(
+        &mut self,
+        profile: ProfileId,
+        expected: ExtensionProfilePolicyRevision,
+        mutation: ExtensionProfilePolicyMutation,
+        deadline: Instant,
+        done: ExtensionProfilePolicyEditCallback,
+    ) -> ExtensionManagementAdmission {
+        if Instant::now() >= deadline {
+            drop(done);
+            return ExtensionManagementAdmission::Busy;
+        }
+        let command = WorkerCommand::EditProfilePolicy {
+            profile,
+            expected,
+            mutation,
+            deadline,
+            settlement: ManagementSettlementSink::callback(done, profile_policy_edit_worker_lost),
         };
         match self.mailbox.try_push_normal(command) {
             NormalAdmission::Accepted => ExtensionManagementAdmission::Accepted,
@@ -2819,6 +2875,28 @@ impl WorkerState {
                     return false;
                 }
             }
+            WorkerCommand::EditProfilePolicy {
+                profile,
+                expected,
+                mutation,
+                deadline,
+                settlement,
+            } => {
+                let (outcome, continue_running) = self.complete_profile_policy_edit(
+                    worker,
+                    status,
+                    startup_outcome,
+                    cancellation,
+                    profile,
+                    expected,
+                    mutation,
+                    deadline,
+                );
+                settlement.settle(outcome);
+                if !continue_running {
+                    return false;
+                }
+            }
             WorkerCommand::LoadManagementCatalog {
                 profile,
                 deadline,
@@ -3352,6 +3430,73 @@ impl WorkerState {
                     ),
                 ..
             } => {
+                self.management_write_state = ManagementWriteState::FailedClosed;
+                status.publish(ExtensionServicePhase::Failed);
+            }
+            _ => {}
+        }
+        (outcome, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn complete_profile_policy_edit(
+        &mut self,
+        worker: ExtensionServiceWorkerIdentity,
+        status: &SharedStatus,
+        startup_outcome: &SharedStartupOutcome,
+        cancellation: &WorkerCancellation,
+        profile: ProfileId,
+        expected: ExtensionProfilePolicyRevision,
+        mutation: ExtensionProfilePolicyMutation,
+        deadline: Instant,
+    ) -> (
+        ExtensionManagementSettlement<ExtensionProfilePolicyEditOutcome>,
+        bool,
+    ) {
+        if let Err(failure) =
+            self.management_ingress_readiness(worker, startup_outcome, cancellation, profile)
+        {
+            let outcome = match failure {
+                ManagementIngressFailure::Unavailable => {
+                    ExtensionProfilePolicyEditOutcome::Unavailable
+                }
+                ManagementIngressFailure::OutcomeUnknown => {
+                    ExtensionProfilePolicyEditOutcome::OutcomeUnknown
+                }
+                ManagementIngressFailure::FailedClosed
+                | ManagementIngressFailure::ProtocolViolation => {
+                    status.publish(ExtensionServicePhase::Failed);
+                    ExtensionProfilePolicyEditOutcome::FailedClosed
+                }
+            };
+            return (
+                ExtensionManagementSettlement::new(outcome, self.runtime.active_profiles()),
+                failure != ManagementIngressFailure::ProtocolViolation,
+            );
+        }
+        let Some(startup) = self.startup.as_mut() else {
+            status.publish(ExtensionServicePhase::Failed);
+            return (
+                ExtensionManagementSettlement::new(
+                    ExtensionProfilePolicyEditOutcome::FailedClosed,
+                    None,
+                ),
+                false,
+            );
+        };
+        let outcome = profile_policy::edit_until(
+            startup,
+            &mut self.runtime,
+            profile,
+            expected,
+            mutation,
+            deadline,
+        );
+        match outcome.outcome() {
+            ExtensionProfilePolicyEditOutcome::OutcomeUnknown => {
+                self.management_write_state = ManagementWriteState::OutcomeUnknown;
+            }
+            ExtensionProfilePolicyEditOutcome::FailedClosed => {
                 self.management_write_state = ManagementWriteState::FailedClosed;
                 status.publish(ExtensionServicePhase::Failed);
             }

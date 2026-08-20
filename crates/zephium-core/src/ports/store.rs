@@ -253,6 +253,33 @@ pub enum ExtensionNativeNamespaceLoadOutcome {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExtensionProfilePolicyLoadOutcome {
+    Loaded(crate::extensions::ExtensionProfilePolicy),
+    NotRegistered,
+    DegradedProfile,
+    Failed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExtensionProfilePolicyMutationOutcome {
+    Applied {
+        policy: crate::extensions::ExtensionProfilePolicy,
+        changed: bool,
+    },
+    Conflict {
+        current: crate::extensions::ExtensionProfilePolicyRevision,
+    },
+    NotRegistered,
+    DegradedProfile,
+    Invalid,
+    LimitReached,
+    RevisionExhausted,
+    RuntimeOwnershipConflict,
+    OutcomeUnknown,
+    Failed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExtensionInstallCatalogMutationApplied {
     pub catalog_revision: ExtensionInstallCatalogRevision,
     /// Greatest install id durably admitted by this profile, including rows
@@ -723,6 +750,26 @@ pub trait Store {
         _profile: ProfileId,
         _bindings: ExtensionGrantManifestBindings,
         _done: Box<dyn FnOnce(ExtensionGrantCohortLoadOutcome) + Send>,
+    ) -> bool {
+        false
+    }
+    /// Loads the complete profile-wide extension execution policy.
+    fn load_extension_profile_policy(
+        &self,
+        _profile: ProfileId,
+        _done: Box<dyn FnOnce(ExtensionProfilePolicyLoadOutcome) + Send>,
+    ) -> bool {
+        false
+    }
+    /// Applies one exact profile-wide pause/site-denial policy mutation.
+    /// Changed mutations must be refused while native runtime ownership for
+    /// the profile remains unresolved.
+    fn mutate_extension_profile_policy(
+        &self,
+        _profile: ProfileId,
+        _expected: crate::extensions::ExtensionProfilePolicyRevision,
+        _mutation: crate::extensions::ExtensionProfilePolicyMutation,
+        _done: Box<dyn FnOnce(ExtensionProfilePolicyMutationOutcome) + Send>,
     ) -> bool {
         false
     }

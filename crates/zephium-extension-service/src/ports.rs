@@ -1,6 +1,8 @@
 use std::time::{Duration, Instant};
 
-use zephium_core::extensions::ExtensionNativeOwnershipKey;
+use zephium_core::extensions::{
+    ExtensionNativeOwnershipKey, ExtensionProfilePolicyMutation, ExtensionProfilePolicyRevision,
+};
 use zephium_core::ids::ProfileId;
 use zephium_core::ports::extensions::{
     ExtensionAcquiredCatalogActivationCallback, ExtensionAcquiredCatalogActivationOutcome,
@@ -11,6 +13,7 @@ use zephium_core::ports::extensions::{
     ExtensionInstallSelector, ExtensionInstallUpdateSelector, ExtensionManagementAdmission,
     ExtensionManagementAvailability, ExtensionManagementCatalogAdmission,
     ExtensionManagementCatalogCallback, ExtensionManagementSettlement,
+    ExtensionProfilePolicyEditCallback,
     ExtensionProfileRetirementDisposition as CoreExtensionProfileRetirementDisposition,
     ExtensionRepositoryMaintenanceAdmission, ExtensionRepositoryMaintenanceCallback,
     ExtensionRuntimeActivationDisposition as CoreExtensionRuntimeActivationDisposition,
@@ -302,6 +305,19 @@ impl ExtensionServiceLifecycle for ExtensionServiceOwner {
         done: ExtensionGrantEditCallback,
     ) -> ExtensionManagementAdmission {
         ExtensionServiceOwner::begin_edit_optional_grant(self, request, deadline, done)
+    }
+
+    fn begin_edit_profile_policy(
+        &mut self,
+        profile: ProfileId,
+        expected: ExtensionProfilePolicyRevision,
+        mutation: ExtensionProfilePolicyMutation,
+        deadline: Instant,
+        done: ExtensionProfilePolicyEditCallback,
+    ) -> ExtensionManagementAdmission {
+        ExtensionServiceOwner::begin_edit_profile_policy(
+            self, profile, expected, mutation, deadline, done,
+        )
     }
 
     fn begin_load_management_catalog(

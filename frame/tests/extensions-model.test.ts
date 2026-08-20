@@ -85,6 +85,13 @@ function management(value: number, profileId = "profile-a"): ExtensionManagement
     profile_id: profileId,
     phase: "ready",
     catalog_revision: "0000000000000001",
+    profile_policy: {
+      revision: "0000000000000001",
+      paused: false,
+      denied_site_count: 0,
+      current_site_available: true,
+      current_site_denied: false,
+    },
     entries: [
       {
         install_id: "install-a",
@@ -204,6 +211,7 @@ describe("extension management projection admission", () => {
       profile_id: "",
       phase: "unavailable",
       catalog_revision: null,
+      profile_policy: null,
       entries: [],
       candidates: [],
       pending_update: null,
@@ -232,6 +240,7 @@ describe("extension management projection admission", () => {
       profile_id: "profile-a",
       phase: "update_consent_required",
       catalog_revision: null,
+      profile_policy: null,
       entries: [],
       candidates: [],
       pending_update: {

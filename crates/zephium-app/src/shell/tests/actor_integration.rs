@@ -1391,6 +1391,143 @@ fn optional_grant_edit_keeps_only_index_and_exact_revisions_across_shell() {
 }
 
 #[test]
+fn current_site_extension_policy_is_derived_by_shell_and_revision_fenced() {
+    use zephium_core::extensions::{ExtensionProfilePolicyMutation, ExtensionSiteAccessScope};
+    use zephium_core::ports::extensions::{
+        ExtensionManagementSettlement, ExtensionProfilePolicyEditOutcome,
+    };
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (extension_service, extension_state) =
+        extension_lifecycle_with_outcome(ExtensionServiceShutdownOutcome::Clean);
+    let handle = spawn(
+        Arc::new(FakeEngine::default()),
+        Arc::new(FakeStore::default()),
+        Arc::new(ImmediateAllowAllCompiler),
+        extension_service,
+        Box::new(|_| {}),
+        Arc::new(FakeChrome),
+        Box::new(move |projection| {
+            let _ = tx.send(projection);
+        }),
+    )
+    .expect("spawn test shell");
+    assert!(handle.dispatch(Command::SetWindowSize(Size::new(1200.0, 800.0))));
+    assert!(handle.dispatch(Command::Bootstrap));
+    let (profile, item) =
+        std::iter::from_fn(|| rx.recv_timeout(std::time::Duration::from_secs(2)).ok())
+            .find_map(|projection| match projection {
+                Projection::Items(items) => Some((items.profile?.id, items.active?)),
+                _ => None,
+            })
+            .and_then(|(profile, item)| Some((ProfileId::parse(&profile)?, ItemId::parse(&item)?)))
+            .expect("bootstrap must publish focused profile and item");
+    assert!(handle.dispatch(Command::Navigate {
+        id: item,
+        input: "https://Example.COM:8443/private/path?token=secret".into(),
+    }));
+    assert!(handle.dispatch(Command::Engine(EngineEvent::UrlChanged {
+        id: item,
+        url: "https://example.com:8443/private/path?token=secret".into(),
+    })));
+
+    let install = zephium_core::ids::ExtensionInstallId::from(91_200);
+    assert!(handle.dispatch(Command::SetExtensionManagementVisible(true)));
+    settle_next_management_catalog(
+        &extension_state,
+        extension_management_catalog(
+            profile,
+            install,
+            zephium_core::extensions::ExtensionInstallCatalogRevision::INITIAL,
+            zephium_core::extensions::ExtensionInstallRevision::INITIAL,
+            zephium_core::ports::extensions::ExtensionManagementRuntimeState::Disabled,
+        ),
+    );
+    let ready = wait_for_ready_management_catalog(
+        &rx,
+        profile,
+        zephium_core::extensions::ExtensionInstallCatalogRevision::INITIAL,
+        1,
+    );
+    let policy = ready.profile_policy.expect("ready policy projection");
+    assert!(policy.current_site_available);
+    assert!(!policy.current_site_denied);
+
+    assert!(handle.dispatch_operation(
+        "disable-extensions-current-site".into(),
+        Command::SetFocusedSiteExtensionsEnabled {
+            expected_policy: zephium_core::extensions::ExtensionProfilePolicyRevision::INITIAL,
+            enabled: false,
+        },
+    ));
+    assert!(wait_for_actor_condition(
+        std::time::Duration::from_secs(2),
+        || extension_state
+            .profile_policy_edit_callbacks
+            .lock()
+            .unwrap()
+            .len()
+            == 1
+    ));
+    let (called_profile, expected, mutation, deadline) =
+        extension_state.profile_policy_edit_calls.lock().unwrap()[0].clone();
+    assert_eq!(called_profile, profile);
+    assert_eq!(
+        expected,
+        zephium_core::extensions::ExtensionProfilePolicyRevision::INITIAL
+    );
+    let expected_scope = ExtensionSiteAccessScope::parse_exact("https://example.com/*").unwrap();
+    assert_eq!(
+        mutation,
+        ExtensionProfilePolicyMutation::SetSiteDenied {
+            scope: expected_scope.clone(),
+            denied: true,
+        }
+    );
+    assert!(deadline > std::time::Instant::now());
+    let policy = zephium_core::extensions::ExtensionProfilePolicy::initial()
+        .apply(
+            zephium_core::extensions::ExtensionProfilePolicyRevision::INITIAL,
+            mutation,
+        )
+        .unwrap()
+        .into_policy();
+    extension_state
+        .profile_policy_edit_callbacks
+        .lock()
+        .unwrap()
+        .pop()
+        .unwrap()(ExtensionManagementSettlement::new(
+        ExtensionProfilePolicyEditOutcome::Applied {
+            policy: Box::new(policy),
+            changed: true,
+            activation_pending: false,
+        },
+        Some(zephium_core::ports::extensions::ExtensionActiveProfiles::EMPTY),
+    ));
+    let completion = std::iter::from_fn(|| rx.recv_timeout(std::time::Duration::from_secs(2)).ok())
+        .find_map(|projection| match projection {
+            Projection::OperationProcessed(completion)
+                if completion.operation_id == "disable-extensions-current-site" =>
+            {
+                Some(completion)
+            }
+            _ => None,
+        })
+        .expect("profile site policy must settle the original operation");
+    assert_eq!(completion.outcome, OperationOutcome::Applied);
+    assert_eq!(completion.reason, OperationReason::MutationApplied);
+
+    assert_eq!(
+        handle
+            .shutdown()
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap(),
+        ShutdownOutcome::Clean
+    );
+}
+
+#[test]
 fn unprovisioned_management_is_truthful_and_never_probes_the_inert_service() {
     let (tx, rx) = std::sync::mpsc::channel();
     let (extension_service, extension_state) =

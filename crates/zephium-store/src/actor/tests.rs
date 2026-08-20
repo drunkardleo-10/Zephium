@@ -19,7 +19,8 @@ use zephium_core::extensions::{
     ExtensionNativeOwnershipJournalRevision, ExtensionNativeOwnershipKey,
     ExtensionNativeOwnershipPhase, ExtensionNativeOwnershipPreparation, ExtensionPackageIdentity,
     ExtensionPackageKey, ExtensionPackagePayloadIdentity, ExtensionPackageRevision,
-    ExtensionRuntimeBackendTarget, ExtensionRuntimeEligibilityDenial, ExtensionTreeDigest,
+    ExtensionProfilePolicyMutation, ExtensionProfilePolicyRevision, ExtensionRuntimeBackendTarget,
+    ExtensionRuntimeEligibilityDenial, ExtensionSiteAccessScope, ExtensionTreeDigest,
     EXTENSION_SHA256_BYTES, MAX_EXTENSION_INSTALLS_PER_PROFILE,
 };
 use zephium_core::ids::{ExtensionInstallId, ItemId, PagePermissionGrantId, SpaceId, UserscriptId};
@@ -32,6 +33,7 @@ use zephium_core::permissions::{
 use zephium_core::ports::store::{
     ExtensionGrantConflict, ExtensionInstallUpdateGrantDecision,
     ExtensionNativeOwnershipActivationStale, ExtensionNativeOwnershipJournalMutationApplied,
+    ExtensionProfilePolicyLoadOutcome, ExtensionProfilePolicyMutationOutcome,
 };
 use zephium_core::profiles::ProfileKind;
 use zephium_core::session::{
@@ -3122,6 +3124,63 @@ fn live_grant_patch_requires_and_rebinds_one_exact_owned_runtime() {
 }
 
 #[test]
+fn changed_profile_policy_waits_for_complete_native_profile_absence() {
+    let profile = ProfileId::from(1);
+    let install_id = ExtensionInstallId::from(911);
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    store.save_session(sample());
+    assert!(store.flush());
+    let authority = store.claim_extension_service_store_authority().unwrap();
+    let fixture = prepare_native_ownership_activation(
+        store.as_ref(),
+        profile,
+        install_id,
+        84,
+        ExtensionRuntimeBackendTarget::MacosNative,
+    );
+    let _owned = acquire_native_owned(
+        &authority,
+        ExtensionNativeOwnershipJournalRevision::INITIAL,
+        &fixture,
+    );
+    let ExtensionServiceStoreCallOutcome::Completed(ExtensionProfilePolicyLoadOutcome::Loaded(
+        policy,
+    )) = authority.load_profile_policy_until(profile, Instant::now() + STORE_RPC_TIMEOUT)
+    else {
+        panic!("profile policy did not load");
+    };
+    assert!(matches!(
+        authority.mutate_profile_policy_until(
+            profile,
+            policy.revision(),
+            ExtensionProfilePolicyMutation::SetPaused(false),
+            Instant::now() + STORE_RPC_TIMEOUT,
+        ),
+        ExtensionServiceStoreCallOutcome::Completed(
+            ExtensionProfilePolicyMutationOutcome::Applied { changed: false, .. }
+        )
+    ));
+    assert_eq!(
+        authority.mutate_profile_policy_until(
+            profile,
+            policy.revision(),
+            ExtensionProfilePolicyMutation::SetPaused(true),
+            Instant::now() + STORE_RPC_TIMEOUT,
+        ),
+        ExtensionServiceStoreCallOutcome::Completed(
+            ExtensionProfilePolicyMutationOutcome::RuntimeOwnershipConflict,
+        )
+    );
+    let ExtensionServiceStoreCallOutcome::Completed(ExtensionProfilePolicyLoadOutcome::Loaded(
+        unchanged,
+    )) = authority.load_profile_policy_until(profile, Instant::now() + STORE_RPC_TIMEOUT)
+    else {
+        panic!("profile policy did not reload after owner refusal");
+    };
+    assert_eq!(unchanged, policy);
+}
+
+#[test]
 fn native_ownership_may_own_fence_revalidates_after_catalog_drift() {
     let profile = ProfileId::from(1);
     let store = Arc::new(SqliteStore::in_memory().unwrap());
@@ -3439,6 +3498,8 @@ fn extension_service_store_authority_has_one_closed_public_surface() {
         "pub fn set_install_enabled_until(",
         "pub fn delete_install_until(",
         "pub fn load_grant_cohort_until(",
+        "pub fn load_profile_policy_until(",
+        "pub fn mutate_profile_policy_until(",
         "pub fn apply_grant_patch_until(",
         "pub fn apply_live_grant_patch_until(",
     ] {
@@ -3456,7 +3517,7 @@ fn extension_service_store_authority_has_one_closed_public_surface() {
         })
         .count();
     assert_eq!(
-        public_items, 16,
+        public_items, 18,
         "the service Store authority gained an unreviewed public item"
     );
     assert!(!surface.contains("pub fn mutate_extension_install"));
@@ -3567,6 +3628,86 @@ fn extension_service_store_authority_loads_exact_runtime_snapshots() {
     assert_eq!(cohort.profile(), profile);
     assert_eq!(cohort.install_catalog(), &catalog);
     assert_eq!(cohort.grants().len(), 0);
+}
+
+#[test]
+fn extension_profile_policy_is_durable_canonical_and_cas_ordered() {
+    let profile = ProfileId::from(1);
+    let store = Arc::new(SqliteStore::in_memory().unwrap());
+    store.save_session(sample());
+    assert!(store.flush());
+    let authority = store.claim_extension_service_store_authority().unwrap();
+
+    let ExtensionServiceStoreCallOutcome::Completed(ExtensionProfilePolicyLoadOutcome::Loaded(
+        initial,
+    )) = authority.load_profile_policy_until(profile, Instant::now() + STORE_RPC_TIMEOUT)
+    else {
+        panic!("service authority did not load the initial extension profile policy");
+    };
+    assert_eq!(initial.revision(), ExtensionProfilePolicyRevision::INITIAL);
+    assert!(!initial.paused());
+    assert!(initial.denied_sites().is_empty());
+
+    let scope = ExtensionSiteAccessScope::parse_exact("https://example.com/*").unwrap();
+    let ExtensionServiceStoreCallOutcome::Completed(
+        ExtensionProfilePolicyMutationOutcome::Applied {
+            policy: denied,
+            changed: true,
+        },
+    ) = authority.mutate_profile_policy_until(
+        profile,
+        initial.revision(),
+        ExtensionProfilePolicyMutation::SetSiteDenied {
+            scope: scope.clone(),
+            denied: true,
+        },
+        Instant::now() + STORE_RPC_TIMEOUT,
+    )
+    else {
+        panic!("service authority did not persist the extension site denial");
+    };
+    assert!(denied.denies(&scope));
+    assert_eq!(denied.revision().get(), 2);
+
+    assert_eq!(
+        authority.mutate_profile_policy_until(
+            profile,
+            initial.revision(),
+            ExtensionProfilePolicyMutation::SetPaused(true),
+            Instant::now() + STORE_RPC_TIMEOUT,
+        ),
+        ExtensionServiceStoreCallOutcome::Completed(
+            ExtensionProfilePolicyMutationOutcome::Conflict {
+                current: denied.revision(),
+            },
+        )
+    );
+    let ExtensionServiceStoreCallOutcome::Completed(
+        ExtensionProfilePolicyMutationOutcome::Applied {
+            policy: unchanged,
+            changed: false,
+        },
+    ) = authority.mutate_profile_policy_until(
+        profile,
+        denied.revision(),
+        ExtensionProfilePolicyMutation::SetSiteDenied {
+            scope,
+            denied: true,
+        },
+        Instant::now() + STORE_RPC_TIMEOUT,
+    )
+    else {
+        panic!("extension policy no-op did not settle exactly");
+    };
+    assert_eq!(unchanged.revision(), denied.revision());
+
+    let ExtensionServiceStoreCallOutcome::Completed(ExtensionProfilePolicyLoadOutcome::Loaded(
+        reloaded,
+    )) = authority.load_profile_policy_until(profile, Instant::now() + STORE_RPC_TIMEOUT)
+    else {
+        panic!("service authority did not reload the extension profile policy");
+    };
+    assert_eq!(reloaded, denied);
 }
 
 #[test]

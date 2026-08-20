@@ -18,8 +18,7 @@ const DENIED: ExtensionNativeGrantDecision = ExtensionNativeGrantDecision::Denie
 fn identity(seed: u8) -> PlanIdentity {
     PlanIdentity {
         schema: MacosNativeGrantSchema::WkWebExtensionV1,
-        apply_mode:
-            MacosNativeGrantApplyMode::ReplaceCompleteGrantedSetsClearDeniedAndVerifyReadback,
+        apply_mode: MacosNativeGrantApplyMode::ReplaceCompleteGrantedAndDeniedSetsVerifyReadback,
         runtime: ExtensionRuntimeInstance::new(
             ProfileId::from(u128::from(seed)),
             ExtensionInstallId::from(u128::from(seed) + 1),
@@ -78,6 +77,8 @@ fn compile<'a>(
         api_grants: api_grants.iter().copied(),
         host_count: host_grants.len(),
         host_grants: host_grants.iter().copied(),
+        denied_site_count: 0,
+        denied_sites: std::iter::empty(),
     })
 }
 
@@ -129,6 +130,8 @@ fn brokered_schema_keeps_compatibility_only_permissions_out_of_native_sets() {
         api_grants: grants,
         host_count: 0,
         host_grants: std::iter::empty(),
+        denied_site_count: 0,
+        denied_sites: std::iter::empty(),
     })
     .expect("brokered v1 permission cohort");
 
@@ -307,7 +310,7 @@ fn never_requested_optional_api_is_omitted_without_native_prompt_suppression() {
     assert!(compiled_api_permissions(&plan).is_empty());
     assert_eq!(
         plan.apply_mode(),
-        MacosNativeGrantApplyMode::ReplaceCompleteGrantedSetsClearDeniedAndVerifyReadback
+        MacosNativeGrantApplyMode::ReplaceCompleteGrantedAndDeniedSetsVerifyReadback
     );
 }
 
@@ -399,7 +402,7 @@ fn absent_rows_never_become_native_denials_or_override_effective_grants() {
     );
     assert_eq!(
         overlap_plan.apply_mode(),
-        MacosNativeGrantApplyMode::ReplaceCompleteGrantedSetsClearDeniedAndVerifyReadback
+        MacosNativeGrantApplyMode::ReplaceCompleteGrantedAndDeniedSetsVerifyReadback
     );
 }
 
@@ -543,6 +546,8 @@ fn declared_counts_and_input_limits_are_checked_before_compaction() {
         api_grants: std::iter::empty(),
         host_count: 0,
         host_grants: std::iter::empty(),
+        denied_site_count: 0,
+        denied_sites: std::iter::empty(),
     });
     assert_eq!(
         mismatched.expect_err("projection count mismatch"),
@@ -558,6 +563,8 @@ fn declared_counts_and_input_limits_are_checked_before_compaction() {
         api_grants: std::iter::empty(),
         host_count: 0,
         host_grants: std::iter::empty(),
+        denied_site_count: 0,
+        denied_sites: std::iter::empty(),
     });
     assert_eq!(
         too_many_api.expect_err("API entry bound"),
@@ -573,6 +580,8 @@ fn declared_counts_and_input_limits_are_checked_before_compaction() {
         api_grants: std::iter::empty(),
         host_count: MAX_EXTENSION_HOST_GRANTS + 1,
         host_grants: std::iter::empty(),
+        denied_site_count: 0,
+        denied_sites: std::iter::empty(),
     });
     assert_eq!(
         too_many_hosts.expect_err("host entry bound"),
@@ -591,6 +600,8 @@ fn surplus_and_infinite_iterators_stop_before_exceeding_declared_capacity() {
         api_grants: std::iter::once(api("futurePermission", OPTIONAL, GRANTED)),
         host_count: 0,
         host_grants: std::iter::empty(),
+        denied_site_count: 0,
+        denied_sites: std::iter::empty(),
     });
     assert_eq!(
         surplus_api.expect_err("surplus API row must precede taxonomy and push"),
@@ -607,6 +618,8 @@ fn surplus_and_infinite_iterators_stop_before_exceeding_declared_capacity() {
         api_grants: std::iter::empty(),
         host_count: 0,
         host_grants: std::iter::once(host(&exact_port, OPTIONAL, GRANTED)),
+        denied_site_count: 0,
+        denied_sites: std::iter::empty(),
     });
     assert_eq!(
         surplus_host.expect_err("surplus host row must precede translation and push"),
@@ -622,6 +635,8 @@ fn surplus_and_infinite_iterators_stop_before_exceeding_declared_capacity() {
         api_grants: std::iter::repeat(api("storage", OPTIONAL, GRANTED)),
         host_count: 0,
         host_grants: std::iter::empty(),
+        denied_site_count: 0,
+        denied_sites: std::iter::empty(),
     });
     assert_eq!(
         infinite_api.expect_err("infinite API iterator is bounded by admitted capacity"),
@@ -638,6 +653,8 @@ fn surplus_and_infinite_iterators_stop_before_exceeding_declared_capacity() {
         api_grants: std::iter::empty(),
         host_count: MAX_EXTENSION_HOST_GRANTS,
         host_grants: std::iter::repeat(host(&all_urls, OPTIONAL, GRANTED)),
+        denied_site_count: 0,
+        denied_sites: std::iter::empty(),
     });
     assert_eq!(
         infinite_host.expect_err("infinite host iterator is bounded by admitted capacity"),
@@ -669,7 +686,7 @@ fn compact_retained_accounting_is_exact_for_empty_and_populated_plans() {
         MacosNativeGrantPlanError::RetainedBytesOverflow
     );
     assert_eq!(
-        calculate_retained_bytes(0, 0, usize::MAX).expect_err("span multiplication overflow"),
+        calculate_retained_bytes(0, 0, usize::MAX, 0).expect_err("span multiplication overflow"),
         MacosNativeGrantPlanError::RetainedBytesOverflow
     );
 }
@@ -681,10 +698,59 @@ fn compiler_exposes_a_conservative_logical_transient_heap_ceiling() {
             + MAX_MACOS_NATIVE_HOST_PATTERNS * size_of::<WebPatternKey<'static>>()
             + MAX_MACOS_NATIVE_PATTERN_ARENA_BYTES
             + MAX_MACOS_NATIVE_HOST_PATTERNS * size_of::<PatternSpan>()
-            + 5 * RETAINED_HEAP_ALLOCATION_OVERHEAD_BYTES;
+            + 7 * RETAINED_HEAP_ALLOCATION_OVERHEAD_BYTES;
     assert_eq!(
         MACOS_NATIVE_GRANT_COMPILER_CONSERVATIVE_TRANSIENT_HEAP_CEILING_BYTES,
         exact_ceiling
+    );
+}
+
+#[test]
+fn profile_site_denials_compile_separately_from_manifest_grants() {
+    let broad = parse("https://*/*");
+    let denied = parse("https://denied.example/*");
+    let plan = compile_projection(CompilerInput {
+        identity: identity(43),
+        browsing_context: ExtensionGrantBrowsingContext::Regular,
+        file_access_granted: false,
+        private_access_granted: false,
+        api_count: 0,
+        api_grants: std::iter::empty(),
+        host_count: 1,
+        host_grants: [host(&broad, REQUIRED, GRANTED)],
+        denied_site_count: 1,
+        denied_sites: [&denied],
+    })
+    .expect("representable exact site denial");
+
+    assert_eq!(
+        plan.granted_host_patterns().collect::<Vec<_>>(),
+        ["https://*/*"]
+    );
+    assert_eq!(
+        plan.denied_site_patterns().collect::<Vec<_>>(),
+        ["https://denied.example/*"]
+    );
+    assert!(plan.retained_bytes() <= MAX_MACOS_NATIVE_GRANT_PLAN_RETAINED_BYTES);
+
+    let exact = parse("https://exact.example/*");
+    let exact_denied = compile_projection(CompilerInput {
+        identity: identity(44),
+        browsing_context: ExtensionGrantBrowsingContext::Regular,
+        file_access_granted: false,
+        private_access_granted: false,
+        api_count: 0,
+        api_grants: std::iter::empty(),
+        host_count: 1,
+        host_grants: [host(&exact, REQUIRED, GRANTED)],
+        denied_site_count: 1,
+        denied_sites: [&exact],
+    })
+    .expect("exact policy denial dominates an identical manifest grant");
+    assert!(exact_denied.granted_host_patterns().next().is_none());
+    assert_eq!(
+        exact_denied.denied_site_patterns().collect::<Vec<_>>(),
+        ["https://exact.example/*"]
     );
 }
 
@@ -701,6 +767,8 @@ fn plan_retains_exact_generation_identity_and_redacts_debug_output() {
         api_grants: [api("storage", REQUIRED, GRANTED)],
         host_count: 1,
         host_grants: [host(&pattern, REQUIRED, GRANTED)],
+        denied_site_count: 0,
+        denied_sites: std::iter::empty(),
     })
     .expect("representable plan");
 

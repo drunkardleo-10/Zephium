@@ -1479,7 +1479,7 @@ fn run_internal_acquired_repository_e2e_tests() {
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn run_internal_acquired_extension_service_e2e_tests() {
     const FILTER: &str = "runtime_coordinator::e2e::";
-    const EXPECTED_TESTS: usize = 16;
+    const EXPECTED_TESTS: usize = 17;
     let list_args = [
         "test",
         "--locked",
@@ -1557,7 +1557,7 @@ fn list_extension_repository_tests(internal: bool) -> std::collections::BTreeSet
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn run_internal_extension_service_e2e_tests() {
     const FILTER: &str = "runtime_coordinator::e2e::";
-    const EXPECTED_TESTS: usize = 15;
+    const EXPECTED_TESTS: usize = 16;
 
     let regular_inventory = list_extension_service_tests(false);
     let internal_inventory = list_extension_service_tests(true);

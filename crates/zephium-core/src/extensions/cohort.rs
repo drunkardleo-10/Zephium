@@ -9,9 +9,10 @@ use crate::ids::{ExtensionInstallId, ProfileId};
 use super::{
     ExtensionGrantAuthority, ExtensionGrantBrowsingContext, ExtensionInstall,
     ExtensionInstallCatalog, ExtensionInstallCatalogRevision, ExtensionManifestDescriptor,
-    ExtensionRuntimeEligibility, ExtensionRuntimeEligibilityDenial,
+    ExtensionProfilePolicy, ExtensionRuntimeEligibility, ExtensionRuntimeEligibilityDenial,
     MAX_EXTENSION_GRANT_RETAINED_BYTES, MAX_EXTENSION_INSTALLS_PER_PROFILE,
     MAX_EXTENSION_INSTALL_CATALOG_RETAINED_BYTES, MAX_EXTENSION_MANIFEST_RETAINED_BYTES,
+    MAX_EXTENSION_PROFILE_POLICY_RETAINED_BYTES,
 };
 
 const BINDINGS_FIXED_BYTES: usize = 256;
@@ -28,6 +29,7 @@ pub const MAX_EXTENSION_GRANT_MANIFEST_BINDINGS_RETAINED_BYTES: usize = BINDINGS
 
 pub const MAX_EXTENSION_GRANT_COHORT_RETAINED_BYTES: usize = COHORT_FIXED_BYTES
     + MAX_EXTENSION_INSTALL_CATALOG_RETAINED_BYTES
+    + MAX_EXTENSION_PROFILE_POLICY_RETAINED_BYTES
     + MAX_EXTENSION_GRANT_MANIFEST_BINDINGS_RETAINED_BYTES
     + MAX_EXTENSION_INSTALLS_PER_PROFILE
         * (std::mem::size_of::<ExtensionGrantInitializationState>()
@@ -244,6 +246,7 @@ impl ExtensionGrantCohortAbsence<'_> {
 #[derive(Debug, PartialEq, Eq)]
 pub struct ExtensionGrantCohort {
     profile: ProfileId,
+    profile_policy: Arc<ExtensionProfilePolicy>,
     install_catalog: ExtensionInstallCatalog,
     bindings: ExtensionGrantManifestBindings,
     states: Box<[ExtensionGrantInitializationState]>,
@@ -260,6 +263,7 @@ impl ExtensionGrantCohort {
     /// of the package authority and store adapter before this boundary.
     pub fn from_persisted(
         profile: ProfileId,
+        profile_policy: ExtensionProfilePolicy,
         install_catalog: ExtensionInstallCatalog,
         bindings: ExtensionGrantManifestBindings,
         mut authorities: Vec<ExtensionGrantAuthority>,
@@ -336,7 +340,8 @@ impl ExtensionGrantCohort {
                 .ok_or(ExtensionGrantCohortError::AccountingOverflow)
         })?;
         let retained_bytes = COHORT_FIXED_BYTES
-            .checked_add(install_catalog.retained_bytes())
+            .checked_add(profile_policy.retained_bytes())
+            .and_then(|bytes| bytes.checked_add(install_catalog.retained_bytes()))
             .and_then(|bytes| bytes.checked_add(bindings.retained_bytes()))
             .and_then(|bytes| {
                 bytes.checked_add(
@@ -353,6 +358,7 @@ impl ExtensionGrantCohort {
         }
         Ok(Self {
             profile,
+            profile_policy: Arc::new(profile_policy),
             install_catalog,
             bindings,
             states,
@@ -367,6 +373,10 @@ impl ExtensionGrantCohort {
 
     pub const fn install_catalog(&self) -> &ExtensionInstallCatalog {
         &self.install_catalog
+    }
+
+    pub const fn profile_policy(&self) -> &Arc<ExtensionProfilePolicy> {
+        &self.profile_policy
     }
 
     pub fn grants(
@@ -424,7 +434,11 @@ impl ExtensionGrantCohort {
         let entry = self
             .resolve_entry(id)
             .ok_or(ExtensionRuntimeEligibilityDenial::InstallNotFound)?;
-        ExtensionRuntimeEligibility::from_entry(entry, browsing_context)
+        ExtensionRuntimeEligibility::from_entry(
+            entry,
+            Arc::clone(&self.profile_policy),
+            browsing_context,
+        )
     }
 
     /// Issues an exact absence witness only from this complete cohort and only
@@ -574,8 +588,14 @@ mod tests {
             ExtensionInstallCatalog::new(ExtensionInstallCatalogRevision::INITIAL, Vec::new())
                 .unwrap();
         let profile = ProfileId::from(1);
-        let cohort =
-            ExtensionGrantCohort::from_persisted(profile, catalog, bindings, authorities).unwrap();
+        let cohort = ExtensionGrantCohort::from_persisted(
+            profile,
+            ExtensionProfilePolicy::initial(),
+            catalog,
+            bindings,
+            authorities,
+        )
+        .unwrap();
         assert_eq!(cohort.profile(), profile);
         assert!(cohort.grants().next().is_none());
         assert!(cohort.retained_bytes() < 4096);
@@ -616,6 +636,7 @@ mod tests {
             .unwrap();
         let absent = ExtensionGrantCohort::from_persisted(
             ProfileId::from(1),
+            ExtensionProfilePolicy::initial(),
             catalog.clone(),
             bindings.clone(),
             Vec::new(),
@@ -629,6 +650,7 @@ mod tests {
         let authority = ExtensionGrantAuthority::new(&install, &manifest).unwrap();
         let initialized = ExtensionGrantCohort::from_persisted(
             ProfileId::from(1),
+            ExtensionProfilePolicy::initial(),
             catalog,
             bindings,
             vec![authority],
@@ -657,9 +679,14 @@ mod tests {
                 manifest,
             )])
             .unwrap();
-        let cohort =
-            ExtensionGrantCohort::from_persisted(ProfileId::from(3), catalog, bindings, Vec::new())
-                .unwrap();
+        let cohort = ExtensionGrantCohort::from_persisted(
+            ProfileId::from(3),
+            ExtensionProfilePolicy::initial(),
+            catalog,
+            bindings,
+            Vec::new(),
+        )
+        .unwrap();
 
         assert!(cohort.resolve_absence(install.id()).is_none());
         assert!(cohort
@@ -712,6 +739,7 @@ mod tests {
         .unwrap();
         let cohort = ExtensionGrantCohort::from_persisted(
             ProfileId::from(42),
+            ExtensionProfilePolicy::initial(),
             catalog,
             bindings,
             vec![second_authority],
@@ -782,6 +810,7 @@ mod tests {
         .unwrap();
         let disabled_cohort = ExtensionGrantCohort::from_persisted(
             profile,
+            ExtensionProfilePolicy::initial(),
             ExtensionInstallCatalog::new(ExtensionInstallCatalogRevision::INITIAL, vec![disabled])
                 .unwrap(),
             bindings(),
@@ -817,6 +846,7 @@ mod tests {
         };
         let uninitialized = ExtensionGrantCohort::from_persisted(
             profile,
+            ExtensionProfilePolicy::initial(),
             enabled_catalog(),
             bindings(),
             Vec::new(),
@@ -830,6 +860,7 @@ mod tests {
         let missing = ExtensionGrantAuthority::new(&enabled, &manifest).unwrap();
         let missing = ExtensionGrantCohort::from_persisted(
             profile,
+            ExtensionProfilePolicy::initial(),
             enabled_catalog(),
             bindings(),
             vec![missing],
@@ -851,8 +882,57 @@ mod tests {
         .unwrap();
         let grant_revision = authority.revision();
         let grant_digest = authority.digest();
+        let paused_policy = ExtensionProfilePolicy::initial()
+            .apply(
+                ExtensionProfilePolicy::initial().revision(),
+                crate::extensions::ExtensionProfilePolicyMutation::SetPaused(true),
+            )
+            .unwrap()
+            .into_policy();
+        let paused = ExtensionGrantCohort::from_persisted(
+            profile,
+            paused_policy,
+            enabled_catalog(),
+            bindings(),
+            vec![authority.clone()],
+        )
+        .unwrap();
+        assert!(matches!(
+            paused.runtime_eligibility(id, ExtensionGrantBrowsingContext::Regular),
+            Err(ExtensionRuntimeEligibilityDenial::ProfilePaused)
+        ));
+        let denied_scope =
+            crate::extensions::ExtensionSiteAccessScope::parse_exact("https://denied.example/*")
+                .unwrap();
+        let denied_policy = ExtensionProfilePolicy::initial()
+            .apply(
+                ExtensionProfilePolicy::initial().revision(),
+                crate::extensions::ExtensionProfilePolicyMutation::SetSiteDenied {
+                    scope: denied_scope,
+                    denied: true,
+                },
+            )
+            .unwrap()
+            .into_policy();
+        let denied = ExtensionGrantCohort::from_persisted(
+            profile,
+            denied_policy,
+            enabled_catalog(),
+            bindings(),
+            vec![authority.clone()],
+        )
+        .unwrap()
+        .runtime_eligibility(id, ExtensionGrantBrowsingContext::Regular)
+        .unwrap();
+        assert_eq!(
+            denied.decide_url_scope(&url::Url::parse("https://denied.example/path").unwrap()),
+            crate::extensions::ExtensionUrlScopeDecision::OutOfScope(
+                crate::extensions::ExtensionGrantDenial::ProfileSiteDenied,
+            )
+        );
         let admitted = ExtensionGrantCohort::from_persisted(
             profile,
+            ExtensionProfilePolicy::initial(),
             enabled_catalog(),
             bindings(),
             vec![authority],
@@ -888,6 +968,14 @@ mod tests {
         assert_eq!(fingerprint.install_revision(), enabled.revision());
         assert_eq!(fingerprint.grant_revision(), grant_revision);
         assert_eq!(fingerprint.grant_digest(), grant_digest);
+        assert_eq!(
+            fingerprint.profile_policy_revision(),
+            ExtensionProfilePolicy::initial().revision()
+        );
+        assert_eq!(
+            fingerprint.profile_policy_digest(),
+            ExtensionProfilePolicy::initial().digest()
+        );
         assert_eq!(fingerprint.package(), enabled.package());
         assert_eq!(
             fingerprint.browsing_context(),
@@ -940,7 +1028,13 @@ mod tests {
             )])
             .unwrap();
         assert_eq!(
-            ExtensionGrantCohort::from_persisted(ProfileId::from(1), catalog, bindings, Vec::new(),),
+            ExtensionGrantCohort::from_persisted(
+                ProfileId::from(1),
+                ExtensionProfilePolicy::initial(),
+                catalog,
+                bindings,
+                Vec::new(),
+            ),
             Err(ExtensionGrantCohortError::ManifestPackageMismatch(
                 install.id()
             ))
@@ -990,6 +1084,7 @@ mod tests {
         assert_eq!(
             ExtensionGrantCohort::from_persisted(
                 ProfileId::from(1),
+                ExtensionProfilePolicy::initial(),
                 duplicate_catalog,
                 duplicate_bindings,
                 vec![authority.clone(), authority.clone()],
@@ -1002,6 +1097,7 @@ mod tests {
         assert_eq!(
             ExtensionGrantCohort::from_persisted(
                 ProfileId::from(1),
+                ExtensionProfilePolicy::initial(),
                 catalog.clone(),
                 bindings.clone(),
                 vec![unknown],
@@ -1012,7 +1108,13 @@ mod tests {
         let mut oversized = Vec::with_capacity(4096);
         oversized.resize(MAX_EXTENSION_INSTALLS_PER_PROFILE + 1, authority);
         assert_eq!(
-            ExtensionGrantCohort::from_persisted(ProfileId::from(1), catalog, bindings, oversized,),
+            ExtensionGrantCohort::from_persisted(
+                ProfileId::from(1),
+                ExtensionProfilePolicy::initial(),
+                catalog,
+                bindings,
+                oversized,
+            ),
             Err(ExtensionGrantCohortError::TooManyAuthorities {
                 count: MAX_EXTENSION_INSTALLS_PER_PROFILE + 1,
                 max: MAX_EXTENSION_INSTALLS_PER_PROFILE,

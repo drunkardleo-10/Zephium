@@ -39,6 +39,8 @@ type HeldExtensionManagementCatalog =
     zephium_core::ports::extensions::ExtensionManagementCatalogCallback;
 type HeldExtensionRuntimeGrant = zephium_core::ports::extensions::ExtensionRuntimeGrantCallback;
 type HeldExtensionGrantEdit = zephium_core::ports::extensions::ExtensionGrantEditCallback;
+type HeldExtensionProfilePolicyEdit =
+    zephium_core::ports::extensions::ExtensionProfilePolicyEditCallback;
 type HeldExtensionRepositoryMaintenance =
     zephium_core::ports::extensions::ExtensionRepositoryMaintenanceCallback;
 type HeldAcquiredPackage = (
@@ -224,6 +226,15 @@ pub(super) struct FakeExtensionLifecycleState {
         )>,
     >,
     pub(super) grant_edit_callbacks: Mutex<Vec<HeldExtensionGrantEdit>>,
+    pub(super) profile_policy_edit_calls: Mutex<
+        Vec<(
+            ProfileId,
+            zephium_core::extensions::ExtensionProfilePolicyRevision,
+            zephium_core::extensions::ExtensionProfilePolicyMutation,
+            std::time::Instant,
+        )>,
+    >,
+    pub(super) profile_policy_edit_callbacks: Mutex<Vec<HeldExtensionProfilePolicyEdit>>,
     pub(super) repository_maintenance_available: std::sync::atomic::AtomicBool,
     pub(super) repository_maintenance_admission:
         Mutex<Option<zephium_core::ports::extensions::ExtensionRepositoryMaintenanceAdmission>>,
@@ -584,6 +595,37 @@ impl zephium_core::ports::extensions::ExtensionServiceLifecycle for FakeExtensio
             .unwrap_or(zephium_core::ports::extensions::ExtensionManagementAdmission::Accepted);
         if admission == zephium_core::ports::extensions::ExtensionManagementAdmission::Accepted {
             self.state.grant_edit_callbacks.lock().unwrap().push(done);
+        } else {
+            drop(done);
+        }
+        admission
+    }
+
+    fn begin_edit_profile_policy(
+        &mut self,
+        profile: ProfileId,
+        expected: zephium_core::extensions::ExtensionProfilePolicyRevision,
+        mutation: zephium_core::extensions::ExtensionProfilePolicyMutation,
+        deadline: std::time::Instant,
+        done: zephium_core::ports::extensions::ExtensionProfilePolicyEditCallback,
+    ) -> zephium_core::ports::extensions::ExtensionManagementAdmission {
+        self.state
+            .profile_policy_edit_calls
+            .lock()
+            .unwrap()
+            .push((profile, expected, mutation, deadline));
+        let admission = self
+            .state
+            .management_admission
+            .lock()
+            .unwrap()
+            .unwrap_or(zephium_core::ports::extensions::ExtensionManagementAdmission::Accepted);
+        if admission == zephium_core::ports::extensions::ExtensionManagementAdmission::Accepted {
+            self.state
+                .profile_policy_edit_callbacks
+                .lock()
+                .unwrap()
+                .push(done);
         } else {
             drop(done);
         }

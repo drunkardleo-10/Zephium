@@ -8,8 +8,8 @@ use zephium_core::ports::extensions::{
     ExtensionInstallUpdateSelector, ExtensionInstalledRuntimeState, ExtensionManagementAdmission,
     ExtensionManagementAvailability, ExtensionManagementCatalog,
     ExtensionManagementCatalogAdmission, ExtensionManagementCatalogOutcome,
-    ExtensionSetEnabledOutcome, ExtensionUninstallOutcome, ExtensionUpdateConsentEntry,
-    ExtensionUpdateOutcome, ExtensionUpdateRuntimeState,
+    ExtensionProfilePolicyEditOutcome, ExtensionSetEnabledOutcome, ExtensionUninstallOutcome,
+    ExtensionUpdateConsentEntry, ExtensionUpdateOutcome, ExtensionUpdateRuntimeState,
 };
 
 use super::*;
@@ -45,6 +45,7 @@ enum PendingExtensionManagementKind {
     SetEnabled(bool),
     Uninstall,
     GrantEdit,
+    ProfilePolicy,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -52,6 +53,7 @@ enum PendingExtensionManagementSubject {
     Candidate(ExtensionInstallCandidateSelector),
     Installed(ExtensionInstallSelector),
     Update(ExtensionInstallUpdateSelector),
+    Profile(ProfileId),
 }
 
 impl PendingExtensionManagementSubject {
@@ -60,6 +62,7 @@ impl PendingExtensionManagementSubject {
             Self::Candidate(selector) => selector.profile(),
             Self::Installed(selector) => selector.profile(),
             Self::Update(selector) => selector.install().profile(),
+            Self::Profile(profile) => *profile,
         }
     }
 
@@ -78,6 +81,7 @@ impl PendingExtensionManagementSubject {
                 installed.profile() == update.install().profile()
                     && installed.install() == update.install().install()
             }
+            (Self::Profile(left), right) | (right, Self::Profile(left)) => *left == right.profile(),
             _ => false,
         }
     }
@@ -159,6 +163,9 @@ impl ExtensionManagementState {
             ) | (
                 PendingExtensionManagementKind::GrantEdit,
                 ExtensionManagementCompletion::GrantEdit(_)
+            ) | (
+                PendingExtensionManagementKind::ProfilePolicy,
+                ExtensionManagementCompletion::ProfilePolicy(_)
             )
         );
         if !exact {
@@ -320,6 +327,16 @@ impl ExtensionManagementState {
         })
     }
 
+    fn authorizes_profile_policy(
+        &self,
+        profile: ProfileId,
+        expected: zephium_core::extensions::ExtensionProfilePolicyRevision,
+    ) -> bool {
+        self.catalog.as_ref().is_some_and(|catalog| {
+            catalog.profile() == profile && catalog.profile_policy().revision() == expected
+        })
+    }
+
     fn options_runtime(
         &self,
         selector: ExtensionInstallSelector,
@@ -397,6 +414,14 @@ impl ExtensionManagementState {
 }
 
 impl Shell {
+    pub(super) fn reproject_extension_site_policy_if_visible(&self, profile: ProfileId) {
+        if self.extension_management.visible_profile() == Some(profile)
+            && self.extension_management.catalog().is_some()
+        {
+            self.project_extension_management_catalog();
+        }
+    }
+
     pub(super) fn open_focused_extension_options(
         &mut self,
         install: zephium_core::ids::ExtensionInstallId,
@@ -672,119 +697,174 @@ impl Shell {
                 OperationReason::StoreAdmissionRejected,
             ));
         }
-        let (subject, kind, install_selection, update_review, grant_edit) = match command {
-            Command::InstallFocusedExtension {
-                candidate_index,
-                expected_catalog,
-                optional_api_indices,
-                optional_host_indices,
-                file_access,
-                private_access,
-            } => {
-                let Some((selector, selection)) = self.extension_management.resolve_candidate(
-                    profile,
-                    expected_catalog,
+        let (subject, kind, install_selection, update_review, grant_edit, profile_policy_edit) =
+            match command {
+                Command::InstallFocusedExtension {
                     candidate_index,
-                    ExtensionInstallGrantRequest {
-                        optional_api_indices,
-                        optional_host_indices,
-                        file_access,
-                        private_access,
-                    },
-                ) else {
-                    return Some(operation_result(
-                        OperationOutcome::Rejected,
-                        OperationReason::StoreConflict,
-                    ));
-                };
-                (
-                    PendingExtensionManagementSubject::Candidate(selector),
-                    PendingExtensionManagementKind::Install,
-                    Some(selection),
-                    None,
-                    None,
-                )
-            }
-            Command::ApproveFocusedExtensionUpdate { review } => {
-                let Some(selector) = self.extension_management.resolve_update(profile, review)
-                else {
-                    return Some(operation_result(
-                        OperationOutcome::Rejected,
-                        OperationReason::StoreConflict,
-                    ));
-                };
-                (
-                    PendingExtensionManagementSubject::Update(selector),
-                    PendingExtensionManagementKind::Update,
-                    None,
-                    Some(review),
-                    None,
-                )
-            }
-            Command::SetFocusedExtensionEnabled {
-                install,
-                expected_catalog,
-                expected_install,
-                enabled,
-            } => (
-                PendingExtensionManagementSubject::Installed(ExtensionInstallSelector::new(
-                    profile,
+                    expected_catalog,
+                    optional_api_indices,
+                    optional_host_indices,
+                    file_access,
+                    private_access,
+                } => {
+                    let Some((selector, selection)) = self.extension_management.resolve_candidate(
+                        profile,
+                        expected_catalog,
+                        candidate_index,
+                        ExtensionInstallGrantRequest {
+                            optional_api_indices,
+                            optional_host_indices,
+                            file_access,
+                            private_access,
+                        },
+                    ) else {
+                        return Some(operation_result(
+                            OperationOutcome::Rejected,
+                            OperationReason::StoreConflict,
+                        ));
+                    };
+                    (
+                        PendingExtensionManagementSubject::Candidate(selector),
+                        PendingExtensionManagementKind::Install,
+                        Some(selection),
+                        None,
+                        None,
+                        None,
+                    )
+                }
+                Command::ApproveFocusedExtensionUpdate { review } => {
+                    let Some(selector) = self.extension_management.resolve_update(profile, review)
+                    else {
+                        return Some(operation_result(
+                            OperationOutcome::Rejected,
+                            OperationReason::StoreConflict,
+                        ));
+                    };
+                    (
+                        PendingExtensionManagementSubject::Update(selector),
+                        PendingExtensionManagementKind::Update,
+                        None,
+                        Some(review),
+                        None,
+                        None,
+                    )
+                }
+                Command::SetFocusedExtensionEnabled {
                     install,
                     expected_catalog,
                     expected_install,
-                )),
-                PendingExtensionManagementKind::SetEnabled(enabled),
-                None,
-                None,
-                None,
-            ),
-            Command::UninstallFocusedExtension {
-                install,
-                expected_catalog,
-                expected_install,
-            } => (
-                PendingExtensionManagementSubject::Installed(ExtensionInstallSelector::new(
-                    profile,
-                    install,
-                    expected_catalog,
-                    expected_install,
-                )),
-                PendingExtensionManagementKind::Uninstall,
-                None,
-                None,
-                None,
-            ),
-            Command::EditFocusedExtensionOptionalGrant {
-                install,
-                expected_catalog,
-                expected_install,
-                expected_grant,
-                target,
-                granted,
-            } => (
-                PendingExtensionManagementSubject::Installed(ExtensionInstallSelector::new(
-                    profile,
-                    install,
-                    expected_catalog,
-                    expected_install,
-                )),
-                PendingExtensionManagementKind::GrantEdit,
-                None,
-                None,
-                Some(ExtensionGrantEditRequest::new(
-                    ExtensionInstallSelector::new(
+                    enabled,
+                } => (
+                    PendingExtensionManagementSubject::Installed(ExtensionInstallSelector::new(
                         profile,
                         install,
                         expected_catalog,
                         expected_install,
-                    ),
+                    )),
+                    PendingExtensionManagementKind::SetEnabled(enabled),
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+                Command::UninstallFocusedExtension {
+                    install,
+                    expected_catalog,
+                    expected_install,
+                } => (
+                    PendingExtensionManagementSubject::Installed(ExtensionInstallSelector::new(
+                        profile,
+                        install,
+                        expected_catalog,
+                        expected_install,
+                    )),
+                    PendingExtensionManagementKind::Uninstall,
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+                Command::EditFocusedExtensionOptionalGrant {
+                    install,
+                    expected_catalog,
+                    expected_install,
                     expected_grant,
                     target,
                     granted,
-                )),
-            ),
-            _ => return None,
-        };
+                } => (
+                    PendingExtensionManagementSubject::Installed(ExtensionInstallSelector::new(
+                        profile,
+                        install,
+                        expected_catalog,
+                        expected_install,
+                    )),
+                    PendingExtensionManagementKind::GrantEdit,
+                    None,
+                    None,
+                    Some(ExtensionGrantEditRequest::new(
+                        ExtensionInstallSelector::new(
+                            profile,
+                            install,
+                            expected_catalog,
+                            expected_install,
+                        ),
+                        expected_grant,
+                        target,
+                        granted,
+                    )),
+                    None,
+                ),
+                Command::SetFocusedProfileExtensionsPaused {
+                    expected_policy,
+                    paused,
+                } => (
+                    PendingExtensionManagementSubject::Profile(profile),
+                    PendingExtensionManagementKind::ProfilePolicy,
+                    None,
+                    None,
+                    None,
+                    Some((
+                        expected_policy,
+                        zephium_core::extensions::ExtensionProfilePolicyMutation::SetPaused(paused),
+                    )),
+                ),
+                Command::SetFocusedSiteExtensionsEnabled {
+                    expected_policy,
+                    enabled,
+                } => {
+                    let Some(scope) = self
+                        .windows
+                        .focused()
+                        .filter(|window| window.profile == profile)
+                        .and_then(|window| window.active)
+                        .and_then(|item| self.items.tab(item))
+                        .and_then(|tab| tab.url.as_ref())
+                        .and_then(|url| {
+                            zephium_core::extensions::ExtensionSiteAccessScope::from_url(url).ok()
+                        })
+                    else {
+                        return Some(operation_result(
+                            OperationOutcome::Rejected,
+                            OperationReason::InvalidScope,
+                        ));
+                    };
+                    (
+                    PendingExtensionManagementSubject::Profile(profile),
+                    PendingExtensionManagementKind::ProfilePolicy,
+                    None,
+                    None,
+                    None,
+                    Some((
+                        expected_policy,
+                        zephium_core::extensions::ExtensionProfilePolicyMutation::SetSiteDenied {
+                            scope,
+                            denied: !enabled,
+                        },
+                    )),
+                )
+                }
+                _ => return None,
+            };
         if self.extension_management.writes_failed_closed() {
             return Some(operation_result(
                 OperationOutcome::Rejected,
@@ -802,6 +882,16 @@ impl Shell {
         if grant_edit
             .is_some_and(|request| !self.extension_management.authorizes_grant_edit(request))
         {
+            return Some(operation_result(
+                OperationOutcome::Rejected,
+                OperationReason::StoreConflict,
+            ));
+        }
+        if profile_policy_edit.as_ref().is_some_and(|(expected, _)| {
+            !self
+                .extension_management
+                .authorizes_profile_policy(profile, *expected)
+        }) {
             return Some(operation_result(
                 OperationOutcome::Rejected,
                 OperationReason::StoreConflict,
@@ -925,6 +1015,22 @@ impl Shell {
                     }),
                 )
             }
+            PendingExtensionManagementKind::ProfilePolicy => {
+                let (expected, mutation) = profile_policy_edit
+                    .expect("profile policy edit retained its exact revision and mutation");
+                service.begin_edit_profile_policy(
+                    profile,
+                    expected,
+                    mutation,
+                    deadline,
+                    Box::new(move |settlement| {
+                        let _ = callback.dispatch(Command::ExtensionManagementSettled {
+                            request,
+                            completion: ExtensionManagementCompletion::ProfilePolicy(settlement),
+                        });
+                    }),
+                )
+            }
         }));
         match admission {
             Ok(ExtensionManagementAdmission::Accepted) => {
@@ -973,12 +1079,15 @@ impl Shell {
             return;
         };
         let profile = pending.subject.profile();
-        let active_profiles = match completion {
+        let active_profiles = match &completion {
             ExtensionManagementCompletion::Install(settlement) => settlement.active_profiles(),
             ExtensionManagementCompletion::Update(settlement) => settlement.active_profiles(),
             ExtensionManagementCompletion::SetEnabled(settlement) => settlement.active_profiles(),
             ExtensionManagementCompletion::Uninstall(settlement) => settlement.active_profiles(),
             ExtensionManagementCompletion::GrantEdit(settlement) => settlement.active_profiles(),
+            ExtensionManagementCompletion::ProfilePolicy(settlement) => {
+                settlement.active_profiles()
+            }
         };
         if let Some(active_profiles) = active_profiles {
             let previous_surface_generation = self
@@ -1233,6 +1342,54 @@ impl Shell {
                         true,
                     ),
                     ExtensionGrantEditOutcome::FailedClosed => (
+                        OperationOutcome::Rejected,
+                        OperationReason::StoreReconciliationFailed,
+                        true,
+                    ),
+                }
+            }
+            ExtensionManagementCompletion::ProfilePolicy(settlement) => {
+                match settlement.into_outcome() {
+                    ExtensionProfilePolicyEditOutcome::Applied {
+                        changed,
+                        activation_pending,
+                        ..
+                    } => (
+                        if changed {
+                            OperationOutcome::Applied
+                        } else {
+                            OperationOutcome::NoOp
+                        },
+                        if activation_pending {
+                            OperationReason::ExtensionActivationPending
+                        } else if changed {
+                            OperationReason::MutationApplied
+                        } else {
+                            OperationReason::StateUnchanged
+                        },
+                        false,
+                    ),
+                    ExtensionProfilePolicyEditOutcome::Conflict => (
+                        OperationOutcome::Rejected,
+                        OperationReason::StoreConflict,
+                        false,
+                    ),
+                    ExtensionProfilePolicyEditOutcome::Rejected => (
+                        OperationOutcome::Rejected,
+                        OperationReason::InvalidScope,
+                        false,
+                    ),
+                    ExtensionProfilePolicyEditOutcome::Unavailable => (
+                        OperationOutcome::Rejected,
+                        OperationReason::StoreAdmissionRejected,
+                        false,
+                    ),
+                    ExtensionProfilePolicyEditOutcome::OutcomeUnknown => (
+                        OperationOutcome::Deferred,
+                        OperationReason::StoreOutcomeUnknown,
+                        true,
+                    ),
+                    ExtensionProfilePolicyEditOutcome::FailedClosed => (
                         OperationOutcome::Rejected,
                         OperationReason::StoreReconciliationFailed,
                         true,

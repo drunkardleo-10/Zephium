@@ -634,6 +634,8 @@ fn scrub_profile_database(path: &Path) -> rusqlite::Result<()> {
     let tx = conn.transaction()?;
     tx.execute_batch(
         "INSERT INTO history_fts(history_fts, rank) VALUES('secure-delete', 1);
+         DELETE FROM extension_profile_site_denials;
+         DELETE FROM extension_profile_policy;
          DELETE FROM extension_grant_api_permissions;
          DELETE FROM extension_grant_host_permissions;
          DELETE FROM extension_grants;
@@ -886,6 +888,8 @@ mod tests {
             "extension_grants",
             "extension_install_catalog",
             "extension_installs",
+            "extension_profile_policy",
+            "extension_profile_site_denials",
             "favicons",
             "focus",
             "history",
@@ -927,6 +931,8 @@ mod tests {
             "extension_grants",
             "extension_grant_api_permissions",
             "extension_grant_host_permissions",
+            "extension_profile_policy",
+            "extension_profile_site_denials",
         ] {
             let count: i64 = conn
                 .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {

@@ -129,13 +129,14 @@ use zephium_ipc::{
     ExtensionManagementCompatibilityView, ExtensionManagementEntryView,
     ExtensionManagementGrantView, ExtensionManagementLimitationView, ExtensionManagementPhase,
     ExtensionManagementProvenanceView, ExtensionManagementRuntimeView,
-    ExtensionManagementSourceView, ExtensionManagementView, ExtensionRuntimeGrantPromptEntryView,
-    ExtensionRuntimeGrantPromptView, ExtensionUpdateConsentView, ItemsState, LayoutState,
-    OperationDisposition, OperationOutcome, OperationReason, PagePermissionKindView,
-    PagePermissionPromptEntryView, PagePermissionPromptView, ProfileKindView, ProfileView,
-    Projection, RuntimeSecurityAdvisory, RuntimeSecurityAdvisoryKind, RuntimeSecurityUpdateTarget,
-    RuntimeStatus, SearchAction, SearchResult, SearchResults, SidebarNodeKindView, SidebarNodeView,
-    SidebarSectionView, SpaceView, SplitGroupView, TabView,
+    ExtensionManagementSourceView, ExtensionManagementView, ExtensionProfilePolicyView,
+    ExtensionRuntimeGrantPromptEntryView, ExtensionRuntimeGrantPromptView,
+    ExtensionUpdateConsentView, ItemsState, LayoutState, OperationDisposition, OperationOutcome,
+    OperationReason, PagePermissionKindView, PagePermissionPromptEntryView,
+    PagePermissionPromptView, ProfileKindView, ProfileView, Projection, RuntimeSecurityAdvisory,
+    RuntimeSecurityAdvisoryKind, RuntimeSecurityUpdateTarget, RuntimeStatus, SearchAction,
+    SearchResult, SearchResults, SidebarNodeKindView, SidebarNodeView, SidebarSectionView,
+    SpaceView, SplitGroupView, TabView,
 };
 
 // More simultaneous native renderers are neither usable in the current tiled
@@ -477,6 +478,8 @@ impl Shell {
                     Command::InstallFocusedExtension { .. }
                         | Command::ApproveFocusedExtensionUpdate { .. }
                         | Command::EditFocusedExtensionOptionalGrant { .. }
+                        | Command::SetFocusedProfileExtensionsPaused { .. }
+                        | Command::SetFocusedSiteExtensionsEnabled { .. }
                         | Command::SetFocusedExtensionEnabled { .. }
                         | Command::UninstallFocusedExtension { .. }
                 ) {
@@ -652,6 +655,8 @@ impl Shell {
             | Command::InstallFocusedExtension { .. }
             | Command::ApproveFocusedExtensionUpdate { .. }
             | Command::EditFocusedExtensionOptionalGrant { .. }
+            | Command::SetFocusedProfileExtensionsPaused { .. }
+            | Command::SetFocusedSiteExtensionsEnabled { .. }
             | Command::SetFocusedExtensionEnabled { .. }
             | Command::UninstallFocusedExtension { .. } => {}
             Command::RespondToExtensionRuntimeGrantPrompt { .. } => {}

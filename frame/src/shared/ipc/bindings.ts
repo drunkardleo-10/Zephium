@@ -42,6 +42,8 @@ export const commands = {
 	 *  management projection. Permission text never crosses this IPC boundary.
 	 */
 	extensionManagementEditOptionalGrant: (installId: string, catalogRevision: string, installRevision: string, grantRevision: string, kind: ExtensionOptionalGrantKindInput, index: number, granted: boolean) => __TAURI_INVOKE<OperationAdmission>("extension_management_edit_optional_grant", { installId, catalogRevision, installRevision, grantRevision, kind, index, granted }),
+	extensionManagementSetProfilePaused: (policyRevision: string, paused: boolean) => __TAURI_INVOKE<OperationAdmission>("extension_management_set_profile_paused", { policyRevision, paused }),
+	extensionManagementSetCurrentSiteEnabled: (policyRevision: string, enabled: boolean) => __TAURI_INVOKE<OperationAdmission>("extension_management_set_current_site_enabled", { policyRevision, enabled }),
 	extensionManagementOpenOptions: (installId: string, catalogRevision: string, installRevision: string) => __TAURI_INVOKE<boolean>("extension_management_open_options", { installId, catalogRevision, installRevision }),
 	extensionManagementUninstall: (installId: string, catalogRevision: string, installRevision: string) => __TAURI_INVOKE<OperationAdmission>("extension_management_uninstall", { installId, catalogRevision, installRevision }),
 	/**
@@ -471,7 +473,7 @@ export type ExtensionManagementProvenanceView = {
 };
 
 /**  Process-local regular-runtime state for one installed extension. */
-export type ExtensionManagementRuntimeView = "disabled" | "pending_activation" | "active";
+export type ExtensionManagementRuntimeView = "disabled" | "pending_activation" | "profile_paused" | "active";
 
 /**  Browser-authenticated acquisition/support lane for extension management UI. */
 export type ExtensionManagementSourceView = "zephium_verified" | "external_compatibility" | "developer_local";
@@ -486,6 +488,8 @@ export type ExtensionManagementView = {
 	profile_id: string,
 	phase: ExtensionManagementPhase,
 	catalog_revision: string | null,
+	/**  Present only while `phase` is `ready`. */
+	profile_policy: ExtensionProfilePolicyView | null,
 	entries: ExtensionManagementEntryView[],
 	candidates: ExtensionInstallCandidateView[],
 	/**  Present only while `phase` is `update_consent_required`. */
@@ -493,6 +497,14 @@ export type ExtensionManagementView = {
 };
 
 export type ExtensionOptionalGrantKindInput = "api" | "host";
+
+export type ExtensionProfilePolicyView = {
+	revision: string,
+	paused: boolean,
+	denied_site_count: number,
+	current_site_available: boolean,
+	current_site_denied: boolean,
+};
 
 export type ExtensionRuntimeGrantPromptChanged = ExtensionRuntimeGrantPromptView;
 

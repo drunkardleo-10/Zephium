@@ -175,10 +175,16 @@ fn eligibility_at_revision(
         &manifest,
     )
     .expect("valid grant authority");
-    ExtensionGrantCohort::from_persisted(profile, catalog, bindings, vec![authority])
-        .expect("valid grant cohort")
-        .runtime_eligibility(install_id, ExtensionGrantBrowsingContext::Regular)
-        .expect("eligible runtime")
+    ExtensionGrantCohort::from_persisted(
+        profile,
+        zephium_core::extensions::ExtensionProfilePolicy::initial(),
+        catalog,
+        bindings,
+        vec![authority],
+    )
+    .expect("valid grant cohort")
+    .runtime_eligibility(install_id, ExtensionGrantBrowsingContext::Regular)
+    .expect("eligible runtime")
 }
 
 #[derive(Clone)]

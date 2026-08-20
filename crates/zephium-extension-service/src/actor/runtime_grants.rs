@@ -191,6 +191,7 @@ pub(super) fn request_until(
         Err(_) => return settle(runtime, ExtensionRuntimeGrantOutcome::FailedClosed),
     };
     let expected_grant = authority.revision();
+    let profile_policy = Arc::clone(cohort.profile_policy());
     drop(cohort);
 
     let mutation = startup.store.apply_live_grant_patch_until(
@@ -252,6 +253,7 @@ pub(super) fn request_until(
         *applied.install,
         manifest,
         *applied.authority,
+        profile_policy,
         key.browsing_context(),
     ) {
         Ok(eligibility) if eligibility.grant_revision() == revision => eligibility,

@@ -506,8 +506,14 @@ impl EligibilityFixture {
             &manifest,
         )
         .unwrap();
-        let cohort =
-            ExtensionGrantCohort::from_persisted(profile, catalog, bindings, vec![grants]).unwrap();
+        let cohort = ExtensionGrantCohort::from_persisted(
+            profile,
+            zephium_core::extensions::ExtensionProfilePolicy::initial(),
+            catalog,
+            bindings,
+            vec![grants],
+        )
+        .unwrap();
         Self {
             cohort,
             install: install_id,

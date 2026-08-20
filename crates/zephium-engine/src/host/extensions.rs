@@ -469,6 +469,14 @@ impl ExtensionDocumentAuthority {
         {
             return Err(ExtensionAuthorityDenial::NativeDocumentMismatch);
         }
+        let url = url::Url::parse(document.url)
+            .map_err(|_| ExtensionAuthorityDenial::NativeDocumentMismatch)?;
+        if !matches!(
+            witness.decide_engine_document_url_scope(&url),
+            ExtensionUrlScopeDecision::InScope
+        ) {
+            return Err(ExtensionAuthorityDenial::DocumentUrlOutOfScope);
+        }
         let Some(origin) = DocumentOrigin::from_url(document.url) else {
             return Err(ExtensionAuthorityDenial::UnsupportedDocumentOrigin);
         };
@@ -1149,6 +1157,24 @@ mod tests {
         grant_hosts: bool,
         file_access: bool,
     ) -> TestRuntime {
+        test_runtime_with_policy(
+            profile,
+            install,
+            generation,
+            grant_hosts,
+            file_access,
+            zephium_core::extensions::ExtensionProfilePolicy::initial(),
+        )
+    }
+
+    fn test_runtime_with_policy(
+        profile: u128,
+        install: u128,
+        generation: u64,
+        grant_hosts: bool,
+        file_access: bool,
+        profile_policy: zephium_core::extensions::ExtensionProfilePolicy,
+    ) -> TestRuntime {
         let profile = ProfileId::from(profile);
         let install_id = ExtensionInstallId::from(install);
         let package = ExtensionPackageIdentity::new(
@@ -1255,9 +1281,14 @@ mod tests {
             &manifest,
         )
         .unwrap();
-        let cohort =
-            ExtensionGrantCohort::from_persisted(profile, catalog, bindings, vec![authority])
-                .unwrap();
+        let cohort = ExtensionGrantCohort::from_persisted(
+            profile,
+            profile_policy,
+            catalog,
+            bindings,
+            vec![authority],
+        )
+        .unwrap();
         let eligibility = cohort
             .runtime_eligibility(install_id, ExtensionGrantBrowsingContext::Regular)
             .unwrap();
@@ -1378,6 +1409,45 @@ mod tests {
             Err(ExtensionAuthorityDenial::WrongProfile)
         );
         assert_eq!(grant(&mut authority, &runtime, item, &document), Ok(()));
+    }
+
+    #[test]
+    fn profile_site_denial_blocks_durable_and_active_tab_document_authority() {
+        let scope = zephium_core::extensions::ExtensionSiteAccessScope::parse_exact(
+            "https://example.test/*",
+        )
+        .unwrap();
+        let policy = zephium_core::extensions::ExtensionProfilePolicy::initial()
+            .apply(
+                zephium_core::extensions::ExtensionProfilePolicyRevision::INITIAL,
+                zephium_core::extensions::ExtensionProfilePolicyMutation::SetSiteDenied {
+                    scope,
+                    denied: true,
+                },
+            )
+            .unwrap()
+            .into_policy();
+        let runtime = test_runtime_with_policy(1, 12, 1, true, false, policy);
+        let document = TestDocument::committed(1, "https://example.test/page");
+        let item = ItemId::from(1);
+        let mut authority = ExtensionDocumentAuthority::default();
+        retain_runtime(&mut authority, &runtime);
+
+        assert_eq!(
+            grant(&mut authority, &runtime, item, &document),
+            Err(ExtensionAuthorityDenial::DocumentUrlOutOfScope)
+        );
+        assert!(matches!(
+            issue(
+                &mut authority,
+                &runtime,
+                item,
+                &document,
+                ExtensionDocumentPurpose::ExecuteScript,
+                Instant::now(),
+            ),
+            Err(ExtensionAuthorityDenial::DocumentUrlOutOfScope)
+        ));
     }
 
     #[test]

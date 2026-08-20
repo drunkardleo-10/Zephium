@@ -42,8 +42,8 @@ use zephium_app::{
 use zephium_blocker_service::ManagedBlocker;
 use zephium_core::extensions::{
     ExtensionActionRevision, ExtensionGrantRevision, ExtensionInstallCatalogRevision,
-    ExtensionInstallRevision, ExtensionPopupAnchor, ExtensionRuntimeGeneration,
-    ExtensionRuntimeInstance,
+    ExtensionInstallRevision, ExtensionPopupAnchor, ExtensionProfilePolicyRevision,
+    ExtensionRuntimeGeneration, ExtensionRuntimeInstance,
 };
 use zephium_core::geometry::{Rect, Size};
 use zephium_core::ids::ScriptId;
@@ -1492,6 +1492,8 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             extension_management_approve_update,
             extension_management_set_enabled,
             extension_management_edit_optional_grant,
+            extension_management_set_profile_paused,
+            extension_management_set_current_site_enabled,
             extension_management_open_options,
             extension_management_uninstall,
             extension_runtime_grant_respond,
@@ -2700,6 +2702,68 @@ fn extension_management_edit_optional_grant(
             expected_grant,
             target,
             granted,
+        },
+    )
+}
+
+fn extension_profile_policy_revision(value: &str) -> Option<ExtensionProfilePolicyRevision> {
+    fixed_nonzero_hex(value).and_then(ExtensionProfilePolicyRevision::new)
+}
+
+#[tauri::command]
+#[specta::specta]
+fn extension_management_set_profile_paused(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    policy_revision: String,
+    paused: bool,
+) -> zephium_ipc::OperationAdmission {
+    if !authorize(
+        &caller,
+        CallerPolicy::Main,
+        "extension_management_set_profile_paused",
+    ) || shutdown_started(caller.app_handle())
+    {
+        return rejected_operation();
+    }
+    let Some(expected_policy) = extension_profile_policy_revision(&policy_revision) else {
+        return rejected_operation();
+    };
+    dispatch_operation(
+        caller.app_handle(),
+        &shell,
+        Command::SetFocusedProfileExtensionsPaused {
+            expected_policy,
+            paused,
+        },
+    )
+}
+
+#[tauri::command]
+#[specta::specta]
+fn extension_management_set_current_site_enabled(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    policy_revision: String,
+    enabled: bool,
+) -> zephium_ipc::OperationAdmission {
+    if !authorize(
+        &caller,
+        CallerPolicy::Main,
+        "extension_management_set_current_site_enabled",
+    ) || shutdown_started(caller.app_handle())
+    {
+        return rejected_operation();
+    }
+    let Some(expected_policy) = extension_profile_policy_revision(&policy_revision) else {
+        return rejected_operation();
+    };
+    dispatch_operation(
+        caller.app_handle(),
+        &shell,
+        Command::SetFocusedSiteExtensionsEnabled {
+            expected_policy,
+            enabled,
         },
     )
 }
@@ -5046,6 +5110,8 @@ mod tests {
             "extension_management_install",
             "extension_management_set_enabled",
             "extension_management_edit_optional_grant",
+            "extension_management_set_profile_paused",
+            "extension_management_set_current_site_enabled",
             "extension_management_uninstall",
         ] {
             let command = source

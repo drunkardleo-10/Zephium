@@ -457,6 +457,15 @@ impl Shell {
                     self.project_tab(id);
                 }
                 self.sync_extension_browser_surface_metadata(id);
+                if self
+                    .windows
+                    .focused()
+                    .is_some_and(|window| window.active == Some(id))
+                {
+                    if let Some(profile) = self.profile_of_item(id) {
+                        self.reproject_extension_site_policy_if_visible(profile);
+                    }
+                }
             }
         }
     }

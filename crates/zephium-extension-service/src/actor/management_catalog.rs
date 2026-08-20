@@ -154,11 +154,18 @@ pub(super) fn load(
             ExtensionGrantBrowsingContext::Regular,
         );
         let live_generation = runtime.live_generation(key);
-        let runtime_state = match (install.desired_enabled(), live_generation) {
-            (false, None) => ExtensionManagementRuntimeState::Disabled,
-            (true, None) => ExtensionManagementRuntimeState::PendingActivation,
-            (true, Some(generation)) => ExtensionManagementRuntimeState::Active(generation),
-            (false, Some(_)) => return ExtensionManagementCatalogOutcome::FailedClosed,
+        let runtime_state = match (
+            install.desired_enabled(),
+            cohort.profile_policy().paused(),
+            live_generation,
+        ) {
+            (false, _, None) => ExtensionManagementRuntimeState::Disabled,
+            (true, true, None) => ExtensionManagementRuntimeState::ProfilePaused,
+            (true, false, None) => ExtensionManagementRuntimeState::PendingActivation,
+            (true, false, Some(generation)) => ExtensionManagementRuntimeState::Active(generation),
+            (false, _, Some(_)) | (true, true, Some(_)) => {
+                return ExtensionManagementCatalogOutcome::FailedClosed
+            }
         };
         let grants = match cohort_entry.authority_arc() {
             None => ExtensionManagementGrantState::Uninitialized,
@@ -309,9 +316,10 @@ pub(super) fn load(
     });
     available_entries.truncate(MAX_EXTENSION_INSTALLS_PER_PROFILE.saturating_sub(entries.len()));
 
-    match ExtensionManagementCatalog::with_candidates(
+    match ExtensionManagementCatalog::with_profile_policy(
         profile,
         catalog.revision(),
+        cohort.profile_policy().as_ref().clone(),
         entries,
         available_entries,
     ) {

@@ -123,7 +123,13 @@ pub(super) fn apply_compiled_grants(
     let permissions = plan.granted_api_permissions().iter().copied();
     // The compiler currently refuses private runtimes, so private-data access
     // is necessarily absent for every admitted production plan.
-    apply_exact_grants(context, permissions, plan.granted_host_patterns(), false)
+    apply_exact_grants_with_denied_patterns(
+        context,
+        permissions,
+        plan.granted_host_patterns(),
+        plan.denied_site_patterns(),
+        false,
+    )
 }
 
 #[cfg(feature = "native-web-extension-probes")]
@@ -155,21 +161,6 @@ pub(crate) fn apply_probe_grants_with_denied_patterns(
         permissions.iter().copied(),
         granted_patterns.iter().copied(),
         denied_patterns.iter().copied(),
-        private_data_access,
-    )
-}
-
-fn apply_exact_grants<'a>(
-    context: &WKWebExtensionContext,
-    permissions: impl ExactSizeIterator<Item = MacosNativeApiPermission>,
-    patterns: impl ExactSizeIterator<Item = &'a str>,
-    private_data_access: bool,
-) -> Result<AppliedMacosGrantSet, MacosGrantApplicationError> {
-    apply_exact_grants_with_denied_patterns(
-        context,
-        permissions,
-        patterns,
-        std::iter::empty(),
         private_data_access,
     )
 }

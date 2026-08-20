@@ -962,16 +962,36 @@ over-capacity, or unavailable paths deny rather than grant. This extension
 grant broker is distinct from page-origin permission events; camera/microphone
 prompts now have their own Store-backed Shell policy and UI.
 
-The native macOS gate also proves the mechanism required by a future
-profile-level per-site extension pause. One context receives a broad
+Profile-wide extension safe mode and exact-site pause now use a separate
+durable policy aggregate rather than rewriting per-install grants. Profile
+schema 13 stores one monotonic pause revision plus at most 128 canonical HTTP
+or HTTPS DNS/IPv4 whole-host denials. The Store loads that policy in the same
+SQLite snapshot as the install/grant cohort; its revision and digest enter the
+runtime fingerprint and the native grant snapshot. Changed policy writes are
+refused while any profile runtime ownership row exists. The serialized service
+captures the bounded live-key cohort, retires the complete profile, commits one
+policy CAS, and restores only prior live runtimes; resuming safe mode
+deterministically activates enabled installs within the existing global runtime
+ceiling. Definite pre-commit refusal restores the old cohort, while uncertain
+commit quarantines management until restart.
+Core URL decisions intersect the same policy before durable host or transient
+`activeTab` authority reaches the engine, so a native denied dictionary is not
+the sole enforcement layer for Zephium-owned scripting brokers.
+
+Privileged chrome echoes only the policy revision and a boolean. Shell derives
+the current site's scope from its own focused committed URL; URL, host, path,
+query, and browsing data never cross the IPC command. The Extensions Center
+exposes profile pause and current-site controls and reprojects them on active
+tab/committed-URL changes. Unsupported schemes and IPv6 have no site toggle.
+One native gate gives a context a broad
 `http://*/*` grant and an exact explicit `http://127.0.0.1/*` denial in the
 same complete replacement. WebKit retains both dictionaries, reports the
 overlapped broad pattern as implicitly denied, blocks real content-script
 execution on the exact host, and keeps a different HTTP host granted. Removing
 the denial restores execution without changing controller-owned script
-inventory. This closes native feasibility only: no product site-policy Store,
-Shell command, or UX is enabled yet, and production grant plans still contain
-no denied patterns.
+inventory. The authenticated native and brokered product gates additionally
+commit the policy through Store/service, rebind the real runtime, prove absence
+on a new denied navigation, remove the denial, and prove execution returns.
 
 Installed-package updates compare the exact current grant root and reviewed
 compatibility map with the authenticated replacement before native retirement.

@@ -10,6 +10,7 @@ use crate::ids::{ExtensionInstallId, ProfileId};
 use super::{
     ExtensionGrantBrowsingContext, ExtensionGrantDigest, ExtensionGrantRevision,
     ExtensionInstallCatalogRevision, ExtensionInstallRevision, ExtensionPackageIdentity,
+    ExtensionProfilePolicyDigest, ExtensionProfilePolicyRevision,
 };
 
 /// Process-local, non-wrapping identity for one extension runtime generation.
@@ -102,6 +103,8 @@ pub struct ExtensionRuntimeFingerprint {
     install_revision: ExtensionInstallRevision,
     grant_revision: ExtensionGrantRevision,
     grant_digest: ExtensionGrantDigest,
+    profile_policy_revision: ExtensionProfilePolicyRevision,
+    profile_policy_digest: ExtensionProfilePolicyDigest,
     package: ExtensionPackageIdentity,
     browsing_context: ExtensionGrantBrowsingContext,
 }
@@ -112,6 +115,8 @@ pub(super) struct ExtensionRuntimeFingerprintInput {
     pub(super) install_revision: ExtensionInstallRevision,
     pub(super) grant_revision: ExtensionGrantRevision,
     pub(super) grant_digest: ExtensionGrantDigest,
+    pub(super) profile_policy_revision: ExtensionProfilePolicyRevision,
+    pub(super) profile_policy_digest: ExtensionProfilePolicyDigest,
     pub(super) package: ExtensionPackageIdentity,
     pub(super) browsing_context: ExtensionGrantBrowsingContext,
 }
@@ -124,6 +129,8 @@ impl ExtensionRuntimeFingerprint {
             install_revision,
             grant_revision,
             grant_digest,
+            profile_policy_revision,
+            profile_policy_digest,
             package,
             browsing_context,
         } = input;
@@ -133,6 +140,8 @@ impl ExtensionRuntimeFingerprint {
             install_revision,
             grant_revision,
             grant_digest,
+            profile_policy_revision,
+            profile_policy_digest,
             package,
             browsing_context,
         }
@@ -161,6 +170,14 @@ impl ExtensionRuntimeFingerprint {
     /// Digest of the complete grant authority observed by the runtime.
     pub const fn grant_digest(&self) -> ExtensionGrantDigest {
         self.grant_digest
+    }
+
+    pub const fn profile_policy_revision(&self) -> ExtensionProfilePolicyRevision {
+        self.profile_policy_revision
+    }
+
+    pub const fn profile_policy_digest(&self) -> ExtensionProfilePolicyDigest {
+        self.profile_policy_digest
     }
 
     /// Complete immutable package identity expected by the runtime.

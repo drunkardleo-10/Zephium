@@ -122,6 +122,7 @@ impl Shell {
             profile_id: profile.to_string(),
             phase,
             catalog_revision: None,
+            profile_policy: None,
             entries: Vec::new(),
             candidates: Vec::new(),
             pending_update: None,
@@ -172,6 +173,7 @@ impl Shell {
             profile_id: prompt.selector().install().profile().to_string(),
             phase: ExtensionManagementPhase::UpdateConsentRequired,
             catalog_revision: None,
+            profile_policy: None,
             entries: Vec::new(),
             candidates: Vec::new(),
             pending_update: Some(update),
@@ -193,6 +195,9 @@ impl Shell {
                     }
                     ExtensionManagementRuntimeState::PendingActivation => {
                         (ExtensionManagementRuntimeView::PendingActivation, None)
+                    }
+                    ExtensionManagementRuntimeState::ProfilePaused => {
+                        (ExtensionManagementRuntimeView::ProfilePaused, None)
                     }
                     ExtensionManagementRuntimeState::Active(generation) => (
                         ExtensionManagementRuntimeView::Active,
@@ -325,11 +330,30 @@ impl Shell {
                     .collect(),
             })
             .collect();
+        let current_site = self
+            .windows
+            .focused()
+            .filter(|window| window.profile == catalog.profile())
+            .and_then(|window| window.active)
+            .and_then(|item| self.items.tab(item))
+            .and_then(|tab| tab.url.as_ref())
+            .and_then(|url| zephium_core::extensions::ExtensionSiteAccessScope::from_url(url).ok());
+        let profile_policy = ExtensionProfilePolicyView {
+            revision: format!("{:016x}", catalog.profile_policy().revision().get()),
+            paused: catalog.profile_policy().paused(),
+            denied_site_count: u16::try_from(catalog.profile_policy().denied_sites().len())
+                .expect("extension site-denial count is statically bounded below u16::MAX"),
+            current_site_available: current_site.is_some(),
+            current_site_denied: current_site
+                .as_ref()
+                .is_some_and(|scope| catalog.profile_policy().denies(scope)),
+        };
         (self.emit)(Projection::ExtensionManagement(ExtensionManagementView {
             projection_revision: format!("{:032x}", self.next_projection_revision()),
             profile_id: catalog.profile().to_string(),
             phase: ExtensionManagementPhase::Ready,
             catalog_revision: Some(format!("{:016x}", catalog.catalog_revision().get())),
+            profile_policy: Some(profile_policy),
             entries,
             candidates,
             pending_update: None,

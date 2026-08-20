@@ -132,7 +132,17 @@ pub struct ExtensionManagementAvailabilityChangedView {
 pub enum ExtensionManagementRuntimeView {
     Disabled,
     PendingActivation,
+    ProfilePaused,
     Active,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct ExtensionProfilePolicyView {
+    pub revision: String,
+    pub paused: bool,
+    pub denied_site_count: u16,
+    pub current_site_available: bool,
+    pub current_site_denied: bool,
 }
 
 /// Reviewed compatibility of the exact authenticated manifest.
@@ -277,6 +287,8 @@ pub struct ExtensionManagementView {
     pub profile_id: String,
     pub phase: ExtensionManagementPhase,
     pub catalog_revision: Option<String>,
+    /// Present only while `phase` is `ready`.
+    pub profile_policy: Option<ExtensionProfilePolicyView>,
     pub entries: Vec<ExtensionManagementEntryView>,
     pub candidates: Vec<ExtensionInstallCandidateView>,
     /// Present only while `phase` is `update_consent_required`.

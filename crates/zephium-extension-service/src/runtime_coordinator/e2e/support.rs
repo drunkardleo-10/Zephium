@@ -251,6 +251,7 @@ impl RealAuthorityHarness {
             *applied.install,
             manifest,
             *applied.authority,
+            Arc::new(zephium_core::extensions::ExtensionProfilePolicy::initial()),
             key.browsing_context(),
         )
         .expect("committed grant result projects exactly")

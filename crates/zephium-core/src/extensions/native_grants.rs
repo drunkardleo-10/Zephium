@@ -19,7 +19,8 @@ use super::{
     ApiPermissionName, ExtensionApiGrantDecision, ExtensionCompatibilityTargetId,
     ExtensionGrantAuthority, ExtensionGrantBrowsingContext, ExtensionGrantDigest,
     ExtensionGrantRevision, ExtensionManifestDeclarations, ExtensionManifestDescriptor,
-    ExtensionRuntimeFingerprint, ExtensionUrlScopeDecision,
+    ExtensionProfilePolicy, ExtensionProfilePolicyDigest, ExtensionProfilePolicyRevision,
+    ExtensionRuntimeFingerprint, ExtensionSiteAccessScope, ExtensionUrlScopeDecision,
     MAX_EXTENSION_CONTENT_SCRIPT_DECLARATIONS, MAX_EXTENSION_HOST_GRANTS,
 };
 
@@ -175,6 +176,7 @@ pub struct ExtensionNativeGrantProjection<'a> {
     runtime: &'a ExtensionRuntimeFingerprint,
     manifest: &'a Arc<ExtensionManifestDescriptor>,
     grants: &'a Arc<ExtensionGrantAuthority>,
+    profile_policy: &'a Arc<ExtensionProfilePolicy>,
 }
 
 impl<'a> ExtensionNativeGrantProjection<'a> {
@@ -182,15 +184,19 @@ impl<'a> ExtensionNativeGrantProjection<'a> {
         runtime: &'a ExtensionRuntimeFingerprint,
         manifest: &'a Arc<ExtensionManifestDescriptor>,
         grants: &'a Arc<ExtensionGrantAuthority>,
+        profile_policy: &'a Arc<ExtensionProfilePolicy>,
     ) -> Self {
         debug_assert_eq!(runtime.package(), manifest.package());
         debug_assert_eq!(runtime.package(), grants.package());
         debug_assert_eq!(runtime.grant_revision(), grants.revision());
         debug_assert_eq!(runtime.grant_digest(), grants.digest());
+        debug_assert_eq!(runtime.profile_policy_revision(), profile_policy.revision());
+        debug_assert_eq!(runtime.profile_policy_digest(), profile_policy.digest());
         Self {
             runtime,
             manifest,
             grants,
+            profile_policy,
         }
     }
 
@@ -215,6 +221,18 @@ impl<'a> ExtensionNativeGrantProjection<'a> {
     /// Browsing partition for which every projected decision is effective.
     pub const fn browsing_context(&self) -> ExtensionGrantBrowsingContext {
         self.runtime.browsing_context()
+    }
+
+    pub fn profile_policy_revision(&self) -> ExtensionProfilePolicyRevision {
+        self.profile_policy.revision()
+    }
+
+    pub fn profile_policy_digest(&self) -> ExtensionProfilePolicyDigest {
+        self.profile_policy.digest()
+    }
+
+    pub fn denied_sites(&self) -> impl ExactSizeIterator<Item = &ExtensionSiteAccessScope> {
+        self.profile_policy.denied_sites().iter()
     }
 
     /// Canonically ordered complete API declaration stream.
@@ -311,6 +329,7 @@ impl<'a> ExtensionNativeGrantProjection<'a> {
             runtime: self.runtime.clone(),
             manifest: Arc::clone(self.manifest),
             grants: Arc::clone(self.grants),
+            profile_policy: Arc::clone(self.profile_policy),
         }
     }
 }
@@ -359,6 +378,7 @@ pub struct ExtensionNativeGrantSnapshot {
     runtime: ExtensionRuntimeFingerprint,
     manifest: Arc<ExtensionManifestDescriptor>,
     grants: Arc<ExtensionGrantAuthority>,
+    profile_policy: Arc<ExtensionProfilePolicy>,
 }
 
 impl ExtensionNativeGrantSnapshot {
@@ -382,13 +402,30 @@ impl ExtensionNativeGrantSnapshot {
         self.runtime.browsing_context()
     }
 
+    pub fn profile_policy_revision(&self) -> ExtensionProfilePolicyRevision {
+        self.profile_policy.revision()
+    }
+
+    pub fn profile_policy_digest(&self) -> ExtensionProfilePolicyDigest {
+        self.profile_policy.digest()
+    }
+
+    pub fn denied_sites(&self) -> impl ExactSizeIterator<Item = &ExtensionSiteAccessScope> {
+        self.profile_policy.denied_sites().iter()
+    }
+
     /// Exact reviewed compatibility profile bound into the admitted manifest.
     pub fn compatibility_target(&self) -> &ExtensionCompatibilityTargetId {
         self.manifest.compatibility_target()
     }
 
     fn projection(&self) -> ExtensionNativeGrantProjection<'_> {
-        ExtensionNativeGrantProjection::new(&self.runtime, &self.manifest, &self.grants)
+        ExtensionNativeGrantProjection::new(
+            &self.runtime,
+            &self.manifest,
+            &self.grants,
+            &self.profile_policy,
+        )
     }
 
     /// Canonically ordered complete API declaration stream.
@@ -441,8 +478,9 @@ impl ExtensionNativeGrantSnapshot {
         size_of::<Self>()
             .saturating_add(self.manifest.retained_bytes())
             .saturating_add(self.grants.retained_bytes())
-            .saturating_add(2 * RETAINED_HEAP_ALLOCATION_OVERHEAD_BYTES)
-            .saturating_add(2 * RETAINED_ARC_COUNTER_BYTES)
+            .saturating_add(self.profile_policy.retained_bytes())
+            .saturating_add(3 * RETAINED_HEAP_ALLOCATION_OVERHEAD_BYTES)
+            .saturating_add(3 * RETAINED_ARC_COUNTER_BYTES)
     }
 }
 

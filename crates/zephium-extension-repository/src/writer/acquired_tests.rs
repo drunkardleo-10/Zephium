@@ -217,10 +217,16 @@ fn acquired_eligibility(catalog: &AdmittedAcquiredCatalog) -> ExtensionRuntimeEl
         &descriptor,
     )
     .unwrap();
-    ExtensionGrantCohort::from_persisted(ProfileId::from(19), installs, bindings, vec![grants])
-        .unwrap()
-        .runtime_eligibility(install_id, ExtensionGrantBrowsingContext::Regular)
-        .unwrap()
+    ExtensionGrantCohort::from_persisted(
+        ProfileId::from(19),
+        zephium_core::extensions::ExtensionProfilePolicy::initial(),
+        installs,
+        bindings,
+        vec![grants],
+    )
+    .unwrap()
+    .runtime_eligibility(install_id, ExtensionGrantBrowsingContext::Regular)
+    .unwrap()
 }
 
 fn runtime_backend() -> ExtensionRuntimeBackendTarget {

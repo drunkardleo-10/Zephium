@@ -52,6 +52,7 @@ pub const MAX_EXTENSION_UPDATE_CONSENT_RETAINED_BYTES: usize =
 pub const MAX_EXTENSION_MANAGEMENT_CATALOG_RETAINED_BYTES: usize = size_of::<
     ExtensionManagementCatalog,
 >()
+    + crate::extensions::MAX_EXTENSION_PROFILE_POLICY_RETAINED_BYTES
     + MAX_EXTENSION_INSTALLS_PER_PROFILE
         * (size_of::<ExtensionManagementEntry>()
             + 5 * MAX_EXTENSION_MANAGEMENT_DISPLAY_TEXT_BYTES
@@ -81,6 +82,8 @@ pub enum ExtensionManagementRuntimeState {
     Disabled,
     /// Durable user intent is enabled, but no regular runtime is currently live.
     PendingActivation,
+    /// Profile-wide safe mode pauses this otherwise enabled install.
+    ProfilePaused,
     /// The regular runtime is live at this exact process generation.
     Active(ExtensionRuntimeGeneration),
 }
@@ -1080,6 +1083,7 @@ fn canonical_required_host_permissions(
 pub struct ExtensionManagementCatalog {
     profile: ProfileId,
     catalog_revision: ExtensionInstallCatalogRevision,
+    profile_policy: Box<crate::extensions::ExtensionProfilePolicy>,
     entries: Box<[ExtensionManagementEntry]>,
     candidates: Box<[ExtensionInstallCandidateEntry]>,
     retained_bytes: usize,
@@ -1092,7 +1096,13 @@ impl ExtensionManagementCatalog {
         catalog_revision: ExtensionInstallCatalogRevision,
         entries: Vec<ExtensionManagementEntry>,
     ) -> Result<Self, ExtensionManagementProjectionError> {
-        Self::with_candidates(profile, catalog_revision, entries, Vec::new())
+        Self::with_profile_policy(
+            profile,
+            catalog_revision,
+            crate::extensions::ExtensionProfilePolicy::initial(),
+            entries,
+            Vec::new(),
+        )
     }
 
     /// Validates installed rows and current-catalog install candidates as one
@@ -1100,6 +1110,22 @@ impl ExtensionManagementCatalog {
     pub fn with_candidates(
         profile: ProfileId,
         catalog_revision: ExtensionInstallCatalogRevision,
+        entries: Vec<ExtensionManagementEntry>,
+        candidates: Vec<ExtensionInstallCandidateEntry>,
+    ) -> Result<Self, ExtensionManagementProjectionError> {
+        Self::with_profile_policy(
+            profile,
+            catalog_revision,
+            crate::extensions::ExtensionProfilePolicy::initial(),
+            entries,
+            candidates,
+        )
+    }
+
+    pub fn with_profile_policy(
+        profile: ProfileId,
+        catalog_revision: ExtensionInstallCatalogRevision,
+        profile_policy: crate::extensions::ExtensionProfilePolicy,
         mut entries: Vec<ExtensionManagementEntry>,
         mut candidates: Vec<ExtensionInstallCandidateEntry>,
     ) -> Result<Self, ExtensionManagementProjectionError> {
@@ -1139,9 +1165,12 @@ impl ExtensionManagementCatalog {
         }) {
             return Err(ExtensionManagementProjectionError::MixedCatalog);
         }
+        let base_retained_bytes = size_of::<Self>()
+            .checked_add(profile_policy.retained_bytes())
+            .ok_or(ExtensionManagementProjectionError::AccountingOverflow)?;
         let retained_bytes = entries
             .iter()
-            .try_fold(size_of::<Self>(), |bytes, entry| {
+            .try_fold(base_retained_bytes, |bytes, entry| {
                 bytes.checked_add(entry.retained_bytes())
             })
             .and_then(|bytes| {
@@ -1157,6 +1186,7 @@ impl ExtensionManagementCatalog {
         Ok(Self {
             profile,
             catalog_revision,
+            profile_policy: Box::new(profile_policy),
             entries: entries.into_boxed_slice(),
             candidates: candidates.into_boxed_slice(),
             retained_bytes,
@@ -1169,6 +1199,10 @@ impl ExtensionManagementCatalog {
 
     pub const fn catalog_revision(&self) -> ExtensionInstallCatalogRevision {
         self.catalog_revision
+    }
+
+    pub fn profile_policy(&self) -> &crate::extensions::ExtensionProfilePolicy {
+        self.profile_policy.as_ref()
     }
 
     pub fn entries(&self) -> &[ExtensionManagementEntry] {

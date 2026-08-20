@@ -26,7 +26,8 @@ use super::{
     ExtensionInstallCatalogRevision, ExtensionInstallRevision, ExtensionManifestDescriptor,
     ExtensionNativeGrantProjection, ExtensionNativeIncarnation, ExtensionNativeOwnershipEntry,
     ExtensionNativeOwnershipIntent, ExtensionNativeOwnershipOperation,
-    ExtensionNativeOwnershipPhase, ExtensionPackageIdentity, ExtensionRuntimeBackendTarget,
+    ExtensionNativeOwnershipPhase, ExtensionPackageIdentity, ExtensionProfilePolicy,
+    ExtensionProfilePolicyDigest, ExtensionProfilePolicyRevision, ExtensionRuntimeBackendTarget,
     ExtensionRuntimeFingerprint, ExtensionRuntimeGeneration, ExtensionRuntimeInstance,
     ExtensionUrlScopeDecision, ExtensionUserInvocationKind,
     MACOS_NATIVE_BROKERED_COMPATIBILITY_TARGET,
@@ -165,6 +166,7 @@ impl fmt::Debug for ExtensionRuntimeGrantRebindRefusal {
 pub struct ExtensionActiveTabGrantWitness {
     runtime: ExtensionRuntimeFingerprint,
     invocation: ExtensionUserInvocationKind,
+    profile_policy: Arc<ExtensionProfilePolicy>,
 }
 
 impl ExtensionActiveTabGrantWitness {
@@ -193,6 +195,10 @@ impl ExtensionActiveTabGrantWitness {
         invocation: ExtensionUserInvocationKind,
     ) -> bool {
         &self.runtime == runtime && self.invocation == invocation
+    }
+
+    pub fn decide_engine_document_url_scope(&self, url: &Url) -> ExtensionUrlScopeDecision {
+        profile_policy_url_decision(&self.profile_policy, url)
     }
 }
 
@@ -250,6 +256,7 @@ pub struct ExtensionDocumentAuthorityWitness {
     purpose: ExtensionDocumentPurpose,
     manifest: Arc<ExtensionManifestDescriptor>,
     grants: Arc<ExtensionGrantAuthority>,
+    profile_policy: Arc<ExtensionProfilePolicy>,
 }
 
 impl ExtensionDocumentAuthorityWitness {
@@ -288,6 +295,11 @@ impl ExtensionDocumentAuthorityWitness {
         &self,
         engine_document_url: &Url,
     ) -> ExtensionUrlScopeDecision {
+        if let ExtensionUrlScopeDecision::OutOfScope(reason) =
+            profile_policy_url_decision(&self.profile_policy, engine_document_url)
+        {
+            return ExtensionUrlScopeDecision::OutOfScope(reason);
+        }
         self.grants.decide_url_scope(
             &self.manifest,
             engine_document_url,
@@ -384,6 +396,18 @@ fn document_purpose_api_permission(
     }
 }
 
+fn profile_policy_url_decision(
+    policy: &ExtensionProfilePolicy,
+    url: &Url,
+) -> ExtensionUrlScopeDecision {
+    match super::ExtensionSiteAccessScope::from_url(url) {
+        Ok(scope) if policy.denies(&scope) => {
+            ExtensionUrlScopeDecision::OutOfScope(super::ExtensionGrantDenial::ProfileSiteDenied)
+        }
+        _ => ExtensionUrlScopeDecision::InScope,
+    }
+}
+
 /// Exact fail-closed reason one atomic profile cohort cannot yield runtime
 /// eligibility for an install.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -393,6 +417,8 @@ pub enum ExtensionRuntimeEligibilityDenial {
     InstallNotFound,
     /// Durable user intent currently requests that the install remain off.
     Disabled,
+    /// Profile-wide safe mode currently pauses every extension runtime.
+    ProfilePaused,
     /// No exact package-bound grant root has been initialized.
     GrantsUninitialized,
     /// At least one required manifest API or host declaration is not granted.
@@ -411,6 +437,8 @@ pub enum ExtensionCommittedRuntimeEligibilityError {
     CohortMismatch,
     /// Durable user intent no longer requests an enabled runtime.
     Disabled,
+    /// Profile-wide safe mode currently pauses every extension runtime.
+    ProfilePaused,
     /// A required manifest declaration is unexpectedly absent.
     RequiredAuthorityMissing,
     /// Private execution has not passed its independent isolation gates.
@@ -432,6 +460,7 @@ pub struct ExtensionRuntimeEligibility {
     install_revision: ExtensionInstallRevision,
     grant_revision: ExtensionGrantRevision,
     grant_digest: ExtensionGrantDigest,
+    profile_policy: Arc<ExtensionProfilePolicy>,
     browsing_context: ExtensionGrantBrowsingContext,
     manifest: Arc<ExtensionManifestDescriptor>,
     grants: Arc<ExtensionGrantAuthority>,
@@ -440,11 +469,15 @@ pub struct ExtensionRuntimeEligibility {
 impl ExtensionRuntimeEligibility {
     pub(super) fn from_entry(
         entry: ExtensionGrantCohortEntry<'_>,
+        profile_policy: Arc<ExtensionProfilePolicy>,
         browsing_context: ExtensionGrantBrowsingContext,
     ) -> Result<Self, ExtensionRuntimeEligibilityDenial> {
         let install = entry.install();
         if !install.desired_enabled() {
             return Err(ExtensionRuntimeEligibilityDenial::Disabled);
+        }
+        if profile_policy.paused() {
+            return Err(ExtensionRuntimeEligibilityDenial::ProfilePaused);
         }
         let grants = entry
             .authority_arc()
@@ -463,6 +496,7 @@ impl ExtensionRuntimeEligibility {
             install_revision: install.revision(),
             grant_revision: grants.revision(),
             grant_digest: grants.digest(),
+            profile_policy,
             browsing_context,
             manifest: Arc::clone(entry.manifest_arc()),
             grants: Arc::clone(grants),
@@ -482,6 +516,7 @@ impl ExtensionRuntimeEligibility {
         install: ExtensionInstall,
         manifest: Arc<ExtensionManifestDescriptor>,
         grants: ExtensionGrantAuthority,
+        profile_policy: Arc<ExtensionProfilePolicy>,
         browsing_context: ExtensionGrantBrowsingContext,
     ) -> Result<Self, ExtensionCommittedRuntimeEligibilityError> {
         if install.id() != grants.install_id()
@@ -492,6 +527,9 @@ impl ExtensionRuntimeEligibility {
         }
         if !install.desired_enabled() {
             return Err(ExtensionCommittedRuntimeEligibilityError::Disabled);
+        }
+        if profile_policy.paused() {
+            return Err(ExtensionCommittedRuntimeEligibilityError::ProfilePaused);
         }
         if !grants.has_required_api_and_host_grants_for(&manifest) {
             return Err(ExtensionCommittedRuntimeEligibilityError::RequiredAuthorityMissing);
@@ -508,6 +546,7 @@ impl ExtensionRuntimeEligibility {
             install_revision: install.revision(),
             grant_revision,
             grant_digest,
+            profile_policy,
             browsing_context,
             manifest,
             grants: Arc::new(grants),
@@ -542,6 +581,18 @@ impl ExtensionRuntimeEligibility {
     /// Exact complete grant-authority digest observed at the same revision.
     pub const fn grant_digest(&self) -> ExtensionGrantDigest {
         self.grant_digest
+    }
+
+    pub fn profile_policy_revision(&self) -> ExtensionProfilePolicyRevision {
+        self.profile_policy.revision()
+    }
+
+    pub fn profile_policy_digest(&self) -> ExtensionProfilePolicyDigest {
+        self.profile_policy.digest()
+    }
+
+    pub fn profile_policy(&self) -> &ExtensionProfilePolicy {
+        &self.profile_policy
     }
 
     /// Browsing partition whose grant decisions this value may evaluate.
@@ -582,6 +633,7 @@ impl ExtensionRuntimeEligibility {
         self.manifest
             .retained_bytes()
             .saturating_add(self.grants.retained_bytes())
+            .saturating_add(self.profile_policy.retained_bytes())
     }
 
     pub(super) fn into_operation_authority(
@@ -619,6 +671,8 @@ impl ExtensionRuntimeEligibility {
             install_revision: self.install_revision,
             grant_revision: self.grant_revision,
             grant_digest: self.grant_digest,
+            profile_policy_revision: self.profile_policy.revision(),
+            profile_policy_digest: self.profile_policy.digest(),
             package: self.manifest.package().clone(),
             browsing_context: self.browsing_context,
         })
@@ -639,6 +693,11 @@ impl ExtensionRuntimeEligibility {
     /// `InScope` remains a scope result, not permission to fetch, inject, or
     /// expose data. The operation broker must independently validate purpose.
     pub fn decide_url_scope(&self, url: &Url) -> ExtensionUrlScopeDecision {
+        if let ExtensionUrlScopeDecision::OutOfScope(reason) =
+            profile_policy_url_decision(&self.profile_policy, url)
+        {
+            return ExtensionUrlScopeDecision::OutOfScope(reason);
+        }
         self.grants
             .decide_url_scope(&self.manifest, url, self.browsing_context)
     }
@@ -749,6 +808,7 @@ impl ExtensionRuntimeOperationAuthority {
             &self.fingerprint,
             &self.eligibility.manifest,
             &self.eligibility.grants,
+            &self.eligibility.profile_policy,
         ))
     }
 
@@ -874,6 +934,7 @@ impl ExtensionRuntimeOperationAuthority {
         Ok(ExtensionActiveTabGrantWitness {
             runtime: self.fingerprint.clone(),
             invocation,
+            profile_policy: Arc::clone(&self.eligibility.profile_policy),
         })
     }
 
@@ -904,6 +965,7 @@ impl ExtensionRuntimeOperationAuthority {
             purpose,
             manifest: Arc::clone(&self.eligibility.manifest),
             grants: Arc::clone(&self.eligibility.grants),
+            profile_policy: Arc::clone(&self.eligibility.profile_policy),
         })
     }
 
@@ -1240,7 +1302,14 @@ mod tests {
             &manifest,
         )
         .unwrap();
-        ExtensionGrantCohort::from_persisted(profile, catalog, bindings, vec![authority]).unwrap()
+        ExtensionGrantCohort::from_persisted(
+            profile,
+            super::ExtensionProfilePolicy::initial(),
+            catalog,
+            bindings,
+            vec![authority],
+        )
+        .unwrap()
     }
 
     fn owned_entry(
@@ -1990,6 +2059,7 @@ mod tests {
             install,
             Arc::clone(&manifest),
             grants,
+            Arc::new(super::ExtensionProfilePolicy::initial()),
             ExtensionGrantBrowsingContext::Regular,
         )
         .expect("exact committed mutation projects");

@@ -660,6 +660,21 @@ pub enum ExtensionGrantEditOutcome {
     FailedClosed,
 }
 
+/// Settlement of one profile-wide safe-mode or site-denial edit.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ExtensionProfilePolicyEditOutcome {
+    Applied {
+        policy: Box<crate::extensions::ExtensionProfilePolicy>,
+        changed: bool,
+        activation_pending: bool,
+    },
+    Conflict,
+    Rejected,
+    Unavailable,
+    OutcomeUnknown,
+    FailedClosed,
+}
+
 /// Management settlement plus the complete same-turn browser-routing cohort.
 ///
 /// `None` means the worker could not establish a trustworthy runtime
@@ -784,6 +799,8 @@ pub type ExtensionRuntimeGrantCallback =
 /// Exactly-once completion callback for a privileged optional-authority edit.
 pub type ExtensionGrantEditCallback =
     Box<dyn FnOnce(ExtensionManagementSettlement<ExtensionGrantEditOutcome>) + Send>;
+pub type ExtensionProfilePolicyEditCallback =
+    Box<dyn FnOnce(ExtensionManagementSettlement<ExtensionProfilePolicyEditOutcome>) + Send>;
 /// Exactly-once completion callback for an admitted management-catalog read.
 pub type ExtensionManagementCatalogCallback =
     Box<dyn FnOnce(ExtensionManagementCatalogOutcome) + Send>;
@@ -1054,6 +1071,20 @@ pub trait ExtensionServiceLifecycle: Send {
         _request: ExtensionGrantEditRequest,
         _deadline: Instant,
         done: ExtensionGrantEditCallback,
+    ) -> ExtensionManagementAdmission {
+        drop(done);
+        ExtensionManagementAdmission::Unavailable
+    }
+
+    /// Applies one profile-wide extension pause or exact-site denial after
+    /// retiring every matching runtime owner.
+    fn begin_edit_profile_policy(
+        &mut self,
+        _profile: ProfileId,
+        _expected: crate::extensions::ExtensionProfilePolicyRevision,
+        _mutation: crate::extensions::ExtensionProfilePolicyMutation,
+        _deadline: Instant,
+        done: ExtensionProfilePolicyEditCallback,
     ) -> ExtensionManagementAdmission {
         drop(done);
         ExtensionManagementAdmission::Unavailable

@@ -1275,13 +1275,27 @@ restart; a definite pre-commit refusal restores the old runtime. Page content
 cannot name a permission, package, profile, runtime, or native object through
 this path.
 
+Profile-wide safe mode and site denials are a separate revisioned Store
+authority, never implicit grant mutations. The complete policy is loaded in
+the same profile transaction as installs/grants and is bound into runtime and
+native-plan identity. A changed write cannot commit while any native ownership
+row for the profile exists; the serialized service retires the whole bounded
+profile cohort before CAS and restores only the exact previous live keys on a
+definite refusal. Outcome uncertainty closes management until restart.
+Privileged IPC carries only the exact policy revision and booleans. Shell alone
+derives a canonical HTTP/HTTPS DNS-or-IPv4 whole-host scope from the focused
+committed URL, so page/chrome JavaScript cannot submit a URL or pattern.
+Core document witnesses and transient `activeTab` redemption independently
+reject a profile-denied site before any engine scripting permit is issued.
+
 The macOS live gate proves that an explicit exact-host denial overrides a
 broader granted host pattern while a different host remains granted, and that
 content-script execution follows the effective denial and later restoration.
-The probe applies and exactly reads back both native dictionaries. This is not
-yet user authority: production has no durable site-pause policy and emits no
-denied-pattern plan until the Store, runtime-journal, lifecycle, and privileged
-UX transaction are implemented together.
+The probe applies and exactly reads back both native dictionaries. Authenticated
+native and brokered product gates then prove the durable policy transaction,
+native rebind, denied execution, restoration, uninstall erasure, and clean
+restart. File, wildcard, path-specific, userinfo, and IPv6 scopes remain
+unavailable rather than being approximated.
 
 ### Extension compatibility broker
 

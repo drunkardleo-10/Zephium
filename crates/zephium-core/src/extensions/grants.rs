@@ -124,6 +124,7 @@ pub enum ExtensionGrantDenial {
     HostNotDeclared,
     HostNotGranted,
     UrlNotGranted,
+    ProfileSiteDenied,
 }
 
 /// Effective decision for one exact manifest API permission.

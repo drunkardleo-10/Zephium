@@ -1,5 +1,6 @@
 use zephium_core::extensions::{
-    ApiPermissionName, ExtensionCatalogSetDigest, ExtensionRuntimeGeneration,
+    ApiPermissionName, ExtensionCatalogSetDigest, ExtensionProfilePolicyMutation,
+    ExtensionRuntimeGeneration, ExtensionSiteAccessScope,
 };
 use zephium_core::injection::MatchPattern;
 #[cfg(all(
@@ -15,8 +16,8 @@ use zephium_core::ports::extensions::{
     ExtensionInstallSelector, ExtensionInstalledRuntimeState, ExtensionManagementAdmission,
     ExtensionManagementCatalogAdmission, ExtensionManagementCatalogOutcome,
     ExtensionManagementGrantState, ExtensionManagementRuntimeState, ExtensionManagementSource,
-    ExtensionRuntimeActivationDisposition, ExtensionRuntimeGrantOutcome,
-    ExtensionRuntimeGrantRequest, ExtensionRuntimeGrantRuntimeState,
+    ExtensionProfilePolicyEditOutcome, ExtensionRuntimeActivationDisposition,
+    ExtensionRuntimeGrantOutcome, ExtensionRuntimeGrantRequest, ExtensionRuntimeGrantRuntimeState,
     ExtensionRuntimeRetirementDisposition, ExtensionServiceLifecycle, ExtensionSetEnabledOutcome,
     ExtensionUninstallOutcome,
 };
@@ -667,6 +668,137 @@ fn actor_runtime_optional_grants_rebind_one_exact_live_generation() {
     };
     assert_eq!(evidence.accepted_commands(), 8);
     assert_eq!(evidence.completed_commands(), 8);
+    harness.finish(evidence);
+}
+
+#[test]
+fn actor_profile_policy_pauses_restores_and_rebinds_exact_site_denials() {
+    let (harness, mut owner) = ActorAuthorityHarness::launch(1);
+    let profile = harness.profiles[0];
+
+    let (catalog_tx, catalog_rx) = std::sync::mpsc::sync_channel(1);
+    assert_eq!(
+        ExtensionServiceLifecycle::begin_load_management_catalog(
+            &mut owner,
+            profile,
+            deadline(),
+            Box::new(move |outcome| {
+                let _ = catalog_tx.send(outcome);
+            }),
+        ),
+        ExtensionManagementCatalogAdmission::Accepted
+    );
+    let ExtensionManagementCatalogOutcome::Loaded(catalog) = catalog_rx
+        .recv_timeout(std::time::Duration::from_secs(15))
+        .unwrap()
+    else {
+        panic!("profile-policy management catalog did not load");
+    };
+    let initial = catalog.profile_policy().clone();
+
+    let (pause_tx, pause_rx) = std::sync::mpsc::sync_channel(1);
+    assert_eq!(
+        ExtensionServiceLifecycle::begin_edit_profile_policy(
+            &mut owner,
+            profile,
+            initial.revision(),
+            ExtensionProfilePolicyMutation::SetPaused(true),
+            deadline(),
+            Box::new(move |outcome| {
+                let _ = pause_tx.send(outcome);
+            }),
+        ),
+        ExtensionManagementAdmission::Accepted
+    );
+    let paused = pause_rx
+        .recv_timeout(std::time::Duration::from_secs(15))
+        .unwrap();
+    let ExtensionProfilePolicyEditOutcome::Applied {
+        policy: paused_policy,
+        changed: true,
+        activation_pending: false,
+    } = paused.outcome()
+    else {
+        panic!("profile pause did not settle exactly: {paused:?}");
+    };
+    assert!(paused_policy.paused());
+    assert!(paused.active_profiles().unwrap().is_empty());
+    assert_eq!(harness.probe.retirement_calls(), 1);
+
+    let (resume_tx, resume_rx) = std::sync::mpsc::sync_channel(1);
+    assert_eq!(
+        ExtensionServiceLifecycle::begin_edit_profile_policy(
+            &mut owner,
+            profile,
+            paused_policy.revision(),
+            ExtensionProfilePolicyMutation::SetPaused(false),
+            deadline(),
+            Box::new(move |outcome| {
+                let _ = resume_tx.send(outcome);
+            }),
+        ),
+        ExtensionManagementAdmission::Accepted
+    );
+    let resumed = resume_rx
+        .recv_timeout(std::time::Duration::from_secs(15))
+        .unwrap();
+    let ExtensionProfilePolicyEditOutcome::Applied {
+        policy: resumed_policy,
+        changed: true,
+        activation_pending: false,
+    } = resumed.outcome()
+    else {
+        panic!("profile resume did not reactivate: {resumed:?}");
+    };
+    assert!(!resumed_policy.paused());
+    assert_eq!(
+        resumed
+            .active_profiles()
+            .unwrap()
+            .iter()
+            .collect::<Vec<_>>(),
+        [profile]
+    );
+
+    let site = ExtensionSiteAccessScope::parse_exact("https://denied.example/*").unwrap();
+    let (site_tx, site_rx) = std::sync::mpsc::sync_channel(1);
+    assert_eq!(
+        ExtensionServiceLifecycle::begin_edit_profile_policy(
+            &mut owner,
+            profile,
+            resumed_policy.revision(),
+            ExtensionProfilePolicyMutation::SetSiteDenied {
+                scope: site.clone(),
+                denied: true,
+            },
+            deadline(),
+            Box::new(move |outcome| {
+                let _ = site_tx.send(outcome);
+            }),
+        ),
+        ExtensionManagementAdmission::Accepted
+    );
+    let denied = site_rx
+        .recv_timeout(std::time::Duration::from_secs(15))
+        .unwrap();
+    let ExtensionProfilePolicyEditOutcome::Applied {
+        policy: denied_policy,
+        changed: true,
+        activation_pending: false,
+    } = denied.outcome()
+    else {
+        panic!("site denial did not rebind the live profile: {denied:?}");
+    };
+    assert!(denied_policy.denies(&site));
+    assert_eq!(harness.probe.retirement_calls(), 2);
+    assert_eq!(harness.probe.activation_calls(), 3);
+
+    let ExtensionServiceShutdownOutcome::Complete(evidence) = owner.shutdown_until(deadline())
+    else {
+        panic!("profile-policy actor did not prove clean shutdown");
+    };
+    assert_eq!(evidence.accepted_commands(), 4);
+    assert_eq!(evidence.completed_commands(), 4);
     harness.finish(evidence);
 }
 

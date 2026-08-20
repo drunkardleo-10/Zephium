@@ -52,7 +52,7 @@ let failure = $state.raw<VisibleFailure | null>(null);
 const invoking = new SvelteSet<string>();
 type ManagementMutation = {
   subject: string;
-  kind: "install" | "update" | "enable" | "disable" | "uninstall" | "grant";
+  kind: "install" | "update" | "enable" | "disable" | "uninstall" | "grant" | "policy";
 };
 let managementMutation = $state.raw<ManagementMutation | null>(null);
 let managementNotice = $state<string | null>(null);
@@ -516,6 +516,18 @@ export function editOptionalGrant(
       index,
       granted,
     ),
+  );
+}
+
+export function setProfilePaused(policyRevision: string, paused: boolean): void {
+  void settleManagementMutation({ subject: "profile", kind: "policy" }, () =>
+    commands.extensionManagementSetProfilePaused(policyRevision, paused),
+  );
+}
+
+export function setCurrentSiteEnabled(policyRevision: string, enabled: boolean): void {
+  void settleManagementMutation({ subject: "current-site", kind: "policy" }, () =>
+    commands.extensionManagementSetCurrentSiteEnabled(policyRevision, enabled),
   );
 }
 

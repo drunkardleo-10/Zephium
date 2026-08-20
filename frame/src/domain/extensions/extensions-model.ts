@@ -25,6 +25,7 @@ export function initialExtensionManagement(): ExtensionManagementView {
     profile_id: "",
     phase: "unavailable",
     catalog_revision: null,
+    profile_policy: null,
     entries: [],
     candidates: [],
     pending_update: null,
@@ -148,11 +149,16 @@ export class ExtensionManagementProjectionModel {
 
 function validExtensionManagementShape(candidate: ExtensionManagementView): boolean {
   if (candidate.phase === "ready") {
-    return candidate.catalog_revision !== null && candidate.pending_update === null;
+    return (
+      candidate.catalog_revision !== null &&
+      candidate.profile_policy !== null &&
+      candidate.pending_update === null
+    );
   }
   if (candidate.phase === "update_consent_required") {
     return (
       candidate.catalog_revision === null &&
+      candidate.profile_policy === null &&
       candidate.entries.length === 0 &&
       candidate.candidates.length === 0 &&
       candidate.pending_update !== null &&
@@ -164,6 +170,7 @@ function validExtensionManagementShape(candidate: ExtensionManagementView): bool
   }
   return (
     candidate.catalog_revision === null &&
+    candidate.profile_policy === null &&
     candidate.entries.length === 0 &&
     candidate.candidates.length === 0 &&
     candidate.pending_update === null

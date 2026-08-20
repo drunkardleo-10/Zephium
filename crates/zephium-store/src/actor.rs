@@ -23,8 +23,10 @@ use zephium_core::extensions::{
     ExtensionInstallCatalogMutation, ExtensionInstallCatalogRevision, ExtensionInstallRevision,
     ExtensionManifestDescriptor, ExtensionNativeOwnershipEntryCas,
     ExtensionNativeOwnershipJournalMutation, ExtensionNativeOwnershipJournalRevision,
-    ExtensionNativeOwnershipKey, MAX_EXTENSION_GRANT_MANIFEST_BINDINGS_RETAINED_BYTES,
-    MAX_EXTENSION_MANIFEST_RETAINED_BYTES, MAX_EXTENSION_NATIVE_OWNERSHIP_MUTATION_RETAINED_BYTES,
+    ExtensionNativeOwnershipKey, ExtensionProfilePolicyMutation, ExtensionProfilePolicyRevision,
+    MAX_EXTENSION_GRANT_MANIFEST_BINDINGS_RETAINED_BYTES, MAX_EXTENSION_MANIFEST_RETAINED_BYTES,
+    MAX_EXTENSION_NATIVE_OWNERSHIP_MUTATION_RETAINED_BYTES,
+    MAX_EXTENSION_PROFILE_POLICY_MUTATION_RETAINED_BYTES,
 };
 use zephium_core::ids::{ExtensionInstallId, ProfileId};
 use zephium_core::item::sanitize_page_title;
@@ -37,7 +39,8 @@ use zephium_core::ports::store::{
     ExtensionInstallUpdateGrantDecision, ExtensionInstallUpdateOutcome,
     ExtensionNativeNamespaceLoadOutcome, ExtensionNativeOwnershipActivationOutcome,
     ExtensionNativeOwnershipJournalLoadOutcome, ExtensionNativeOwnershipJournalMutationOutcome,
-    HistoryHit, PagePermissionCatalogLoadOutcome, PagePermissionCatalogMutationOutcome,
+    ExtensionProfilePolicyLoadOutcome, ExtensionProfilePolicyMutationOutcome, HistoryHit,
+    PagePermissionCatalogLoadOutcome, PagePermissionCatalogMutationOutcome,
     ProfileDeletionAuthorizeOutcome, ProfileDeletionFinalizeOutcome, ProfileDeletionLoad,
     SessionLoad, Store, StoreShutdownOutcome, UserscriptCatalogLoadOutcome,
     UserscriptCatalogMutationOutcome, MAX_EXTENSION_GRANT_WRITE_RETAINED_BYTES,
@@ -137,6 +140,9 @@ type ExtensionInstallCatalogMutationDone =
     Box<dyn FnOnce(ExtensionInstallCatalogMutationOutcome) + Send>;
 type ExtensionGrantCohortLoadDone = Box<dyn FnOnce(ExtensionGrantCohortLoadOutcome) + Send>;
 type ExtensionGrantMutationDone = Box<dyn FnOnce(ExtensionGrantMutationOutcome) + Send>;
+type ExtensionProfilePolicyLoadDone = Box<dyn FnOnce(ExtensionProfilePolicyLoadOutcome) + Send>;
+type ExtensionProfilePolicyMutationDone =
+    Box<dyn FnOnce(ExtensionProfilePolicyMutationOutcome) + Send>;
 type ExtensionInstallProvisionDone = Box<dyn FnOnce(ExtensionInstallProvisionOutcome) + Send>;
 type ExtensionInstallUpdateDone = Box<dyn FnOnce(ExtensionInstallUpdateOutcome) + Send>;
 type ExtensionNativeNamespaceLoadDone = Box<dyn FnOnce(ExtensionNativeNamespaceLoadOutcome) + Send>;
@@ -643,6 +649,18 @@ enum Cmd {
         ExtensionGrantWrite,
         ExtensionGrantRequestPermit,
         ExtensionGrantMutationDone,
+    ),
+    LoadExtensionProfilePolicy(
+        ProfileId,
+        ExtensionGrantRequestPermit,
+        ExtensionProfilePolicyLoadDone,
+    ),
+    MutateExtensionProfilePolicy(
+        ProfileId,
+        ExtensionProfilePolicyRevision,
+        ExtensionProfilePolicyMutation,
+        ExtensionGrantRequestPermit,
+        ExtensionProfilePolicyMutationDone,
     ),
     ProvisionExtensionInstall(
         ProfileId,
@@ -1305,6 +1323,50 @@ impl ExtensionServiceStoreAuthority {
         observe_extension_service_store_call(result, deadline)
     }
 
+    pub fn load_profile_policy_until(
+        &self,
+        profile: ProfileId,
+        deadline: Instant,
+    ) -> ExtensionServiceStoreCallOutcome<ExtensionProfilePolicyLoadOutcome> {
+        if Instant::now() >= deadline {
+            return ExtensionServiceStoreCallOutcome::NotAdmitted;
+        }
+        let (reply, result) = mpsc::sync_channel(1);
+        let done = Box::new(move |outcome| {
+            let _ = reply.send(outcome);
+        });
+        if !self
+            .store
+            .try_load_extension_profile_policy(profile, deadline, done)
+        {
+            return ExtensionServiceStoreCallOutcome::NotAdmitted;
+        }
+        observe_extension_service_store_call(result, deadline)
+    }
+
+    pub fn mutate_profile_policy_until(
+        &self,
+        profile: ProfileId,
+        expected: ExtensionProfilePolicyRevision,
+        mutation: ExtensionProfilePolicyMutation,
+        deadline: Instant,
+    ) -> ExtensionServiceStoreCallOutcome<ExtensionProfilePolicyMutationOutcome> {
+        if Instant::now() >= deadline {
+            return ExtensionServiceStoreCallOutcome::NotAdmitted;
+        }
+        let (reply, result) = mpsc::sync_channel(1);
+        let done = Box::new(move |outcome| {
+            let _ = reply.send(outcome);
+        });
+        if !self
+            .store
+            .try_mutate_extension_profile_policy(profile, expected, mutation, deadline, done)
+        {
+            return ExtensionServiceStoreCallOutcome::NotAdmitted;
+        }
+        observe_extension_service_store_call(result, deadline)
+    }
+
     /// Applies one exact bounded grant patch after native ownership for the
     /// install has been retired.
     ///
@@ -1683,6 +1745,72 @@ impl SqliteStore {
         self.tx
             .try_send(Cmd::LoadExtensionGrantCohort(
                 profile, bindings, permit, done,
+            ))
+            .is_ok()
+    }
+
+    fn try_load_extension_profile_policy(
+        &self,
+        profile: ProfileId,
+        deadline: Instant,
+        done: ExtensionProfilePolicyLoadDone,
+    ) -> bool {
+        let lifecycle = match self.lifecycle.try_lock() {
+            Ok(lifecycle) => lifecycle,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => return false,
+        };
+        if Instant::now() >= deadline
+            || lifecycle.terminal_admitted
+            || self.shutdown_clean.load(Ordering::Acquire)
+        {
+            return false;
+        }
+        let Some(permit) =
+            ExtensionGrantRequestPermit::try_acquire(&self.extension_grant_request_admission, 0)
+        else {
+            return false;
+        };
+        self.tx
+            .try_send(Cmd::LoadExtensionProfilePolicy(profile, permit, done))
+            .is_ok()
+    }
+
+    fn try_mutate_extension_profile_policy(
+        &self,
+        profile: ProfileId,
+        expected: ExtensionProfilePolicyRevision,
+        mutation: ExtensionProfilePolicyMutation,
+        deadline: Instant,
+        done: ExtensionProfilePolicyMutationDone,
+    ) -> bool {
+        let lifecycle = match self.lifecycle.try_lock() {
+            Ok(lifecycle) => lifecycle,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => return false,
+        };
+        if Instant::now() >= deadline
+            || lifecycle.terminal_admitted
+            || self.shutdown_clean.load(Ordering::Acquire)
+        {
+            return false;
+        }
+        let retained_bytes = mutation.retained_bytes();
+        if retained_bytes > MAX_EXTENSION_PROFILE_POLICY_MUTATION_RETAINED_BYTES {
+            return false;
+        }
+        let Some(permit) = ExtensionGrantRequestPermit::try_acquire(
+            &self.extension_grant_request_admission,
+            retained_bytes,
+        ) else {
+            return false;
+        };
+        if Instant::now() >= deadline {
+            return false;
+        }
+        self.tx
+            .try_send(Cmd::MutateExtensionProfilePolicy(
+                profile, expected, mutation, permit, done,
             ))
             .is_ok()
     }
@@ -2460,6 +2588,56 @@ impl Store for SqliteStore {
             .is_ok()
     }
 
+    fn load_extension_profile_policy(
+        &self,
+        profile: ProfileId,
+        done: ExtensionProfilePolicyLoadDone,
+    ) -> bool {
+        let lifecycle = self
+            .lifecycle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if lifecycle.terminal_admitted || self.shutdown_clean.load(Ordering::Acquire) {
+            return false;
+        }
+        let Some(permit) =
+            ExtensionGrantRequestPermit::acquire(&self.extension_grant_request_admission, 0)
+        else {
+            return false;
+        };
+        self.tx
+            .try_send(Cmd::LoadExtensionProfilePolicy(profile, permit, done))
+            .is_ok()
+    }
+
+    fn mutate_extension_profile_policy(
+        &self,
+        profile: ProfileId,
+        expected: ExtensionProfilePolicyRevision,
+        mutation: ExtensionProfilePolicyMutation,
+        done: ExtensionProfilePolicyMutationDone,
+    ) -> bool {
+        let lifecycle = self
+            .lifecycle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if lifecycle.terminal_admitted || self.shutdown_clean.load(Ordering::Acquire) {
+            return false;
+        }
+        let retained_bytes = mutation.retained_bytes();
+        let Some(permit) = ExtensionGrantRequestPermit::acquire(
+            &self.extension_grant_request_admission,
+            retained_bytes,
+        ) else {
+            return false;
+        };
+        self.tx
+            .try_send(Cmd::MutateExtensionProfilePolicy(
+                profile, expected, mutation, permit, done,
+            ))
+            .is_ok()
+    }
+
     fn mutate_extension_grants(
         &self,
         profile: ProfileId,
@@ -3073,6 +3251,26 @@ fn actor(
                         ExtensionGrantCohortLoadOutcome::Failed
                     }
                 };
+                done(outcome);
+            }
+            Some(Cmd::LoadExtensionProfilePolicy(profile, _permit, done)) => {
+                let outcome = hub
+                    .load_extension_profile_policy(profile)
+                    .unwrap_or_else(|error| {
+                        eprintln!("store: profile {profile} extension-policy load failed: {error}");
+                        ExtensionProfilePolicyLoadOutcome::Failed
+                    });
+                done(outcome);
+            }
+            Some(Cmd::MutateExtensionProfilePolicy(profile, expected, mutation, _permit, done)) => {
+                let outcome = hub
+                    .mutate_extension_profile_policy(profile, expected, mutation)
+                    .unwrap_or_else(|error| {
+                        eprintln!(
+                            "store: profile {profile} extension-policy mutation failed: {error}"
+                        );
+                        ExtensionProfilePolicyMutationOutcome::Failed
+                    });
                 done(outcome);
             }
             Some(Cmd::MutateExtensionGrants(

@@ -19,6 +19,7 @@ mod native_grants;
 mod native_namespace;
 mod native_ownership;
 mod package_pin;
+mod profile_policy;
 mod runtime;
 mod transient;
 
@@ -133,6 +134,13 @@ pub use package_pin::{
     ExtensionPackagePinHeldBinding, ExtensionPackagePinRecombineRefusal,
     ExtensionPackagePinReleaseBinding, ExtensionPackagePinReleaseDenial,
     ExtensionPackagePinRuntimeParts,
+};
+pub use profile_policy::{
+    ExtensionProfilePolicy, ExtensionProfilePolicyApplication, ExtensionProfilePolicyApplyError,
+    ExtensionProfilePolicyDigest, ExtensionProfilePolicyError, ExtensionProfilePolicyMutation,
+    ExtensionProfilePolicyRevision, ExtensionSiteAccessScope,
+    MAX_EXTENSION_PROFILE_POLICY_MUTATION_RETAINED_BYTES,
+    MAX_EXTENSION_PROFILE_POLICY_RETAINED_BYTES, MAX_EXTENSION_SITE_DENIALS_PER_PROFILE,
 };
 pub use runtime::{
     ExtensionActiveTabGrantWitness, ExtensionCommittedRuntimeEligibilityError,

@@ -131,8 +131,10 @@ impl Hub {
             return Ok(ExtensionGrantCohortLoadOutcome::Invalid);
         }
         let authorities = load_all_authorities(&tx, &catalog, &bindings)?;
+        let profile_policy = super::extension_profile_policy::load_policy(&tx)?;
         let cohort = zephium_core::extensions::ExtensionGrantCohort::from_persisted(
             profile,
+            profile_policy,
             catalog,
             bindings,
             authorities,

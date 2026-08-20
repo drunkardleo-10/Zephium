@@ -7,7 +7,8 @@ use std::sync::{Arc, Mutex};
 use zephium_core::blocker::{ContentPolicyGeneration, ProfileContentPolicyStatus};
 use zephium_core::extensions::{
     ExtensionActionRevision, ExtensionGrantRevision, ExtensionInstallCatalogRevision,
-    ExtensionInstallRevision, ExtensionPopupAnchor, ExtensionRuntimeInstance,
+    ExtensionInstallRevision, ExtensionPopupAnchor, ExtensionProfilePolicyRevision,
+    ExtensionRuntimeInstance,
 };
 use zephium_core::geometry::Size;
 use zephium_core::ids::{ExtensionInstallId, ItemId, ProfileId};
@@ -21,8 +22,9 @@ use zephium_core::ports::extensions::{
     ExtensionAcquiredPackageProvisioningOutcome, ExtensionAcquiredPackageProvisioningRequest,
     ExtensionDistributionStatus, ExtensionGrantEditOutcome, ExtensionGrantEditTarget,
     ExtensionInstallOutcome, ExtensionManagementCatalogOutcome, ExtensionManagementSettlement,
-    ExtensionRepositoryMaintenanceOutcome, ExtensionRuntimeGrantOutcome,
-    ExtensionRuntimeGrantRequestId, ExtensionSetEnabledOutcome, ExtensionUninstallOutcome,
+    ExtensionProfilePolicyEditOutcome, ExtensionRepositoryMaintenanceOutcome,
+    ExtensionRuntimeGrantOutcome, ExtensionRuntimeGrantRequestId, ExtensionSetEnabledOutcome,
+    ExtensionUninstallOutcome,
 };
 use zephium_core::ports::store::Store;
 use zephium_core::ports::store::{
@@ -182,13 +184,14 @@ pub type ExtensionLifecycle = Box<dyn ExtensionServiceLifecycle>;
 /// service settlement. This also reserves critical Shell mailbox capacity.
 pub const MAX_PENDING_EXTENSION_MANAGEMENT_OPERATIONS: usize = 8;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ExtensionManagementCompletion {
     Install(ExtensionManagementSettlement<ExtensionInstallOutcome>),
     Update(ExtensionManagementSettlement<zephium_core::ports::extensions::ExtensionUpdateOutcome>),
     SetEnabled(ExtensionManagementSettlement<ExtensionSetEnabledOutcome>),
     Uninstall(ExtensionManagementSettlement<ExtensionUninstallOutcome>),
     GrantEdit(ExtensionManagementSettlement<ExtensionGrantEditOutcome>),
+    ProfilePolicy(ExtensionManagementSettlement<ExtensionProfilePolicyEditOutcome>),
 }
 /// Redacted terminal reason delivered to the desktop composition root when
 /// the shell can no longer continue safely in the current process.
@@ -403,6 +406,17 @@ pub enum Command {
         expected_grant: ExtensionGrantRevision,
         target: ExtensionGrantEditTarget,
         granted: bool,
+    },
+    /// Pauses or resumes every extension in the focused profile.
+    SetFocusedProfileExtensionsPaused {
+        expected_policy: ExtensionProfilePolicyRevision,
+        paused: bool,
+    },
+    /// Enables or disables extensions on the focused tab's browser-derived
+    /// whole-host scope. No URL or host crosses privileged IPC.
+    SetFocusedSiteExtensionsEnabled {
+        expected_policy: ExtensionProfilePolicyRevision,
+        enabled: bool,
     },
     /// Installs one exact package from the latest privileged management
     /// projection. Shell derives the focused profile and complete package
