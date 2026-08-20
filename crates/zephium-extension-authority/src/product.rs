@@ -980,28 +980,13 @@ fn sealed_product_bundled_catalog_generations(
 ) -> Result<Option<SealedBundledCatalogGenerations>, BundledCatalogAdmissionError> {
     use crate::staging_catalog as staging;
 
-    let active = staging_generation(
-        staging::CATALOG_BYTES,
-        staging::CATALOG_LENGTH,
-        staging::CATALOG_SHA256,
-        staging::INVENTORY_SHA256,
-    )?;
-    let rollback_one = staging_generation(
-        staging::ROLLBACK_CATALOG_BYTES,
-        staging::ROLLBACK_CATALOG_LENGTH,
-        staging::ROLLBACK_CATALOG_SHA256,
-        staging::ROLLBACK_INVENTORY_SHA256,
-    )?;
-    let rollback_two = staging_generation(
-        staging::ROLLBACK_TWO_CATALOG_BYTES,
-        staging::ROLLBACK_TWO_CATALOG_LENGTH,
-        staging::ROLLBACK_TWO_CATALOG_SHA256,
-        staging::ROLLBACK_TWO_INVENTORY_SHA256,
-    )?;
-    Ok(Some((
-        active,
-        vec![rollback_one, rollback_two].into_boxed_slice(),
-    )))
+    let active = staging_generation(&staging::ACTIVE_GENERATION)?;
+    let rollback = staging::ROLLBACK_GENERATIONS
+        .iter()
+        .map(staging_generation)
+        .collect::<Result<Vec<_>, _>>()?
+        .into_boxed_slice();
+    Ok(Some((active, rollback)))
 }
 
 #[cfg(all(
@@ -1009,26 +994,34 @@ fn sealed_product_bundled_catalog_generations(
     not(zephium_internal_repository_e2e)
 ))]
 fn staging_generation(
-    bytes: &[u8],
-    expected_length: usize,
-    expected_sha256: [u8; 32],
-    expected_inventory: [u8; 32],
+    input: &crate::staging_catalog::StagingCatalogGeneration,
 ) -> Result<SealedBundledCatalogGeneration, BundledCatalogAdmissionError> {
     use crate::staging_catalog as staging;
 
-    if bytes.len() != expected_length || <[u8; 32]>::from(Sha256::digest(bytes)) != expected_sha256
+    if input.catalog_bytes.len() != input.catalog_length
+        || <[u8; 32]>::from(Sha256::digest(input.catalog_bytes)) != input.catalog_sha256
     {
         return Err(BundledCatalogAdmissionError::InvalidProductConfiguration);
     }
-    let catalog = ExtensionReleaseCatalog::parse_canonical(bytes)
+    let catalog = ExtensionReleaseCatalog::parse_canonical(input.catalog_bytes)
         .map_err(BundledCatalogAdmissionError::Catalog)?;
     let inventory_digest = digest_catalog_inventory(&catalog)
         .ok_or(BundledCatalogAdmissionError::AccountingOverflow)?;
-    if catalog.digest().as_bytes() != &expected_sha256
-        || inventory_digest.as_bytes() != &expected_inventory
+    let exact_profile_cohort = catalog.packages().len() == input.profiles.len()
+        && input.profiles.iter().enumerate().all(|(index, profile)| {
+            catalog
+                .package(zephium_core::extensions::ExtensionPackageKey::from_bytes(
+                    profile.package_key,
+                ))
+                .is_some()
+                && !input.profiles[..index]
+                    .iter()
+                    .any(|prior| prior.package_key == profile.package_key)
+        });
+    if catalog.digest().as_bytes() != &input.catalog_sha256
+        || inventory_digest.as_bytes() != &input.inventory_sha256
         || catalog.admission_policy_sha256().as_bytes() != &staging::ADMISSION_POLICY_SHA256
-        || catalog.packages().len() != 1
-        || catalog.packages()[0].identity().key().as_bytes() != &staging::PACKAGE_KEY
+        || !exact_profile_cohort
     {
         return Err(BundledCatalogAdmissionError::InvalidProductConfiguration);
     }
@@ -1040,7 +1033,7 @@ fn staging_generation(
     .map_err(|_| BundledCatalogAdmissionError::InvalidProductConfiguration)?;
     Ok(SealedBundledCatalogGeneration {
         anchor: SealedBundledCatalogAnchor {
-            catalog_length: expected_length,
+            catalog_length: input.catalog_length,
             catalog_digest: catalog.digest(),
             authority: catalog.authority(),
             catalog_revision: catalog.revision(),
@@ -1338,29 +1331,38 @@ mod tests {
             BundledProductAuthorityStatus::Configured
         );
         let admitted = authority
-            .admit_acquired_catalog(crate::staging_catalog::CATALOG_BYTES)
+            .admit_acquired_catalog(crate::staging_catalog::ACTIVE_GENERATION.catalog_bytes)
             .unwrap();
-        assert_eq!(admitted.catalog().packages().len(), 1);
-        assert_eq!(
-            admitted.catalog().packages()[0].identity().key().as_bytes(),
-            &crate::staging_catalog::PACKAGE_KEY
-        );
+        assert_eq!(admitted.catalog().packages().len(), 2);
+        for package_key in [
+            crate::staging_catalog::VIMIUM_PACKAGE_KEY,
+            crate::staging_catalog::DARK_READER_PACKAGE_KEY,
+        ] {
+            assert!(admitted
+                .catalog()
+                .package(zephium_core::extensions::ExtensionPackageKey::from_bytes(
+                    package_key
+                ))
+                .is_some());
+        }
         let rollback_one = authority
-            .admit_rollback_catalog(crate::staging_catalog::ROLLBACK_CATALOG_BYTES)
+            .admit_rollback_catalog(crate::staging_catalog::ROLLBACK_GENERATIONS[0].catalog_bytes)
             .unwrap();
         let rollback_two = authority
-            .admit_rollback_catalog(crate::staging_catalog::ROLLBACK_TWO_CATALOG_BYTES)
+            .admit_rollback_catalog(crate::staging_catalog::ROLLBACK_GENERATIONS[1].catalog_bytes)
             .unwrap();
-        assert_eq!(admitted.revision().get(), 6);
-        assert_eq!(rollback_one.revision().get(), 4);
-        assert_eq!(rollback_two.revision().get(), 5);
+        assert_eq!(admitted.revision().get(), 8);
+        assert_eq!(rollback_one.revision().get(), 6);
+        assert_eq!(rollback_two.revision().get(), 7);
         for rollback in [rollback_one, rollback_two] {
             assert_eq!(
                 authority.recognize_generation(&rollback.generation_anchor()),
                 Some(ProductBundledCatalogGenerationRole::Rollback)
             );
         }
-        let mut altered = crate::staging_catalog::CATALOG_BYTES.to_vec();
+        let mut altered = crate::staging_catalog::ACTIVE_GENERATION
+            .catalog_bytes
+            .to_vec();
         altered[0] ^= 1;
         assert_eq!(
             authority.admit_acquired_catalog(&altered).unwrap_err(),

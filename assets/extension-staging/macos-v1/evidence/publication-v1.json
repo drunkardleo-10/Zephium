@@ -3,13 +3,13 @@
   "kind": "zephium-extension-catalog-publication",
   "product_authority": false,
   "source_paths_retained": false,
-  "review_sha256": "d213f9bb2606a1171b35c46f8d98242de9643330f9dec6d3d41ccb378288c674",
+  "review_sha256": "b0e38ca2a5584275028deebcf344c7ed29b7144fcc627e198204c2dd31fe30c1",
   "catalog": {
     "authority_id": "81a343638e49df23245a9f99121a6be7a5501b19205015341203941e43188abc",
-    "catalog_revision": 6,
-    "catalog_bytes": 2169,
-    "catalog_sha256": "d15bb0a138379049d933c531b5225ec11c11a216d5d094e8d9c67212fce47638",
-    "catalog_inventory_sha256": "e538b0c155d7595be5a3cb4b41dd6692f04af070ada95bfd23ba9f8d4510e9c8",
+    "catalog_revision": 8,
+    "catalog_bytes": 4068,
+    "catalog_sha256": "e1cc8aa85eacd6df7c99f24263a1e1f35767fd83b3df4894c9a4e00b309dea5a",
+    "catalog_inventory_sha256": "9897724aca1a5e770ac1a2ad4f63ab97693917c581f5713a7f62740a2e9bcd6f",
     "admission_policy_sha256": "d05d6d14b6c2c81fa0dbefd350e547fe6e269156b0bef5ff5d77e5be5d0a3225",
     "license_rules": [
       {
@@ -30,14 +30,34 @@
       "sha256": "d8c686e59525111cd91f51b5ba77ea357106bd7cd1da1cb40d1c0da7bafb5f9a"
     },
     {
+      "target": "product/profile-inputs/b36c771ac46c6d64c6f62063c5ed29359338d5128be9fdbcb7cddb74c7b4cf98/2/778718d67d3efea8d488fd08491b40a1f14d7534a1e5243314d17123775096d3.manifest.json",
+      "bytes": 2004,
+      "sha256": "778718d67d3efea8d488fd08491b40a1f14d7534a1e5243314d17123775096d3"
+    },
+    {
+      "target": "product/profile-inputs/b36c771ac46c6d64c6f62063c5ed29359338d5128be9fdbcb7cddb74c7b4cf98/2/e42d79f3b12e29914cd1e7f50034bd1b63d843da4b7159408584778a2aaecede.tree-index.json",
+      "bytes": 11949,
+      "sha256": "e42d79f3b12e29914cd1e7f50034bd1b63d843da4b7159408584778a2aaecede"
+    },
+    {
       "target": "targets/crx3/4b2ab3abd19a8b3abe05f49956e96dd214a6d164bcda8f43e7d52102ffe58fd3/6/0154d07f8378f4e0396d1083941854dc141090680bb58394260ca5bd799e9598.crx3",
       "bytes": 220028,
       "sha256": "5bf9a4d8916959fca6b441b1ded47fa8dd615dffa2d1fb80314e5f9f4ec3187b"
     },
     {
+      "target": "targets/crx3/b36c771ac46c6d64c6f62063c5ed29359338d5128be9fdbcb7cddb74c7b4cf98/2/2d39a45d9a1514b214efee202c8e8276b1e8fc61461f33ee46b8ce20f65cfeb0.crx3",
+      "bytes": 830011,
+      "sha256": "523516c9550b15fd2cd97ce722348313da32deccb777caae4dc0a127e13d2c1a"
+    },
+    {
       "target": "targets/legal/bc52afe9916014c3fe1d9244b65a1c0293d1ccf7507af317b3b63c49a452dcbc.notice",
       "bytes": 1068,
       "sha256": "bc52afe9916014c3fe1d9244b65a1c0293d1ccf7507af317b3b63c49a452dcbc"
+    },
+    {
+      "target": "targets/legal/f0a5f835174494f8981b2cbb1a34054d4f887a5c865318650d6a17afe1c7850e.notice",
+      "bytes": 1095,
+      "sha256": "f0a5f835174494f8981b2cbb1a34054d4f887a5c865318650d6a17afe1c7850e"
     }
   ],
   "manifest_profiles_classified": false

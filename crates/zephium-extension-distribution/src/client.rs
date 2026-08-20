@@ -143,12 +143,10 @@ impl EmbeddedStagingArtifactTransport {
         url: Url,
         max_bytes: usize,
     ) -> Result<Box<[u8]>, FixedOriginFetchError> {
-        let bytes = match url.as_str() {
-            crate::staging::CATALOG_URL => crate::staging::CATALOG_BYTES,
-            crate::staging::CRX3_URL => crate::staging::CRX3_BYTES,
-            crate::staging::LEGAL_URL => crate::staging::LEGAL_BYTES,
-            _ => return Err(FixedOriginFetchError::Boundary),
-        };
+        let bytes = crate::staging::OBJECTS
+            .iter()
+            .find_map(|(candidate, bytes)| (*candidate == url.as_str()).then_some(*bytes))
+            .ok_or(FixedOriginFetchError::Boundary)?;
         if max_bytes == 0 || bytes.len() > max_bytes {
             return Err(FixedOriginFetchError::ResponseTooLarge);
         }

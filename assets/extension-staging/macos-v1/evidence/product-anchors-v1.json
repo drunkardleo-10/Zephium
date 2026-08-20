@@ -4,10 +4,10 @@
   "product_authority": false,
   "active": {
     "authority_id": "81a343638e49df23245a9f99121a6be7a5501b19205015341203941e43188abc",
-    "catalog_revision": 6,
-    "catalog_bytes": 2169,
-    "catalog_sha256": "d15bb0a138379049d933c531b5225ec11c11a216d5d094e8d9c67212fce47638",
-    "catalog_inventory_sha256": "e538b0c155d7595be5a3cb4b41dd6692f04af070ada95bfd23ba9f8d4510e9c8",
+    "catalog_revision": 8,
+    "catalog_bytes": 4068,
+    "catalog_sha256": "e1cc8aa85eacd6df7c99f24263a1e1f35767fd83b3df4894c9a4e00b309dea5a",
+    "catalog_inventory_sha256": "9897724aca1a5e770ac1a2ad4f63ab97693917c581f5713a7f62740a2e9bcd6f",
     "admission_policy_sha256": "d05d6d14b6c2c81fa0dbefd350e547fe6e269156b0bef5ff5d77e5be5d0a3225",
     "license_rules": [
       {
@@ -19,10 +19,10 @@
   "rollback": [
     {
       "authority_id": "81a343638e49df23245a9f99121a6be7a5501b19205015341203941e43188abc",
-      "catalog_revision": 4,
+      "catalog_revision": 6,
       "catalog_bytes": 2169,
-      "catalog_sha256": "7f06d03b7e9f1a3967109481dc2804955236d0e2f2868554624d98397f2aeecb",
-      "catalog_inventory_sha256": "688f881633543e8efb7a3e6d468e8572aad4de388bedc8d23d0b0e856113dde8",
+      "catalog_sha256": "d15bb0a138379049d933c531b5225ec11c11a216d5d094e8d9c67212fce47638",
+      "catalog_inventory_sha256": "e538b0c155d7595be5a3cb4b41dd6692f04af070ada95bfd23ba9f8d4510e9c8",
       "admission_policy_sha256": "d05d6d14b6c2c81fa0dbefd350e547fe6e269156b0bef5ff5d77e5be5d0a3225",
       "license_rules": [
         {
@@ -33,10 +33,10 @@
     },
     {
       "authority_id": "81a343638e49df23245a9f99121a6be7a5501b19205015341203941e43188abc",
-      "catalog_revision": 5,
-      "catalog_bytes": 2169,
-      "catalog_sha256": "86b7af189f0882701a457402e8cde0ea415404059a6052f90b10285ba593b4cc",
-      "catalog_inventory_sha256": "7b3363b9e183e33187181bf514a1e4a89c7e7f3985e6dd94890920c54d44b158",
+      "catalog_revision": 7,
+      "catalog_bytes": 4068,
+      "catalog_sha256": "44a81563470b52f097dd188f258a2516294cd27e1f2d68aff147ef07017a176e",
+      "catalog_inventory_sha256": "880b4948f84c5851d5738913f584215c5a31e6254fdcd5bb20b3059d5c3b40b5",
       "admission_policy_sha256": "d05d6d14b6c2c81fa0dbefd350e547fe6e269156b0bef5ff5d77e5be5d0a3225",
       "license_rules": [
         {

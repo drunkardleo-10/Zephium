@@ -2,7 +2,7 @@
   "schema": 1,
   "kind": "zephium-extension-classified-manifest-profiles",
   "product_authority": false,
-  "catalog_sha256": "86b7af189f0882701a457402e8cde0ea415404059a6052f90b10285ba593b4cc",
+  "catalog_sha256": "e1cc8aa85eacd6df7c99f24263a1e1f35767fd83b3df4894c9a4e00b309dea5a",
   "admission_policy": {
     "digest_sha256": "d05d6d14b6c2c81fa0dbefd350e547fe6e269156b0bef5ff5d77e5be5d0a3225",
     "license_rules": [
@@ -17,13 +17,13 @@
     {
       "input": {
         "package_key": "4b2ab3abd19a8b3abe05f49956e96dd214a6d164bcda8f43e7d52102ffe58fd3",
-        "package_revision": 5,
+        "package_revision": 6,
         "manifest_sha256": "886d008e4d79a1441f3e6c7e836abff7ed4f8d70d3405c742d36429caacd885b",
         "tree_sha256": "6b0960e703616c920c75a7b3994a4f63c2313234fc3886a764cbdf04d86a2e68",
         "tree_index_sha256": "d8c686e59525111cd91f51b5ba77ea357106bd7cd1da1cb40d1c0da7bafb5f9a",
         "tree_index_length": 11635,
-        "manifest_target": "product/profile-inputs/4b2ab3abd19a8b3abe05f49956e96dd214a6d164bcda8f43e7d52102ffe58fd3/5/886d008e4d79a1441f3e6c7e836abff7ed4f8d70d3405c742d36429caacd885b.manifest.json",
-        "tree_index_target": "product/profile-inputs/4b2ab3abd19a8b3abe05f49956e96dd214a6d164bcda8f43e7d52102ffe58fd3/5/d8c686e59525111cd91f51b5ba77ea357106bd7cd1da1cb40d1c0da7bafb5f9a.tree-index.json",
+        "manifest_target": "product/profile-inputs/4b2ab3abd19a8b3abe05f49956e96dd214a6d164bcda8f43e7d52102ffe58fd3/6/886d008e4d79a1441f3e6c7e836abff7ed4f8d70d3405c742d36429caacd885b.manifest.json",
+        "tree_index_target": "product/profile-inputs/4b2ab3abd19a8b3abe05f49956e96dd214a6d164bcda8f43e7d52102ffe58fd3/6/d8c686e59525111cd91f51b5ba77ea357106bd7cd1da1cb40d1c0da7bafb5f9a.tree-index.json",
         "compatibility_target": "macos.wkwebextension-brokered.v1",
         "compatibility_receipt_sha256": "04310a75132f0b27c55b43a730eb2b05a93127aeb236d5028701febb8b10c126",
         "declarations": [
@@ -176,7 +176,132 @@
         ]
       },
       "compatibility_digest": "b1f49c55a538ea75cbd5de3bd969df3200a302f8b14d88d5194f6996dd14ed16",
-      "admission_digest": "63ccf52f015915d288ac8515e600fc191b6272a29de7306e66b53db5eb3e2755",
+      "admission_digest": "310ce75fdb22e8487b6681eebd64a7ce4bc5853ad0410abc9f6e94631010a8ab",
+      "activatable": true
+    },
+    {
+      "input": {
+        "package_key": "b36c771ac46c6d64c6f62063c5ed29359338d5128be9fdbcb7cddb74c7b4cf98",
+        "package_revision": 2,
+        "manifest_sha256": "778718d67d3efea8d488fd08491b40a1f14d7534a1e5243314d17123775096d3",
+        "tree_sha256": "ac9611842b883e1c100b2eb0a28e8351783a33ecff319ec3b39dba3b9fc8cb07",
+        "tree_index_sha256": "e42d79f3b12e29914cd1e7f50034bd1b63d843da4b7159408584778a2aaecede",
+        "tree_index_length": 11949,
+        "manifest_target": "product/profile-inputs/b36c771ac46c6d64c6f62063c5ed29359338d5128be9fdbcb7cddb74c7b4cf98/2/778718d67d3efea8d488fd08491b40a1f14d7534a1e5243314d17123775096d3.manifest.json",
+        "tree_index_target": "product/profile-inputs/b36c771ac46c6d64c6f62063c5ed29359338d5128be9fdbcb7cddb74c7b4cf98/2/e42d79f3b12e29914cd1e7f50034bd1b63d843da4b7159408584778a2aaecede.tree-index.json",
+        "compatibility_target": "macos.wkwebextension.v1",
+        "compatibility_receipt_sha256": "91f28142bdc6e0c59adcbbed551087aaf22e151b09c59944e12db6c292953135",
+        "declarations": [
+          {
+            "declaration": {
+              "kind": "required_api",
+              "name": "alarms"
+            },
+            "level": "compatible"
+          },
+          {
+            "declaration": {
+              "kind": "required_api",
+              "name": "fontSettings"
+            },
+            "level": "degraded"
+          },
+          {
+            "declaration": {
+              "kind": "required_api",
+              "name": "scripting"
+            },
+            "level": "compatible"
+          },
+          {
+            "declaration": {
+              "kind": "required_api",
+              "name": "storage"
+            },
+            "level": "compatible"
+          },
+          {
+            "declaration": {
+              "kind": "optional_api",
+              "name": "contextMenus"
+            },
+            "level": "compatible"
+          },
+          {
+            "declaration": {
+              "kind": "required_host",
+              "pattern": "*://*/*"
+            },
+            "level": "compatible"
+          },
+          {
+            "declaration": {
+              "kind": "background"
+            },
+            "level": "degraded"
+          },
+          {
+            "declaration": {
+              "kind": "action"
+            },
+            "level": "compatible"
+          },
+          {
+            "declaration": {
+              "kind": "extension_pages_csp"
+            },
+            "level": "compatible"
+          },
+          {
+            "declaration": {
+              "kind": "content_script",
+              "index": 0,
+              "descriptor_sha256": "69ef925931dc1bdc79cddc234cc1a9bb54a0d0638e71b3b46254e34b475d8141"
+            },
+            "level": "degraded"
+          },
+          {
+            "declaration": {
+              "kind": "content_script",
+              "index": 1,
+              "descriptor_sha256": "53aca29e5961d89acd651b0aa9c6622c8da1667b34bba07d303f2f30f812d3c5"
+            },
+            "level": "degraded"
+          },
+          {
+            "declaration": {
+              "kind": "content_script",
+              "index": 2,
+              "descriptor_sha256": "03409efd99c3e242d3055b45f227653c48d389593fed8b534bdcdfa6a7ab4f06"
+            },
+            "level": "compatible"
+          },
+          {
+            "declaration": {
+              "kind": "minimum_chromium_version",
+              "version": "106.0.0.0"
+            },
+            "level": "degraded"
+          },
+          {
+            "declaration": {
+              "kind": "commands",
+              "count": 3,
+              "descriptor_sha256": "f39a55834f9c71bdf12e431cb0b37b6dba12f217dd511abffd236b554d9102de"
+            },
+            "level": "compatible"
+          },
+          {
+            "declaration": {
+              "kind": "options_page",
+              "descriptor_sha256": "0f8077b71e2b191ab78b8e72bb151e083b72fc664b94dd90c96a73111aa38fdb"
+            },
+            "level": "compatible"
+          }
+        ]
+      },
+      "compatibility_digest": "4606f04f5784769f5df5dd9e596aa2a056d6724dac5e152648aaff26630c3764",
+      "admission_digest": "ec5f0f866b75da2792a23d1624668f0beb9172e21b9554f95986aa27fc7147e2",
       "activatable": true
     }
   ]

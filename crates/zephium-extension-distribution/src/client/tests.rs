@@ -301,28 +301,47 @@ async fn staging_client_fetches_only_the_exact_embedded_catalog_objects() {
     let authority =
         zephium_extension_authority::ProductExtensionManifestAuthority::product().unwrap();
     let selections = authority
-        .active_acquired_runtime_selections(
+        .active_acquired_runtime_selections_for_targets(&[
+            zephium_extension_authority::ProductExtensionRuntimeTarget::MacosNative,
             zephium_extension_authority::ProductExtensionRuntimeTarget::MacosNativeBrokered,
-        )
+        ])
         .unwrap();
     let client = ExtensionDistributionClient::staging().unwrap();
     let session = client.begin(selections).await.unwrap();
-    assert_eq!(session.package_count(), 1);
-    let selected_package = session.selection(0).unwrap().package_key();
-    let request = client.fetch_package(&session, 0).await.unwrap();
-    assert_eq!(
-        request.runtime_profile(),
-        ExtensionAcquiredRuntimeProfile::MacosNativeBrokered
-    );
-    let (catalog, package, profile, crx, legal) = request.into_parts();
-    assert_eq!(catalog, crate::staging::CATALOG_BYTES);
-    assert_eq!(package, selected_package);
-    assert_eq!(
-        profile,
-        ExtensionAcquiredRuntimeProfile::MacosNativeBrokered
-    );
-    assert_eq!(crx, crate::staging::CRX3_BYTES);
-    assert_eq!(legal, crate::staging::LEGAL_BYTES);
+    assert_eq!(session.package_count(), 2);
+    let mut saw_native = false;
+    let mut saw_brokered = false;
+    for index in 0..session.package_count() {
+        let selection = session.selection(index).unwrap();
+        let selected_package = selection.package_key();
+        let selected_profile = selection.runtime_profile();
+        let expected = match selected_profile {
+            ExtensionAcquiredRuntimeProfile::MacosNative => {
+                saw_native = true;
+                (
+                    crate::staging::DARK_READER_CRX3_BYTES,
+                    crate::staging::DARK_READER_LEGAL_BYTES,
+                )
+            }
+            ExtensionAcquiredRuntimeProfile::MacosNativeBrokered => {
+                saw_brokered = true;
+                (
+                    crate::staging::VIMIUM_CRX3_BYTES,
+                    crate::staging::VIMIUM_LEGAL_BYTES,
+                )
+            }
+            profile => panic!("unexpected staging runtime profile {profile:?}"),
+        };
+        let request = client.fetch_package(&session, index).await.unwrap();
+        assert_eq!(request.runtime_profile(), selected_profile);
+        let (catalog, package, profile, crx, legal) = request.into_parts();
+        assert_eq!(catalog, crate::staging::CATALOG_BYTES);
+        assert_eq!(package, selected_package);
+        assert_eq!(profile, selected_profile);
+        assert_eq!(crx, expected.0);
+        assert_eq!(legal, expected.1);
+    }
+    assert!(saw_native && saw_brokered);
 
     let transport = EmbeddedStagingArtifactTransport;
     assert_eq!(
