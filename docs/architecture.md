@@ -1744,8 +1744,20 @@ re-enable, or reconstructing it for a package-revision update, makes WebKit emit
 another help tab even with its deterministic origin. Restart-only hydration
 does not. Zephium does not suppress arbitrary `tabs.create` calls or branch on
 Dark Reader's package identity; the background declaration remains degraded
-until a reusable unloaded-context design passes native-ownership and resource
-budgets, or the WebKit event behavior changes.
+as an intentional WebKit semantic difference. WebKit's own
+[`InstalledEvent` test](https://github.com/WebKit/WebKit/blob/main/Tools/TestWebKitAPI/Tests/WebKit/WKWebView/WKWebExtensionAPIRuntime.mm)
+expects the event after every unload/load, while
+[`determineInstallReasonDuringLoad`](https://github.com/WebKit/WebKit/blob/main/Source/WebKit/UIProcess/Extensions/Cocoa/WebExtensionContextCocoa.mm)
+selects `install` whenever an unchanged extension loads into a controller that
+is not freshly created. The same source clears that transient reason on unload
+and recalculates it on the next load. A live package-neutral negative probe also
+showed that `unsupportedAPIs` retains the requested event-member string but
+still exposes native `runtime.onInstalled`; directly replacing the property
+instead makes the background fail to load. Keeping a context loaded would
+contradict disabled-state native-owner absence. Closing this gap therefore
+requires a future host-controlled lifecycle API or deeper compatibility-runtime
+ownership, not a dormant-context cache or suppression of extension-created
+tabs.
 
 That run also settles the `fontSettings` declaration boundary. WebKit parses
 the required token without error, omits it from `requestedPermissions`, and

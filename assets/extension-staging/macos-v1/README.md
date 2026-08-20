@@ -41,9 +41,13 @@ reconstructing it for the revision-7 to revision-8 package update, cause WebKit
 to emit another `runtime.onInstalled` event with reason `install`, so the stock
 extension opens its help tab again even with the deterministic
 `webkit-extension` origin; restart-only rehydration does not. The background
-lifecycle remains degraded until a bounded reusable unloaded-context design
-passes resource and ownership gates or WebKit corrects the event. This staging
-membership is not a public compatibility or distribution claim.
+lifecycle remains degraded. WebKit's own runtime test expects the install event
+after every unload/load; keeping the context loaded would violate disabled-state
+ownership, the public unsupported-API set does not hide this event member, and
+attempting to replace it makes the background fail. Closing the gap therefore
+requires a future host-controlled lifecycle API or a deeper compatibility
+runtime, not tab suppression or a dormant-context cache. This staging membership
+is not a public compatibility or distribution claim.
 
 The feature uses a five-object in-process transport with the same catalog,
 CRX3, legal, repository, admission, runtime-selection, and activation pipeline
