@@ -39,10 +39,11 @@ WebKit runtime, while an `about:srcdoc` descendant remains unthemed. Its absent
 degraded. Unloading and reconstructing its native context for re-enable, and
 reconstructing it for the revision-7 to revision-8 package update, cause WebKit
 to emit another `runtime.onInstalled` event with reason `install`, so the stock
-extension opens its help tab again; restart-only rehydration does not. The
-background lifecycle remains degraded until a bounded reusable unloaded-context
-design passes resource and ownership gates or WebKit corrects the event. This
-staging membership is not a public compatibility or distribution claim.
+extension opens its help tab again even with the deterministic
+`webkit-extension` origin; restart-only rehydration does not. The background
+lifecycle remains degraded until a bounded reusable unloaded-context design
+passes resource and ownership gates or WebKit corrects the event. This staging
+membership is not a public compatibility or distribution claim.
 
 The feature uses a five-object in-process transport with the same catalog,
 CRX3, legal, repository, admission, runtime-selection, and activation pipeline

@@ -1365,6 +1365,20 @@ its workflows. The separate brokered gate proves only its explicitly named
 history, default-search, and most-recent-session compatibility slices;
 bookmarks remain empty/read-only and notifications remain unassessed.
 
+Product contexts also bind one deterministic extension origin before load.
+Both `uniqueIdentifier` and the host of
+`webkit-extension://<chromium-extension-id>/` come from the
+catalog-authenticated Chromium signing identity; the adapter verifies both
+before and after controller load. WebKit's random default `baseURL` is never
+accepted for a product runtime. Reconstructed contexts for one installed
+package therefore keep the same extension-page origin, while the independently
+verified per-profile `WKWebsiteDataStore` and controller preserve profile
+isolation even when the public extension identifier is the same. The packaged
+Dark Reader gate reads the exact deterministic popup origin after restart and
+re-enable. Stable origin does not change WebKit's repeated `onInstalled`
+behavior described below, so it is origin/persistence hardening rather than a
+claim that the lifecycle degradation is closed.
+
 WebKit does expose a narrower compatibility seam through
 `WKWebExtensionControllerDelegate`, and the live gate now classifies it without
 enabling it in ordinary product policy. A separate Zephium-owned extension
@@ -1714,11 +1728,11 @@ without changing that core result. It also exposes a native lifecycle
 degradation: unloading the context on disable and constructing a replacement on
 re-enable, or reconstructing it for a package-revision update, makes WebKit emit
 `runtime.onInstalled` with reason `install` again, so stock Dark Reader opens
-another help tab. Restart-only hydration does not. Zephium does not suppress
-arbitrary `tabs.create` calls or branch on Dark Reader's package identity; the
-background declaration remains degraded until a reusable unloaded-context
-design passes native-ownership and resource budgets, or the WebKit event
-behavior changes.
+another help tab even with its deterministic origin. Restart-only hydration
+does not. Zephium does not suppress arbitrary `tabs.create` calls or branch on
+Dark Reader's package identity; the background declaration remains degraded
+until a reusable unloaded-context design passes native-ownership and resource
+budgets, or the WebKit event behavior changes.
 
 That run also settles the `fontSettings` declaration boundary. WebKit parses
 the required token without error, omits it from `requestedPermissions`, and
