@@ -9,6 +9,7 @@ mod extension_release;
 mod extension_runtime_acquisition_boundary;
 mod extension_tree;
 mod macos_extension_compatibility;
+mod macos_process_family;
 mod webview2_extension_boundary;
 
 use std::process::{exit, Command};
@@ -67,6 +68,12 @@ fn main() {
         }
         Some("measure-macos-extension-product") if arguments.len() == 1 => {
             measure_macos_extension_product()
+        }
+        Some("measure-macos-process-family") => {
+            if let Err(error) = macos_process_family::run(&arguments[1..]) {
+                eprintln!("macOS process-family measurement failed: {error}");
+                exit(1);
+            }
         }
         Some("check-blocker-seed") if arguments.len() == 1 => {
             let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
@@ -303,7 +310,7 @@ fn main() {
         Some("check-webview2-floor") => check_engine_floors(),
         _ => {
             eprintln!(
-                "usage: cargo xtask <ci|check-engine-floors|check-release-engine-security|check-advisory-exceptions|check-security-fork-locks|check-native-adapter-locks|check-blocker-security-fork|check-extension-runtime-host-assembler|check-extension-runtime-acquisition-boundary|check-webview2-extension-boundary|check-macos-extension-compatibility-asset|measure-macos-extension-product|check-blocker-seed|check-crx3 --archive PATH --expected-id ID|materialize-crx3-probe --archive PATH --expected-id ID --output PATH|prepare-extension-crx3-signing-message --archive PATH --public-key PATH --output PATH|assemble-extension-crx3 --archive PATH --public-key PATH --signature PATH --output PATH|prepare-extension-crx3-release-archive --extension PATH --tree-index PATH --public-key PATH --output PATH|prepare-extension-compatibility-crx3-release-archive --compatibility-artifact PATH --public-key PATH --output PATH|publish-extension-catalog --review PATH --output PATH|finalize-extension-manifest-profiles --publication PATH --review PATH --output PATH|index-extension-probe-tree --extension PATH --output PATH|materialize-macos-extension-compatibility --extension PATH --tree-index PATH --output PATH|materialize-macos-extension-compatibility-brokered --extension PATH --tree-index PATH --output PATH|check-bitwarden-core-source --source PATH|materialize-bitwarden-core-macos-probe-overlay --source PATH --output PATH|finalize-bitwarden-core-macos-probe-artifact --build PATH --output PATH [--wasm-response-mime-adapter]|materialize-blocker-seed-webkit --output PATH|update-blocker-seed --easylist PATH --easyprivacy PATH --license PATH|check-webview2-floor>"
+                "usage: cargo xtask <ci|check-engine-floors|check-release-engine-security|check-advisory-exceptions|check-security-fork-locks|check-native-adapter-locks|check-blocker-security-fork|check-extension-runtime-host-assembler|check-extension-runtime-acquisition-boundary|check-webview2-extension-boundary|check-macos-extension-compatibility-asset|measure-macos-extension-product|measure-macos-process-family --bundle-id ID --duration-seconds N [--interval-millis N] [--label LABEL]|check-blocker-seed|check-crx3 --archive PATH --expected-id ID|materialize-crx3-probe --archive PATH --expected-id ID --output PATH|prepare-extension-crx3-signing-message --archive PATH --public-key PATH --output PATH|assemble-extension-crx3 --archive PATH --public-key PATH --signature PATH --output PATH|prepare-extension-crx3-release-archive --extension PATH --tree-index PATH --public-key PATH --output PATH|prepare-extension-compatibility-crx3-release-archive --compatibility-artifact PATH --public-key PATH --output PATH|publish-extension-catalog --review PATH --output PATH|finalize-extension-manifest-profiles --publication PATH --review PATH --output PATH|index-extension-probe-tree --extension PATH --output PATH|materialize-macos-extension-compatibility --extension PATH --tree-index PATH --output PATH|materialize-macos-extension-compatibility-brokered --extension PATH --tree-index PATH --output PATH|check-bitwarden-core-source --source PATH|materialize-bitwarden-core-macos-probe-overlay --source PATH --output PATH|finalize-bitwarden-core-macos-probe-artifact --build PATH --output PATH [--wasm-response-mime-adapter]|materialize-blocker-seed-webkit --output PATH|update-blocker-seed --easylist PATH --easyprivacy PATH --license PATH|check-webview2-floor>"
             );
             exit(2);
         }

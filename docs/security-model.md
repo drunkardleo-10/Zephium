@@ -621,6 +621,13 @@ The non-shipping `measure-macos-extension-product` gate now captures optimized
 authenticated-path latency plus main-process `RUSAGE_SELF` evidence, but it
 explicitly excludes WebKit helper processes, idle/battery behavior, tab-scale
 campaigns, and endurance and therefore does not close those release gates.
+The separate non-shipping `measure-macos-process-family` command attaches to one
+unambiguous LaunchServices application coalition and samples the app plus its
+re-parented WebKit XPC services through kernel resource counters. It rejects
+identity drift, duplicate or oversized coalitions, unreadable live members, and
+counter rollback. Its local JSON evidence still does not establish release
+budgets until signed builds run the named clean-machine scenarios and endurance
+matrix.
 
 Every item-attributed native callback, native error, navigation observation, accelerator,
 and asynchronous JavaScript result carries the immutable permit identity of its native

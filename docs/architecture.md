@@ -1022,6 +1022,26 @@ release-path regressions and trend evidence, not permission to retain disabled
 contexts or a substitute for process-family RSS/CPU, idle-wakeup, energy, and
 endurance budgets.
 
+`cargo xtask measure-macos-process-family --bundle-id ID
+--duration-seconds N` is the complementary packaged-application sampler. It
+binds exactly one running LaunchServices application and refreshes its bounded
+process coalition throughout the campaign. This is essential on macOS because
+WebKit WebContent, networking, GPU, and auxiliary XPC services are re-parented
+to launchd and therefore are not discoverable through a parent-PID walk. Each
+sample reads `proc_pid_rusage(RUSAGE_INFO_V4)` under the process UUID and start
+time, converts Mach CPU time through the current kernel timebase, accumulates
+monotonic CPU/wakeup/I/O/instruction counters across helper churn, and records
+simultaneous resident and physical-footprint peaks for the application,
+WebContent, networking, GPU, and auxiliary roles. Bundle-ID ambiguity, a changed
+root identity, an oversized/duplicate coalition, unreadable live members, and
+counter rollback all fail the campaign. Output is one versioned JSON object on
+stdout plus a bounded human summary on stderr, so release infrastructure can
+retain raw evidence without granting measurement authority to product code.
+The V4 billed/serviced energy fields remain explicitly raw counters; release
+energy budgets require a calibrated supported-machine campaign rather than an
+invented unit conversion. A successful short attachment proves only sampler
+integrity, not a browser resource budget.
+
 Remaining macOS work is now product/API breadth rather than a missing runtime
 foundation: changed-permission update consent, extension notifications and
 additional browser APIs, storage quotas, private/file execution gates,
