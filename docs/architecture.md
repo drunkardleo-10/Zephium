@@ -1705,8 +1705,20 @@ context errors; and release every native owner. Stock therefore needs no
 Zephium adapter for that core workflow. An `about:srcdoc` descendant remains
 light even though the source requests `match_about_blank`; the result is
 `usable-with-about-srcdoc-frame-degradation`, not full parity. No Dark Reader
-byte is stored in this repository and this evidence grants no redistribution
-or catalog authority.
+byte was admitted by that external probe, and its evidence alone grants no
+redistribution or catalog authority. Reviewed bytes are present only in the
+explicit non-shipping mixed staging catalog described below.
+
+The later mixed-catalog packaged gate adds redistribution and staging authority
+without changing that core result. It also exposes a native lifecycle
+degradation: unloading the context on disable and constructing a replacement on
+re-enable, or reconstructing it for a package-revision update, makes WebKit emit
+`runtime.onInstalled` with reason `install` again, so stock Dark Reader opens
+another help tab. Restart-only hydration does not. Zephium does not suppress
+arbitrary `tabs.create` calls or branch on Dark Reader's package identity; the
+background declaration remains degraded until a reusable unloaded-context
+design passes native-ownership and resource budgets, or the WebKit event
+behavior changes.
 
 That run also settles the `fontSettings` declaration boundary. WebKit parses
 the required token without error, omits it from `requestedPermissions`, and
@@ -1882,14 +1894,20 @@ and canonical index SHA-256
 `88917d255a2914fdc0a2a6f9e7fdb3faa46523be1ccda5c73331a127775da286`.
 The transformed source tree is not committed or downloaded by ordinary product
 code. An explicit non-shipping `staging-extension-catalog` build instead embeds
-the externally signed deterministic CRX3 (`4bc71181804ec8aed8385bf2bd3db6df488c0b4e4bfffc20a7dc0ddeb131a9f6`)
-under catalog SHA-256
-`b27962b45ecb1f85df1afbed626dc42a92c11230a8a7ac162a40511f1aa24b56`.
-That feature has a separate application identifier and a fixed three-object
-in-process transport; ordinary builds compile neither the catalog bytes nor a
-distribution worker. On macOS, `cargo xtask ci` separately authenticates the
-embedded authority/distribution objects and lints the complete staging desktop
-feature graph under the exact isolated Tauri configuration.
+the externally signed deterministic Vimium CRX3
+(`5bf9a4d8916959fca6b441b1ded47fa8dd615dffa2d1fb80314e5f9f4ec3187b`)
+and the separately signed Dark Reader CRX3
+(`523516c9550b15fd2cd97ce722348313da32deccb777caae4dc0a127e13d2c1a`)
+under mixed catalog SHA-256
+`e1cc8aa85eacd6df7c99f24263a1e1f35767fd83b3df4894c9a4e00b309dea5a`.
+The catalog selects Dark Reader's `MacosNative` profile and Vimium's
+`MacosNativeBrokered` profile as one canonical cohort. That feature has a
+separate application identifier and a fixed five-object in-process transport;
+ordinary builds compile neither the catalog/package bytes nor a distribution
+worker. On macOS, `cargo xtask ci` separately authenticates both runtime
+selections and every embedded authority/distribution object, then lints the
+complete staging desktop feature graph under the exact isolated Tauri
+configuration.
 
 The feature-gated release probe independently reopens both exact identities,
 loads the module worker through WebKit's public background completion API, and
@@ -1956,10 +1974,14 @@ The isolated packaged staging application exercises the complete profile path:
 first-run profile registration, authenticated catalog synchronization,
 permission review, install, enable, content/action execution, popup and options
 presentation, disable/re-enable, uninstall, clean shutdown, and restart.
-Revision 6 is active, with revisions 4 and 5 retained as the two bounded
-rollback generations. Revisions 5 and 6 deliberately reuse the exact revision-4
-package bytes to isolate the live runtime-generation update contract. The
-service
+Revision 8 is active, with revisions 6 and 7 retained as the two bounded
+rollback generations. Revision 7 kept Vimium's exact revision-6 package bytes
+and added Dark Reader revision 1, proving that one catalog transaction can grow
+from one brokered package to a mixed native/brokered cohort. Revision 8 keeps
+both byte streams and advances Dark Reader to package revision 2 so its newly
+observed background-lifecycle degradation cannot mutate an already admitted
+profile in place. Revisions 5 and 6 deliberately reused the same Vimium package
+bytes to isolate the live runtime-generation update contract. The service
 retires every regular/private native owner, Store atomically advances the
 catalog, stable install, and package-bound grant revisions, and only then
 reactivates the same install identity. Existing authority is reconciled by
@@ -1974,7 +1996,13 @@ The newer live revision-5 to revision-6 packaged gate additionally proves that
 activation schedules one bounded post-load action invalidation, the trusted
 toolbar replaces its stale runtime generation, and the popup opens immediately
 without a process restart. A `RuntimeUnavailable` action settlement also
-requests a metadata refresh as a fail-soft repair path.
+requests a metadata refresh as a fail-soft repair path. Install, enable,
+disable, and uninstall settlements additionally compare the logical browser
+surface generation: when the tab/window surface is unchanged but the runtime
+cohort changed, Shell clears the prior action snapshot before requesting its
+replacement. A disabled extension therefore cannot remain visible or
+actionable merely because no tab mutation occurred or the replacement read is
+delayed.
 
 This gate establishes a reusable stock Chrome-extension path and core Vimium
 keyboard/link/action behavior on the exercised macOS runtime. It does not yet
