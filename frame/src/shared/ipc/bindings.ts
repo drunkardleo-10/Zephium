@@ -30,6 +30,12 @@ export const commands = {
 	 */
 	extensionDistributionRefresh: () => __TAURI_INVOKE<ExtensionDistributionRefreshAdmissionView>("extension_distribution_refresh"),
 	extensionManagementInstall: (candidateIndex: number, catalogRevision: string, selection: ExtensionInstallGrantSelectionInput) => __TAURI_INVOKE<OperationAdmission>("extension_management_install", { candidateIndex, catalogRevision, selection }),
+	/**
+	 *  Approves only the exact changed-authority replacement retained by Shell's
+	 *  current focused-profile subscription. Package identity and permission names
+	 *  never cross this IPC boundary.
+	 */
+	extensionManagementApproveUpdate: (reviewId: string) => __TAURI_INVOKE<OperationAdmission>("extension_management_approve_update", { reviewId }),
 	extensionManagementSetEnabled: (installId: string, catalogRevision: string, installRevision: string, enabled: boolean) => __TAURI_INVOKE<OperationAdmission>("extension_management_set_enabled", { installId, catalogRevision, installRevision, enabled }),
 	extensionManagementOpenOptions: (installId: string, catalogRevision: string, installRevision: string) => __TAURI_INVOKE<boolean>("extension_management_open_options", { installId, catalogRevision, installRevision }),
 	extensionManagementUninstall: (installId: string, catalogRevision: string, installRevision: string) => __TAURI_INVOKE<OperationAdmission>("extension_management_uninstall", { installId, catalogRevision, installRevision }),
@@ -470,6 +476,8 @@ export type ExtensionManagementView = {
 	catalog_revision: string | null,
 	entries: ExtensionManagementEntryView[],
 	candidates: ExtensionInstallCandidateView[],
+	/**  Present only while `phase` is `update_consent_required`. */
+	pending_update: ExtensionUpdateConsentView | null,
 };
 
 export type ExtensionRuntimeGrantPromptChanged = ExtensionRuntimeGrantPromptView;
@@ -503,6 +511,25 @@ export type ExtensionRuntimeGrantPromptEntryView = {
 export type ExtensionRuntimeGrantPromptView = {
 	projection_revision: string,
 	prompt: ExtensionRuntimeGrantPromptEntryView | null,
+};
+
+/**
+ *  One exact authenticated replacement awaiting changed-authority or newly
+ *  degraded compatibility review. `review_id` is an opaque,
+ *  subscription-local echo token; no package identity or permission name is
+ *  accepted back from privileged chrome.
+ */
+export type ExtensionUpdateConsentView = {
+	review_id: string,
+	name: string,
+	version: string,
+	source: ExtensionManagementSourceView,
+	verified_catalog_unix: string | null,
+	provenance: ExtensionManagementProvenanceView | null,
+	added_required_api: string[],
+	added_required_hosts: string[],
+	compatibility: ExtensionManagementCompatibilityView,
+	limitations: ExtensionManagementLimitationView[],
 };
 
 export type ItemsChanged = ItemsState;

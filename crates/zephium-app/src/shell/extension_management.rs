@@ -4,10 +4,11 @@ use std::collections::HashMap;
 
 use zephium_core::ports::extensions::{
     ExtensionInitialGrantSelection, ExtensionInstallCandidateSelector, ExtensionInstallOutcome,
-    ExtensionInstallSelector, ExtensionInstalledRuntimeState, ExtensionManagementAdmission,
-    ExtensionManagementAvailability, ExtensionManagementCatalog,
+    ExtensionInstallSelector, ExtensionInstallUpdateSelector, ExtensionInstalledRuntimeState,
+    ExtensionManagementAdmission, ExtensionManagementAvailability, ExtensionManagementCatalog,
     ExtensionManagementCatalogAdmission, ExtensionManagementCatalogOutcome,
-    ExtensionSetEnabledOutcome, ExtensionUninstallOutcome,
+    ExtensionSetEnabledOutcome, ExtensionUninstallOutcome, ExtensionUpdateConsentEntry,
+    ExtensionUpdateOutcome, ExtensionUpdateRuntimeState,
 };
 
 use super::*;
@@ -26,6 +27,7 @@ pub(super) struct ExtensionManagementState {
     visible_profile: Option<ProfileId>,
     catalog_request: Option<(u64, ProfileId)>,
     catalog: Option<ExtensionManagementCatalog>,
+    pending_update: Option<(u64, Box<ExtensionUpdateConsentEntry>)>,
 }
 
 struct ExtensionInstallGrantRequest {
@@ -38,6 +40,7 @@ struct ExtensionInstallGrantRequest {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PendingExtensionManagementKind {
     Install,
+    Update,
     SetEnabled(bool),
     Uninstall,
 }
@@ -46,6 +49,7 @@ enum PendingExtensionManagementKind {
 enum PendingExtensionManagementSubject {
     Candidate(ExtensionInstallCandidateSelector),
     Installed(ExtensionInstallSelector),
+    Update(ExtensionInstallUpdateSelector),
 }
 
 impl PendingExtensionManagementSubject {
@@ -53,6 +57,7 @@ impl PendingExtensionManagementSubject {
         match self {
             Self::Candidate(selector) => selector.profile(),
             Self::Installed(selector) => selector.profile(),
+            Self::Update(selector) => selector.install().profile(),
         }
     }
 
@@ -64,6 +69,12 @@ impl PendingExtensionManagementSubject {
             }
             (Self::Installed(left), Self::Installed(right)) => {
                 left.profile() == right.profile() && left.install() == right.install()
+            }
+            (Self::Update(left), Self::Update(right)) => left == right,
+            (Self::Installed(installed), Self::Update(update))
+            | (Self::Update(update), Self::Installed(installed)) => {
+                installed.profile() == update.install().profile()
+                    && installed.install() == update.install().install()
             }
             _ => false,
         }
@@ -135,6 +146,9 @@ impl ExtensionManagementState {
                 PendingExtensionManagementKind::Install,
                 ExtensionManagementCompletion::Install(_)
             ) | (
+                PendingExtensionManagementKind::Update,
+                ExtensionManagementCompletion::Update(_)
+            ) | (
                 PendingExtensionManagementKind::SetEnabled(_),
                 ExtensionManagementCompletion::SetEnabled(_)
             ) | (
@@ -164,6 +178,7 @@ impl ExtensionManagementState {
         // invalidate its request token and let any late settlement be ignored.
         self.catalog_request = None;
         self.catalog = None;
+        self.pending_update = None;
     }
 
     pub(super) fn visible_profile(&self) -> Option<ProfileId> {
@@ -181,6 +196,7 @@ impl ExtensionManagementState {
         let request = self.next_request;
         self.catalog_request = Some((request, profile));
         self.catalog = None;
+        self.pending_update = None;
         Ok(Some(request))
     }
 
@@ -201,20 +217,62 @@ impl ExtensionManagementState {
             return false;
         }
         self.catalog = Some(catalog);
+        self.pending_update = None;
+        true
+    }
+
+    fn install_update_prompt(&mut self, prompt: Box<ExtensionUpdateConsentEntry>) -> bool {
+        if self.visible_profile != Some(prompt.selector().install().profile()) {
+            return false;
+        }
+        let Some(review) = self.next_request.checked_add(1) else {
+            return false;
+        };
+        self.next_request = review;
+        self.catalog = None;
+        self.pending_update = Some((review, prompt));
         true
     }
 
     fn clear_catalog(&mut self) {
         self.catalog = None;
+        self.pending_update = None;
     }
 
     fn invalidate_catalog_subscription(&mut self) {
         self.catalog_request = None;
         self.catalog = None;
+        self.pending_update = None;
     }
 
     pub(super) fn catalog(&self) -> Option<&ExtensionManagementCatalog> {
         self.catalog.as_ref()
+    }
+
+    pub(super) fn pending_update(&self) -> Option<(u64, &ExtensionUpdateConsentEntry)> {
+        self.pending_update
+            .as_ref()
+            .map(|(review, prompt)| (*review, prompt.as_ref()))
+    }
+
+    fn resolve_update(
+        &self,
+        profile: ProfileId,
+        review: u64,
+    ) -> Option<ExtensionInstallUpdateSelector> {
+        let (current_review, prompt) = self.pending_update.as_ref()?;
+        (*current_review == review && prompt.selector().install().profile() == profile)
+            .then(|| prompt.selector().clone())
+    }
+
+    fn consume_update(&mut self, review: u64) {
+        if self
+            .pending_update
+            .as_ref()
+            .is_some_and(|(current, _)| *current == review)
+        {
+            self.pending_update = None;
+        }
     }
 
     fn authorizes(&self, selector: ExtensionInstallSelector) -> bool {
@@ -517,12 +575,16 @@ impl Shell {
                     zephium_ipc::ExtensionManagementPhase::CatalogNotSynchronized,
                 );
             }
-            ExtensionManagementCatalogOutcome::UpdateConsentRequired => {
-                self.extension_management.clear_catalog();
-                self.project_extension_management_phase(
-                    profile,
-                    zephium_ipc::ExtensionManagementPhase::UpdateConsentRequired,
-                );
+            ExtensionManagementCatalogOutcome::UpdateConsentRequired(prompt) => {
+                if self.extension_management.install_update_prompt(prompt) {
+                    self.project_extension_update_consent();
+                } else {
+                    self.extension_management.clear_catalog();
+                    self.project_extension_management_phase(
+                        profile,
+                        zephium_ipc::ExtensionManagementPhase::FailedClosed,
+                    );
+                }
             }
             ExtensionManagementCatalogOutcome::Unavailable => {
                 self.extension_management.clear_catalog();
@@ -576,7 +638,7 @@ impl Shell {
                 OperationReason::StoreAdmissionRejected,
             ));
         }
-        let (subject, kind, install_selection) = match command {
+        let (subject, kind, install_selection, update_review) = match command {
             Command::InstallFocusedExtension {
                 candidate_index,
                 expected_catalog,
@@ -605,6 +667,22 @@ impl Shell {
                     PendingExtensionManagementSubject::Candidate(selector),
                     PendingExtensionManagementKind::Install,
                     Some(selection),
+                    None,
+                )
+            }
+            Command::ApproveFocusedExtensionUpdate { review } => {
+                let Some(selector) = self.extension_management.resolve_update(profile, review)
+                else {
+                    return Some(operation_result(
+                        OperationOutcome::Rejected,
+                        OperationReason::StoreConflict,
+                    ));
+                };
+                (
+                    PendingExtensionManagementSubject::Update(selector),
+                    PendingExtensionManagementKind::Update,
+                    None,
+                    Some(review),
                 )
             }
             Command::SetFocusedExtensionEnabled {
@@ -621,6 +699,7 @@ impl Shell {
                 )),
                 PendingExtensionManagementKind::SetEnabled(enabled),
                 None,
+                None,
             ),
             Command::UninstallFocusedExtension {
                 install,
@@ -634,6 +713,7 @@ impl Shell {
                     expected_install,
                 )),
                 PendingExtensionManagementKind::Uninstall,
+                None,
                 None,
             ),
             _ => return None,
@@ -710,6 +790,21 @@ impl Shell {
                     }),
                 )
             }
+            PendingExtensionManagementKind::Update => {
+                let PendingExtensionManagementSubject::Update(selector) = subject else {
+                    unreachable!("update request retained a non-update selector")
+                };
+                service.begin_approve_update(
+                    selector,
+                    deadline,
+                    Box::new(move |settlement| {
+                        let _ = callback.dispatch(Command::ExtensionManagementSettled {
+                            request,
+                            completion: ExtensionManagementCompletion::Update(settlement),
+                        });
+                    }),
+                )
+            }
             PendingExtensionManagementKind::SetEnabled(enabled) => {
                 let PendingExtensionManagementSubject::Installed(selector) = subject else {
                     unreachable!("enablement request retained a candidate selector")
@@ -743,7 +838,12 @@ impl Shell {
             }
         }));
         match admission {
-            Ok(ExtensionManagementAdmission::Accepted) => None,
+            Ok(ExtensionManagementAdmission::Accepted) => {
+                if let Some(review) = update_review {
+                    self.extension_management.consume_update(review);
+                }
+                None
+            }
             Ok(ExtensionManagementAdmission::Busy) => {
                 self.extension_management.cancel(request);
                 Some(operation_result(
@@ -786,6 +886,7 @@ impl Shell {
         let profile = pending.subject.profile();
         let active_profiles = match completion {
             ExtensionManagementCompletion::Install(settlement) => settlement.active_profiles(),
+            ExtensionManagementCompletion::Update(settlement) => settlement.active_profiles(),
             ExtensionManagementCompletion::SetEnabled(settlement) => settlement.active_profiles(),
             ExtensionManagementCompletion::Uninstall(settlement) => settlement.active_profiles(),
         };
@@ -877,6 +978,44 @@ impl Shell {
                     true,
                 ),
                 ExtensionInstallOutcome::FailedClosed => (
+                    OperationOutcome::Rejected,
+                    OperationReason::StoreReconciliationFailed,
+                    true,
+                ),
+            },
+            ExtensionManagementCompletion::Update(settlement) => match settlement.into_outcome() {
+                ExtensionUpdateOutcome::Updated { runtime } => (
+                    OperationOutcome::Applied,
+                    match runtime {
+                        ExtensionUpdateRuntimeState::Active(_)
+                        | ExtensionUpdateRuntimeState::Disabled => OperationReason::MutationApplied,
+                        ExtensionUpdateRuntimeState::PendingActivation(_) => {
+                            OperationReason::ExtensionActivationPending
+                        }
+                    },
+                    false,
+                ),
+                ExtensionUpdateOutcome::Conflict => (
+                    OperationOutcome::Rejected,
+                    OperationReason::StoreConflict,
+                    false,
+                ),
+                ExtensionUpdateOutcome::Rejected => (
+                    OperationOutcome::Rejected,
+                    OperationReason::InvalidScope,
+                    false,
+                ),
+                ExtensionUpdateOutcome::Unavailable => (
+                    OperationOutcome::Rejected,
+                    OperationReason::StoreAdmissionRejected,
+                    false,
+                ),
+                ExtensionUpdateOutcome::OutcomeUnknown => (
+                    OperationOutcome::Deferred,
+                    OperationReason::StoreOutcomeUnknown,
+                    true,
+                ),
+                ExtensionUpdateOutcome::FailedClosed => (
                     OperationOutcome::Rejected,
                     OperationReason::StoreReconciliationFailed,
                     true,

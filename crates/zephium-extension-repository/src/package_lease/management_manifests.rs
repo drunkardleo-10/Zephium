@@ -174,7 +174,7 @@ pub struct BundledCurrentInstallCandidates {
 pub struct BundledInstallUpdate {
     install: ExtensionInstall,
     current_manifest: Arc<ExtensionManifestDescriptor>,
-    replacement_manifest: Arc<ExtensionManifestDescriptor>,
+    replacement: BundledInstallCandidate,
 }
 
 impl BundledInstallUpdate {
@@ -190,7 +190,13 @@ impl BundledInstallUpdate {
 
     /// Returns the current-catalog replacement manifest.
     pub const fn replacement_manifest(&self) -> &Arc<ExtensionManifestDescriptor> {
-        &self.replacement_manifest
+        self.replacement.manifest_arc()
+    }
+
+    /// Returns the current-catalog replacement's authenticated presentation,
+    /// provenance, and descriptor cohort.
+    pub const fn replacement(&self) -> &BundledInstallCandidate {
+        &self.replacement
     }
 }
 
@@ -458,7 +464,7 @@ impl ExtensionRepository {
                     BundledManifestBindingsError::InstallPackageMismatch,
                 ));
             }
-            pending.push((install.clone(), Arc::clone(replacement.manifest_arc())));
+            pending.push((install.clone(), replacement.clone()));
         }
         if pending.is_empty() {
             let mut exact = Vec::with_capacity(installs.installs().len());
@@ -546,7 +552,7 @@ impl ExtensionRepository {
             bindings
         };
         let mut updates = Vec::with_capacity(pending.len());
-        for (install, replacement_manifest) in pending {
+        for (install, replacement) in pending {
             let Some(binding) = rollback_bindings
                 .iter()
                 .find(|binding| binding.install_id() == install.id())
@@ -563,7 +569,7 @@ impl ExtensionRepository {
             updates.push(BundledInstallUpdate {
                 install,
                 current_manifest: Arc::clone(binding.manifest_arc()),
-                replacement_manifest,
+                replacement,
             });
         }
         let mut complete = Vec::with_capacity(installs.installs().len());

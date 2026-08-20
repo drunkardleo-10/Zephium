@@ -130,12 +130,12 @@ use zephium_ipc::{
     ExtensionManagementGrantView, ExtensionManagementLimitationView, ExtensionManagementPhase,
     ExtensionManagementProvenanceView, ExtensionManagementRuntimeView,
     ExtensionManagementSourceView, ExtensionManagementView, ExtensionRuntimeGrantPromptEntryView,
-    ExtensionRuntimeGrantPromptView, ItemsState, LayoutState, OperationDisposition,
-    OperationOutcome, OperationReason, PagePermissionKindView, PagePermissionPromptEntryView,
-    PagePermissionPromptView, ProfileKindView, ProfileView, Projection, RuntimeSecurityAdvisory,
-    RuntimeSecurityAdvisoryKind, RuntimeSecurityUpdateTarget, RuntimeStatus, SearchAction,
-    SearchResult, SearchResults, SidebarNodeKindView, SidebarNodeView, SidebarSectionView,
-    SpaceView, SplitGroupView, TabView,
+    ExtensionRuntimeGrantPromptView, ExtensionUpdateConsentView, ItemsState, LayoutState,
+    OperationDisposition, OperationOutcome, OperationReason, PagePermissionKindView,
+    PagePermissionPromptEntryView, PagePermissionPromptView, ProfileKindView, ProfileView,
+    Projection, RuntimeSecurityAdvisory, RuntimeSecurityAdvisoryKind, RuntimeSecurityUpdateTarget,
+    RuntimeStatus, SearchAction, SearchResult, SearchResults, SidebarNodeKindView, SidebarNodeView,
+    SidebarSectionView, SpaceView, SplitGroupView, TabView,
 };
 
 // More simultaneous native renderers are neither usable in the current tiled
@@ -475,6 +475,7 @@ impl Shell {
                 if matches!(
                     &command,
                     Command::InstallFocusedExtension { .. }
+                        | Command::ApproveFocusedExtensionUpdate { .. }
                         | Command::SetFocusedExtensionEnabled { .. }
                         | Command::UninstallFocusedExtension { .. }
                 ) {
@@ -648,6 +649,7 @@ impl Shell {
             // This privileged mutation must carry a desktop operation id.
             Command::InvokeExtensionAction { .. }
             | Command::InstallFocusedExtension { .. }
+            | Command::ApproveFocusedExtensionUpdate { .. }
             | Command::SetFocusedExtensionEnabled { .. }
             | Command::UninstallFocusedExtension { .. } => {}
             Command::RespondToExtensionRuntimeGrantPrompt { .. } => {}

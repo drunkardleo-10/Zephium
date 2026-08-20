@@ -7,6 +7,7 @@ import type {
   ExtensionInstallCandidateView,
   ExtensionManagementEntryView,
   ExtensionManagementView,
+  ExtensionUpdateConsentView,
   ExtensionRuntimeGrantPromptEntryView,
   ExtensionRuntimeGrantPromptView,
   OperationAdmission,
@@ -51,7 +52,7 @@ let failure = $state.raw<VisibleFailure | null>(null);
 const invoking = new SvelteSet<string>();
 type ManagementMutation = {
   subject: string;
-  kind: "install" | "enable" | "disable" | "uninstall";
+  kind: "install" | "update" | "enable" | "disable" | "uninstall";
 };
 let managementMutation = $state.raw<ManagementMutation | null>(null);
 let managementNotice = $state<string | null>(null);
@@ -477,6 +478,12 @@ export function setEnabled(
         entry.install_revision,
         enabled,
       ),
+  );
+}
+
+export function approveUpdate(update: ExtensionUpdateConsentView): void {
+  void settleManagementMutation({ subject: update.review_id, kind: "update" }, () =>
+    commands.extensionManagementApproveUpdate(update.review_id),
   );
 }
 

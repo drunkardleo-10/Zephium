@@ -85,7 +85,8 @@ use zephium_core::ids::ExtensionInstallId;
 use zephium_core::ports::store::{
     ExtensionGrantConflict, ExtensionGrantMutationApplied, ExtensionInstallCatalogLoadOutcome,
     ExtensionInstallCatalogMutationApplied, ExtensionInstallCatalogMutationOutcome,
-    ExtensionInstallProvisionOutcome, ExtensionInstallUpdateOutcome,
+    ExtensionInstallProvisionOutcome, ExtensionInstallUpdateGrantDecision,
+    ExtensionInstallUpdateOutcome,
 };
 
 impl Hub {
@@ -477,6 +478,7 @@ impl Hub {
         install_id: ExtensionInstallId,
         expected_install: ExtensionInstallRevision,
         expected_grant: ExtensionGrantRevision,
+        grant_decision: ExtensionInstallUpdateGrantDecision,
         current_manifest: Arc<ExtensionManifestDescriptor>,
         replacement_manifest: Arc<ExtensionManifestDescriptor>,
     ) -> rusqlite::Result<ExtensionInstallUpdateOutcome> {
@@ -527,11 +529,18 @@ impl Hub {
         else {
             return Ok(ExtensionInstallUpdateOutcome::Uninitialized);
         };
-        let reconciled = match authority.reconcile_manifest(
-            expected_grant,
-            &current_manifest,
-            &replacement_manifest,
-        ) {
+        let reconciliation =
+            match grant_decision {
+                ExtensionInstallUpdateGrantDecision::PreserveExisting => authority
+                    .reconcile_manifest(expected_grant, &current_manifest, &replacement_manifest),
+                ExtensionInstallUpdateGrantDecision::GrantReplacementRequired => authority
+                    .reconcile_manifest_with_required_consent(
+                        expected_grant,
+                        &current_manifest,
+                        &replacement_manifest,
+                    ),
+            };
+        let reconciled = match reconciliation {
             Ok(application) => application.into_authority(),
             Err(ExtensionGrantApplyError::RevisionConflict { current, .. }) => {
                 return Ok(ExtensionInstallUpdateOutcome::Conflict(

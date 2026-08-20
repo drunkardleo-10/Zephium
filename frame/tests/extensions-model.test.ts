@@ -117,6 +117,7 @@ function management(value: number, profileId = "profile-a"): ExtensionManagement
       },
     ],
     candidates: [],
+    pending_update: null,
   };
 }
 
@@ -203,6 +204,7 @@ describe("extension management projection admission", () => {
       catalog_revision: null,
       entries: [],
       candidates: [],
+      pending_update: null,
     });
   });
 
@@ -214,6 +216,42 @@ describe("extension management projection admission", () => {
     expect(model.apply(management(4, "profile-b"))).toBe(false);
     expect(model.apply(management(3, "profile-b"))).toBe(false);
     expect(model.management).toBe(current);
+  });
+
+  it("rejects contradictory update-review and catalog shapes", () => {
+    const model = new ExtensionManagementProjectionModel();
+    const contradictory = management(2);
+    contradictory.phase = "update_consent_required";
+    expect(model.apply(contradictory)).toBe(false);
+    expect(model.management).toEqual(initialExtensionManagement());
+
+    const review: ExtensionManagementView = {
+      projection_revision: revision(3),
+      profile_id: "profile-a",
+      phase: "update_consent_required",
+      catalog_revision: null,
+      entries: [],
+      candidates: [],
+      pending_update: {
+        review_id: "0000000000000001",
+        name: "Example",
+        version: "2.0.0",
+        source: "zephium_verified",
+        verified_catalog_unix: "1786924800",
+        provenance: {
+          source_url: "https://example.com/extension",
+          upstream_version: "2.0.0",
+          license_expression: "MIT",
+          attribution: "Example",
+        },
+        added_required_api: ["history"],
+        added_required_hosts: [],
+        compatibility: "compatible",
+        limitations: [],
+      },
+    };
+    expect(model.apply(review)).toBe(true);
+    expect(model.management).toBe(review);
   });
 
   it("exposes selectors only for the exact focused profile", () => {

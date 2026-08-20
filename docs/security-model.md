@@ -63,6 +63,13 @@ Chromium's full site-isolation model.
    availability. The current management projection marks both unavailable and
    Shell rejects a forged grant selection before Store admission; those flags
    stay closed until their native data-isolation and execution gates pass.
+   A replacement adding required API/host authority or a new compatibility
+   degradation cannot silently retire the old runtime. Shell retains an exact
+   catalog-set/package/install/grant-bound review and gives chrome only an
+   opaque echo token. Approval is freshly reauthenticated and Store advances
+   package plus required grants atomically; optional, file, and private grants
+   are never inferred from update consent. Closing the review leaves the old
+   package live, and stale tokens cannot authorize a later replacement.
 
 The structural boundary between zones 2 and 3 is the most important application-owned
 control. A tab is a separate raw WebView, never a navigation of the privileged chrome.

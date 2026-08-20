@@ -1,9 +1,10 @@
 use std::time::Instant;
 
 use crate::extensions::{
-    ExtensionCatalogSetDigest, ExtensionInstallCatalogRevision, ExtensionInstallRevision,
-    ExtensionNativeOwnershipKey, ExtensionPackageIdentity, ExtensionRuntimeGeneration,
-    MAX_EXTENSION_API_PERMISSIONS, MAX_EXTENSION_HOST_PERMISSION_PATTERNS,
+    ExtensionCatalogSetDigest, ExtensionGrantRevision, ExtensionInstallCatalogRevision,
+    ExtensionInstallRevision, ExtensionNativeOwnershipKey, ExtensionPackageIdentity,
+    ExtensionRuntimeGeneration, MAX_EXTENSION_API_PERMISSIONS,
+    MAX_EXTENSION_HOST_PERMISSION_PATTERNS,
 };
 use crate::ids::{ExtensionInstallId, ProfileId};
 
@@ -24,10 +25,11 @@ pub use management::{
     ExtensionInstallCandidateEntry, ExtensionManagementCatalog, ExtensionManagementCompatibility,
     ExtensionManagementEntry, ExtensionManagementGrantState, ExtensionManagementLimitation,
     ExtensionManagementProjectionError, ExtensionManagementProvenance,
-    ExtensionManagementRuntimeState, ExtensionManagementSource,
+    ExtensionManagementRuntimeState, ExtensionManagementSource, ExtensionUpdateConsentEntry,
     MAX_EXTENSION_MANAGEMENT_CATALOG_RETAINED_BYTES, MAX_EXTENSION_MANAGEMENT_DISPLAY_TEXT_BYTES,
     MAX_EXTENSION_MANAGEMENT_LICENSE_EXPRESSION_BYTES, MAX_EXTENSION_MANAGEMENT_LIMITATIONS,
     MAX_EXTENSION_MANAGEMENT_SOURCE_URL_BYTES, MAX_EXTENSION_MANAGEMENT_UPSTREAM_VERSION_BYTES,
+    MAX_EXTENSION_UPDATE_CONSENT_RETAINED_BYTES,
 };
 pub use provisioning::{
     acquired_runtime_selections_are_canonical, ExtensionAcquiredCatalogActivationCallback,
@@ -262,6 +264,52 @@ pub struct ExtensionInstallCandidateSelector {
     expected_catalog_revision: ExtensionInstallCatalogRevision,
     catalog_set: ExtensionCatalogSetDigest,
     package: ExtensionPackageIdentity,
+}
+
+/// Exact stale-resistant replacement reviewed by privileged browser chrome.
+///
+/// This value grants nothing. It binds one profile-local install/grant CAS to
+/// the authenticated current catalog-set identity and exact replacement
+/// package displayed to the user. The serialized service must reauthenticate
+/// every component before retiring a runtime or writing durable state.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExtensionInstallUpdateSelector {
+    install: ExtensionInstallSelector,
+    expected_grant_revision: ExtensionGrantRevision,
+    catalog_set: ExtensionCatalogSetDigest,
+    replacement: ExtensionPackageIdentity,
+}
+
+impl ExtensionInstallUpdateSelector {
+    pub const fn new(
+        install: ExtensionInstallSelector,
+        expected_grant_revision: ExtensionGrantRevision,
+        catalog_set: ExtensionCatalogSetDigest,
+        replacement: ExtensionPackageIdentity,
+    ) -> Self {
+        Self {
+            install,
+            expected_grant_revision,
+            catalog_set,
+            replacement,
+        }
+    }
+
+    pub const fn install(&self) -> ExtensionInstallSelector {
+        self.install
+    }
+
+    pub const fn expected_grant_revision(&self) -> ExtensionGrantRevision {
+        self.expected_grant_revision
+    }
+
+    pub const fn catalog_set(&self) -> ExtensionCatalogSetDigest {
+        self.catalog_set
+    }
+
+    pub const fn replacement(&self) -> &ExtensionPackageIdentity {
+        &self.replacement
+    }
 }
 
 impl ExtensionInstallCandidateSelector {
@@ -515,6 +563,28 @@ pub enum ExtensionInstallOutcome {
     FailedClosed,
 }
 
+/// Exact result of one user-approved, package-bound extension update.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExtensionUpdateOutcome {
+    Updated {
+        runtime: ExtensionUpdateRuntimeState,
+    },
+    /// The retained prompt or one of its Store/repository revisions is stale.
+    Conflict,
+    Rejected,
+    Unavailable,
+    OutcomeUnknown,
+    FailedClosed,
+}
+
+/// Truthful regular-runtime state after an atomic reviewed update.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExtensionUpdateRuntimeState {
+    Active(ExtensionRuntimeGeneration),
+    PendingActivation(ExtensionActivationPendingReason),
+    Disabled,
+}
+
 /// Management settlement plus the complete same-turn browser-routing cohort.
 ///
 /// `None` means the worker could not establish a trustworthy runtime
@@ -548,7 +618,7 @@ pub enum ExtensionManagementCatalogOutcome {
     CatalogNotSynchronized,
     /// A newer authenticated package adds required authority. The old package
     /// and runtime remain intact until a dedicated consent transaction exists.
-    UpdateConsentRequired,
+    UpdateConsentRequired(Box<ExtensionUpdateConsentEntry>),
     /// The request was coherent but could not complete before its deadline or
     /// while startup/profile state temporarily refused it.
     Unavailable,
@@ -630,6 +700,9 @@ pub type ExtensionUninstallCallback =
 /// Exactly-once completion callback for an admitted curated install request.
 pub type ExtensionInstallCallback =
     Box<dyn FnOnce(ExtensionManagementSettlement<ExtensionInstallOutcome>) + Send>;
+/// Exactly-once completion callback for an admitted reviewed update.
+pub type ExtensionUpdateCallback =
+    Box<dyn FnOnce(ExtensionManagementSettlement<ExtensionUpdateOutcome>) + Send>;
 /// Exactly-once completion callback for an admitted live-runtime grant request.
 pub type ExtensionRuntimeGrantCallback =
     Box<dyn FnOnce(ExtensionManagementSettlement<ExtensionRuntimeGrantOutcome>) + Send>;
@@ -814,6 +887,29 @@ pub trait ExtensionServiceLifecycle: Send {
         _selection: ExtensionInitialGrantSelection,
         _deadline: Instant,
         done: ExtensionInstallCallback,
+    ) -> ExtensionManagementAdmission {
+        drop(done);
+        ExtensionManagementAdmission::Unavailable
+    }
+
+    /// Atomically applies the exact replacement previously projected for
+    /// consent, granting only that replacement's required API/host authority.
+    /// Optional, file, and private declarations are never enabled by this
+    /// transaction. The default fails closed.
+    fn approve_update_until(
+        &mut self,
+        _selector: ExtensionInstallUpdateSelector,
+        _deadline: Instant,
+    ) -> ExtensionManagementSettlement<ExtensionUpdateOutcome> {
+        ExtensionManagementSettlement::new(ExtensionUpdateOutcome::FailedClosed, None)
+    }
+
+    /// Non-blocking reviewed-update form used by the application actor.
+    fn begin_approve_update(
+        &mut self,
+        _selector: ExtensionInstallUpdateSelector,
+        _deadline: Instant,
+        done: ExtensionUpdateCallback,
     ) -> ExtensionManagementAdmission {
         drop(done);
         ExtensionManagementAdmission::Unavailable

@@ -30,8 +30,8 @@ use zephium_core::permissions::{
     PagePermissionKind, PagePermissionPatch, RememberedPagePermission,
 };
 use zephium_core::ports::store::{
-    ExtensionGrantConflict, ExtensionNativeOwnershipActivationStale,
-    ExtensionNativeOwnershipJournalMutationApplied,
+    ExtensionGrantConflict, ExtensionInstallUpdateGrantDecision,
+    ExtensionNativeOwnershipActivationStale, ExtensionNativeOwnershipJournalMutationApplied,
 };
 use zephium_core::profiles::ProfileKind;
 use zephium_core::session::{
@@ -3688,6 +3688,7 @@ fn extension_service_store_authority_atomically_updates_install_and_grant_identi
         install_id,
         enabled.revision(),
         ExtensionGrantRevision::INITIAL,
+        ExtensionInstallUpdateGrantDecision::PreserveExisting,
         Arc::clone(&current),
         Arc::clone(&replacement),
         Instant::now() + STORE_RPC_TIMEOUT,
@@ -3768,8 +3769,9 @@ fn extension_update_requiring_new_authority_preserves_the_old_atomic_cohort() {
             install_id,
             provisioned.install.revision(),
             grants.revision(),
+            ExtensionInstallUpdateGrantDecision::PreserveExisting,
             Arc::clone(&current),
-            replacement,
+            Arc::clone(&replacement),
             Instant::now() + STORE_RPC_TIMEOUT,
         ),
         ExtensionServiceStoreCallOutcome::Completed(
@@ -3785,7 +3787,7 @@ fn extension_update_requiring_new_authority_preserves_the_old_atomic_cohort() {
     let ExtensionGrantCohortLoadOutcome::Loaded(cohort) = load_extension_grants(
         store.as_ref(),
         profile,
-        extension_grant_bindings(&[(install_id, current)]),
+        extension_grant_bindings(&[(install_id, Arc::clone(&current))]),
     ) else {
         panic!("refused update grant cohort did not reload");
     };
@@ -3795,6 +3797,36 @@ fn extension_update_requiring_new_authority_preserves_the_old_atomic_cohort() {
             .and_then(|entry| entry.authority_arc())
             .map(Arc::as_ref),
         Some(&grants)
+    );
+
+    let ExtensionServiceStoreCallOutcome::Completed(ExtensionInstallUpdateOutcome::Applied(
+        approved,
+    )) = service.update_install_until(
+        profile,
+        provisioned.catalog_revision,
+        install_id,
+        provisioned.install.revision(),
+        grants.revision(),
+        ExtensionInstallUpdateGrantDecision::GrantReplacementRequired,
+        current,
+        Arc::clone(&replacement),
+        Instant::now() + STORE_RPC_TIMEOUT,
+    )
+    else {
+        panic!("reviewed extension update did not settle atomically");
+    };
+    assert_eq!(approved.install.package(), replacement.package());
+    assert!(approved
+        .authority
+        .has_required_api_and_host_grants_for(&replacement));
+    assert_eq!(
+        approved
+            .authority
+            .persistence_projection()
+            .api_grants()
+            .map(ApiPermissionName::as_str)
+            .collect::<Vec<_>>(),
+        vec!["storage", "tabs"]
     );
 }
 
@@ -3837,6 +3869,7 @@ fn ambiguous_extension_update_never_commits_half_a_package_rebind() {
             install_id,
             provisioned.install.revision(),
             provisioned.authority.revision(),
+            ExtensionInstallUpdateGrantDecision::PreserveExisting,
             current,
             Arc::clone(&replacement),
         )

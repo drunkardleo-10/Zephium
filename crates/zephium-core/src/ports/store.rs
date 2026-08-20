@@ -328,6 +328,18 @@ pub enum ExtensionInstallUpdateOutcome {
     Failed,
 }
 
+/// Exact grant policy for one atomic installed-package replacement.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExtensionInstallUpdateGrantDecision {
+    /// Carry forward only authority already granted and still declared. A new
+    /// required declaration returns `AdditionalConsentRequired` unchanged.
+    PreserveExisting,
+    /// The user reviewed the exact replacement package and approved all of
+    /// its required API and host declarations. Optional, file, and private
+    /// authority remain unchanged or denied.
+    GrantReplacementRequired,
+}
+
 /// Bounded grant write payload. Initialization persists a complete selected
 /// grant set in one transaction; later settings changes remain per-install
 /// CAS operations.

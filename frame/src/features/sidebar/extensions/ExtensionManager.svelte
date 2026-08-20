@@ -67,6 +67,9 @@
   let catalogRevision = $derived(
     management?.phase === "ready" ? management.catalog_revision : null,
   );
+  let pendingUpdate = $derived(
+    management?.phase === "update_consent_required" ? management.pending_update : null,
+  );
 
   async function load() {
     requestFailed = !(await extensions.setManagementVisible(true));
@@ -456,7 +459,77 @@
         </div>
       {/if}
 
-      {#if requestFailed || management === null || management.phase !== "ready"}
+      {#if !requestFailed && pendingUpdate !== null}
+        <article class="rounded-md bg-fill px-3 py-3">
+          <div class="flex items-start gap-2.5">
+            <span
+              class="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-raised text-muted"
+              aria-hidden="true"
+            >
+              <Icon icon={PuzzleIcon} size={16} />
+            </span>
+            <div class="min-w-0 flex-1">
+              <h3 class="text-[12.5px] leading-4 font-medium text-text">
+                {pendingUpdate.name} update needs review
+              </h3>
+              <p class="mt-0.5 text-[10.5px] leading-4 text-faint">
+                Review version {pendingUpdate.version} before updating. Your current version remains installed
+                and unchanged until you approve.
+              </p>
+              <span
+                class="mt-1 inline-flex rounded-full bg-raised px-1.5 py-0.5 text-[9.5px] leading-3 font-medium text-accent"
+              >
+                {sourceLabel(pendingUpdate.source, pendingUpdate.verified_catalog_unix)}
+              </span>
+              {#if pendingUpdate.provenance !== null}
+                <p class="mt-1 text-[10.5px] leading-4 text-muted">
+                  {pendingUpdate.provenance.attribution} ·
+                  {pendingUpdate.provenance.license_expression}
+                </p>
+              {/if}
+            </div>
+          </div>
+
+          {#if pendingUpdate.added_required_api.length + pendingUpdate.added_required_hosts.length > 0}
+            <div class="mt-3 rounded-md bg-raised px-2.5 py-2">
+              <p class="text-[10.5px] leading-4 font-medium text-text">New required access</p>
+              <ul class="mt-1 text-[10.5px] leading-4 text-muted">
+                {#each pendingUpdate.added_required_api as permission (permission)}
+                  <li>• {apiPermissionLabel(permission)}</li>
+                {/each}
+                {#each pendingUpdate.added_required_hosts as pattern (pattern)}
+                  <li>• {hostPermissionLabel(pattern)}</li>
+                {/each}
+              </ul>
+            </div>
+          {/if}
+
+          {#if pendingUpdate.compatibility === "degraded"}
+            <div class="mt-2 rounded-md bg-raised px-2.5 py-2 text-[10.5px] leading-4 text-warning">
+              <p class="font-medium">New compatibility limitations</p>
+              <ul class="mt-1">
+                {#each pendingUpdate.limitations as limitation (limitationKey(limitation))}
+                  <li>• {compatibilityLimitationLabel(limitation)}</li>
+                {/each}
+              </ul>
+            </div>
+          {/if}
+
+          <div class="mt-3 flex items-center justify-between gap-2">
+            <p class="text-[10px] leading-4 text-faint">
+              Close this window to keep the current version.
+            </p>
+            <button
+              type="button"
+              class="h-8 rounded-md bg-accent px-3 text-[11px] font-medium text-white hover:bg-accent/90 disabled:opacity-45"
+              disabled={mutation !== null}
+              onclick={() => extensions.approveUpdate(pendingUpdate)}
+            >
+              {mutation?.kind === "update" ? "Updating…" : "Approve and update"}
+            </button>
+          </div>
+        </article>
+      {:else if requestFailed || management === null || management.phase !== "ready"}
         <div class="rounded-md bg-fill px-2.5 py-3 text-[11.5px] leading-4 text-muted">
           {#if !requestFailed && (management === null || management.phase === "loading")}
             <p role="status">Loading installed extensions…</p>
@@ -469,7 +542,7 @@
               {:else if management?.phase === "catalog_not_synchronized"}
                 No verified extension catalog has been synchronized yet.
               {:else if management?.phase === "update_consent_required"}
-                An extension update needs permission review. The installed version remains active.
+                The extension update review could not be loaded safely.
               {:else if management?.phase === "failed_closed"}
                 Extension management stopped to protect this profile.
               {:else}

@@ -1487,6 +1487,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             extension_management_set_visible,
             extension_distribution_refresh,
             extension_management_install,
+            extension_management_approve_update,
             extension_management_set_enabled,
             extension_management_open_options,
             extension_management_uninstall,
@@ -2575,6 +2576,34 @@ fn extension_management_install(
             file_access: selection.file_access,
             private_access: selection.private_access,
         },
+    )
+}
+
+/// Approves only the exact changed-authority replacement retained by Shell's
+/// current focused-profile subscription. Package identity and permission names
+/// never cross this IPC boundary.
+#[tauri::command]
+#[specta::specta]
+fn extension_management_approve_update(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    review_id: String,
+) -> zephium_ipc::OperationAdmission {
+    if !authorize(
+        &caller,
+        CallerPolicy::Main,
+        "extension_management_approve_update",
+    ) || shutdown_started(caller.app_handle())
+    {
+        return rejected_operation();
+    }
+    let Some(review) = fixed_nonzero_hex(&review_id) else {
+        return rejected_operation();
+    };
+    dispatch_operation(
+        caller.app_handle(),
+        &shell,
+        Command::ApproveFocusedExtensionUpdate { review },
     )
 }
 

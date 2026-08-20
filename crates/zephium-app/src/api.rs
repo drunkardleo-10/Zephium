@@ -185,6 +185,7 @@ pub const MAX_PENDING_EXTENSION_MANAGEMENT_OPERATIONS: usize = 8;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExtensionManagementCompletion {
     Install(ExtensionManagementSettlement<ExtensionInstallOutcome>),
+    Update(ExtensionManagementSettlement<zephium_core::ports::extensions::ExtensionUpdateOutcome>),
     SetEnabled(ExtensionManagementSettlement<ExtensionSetEnabledOutcome>),
     Uninstall(ExtensionManagementSettlement<ExtensionUninstallOutcome>),
 }
@@ -403,6 +404,12 @@ pub enum Command {
         optional_host_indices: Vec<u8>,
         file_access: bool,
         private_access: bool,
+    },
+    /// Approves the exact changed-required-authority update retained by the
+    /// focused profile's current management subscription. The opaque review
+    /// token carries no package or permission authority.
+    ApproveFocusedExtensionUpdate {
+        review: u64,
     },
     /// Removes one exact installed extension from the focused profile after
     /// the extension service proves regular/private native absence.

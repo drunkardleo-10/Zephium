@@ -27,6 +27,7 @@ export function initialExtensionManagement(): ExtensionManagementView {
     catalog_revision: null,
     entries: [],
     candidates: [],
+    pending_update: null,
   };
 }
 
@@ -134,11 +135,39 @@ export class ExtensionManagementProjectionModel {
   }
 
   apply(candidate: ExtensionManagementView): boolean {
-    if (candidate.projection_revision <= this.#appliedRevision) return false;
+    if (
+      candidate.projection_revision <= this.#appliedRevision ||
+      !validExtensionManagementShape(candidate)
+    )
+      return false;
     this.#appliedRevision = candidate.projection_revision;
     this.#management = candidate;
     return true;
   }
+}
+
+function validExtensionManagementShape(candidate: ExtensionManagementView): boolean {
+  if (candidate.phase === "ready") {
+    return candidate.catalog_revision !== null && candidate.pending_update === null;
+  }
+  if (candidate.phase === "update_consent_required") {
+    return (
+      candidate.catalog_revision === null &&
+      candidate.entries.length === 0 &&
+      candidate.candidates.length === 0 &&
+      candidate.pending_update !== null &&
+      candidate.pending_update.added_required_api.length +
+        candidate.pending_update.added_required_hosts.length +
+        candidate.pending_update.limitations.length >
+        0
+    );
+  }
+  return (
+    candidate.catalog_revision === null &&
+    candidate.entries.length === 0 &&
+    candidate.candidates.length === 0 &&
+    candidate.pending_update === null
+  );
 }
 
 /**

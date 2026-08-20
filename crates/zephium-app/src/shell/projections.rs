@@ -124,6 +124,57 @@ impl Shell {
             catalog_revision: None,
             entries: Vec::new(),
             candidates: Vec::new(),
+            pending_update: None,
+        }));
+    }
+
+    pub(super) fn project_extension_update_consent(&self) {
+        let Some((review, prompt)) = self.extension_management.pending_update() else {
+            return;
+        };
+        let update = ExtensionUpdateConsentView {
+            review_id: format!("{review:016x}"),
+            name: prompt.name().to_owned(),
+            version: prompt.version().to_owned(),
+            source: extension_management_source_view(prompt.source()),
+            verified_catalog_unix: prompt
+                .verified_catalog_unix()
+                .map(|value| value.to_string()),
+            provenance: prompt
+                .provenance()
+                .map(extension_management_provenance_view),
+            added_required_api: prompt
+                .added_required_api()
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            added_required_hosts: prompt
+                .added_required_hosts()
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            compatibility: match prompt.compatibility() {
+                ExtensionManagementCompatibility::Compatible => {
+                    ExtensionManagementCompatibilityView::Compatible
+                }
+                ExtensionManagementCompatibility::Degraded => {
+                    ExtensionManagementCompatibilityView::Degraded
+                }
+            },
+            limitations: prompt
+                .limitations()
+                .iter()
+                .map(extension_management_limitation_view)
+                .collect(),
+        };
+        (self.emit)(Projection::ExtensionManagement(ExtensionManagementView {
+            projection_revision: format!("{:032x}", self.next_projection_revision()),
+            profile_id: prompt.selector().install().profile().to_string(),
+            phase: ExtensionManagementPhase::UpdateConsentRequired,
+            catalog_revision: None,
+            entries: Vec::new(),
+            candidates: Vec::new(),
+            pending_update: Some(update),
         }));
     }
 
@@ -267,6 +318,7 @@ impl Shell {
             catalog_revision: Some(format!("{:016x}", catalog.catalog_revision().get())),
             entries,
             candidates,
+            pending_update: None,
         }));
     }
 

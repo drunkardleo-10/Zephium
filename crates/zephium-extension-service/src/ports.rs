@@ -7,9 +7,10 @@ use zephium_core::ports::extensions::{
     ExtensionAcquiredCatalogActivationRequest, ExtensionAcquiredPackageProvisioningCallback,
     ExtensionAcquiredPackageProvisioningOutcome, ExtensionAcquiredPackageProvisioningRequest,
     ExtensionInitialGrantSelection, ExtensionInstallCallback, ExtensionInstallCandidateSelector,
-    ExtensionInstallOutcome, ExtensionInstallSelector, ExtensionManagementAdmission,
-    ExtensionManagementAvailability, ExtensionManagementCatalogAdmission,
-    ExtensionManagementCatalogCallback, ExtensionManagementSettlement,
+    ExtensionInstallOutcome, ExtensionInstallSelector, ExtensionInstallUpdateSelector,
+    ExtensionManagementAdmission, ExtensionManagementAvailability,
+    ExtensionManagementCatalogAdmission, ExtensionManagementCatalogCallback,
+    ExtensionManagementSettlement,
     ExtensionProfileRetirementDisposition as CoreExtensionProfileRetirementDisposition,
     ExtensionRepositoryMaintenanceAdmission, ExtensionRepositoryMaintenanceCallback,
     ExtensionRuntimeActivationDisposition as CoreExtensionRuntimeActivationDisposition,
@@ -19,7 +20,7 @@ use zephium_core::ports::extensions::{
     ExtensionServiceShutdownOutcome as CoreExtensionServiceShutdownOutcome,
     ExtensionServiceStartupOutcome as CoreExtensionServiceStartupOutcome,
     ExtensionSetEnabledCallback, ExtensionSetEnabledOutcome, ExtensionUninstallCallback,
-    ExtensionUninstallOutcome,
+    ExtensionUninstallOutcome, ExtensionUpdateCallback, ExtensionUpdateOutcome,
 };
 
 use crate::{
@@ -233,6 +234,23 @@ impl ExtensionServiceLifecycle for ExtensionServiceOwner {
         done: ExtensionInstallCallback,
     ) -> ExtensionManagementAdmission {
         ExtensionServiceOwner::begin_install(self, selector, selection, deadline, done)
+    }
+
+    fn approve_update_until(
+        &mut self,
+        selector: ExtensionInstallUpdateSelector,
+        deadline: Instant,
+    ) -> ExtensionManagementSettlement<ExtensionUpdateOutcome> {
+        ExtensionServiceOwner::approve_update_until(self, selector, deadline)
+    }
+
+    fn begin_approve_update(
+        &mut self,
+        selector: ExtensionInstallUpdateSelector,
+        deadline: Instant,
+        done: ExtensionUpdateCallback,
+    ) -> ExtensionManagementAdmission {
+        ExtensionServiceOwner::begin_approve_update(self, selector, deadline, done)
     }
 
     fn uninstall_until(

@@ -245,6 +245,24 @@ pub struct ExtensionInstallCandidateView {
     pub limitations: Vec<ExtensionManagementLimitationView>,
 }
 
+/// One exact authenticated replacement awaiting changed-authority or newly
+/// degraded compatibility review. `review_id` is an opaque,
+/// subscription-local echo token; no package identity or permission name is
+/// accepted back from privileged chrome.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct ExtensionUpdateConsentView {
+    pub review_id: String,
+    pub name: String,
+    pub version: String,
+    pub source: ExtensionManagementSourceView,
+    pub verified_catalog_unix: Option<String>,
+    pub provenance: Option<ExtensionManagementProvenanceView>,
+    pub added_required_api: Vec<String>,
+    pub added_required_hosts: Vec<String>,
+    pub compatibility: ExtensionManagementCompatibilityView,
+    pub limitations: Vec<ExtensionManagementLimitationView>,
+}
+
 /// Exact replacement management cohort for the focused profile.
 /// Loading and failure phases always carry no catalog revision or rows, so a
 /// delayed failure cannot leave stale selectors actionable in privileged UI.
@@ -256,6 +274,8 @@ pub struct ExtensionManagementView {
     pub catalog_revision: Option<String>,
     pub entries: Vec<ExtensionManagementEntryView>,
     pub candidates: Vec<ExtensionInstallCandidateView>,
+    /// Present only while `phase` is `update_consent_required`.
+    pub pending_update: Option<ExtensionUpdateConsentView>,
 }
 
 /// Stable distribution failure stage exposed only to privileged chrome.

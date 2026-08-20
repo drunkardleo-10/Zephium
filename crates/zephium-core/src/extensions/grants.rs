@@ -712,6 +712,31 @@ impl ExtensionGrantAuthority {
         current: &ExtensionManifestDescriptor,
         replacement: &ExtensionManifestDescriptor,
     ) -> Result<ExtensionGrantApplication, ExtensionGrantApplyError> {
+        self.reconcile_manifest_inner(expected, current, replacement, false)
+    }
+
+    /// Rebinds authority to a newer package after an explicit user review and
+    /// grants every required API and host declaration of that exact
+    /// replacement. Optional declarations remain grant-preserving only; file
+    /// and private access remain independent toggles. The complete package and
+    /// grant transition consumes one revision, so no crash frontier can expose
+    /// a replacement package with only part of its required authority.
+    pub fn reconcile_manifest_with_required_consent(
+        self,
+        expected: ExtensionGrantRevision,
+        current: &ExtensionManifestDescriptor,
+        replacement: &ExtensionManifestDescriptor,
+    ) -> Result<ExtensionGrantApplication, ExtensionGrantApplyError> {
+        self.reconcile_manifest_inner(expected, current, replacement, true)
+    }
+
+    fn reconcile_manifest_inner(
+        self,
+        expected: ExtensionGrantRevision,
+        current: &ExtensionManifestDescriptor,
+        replacement: &ExtensionManifestDescriptor,
+        grant_replacement_required: bool,
+    ) -> Result<ExtensionGrantApplication, ExtensionGrantApplyError> {
         if self.revision != expected {
             return Err(ExtensionGrantApplyError::RevisionConflict {
                 expected,
@@ -741,7 +766,7 @@ impl ExtensionGrantAuthority {
             private_access,
             ..
         } = self;
-        let granted_api = required_api
+        let mut granted_api = required_api
             .into_vec()
             .into_iter()
             .chain(optional_api.into_vec())
@@ -750,7 +775,7 @@ impl ExtensionGrantAuthority {
                     || replacement.declarations().optional_api().contains(name)
             })
             .collect::<Vec<_>>();
-        let granted_hosts = required_hosts
+        let mut granted_hosts = required_hosts
             .into_vec()
             .into_iter()
             .chain(optional_hosts.into_vec())
@@ -764,6 +789,21 @@ impl ExtensionGrantAuthority {
                         .is_some_and(|set| set.contains_canonical(pattern.as_str()))
             })
             .collect::<Vec<_>>();
+        if grant_replacement_required {
+            for name in replacement.declarations().required_api().names() {
+                if !granted_api.contains(name) {
+                    granted_api.push(name.clone());
+                }
+            }
+            for pattern in replacement.declarations().required_host_authorities() {
+                if !granted_hosts
+                    .iter()
+                    .any(|granted| granted.as_str() == pattern.as_str())
+                {
+                    granted_hosts.push(pattern.clone());
+                }
+            }
+        }
         let authority = Self::build(
             install_id,
             revision,
@@ -2479,6 +2519,65 @@ mod tests {
         assert_eq!(updated.required_hosts[0].as_str(), "https://example.com/*");
         assert!(updated.optional_hosts.is_empty());
         assert!(!updated.persistence_projection().persisted_file_access());
+    }
+
+    #[test]
+    fn reviewed_update_grants_only_the_exact_replacement_required_authority() {
+        let current = manifest_for(
+            package(1, 1),
+            &["storage"],
+            &["history"],
+            &["https://old.example/*"],
+            &["file:///*"],
+        );
+        let mut authority =
+            ExtensionGrantAuthority::new(&install(current.package().clone()), &current).unwrap();
+        authority = grant_api(authority, &current, "storage");
+        authority = grant_api(authority, &current, "history");
+        authority = grant_host(authority, &current, "https://old.example/*");
+        authority = grant_host(authority, &current, "file:///*");
+        let revision = authority.revision();
+        authority = authority
+            .apply(
+                revision,
+                &current,
+                ExtensionGrantMutation::SetFileAccess { granted: true },
+            )
+            .unwrap()
+            .into_authority();
+
+        let replacement = manifest_for(
+            package(2, 2),
+            &["history", "newRequired"],
+            &["storage", "newOptional"],
+            &["https://new.example/*"],
+            &["https://optional.example/*"],
+        );
+        let prior_revision = authority.revision();
+        let updated = authority
+            .reconcile_manifest_with_required_consent(prior_revision, &current, &replacement)
+            .unwrap()
+            .into_authority();
+
+        assert_eq!(prior_revision.next(), Some(updated.revision()));
+        assert_eq!(
+            persisted_api_grants(&updated),
+            vec!["history", "newRequired", "storage"]
+        );
+        assert_eq!(
+            persisted_host_grants(&updated),
+            vec!["https://new.example/*"]
+        );
+        assert!(updated.has_required_api_and_host_grants_for(&replacement));
+        assert!(!updated.persistence_projection().persisted_file_access());
+        assert_eq!(
+            updated.decide_api(
+                &replacement,
+                &ApiPermissionName::parse_exact("newOptional").unwrap(),
+                ExtensionGrantBrowsingContext::Regular,
+            ),
+            ExtensionApiGrantDecision::Denied(ExtensionGrantDenial::ApiNotGranted)
+        );
     }
 
     #[test]

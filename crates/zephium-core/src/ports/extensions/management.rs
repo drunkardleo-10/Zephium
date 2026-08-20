@@ -16,7 +16,9 @@ use crate::extensions::{
 use crate::ids::ProfileId;
 use crate::injection::{MatchPattern, MAX_MATCH_PATTERN_BYTES};
 
-use super::{ExtensionInstallCandidateSelector, ExtensionInstallSelector};
+use super::{
+    ExtensionInstallCandidateSelector, ExtensionInstallSelector, ExtensionInstallUpdateSelector,
+};
 
 /// Maximum bytes in one browser-rendered extension metadata field.
 pub const MAX_EXTENSION_MANAGEMENT_DISPLAY_TEXT_BYTES: usize = 4 * 1024;
@@ -31,6 +33,21 @@ pub const MAX_EXTENSION_MANAGEMENT_LICENSE_EXPRESSION_BYTES: usize = 256;
 /// Every API permission can retain its own label; all other declaration kinds
 /// collapse into the fourteen fixed browser-owned feature categories below.
 pub const MAX_EXTENSION_MANAGEMENT_LIMITATIONS: usize = MAX_EXTENSION_API_PERMISSIONS + 14;
+/// Maximum retained heap and inline data for one changed-authority or newly
+/// degraded update prompt. Only required additions and newly introduced
+/// browser-owned limitations enter this value; optional declarations remain
+/// denied and absent.
+pub const MAX_EXTENSION_UPDATE_CONSENT_RETAINED_BYTES: usize =
+    size_of::<ExtensionUpdateConsentEntry>()
+        + 2 * MAX_EXTENSION_MANAGEMENT_DISPLAY_TEXT_BYTES
+        + MAX_EXTENSION_MANAGEMENT_SOURCE_URL_BYTES
+        + MAX_EXTENSION_MANAGEMENT_UPSTREAM_VERSION_BYTES
+        + MAX_EXTENSION_MANAGEMENT_LICENSE_EXPRESSION_BYTES
+        + MAX_EXTENSION_API_PERMISSIONS * MAX_EXTENSION_API_PERMISSION_NAME_BYTES
+        + MAX_EXTENSION_HOST_GRANTS * MAX_MATCH_PATTERN_BYTES
+        + MAX_EXTENSION_MANAGEMENT_LIMITATIONS
+            * (size_of::<ExtensionManagementLimitation>()
+                + MAX_EXTENSION_API_PERMISSION_NAME_BYTES);
 /// Maximum retained bytes for the complete management catalog of one profile.
 pub const MAX_EXTENSION_MANAGEMENT_CATALOG_RETAINED_BYTES: usize = size_of::<
     ExtensionManagementCatalog,
@@ -679,6 +696,169 @@ impl ExtensionInstallCandidateEntry {
     }
 }
 
+/// Browser-owned review for one exact authenticated replacement that adds
+/// required API/host authority or introduces a new reviewed degradation.
+///
+/// The selector is retained only by Shell. Privileged UI receives an opaque
+/// short-lived index and the bounded display cohort below, so it cannot submit
+/// package identities or permission names back to the service.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExtensionUpdateConsentEntry {
+    selector: ExtensionInstallUpdateSelector,
+    name: Box<str>,
+    version: Box<str>,
+    source: ExtensionManagementSource,
+    verified_catalog_unix: Option<u64>,
+    provenance: Option<ExtensionManagementProvenance>,
+    added_required_api: Box<[Box<str>]>,
+    added_required_hosts: Box<[Box<str>]>,
+    compatibility: ExtensionManagementCompatibility,
+    limitations: Box<[ExtensionManagementLimitation]>,
+    retained_bytes: usize,
+}
+
+impl ExtensionUpdateConsentEntry {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        selector: ExtensionInstallUpdateSelector,
+        name: impl Into<Box<str>>,
+        version: impl Into<Box<str>>,
+        source: ExtensionManagementSource,
+        verified_catalog_unix: Option<u64>,
+        provenance: Option<ExtensionManagementProvenance>,
+        added_required_api: Vec<Box<str>>,
+        added_required_hosts: Vec<Box<str>>,
+        compatibility: ExtensionManagementCompatibility,
+        limitations: Vec<ExtensionManagementLimitation>,
+    ) -> Result<Self, ExtensionManagementProjectionError> {
+        let name = name.into();
+        let version = version.into();
+        validate_display_text(&name, 75, true)?;
+        validate_display_text(&version, MAX_EXTENSION_MANAGEMENT_DISPLAY_TEXT_BYTES, false)?;
+        if version.is_empty() || !version.is_ascii() {
+            return Err(ExtensionManagementProjectionError::InvalidDisplayText);
+        }
+        validate_source(source, verified_catalog_unix, provenance.as_ref())?;
+        if added_required_api.len() > MAX_EXTENSION_API_PERMISSIONS
+            || added_required_hosts.len() > MAX_EXTENSION_HOST_GRANTS
+        {
+            return Err(ExtensionManagementProjectionError::TooManyPermissions);
+        }
+        let added_required_api = canonical_api_permissions(added_required_api)?;
+        let added_required_hosts = canonical_required_host_permissions(added_required_hosts)?;
+        if added_required_hosts.iter().any(|pattern| {
+            MatchPattern::parse(pattern)
+                .ok()
+                .is_none_or(|parsed| parsed.as_str() != pattern.as_ref())
+        }) {
+            return Err(ExtensionManagementProjectionError::InvalidPermission);
+        }
+        let limitations = canonical_limitations(compatibility, limitations)?;
+        if added_required_api.is_empty()
+            && added_required_hosts.is_empty()
+            && limitations.is_empty()
+        {
+            return Err(ExtensionManagementProjectionError::EmptyUpdateReview);
+        }
+        let retained_bytes = name
+            .len()
+            .checked_add(version.len())
+            .and_then(|bytes| {
+                bytes.checked_add(
+                    provenance
+                        .as_ref()
+                        .map_or(0, ExtensionManagementProvenance::retained_bytes),
+                )
+            })
+            .and_then(|bytes| {
+                added_required_api
+                    .iter()
+                    .chain(added_required_hosts.iter())
+                    .try_fold(bytes, |bytes, value| bytes.checked_add(value.len()))
+            })
+            .and_then(|bytes| {
+                limitations.iter().try_fold(bytes, |bytes, limitation| {
+                    bytes.checked_add(limitation.retained_text_bytes())
+                })
+            })
+            .and_then(|bytes| bytes.checked_add(size_of::<Self>()))
+            .and_then(|bytes| {
+                added_required_api
+                    .len()
+                    .checked_add(added_required_hosts.len())
+                    .and_then(|count| count.checked_mul(size_of::<Box<str>>()))
+                    .and_then(|permission_bytes| bytes.checked_add(permission_bytes))
+            })
+            .and_then(|bytes| {
+                limitations
+                    .len()
+                    .checked_mul(size_of::<ExtensionManagementLimitation>())
+                    .and_then(|limitation_bytes| bytes.checked_add(limitation_bytes))
+            })
+            .ok_or(ExtensionManagementProjectionError::AccountingOverflow)?;
+        if retained_bytes > MAX_EXTENSION_UPDATE_CONSENT_RETAINED_BYTES {
+            return Err(ExtensionManagementProjectionError::RetainedBytesExceeded);
+        }
+        Ok(Self {
+            selector,
+            name,
+            version,
+            source,
+            verified_catalog_unix,
+            provenance,
+            added_required_api: added_required_api.into_boxed_slice(),
+            added_required_hosts: added_required_hosts.into_boxed_slice(),
+            compatibility,
+            limitations,
+            retained_bytes,
+        })
+    }
+
+    pub const fn selector(&self) -> &ExtensionInstallUpdateSelector {
+        &self.selector
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+
+    pub const fn source(&self) -> ExtensionManagementSource {
+        self.source
+    }
+
+    pub const fn verified_catalog_unix(&self) -> Option<u64> {
+        self.verified_catalog_unix
+    }
+
+    pub const fn provenance(&self) -> Option<&ExtensionManagementProvenance> {
+        self.provenance.as_ref()
+    }
+
+    pub fn added_required_api(&self) -> &[Box<str>] {
+        &self.added_required_api
+    }
+
+    pub fn added_required_hosts(&self) -> &[Box<str>] {
+        &self.added_required_hosts
+    }
+
+    pub const fn compatibility(&self) -> ExtensionManagementCompatibility {
+        self.compatibility
+    }
+
+    pub fn limitations(&self) -> &[ExtensionManagementLimitation] {
+        &self.limitations
+    }
+
+    pub const fn retained_bytes(&self) -> usize {
+        self.retained_bytes
+    }
+}
+
 fn canonical_limitations(
     compatibility: ExtensionManagementCompatibility,
     mut limitations: Vec<ExtensionManagementLimitation>,
@@ -885,6 +1065,7 @@ pub enum ExtensionManagementProjectionError {
     InvalidSource,
     InvalidProvenance,
     InvalidDisplayText,
+    EmptyUpdateReview,
     AccountingOverflow,
     RetainedBytesExceeded,
 }
@@ -902,6 +1083,9 @@ impl fmt::Display for ExtensionManagementProjectionError {
             Self::InvalidSource => "invalid extension management source",
             Self::InvalidProvenance => "invalid extension management provenance",
             Self::InvalidDisplayText => "invalid extension management display text",
+            Self::EmptyUpdateReview => {
+                "extension update review has no authority or compatibility change"
+            }
             Self::AccountingOverflow => "extension management accounting overflow",
             Self::RetainedBytesExceeded => "extension management retained-byte bound exceeded",
         })
@@ -1105,6 +1289,67 @@ mod tests {
             Vec::new(),
         )
         .unwrap()
+    }
+
+    fn update_selector(profile: ProfileId) -> ExtensionInstallUpdateSelector {
+        let replacement = ExtensionPackageIdentity::new(
+            ExtensionAuthorityId::from_bytes([1; 32]),
+            ExtensionPackageKey::from_bytes([7; 32]),
+            ExtensionPackageRevision::new(2).unwrap(),
+            ExtensionPackagePayloadIdentity::BundledTree,
+            ExtensionManifestDigest::from_bytes([8; 32]),
+            ExtensionTreeDigest::from_bytes([9; 32]),
+        );
+        ExtensionInstallUpdateSelector::new(
+            selector(profile, 7),
+            ExtensionGrantRevision::INITIAL,
+            ExtensionCatalogSetDigest::from_bytes([10; 32]),
+            replacement,
+        )
+    }
+
+    #[test]
+    fn update_consent_is_nonempty_canonical_and_package_bound() {
+        let profile = ProfileId::from(1);
+        let prompt = ExtensionUpdateConsentEntry::new(
+            update_selector(profile),
+            "Fixture update",
+            "2.0.0",
+            ExtensionManagementSource::ZephiumVerified,
+            Some(2),
+            Some(provenance()),
+            vec!["tabs".into(), "history".into()],
+            vec!["https://example.com/*".into()],
+            ExtensionManagementCompatibility::Compatible,
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(prompt.selector().install().profile(), profile);
+        assert_eq!(
+            prompt
+                .added_required_api()
+                .iter()
+                .map(Box::as_ref)
+                .collect::<Vec<_>>(),
+            vec!["history", "tabs"]
+        );
+        assert!(prompt.retained_bytes() <= MAX_EXTENSION_UPDATE_CONSENT_RETAINED_BYTES);
+
+        assert_eq!(
+            ExtensionUpdateConsentEntry::new(
+                update_selector(profile),
+                "Fixture update",
+                "2.0.0",
+                ExtensionManagementSource::ZephiumVerified,
+                Some(2),
+                Some(provenance()),
+                Vec::new(),
+                Vec::new(),
+                ExtensionManagementCompatibility::Compatible,
+                Vec::new(),
+            ),
+            Err(ExtensionManagementProjectionError::EmptyUpdateReview)
+        );
     }
 
     #[test]

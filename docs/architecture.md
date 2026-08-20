@@ -948,9 +948,26 @@ prompt per admitted runtime, a Shell-owned consent projection, an exact
 generation-bound service mutation, and native settlement; absent, stale,
 over-capacity, or unavailable paths deny rather than grant. This extension
 grant broker is distinct from page-origin permission events; camera/microphone
-prompts now have their own Store-backed Shell policy and UI. Remaining release
-gaps include product-sealed distribution endpoints, the complete permission
-and API matrix, changed-permission update consent, quotas, complete
+prompts now have their own Store-backed Shell policy and UI.
+
+Installed-package updates compare the exact current grant root and reviewed
+compatibility map with the authenticated replacement before native retirement.
+New required API/host authority or a newly introduced degradation produces one
+bounded Shell-retained review; the old package and runtime remain live while
+the review is visible or dismissed. Privileged chrome receives only an opaque
+subscription-local review token plus bounded browser-owned display data. An
+approval reauthenticates the catalog-set digest, replacement package, profile
+catalog/install/grant revisions, manifests, and changed cohort inside the
+serialized service. Store then commits the package replacement and all exact
+replacement-required grants as one transaction and one grant revision. It
+preserves only still-declared optional grants and never enables new optional,
+file, or private authority. Stale or contradictory reviews conflict without
+mutation; uncertain commits enter restart reconciliation rather than replaying
+consent. Permission-neutral and non-degrading updates retain the automatic
+atomic path.
+
+Remaining release gaps include product-sealed distribution endpoints, the
+complete permission and API matrix, quotas, complete
 cross-process release-build resource evidence, and endurance. Older admitted
 macOS versions and Linux require a Zephium
 compatibility runtime only after per-principal world/handler isolation, exact
