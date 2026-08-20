@@ -107,8 +107,8 @@ function management(value: number, profileId = "profile-a"): ExtensionManagement
         grants: {
           initialized: true,
           revision: "0000000000000001",
-          api_grants: 3,
-          host_grants: 2,
+          api_permissions: ["storage", "tabs", "webNavigation"],
+          host_permissions: ["http://*/*", "https://*/*"],
           file_access: false,
           private_access: false,
         },

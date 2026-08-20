@@ -329,12 +329,12 @@ fn actor_management_serializes_disable_reenable_and_uninstall_with_native_owners
     assert!(matches!(
         entry.grants(),
         ExtensionManagementGrantState::Initialized {
-            api_grants: 1,
-            host_grants: 1,
+            api_permissions,
+            host_permissions,
             file_access: false,
             private_access: false,
             ..
-        }
+        } if api_permissions.len() == 1 && host_permissions.len() == 1
     ));
 
     let (disabled_tx, disabled_rx) = std::sync::mpsc::sync_channel(1);
@@ -546,11 +546,14 @@ fn actor_runtime_optional_grants_rebind_one_exact_live_generation() {
         entry.grants(),
         ExtensionManagementGrantState::Initialized {
             revision,
-            api_grants: 2,
-            host_grants: 2,
+            api_permissions,
+            host_permissions,
             file_access: false,
             private_access: false,
+            ..
         } if revision.get() == 2
+            && api_permissions.len() == 2
+            && host_permissions.len() == 2
     ));
 
     let ExtensionServiceShutdownOutcome::Complete(evidence) = owner.shutdown_until(deadline())

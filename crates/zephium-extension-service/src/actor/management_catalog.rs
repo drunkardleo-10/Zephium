@@ -164,18 +164,21 @@ pub(super) fn load(
             None => ExtensionManagementGrantState::Uninitialized,
             Some(authority) => {
                 let projection = authority.persistence_projection();
-                let Ok(api_grants) = u8::try_from(projection.api_grant_count()) else {
-                    return ExtensionManagementCatalogOutcome::FailedClosed;
-                };
-                let Ok(host_grants) = u8::try_from(projection.host_grant_count()) else {
-                    return ExtensionManagementCatalogOutcome::FailedClosed;
-                };
-                ExtensionManagementGrantState::Initialized {
-                    revision: projection.revision(),
-                    api_grants,
-                    host_grants,
-                    file_access: projection.persisted_file_access(),
-                    private_access: projection.persisted_private_access(),
+                match ExtensionManagementGrantState::initialized(
+                    projection.revision(),
+                    projection
+                        .api_grants()
+                        .map(|name| Box::<str>::from(name.as_str()))
+                        .collect(),
+                    projection
+                        .host_grants()
+                        .map(|pattern| Box::<str>::from(pattern.as_str()))
+                        .collect(),
+                    projection.persisted_file_access(),
+                    projection.persisted_private_access(),
+                ) {
+                    Ok(grants) => grants,
+                    Err(_) => return ExtensionManagementCatalogOutcome::FailedClosed,
                 }
             }
         };

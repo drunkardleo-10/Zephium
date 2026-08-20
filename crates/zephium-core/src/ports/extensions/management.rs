@@ -57,7 +57,10 @@ pub const MAX_EXTENSION_MANAGEMENT_CATALOG_RETAINED_BYTES: usize = size_of::<
             + 5 * MAX_EXTENSION_MANAGEMENT_DISPLAY_TEXT_BYTES
             + MAX_EXTENSION_MANAGEMENT_SOURCE_URL_BYTES
             + MAX_EXTENSION_MANAGEMENT_UPSTREAM_VERSION_BYTES
-            + MAX_EXTENSION_MANAGEMENT_LICENSE_EXPRESSION_BYTES)
+            + MAX_EXTENSION_MANAGEMENT_LICENSE_EXPRESSION_BYTES
+            + MAX_EXTENSION_API_PERMISSIONS
+                * (size_of::<Box<str>>() + MAX_EXTENSION_API_PERMISSION_NAME_BYTES)
+            + MAX_EXTENSION_HOST_GRANTS * (size_of::<Box<str>>() + MAX_MATCH_PATTERN_BYTES))
     + MAX_EXTENSION_INSTALLS_PER_PROFILE
         * (size_of::<ExtensionInstallCandidateEntry>()
             + 4 * MAX_EXTENSION_MANAGEMENT_DISPLAY_TEXT_BYTES
@@ -265,18 +268,86 @@ impl ExtensionManagementLimitation {
 ///
 /// Counts and toggles are display data only. They do not implement permission
 /// checks; runtime and broker code must retain the full grant authority.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ExtensionManagementGrantState {
     /// No grant row has been initialized, so the extension has no authority.
     Uninitialized,
     /// One exact grant row exists for the authenticated install and manifest.
     Initialized {
         revision: ExtensionGrantRevision,
-        api_grants: u8,
-        host_grants: u8,
+        api_permissions: Box<[Box<str>]>,
+        host_permissions: Box<[Box<str>]>,
         file_access: bool,
         private_access: bool,
+        retained_bytes: usize,
     },
+}
+
+impl ExtensionManagementGrantState {
+    pub fn initialized(
+        revision: ExtensionGrantRevision,
+        api_permissions: Vec<Box<str>>,
+        host_permissions: Vec<Box<str>>,
+        file_access: bool,
+        private_access: bool,
+    ) -> Result<Self, ExtensionManagementProjectionError> {
+        if api_permissions.len() > MAX_EXTENSION_API_PERMISSIONS
+            || host_permissions.len() > MAX_EXTENSION_HOST_GRANTS
+        {
+            return Err(ExtensionManagementProjectionError::TooManyPermissions);
+        }
+        let api_permissions = canonical_api_permissions(api_permissions)?;
+        let host_permissions = canonical_host_permissions(host_permissions)?;
+        if host_permissions.iter().any(|pattern| {
+            MatchPattern::parse(pattern)
+                .ok()
+                .is_none_or(|parsed| parsed.as_str() != pattern.as_ref())
+        }) {
+            return Err(ExtensionManagementProjectionError::InvalidPermission);
+        }
+        let retained_bytes = api_permissions
+            .iter()
+            .chain(host_permissions.iter())
+            .try_fold(0_usize, |bytes, value| {
+                bytes
+                    .checked_add(size_of::<Box<str>>())
+                    .and_then(|bytes| bytes.checked_add(value.len()))
+            })
+            .ok_or(ExtensionManagementProjectionError::AccountingOverflow)?;
+        Ok(Self::Initialized {
+            revision,
+            api_permissions: api_permissions.into_boxed_slice(),
+            host_permissions: host_permissions.into_boxed_slice(),
+            file_access,
+            private_access,
+            retained_bytes,
+        })
+    }
+
+    pub fn api_permissions(&self) -> &[Box<str>] {
+        match self {
+            Self::Uninitialized => &[],
+            Self::Initialized {
+                api_permissions, ..
+            } => api_permissions,
+        }
+    }
+
+    pub fn host_permissions(&self) -> &[Box<str>] {
+        match self {
+            Self::Uninitialized => &[],
+            Self::Initialized {
+                host_permissions, ..
+            } => host_permissions,
+        }
+    }
+
+    const fn retained_bytes(&self) -> usize {
+        match self {
+            Self::Uninitialized => 0,
+            Self::Initialized { retained_bytes, .. } => *retained_bytes,
+        }
+    }
 }
 
 /// One complete browser-owned management row.
@@ -358,6 +429,7 @@ impl ExtensionManagementEntry {
             .ok_or(ExtensionManagementProjectionError::AccountingOverflow)?;
         let retained_bytes = size_of::<Self>()
             .checked_add(text_bytes)
+            .and_then(|bytes| bytes.checked_add(grants.retained_bytes()))
             .and_then(|bytes| {
                 limitations
                     .len()
@@ -424,8 +496,8 @@ impl ExtensionManagementEntry {
         self.runtime
     }
 
-    pub const fn grants(&self) -> ExtensionManagementGrantState {
-        self.grants
+    pub const fn grants(&self) -> &ExtensionManagementGrantState {
+        &self.grants
     }
 
     pub const fn compatibility(&self) -> ExtensionManagementCompatibility {
@@ -1249,6 +1321,50 @@ mod tests {
         )
         .unwrap();
         assert!(with.has_options_page());
+    }
+
+    #[test]
+    fn installed_grant_disclosure_is_exact_canonical_and_bounded() {
+        let grants = ExtensionManagementGrantState::initialized(
+            ExtensionGrantRevision::INITIAL,
+            vec!["tabs".into(), "storage".into()],
+            vec!["https://example.com/*".into(), "<all_urls>".into()],
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            grants
+                .api_permissions()
+                .iter()
+                .map(Box::as_ref)
+                .collect::<Vec<_>>(),
+            vec!["storage", "tabs"]
+        );
+        assert_eq!(
+            grants
+                .host_permissions()
+                .iter()
+                .map(Box::as_ref)
+                .collect::<Vec<_>>(),
+            vec!["<all_urls>", "https://example.com/*"]
+        );
+        assert!(ExtensionManagementGrantState::initialized(
+            ExtensionGrantRevision::INITIAL,
+            vec!["tabs".into(), "tabs".into()],
+            Vec::new(),
+            false,
+            false,
+        )
+        .is_err());
+        assert!(ExtensionManagementGrantState::initialized(
+            ExtensionGrantRevision::INITIAL,
+            Vec::new(),
+            vec!["not a match pattern".into()],
+            false,
+            false,
+        )
+        .is_err());
     }
 
     fn candidate(

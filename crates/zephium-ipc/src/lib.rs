@@ -188,8 +188,8 @@ pub enum ExtensionManagementLimitationView {
 pub struct ExtensionManagementGrantView {
     pub initialized: bool,
     pub revision: Option<String>,
-    pub api_grants: u8,
-    pub host_grants: u8,
+    pub api_permissions: Vec<String>,
+    pub host_permissions: Vec<String>,
     pub file_access: bool,
     pub private_access: bool,
 }

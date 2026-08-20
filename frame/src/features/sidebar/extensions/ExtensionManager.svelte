@@ -39,6 +39,7 @@
   let requestFailed = $state(false);
   let subscribedProfile = $state<string | null>(null);
   let confirming = $state<string | null>(null);
+  let expandedPermissions = $state<string | null>(null);
   let reviewingCandidate = $state<number | null>(null);
   let selectedOptionalApi = $state.raw<number[]>([]);
   let selectedOptionalHosts = $state.raw<number[]>([]);
@@ -108,6 +109,7 @@
     if (subscribedProfile === currentProfile) return;
     subscribedProfile = currentProfile;
     confirming = null;
+    expandedPermissions = null;
     reviewingCandidate = null;
     selectedOptionalApi = [];
     selectedOptionalHosts = [];
@@ -147,6 +149,7 @@
     subscribedProfile = null;
     catalogSyncAttemptedProfile = null;
     confirming = null;
+    expandedPermissions = null;
     reviewingCandidate = null;
     selectedOptionalApi = [];
     selectedOptionalHosts = [];
@@ -175,6 +178,7 @@
     section = next;
     sectionChosen = true;
     confirming = null;
+    expandedPermissions = null;
     reviewingCandidate = null;
     selectedOptionalApi = [];
     selectedOptionalHosts = [];
@@ -231,6 +235,7 @@
     if (catalogRevision === null || mutation !== null) return;
     extensions.uninstall(entry, catalogRevision);
     confirming = null;
+    expandedPermissions = null;
   }
 
   function openOptions(entry: ExtensionManagementEntryView) {
@@ -241,6 +246,7 @@
   function reviewInstall(candidate: ExtensionInstallCandidateView) {
     if (mutation !== null) return;
     confirming = null;
+    expandedPermissions = null;
     reviewingCandidate = candidate.candidate_index;
     selectedOptionalApi = [];
     selectedOptionalHosts = [];
@@ -645,8 +651,11 @@
                         {/if}
                         {#if entry.grants.initialized}
                           <p class="mt-1 text-[10.5px] leading-4 text-muted">
-                            {entry.grants.api_grants} API · {entry.grants.host_grants} site
-                            {entry.grants.host_grants === 1 ? "permission" : "permissions"}
+                            {entry.grants.api_permissions.length} API ·
+                            {entry.grants.host_permissions.length} site
+                            {entry.grants.host_permissions.length === 1
+                              ? "permission"
+                              : "permissions"}
                             {#if entry.grants.file_access}
                               · File access{/if}
                             {#if entry.grants.private_access}
@@ -659,6 +668,45 @@
                         {/if}
                       </div>
                     </div>
+
+                    {#if expandedPermissions === entry.install_id}
+                      <div
+                        id={`extension-permissions-${entry.install_id}`}
+                        class="mt-2 rounded-md bg-raised px-2.5 py-2 text-[10.5px] leading-4"
+                      >
+                        {#if entry.grants.api_permissions.length > 0}
+                          <p class="font-medium text-text">Browser access</p>
+                          <ul class="mt-0.5 text-muted">
+                            {#each entry.grants.api_permissions as permission (permission)}
+                              <li>• {apiPermissionLabel(permission)}</li>
+                            {/each}
+                          </ul>
+                        {/if}
+                        {#if entry.grants.host_permissions.length > 0}
+                          <p
+                            class="font-medium text-text"
+                            class:mt-2={entry.grants.api_permissions.length > 0}
+                          >
+                            Site access
+                          </p>
+                          <ul class="mt-0.5 text-muted">
+                            {#each entry.grants.host_permissions as pattern (pattern)}
+                              <li>• {hostPermissionLabel(pattern)}</li>
+                            {/each}
+                          </ul>
+                        {/if}
+                        {#if entry.grants.api_permissions.length === 0 && entry.grants.host_permissions.length === 0}
+                          <p class="text-muted">No API or site access is granted.</p>
+                        {/if}
+                        {#if entry.grants.file_access || entry.grants.private_access}
+                          <p class="mt-2 text-muted">
+                            {entry.grants.file_access ? "File URL access" : ""}
+                            {entry.grants.file_access && entry.grants.private_access ? " · " : ""}
+                            {entry.grants.private_access ? "Private window access" : ""}
+                          </p>
+                        {/if}
+                      </div>
+                    {/if}
 
                     <div class="mt-1.5 flex min-h-7 items-center justify-end gap-1">
                       {#if confirming === entry.install_id}
@@ -682,6 +730,19 @@
                           Remove
                         </button>
                       {:else}
+                        {#if entry.grants.initialized}
+                          <button
+                            type="button"
+                            aria-expanded={expandedPermissions === entry.install_id}
+                            aria-controls={`extension-permissions-${entry.install_id}`}
+                            class="hover:bg-fill-strong mr-auto h-7 rounded-md px-2 text-[11px] font-medium text-muted hover:text-text"
+                            onclick={() =>
+                              (expandedPermissions =
+                                expandedPermissions === entry.install_id ? null : entry.install_id)}
+                          >
+                            Permissions
+                          </button>
+                        {/if}
                         {#if entry.has_options_page && entry.runtime === "active"}
                           <button
                             type="button"

@@ -938,9 +938,12 @@ declarations also flow from that exact admitted manifest into a bounded typed
 disclosure cohort. API names are revalidated tokens; structural declarations
 collapse into browser-owned feature categories; compatible rows cannot carry
 limitations and degraded rows cannot omit them. The install review renders the
-complete cohort before consent, while installed rows show a bounded summary;
-neither surface receives native error strings or invents compatibility from a
-package name. Legacy `options_page` and MV3 `options_ui` declarations are
+complete cohort before consent. Installed rows retain the exact canonical API
+and host grants from the same authenticated Store authority and disclose them
+on demand; their counts are derived in chrome rather than projected as a
+second source of truth. This is bounded presentation data, not a permission
+decision surface. Neither view receives native error strings or invents
+compatibility from a package name. Legacy `options_page` and MV3 `options_ui` declarations are
 schema-validated and bound to the exact authenticated page resource and option
 flags; they no longer survive as unmodeled authority. Dynamic optional-grant
 requests now traverse one bounded native

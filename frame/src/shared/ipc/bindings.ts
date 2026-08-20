@@ -438,8 +438,8 @@ export type ExtensionManagementEntryView = {
 export type ExtensionManagementGrantView = {
 	initialized: boolean,
 	revision: string | null,
-	api_grants: number,
-	host_grants: number,
+	api_permissions: string[],
+	host_permissions: string[],
 	file_access: boolean,
 	private_access: boolean,
 };

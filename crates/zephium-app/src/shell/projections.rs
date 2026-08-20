@@ -203,24 +203,28 @@ impl Shell {
                     ExtensionManagementGrantState::Uninitialized => ExtensionManagementGrantView {
                         initialized: false,
                         revision: None,
-                        api_grants: 0,
-                        host_grants: 0,
+                        api_permissions: Vec::new(),
+                        host_permissions: Vec::new(),
                         file_access: false,
                         private_access: false,
                     },
                     ExtensionManagementGrantState::Initialized {
                         revision,
-                        api_grants,
-                        host_grants,
+                        api_permissions,
+                        host_permissions,
                         file_access,
                         private_access,
+                        ..
                     } => ExtensionManagementGrantView {
                         initialized: true,
                         revision: Some(format!("{:016x}", revision.get())),
-                        api_grants,
-                        host_grants,
-                        file_access,
-                        private_access,
+                        api_permissions: api_permissions.iter().map(ToString::to_string).collect(),
+                        host_permissions: host_permissions
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect(),
+                        file_access: *file_access,
+                        private_access: *private_access,
                     },
                 };
                 ExtensionManagementEntryView {
