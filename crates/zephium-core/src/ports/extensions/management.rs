@@ -497,7 +497,7 @@ impl ExtensionInstallCandidateEntry {
         {
             return Err(ExtensionManagementProjectionError::InvalidPermission);
         }
-        let required_hosts = canonical_host_permissions(required_hosts)?;
+        let required_hosts = canonical_required_host_permissions(required_hosts)?;
         let optional_hosts = canonical_host_permissions(optional_hosts)?;
         if required_hosts
             .iter()
@@ -747,6 +747,19 @@ fn canonical_host_permissions(
         return Err(ExtensionManagementProjectionError::InvalidPermission);
     }
     entries.shrink_to_fit();
+    Ok(entries)
+}
+
+fn canonical_required_host_permissions(
+    entries: Vec<Box<str>>,
+) -> Result<Vec<Box<str>>, ExtensionManagementProjectionError> {
+    let mut entries = canonical_host_permissions(entries)?;
+    if let Ok(index) = entries.binary_search_by(|entry| entry.as_ref().cmp("<all_urls>")) {
+        let all_urls = entries.remove(index);
+        entries.clear();
+        entries.push(all_urls);
+        entries.shrink_to_fit();
+    }
     Ok(entries)
 }
 
@@ -1356,7 +1369,7 @@ mod tests {
             profile,
             2,
             vec!["storage".into(), "tabs".into()],
-            vec!["<all_urls>".into()],
+            vec!["*://*/*".into(), "<all_urls>".into()],
         );
         assert!(with_files.supports_file_access());
         assert!(!with_files.file_access_available());
@@ -1364,6 +1377,10 @@ mod tests {
         assert_eq!(
             with_files.required_api(),
             &[Box::<str>::from("storage"), Box::<str>::from("tabs")]
+        );
+        assert_eq!(
+            with_files.required_hosts(),
+            &[Box::<str>::from("<all_urls>")]
         );
         let catalog = ExtensionManagementCatalog::with_candidates(
             profile,
