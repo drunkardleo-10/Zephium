@@ -112,6 +112,8 @@ function management(value: number, profileId = "profile-a"): ExtensionManagement
           file_access: false,
           private_access: false,
         },
+        optional_api: [],
+        optional_hosts: [],
         compatibility: "degraded",
         limitations: [{ type: "api_permission", name: "webRequest" }],
       },

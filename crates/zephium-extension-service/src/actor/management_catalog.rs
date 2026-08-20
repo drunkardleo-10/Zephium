@@ -211,6 +211,22 @@ pub(super) fn load(
             Some(provenance),
             runtime_state,
             grants,
+            candidate
+                .manifest_arc()
+                .declarations()
+                .optional_api()
+                .names()
+                .iter()
+                .map(|name| Box::<str>::from(name.as_str()))
+                .collect(),
+            candidate
+                .manifest_arc()
+                .declarations()
+                .optional_hosts()
+                .into_iter()
+                .flat_map(|hosts| hosts.patterns())
+                .map(|pattern| Box::<str>::from(pattern.as_str()))
+                .collect(),
             compatibility,
             limitations,
         ) {

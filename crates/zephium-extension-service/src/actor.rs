@@ -20,7 +20,8 @@ use zephium_core::ports::extensions::{
     ExtensionAcquiredPackageProvisioningOutcome, ExtensionAcquiredPackageProvisioningRequest,
 };
 use zephium_core::ports::extensions::{
-    ExtensionActiveProfiles, ExtensionInitialGrantSelection, ExtensionInstallCallback,
+    ExtensionActiveProfiles, ExtensionGrantEditCallback, ExtensionGrantEditOutcome,
+    ExtensionGrantEditRequest, ExtensionInitialGrantSelection, ExtensionInstallCallback,
     ExtensionInstallCandidateSelector, ExtensionInstallOutcome, ExtensionInstallSelector,
     ExtensionInstallUpdateSelector, ExtensionManagementAdmission,
     ExtensionManagementCatalogAdmission, ExtensionManagementCatalogCallback,
@@ -78,6 +79,7 @@ use crate::{
 mod installation;
 mod management;
 mod management_catalog;
+mod optional_grant_edit;
 mod runtime_grants;
 mod runtime_operations;
 
@@ -326,6 +328,11 @@ enum WorkerCommand {
         _permit: RuntimeGrantRequestPermit,
         settlement: ManagementSettlementSink<ExtensionRuntimeGrantOutcome>,
     },
+    EditOptionalGrant {
+        request: ExtensionGrantEditRequest,
+        deadline: Instant,
+        settlement: ManagementSettlementSink<ExtensionGrantEditOutcome>,
+    },
     LoadManagementCatalog {
         profile: ProfileId,
         deadline: Instant,
@@ -551,6 +558,10 @@ fn runtime_grant_worker_lost() -> ExtensionManagementSettlement<ExtensionRuntime
     ExtensionManagementSettlement::new(ExtensionRuntimeGrantOutcome::FailedClosed, None)
 }
 
+fn optional_grant_edit_worker_lost() -> ExtensionManagementSettlement<ExtensionGrantEditOutcome> {
+    ExtensionManagementSettlement::new(ExtensionGrantEditOutcome::FailedClosed, None)
+}
+
 #[cfg(feature = "acquired-packages")]
 fn acquired_package_worker_lost() -> ExtensionAcquiredPackageProvisioningOutcome {
     ExtensionAcquiredPackageProvisioningOutcome::FailedClosed
@@ -577,6 +588,7 @@ fn cancel_unadmitted_management(command: WorkerCommand) {
         WorkerCommand::ApproveUpdate { settlement, .. } => settlement.cancel(),
         WorkerCommand::Uninstall { settlement, .. } => settlement.cancel(),
         WorkerCommand::RequestRuntimeGrants { settlement, .. } => settlement.cancel(),
+        WorkerCommand::EditOptionalGrant { settlement, .. } => settlement.cancel(),
         WorkerCommand::LoadManagementCatalog { settlement, .. } => settlement.cancel(),
         WorkerCommand::MaintainRepository { settlement, .. } => settlement.cancel(),
         _ => debug_assert!(false, "management admission returned a different command"),
@@ -1780,6 +1792,41 @@ impl ExtensionServiceOwner {
         }
     }
 
+    /// Admits one privileged optional-authority edit.
+    #[must_use = "management admission determines callback ownership"]
+    pub fn begin_edit_optional_grant(
+        &mut self,
+        request: ExtensionGrantEditRequest,
+        deadline: Instant,
+        done: ExtensionGrantEditCallback,
+    ) -> ExtensionManagementAdmission {
+        if Instant::now() >= deadline {
+            drop(done);
+            return ExtensionManagementAdmission::Busy;
+        }
+        let command = WorkerCommand::EditOptionalGrant {
+            request,
+            deadline,
+            settlement: ManagementSettlementSink::callback(done, optional_grant_edit_worker_lost),
+        };
+        match self.mailbox.try_push_normal(command) {
+            NormalAdmission::Accepted => ExtensionManagementAdmission::Accepted,
+            NormalAdmission::Full(command) => {
+                cancel_unadmitted_management(command);
+                ExtensionManagementAdmission::Busy
+            }
+            NormalAdmission::Sealed(command) | NormalAdmission::Closed(command) => {
+                cancel_unadmitted_management(command);
+                ExtensionManagementAdmission::Unavailable
+            }
+            NormalAdmission::CounterExhausted(command) => {
+                cancel_unadmitted_management(command);
+                self.status.publish(ExtensionServicePhase::ShutdownQueued);
+                ExtensionManagementAdmission::Unavailable
+            }
+        }
+    }
+
     /// Admits one lazy, read-only management projection for an exact profile.
     #[must_use = "management catalog admission determines callback ownership"]
     pub fn begin_load_management_catalog(
@@ -2754,6 +2801,24 @@ impl WorkerState {
                     return false;
                 }
             }
+            WorkerCommand::EditOptionalGrant {
+                request,
+                deadline,
+                settlement,
+            } => {
+                let (outcome, continue_running) = self.complete_optional_grant_edit(
+                    worker,
+                    status,
+                    startup_outcome,
+                    cancellation,
+                    request,
+                    deadline,
+                );
+                settlement.settle(outcome);
+                if !continue_running {
+                    return false;
+                }
+            }
             WorkerCommand::LoadManagementCatalog {
                 profile,
                 deadline,
@@ -3224,6 +3289,69 @@ impl WorkerState {
                 self.management_write_state = ManagementWriteState::OutcomeUnknown;
             }
             ExtensionRuntimeGrantOutcome::FailedClosed => {
+                self.management_write_state = ManagementWriteState::FailedClosed;
+                status.publish(ExtensionServicePhase::Failed);
+            }
+            _ => {}
+        }
+        (outcome, true)
+    }
+
+    fn complete_optional_grant_edit(
+        &mut self,
+        worker: ExtensionServiceWorkerIdentity,
+        status: &SharedStatus,
+        startup_outcome: &SharedStartupOutcome,
+        cancellation: &WorkerCancellation,
+        request: ExtensionGrantEditRequest,
+        deadline: Instant,
+    ) -> (
+        ExtensionManagementSettlement<ExtensionGrantEditOutcome>,
+        bool,
+    ) {
+        if let Err(failure) = self.management_ingress_readiness(
+            worker,
+            startup_outcome,
+            cancellation,
+            request.install().profile(),
+        ) {
+            let outcome = match failure {
+                ManagementIngressFailure::Unavailable => ExtensionGrantEditOutcome::Unavailable,
+                ManagementIngressFailure::OutcomeUnknown => {
+                    ExtensionGrantEditOutcome::OutcomeUnknown
+                }
+                ManagementIngressFailure::FailedClosed
+                | ManagementIngressFailure::ProtocolViolation => {
+                    status.publish(ExtensionServicePhase::Failed);
+                    ExtensionGrantEditOutcome::FailedClosed
+                }
+            };
+            return (
+                ExtensionManagementSettlement::new(outcome, self.runtime.active_profiles()),
+                failure != ManagementIngressFailure::ProtocolViolation,
+            );
+        }
+        let Some(startup) = self.startup.as_mut() else {
+            status.publish(ExtensionServicePhase::Failed);
+            return (
+                ExtensionManagementSettlement::new(ExtensionGrantEditOutcome::FailedClosed, None),
+                false,
+            );
+        };
+        let outcome =
+            optional_grant_edit::edit_until(startup, &mut self.runtime, request, deadline);
+        match outcome.outcome() {
+            ExtensionGrantEditOutcome::OutcomeUnknown => {
+                self.management_write_state = ManagementWriteState::OutcomeUnknown;
+            }
+            ExtensionGrantEditOutcome::FailedClosed
+            | ExtensionGrantEditOutcome::Applied {
+                runtime:
+                    zephium_core::ports::extensions::ExtensionUpdateRuntimeState::PendingActivation(
+                        zephium_core::ports::extensions::ExtensionActivationPendingReason::FailedClosed,
+                    ),
+                ..
+            } => {
                 self.management_write_state = ManagementWriteState::FailedClosed;
                 status.publish(ExtensionServicePhase::Failed);
             }

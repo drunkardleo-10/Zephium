@@ -52,7 +52,7 @@ let failure = $state.raw<VisibleFailure | null>(null);
 const invoking = new SvelteSet<string>();
 type ManagementMutation = {
   subject: string;
-  kind: "install" | "update" | "enable" | "disable" | "uninstall";
+  kind: "install" | "update" | "enable" | "disable" | "uninstall" | "grant";
 };
 let managementMutation = $state.raw<ManagementMutation | null>(null);
 let managementNotice = $state<string | null>(null);
@@ -493,6 +493,28 @@ export function uninstall(entry: ExtensionManagementEntryView, catalogRevision: 
       entry.install_id,
       catalogRevision,
       entry.install_revision,
+    ),
+  );
+}
+
+export function editOptionalGrant(
+  entry: ExtensionManagementEntryView,
+  catalogRevision: string,
+  kind: "api" | "host",
+  index: number,
+  granted: boolean,
+): void {
+  const grantRevision = entry.grants.revision;
+  if (!entry.grants.initialized || grantRevision === null) return;
+  void settleManagementMutation({ subject: entry.install_id, kind: "grant" }, () =>
+    commands.extensionManagementEditOptionalGrant(
+      entry.install_id,
+      catalogRevision,
+      entry.install_revision,
+      grantRevision,
+      kind,
+      index,
+      granted,
     ),
   );
 }

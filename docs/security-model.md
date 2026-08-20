@@ -1262,6 +1262,19 @@ content manufacture extension navigation events. Subframe History API changes
 that do not update the top-level WKWebView source remain limited to native
 `hashchange`/`popstate` delivery inside the injected frame.
 
+Installed optional-authority edits are browser-owned transactions, not a
+generic permission bridge. Privileged chrome echoes only a bounded optional
+declaration index and exact install/catalog/grant revisions from its current
+authenticated projection. The serialized extension service resolves that
+index from a freshly authenticated manifest and refuses required, missing, or
+stale declarations. A changed edit first retires every native context for the
+install, commits one grant CAS only after the Store proves native ownership
+absent, and reactivates only the contexts that were live. A no-op does not
+touch WebKit or durable state. Store uncertainty quarantines management until
+restart; a definite pre-commit refusal restores the old runtime. Page content
+cannot name a permission, package, profile, runtime, or native object through
+this path.
+
 ### Extension compatibility broker
 
 The macOS native extension compatibility broker is a narrow zone-1 service,

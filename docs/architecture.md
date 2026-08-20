@@ -941,9 +941,18 @@ limitations and degraded rows cannot omit them. The install review renders the
 complete cohort before consent. Installed rows retain the exact canonical API
 and host grants from the same authenticated Store authority and disclose them
 on demand; their counts are derived in chrome rather than projected as a
-second source of truth. This is bounded presentation data, not a permission
-decision surface. Neither view receives native error strings or invents
-compatibility from a package name. Legacy `options_page` and MV3 `options_ui` declarations are
+second source of truth. Optional declarations are projected as separate,
+canonically ordered arrays. Privileged chrome may return only one array index,
+the exact install/catalog/grant CAS revisions, and a desired boolean;
+permission text never returns through IPC. The serialized service
+reauthenticates the package and manifest, resolves the index, and compares the
+complete grant cohort before mutation. A changed edit retires every
+regular/private native context, applies one bounded Store patch only after
+native-owner absence, then restores only contexts that were live. No-op edits
+perform no native work; uncertain commits stop further management writes until
+restart. Required declarations are not editable from this surface. Neither
+view receives native error strings or invents compatibility from a package
+name. Legacy `options_page` and MV3 `options_ui` declarations are
 schema-validated and bound to the exact authenticated page resource and option
 flags; they no longer survive as unmodeled authority. Dynamic optional-grant
 requests now traverse one bounded native

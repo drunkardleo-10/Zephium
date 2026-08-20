@@ -476,6 +476,7 @@ impl Shell {
                     &command,
                     Command::InstallFocusedExtension { .. }
                         | Command::ApproveFocusedExtensionUpdate { .. }
+                        | Command::EditFocusedExtensionOptionalGrant { .. }
                         | Command::SetFocusedExtensionEnabled { .. }
                         | Command::UninstallFocusedExtension { .. }
                 ) {
@@ -650,6 +651,7 @@ impl Shell {
             Command::InvokeExtensionAction { .. }
             | Command::InstallFocusedExtension { .. }
             | Command::ApproveFocusedExtensionUpdate { .. }
+            | Command::EditFocusedExtensionOptionalGrant { .. }
             | Command::SetFocusedExtensionEnabled { .. }
             | Command::UninstallFocusedExtension { .. } => {}
             Command::RespondToExtensionRuntimeGrantPrompt { .. } => {}

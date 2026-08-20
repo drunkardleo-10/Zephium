@@ -37,6 +37,11 @@ export const commands = {
 	 */
 	extensionManagementApproveUpdate: (reviewId: string) => __TAURI_INVOKE<OperationAdmission>("extension_management_approve_update", { reviewId }),
 	extensionManagementSetEnabled: (installId: string, catalogRevision: string, installRevision: string, enabled: boolean) => __TAURI_INVOKE<OperationAdmission>("extension_management_set_enabled", { installId, catalogRevision, installRevision, enabled }),
+	/**
+	 *  Mutates only one bounded optional declaration from the exact installed
+	 *  management projection. Permission text never crosses this IPC boundary.
+	 */
+	extensionManagementEditOptionalGrant: (installId: string, catalogRevision: string, installRevision: string, grantRevision: string, kind: ExtensionOptionalGrantKindInput, index: number, granted: boolean) => __TAURI_INVOKE<OperationAdmission>("extension_management_edit_optional_grant", { installId, catalogRevision, installRevision, grantRevision, kind, index, granted }),
 	extensionManagementOpenOptions: (installId: string, catalogRevision: string, installRevision: string) => __TAURI_INVOKE<boolean>("extension_management_open_options", { installId, catalogRevision, installRevision }),
 	extensionManagementUninstall: (installId: string, catalogRevision: string, installRevision: string) => __TAURI_INVOKE<OperationAdmission>("extension_management_uninstall", { installId, catalogRevision, installRevision }),
 	/**
@@ -430,6 +435,13 @@ export type ExtensionManagementEntryView = {
 	/**  Present only when `runtime` is `active`. */
 	runtime_generation: string | null,
 	grants: ExtensionManagementGrantView,
+	/**
+	 *  Canonically ordered optional API declarations. Mutations return only
+	 *  the array index plus the exact grant revision.
+	 */
+	optional_api: string[],
+	/**  Canonically ordered optional host declarations. */
+	optional_hosts: string[],
 	compatibility: ExtensionManagementCompatibilityView,
 	limitations: ExtensionManagementLimitationView[],
 };
@@ -479,6 +491,8 @@ export type ExtensionManagementView = {
 	/**  Present only while `phase` is `update_consent_required`. */
 	pending_update: ExtensionUpdateConsentView | null,
 };
+
+export type ExtensionOptionalGrantKindInput = "api" | "host";
 
 export type ExtensionRuntimeGrantPromptChanged = ExtensionRuntimeGrantPromptView;
 

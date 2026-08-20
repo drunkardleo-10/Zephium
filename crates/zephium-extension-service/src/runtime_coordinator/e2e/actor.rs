@@ -10,6 +10,7 @@ use zephium_core::ports::extensions::{
     ExtensionAcquiredCatalogActivationOutcome, ExtensionAcquiredPackageProvisioningOutcome,
 };
 use zephium_core::ports::extensions::{
+    ExtensionGrantEditOutcome, ExtensionGrantEditRequest, ExtensionGrantEditTarget,
     ExtensionInitialGrantSelection, ExtensionInstallCandidateSelector, ExtensionInstallOutcome,
     ExtensionInstallSelector, ExtensionInstalledRuntimeState, ExtensionManagementAdmission,
     ExtensionManagementCatalogAdmission, ExtensionManagementCatalogOutcome,
@@ -556,12 +557,116 @@ fn actor_runtime_optional_grants_rebind_one_exact_live_generation() {
             && host_permissions.len() == 2
     ));
 
+    let optional_api_index = entry
+        .optional_api()
+        .iter()
+        .position(|name| name.as_ref() == "tabs")
+        .and_then(|index| u8::try_from(index).ok())
+        .expect("tabs must be a bounded optional API declaration");
+    let edit_selector = entry.selector();
+    let edit_revision = entry
+        .grants()
+        .revision()
+        .expect("the installed grant row is initialized");
+    let revoke = ExtensionGrantEditRequest::new(
+        edit_selector,
+        edit_revision,
+        ExtensionGrantEditTarget::OptionalApi(optional_api_index),
+        false,
+    );
+    let (revoke_tx, revoke_rx) = std::sync::mpsc::sync_channel(1);
+    assert_eq!(
+        ExtensionServiceLifecycle::begin_edit_optional_grant(
+            &mut owner,
+            revoke,
+            deadline(),
+            Box::new(move |outcome| {
+                let _ = revoke_tx.send(outcome);
+            }),
+        ),
+        ExtensionManagementAdmission::Accepted
+    );
+    let revoked = revoke_rx
+        .recv_timeout(std::time::Duration::from_secs(15))
+        .expect("optional grant revocation callback");
+    let ExtensionGrantEditOutcome::Applied {
+        revision: revoked_revision,
+        runtime:
+            zephium_core::ports::extensions::ExtensionUpdateRuntimeState::Active(revoked_generation),
+    } = revoked.outcome()
+    else {
+        panic!("optional grant revocation did not restore the runtime: {revoked:?}");
+    };
+    assert_eq!(revoked_revision.get(), 3);
+    assert!(*revoked_generation > *generation);
+    assert_eq!(harness.probe.retirement_calls(), 1);
+    assert_eq!(harness.probe.activation_calls(), 2);
+
+    let no_op = ExtensionGrantEditRequest::new(
+        edit_selector,
+        *revoked_revision,
+        ExtensionGrantEditTarget::OptionalApi(optional_api_index),
+        false,
+    );
+    let (no_op_tx, no_op_rx) = std::sync::mpsc::sync_channel(1);
+    assert_eq!(
+        ExtensionServiceLifecycle::begin_edit_optional_grant(
+            &mut owner,
+            no_op,
+            deadline(),
+            Box::new(move |outcome| {
+                let _ = no_op_tx.send(outcome);
+            }),
+        ),
+        ExtensionManagementAdmission::Accepted
+    );
+    assert_eq!(
+        no_op_rx
+            .recv_timeout(std::time::Duration::from_secs(15))
+            .expect("optional grant no-op callback")
+            .outcome(),
+        &ExtensionGrantEditOutcome::Unchanged {
+            revision: *revoked_revision,
+            runtime: zephium_core::ports::extensions::ExtensionUpdateRuntimeState::Active(
+                *revoked_generation,
+            ),
+        }
+    );
+    assert_eq!(harness.probe.retirement_calls(), 1);
+    assert_eq!(harness.probe.activation_calls(), 2);
+
+    let stale = ExtensionGrantEditRequest::new(
+        edit_selector,
+        edit_revision,
+        ExtensionGrantEditTarget::OptionalApi(optional_api_index),
+        true,
+    );
+    let (stale_tx, stale_rx) = std::sync::mpsc::sync_channel(1);
+    assert_eq!(
+        ExtensionServiceLifecycle::begin_edit_optional_grant(
+            &mut owner,
+            stale,
+            deadline(),
+            Box::new(move |outcome| {
+                let _ = stale_tx.send(outcome);
+            }),
+        ),
+        ExtensionManagementAdmission::Accepted
+    );
+    assert_eq!(
+        stale_rx
+            .recv_timeout(std::time::Duration::from_secs(15))
+            .expect("stale optional grant callback")
+            .outcome(),
+        &ExtensionGrantEditOutcome::Conflict
+    );
+
     let ExtensionServiceShutdownOutcome::Complete(evidence) = owner.shutdown_until(deadline())
     else {
         panic!("runtime-grant actor did not prove clean shutdown");
     };
-    assert_eq!(evidence.accepted_commands(), 5);
-    assert_eq!(evidence.completed_commands(), 5);
+    assert_eq!(evidence.accepted_commands(), 8);
+    assert_eq!(evidence.completed_commands(), 8);
     harness.finish(evidence);
 }
 

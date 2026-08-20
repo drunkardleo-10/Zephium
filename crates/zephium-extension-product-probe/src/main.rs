@@ -40,6 +40,7 @@ use zephium_core::geometry::Rect;
 use zephium_core::ids::ItemId;
 use zephium_core::ports::engine::{Engine, NativeDispatch, Partition};
 use zephium_core::ports::extensions::{
+    ExtensionGrantEditOutcome, ExtensionGrantEditRequest, ExtensionGrantEditTarget,
     ExtensionManagementAdmission, ExtensionManagementCatalogAdmission,
     ExtensionManagementCatalogOutcome, ExtensionRuntimeGrantOutcome,
     ExtensionRuntimeGrantPromptSettlement, ExtensionRuntimeGrantRuntimeState,
@@ -87,7 +88,7 @@ fn main() {
     match outcome {
         Ok(ProbeDisposition::Passed(measurements)) => {
             println!(
-                "extension-product-probe: passed; runtime={}; authenticated_startup_ms={}; durable_grant_rebind_ms={}; profile_view_ms={}; popup_presentation_ms={}; extension_live_idle_window_ms={}; extension_live_main_process_user_cpu_ms={}; extension_live_main_process_system_cpu_ms={}; extension_live_main_process_voluntary_context_switches={}; extension_live_main_process_involuntary_context_switches={}; runtime_retired_idle_window_ms={}; runtime_retired_main_process_user_cpu_ms={}; runtime_retired_main_process_system_cpu_ms={}; runtime_retired_main_process_voluntary_context_switches={}; runtime_retired_main_process_involuntary_context_switches={}; service_shutdown_ms={}; engine_shutdown_ms={}; main_process_peak_rss_bytes={}; process_user_cpu_ms={}; process_system_cpu_ms={}; voluntary_context_switches={}; involuntary_context_switches={}; optional_api_host_grant_rebind=passed; tabs_create_activate_update_remove=passed; same_document_history_signal=passed; signed_compatibility_receipt={}; brokered_recent_history={}; popup_capacity_discard_reopen=passed; repository_cleanup=passed; uninstall_data_erasure=passed; store_restart_cleanup=passed",
+                "extension-product-probe: passed; runtime={}; authenticated_startup_ms={}; durable_grant_rebind_ms={}; profile_view_ms={}; popup_presentation_ms={}; extension_live_idle_window_ms={}; extension_live_main_process_user_cpu_ms={}; extension_live_main_process_system_cpu_ms={}; extension_live_main_process_voluntary_context_switches={}; extension_live_main_process_involuntary_context_switches={}; runtime_retired_idle_window_ms={}; runtime_retired_main_process_user_cpu_ms={}; runtime_retired_main_process_system_cpu_ms={}; runtime_retired_main_process_voluntary_context_switches={}; runtime_retired_main_process_involuntary_context_switches={}; service_shutdown_ms={}; engine_shutdown_ms={}; main_process_peak_rss_bytes={}; process_user_cpu_ms={}; process_system_cpu_ms={}; voluntary_context_switches={}; involuntary_context_switches={}; optional_api_host_grant_rebind=passed; privileged_optional_grant_revocation=passed; tabs_create_activate_update_remove=passed; same_document_history_signal=passed; signed_compatibility_receipt={}; brokered_recent_history={}; popup_capacity_discard_reopen=passed; repository_cleanup=passed; uninstall_data_erasure=passed; store_restart_cleanup=passed",
                 runtime_target_argument(runtime_target),
                 measurements.authenticated_startup.as_millis(),
                 measurements.durable_grant_rebind.as_millis(),
@@ -1108,6 +1109,61 @@ fn run(runtime_target: ProductExtensionRuntimeTarget) -> Result<ProbeDisposition
     };
     if entry.selector().install() != action.runtime().install_id() {
         return Err("authenticated uninstall selected a different install".into());
+    }
+    let optional_api = entry
+        .optional_api()
+        .iter()
+        .position(|name| name.as_ref() == "tabs")
+        .and_then(|index| u8::try_from(index).ok())
+        .ok_or_else(|| "authenticated management omitted optional tabs authority".to_owned())?;
+    let expected_grant = entry
+        .grants()
+        .revision()
+        .ok_or_else(|| "authenticated management grant row was uninitialized".to_owned())?;
+    let (edit_tx, edit_rx) = mpsc::sync_channel(1);
+    if service.begin_edit_optional_grant(
+        ExtensionGrantEditRequest::new(
+            entry.selector(),
+            expected_grant,
+            ExtensionGrantEditTarget::OptionalApi(optional_api),
+            false,
+        ),
+        deadline(),
+        Box::new(move |settlement| {
+            let _ = edit_tx.send(settlement);
+        }),
+    ) != ExtensionManagementAdmission::Accepted
+    {
+        return Err("authenticated optional-grant revocation was not admitted".into());
+    }
+    let mut edit = None;
+    engine.pump_until(
+        "authenticated optional-grant revocation",
+        deadline(),
+        |_| match edit_rx.try_recv() {
+            Ok(settlement) => {
+                edit = Some(settlement);
+                Ok(true)
+            }
+            Err(mpsc::TryRecvError::Empty) => Ok(false),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Err("optional-grant revocation callback disconnected".to_owned())
+            }
+        },
+    )?;
+    match edit
+        .ok_or_else(|| "optional-grant revocation settlement was absent".to_owned())?
+        .into_outcome()
+    {
+        ExtensionGrantEditOutcome::Applied {
+            revision,
+            runtime: zephium_core::ports::extensions::ExtensionUpdateRuntimeState::Active(_),
+        } if expected_grant.next() == Some(revision) => {}
+        outcome => {
+            return Err(format!(
+                "authenticated optional-grant revocation did not settle active: {outcome:?}"
+            ))
+        }
     }
     let (uninstall_tx, uninstall_rx) = mpsc::sync_channel(1);
     if service.begin_uninstall(

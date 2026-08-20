@@ -243,6 +243,24 @@
     extensions.openOptions(entry, catalogRevision);
   }
 
+  function editOptionalGrant(
+    entry: ExtensionManagementEntryView,
+    kind: "api" | "host",
+    index: number,
+    granted: boolean,
+  ) {
+    if (catalogRevision === null || mutation !== null || !entry.grants.initialized) return;
+    extensions.editOptionalGrant(entry, catalogRevision, kind, index, granted);
+  }
+
+  const requiredApiPermissions = (entry: ExtensionManagementEntryView) =>
+    entry.grants.api_permissions.filter((permission) => !entry.optional_api.includes(permission));
+
+  const requiredHostPermissions = (entry: ExtensionManagementEntryView) =>
+    entry.grants.host_permissions.filter(
+      (permission) => !entry.optional_hosts.includes(permission),
+    );
+
   function reviewInstall(candidate: ExtensionInstallCandidateView) {
     if (mutation !== null) return;
     confirming = null;
@@ -674,28 +692,97 @@
                         id={`extension-permissions-${entry.install_id}`}
                         class="mt-2 rounded-md bg-raised px-2.5 py-2 text-[10.5px] leading-4"
                       >
-                        {#if entry.grants.api_permissions.length > 0}
-                          <p class="font-medium text-text">Browser access</p>
+                        {#if requiredApiPermissions(entry).length > 0}
+                          <p class="font-medium text-text">Required browser access</p>
                           <ul class="mt-0.5 text-muted">
-                            {#each entry.grants.api_permissions as permission (permission)}
+                            {#each requiredApiPermissions(entry) as permission (permission)}
                               <li>• {apiPermissionLabel(permission)}</li>
                             {/each}
                           </ul>
                         {/if}
-                        {#if entry.grants.host_permissions.length > 0}
+                        {#if entry.optional_api.length > 0}
                           <p
                             class="font-medium text-text"
-                            class:mt-2={entry.grants.api_permissions.length > 0}
+                            class:mt-2={requiredApiPermissions(entry).length > 0}
                           >
-                            Site access
+                            Optional browser access
+                          </p>
+                          <ul class="mt-1 space-y-1 text-muted">
+                            {#each entry.optional_api as permission, index (permission)}
+                              {@const granted = entry.grants.api_permissions.includes(permission)}
+                              <li class="flex min-h-6 items-center justify-between gap-3">
+                                <span>{apiPermissionLabel(permission)}</span>
+                                <button
+                                  type="button"
+                                  role="switch"
+                                  aria-label={(granted ? "Revoke " : "Allow ") +
+                                    apiPermissionLabel(permission)}
+                                  aria-checked={granted}
+                                  disabled={mutation !== null}
+                                  class="relative h-[18px] w-8 shrink-0 rounded-full bg-border-strong transition-colors disabled:opacity-45"
+                                  class:bg-accent={granted}
+                                  onclick={() => editOptionalGrant(entry, "api", index, !granted)}
+                                >
+                                  <span
+                                    aria-hidden="true"
+                                    class="absolute top-[2px] left-[2px] h-3.5 w-3.5 rounded-full bg-white shadow-sm transition-transform"
+                                    class:translate-x-3.5={granted}
+                                  ></span>
+                                </button>
+                              </li>
+                            {/each}
+                          </ul>
+                        {/if}
+                        {#if requiredHostPermissions(entry).length > 0}
+                          <p
+                            class="font-medium text-text"
+                            class:mt-2={requiredApiPermissions(entry).length > 0 ||
+                              entry.optional_api.length > 0}
+                          >
+                            Required site access
                           </p>
                           <ul class="mt-0.5 text-muted">
-                            {#each entry.grants.host_permissions as pattern (pattern)}
+                            {#each requiredHostPermissions(entry) as pattern (pattern)}
                               <li>• {hostPermissionLabel(pattern)}</li>
                             {/each}
                           </ul>
                         {/if}
-                        {#if entry.grants.api_permissions.length === 0 && entry.grants.host_permissions.length === 0}
+                        {#if entry.optional_hosts.length > 0}
+                          <p
+                            class="font-medium text-text"
+                            class:mt-2={requiredApiPermissions(entry).length > 0 ||
+                              entry.optional_api.length > 0 ||
+                              requiredHostPermissions(entry).length > 0}
+                          >
+                            Optional site access
+                          </p>
+                          <ul class="mt-1 space-y-1 text-muted">
+                            {#each entry.optional_hosts as pattern, index (pattern)}
+                              {@const granted = entry.grants.host_permissions.includes(pattern)}
+                              <li class="flex min-h-6 items-center justify-between gap-3">
+                                <span>{hostPermissionLabel(pattern)}</span>
+                                <button
+                                  type="button"
+                                  role="switch"
+                                  aria-label={(granted ? "Revoke " : "Allow ") +
+                                    hostPermissionLabel(pattern)}
+                                  aria-checked={granted}
+                                  disabled={mutation !== null}
+                                  class="relative h-[18px] w-8 shrink-0 rounded-full bg-border-strong transition-colors disabled:opacity-45"
+                                  class:bg-accent={granted}
+                                  onclick={() => editOptionalGrant(entry, "host", index, !granted)}
+                                >
+                                  <span
+                                    aria-hidden="true"
+                                    class="absolute top-[2px] left-[2px] h-3.5 w-3.5 rounded-full bg-white shadow-sm transition-transform"
+                                    class:translate-x-3.5={granted}
+                                  ></span>
+                                </button>
+                              </li>
+                            {/each}
+                          </ul>
+                        {/if}
+                        {#if entry.grants.api_permissions.length === 0 && entry.grants.host_permissions.length === 0 && entry.optional_api.length === 0 && entry.optional_hosts.length === 0}
                           <p class="text-muted">No API or site access is granted.</p>
                         {/if}
                         {#if entry.grants.file_access || entry.grants.private_access}

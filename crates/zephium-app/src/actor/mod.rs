@@ -795,6 +795,7 @@ fn tracked_operation_command(command: &Command) -> bool {
             | Command::InvokeExtensionAction { .. }
             | Command::InstallFocusedExtension { .. }
             | Command::ApproveFocusedExtensionUpdate { .. }
+            | Command::EditFocusedExtensionOptionalGrant { .. }
             | Command::SetFocusedExtensionEnabled { .. }
             | Command::UninstallFocusedExtension { .. }
             | Command::RespondToExtensionRuntimeGrantPrompt { .. }

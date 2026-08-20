@@ -41,8 +41,9 @@ use zephium_app::{
 };
 use zephium_blocker_service::ManagedBlocker;
 use zephium_core::extensions::{
-    ExtensionActionRevision, ExtensionInstallCatalogRevision, ExtensionInstallRevision,
-    ExtensionPopupAnchor, ExtensionRuntimeGeneration, ExtensionRuntimeInstance,
+    ExtensionActionRevision, ExtensionGrantRevision, ExtensionInstallCatalogRevision,
+    ExtensionInstallRevision, ExtensionPopupAnchor, ExtensionRuntimeGeneration,
+    ExtensionRuntimeInstance,
 };
 use zephium_core::geometry::{Rect, Size};
 use zephium_core::ids::ScriptId;
@@ -52,6 +53,7 @@ use zephium_core::ports::blocker::{BlockerCompiler as _, BlockerShutdownOutcome}
 use zephium_core::ports::engine::{
     Engine as _, ScriptOwner, UserContent, UserContentGeneration, UserStyle,
 };
+use zephium_core::ports::extensions::ExtensionGrantEditTarget;
 use zephium_core::ports::extensions::ExtensionServiceShutdownOutcome as ExtensionLifecycleShutdownOutcome;
 use zephium_core::ports::store::{Store as _, StoreShutdownOutcome};
 use zephium_core::split::Axis;
@@ -1489,6 +1491,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             extension_management_install,
             extension_management_approve_update,
             extension_management_set_enabled,
+            extension_management_edit_optional_grant,
             extension_management_open_options,
             extension_management_uninstall,
             extension_runtime_grant_respond,
@@ -2638,6 +2641,65 @@ fn extension_management_set_enabled(
             expected_catalog,
             expected_install,
             enabled,
+        },
+    )
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, specta::Type)]
+#[serde(rename_all = "snake_case")]
+enum ExtensionOptionalGrantKindInput {
+    Api,
+    Host,
+}
+
+/// Mutates only one bounded optional declaration from the exact installed
+/// management projection. Permission text never crosses this IPC boundary.
+#[tauri::command]
+#[specta::specta]
+#[allow(clippy::too_many_arguments)]
+fn extension_management_edit_optional_grant(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    install_id: String,
+    catalog_revision: String,
+    install_revision: String,
+    grant_revision: String,
+    kind: ExtensionOptionalGrantKindInput,
+    index: u8,
+    granted: bool,
+) -> zephium_ipc::OperationAdmission {
+    if !authorize(
+        &caller,
+        CallerPolicy::Main,
+        "extension_management_edit_optional_grant",
+    ) || shutdown_started(caller.app_handle())
+    {
+        return rejected_operation();
+    }
+    let Some((install, expected_catalog, expected_install)) =
+        extension_management_selector(&install_id, &catalog_revision, &install_revision)
+    else {
+        return rejected_operation();
+    };
+    let Some(expected_grant) =
+        fixed_nonzero_hex(&grant_revision).and_then(ExtensionGrantRevision::new)
+    else {
+        return rejected_operation();
+    };
+    let target = match kind {
+        ExtensionOptionalGrantKindInput::Api => ExtensionGrantEditTarget::OptionalApi(index),
+        ExtensionOptionalGrantKindInput::Host => ExtensionGrantEditTarget::OptionalHost(index),
+    };
+    dispatch_operation(
+        caller.app_handle(),
+        &shell,
+        Command::EditFocusedExtensionOptionalGrant {
+            install,
+            expected_catalog,
+            expected_install,
+            expected_grant,
+            target,
+            granted,
         },
     )
 }
@@ -4983,6 +5045,7 @@ mod tests {
             "extension_management_set_visible",
             "extension_management_install",
             "extension_management_set_enabled",
+            "extension_management_edit_optional_grant",
             "extension_management_uninstall",
         ] {
             let command = source

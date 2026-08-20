@@ -58,9 +58,10 @@ pub const MAX_EXTENSION_MANAGEMENT_CATALOG_RETAINED_BYTES: usize = size_of::<
             + MAX_EXTENSION_MANAGEMENT_SOURCE_URL_BYTES
             + MAX_EXTENSION_MANAGEMENT_UPSTREAM_VERSION_BYTES
             + MAX_EXTENSION_MANAGEMENT_LICENSE_EXPRESSION_BYTES
-            + MAX_EXTENSION_API_PERMISSIONS
+            + 2 * MAX_EXTENSION_API_PERMISSIONS
                 * (size_of::<Box<str>>() + MAX_EXTENSION_API_PERMISSION_NAME_BYTES)
-            + MAX_EXTENSION_HOST_GRANTS * (size_of::<Box<str>>() + MAX_MATCH_PATTERN_BYTES))
+            + (MAX_EXTENSION_HOST_GRANTS + MAX_EXTENSION_HOST_PERMISSION_PATTERNS)
+                * (size_of::<Box<str>>() + MAX_MATCH_PATTERN_BYTES))
     + MAX_EXTENSION_INSTALLS_PER_PROFILE
         * (size_of::<ExtensionInstallCandidateEntry>()
             + 4 * MAX_EXTENSION_MANAGEMENT_DISPLAY_TEXT_BYTES
@@ -342,6 +343,27 @@ impl ExtensionManagementGrantState {
         }
     }
 
+    pub const fn revision(&self) -> Option<ExtensionGrantRevision> {
+        match self {
+            Self::Uninitialized => None,
+            Self::Initialized { revision, .. } => Some(*revision),
+        }
+    }
+
+    pub const fn file_access(&self) -> bool {
+        match self {
+            Self::Uninitialized => false,
+            Self::Initialized { file_access, .. } => *file_access,
+        }
+    }
+
+    pub const fn private_access(&self) -> bool {
+        match self {
+            Self::Uninitialized => false,
+            Self::Initialized { private_access, .. } => *private_access,
+        }
+    }
+
     const fn retained_bytes(&self) -> usize {
         match self {
             Self::Uninitialized => 0,
@@ -364,6 +386,8 @@ pub struct ExtensionManagementEntry {
     provenance: Option<ExtensionManagementProvenance>,
     runtime: ExtensionManagementRuntimeState,
     grants: ExtensionManagementGrantState,
+    optional_api: Box<[Box<str>]>,
+    optional_hosts: Box<[Box<str>]>,
     compatibility: ExtensionManagementCompatibility,
     limitations: Box<[ExtensionManagementLimitation]>,
     retained_bytes: usize,
@@ -388,6 +412,8 @@ impl ExtensionManagementEntry {
         provenance: Option<ExtensionManagementProvenance>,
         runtime: ExtensionManagementRuntimeState,
         grants: ExtensionManagementGrantState,
+        optional_api: Vec<Box<str>>,
+        optional_hosts: Vec<Box<str>>,
         compatibility: ExtensionManagementCompatibility,
         limitations: Vec<ExtensionManagementLimitation>,
     ) -> Result<Self, ExtensionManagementProjectionError> {
@@ -404,6 +430,20 @@ impl ExtensionManagementEntry {
         }
         if let Some(author) = author.as_deref() {
             validate_display_text(author, MAX_EXTENSION_MANAGEMENT_DISPLAY_TEXT_BYTES, false)?;
+        }
+        if optional_api.len() > MAX_EXTENSION_API_PERMISSIONS
+            || optional_hosts.len() > MAX_EXTENSION_HOST_PERMISSION_PATTERNS
+        {
+            return Err(ExtensionManagementProjectionError::TooManyPermissions);
+        }
+        let optional_api = canonical_api_permissions(optional_api)?;
+        let optional_hosts = canonical_host_permissions(optional_hosts)?;
+        if optional_hosts.iter().any(|pattern| {
+            MatchPattern::parse(pattern)
+                .ok()
+                .is_none_or(|parsed| parsed.as_str() != pattern.as_ref())
+        }) {
+            return Err(ExtensionManagementProjectionError::InvalidPermission);
         }
         let text_bytes = name
             .len()
@@ -431,6 +471,16 @@ impl ExtensionManagementEntry {
             .checked_add(text_bytes)
             .and_then(|bytes| bytes.checked_add(grants.retained_bytes()))
             .and_then(|bytes| {
+                optional_api
+                    .iter()
+                    .chain(optional_hosts.iter())
+                    .try_fold(bytes, |bytes, value| {
+                        bytes
+                            .checked_add(size_of::<Box<str>>())
+                            .and_then(|bytes| bytes.checked_add(value.len()))
+                    })
+            })
+            .and_then(|bytes| {
                 limitations
                     .len()
                     .checked_mul(size_of::<ExtensionManagementLimitation>())
@@ -450,6 +500,8 @@ impl ExtensionManagementEntry {
             provenance,
             runtime,
             grants,
+            optional_api: optional_api.into_boxed_slice(),
+            optional_hosts: optional_hosts.into_boxed_slice(),
             compatibility,
             limitations,
             retained_bytes,
@@ -498,6 +550,14 @@ impl ExtensionManagementEntry {
 
     pub const fn grants(&self) -> &ExtensionManagementGrantState {
         &self.grants
+    }
+
+    pub fn optional_api(&self) -> &[Box<str>] {
+        &self.optional_api
+    }
+
+    pub fn optional_hosts(&self) -> &[Box<str>] {
+        &self.optional_hosts
     }
 
     pub const fn compatibility(&self) -> ExtensionManagementCompatibility {
@@ -1294,6 +1354,8 @@ mod tests {
             Some(provenance()),
             ExtensionManagementRuntimeState::PendingActivation,
             ExtensionManagementGrantState::Uninitialized,
+            Vec::new(),
+            Vec::new(),
             ExtensionManagementCompatibility::Compatible,
             Vec::new(),
         )
@@ -1316,11 +1378,52 @@ mod tests {
             Some(provenance()),
             ExtensionManagementRuntimeState::Disabled,
             ExtensionManagementGrantState::Uninitialized,
+            Vec::new(),
+            Vec::new(),
             ExtensionManagementCompatibility::Compatible,
             Vec::new(),
         )
         .unwrap();
         assert!(with.has_options_page());
+    }
+
+    #[test]
+    fn installed_optional_declarations_are_canonical_bounded_display_selectors() {
+        let entry = ExtensionManagementEntry::new(
+            selector(ProfileId::from(1), 3),
+            "Fixture",
+            None,
+            None,
+            "1.0.0",
+            false,
+            ExtensionManagementSource::ZephiumVerified,
+            Some(1),
+            Some(provenance()),
+            ExtensionManagementRuntimeState::Disabled,
+            ExtensionManagementGrantState::Uninitialized,
+            vec!["tabs".into(), "notifications".into()],
+            vec!["https://z.example/*".into(), "https://a.example/*".into()],
+            ExtensionManagementCompatibility::Compatible,
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            entry
+                .optional_api()
+                .iter()
+                .map(Box::as_ref)
+                .collect::<Vec<_>>(),
+            ["notifications", "tabs"]
+        );
+        assert_eq!(
+            entry
+                .optional_hosts()
+                .iter()
+                .map(Box::as_ref)
+                .collect::<Vec<_>>(),
+            ["https://a.example/*", "https://z.example/*"]
+        );
+        assert!(entry.retained_bytes() <= MAX_EXTENSION_MANAGEMENT_CATALOG_RETAINED_BYTES);
     }
 
     #[test]
@@ -1512,6 +1615,8 @@ mod tests {
                     Some(provenance()),
                     ExtensionManagementRuntimeState::Disabled,
                     ExtensionManagementGrantState::Uninitialized,
+                    Vec::new(),
+                    Vec::new(),
                     ExtensionManagementCompatibility::Compatible,
                     Vec::new(),
                 ),
@@ -1561,6 +1666,8 @@ mod tests {
                 provenance,
                 ExtensionManagementRuntimeState::Disabled,
                 ExtensionManagementGrantState::Uninitialized,
+                Vec::new(),
+                Vec::new(),
                 ExtensionManagementCompatibility::Compatible,
                 Vec::new(),
             )
@@ -1603,6 +1710,8 @@ mod tests {
                     provenance,
                     ExtensionManagementRuntimeState::Disabled,
                     ExtensionManagementGrantState::Uninitialized,
+                    Vec::new(),
+                    Vec::new(),
                     ExtensionManagementCompatibility::Compatible,
                     Vec::new(),
                 ),
@@ -1672,6 +1781,8 @@ mod tests {
             Some(provenance()),
             ExtensionManagementRuntimeState::Disabled,
             ExtensionManagementGrantState::Uninitialized,
+            Vec::new(),
+            Vec::new(),
             ExtensionManagementCompatibility::Degraded,
             vec![
                 ExtensionManagementLimitation::ContentScripts,
@@ -1715,6 +1826,8 @@ mod tests {
                     None,
                     ExtensionManagementRuntimeState::Disabled,
                     ExtensionManagementGrantState::Uninitialized,
+                    Vec::new(),
+                    Vec::new(),
                     compatibility,
                     limitations,
                 ),

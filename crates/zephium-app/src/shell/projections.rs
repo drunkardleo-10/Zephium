@@ -243,6 +243,16 @@ impl Shell {
                     runtime,
                     runtime_generation,
                     grants,
+                    optional_api: entry
+                        .optional_api()
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect(),
+                    optional_hosts: entry
+                        .optional_hosts()
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect(),
                     compatibility: match entry.compatibility() {
                         ExtensionManagementCompatibility::Compatible => {
                             ExtensionManagementCompatibilityView::Compatible

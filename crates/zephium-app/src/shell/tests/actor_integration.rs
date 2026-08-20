@@ -44,6 +44,8 @@ fn extension_management_catalog(
         ),
         runtime,
         zephium_core::ports::extensions::ExtensionManagementGrantState::Uninitialized,
+        Vec::new(),
+        Vec::new(),
         zephium_core::ports::extensions::ExtensionManagementCompatibility::Compatible,
         Vec::new(),
     )
@@ -66,6 +68,64 @@ fn empty_extension_management_catalog(
         Vec::new(),
     )
     .expect("empty fixture management catalog must be valid")
+}
+
+fn extension_management_catalog_with_optional_grant(
+    profile: ProfileId,
+    install: zephium_core::ids::ExtensionInstallId,
+) -> zephium_core::ports::extensions::ExtensionManagementCatalog {
+    use zephium_core::extensions::ExtensionGrantRevision;
+    use zephium_core::ports::extensions::{
+        ExtensionManagementCompatibility, ExtensionManagementEntry, ExtensionManagementGrantState,
+        ExtensionManagementRuntimeState, ExtensionManagementSource,
+    };
+
+    let selector = zephium_core::ports::extensions::ExtensionInstallSelector::new(
+        profile,
+        install,
+        zephium_core::extensions::ExtensionInstallCatalogRevision::INITIAL,
+        zephium_core::extensions::ExtensionInstallRevision::INITIAL,
+    );
+    let grants = ExtensionManagementGrantState::initialized(
+        ExtensionGrantRevision::INITIAL,
+        vec!["storage".into()],
+        Vec::new(),
+        false,
+        false,
+    )
+    .unwrap();
+    let entry = ExtensionManagementEntry::new(
+        selector,
+        "Optional grant fixture",
+        None,
+        None,
+        "1.0.0",
+        false,
+        ExtensionManagementSource::ZephiumVerified,
+        Some(1),
+        Some(
+            zephium_core::ports::extensions::ExtensionManagementProvenance::new(
+                "https://example.com/releases/optional-grant",
+                "1.0.0",
+                "MIT",
+                "Example contributors",
+            )
+            .unwrap(),
+        ),
+        ExtensionManagementRuntimeState::Disabled,
+        grants,
+        vec!["tabs".into()],
+        vec!["https://optional.example/*".into()],
+        ExtensionManagementCompatibility::Compatible,
+        Vec::new(),
+    )
+    .unwrap();
+    zephium_core::ports::extensions::ExtensionManagementCatalog::new(
+        profile,
+        zephium_core::extensions::ExtensionInstallCatalogRevision::INITIAL,
+        vec![entry],
+    )
+    .unwrap()
 }
 
 fn extension_install_candidate_catalog(
@@ -1202,6 +1262,124 @@ fn extension_management_stays_pending_until_serialized_service_settlement() {
     );
     wait_for_ready_management_catalog(&rx, profile, uninstalled_catalog, 0);
     assert!(handle.dispatch(Command::SetExtensionManagementVisible(false)));
+
+    assert_eq!(
+        handle
+            .shutdown()
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap(),
+        ShutdownOutcome::Clean
+    );
+}
+
+#[test]
+fn optional_grant_edit_keeps_only_index_and_exact_revisions_across_shell() {
+    use zephium_core::ports::extensions::{
+        ExtensionGrantEditOutcome, ExtensionGrantEditTarget, ExtensionManagementSettlement,
+        ExtensionUpdateRuntimeState,
+    };
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (extension_service, extension_state) =
+        extension_lifecycle_with_outcome(ExtensionServiceShutdownOutcome::Clean);
+    let handle = spawn(
+        Arc::new(FakeEngine::default()),
+        Arc::new(FakeStore::default()),
+        Arc::new(ImmediateAllowAllCompiler),
+        extension_service,
+        Box::new(|_| {}),
+        Arc::new(FakeChrome),
+        Box::new(move |projection| {
+            let _ = tx.send(projection);
+        }),
+    )
+    .expect("spawn test shell");
+    assert!(handle.dispatch(Command::SetWindowSize(Size::new(1200.0, 800.0))));
+    assert!(handle.dispatch(Command::Bootstrap));
+    let profile = std::iter::from_fn(|| rx.recv_timeout(std::time::Duration::from_secs(2)).ok())
+        .find_map(|projection| match projection {
+            Projection::Items(items) => items.profile.map(|profile| profile.id),
+            _ => None,
+        })
+        .and_then(|profile| ProfileId::parse(&profile))
+        .expect("bootstrap must publish the focused profile");
+    let _ = rx.try_iter().count();
+
+    let install = zephium_core::ids::ExtensionInstallId::from(91_100);
+    assert!(handle.dispatch(Command::SetExtensionManagementVisible(true)));
+    settle_next_management_catalog(
+        &extension_state,
+        extension_management_catalog_with_optional_grant(profile, install),
+    );
+    let ready = wait_for_ready_management_catalog(
+        &rx,
+        profile,
+        zephium_core::extensions::ExtensionInstallCatalogRevision::INITIAL,
+        1,
+    );
+    assert_eq!(ready.entries[0].optional_api, ["tabs"]);
+    assert_eq!(
+        ready.entries[0].optional_hosts,
+        ["https://optional.example/*"]
+    );
+
+    assert!(handle.dispatch_operation(
+        "extension-edit-optional-grant".into(),
+        Command::EditFocusedExtensionOptionalGrant {
+            install,
+            expected_catalog: zephium_core::extensions::ExtensionInstallCatalogRevision::INITIAL,
+            expected_install: zephium_core::extensions::ExtensionInstallRevision::INITIAL,
+            expected_grant: zephium_core::extensions::ExtensionGrantRevision::INITIAL,
+            target: ExtensionGrantEditTarget::OptionalApi(0),
+            granted: true,
+        },
+    ));
+    assert!(wait_for_actor_condition(
+        std::time::Duration::from_secs(2),
+        || extension_state.grant_edit_callbacks.lock().unwrap().len() == 1
+    ));
+    let (request, deadline) = extension_state.grant_edit_calls.lock().unwrap()[0];
+    assert_eq!(request.install().profile(), profile);
+    assert_eq!(request.install().install(), install);
+    assert_eq!(request.target(), ExtensionGrantEditTarget::OptionalApi(0));
+    assert!(request.granted());
+    assert!(deadline > std::time::Instant::now());
+
+    extension_state
+        .grant_edit_callbacks
+        .lock()
+        .unwrap()
+        .pop()
+        .unwrap()(ExtensionManagementSettlement::new(
+        ExtensionGrantEditOutcome::Applied {
+            revision: zephium_core::extensions::ExtensionGrantRevision::INITIAL
+                .next()
+                .unwrap(),
+            runtime: ExtensionUpdateRuntimeState::Disabled,
+        },
+        Some(zephium_core::ports::extensions::ExtensionActiveProfiles::EMPTY),
+    ));
+    let completion = std::iter::from_fn(|| rx.recv_timeout(std::time::Duration::from_secs(2)).ok())
+        .find_map(|projection| match projection {
+            Projection::OperationProcessed(completion)
+                if completion.operation_id == "extension-edit-optional-grant" =>
+            {
+                Some(completion)
+            }
+            _ => None,
+        })
+        .expect("grant edit must settle the original operation");
+    assert_eq!(completion.outcome, OperationOutcome::Applied);
+    assert_eq!(completion.reason, OperationReason::MutationApplied);
+    assert!(wait_for_actor_condition(
+        std::time::Duration::from_secs(2),
+        || extension_state
+            .management_catalog_callbacks
+            .lock()
+            .unwrap()
+            .len()
+            == 1
+    ));
 
     assert_eq!(
         handle

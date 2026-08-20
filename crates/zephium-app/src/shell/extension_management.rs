@@ -3,9 +3,10 @@
 use std::collections::HashMap;
 
 use zephium_core::ports::extensions::{
-    ExtensionInitialGrantSelection, ExtensionInstallCandidateSelector, ExtensionInstallOutcome,
-    ExtensionInstallSelector, ExtensionInstallUpdateSelector, ExtensionInstalledRuntimeState,
-    ExtensionManagementAdmission, ExtensionManagementAvailability, ExtensionManagementCatalog,
+    ExtensionGrantEditOutcome, ExtensionGrantEditRequest, ExtensionInitialGrantSelection,
+    ExtensionInstallCandidateSelector, ExtensionInstallOutcome, ExtensionInstallSelector,
+    ExtensionInstallUpdateSelector, ExtensionInstalledRuntimeState, ExtensionManagementAdmission,
+    ExtensionManagementAvailability, ExtensionManagementCatalog,
     ExtensionManagementCatalogAdmission, ExtensionManagementCatalogOutcome,
     ExtensionSetEnabledOutcome, ExtensionUninstallOutcome, ExtensionUpdateConsentEntry,
     ExtensionUpdateOutcome, ExtensionUpdateRuntimeState,
@@ -43,6 +44,7 @@ enum PendingExtensionManagementKind {
     Update,
     SetEnabled(bool),
     Uninstall,
+    GrantEdit,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -154,6 +156,9 @@ impl ExtensionManagementState {
             ) | (
                 PendingExtensionManagementKind::Uninstall,
                 ExtensionManagementCompletion::Uninstall(_)
+            ) | (
+                PendingExtensionManagementKind::GrantEdit,
+                ExtensionManagementCompletion::GrantEdit(_)
             )
         );
         if !exact {
@@ -283,6 +288,35 @@ impl ExtensionManagementState {
                     .entries()
                     .iter()
                     .any(|entry| entry.selector() == selector)
+        })
+    }
+
+    fn authorizes_grant_edit(&self, request: ExtensionGrantEditRequest) -> bool {
+        self.catalog.as_ref().is_some_and(|catalog| {
+            let selector = request.install();
+            if catalog.profile() != selector.profile()
+                || catalog.catalog_revision() != selector.catalog_revision()
+            {
+                return false;
+            }
+            let Some(entry) = catalog
+                .entries()
+                .iter()
+                .find(|entry| entry.selector() == selector)
+            else {
+                return false;
+            };
+            if entry.grants().revision() != Some(request.expected_grant_revision()) {
+                return false;
+            }
+            match request.target() {
+                zephium_core::ports::extensions::ExtensionGrantEditTarget::OptionalApi(index) => {
+                    usize::from(index) < entry.optional_api().len()
+                }
+                zephium_core::ports::extensions::ExtensionGrantEditTarget::OptionalHost(index) => {
+                    usize::from(index) < entry.optional_hosts().len()
+                }
+            }
         })
     }
 
@@ -638,7 +672,7 @@ impl Shell {
                 OperationReason::StoreAdmissionRejected,
             ));
         }
-        let (subject, kind, install_selection, update_review) = match command {
+        let (subject, kind, install_selection, update_review, grant_edit) = match command {
             Command::InstallFocusedExtension {
                 candidate_index,
                 expected_catalog,
@@ -668,6 +702,7 @@ impl Shell {
                     PendingExtensionManagementKind::Install,
                     Some(selection),
                     None,
+                    None,
                 )
             }
             Command::ApproveFocusedExtensionUpdate { review } => {
@@ -683,6 +718,7 @@ impl Shell {
                     PendingExtensionManagementKind::Update,
                     None,
                     Some(review),
+                    None,
                 )
             }
             Command::SetFocusedExtensionEnabled {
@@ -700,6 +736,7 @@ impl Shell {
                 PendingExtensionManagementKind::SetEnabled(enabled),
                 None,
                 None,
+                None,
             ),
             Command::UninstallFocusedExtension {
                 install,
@@ -715,6 +752,36 @@ impl Shell {
                 PendingExtensionManagementKind::Uninstall,
                 None,
                 None,
+                None,
+            ),
+            Command::EditFocusedExtensionOptionalGrant {
+                install,
+                expected_catalog,
+                expected_install,
+                expected_grant,
+                target,
+                granted,
+            } => (
+                PendingExtensionManagementSubject::Installed(ExtensionInstallSelector::new(
+                    profile,
+                    install,
+                    expected_catalog,
+                    expected_install,
+                )),
+                PendingExtensionManagementKind::GrantEdit,
+                None,
+                None,
+                Some(ExtensionGrantEditRequest::new(
+                    ExtensionInstallSelector::new(
+                        profile,
+                        install,
+                        expected_catalog,
+                        expected_install,
+                    ),
+                    expected_grant,
+                    target,
+                    granted,
+                )),
             ),
             _ => return None,
         };
@@ -731,6 +798,14 @@ impl Shell {
                     OperationReason::StoreConflict,
                 ));
             }
+        }
+        if grant_edit
+            .is_some_and(|request| !self.extension_management.authorizes_grant_edit(request))
+        {
+            return Some(operation_result(
+                OperationOutcome::Rejected,
+                OperationReason::StoreConflict,
+            ));
         }
         let request = match self
             .extension_management
@@ -836,6 +911,20 @@ impl Shell {
                     }),
                 )
             }
+            PendingExtensionManagementKind::GrantEdit => {
+                let request_value =
+                    grant_edit.expect("grant edit retained its validated stale-resistant request");
+                service.begin_edit_optional_grant(
+                    request_value,
+                    deadline,
+                    Box::new(move |settlement| {
+                        let _ = callback.dispatch(Command::ExtensionManagementSettled {
+                            request,
+                            completion: ExtensionManagementCompletion::GrantEdit(settlement),
+                        });
+                    }),
+                )
+            }
         }));
         match admission {
             Ok(ExtensionManagementAdmission::Accepted) => {
@@ -889,6 +978,7 @@ impl Shell {
             ExtensionManagementCompletion::Update(settlement) => settlement.active_profiles(),
             ExtensionManagementCompletion::SetEnabled(settlement) => settlement.active_profiles(),
             ExtensionManagementCompletion::Uninstall(settlement) => settlement.active_profiles(),
+            ExtensionManagementCompletion::GrantEdit(settlement) => settlement.active_profiles(),
         };
         if let Some(active_profiles) = active_profiles {
             let previous_surface_generation = self
@@ -1102,6 +1192,53 @@ impl Shell {
                     true,
                 ),
             },
+            ExtensionManagementCompletion::GrantEdit(settlement) => {
+                match settlement.into_outcome() {
+                    ExtensionGrantEditOutcome::Applied { runtime, .. } => (
+                        OperationOutcome::Applied,
+                        match runtime {
+                            ExtensionUpdateRuntimeState::Active(_)
+                            | ExtensionUpdateRuntimeState::Disabled => {
+                                OperationReason::MutationApplied
+                            }
+                            ExtensionUpdateRuntimeState::PendingActivation(_) => {
+                                OperationReason::ExtensionActivationPending
+                            }
+                        },
+                        false,
+                    ),
+                    ExtensionGrantEditOutcome::Unchanged { .. } => (
+                        OperationOutcome::NoOp,
+                        OperationReason::StateUnchanged,
+                        false,
+                    ),
+                    ExtensionGrantEditOutcome::Conflict => (
+                        OperationOutcome::Rejected,
+                        OperationReason::StoreConflict,
+                        false,
+                    ),
+                    ExtensionGrantEditOutcome::Rejected => (
+                        OperationOutcome::Rejected,
+                        OperationReason::InvalidScope,
+                        false,
+                    ),
+                    ExtensionGrantEditOutcome::Unavailable => (
+                        OperationOutcome::Rejected,
+                        OperationReason::StoreAdmissionRejected,
+                        false,
+                    ),
+                    ExtensionGrantEditOutcome::OutcomeUnknown => (
+                        OperationOutcome::Deferred,
+                        OperationReason::StoreOutcomeUnknown,
+                        true,
+                    ),
+                    ExtensionGrantEditOutcome::FailedClosed => (
+                        OperationOutcome::Rejected,
+                        OperationReason::StoreReconciliationFailed,
+                        true,
+                    ),
+                }
+            }
         };
         if fail_until_restart {
             self.extension_management.fail_until_restart();
@@ -1163,6 +1300,8 @@ mod state_tests {
                 zephium_core::extensions::ExtensionRuntimeGeneration::INITIAL,
             ),
             ExtensionManagementGrantState::Uninitialized,
+            Vec::new(),
+            Vec::new(),
             ExtensionManagementCompatibility::Compatible,
             Vec::new(),
         )

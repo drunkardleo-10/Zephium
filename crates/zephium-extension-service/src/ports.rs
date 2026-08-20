@@ -6,11 +6,11 @@ use zephium_core::ports::extensions::{
     ExtensionAcquiredCatalogActivationCallback, ExtensionAcquiredCatalogActivationOutcome,
     ExtensionAcquiredCatalogActivationRequest, ExtensionAcquiredPackageProvisioningCallback,
     ExtensionAcquiredPackageProvisioningOutcome, ExtensionAcquiredPackageProvisioningRequest,
-    ExtensionInitialGrantSelection, ExtensionInstallCallback, ExtensionInstallCandidateSelector,
-    ExtensionInstallOutcome, ExtensionInstallSelector, ExtensionInstallUpdateSelector,
-    ExtensionManagementAdmission, ExtensionManagementAvailability,
-    ExtensionManagementCatalogAdmission, ExtensionManagementCatalogCallback,
-    ExtensionManagementSettlement,
+    ExtensionGrantEditCallback, ExtensionGrantEditRequest, ExtensionInitialGrantSelection,
+    ExtensionInstallCallback, ExtensionInstallCandidateSelector, ExtensionInstallOutcome,
+    ExtensionInstallSelector, ExtensionInstallUpdateSelector, ExtensionManagementAdmission,
+    ExtensionManagementAvailability, ExtensionManagementCatalogAdmission,
+    ExtensionManagementCatalogCallback, ExtensionManagementSettlement,
     ExtensionProfileRetirementDisposition as CoreExtensionProfileRetirementDisposition,
     ExtensionRepositoryMaintenanceAdmission, ExtensionRepositoryMaintenanceCallback,
     ExtensionRuntimeActivationDisposition as CoreExtensionRuntimeActivationDisposition,
@@ -293,6 +293,15 @@ impl ExtensionServiceLifecycle for ExtensionServiceOwner {
         ExtensionServiceOwner::begin_request_runtime_grants(
             self, key, generation, request, deadline, done,
         )
+    }
+
+    fn begin_edit_optional_grant(
+        &mut self,
+        request: ExtensionGrantEditRequest,
+        deadline: Instant,
+        done: ExtensionGrantEditCallback,
+    ) -> ExtensionManagementAdmission {
+        ExtensionServiceOwner::begin_edit_optional_grant(self, request, deadline, done)
     }
 
     fn begin_load_management_catalog(

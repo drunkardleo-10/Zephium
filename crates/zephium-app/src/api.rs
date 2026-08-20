@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex};
 
 use zephium_core::blocker::{ContentPolicyGeneration, ProfileContentPolicyStatus};
 use zephium_core::extensions::{
-    ExtensionActionRevision, ExtensionInstallCatalogRevision, ExtensionInstallRevision,
-    ExtensionPopupAnchor, ExtensionRuntimeInstance,
+    ExtensionActionRevision, ExtensionGrantRevision, ExtensionInstallCatalogRevision,
+    ExtensionInstallRevision, ExtensionPopupAnchor, ExtensionRuntimeInstance,
 };
 use zephium_core::geometry::Size;
 use zephium_core::ids::{ExtensionInstallId, ItemId, ProfileId};
@@ -19,10 +19,10 @@ use zephium_core::ports::extensions::{
     ExtensionAcquiredCatalogActivationCallback, ExtensionAcquiredCatalogActivationOutcome,
     ExtensionAcquiredCatalogActivationRequest, ExtensionAcquiredPackageProvisioningCallback,
     ExtensionAcquiredPackageProvisioningOutcome, ExtensionAcquiredPackageProvisioningRequest,
-    ExtensionDistributionStatus, ExtensionInstallOutcome, ExtensionManagementCatalogOutcome,
-    ExtensionManagementSettlement, ExtensionRepositoryMaintenanceOutcome,
-    ExtensionRuntimeGrantOutcome, ExtensionRuntimeGrantRequestId, ExtensionSetEnabledOutcome,
-    ExtensionUninstallOutcome,
+    ExtensionDistributionStatus, ExtensionGrantEditOutcome, ExtensionGrantEditTarget,
+    ExtensionInstallOutcome, ExtensionManagementCatalogOutcome, ExtensionManagementSettlement,
+    ExtensionRepositoryMaintenanceOutcome, ExtensionRuntimeGrantOutcome,
+    ExtensionRuntimeGrantRequestId, ExtensionSetEnabledOutcome, ExtensionUninstallOutcome,
 };
 use zephium_core::ports::store::Store;
 use zephium_core::ports::store::{
@@ -188,6 +188,7 @@ pub enum ExtensionManagementCompletion {
     Update(ExtensionManagementSettlement<zephium_core::ports::extensions::ExtensionUpdateOutcome>),
     SetEnabled(ExtensionManagementSettlement<ExtensionSetEnabledOutcome>),
     Uninstall(ExtensionManagementSettlement<ExtensionUninstallOutcome>),
+    GrantEdit(ExtensionManagementSettlement<ExtensionGrantEditOutcome>),
 }
 /// Redacted terminal reason delivered to the desktop composition root when
 /// the shell can no longer continue safely in the current process.
@@ -392,6 +393,16 @@ pub enum Command {
         expected_catalog: ExtensionInstallCatalogRevision,
         expected_install: ExtensionInstallRevision,
         enabled: bool,
+    },
+    /// Changes one optional API or host grant from the exact installed row.
+    /// The target index is resolved again against authenticated manifest data.
+    EditFocusedExtensionOptionalGrant {
+        install: ExtensionInstallId,
+        expected_catalog: ExtensionInstallCatalogRevision,
+        expected_install: ExtensionInstallRevision,
+        expected_grant: ExtensionGrantRevision,
+        target: ExtensionGrantEditTarget,
+        granted: bool,
     },
     /// Installs one exact package from the latest privileged management
     /// projection. Shell derives the focused profile and complete package

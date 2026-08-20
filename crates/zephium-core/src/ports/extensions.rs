@@ -280,6 +280,63 @@ pub struct ExtensionInstallUpdateSelector {
     replacement: ExtensionPackageIdentity,
 }
 
+/// One optional manifest declaration selected from the exact installed
+/// package projection retained by privileged browser chrome.
+///
+/// Indices, rather than caller-provided strings, keep page/IPC text from
+/// becoming authority. The serialized service resolves the index against a
+/// freshly authenticated manifest before any native or durable mutation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExtensionGrantEditTarget {
+    OptionalApi(u8),
+    OptionalHost(u8),
+}
+
+/// Stale-resistant user edit of one installed extension's optional authority.
+///
+/// This value is routing data only. The install and grant revisions are CAS
+/// inputs, and the service must reauthenticate the package and declaration
+/// before applying the requested state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExtensionGrantEditRequest {
+    install: ExtensionInstallSelector,
+    expected_grant_revision: ExtensionGrantRevision,
+    target: ExtensionGrantEditTarget,
+    granted: bool,
+}
+
+impl ExtensionGrantEditRequest {
+    pub const fn new(
+        install: ExtensionInstallSelector,
+        expected_grant_revision: ExtensionGrantRevision,
+        target: ExtensionGrantEditTarget,
+        granted: bool,
+    ) -> Self {
+        Self {
+            install,
+            expected_grant_revision,
+            target,
+            granted,
+        }
+    }
+
+    pub const fn install(self) -> ExtensionInstallSelector {
+        self.install
+    }
+
+    pub const fn expected_grant_revision(self) -> ExtensionGrantRevision {
+        self.expected_grant_revision
+    }
+
+    pub const fn target(self) -> ExtensionGrantEditTarget {
+        self.target
+    }
+
+    pub const fn granted(self) -> bool {
+        self.granted
+    }
+}
+
 impl ExtensionInstallUpdateSelector {
     pub const fn new(
         install: ExtensionInstallSelector,
@@ -585,6 +642,24 @@ pub enum ExtensionUpdateRuntimeState {
     Disabled,
 }
 
+/// Exact result of one user-directed optional-authority edit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExtensionGrantEditOutcome {
+    Applied {
+        revision: ExtensionGrantRevision,
+        runtime: ExtensionUpdateRuntimeState,
+    },
+    Unchanged {
+        revision: ExtensionGrantRevision,
+        runtime: ExtensionUpdateRuntimeState,
+    },
+    Conflict,
+    Rejected,
+    Unavailable,
+    OutcomeUnknown,
+    FailedClosed,
+}
+
 /// Management settlement plus the complete same-turn browser-routing cohort.
 ///
 /// `None` means the worker could not establish a trustworthy runtime
@@ -706,6 +781,9 @@ pub type ExtensionUpdateCallback =
 /// Exactly-once completion callback for an admitted live-runtime grant request.
 pub type ExtensionRuntimeGrantCallback =
     Box<dyn FnOnce(ExtensionManagementSettlement<ExtensionRuntimeGrantOutcome>) + Send>;
+/// Exactly-once completion callback for a privileged optional-authority edit.
+pub type ExtensionGrantEditCallback =
+    Box<dyn FnOnce(ExtensionManagementSettlement<ExtensionGrantEditOutcome>) + Send>;
 /// Exactly-once completion callback for an admitted management-catalog read.
 pub type ExtensionManagementCatalogCallback =
     Box<dyn FnOnce(ExtensionManagementCatalogOutcome) + Send>;
@@ -961,6 +1039,21 @@ pub trait ExtensionServiceLifecycle: Send {
         _request: ExtensionRuntimeGrantRequest,
         _deadline: Instant,
         done: ExtensionRuntimeGrantCallback,
+    ) -> ExtensionManagementAdmission {
+        drop(done);
+        ExtensionManagementAdmission::Unavailable
+    }
+
+    /// Applies one exact user-directed optional API/host authority edit.
+    ///
+    /// Implementations must resolve the bounded target against a freshly
+    /// authenticated manifest, retire all matching native contexts before a
+    /// changed Store write, and reactivate only the contexts that were live.
+    fn begin_edit_optional_grant(
+        &mut self,
+        _request: ExtensionGrantEditRequest,
+        _deadline: Instant,
+        done: ExtensionGrantEditCallback,
     ) -> ExtensionManagementAdmission {
         drop(done);
         ExtensionManagementAdmission::Unavailable

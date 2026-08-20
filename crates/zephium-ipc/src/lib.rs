@@ -212,6 +212,11 @@ pub struct ExtensionManagementEntryView {
     /// Present only when `runtime` is `active`.
     pub runtime_generation: Option<String>,
     pub grants: ExtensionManagementGrantView,
+    /// Canonically ordered optional API declarations. Mutations return only
+    /// the array index plus the exact grant revision.
+    pub optional_api: Vec<String>,
+    /// Canonically ordered optional host declarations.
+    pub optional_hosts: Vec<String>,
     pub compatibility: ExtensionManagementCompatibilityView,
     pub limitations: Vec<ExtensionManagementLimitationView>,
 }

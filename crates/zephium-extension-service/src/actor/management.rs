@@ -472,6 +472,10 @@ impl RetiredContexts {
     pub(super) const fn is_empty(self) -> bool {
         !self.regular && !self.private
     }
+
+    pub(super) const fn regular_was_live(self) -> bool {
+        self.regular
+    }
 }
 
 pub(super) fn retire_all_contexts(

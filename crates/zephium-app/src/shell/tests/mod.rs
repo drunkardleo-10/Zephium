@@ -38,6 +38,7 @@ type HeldExtensionUninstall = zephium_core::ports::extensions::ExtensionUninstal
 type HeldExtensionManagementCatalog =
     zephium_core::ports::extensions::ExtensionManagementCatalogCallback;
 type HeldExtensionRuntimeGrant = zephium_core::ports::extensions::ExtensionRuntimeGrantCallback;
+type HeldExtensionGrantEdit = zephium_core::ports::extensions::ExtensionGrantEditCallback;
 type HeldExtensionRepositoryMaintenance =
     zephium_core::ports::extensions::ExtensionRepositoryMaintenanceCallback;
 type HeldAcquiredPackage = (
@@ -216,6 +217,13 @@ pub(super) struct FakeExtensionLifecycleState {
         )>,
     >,
     pub(super) runtime_grant_callbacks: Mutex<Vec<HeldExtensionRuntimeGrant>>,
+    pub(super) grant_edit_calls: Mutex<
+        Vec<(
+            zephium_core::ports::extensions::ExtensionGrantEditRequest,
+            std::time::Instant,
+        )>,
+    >,
+    pub(super) grant_edit_callbacks: Mutex<Vec<HeldExtensionGrantEdit>>,
     pub(super) repository_maintenance_available: std::sync::atomic::AtomicBool,
     pub(super) repository_maintenance_admission:
         Mutex<Option<zephium_core::ports::extensions::ExtensionRepositoryMaintenanceAdmission>>,
@@ -551,6 +559,31 @@ impl zephium_core::ports::extensions::ExtensionServiceLifecycle for FakeExtensio
                 .lock()
                 .unwrap()
                 .push(done);
+        } else {
+            drop(done);
+        }
+        admission
+    }
+
+    fn begin_edit_optional_grant(
+        &mut self,
+        request: zephium_core::ports::extensions::ExtensionGrantEditRequest,
+        deadline: std::time::Instant,
+        done: zephium_core::ports::extensions::ExtensionGrantEditCallback,
+    ) -> zephium_core::ports::extensions::ExtensionManagementAdmission {
+        self.state
+            .grant_edit_calls
+            .lock()
+            .unwrap()
+            .push((request, deadline));
+        let admission = self
+            .state
+            .management_admission
+            .lock()
+            .unwrap()
+            .unwrap_or(zephium_core::ports::extensions::ExtensionManagementAdmission::Accepted);
+        if admission == zephium_core::ports::extensions::ExtensionManagementAdmission::Accepted {
+            self.state.grant_edit_callbacks.lock().unwrap().push(done);
         } else {
             drop(done);
         }
