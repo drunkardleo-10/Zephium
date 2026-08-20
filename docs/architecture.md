@@ -1009,6 +1009,19 @@ used 177--186 ms native and 183--190 ms brokered main-process CPU, versus
 is not yet a release threshold; the probe intentionally reports only
 `RUSAGE_SELF`, so WebKit helper RSS/CPU and energy remain outside this evidence.
 
+A three-pair optimized campaign on 2026-08-20 passed after the mixed native /
+native-brokered catalog and deterministic extension origin landed. Native
+measured 120--142 ms authenticated startup, 206--254 ms profile-view creation,
+275--305 ms popup presentation, and 90,832,896--92,209,152 bytes peak
+main-process RSS; native-brokered measured 122--126 ms, 214--221 ms, 280--309
+ms, and 91,406,336--92,274,688 bytes respectively. Five-second live-runtime
+windows used 202--205 ms native and 204--216 ms brokered main-process CPU,
+versus 135--154 ms and 144--156 ms after retirement. The 51--72 ms paired CPU
+delta remains visible after origin stabilization. These machine-local runs are
+release-path regressions and trend evidence, not permission to retain disabled
+contexts or a substitute for process-family RSS/CPU, idle-wakeup, energy, and
+endurance budgets.
+
 Remaining macOS work is now product/API breadth rather than a missing runtime
 foundation: changed-permission update consent, extension notifications and
 additional browser APIs, storage quotas, private/file execution gates,
