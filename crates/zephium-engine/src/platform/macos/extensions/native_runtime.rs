@@ -852,17 +852,19 @@ fn validate_loaded_owner_membership(
 ) -> Result<(), MacosNativeRuntimeFailure> {
     catch_native(|| unsafe {
         let identifier = owner.context.uniqueIdentifier();
-        let expected_bytes = owner.owner_id.encoded_bytes();
-        let expected = NSString::from_str(
-            std::str::from_utf8(&expected_bytes)
-                .map_err(|_| MacosNativeRuntimeFailure::IdentityReadbackMismatch)?,
-        );
+        let expected = native_context_identity(owner.owner_id)?;
+        let base_url_matches = owner
+            .context
+            .baseURL()
+            .absoluteString()
+            .is_some_and(|actual| actual.isEqualToString(&expected.base_url_string));
         let context_controller = owner.context.webExtensionController();
         let looked_up = owner
             .controller
             .extensionContextForExtension(&owner.extension);
         let exact = owner.context.isLoaded()
-            && identifier.isEqualToString(&expected)
+            && identifier.isEqualToString(&expected.identifier)
+            && base_url_matches
             && owner
                 .controller
                 .extensionContexts()
@@ -924,14 +926,19 @@ fn set_and_verify_identity(
     context: &WKWebExtensionContext,
     owner_id: ExtensionRuntimeNativeOwnerId,
 ) -> Result<(), MacosNativeRuntimeFailure> {
-    let bytes = owner_id.encoded_bytes();
-    let identifier = std::str::from_utf8(&bytes)
-        .map_err(|_| MacosNativeRuntimeFailure::IdentityReadbackMismatch)?;
-    let identifier = NSString::from_str(identifier);
+    let identity = native_context_identity(owner_id)?;
     catch_native(|| unsafe {
-        context.setUniqueIdentifier(&identifier);
+        context.setBaseURL(&identity.base_url);
+        context.setUniqueIdentifier(&identity.identifier);
         context.setInspectable(false);
-        if context.uniqueIdentifier().isEqualToString(&identifier)
+        let base_url_matches = context
+            .baseURL()
+            .absoluteString()
+            .is_some_and(|actual| actual.isEqualToString(&identity.base_url_string));
+        if base_url_matches
+            && context
+                .uniqueIdentifier()
+                .isEqualToString(&identity.identifier)
             && !context.isInspectable()
             && !context.isLoaded()
             && context.webExtensionController().is_none()
@@ -940,6 +947,29 @@ fn set_and_verify_identity(
         } else {
             Err(MacosNativeRuntimeFailure::IdentityReadbackMismatch)
         }
+    })
+}
+
+struct NativeContextIdentity {
+    identifier: Retained<NSString>,
+    base_url_string: Retained<NSString>,
+    base_url: Retained<NSURL>,
+}
+
+fn native_context_identity(
+    owner_id: ExtensionRuntimeNativeOwnerId,
+) -> Result<NativeContextIdentity, MacosNativeRuntimeFailure> {
+    let bytes = owner_id.encoded_bytes();
+    let identifier_text = std::str::from_utf8(&bytes)
+        .map_err(|_| MacosNativeRuntimeFailure::IdentityReadbackMismatch)?;
+    let identifier = NSString::from_str(identifier_text);
+    let base_url_string = NSString::from_str(&format!("webkit-extension://{identifier_text}/"));
+    let base_url = NSURL::URLWithString(&base_url_string)
+        .ok_or(MacosNativeRuntimeFailure::IdentityReadbackMismatch)?;
+    Ok(NativeContextIdentity {
+        identifier,
+        base_url_string,
+        base_url,
     })
 }
 
@@ -1006,4 +1036,37 @@ fn catch_native<T>(
 ) -> Result<T, MacosNativeRuntimeFailure> {
     objc2::exception::catch(AssertUnwindSafe(operation))
         .map_err(|_| MacosNativeRuntimeFailure::NativeException)?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_context_origin_is_stable_exact_and_owner_distinct() {
+        let first = ExtensionRuntimeNativeOwnerId::from_encoded_bytes([b'a'; 32]).unwrap();
+        let second = ExtensionRuntimeNativeOwnerId::from_encoded_bytes([b'b'; 32]).unwrap();
+        let first_identity = native_context_identity(first).unwrap();
+        let repeated_identity = native_context_identity(first).unwrap();
+        let second_identity = native_context_identity(second).unwrap();
+
+        assert_eq!(first_identity.identifier.to_string(), "a".repeat(32));
+        assert_eq!(first_identity.identifier, repeated_identity.identifier);
+        assert_eq!(
+            first_identity.base_url_string,
+            repeated_identity.base_url_string
+        );
+        assert_eq!(
+            first_identity.base_url_string.to_string(),
+            format!("webkit-extension://{}/", "a".repeat(32))
+        );
+        assert_eq!(
+            first_identity.base_url.absoluteString().unwrap(),
+            repeated_identity.base_url.absoluteString().unwrap()
+        );
+        assert_ne!(
+            first_identity.base_url_string,
+            second_identity.base_url_string
+        );
+    }
 }
