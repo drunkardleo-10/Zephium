@@ -1254,12 +1254,12 @@ before its document-end content script. The page requires Tauri, Wry,
 principal-handler, and privileged extension APIs to be absent, then installs
 forged `chrome`/`browser` objects and poisons its own DOM setter. WebKit's raw
 page does expose the restricted external-messaging
-`browser.runtime.connect/sendMessage` pair. The lower live gate addresses the
-exact known extension context with both a message and port, then has a later
-isolated content script read the target worker's delivery counter. Only exact
-zero passes; no timeout is interpreted as refusal. Zephium preserves any
-`externally_connectable` declaration as unmodeled authority and cannot classify
-it runnable.
+`browser.runtime.connect/sendMessage` pair. The lower live gate has both that
+raw page and a separate extension address the exact known extension context
+through message and port APIs, then has a delayed isolated content script read
+the target worker's delivery counter. Only exact zero passes; no timeout is
+interpreted as refusal. Zephium preserves any `externally_connectable`
+declaration as unmodeled authority and cannot classify it runnable.
 Extension execution must still settle through its isolated world without
 touching either forgery. This is real product-path boundary evidence, not a
 claim against a native WebKit sandbox escape.

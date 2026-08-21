@@ -853,13 +853,14 @@ HTTP document first proves that Tauri, Wry, principal-handler, and privileged
 extension APIs are absent, then installs page-world `chrome`/`browser`
 lookalikes and poisons the DOM setter used by the document-end fixture. WebKit
 does expose the restricted page-side `browser.runtime.connect/sendMessage`
-shell; a separate live gate addresses the exact known context identifier and
-issues both a message and port when `externally_connectable` is absent. A later
-isolated content script asks the target worker for its delivery counter; only
-exact zero passes, so a timeout is never treated as refusal. Zephium preserves
-that manifest declaration as unmodeled authority, so no product profile can
-classify it runnable. The authenticated content script must still complete
-through its isolated world without touching either forgery. Production
+shell; a separate live gate has both the raw page and a second extension
+address the exact known context identifier through message and port APIs when
+`externally_connectable` is absent. A delayed isolated content script asks the
+target worker for its delivery counter; only exact zero passes, so a timeout is
+never treated as refusal. Zephium preserves that manifest declaration as
+unmodeled authority, so no product profile can classify it runnable. The
+authenticated content script must still complete through its isolated world
+without touching either forgery. Production
 provisioning remains deliberately empty, so ordinary release builds expose no
 extension runtime. The opt-in acquired-package service does now own a bounded
 provisioning ingress: one move-owned, path-free request may be retained at a
