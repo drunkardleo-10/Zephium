@@ -821,7 +821,12 @@ terminal settlement. Surface replacement closes a popup when its tab becomes
 discarded, inactive, or absent; runtime retirement, profile erasure, and host
 shutdown cancel loading and close the native popup before owner release. The
 lease covers only the pending/presented interval and is released even though
-WebKit may cache its popup wrapper.
+WebKit may cache its popup wrapper. Zephium-created options WKWebViews also
+handle `webViewWebContentProcessDidTerminate:`. The weak native delegate defers
+teardown to the next main-queue turn, revalidates the exact context and WKWebView
+generation, detaches and closes the window, and releases the shared
+popup/options lease instead of leaving a blank resource owner. A real injected
+renderer-crash run in a signed packaged application remains a release gate.
 
 The privileged frame receives an actor-revisioned exact-replacement action
 cohort only for the focused profile and active logical tab. Fixed RGBA icons

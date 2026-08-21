@@ -58,7 +58,10 @@ Chromium's full site-isolation model.
    programmatic remote navigation is cancelled, while a user-activated HTTP(S)
    link may request one ordinary Shell tab through the bounded browser-request
    broker. Opening options consumes the existing popup-class native resource
-   lease rather than allocating outside the process ceiling.
+   lease rather than allocating outside the process ceiling. If its WebContent
+   process terminates, the weak navigation delegate schedules a later main-turn
+   teardown and releases only the options owner whose exact context and
+   WKWebView still match; a delayed callback cannot close a replacement.
    Manifest support for file URLs or private browsing does not imply product
    availability. The current management projection marks both unavailable and
    Shell rejects a forged grant selection before Store admission; those flags

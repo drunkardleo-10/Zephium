@@ -12,7 +12,7 @@ use std::rc::{Rc, Weak as RcWeak};
 use std::time::Duration;
 
 use block2::{DynBlock, RcBlock};
-use objc2::rc::Retained;
+use objc2::rc::{Retained, Weak};
 use objc2::runtime::{NSObject, ProtocolObject};
 use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
@@ -223,6 +223,21 @@ define_class!(
                 }
                 None => decision.call((WKNavigationActionPolicy::Cancel,)),
             }
+        }
+
+        #[unsafe(method(webViewWebContentProcessDidTerminate:))]
+        fn web_content_process_did_terminate(&self, webview: &WKWebView) {
+            let Some(broker) = self.ivars().broker.upgrade() else {
+                return;
+            };
+            // The callback is borrowed. Retain only long enough to mint a
+            // non-owning exact-generation witness for the deferred main-turn
+            // teardown; the active options owner remains the sole strong
+            // lifetime authority.
+            let Some(webview) = (unsafe { Retained::retain(webview as *const _ as *mut _) }) else {
+                return;
+            };
+            broker.schedule_options_process_termination(&self.ivars().context, &webview);
         }
     }
 );
@@ -797,6 +812,51 @@ impl ActionPopupBroker {
         let _keep_delegate_alive_through_close = options.delegate;
     }
 
+    fn schedule_options_process_termination(
+        self: &Rc<Self>,
+        context: &Retained<WKWebExtensionContext>,
+        webview: &Retained<WKWebView>,
+    ) {
+        let broker = Rc::downgrade(self);
+        let context = Weak::from_retained(context);
+        let webview = Weak::from_retained(webview);
+        let completion: RcBlock<dyn Fn()> = RcBlock::new(move || {
+            let (Some(broker), Some(context), Some(webview)) =
+                (broker.upgrade(), context.load(), webview.load())
+            else {
+                return;
+            };
+            broker.finish_options_process_termination(&context, &webview);
+        });
+        // SAFETY: dispatch_async copies this heap block onto the main queue.
+        // Every captured native owner and the broker are main-thread-only; the
+        // deferred turn also prevents the weak navigation delegate from being
+        // released while WebKit is still invoking it.
+        unsafe {
+            dispatch2::DispatchQueue::main().exec_async_with_block(RcBlock::as_ptr(&completion));
+        }
+    }
+
+    fn finish_options_process_termination(
+        &self,
+        context: &WKWebExtensionContext,
+        webview: &WKWebView,
+    ) {
+        let matches = self.options.borrow().as_ref().is_some_and(|options| {
+            std::ptr::eq(&*options.context, context) && std::ptr::eq(&*options.webview, webview)
+        });
+        if !matches {
+            return;
+        }
+        let Some(options) = self.options.borrow_mut().take() else {
+            return;
+        };
+        crate::diagnostic!("extensions: options-page web content process terminated");
+        retire_options_native_surface(&options);
+        let _keep_delegate_alive_through_close = options.delegate;
+        options.window.close();
+    }
+
     fn close_options(&self) {
         let Some(options) = self.options.borrow_mut().take() else {
             return;
@@ -1203,5 +1263,29 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn options_renderer_termination_is_deferred_and_identity_exact() {
+        let source = include_str!("action_popup.rs");
+        let callback = source
+            .find("fn web_content_process_did_terminate")
+            .expect("options navigation delegate termination callback");
+        let deferred = source
+            .find("fn schedule_options_process_termination")
+            .expect("deferred options teardown");
+        let exact = source
+            .find("fn finish_options_process_termination")
+            .expect("exact options teardown");
+        assert!(callback < deferred && deferred < exact);
+        let body = &source[exact
+            ..source
+                .get(exact..)
+                .and_then(|tail| tail.find("fn close_options"))
+                .map(|end| exact + end)
+                .expect("options teardown end")];
+        assert!(body.contains("std::ptr::eq(&*options.context, context)"));
+        assert!(body.contains("std::ptr::eq(&*options.webview, webview)"));
+        assert!(body.contains("retire_options_native_surface(&options)"));
     }
 }
