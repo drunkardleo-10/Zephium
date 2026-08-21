@@ -848,7 +848,18 @@ The repository/service tests prove authenticated package admission and
 startup/crash reconciliation against a bounded native fake, while the live
 WebKit probe proves the platform adapter. The authenticated product probe now
 joins package authority, native ownership, controller activation, the
-Shell-owned window/tab delegate, and real content-script execution. Production
+Shell-owned window/tab delegate, and real content-script execution. Its raw
+HTTP document first proves that Tauri, Wry, principal-handler, and privileged
+extension APIs are absent, then installs page-world `chrome`/`browser`
+lookalikes and poisons the DOM setter used by the document-end fixture. WebKit
+does expose the restricted page-side `browser.runtime.connect/sendMessage`
+shell; a separate live gate addresses the exact known context identifier and
+issues both a message and port when `externally_connectable` is absent. A later
+isolated content script asks the target worker for its delivery counter; only
+exact zero passes, so a timeout is never treated as refusal. Zephium preserves
+that manifest declaration as unmodeled authority, so no product profile can
+classify it runnable. The authenticated content script must still complete
+through its isolated world without touching either forgery. Production
 provisioning remains deliberately empty, so ordinary release builds expose no
 extension runtime. The opt-in acquired-package service does now own a bounded
 provisioning ingress: one move-owned, path-free request may be retained at a

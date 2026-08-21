@@ -74,6 +74,7 @@ const EXPECTED_NATIVE_CONTROLLERS: usize = 5;
 const PROBE_TOKEN: &str = "zephium-wk-web-extension-v1";
 const PERSISTENT_PROFILE_A: u128 = 0xf0cc_44f2_4355_4cf9_a74f_27fe_6cb3_7eda;
 const PERSISTENT_PROFILE_B: u128 = 0x6a90_af85_503a_4db6_8359_a082_5da9_07ab;
+const PRIMARY_CONTEXT_IDENTIFIER: &str = "zephium-probe-primary";
 const PROFILE_ROUTING_PRINCIPALS: [&str; 2] =
     ["zephium-profile-route-a", "zephium-profile-route-b"];
 const HOST_MATCH_PATTERN: &str = "http://127.0.0.1/*";
@@ -791,7 +792,7 @@ fn run_web_extension_probe_with_permissions(
         set_phase("teardown-wait");
         wait_for_teardown(&teardown)?;
         println!(
-            "native-probe: macOS WKWebExtension passed; os={}; mv3=temp-directory; controller_before_wry=passed; default_deny=passed; exact_native_grant_replace_readback=passed; exact_native_grant_live_revocation=passed; exact_native_grant_clear_readback=passed; exact_native_owner_lifecycle=passed; restart_controller_absence=passed; exact_host_grant=passed; exact_site_deny_override=passed; dynamic_file_access=unsupported; dynamic_file_grant_readback=accepted; dynamic_file_contexts=3; private_data_default_deny=passed; private_data_explicit_grant=passed; private_data_separation=passed; runtime_permission_request={}; runtime_permission_readback={}; runtime_permission_callbacks_coalesced_before_settlement={}; runtime_permission_replacement_settlement_stranded={}; document_start=passed; isolated_worlds=passed; include_exclude=passed; all_frames=passed; match_about_blank=passed; match_origin_as_fallback=passed; exact_unload_reload=passed; peer_context=passed; nonpersistent_permission_separation=passed; protected_inventory=passed; product_profile_view_store_binding=passed; regular_cookie_isolation=passed; private_cookie_noninheritance=passed; regular_cookie_reconstruction=passed; regular_tab_routing_isolation=passed; browser_mutation_broker=passed; discarded_tab_native_view_refusal=passed; persistent_extension_storage_namespace_isolation=passed; persistent_local_zero_after_reopen=passed; private_extension_storage_noninheritance=passed; mv3_background_execution=passed; major_extension_native_permissions={}; major_extension_namespaces={}; native_broker_history_search=bounded-round-trip; native_broker_port=extension-to-host-only; native_broker_port_host_send=accepted-unobserved; native_broker_principal_binding=passed; native_broker_port_released=1; native_broker_delegate_released={}; bitwarden_web_request_background_registration=passed; bitwarden_web_request_observation={}; bitwarden_scripting_main_world=passed; bitwarden_execution_world_namespace={}; bitwarden_web_navigation_observation=passed; bitwarden_tabs_same_document_observation={}; bitwarden_alarms_lifecycle=passed; bitwarden_commands_readback=passed; bitwarden_commands_native_dispatch=passed; bitwarden_runtime_port_registered=round-trip; bitwarden_runtime_port_early_connect={}; bitwarden_context_menus_lifecycle=passed; bitwarden_context_menus_native_projection=passed; bitwarden_dynamic_resource_execution=passed; bitwarden_dynamic_resource_url={}; bitwarden_sandbox_isolation={}; bitwarden_action_popup_native_lifecycle=passed; bitwarden_http_basic_auth_autofill=degraded; extension_product_views_released={}; extension_product_stores_released={}; extension_ui_views_released={}; capability_views_released={}; capability_stores_released={}; all_type_removal_callbacks_completed={}; baseline_controller_scripts={}; peak_extension_script_delta={}; webview_callbacks={}; protected_scripts=3; lifecycle_objects_released=3; ordinary_native_controllers_released={}; ordinary_native_contexts_released={}; persistent_native_controllers_released={}; persistent_native_contexts_released={}; persistent_native_stores_released={}; profile_views_released={}; profile_contexts_released={}; profile_controllers_released={}; profile_stores_released={}; profile_lifecycle_objects_released={}",
+            "native-probe: macOS WKWebExtension passed; os={}; mv3=temp-directory; controller_before_wry=passed; default_deny=passed; exact_native_grant_replace_readback=passed; exact_native_grant_live_revocation=passed; exact_native_grant_clear_readback=passed; exact_native_owner_lifecycle=passed; restart_controller_absence=passed; exact_host_grant=passed; exact_site_deny_override=passed; dynamic_file_access=unsupported; dynamic_file_grant_readback=accepted; dynamic_file_contexts=3; private_data_default_deny=passed; private_data_explicit_grant=passed; private_data_separation=passed; runtime_permission_request={}; runtime_permission_readback={}; runtime_permission_callbacks_coalesced_before_settlement={}; runtime_permission_replacement_settlement_stranded={}; document_start=passed; isolated_worlds=passed; external_page_messaging_default_deny=passed; include_exclude=passed; all_frames=passed; match_about_blank=passed; match_origin_as_fallback=passed; exact_unload_reload=passed; peer_context=passed; nonpersistent_permission_separation=passed; protected_inventory=passed; product_profile_view_store_binding=passed; regular_cookie_isolation=passed; private_cookie_noninheritance=passed; regular_cookie_reconstruction=passed; regular_tab_routing_isolation=passed; browser_mutation_broker=passed; discarded_tab_native_view_refusal=passed; persistent_extension_storage_namespace_isolation=passed; persistent_local_zero_after_reopen=passed; private_extension_storage_noninheritance=passed; mv3_background_execution=passed; major_extension_native_permissions={}; major_extension_namespaces={}; native_broker_history_search=bounded-round-trip; native_broker_port=extension-to-host-only; native_broker_port_host_send=accepted-unobserved; native_broker_principal_binding=passed; native_broker_port_released=1; native_broker_delegate_released={}; bitwarden_web_request_background_registration=passed; bitwarden_web_request_observation={}; bitwarden_scripting_main_world=passed; bitwarden_execution_world_namespace={}; bitwarden_web_navigation_observation=passed; bitwarden_tabs_same_document_observation={}; bitwarden_alarms_lifecycle=passed; bitwarden_commands_readback=passed; bitwarden_commands_native_dispatch=passed; bitwarden_runtime_port_registered=round-trip; bitwarden_runtime_port_early_connect={}; bitwarden_context_menus_lifecycle=passed; bitwarden_context_menus_native_projection=passed; bitwarden_dynamic_resource_execution=passed; bitwarden_dynamic_resource_url={}; bitwarden_sandbox_isolation={}; bitwarden_action_popup_native_lifecycle=passed; bitwarden_http_basic_auth_autofill=degraded; extension_product_views_released={}; extension_product_stores_released={}; extension_ui_views_released={}; capability_views_released={}; capability_stores_released={}; all_type_removal_callbacks_completed={}; baseline_controller_scripts={}; peak_extension_script_delta={}; webview_callbacks={}; protected_scripts=3; lifecycle_objects_released=3; ordinary_native_controllers_released={}; ordinary_native_contexts_released={}; persistent_native_controllers_released={}; persistent_native_contexts_released={}; persistent_native_stores_released={}; profile_views_released={}; profile_contexts_released={}; profile_controllers_released={}; profile_stores_released={}; profile_lifecycle_objects_released={}",
             teardown.operating_system,
             teardown.runtime_permission_status,
             teardown.runtime_permission_readback,
@@ -1064,7 +1065,7 @@ fn run_supported_probe(
             .setWebExtensionController(Some(&primary_bundle.controller));
     }
 
-    let primary_context = new_context(&primary_extension, "zephium-probe-primary")?;
+    let primary_context = new_context(&primary_extension, PRIMARY_CONTEXT_IDENTIFIER)?;
     let peer_context = new_context(&peer_extension, "zephium-probe-peer")?;
     let secondary_context = new_context(&primary_extension, "zephium-probe-secondary")?;
     assert_private_data_access(&primary_context, false, "primary default")?;
@@ -2370,7 +2371,7 @@ fn validate_page_batch(
     let early_main = batch
         .get("earlyMain")
         .ok_or_else(|| format!("{run} page evidence has no early main-frame report"))?;
-    validate_frame_report(early_main, run, "main", expected)?;
+    validate_frame_report(early_main, run, "main", expected, false)?;
 
     let reports = batch
         .get("reports")
@@ -2394,7 +2395,7 @@ fn validate_page_batch(
                 "{run} has unexpected or duplicate frame role {role}"
             ));
         }
-        validate_frame_report(report, run, role, expected)?;
+        validate_frame_report(report, run, role, expected, true)?;
     }
     Ok(())
 }
@@ -2404,6 +2405,7 @@ fn validate_frame_report(
     run: &str,
     expected_role: &str,
     expected: ExpectedExtensions,
+    final_report: bool,
 ) -> Result<(), String> {
     if report.get("role").and_then(Value::as_str) != Some(expected_role) {
         return Err(format!(
@@ -2430,6 +2432,25 @@ fn validate_frame_report(
             "{run}/{expected_role} observed page/extension world leakage: {report}"
         ));
     }
+    let external_attempt = report.get("externalAttempt").and_then(Value::as_str);
+    let external_deliveries = report.get("externalDeliveries").and_then(Value::as_str);
+    if expected_role == "main" && final_report && run == "default-deny" {
+        if external_attempt != Some("message-and-port-issued") {
+            return Err(format!(
+                "{run}/{expected_role} did not issue both hostile external-messaging attempts: {report}"
+            ));
+        }
+    } else if expected_role == "main" && final_report && run == "both-granted" {
+        if external_deliveries != Some("0") {
+            return Err(format!(
+                "{run}/{expected_role} delivered page-origin messaging to an extension without externally_connectable: {report}"
+            ));
+        }
+    } else if final_report && (external_attempt.is_some() || external_deliveries.is_some()) {
+        return Err(format!(
+            "{run}/{expected_role} carried external-messaging evidence outside its exact phase: {report}"
+        ));
+    }
     Ok(())
 }
 
@@ -2442,7 +2463,7 @@ fn expected_counts(role: &str, expected: ExpectedExtensions) -> (u64, u64, u64) 
     if role == "excluded" {
         return (0, 0, 0);
     }
-    if role == "data" || role == "blob" {
+    if matches!(role, "srcdoc" | "data" | "blob") {
         return (0, u64::from(primary), 0);
     }
     (u64::from(primary), u64::from(primary), u64::from(peer))
@@ -2633,6 +2654,9 @@ fn write_primary_extension(path: &Path) -> Result<(), String> {
         "version": "1.0.0",
         "permissions": ["storage"],
         "host_permissions": [BROAD_HTTP_MATCH_PATTERN],
+        "background": {
+            "service_worker": "background.js"
+        },
         "content_scripts": [
             {
                 "matches": [HOST_MATCH_PATTERN],
@@ -2655,14 +2679,52 @@ fn write_primary_extension(path: &Path) -> Result<(), String> {
     write_fixture_file(path, "manifest.json", &manifest.to_string())?;
     write_fixture_file(
         path,
-        "direct.js",
-        &content_script(
-            "primary-direct",
-            "data-zepx-primary-direct",
-            "__zepxPrimaryDirect",
-            &["__zepxPeer"],
-        ),
+        "background.js",
+        r#"const api = globalThis.browser ?? globalThis.chrome;
+let externalDeliveries = 0;
+api.runtime.onMessageExternal.addListener((message, _sender, sendResponse) => {
+  if (message?.probe === "zephium-wk-web-extension-v1") {
+    externalDeliveries += 1;
+    sendResponse({ kind: "unexpected-external-message-accepted" });
+  }
+  return false;
+});
+api.runtime.onConnectExternal.addListener((port) => {
+  externalDeliveries += 1;
+  port.onMessage.addListener((message) => {
+    if (message?.probe === "zephium-wk-web-extension-v1") {
+      port.postMessage({ kind: "unexpected-external-port-accepted" });
+    }
+  });
+});
+api.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.probe === "zephium-wk-web-extension-v1" && message?.kind === "read-external-deliveries") {
+    sendResponse({ count: externalDeliveries });
+  }
+  return false;
+});"#,
     )?;
+    let mut direct = content_script(
+        "primary-direct",
+        "data-zepx-primary-direct",
+        "__zepxPrimaryDirect",
+        &["__zepxPeer"],
+    );
+    direct.push_str(
+        r#"
+if (window === top && new URLSearchParams(location.search).get("run") === "both-granted") {
+  const api = globalThis.browser ?? globalThis.chrome;
+  api.runtime.sendMessage(
+    { probe: "zephium-wk-web-extension-v1", kind: "read-external-deliveries" },
+    (response) => document.documentElement.setAttribute(
+      "data-zepx-external-deliveries",
+      Number.isSafeInteger(response?.count) ? String(response.count) : "invalid"
+    )
+  );
+}
+"#,
+    );
+    write_fixture_file(path, "direct.js", &direct)?;
     write_fixture_file(
         path,
         "fallback.js",
@@ -2970,8 +3032,8 @@ fn snapshot_function(role: &str, run: &str) -> String {
     let role = serde_json::to_string(role).expect("static role is serializable");
     let run = serde_json::to_string(run).expect("bounded run identifier is serializable");
     format!(
-        r#"() => {{
-            const root = document.documentElement;
+        r#"function() {{
+            const root = (this?.document ?? document).documentElement;
             const count = name => Number(root?.getAttribute(name) || '0');
             return {{
                 probe: {probe}, run: {run}, role: {role},
@@ -2982,7 +3044,9 @@ fn snapshot_function(role: &str, run: &str) -> String {
                     typeof globalThis.__zepxPrimaryDirect !== 'undefined' ||
                     typeof globalThis.__zepxPrimaryFallback !== 'undefined' ||
                     typeof globalThis.__zepxPeer !== 'undefined',
-                crossWorldLeak: root?.getAttribute('data-zepx-cross-world-leak') === '1'
+                crossWorldLeak: root?.getAttribute('data-zepx-cross-world-leak') === '1',
+                externalAttempt: root?.getAttribute('data-zepx-external-attempt'),
+                externalDeliveries: root?.getAttribute('data-zepx-external-deliveries')
             }};
         }}"#,
         probe = serde_json::to_string(PROBE_TOKEN).expect("static token is serializable"),
@@ -3003,6 +3067,8 @@ fn main_page(run: &str, cross_origin: SocketAddr) -> String {
         .expect("excluded URL is serializable");
     let cross_url = serde_json::to_string(&format!("http://{cross_origin}/frame/cross?run={run}"))
         .expect("cross-origin URL is serializable");
+    let primary_context = serde_json::to_string(PRIMARY_CONTEXT_IDENTIFIER)
+        .expect("static primary context identifier is serializable");
 
     format!(
         r#"<!doctype html><html><head><meta charset="utf-8"><script>
@@ -3012,6 +3078,39 @@ fn main_page(run: &str, cross_origin: SocketAddr) -> String {
             const run = {run_json};
             const expected = new Set(['main', 'same', 'cross', 'excluded', 'about', 'srcdoc', 'data', 'blob']);
             const reports = new Map();
+            const root = document.documentElement;
+            if (run === 'default-deny') {{
+                const runtime = globalThis.browser?.runtime ?? globalThis.chrome?.runtime;
+                if (typeof runtime?.sendMessage !== 'function' || typeof runtime?.connect !== 'function') {{
+                    root.setAttribute('data-zepx-external-attempt', 'surface-absent');
+                }} else {{
+                try {{
+                    const result = runtime.sendMessage(
+                        {primary_context},
+                        {{ probe, kind: 'hostile-page-message' }},
+                        () => undefined
+                    );
+                    if (typeof result?.then === 'function') {{
+                        result.catch(() => undefined);
+                    }}
+                }} catch (_) {{
+                    // A synchronous refusal is still evidence that the exact
+                    // target was attempted; worker-side delivery remains zero.
+                }}
+                try {{
+                    const port = runtime.connect(
+                        {primary_context},
+                        {{ name: 'zephium-hostile-page-port' }}
+                    );
+                    port.onMessage.addListener(() => undefined);
+                    port.onDisconnect.addListener(() => undefined);
+                    port.postMessage({{ probe, kind: 'hostile-page-port' }});
+                }} catch (_) {{
+                    // See the synchronous message-refusal note above.
+                }}
+                root.setAttribute('data-zepx-external-attempt', 'message-and-port-issued');
+                }}
+            }}
             const accept = report => {{
                 if (!report || report.probe !== probe || report.run !== run || !expected.has(report.role)) return;
                 reports.set(report.role, report);
@@ -3050,7 +3149,10 @@ fn main_page(run: &str, cross_origin: SocketAddr) -> String {
 
             let polls = 0;
             const publish = () => {{
-                if (reports.size === expected.size) {{
+                const externalAuditReady =
+                    run !== 'both-granted' ||
+                    root.getAttribute('data-zepx-external-deliveries') !== null;
+                if (reports.size === expected.size && externalAuditReady) {{
                     // Preserve the first page-script observation as the
                     // document-start proof, then refresh the main-frame
                     // report so a forbidden late injection cannot hide

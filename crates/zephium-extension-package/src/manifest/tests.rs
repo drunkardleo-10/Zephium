@@ -744,6 +744,33 @@ fn unknown_authority_is_preserved_blocking_and_never_defaulted_runnable() {
         admit_extension_manifest(invalid_name.binding(), &invalid_name.manifest, &unsupported),
         Err(ExtensionManifestAdmissionError::InvalidUnmodeledDeclaration(_))
     ));
+
+    let external_messaging = make_fixture(
+        json!({
+            "manifest_version":3,"name":"X","version":"1",
+            "externally_connectable":{"matches":["https://example.com/*"]}
+        }),
+        &[],
+        false,
+    );
+    let blocked = admit_extension_manifest(
+        external_messaging.binding(),
+        &external_messaging.manifest,
+        &unsupported,
+    )
+    .unwrap();
+    assert_eq!(
+        blocked.descriptor().declarations().unmodeled()[0].as_str(),
+        "externally_connectable"
+    );
+    assert!(matches!(
+        admit_extension_manifest(
+            external_messaging.binding(),
+            &external_messaging.manifest,
+            &runnable,
+        ),
+        Err(ExtensionManifestAdmissionError::RunnableUnmodeledDeclaration(_))
+    ));
 }
 
 #[test]

@@ -18,7 +18,14 @@ const PAGE_BODY: &[u8] = br#"<!doctype html>
 (() => {
   "use strict";
   const extensionMarker = "data-zephium-extension-product-probe";
+  const isolationMarker = "data-zephium-page-world-isolation";
+  const isolationSurfaceMarker = "data-zephium-page-world-runtime-surface";
+  const forgeryMarker = "data-zephium-page-world-extension-api-forgery";
   const signal = "zephium-webkit-same-document-navigation-v1";
+  const nativeSetAttribute = Element.prototype.setAttribute;
+  const mark = (name, value) => {
+    Reflect.apply(nativeSetAttribute, document.documentElement, [name, value]);
+  };
   let requested = false;
 
   document.addEventListener(signal, () => {
@@ -41,6 +48,108 @@ const PAGE_BODY: &[u8] = br#"<!doctype html>
     attributes: true,
     attributeFilter: [extensionMarker],
   });
+
+  // This script runs in the page world before the fixture's document_end
+  // content script. First prove that the raw document has no browser-native
+  // or extension API. Then install hostile page-world lookalikes and poison
+  // the exact DOM method the content script uses. A content script running in
+  // the page world will touch the lookalike or poisoned prototype and cannot
+  // arm. The native isolated world must retain its own global and wrappers.
+  const messageHandlers = globalThis.webkit?.messageHandlers;
+  const exposedHandlerNames = messageHandlers == null
+    ? []
+    : Object.getOwnPropertyNames(messageHandlers);
+  const extensionApiRoots = [
+    "action",
+    "permissions",
+    "scripting",
+    "storage",
+    "tabs",
+    "webNavigation",
+  ];
+  const reachableExtensionApis = (namespace, label) => {
+    if (namespace == null) return [];
+    const reachable = [];
+    for (const name of extensionApiRoots) {
+      try {
+        if (namespace[name] != null) reachable.push(`${label}-${name}`);
+      } catch {
+        reachable.push(`${label}-${name}-read-failed`);
+      }
+    }
+    return reachable;
+  };
+  const exposedBridges = [];
+  if (typeof globalThis.__TAURI_INTERNALS__ !== "undefined") {
+    exposedBridges.push("tauri-internals");
+  }
+  if (typeof globalThis.__TAURI__ !== "undefined") {
+    exposedBridges.push("tauri-global");
+  }
+  if (typeof globalThis.ipc !== "undefined") exposedBridges.push("wry-ipc");
+  exposedBridges.push(...reachableExtensionApis(globalThis.browser, "browser"));
+  exposedBridges.push(...reachableExtensionApis(globalThis.chrome, "chrome"));
+  // WebKit exposes only the standard page-to-extension external messaging
+  // shell here. The lower native gate addresses the exact installed context
+  // and proves both paths are denied without externally_connectable, which
+  // Zephium retains as unmodeled and therefore never admits as runnable.
+  const runtime = globalThis.browser?.runtime ?? globalThis.chrome?.runtime;
+  let restrictedExternalRuntime = runtime == null;
+  if (runtime != null) {
+    try {
+      restrictedExternalRuntime =
+        runtime.id == null &&
+        typeof runtime.connect === "function" &&
+        typeof runtime.sendMessage === "function" &&
+        runtime.getManifest == null &&
+        runtime.getURL == null &&
+        runtime.onConnect == null &&
+        runtime.onMessage == null;
+    } catch {
+      restrictedExternalRuntime = false;
+    }
+  }
+  if (!restrictedExternalRuntime) exposedBridges.push("runtime-unrestricted");
+  if (messageHandlers?.wryIpc != null) exposedBridges.push("wry-handler");
+  if (
+    exposedHandlerNames.some((name) =>
+      name !== "wryIpc" && name.toLowerCase().includes("zephium")
+    )
+  ) {
+    exposedBridges.push("principal-handler");
+  }
+  mark(isolationMarker, exposedBridges.length === 0 ? "passed" : exposedBridges.join("-"));
+  const runtimeSurface = runtime == null
+    ? ["absent"]
+    : ["id", "connect", "getManifest", "getURL", "onConnect", "onMessage", "sendMessage"].map(
+        (name) => `${name}-${typeof runtime[name]}`
+      );
+  mark(isolationSurfaceMarker, runtimeSurface.join("-"));
+  mark(forgeryMarker, "untouched");
+
+  const recordForgeryTouch = () => {
+    mark(forgeryMarker, "touched");
+    throw new Error("page-world extension API forgery was touched");
+  };
+  const forgedApi = new Proxy(Object.create(null), {
+    get: recordForgeryTouch,
+    set: recordForgeryTouch,
+    has: recordForgeryTouch,
+  });
+  for (const name of ["browser", "chrome"]) {
+    try {
+      Object.defineProperty(globalThis, name, {
+        configurable: false,
+        enumerable: false,
+        writable: false,
+        value: forgedApi,
+      });
+    } catch {}
+  }
+  Element.prototype.setAttribute = function pageWorldPoison() {
+    recordForgeryTouch();
+  };
+
   queueMicrotask(requestSameDocumentNavigation);
 })();
 </script>
@@ -120,5 +229,29 @@ fn serve(listener: TcpListener, stop: Arc<AtomicBool>) {
             }
             Err(_) => break,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PAGE_BODY;
+
+    #[test]
+    fn product_page_prearms_hostile_page_world_before_document_end() {
+        let page = std::str::from_utf8(PAGE_BODY).expect("probe page is UTF-8");
+        let isolation = page
+            .find("data-zephium-page-world-isolation")
+            .expect("isolation marker");
+        let forged_api = page
+            .find("Object.defineProperty(globalThis, name")
+            .expect("page-world API forgery");
+        let poisoned_dom = page
+            .find("Element.prototype.setAttribute = function pageWorldPoison")
+            .expect("page-world DOM poison");
+        assert!(isolation < forged_api);
+        assert!(forged_api < poisoned_dom);
+        assert!(page.contains("messageHandlers?.wryIpc == null"));
+        assert!(page.contains("typeof globalThis.__TAURI_INTERNALS__ !== \"undefined\""));
+        assert!(page.contains("reachableExtensionApis(globalThis.browser, \"browser\")"));
     }
 }

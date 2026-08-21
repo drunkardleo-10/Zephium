@@ -44,6 +44,9 @@ const RUN_LOOP_SLICE: Duration = Duration::from_millis(5);
 const HTML_OBSERVATION_INTERVAL: Duration = Duration::from_millis(100);
 const EXTENSION_MARKER: &str = "data-zephium-extension-product-probe";
 const EXTENSION_POPUP_MARKER: &str = "data-zephium-extension-popup-probe";
+const PAGE_WORLD_ISOLATION_MARKER: &str = "data-zephium-page-world-isolation=\"passed\"";
+const PAGE_WORLD_FORGERY_MARKER: &str =
+    "data-zephium-page-world-extension-api-forgery=\"untouched\"";
 const SAME_DOCUMENT_SIGNAL_MARKER: &str = "data-zephium-same-document-signal=\"observed\"";
 
 type MainTask = Box<dyn FnOnce() + Send + 'static>;
@@ -279,6 +282,36 @@ impl MacosEngineHarness {
                             );
                         }
                         if html.contains(&expected) {
+                            if !html.contains(PAGE_WORLD_ISOLATION_MARKER) {
+                                let prefix = "data-zephium-page-world-isolation=\"";
+                                let detail = html
+                                    .find(prefix)
+                                    .map(|start| &html[start + prefix.len()..])
+                                    .and_then(|suffix| suffix.split('"').next())
+                                    .unwrap_or("missing")
+                                    .chars()
+                                    .take(96)
+                                    .collect::<String>();
+                                let surface_prefix =
+                                    "data-zephium-page-world-runtime-surface=\"";
+                                let surface = html
+                                    .find(surface_prefix)
+                                    .map(|start| &html[start + surface_prefix.len()..])
+                                    .and_then(|suffix| suffix.split('"').next())
+                                    .unwrap_or("missing")
+                                    .chars()
+                                    .take(160)
+                                    .collect::<String>();
+                                return Err(format!(
+                                    "raw product page exposed a native/extension bridge: {detail}; surface={surface}"
+                                ));
+                            }
+                            if !html.contains(PAGE_WORLD_FORGERY_MARKER) {
+                                return Err(
+                                    "extension execution touched the hostile page-world API/DOM forgery"
+                                        .to_owned(),
+                                );
+                            }
                             return Ok(true);
                         }
                         if let Some(marker_start) = html.find(&marker_prefix) {
