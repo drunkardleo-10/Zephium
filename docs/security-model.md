@@ -62,6 +62,12 @@ Chromium's full site-isolation model.
    process terminates, the weak navigation delegate schedules a later main-turn
    teardown and releases only the options owner whose exact context and
    WKWebView still match; a delayed callback cannot close a replacement.
+   `unlimitedStorage` is product-prohibited on both native macOS grant schemas.
+   WebKit exposes per-extension data-size records and deletion, but no quota
+   setter; reactive inspection cannot prevent a granted extension from filling
+   disk between observations. Feature-only probes retain the native permission
+   enum for platform evidence, while product activation fails before removing
+   WebKit's finite default quota.
    Manifest support for file URLs or private browsing does not imply product
    availability. The current management projection marks both unavailable and
    Shell rejects a forged grant selection before Store admission; those flags

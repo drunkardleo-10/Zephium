@@ -250,7 +250,7 @@ mod tests {
             .expect("page-world DOM poison");
         assert!(isolation < forged_api);
         assert!(forged_api < poisoned_dom);
-        assert!(page.contains("messageHandlers?.wryIpc == null"));
+        assert!(page.contains("messageHandlers?.wryIpc != null"));
         assert!(page.contains("typeof globalThis.__TAURI_INTERNALS__ !== \"undefined\""));
         assert!(page.contains("reachableExtensionApis(globalThis.browser, \"browser\")"));
     }

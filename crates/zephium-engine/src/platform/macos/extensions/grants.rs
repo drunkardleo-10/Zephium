@@ -449,6 +449,13 @@ pub(crate) enum MacosNativeApiPermission {
     Scripting,
     Storage,
     Tabs,
+    #[cfg_attr(
+        not(feature = "native-web-extension-probes"),
+        allow(
+            dead_code,
+            reason = "platform probes retain the native token while product schemas prohibit it"
+        )
+    )]
     UnlimitedStorage,
     WebNavigation,
     WebRequest,
@@ -538,7 +545,13 @@ impl MacosNativeGrantSchema {
             "scripting" => Ok(Native(MacosNativeApiPermission::Scripting)),
             "storage" => Ok(Native(MacosNativeApiPermission::Storage)),
             "tabs" => Ok(Native(MacosNativeApiPermission::Tabs)),
-            "unlimitedStorage" => Ok(Native(MacosNativeApiPermission::UnlimitedStorage)),
+            // WebKit can report per-extension stored bytes, but exposes no
+            // product quota setter. Granting this token removes its own local
+            // storage quota and would let one extension grow outside every
+            // Zephium resource bound. Keep the native enum for feature-only
+            // platform probes; product grant schemas reject it until a
+            // separately reviewed bounded storage design exists.
+            "unlimitedStorage" => Ok(ProductProhibited),
             "webNavigation" => Ok(Native(MacosNativeApiPermission::WebNavigation)),
             "webRequest" => Ok(Native(MacosNativeApiPermission::WebRequest)),
             "clipboardRead"

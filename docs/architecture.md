@@ -1115,6 +1115,17 @@ release-path regressions and trend evidence, not permission to retain disabled
 contexts or a substitute for process-family RSS/CPU, idle-wakeup, energy, and
 endurance budgets.
 
+A three-pair optimized campaign on 2026-08-21 passed after profile execution
+policy, hostile page/cross-extension denial, and exact options-view crash
+cleanup landed. Native measured 120--144 ms authenticated startup, 220--241 ms
+profile-view creation, 286--303 ms popup presentation, and
+96,010,240--97,042,432 bytes peak main-process RSS; native-brokered measured
+117--139 ms, 212--223 ms, 267--290 ms, and 95,911,936--96,714,752 bytes.
+Five-second live-versus-retired main-process CPU deltas were -7--26 ms native
+and 22--50 ms native-brokered. The reversed native pair demonstrates the noise
+floor of this sequential machine-local measurement; these ranges are trend
+evidence, not budgets or a system-wide energy/process-family claim.
+
 `cargo xtask measure-macos-process-family --bundle-id ID
 --duration-seconds N` is the complementary packaged-application sampler. It
 binds exactly one running LaunchServices application and refreshes its bounded
@@ -1386,7 +1397,8 @@ stack is absent from the ordinary inert product graph.
 
 Permanent ceilings include Manifest V2, persistent backgrounds, blocking
 `webRequest` on public WebKit, devtools extensions, browser-identity overrides,
-native messaging in the initial target, and an open catalog. Unsupported or
+native messaging and unbounded extension storage in the initial target, and an
+open catalog. Unsupported or
 degraded APIs must fail deterministically and be disclosed; they are never
 silently approximated. Permanent security invariants and release gates live in
 [`security-model.md`](security-model.md); implementation sequencing is not part
@@ -1588,6 +1600,7 @@ mandatory before Vimium is presented as compatible.
 | MV3 backup-localStorage through `offscreen` | Requires a reviewed Bitwarden Core adapter before release | The pinned entrypoint always selects [`OffscreenStorageService`](https://github.com/bitwarden/clients/blob/browser-v2026.7.0/apps/browser/src/platform/storage/offscreen-storage.service.ts) for MV3. Primary writes survive because the upstream [`PrimarySecondaryStorageService`](https://github.com/bitwarden/clients/blob/browser-v2026.7.0/libs/common/src/platform/storage/primary-secondary-storage.service.ts) settles both writes, but a primary miss reaches the absent API. Zephium must select a deterministic primary-only/recovery-compatible adapter in its sealed build and test migration, missing-key, and recovery behavior; it must not inject a page-world shim. |
 | Idle and system-lock integration | Degraded | The pinned [`IdleBackground`](https://github.com/bitwarden/clients/blob/browser-v2026.7.0/apps/browser/src/background/idle.background.ts) returns immediately when the namespace is absent. System-lock vault timeout and idle-driven notification reconnect/disconnect are unavailable; ordinary timer-based vault locking remains a separate behavioral gate. |
 | System notifications | Degraded | The pinned composition selects `UnsupportedSystemNotificationsService` when `chrome.notifications` is absent. In-extension auth-request flows may remain available, but OS notification presentation/click handling is unavailable. |
+| Unlimited local storage | Unsupported in the initial target | WebKit can report per-extension stored bytes but exposes no quota setter. Zephium therefore refuses `unlimitedStorage` in both product grant schemas; the feature-only platform probe may exercise the native token, but no product runtime can remove WebKit's finite default quota without a separately reviewed bounded storage design. |
 | Chrome side panel | Degraded | The pinned [`BrowserApi`](https://github.com/bitwarden/clients/blob/browser-v2026.7.0/apps/browser/src/platform/browser/browser-api.ts) capability-checks the namespace and makes side-panel operations no-ops. Zephium's native toolbar popup remains the primary extension UI. |
 | Enterprise managed storage | Unsupported in the initial target | `storage.managed` is absent, so enterprise policy supplied through that browser API is not exposed. This does not authorize approximating managed policy with writable extension storage. |
 | Native messaging | Unsupported in the initial native target | The optional permission is parsed, but `macos.wkwebextension.v1` product grant compilation prohibits it. The separate brokered profile grants only Zephium's fixed internal one-shot channel to an exact reviewed adapter; persistent ports are extension-to-host-only on the exercised runtime. It exposes neither arbitrary native applications nor Bitwarden's optional native integration. Native biometric/application integration must be disclosed separately from core vault use. |

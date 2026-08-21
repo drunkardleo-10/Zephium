@@ -159,7 +159,6 @@ fn supported_api_table_is_closed_canonical_and_complete() {
         "webRequest",
         "tabs",
         "storage",
-        "unlimitedStorage",
         "scripting",
         "notifications",
         "menus",
@@ -196,7 +195,6 @@ fn supported_api_table_is_closed_canonical_and_complete() {
             "scripting",
             "storage",
             "tabs",
-            "unlimitedStorage",
             "webNavigation",
             "webRequest",
         ]
@@ -205,7 +203,7 @@ fn supported_api_table_is_closed_canonical_and_complete() {
 
 #[test]
 fn prohibited_unknown_and_manifest_only_api_tokens_remain_distinct() {
-    for name in ["history", "nativeMessaging"] {
+    for name in ["history", "nativeMessaging", "unlimitedStorage"] {
         let prohibited = regular(&[api(name, OPTIONAL, GRANTED)], &[])
             .expect_err("effective broker-only capability is product-prohibited");
         assert_eq!(
@@ -258,7 +256,7 @@ fn prohibited_unknown_and_manifest_only_api_tokens_remain_distinct() {
 }
 
 #[test]
-fn pinned_bitwarden_contract_compiles_to_the_exact_native_permission_subset() {
+fn pinned_bitwarden_contract_is_refused_before_unbounded_storage_can_activate() {
     let required = [
         "activeTab",
         "alarms",
@@ -284,22 +282,9 @@ fn pinned_bitwarden_contract_compiles_to_the_exact_native_permission_subset() {
         .chain(optional.iter().map(|name| api(name, OPTIONAL, DENIED)))
         .collect::<Vec<_>>();
 
-    let plan = regular(&grants, &[]).expect("pinned Bitwarden permission contract");
     assert_eq!(
-        compiled_api_permissions(&plan),
-        [
-            "activeTab",
-            "alarms",
-            "clipboardWrite",
-            "contextMenus",
-            "notifications",
-            "scripting",
-            "storage",
-            "tabs",
-            "unlimitedStorage",
-            "webNavigation",
-            "webRequest",
-        ]
+        regular(&grants, &[]).expect_err("unbounded storage must be product-prohibited"),
+        MacosNativeGrantPlanError::ProhibitedApiPermission
     );
 }
 
