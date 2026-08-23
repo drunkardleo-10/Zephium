@@ -12,7 +12,8 @@ use std::time::Instant;
 
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::ProtocolObject;
-use objc2_foundation::{MainThreadMarker, NSRunLoop, NSSet, NSString};
+use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType};
+use objc2_foundation::{MainThreadMarker, NSPoint, NSProcessInfo, NSRunLoop, NSSet, NSString};
 use objc2_web_kit::{
     WKWebExtension, WKWebExtensionContext, WKWebExtensionController, WKWebExtensionMatchPattern,
     WKWebExtensionPermission,
@@ -76,6 +77,7 @@ pub(super) struct ContractEvidence {
 pub(super) struct ContractNativeTeardown {
     pub(super) controller: Weak<WKWebExtensionController>,
     pub(super) context: Weak<WKWebExtensionContext>,
+    pub(super) command_contexts: Vec<Weak<WKWebExtensionContext>>,
     pub(super) product_view: Weak<objc2_web_kit::WKWebView>,
     pub(super) product_store: Weak<objc2_web_kit::WKWebsiteDataStore>,
     pub(super) popup_views: Vec<Weak<objc2_web_kit::WKWebView>>,
@@ -275,7 +277,8 @@ pub(super) fn validate_native_grant_round_trip(
 ) -> Result<ContractNativeTeardown, String> {
     use super::super::extensions::MacosNativeApiPermission as Permission;
     use crate::platform::macos::{
-        ControllerSurfaceApplication, PersistentControllerRegistry, ProbeControllerPreparation,
+        ControllerCommandDispatch, ControllerSurfaceApplication, PersistentControllerRegistry,
+        ProbeControllerPreparation,
     };
 
     let _namespace_lock = super::persistent_runtime::NamespaceLock::acquire()?;
@@ -304,7 +307,10 @@ pub(super) fn validate_native_grant_round_trip(
         &data_types,
         run_loop,
         "stale Bitwarden contract",
-        &[BITWARDEN_CONTRACT_PRINCIPAL],
+        &[
+            BITWARDEN_CONTRACT_PRINCIPAL,
+            "cccccccccccccccccccccccccccccccc",
+        ],
     )?;
 
     let context = super::new_context(extension, BITWARDEN_CONTRACT_PRINCIPAL)?;
@@ -398,6 +404,7 @@ pub(super) fn validate_native_grant_round_trip(
     let mut web_request = None;
     let mut browser_api_observation = None;
     let mut tabs_same_document_observation = None;
+    let mut command_contexts = Vec::new();
     let gate = (|| {
         let window = super::new_window(mtm)?;
         let surface_host =
@@ -406,6 +413,12 @@ pub(super) fn validate_native_grant_round_trip(
         let loaded = super::load_context(&controller, &context, "Bitwarden contract");
         context_loaded = unsafe { context.isLoaded() };
         loaded?;
+        registry
+            .ensure_command_monitor()
+            .map_err(|error| format!("cannot install Bitwarden command monitor: {error}"))?;
+        if !registry.probe_command_monitor_active() {
+            return Err("Bitwarden command monitor was not retained".into());
+        }
         let view = super::profile_isolation::build_profile_view(
             &surface_host,
             configuration
@@ -461,7 +474,57 @@ pub(super) fn validate_native_grant_round_trip(
             &context,
             run_loop,
         )?;
-        perform_native_command(&context, "autofill_login")?;
+        perform_routed_command(
+            &mut registry,
+            profile,
+            &context,
+            "_execute_action",
+            &[Retained::as_ptr(&context)],
+            ControllerCommandDispatch::PopupRequiresAnchor,
+        )?;
+        perform_routed_command(
+            &mut registry,
+            profile,
+            &context,
+            "autofill_login",
+            &[Retained::as_ptr(&context)],
+            ControllerCommandDispatch::Performed,
+        )?;
+        let collision_context = unsafe { WKWebExtensionContext::contextForExtension(extension) };
+        command_contexts.push(Weak::from_retained(&collision_context));
+        unsafe {
+            collision_context
+                .setUniqueIdentifier(&NSString::from_str("cccccccccccccccccccccccccccccccc"));
+        }
+        let collision_gate = (|| {
+            super::load_context(
+                &controller,
+                &collision_context,
+                "Bitwarden command collision",
+            )?;
+            perform_routed_command(
+                &mut registry,
+                profile,
+                &context,
+                "autofill_login",
+                &[
+                    Retained::as_ptr(&context),
+                    Retained::as_ptr(&collision_context),
+                ],
+                ControllerCommandDispatch::Collision,
+            )
+        })();
+        let collision_cleanup = if unsafe { collision_context.isLoaded() } {
+            super::unload_context(
+                &controller,
+                &collision_context,
+                "Bitwarden command collision",
+            )
+        } else {
+            Ok(())
+        };
+        collision_gate?;
+        collision_cleanup?;
         let browser_api_evidence = probe_browser_apis(&context, run_loop, mtm, false)?;
         let observation = browser_api::validate_for_native_inspection(&browser_api_evidence)?;
         let same_document_evidence = probe_tabs_same_document(&context, run_loop, mtm)?;
@@ -526,6 +589,11 @@ pub(super) fn validate_native_grant_round_trip(
             cleanup_failures.push(error);
         }
     }
+    if let Err(error) = registry.refresh_command_monitor() {
+        cleanup_failures.push(format!("cannot retire Bitwarden command monitor: {error}"));
+    } else if registry.probe_command_monitor_active() {
+        cleanup_failures.push("Bitwarden command monitor survived the last context".into());
+    }
     if let Err(error) = applied.clear_and_verify(&context) {
         cleanup_failures.push(format!("Bitwarden contract grant cleanup failed: {error}"));
     }
@@ -534,7 +602,10 @@ pub(super) fn validate_native_grant_round_trip(
         &data_types,
         run_loop,
         "Bitwarden contract",
-        &[BITWARDEN_CONTRACT_PRINCIPAL],
+        &[
+            BITWARDEN_CONTRACT_PRINCIPAL,
+            "cccccccccccccccccccccccccccccccc",
+        ],
     ) {
         cleanup_failures.push(error);
     }
@@ -570,7 +641,7 @@ pub(super) fn validate_native_grant_round_trip(
             let browser_api = browser_api_observation
                 .expect("successful Bitwarden gate records browser API evidence");
             eprintln!(
-                "native-probe-bitwarden-browser-api: scripting_main_world=passed; execution_world_namespace={}; web_navigation=passed; tabs_same_document={}; alarms_lifecycle=passed; commands_readback=passed; commands_native_dispatch=passed; runtime_port_registered=round-trip; runtime_port_early_connect={}; context_menus_lifecycle=passed; context_menus_native_projection=passed; dynamic_resource=passed; dynamic_resource_url={}; sandbox_isolation={}",
+                "native-probe-bitwarden-browser-api: scripting_main_world=passed; execution_world_namespace={}; web_navigation=passed; tabs_same_document={}; alarms_lifecycle=passed; commands_readback=passed; commands_native_event_dispatch=passed; runtime_port_registered=round-trip; runtime_port_early_connect={}; context_menus_lifecycle=passed; context_menus_native_projection=passed; dynamic_resource=passed; dynamic_resource_url={}; sandbox_isolation={}",
                 browser_api.execution_world_namespace(),
                 tabs_same_document_observation
                     .expect("successful Bitwarden gate records same-document evidence"),
@@ -581,6 +652,7 @@ pub(super) fn validate_native_grant_round_trip(
             Ok(ContractNativeTeardown {
                 controller: controller_weak,
                 context: context_weak,
+                command_contexts,
                 product_view: product_view
                     .expect("successful Bitwarden gate constructed a product view"),
                 product_store: store_weak,
@@ -759,7 +831,14 @@ fn probe_browser_apis(
     )
 }
 
-fn perform_native_command(context: &WKWebExtensionContext, identifier: &str) -> Result<(), String> {
+fn perform_routed_command(
+    registry: &mut super::super::extensions::PersistentControllerRegistry,
+    profile: ProfileId,
+    context: &WKWebExtensionContext,
+    identifier: &str,
+    authorized_contexts: &[*const WKWebExtensionContext],
+    expected: super::super::extensions::ControllerCommandDispatch,
+) -> Result<(), String> {
     let commands = unsafe { context.commands() };
     let command = (0..commands.count())
         .map(|index| commands.objectAtIndex(index))
@@ -772,7 +851,55 @@ fn perform_native_command(context: &WKWebExtensionContext, identifier: &str) -> 
             "Bitwarden native command {identifier:?} crossed extension contexts"
         ));
     }
-    unsafe { context.performCommand(&command) };
+    let activation_key = unsafe { command.activationKey() }
+        .ok_or_else(|| format!("Bitwarden command {identifier:?} has no activation key"))?;
+    let activation_key = activation_key.to_string();
+    if activation_key.len() != 1 || !activation_key.is_ascii() {
+        return Err(format!(
+            "Bitwarden command {identifier:?} returned an unsupported activation key"
+        ));
+    }
+    let modifiers = unsafe { command.modifierFlags() };
+    let characters = if modifiers.contains(NSEventModifierFlags::Shift) {
+        activation_key.to_ascii_uppercase()
+    } else {
+        activation_key.clone()
+    };
+    let characters = NSString::from_str(&characters);
+    let unmodified = NSString::from_str(&activation_key.to_ascii_lowercase());
+    let key_code = match activation_key.to_ascii_lowercase().as_str() {
+        "l" => 37,
+        "y" => 16,
+        "9" => 25,
+        _ => {
+            return Err(format!(
+                "Bitwarden command {identifier:?} has no probe key-code mapping"
+            ))
+        }
+    };
+    let event = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+        NSEventType::KeyDown,
+        NSPoint::new(0.0, 0.0),
+        modifiers,
+        NSProcessInfo::processInfo().systemUptime(),
+        0,
+        None,
+        &characters,
+        &unmodified,
+        false,
+        key_code,
+    )
+    .ok_or_else(|| "cannot construct Bitwarden command key event".to_owned())?;
+    let actual = registry
+        .dispatch_command_for_event(profile, &event, |candidate| {
+            authorized_contexts.contains(&candidate)
+        })
+        .map_err(|error| format!("Bitwarden native command routing failed: {error}"))?;
+    if actual != expected {
+        return Err(format!(
+            "Bitwarden native command routing returned {actual:?}, expected {expected:?}"
+        ));
+    }
     Ok(())
 }
 

@@ -541,6 +541,25 @@ where
     with_priority(HostTaskPriority::Normal, None, f)
 }
 
+/// Local AppKit monitors must decide synchronously whether to consume an
+/// event. Reentrant host ownership therefore fails open to ordinary page input
+/// instead of queueing a stale keyboard gesture for later execution.
+#[cfg(target_os = "macos")]
+pub(crate) fn try_dispatch_macos_extension_command(event: &objc2_app_kit::NSEvent) -> bool {
+    if HOST_SEALED.with(Cell::get) || HOST_INSTALLING.with(Cell::get) {
+        return false;
+    }
+    HOST.with(|host| {
+        host.try_borrow_mut()
+            .ok()
+            .and_then(|mut host| {
+                host.as_mut()
+                    .map(|host| host.dispatch_macos_extension_command(event))
+            })
+            .unwrap_or(false)
+    })
+}
+
 #[cfg(test)]
 pub(crate) fn make_unavailable_for_test() {
     HOST_SEALED.with(|sealed| sealed.set(false));

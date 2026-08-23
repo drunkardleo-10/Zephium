@@ -62,6 +62,14 @@ pub(super) fn begin_native_activation(
             return complete_pre_entry_failure(host, ticket, map_controller_failure(error));
         }
     }
+    if let Err(error) = host.macos_extension_controllers.ensure_command_monitor() {
+        report_product_probe_failure("command monitor preparation", error);
+        return complete_pre_entry_failure(
+            host,
+            ticket,
+            ExtensionRuntimeFailure::BackendUnavailable,
+        );
+    }
     if let Err(error) = host.reconcile_extension_browser_surface(profile) {
         report_product_probe_failure("browser-surface reconciliation", error);
         return complete_pre_entry_failure(host, ticket, map_controller_failure(error));
@@ -205,6 +213,14 @@ pub(super) fn begin_native_retirement(
         disposition,
         returned_owner,
     )? {
+        host.extension_runtime_registry.fail_invariant();
+        return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+    }
+    if host
+        .macos_extension_controllers
+        .refresh_command_monitor()
+        .is_err()
+    {
         host.extension_runtime_registry.fail_invariant();
         return Err(ExtensionRuntimeHostBindError::InternalInvariant);
     }
@@ -390,6 +406,14 @@ fn complete_pre_entry_failure(
         host.extension_runtime_registry.fail_invariant();
         return Err(ExtensionRuntimeHostBindError::InternalInvariant);
     }
+    if host
+        .macos_extension_controllers
+        .refresh_command_monitor()
+        .is_err()
+    {
+        host.extension_runtime_registry.fail_invariant();
+        return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+    }
     Ok(())
 }
 
@@ -454,6 +478,14 @@ fn settle_native_activation(
     let settled =
         host.extension_runtime_registry
             .complete_native_activation(ticket, disposition, owner)?;
+    if host
+        .macos_extension_controllers
+        .refresh_command_monitor()
+        .is_err()
+    {
+        host.extension_runtime_registry.fail_invariant();
+        return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+    }
     if settled && activated {
         if let Err(error) = host
             .macos_extension_controllers
@@ -486,7 +518,9 @@ fn map_controller_failure(error: ControllerRegistryError) -> ExtensionRuntimeFai
         | ControllerRegistryError::UnsupportedNamespaceScope => {
             ExtensionRuntimeFailure::UnsupportedTarget
         }
-        ControllerRegistryError::Sealed | ControllerRegistryError::ErasureInFlight => {
+        ControllerRegistryError::Sealed
+        | ControllerRegistryError::ErasureInFlight
+        | ControllerRegistryError::CommandMonitorUnavailable => {
             ExtensionRuntimeFailure::BackendUnavailable
         }
         _ => ExtensionRuntimeFailure::Internal,

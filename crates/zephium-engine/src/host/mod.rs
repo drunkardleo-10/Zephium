@@ -5,6 +5,8 @@ mod dispatch;
 #[cfg(target_os = "macos")]
 mod extension_action;
 mod extension_browser_surface;
+#[cfg(target_os = "macos")]
+mod extension_commands;
 pub(crate) mod extension_runtime;
 mod extensions;
 mod lifecycle;
@@ -20,6 +22,8 @@ mod stages;
 
 #[cfg(test)]
 pub(crate) use dispatch::make_unavailable_for_test;
+#[cfg(target_os = "macos")]
+pub(crate) use dispatch::try_dispatch_macos_extension_command;
 #[cfg(target_os = "macos")]
 pub(crate) use dispatch::with_extension_action_popup_terminal;
 #[cfg(target_os = "macos")]

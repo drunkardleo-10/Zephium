@@ -62,6 +62,13 @@ Chromium's full site-isolation model.
    process terminates, the weak navigation delegate schedules a later main-turn
    teardown and releases only the options owner whose exact context and
    WKWebView still match; a delayed callback cannot close a replacement.
+   Native extension keyboard commands use no startup monitor. The observer
+   exists only while a context is loaded, gives browser-menu accelerators first
+   refusal, and accepts only the focused resident regular tab's WKWebView. It
+   resolves every canonical context without executing, reauthenticates matches
+   against published runtime ownership, rejects collisions, and refuses
+   `_execute_action` without a Shell-owned popup anchor. Monitor-removal failure
+   poisons clean shutdown rather than leaving an untracked input observer.
    `unlimitedStorage` is product-prohibited on both native macOS grant schemas.
    WebKit exposes per-extension data-size records and deletion, but no quota
    setter; reactive inspection cannot prevent a granted extension from filling

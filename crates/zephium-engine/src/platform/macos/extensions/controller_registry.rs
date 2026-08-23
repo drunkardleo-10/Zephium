@@ -17,9 +17,9 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, Sel};
 use objc2::sel;
 use objc2::MainThreadOnly;
-use objc2_app_kit::NSView;
+use objc2_app_kit::{NSEvent, NSView};
 use objc2_foundation::MainThreadMarker;
-use objc2_foundation::{NSClassFromString, NSProcessInfo, NSString, NSUUID};
+use objc2_foundation::{NSClassFromString, NSProcessInfo, NSString, NSUTF8StringEncoding, NSUUID};
 use objc2_web_kit::WKWebExtensionControllerConfiguration;
 use objc2_web_kit::{
     WKWebExtensionContext, WKWebExtensionController, WKWebView, WKWebViewConfiguration,
@@ -30,6 +30,7 @@ use zephium_core::extensions::{
     ExtensionBrowserSurface, ExtensionCompatibilityBrokerOperation,
     ExtensionCompatibilityBrokerRequestId, ExtensionCompatibilityBrokerSettlement,
     ExtensionCompatibilityBrokerWitness, ExtensionNativeNamespaceScope, ExtensionRuntimeInstance,
+    MAX_EXTENSION_INSTALLS_PER_PROFILE,
 };
 use zephium_core::ids::{ItemId, ProfileId};
 use zephium_extension_runtime_api::{
@@ -96,6 +97,9 @@ pub(crate) enum ControllerRegistryError {
     NamespaceScopeRequired,
     NamespaceReopenUnavailable,
     UnsupportedNamespaceScope,
+    CommandMonitorUnavailable,
+    CommandMonitorRemovalFailed,
+    CommandContextInventoryInvalid,
 }
 
 impl fmt::Display for ControllerRegistryError {
@@ -174,6 +178,15 @@ impl fmt::Display for ControllerRegistryError {
             }
             Self::UnsupportedNamespaceScope => {
                 "the extension namespace scope is not supported by this macOS erasure adapter"
+            }
+            Self::CommandMonitorUnavailable => {
+                "the macOS extension command monitor could not be installed"
+            }
+            Self::CommandMonitorRemovalFailed => {
+                "the macOS extension command monitor could not be removed"
+            }
+            Self::CommandContextInventoryInvalid => {
+                "the macOS extension command context inventory is invalid"
             }
         })
     }
@@ -333,6 +346,15 @@ pub(crate) struct PersistentControllerRegistry {
     browser_request_pool: Rc<BrowserRequestPool>,
     runtime_grant_pool: Rc<RuntimeGrantRequestPool>,
     compatibility_broker_pool: Option<Rc<CompatibilityBrokerPool>>,
+    command_monitor: Option<super::command_monitor::ExtensionCommandMonitor>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ControllerCommandDispatch {
+    NotMatched,
+    Performed,
+    Collision,
+    PopupRequiresAnchor,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -379,6 +401,7 @@ impl PersistentControllerRegistry {
             browser_request_pool: Rc::new(BrowserRequestPool::new()),
             runtime_grant_pool: Rc::new(RuntimeGrantRequestPool::new()),
             compatibility_broker_pool: None,
+            command_monitor: None,
         }
     }
 
@@ -387,6 +410,149 @@ impl PersistentControllerRegistry {
             browser_request_sink: Some(sink),
             ..Self::new()
         }
+    }
+
+    /// Installs the process-local key monitor only for a native activation
+    /// attempt. Ordinary inert startup and controller-only erasure/recovery do
+    /// not allocate this observer.
+    pub(crate) fn ensure_command_monitor(&mut self) -> Result<(), ControllerRegistryError> {
+        if self.command_monitor.is_some() {
+            return Ok(());
+        }
+        self.command_monitor = super::command_monitor::ExtensionCommandMonitor::install();
+        self.command_monitor
+            .as_ref()
+            .map(|_| ())
+            .ok_or(ControllerRegistryError::CommandMonitorUnavailable)
+    }
+
+    /// Drops the key monitor immediately after the last native context unloads.
+    /// A disabled extension therefore retains no per-keystroke observer cost.
+    pub(crate) fn refresh_command_monitor(&mut self) -> Result<(), ControllerRegistryError> {
+        let mut loaded = 0_usize;
+        for slot in self.slots.entries.values() {
+            let PersistentControllerSlot::Prepared(entry) = slot else {
+                continue;
+            };
+            let count = match catch_native(|| {
+                validate_entry_identity(entry)?;
+                Ok(unsafe { entry.controller.extensionContexts() }.count())
+            }) {
+                Ok(count) => count,
+                Err(error) => {
+                    self.slots.poison();
+                    return Err(error);
+                }
+            };
+            if count > MAX_EXTENSION_INSTALLS_PER_PROFILE {
+                self.slots.poison();
+                return Err(ControllerRegistryError::CommandContextInventoryInvalid);
+            }
+            loaded = loaded
+                .checked_add(count)
+                .ok_or(ControllerRegistryError::CommandContextInventoryInvalid)?;
+            if loaded > MAX_EXTENSION_INSTALLS_PER_PROFILE * MAX_PERSISTENT_CONTROLLERS {
+                self.slots.poison();
+                return Err(ControllerRegistryError::CommandContextInventoryInvalid);
+            }
+        }
+        if loaded == 0 {
+            if self
+                .command_monitor
+                .take()
+                .is_some_and(|monitor| !monitor.remove())
+            {
+                self.slots.poison();
+                return Err(ControllerRegistryError::CommandMonitorRemovalFailed);
+            }
+            Ok(())
+        } else {
+            self.ensure_command_monitor()
+        }
+    }
+
+    #[cfg(feature = "native-web-extension-probes")]
+    pub(crate) const fn probe_command_monitor_active(&self) -> bool {
+        self.command_monitor.is_some()
+    }
+
+    /// Resolves an event against every authenticated context before invoking
+    /// anything. Browser-menu precedence is enforced by the monitor; this
+    /// layer rejects cross-extension shortcut collisions and popup commands
+    /// that lack a trusted Shell anchor.
+    pub(crate) fn dispatch_command_for_event(
+        &mut self,
+        profile: ProfileId,
+        event: &NSEvent,
+        mut authorizes: impl FnMut(*const WKWebExtensionContext) -> bool,
+    ) -> Result<ControllerCommandDispatch, ControllerRegistryError> {
+        if self.slots.sealed || self.slots.integrity_failed {
+            return Ok(ControllerCommandDispatch::NotMatched);
+        }
+        let Some(PersistentControllerSlot::Prepared(entry)) = self.slots.entries.get(&profile)
+        else {
+            return Ok(ControllerCommandDispatch::NotMatched);
+        };
+        let result = catch_native(|| {
+            validate_entry_identity(entry)?;
+            let contexts = unsafe { entry.controller.extensionContexts() };
+            let context_count = contexts.count();
+            if context_count > MAX_EXTENSION_INSTALLS_PER_PROFILE {
+                return Err(ControllerRegistryError::CommandContextInventoryInvalid);
+            }
+            let mut identities = [[0_u8; 32]; MAX_EXTENSION_INSTALLS_PER_PROFILE];
+            let mut identity_count = 0_usize;
+            let mut matched = None;
+            let mut collision = false;
+            for context in contexts.iter() {
+                if identity_count == MAX_EXTENSION_INSTALLS_PER_PROFILE {
+                    return Err(ControllerRegistryError::CommandContextInventoryInvalid);
+                }
+                let identity = bounded_command_context_identity(&context)?;
+                if identities[..identity_count].contains(&identity) {
+                    return Err(ControllerRegistryError::CommandContextInventoryInvalid);
+                }
+                identities[identity_count] = identity;
+                identity_count += 1;
+                if !authorizes(Retained::as_ptr(&context)) {
+                    continue;
+                }
+                let Some(command) = (unsafe { context.commandForEvent(event) }) else {
+                    continue;
+                };
+                if unsafe { command.webExtensionContext() }
+                    .as_ref()
+                    .is_none_or(|actual| !std::ptr::eq(&**actual, &*context))
+                {
+                    return Err(ControllerRegistryError::CommandContextInventoryInvalid);
+                }
+                if matched.is_some() {
+                    collision = true;
+                    continue;
+                }
+                matched = Some((context, command));
+            }
+            if identity_count != context_count {
+                return Err(ControllerRegistryError::CommandContextInventoryInvalid);
+            }
+            if collision {
+                return Ok(ControllerCommandDispatch::Collision);
+            }
+            let Some((context, command)) = matched else {
+                return Ok(ControllerCommandDispatch::NotMatched);
+            };
+            if unsafe { command.identifier() }
+                .isEqualToString(&NSString::from_str("_execute_action"))
+            {
+                return Ok(ControllerCommandDispatch::PopupRequiresAnchor);
+            }
+            unsafe { context.performCommand(&command) };
+            Ok(ControllerCommandDispatch::Performed)
+        });
+        if result.is_err() {
+            self.slots.poison();
+        }
+        result
     }
 
     /// Return a fresh custom configuration only for an exact entry previously
@@ -1110,6 +1276,13 @@ impl PersistentControllerRegistry {
     }
 
     pub(crate) fn seal(&mut self) {
+        if self
+            .command_monitor
+            .take()
+            .is_some_and(|monitor| !monitor.remove())
+        {
+            self.slots.poison();
+        }
         self.slots.seal();
     }
 
@@ -1145,8 +1318,15 @@ impl PersistentControllerRegistry {
                 }
             }
         }
+        if self
+            .command_monitor
+            .take()
+            .is_some_and(|monitor| !monitor.remove())
+        {
+            self.slots.poison();
+        }
         self.slots.release_all();
-        self.slots.is_quiescent()
+        self.slots.is_quiescent() && self.command_monitor.is_none()
     }
 
     /// Prepares one persistent controller only after durable native ownership
@@ -1423,6 +1603,26 @@ fn validate_store(
     Ok(())
 }
 
+fn bounded_command_context_identity(
+    context: &WKWebExtensionContext,
+) -> Result<[u8; 32], ControllerRegistryError> {
+    let identity = unsafe { context.uniqueIdentifier() };
+    if identity.lengthOfBytesUsingEncoding(NSUTF8StringEncoding) != 32 {
+        return Err(ControllerRegistryError::CommandContextInventoryInvalid);
+    }
+    objc2::rc::autoreleasepool(|pool| {
+        let value = unsafe { identity.to_str(pool) };
+        let bytes: [u8; 32] = value
+            .as_bytes()
+            .try_into()
+            .map_err(|_| ControllerRegistryError::CommandContextInventoryInvalid)?;
+        if !bytes.iter().all(|byte| matches!(byte, b'a'..=b'p')) {
+            return Err(ControllerRegistryError::CommandContextInventoryInvalid);
+        }
+        Ok(bytes)
+    })
+}
+
 pub(super) fn validate_entry_identity(
     entry: &PersistentControllerEntry,
 ) -> Result<(), ControllerRegistryError> {
@@ -1541,7 +1741,8 @@ fn discover_runtime() -> Result<RuntimeAvailability, ControllerRegistryError> {
 
     let controller = required_class("WKWebExtensionController")?;
     let configuration = required_class("WKWebExtensionControllerConfiguration")?;
-    required_class("WKWebExtensionContext")?;
+    let context = required_class("WKWebExtensionContext")?;
+    let command = required_class("WKWebExtensionCommand")?;
     let data_record = required_class("WKWebExtensionDataRecord")?;
     let webview_configuration = required_class("WKWebViewConfiguration")?;
     let website_data_store = required_class("WKWebsiteDataStore")?;
@@ -1567,6 +1768,23 @@ fn discover_runtime() -> Result<RuntimeAvailability, ControllerRegistryError> {
         ],
     )?;
     require_class_selectors(controller, &[sel!(allExtensionDataTypes)])?;
+    require_instance_selectors(
+        context,
+        &[
+            sel!(commands),
+            sel!(commandForEvent:),
+            sel!(performCommand:),
+        ],
+    )?;
+    require_instance_selectors(
+        command,
+        &[
+            sel!(webExtensionContext),
+            sel!(identifier),
+            sel!(activationKey),
+            sel!(modifierFlags),
+        ],
+    )?;
     require_class_selectors(configuration, &[sel!(configurationWithIdentifier:)])?;
     require_instance_selectors(
         configuration,
@@ -1641,6 +1859,7 @@ mod tests {
         assert_eq!(registry.slots.entries.capacity(), 0);
         assert!(registry.slots.entries.is_empty());
         assert_eq!(registry.runtime, RuntimeAvailability::Unprobed);
+        assert!(registry.command_monitor.is_none());
     }
 
     #[test]

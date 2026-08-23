@@ -8,6 +8,7 @@ mod action_icon;
 mod action_popup;
 mod browser_request_broker;
 mod browser_surface;
+mod command_monitor;
 mod compatibility_broker;
 mod controller_registry;
 mod erasure;
@@ -18,9 +19,10 @@ mod record_erasure;
 mod runtime_grant_broker;
 
 pub(crate) use controller_registry::{
-    ControllerBrowserRequestSettlement, ControllerCompatibilityBrokerSettlement,
-    ControllerErasureSettlement, ControllerNamespaceRecoveryAudit, ControllerPreparation,
-    ControllerRegistryError, ControllerRuntimeGrantSettlement, PersistentControllerRegistry,
+    ControllerBrowserRequestSettlement, ControllerCommandDispatch,
+    ControllerCompatibilityBrokerSettlement, ControllerErasureSettlement,
+    ControllerNamespaceRecoveryAudit, ControllerPreparation, ControllerRegistryError,
+    ControllerRuntimeGrantSettlement, PersistentControllerRegistry,
 };
 #[cfg(feature = "native-web-extension-probes")]
 pub(crate) use controller_registry::{
