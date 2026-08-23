@@ -7,6 +7,8 @@ mod extension_action;
 mod extension_browser_surface;
 #[cfg(target_os = "macos")]
 mod extension_commands;
+#[cfg(target_os = "macos")]
+mod extension_context_menu;
 pub(crate) mod extension_runtime;
 mod extensions;
 mod lifecycle;

@@ -382,6 +382,8 @@ impl InnerWebView {
         drag_drop_handler: attributes.drag_drop_handler,
         #[cfg(target_os = "macos")]
         accept_first_mouse: Bool::new(attributes.accept_first_mouse),
+        #[cfg(target_os = "macos")]
+        context_menu_handler: pl_attrs.context_menu_handler,
         #[cfg(target_os = "ios")]
         input_accessory_view_builder: pl_attrs.input_accessory_view_builder,
         custom_protocol_task_ids: Default::default(),

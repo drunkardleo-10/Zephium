@@ -924,6 +924,8 @@ impl EngineHost {
             let page_permission_permit = event_permit.clone();
             let page_permission_navigation = navigation.clone();
             let page_permission_presence = page_permission_pending.clone();
+            let context_menu_item = id.clone();
+            let context_menu_permit = event_permit.clone();
             let profile = partition.profile();
             builder = builder
                 // Link preview is a native WebKit UI/network surface outside
@@ -947,6 +949,15 @@ impl EngineHost {
                         host.on_renderer_process_exit(id, &queued_permit)
                     });
                 });
+            if prepared_extension_controller.is_some() {
+                builder = builder.with_context_menu_handler(move |_event, default_menu| {
+                    super::dispatch::try_macos_extension_context_menu(
+                        context_menu_item.get(),
+                        &context_menu_permit,
+                        default_menu,
+                    )
+                });
+            }
         }
 
         builder = match partition {

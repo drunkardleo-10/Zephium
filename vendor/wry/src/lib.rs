@@ -1807,6 +1807,15 @@ pub(crate) struct PlatformSpecificWebViewAttributes {
   #[cfg(target_os = "macos")]
   permission_request_handler:
     Option<Box<dyn Fn(PermissionRequest) -> PermissionRequestDisposition>>,
+  #[cfg(target_os = "macos")]
+  context_menu_handler: Option<
+    Box<
+      dyn Fn(
+        &objc2_app_kit::NSEvent,
+        Option<Retained<objc2_app_kit::NSMenu>>,
+      ) -> Option<Retained<objc2_app_kit::NSMenu>>,
+    >,
+  >,
 }
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -1826,6 +1835,8 @@ impl Default for PlatformSpecificWebViewAttributes {
       webview_configuration: None,
       #[cfg(target_os = "macos")]
       permission_request_handler: None,
+      #[cfg(target_os = "macos")]
+      context_menu_handler: None,
     }
   }
 }
@@ -1899,6 +1910,17 @@ pub trait WebViewBuilderExtMacos {
     self,
     handler: impl Fn(PermissionRequest) -> PermissionRequestDisposition + 'static,
   ) -> Self;
+  /// Merges browser-owned items into the native page context menu without
+  /// serializing page metadata through Rust. The callback receives WebKit's
+  /// already-created default menu and may replace or suppress it.
+  fn with_context_menu_handler(
+    self,
+    handler: impl Fn(
+        &objc2_app_kit::NSEvent,
+        Option<Retained<objc2_app_kit::NSMenu>>,
+      ) -> Option<Retained<objc2_app_kit::NSMenu>>
+      + 'static,
+  ) -> Self;
 }
 
 #[cfg(target_os = "macos")]
@@ -1920,6 +1942,18 @@ impl WebViewBuilderExtMacos for WebViewBuilder<'_> {
   ) -> Self {
     self.attrs.permission_handler = None;
     self.platform_specific.permission_request_handler = Some(Box::new(handler));
+    self
+  }
+
+  fn with_context_menu_handler(
+    mut self,
+    handler: impl Fn(
+        &objc2_app_kit::NSEvent,
+        Option<Retained<objc2_app_kit::NSMenu>>,
+      ) -> Option<Retained<objc2_app_kit::NSMenu>>
+      + 'static,
+  ) -> Self {
+    self.platform_specific.context_menu_handler = Some(Box::new(handler));
     self
   }
 }

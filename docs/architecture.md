@@ -842,6 +842,22 @@ also withheld because a keyboard event carries no trusted Shell popup anchor;
 browser-owned shortcut remapping/conflict UX and anchored action shortcuts
 remain separate product work.
 
+Page context menus are composed at Wry's native `menuForEvent:` boundary only
+for views constructed with an authenticated profile controller. WebKit creates
+the default `NSMenu`; Rust receives it as an opaque retained object and never
+copies page URL, selection, link, editable-field, or title metadata. The host
+revalidates the exact view generation, resident logical tab, surface generation,
+and currently published runtime contexts. Contexts are ordered by canonical
+principal in fixed storage; each extension may contribute at most 16 top-level
+items, the merged cohort at most 32, and the complete submenu graph at most 64
+unique items, 32 unique menus, depth four, and 512 UTF-8 title bytes per item.
+Cycles, aliases, inconsistent native counts, stale contexts, and over-budget
+trees fail closed to WebKit's unchanged default menu. A live gate preserves the
+default prefix, adds the native separator/item, performs that item through
+`NSMenu`, observes the exact `contextMenus.onClicked` tab, and then proves
+removal. Packaged physical right-click and page-context variants remain release
+evidence rather than an architecture gap.
+
 The privileged frame receives an actor-revisioned exact-replacement action
 cohort only for the focused profile and active logical tab. Fixed RGBA icons
 use canonical base64 rather than a 4,096-element JSON integer array. The frame
@@ -1626,7 +1642,7 @@ mandatory before Vimium is presented as compatible.
 | Private extension-resource WebAssembly startup | Release-blocked on the exercised runtime | The pinned 7,378,704-byte SDK module is returned as `application/octet-stream`. Native streaming compilation rejects that MIME, the vendor `arrayBuffer()` fallback promise does not settle, and the popup event loop stops advancing before compilation starts. A separately labelled probe that wraps the same private response body with `Content-Type: application/wasm` in both popup and background also stalls during the streaming retry. This closes a header-only runtime workaround; it does not authorize embedding bytes, adding a generic resource bridge, or distributing a modified package. |
 | Alarms | Lifecycle admission compatible; delivery unassessed | The background creates an exact future alarm, reads back its name and finite scheduled time, clears it, and proves post-clear absence. Firing, service-worker wakeup, restart persistence, sleep/wake behavior, and long-duration drift remain release gates. |
 | Commands | Native event routing compatible for unambiguous non-action commands; action shortcut degraded | `commands.getAll` returns the exact six pinned command names. A real `NSEvent` is matched through `commandForEvent:`, the context is exact, and `autofill_login` reaches `commands.onCommand`. Browser-menu precedence, focused/resident-tab binding, current-runtime authentication, collision refusal, and monitor retirement are implemented. `_execute_action` remains refused without a trusted popup anchor; browser-owned remapping/conflict UI and packaged physical-key evidence remain release gates. |
-| Context menus | Native projection compatible; click routing unassessed | The background creates and updates one tab-context item; `menuItemsForTab` returns exactly that updated native item for the product tab; the background then removes it and the probe settles only after removal. Product-tab menu presentation at a pointer location, click routing, frame/editable context, enablement updates, and teardown under navigation remain release gates. |
+| Context menus | Native merge and click routing compatible on the exercised tab context | The background creates and updates one tab-context item; Zephium preserves an opaque default-menu prefix, appends the bounded native item, performs it through `NSMenu`, observes the exact `contextMenus.onClicked` tab, then removes it and verifies native absence. Packaged physical right-click, frame/editable/link variants, dynamic enablement, and navigation-time teardown remain release gates. |
 | Clipboard read/write | Behavior unassessed | A production gate must be driven by a trusted popup gesture and preserve the user's prior clipboard contents on every success, refusal, timeout, and crash path. Automated tests must not destructively overwrite ambient clipboard state. |
 
 This is one reviewed slice of the required declaration-by-declaration matrix,

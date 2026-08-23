@@ -560,6 +560,26 @@ pub(crate) fn try_dispatch_macos_extension_command(event: &objc2_app_kit::NSEven
     })
 }
 
+#[cfg(target_os = "macos")]
+pub(super) fn try_macos_extension_context_menu(
+    item: ItemId,
+    source_permit: &super::permits::EventPermit,
+    default_menu: Option<objc2::rc::Retained<objc2_app_kit::NSMenu>>,
+) -> Option<objc2::rc::Retained<objc2_app_kit::NSMenu>> {
+    if HOST_SEALED.with(Cell::get) || HOST_INSTALLING.with(Cell::get) {
+        return default_menu;
+    }
+    HOST.with(|host| {
+        let Ok(mut host) = host.try_borrow_mut() else {
+            return default_menu;
+        };
+        let Some(host) = host.as_mut() else {
+            return default_menu;
+        };
+        host.macos_extension_context_menu(item, source_permit, default_menu)
+    })
+}
+
 #[cfg(test)]
 pub(crate) fn make_unavailable_for_test() {
     HOST_SEALED.with(|sealed| sealed.set(false));

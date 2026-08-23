@@ -8,7 +8,7 @@ use std::{collections::HashMap, sync::Mutex};
 use objc2::runtime::ProtocolObject;
 use objc2::{define_class, rc::Retained, runtime::Bool, DeclaredClass};
 #[cfg(target_os = "macos")]
-use objc2_app_kit::{NSDraggingDestination, NSEvent};
+use objc2_app_kit::{NSDraggingDestination, NSEvent, NSMenu};
 use objc2_foundation::{NSObjectProtocol, NSUUID};
 
 #[cfg(not(target_os = "macos"))]
@@ -33,6 +33,9 @@ pub struct WryWebViewIvars {
   pub(crate) drag_drop_handler: Option<Box<dyn Fn(DragDropEvent) -> bool>>,
   #[cfg(target_os = "macos")]
   pub(crate) accept_first_mouse: objc2::runtime::Bool,
+  #[cfg(target_os = "macos")]
+  pub(crate) context_menu_handler:
+    Option<Box<dyn Fn(&NSEvent, Option<Retained<NSMenu>>) -> Option<Retained<NSMenu>>>>,
   #[cfg(target_os = "ios")]
   pub(crate) input_accessory_view_builder: Option<Box<crate::InputAccessoryViewBuilder>>,
   pub(crate) custom_protocol_task_ids: Mutex<HashMap<usize, Retained<NSUUID>>>,
@@ -64,6 +67,21 @@ define_class!(
     #[unsafe(method(acceptsFirstMouse:))]
     fn accept_first_mouse(&self, _event: &NSEvent) -> Bool {
       self.ivars().accept_first_mouse
+    }
+
+    #[cfg(target_os = "macos")]
+    #[unsafe(method_id(menuForEvent:))]
+    fn menu_for_event(&self, event: &NSEvent) -> Option<Retained<NSMenu>> {
+      (|| -> Option<Retained<NSMenu>> {
+        let default_menu = unsafe { objc2::msg_send![super(self), menuForEvent: event] };
+        let Some(handler) = &self.ivars().context_menu_handler else {
+          return default_menu;
+        };
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+          handler(event, default_menu)
+        }))
+        .unwrap_or(None)
+      })()
     }
 
     #[cfg(target_os = "ios")]
@@ -151,5 +169,25 @@ impl WryWebView {
       .ok()?
       .get(&task_id)
       .cloned()
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  #[test]
+  fn native_context_menu_preserves_default_before_bounded_embedder_merge() {
+    let source = include_str!("wry_web_view.rs");
+    let body = source
+      .split("fn menu_for_event")
+      .nth(1)
+      .and_then(|source| source.split("fn accept_first_mouse").next())
+      .expect("menuForEvent override");
+    let native = body.find("menuForEvent: event").expect("super menu");
+    let handler = body
+      .find("handler(event, default_menu)")
+      .expect("embedder merge");
+    assert!(native < handler);
+    assert!(body.contains("catch_unwind"));
+    assert!(body.contains("unwrap_or(None)"));
   }
 }

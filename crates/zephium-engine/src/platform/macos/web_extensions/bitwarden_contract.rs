@@ -12,7 +12,7 @@ use std::time::Instant;
 
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::ProtocolObject;
-use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType};
+use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType, NSMenu, NSMenuItem};
 use objc2_foundation::{MainThreadMarker, NSPoint, NSProcessInfo, NSRunLoop, NSSet, NSString};
 use objc2_web_kit::{
     WKWebExtension, WKWebExtensionContext, WKWebExtensionController, WKWebExtensionMatchPattern,
@@ -93,6 +93,13 @@ pub(super) struct ContractNativeTeardown {
 enum WebRequestObservation {
     Observed,
     Unavailable,
+}
+
+#[derive(Clone, Copy)]
+enum BrowserApiProbePhase {
+    Inspection,
+    Clicked,
+    Cleanup,
 }
 
 impl WebRequestObservation {
@@ -525,7 +532,8 @@ pub(super) fn validate_native_grant_round_trip(
         };
         collision_gate?;
         collision_cleanup?;
-        let browser_api_evidence = probe_browser_apis(&context, run_loop, mtm, false)?;
+        let browser_api_evidence =
+            probe_browser_apis(&context, run_loop, mtm, BrowserApiProbePhase::Inspection)?;
         let observation = browser_api::validate_for_native_inspection(&browser_api_evidence)?;
         let same_document_evidence = probe_tabs_same_document(&context, run_loop, mtm)?;
         eprintln!("native-probe-bitwarden-message-sender: {same_document_evidence}");
@@ -533,12 +541,25 @@ pub(super) fn validate_native_grant_round_trip(
             &same_document_evidence,
         )?);
         validate_native_context_menu(
+            &mut registry,
+            profile,
+            ExtensionBrowserSurfaceGeneration::new(BITWARDEN_SURFACE_GENERATION)
+                .expect("static Bitwarden generation is nonzero"),
+            tab_id,
             &context,
             tab_protocol
                 .as_ref()
                 .expect("Bitwarden tab identity is retained"),
+            mtm,
         )?;
-        let cleanup_evidence = probe_browser_apis(&context, run_loop, mtm, true)?;
+        let clicked_evidence =
+            probe_browser_apis(&context, run_loop, mtm, BrowserApiProbePhase::Clicked)?;
+        let clicked_observation = browser_api::validate_after_native_click(&clicked_evidence)?;
+        if observation != clicked_observation {
+            return Err("Bitwarden browser API evidence changed during native menu click".into());
+        }
+        let cleanup_evidence =
+            probe_browser_apis(&context, run_loop, mtm, BrowserApiProbePhase::Cleanup)?;
         let cleanup_observation = browser_api::validate_after_cleanup(&cleanup_evidence)?;
         if observation != cleanup_observation {
             return Err(
@@ -641,7 +662,7 @@ pub(super) fn validate_native_grant_round_trip(
             let browser_api = browser_api_observation
                 .expect("successful Bitwarden gate records browser API evidence");
             eprintln!(
-                "native-probe-bitwarden-browser-api: scripting_main_world=passed; execution_world_namespace={}; web_navigation=passed; tabs_same_document={}; alarms_lifecycle=passed; commands_readback=passed; commands_native_event_dispatch=passed; runtime_port_registered=round-trip; runtime_port_early_connect={}; context_menus_lifecycle=passed; context_menus_native_projection=passed; dynamic_resource=passed; dynamic_resource_url={}; sandbox_isolation={}",
+                "native-probe-bitwarden-browser-api: scripting_main_world=passed; execution_world_namespace={}; web_navigation=passed; tabs_same_document={}; alarms_lifecycle=passed; commands_readback=passed; commands_native_event_dispatch=passed; runtime_port_registered=round-trip; runtime_port_early_connect={}; context_menus_lifecycle=passed; context_menus_native_merge_click=passed; dynamic_resource=passed; dynamic_resource_url={}; sandbox_isolation={}",
                 browser_api.execution_world_namespace(),
                 tabs_same_document_observation
                     .expect("successful Bitwarden gate records same-document evidence"),
@@ -814,12 +835,12 @@ fn probe_browser_apis(
     context: &WKWebExtensionContext,
     run_loop: &NSRunLoop,
     mtm: MainThreadMarker,
-    cleanup_context_menu: bool,
+    phase: BrowserApiProbePhase,
 ) -> Result<Value, String> {
-    let page = if cleanup_context_menu {
-        "browser-api-probe.html?cleanup=context-menu"
-    } else {
-        "browser-api-probe.html"
+    let page = match phase {
+        BrowserApiProbePhase::Inspection => "browser-api-probe.html",
+        BrowserApiProbePhase::Clicked => "browser-api-probe.html?clicked=context-menu",
+        BrowserApiProbePhase::Cleanup => "browser-api-probe.html?cleanup=context-menu",
     };
     probe_extension_page(
         context,
@@ -904,21 +925,52 @@ fn perform_routed_command(
 }
 
 fn validate_native_context_menu(
+    registry: &mut super::super::extensions::PersistentControllerRegistry,
+    profile: ProfileId,
+    generation: ExtensionBrowserSurfaceGeneration,
+    tab_id: ItemId,
     context: &WKWebExtensionContext,
     tab: &ProtocolObject<dyn objc2_web_kit::WKWebExtensionTab>,
+    mtm: MainThreadMarker,
 ) -> Result<(), String> {
-    let items = unsafe { context.menuItemsForTab(tab) };
-    if items.count() != 1 {
+    let default_menu = NSMenu::new(mtm);
+    let default_item =
+        NSMenuItem::sectionHeaderWithTitle(&NSString::from_str("Zephium default menu probe"), mtm);
+    let default_identity = Retained::as_ptr(&default_item);
+    default_menu.addItem(&default_item);
+    let context_identity = context as *const WKWebExtensionContext;
+    let menu = registry
+        .context_menu_for_tab(
+            profile,
+            generation,
+            tab_id,
+            Some(default_menu),
+            |candidate| candidate == context_identity,
+        )
+        .map_err(|error| format!("Bitwarden native context-menu merge failed: {error}"))?
+        .ok_or_else(|| "Bitwarden native context-menu merge returned no menu".to_owned())?;
+    let items = menu.itemArray();
+    if items.count() != 3 {
         return Err(format!(
-            "Bitwarden native context-menu projection returned {} items instead of one",
+            "Bitwarden native context-menu merge returned {} items instead of three",
             items.count()
         ));
     }
-    let title = items.objectAtIndex(0).title().to_string();
+    if Retained::as_ptr(&items.objectAtIndex(0)) != default_identity
+        || !items.objectAtIndex(1).isSeparatorItem()
+    {
+        return Err("Bitwarden native context-menu merge replaced the default prefix".into());
+    }
+    let title = items.objectAtIndex(2).title().to_string();
     if title != "Zephium Bitwarden probe updated" {
         return Err(format!(
             "Bitwarden native context-menu projection returned an unexpected title: {title:?}"
         ));
+    }
+    menu.performActionForItemAtIndex(2);
+    let native_items = unsafe { context.menuItemsForTab(tab) };
+    if native_items.count() != 1 {
+        return Err("Bitwarden context-menu item disappeared after native click".into());
     }
     Ok(())
 }
@@ -1106,7 +1158,8 @@ fn background_probe_script() -> &'static str {
         commandDispatch: "pending",
         runtimePortEarly: "pending",
         runtimePortRegistered: "pending",
-        contextMenusLifecycle: "pending"
+        menuLife: "pending",
+        menuClick: "pending"
     };
     const publishSurface = () => api?.storage?.local?.set({ zephiumBitwardenBackgroundApiProbe: surface });
     const noListenerError = (error) => /no runtime\.onconnect listeners found/i.test(
@@ -1190,9 +1243,9 @@ fn background_probe_script() -> &'static str {
             if (message?.type === "zephium-bitwarden-context-menu-cleanup") {
                 globalThis.chrome.contextMenus.remove(menuId, () => {
                     const removeError = globalThis.chrome.runtime.lastError;
-                    surface.contextMenusLifecycle = removeError
+                    surface.menuLife = removeError
                         ? "remove-rejected"
-                        : "created-updated-native-read-removed";
+                        : "removed";
                     void publishSurface();
                 });
                 return;
@@ -1289,12 +1342,19 @@ fn background_probe_script() -> &'static str {
 
     const menuId = "zephium-bitwarden-contract-menu";
     try {
+        globalThis.chrome.contextMenus.onClicked.addListener((info, tab) => {
+            if (info?.menuItemId !== menuId) return;
+            surface.menuClick = Number.isInteger(tab?.id)
+                ? "clicked"
+                : "clicked-without-tab";
+            void publishSurface();
+        });
         globalThis.chrome.contextMenus.create(
             { id: menuId, title: "Zephium Bitwarden probe", contexts: ["all"] },
             () => {
                 const createError = globalThis.chrome.runtime.lastError;
                 if (createError) {
-                    surface.contextMenusLifecycle = "create-rejected";
+                    surface.menuLife = "create-rejected";
                     void publishSurface();
                     return;
                 }
@@ -1304,18 +1364,18 @@ fn background_probe_script() -> &'static str {
                     () => {
                         const updateError = globalThis.chrome.runtime.lastError;
                         if (updateError) {
-                            surface.contextMenusLifecycle = "update-rejected";
+                            surface.menuLife = "update-rejected";
                             void publishSurface();
                             return;
                         }
-                        surface.contextMenusLifecycle = "created-updated-held";
+                        surface.menuLife = "held";
                         void publishSurface();
                     }
                 );
             }
         );
     } catch (_) {
-        surface.contextMenusLifecycle = "rejected";
+        surface.menuLife = "rejected";
     }
     void publish();
     void publishSurface();

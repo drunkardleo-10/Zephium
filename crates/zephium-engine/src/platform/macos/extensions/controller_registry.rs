@@ -17,7 +17,7 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, Sel};
 use objc2::sel;
 use objc2::MainThreadOnly;
-use objc2_app_kit::{NSEvent, NSView};
+use objc2_app_kit::{NSEvent, NSMenu, NSMenuItem, NSView};
 use objc2_foundation::MainThreadMarker;
 use objc2_foundation::{NSClassFromString, NSProcessInfo, NSString, NSUTF8StringEncoding, NSUUID};
 use objc2_web_kit::WKWebExtensionControllerConfiguration;
@@ -53,6 +53,56 @@ use super::runtime_grant_broker::{RuntimeGrantRequestPool, RuntimeGrantSettlemen
 
 const MAX_PERSISTENT_CONTROLLERS: usize = zephium_core::session::MAX_SESSION_PROFILES;
 const _: () = assert!(MAX_PERSISTENT_CONTROLLERS == 64);
+const MAX_CONTEXT_MENU_ITEMS_PER_EXTENSION: usize = 16;
+const MAX_EXTENSION_CONTEXT_MENU_ITEMS: usize = 2 * MAX_CONTEXT_MENU_ITEMS_PER_EXTENSION;
+const MAX_EXTENSION_CONTEXT_MENU_TREE_ITEMS: usize = 64;
+const MAX_EXTENSION_CONTEXT_MENU_TREE_MENUS: usize = 32;
+const MAX_EXTENSION_CONTEXT_MENU_DEPTH: usize = 4;
+const MAX_EXTENSION_CONTEXT_MENU_TITLE_BYTES: usize = 512;
+
+struct ContextMenuInventory {
+    item_pointers: [usize; MAX_EXTENSION_CONTEXT_MENU_TREE_ITEMS],
+    item_count: usize,
+    menu_pointers: [usize; MAX_EXTENSION_CONTEXT_MENU_TREE_MENUS],
+    menu_count: usize,
+}
+
+impl ContextMenuInventory {
+    const EMPTY: Self = Self {
+        item_pointers: [0; MAX_EXTENSION_CONTEXT_MENU_TREE_ITEMS],
+        item_count: 0,
+        menu_pointers: [0; MAX_EXTENSION_CONTEXT_MENU_TREE_MENUS],
+        menu_count: 0,
+    };
+
+    fn observe_item(&mut self, item: &Retained<NSMenuItem>) -> Result<(), ControllerRegistryError> {
+        let pointer = Retained::as_ptr(item) as usize;
+        if self.item_count == self.item_pointers.len()
+            || self.item_pointers[..self.item_count].contains(&pointer)
+            || item
+                .title()
+                .lengthOfBytesUsingEncoding(NSUTF8StringEncoding)
+                > MAX_EXTENSION_CONTEXT_MENU_TITLE_BYTES
+        {
+            return Err(ControllerRegistryError::ContextMenuInventoryInvalid);
+        }
+        self.item_pointers[self.item_count] = pointer;
+        self.item_count += 1;
+        Ok(())
+    }
+
+    fn observe_menu(&mut self, menu: &Retained<NSMenu>) -> Result<(), ControllerRegistryError> {
+        let pointer = Retained::as_ptr(menu) as usize;
+        if self.menu_count == self.menu_pointers.len()
+            || self.menu_pointers[..self.menu_count].contains(&pointer)
+        {
+            return Err(ControllerRegistryError::ContextMenuInventoryInvalid);
+        }
+        self.menu_pointers[self.menu_count] = pointer;
+        self.menu_count += 1;
+        Ok(())
+    }
+}
 
 pub(crate) struct ControllerActionTab {
     tab: super::browser_surface::NativeExtensionTab,
@@ -100,6 +150,7 @@ pub(crate) enum ControllerRegistryError {
     CommandMonitorUnavailable,
     CommandMonitorRemovalFailed,
     CommandContextInventoryInvalid,
+    ContextMenuInventoryInvalid,
 }
 
 impl fmt::Display for ControllerRegistryError {
@@ -187,6 +238,9 @@ impl fmt::Display for ControllerRegistryError {
             }
             Self::CommandContextInventoryInvalid => {
                 "the macOS extension command context inventory is invalid"
+            }
+            Self::ContextMenuInventoryInvalid => {
+                "the macOS extension context-menu inventory is invalid"
             }
         })
     }
@@ -548,6 +602,127 @@ impl PersistentControllerRegistry {
             }
             unsafe { context.performCommand(&command) };
             Ok(ControllerCommandDispatch::Performed)
+        });
+        if result.is_err() {
+            self.slots.poison();
+        }
+        result
+    }
+
+    /// Appends only bounded native menu items for the exact resident tab.
+    /// WebKit's opaque default menu and native extension items never cross a
+    /// Rust string/URL boundary.
+    pub(crate) fn context_menu_for_tab(
+        &mut self,
+        profile: ProfileId,
+        generation: zephium_core::extensions::ExtensionBrowserSurfaceGeneration,
+        tab_id: ItemId,
+        default_menu: Option<Retained<NSMenu>>,
+        mut authorizes: impl FnMut(*const WKWebExtensionContext) -> bool,
+    ) -> Result<Option<Retained<NSMenu>>, ControllerRegistryError> {
+        if self.slots.sealed || self.slots.integrity_failed {
+            return Ok(default_menu);
+        }
+        let Some(PersistentControllerSlot::Prepared(entry)) = self.slots.entries.get(&profile)
+        else {
+            return Ok(default_menu);
+        };
+        let result = catch_native(|| {
+            validate_entry_identity(entry)?;
+            let Some((tab, resident)) = entry
+                .browser_surface
+                .action_tab(generation, tab_id)
+                .map_err(map_browser_surface_error)?
+            else {
+                return Ok(default_menu);
+            };
+            if !resident {
+                return Ok(default_menu);
+            }
+
+            let native_contexts = unsafe { entry.controller.extensionContexts() };
+            let context_count = native_contexts.count();
+            if context_count > MAX_EXTENSION_INSTALLS_PER_PROFILE {
+                return Err(ControllerRegistryError::ContextMenuInventoryInvalid);
+            }
+            let mut identities = [[0_u8; 32]; MAX_EXTENSION_INSTALLS_PER_PROFILE];
+            let mut identity_count = 0_usize;
+            let mut ordered: [Option<([u8; 32], Retained<WKWebExtensionContext>)>;
+                MAX_EXTENSION_INSTALLS_PER_PROFILE] = std::array::from_fn(|_| None);
+            let mut ordered_count = 0_usize;
+            for context in native_contexts.iter() {
+                if identity_count == MAX_EXTENSION_INSTALLS_PER_PROFILE {
+                    return Err(ControllerRegistryError::ContextMenuInventoryInvalid);
+                }
+                let identity = bounded_command_context_identity(&context)?;
+                if identities[..identity_count].contains(&identity) {
+                    return Err(ControllerRegistryError::ContextMenuInventoryInvalid);
+                }
+                identities[identity_count] = identity;
+                identity_count += 1;
+                if !authorizes(Retained::as_ptr(&context)) {
+                    continue;
+                }
+                let mut insertion = ordered_count;
+                while insertion > 0
+                    && ordered[insertion - 1]
+                        .as_ref()
+                        .is_some_and(|entry| entry.0 > identity)
+                {
+                    ordered[insertion] = ordered[insertion - 1].take();
+                    insertion -= 1;
+                }
+                ordered[insertion] = Some((identity, context));
+                ordered_count += 1;
+            }
+            if identity_count != context_count {
+                return Err(ControllerRegistryError::ContextMenuInventoryInvalid);
+            }
+
+            let mut items: [Option<Retained<NSMenuItem>>; MAX_EXTENSION_CONTEXT_MENU_ITEMS] =
+                std::array::from_fn(|_| None);
+            let mut item_count = 0_usize;
+            let mut inventory = ContextMenuInventory::EMPTY;
+            for slot in &mut ordered[..ordered_count] {
+                let Some((_, context)) = slot.take() else {
+                    return Err(ControllerRegistryError::ContextMenuInventoryInvalid);
+                };
+                let context_items = unsafe { context.menuItemsForTab(&tab) };
+                let expected_items = context_items.count();
+                if expected_items > MAX_CONTEXT_MENU_ITEMS_PER_EXTENSION {
+                    return Err(ControllerRegistryError::ContextMenuInventoryInvalid);
+                }
+                let before_context = item_count;
+                for item in context_items.iter() {
+                    if item_count == MAX_EXTENSION_CONTEXT_MENU_ITEMS {
+                        return Err(ControllerRegistryError::ContextMenuInventoryInvalid);
+                    }
+                    validate_context_menu_item(&item, 0, &mut inventory)?;
+                    items[item_count] = Some(item);
+                    item_count += 1;
+                }
+                if item_count - before_context != expected_items {
+                    return Err(ControllerRegistryError::ContextMenuInventoryInvalid);
+                }
+            }
+            if item_count == 0 {
+                return Ok(default_menu);
+            }
+            let mtm = MainThreadMarker::new().ok_or(ControllerRegistryError::MainThreadRequired)?;
+            let menu = default_menu.unwrap_or_else(|| NSMenu::new(mtm));
+            if menu.numberOfItems() < 0 {
+                return Err(ControllerRegistryError::ContextMenuInventoryInvalid);
+            }
+            if menu.numberOfItems() > 0 {
+                menu.addItem(&NSMenuItem::separatorItem(mtm));
+            }
+            for item in &mut items[..item_count] {
+                let Some(item) = item.take() else {
+                    return Err(ControllerRegistryError::ContextMenuInventoryInvalid);
+                };
+                menu.addItem(&item);
+            }
+            Ok(Some(menu))
         });
         if result.is_err() {
             self.slots.poison();
@@ -1608,7 +1783,7 @@ fn bounded_command_context_identity(
 ) -> Result<[u8; 32], ControllerRegistryError> {
     let identity = unsafe { context.uniqueIdentifier() };
     if identity.lengthOfBytesUsingEncoding(NSUTF8StringEncoding) != 32 {
-        return Err(ControllerRegistryError::CommandContextInventoryInvalid);
+        return Err(ControllerRegistryError::ContextMenuInventoryInvalid);
     }
     objc2::rc::autoreleasepool(|pool| {
         let value = unsafe { identity.to_str(pool) };
@@ -1621,6 +1796,41 @@ fn bounded_command_context_identity(
         }
         Ok(bytes)
     })
+}
+
+fn validate_context_menu_item(
+    item: &Retained<NSMenuItem>,
+    depth: usize,
+    inventory: &mut ContextMenuInventory,
+) -> Result<(), ControllerRegistryError> {
+    inventory.observe_item(item)?;
+    let Some(submenu) = item.submenu() else {
+        return Ok(());
+    };
+    if depth == MAX_EXTENSION_CONTEXT_MENU_DEPTH {
+        return Err(ControllerRegistryError::ContextMenuInventoryInvalid);
+    }
+    inventory.observe_menu(&submenu)?;
+    let declared = usize::try_from(submenu.numberOfItems())
+        .map_err(|_| ControllerRegistryError::ContextMenuInventoryInvalid)?;
+    let children = submenu.itemArray();
+    if children.count() != declared {
+        return Err(ControllerRegistryError::ContextMenuInventoryInvalid);
+    }
+    let mut observed = 0_usize;
+    for child in children.iter() {
+        observed = observed
+            .checked_add(1)
+            .ok_or(ControllerRegistryError::ContextMenuInventoryInvalid)?;
+        if observed > declared {
+            return Err(ControllerRegistryError::ContextMenuInventoryInvalid);
+        }
+        validate_context_menu_item(&child, depth + 1, inventory)?;
+    }
+    if observed != declared {
+        return Err(ControllerRegistryError::ContextMenuInventoryInvalid);
+    }
+    Ok(())
 }
 
 pub(super) fn validate_entry_identity(

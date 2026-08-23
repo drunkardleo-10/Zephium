@@ -55,14 +55,22 @@ pub(super) struct Observation {
 #[derive(Clone, Copy)]
 enum ContextMenuPhase {
     NativeInspection,
+    NativeClicked,
     Cleanup,
 }
 
 impl ContextMenuPhase {
     const fn expected_lifecycle(self) -> &'static str {
         match self {
-            Self::NativeInspection => "created-updated-held",
-            Self::Cleanup => "created-updated-native-read-removed",
+            Self::NativeInspection | Self::NativeClicked => "held",
+            Self::Cleanup => "removed",
+        }
+    }
+
+    const fn expected_click(self) -> &'static str {
+        match self {
+            Self::NativeInspection => "pending",
+            Self::NativeClicked | Self::Cleanup => "clicked",
         }
     }
 }
@@ -262,6 +270,7 @@ pub(super) fn probe_script() -> String {
     const api = globalThis.browser ?? globalThis.chrome;
     const settle = (value) => { document.title = JSON.stringify(value); };
     const cleanup = new URLSearchParams(location.search).get("cleanup") === "context-menu";
+    const requireClick = new URLSearchParams(location.search).get("clicked") === "context-menu";
     let cleanupRequested = false;
     let runtimePortRequested = false;
     let polls = 0;
@@ -283,8 +292,10 @@ pub(super) fn probe_script() -> String {
         const background = backgroundStored?.zephiumBitwardenBackgroundApiProbe;
         const content = contentStored?.zephiumBitwardenContentApiProbe;
         const contextMenuReady = cleanup
-            ? background?.contextMenusLifecycle === "created-updated-native-read-removed"
-            : background?.contextMenusLifecycle === "created-updated-held";
+            ? background?.menuLife === "removed"
+            : background?.menuLife === "held";
+        const contextMenuClickReady = !requireClick
+            || background?.menuClick === "clicked";
         if (!cleanup && !runtimePortRequested && !!background) {
             runtimePortRequested = true;
             try {
@@ -305,7 +316,8 @@ pub(super) fn probe_script() -> String {
             && background.commandDispatch !== "pending"
             && background.runtimePortRegistered === "round-trip"
             && earlyPortSettled
-            && contextMenuReady;
+            && contextMenuReady
+            && contextMenuClickReady;
         if (ready || polls >= __ZEPHIUM_SETTLE_POLLS__) {
             settle({ background, content, settled: ready });
             return;
@@ -321,6 +333,10 @@ pub(super) fn probe_script() -> String {
 
 pub(super) fn validate_for_native_inspection(evidence: &Value) -> Result<Observation, String> {
     validate(evidence, ContextMenuPhase::NativeInspection)
+}
+
+pub(super) fn validate_after_native_click(evidence: &Value) -> Result<Observation, String> {
+    validate(evidence, ContextMenuPhase::NativeClicked)
 }
 
 pub(super) fn validate_after_cleanup(evidence: &Value) -> Result<Observation, String> {
@@ -447,9 +463,10 @@ fn validate(evidence: &Value, context_menu_phase: ContextMenuPhase) -> Result<Ob
         || !matches(background, "runtimePortRegistered", "round-trip")
         || !matches(
             background,
-            "contextMenusLifecycle",
+            "menuLife",
             context_menu_phase.expected_lifecycle(),
         )
+        || !matches(background, "menuClick", context_menu_phase.expected_click())
         || !matches(content, "dynamicResourceLoad", "loaded")
         || !matches(content, "dynamicResourceExecution", "executed")
         || !matches(content, "programmaticScript", "executed")
@@ -506,7 +523,8 @@ mod tests {
                 "commandDispatch": "autofill_login",
                 "runtimePortEarly": "disconnected-without-diagnostic",
                 "runtimePortRegistered": "round-trip",
-                "contextMenusLifecycle": "created-updated-held"
+                "menuLife": "held",
+                "menuClick": "pending"
             },
             "content": {
                 "dynamicResourceLoad": "loaded",
@@ -558,8 +576,9 @@ mod tests {
         assert!(validate_for_native_inspection(&ambiguous).is_err());
 
         let mut cleaned = native;
-        cleaned["background"]["contextMenusLifecycle"] =
-            Value::String("created-updated-native-read-removed".to_owned());
+        cleaned["background"]["menuClick"] = Value::String("clicked".to_owned());
+        assert!(validate_after_native_click(&cleaned).is_ok());
+        cleaned["background"]["menuLife"] = Value::String("removed".to_owned());
         assert!(validate_after_cleanup(&cleaned).is_ok());
     }
 }

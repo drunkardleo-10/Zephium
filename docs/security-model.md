@@ -69,6 +69,13 @@ Chromium's full site-isolation model.
    against published runtime ownership, rejects collisions, and refuses
    `_execute_action` without a Shell-owned popup anchor. Monitor-removal failure
    poisons clean shutdown rather than leaving an untracked input observer.
+   Extension page-menu integration runs only in Wry's native `menuForEvent:`
+   callback for a controller-bound content view. The default `NSMenu` and
+   extension `NSMenuItem` objects remain opaque; page context is never copied
+   into Rust. Exact view/tab/runtime checks precede a fixed-cap merge, and the
+   full submenu tree has identity, depth, count, and title-byte ceilings.
+   Malformed or stale native inventory returns the unchanged default menu and
+   poisons extension-controller integrity rather than presenting partial items.
    `unlimitedStorage` is product-prohibited on both native macOS grant schemas.
    WebKit exposes per-extension data-size records and deletion, but no quota
    setter; reactive inspection cannot prevent a granted extension from filling
