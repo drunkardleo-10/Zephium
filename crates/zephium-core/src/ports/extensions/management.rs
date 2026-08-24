@@ -237,6 +237,7 @@ pub enum ExtensionManagementLimitation {
     SidePanel,
     ManagedStorage,
     OptionsPage,
+    DeclarativeNetRequest,
 }
 
 impl ExtensionManagementLimitation {

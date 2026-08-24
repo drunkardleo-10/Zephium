@@ -19,6 +19,11 @@ use crate::{
 const MAX_RELEASE_CATALOG_JSON_NODES: usize =
     32 + MAX_EXTENSION_PACKAGE_LINES * (64 + MAX_EXTENSION_COMPATIBILITY_RECEIPTS_PER_PACKAGE * 16);
 const MAX_RELEASE_CATALOG_COLLECTION_ENTRIES: usize = 32;
+const MAX_MANIFEST_PROFILE_JSON_NODES: usize = 64
+    + MAX_EXTENSION_PACKAGE_LINES
+        * (64 + zephium_core::extensions::MAX_EXTENSION_MANIFEST_DECLARATIONS * 8);
+const MAX_MANIFEST_PROFILE_COLLECTION_ENTRIES: usize =
+    zephium_core::extensions::MAX_EXTENSION_MANIFEST_DECLARATIONS;
 const MAX_TREE_INDEX_JSON_NODES: usize = MAX_EXTENSION_TREE_FILES * 5 + 16;
 
 /// Hard-bounded settings for one JSON trust boundary.
@@ -39,6 +44,21 @@ impl BoundedJsonLimits {
             max_depth: MAX_EXTENSION_JSON_DEPTH,
             max_nodes: MAX_RELEASE_CATALOG_JSON_NODES,
             max_collection_entries: MAX_RELEASE_CATALOG_COLLECTION_ENTRIES,
+            max_string_bytes: MAX_EXTENSION_RELEASE_CATALOG_BYTES,
+        }
+    }
+
+    /// Limits for generated or reviewed manifest-profile matrices.
+    ///
+    /// These documents share the release-catalog byte ceiling but may contain
+    /// one compatibility row for every bounded manifest declaration. Keeping a
+    /// distinct collection limit avoids weakening canonical catalog parsing.
+    pub const fn manifest_profile_review() -> Self {
+        Self {
+            max_bytes: MAX_EXTENSION_RELEASE_CATALOG_BYTES,
+            max_depth: MAX_EXTENSION_JSON_DEPTH,
+            max_nodes: MAX_MANIFEST_PROFILE_JSON_NODES,
+            max_collection_entries: MAX_MANIFEST_PROFILE_COLLECTION_ENTRIES,
             max_string_bytes: MAX_EXTENSION_RELEASE_CATALOG_BYTES,
         }
     }
@@ -466,5 +486,25 @@ mod tests {
         )
         .unwrap();
         assert_eq!(parsed.as_value()["nested"]["text"], "safe");
+    }
+
+    #[test]
+    fn manifest_profile_rows_do_not_widen_release_catalog_collections() {
+        let rows = format!(
+            "[{}]",
+            (0..33)
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        assert_eq!(
+            parse_bounded_json(rows.as_bytes(), BoundedJsonLimits::release_catalog()),
+            Err(BoundedJsonError::CollectionLimit)
+        );
+        assert!(parse_bounded_json(
+            rows.as_bytes(),
+            BoundedJsonLimits::manifest_profile_review()
+        )
+        .is_ok());
     }
 }

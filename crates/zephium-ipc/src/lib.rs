@@ -205,6 +205,7 @@ pub enum ExtensionManagementLimitationView {
     SidePanel,
     ManagedStorage,
     OptionsPage,
+    DeclarativeNetRequest,
 }
 
 /// Non-authorizing summary of the atomic grant row joined to an install.

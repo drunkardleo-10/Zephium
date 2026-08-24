@@ -82,5 +82,7 @@ export function compatibilityLimitationLabel(
       return "Administrator-managed extension storage is limited";
     case "options_page":
       return "Some extension settings-page behavior is limited";
+    case "declarative_net_request":
+      return "Some declarative network rules have platform limitations";
   }
 }

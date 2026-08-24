@@ -356,6 +356,11 @@
     limitation.type === "api_permission"
       ? `${limitation.type}:${limitation.name}`
       : limitation.type;
+
+  const candidateSectionIsVerified = () =>
+    management !== null &&
+    management.candidates.length > 0 &&
+    management.candidates.every((candidate) => candidate.source === "zephium_verified");
 </script>
 
 <svelte:window onkeydown={handleWindowKeydown} onpointerdown={handleWindowPointerDown} />
@@ -492,7 +497,8 @@
             onclick={() => selectSection("verified")}
             onkeydown={handleSectionKeydown}
           >
-            Verified · {management.candidates.length}
+            {candidateSectionIsVerified() ? "Verified" : "Available"} · {management.candidates
+              .length}
           </button>
         </div>
         {#if profilePolicy !== null}
@@ -941,14 +947,18 @@
               <p class="rounded-md bg-fill px-2.5 py-3 text-[11.5px] leading-4 text-muted">
                 {management.entries.some((entry) => entry.source === "zephium_verified")
                   ? "All verified extensions in this catalog are installed."
-                  : "No verified extensions are available in this catalog."}
+                  : "No compatible extensions are available in this catalog."}
               </p>
             {:else}
               <div>
                 <div class="mb-3">
-                  <h3 class="text-[13px] leading-4 font-medium text-text">Zephium Verified</h3>
+                  <h3 class="text-[13px] leading-4 font-medium text-text">
+                    {candidateSectionIsVerified() ? "Zephium Verified" : "Compatibility candidates"}
+                  </h3>
                   <p class="mt-1 text-[10.5px] leading-4 text-muted">
-                    Exact packages reviewed for this platform and catalog release.
+                    {candidateSectionIsVerified()
+                      ? "Exact packages reviewed for this platform and catalog release."
+                      : "Authenticated packages being evaluated for this platform."}
                   </p>
                 </div>
                 <div class="space-y-1.5">

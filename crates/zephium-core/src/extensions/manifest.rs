@@ -36,6 +36,8 @@ pub const MAX_EXTENSION_WEB_ACCESSIBLE_DECLARATIONS: usize = 16;
 pub const MAX_EXTENSION_WEB_ACCESSIBLE_RESOURCES: usize = 128;
 pub const MAX_EXTENSION_SANDBOX_RESOURCES: usize = 32;
 pub const MAX_EXTENSION_COMMANDS: usize = 64;
+/// Chromium's current maximum number of packaged static DNR rulesets.
+pub const MAX_EXTENSION_DECLARATIVE_NET_REQUEST_RULESETS: usize = 100;
 pub const MAX_EXTENSION_UNMODELED_DECLARATIONS: usize = 16;
 /// MV3 defines exactly the new-tab, bookmarks, and history override targets.
 pub const MAX_EXTENSION_OVERRIDES: usize = 3;
@@ -44,7 +46,7 @@ pub const MAX_EXTENSION_MANIFEST_DECLARATIONS: usize = MAX_EXTENSION_API_PERMISS
     + MAX_EXTENSION_CONTENT_SCRIPT_DECLARATIONS
     + MAX_EXTENSION_WEB_ACCESSIBLE_DECLARATIONS
     + MAX_EXTENSION_UNMODELED_DECLARATIONS
-    + 15;
+    + 16;
 pub const MAX_EXTENSION_MANIFEST_RETAINED_BYTES: usize = 4 * 1024 * 1024;
 /// Exact reviewed profile that authorizes Zephium's sealed macOS broker.
 ///
@@ -970,6 +972,51 @@ pub struct ExtensionCommandsDeclaration {
     descriptor_digest: ExtensionManifestResourceDigest,
 }
 
+/// Bounded identity of packaged Declarative Net Request rulesets.
+///
+/// Rule identifiers, enablement, paths, and exact authenticated resource
+/// identities are folded into `descriptor_digest` by package admission. Core
+/// retains no filesystem path or rule bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ExtensionDeclarativeNetRequestDeclaration {
+    ruleset_count: u16,
+    enabled_ruleset_count: u16,
+    descriptor_digest: ExtensionManifestResourceDigest,
+}
+
+impl ExtensionDeclarativeNetRequestDeclaration {
+    pub fn new(
+        ruleset_count: usize,
+        enabled_ruleset_count: usize,
+        descriptor_digest: ExtensionManifestResourceDigest,
+    ) -> Option<Self> {
+        if ruleset_count == 0
+            || ruleset_count > MAX_EXTENSION_DECLARATIVE_NET_REQUEST_RULESETS
+            || enabled_ruleset_count > ruleset_count
+            || enabled_ruleset_count > 50
+        {
+            return None;
+        }
+        Some(Self {
+            ruleset_count: ruleset_count as u16,
+            enabled_ruleset_count: enabled_ruleset_count as u16,
+            descriptor_digest,
+        })
+    }
+
+    pub const fn ruleset_count(self) -> usize {
+        self.ruleset_count as usize
+    }
+
+    pub const fn enabled_ruleset_count(self) -> usize {
+        self.enabled_ruleset_count as usize
+    }
+
+    pub const fn descriptor_digest(self) -> ExtensionManifestResourceDigest {
+        self.descriptor_digest
+    }
+}
+
 impl ExtensionCommandsDeclaration {
     pub fn new(
         command_count: usize,
@@ -1006,6 +1053,7 @@ pub struct ExtensionManifestAdditionalDeclarations {
     side_panel_resource: Option<ExtensionManifestResourceDigest>,
     managed_storage_schema_resource: Option<ExtensionManifestResourceDigest>,
     options_page_descriptor: Option<ExtensionManifestResourceDigest>,
+    declarative_net_request: Option<ExtensionDeclarativeNetRequestDeclaration>,
 }
 
 impl ExtensionManifestAdditionalDeclarations {
@@ -1021,6 +1069,7 @@ impl ExtensionManifestAdditionalDeclarations {
             side_panel_resource,
             managed_storage_schema_resource,
             options_page_descriptor: None,
+            declarative_net_request: None,
         }
     }
 
@@ -1029,6 +1078,14 @@ impl ExtensionManifestAdditionalDeclarations {
         descriptor: Option<ExtensionManifestResourceDigest>,
     ) -> Self {
         self.options_page_descriptor = descriptor;
+        self
+    }
+
+    pub const fn with_declarative_net_request(
+        mut self,
+        declaration: Option<ExtensionDeclarativeNetRequestDeclaration>,
+    ) -> Self {
+        self.declarative_net_request = declaration;
         self
     }
 
@@ -1052,12 +1109,19 @@ impl ExtensionManifestAdditionalDeclarations {
         self.options_page_descriptor
     }
 
+    pub const fn declarative_net_request(
+        self,
+    ) -> Option<ExtensionDeclarativeNetRequestDeclaration> {
+        self.declarative_net_request
+    }
+
     const fn declaration_count(self) -> usize {
         self.minimum_chromium_version.is_some() as usize
             + self.commands.is_some() as usize
             + self.side_panel_resource.is_some() as usize
             + self.managed_storage_schema_resource.is_some() as usize
             + self.options_page_descriptor.is_some() as usize
+            + self.declarative_net_request.is_some() as usize
     }
 }
 
@@ -1236,6 +1300,7 @@ impl ExtensionManifestDeclarations {
                 "commands" => additional.commands.is_some(),
                 "side_panel" => additional.side_panel_resource.is_some(),
                 "storage" => additional.managed_storage_schema_resource.is_some(),
+                "declarative_net_request" => additional.declarative_net_request.is_some(),
                 _ => false,
             };
             if duplicates_typed {
@@ -1463,6 +1528,11 @@ impl ExtensionManifestDeclarations {
         if let Some(descriptor) = self.additional.options_page_descriptor {
             declarations.push(ExtensionManifestDeclaration::OptionsPage { descriptor });
         }
+        if let Some(declaration) = self.additional.declarative_net_request {
+            declarations.push(ExtensionManifestDeclaration::DeclarativeNetRequest(
+                declaration,
+            ));
+        }
         declarations.push(ExtensionManifestDeclaration::ExtensionPagesCsp);
         if self.execution.sandbox().is_some() {
             declarations.push(ExtensionManifestDeclaration::Sandbox);
@@ -1568,6 +1638,7 @@ pub enum ExtensionManifestDeclaration {
     OptionsPage {
         descriptor: ExtensionManifestResourceDigest,
     },
+    DeclarativeNetRequest(ExtensionDeclarativeNetRequestDeclaration),
     UnmodeledAuthority(ExtensionUnmodeledDeclarationName),
 }
 
@@ -1594,7 +1665,7 @@ impl ExtensionManifestDeclaration {
             | Self::Commands(_)
             | Self::SidePanel { .. }
             | Self::ManagedStorageSchema { .. } => None,
-            Self::OptionsPage { .. } => None,
+            Self::OptionsPage { .. } | Self::DeclarativeNetRequest(_) => None,
         }
     }
 
@@ -1621,6 +1692,7 @@ impl ExtensionManifestDeclaration {
             Self::SidePanel { .. } => 19,
             Self::ManagedStorageSchema { .. } => 20,
             Self::OptionsPage { .. } => 21,
+            Self::DeclarativeNetRequest(_) => 22,
         }
     }
 
@@ -1654,6 +1726,11 @@ impl ExtensionManifestDeclaration {
                 digest.update(resource.as_bytes());
             }
             Self::OptionsPage { descriptor } => digest.update(descriptor.as_bytes()),
+            Self::DeclarativeNetRequest(declaration) => {
+                digest.update((declaration.ruleset_count() as u64).to_be_bytes());
+                digest.update((declaration.enabled_ruleset_count() as u64).to_be_bytes());
+                digest.update(declaration.descriptor_digest().as_bytes());
+            }
             _ => {}
         }
     }
@@ -1702,6 +1779,9 @@ impl ExtensionManifestDeclaration {
                 Self::ManagedStorageSchema { resource: right },
             ) => left.cmp(right),
             (Self::OptionsPage { descriptor: left }, Self::OptionsPage { descriptor: right }) => {
+                left.cmp(right)
+            }
+            (Self::DeclarativeNetRequest(left), Self::DeclarativeNetRequest(right)) => {
                 left.cmp(right)
             }
             _ => self

@@ -164,10 +164,12 @@ fn validate_extension_pages(directives: &[(&str, Vec<&str>)]) -> Result<(), CspE
     let script = directives
         .iter()
         .find(|(name, _)| *name == "script-src")
+        .or_else(|| directives.iter().find(|(name, _)| *name == "default-src"))
         .ok_or(CspError::MissingExtensionScriptSource)?;
     let object = directives
         .iter()
         .find(|(name, _)| *name == "object-src")
+        .or_else(|| directives.iter().find(|(name, _)| *name == "default-src"))
         .ok_or(CspError::MissingExtensionObjectSource)?;
 
     if !safe_extension_sources(&script.1, true) {
@@ -310,6 +312,27 @@ mod tests {
                 Err(CspError::InsecureExtensionScriptSource)
             );
         }
+    }
+
+    #[test]
+    fn restrictive_default_source_safely_supplies_missing_object_source() {
+        let policy = normalize_policy(
+            "default-src 'none'; script-src 'self' 'wasm-unsafe-eval';",
+            PolicyKind::ExtensionPages,
+        )
+        .unwrap();
+        assert_eq!(
+            policy,
+            "default-src 'none'; script-src 'self' 'wasm-unsafe-eval';"
+        );
+
+        assert_eq!(
+            normalize_policy(
+                "default-src https://remote.example; script-src 'self';",
+                PolicyKind::ExtensionPages,
+            ),
+            Err(CspError::InsecureExtensionObjectSource)
+        );
     }
 
     #[test]

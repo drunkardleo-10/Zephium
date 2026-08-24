@@ -482,6 +482,7 @@ fn admit_compatibility_artifact(
         || artifact.surfaces.same_document_navigation_routes
             != output.same_document_navigation_routes
         || artifact.surfaces.notifications_fallback != output.notifications_fallback
+        || artifact.surfaces.native_messaging_omitted != output.native_messaging_omitted
         || artifact.surfaces.history_search
     {
         return Err("stock compatibility artifact surface contract drifted".into());
@@ -656,9 +657,20 @@ fn run_native(
     let extension = super::load_extension(&admitted.extension_root, &run_loop, mtm)?;
     super::validate_extension(&extension, contract.display_name())?;
     let context = super::new_context(&extension, contract.context_identifier())?;
+    let native_permissions = contract
+        .native_permissions()
+        .iter()
+        .copied()
+        .filter(|permission| {
+            admitted.probe_mode == ProbeMode::Stock
+                || contract != StockContract::OnePassword8123233
+                || *permission
+                    != super::super::extensions::MacosNativeApiPermission::NativeMessaging
+        })
+        .collect::<Vec<_>>();
     let grants = super::super::extensions::apply_probe_grants(
         &context,
-        contract.native_permissions(),
+        &native_permissions,
         contract.granted_host_patterns(),
         contract.private_data_access(),
     )

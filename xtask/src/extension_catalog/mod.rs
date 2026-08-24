@@ -30,7 +30,7 @@ use zephium_extension_package::{
 use crate::extension_tree;
 
 mod profiles;
-mod storage;
+pub(crate) mod storage;
 #[cfg(test)]
 mod tests;
 
@@ -384,6 +384,11 @@ enum ManifestDeclarationReviewKey {
         resource_sha256: String,
     },
     OptionsPage {
+        descriptor_sha256: String,
+    },
+    DeclarativeNetRequest {
+        ruleset_count: usize,
+        enabled_ruleset_count: usize,
         descriptor_sha256: String,
     },
     UnmodeledAuthority {
@@ -957,6 +962,13 @@ fn manifest_declaration_review_key(
         ExtensionManifestDeclaration::OptionsPage { descriptor } => {
             ManifestDeclarationReviewKey::OptionsPage {
                 descriptor_sha256: lower_hex(descriptor.as_bytes()),
+            }
+        }
+        ExtensionManifestDeclaration::DeclarativeNetRequest(declaration) => {
+            ManifestDeclarationReviewKey::DeclarativeNetRequest {
+                ruleset_count: declaration.ruleset_count(),
+                enabled_ruleset_count: declaration.enabled_ruleset_count(),
+                descriptor_sha256: lower_hex(declaration.descriptor_digest().as_bytes()),
             }
         }
         ExtensionManifestDeclaration::UnmodeledAuthority(name) => {

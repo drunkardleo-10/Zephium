@@ -110,6 +110,7 @@ pub(super) struct ArtifactSurfaces {
     pub(super) recent_sessions: bool,
     pub(super) options_page: bool,
     pub(super) notifications_fallback: bool,
+    pub(super) native_messaging_omitted: bool,
 }
 
 #[derive(Debug)]
@@ -171,6 +172,19 @@ struct Surfaces {
     options_page: Option<String>,
     #[serde(default)]
     notifications: Option<String>,
+    #[serde(default)]
+    native_messaging: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct ContractFeatures {
+    bookmarked: bool,
+    favicon: bool,
+    search: bool,
+    sessions: bool,
+    options_page: bool,
+    notifications_fallback: bool,
+    native_messaging_omitted: bool,
 }
 
 pub(super) fn validate(root: &Path) -> Result<ValidatedCompatibilityArtifact, String> {
@@ -209,14 +223,19 @@ pub(super) fn validate(root: &Path) -> Result<ValidatedCompatibilityArtifact, St
         metadata.surfaces.options_page.as_deref() == Some("runtime-open-options-page-window");
     let notifications_fallback =
         metadata.surfaces.notifications.as_deref() == Some("native-preserved-or-inert-no-delivery");
+    let native_messaging_omitted =
+        metadata.surfaces.native_messaging.as_deref() == Some("omitted-product-prohibited");
     let (adaptations, limitations) = expected_contract(
         target,
-        bookmarked,
-        favicon,
-        search,
-        sessions,
-        options_page,
-        notifications_fallback,
+        ContractFeatures {
+            bookmarked,
+            favicon,
+            search,
+            sessions,
+            options_page,
+            notifications_fallback,
+            native_messaging_omitted,
+        },
     )?;
     if metadata.adaptations != adaptations || metadata.limitations != limitations {
         return Err("compatibility artifact adaptation contract drifted".into());
@@ -255,13 +274,17 @@ pub(super) fn validate(root: &Path) -> Result<ValidatedCompatibilityArtifact, St
 
 fn expected_contract(
     target: CompatibilityArtifactTarget,
-    bookmarked: bool,
-    favicon: bool,
-    search: bool,
-    sessions: bool,
-    options_page: bool,
-    notifications_fallback: bool,
+    features: ContractFeatures,
 ) -> Result<(Vec<&'static str>, Vec<&'static str>), String> {
+    let ContractFeatures {
+        bookmarked,
+        favicon,
+        search,
+        sessions,
+        options_page,
+        notifications_fallback,
+        native_messaging_omitted,
+    } = features;
     if target == CompatibilityArtifactTarget::NativeV3 {
         if bookmarked || favicon || search || sessions {
             return Err("native compatibility artifact declared a brokered surface".into());
@@ -276,7 +299,14 @@ fn expected_contract(
             adaptations.push("declared-notifications-fallback-v1");
             limitations.push("notifications-fallback-never-delivers-or-emits-events");
         }
+        if native_messaging_omitted {
+            adaptations.push("product-prohibited-native-messaging-omission-v1");
+            limitations.push("arbitrary-native-messaging-unavailable");
+        }
         return Ok((adaptations, limitations));
+    }
+    if native_messaging_omitted {
+        return Err("brokered compatibility artifact omitted native messaging".into());
     }
     let mut adaptations = vec![
         "native-api-identity-preservation-v1",
@@ -468,6 +498,12 @@ fn validate_surfaces(
         Some("native-preserved-or-inert-no-delivery") => true,
         _ => return Err("compatibility artifact notifications surface is invalid".into()),
     };
+    let native_messaging_omitted = match (target, surfaces.native_messaging.as_deref()) {
+        (CompatibilityArtifactTarget::NativeV3, None) => false,
+        (CompatibilityArtifactTarget::NativeV3, Some("omitted-product-prohibited")) => true,
+        (CompatibilityArtifactTarget::NativeBrokeredV1, None) => false,
+        _ => return Err("compatibility artifact native-messaging surface is invalid".into()),
+    };
     Ok(ArtifactSurfaces {
         background,
         isolated_content_scripts: surfaces.isolated_content_scripts,
@@ -483,6 +519,7 @@ fn validate_surfaces(
         recent_sessions,
         options_page,
         notifications_fallback,
+        native_messaging_omitted,
     })
 }
 

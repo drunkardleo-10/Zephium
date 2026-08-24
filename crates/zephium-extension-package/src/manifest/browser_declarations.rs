@@ -8,8 +8,10 @@
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use zephium_core::extensions::{
-    ExtensionCommandsDeclaration, ExtensionManifestAdditionalDeclarations,
-    ExtensionManifestResourceDigest, ExtensionMinimumChromiumVersion, MAX_EXTENSION_COMMANDS,
+    ExtensionCommandsDeclaration, ExtensionDeclarativeNetRequestDeclaration,
+    ExtensionManifestAdditionalDeclarations, ExtensionManifestResourceDigest,
+    ExtensionMinimumChromiumVersion, MAX_EXTENSION_COMMANDS,
+    MAX_EXTENSION_DECLARATIVE_NET_REQUEST_RULESETS,
 };
 
 use crate::ExtensionReleaseTreeBinding;
@@ -20,13 +22,18 @@ use super::{
 };
 
 const COMMANDS_DIGEST_DOMAIN: &[u8] = b"zephium:extension-commands:v1\0";
+const COMMAND_DISPLAY_NAME_DIGEST_DOMAIN: &[u8] = b"zephium:extension-command-display-name:v1\0";
 const SIDE_PANEL_RESOURCE_DIGEST_DOMAIN: &[u8] = b"zephium:extension-side-panel-resource:v1\0";
 const MANAGED_STORAGE_RESOURCE_DIGEST_DOMAIN: &[u8] =
     b"zephium:extension-managed-storage-resource:v1\0";
 const OPTIONS_PAGE_DESCRIPTOR_DIGEST_DOMAIN: &[u8] = b"zephium:extension-options-page:v1\0";
+const DECLARATIVE_NET_REQUEST_DIGEST_DOMAIN: &[u8] =
+    b"zephium:extension-declarative-net-request:v1\0";
 const MAX_COMMAND_NAME_BYTES: usize = 128;
+const MAX_COMMAND_DISPLAY_NAME_BYTES: usize = 128;
 const MAX_COMMAND_DESCRIPTION_BYTES: usize = 512;
 const MAX_COMMAND_SHORTCUT_BYTES: usize = 64;
+const MAX_RULESET_ID_BYTES: usize = 128;
 const COMMAND_PLATFORMS: [&str; 5] = ["default", "chromeos", "linux", "mac", "windows"];
 
 pub(super) fn parse_browser_declarations(
@@ -56,6 +63,11 @@ pub(super) fn parse_browser_declarations(
         auxiliary_resources,
     )?;
     let options_page_descriptor = parse_options_page(root, binding, auxiliary_resources)?;
+    let declarative_net_request = parse_declarative_net_request(
+        root.remove("declarative_net_request"),
+        binding,
+        auxiliary_resources,
+    )?;
 
     Ok(ExtensionManifestAdditionalDeclarations::new(
         minimum_chromium_version,
@@ -63,7 +75,89 @@ pub(super) fn parse_browser_declarations(
         side_panel_resource,
         managed_storage_schema_resource,
     )
-    .with_options_page_descriptor(options_page_descriptor))
+    .with_options_page_descriptor(options_page_descriptor)
+    .with_declarative_net_request(declarative_net_request))
+}
+
+fn parse_declarative_net_request(
+    value: Option<Value>,
+    binding: ExtensionReleaseTreeBinding<'_>,
+    auxiliary_resources: &mut Vec<ExtensionManifestResource>,
+) -> Result<Option<ExtensionDeclarativeNetRequestDeclaration>, ExtensionManifestAdmissionError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let mut object = into_object(value, "declarative_net_request")?;
+    let rules = object
+        .remove("rule_resources")
+        .ok_or_else(|| missing("declarative_net_request.rule_resources"))?;
+    if !object.is_empty() {
+        return Err(invalid("declarative_net_request"));
+    }
+    let rules = rules
+        .as_array()
+        .filter(|rules| {
+            !rules.is_empty() && rules.len() <= MAX_EXTENSION_DECLARATIVE_NET_REQUEST_RULESETS
+        })
+        .ok_or_else(|| invalid("declarative_net_request.rule_resources"))?;
+    let mut parsed = Vec::new();
+    parsed
+        .try_reserve_exact(rules.len())
+        .map_err(|_| invalid("declarative_net_request.rule_resources"))?;
+    for rule in rules {
+        let mut rule = rule
+            .as_object()
+            .cloned()
+            .ok_or_else(|| invalid("declarative_net_request.rule_resources"))?;
+        let id = rule
+            .remove("id")
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .filter(|id| valid_ruleset_id(id))
+            .ok_or_else(|| invalid("declarative_net_request.rule_resources.id"))?;
+        let enabled = rule
+            .remove("enabled")
+            .and_then(|value| value.as_bool())
+            .ok_or_else(|| invalid("declarative_net_request.rule_resources.enabled"))?;
+        let source = rule
+            .remove("path")
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .ok_or_else(|| invalid("declarative_net_request.rule_resources.path"))?;
+        if !rule.is_empty() {
+            return Err(invalid("declarative_net_request.rule_resources"));
+        }
+        let resource = bind_resource(binding, &source, "declarative_net_request.rule_resources")?;
+        parsed.push((id, enabled, resource));
+    }
+    parsed.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    if parsed.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        return Err(invalid("declarative_net_request.rule_resources.id"));
+    }
+    let enabled = parsed.iter().filter(|(_, enabled, _)| *enabled).count();
+    let mut digest = Sha256::new();
+    digest.update(DECLARATIVE_NET_REQUEST_DIGEST_DOMAIN);
+    update_len(&mut digest, parsed.len());
+    for (id, enabled, resource) in &parsed {
+        update_bytes(&mut digest, id.as_bytes());
+        digest.update([u8::from(*enabled)]);
+        resource.update_digest(&mut digest);
+    }
+    let declaration = ExtensionDeclarativeNetRequestDeclaration::new(
+        parsed.len(),
+        enabled,
+        ExtensionManifestResourceDigest::from_bytes(digest.finalize().into()),
+    )
+    .ok_or_else(|| invalid("declarative_net_request.rule_resources"))?;
+    auxiliary_resources.extend(parsed.into_iter().map(|(_, _, resource)| resource));
+    Ok(Some(declaration))
+}
+
+fn valid_ruleset_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_RULESET_ID_BYTES
+        && value.is_ascii()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
 }
 
 fn parse_options_page(
@@ -179,10 +273,12 @@ fn parse_commands(
         validate_command_name(name)?;
         update_bytes(&mut digest, name.as_bytes());
         let command = value.as_object().ok_or_else(|| invalid("commands"))?;
-        if command
-            .keys()
-            .any(|key| !matches!(key.as_str(), "description" | "suggested_key" | "global"))
-        {
+        if command.keys().any(|key| {
+            !matches!(
+                key.as_str(),
+                "description" | "name" | "suggested_key" | "global"
+            )
+        }) {
             return Err(invalid("commands"));
         }
 
@@ -245,6 +341,26 @@ fn parse_commands(
                 let global = global.as_bool().ok_or_else(|| invalid("commands.global"))?;
                 digest.update([1, u8::from(global)]);
             }
+        }
+
+        // Chromium tolerates a redundant display name in command descriptors
+        // and major signed MV3 packages contain it. It grants no command
+        // authority, but remains explicitly bounded and digest-bound rather
+        // than being silently discarded as unknown metadata. Appending a
+        // domain-separated component only when present preserves the stable
+        // identity of older manifests that do not declare this metadata.
+        if let Some(display_name) = command.get("name") {
+            let display_name = display_name
+                .as_str()
+                .ok_or_else(|| invalid("commands.name"))?;
+            if display_name.is_empty()
+                || display_name.len() > MAX_COMMAND_DISPLAY_NAME_BYTES
+                || display_name.chars().any(char::is_control)
+            {
+                return Err(invalid("commands.name"));
+            }
+            digest.update(COMMAND_DISPLAY_NAME_DIGEST_DOMAIN);
+            update_bytes(&mut digest, display_name.as_bytes());
         }
     }
 

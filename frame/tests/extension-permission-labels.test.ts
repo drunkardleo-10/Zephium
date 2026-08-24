@@ -37,5 +37,8 @@ describe("extension permission copy", () => {
     expect(compatibilityLimitationLabel({ type: "native_messaging" })).toBe(
       "Arbitrary native app connections are unavailable",
     );
+    expect(compatibilityLimitationLabel({ type: "declarative_net_request" })).toBe(
+      "Some declarative network rules have platform limitations",
+    );
   });
 });

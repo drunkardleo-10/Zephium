@@ -214,17 +214,19 @@ impl StockContract {
                 isolated_content_scripts: 1,
                 same_document_navigation_routes: 2,
                 notifications_fallback: false,
+                native_messaging_omitted: false,
             },
             Self::OnePassword8123233 => CompatibilityOutputContract {
                 files: 1_002,
-                bytes: 45_127_086,
-                manifest_sha256: "1201d15558075a2cc1a78d2235a2d434cb8bcd739111e62001efe45d726c409c",
-                tree_sha256: "3a5c59b90860ca3b9e44fe1e3f0c612fb50e0fa927656e6d05859048865fa8ed",
-                index_sha256: "24f6ba293d06c1d63a5ebec5f743dd146e628b129d1a507e231d850178200266",
+                bytes: 45_127_068,
+                manifest_sha256: "f498087294176d2e357579fd75eb34dc2f5fd556b57d9308f26d5cd51ad68e00",
+                tree_sha256: "15f37657ee69447ac15bdbcdc453e2736e795b558f4bea0f6444011cf97f9c75",
+                index_sha256: "7fb8941393f12461a665f2899f05aa82715418859b03f1ff12c9d982332b81bb",
                 background: BackgroundAdaptationKind::Module,
                 isolated_content_scripts: 7,
                 same_document_navigation_routes: 7,
                 notifications_fallback: true,
+                native_messaging_omitted: true,
             },
         }
     }
@@ -305,6 +307,7 @@ pub(super) struct CompatibilityOutputContract {
     pub(super) isolated_content_scripts: usize,
     pub(super) same_document_navigation_routes: usize,
     pub(super) notifications_fallback: bool,
+    pub(super) native_messaging_omitted: bool,
 }
 
 fn validate_proton_manifest(manifest: &Value) -> Result<(), String> {
@@ -385,7 +388,6 @@ fn validate_onepassword_manifest(manifest: &Value) -> Result<(), String> {
             "downloads",
             "idle",
             "management",
-            "nativeMessaging",
             "notifications",
             "offscreen",
             "privacy",

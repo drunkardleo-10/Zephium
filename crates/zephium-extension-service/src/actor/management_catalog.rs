@@ -213,8 +213,8 @@ pub(super) fn load(
                 .additional()
                 .options_page_descriptor()
                 .is_some(),
-            ExtensionManagementSource::ZephiumVerified,
-            Some(candidate.catalog_created_unix()),
+            acquired_management_source(),
+            acquired_verified_catalog_unix(candidate.catalog_created_unix()),
             Some(provenance),
             runtime_state,
             grants,
@@ -268,8 +268,8 @@ pub(super) fn load(
             candidate.description().map(Into::into),
             candidate.author().map(Into::into),
             candidate.version(),
-            ExtensionManagementSource::ZephiumVerified,
-            Some(candidate.catalog_created_unix()),
+            acquired_management_source(),
+            acquired_verified_catalog_unix(candidate.catalog_created_unix()),
             Some(provenance),
             declarations
                 .required_api()
@@ -677,8 +677,8 @@ fn reconcile_one_install_update(
             selector,
             replacement.name(),
             replacement.version(),
-            ExtensionManagementSource::ZephiumVerified,
-            Some(replacement.catalog_created_unix()),
+            acquired_management_source(),
+            acquired_verified_catalog_unix(replacement.catalog_created_unix()),
             Some(provenance),
             added_required_api,
             added_required_hosts,
@@ -1136,6 +1136,22 @@ fn verified_provenance(
     .ok()
 }
 
+const fn acquired_management_source() -> ExtensionManagementSource {
+    if cfg!(feature = "local-extension-lab") {
+        ExtensionManagementSource::ExternalCompatibility
+    } else {
+        ExtensionManagementSource::ZephiumVerified
+    }
+}
+
+const fn acquired_verified_catalog_unix(created_unix: u64) -> Option<u64> {
+    if cfg!(feature = "local-extension-lab") {
+        None
+    } else {
+        Some(created_unix)
+    }
+}
+
 fn compatibility(
     manifest: &zephium_core::extensions::ExtensionManifestDescriptor,
 ) -> Option<(
@@ -1193,6 +1209,9 @@ fn compatibility(
             ExtensionManifestDeclaration::OptionsPage { .. } => {
                 ExtensionManagementLimitation::OptionsPage
             }
+            ExtensionManifestDeclaration::DeclarativeNetRequest(_) => {
+                ExtensionManagementLimitation::DeclarativeNetRequest
+            }
             ExtensionManifestDeclaration::UnmodeledAuthority(_) => return None,
         };
         limitations.push(limitation);
@@ -1241,5 +1260,22 @@ mod tests {
             )),
             ExtensionManagementCatalogOutcome::Rejected
         );
+    }
+
+    #[test]
+    fn acquired_catalog_source_label_matches_the_compiled_product_boundary() {
+        if cfg!(feature = "local-extension-lab") {
+            assert_eq!(
+                acquired_management_source(),
+                ExtensionManagementSource::ExternalCompatibility
+            );
+            assert_eq!(acquired_verified_catalog_unix(17), None);
+        } else {
+            assert_eq!(
+                acquired_management_source(),
+                ExtensionManagementSource::ZephiumVerified
+            );
+            assert_eq!(acquired_verified_catalog_unix(17), Some(17));
+        }
     }
 }

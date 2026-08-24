@@ -116,6 +116,7 @@ struct TransformPlan {
     removed_file_match_patterns: usize,
     same_document_navigation_routes: usize,
     notifications_fallback: bool,
+    native_messaging_omitted: bool,
     history_broker_search: bool,
     empty_bookmarks: bool,
     empty_favicon: bool,
@@ -134,6 +135,17 @@ struct ExtensionBridgePlan {
     default_search: bool,
     recent_sessions: bool,
     notifications_fallback: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct ReceiptFeatures {
+    empty_bookmarks: bool,
+    empty_favicon: bool,
+    default_search: bool,
+    recent_sessions: bool,
+    options_page: bool,
+    notifications_fallback: bool,
+    native_messaging_omitted: bool,
 }
 
 #[derive(Deserialize)]
@@ -186,6 +198,8 @@ struct CompatibilitySurfaces {
     options_page: Option<String>,
     #[serde(default)]
     notifications: Option<String>,
+    #[serde(default)]
+    native_messaging: Option<String>,
 }
 
 pub(crate) struct ValidatedCompatibilityReleaseInput {
@@ -299,23 +313,8 @@ pub(crate) fn validate_release_input(
     };
     validate_compatibility_identity(&receipt.source, "source")?;
     validate_compatibility_identity(&receipt.output, "output")?;
-    let (
-        empty_bookmarks,
-        empty_favicon,
-        default_search,
-        recent_sessions,
-        options_page,
-        notifications_fallback,
-    ) = validate_receipt_surfaces(&receipt.surfaces, target)?;
-    let (expected_adaptations, expected_limitations) = receipt_contract(
-        target,
-        empty_bookmarks,
-        empty_favicon,
-        default_search,
-        recent_sessions,
-        options_page,
-        notifications_fallback,
-    );
+    let features = validate_receipt_surfaces(&receipt.surfaces, target)?;
+    let (expected_adaptations, expected_limitations) = receipt_contract(target, features);
     if receipt.adaptations != expected_adaptations || receipt.limitations != expected_limitations {
         return Err("compatibility receipt adaptation contract drifted".into());
     }
@@ -369,7 +368,7 @@ fn validate_compatibility_identity(
 fn validate_receipt_surfaces(
     surfaces: &CompatibilitySurfaces,
     target: ArtifactTarget,
-) -> Result<(bool, bool, bool, bool, bool, bool), String> {
+) -> Result<ReceiptFeatures, String> {
     let background_valid = matches!(
         surfaces.background.as_str(),
         "absent" | "classic-wrapper" | "module-wrapper"
@@ -398,6 +397,11 @@ fn validate_receipt_surfaces(
         Some("native-preserved-or-inert-no-delivery") => true,
         _ => return Err("compatibility receipt notifications surface is invalid".into()),
     };
+    let native_messaging_omitted = match surfaces.native_messaging.as_deref() {
+        None => false,
+        Some("omitted-product-prohibited") => true,
+        _ => return Err("compatibility receipt native-messaging surface is invalid".into()),
+    };
     match target {
         ArtifactTarget::NativeV3 => {
             if surfaces.history_search.is_some()
@@ -409,17 +413,16 @@ fn validate_receipt_surfaces(
             {
                 return Err("native compatibility receipt declared brokered surfaces".into());
             }
-            Ok((
-                false,
-                false,
-                false,
-                false,
+            Ok(ReceiptFeatures {
                 options_page,
                 notifications_fallback,
-            ))
+                native_messaging_omitted,
+                ..ReceiptFeatures::default()
+            })
         }
         ArtifactTarget::NativeBrokeredV1 => {
             if surfaces.background == "absent"
+                || native_messaging_omitted
                 || surfaces.history_search.as_deref() != Some("bounded-native-broker")
                 || !surfaces
                     .extension_pages
@@ -447,27 +450,32 @@ fn validate_receipt_surfaces(
                 Some("recent-current-space-tab-only") => true,
                 _ => return Err("compatibility receipt sessions surface is invalid".into()),
             };
-            Ok((
+            Ok(ReceiptFeatures {
                 empty_bookmarks,
                 empty_favicon,
                 default_search,
                 recent_sessions,
                 options_page,
                 notifications_fallback,
-            ))
+                native_messaging_omitted: false,
+            })
         }
     }
 }
 
 fn receipt_contract(
     target: ArtifactTarget,
-    empty_bookmarks: bool,
-    empty_favicon: bool,
-    default_search: bool,
-    recent_sessions: bool,
-    options_page: bool,
-    notifications_fallback: bool,
+    features: ReceiptFeatures,
 ) -> (Vec<&'static str>, Vec<&'static str>) {
+    let ReceiptFeatures {
+        empty_bookmarks,
+        empty_favicon,
+        default_search,
+        recent_sessions,
+        options_page,
+        notifications_fallback,
+        native_messaging_omitted,
+    } = features;
     let mut adaptations = vec![
         "native-api-identity-preservation-v1",
         "catalog-update-event-stub-v1",
@@ -516,6 +524,10 @@ fn receipt_contract(
     if notifications_fallback {
         adaptations.push("declared-notifications-fallback-v1");
         limitations.push("notifications-fallback-never-delivers-or-emits-events");
+    }
+    if native_messaging_omitted {
+        adaptations.push("product-prohibited-native-messaging-omission-v1");
+        limitations.push("arbitrary-native-messaging-unavailable");
     }
     if target.requires_history_broker() {
         limitations.retain(|limitation| *limitation != "non-action-extension-pages-not-adapted");
@@ -668,12 +680,15 @@ fn materialize_target(
     write_new_file(staging.path(), ARTIFACT_TREE_INDEX, &generated.bytes)?;
     let (adaptations, limitations) = receipt_contract(
         target,
-        plan.empty_bookmarks,
-        plan.empty_favicon,
-        plan.default_search,
-        plan.recent_sessions,
-        plan.options_page.is_some(),
-        plan.notifications_fallback,
+        ReceiptFeatures {
+            empty_bookmarks: plan.empty_bookmarks,
+            empty_favicon: plan.empty_favicon,
+            default_search: plan.default_search,
+            recent_sessions: plan.recent_sessions,
+            options_page: plan.options_page.is_some(),
+            notifications_fallback: plan.notifications_fallback,
+            native_messaging_omitted: plan.native_messaging_omitted,
+        },
     );
     let mut surfaces = serde_json::json!({
         "background": plan.worker.label(),
@@ -742,6 +757,15 @@ fn materialize_target(
             .insert(
                 "notifications".to_owned(),
                 Value::String("native-preserved-or-inert-no-delivery".to_owned()),
+            );
+    }
+    if plan.native_messaging_omitted {
+        surfaces
+            .as_object_mut()
+            .expect("compatibility surfaces are an object")
+            .insert(
+                "native_messaging".to_owned(),
+                Value::String("omitted-product-prohibited".to_owned()),
             );
     }
     let metadata = serde_json::to_vec_pretty(&serde_json::json!({
@@ -820,6 +844,12 @@ fn build_plan(
 
     let history_broker_search = target.requires_history_broker();
     let notifications_fallback = declares_permission(&root, "permissions", "notifications")?;
+    let native_messaging_omitted = if target == ArtifactTarget::NativeV3 {
+        remove_permission(&mut root, "permissions", "nativeMessaging")?
+            | remove_permission(&mut root, "optional_permissions", "nativeMessaging")?
+    } else {
+        false
+    };
     let empty_bookmarks =
         history_broker_search && declares_permission(&root, "permissions", "bookmarks")?;
     let empty_favicon =
@@ -929,6 +959,7 @@ fn build_plan(
         removed_file_match_patterns: content_scripts.removed_file_patterns,
         same_document_navigation_routes,
         notifications_fallback,
+        native_messaging_omitted,
         history_broker_search,
         empty_bookmarks,
         empty_favicon,
@@ -957,6 +988,39 @@ fn declares_permission(
     Ok(permissions
         .iter()
         .any(|value| value.as_str() == Some(expected)))
+}
+
+fn remove_permission(
+    root: &mut Map<String, Value>,
+    field: &str,
+    expected: &str,
+) -> Result<bool, String> {
+    let Some(permissions) = root.get_mut(field) else {
+        return Ok(false);
+    };
+    let permissions = permissions
+        .as_array_mut()
+        .ok_or_else(|| format!("extension {field} is not an array"))?;
+    if permissions
+        .iter()
+        .any(|permission| permission.as_str().is_none())
+    {
+        return Err(format!(
+            "extension {field} contains a non-string permission"
+        ));
+    }
+    let matches = permissions
+        .iter()
+        .filter(|permission| permission.as_str() == Some(expected))
+        .count();
+    if matches > 1 {
+        return Err(format!("extension {field} repeats {expected}"));
+    }
+    if matches == 1 {
+        permissions.retain(|permission| permission.as_str() != Some(expected));
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 fn append_required_permission(
@@ -2107,6 +2171,49 @@ mod tests {
                 "native-preserved-or-inert-no-delivery".to_owned()
             ))
         );
+        validate_release_input(&artifact).unwrap();
+    }
+
+    #[test]
+    fn ordinary_native_target_omits_arbitrary_native_messaging_authority() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir(&source).unwrap();
+        let index = fixture(
+            &source,
+            Some("module"),
+            b"<!doctype html><html><head></head><body></body></html>",
+        );
+        let manifest_path = source.join("manifest.json");
+        let mut manifest: Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["permissions"] = serde_json::json!(["nativeMessaging", "storage"]);
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        reindex(&source, &index);
+
+        let artifact = temp.path().join("artifact");
+        materialize(&source, &index, &artifact).unwrap();
+        let transformed: Value = serde_json::from_slice(
+            &fs::read(artifact.join(ARTIFACT_EXTENSION).join("manifest.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(transformed["permissions"], serde_json::json!(["storage"]));
+        let metadata: Value =
+            serde_json::from_slice(&fs::read(artifact.join(ARTIFACT_METADATA)).unwrap()).unwrap();
+        assert_eq!(
+            metadata.pointer("/surfaces/native_messaging"),
+            Some(&Value::String("omitted-product-prohibited".to_owned()))
+        );
+        assert!(metadata["adaptations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == "product-prohibited-native-messaging-omission-v1"));
+        assert!(metadata["limitations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == "arbitrary-native-messaging-unavailable"));
         validate_release_input(&artifact).unwrap();
     }
 

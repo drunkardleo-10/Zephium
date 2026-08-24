@@ -331,7 +331,7 @@ fn review_level(value: &str) -> Result<ExtensionCompatibilityLevel, String> {
 }
 
 fn parse_inputs(bytes: &[u8], label: &str) -> Result<ManifestProfileInputs, String> {
-    let bounded = parse_bounded_json(bytes, BoundedJsonLimits::release_catalog())
+    let bounded = parse_bounded_json(bytes, BoundedJsonLimits::manifest_profile_review())
         .map_err(|error| format!("{label} is invalid: {error}"))?;
     serde_json::from_value(bounded.into_value())
         .map_err(|error| format!("{label} contract is invalid: {error}"))

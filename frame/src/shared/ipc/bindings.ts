@@ -477,7 +477,7 @@ export type ExtensionManagementGrantView = {
 };
 
 /**  One browser-owned explanation for a reviewed platform degradation. */
-export type ExtensionManagementLimitationView = { type: "api_permission"; name: string } | { type: "host_access" } | { type: "background" } | { type: "action" } | { type: "offscreen" } | { type: "native_messaging" } | { type: "browser_override" } | { type: "extension_pages_csp" } | { type: "sandbox" } | { type: "content_scripts" } | { type: "web_accessible_resources" } | { type: "minimum_browser_version" } | { type: "commands" } | { type: "side_panel" } | { type: "managed_storage" } | { type: "options_page" };
+export type ExtensionManagementLimitationView = { type: "api_permission"; name: string } | { type: "host_access" } | { type: "background" } | { type: "action" } | { type: "offscreen" } | { type: "native_messaging" } | { type: "browser_override" } | { type: "extension_pages_csp" } | { type: "sandbox" } | { type: "content_scripts" } | { type: "web_accessible_resources" } | { type: "minimum_browser_version" } | { type: "commands" } | { type: "side_panel" } | { type: "managed_storage" } | { type: "options_page" } | { type: "declarative_net_request" };
 
 /**  Settlement of the focused profile's lazy installed-extension projection. */
 export type ExtensionManagementPhase = "loading" | "ready" | "not_configured" | "catalog_not_synchronized" | "update_consent_required" | "unavailable" | "rejected" | "failed_closed";

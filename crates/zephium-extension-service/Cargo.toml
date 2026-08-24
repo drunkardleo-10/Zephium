@@ -9,6 +9,10 @@ acquired-packages = [
     "dep:zephium-extension-package",
     "zephium-extension-repository/acquired-packages",
 ]
+# Non-shipping projection policy for the separately identified private lab.
+# It keeps exact upstream provenance but never labels a local candidate as a
+# Zephium-reviewed release package.
+local-extension-lab = ["acquired-packages"]
 
 [dependencies]
 zephium-core.workspace = true

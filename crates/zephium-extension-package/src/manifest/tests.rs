@@ -581,6 +581,134 @@ fn command_semantics_change_the_typed_compatibility_identity() {
 }
 
 #[test]
+fn command_display_name_is_bounded_and_digest_bound() {
+    let fixture = |display_name: Value| {
+        make_fixture(
+            json!({
+                "manifest_version": 3,
+                "name": "X",
+                "version": "1",
+                "commands": {
+                    "lock": {
+                        "description": "Lock the extension",
+                        "name": display_name,
+                        "suggested_key": {
+                            "default": "Ctrl+Shift+L",
+                            "mac": "Command+Shift+L"
+                        }
+                    }
+                }
+            }),
+            &[],
+            false,
+        )
+    };
+    let first = fixture(json!("lock"));
+    let second = fixture(json!("lock-vault"));
+    let invalid = fixture(json!(7));
+    let policy = CompletePolicy::new(ExtensionCompatibilityLevel::Unsupported);
+    let first = admit_extension_manifest(first.binding(), &first.manifest, &policy).unwrap();
+    let second = admit_extension_manifest(second.binding(), &second.manifest, &policy).unwrap();
+
+    assert_ne!(
+        first
+            .descriptor()
+            .declarations()
+            .additional()
+            .commands()
+            .unwrap()
+            .descriptor_digest(),
+        second
+            .descriptor()
+            .declarations()
+            .additional()
+            .commands()
+            .unwrap()
+            .descriptor_digest()
+    );
+    assert!(matches!(
+        admit_extension_manifest(invalid.binding(), &invalid.manifest, &policy),
+        Err(ExtensionManifestAdmissionError::InvalidField(_))
+    ));
+}
+
+#[test]
+fn declarative_net_request_rulesets_are_typed_bounded_and_resource_bound() {
+    let fixture = |enabled: bool| {
+        make_fixture(
+            json!({
+                "manifest_version": 3,
+                "name": "DNR",
+                "version": "1",
+                "permissions": ["declarativeNetRequestWithHostAccess"],
+                "declarative_net_request": {
+                    "rule_resources": [{
+                        "id": "ruleset_1",
+                        "enabled": enabled,
+                        "path": "rules_1.json"
+                    }]
+                }
+            }),
+            &[(
+                "rules_1.json",
+                br#"[{"id":1,"action":{"type":"block"},"condition":{"urlFilter":"ads"}}]"#,
+            )],
+            false,
+        )
+    };
+    let enabled = fixture(true);
+    let disabled = fixture(false);
+    let policy = CompletePolicy::new(ExtensionCompatibilityLevel::Unsupported);
+    let enabled = admit_extension_manifest(enabled.binding(), &enabled.manifest, &policy).unwrap();
+    let disabled =
+        admit_extension_manifest(disabled.binding(), &disabled.manifest, &policy).unwrap();
+    let declaration = enabled
+        .descriptor()
+        .declarations()
+        .additional()
+        .declarative_net_request()
+        .unwrap();
+    assert_eq!(declaration.ruleset_count(), 1);
+    assert_eq!(declaration.enabled_ruleset_count(), 1);
+    assert!(enabled.descriptor().declarations().unmodeled().is_empty());
+    assert!(enabled
+        .resources()
+        .auxiliary_resources()
+        .iter()
+        .any(|resource| resource.path().as_str() == "rules_1.json"));
+    assert_ne!(
+        declaration.descriptor_digest(),
+        disabled
+            .descriptor()
+            .declarations()
+            .additional()
+            .declarative_net_request()
+            .unwrap()
+            .descriptor_digest()
+    );
+
+    let duplicate = make_fixture(
+        json!({
+            "manifest_version": 3,
+            "name": "DNR",
+            "version": "1",
+            "declarative_net_request": {
+                "rule_resources": [
+                    {"id":"same","enabled":true,"path":"rules_1.json"},
+                    {"id":"same","enabled":false,"path":"rules_2.json"}
+                ]
+            }
+        }),
+        &[("rules_1.json", b"[]"), ("rules_2.json", b"[]")],
+        false,
+    );
+    assert!(matches!(
+        admit_extension_manifest(duplicate.binding(), &duplicate.manifest, &policy),
+        Err(ExtensionManifestAdmissionError::InvalidField(_))
+    ));
+}
+
+#[test]
 fn exact_defaults_and_admission_digest_are_deterministic() {
     let fixture = make_fixture(
         json!({"manifest_version":3,"name":"Minimal","version":"1"}),

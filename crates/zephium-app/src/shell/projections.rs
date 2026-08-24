@@ -808,6 +808,9 @@ fn extension_management_limitation_view(
         ExtensionManagementLimitation::OptionsPage => {
             ExtensionManagementLimitationView::OptionsPage
         }
+        ExtensionManagementLimitation::DeclarativeNetRequest => {
+            ExtensionManagementLimitationView::DeclarativeNetRequest
+        }
     }
 }
 
