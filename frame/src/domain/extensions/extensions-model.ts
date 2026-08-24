@@ -1,5 +1,6 @@
 import type {
   ExtensionActionFailedView,
+  ExtensionActionShortcutView,
   ExtensionActionFailure,
   ExtensionActionsView,
   ExtensionDistributionRefreshAdmissionView,
@@ -94,6 +95,10 @@ export class ExtensionProjectionModel {
     return this.#failure;
   }
 
+  get revision(): string {
+    return this.#appliedRevision;
+  }
+
   applyActions(candidate: ExtensionActionsView): boolean {
     if (candidate.projection_revision <= this.#appliedRevision) return false;
     this.#appliedRevision = candidate.projection_revision;
@@ -113,6 +118,45 @@ export class ExtensionProjectionModel {
     if (this.#failure?.projection_revision !== revision) return false;
     this.#failure = null;
     return true;
+  }
+}
+
+/**
+ * One-shot admission for a native action shortcut. The shared actor revision
+ * floor prevents a delayed shortcut from targeting an action cohort that has
+ * already been replaced or failed. Consumption is exact so a Svelte remount
+ * cannot replay a prior keyboard gesture.
+ */
+export class ExtensionActionShortcutProjectionModel {
+  #view: ExtensionActionShortcutView | null = null;
+  #appliedRevision = ZERO_PROJECTION_REVISION;
+
+  get view(): ExtensionActionShortcutView | null {
+    return this.#view;
+  }
+
+  observeContextRevision(revision: string): void {
+    if (revision <= this.#appliedRevision) return;
+    this.#appliedRevision = revision;
+    if (this.#view !== null && this.#view.projection_revision <= revision) this.#view = null;
+  }
+
+  apply(candidate: ExtensionActionShortcutView, contextRevision: string): boolean {
+    this.observeContextRevision(contextRevision);
+    if (candidate.projection_revision <= this.#appliedRevision) return false;
+    this.#appliedRevision = candidate.projection_revision;
+    this.#view = candidate;
+    return true;
+  }
+
+  consume(revision: string): boolean {
+    if (this.#view?.projection_revision !== revision) return false;
+    this.#view = null;
+    return true;
+  }
+
+  clear(): void {
+    this.#view = null;
   }
 }
 

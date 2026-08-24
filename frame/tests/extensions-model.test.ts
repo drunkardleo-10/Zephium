@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type {
   ExtensionActionFailedView,
+  ExtensionActionShortcutView,
   ExtensionActionsView,
   ExtensionManagementAvailabilityChangedView,
   ExtensionManagementView,
@@ -8,6 +9,7 @@ import type {
 } from "../src/shared/ipc/bindings";
 import {
   ExtensionDistributionProjectionModel,
+  ExtensionActionShortcutProjectionModel,
   ExtensionManagementAvailabilityProjectionModel,
   ExtensionManagementProjectionModel,
   ExtensionProjectionModel,
@@ -76,6 +78,16 @@ function failure(value: number): ExtensionActionFailedView {
     profile_id: "profile-a",
     tab_id: "tab-a",
     reason: "tab_discarded",
+  };
+}
+
+function shortcut(value: number): ExtensionActionShortcutView {
+  return {
+    projection_revision: revision(value),
+    profile_id: "profile-a",
+    tab_id: "tab-a",
+    runtime: { install_id: "install-a", generation: "0000000000000001" },
+    action_revision: "0000000000000002",
   };
 }
 
@@ -183,6 +195,24 @@ describe("extension projection admission", () => {
     expect(failureForContext(current, "profile-b", "tab-a")).toBeNull();
     expect(failureForContext(current, "profile-a", "tab-b")).toBeNull();
     expect(failureForContext(current, null, null)).toBeNull();
+  });
+
+  it("consumes each action shortcut once and invalidates it with newer context", () => {
+    const actionModel = new ExtensionProjectionModel();
+    const shortcutModel = new ExtensionActionShortcutProjectionModel();
+    expect(actionModel.applyActions(actions(2))).toBe(true);
+    expect(shortcutModel.apply(shortcut(3), actionModel.revision)).toBe(true);
+    expect(shortcutModel.view).toEqual(shortcut(3));
+    expect(shortcutModel.consume(revision(2))).toBe(false);
+    expect(shortcutModel.consume(revision(3))).toBe(true);
+    expect(shortcutModel.view).toBeNull();
+    expect(shortcutModel.consume(revision(3))).toBe(false);
+
+    expect(shortcutModel.apply(shortcut(4), actionModel.revision)).toBe(true);
+    expect(actionModel.applyActions(actions(5, "Updated"))).toBe(true);
+    shortcutModel.observeContextRevision(actionModel.revision);
+    expect(shortcutModel.view).toBeNull();
+    expect(shortcutModel.apply(shortcut(4), actionModel.revision)).toBe(false);
   });
 });
 

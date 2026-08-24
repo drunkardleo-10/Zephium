@@ -10,6 +10,8 @@
   let tabId = $derived(tabs.activeId());
   let actions = $derived(extensions.activeActions(profileId, tabId));
   let failure = $derived(extensions.failureReason(profileId, tabId));
+  let shortcut = $derived(extensions.actionShortcut(profileId, tabId));
+  let actionRoot = $state<HTMLDivElement>();
 
   const failureMessage = (reason: ReturnType<typeof extensions.failureReason>) => {
     switch (reason) {
@@ -44,9 +46,29 @@
     if (profileId === null || tabId === null || !(target instanceof HTMLButtonElement)) return;
     void extensions.invoke(profileId, tabId, action, target.getBoundingClientRect());
   }
+
+  $effect(() => {
+    const request = shortcut;
+    const root = actionRoot;
+    if (request === null || root === undefined || profileId === null || tabId === null) return;
+    const action = actions.find(
+      (candidate) =>
+        candidate.runtime.install_id === request.runtime.install_id &&
+        candidate.runtime.generation === request.runtime.generation &&
+        candidate.revision === request.action_revision,
+    );
+    if (action === undefined || !action.enabled) return;
+    const button = [
+      ...root.querySelectorAll<HTMLButtonElement>("button[data-extension-install]"),
+    ].find((candidate) => candidate.dataset.extensionInstall === request.runtime.install_id);
+    if (button === undefined || button.disabled) return;
+    if (!extensions.consumeActionShortcut(request.projection_revision)) return;
+    void extensions.invoke(profileId, tabId, action, button.getBoundingClientRect());
+  });
 </script>
 
 <div
+  bind:this={actionRoot}
   class="relative flex shrink-0 gap-px px-1.5 pb-1.5"
   class:flex-wrap={!compact}
   class:flex-col={compact}
@@ -62,6 +84,7 @@
         aria-haspopup={action.presents_popup ? "dialog" : undefined}
         title={action.label || "Extension action"}
         disabled={!action.enabled || extensions.isInvoking(action.runtime.install_id)}
+        data-extension-install={action.runtime.install_id}
         class="icon-button relative"
         style:--icon-button-size="28px"
         onclick={(event) => invoke(event, action)}

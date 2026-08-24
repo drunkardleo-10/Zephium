@@ -94,6 +94,20 @@ pub struct ExtensionActionFailedView {
     pub reason: ExtensionActionFailure,
 }
 
+/// One actor-ordered request for privileged chrome to invoke the exact
+/// browser-owned action button already projected for the focused tab. The
+/// frame contributes only that button's current geometry; every authorizing
+/// identity is revalidated by Shell and the native host on the normal action
+/// path.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct ExtensionActionShortcutView {
+    pub projection_revision: String,
+    pub profile_id: String,
+    pub tab_id: String,
+    pub runtime: ExtensionActionRuntimeView,
+    pub action_revision: String,
+}
+
 /// Settlement of the focused profile's lazy installed-extension projection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "snake_case")]
@@ -910,6 +924,7 @@ pub enum Projection {
     Tab(TabView),
     ExtensionActions(ExtensionActionsView),
     ExtensionActionFailed(ExtensionActionFailedView),
+    ExtensionActionShortcut(ExtensionActionShortcutView),
     ExtensionManagementAvailability(ExtensionManagementAvailabilityChangedView),
     ExtensionManagement(ExtensionManagementView),
     ExtensionDistribution(ExtensionDistributionView),

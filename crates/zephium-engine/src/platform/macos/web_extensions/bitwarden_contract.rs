@@ -21,9 +21,9 @@ use objc2_web_kit::{
 use serde_json::{json, Value};
 use zephium_core::extensions::{
     ExtensionBrowserSurface, ExtensionBrowserSurfaceGeneration, ExtensionBrowserTab,
-    ExtensionBrowserWindow,
+    ExtensionBrowserWindow, ExtensionRuntimeGeneration, ExtensionRuntimeInstance,
 };
-use zephium_core::ids::{ItemId, ProfileId};
+use zephium_core::ids::{ExtensionInstallId, ItemId, ProfileId};
 
 const EXPECTED_NATIVE_REQUIRED_PERMISSIONS: [&str; 11] = [
     "activeTab",
@@ -487,7 +487,7 @@ pub(super) fn validate_native_grant_round_trip(
             &context,
             "_execute_action",
             &[Retained::as_ptr(&context)],
-            ControllerCommandDispatch::PopupRequiresAnchor,
+            ControllerCommandDispatch::PopupRequiresAnchor(probe_command_runtime(profile)),
         )?;
         perform_routed_command(
             &mut registry,
@@ -913,7 +913,9 @@ fn perform_routed_command(
     .ok_or_else(|| "cannot construct Bitwarden command key event".to_owned())?;
     let actual = registry
         .dispatch_command_for_event(profile, &event, |candidate| {
-            authorized_contexts.contains(&candidate)
+            authorized_contexts
+                .contains(&candidate)
+                .then_some(probe_command_runtime(profile))
         })
         .map_err(|error| format!("Bitwarden native command routing failed: {error}"))?;
     if actual != expected {
@@ -922,6 +924,14 @@ fn perform_routed_command(
         ));
     }
     Ok(())
+}
+
+fn probe_command_runtime(profile: ProfileId) -> ExtensionRuntimeInstance {
+    ExtensionRuntimeInstance::new(
+        profile,
+        ExtensionInstallId::from(BITWARDEN_PRODUCT_TAB),
+        ExtensionRuntimeGeneration::INITIAL,
+    )
 }
 
 fn validate_native_context_menu(

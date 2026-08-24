@@ -1,5 +1,6 @@
 import type {
   ExtensionActionFailedView,
+  ExtensionActionShortcutView,
   ExtensionActionFailure,
   ExtensionActionView,
   ExtensionActionsView,
@@ -19,6 +20,7 @@ import { events } from "../../shared/ipc/native-events";
 import * as operations from "../operations/operations";
 import {
   ExtensionDistributionProjectionModel,
+  ExtensionActionShortcutProjectionModel,
   ExtensionManagementAvailabilityProjectionModel,
   ExtensionManagementProjectionModel,
   ExtensionProjectionModel,
@@ -32,15 +34,18 @@ import {
 } from "./extensions-model";
 
 const NOTICE_LIFETIME_MS = 5_000;
+const ACTION_SHORTCUT_LIFETIME_MS = 1_000;
 const MANAGEMENT_IPC_TIMEOUT_MS = 5_000;
 const MANAGEMENT_SETTLEMENT_TIMEOUT_MS = 30_000;
 
 const model = new ExtensionProjectionModel();
+const shortcutModel = new ExtensionActionShortcutProjectionModel();
 const managementModel = new ExtensionManagementProjectionModel();
 const managementAvailabilityModel = new ExtensionManagementAvailabilityProjectionModel();
 const distributionModel = new ExtensionDistributionProjectionModel();
 const runtimeGrantModel = new ExtensionRuntimeGrantPromptProjectionModel();
 let state = $state.raw<ExtensionActionsView>(model.actions);
+let shortcutState = $state.raw<ExtensionActionShortcutView | null>(shortcutModel.view);
 let managementState = $state.raw<ExtensionManagementView>(managementModel.management);
 let managementAvailabilityState = $state.raw(managementAvailabilityModel.view);
 let distributionState = $state.raw<ExtensionDistributionView | null>(distributionModel.view);
@@ -67,6 +72,7 @@ let initialized = false;
 let initializing: Promise<void> | null = null;
 let unlisten: (() => void) | null = null;
 let noticeTimer: ReturnType<typeof setTimeout> | null = null;
+let shortcutTimer: ReturnType<typeof setTimeout> | null = null;
 
 type Unlisten = () => void;
 
@@ -74,6 +80,19 @@ export const snapshot = () => state;
 export const failureReason = (profileId: string | null, tabId: string | null) =>
   failureForContext(failure, profileId, tabId);
 export const isInvoking = (installId: string) => invoking.has(installId);
+export const actionShortcut = (profileId: string | null, tabId: string | null) =>
+  shortcutState !== null && shortcutState.profile_id === profileId && shortcutState.tab_id === tabId
+    ? shortcutState
+    : null;
+export const consumeActionShortcut = (revision: string) => {
+  const consumed = shortcutModel.consume(revision);
+  if (consumed) {
+    if (shortcutTimer !== null) clearTimeout(shortcutTimer);
+    shortcutTimer = null;
+    shortcutState = shortcutModel.view;
+  }
+  return consumed;
+};
 export const management = (profileId: string | null) =>
   managementForProfile(managementState, profileId);
 export const managementAvailability = () => managementAvailabilityState.availability;
@@ -159,16 +178,39 @@ async function initialize(generation: number) {
     events.extensionActionsChanged.listen((event) => {
       if (generation !== lifecycle || !model.applyActions(event.payload)) return;
       state = model.actions;
+      shortcutModel.observeContextRevision(model.revision);
+      shortcutState = shortcutModel.view;
+      if (shortcutState === null && shortcutTimer !== null) {
+        clearTimeout(shortcutTimer);
+        shortcutTimer = null;
+      }
       clearVisibleFailure();
     }),
     events.extensionActionFailed.listen((event) => {
       if (generation !== lifecycle || !model.applyFailure(event.payload)) return;
+      shortcutModel.observeContextRevision(model.revision);
+      shortcutState = shortcutModel.view;
+      if (shortcutState === null && shortcutTimer !== null) {
+        clearTimeout(shortcutTimer);
+        shortcutTimer = null;
+      }
       publishFailure(
         event.payload.reason,
         event.payload.profile_id,
         event.payload.tab_id,
         event.payload.projection_revision,
       );
+    }),
+    events.extensionActionShortcut.listen((event) => {
+      if (generation !== lifecycle || !shortcutModel.apply(event.payload, model.revision)) return;
+      shortcutState = shortcutModel.view;
+      if (shortcutTimer !== null) clearTimeout(shortcutTimer);
+      const revision = event.payload.projection_revision;
+      shortcutTimer = setTimeout(() => {
+        shortcutTimer = null;
+        if (generation !== lifecycle || !shortcutModel.consume(revision)) return;
+        shortcutState = shortcutModel.view;
+      }, ACTION_SHORTCUT_LIFETIME_MS);
     }),
     events.extensionManagementChanged.listen((event) => {
       if (generation !== lifecycle || !managementModel.apply(event.payload)) return;
@@ -228,7 +270,11 @@ export function dispose() {
   unlisten = null;
   if (noticeTimer !== null) clearTimeout(noticeTimer);
   noticeTimer = null;
+  if (shortcutTimer !== null) clearTimeout(shortcutTimer);
+  shortcutTimer = null;
   invoking.clear();
+  shortcutModel.clear();
+  shortcutState = shortcutModel.view;
   managementMutation = null;
   managementAvailabilityState = initialExtensionManagementAvailability();
   managementNotice = null;

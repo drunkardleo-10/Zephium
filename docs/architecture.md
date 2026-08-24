@@ -837,9 +837,16 @@ WKWebView whose logical item is the Shell-focused, active, resident regular tab.
 The controller then bounds and sorts at most eight canonical context identities,
 uses `commandForEvent:` without executing, reauthenticates every match against a
 currently published runtime, and performs only one unambiguous non-action
-command. Cross-extension collisions are not dispatched. `_execute_action` is
-also withheld because a keyboard event carries no trusted Shell popup anchor;
-browser-owned shortcut remapping/conflict UX and anchored action shortcuts
+command. Cross-extension collisions are not dispatched. An unambiguous
+`_execute_action` match emits only the exact runtime, tab, and surface
+generation into Shell. Shell rejoins the current action revision and projects
+one actor-ordered, one-shot request to privileged chrome; chrome can contribute
+only the already-rendered browser-owned action button's current rectangle
+through the ordinary action invocation. A newer action/failure projection or
+the one-second gesture deadline invalidates the request, exact consumption
+prevents remount replay, and the
+normal native path reauthenticates every identity before WebKit executes.
+Browser-owned shortcut remapping/conflict UX and packaged physical-key evidence
 remain separate product work.
 
 Page context menus are composed at Wry's native `menuForEvent:` boundary only
@@ -1175,6 +1182,17 @@ The V4 billed/serviced energy fields remain explicitly raw counters; release
 energy budgets require a calibrated supported-machine campaign rather than an
 invented unit conversion. A successful short attachment proves only sampler
 integrity, not a browser resource budget.
+
+One ten-second arm64 macOS 26.6.1 attachment on 2026-08-24 exercised the release
+staging application with one enabled extension after native commands and
+context-menu routing landed. Six processes reached 118,133,224 bytes peak and
+118,067,688 bytes terminal aggregate physical footprint; the observation
+interval accumulated 2.72 ms user CPU, 1.07 ms system CPU, 12 package-idle
+wakeups, and 15 interrupt wakeups. Peak application and combined two-WebContent
+physical footprints were 35,832,888 and 55,920,224 bytes respectively. This is
+a correctly attributed short sample, not a before/after causal claim or release
+budget; clean-runner multi-extension, churn, energy, tab-pressure, and endurance
+campaigns remain required.
 
 Remaining macOS work is now product/API breadth rather than a missing runtime
 foundation: changed-permission update consent, extension notifications and
@@ -1641,7 +1659,7 @@ mandatory before Vimium is presented as compatible.
 | Manifest sandbox pages | Sealed adapter primitive compatible; pinned transform still required | WebKit does not enforce the declared sandbox and also ignores the intended isolation when the extension URL is placed in an explicit sandboxed iframe. The live gate proves the reviewed replacement topology: an inert public payload is fetched by the authenticated content-script host and instantiated through a Blob-backed `allow-scripts` frame; the child has a `null` message origin, no extension APIs, and no parent DOM authority, while the privileged leaf URL is not public. The exact Bitwarden button/list bundle transformation and authenticated message flow still require deterministic source/build adaptation and hostile end-to-end tests. |
 | Private extension-resource WebAssembly startup | Release-blocked on the exercised runtime | The pinned 7,378,704-byte SDK module is returned as `application/octet-stream`. Native streaming compilation rejects that MIME, the vendor `arrayBuffer()` fallback promise does not settle, and the popup event loop stops advancing before compilation starts. A separately labelled probe that wraps the same private response body with `Content-Type: application/wasm` in both popup and background also stalls during the streaming retry. This closes a header-only runtime workaround; it does not authorize embedding bytes, adding a generic resource bridge, or distributing a modified package. |
 | Alarms | Lifecycle admission compatible; delivery unassessed | The background creates an exact future alarm, reads back its name and finite scheduled time, clears it, and proves post-clear absence. Firing, service-worker wakeup, restart persistence, sleep/wake behavior, and long-duration drift remain release gates. |
-| Commands | Native event routing compatible for unambiguous non-action commands; action shortcut degraded | `commands.getAll` returns the exact six pinned command names. A real `NSEvent` is matched through `commandForEvent:`, the context is exact, and `autofill_login` reaches `commands.onCommand`. Browser-menu precedence, focused/resident-tab binding, current-runtime authentication, collision refusal, and monitor retirement are implemented. `_execute_action` remains refused without a trusted popup anchor; browser-owned remapping/conflict UI and packaged physical-key evidence remain release gates. |
+| Commands | Native event routing compatible for unambiguous commands | `commands.getAll` returns the exact six pinned command names. A real `NSEvent` is matched through `commandForEvent:`, the context is exact, and `autofill_login` reaches `commands.onCommand`. Browser-menu precedence, focused/resident-tab binding, current-runtime authentication, collision refusal, and monitor retirement are implemented. `_execute_action` crosses one actor-ordered, one-second request and reuses the exact visible browser-action button as its trusted popup anchor; the ordinary Shell/native action path revalidates the complete runtime/tab/revision cohort. Browser-owned remapping/conflict UI and packaged physical-key evidence remain release gates. |
 | Context menus | Native merge and click routing compatible on the exercised tab context | The background creates and updates one tab-context item; Zephium preserves an opaque default-menu prefix, appends the bounded native item, performs it through `NSMenu`, observes the exact `contextMenus.onClicked` tab, then removes it and verifies native absence. Packaged physical right-click, frame/editable/link variants, dynamic enablement, and navigation-time teardown remain release gates. |
 | Clipboard read/write | Behavior unassessed | A production gate must be driven by a trusted popup gesture and preserve the user's prior clipboard contents on every success, refusal, timeout, and crash path. Automated tests must not destructively overwrite ambient clipboard state. |
 

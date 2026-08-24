@@ -3,8 +3,9 @@ use super::*;
 use crate::shell::extension_actions::ExtensionActionInvocationObservation;
 use zephium_core::extensions::{
     ExtensionActionIcon, ExtensionActionRevision, ExtensionActionScope, ExtensionActionSnapshot,
-    ExtensionActionSnapshotSettlement, ExtensionActionState, ExtensionPopupAnchor,
-    ExtensionRuntimeGeneration, ExtensionRuntimeInstance, EXTENSION_ACTION_ICON_RGBA_BYTES,
+    ExtensionActionSnapshotSettlement, ExtensionActionState, ExtensionBrowserSurface,
+    ExtensionBrowserTab, ExtensionBrowserWindow, ExtensionPopupAnchor, ExtensionRuntimeGeneration,
+    ExtensionRuntimeInstance, EXTENSION_ACTION_ICON_RGBA_BYTES,
 };
 use zephium_core::ids::ExtensionInstallId;
 
@@ -62,6 +63,55 @@ fn newest_exact_action_snapshot_replaces_and_failures_retain() {
         },
     ));
     assert_eq!(shell.extension_actions.snapshot(profile), Some(&snapshot));
+    let resident_surface = ExtensionBrowserSurface::new(
+        profile,
+        generation,
+        Some(1),
+        vec![ExtensionBrowserWindow::new(
+            1,
+            false,
+            Some(tab),
+            vec![ExtensionBrowserTab::from_snapshot(
+                None,
+                tab,
+                true,
+                "Bitwarden test",
+                Some(&url::Url::parse("https://example.test/").unwrap()),
+                false,
+                false,
+            )
+            .unwrap()],
+        )
+        .unwrap()],
+    )
+    .unwrap();
+    assert_eq!(
+        shell.extension_actions.shortcut_action_revision(
+            Some(&resident_surface),
+            runtime,
+            tab,
+            generation,
+        ),
+        Ok(ExtensionActionRevision::INITIAL)
+    );
+    assert_eq!(
+        shell.extension_actions.shortcut_action_revision(
+            shell.extension_browser_surfaces.published_surface(profile),
+            runtime,
+            tab,
+            generation,
+        ),
+        Err(zephium_core::extensions::ExtensionActionRejection::TabDiscarded)
+    );
+    assert_eq!(
+        shell.extension_actions.shortcut_action_revision(
+            shell.extension_browser_surfaces.published_surface(profile),
+            runtime,
+            tab,
+            generation.next().unwrap(),
+        ),
+        Err(zephium_core::extensions::ExtensionActionRejection::TabUnavailable)
+    );
     let projected = shell
         .extension_actions
         .projected_actions(profile, tab, generation);

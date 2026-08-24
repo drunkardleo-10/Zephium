@@ -874,6 +874,15 @@ pub enum EngineEvent {
     ExtensionActionsInvalidated {
         profile: ProfileId,
     },
+    /// A native command matched the reserved browser-action shortcut for one
+    /// exact published runtime and resident tab. The event carries no popup
+    /// geometry: Shell must rejoin it to the current action snapshot and ask
+    /// privileged chrome for the already-rendered browser-owned button anchor.
+    ExtensionActionShortcutRequested {
+        runtime: crate::extensions::ExtensionRuntimeInstance,
+        tab: ItemId,
+        surface_generation: crate::extensions::ExtensionBrowserSurfaceGeneration,
+    },
     TitleChanged {
         id: ItemId,
         title: String,

@@ -104,6 +104,7 @@ const EVENT_ITEMS: &str = "zephium:items";
 const EVENT_TAB: &str = "zephium:tab";
 const EVENT_EXTENSION_ACTIONS: &str = "zephium:extension-actions";
 const EVENT_EXTENSION_ACTION_FAILED: &str = "zephium:extension-action-failed";
+const EVENT_EXTENSION_ACTION_SHORTCUT: &str = "zephium:extension-action-shortcut";
 const EVENT_EXTENSION_MANAGEMENT_AVAILABILITY: &str = "zephium:extension-management-availability";
 const EVENT_EXTENSION_MANAGEMENT: &str = "zephium:extension-management";
 const EVENT_EXTENSION_DISTRIBUTION: &str = "zephium:extension-distribution";
@@ -1264,6 +1265,9 @@ struct ExtensionActionsChanged(zephium_ipc::ExtensionActionsView);
 struct ExtensionActionFailed(zephium_ipc::ExtensionActionFailedView);
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
+struct ExtensionActionShortcut(zephium_ipc::ExtensionActionShortcutView);
+
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
 struct ExtensionManagementAvailabilityChanged(
     zephium_ipc::ExtensionManagementAvailabilityChangedView,
 );
@@ -1531,6 +1535,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             TabChanged,
             ExtensionActionsChanged,
             ExtensionActionFailed,
+            ExtensionActionShortcut,
             ExtensionManagementAvailabilityChanged,
             ExtensionManagementChanged,
             ExtensionDistributionChanged,
@@ -4271,6 +4276,12 @@ pub fn run() {
                     MAIN_LABEL,
                     EVENT_EXTENSION_ACTION_FAILED,
                     &failure,
+                ),
+                Projection::ExtensionActionShortcut(shortcut) => emit_to_privileged(
+                    &emit_handle,
+                    MAIN_LABEL,
+                    EVENT_EXTENSION_ACTION_SHORTCUT,
+                    &shortcut,
                 ),
                 Projection::ExtensionManagementAvailability(availability) => emit_to_privileged(
                     &emit_handle,

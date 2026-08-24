@@ -270,6 +270,36 @@ impl Shell {
                     );
                 }
             }
+            EngineEvent::ExtensionActionShortcutRequested {
+                runtime,
+                tab,
+                surface_generation,
+            } => match self.extension_actions.shortcut_action_revision(
+                self.extension_browser_surfaces
+                    .published_surface(runtime.profile()),
+                runtime,
+                tab,
+                surface_generation,
+            ) {
+                Ok(revision) => {
+                    self.project_extension_action_shortcut(runtime, tab, revision);
+                }
+                Err(reason) => {
+                    crate::diagnostic!(
+                        "extensions: action shortcut rejected with typed reason {reason:?}"
+                    );
+                    self.project_extension_action_failure(runtime.profile(), Some(tab), reason);
+                    if matches!(
+                        reason,
+                        zephium_core::extensions::ExtensionActionRejection::RuntimeSuperseded
+                            | zephium_core::extensions::ExtensionActionRejection::RuntimeUnavailable
+                            | zephium_core::extensions::ExtensionActionRejection::ActionUnavailable
+                            | zephium_core::extensions::ExtensionActionRejection::ActionDisabled
+                    ) {
+                        let _ = self.refresh_extension_actions(runtime.profile());
+                    }
+                }
+            },
             EngineEvent::SplitChanged { window, tree } => {
                 // Native divider drags may update ratios only. Never let a
                 // stale or malformed callback mutate topology, swap tabs, or
@@ -506,6 +536,9 @@ impl Shell {
             EngineEvent::ExtensionActionSettled { profile, .. } => Some(*profile),
             EngineEvent::ExtensionOptionsPageSettled { runtime, .. } => Some(runtime.profile()),
             EngineEvent::ExtensionActionsInvalidated { profile } => Some(*profile),
+            EngineEvent::ExtensionActionShortcutRequested { runtime, .. } => {
+                Some(runtime.profile())
+            }
             EngineEvent::SplitChanged { window, .. } => {
                 self.windows.get(*window).map(|window| window.profile)
             }

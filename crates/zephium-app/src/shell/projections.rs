@@ -425,6 +425,34 @@ impl Shell {
         ));
     }
 
+    pub(super) fn project_extension_action_shortcut(
+        &self,
+        runtime: zephium_core::extensions::ExtensionRuntimeInstance,
+        tab: ItemId,
+        action_revision: zephium_core::extensions::ExtensionActionRevision,
+    ) {
+        let current = self
+            .windows
+            .focused()
+            .filter(|window| window.profile == runtime.profile() && window.active == Some(tab))
+            .is_some();
+        if !current {
+            return;
+        }
+        (self.emit)(Projection::ExtensionActionShortcut(
+            ExtensionActionShortcutView {
+                projection_revision: format!("{:032x}", self.next_projection_revision()),
+                profile_id: runtime.profile().to_string(),
+                tab_id: tab.to_string(),
+                runtime: ExtensionActionRuntimeView {
+                    install_id: runtime.install_id().to_string(),
+                    generation: format!("{:016x}", runtime.generation().get()),
+                },
+                action_revision: format!("{:016x}", action_revision.get()),
+            },
+        ));
+    }
+
     pub(super) fn project_runtime_status(&self) {
         (self.emit)(Projection::RuntimeStatus(RuntimeStatus {
             restart_required: self.runtime_restart_required,

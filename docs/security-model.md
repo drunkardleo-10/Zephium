@@ -66,9 +66,15 @@ Chromium's full site-isolation model.
    exists only while a context is loaded, gives browser-menu accelerators first
    refusal, and accepts only the focused resident regular tab's WKWebView. It
    resolves every canonical context without executing, reauthenticates matches
-   against published runtime ownership, rejects collisions, and refuses
-   `_execute_action` without a Shell-owned popup anchor. Monitor-removal failure
-   poisons clean shutdown rather than leaving an untracked input observer.
+   against published runtime ownership, and rejects collisions. An exact
+   `_execute_action` match carries no geometry or native object across the
+   engine boundary: Shell rejoins the current action revision and privileged
+   chrome may return only its already-rendered browser-owned button rectangle
+   through the ordinary action command. Actor revision ordering, a one-second
+   gesture deadline, exact one-shot consumption, and the existing native
+   revalidation prevent delayed or replayed shortcuts from minting popup
+   authority. Monitor-removal failure poisons clean
+   shutdown rather than leaving an untracked input observer.
    Extension page-menu integration runs only in Wry's native `menuForEvent:`
    callback for a controller-bound content view. The default `NSMenu` and
    extension `NSMenuItem` objects remain opaque; page context is never copied

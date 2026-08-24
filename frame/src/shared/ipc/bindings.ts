@@ -92,6 +92,7 @@ export const commands = {
 export const events = {
 	blockerStatusChanged: makeEvent<BlockerStatusChanged>("blocker-status-changed"),
 	extensionActionFailed: makeEvent<ExtensionActionFailed>("extension-action-failed"),
+	extensionActionShortcut: makeEvent<ExtensionActionShortcut>("extension-action-shortcut"),
 	extensionActionsChanged: makeEvent<ExtensionActionsChanged>("extension-actions-changed"),
 	extensionDistributionChanged: makeEvent<ExtensionDistributionChanged>("extension-distribution-changed"),
 	extensionManagementAvailabilityChanged: makeEvent<ExtensionManagementAvailabilityChanged>("extension-management-availability-changed"),
@@ -295,6 +296,23 @@ export type ExtensionActionRuntimeView = {
 	 *  so JavaScript never rounds a Rust `u64`.
 	 */
 	generation: string,
+};
+
+export type ExtensionActionShortcut = ExtensionActionShortcutView;
+
+/**
+ *  One actor-ordered request for privileged chrome to invoke the exact
+ *  browser-owned action button already projected for the focused tab. The
+ *  frame contributes only that button's current geometry; every authorizing
+ *  identity is revalidated by Shell and the native host on the normal action
+ *  path.
+ */
+export type ExtensionActionShortcutView = {
+	projection_revision: string,
+	profile_id: string,
+	tab_id: string,
+	runtime: ExtensionActionRuntimeView,
+	action_revision: string,
 };
 
 /**

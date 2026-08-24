@@ -48,25 +48,28 @@ impl EngineHost {
         else {
             return false;
         };
-        let focused_resident = self
-            .extension_browser_surfaces
-            .get(&profile)
-            .and_then(|surface| {
-                let focused = surface.focused()?;
-                surface.windows().iter().find(|window| {
-                    window.id() == focused
-                        && !window.is_private()
-                        && window.active() == Some(item)
-                        && window
-                            .tabs()
-                            .iter()
-                            .any(|tab| tab.id() == item && tab.resident())
-                })
-            })
-            .is_some();
-        if !focused_resident {
+        let focused_surface_generation =
+            self.extension_browser_surfaces
+                .get(&profile)
+                .and_then(|surface| {
+                    let focused = surface.focused()?;
+                    surface
+                        .windows()
+                        .iter()
+                        .any(|window| {
+                            window.id() == focused
+                                && !window.is_private()
+                                && window.active() == Some(item)
+                                && window
+                                    .tabs()
+                                    .iter()
+                                    .any(|tab| tab.id() == item && tab.resident())
+                        })
+                        .then_some(surface.generation())
+                });
+        let Some(surface_generation) = focused_surface_generation else {
             return false;
-        }
+        };
 
         let runtimes = &mut self.extension_runtime_registry;
         let mut authorization_failed = false;
@@ -74,11 +77,11 @@ impl EngineHost {
             profile,
             event,
             |context| match runtimes.published_runtime_for_macos_context(profile, context) {
-                Ok(Some(_)) => true,
-                Ok(None) => false,
+                Ok(Some(runtime)) => Some(runtime.instance()),
+                Ok(None) => None,
                 Err(_) => {
                     authorization_failed = true;
-                    false
+                    None
                 }
             },
         );
@@ -94,11 +97,15 @@ impl EngineHost {
                 crate::diagnostic!("extensions: command shortcut collision was not dispatched");
                 false
             }
-            Ok(crate::platform::imp::ControllerCommandDispatch::PopupRequiresAnchor) => {
-                crate::diagnostic!(
-                    "extensions: action shortcut requires a browser-owned popup anchor"
+            Ok(crate::platform::imp::ControllerCommandDispatch::PopupRequiresAnchor(runtime)) => {
+                self.sink.emit(
+                    zephium_core::ports::engine::EngineEvent::ExtensionActionShortcutRequested {
+                        runtime,
+                        tab: item,
+                        surface_generation,
+                    },
                 );
-                false
+                true
             }
             Ok(crate::platform::imp::ControllerCommandDispatch::NotMatched) => false,
             Err(_) => {

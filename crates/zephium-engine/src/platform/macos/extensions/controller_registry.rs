@@ -408,7 +408,7 @@ pub(crate) enum ControllerCommandDispatch {
     NotMatched,
     Performed,
     Collision,
-    PopupRequiresAnchor,
+    PopupRequiresAnchor(ExtensionRuntimeInstance),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -538,7 +538,7 @@ impl PersistentControllerRegistry {
         &mut self,
         profile: ProfileId,
         event: &NSEvent,
-        mut authorizes: impl FnMut(*const WKWebExtensionContext) -> bool,
+        mut authenticates: impl FnMut(*const WKWebExtensionContext) -> Option<ExtensionRuntimeInstance>,
     ) -> Result<ControllerCommandDispatch, ControllerRegistryError> {
         if self.slots.sealed || self.slots.integrity_failed {
             return Ok(ControllerCommandDispatch::NotMatched);
@@ -568,9 +568,9 @@ impl PersistentControllerRegistry {
                 }
                 identities[identity_count] = identity;
                 identity_count += 1;
-                if !authorizes(Retained::as_ptr(&context)) {
+                let Some(runtime) = authenticates(Retained::as_ptr(&context)) else {
                     continue;
-                }
+                };
                 let Some(command) = (unsafe { context.commandForEvent(event) }) else {
                     continue;
                 };
@@ -584,7 +584,7 @@ impl PersistentControllerRegistry {
                     collision = true;
                     continue;
                 }
-                matched = Some((context, command));
+                matched = Some((context, command, runtime));
             }
             if identity_count != context_count {
                 return Err(ControllerRegistryError::CommandContextInventoryInvalid);
@@ -592,13 +592,13 @@ impl PersistentControllerRegistry {
             if collision {
                 return Ok(ControllerCommandDispatch::Collision);
             }
-            let Some((context, command)) = matched else {
+            let Some((context, command, runtime)) = matched else {
                 return Ok(ControllerCommandDispatch::NotMatched);
             };
             if unsafe { command.identifier() }
                 .isEqualToString(&NSString::from_str("_execute_action"))
             {
-                return Ok(ControllerCommandDispatch::PopupRequiresAnchor);
+                return Ok(ControllerCommandDispatch::PopupRequiresAnchor(runtime));
             }
             unsafe { context.performCommand(&command) };
             Ok(ControllerCommandDispatch::Performed)

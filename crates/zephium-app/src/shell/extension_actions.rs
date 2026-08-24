@@ -85,6 +85,55 @@ impl ExtensionActionState {
             .collect()
     }
 
+    /// Rejoins a native `_execute_action` command to the exact Shell-owned
+    /// action snapshot. This mints no action request and accepts no geometry;
+    /// privileged chrome must echo the current browser-owned button anchor
+    /// through the ordinary invocation path before native work can begin.
+    pub(super) fn shortcut_action_revision(
+        &self,
+        current_surface: Option<&ExtensionBrowserSurface>,
+        runtime: ExtensionRuntimeInstance,
+        tab: ItemId,
+        surface_generation: ExtensionBrowserSurfaceGeneration,
+    ) -> Result<ExtensionActionRevision, ExtensionActionRejection> {
+        let surface = current_surface
+            .filter(|surface| {
+                surface.profile() == runtime.profile()
+                    && surface.generation() == surface_generation
+                    && surface
+                        .windows()
+                        .first()
+                        .and_then(zephium_core::extensions::ExtensionBrowserWindow::active)
+                        == Some(tab)
+            })
+            .ok_or(ExtensionActionRejection::TabUnavailable)?;
+        let resident = surface
+            .windows()
+            .first()
+            .and_then(|window| window.tabs().iter().find(|candidate| candidate.id() == tab))
+            .is_some_and(zephium_core::extensions::ExtensionBrowserTab::resident);
+        if !resident {
+            return Err(ExtensionActionRejection::TabDiscarded);
+        }
+        let action = self
+            .snapshots
+            .get(&runtime.profile())
+            .filter(|snapshot| {
+                snapshot.tab() == tab && snapshot.surface_generation() == surface_generation
+            })
+            .and_then(|snapshot| {
+                snapshot
+                    .actions()
+                    .iter()
+                    .find(|action| action.runtime() == runtime)
+            })
+            .ok_or(ExtensionActionRejection::ActionUnavailable)?;
+        if !action.is_enabled() {
+            return Err(ExtensionActionRejection::ActionDisabled);
+        }
+        Ok(action.revision())
+    }
+
     pub(super) fn observe(
         &mut self,
         current_surface: Option<&ExtensionBrowserSurface>,
