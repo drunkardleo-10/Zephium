@@ -9,6 +9,8 @@
 #[allow(dead_code)]
 mod cdp;
 mod content_filter;
+#[allow(dead_code)]
+mod extensions;
 mod stage;
 
 pub(crate) use content_filter::{

@@ -14,6 +14,10 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     let constructor_source = read_source(&constructor_path)?;
     validate_constructor(&constructor_source)?;
 
+    let native_owner_path = repository.join(NATIVE_OWNER);
+    let native_owner_source = read_source(&native_owner_path)?;
+    validate_native_owner(&native_owner_source)?;
+
     let mut wry_sources = Vec::new();
     collect_rust_sources(&wry_root, &mut wry_sources)?;
     wry_sources.sort();
@@ -218,6 +222,60 @@ fn validate_shipping_source(relative: &Path, source: &str) -> Result<(), String>
     }
 
     reject_direct_enablement(relative, &compact)
+}
+
+fn validate_native_owner(source: &str) -> Result<(), String> {
+    let source = compact(source);
+    let install_entry = [".AddBrowser", "Extension("].concat();
+    if source.matches(&install_entry).count() != 1 {
+        return Err(format!(
+            "{NATIVE_OWNER} must contain exactly one native extension-install entry"
+        ));
+    }
+    for required in [
+        "letresult=completion.and_then(|()|{extension.ok_or_else(",
+        "ifletErr(unsent)=sender.send(result)",
+        "Ok(Err(_))=>Err(WindowsNativeExtensionFailure::NativeCall(WindowsNativeExtensionCall::InstallCompletion",
+        "Err(_)=>Err(WindowsNativeExtensionFailure::NativeCall(WindowsNativeExtensionCall::InstallWait",
+        "extension:Option<ICoreWebView2BrowserExtension>",
+        "environment:ICoreWebView2Environment",
+        "profile:ICoreWebView2Profile7",
+        "native_root:ExtensionRuntimeNativeRootLease",
+        "super::super::attest_environment(&environment,expected_user_data_folder)",
+        "ExtensionRuntimeNativeOwnerId::parse_exact(&owner)",
+        "observed_owner!=expected_owner",
+        "observed_owner:Option<ExtensionRuntimeNativeOwnerId>",
+        "retained.observed_owner=Some(observed_owner)",
+        "debug_assert_eq!(retained.observed_owner,Some(retained.expected_owner))",
+        "count<=MAX_EXTENSION_INSTALLS_PER_PROFILE",
+        "implDropforWindowsNativeExtensionCleanupDebt",
+        "retain_orphaned_native_object(OrphanedNativeObject::Lifecycle",
+        "native_extension_cleanup_invariant_failed()",
+        "NATIVE_CALLBACK_SETTLEMENT_UNOBSERVED.with(Cell::get)",
+        "OrphanedNativeObject::Extension(ManuallyDrop::new(extension))",
+        "OrphanedNativeObject::Inventory(ManuallyDrop::new(inventory))",
+        ".field(\"profile\",&\"[redacted]\")",
+        ".field(\"owner\",&\"[redacted]\")",
+    ] {
+        if !source.contains(required) {
+            return Err(format!(
+                "{NATIVE_OWNER} is missing native install/identity/lifecycle contract: {required}"
+            ));
+        }
+    }
+    for forbidden in [
+        ["CreateCoreWebView2Environment", "WithOptions"].concat(),
+        ["CoreWebView2Environment", "Options"].concat(),
+        "with_browser_extensions_enabled(true)".to_owned(),
+        "with_webview2_extension_startup_gate".to_owned(),
+    ] {
+        if source.contains(&forbidden) {
+            return Err(format!(
+                "{NATIVE_OWNER} may not create or enable a WebView2 environment in this milestone"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn reject_direct_enablement(relative: &Path, compact: &str) -> Result<(), String> {
@@ -426,6 +484,43 @@ fn create_environment() {
         ] {
             assert!(validate_shipping_source(Path::new("crates/unfenced.rs"), &direct).is_err());
         }
+    }
+
+    #[test]
+    fn native_owner_requires_exact_completion_identity_and_retained_lifecycle() {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("xtask has repository parent");
+        let source = read_source(&repository.join(NATIVE_OWNER)).expect("native owner source");
+        assert!(validate_native_owner(&source).is_ok());
+
+        let dropped_completion = source.replacen(
+            "let result = completion.and_then(|()| {",
+            "let result = Ok(()).and_then(|()| {",
+            1,
+        );
+        assert!(validate_native_owner(&dropped_completion).is_err());
+
+        let dropped_identity = source.replacen(
+            "ExtensionRuntimeNativeOwnerId::parse_exact(&owner)",
+            "Ok(ExtensionRuntimeNativeOwnerId::from_encoded_bytes([b'a'; 32]).unwrap())",
+            1,
+        );
+        assert!(validate_native_owner(&dropped_identity).is_err());
+
+        let unbound_environment = source.replacen(
+            "super::super::attest_environment(&environment, expected_user_data_folder)",
+            "Ok::<(), ()>(())",
+            1,
+        );
+        assert!(validate_native_owner(&unbound_environment).is_err());
+
+        let leaked_drop = source.replacen(
+            "retain_orphaned_native_object(OrphanedNativeObject::Lifecycle(",
+            "drop(OrphanedNativeObject::Lifecycle(",
+            1,
+        );
+        assert!(validate_native_owner(&leaked_drop).is_err());
     }
 
     #[test]
