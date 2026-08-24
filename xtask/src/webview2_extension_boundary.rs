@@ -236,7 +236,21 @@ fn validate_native_owner(source: &str) -> Result<(), String> {
         "letresult=completion.and_then(|()|{extension.ok_or_else(",
         "ifletErr(unsent)=sender.send(result)",
         "Ok(Err(_))=>Err(WindowsNativeExtensionFailure::NativeCall(WindowsNativeExtensionCall::InstallCompletion",
-        "Err(_)=>Err(WindowsNativeExtensionFailure::NativeCall(WindowsNativeExtensionCall::InstallWait",
+        "wait_for_native_callback_until(receiver,deadline)",
+        "MsgWaitForMultipleObjectsEx(None,timeout,QS_ALLINPUT,MWMO_INPUTAVAILABLE)",
+        "PeekMessageW(&mutmessage,None,0,0,PM_REMOVE)",
+        "message.message==WM_QUIT",
+        "PostQuitMessage(message.wParam.0asi32)",
+        "MAX_MESSAGES_PER_PUMP",
+        "MAX_NATIVE_LIFECYCLE_OWNERS",
+        "ifInstant::now()>=deadline",
+        "NATIVE_CALLBACK_PUMP_ACTIVE.with(Cell::get)",
+        "state.reserved_callback_slots+=1",
+        "NativeLifecycleReservation::acquire()",
+        "current>=MAX_NATIVE_LIFECYCLE_OWNERS",
+        "_lifecycle:NativeLifecycleReservation",
+        "fnretain_orphaned_lifecycle_owner(owner:OrphanedNativeObject){fail_stop_native_extension_admission();",
+        "fnquarantine_unregistered(owner:OrphanedNativeObject){let_retained_until_process_exit=ManuallyDrop::new(owner);}",
         "extension:Option<ICoreWebView2BrowserExtension>",
         "environment:ICoreWebView2Environment",
         "profile:ICoreWebView2Profile7",
@@ -249,11 +263,14 @@ fn validate_native_owner(source: &str) -> Result<(), String> {
         "debug_assert_eq!(retained.observed_owner,Some(retained.expected_owner))",
         "count<=MAX_EXTENSION_INSTALLS_PER_PROFILE",
         "implDropforWindowsNativeExtensionCleanupDebt",
-        "retain_orphaned_native_object(OrphanedNativeObject::Lifecycle",
+        "retain_orphaned_lifecycle_owner(OrphanedNativeObject::Lifecycle",
         "native_extension_cleanup_invariant_failed()",
-        "NATIVE_CALLBACK_SETTLEMENT_UNOBSERVED.with(Cell::get)",
         "OrphanedNativeObject::Extension(ManuallyDrop::new(extension))",
         "OrphanedNativeObject::Inventory(ManuallyDrop::new(inventory))",
+        "WindowsNativeExtensionActivation::RejectedBeforeNative",
+        "if!native_call_entered",
+        "IdentityMismatchQuarantined",
+        "destroyadifferentauthorizedinstall.Keepbothexact",
         ".field(\"profile\",&\"[redacted]\")",
         ".field(\"owner\",&\"[redacted]\")",
     ] {
@@ -263,11 +280,25 @@ fn validate_native_owner(source: &str) -> Result<(), String> {
             ));
         }
     }
+    for (required, count) in [
+        ("NativeCallbackReservation::acquire()?", 3),
+        ("wait_for_native_callback_until(receiver,deadline)", 3),
+        ("ifnative_extension_cleanup_invariant_failed()", 2),
+        ("quarantine_unregistered(owner)", 7),
+    ] {
+        if source.matches(required).count() != count {
+            return Err(format!(
+                "{NATIVE_OWNER} must contain exactly {count} occurrences of {required}"
+            ));
+        }
+    }
     for forbidden in [
         ["CreateCoreWebView2Environment", "WithOptions"].concat(),
         ["CoreWebView2Environment", "Options"].concat(),
         "with_browser_extensions_enabled(true)".to_owned(),
         "with_webview2_extension_startup_gate".to_owned(),
+        "webview2_com::wait_with_pump".to_owned(),
+        "std::mem::forget".to_owned(),
     ] {
         if source.contains(&forbidden) {
             return Err(format!(
@@ -516,11 +547,42 @@ fn create_environment() {
         assert!(validate_native_owner(&unbound_environment).is_err());
 
         let leaked_drop = source.replacen(
-            "retain_orphaned_native_object(OrphanedNativeObject::Lifecycle(",
+            "retain_orphaned_lifecycle_owner(OrphanedNativeObject::Lifecycle(",
             "drop(OrphanedNativeObject::Lifecycle(",
             1,
         );
         assert!(validate_native_owner(&leaked_drop).is_err());
+
+        let swallowed_quit = source.replacen(
+            "unsafe { PostQuitMessage(message.wParam.0 as i32) };",
+            "drop(message);",
+            1,
+        );
+        assert!(validate_native_owner(&swallowed_quit).is_err());
+
+        let unbounded_wait = source.replacen(
+            "wait_for_native_callback_until(receiver, deadline)",
+            "webview2_com::wait_with_pump(receiver)",
+            1,
+        );
+        assert!(validate_native_owner(&unbounded_wait).is_err());
+
+        let unreserved_callback = source.replacen(
+            "let reservation = NativeCallbackReservation::acquire()?;",
+            "let reservation = fake_unbounded_reservation();",
+            1,
+        );
+        assert!(validate_native_owner(&unreserved_callback).is_err());
+
+        let lost_pre_entry = source.replacen("if !native_call_entered {", "if false {", 1);
+        assert!(validate_native_owner(&lost_pre_entry).is_err());
+
+        let unbounded_owners = source.replacen(
+            "let lifecycle = match NativeLifecycleReservation::acquire() {",
+            "let lifecycle = fake_unbounded_lifecycle_owner(); match Ok(()) {",
+            1,
+        );
+        assert!(validate_native_owner(&unbounded_owners).is_err());
     }
 
     #[test]
