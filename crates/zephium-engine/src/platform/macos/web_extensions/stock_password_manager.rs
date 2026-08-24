@@ -1,9 +1,8 @@
-//! Exact stock-extension execution probe for a second password manager.
+//! Exact stock-extension execution probe for password managers.
 //!
 //! The browser runtime in this module is target-agnostic. The pinned contract
-//! exists only to make one external experiment reproducible: unmodified Proton
-//! Pass 1.39.0 from its signed Chrome Web Store CRX. No production entry point
-//! selects, downloads, admits, or special-cases this extension.
+//! exists only to make external experiments reproducible. No production entry
+//! point selects, downloads, admits, or special-cases any diagnostic target.
 
 use std::fs;
 use std::fs::OpenOptions;
@@ -17,7 +16,7 @@ use std::time::Instant;
 use objc2::rc::Weak;
 use objc2::runtime::ProtocolObject;
 use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
-use objc2_foundation::{MainThreadMarker, NSRunLoop, NSString};
+use objc2_foundation::{MainThreadMarker, NSArray, NSError, NSRunLoop, NSString};
 use objc2_web_kit::{
     WKWebExtensionAction, WKWebExtensionContext, WKWebExtensionController, WKWebView,
     WKWebsiteDataStore,
@@ -32,21 +31,9 @@ use zephium_extension_package::{
     MAX_EXTENSION_TREE_ENTRIES, MAX_EXTENSION_TREE_FILES, MAX_EXTENSION_TREE_INDEX_BYTES,
 };
 
-use super::super::extensions::MacosNativeApiPermission as Permission;
+use super::stock_password_manager_contract::StockContract;
 use crate::MacosStockPasswordManagerProbeMode as ProbeMode;
 
-const DISPLAY_NAME: &str = "Proton Pass: Free Password Manager";
-const VERSION: &str = "1.39.0";
-const CONTEXT_IDENTIFIER: &str = "zephium-stock-proton-pass-1-39-0-probe";
-const EXPECTED_FILE_COUNT: usize = 276;
-const EXPECTED_TOTAL_BYTES: u64 = 21_512_233;
-const EXPECTED_INDEX_SHA256: &str =
-    "451ef9fd5c383eb3976d91ffbc5fb807833f115ad2d3ecbd8993b233527e8bc6";
-const EXPECTED_TREE_SHA256: &str =
-    "894dadc936b4c462e35981bc04d9e169a9d61989889c1747a2117c28f8c7f1ea";
-const EXPECTED_MANIFEST_SHA256: &str =
-    "806fd0a0162a88eef12ae3d37fb6f4ec748d4f668fe3dbe95d023f8d19ef8556";
-const EXPECTED_WASM_FILES: usize = 5;
 const PAGE_READY_TITLE: &str = "zephium-stock-password-page-ready";
 const PAGE_STATE_PREFIX: &str = "ZEPHIUM_STOCK_PAGE_STATE:";
 const POPUP_STATE_PREFIX: &str = "ZEPHIUM_STOCK_POPUP_STATE:";
@@ -198,19 +185,10 @@ const WEBKIT_BACKGROUND_WRAPPER_SOURCE: &str = r#"(() => {
   }
 })();
 "#;
-const NATIVE_PERMISSIONS: [Permission; 7] = [
-    Permission::ActiveTab,
-    Permission::Alarms,
-    Permission::Scripting,
-    Permission::Storage,
-    Permission::UnlimitedStorage,
-    Permission::WebNavigation,
-    Permission::WebRequest,
-];
-
 struct AdmittedStockArtifact {
     extension_root: PathBuf,
     probe_mode: ProbeMode,
+    contract: StockContract,
     _temporary_root: Option<TempDir>,
 }
 
@@ -228,6 +206,7 @@ struct NativeTeardown {
     inline_roots: usize,
     inline_extension_frames: usize,
     background_preload_millis: Option<u128>,
+    background_load_failure: Option<String>,
     isolated_content_adapter_mode: Option<String>,
     popup_root_children: usize,
     popup_offscreen_namespace: String,
@@ -237,6 +216,7 @@ struct NativeTeardown {
     background_action_label: String,
     probe_mode: ProbeMode,
     compatibility_failure: Option<String>,
+    contract: StockContract,
 }
 
 #[derive(Debug, Deserialize)]
@@ -276,7 +256,18 @@ struct IsolatedContentState {
 }
 
 pub(super) fn run(extension: &Path, tree_index: &Path, mode: ProbeMode) -> Result<bool, String> {
-    let admitted = admit_exact_stock_artifact(extension, tree_index, mode)?;
+    let admitted =
+        admit_exact_stock_artifact(extension, tree_index, mode, StockContract::ProtonPass1390)?;
+    run_admitted(admitted)
+}
+
+pub(super) fn run_onepassword(extension: &Path, tree_index: &Path) -> Result<bool, String> {
+    let admitted = admit_exact_stock_artifact(
+        extension,
+        tree_index,
+        ProbeMode::Stock,
+        StockContract::OnePassword8123233,
+    )?;
     run_admitted(admitted)
 }
 
@@ -316,7 +307,9 @@ fn run_admitted(admitted: AdmittedStockArtifact) -> Result<bool, String> {
             (None, Ok(())) => {}
         }
         println!(
-            "native-probe: macOS stock password manager passed; target=proton-pass; version={VERSION}; os={}; exact_source_tree=passed; mode={}; source_modified={}; manifest_contract=passed; exact_native_grants=passed; controller_visible_scripts={}; inline_field_markers={}; inline_roots={}; inline_extension_frames={}; page_api_compatibility={}; isolated_content_adapter={}; background_preload_ms={}; popup_execution=passed; popup_root_children={}; popup_api_compatibility={}; background_diagnostic_badge={}; background_action_label={}; offscreen_namespace={}; webview_callbacks={}; user_workflows=unassessed; product_authority=false; native_objects_released=passed",
+            "native-probe: macOS stock password manager passed; target={}; version={}; os={}; exact_source_tree=passed; mode={}; source_modified={}; manifest_contract=passed; exact_native_grants=passed; controller_visible_scripts={}; inline_field_markers={}; inline_roots={}; inline_extension_frames={}; page_api_compatibility={}; isolated_content_adapter={}; background_preload_ms={}; background_load_failure={}; popup_execution=passed; popup_root_children={}; popup_api_compatibility={}; background_diagnostic_badge={}; background_action_label={}; offscreen_namespace={}; webview_callbacks={}; user_workflows=unassessed; product_authority=false; native_objects_released=passed",
+            teardown.contract.target(),
+            teardown.contract.version(),
             teardown.operating_system,
             probe_mode_name(teardown.probe_mode),
             teardown.probe_mode != ProbeMode::Stock,
@@ -332,6 +325,10 @@ fn run_admitted(admitted: AdmittedStockArtifact) -> Result<bool, String> {
             teardown
                 .background_preload_millis
                 .map_or_else(|| "not-requested".to_owned(), |value| value.to_string()),
+            teardown
+                .background_load_failure
+                .as_deref()
+                .unwrap_or("none"),
             teardown.popup_root_children,
             teardown.popup_api_compatibility,
             teardown.background_diagnostic_badge,
@@ -349,6 +346,7 @@ fn admit_exact_stock_artifact(
     extension: &Path,
     tree_index: &Path,
     mode: ProbeMode,
+    contract: StockContract,
 ) -> Result<AdmittedStockArtifact, String> {
     let extension_root = extension
         .canonicalize()
@@ -363,33 +361,39 @@ fn admit_exact_stock_artifact(
     )?;
     let index = CanonicalExtensionTreeIndex::parse_canonical(&index_bytes)
         .map_err(|error| format!("stock extension tree index is invalid: {error}"))?;
-    require_evidence(&index)?;
-    super::artifact_tree::verify_closed_tree(&extension_root, &index, DISPLAY_NAME)?;
-    validate_manifest(&extension_root.join("manifest.json"))?;
+    contract.require_evidence(&index)?;
+    super::artifact_tree::verify_closed_tree(&extension_root, &index, contract.display_name())?;
+    validate_manifest(&extension_root.join("manifest.json"), contract)?;
     if mode == ProbeMode::Stock {
         return Ok(AdmittedStockArtifact {
             extension_root,
             probe_mode: mode,
+            contract,
             _temporary_root: None,
         });
+    }
+    if contract != StockContract::ProtonPass1390 {
+        return Err("this pinned stock target has no reviewed compatibility transform".into());
     }
     let temporary_root = materialize_webkit_api_diagnostic(&extension_root, &index)?;
     let diagnostic_root = temporary_root.path().to_path_buf();
     Ok(AdmittedStockArtifact {
         extension_root: diagnostic_root,
         probe_mode: mode,
+        contract,
         _temporary_root: Some(temporary_root),
     })
 }
 
 fn admit_compatibility_artifact(root: &Path) -> Result<AdmittedStockArtifact, String> {
     let artifact = super::compatibility_artifact::validate(root)?;
+    let source_contract = StockContract::ProtonPass1390;
     if !artifact.source.matches(
-        EXPECTED_FILE_COUNT,
-        EXPECTED_TOTAL_BYTES,
-        EXPECTED_MANIFEST_SHA256,
-        EXPECTED_TREE_SHA256,
-        EXPECTED_INDEX_SHA256,
+        source_contract.expected_file_count(),
+        source_contract.expected_total_bytes(),
+        source_contract.expected_manifest_sha256(),
+        source_contract.expected_tree_sha256(),
+        source_contract.expected_index_sha256(),
     ) || !artifact.output.matches(
         EXPECTED_COMPATIBILITY_FILE_COUNT,
         EXPECTED_COMPATIBILITY_TOTAL_BYTES,
@@ -417,47 +421,9 @@ fn admit_compatibility_artifact(root: &Path) -> Result<AdmittedStockArtifact, St
     Ok(AdmittedStockArtifact {
         extension_root,
         probe_mode: ProbeMode::WebkitCompatibilityArtifact,
+        contract: StockContract::ProtonPass1390,
         _temporary_root: None,
     })
-}
-
-fn require_evidence(index: &CanonicalExtensionTreeIndex) -> Result<(), String> {
-    let evidence = [
-        (
-            "tree-index",
-            lower_hex(index.index_sha256().as_bytes()),
-            EXPECTED_INDEX_SHA256,
-        ),
-        (
-            "tree",
-            lower_hex(index.tree_sha256().as_bytes()),
-            EXPECTED_TREE_SHA256,
-        ),
-        (
-            "manifest",
-            lower_hex(index.manifest_sha256().as_bytes()),
-            EXPECTED_MANIFEST_SHA256,
-        ),
-    ];
-    for (kind, observed, expected) in evidence {
-        if observed != expected {
-            return Err(format!(
-                "stock extension {kind} digest is not the pinned contract"
-            ));
-        }
-    }
-    if index.files().len() != EXPECTED_FILE_COUNT || index.total_bytes() != EXPECTED_TOTAL_BYTES {
-        return Err("stock extension resource accounting is not the pinned contract".into());
-    }
-    let wasm_files = index
-        .files()
-        .iter()
-        .filter(|file| file.path().as_str().ends_with(".wasm"))
-        .count();
-    if wasm_files != EXPECTED_WASM_FILES {
-        return Err("stock extension WASM inventory is not the pinned contract".into());
-    }
-    Ok(())
 }
 
 fn materialize_webkit_api_diagnostic(
@@ -584,58 +550,13 @@ const fn probe_mode_name(mode: ProbeMode) -> &'static str {
     }
 }
 
-fn validate_manifest(path: &Path) -> Result<(), String> {
+fn validate_manifest(path: &Path, contract: StockContract) -> Result<(), String> {
     let bytes = read_bounded_file(
         path,
         zephium_extension_package::MAX_EXTENSION_MANIFEST_BYTES as u64,
         "stock extension manifest",
     )?;
-    let manifest = parse_bounded_json(&bytes, BoundedJsonLimits::extension_manifest())
-        .map_err(|error| format!("stock extension manifest is invalid: {error}"))?
-        .into_value();
-    for (pointer, expected) in [
-        ("/name", Value::from(DISPLAY_NAME)),
-        ("/version", Value::from(VERSION)),
-        ("/manifest_version", Value::from(3)),
-        ("/background/service_worker", Value::from("background.js")),
-        ("/action/default_popup", Value::from("popup.html")),
-    ] {
-        if manifest.pointer(pointer) != Some(&expected) {
-            return Err(format!("stock extension manifest drifted at {pointer}"));
-        }
-    }
-    require_string_set(
-        &manifest,
-        "/permissions",
-        &[
-            "activeTab",
-            "alarms",
-            "offscreen",
-            "scripting",
-            "storage",
-            "unlimitedStorage",
-            "webNavigation",
-            "webRequest",
-        ],
-    )?;
-    require_string_set(
-        &manifest,
-        "/host_permissions",
-        &["http://*/*", "https://*/*"],
-    )?;
-    let scripts = manifest
-        .pointer("/content_scripts")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "stock extension manifest has no content-script array".to_owned())?;
-    if scripts.len() != 2
-        || scripts[0].pointer("/js/0").and_then(Value::as_str) != Some("orchestrator.js")
-        || scripts[0].get("all_frames").and_then(Value::as_bool) != Some(true)
-        || scripts[1].pointer("/js/0").and_then(Value::as_str) != Some("webauthn.js")
-        || scripts[1].get("world").and_then(Value::as_str) != Some("MAIN")
-    {
-        return Err("stock extension content-script contract drifted".into());
-    }
-    Ok(())
+    contract.validate_manifest(&bytes)
 }
 
 fn validate_compatibility_manifest(path: &Path) -> Result<(), String> {
@@ -648,8 +569,14 @@ fn validate_compatibility_manifest(path: &Path) -> Result<(), String> {
         .map_err(|error| format!("compatibility artifact manifest is invalid: {error}"))?
         .into_value();
     for (pointer, expected) in [
-        ("/name", Value::from(DISPLAY_NAME)),
-        ("/version", Value::from(VERSION)),
+        (
+            "/name",
+            Value::from(StockContract::ProtonPass1390.display_name()),
+        ),
+        (
+            "/version",
+            Value::from(StockContract::ProtonPass1390.version()),
+        ),
         ("/manifest_version", Value::from(3)),
         (
             "/background/service_worker",
@@ -743,6 +670,7 @@ fn run_native(
     operating_system: String,
     mtm: MainThreadMarker,
 ) -> Result<NativeTeardown, String> {
+    let contract = admitted.contract;
     let run_loop = NSRunLoop::mainRunLoop();
     let cross_server = super::FixtureServer::start(None)?;
     let server = super::FixtureServer::start(Some(cross_server.address))?;
@@ -753,16 +681,16 @@ fn run_native(
             .setWebExtensionController(Some(&bundle.controller));
     }
     let extension = super::load_extension(&admitted.extension_root, &run_loop, mtm)?;
-    super::validate_extension(&extension, DISPLAY_NAME)?;
-    let context = super::new_context(&extension, CONTEXT_IDENTIFIER)?;
+    super::validate_extension(&extension, contract.display_name())?;
+    let context = super::new_context(&extension, contract.context_identifier())?;
     let grants = super::super::extensions::apply_probe_grants(
         &context,
-        &NATIVE_PERMISSIONS,
-        &["http://*/*", "https://*/*"],
-        true,
+        contract.native_permissions(),
+        contract.granted_host_patterns(),
+        contract.private_data_access(),
     )
     .map_err(|error| format!("cannot apply stock extension native grants: {error}"))?;
-    super::load_context(&bundle.controller, &context, DISPLAY_NAME)?;
+    super::load_context(&bundle.controller, &context, contract.display_name())?;
 
     let window = super::new_window(mtm)?;
     let host = super::ProbeHostView {
@@ -826,18 +754,31 @@ fn run_native(
     // is executable before content and popup observations are interpreted.
     // This is a one-shot probe barrier through WebKit's public completion API;
     // it does not retain a hidden view or grant product activation authority.
-    let background_preload_millis = if admitted.probe_mode == ProbeMode::WebkitCompatibilityArtifact
-    {
-        let started = Instant::now();
-        super::persistent_runtime::load_background_content(
-            &context,
-            &run_loop,
-            "stock password-manager compatibility artifact",
-        )?;
-        Some(started.elapsed().as_millis())
-    } else {
-        None
-    };
+    let (background_preload_millis, background_load_failure) =
+        if admitted.probe_mode == ProbeMode::WebkitCompatibilityArtifact {
+            let started = Instant::now();
+            super::persistent_runtime::load_background_content(
+                &context,
+                &run_loop,
+                "stock password-manager compatibility artifact",
+            )?;
+            (Some(started.elapsed().as_millis()), None)
+        } else if contract == StockContract::OnePassword8123233 {
+            // This explicit stock load is diagnostic only. It does not modify
+            // the package or claim a product preload policy; it captures the
+            // public completion error before content/popup effects obscure the
+            // first background failure.
+            let started = Instant::now();
+            let failure = super::persistent_runtime::load_background_content(
+                &context,
+                &run_loop,
+                "stock 1Password",
+            )
+            .err();
+            (Some(started.elapsed().as_millis()), failure)
+        } else {
+            (None, None)
+        };
 
     super::set_phase("stock-password-manager-content-execution");
     let page_url = server.url("/login", "stock-password-manager");
@@ -851,7 +792,7 @@ fn run_native(
     // controller rather than mirroring them into the view's public
     // WKUserContentController. The observable page effect below is the
     // execution gate; this count remains bounded diagnostic evidence only.
-    let page_state = observe_inline_execution(&page, &run_loop)?;
+    let page_state = observe_inline_execution(&page, &run_loop, contract)?;
 
     super::set_phase("stock-password-manager-popup-execution");
     let action = unsafe { context.actionForTab(Some(tab_protocol)) }
@@ -867,7 +808,7 @@ fn run_native(
         .ok_or_else(|| "stock extension action returned no popup view".to_owned())?;
     super::assert_attached_controller(&popup, &bundle.controller)?;
     super::profile_isolation::assert_attached_store(&popup, &bundle._data_store)?;
-    let popup_state = wait_for_executable_popup(&popup, &run_loop)?;
+    let popup_state = wait_for_executable_popup(&popup, &run_loop, contract)?;
     let isolated_content_adapter_mode = (admitted.probe_mode
         == ProbeMode::WebkitCompatibilityArtifact)
         .then(|| wait_for_isolated_content_adapter(&popup, &run_loop))
@@ -879,7 +820,7 @@ fn run_native(
     let context_errors = unsafe { context.errors() };
     let context_error_count = context_errors.count();
     let context_error_summary =
-        (context_error_count != 0).then(|| super::describe_native_errors(&context_errors));
+        (context_error_count != 0).then(|| describe_stock_native_errors(&context_errors));
     popover.close();
     unsafe { action.closePopup() };
     drop(popup);
@@ -893,7 +834,7 @@ fn run_native(
         bundle.controller.didCloseWindow(window_protocol);
         bundle.controller.setDelegate(None);
     }
-    super::unload_context(&bundle.controller, &context, DISPLAY_NAME)?;
+    super::unload_context(&bundle.controller, &context, contract.display_name())?;
     grants
         .clear_and_verify(&context)
         .map_err(|error| format!("cannot clear stock extension native grants: {error}"))?;
@@ -919,7 +860,7 @@ fn run_native(
     }))
     .then(|| {
             format!(
-                "stock extension compatibility failed: mode={}, inline_executed={inline_executed}, page_state={page_state:?}, popup_rendered={popup_rendered}, popup_api_observed={popup_api_observed}, popup_state={popup_state:?}, background_diagnostic_badge={background_diagnostic_badge:?}, background_action_label={background_action_label:?}, context_errors={context_error_count}, context_error_summary={context_error_summary:?}",
+                "stock extension compatibility failed: mode={}, inline_executed={inline_executed}, page_state={page_state:?}, popup_rendered={popup_rendered}, popup_api_observed={popup_api_observed}, popup_state={popup_state:?}, background_load_failure={background_load_failure:?}, background_preload_ms={background_preload_millis:?}, background_diagnostic_badge={background_diagnostic_badge:?}, background_action_label={background_action_label:?}, context_errors={context_error_count}, context_error_summary={context_error_summary:?}",
                 probe_mode_name(admitted.probe_mode),
             )
         });
@@ -938,6 +879,7 @@ fn run_native(
         inline_roots: page_state.roots,
         inline_extension_frames: page_state.extension_frames,
         background_preload_millis,
+        background_load_failure,
         isolated_content_adapter_mode,
         popup_root_children: popup_state.root_children,
         popup_offscreen_namespace: popup_state.offscreen,
@@ -947,6 +889,7 @@ fn run_native(
         background_action_label,
         probe_mode: admitted.probe_mode,
         compatibility_failure,
+        contract,
     };
     drop(delegate);
     drop(extension_window);
@@ -1043,7 +986,10 @@ fn wait_for_page(
 fn observe_inline_execution(
     view: &wry::WebView,
     run_loop: &NSRunLoop,
+    contract: StockContract,
 ) -> Result<PageState, String> {
+    let marker_selector = contract.inline_marker_selector();
+    let root_selector = contract.inline_root_selector();
     let script = format!(
         r#"(() => {{
           const fields = [...document.querySelectorAll('input')];
@@ -1054,8 +1000,8 @@ fn observe_inline_execution(
           }}
           const state = {{
             ready: document.readyState,
-            fieldMarkers: document.querySelectorAll('[data-protonpass-role]').length,
-            roots: document.querySelectorAll('[id^="protonpass-root-"], [class*="protonpass-control-"]').length,
+            fieldMarkers: document.querySelectorAll({marker_selector:?}).length,
+            roots: document.querySelectorAll({root_selector:?}).length,
             extensionFrames: [...document.querySelectorAll('iframe')].filter((frame) => String(frame.src).startsWith('chrome-extension:') || String(frame.src).startsWith('safari-web-extension:')).length,
             compatibilityState: globalThis[Symbol.for({COMPATIBILITY_SYMBOL:?})] === true
               ? 'package-neutral-v1'
@@ -1111,7 +1057,9 @@ fn wait_for_popup_presentation(
 fn wait_for_executable_popup(
     popup: &WKWebView,
     run_loop: &NSRunLoop,
+    contract: StockContract,
 ) -> Result<PopupState, String> {
+    let popup_root_selector = contract.popup_root_selector();
     let script = format!(
         r#"(() => {{
           const key = '__zephiumStockProbe';
@@ -1124,7 +1072,7 @@ fn wait_for_executable_popup(
             addEventListener('unhandledrejection', (event) => record(event.reason), true);
             globalThis[key] = {{ errors }};
           }}
-          const root = document.querySelector('.app-root');
+          const root = document.querySelector({popup_root_selector:?});
           const state = {{
             ready: document.readyState,
             rootChildren: root ? root.childElementCount : 0,
@@ -1296,6 +1244,65 @@ fn wait_for_teardown(teardown: &NativeTeardown) -> Result<(), String> {
     }
 }
 
+fn describe_stock_native_errors(errors: &NSArray<NSError>) -> String {
+    let count = errors.count().min(4);
+    let mut descriptions = Vec::with_capacity(count);
+    for index in 0..count {
+        descriptions.push(describe_stock_native_error(&errors.objectAtIndex(index)));
+    }
+    if errors.count() > count {
+        descriptions.push(format!(
+            "{} additional error(s) omitted",
+            errors.count() - count
+        ));
+    }
+    bounded_diagnostic_text(&descriptions.join("; "))
+}
+
+fn describe_stock_native_error(error: &NSError) -> String {
+    let mut description = format!(
+        "domain={}, code={}, description={}",
+        error.domain(),
+        error.code(),
+        error.localizedDescription()
+    );
+    if let Some(reason) = error.localizedFailureReason() {
+        description.push_str(", reason=");
+        description.push_str(&reason.to_string());
+    }
+    let underlying = error.underlyingErrors();
+    if underlying.count() != 0 {
+        description.push_str(", underlying=[");
+        for index in 0..underlying.count().min(4) {
+            if index != 0 {
+                description.push_str("; ");
+            }
+            let error = underlying.objectAtIndex(index);
+            description.push_str(&format!(
+                "domain={}, code={}, description={}",
+                error.domain(),
+                error.code(),
+                error.localizedDescription()
+            ));
+        }
+        description.push(']');
+    }
+    bounded_diagnostic_text(&description)
+}
+
+fn bounded_diagnostic_text(value: &str) -> String {
+    let mut characters = value.chars();
+    let bounded = characters
+        .by_ref()
+        .take(MAX_DIAGNOSTIC_TITLE_BYTES)
+        .collect::<String>();
+    if characters.next().is_some() {
+        format!("{bounded}…")
+    } else {
+        bounded
+    }
+}
+
 fn read_bounded_file(path: &Path, max_bytes: u64, description: &str) -> Result<Vec<u8>, String> {
     let path_metadata = fs::symlink_metadata(path)
         .map_err(|error| format!("cannot inspect {description}: {error}"))?;
@@ -1321,15 +1328,6 @@ fn read_bounded_file(path: &Path, max_bytes: u64, description: &str) -> Result<V
         return Err(format!("{description} changed while being read"));
     }
     Ok(bytes)
-}
-
-fn lower_hex(bytes: &[u8]) -> String {
-    let mut encoded = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        use std::fmt::Write as _;
-        write!(&mut encoded, "{byte:02x}").expect("writing into a String cannot fail");
-    }
-    encoded
 }
 
 #[cfg(test)]

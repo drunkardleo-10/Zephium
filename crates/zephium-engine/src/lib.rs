@@ -155,6 +155,20 @@ pub fn run_macos_stock_password_manager_probe(
     platform::macos::run_stock_password_manager_probe(extension, tree_index, mode)
 }
 
+/// Executes the exact authenticated stock 1Password Chrome Web Store package.
+///
+/// This feature-gated diagnostic accepts only the pinned signed tree encoded
+/// by its contract. It grants no catalog, installation, or product authority
+/// and does not modify any extension resource.
+#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
+#[doc(hidden)]
+pub fn run_macos_onepassword_probe(
+    extension: &std::path::Path,
+    tree_index: &std::path::Path,
+) -> Result<bool, String> {
+    platform::macos::run_onepassword_probe(extension, tree_index)
+}
+
 /// Executes the package-neutral compatibility artifact derived from the exact
 /// pinned stock password-manager tree.
 ///

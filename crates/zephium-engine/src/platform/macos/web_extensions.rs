@@ -19,6 +19,7 @@ mod profile_isolation;
 mod representative_extension;
 mod resource_transport;
 mod stock_password_manager;
+mod stock_password_manager_contract;
 mod vimium_contract;
 
 use std::cell::{Cell, RefCell};
@@ -855,6 +856,10 @@ pub(crate) fn run_stock_password_manager_probe(
     mode: crate::MacosStockPasswordManagerProbeMode,
 ) -> Result<bool, String> {
     stock_password_manager::run(extension, tree_index, mode)
+}
+
+pub(crate) fn run_onepassword_probe(extension: &Path, tree_index: &Path) -> Result<bool, String> {
+    stock_password_manager::run_onepassword(extension, tree_index)
 }
 
 pub(crate) fn run_stock_password_manager_compatibility_artifact_probe(

@@ -1,6 +1,27 @@
 #[cfg(target_os = "macos")]
 fn main() {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    if arguments.len() == 6
+        && arguments[0] == "--target"
+        && arguments[1] == "1password"
+        && arguments[2] == "--extension"
+        && arguments[4] == "--tree-index"
+    {
+        match zephium_engine::run_macos_onepassword_probe(
+            std::path::Path::new(&arguments[3]),
+            std::path::Path::new(&arguments[5]),
+        ) {
+            Ok(true) => return,
+            Ok(false) => {
+                eprintln!("macOS stock 1Password probe did not execute; requires macOS 15.4+");
+                std::process::exit(1);
+            }
+            Err(error) => {
+                eprintln!("macOS stock 1Password probe failed: {error}");
+                std::process::exit(1);
+            }
+        }
+    }
     if arguments.len() == 2 && arguments[0] == "--compatibility-artifact" {
         match zephium_engine::run_macos_stock_password_manager_compatibility_artifact_probe(
             std::path::Path::new(&arguments[1]),
@@ -23,7 +44,7 @@ fn main() {
             && (arguments[4] != "--diagnostic" || arguments[5] != "webkit-api-surface"))
     {
         eprintln!(
-            "usage: macos-stock-password-manager-probe (--extension PATH --tree-index PATH [--diagnostic webkit-api-surface] | --compatibility-artifact PATH)"
+            "usage: macos-stock-password-manager-probe (--target 1password --extension PATH --tree-index PATH | --extension PATH --tree-index PATH [--diagnostic webkit-api-surface] | --compatibility-artifact PATH)"
         );
         std::process::exit(2);
     }

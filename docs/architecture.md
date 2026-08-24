@@ -1873,6 +1873,51 @@ raw stock Chrome package is not usable on the exercised WKWebExtension runtime.
 It does **not** prove that Safari-authored packages or a reviewed
 package-neutral compatibility transform are impossible.
 
+The next stock gate authenticates
+[1Password 8.12.32.33](https://chromewebstore.google.com/detail/1password-%E2%80%93-password-mana/aeblfdkhhhdcdjpifhhbdiojplfjncoa)
+from the Chrome Web Store. The CRX SHA-256 is
+`3bd61e220683d0549a4f5b0d9632e2015d5a3a809bc12e9a832e8bc0630600f6`;
+three valid CRX3 proofs derive `aeblfdkhhhdcdjpifhhbdiojplfjncoa`,
+and the complete developer-key SHA-256 is
+`041b53a7773239f8577138e9fb59d2e02599f358bd24094b9e875402b0cc7927`.
+The exact 998-file, 45,115,978-byte tree has SHA-256
+`873bd553f05fda33c2227b40682cfa4ff2988e0e53944291432e4869f6caaa4e`
+and canonical-index SHA-256
+`633f2cbe9ce15b12e89e6276c76565834618fb5403d5e6969b7f488122291de4`.
+No package byte or manifest is committed. The diagnostic pins only those
+identities and the reviewed manifest shape.
+
+The package is genuine MV3, has no manifest sandbox, and its unmodified action
+popup executes with both native `chrome.runtime` and `browser.runtime`
+identities. Its module background nevertheless fails to complete WebKit's
+public load callback within 12 seconds, records
+`WKWebExtensionContextErrorDomain` code 6, and leaves the content/autofill
+orchestrator unconfigured. The package contains seven WASM resources; the
+largest is 17,466,756 bytes, and its generated loaders try streaming before an
+`arrayBuffer` fallback. The separate package-neutral resource gate already
+proves that WKWebExtension serves private WASM as
+`application/octet-stream` and that large-body progress can stall after the
+streaming rejection. That platform fact is consistent with this stock result,
+but a package-specific resource trace is still required before naming the
+exact 1Password startup instruction as causal. The failed background path also
+retains the nonpersistent data store beyond the teardown budget. Stock
+1Password is therefore **not Verified** and must not enter a shipping catalog.
+
+Authenticating this real package exposed one legitimate package-admission
+ceiling: a current major extension contains a single resource slightly above
+16 MiB while remaining well under the 128 MiB aggregate tree bound. The exact
+per-file and mirrored runtime-reader ceilings are now 32 MiB. Acquisition and
+repository access remain streaming, resource-plan memory is independent of
+file bodies, and the per-file ceiling remains one quarter of the aggregate
+tree ceiling; this does not authorize a runtime to retain 32 MiB buffers.
+
+This extension result does not remove the platform credential baseline. Apple
+documents that [`WKWebView` handles website credential challenges and works
+with keychain and third-party credential managers](https://developer.apple.com/documentation/authenticationservices/password-use-in-web-browsers).
+Zephium should preserve and separately verify that native Password AutoFill
+path for passwords and passkeys. It is not a substitute for a manager's full
+popup, vault, save, inline-menu, settings, or desktop-integration workflows.
+
 A separate authenticated-tree diagnostic now identifies two narrow WebKit API
 compatibility requirements without changing production authority. It copies
 only the indexed Proton tree into a private no-replace stage, re-hashes every
@@ -1889,8 +1934,8 @@ shows that the stock failure includes a missing catalog-update event and an
 unstable namespace-global seam, rather than requiring a Proton-specific product
 runtime.
 
-Both third-party contracts stay feature-gated and confer
-`product_authority=false`. Zephium must not hardcode either manager into the
+All stock third-party contracts stay feature-gated and confer
+`product_authority=false`. Zephium must not hardcode any manager into the
 production runtime or redistribute modified third-party bytes by accident.
 
 The representative-extension gate applies the same rule to ordinary major
