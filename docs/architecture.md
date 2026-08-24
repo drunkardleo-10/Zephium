@@ -1194,13 +1194,29 @@ a correctly attributed short sample, not a before/after causal claim or release
 budget; clean-runner multi-extension, churn, energy, tab-pressure, and endurance
 campaigns remain required.
 
-Remaining macOS work is now product/API breadth rather than a missing runtime
-foundation: changed-permission update consent, extension notifications and
-additional browser APIs, storage quotas, private/file execution gates,
-password-manager workflows, process-family/energy evidence, and packaged
-multi-profile endurance. Windows still needs its separate native
-admission/resource policy, while Linux needs the package-neutral compatibility
-runtime built on the already-proven principal and injection boundaries.
+### macOS extension handoff (2026-08-24)
+
+The reusable macOS implementation boundary is stable enough to branch Windows
+work without freezing ordinary browser development. This means the current
+declared support contract is implemented, fail-closed, resource-bounded, and
+green; it does not mean every Chrome API, third-party extension, or external
+release dependency is finished.
+
+| Area | Current macOS state | Work that deliberately remains outside the stable handoff |
+|---|---|---|
+| Package authority, install lifecycle, updates, rollback, revocation foundations, uninstall, restart, profile deletion | Implemented and source/native gated | Provision the production KMS/origin/catalog/rollout authority; ordinary builds remain intentionally inert until then |
+| Browser UX | Extensions Center, reviewed install, required/optional grants, enable/disable, options, toolbar/popup, profile safe mode, exact-site pause, update/degradation consent, and uninstall are implemented | Physical VoiceOver and supported-machine packaged workflow matrix |
+| Native runtime security | Per-profile data-store/controller binding, stable principals, hostile page/peer denial, protected scripts, undeclared-resource denial, discarded-tab non-resurrection, exact erasure, bounded commands/context menus, and crash cleanup are implemented | Signed-app renderer-crash injection and long hostile/endurance campaigns |
+| Verified staging cohort | Revision 9 carries Vimium 2.4.2 and Dark Reader 4.9.129 with revisions 7/8 as immutable rollback; artifact bytes, classifications, and reissue evidence are exact | Add a publisher-supported authenticated cloud/security extension and define operational support windows |
+| API compatibility | The declaration table below is authoritative; live alarms work, while context-restart persistence is disclosed as degraded | Notifications, idle/system-lock, managed storage, offscreen, arbitrary native messaging, blocking request mutation, and broader browser APIs remain absent or degraded |
+| File/private contexts | File execution is negative-gated and the unavailable control cannot be forged; native private-store isolation is proven | No product file-access claim and no extension-enabled private-window claim until WebKit execution and a separate product runtime pass |
+| Password managers | Platform diagnostics, popup/content/background primitives, sandbox replacement primitive, and explicit failure classifications exist | No password manager is Verified: WebKit resource/WASM, sandbox, offscreen, request-auth, notification, and publisher/legal gates remain |
+| Performance/release evidence | Optimized product campaigns and a real process-family sampler are implemented; short release samples are recorded | Dedicated clean-runner budgets, maximum-cohort/tab pressure, energy calibration, sleep/wake, multi-profile, and 24-hour endurance |
+| External compatibility mode | Package-neutral offline transformation and authenticated acquisition primitives exist | Chrome Web Store/AMO/Safari/file/developer acquisition UX, legal adapters, diagnostics, and public compatibility policy are not shipped |
+
+Windows still needs its separate native admission/resource policy, while Linux
+needs the package-neutral compatibility runtime built on the already-proven
+principal and injection boundaries.
 Distribution reuses the blocker stack's generic package-authority model—fixed origins,
 authenticated content-addressed packages, monotonic candidate/current/previous
 state, staged activation, rollback, and crash recovery—without coupling
@@ -1549,7 +1565,8 @@ authenticated Vimium gate described below is a non-authorizing compatibility-
 artifact result; it does not silently broaden the native profile or establish
 its workflows. The separate brokered gate proves only its explicitly named
 history, default-search, and most-recent-session compatibility slices;
-bookmarks remain empty/read-only and notifications remain unassessed.
+bookmarks remain empty/read-only and notifications remain unavailable with an
+explicit degraded classification.
 
 Product contexts also bind one deterministic extension origin before load.
 Both `uniqueIdentifier` and the host of
@@ -2229,8 +2246,8 @@ provide real bookmark results: bookmarks are explicitly empty/read-only, and
 page favicons are transparent. Search is deliberately limited to the browser's
 default provider in the current or a new tab, and session support restores only
 the newest current-space tab; enumeration and explicit session identifiers are
-unsupported. Notifications and multi-profile packaged management behavior
-remain unassessed. The exact native Vimium gate
+unsupported. Notifications are absent/degraded, while multi-profile packaged
+management behavior remains a release gate. The exact native Vimium gate
 now edits, saves, closes, recreates, and rereads a real option through WebKit's
 extension storage before proving both settings views release with the context.
 Enable/disable, package update, popup/options presentation, shutdown, and
