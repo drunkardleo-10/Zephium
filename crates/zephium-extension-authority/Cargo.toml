@@ -8,8 +8,13 @@ license.workspace = true
 # Non-shipping, compile-time-only authority for the reviewed local macOS
 # catalog. Ordinary and production builds retain an empty authority slot.
 staging-extension-catalog = []
+# Non-shipping, compile-time-only authority for one private candidate generated
+# beneath target/. Ordinary and production builds cannot select it.
+local-extension-lab = ["dep:serde", "dep:serde_json"]
 
 [dependencies]
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
 sha2 = "=0.10.9"
 thiserror.workspace = true
 zephium-core = { path = "../zephium-core", version = "=0.1.0" }

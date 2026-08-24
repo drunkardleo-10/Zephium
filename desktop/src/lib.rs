@@ -5,6 +5,10 @@
 compile_error!("the internal repository E2E authority may not link into the Zephium desktop");
 #[cfg(all(feature = "staging-extension-catalog", not(target_os = "macos")))]
 compile_error!("the embedded extension staging catalog is a macOS-only product gate");
+#[cfg(all(feature = "local-extension-lab", not(target_os = "macos")))]
+compile_error!("the private extension lab is a macOS-only product gate");
+#[cfg(all(feature = "staging-extension-catalog", feature = "local-extension-lab"))]
+compile_error!("staging-extension-catalog and local-extension-lab are mutually exclusive");
 
 mod blocker_service;
 #[cfg(feature = "curated-extension-distribution")]

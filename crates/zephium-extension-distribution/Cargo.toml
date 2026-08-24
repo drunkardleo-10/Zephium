@@ -6,6 +6,7 @@ license.workspace = true
 
 [features]
 staging-extension-catalog = ["zephium-extension-authority/staging-extension-catalog"]
+local-extension-lab = ["zephium-extension-authority/local-extension-lab"]
 
 [dependencies]
 sha2 = "=0.10.9"

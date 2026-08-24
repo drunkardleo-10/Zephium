@@ -355,6 +355,47 @@ async fn staging_client_fetches_only_the_exact_embedded_catalog_objects() {
     );
 }
 
+#[cfg(feature = "local-extension-lab")]
+#[tokio::test(flavor = "current_thread")]
+async fn local_lab_client_fetches_only_the_exact_private_candidate_objects() {
+    let authority =
+        zephium_extension_authority::ProductExtensionManifestAuthority::product().unwrap();
+    let selections = authority
+        .active_acquired_runtime_selections_for_targets(&[
+            zephium_extension_authority::ProductExtensionRuntimeTarget::MacosNative,
+            zephium_extension_authority::ProductExtensionRuntimeTarget::MacosNativeBrokered,
+        ])
+        .unwrap();
+    assert_eq!(selections.len(), 1);
+    let client = ExtensionDistributionClient::local_lab().unwrap();
+    let session = client.begin(selections).await.unwrap();
+    assert_eq!(session.package_count(), 1);
+    let selection = session.selection(0).unwrap();
+    assert_eq!(
+        selection.runtime_profile(),
+        ExtensionAcquiredRuntimeProfile::MacosNative
+    );
+    let request = client.fetch_package(&session, 0).await.unwrap();
+    let (catalog, package, profile, crx, legal) = request.into_parts();
+    assert_eq!(catalog, crate::local_lab::CATALOG_BYTES);
+    assert_eq!(package, selection.package_key());
+    assert_eq!(profile, selection.runtime_profile());
+    assert_eq!(crx, crate::local_lab::CRX3_BYTES);
+    assert_eq!(legal, crate::local_lab::LEGAL_NOTICE_BYTES);
+
+    let targets = Url::parse(crate::local_lab::TARGETS_BASE).unwrap();
+    let transport = EmbeddedLocalLabArtifactTransport::new(&targets).unwrap();
+    assert_eq!(
+        transport
+            .fetch_bounded(
+                Url::parse("https://lab.extensions.zephium.invalid/v1/targets/other").unwrap(),
+                1,
+            )
+            .unwrap_err(),
+        FixedOriginFetchError::Boundary
+    );
+}
+
 pub(crate) fn fixture() -> Fixture {
     let archive = b"PK\x03\x04zephium-extension-distribution-fixture".to_vec();
     let archive_sha256: [u8; 32] = Sha256::digest(&archive).into();

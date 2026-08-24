@@ -310,7 +310,8 @@ fn authority_with_rollback(
 
 #[cfg(all(
     not(zephium_internal_repository_e2e),
-    not(feature = "staging-extension-catalog")
+    not(feature = "staging-extension-catalog"),
+    not(feature = "local-extension-lab")
 ))]
 #[test]
 fn production_authority_is_explicitly_unprovisioned() {
@@ -528,7 +529,8 @@ fn caller_owned_policy_can_mint_only_structural_output() {
     );
     #[cfg(all(
         not(zephium_internal_repository_e2e),
-        not(feature = "staging-extension-catalog")
+        not(feature = "staging-extension-catalog"),
+        not(feature = "local-extension-lab")
     ))]
     assert!(ProductExtensionManifestAuthority::product().is_err());
 }
@@ -603,6 +605,43 @@ fn staging_manifest_authority_admits_the_exact_mixed_runtime_cohort() {
             );
         }
     }
+}
+
+#[cfg(all(feature = "local-extension-lab", not(zephium_internal_repository_e2e)))]
+#[test]
+fn local_lab_manifest_authority_admits_only_the_exact_private_profile() {
+    let package_authority = BundledPackageAuthority::product().unwrap();
+    let catalog = package_authority
+        .admit_acquired_catalog(crate::local_lab_catalog::CATALOG_BYTES)
+        .unwrap();
+    let package = &catalog.catalog().packages()[0];
+    let tree =
+        CanonicalExtensionTreeIndex::parse_canonical(crate::local_lab_catalog::TREE_INDEX_BYTES)
+            .unwrap();
+    let authority = ProductExtensionManifestAuthority::product().unwrap();
+    let admitted = authority
+        .admit_acquired_manifest(
+            &catalog,
+            ProductExtensionRuntimeTarget::MacosNative,
+            package.identity().key(),
+            &tree,
+            crate::local_lab_catalog::MANIFEST_BYTES,
+        )
+        .unwrap();
+    assert_eq!(admitted.package_identity(), package.identity());
+    assert_eq!(
+        admitted.compatibility_target().as_str(),
+        ProductExtensionRuntimeTarget::MacosNative.compatibility_target_id()
+    );
+    assert!(authority
+        .admit_acquired_manifest(
+            &catalog,
+            ProductExtensionRuntimeTarget::MacosNativeBrokered,
+            package.identity().key(),
+            &tree,
+            crate::local_lab_catalog::MANIFEST_BYTES,
+        )
+        .is_err());
 }
 
 #[test]

@@ -25,6 +25,14 @@ staging-extension-catalog = [
     "zephium-extension-authority/staging-extension-catalog",
     "zephium-extension-distribution/staging-extension-catalog",
 ]
+# Private candidate validation in the real Zephium shell. Exact authority and
+# object bytes are generated beneath target/ and remain outside source control.
+local-extension-lab = [
+    "curated-extension-distribution",
+    "zephium-extension-service/local-extension-lab",
+    "zephium-extension-authority/local-extension-lab",
+    "zephium-extension-distribution/local-extension-lab",
+]
 
 [lib]
 name = "zephium_desktop_lib"

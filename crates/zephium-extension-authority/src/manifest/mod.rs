@@ -25,7 +25,11 @@ use zephium_core::ports::extensions::{
     acquired_runtime_selections_are_canonical, ExtensionAcquiredRuntimeProfile,
     ExtensionAcquiredRuntimeSelection, MAX_ACQUIRED_CATALOG_SELECTIONS,
 };
-#[cfg(any(zephium_internal_repository_e2e, feature = "staging-extension-catalog"))]
+#[cfg(any(
+    zephium_internal_repository_e2e,
+    feature = "staging-extension-catalog",
+    feature = "local-extension-lab"
+))]
 use zephium_extension_package::ExtensionReleaseCatalog;
 use zephium_extension_package::{
     admit_extension_manifest, AdmittedExtensionManifest, CanonicalExtensionTreeIndex,
@@ -1129,7 +1133,8 @@ impl SealedManifestCompatibilityPolicy {
     #[cfg(any(
         test,
         zephium_internal_repository_e2e,
-        feature = "staging-extension-catalog"
+        feature = "staging-extension-catalog",
+        feature = "local-extension-lab"
     ))]
     fn new(
         target: ExtensionCompatibilityTargetId,
@@ -1259,11 +1264,194 @@ fn validate_catalog_generations(
 // runtime bytes, configuration, or environment variables.
 #[cfg(all(
     not(zephium_internal_repository_e2e),
-    not(feature = "staging-extension-catalog")
+    not(feature = "staging-extension-catalog"),
+    not(feature = "local-extension-lab")
 ))]
 fn sealed_product_manifest_provisioning(
 ) -> Result<Option<SealedManifestAuthorityProvisioning>, ProductExtensionManifestAuthorityError> {
     Ok(None)
+}
+
+#[cfg(all(feature = "local-extension-lab", not(zephium_internal_repository_e2e)))]
+fn sealed_product_manifest_provisioning(
+) -> Result<Option<SealedManifestAuthorityProvisioning>, ProductExtensionManifestAuthorityError> {
+    use sha2::{Digest as _, Sha256};
+
+    use crate::local_lab_catalog::{
+        decode_lower_hex_32, LocalLabConfiguration, CATALOG_BYTES, MANIFEST_BYTES, TREE_INDEX_BYTES,
+    };
+
+    let configuration = LocalLabConfiguration::load()
+        .map_err(|()| ProductExtensionManifestAuthorityError::InvalidProductConfiguration)?;
+    let input = configuration
+        .profiles
+        .first()
+        .ok_or(ProductExtensionManifestAuthorityError::InvalidProductConfiguration)?;
+    let profile = &input.input;
+    let catalog = ExtensionReleaseCatalog::parse_canonical(CATALOG_BYTES)
+        .map_err(invalid_local_lab_configuration)?;
+    let inventory_digest = crate::inventory::digest_catalog_inventory(&catalog)
+        .ok_or(ProductExtensionManifestAuthorityError::InvalidProductConfiguration)?;
+    let expected_catalog = decode_lower_hex_32(&configuration.catalog_sha256)
+        .map_err(|()| ProductExtensionManifestAuthorityError::InvalidProductConfiguration)?;
+    let package_key = ExtensionPackageKey::from_bytes(
+        decode_lower_hex_32(&profile.package_key)
+            .map_err(|()| ProductExtensionManifestAuthorityError::InvalidProductConfiguration)?,
+    );
+    let package = catalog
+        .package(package_key)
+        .filter(|package| package.identity().revision().get() == profile.package_revision)
+        .ok_or(ProductExtensionManifestAuthorityError::InvalidProductConfiguration)?;
+    if catalog.packages().len() != 1
+        || catalog.digest().as_bytes() != &expected_catalog
+        || MANIFEST_BYTES.len() > MAX_EXTENSION_MANIFEST_BYTES
+        || TREE_INDEX_BYTES.len() as u64 != profile.tree_index_length
+        || <[u8; 32]>::from(Sha256::digest(MANIFEST_BYTES))
+            != decode_lower_hex_32(&profile.manifest_sha256)
+                .map_err(|()| ProductExtensionManifestAuthorityError::InvalidProductConfiguration)?
+        || <[u8; 32]>::from(Sha256::digest(TREE_INDEX_BYTES))
+            != decode_lower_hex_32(&profile.tree_index_sha256)
+                .map_err(|()| ProductExtensionManifestAuthorityError::InvalidProductConfiguration)?
+    {
+        return Err(ProductExtensionManifestAuthorityError::InvalidProductConfiguration);
+    }
+    let tree = CanonicalExtensionTreeIndex::parse_canonical(TREE_INDEX_BYTES)
+        .map_err(invalid_local_lab_configuration)?;
+    if tree.manifest_sha256().as_bytes()
+        != &decode_lower_hex_32(&profile.manifest_sha256)
+            .map_err(|()| ProductExtensionManifestAuthorityError::InvalidProductConfiguration)?
+        || tree.tree_sha256().as_bytes()
+            != &decode_lower_hex_32(&profile.tree_sha256)
+                .map_err(|()| ProductExtensionManifestAuthorityError::InvalidProductConfiguration)?
+        || tree.index_sha256().as_bytes()
+            != &decode_lower_hex_32(&profile.tree_index_sha256)
+                .map_err(|()| ProductExtensionManifestAuthorityError::InvalidProductConfiguration)?
+    {
+        return Err(ProductExtensionManifestAuthorityError::InvalidProductConfiguration);
+    }
+    let compatibility_target = profile
+        .compatibility_target
+        .as_deref()
+        .ok_or(ProductExtensionManifestAuthorityError::InvalidProductConfiguration)?;
+    let runtime_target = local_lab_runtime_target(compatibility_target)
+        .ok_or(ProductExtensionManifestAuthorityError::InvalidProductConfiguration)?;
+    let target = ExtensionCompatibilityTargetId::parse_exact(compatibility_target)
+        .map_err(invalid_local_lab_configuration)?;
+    let classifier = LocalLabCompatibilityPolicy {
+        target: target.clone(),
+        rows: &profile.declarations,
+    };
+    let admitted = admit_extension_manifest(
+        package
+            .bind_tree_index(&tree)
+            .map_err(invalid_local_lab_configuration)?,
+        MANIFEST_BYTES,
+        &classifier,
+    )
+    .map_err(invalid_local_lab_configuration)?;
+    let expected_compatibility = decode_lower_hex_32(&input.compatibility_digest)
+        .map_err(|()| ProductExtensionManifestAuthorityError::InvalidProductConfiguration)?;
+    let expected_admission = decode_lower_hex_32(&input.admission_digest)
+        .map_err(|()| ProductExtensionManifestAuthorityError::InvalidProductConfiguration)?;
+    if admitted.descriptor().compatibility().len() != profile.declarations.len()
+        || admitted.descriptor().compatibility_digest().as_bytes() != &expected_compatibility
+        || admitted.admission_digest().as_bytes() != &expected_admission
+        || admitted
+            .descriptor()
+            .compatibility()
+            .iter()
+            .any(|classification| {
+                matches!(
+                    classification.level(),
+                    ExtensionCompatibilityLevel::Unsupported
+                        | ExtensionCompatibilityLevel::Unassessed
+                ) || matches!(
+                    classification.declaration(),
+                    ExtensionManifestDeclaration::UnmodeledAuthority(_)
+                )
+            })
+    {
+        return Err(ProductExtensionManifestAuthorityError::InvalidProductConfiguration);
+    }
+    let rows = admitted
+        .descriptor()
+        .compatibility()
+        .iter()
+        .map(|classification| SealedManifestCompatibilityRow {
+            declaration: classification.declaration().clone(),
+            level: classification.level(),
+        })
+        .collect::<Vec<_>>()
+        .into_boxed_slice();
+    let policy = SealedManifestCompatibilityPolicy::new(target.clone(), rows)?;
+    let catalog_anchor = SealedManifestCatalogAnchor {
+        authority: catalog.authority(),
+        revision: catalog.revision(),
+        length: CATALOG_BYTES.len() as u64,
+        digest: catalog.digest(),
+        inventory_digest,
+    };
+    Ok(Some(SealedManifestAuthorityProvisioning {
+        active_catalog: catalog_anchor,
+        rollback_catalogs: Box::new([]),
+        profiles: vec![SealedManifestProfile {
+            runtime_target,
+            catalog: catalog_anchor,
+            package: SealedManifestPackageAnchor {
+                key: package_key,
+                revision: package.identity().revision(),
+                identity: package.identity().clone(),
+                tree_index_digest: tree.index_sha256(),
+                tree_index_length: tree.index_bytes(),
+                tree_digest: tree.tree_sha256(),
+                manifest_digest: tree.manifest_sha256(),
+                compatibility_target: target,
+                compatibility_digest: admitted.descriptor().compatibility_digest(),
+                admission_digest: admitted.admission_digest(),
+            },
+            policy,
+        }]
+        .into_boxed_slice(),
+    }))
+}
+
+#[cfg(all(feature = "local-extension-lab", not(zephium_internal_repository_e2e)))]
+fn local_lab_runtime_target(value: &str) -> Option<ProductExtensionRuntimeTarget> {
+    match value {
+        MACOS_NATIVE_COMPATIBILITY_TARGET => Some(ProductExtensionRuntimeTarget::MacosNative),
+        MACOS_NATIVE_BROKERED_COMPATIBILITY_TARGET => {
+            Some(ProductExtensionRuntimeTarget::MacosNativeBrokered)
+        }
+        _ => None,
+    }
+}
+
+#[cfg(all(feature = "local-extension-lab", not(zephium_internal_repository_e2e)))]
+fn invalid_local_lab_configuration<Error>(_error: Error) -> ProductExtensionManifestAuthorityError {
+    ProductExtensionManifestAuthorityError::InvalidProductConfiguration
+}
+
+#[cfg(all(feature = "local-extension-lab", not(zephium_internal_repository_e2e)))]
+struct LocalLabCompatibilityPolicy<'a> {
+    target: ExtensionCompatibilityTargetId,
+    rows: &'a [crate::local_lab_catalog::LocalLabDeclarationReviewRow],
+}
+
+#[cfg(all(feature = "local-extension-lab", not(zephium_internal_repository_e2e)))]
+impl ExtensionManifestCompatibilityPolicy for LocalLabCompatibilityPolicy<'_> {
+    fn target(&self) -> &ExtensionCompatibilityTargetId {
+        &self.target
+    }
+
+    fn classify(
+        &self,
+        subject: ExtensionManifestCompatibilitySubject<'_>,
+    ) -> Option<ExtensionCompatibilityLevel> {
+        crate::local_lab_catalog::LocalLabDeclarationReviewRow::classification(
+            self.rows,
+            subject.declaration(),
+        )
+    }
 }
 
 #[cfg(all(

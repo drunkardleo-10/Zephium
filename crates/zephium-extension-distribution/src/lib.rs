@@ -18,9 +18,14 @@ mod authentication;
 mod client;
 mod coordinator;
 mod layout;
+#[cfg(feature = "local-extension-lab")]
+mod local_lab;
 mod session;
 #[cfg(feature = "staging-extension-catalog")]
 mod staging;
+
+#[cfg(all(feature = "staging-extension-catalog", feature = "local-extension-lab"))]
+compile_error!("staging-extension-catalog and local-extension-lab are mutually exclusive");
 
 pub use client::{
     ExtensionDistributionClient, ExtensionDistributionClientError, ExtensionDistributionError,

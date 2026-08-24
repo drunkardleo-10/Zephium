@@ -105,6 +105,8 @@ pub(crate) enum ProductArtifactTransport {
     Fixed(FixedOriginTransport),
     #[cfg(feature = "staging-extension-catalog")]
     EmbeddedStaging,
+    #[cfg(feature = "local-extension-lab")]
+    EmbeddedLocalLab(EmbeddedLocalLabArtifactTransport),
 }
 
 impl ArtifactTransport for ProductArtifactTransport {
@@ -117,6 +119,8 @@ impl ArtifactTransport for ProductArtifactTransport {
             Self::Fixed(transport) => transport.fetch_bounded(url, max_bytes).await,
             #[cfg(feature = "staging-extension-catalog")]
             Self::EmbeddedStaging => EmbeddedStagingArtifactTransport.fetch_bounded(url, max_bytes),
+            #[cfg(feature = "local-extension-lab")]
+            Self::EmbeddedLocalLab(transport) => transport.fetch_bounded(url, max_bytes),
         }
     }
 }
@@ -129,8 +133,84 @@ impl fmt::Debug for ProductArtifactTransport {
             Self::EmbeddedStaging => formatter
                 .debug_struct("EmbeddedStagingArtifactTransport")
                 .finish_non_exhaustive(),
+            #[cfg(feature = "local-extension-lab")]
+            Self::EmbeddedLocalLab(_) => formatter
+                .debug_struct("EmbeddedLocalLabArtifactTransport")
+                .finish_non_exhaustive(),
         }
     }
+}
+
+#[cfg(feature = "local-extension-lab")]
+pub(crate) struct EmbeddedLocalLabArtifactTransport {
+    crx_url: Url,
+    legal_url: Url,
+}
+
+#[cfg(feature = "local-extension-lab")]
+impl EmbeddedLocalLabArtifactTransport {
+    fn new(targets_base: &Url) -> Result<Self, ExtensionDistributionClientError> {
+        let catalog = zephium_extension_package::ExtensionReleaseCatalog::parse_canonical(
+            crate::local_lab::CATALOG_BYTES,
+        )
+        .map_err(|_| ExtensionDistributionClientError::ProductAuthorityInvalid)?;
+        let package = catalog
+            .packages()
+            .first()
+            .filter(|_| catalog.packages().len() == 1)
+            .ok_or(ExtensionDistributionClientError::ProductAuthorityInvalid)?;
+        let (_, archive_digest) = package
+            .payload()
+            .acquired_zip_evidence()
+            .ok_or(ExtensionDistributionClientError::ProductAuthorityInvalid)?;
+        let crx_url = crx3_url(
+            targets_base,
+            package.identity().key(),
+            package.identity().revision(),
+            archive_digest,
+        )
+        .map_err(|()| ExtensionDistributionClientError::TransportConfiguration)?;
+        let legal_url =
+            legal_notice_url(targets_base, &package.provenance().legal_notice().sha256())
+                .map_err(|()| ExtensionDistributionClientError::TransportConfiguration)?;
+        Ok(Self { crx_url, legal_url })
+    }
+
+    fn fetch_bounded(
+        &self,
+        url: Url,
+        max_bytes: usize,
+    ) -> Result<Box<[u8]>, FixedOriginFetchError> {
+        let bytes = if url.as_str() == crate::local_lab::CATALOG_URL {
+            crate::local_lab::CATALOG_BYTES
+        } else if url == self.crx_url {
+            crate::local_lab::CRX3_BYTES
+        } else if url == self.legal_url {
+            crate::local_lab::LEGAL_NOTICE_BYTES
+        } else {
+            return Err(FixedOriginFetchError::Boundary);
+        };
+        copy_embedded_bounded(bytes, max_bytes)
+    }
+}
+
+#[cfg(feature = "local-extension-lab")]
+fn copy_embedded_bounded(
+    bytes: &[u8],
+    max_bytes: usize,
+) -> Result<Box<[u8]>, FixedOriginFetchError> {
+    if max_bytes == 0 || bytes.len() > max_bytes {
+        return Err(FixedOriginFetchError::ResponseTooLarge);
+    }
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(bytes.len())
+        .map_err(|_| FixedOriginFetchError::CapacityUnavailable)?;
+    if output.capacity() > max_bytes {
+        return Err(FixedOriginFetchError::ResponseTooLarge);
+    }
+    output.extend_from_slice(bytes);
+    Ok(output.into_boxed_slice())
 }
 
 #[cfg(feature = "staging-extension-catalog")]
@@ -330,6 +410,31 @@ impl ExtensionDistributionClient {
         Ok(Self {
             inner: DistributionClient {
                 transport: ProductArtifactTransport::EmbeddedStaging,
+                authenticator,
+                catalog_url,
+                targets_base,
+            },
+        })
+    }
+
+    /// Opens the exact embedded client for the separately identified private
+    /// candidate lab without constructing an HTTP client or performing I/O.
+    #[cfg(feature = "local-extension-lab")]
+    pub fn local_lab() -> Result<Self, ExtensionDistributionClientError> {
+        let authenticator = ProductCatalogAuthenticator::new().map_err(classify_authority_error)?;
+        let metadata_base = Url::parse(crate::local_lab::METADATA_BASE)
+            .map_err(|_| ExtensionDistributionClientError::TransportConfiguration)?;
+        let targets_base = Url::parse(crate::local_lab::TARGETS_BASE)
+            .map_err(|_| ExtensionDistributionClientError::TransportConfiguration)?;
+        let catalog_url = catalog_url(&metadata_base)
+            .map_err(|()| ExtensionDistributionClientError::TransportConfiguration)?;
+        if catalog_url.as_str() != crate::local_lab::CATALOG_URL {
+            return Err(ExtensionDistributionClientError::TransportConfiguration);
+        }
+        let transport = EmbeddedLocalLabArtifactTransport::new(&targets_base)?;
+        Ok(Self {
+            inner: DistributionClient {
+                transport: ProductArtifactTransport::EmbeddedLocalLab(transport),
                 authenticator,
                 catalog_url,
                 targets_base,

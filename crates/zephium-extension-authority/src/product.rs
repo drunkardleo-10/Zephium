@@ -7,7 +7,11 @@ use sha2::{Digest, Sha256};
 use zephium_core::extensions::{ExtensionAuthorityId, ExtensionPackagePayloadIdentity};
 #[cfg(zephium_internal_repository_e2e)]
 use zephium_extension_package::CanonicalExtensionTreeIndex;
-#[cfg(any(zephium_internal_repository_e2e, feature = "staging-extension-catalog"))]
+#[cfg(any(
+    zephium_internal_repository_e2e,
+    feature = "staging-extension-catalog",
+    feature = "local-extension-lab"
+))]
 use zephium_extension_package::ExtensionReleaseLicenseRule;
 use zephium_extension_package::{
     ExtensionPackageAdmissionPolicyDigest, ExtensionReleaseAdmissionPolicy,
@@ -962,7 +966,8 @@ fn classify_catalog_payload(catalog: &ExtensionReleaseCatalog) -> Option<Catalog
 // caller-provided bytes.
 #[cfg(all(
     not(zephium_internal_repository_e2e),
-    not(feature = "staging-extension-catalog")
+    not(feature = "staging-extension-catalog"),
+    not(feature = "local-extension-lab")
 ))]
 fn sealed_product_bundled_catalog_generations(
 ) -> Result<Option<SealedBundledCatalogGenerations>, BundledCatalogAdmissionError> {
@@ -970,6 +975,55 @@ fn sealed_product_bundled_catalog_generations(
     // policy, must land atomically once reviewed release artifacts exist.
     // Returning `None` preserves an explicit fail-closed production build.
     Ok(None)
+}
+
+#[cfg(all(feature = "local-extension-lab", not(zephium_internal_repository_e2e)))]
+fn sealed_product_bundled_catalog_generations(
+) -> Result<Option<SealedBundledCatalogGenerations>, BundledCatalogAdmissionError> {
+    use crate::local_lab_catalog::{decode_lower_hex_32, LocalLabConfiguration, CATALOG_BYTES};
+
+    let configuration = LocalLabConfiguration::load()
+        .map_err(|()| BundledCatalogAdmissionError::InvalidProductConfiguration)?;
+    let catalog = ExtensionReleaseCatalog::parse_canonical(CATALOG_BYTES)
+        .map_err(BundledCatalogAdmissionError::Catalog)?;
+    let catalog_digest = decode_lower_hex_32(&configuration.catalog_sha256)
+        .map_err(|()| BundledCatalogAdmissionError::InvalidProductConfiguration)?;
+    let policy_digest = decode_lower_hex_32(&configuration.admission_policy.digest_sha256)
+        .map_err(|()| BundledCatalogAdmissionError::InvalidProductConfiguration)?;
+    let inventory_digest = digest_catalog_inventory(&catalog)
+        .ok_or(BundledCatalogAdmissionError::AccountingOverflow)?;
+    if catalog.packages().len() != 1
+        || catalog.digest().as_bytes() != &catalog_digest
+        || catalog.admission_policy_sha256().as_bytes() != &policy_digest
+    {
+        return Err(BundledCatalogAdmissionError::InvalidProductConfiguration);
+    }
+    let license_rules = configuration
+        .admission_policy
+        .license_rules
+        .iter()
+        .map(|rule| {
+            ExtensionReleaseLicenseRule::new(&rule.expression, rule.corresponding_source_required)
+                .map_err(|_| BundledCatalogAdmissionError::InvalidProductConfiguration)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let policy = ExtensionReleaseAdmissionPolicy::new(
+        ExtensionPackageAdmissionPolicyDigest::from_bytes(policy_digest),
+        license_rules,
+    )
+    .map_err(|_| BundledCatalogAdmissionError::InvalidProductConfiguration)?;
+    let active = SealedBundledCatalogGeneration {
+        anchor: SealedBundledCatalogAnchor {
+            catalog_length: CATALOG_BYTES.len(),
+            catalog_digest: catalog.digest(),
+            authority: catalog.authority(),
+            catalog_revision: catalog.revision(),
+            admission_policy_digest: catalog.admission_policy_sha256(),
+            inventory_digest,
+        },
+        policy,
+    };
+    Ok(Some((active, Box::new([]))))
 }
 
 #[cfg(all(
@@ -1303,7 +1357,8 @@ mod tests {
 
     #[cfg(all(
         not(zephium_internal_repository_e2e),
-        not(feature = "staging-extension-catalog")
+        not(feature = "staging-extension-catalog"),
+        not(feature = "local-extension-lab")
     ))]
     #[test]
     fn production_authority_is_explicitly_unprovisioned() {

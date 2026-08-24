@@ -4,6 +4,7 @@
   "scripts": {
     "dev": "tauri dev",
     "dev:extensions-staging": "tauri dev --config tauri.extensions-staging.conf.json --features staging-extension-catalog",
+    "dev:extension-lab": "tauri dev --config tauri.extension-lab.conf.json --features local-extension-lab",
     "build": "tauri build"
   },
   "devDependencies": {

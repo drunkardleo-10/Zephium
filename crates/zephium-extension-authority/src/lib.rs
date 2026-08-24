@@ -45,6 +45,8 @@ mod checkpoint;
 mod digest;
 mod error;
 mod inventory;
+#[cfg(all(feature = "local-extension-lab", not(zephium_internal_repository_e2e)))]
+mod local_lab_catalog;
 mod manifest;
 mod product;
 #[cfg(zephium_internal_repository_e2e)]
@@ -54,6 +56,9 @@ mod repository_e2e_fixture;
     not(zephium_internal_repository_e2e)
 ))]
 mod staging_catalog;
+
+#[cfg(all(feature = "staging-extension-catalog", feature = "local-extension-lab"))]
+compile_error!("staging-extension-catalog and local-extension-lab are mutually exclusive");
 
 pub use checkpoint::{
     BundledCatalogCheckpoint, BundledCatalogDisposition, BundledCatalogGenerationAnchor,

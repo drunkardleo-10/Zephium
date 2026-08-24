@@ -7,6 +7,8 @@ const MAIN_LABEL: &str = "main";
 const LINUX_APP_ID: &str = "app.zephium";
 const EXTENSIONS_STAGING_PRODUCT_NAME: &str = "Zephium Extensions Staging";
 const EXTENSIONS_STAGING_IDENTIFIER: &str = "app.zephium.extensions-staging";
+const EXTENSION_LAB_PRODUCT_NAME: &str = "Zephium Extension Lab";
+const EXTENSION_LAB_IDENTIFIER: &str = "app.zephium.extension-lab";
 const LINUX_DESKTOP_TEMPLATE: &str = "linux/zephium.desktop.hbs";
 const PACKAGE_LICENSE: &str = "MPL-2.0 AND CC-BY-SA-3.0";
 const LEGAL_RESOURCES: [(&str, &str); 3] = [
@@ -55,6 +57,10 @@ fn validate_privileged_window_ownership() -> Result<(), Box<dyn Error>> {
         Err(error) => return Err(Box::new(error)),
     };
     let extensions_staging = env::var_os("CARGO_FEATURE_STAGING_EXTENSION_CATALOG").is_some();
+    let extension_lab = env::var_os("CARGO_FEATURE_LOCAL_EXTENSION_LAB").is_some();
+    if extensions_staging && extension_lab {
+        return Err("the extension staging catalog and private lab are mutually exclusive".into());
+    }
     if extensions_staging {
         if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
             return Err("the extension staging catalog may be built only for macOS".into());
@@ -63,6 +69,15 @@ fn validate_privileged_window_ownership() -> Result<(), Box<dyn Error>> {
             "the extension staging feature requires its isolated Tauri configuration override",
         )?;
         validate_extensions_staging_override(override_config)?;
+    }
+    if extension_lab {
+        if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
+            return Err("the private extension lab may be built only for macOS".into());
+        }
+        let override_config = config_override.as_ref().ok_or(
+            "the private extension lab feature requires its isolated Tauri configuration override",
+        )?;
+        validate_extension_lab_override(override_config)?;
     }
 
     for target in [Target::MacOS, Target::Linux, Target::Windows] {
@@ -80,10 +95,25 @@ fn validate_privileged_window_ownership() -> Result<(), Box<dyn Error>> {
             json_patch::merge(&mut config, config_override);
             validate_target_window(target, "effective", &config)?;
             validate_legal_resources("effective", &config, &root)?;
-            if matches!(target, Target::Linux) && !extensions_staging {
+            if matches!(target, Target::Linux) && !extensions_staging && !extension_lab {
                 validate_linux_identity("effective", &config, &root)?;
             }
         }
+    }
+    Ok(())
+}
+
+fn validate_extension_lab_override(config: &Value) -> io::Result<()> {
+    if config.get("productName").and_then(Value::as_str) != Some(EXTENSION_LAB_PRODUCT_NAME)
+        || config.get("identifier").and_then(Value::as_str) != Some(EXTENSION_LAB_IDENTIFIER)
+        || config
+            .pointer("/app/windows/0/title")
+            .and_then(Value::as_str)
+            != Some(EXTENSION_LAB_PRODUCT_NAME)
+    {
+        return Err(io::Error::other(
+            "the private extension lab must use its exact isolated product identity",
+        ));
     }
     Ok(())
 }
