@@ -10,6 +10,14 @@ const assetUrl = new URL(
 );
 const source = await readFile(fileURLToPath(assetUrl), "utf8");
 const script = new vm.Script(source, { filename: fileURLToPath(assetUrl) });
+const notificationsAssetUrl = new URL(
+  "../../crates/zephium-extension-package/assets/macos/webkit-notifications-v1.js",
+  import.meta.url,
+);
+const notificationsSource = await readFile(fileURLToPath(notificationsAssetUrl), "utf8");
+const notificationsScript = new vm.Script(notificationsSource, {
+  filename: fileURLToPath(notificationsAssetUrl),
+});
 const historyAssetUrl = new URL(
   "../../crates/zephium-extension-package/assets/macos/webkit-history-v1.js",
   import.meta.url,
@@ -53,6 +61,11 @@ const optionsScript = new vm.Script(optionsSource, {
 
 for (const forbidden of ["document", "window", "fetch", "XMLHttpRequest", "WebSocket"]) {
   assert.equal(source.includes(forbidden), false, `compatibility asset exposes ${forbidden}`);
+  assert.equal(
+    notificationsSource.includes(forbidden),
+    false,
+    `notifications asset exposes ${forbidden}`,
+  );
 }
 for (const forbidden of [
   "document",
@@ -181,6 +194,44 @@ assert.equal(browserOnly.chrome, nativeBrowser);
 assert.equal(browserOnly.browser, nativeBrowser);
 assert.equal(browserOnly.browser.runtime.getURL("x"), "native-extension://browser-fixture/x");
 assert.equal(browserOnly[mode], "native-aliased");
+
+let notificationCallback;
+const notificationsNative = nativeNamespace("notifications-fixture");
+const notificationsContext = run({
+  chrome: notificationsNative,
+  queueMicrotask,
+});
+notificationsScript.runInContext(notificationsContext, { timeout: 1_000 });
+const notifications = notificationsContext.chrome.notifications;
+assert.equal(notificationsContext.browser.notifications, notifications);
+assert.equal(Object.isFrozen(notifications), true);
+assert.equal(notifications.onClicked.hasListeners(), false);
+assert.equal(notifications.onClosed.hasListener(() => {}), false);
+assert.equal(await notifications.getPermissionLevel(), "denied");
+assert.equal(Object.keys(await notifications.getAll()).length, 0);
+assert.equal(
+  await notifications.create("requested-id", { type: "basic" }, (value) => {
+    notificationCallback = value;
+  }),
+  "requested-id",
+);
+await Promise.resolve();
+assert.equal(notificationCallback, "requested-id");
+assert.equal(await notifications.update("requested-id", {}), false);
+assert.equal(await notifications.clear("requested-id"), false);
+notificationsScript.runInContext(notificationsContext, { timeout: 1_000 });
+assert.equal(notificationsContext.chrome.notifications, notifications);
+
+const nativeNotifications = Object.freeze({ native: true });
+const preexistingNotifications = nativeNamespace("native-notifications-fixture");
+preexistingNotifications.notifications = nativeNotifications;
+const preexistingContext = run({
+  chrome: preexistingNotifications,
+  queueMicrotask,
+});
+notificationsScript.runInContext(preexistingContext, { timeout: 1_000 });
+assert.equal(preexistingContext.chrome.notifications, nativeNotifications);
+assert.equal(preexistingContext.browser.notifications, nativeNotifications);
 
 assert.throws(
   () => run({}),

@@ -109,6 +109,7 @@ pub(super) struct ArtifactSurfaces {
     pub(super) default_search: bool,
     pub(super) recent_sessions: bool,
     pub(super) options_page: bool,
+    pub(super) notifications_fallback: bool,
 }
 
 #[derive(Debug)]
@@ -168,6 +169,8 @@ struct Surfaces {
     sessions: Option<String>,
     #[serde(default)]
     options_page: Option<String>,
+    #[serde(default)]
+    notifications: Option<String>,
 }
 
 pub(super) fn validate(root: &Path) -> Result<ValidatedCompatibilityArtifact, String> {
@@ -204,8 +207,17 @@ pub(super) fn validate(root: &Path) -> Result<ValidatedCompatibilityArtifact, St
     let sessions = metadata.surfaces.sessions.as_deref() == Some("recent-current-space-tab-only");
     let options_page =
         metadata.surfaces.options_page.as_deref() == Some("runtime-open-options-page-window");
-    let (adaptations, limitations) =
-        expected_contract(target, bookmarked, favicon, search, sessions, options_page)?;
+    let notifications_fallback =
+        metadata.surfaces.notifications.as_deref() == Some("native-preserved-or-inert-no-delivery");
+    let (adaptations, limitations) = expected_contract(
+        target,
+        bookmarked,
+        favicon,
+        search,
+        sessions,
+        options_page,
+        notifications_fallback,
+    )?;
     if metadata.adaptations != adaptations || metadata.limitations != limitations {
         return Err("compatibility artifact adaptation contract drifted".into());
     }
@@ -248,6 +260,7 @@ fn expected_contract(
     search: bool,
     sessions: bool,
     options_page: bool,
+    notifications_fallback: bool,
 ) -> Result<(Vec<&'static str>, Vec<&'static str>), String> {
     if target == CompatibilityArtifactTarget::NativeV3 {
         if bookmarked || favicon || search || sessions {
@@ -258,6 +271,10 @@ fn expected_contract(
         if options_page {
             adaptations.push("extension-options-page-routing-v1");
             limitations.push("options-page-opens-in-dedicated-window");
+        }
+        if notifications_fallback {
+            adaptations.push("declared-notifications-fallback-v1");
+            limitations.push("notifications-fallback-never-delivers-or-emits-events");
         }
         return Ok((adaptations, limitations));
     }
@@ -304,6 +321,10 @@ fn expected_contract(
     if options_page {
         adaptations.push("extension-options-page-routing-v1");
         limitations.push("options-page-opens-in-dedicated-window");
+    }
+    if notifications_fallback {
+        adaptations.push("declared-notifications-fallback-v1");
+        limitations.push("notifications-fallback-never-delivers-or-emits-events");
     }
     adaptations.extend([
         "extension-page-runtime-messaging-session-v1",
@@ -442,6 +463,11 @@ fn validate_surfaces(
         Some("runtime-open-options-page-window") => true,
         _ => return Err("compatibility artifact options-page surface is invalid".into()),
     };
+    let notifications_fallback = match surfaces.notifications.as_deref() {
+        None => false,
+        Some("native-preserved-or-inert-no-delivery") => true,
+        _ => return Err("compatibility artifact notifications surface is invalid".into()),
+    };
     Ok(ArtifactSurfaces {
         background,
         isolated_content_scripts: surfaces.isolated_content_scripts,
@@ -456,6 +482,7 @@ fn validate_surfaces(
         default_search,
         recent_sessions,
         options_page,
+        notifications_fallback,
     })
 }
 

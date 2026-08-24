@@ -32,6 +32,7 @@ const ARTIFACT_TREE_INDEX: &str = "authenticated-extension-tree.json";
 const NATIVE_TARGET: &str = "webkit-macos-native-v3";
 const BROKERED_TARGET: &str = "webkit-macos-native-brokered-v1";
 const API_PRELUDE: &str = "__zephium__/webkit-api-v1.js";
+const NOTIFICATIONS_BRIDGE: &str = "__zephium__/webkit-notifications-v1.js";
 const RUNTIME_MESSAGING_BRIDGE: &str = "__zephium__/webkit-runtime-messaging-v1.js";
 const BOOKMARKS_BRIDGE: &str = "__zephium__/webkit-bookmarks-v1.js";
 const FAVICON_BRIDGE: &str = "__zephium__/webkit-favicon-v1.js";
@@ -46,6 +47,8 @@ const MAX_POPUP_HTML_BYTES: u64 = 2 * 1024 * 1024;
 
 const API_PRELUDE_SOURCE: &str =
     include_str!("../../crates/zephium-extension-package/assets/macos/webkit-api-v1.js");
+const NOTIFICATIONS_BRIDGE_SOURCE: &str =
+    include_str!("../../crates/zephium-extension-package/assets/macos/webkit-notifications-v1.js");
 const RUNTIME_MESSAGING_BRIDGE_SOURCE: &str = include_str!(
     "../../crates/zephium-extension-package/assets/macos/webkit-runtime-messaging-v1.js"
 );
@@ -112,6 +115,7 @@ struct TransformPlan {
     omitted_file_content_scripts: usize,
     removed_file_match_patterns: usize,
     same_document_navigation_routes: usize,
+    notifications_fallback: bool,
     history_broker_search: bool,
     empty_bookmarks: bool,
     empty_favicon: bool,
@@ -129,6 +133,7 @@ struct ExtensionBridgePlan {
     empty_favicon: bool,
     default_search: bool,
     recent_sessions: bool,
+    notifications_fallback: bool,
 }
 
 #[derive(Deserialize)]
@@ -179,6 +184,8 @@ struct CompatibilitySurfaces {
     sessions: Option<String>,
     #[serde(default)]
     options_page: Option<String>,
+    #[serde(default)]
+    notifications: Option<String>,
 }
 
 pub(crate) struct ValidatedCompatibilityReleaseInput {
@@ -292,8 +299,14 @@ pub(crate) fn validate_release_input(
     };
     validate_compatibility_identity(&receipt.source, "source")?;
     validate_compatibility_identity(&receipt.output, "output")?;
-    let (empty_bookmarks, empty_favicon, default_search, recent_sessions, options_page) =
-        validate_receipt_surfaces(&receipt.surfaces, target)?;
+    let (
+        empty_bookmarks,
+        empty_favicon,
+        default_search,
+        recent_sessions,
+        options_page,
+        notifications_fallback,
+    ) = validate_receipt_surfaces(&receipt.surfaces, target)?;
     let (expected_adaptations, expected_limitations) = receipt_contract(
         target,
         empty_bookmarks,
@@ -301,6 +314,7 @@ pub(crate) fn validate_release_input(
         default_search,
         recent_sessions,
         options_page,
+        notifications_fallback,
     );
     if receipt.adaptations != expected_adaptations || receipt.limitations != expected_limitations {
         return Err("compatibility receipt adaptation contract drifted".into());
@@ -355,7 +369,7 @@ fn validate_compatibility_identity(
 fn validate_receipt_surfaces(
     surfaces: &CompatibilitySurfaces,
     target: ArtifactTarget,
-) -> Result<(bool, bool, bool, bool, bool), String> {
+) -> Result<(bool, bool, bool, bool, bool, bool), String> {
     let background_valid = matches!(
         surfaces.background.as_str(),
         "absent" | "classic-wrapper" | "module-wrapper"
@@ -379,6 +393,11 @@ fn validate_receipt_surfaces(
         Some("runtime-open-options-page-window") => true,
         _ => return Err("compatibility receipt options-page surface is invalid".into()),
     };
+    let notifications_fallback = match surfaces.notifications.as_deref() {
+        None => false,
+        Some("native-preserved-or-inert-no-delivery") => true,
+        _ => return Err("compatibility receipt notifications surface is invalid".into()),
+    };
     match target {
         ArtifactTarget::NativeV3 => {
             if surfaces.history_search.is_some()
@@ -390,7 +409,14 @@ fn validate_receipt_surfaces(
             {
                 return Err("native compatibility receipt declared brokered surfaces".into());
             }
-            Ok((false, false, false, false, options_page))
+            Ok((
+                false,
+                false,
+                false,
+                false,
+                options_page,
+                notifications_fallback,
+            ))
         }
         ArtifactTarget::NativeBrokeredV1 => {
             if surfaces.background == "absent"
@@ -427,6 +453,7 @@ fn validate_receipt_surfaces(
                 default_search,
                 recent_sessions,
                 options_page,
+                notifications_fallback,
             ))
         }
     }
@@ -439,6 +466,7 @@ fn receipt_contract(
     default_search: bool,
     recent_sessions: bool,
     options_page: bool,
+    notifications_fallback: bool,
 ) -> (Vec<&'static str>, Vec<&'static str>) {
     let mut adaptations = vec![
         "native-api-identity-preservation-v1",
@@ -484,6 +512,10 @@ fn receipt_contract(
     if options_page {
         adaptations.push("extension-options-page-routing-v1");
         limitations.push("options-page-opens-in-dedicated-window");
+    }
+    if notifications_fallback {
+        adaptations.push("declared-notifications-fallback-v1");
+        limitations.push("notifications-fallback-never-delivers-or-emits-events");
     }
     if target.requires_history_broker() {
         limitations.retain(|limitation| *limitation != "non-action-extension-pages-not-adapted");
@@ -560,6 +592,13 @@ fn materialize_target(
         API_PRELUDE,
         API_PRELUDE_SOURCE.as_bytes(),
     )?;
+    if plan.notifications_fallback {
+        write_new_file(
+            &staged_extension,
+            NOTIFICATIONS_BRIDGE,
+            NOTIFICATIONS_BRIDGE_SOURCE.as_bytes(),
+        )?;
+    }
     if plan.empty_bookmarks {
         write_new_file(
             &staged_extension,
@@ -634,6 +673,7 @@ fn materialize_target(
         plan.default_search,
         plan.recent_sessions,
         plan.options_page.is_some(),
+        plan.notifications_fallback,
     );
     let mut surfaces = serde_json::json!({
         "background": plan.worker.label(),
@@ -693,6 +733,15 @@ fn materialize_target(
             .insert(
                 "options_page".to_owned(),
                 Value::String("runtime-open-options-page-window".to_owned()),
+            );
+    }
+    if plan.notifications_fallback {
+        surfaces
+            .as_object_mut()
+            .expect("compatibility surfaces are an object")
+            .insert(
+                "notifications".to_owned(),
+                Value::String("native-preserved-or-inert-no-delivery".to_owned()),
             );
     }
     let metadata = serde_json::to_vec_pretty(&serde_json::json!({
@@ -770,6 +819,7 @@ fn build_plan(
     }
 
     let history_broker_search = target.requires_history_broker();
+    let notifications_fallback = declares_permission(&root, "permissions", "notifications")?;
     let empty_bookmarks =
         history_broker_search && declares_permission(&root, "permissions", "bookmarks")?;
     let empty_favicon =
@@ -811,6 +861,7 @@ fn build_plan(
         empty_favicon,
         default_search,
         recent_sessions,
+        notifications_fallback,
     };
     let content_scripts = adapt_content_scripts(
         &mut root,
@@ -843,7 +894,10 @@ fn build_plan(
                 let source = read_indexed_file(source_root, indexed)?;
                 inject_extension_page_preludes(
                     &source,
-                    ExtensionBridgePlan::default(),
+                    ExtensionBridgePlan {
+                        notifications_fallback,
+                        ..ExtensionBridgePlan::default()
+                    },
                     options_page.as_deref(),
                 )
                 .map(|bytes| (path, bytes))
@@ -874,6 +928,7 @@ fn build_plan(
         omitted_file_content_scripts: content_scripts.omitted_file_entries,
         removed_file_match_patterns: content_scripts.removed_file_patterns,
         same_document_navigation_routes,
+        notifications_fallback,
         history_broker_search,
         empty_bookmarks,
         empty_favicon,
@@ -1124,6 +1179,10 @@ fn adapt_background(
     let wrapper = match kind {
         WorkerKind::Classic => {
             let prelude = js_string(&format!("/{API_PRELUDE}"))?;
+            let notifications = bridges
+                .notifications_fallback
+                .then(|| js_string(&format!("/{NOTIFICATIONS_BRIDGE}")))
+                .transpose()?;
             let messaging = bridges
                 .extension_page_messaging
                 .then(|| js_string(&format!("/{RUNTIME_MESSAGING_BRIDGE}")))
@@ -1155,6 +1214,7 @@ fn adapt_background(
             let original = js_string(&format!("/{original}"))?;
             let imports = [
                 Some(prelude),
+                notifications,
                 bookmarks,
                 favicon,
                 messaging,
@@ -1172,6 +1232,10 @@ fn adapt_background(
         }
         WorkerKind::Module => {
             let prelude = js_string(&format!("./{API_PRELUDE}"))?;
+            let notifications = bridges
+                .notifications_fallback
+                .then(|| js_string(&format!("./{NOTIFICATIONS_BRIDGE}")))
+                .transpose()?;
             let messaging = bridges
                 .extension_page_messaging
                 .then(|| js_string(&format!("./{RUNTIME_MESSAGING_BRIDGE}")))
@@ -1202,6 +1266,9 @@ fn adapt_background(
                 .transpose()?;
             let original = js_string(&format!("./{original}"))?;
             let mut wrapper = format!("import {prelude};\n");
+            if let Some(notifications) = notifications {
+                wrapper.push_str(&format!("import {notifications};\n"));
+            }
             if let Some(bookmarks) = bookmarks {
                 wrapper.push_str(&format!("import {bookmarks};\n"));
             }
@@ -1369,6 +1436,11 @@ fn inject_extension_page_preludes(
         .map_err(|_| "extension page must be UTF-8 for deterministic adaptation".to_owned())?;
     let insertion = explicit_head_end(source)?;
     let mut tags = format!("<script src=\"/{API_PRELUDE}\"></script>");
+    if bridges.notifications_fallback {
+        tags.push_str(&format!(
+            "<script src=\"/{NOTIFICATIONS_BRIDGE}\"></script>"
+        ));
+    }
     if bridges.empty_bookmarks {
         tags.push_str(&format!("<script src=\"/{BOOKMARKS_BRIDGE}\"></script>"));
     }
@@ -1542,6 +1614,7 @@ fn enforce_output_budgets(
 ) -> Result<(), String> {
     let added_files = 1_usize
         + usize::from(plan.background_wrapper.is_some())
+        + usize::from(plan.notifications_fallback)
         + usize::from(plan.empty_bookmarks)
         + (usize::from(plan.empty_favicon) * 2)
         + usize::from(plan.history_broker_search)
@@ -1551,6 +1624,7 @@ fn enforce_output_budgets(
         + usize::from(plan.options_page.is_some())
         + usize::from(plan.same_document_navigation_routes != 0);
     let added_entries = 3_usize
+        + usize::from(plan.notifications_fallback)
         + usize::from(plan.empty_bookmarks)
         + (usize::from(plan.empty_favicon) * 2)
         + usize::from(plan.history_broker_search)
@@ -1567,6 +1641,8 @@ fn enforce_output_budgets(
     for bytes in [
         Some(plan.manifest.as_slice()),
         Some(API_PRELUDE_SOURCE.as_bytes()),
+        plan.notifications_fallback
+            .then_some(NOTIFICATIONS_BRIDGE_SOURCE.as_bytes()),
         plan.empty_bookmarks
             .then_some(BOOKMARKS_BRIDGE_SOURCE.as_bytes()),
         plan.empty_favicon
@@ -1629,6 +1705,13 @@ fn enforce_output_budgets(
     let replacement_bytes = (plan.manifest.len() as u64)
         .checked_add(replacement_page_bytes)
         .and_then(|bytes| bytes.checked_add(API_PRELUDE_SOURCE.len() as u64))
+        .and_then(|bytes| {
+            bytes.checked_add(if plan.notifications_fallback {
+                NOTIFICATIONS_BRIDGE_SOURCE.len() as u64
+            } else {
+                0
+            })
+        })
         .and_then(|bytes| {
             bytes.checked_add(if plan.empty_bookmarks {
                 BOOKMARKS_BRIDGE_SOURCE.len() as u64
@@ -1952,6 +2035,10 @@ mod tests {
             fs::read_to_string(first.join(ARTIFACT_EXTENSION).join(BACKGROUND_WRAPPER)).unwrap();
         assert!(wrapper.contains("import \"./__zephium__/webkit-api-v1.js\";"));
         assert!(wrapper.contains("import \"./worker.js\";"));
+        assert!(!first
+            .join(ARTIFACT_EXTENSION)
+            .join(NOTIFICATIONS_BRIDGE)
+            .exists());
         let popup =
             fs::read_to_string(first.join(ARTIFACT_EXTENSION).join("ui/popup.html")).unwrap();
         assert!(popup.contains(&format!(
@@ -1962,6 +2049,65 @@ mod tests {
             &first.join(ARTIFACT_TREE_INDEX),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn notifications_fallback_is_permission_gated_and_receipt_bound() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir(&source).unwrap();
+        let index = fixture(
+            &source,
+            Some("module"),
+            b"<!doctype html><html><head></head><body></body></html>",
+        );
+        let manifest_path = source.join("manifest.json");
+        let mut manifest: Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest
+            .as_object_mut()
+            .unwrap()
+            .insert("permissions".into(), serde_json::json!(["notifications"]));
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        reindex(&source, &index);
+
+        let artifact = temp.path().join("artifact");
+        materialize(&source, &index, &artifact).unwrap();
+        let extension = artifact.join(ARTIFACT_EXTENSION);
+        let bridge = fs::read_to_string(extension.join(NOTIFICATIONS_BRIDGE)).unwrap();
+        assert!(bridge.contains("getPermissionLevel"));
+        assert!(bridge.contains("return settle(args, \"denied\")"));
+        assert!(bridge.contains("notifications compatibility found divergent native namespaces"));
+
+        let wrapper = fs::read_to_string(extension.join(BACKGROUND_WRAPPER)).unwrap();
+        let api = wrapper.find(API_PRELUDE).unwrap();
+        let notifications = wrapper.find(NOTIFICATIONS_BRIDGE).unwrap();
+        let worker = wrapper.find("worker.js").unwrap();
+        assert!(api < notifications && notifications < worker);
+        let popup = fs::read_to_string(extension.join("ui/popup.html")).unwrap();
+        assert!(popup.contains(&format!(
+            "<script src=\"/{API_PRELUDE}\"></script><script src=\"/{NOTIFICATIONS_BRIDGE}\"></script>"
+        )));
+
+        let metadata: Value =
+            serde_json::from_slice(&fs::read(artifact.join(ARTIFACT_METADATA)).unwrap()).unwrap();
+        assert!(metadata["adaptations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == "declared-notifications-fallback-v1"));
+        assert!(metadata["limitations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == "notifications-fallback-never-delivers-or-emits-events"));
+        assert_eq!(
+            metadata.pointer("/surfaces/notifications"),
+            Some(&Value::String(
+                "native-preserved-or-inert-no-delivery".to_owned()
+            ))
+        );
+        validate_release_input(&artifact).unwrap();
     }
 
     #[test]
