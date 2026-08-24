@@ -10,7 +10,7 @@ use zephium_extension_package::PortableRelativePath;
 
 use super::INCOMPLETE_MARKER;
 
-pub(super) fn read_regular_bounded(
+pub(crate) fn read_regular_bounded(
     path: &Path,
     max_bytes: u64,
     label: &str,
@@ -37,7 +37,7 @@ pub(super) fn read_regular_bounded(
     Ok(bytes)
 }
 
-pub(super) fn write_new_file(root: &Path, relative: &str, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn write_new_file(root: &Path, relative: &str, bytes: &[u8]) -> Result<(), String> {
     let relative = PortableRelativePath::parse(relative)
         .map_err(|error| format!("publication target is not portable: {error}"))?;
     let path = root.join(relative.as_str());
@@ -59,7 +59,7 @@ pub(super) fn write_new_file(root: &Path, relative: &str, bytes: &[u8]) -> Resul
         .map_err(|error| format!("cannot write publication target: {error}"))
 }
 
-pub(super) fn absent_output_path(output: &Path) -> Result<PathBuf, String> {
+pub(crate) fn absent_output_path(output: &Path) -> Result<PathBuf, String> {
     if path_entry_exists(output)? {
         return Err("catalog publication output already exists".into());
     }
@@ -88,7 +88,7 @@ pub(super) fn publish_no_replace(staging: tempfile::TempDir, output: &Path) -> R
     )
 }
 
-pub(super) fn publish_named_components_no_replace(
+pub(crate) fn publish_named_components_no_replace(
     staging: tempfile::TempDir,
     output: &Path,
     components: &[&str],
@@ -150,18 +150,18 @@ fn create_restricted_directory(path: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(unix)]
-pub(super) fn restrict_directory(path: &Path) -> Result<(), String> {
+pub(crate) fn restrict_directory(path: &Path) -> Result<(), String> {
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))
         .map_err(|error| format!("cannot restrict publication directory: {error}"))
 }
 
 #[cfg(not(unix))]
-pub(super) fn restrict_directory(_path: &Path) -> Result<(), String> {
+pub(crate) fn restrict_directory(_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
 #[cfg(unix)]
-pub(super) fn sync_directory_tree(root: &Path) -> Result<(), String> {
+pub(crate) fn sync_directory_tree(root: &Path) -> Result<(), String> {
     let mut directories = vec![root.to_owned()];
     let mut cursor = 0;
     while cursor < directories.len() {
@@ -188,7 +188,7 @@ pub(super) fn sync_directory_tree(root: &Path) -> Result<(), String> {
 }
 
 #[cfg(not(unix))]
-pub(super) fn sync_directory_tree(_root: &Path) -> Result<(), String> {
+pub(crate) fn sync_directory_tree(_root: &Path) -> Result<(), String> {
     Ok(())
 }
 
