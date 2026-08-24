@@ -13,15 +13,21 @@ fn main() {
     let replacement_settlement = arguments
         .iter()
         .any(|argument| argument == "--permission-replacement-settlement-gate");
+    let alarm_delivery = arguments
+        .iter()
+        .any(|argument| argument == "--alarm-delivery-gate");
     if usize::from(interactive_permissions)
         + usize::from(callback_cohort)
         + usize::from(replacement_settlement)
+        + usize::from(alarm_delivery)
         > 1
     {
-        eprintln!("choose only one interactive permission gate");
+        eprintln!("choose only one extended WebExtension gate");
         std::process::exit(2);
     }
-    let result = if replacement_settlement {
+    let result = if alarm_delivery {
+        zephium_engine::run_macos_web_extension_alarm_delivery_probe()
+    } else if replacement_settlement {
         zephium_engine::run_macos_web_extension_permission_replacement_settlement_probe()
     } else if callback_cohort {
         zephium_engine::run_macos_web_extension_permission_callback_cohort_probe()

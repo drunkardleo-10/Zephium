@@ -744,19 +744,23 @@ struct ProbeTeardown {
 }
 
 pub(crate) fn run_web_extension_probe() -> Result<bool, String> {
-    run_web_extension_probe_with_permissions(RuntimePermissionProbeMode::None)
+    run_web_extension_probe_with_options(RuntimePermissionProbeMode::None, false)
+}
+
+pub(crate) fn run_web_extension_alarm_delivery_probe() -> Result<bool, String> {
+    run_web_extension_probe_with_options(RuntimePermissionProbeMode::None, true)
 }
 
 pub(crate) fn run_web_extension_permission_probe() -> Result<bool, String> {
-    run_web_extension_probe_with_permissions(RuntimePermissionProbeMode::Full)
+    run_web_extension_probe_with_options(RuntimePermissionProbeMode::Full, false)
 }
 
 pub(crate) fn run_web_extension_permission_callback_cohort_probe() -> Result<bool, String> {
-    run_web_extension_probe_with_permissions(RuntimePermissionProbeMode::CallbackCohort)
+    run_web_extension_probe_with_options(RuntimePermissionProbeMode::CallbackCohort, false)
 }
 
 pub(crate) fn run_web_extension_permission_replacement_settlement_probe() -> Result<bool, String> {
-    run_web_extension_probe_with_permissions(RuntimePermissionProbeMode::ReplacementSettlement)
+    run_web_extension_probe_with_options(RuntimePermissionProbeMode::ReplacementSettlement, false)
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -773,8 +777,9 @@ impl RuntimePermissionProbeMode {
     }
 }
 
-fn run_web_extension_probe_with_permissions(
+fn run_web_extension_probe_with_options(
     permission_mode: RuntimePermissionProbeMode,
+    extended_alarm_delivery: bool,
 ) -> Result<bool, String> {
     let Some(operating_system) = supported_runtime()? else {
         return Ok(false);
@@ -782,13 +787,16 @@ fn run_web_extension_probe_with_permissions(
     let watchdog_completed =
         arm_process_watchdog_with_timeout(if permission_mode.is_interactive() {
             Duration::from_secs(600)
+        } else if extended_alarm_delivery {
+            Duration::from_secs(300)
         } else {
             PROCESS_WATCHDOG_TIMEOUT
         });
     let result = (|| {
         set_phase("live-probe");
-        let teardown =
-            objc2::rc::autoreleasepool(|_| run_supported_probe(operating_system, permission_mode))?;
+        let teardown = objc2::rc::autoreleasepool(|_| {
+            run_supported_probe(operating_system, permission_mode, extended_alarm_delivery)
+        })?;
         set_phase("teardown-wait");
         wait_for_teardown(&teardown)?;
         println!(
@@ -909,7 +917,7 @@ fn arm_process_watchdog_with_timeout(timeout: Duration) -> Arc<AtomicBool> {
             .unwrap_or("poisoned-phase-state");
         eprintln!(
             "macOS WKWebExtension probe watchdog expired after {}s in phase {phase}",
-            PROCESS_WATCHDOG_TIMEOUT.as_secs()
+            timeout.as_secs()
         );
         std::process::exit(124);
     });
@@ -950,6 +958,7 @@ fn supported_runtime() -> Result<Option<String>, String> {
 fn run_supported_probe(
     operating_system: String,
     permission_mode: RuntimePermissionProbeMode,
+    extended_alarm_delivery: bool,
 ) -> Result<ProbeTeardown, String> {
     set_phase("appkit-launch");
     let mtm = MainThreadMarker::new()
@@ -996,6 +1005,7 @@ fn run_supported_probe(
         &primary_server.url("/frame/same", "bitwarden-runtime"),
         &run_loop,
         mtm,
+        extended_alarm_delivery,
     )?;
     drop(bitwarden_contract_extension);
     set_phase("major-extension-contract-parse");

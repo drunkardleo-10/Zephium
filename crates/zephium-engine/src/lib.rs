@@ -54,6 +54,17 @@ pub fn run_macos_web_extension_probe() -> Result<bool, String> {
     platform::macos::run_web_extension_probe()
 }
 
+/// Runs the opt-in long-duration MV3 alarm delivery gate.
+///
+/// The probe arms a standards-minimum alarm, unloads and reloads the exact
+/// native context, and requires the service worker to wake and persist the
+/// delivery. It is intentionally excluded from ordinary CI and product builds.
+#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
+#[doc(hidden)]
+pub fn run_macos_web_extension_alarm_delivery_probe() -> Result<bool, String> {
+    platform::macos::run_web_extension_alarm_delivery_probe()
+}
+
 /// Runs the interactive WebKit optional-permission settlement gate.
 ///
 /// This feature-only probe requires three real clicks in temporary

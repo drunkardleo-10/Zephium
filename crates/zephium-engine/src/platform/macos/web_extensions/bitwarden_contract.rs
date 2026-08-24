@@ -5,6 +5,7 @@
 //! MV3 manifest, so the live gate can distinguish WebKit parser/runtime facts
 //! from assumptions without shipping or embedding upstream source artifacts.
 
+mod alarm_delivery;
 mod browser_api;
 
 use std::path::{Path, PathBuf};
@@ -187,7 +188,6 @@ pub(super) fn write_fixture(root: &Path) -> Result<PathBuf, String> {
     write(&path, "manifest.json", &manifest.to_string())?;
     for (name, contents) in [
         ("autofill.css", "html { color-scheme: light dark; }"),
-        ("background.js", background_probe_script()),
         ("managed-schema.json", "{}"),
         ("menu-list.html", "<!doctype html><title>list</title>"),
         ("menu.html", "<!doctype html><title>unused menu host</title>"),
@@ -212,12 +212,14 @@ pub(super) fn write_fixture(root: &Path) -> Result<PathBuf, String> {
     ] {
         write(&path, name, contents)?;
     }
+    write(&path, "background.js", &background_probe_script())?;
     write(&path, "web-request-probe.js", &web_request_probe_script())?;
     write(
         &path,
         "same-document-probe.js",
         &same_document_probe_script(),
     )?;
+    alarm_delivery::write_fixture_assets(&path)?;
     browser_api::write_fixture_assets(&path)?;
     let title = serde_json::to_string(BITWARDEN_PRODUCT_TAB_TITLE)
         .expect("static product-tab title is serializable");
@@ -281,6 +283,7 @@ pub(super) fn validate_native_grant_round_trip(
     product_tab_url: &str,
     run_loop: &NSRunLoop,
     mtm: MainThreadMarker,
+    extended_alarm_delivery: bool,
 ) -> Result<ContractNativeTeardown, String> {
     use super::super::extensions::MacosNativeApiPermission as Permission;
     use crate::platform::macos::{
@@ -578,6 +581,16 @@ pub(super) fn validate_native_grant_round_trip(
             &store,
             run_loop,
         )?;
+        if extended_alarm_delivery {
+            alarm_delivery::run(
+                &context,
+                &controller,
+                &mut registry,
+                run_loop,
+                mtm,
+                &mut context_loaded,
+            )?;
+        }
         super::validate_context_errors(&context, "Bitwarden contract")?;
         web_request = Some((evidence, observation));
         Ok(())
@@ -1089,8 +1102,8 @@ fn validate_web_request_evidence(
     }
 }
 
-fn background_probe_script() -> &'static str {
-    r#"(() => {
+fn background_probe_script() -> String {
+    const TEMPLATE: &str = r#"(() => {
     const webRequest = globalThis.chrome?.webRequest;
     const type = (value) => typeof value;
     const outcome = {
@@ -1172,6 +1185,7 @@ fn background_probe_script() -> &'static str {
         menuClick: "pending"
     };
     const publishSurface = () => api?.storage?.local?.set({ zephiumBitwardenBackgroundApiProbe: surface });
+__ZEPHIUM_ALARM_DELIVERY__
     const noListenerError = (error) => /no runtime\.onconnect listeners found/i.test(
         String(error?.message ?? error)
     );
@@ -1389,7 +1403,11 @@ fn background_probe_script() -> &'static str {
     }
     void publish();
     void publishSurface();
-})()"#
+})()"#;
+    TEMPLATE.replace(
+        "__ZEPHIUM_ALARM_DELIVERY__",
+        alarm_delivery::BACKGROUND_FRAGMENT,
+    )
 }
 
 fn web_request_probe_script() -> String {
@@ -1556,6 +1574,7 @@ mod tests {
         assert!(script.contains("alarms.create"));
         assert!(script.contains("alarms.get"));
         assert!(script.contains("alarms.clear"));
+        assert!(script.contains("delayInMinutes: 0.5"));
         assert!(script.contains("commands.getAll"));
         assert!(script.contains("runtime.connect({ name: \"zephium-bitwarden-early-port\" })"));
         assert!(script.contains("runtime.onConnect.addListener"));

@@ -82,6 +82,11 @@ Chromium's full site-isolation model.
    full submenu tree has identity, depth, count, and title-byte ceilings.
    Malformed or stale native inventory returns the unchanged default menu and
    poisons extension-controller integrity rather than presenting partial items.
+   The opt-in long-duration alarm classifier uses only a Zephium-owned fixture
+   and extension-local storage. It proves live `alarms.onAlarm` delivery, then
+   verifies that current WebKit discards the next alarm when the exact context
+   unloads/reloads before its deadline; this limitation is disclosed rather
+   than repaired with a hidden view or an unbounded background worker.
    `unlimitedStorage` is product-prohibited on both native macOS grant schemas.
    WebKit exposes per-extension data-size records and deletion, but no quota
    setter; reactive inspection cannot prevent a granted extension from filling
