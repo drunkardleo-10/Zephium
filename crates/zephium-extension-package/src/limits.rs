@@ -34,7 +34,12 @@ pub const MAX_EXTENSION_TREE_BYTES: u64 = 128 * 1024 * 1024;
 /// admitting eight individually valid 128 MiB trees into a 512 MiB store.
 pub const MAX_EXTENSION_RELEASE_CATALOG_TREE_BYTES: u64 = 256 * 1024 * 1024;
 /// Maximum bytes in one materialized resource file.
-pub const MAX_EXTENSION_TREE_FILE_BYTES: u64 = 16 * 1024 * 1024;
+///
+/// This admits current, signed password-manager WASM resources while remaining
+/// one quarter of the aggregate tree ceiling. Acquisition and repository
+/// access stream file bytes; this limit does not authorize retaining a whole
+/// resource in the runtime control plane.
+pub const MAX_EXTENSION_TREE_FILE_BYTES: u64 = 32 * 1024 * 1024;
 /// Maximum aggregate regular files plus distinct implicit non-root directories
 /// in one materialized resource tree.
 pub const MAX_EXTENSION_TREE_ENTRIES: usize = 4_096;
@@ -81,6 +86,7 @@ pub const MAX_EXTENSION_RELEASE_CATALOG_RETAINED_BYTES: usize = 64 * 1024;
 pub const MAX_EXTENSION_LEGAL_NOTICE_BYTES: u64 = 4 * 1024 * 1024;
 
 const _: () = assert!(MAX_EXTENSION_TREE_FILE_BYTES <= MAX_EXTENSION_TREE_BYTES);
+const _: () = assert!(MAX_EXTENSION_TREE_FILE_BYTES * 4 <= MAX_EXTENSION_TREE_BYTES);
 const _: () = assert!(MAX_EXTENSION_TREE_BYTES <= MAX_EXTENSION_RELEASE_CATALOG_TREE_BYTES);
 const _: () = assert!(MAX_EXTENSION_TREE_FILES <= MAX_EXTENSION_TREE_ENTRIES);
 const _: () = assert!(MAX_EXTENSION_PACKAGE_LINES <= MAX_EXTENSION_TREE_FILES);

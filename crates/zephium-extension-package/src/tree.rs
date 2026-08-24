@@ -475,6 +475,8 @@ mod tests {
     use crate::MAX_EXTENSION_RELATIVE_PATH_DEPTH;
     use proptest::prelude::*;
 
+    const LARGE_WASM_RESOURCE_BYTES: u64 = 17 * 1024 * 1024;
+
     fn digest(byte: u8) -> String {
         format!("{byte:02x}").repeat(32)
     }
@@ -529,6 +531,24 @@ mod tests {
         assert_eq!(parsed.total_bytes(), 140);
         assert_eq!(parsed.manifest_sha256().bytes(), [1; 32]);
         assert!(parsed.retained_bytes() <= MAX_EXTENSION_TREE_INDEX_RETAINED_BYTES);
+    }
+
+    #[test]
+    fn admits_large_resource_metadata_within_the_bounded_tree() {
+        let bytes = index(vec![
+            file("assets/runtime.wasm", LARGE_WASM_RESOURCE_BYTES, 2),
+            file("manifest.json", 41, 1),
+        ]);
+        let parsed = CanonicalExtensionTreeIndex::parse_canonical(&bytes).unwrap();
+
+        assert_eq!(
+            parsed
+                .file(&PortableRelativePath::parse("assets/runtime.wasm").unwrap())
+                .unwrap()
+                .length(),
+            LARGE_WASM_RESOURCE_BYTES
+        );
+        assert_eq!(parsed.total_bytes(), LARGE_WASM_RESOURCE_BYTES + 41);
     }
 
     #[test]

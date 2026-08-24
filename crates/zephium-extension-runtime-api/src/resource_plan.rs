@@ -9,7 +9,11 @@ use std::ops::Bound::{Included, Unbounded};
 use sha2::{Digest, Sha256};
 
 /// Maximum declared size of one runtime-readable package resource.
-pub const MAX_EXTENSION_RUNTIME_RESOURCE_BYTES: u64 = 16 * 1024 * 1024;
+///
+/// Resource access is synchronous and streaming. Consumers remain responsible
+/// for their own smaller retained-memory limits; this ceiling only bounds the
+/// exact package resource that can be exposed through a reader.
+pub const MAX_EXTENSION_RUNTIME_RESOURCE_BYTES: u64 = 32 * 1024 * 1024;
 
 /// Maximum declared size of an extension manifest.
 pub const MAX_EXTENSION_RUNTIME_MANIFEST_BYTES: u64 = 1024 * 1024;
@@ -589,6 +593,8 @@ fn portable_path_shape_conflicts(paths: &BTreeSet<Box<str>>, candidate: &str) ->
 mod tests {
     use super::*;
 
+    const LARGE_WASM_RESOURCE_BYTES: u64 = 17 * 1024 * 1024;
+
     fn binding(path: &str, byte: u8, length: u64) -> ExtensionRuntimeResourceBinding {
         ExtensionRuntimeResourceBinding::try_new(path, length, [byte; 32]).unwrap()
     }
@@ -640,6 +646,19 @@ mod tests {
             plan.manifest(),
             plan.entry("manifest.json").unwrap().resource()
         );
+    }
+
+    #[test]
+    fn plan_admits_large_resources_without_retaining_their_bytes() {
+        let plan = ExtensionRuntimeResourcePlan::try_new(vec![
+            binding("assets/runtime.wasm", 1, LARGE_WASM_RESOURCE_BYTES),
+            binding("manifest.json", 2, 7),
+        ])
+        .unwrap();
+
+        let resource = plan.entry("assets/runtime.wasm").unwrap();
+        assert_eq!(resource.declared_bytes(), LARGE_WASM_RESOURCE_BYTES);
+        assert!(plan.retained_bytes() < 1_024);
     }
 
     #[test]
