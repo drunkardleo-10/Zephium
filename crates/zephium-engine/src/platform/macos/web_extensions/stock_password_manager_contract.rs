@@ -36,6 +36,14 @@ const ONEPASSWORD_EXPECTED_TREE_SHA256: &str =
 const ONEPASSWORD_EXPECTED_MANIFEST_SHA256: &str =
     "cc7c40234e93d17641ca9b77a10bb1bfe35fa1f58fc07fdaacabc9916b039568";
 const ONEPASSWORD_EXPECTED_WASM_FILES: usize = 7;
+const ONEPASSWORD_PRIMARY_WASM_PATH: &str = "assets/wasm/op_wasm_b5x_bg-KCDDU7LY.wasm";
+const ONEPASSWORD_PRIMARY_WASM_BYTES: usize = 17_466_756;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum BackgroundAdaptationKind {
+    Classic,
+    Module,
+}
 
 const PROTON_NATIVE_PERMISSIONS: [Permission; 7] = [
     Permission::ActiveTab,
@@ -184,6 +192,43 @@ impl StockContract {
         }
     }
 
+    pub(super) const fn wasm_resource_probe(self) -> Option<(&'static str, usize)> {
+        match self {
+            Self::ProtonPass1390 => None,
+            Self::OnePassword8123233 => Some((
+                ONEPASSWORD_PRIMARY_WASM_PATH,
+                ONEPASSWORD_PRIMARY_WASM_BYTES,
+            )),
+        }
+    }
+
+    pub(super) const fn compatibility_output(self) -> CompatibilityOutputContract {
+        match self {
+            Self::ProtonPass1390 => CompatibilityOutputContract {
+                files: 279,
+                bytes: 21_520_099,
+                manifest_sha256: "610a21b051309da265acbabc7464f546f11889bea5e52e84bda4d6dc0bbeafe2",
+                tree_sha256: "faa9115baeaabe8206168b9896dde0136e4e76ca05abaa07c7d636320692653f",
+                index_sha256: "629a580718a626497bd15407fe470b4526ee435cda8ff88011e1ac6fa66ef081",
+                background: BackgroundAdaptationKind::Classic,
+                isolated_content_scripts: 1,
+                same_document_navigation_routes: 2,
+                notifications_fallback: false,
+            },
+            Self::OnePassword8123233 => CompatibilityOutputContract {
+                files: 1_002,
+                bytes: 45_127_086,
+                manifest_sha256: "1201d15558075a2cc1a78d2235a2d434cb8bcd739111e62001efe45d726c409c",
+                tree_sha256: "3a5c59b90860ca3b9e44fe1e3f0c612fb50e0fa927656e6d05859048865fa8ed",
+                index_sha256: "24f6ba293d06c1d63a5ebec5f743dd146e628b129d1a507e231d850178200266",
+                background: BackgroundAdaptationKind::Module,
+                isolated_content_scripts: 7,
+                same_document_navigation_routes: 7,
+                notifications_fallback: true,
+            },
+        }
+    }
+
     pub(super) fn require_evidence(
         self,
         index: &CanonicalExtensionTreeIndex,
@@ -237,6 +282,29 @@ impl StockContract {
             Self::OnePassword8123233 => validate_onepassword_manifest(&manifest),
         }
     }
+
+    pub(super) fn validate_compatibility_manifest(self, bytes: &[u8]) -> Result<(), String> {
+        let manifest = parse_bounded_json(bytes, BoundedJsonLimits::extension_manifest())
+            .map_err(|error| format!("compatibility artifact manifest is invalid: {error}"))?
+            .into_value();
+        match self {
+            Self::ProtonPass1390 => validate_proton_compatibility_manifest(&manifest),
+            Self::OnePassword8123233 => validate_onepassword_compatibility_manifest(&manifest),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct CompatibilityOutputContract {
+    pub(super) files: usize,
+    pub(super) bytes: u64,
+    pub(super) manifest_sha256: &'static str,
+    pub(super) tree_sha256: &'static str,
+    pub(super) index_sha256: &'static str,
+    pub(super) background: BackgroundAdaptationKind,
+    pub(super) isolated_content_scripts: usize,
+    pub(super) same_document_navigation_routes: usize,
+    pub(super) notifications_fallback: bool,
 }
 
 fn validate_proton_manifest(manifest: &Value) -> Result<(), String> {
@@ -382,6 +450,140 @@ fn validate_onepassword_manifest(manifest: &Value) -> Result<(), String> {
             == "wasm-unsafe-eval"
     }) {
         return Err("stock 1Password manifest omitted its WASM CSP contract".into());
+    }
+    Ok(())
+}
+
+fn validate_proton_compatibility_manifest(manifest: &Value) -> Result<(), String> {
+    for (pointer, expected) in [
+        ("/name", Value::from(PROTON_DISPLAY_NAME)),
+        ("/version", Value::from(PROTON_VERSION)),
+        ("/manifest_version", Value::from(3)),
+        (
+            "/background/service_worker",
+            Value::from(super::compatibility_artifact::BACKGROUND_WRAPPER),
+        ),
+        ("/action/default_popup", Value::from("popup.html")),
+    ] {
+        if manifest.pointer(pointer) != Some(&expected) {
+            return Err(format!(
+                "compatibility artifact manifest drifted at {pointer}"
+            ));
+        }
+    }
+    require_string_set(
+        manifest,
+        "/permissions",
+        &[
+            "activeTab",
+            "alarms",
+            "offscreen",
+            "scripting",
+            "storage",
+            "unlimitedStorage",
+            "webNavigation",
+            "webRequest",
+        ],
+    )?;
+    require_string_set(
+        manifest,
+        "/host_permissions",
+        &["http://*/*", "https://*/*"],
+    )?;
+    let scripts = manifest
+        .pointer("/content_scripts")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "compatibility artifact manifest has no content-script array".to_owned())?;
+    if scripts.len() != 4
+        || scripts[0].pointer("/js/0").and_then(Value::as_str)
+            != Some(super::compatibility_artifact::API_PRELUDE)
+        || scripts[0].pointer("/js/1").and_then(Value::as_str)
+            != Some(super::compatibility_artifact::WEB_NAVIGATION_BRIDGE)
+        || scripts[0].pointer("/js/2").is_some()
+        || scripts[0].get("all_frames").and_then(Value::as_bool) != Some(true)
+        || scripts[1].pointer("/js/0").and_then(Value::as_str)
+            != Some(super::compatibility_artifact::API_PRELUDE)
+        || scripts[1].pointer("/js/1").and_then(Value::as_str)
+            != Some(super::compatibility_artifact::WEB_NAVIGATION_BRIDGE)
+        || scripts[1].pointer("/js/2").is_some()
+        || scripts[1].get("all_frames").and_then(Value::as_bool) != Some(false)
+        || scripts[2].pointer("/js/0").and_then(Value::as_str)
+            != Some(super::compatibility_artifact::API_PRELUDE)
+        || scripts[2].pointer("/js/1").and_then(Value::as_str) != Some("orchestrator.js")
+        || scripts[2].pointer("/js/2").is_some()
+        || scripts[2].get("all_frames").and_then(Value::as_bool) != Some(true)
+        || scripts[3].pointer("/js/0").and_then(Value::as_str) != Some("webauthn.js")
+        || scripts[3].pointer("/js/1").is_some()
+        || scripts[3].get("world").and_then(Value::as_str) != Some("MAIN")
+    {
+        return Err("compatibility artifact content-script contract drifted".into());
+    }
+    Ok(())
+}
+
+fn validate_onepassword_compatibility_manifest(manifest: &Value) -> Result<(), String> {
+    for (pointer, expected) in [
+        ("/name", Value::from("__MSG_extName__")),
+        ("/version", Value::from(ONEPASSWORD_VERSION)),
+        ("/manifest_version", Value::from(3)),
+        (
+            "/background/service_worker",
+            Value::from(super::compatibility_artifact::BACKGROUND_WRAPPER),
+        ),
+        ("/background/type", Value::from("module")),
+        ("/action/default_popup", Value::from("popup/index.html")),
+    ] {
+        if manifest.pointer(pointer) != Some(&expected) {
+            return Err(format!(
+                "1Password compatibility manifest drifted at {pointer}"
+            ));
+        }
+    }
+    require_string_set(
+        manifest,
+        "/permissions",
+        &[
+            "alarms",
+            "contextMenus",
+            "declarativeNetRequestWithHostAccess",
+            "downloads",
+            "idle",
+            "management",
+            "nativeMessaging",
+            "notifications",
+            "offscreen",
+            "privacy",
+            "scripting",
+            "storage",
+            "tabs",
+            "webNavigation",
+            "webRequest",
+            "webRequestAuthProvider",
+        ],
+    )?;
+    require_string_set(manifest, "/host_permissions", &["<all_urls>"])?;
+    let scripts = manifest
+        .pointer("/content_scripts")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "1Password compatibility manifest has no content-script array".to_owned())?;
+    if scripts.len() != 15
+        || scripts[0].pointer("/js/0").and_then(Value::as_str)
+            != Some(super::compatibility_artifact::API_PRELUDE)
+        || scripts[0].pointer("/js/1").and_then(Value::as_str)
+            != Some(super::compatibility_artifact::WEB_NAVIGATION_BRIDGE)
+        || scripts[0].pointer("/js/2").is_some()
+        || scripts[7].pointer("/js/0").and_then(Value::as_str)
+            != Some(super::compatibility_artifact::API_PRELUDE)
+        || scripts[7].pointer("/js/1").and_then(Value::as_str)
+            != Some("inline/inject-content-scripts.js")
+        || scripts[8].pointer("/js/1").and_then(Value::as_str)
+            != Some("inline/injected/webauthn.js")
+        || scripts[9].pointer("/js/0").and_then(Value::as_str)
+            != Some("inline/injected/webauthn-listeners.js")
+        || scripts[9].pointer("/js/1").is_some()
+        || scripts[9].get("world").and_then(Value::as_str) != Some("MAIN")
+    {
+        return Err("1Password compatibility content-script contract drifted".into());
     }
     Ok(())
 }

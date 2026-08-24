@@ -53,6 +53,8 @@ pub(crate) use web_extensions::run_bitwarden_core_probe;
 #[cfg(feature = "native-web-extension-probes")]
 pub(crate) use web_extensions::run_extension_compatibility_fixture_probe;
 #[cfg(feature = "native-web-extension-probes")]
+pub(crate) use web_extensions::run_onepassword_compatibility_artifact_probe;
+#[cfg(feature = "native-web-extension-probes")]
 pub(crate) use web_extensions::run_onepassword_probe;
 #[cfg(feature = "native-web-extension-probes")]
 pub(crate) use web_extensions::run_representative_extension_probe;

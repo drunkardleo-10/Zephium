@@ -11,7 +11,7 @@ use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use objc2::rc::Weak;
 use objc2::runtime::ProtocolObject;
@@ -31,27 +31,23 @@ use zephium_extension_package::{
     MAX_EXTENSION_TREE_ENTRIES, MAX_EXTENSION_TREE_FILES, MAX_EXTENSION_TREE_INDEX_BYTES,
 };
 
-use super::stock_password_manager_contract::StockContract;
+use super::stock_password_manager_contract::{BackgroundAdaptationKind, StockContract};
 use crate::MacosStockPasswordManagerProbeMode as ProbeMode;
 
 const PAGE_READY_TITLE: &str = "zephium-stock-password-page-ready";
 const PAGE_STATE_PREFIX: &str = "ZEPHIUM_STOCK_PAGE_STATE:";
 const POPUP_STATE_PREFIX: &str = "ZEPHIUM_STOCK_POPUP_STATE:";
+const WASM_RESOURCE_STATE_PREFIX: &str = "ZEPHIUM_STOCK_WASM_RESOURCE_STATE:";
+const API_SURFACE_STATE_PREFIX: &str = "ZEPHIUM_STOCK_API_SURFACE_STATE:";
+const TAB_QUERY_STATE_PREFIX: &str = "ZEPHIUM_STOCK_TAB_QUERY_STATE:";
 const ISOLATED_CONTENT_STATE_PREFIX: &str = "ZEPHIUM_STOCK_ISOLATED_CONTENT_STATE:";
 const MAX_DIAGNOSTIC_TITLE_BYTES: usize = 4 * 1024;
+const EXTENDED_PASSWORD_MANAGER_TEARDOWN_OBSERVATION: Duration = Duration::from_secs(30);
 const WEBKIT_API_PRELUDE: &str = "zephium-webkit-api-compatibility.js";
 const WEBKIT_BACKGROUND_WRAPPER: &str = "zephium-webkit-background-wrapper.js";
 const WEBKIT_API_COMPATIBILITY_ATTRIBUTE: &str = "data-zephium-webkit-api-compatibility";
 const COMPATIBILITY_SYMBOL: &str = "zephium.webkit-api-compatibility.v1";
 const COMPATIBILITY_MODE_SYMBOL: &str = "zephium.webkit-api-compatibility.mode.v1";
-const EXPECTED_COMPATIBILITY_FILE_COUNT: usize = 279;
-const EXPECTED_COMPATIBILITY_TOTAL_BYTES: u64 = 21_520_099;
-const EXPECTED_COMPATIBILITY_INDEX_SHA256: &str =
-    "629a580718a626497bd15407fe470b4526ee435cda8ff88011e1ac6fa66ef081";
-const EXPECTED_COMPATIBILITY_TREE_SHA256: &str =
-    "faa9115baeaabe8206168b9896dde0136e4e76ca05abaa07c7d636320692653f";
-const EXPECTED_COMPATIBILITY_MANIFEST_SHA256: &str =
-    "610a21b051309da265acbabc7464f546f11889bea5e52e84bda4d6dc0bbeafe2";
 const WEBKIT_API_PRELUDE_SOURCE: &str = r#"(() => {
   'use strict';
   const nativeApi = globalThis.browser;
@@ -208,12 +204,16 @@ struct NativeTeardown {
     background_preload_millis: Option<u128>,
     background_load_failure: Option<String>,
     isolated_content_adapter_mode: Option<String>,
+    isolated_content_adapter_failure: Option<String>,
     popup_root_children: usize,
     popup_offscreen_namespace: String,
     page_api_compatibility: String,
     popup_api_compatibility: String,
     background_diagnostic_badge: String,
     background_action_label: String,
+    wasm_resource_evidence: Option<WasmResourceEvidence>,
+    api_surface_evidence: ApiSurfaceEvidence,
+    tab_query_evidence: TabQueryEvidence,
     probe_mode: ProbeMode,
     compatibility_failure: Option<String>,
     contract: StockContract,
@@ -255,6 +255,50 @@ struct IsolatedContentState {
     browser_runtime: Option<bool>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WasmResourceEvidence {
+    state: String,
+    status: usize,
+    mime: String,
+    bytes: usize,
+    compile_millis: usize,
+    timer: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ApiSurfaceEvidence {
+    action: String,
+    alarms: String,
+    commands: String,
+    context_menus: String,
+    declarative_net_request: String,
+    downloads: String,
+    idle: String,
+    management: String,
+    notifications: String,
+    offscreen: String,
+    privacy: String,
+    scripting: String,
+    storage: String,
+    tabs: String,
+    web_navigation: String,
+    web_request: String,
+    windows: String,
+    connect_native: String,
+    send_native_message: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TabQueryEvidence {
+    current_active: usize,
+    active: usize,
+    all: usize,
+    error: bool,
+}
+
 pub(super) fn run(extension: &Path, tree_index: &Path, mode: ProbeMode) -> Result<bool, String> {
     let admitted =
         admit_exact_stock_artifact(extension, tree_index, mode, StockContract::ProtonPass1390)?;
@@ -272,7 +316,12 @@ pub(super) fn run_onepassword(extension: &Path, tree_index: &Path) -> Result<boo
 }
 
 pub(super) fn run_compatibility_artifact(artifact: &Path) -> Result<bool, String> {
-    let admitted = admit_compatibility_artifact(artifact)?;
+    let admitted = admit_compatibility_artifact(artifact, StockContract::ProtonPass1390)?;
+    run_admitted(admitted)
+}
+
+pub(super) fn run_onepassword_compatibility_artifact(artifact: &Path) -> Result<bool, String> {
+    let admitted = admit_compatibility_artifact(artifact, StockContract::OnePassword8123233)?;
     run_admitted(admitted)
 }
 
@@ -307,7 +356,7 @@ fn run_admitted(admitted: AdmittedStockArtifact) -> Result<bool, String> {
             (None, Ok(())) => {}
         }
         println!(
-            "native-probe: macOS stock password manager passed; target={}; version={}; os={}; exact_source_tree=passed; mode={}; source_modified={}; manifest_contract=passed; exact_native_grants=passed; controller_visible_scripts={}; inline_field_markers={}; inline_roots={}; inline_extension_frames={}; page_api_compatibility={}; isolated_content_adapter={}; background_preload_ms={}; background_load_failure={}; popup_execution=passed; popup_root_children={}; popup_api_compatibility={}; background_diagnostic_badge={}; background_action_label={}; offscreen_namespace={}; webview_callbacks={}; user_workflows=unassessed; product_authority=false; native_objects_released=passed",
+            "native-probe: macOS stock password manager passed; target={}; version={}; os={}; exact_source_tree=passed; mode={}; source_modified={}; manifest_contract=passed; exact_native_grants=passed; controller_visible_scripts={}; inline_field_markers={}; inline_roots={}; inline_extension_frames={}; page_api_compatibility={}; isolated_content_adapter={}; isolated_content_adapter_failure={}; background_preload_ms={}; background_load_failure={}; wasm_resource_evidence={:?}; api_surface_evidence={:?}; tab_query_evidence={:?}; popup_execution=passed; popup_root_children={}; popup_api_compatibility={}; background_diagnostic_badge={}; background_action_label={}; offscreen_namespace={}; webview_callbacks={}; user_workflows=unassessed; product_authority=false; native_objects_released=passed",
             teardown.contract.target(),
             teardown.contract.version(),
             teardown.operating_system,
@@ -323,12 +372,19 @@ fn run_admitted(admitted: AdmittedStockArtifact) -> Result<bool, String> {
                 .as_deref()
                 .unwrap_or("not-requested"),
             teardown
+                .isolated_content_adapter_failure
+                .as_deref()
+                .unwrap_or("none"),
+            teardown
                 .background_preload_millis
                 .map_or_else(|| "not-requested".to_owned(), |value| value.to_string()),
             teardown
                 .background_load_failure
                 .as_deref()
                 .unwrap_or("none"),
+            teardown.wasm_resource_evidence,
+            teardown.api_surface_evidence,
+            teardown.tab_query_evidence,
             teardown.popup_root_children,
             teardown.popup_api_compatibility,
             teardown.background_diagnostic_badge,
@@ -385,43 +441,57 @@ fn admit_exact_stock_artifact(
     })
 }
 
-fn admit_compatibility_artifact(root: &Path) -> Result<AdmittedStockArtifact, String> {
+fn admit_compatibility_artifact(
+    root: &Path,
+    contract: StockContract,
+) -> Result<AdmittedStockArtifact, String> {
     let artifact = super::compatibility_artifact::validate(root)?;
-    let source_contract = StockContract::ProtonPass1390;
+    let output = contract.compatibility_output();
     if !artifact.source.matches(
-        source_contract.expected_file_count(),
-        source_contract.expected_total_bytes(),
-        source_contract.expected_manifest_sha256(),
-        source_contract.expected_tree_sha256(),
-        source_contract.expected_index_sha256(),
+        contract.expected_file_count(),
+        contract.expected_total_bytes(),
+        contract.expected_manifest_sha256(),
+        contract.expected_tree_sha256(),
+        contract.expected_index_sha256(),
     ) || !artifact.output.matches(
-        EXPECTED_COMPATIBILITY_FILE_COUNT,
-        EXPECTED_COMPATIBILITY_TOTAL_BYTES,
-        EXPECTED_COMPATIBILITY_MANIFEST_SHA256,
-        EXPECTED_COMPATIBILITY_TREE_SHA256,
-        EXPECTED_COMPATIBILITY_INDEX_SHA256,
+        output.files,
+        output.bytes,
+        output.manifest_sha256,
+        output.tree_sha256,
+        output.index_sha256,
     ) {
         return Err("stock compatibility artifact identity drifted".into());
     }
+    let background_matches = matches!(
+        (output.background, artifact.surfaces.background),
+        (
+            BackgroundAdaptationKind::Classic,
+            super::compatibility_artifact::BackgroundAdaptation::ClassicWrapper
+        ) | (
+            BackgroundAdaptationKind::Module,
+            super::compatibility_artifact::BackgroundAdaptation::ModuleWrapper
+        )
+    );
     if artifact.target != super::compatibility_artifact::CompatibilityArtifactTarget::NativeV3
-        || artifact.surfaces.background
-            != super::compatibility_artifact::BackgroundAdaptation::ClassicWrapper
-        || artifact.surfaces.isolated_content_scripts != 1
+        || !background_matches
+        || artifact.surfaces.isolated_content_scripts != output.isolated_content_scripts
         || artifact.surfaces.action_popup
             != super::compatibility_artifact::ActionPopupAdaptation::ExplicitHeadInjected
         || artifact.surfaces.omitted_file_content_scripts != 0
         || artifact.surfaces.removed_file_match_patterns != 0
-        || artifact.surfaces.same_document_navigation_routes != 2
+        || artifact.surfaces.same_document_navigation_routes
+            != output.same_document_navigation_routes
+        || artifact.surfaces.notifications_fallback != output.notifications_fallback
         || artifact.surfaces.history_search
     {
         return Err("stock compatibility artifact surface contract drifted".into());
     }
     let extension_root = artifact.extension_root;
-    validate_compatibility_manifest(&extension_root.join("manifest.json"))?;
+    validate_compatibility_manifest(&extension_root.join("manifest.json"), contract)?;
     Ok(AdmittedStockArtifact {
         extension_root,
         probe_mode: ProbeMode::WebkitCompatibilityArtifact,
-        contract: StockContract::ProtonPass1390,
+        contract,
         _temporary_root: None,
     })
 }
@@ -559,110 +629,13 @@ fn validate_manifest(path: &Path, contract: StockContract) -> Result<(), String>
     contract.validate_manifest(&bytes)
 }
 
-fn validate_compatibility_manifest(path: &Path) -> Result<(), String> {
+fn validate_compatibility_manifest(path: &Path, contract: StockContract) -> Result<(), String> {
     let bytes = read_bounded_file(
         path,
         zephium_extension_package::MAX_EXTENSION_MANIFEST_BYTES as u64,
         "compatibility artifact manifest",
     )?;
-    let manifest = parse_bounded_json(&bytes, BoundedJsonLimits::extension_manifest())
-        .map_err(|error| format!("compatibility artifact manifest is invalid: {error}"))?
-        .into_value();
-    for (pointer, expected) in [
-        (
-            "/name",
-            Value::from(StockContract::ProtonPass1390.display_name()),
-        ),
-        (
-            "/version",
-            Value::from(StockContract::ProtonPass1390.version()),
-        ),
-        ("/manifest_version", Value::from(3)),
-        (
-            "/background/service_worker",
-            Value::from(super::compatibility_artifact::BACKGROUND_WRAPPER),
-        ),
-        ("/action/default_popup", Value::from("popup.html")),
-    ] {
-        if manifest.pointer(pointer) != Some(&expected) {
-            return Err(format!(
-                "compatibility artifact manifest drifted at {pointer}"
-            ));
-        }
-    }
-    require_string_set(
-        &manifest,
-        "/permissions",
-        &[
-            "activeTab",
-            "alarms",
-            "offscreen",
-            "scripting",
-            "storage",
-            "unlimitedStorage",
-            "webNavigation",
-            "webRequest",
-        ],
-    )?;
-    require_string_set(
-        &manifest,
-        "/host_permissions",
-        &["http://*/*", "https://*/*"],
-    )?;
-    let scripts = manifest
-        .pointer("/content_scripts")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "compatibility artifact manifest has no content-script array".to_owned())?;
-    if scripts.len() != 4
-        || scripts[0].pointer("/js/0").and_then(Value::as_str)
-            != Some(super::compatibility_artifact::API_PRELUDE)
-        || scripts[0].pointer("/js/1").and_then(Value::as_str)
-            != Some(super::compatibility_artifact::WEB_NAVIGATION_BRIDGE)
-        || scripts[0].pointer("/js/2").is_some()
-        || scripts[0].get("all_frames").and_then(Value::as_bool) != Some(true)
-        || scripts[1].pointer("/js/0").and_then(Value::as_str)
-            != Some(super::compatibility_artifact::API_PRELUDE)
-        || scripts[1].pointer("/js/1").and_then(Value::as_str)
-            != Some(super::compatibility_artifact::WEB_NAVIGATION_BRIDGE)
-        || scripts[1].pointer("/js/2").is_some()
-        || scripts[1].get("all_frames").and_then(Value::as_bool) != Some(false)
-        || scripts[2].pointer("/js/0").and_then(Value::as_str)
-            != Some(super::compatibility_artifact::API_PRELUDE)
-        || scripts[2].pointer("/js/1").and_then(Value::as_str) != Some("orchestrator.js")
-        || scripts[2].pointer("/js/2").is_some()
-        || scripts[2].get("all_frames").and_then(Value::as_bool) != Some(true)
-        || scripts[3].pointer("/js/0").and_then(Value::as_str) != Some("webauthn.js")
-        || scripts[3].pointer("/js/1").is_some()
-        || scripts[3].get("world").and_then(Value::as_str) != Some("MAIN")
-    {
-        return Err("compatibility artifact content-script contract drifted".into());
-    }
-    Ok(())
-}
-
-fn require_string_set(manifest: &Value, pointer: &str, expected: &[&str]) -> Result<(), String> {
-    let mut actual = manifest
-        .pointer(pointer)
-        .and_then(Value::as_array)
-        .ok_or_else(|| format!("stock extension manifest has no {pointer}"))?
-        .iter()
-        .map(|value| {
-            value
-                .as_str()
-                .map(str::to_owned)
-                .ok_or_else(|| format!("stock extension {pointer} contains a non-string"))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    actual.sort_unstable();
-    let mut expected = expected
-        .iter()
-        .map(|value| (*value).to_owned())
-        .collect::<Vec<_>>();
-    expected.sort_unstable();
-    if actual != expected {
-        return Err(format!("stock extension manifest {pointer} drifted"));
-    }
-    Ok(())
+    contract.validate_compatibility_manifest(&bytes)
 }
 
 fn run_native(
@@ -722,8 +695,12 @@ fn run_native(
         Arc::clone(&webview_requests),
         Arc::clone(&lifecycle_drops),
     );
-    let extension_window =
-        super::ProbeWindow::new(mtm, tab.clone(), true, Arc::clone(&lifecycle_drops));
+    let extension_window = super::ProbeWindow::new(
+        mtm,
+        tab.clone(),
+        contract.private_data_access(),
+        Arc::clone(&lifecycle_drops),
+    );
     tab.set_window(&extension_window);
     let delegate = super::ProbeControllerDelegate::new(
         mtm,
@@ -757,12 +734,15 @@ fn run_native(
     let (background_preload_millis, background_load_failure) =
         if admitted.probe_mode == ProbeMode::WebkitCompatibilityArtifact {
             let started = Instant::now();
-            super::persistent_runtime::load_background_content(
+            let result = super::persistent_runtime::load_background_content(
                 &context,
                 &run_loop,
                 "stock password-manager compatibility artifact",
-            )?;
-            (Some(started.elapsed().as_millis()), None)
+            );
+            match (contract, result) {
+                (StockContract::ProtonPass1390, Err(error)) => return Err(error),
+                (_, result) => (Some(started.elapsed().as_millis()), result.err()),
+            }
         } else if contract == StockContract::OnePassword8123233 {
             // This explicit stock load is diagnostic only. It does not modify
             // the package or claim a product preload policy; it captures the
@@ -809,10 +789,24 @@ fn run_native(
     super::assert_attached_controller(&popup, &bundle.controller)?;
     super::profile_isolation::assert_attached_store(&popup, &bundle._data_store)?;
     let popup_state = wait_for_executable_popup(&popup, &run_loop, contract)?;
-    let isolated_content_adapter_mode = (admitted.probe_mode
-        == ProbeMode::WebkitCompatibilityArtifact)
-        .then(|| wait_for_isolated_content_adapter(&popup, &run_loop))
+    let api_surface_evidence = observe_api_surface(&popup, &run_loop)?;
+    let tab_query_evidence = observe_tab_queries(&popup, &run_loop)?;
+    let wasm_resource_evidence = contract
+        .wasm_resource_probe()
+        .map(|(path, expected_bytes)| {
+            observe_wasm_resource(&popup, &run_loop, path, expected_bytes)
+        })
         .transpose()?;
+    let (isolated_content_adapter_mode, isolated_content_adapter_failure) =
+        if admitted.probe_mode == ProbeMode::WebkitCompatibilityArtifact {
+            match wait_for_isolated_content_adapter(&popup, &run_loop) {
+                Ok(mode) => (Some(mode), None),
+                Err(error) if contract == StockContract::ProtonPass1390 => return Err(error),
+                Err(error) => (None, Some(error)),
+            }
+        } else {
+            (None, None)
+        };
     let popup_weak = Weak::from_retained(&popup);
     let background_diagnostic_badge = unsafe { action.badgeText() }.to_string();
     let background_action_label = unsafe { action.label() }.to_string();
@@ -823,6 +817,7 @@ fn run_native(
         (context_error_count != 0).then(|| describe_stock_native_errors(&context_errors));
     popover.close();
     unsafe { action.closePopup() };
+    wait_for_popup_closed(&action, &run_loop)?;
     drop(popup);
     drop(popover);
     drop(action);
@@ -860,7 +855,7 @@ fn run_native(
     }))
     .then(|| {
             format!(
-                "stock extension compatibility failed: mode={}, inline_executed={inline_executed}, page_state={page_state:?}, popup_rendered={popup_rendered}, popup_api_observed={popup_api_observed}, popup_state={popup_state:?}, background_load_failure={background_load_failure:?}, background_preload_ms={background_preload_millis:?}, background_diagnostic_badge={background_diagnostic_badge:?}, background_action_label={background_action_label:?}, context_errors={context_error_count}, context_error_summary={context_error_summary:?}",
+                "stock extension compatibility failed: mode={}, inline_executed={inline_executed}, page_state={page_state:?}, popup_rendered={popup_rendered}, popup_api_observed={popup_api_observed}, popup_state={popup_state:?}, isolated_content_adapter_failure={isolated_content_adapter_failure:?}, background_load_failure={background_load_failure:?}, background_preload_ms={background_preload_millis:?}, wasm_resource_evidence={wasm_resource_evidence:?}, api_surface_evidence={api_surface_evidence:?}, tab_query_evidence={tab_query_evidence:?}, background_diagnostic_badge={background_diagnostic_badge:?}, background_action_label={background_action_label:?}, context_errors={context_error_count}, context_error_summary={context_error_summary:?}",
                 probe_mode_name(admitted.probe_mode),
             )
         });
@@ -881,12 +876,16 @@ fn run_native(
         background_preload_millis,
         background_load_failure,
         isolated_content_adapter_mode,
+        isolated_content_adapter_failure,
         popup_root_children: popup_state.root_children,
         popup_offscreen_namespace: popup_state.offscreen,
         page_api_compatibility: page_state.compatibility_state,
         popup_api_compatibility: popup_state.compatibility_state,
         background_diagnostic_badge,
         background_action_label,
+        wasm_resource_evidence,
+        api_surface_evidence,
+        tab_query_evidence,
         probe_mode: admitted.probe_mode,
         compatibility_failure,
         contract,
@@ -1054,6 +1053,28 @@ fn wait_for_popup_presentation(
     }
 }
 
+fn wait_for_popup_closed(
+    action: &WKWebExtensionAction,
+    run_loop: &NSRunLoop,
+) -> Result<(), String> {
+    let deadline = Instant::now() + super::PROBE_TIMEOUT;
+    loop {
+        let shown = unsafe { action.popupPopover() }.is_some_and(|popover| popover.isShown());
+        if !shown {
+            // Process WebKit's close notification before unloading the
+            // context. Complex popups can otherwise retain their view and the
+            // controller/store graph through a later autorelease cycle.
+            super::drain_run_loop_once(run_loop);
+            super::drain_run_loop_once(run_loop);
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err("stock extension action popup did not close".into());
+        }
+        super::drain_run_loop_once(run_loop);
+    }
+}
+
 fn wait_for_executable_popup(
     popup: &WKWebView,
     run_loop: &NSRunLoop,
@@ -1123,6 +1144,260 @@ fn wait_for_executable_popup(
         }
         super::drain_run_loop_once(run_loop);
     }
+}
+
+fn observe_api_surface(
+    popup: &WKWebView,
+    run_loop: &NSRunLoop,
+) -> Result<ApiSurfaceEvidence, String> {
+    let script = format!(
+        r#"(() => {{
+          const api = globalThis.chrome ?? globalThis.browser;
+          const surface = {{
+            action: typeof api?.action,
+            alarms: typeof api?.alarms,
+            commands: typeof api?.commands,
+            contextMenus: typeof api?.contextMenus,
+            declarativeNetRequest: typeof api?.declarativeNetRequest,
+            downloads: typeof api?.downloads,
+            idle: typeof api?.idle,
+            management: typeof api?.management,
+            notifications: typeof api?.notifications,
+            offscreen: typeof api?.offscreen,
+            privacy: typeof api?.privacy,
+            scripting: typeof api?.scripting,
+            storage: typeof api?.storage,
+            tabs: typeof api?.tabs,
+            webNavigation: typeof api?.webNavigation,
+            webRequest: typeof api?.webRequest,
+            windows: typeof api?.windows,
+            connectNative: typeof api?.runtime?.connectNative,
+            sendNativeMessage: typeof api?.runtime?.sendNativeMessage,
+          }};
+          document.title = {API_SURFACE_STATE_PREFIX:?} + JSON.stringify(surface);
+        }})()"#
+    );
+    unsafe {
+        popup.evaluateJavaScript_completionHandler(&NSString::from_str(&script), None);
+    }
+    let deadline = Instant::now() + super::PROBE_TIMEOUT;
+    loop {
+        if let Some(title) = unsafe { popup.title() }.map(|title| title.to_string()) {
+            if let Some(payload) = title.strip_prefix(API_SURFACE_STATE_PREFIX) {
+                if payload.len() <= MAX_DIAGNOSTIC_TITLE_BYTES {
+                    let evidence: ApiSurfaceEvidence =
+                        serde_json::from_str(payload).map_err(|error| {
+                            format!("stock API-surface evidence is invalid: {error}")
+                        })?;
+                    validate_api_surface_evidence(&evidence)?;
+                    return Ok(evidence);
+                }
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err("stock API-surface observation produced no bounded state".into());
+        }
+        super::drain_run_loop_once(run_loop);
+    }
+}
+
+fn validate_api_surface_evidence(evidence: &ApiSurfaceEvidence) -> Result<(), String> {
+    let values = [
+        &evidence.action,
+        &evidence.alarms,
+        &evidence.commands,
+        &evidence.context_menus,
+        &evidence.declarative_net_request,
+        &evidence.downloads,
+        &evidence.idle,
+        &evidence.management,
+        &evidence.notifications,
+        &evidence.offscreen,
+        &evidence.privacy,
+        &evidence.scripting,
+        &evidence.storage,
+        &evidence.tabs,
+        &evidence.web_navigation,
+        &evidence.web_request,
+        &evidence.windows,
+        &evidence.connect_native,
+        &evidence.send_native_message,
+    ];
+    if values
+        .iter()
+        .any(|value| !matches!(value.as_str(), "object" | "function" | "undefined"))
+    {
+        return Err(format!(
+            "stock API-surface evidence violated its closed vocabulary: {evidence:?}"
+        ));
+    }
+    Ok(())
+}
+
+fn observe_tab_queries(
+    popup: &WKWebView,
+    run_loop: &NSRunLoop,
+) -> Result<TabQueryEvidence, String> {
+    let script = format!(
+        r#"(() => {{
+          const api = globalThis.chrome ?? globalThis.browser;
+          const publish = (value) => {{
+            document.title = {TAB_QUERY_STATE_PREFIX:?} + JSON.stringify(value);
+          }};
+          if (!api?.tabs?.query) {{
+            publish({{ currentActive: 0, active: 0, all: 0, error: true }});
+            return;
+          }}
+          void Promise.all([
+            api.tabs.query({{ active: true, currentWindow: true }}),
+            api.tabs.query({{ active: true }}),
+            api.tabs.query({{}}),
+          ]).then(([currentActive, active, all]) => publish({{
+            currentActive: Array.isArray(currentActive) ? currentActive.length : 0,
+            active: Array.isArray(active) ? active.length : 0,
+            all: Array.isArray(all) ? all.length : 0,
+            error: false,
+          }})).catch(() => publish({{ currentActive: 0, active: 0, all: 0, error: true }}));
+        }})()"#
+    );
+    unsafe {
+        popup.evaluateJavaScript_completionHandler(&NSString::from_str(&script), None);
+    }
+    let deadline = Instant::now() + super::PROBE_TIMEOUT;
+    loop {
+        if let Some(title) = unsafe { popup.title() }.map(|title| title.to_string()) {
+            if let Some(payload) = title.strip_prefix(TAB_QUERY_STATE_PREFIX) {
+                if payload.len() <= MAX_DIAGNOSTIC_TITLE_BYTES {
+                    let evidence: TabQueryEvidence = serde_json::from_str(payload)
+                        .map_err(|error| format!("stock tab-query evidence is invalid: {error}"))?;
+                    if evidence.current_active > 16
+                        || evidence.active > 16
+                        || evidence.all > 16
+                        || evidence.current_active > evidence.active
+                        || evidence.active > evidence.all
+                        || (evidence.error
+                            && (evidence.current_active != 0
+                                || evidence.active != 0
+                                || evidence.all != 0))
+                    {
+                        return Err(format!(
+                            "stock tab-query evidence violated its bounded contract: {evidence:?}"
+                        ));
+                    }
+                    return Ok(evidence);
+                }
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err("stock tab-query observation produced no bounded state".into());
+        }
+        super::drain_run_loop_once(run_loop);
+    }
+}
+
+fn observe_wasm_resource(
+    popup: &WKWebView,
+    run_loop: &NSRunLoop,
+    resource_path: &str,
+    expected_bytes: usize,
+) -> Result<WasmResourceEvidence, String> {
+    let script = format!(
+        r#"(() => {{
+          const api = globalThis.chrome ?? globalThis.browser;
+          const evidence = {{
+            state: 'started',
+            status: 0,
+            mime: 'absent',
+            bytes: 0,
+            compileMillis: 0,
+            timer: 'pending',
+          }};
+          const publish = () => {{
+            document.title = {WASM_RESOURCE_STATE_PREFIX:?} + JSON.stringify(evidence);
+          }};
+          publish();
+          setTimeout(() => {{ evidence.timer = 'fired'; publish(); }}, 100);
+          void (async () => {{
+            try {{
+              const response = await fetch(api.runtime.getURL({resource_path:?}), {{
+                cache: 'no-store',
+              }});
+              evidence.status = response.status;
+              evidence.mime = response.headers.get('content-type') ?? 'absent';
+              evidence.state = 'headers';
+              publish();
+              const bytes = await response.arrayBuffer();
+              evidence.bytes = bytes.byteLength;
+              evidence.state = 'body';
+              publish();
+              const compileStarted = performance.now();
+              evidence.state = 'compiling';
+              publish();
+              await WebAssembly.compile(bytes);
+              evidence.compileMillis = Math.round(performance.now() - compileStarted);
+              evidence.state = 'compiled';
+              publish();
+            }} catch (_) {{
+              evidence.state = 'error';
+              publish();
+            }}
+          }})();
+        }})()"#
+    );
+    unsafe {
+        popup.evaluateJavaScript_completionHandler(&NSString::from_str(&script), None);
+    }
+    let deadline = Instant::now() + super::PROBE_TIMEOUT;
+    let mut last_state = None;
+    loop {
+        if let Some(title) = unsafe { popup.title() }.map(|title| title.to_string()) {
+            if let Some(payload) = title.strip_prefix(WASM_RESOURCE_STATE_PREFIX) {
+                if payload.len() <= MAX_DIAGNOSTIC_TITLE_BYTES {
+                    let state: WasmResourceEvidence = serde_json::from_str(payload)
+                        .map_err(|error| format!("stock WASM evidence is invalid: {error}"))?;
+                    validate_wasm_resource_evidence(&state, expected_bytes)?;
+                    let terminal = matches!(state.state.as_str(), "compiled" | "error");
+                    if terminal {
+                        return Ok(state);
+                    }
+                    last_state = Some(state);
+                }
+            }
+        }
+        if Instant::now() >= deadline {
+            return last_state.ok_or_else(|| {
+                "stock WASM resource observation produced no bounded state".to_owned()
+            });
+        }
+        super::drain_run_loop_once(run_loop);
+    }
+}
+
+fn validate_wasm_resource_evidence(
+    evidence: &WasmResourceEvidence,
+    expected_bytes: usize,
+) -> Result<(), String> {
+    if !matches!(
+        evidence.state.as_str(),
+        "started" | "headers" | "body" | "compiling" | "compiled" | "error"
+    ) || !matches!(evidence.timer.as_str(), "pending" | "fired")
+        || evidence.mime.len() > 128
+        || !evidence.mime.is_ascii()
+        || evidence.bytes > expected_bytes
+        || evidence.compile_millis > 120_000
+        || (matches!(evidence.state.as_str(), "body" | "compiling" | "compiled")
+            && evidence.bytes != expected_bytes)
+        || (matches!(
+            evidence.state.as_str(),
+            "headers" | "body" | "compiling" | "compiled"
+        ) && evidence.status != 200)
+        || (evidence.state == "started" && evidence.status != 0)
+    {
+        return Err(format!(
+            "stock WASM resource evidence violated its bounded contract: {evidence:?}"
+        ));
+    }
+    Ok(())
 }
 
 fn wait_for_isolated_content_adapter(
@@ -1223,7 +1498,10 @@ fn wait_for_isolated_content_adapter(
 
 fn wait_for_teardown(teardown: &NativeTeardown) -> Result<(), String> {
     let run_loop = NSRunLoop::mainRunLoop();
-    let deadline = Instant::now() + super::TEARDOWN_TIMEOUT;
+    let started = Instant::now();
+    let budget_deadline = started + super::TEARDOWN_TIMEOUT;
+    let extended_deadline = started + EXTENDED_PASSWORD_MANAGER_TEARDOWN_OBSERVATION;
+    let mut budget_exceeded = false;
     loop {
         let controller = teardown.controller.load().is_none();
         let context = teardown.context.load().is_none();
@@ -1232,11 +1510,27 @@ fn wait_for_teardown(teardown: &NativeTeardown) -> Result<(), String> {
         let store = teardown.store.load().is_none();
         let lifecycle = teardown.lifecycle_drops.load(Ordering::Acquire) == 3;
         if controller && context && page && popup && store && lifecycle {
+            if budget_exceeded {
+                return Err(format!(
+                    "stock extension native teardown exceeded its budget and released after {} ms",
+                    started.elapsed().as_millis()
+                ));
+            }
             return Ok(());
         }
-        if Instant::now() >= deadline {
+        let now = Instant::now();
+        if now >= budget_deadline {
+            budget_exceeded = true;
+        }
+        let terminal_deadline = if teardown.contract == StockContract::OnePassword8123233 {
+            extended_deadline
+        } else {
+            budget_deadline
+        };
+        if now >= terminal_deadline {
             return Err(format!(
-                "stock extension native teardown did not settle: controller={controller}, context={context}, page={page}, popup={popup}, store={store}, lifecycle={}/3",
+                "stock extension native teardown did not settle within {} ms: controller={controller}, context={context}, page={page}, popup={popup}, store={store}, lifecycle={}/3",
+                started.elapsed().as_millis(),
                 teardown.lifecycle_drops.load(Ordering::Acquire),
             ));
         }

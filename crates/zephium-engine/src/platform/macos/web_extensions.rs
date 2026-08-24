@@ -862,6 +862,12 @@ pub(crate) fn run_onepassword_probe(extension: &Path, tree_index: &Path) -> Resu
     stock_password_manager::run_onepassword(extension, tree_index)
 }
 
+pub(crate) fn run_onepassword_compatibility_artifact_probe(
+    artifact: &Path,
+) -> Result<bool, String> {
+    stock_password_manager::run_onepassword_compatibility_artifact(artifact)
+}
+
 pub(crate) fn run_stock_password_manager_compatibility_artifact_probe(
     artifact: &Path,
 ) -> Result<bool, String> {

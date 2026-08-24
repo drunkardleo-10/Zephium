@@ -169,6 +169,16 @@ pub fn run_macos_onepassword_probe(
     platform::macos::run_onepassword_probe(extension, tree_index)
 }
 
+/// Executes the exact non-authorizing package-neutral artifact derived from
+/// the pinned stock 1Password tree.
+#[cfg(all(target_os = "macos", feature = "native-web-extension-probes"))]
+#[doc(hidden)]
+pub fn run_macos_onepassword_compatibility_artifact_probe(
+    artifact: &std::path::Path,
+) -> Result<bool, String> {
+    platform::macos::run_onepassword_compatibility_artifact_probe(artifact)
+}
+
 /// Executes the package-neutral compatibility artifact derived from the exact
 /// pinned stock password-manager tree.
 ///

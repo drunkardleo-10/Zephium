@@ -1894,14 +1894,44 @@ public load callback within 12 seconds, records
 `WKWebExtensionContextErrorDomain` code 6, and leaves the content/autofill
 orchestrator unconfigured. The package contains seven WASM resources; the
 largest is 17,466,756 bytes, and its generated loaders try streaming before an
-`arrayBuffer` fallback. The separate package-neutral resource gate already
-proves that WKWebExtension serves private WASM as
-`application/octet-stream` and that large-body progress can stall after the
-streaming rejection. That platform fact is consistent with this stock result,
-but a package-specific resource trace is still required before naming the
-exact 1Password startup instruction as causal. The failed background path also
-retains the nonpersistent data store beyond the teardown budget. Stock
-1Password is therefore **not Verified** and must not enter a shipping catalog.
+`arrayBuffer` fallback. A package-specific trace rules that resource out as the
+startup blocker: WebKit returns status 200 and `application/octet-stream`, but
+the complete body arrives and `WebAssembly.compile` settles in 14–17 ms on the
+reviewed machine. The MIME is still wrong, but neither body progress nor raw
+compilation explains the 12-second background failure.
+
+The popup surface instead exposes the relevant API gap. WebKit provides
+`action`, `alarms`, `commands`, `contextMenus`,
+`declarativeNetRequest`, `scripting`, `storage`, `tabs`, `webNavigation`,
+`webRequest`, `windows`, and native-messaging methods, but omits
+`downloads`, `idle`, `management`, `notifications`, `offscreen`, and
+`privacy`. The Chrome build installs `chrome.notifications` event listeners
+during background module initialization. A declared-permission-gated,
+package-neutral notifications fallback now preserves a future native namespace
+when present and otherwise supplies only inert events, promise/callback
+settlement, permission level `denied`, and no-delivery results. It performs no
+I/O, creates no timer or view, and is injected only into adapted background and
+extension-page realms; it is never exposed to content or page worlds.
+
+With that exact fallback, the independently indexed 1Password artifact has
+1,002 files and 45,127,086 bytes, tree SHA-256
+`3a5c59b90860ca3b9e44fe1e3f0c612fb50e0fa927656e6d05859048865fa8ed`,
+and index SHA-256
+`24f6ba293d06c1d63a5ebec5f743dd146e628b129d1a507e231d850178200266`.
+Its real background completes in 174 ms with zero context errors and its popup
+retains native runtime identity. This isolates the stock startup failure to the
+missing notifications namespace and proves a reusable compatibility seam.
+It does **not** make 1Password Verified: no account/vault is configured in the
+automated gate, so inline discovery, sign-in, save, fill, passkeys, popup flows,
+native desktop integration, restart behavior, and resource budgets remain
+unassessed. After correcting the probe's regular/private window projection,
+the extension sees exactly one current active tab and `scripting.executeScript`
+runs in its isolated world; that world observes native runtime identities but
+not the static content-prelude marker. Closing the popup and unloading the
+context still leave its popup/page/controller/store graph retained beyond a
+30-second diagnostic window. Neither stock nor transformed 1Password may enter
+a shipping catalog until the missing marker is classified, native teardown is
+bounded, and real account workflows pass.
 
 Authenticating this real package exposed one legitimate package-admission
 ceiling: a current major extension contains a single resource slightly above
@@ -2019,9 +2049,12 @@ reserved-namespace collisions, and emits a separately indexed artifact. Its
 supplies only the inert catalog-update event owned by Zephium, wraps classic or
 module background workers, prepends isolated content scripts, leaves `MAIN`
 scripts unchanged, and inserts the local prelude only into an explicit leading
-action-popup `<head>`. It does not proxy extension APIs: live WebKit evidence
-showed that proxy replacement accepts listener registration but breaks native
-message delivery. Ambiguous HTML, nonportable or absent resources, links,
+action-popup `<head>`. A declared `notifications` permission conditionally adds
+the separately typed native-preserving/inert fallback described above; packages
+without that declaration receive no namespace or extra resource. It does not
+proxy extension APIs: live WebKit evidence showed that proxy replacement
+accepts listener registration but breaks native message delivery. Ambiguous
+HTML, nonportable or absent resources, links,
 special files, unsupported worlds, and every file/tree budget violation fail
 closed.
 Because file-URL access requires a separate user grant that does not yet exist,
