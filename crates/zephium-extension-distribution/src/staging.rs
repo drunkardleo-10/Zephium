@@ -12,7 +12,7 @@ pub(crate) const VIMIUM_CRX3_URL: &str = concat!(
 );
 pub(crate) const DARK_READER_CRX3_URL: &str = concat!(
     "https://staging.extensions.zephium.invalid/v1/targets/crx3/",
-    "b36c771ac46c6d64c6f62063c5ed29359338d5128be9fdbcb7cddb74c7b4cf98/2/",
+    "b36c771ac46c6d64c6f62063c5ed29359338d5128be9fdbcb7cddb74c7b4cf98/3/",
     "2d39a45d9a1514b214efee202c8e8276b1e8fc61461f33ee46b8ce20f65cfeb0.crx3"
 );
 pub(crate) const VIMIUM_LEGAL_URL: &str = concat!(

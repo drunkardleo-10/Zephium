@@ -6,14 +6,21 @@ than one native runtime profile. It is compiled only when the explicit
 `staging-extension-catalog` feature is enabled. Ordinary and release builds do
 not compile these bytes or construct the distribution worker.
 
-Catalog revision 8 is active. Revisions 6 and 7 are retained as the two ordered
+Catalog revision 9 is active. Revisions 7 and 8 are retained as the two ordered
 rollback generations required by the repository high-water contract. Revision
 7 kept the exact Vimium revision-6 package while adding Dark Reader revision 1,
 so the migration tested catalog-cohort growth without conflating it with a
 Vimium package update. Revision 8 keeps both exact package byte streams and
 advances Dark Reader to package revision 2 so the newly observed background
 lifecycle degradation is published monotonically rather than changing an
-already admitted revision-7 profile in place.
+already admitted revision-7 profile in place. Revision 9 reuses both packages'
+exact CRX3 objects, legal notices, manifests, compatibility receipts, and
+transformed trees. It advances only Dark Reader's update-line identity from 2
+to 3 so the `alarms` declaration can move from compatible to degraded through
+the normal new-degradation consent transaction after the long-duration native
+gate proved live delivery but no persistence across exact context reload. The
+new declaration review is separately retained under `evidence/`, so the old
+profile remains an immutable rollback generation.
 
 The active cohort is:
 
@@ -41,7 +48,10 @@ reconstructing it for the revision-7 to revision-8 package update, cause WebKit
 to emit another `runtime.onInstalled` event with reason `install`, so the stock
 extension opens its help tab again even with the deterministic
 `webkit-extension` origin; restart-only rehydration does not. The background
-lifecycle remains degraded. WebKit's own runtime test expects the install event
+lifecycle remains degraded. A 0.5-minute native alarm fires while the context
+is loaded, but an alarm armed immediately before unload is absent after the
+same context reloads; alarm-backed work that assumes Chrome restart persistence
+is therefore also disclosed as degraded. WebKit's own runtime test expects the install event
 after every unload/load; keeping the context loaded would violate disabled-state
 ownership, the public unsupported-API set does not hide this event member, and
 attempting to replace it makes the background fail. Closing the gap therefore
@@ -56,8 +66,8 @@ two package objects, and two legal objects named below.
 
 Exact active identities:
 
-- catalog SHA-256: `e1cc8aa85eacd6df7c99f24263a1e1f35767fd83b3df4894c9a4e00b309dea5a`
-- catalog inventory SHA-256: `9897724aca1a5e770ac1a2ad4f63ab97693917c581f5713a7f62740a2e9bcd6f`
+- catalog SHA-256: `8462dad95e46ed68bf03760607a293c99afd45f9b7b0a9cb98942ba5c858f0bd`
+- catalog inventory SHA-256: `ce107b0ecf2c3bf1fe11f67894b69abc1a9e1e8fb7297a90aa18a12bee0b459f`
 - Vimium CRX3 SHA-256: `5bf9a4d8916959fca6b441b1ded47fa8dd615dffa2d1fb80314e5f9f4ec3187b`
 - Vimium archive SHA-256: `0154d07f8378f4e0396d1083941854dc141090680bb58394260ca5bd799e9598`
 - Vimium release tree SHA-256: `6b0960e703616c920c75a7b3994a4f63c2313234fc3886a764cbdf04d86a2e68`

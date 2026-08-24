@@ -1467,10 +1467,13 @@ impl ExtensionManifestCompatibilityPolicy for StagingCompatibilityPolicy {
                 classify_staging_vimium(subject.declaration())
             }
             crate::staging_catalog::StagingCompatibilityContract::DarkReaderRevisionSeven => {
-                classify_staging_dark_reader(subject.declaration(), false)
+                classify_staging_dark_reader(subject.declaration(), false, false)
             }
             crate::staging_catalog::StagingCompatibilityContract::DarkReaderRevisionEight => {
-                classify_staging_dark_reader(subject.declaration(), true)
+                classify_staging_dark_reader(subject.declaration(), true, false)
+            }
+            crate::staging_catalog::StagingCompatibilityContract::DarkReaderRevisionNine => {
+                classify_staging_dark_reader(subject.declaration(), true, true)
             }
         }
     }
@@ -1515,12 +1518,14 @@ fn classify_staging_vimium(
 fn classify_staging_dark_reader(
     declaration: &ExtensionManifestDeclaration,
     background_lifecycle_degraded: bool,
+    alarm_persistence_degraded: bool,
 ) -> Option<ExtensionCompatibilityLevel> {
     use ExtensionCompatibilityLevel::{Compatible, Degraded};
     use ExtensionManifestDeclaration as Declaration;
 
     match declaration {
         Declaration::RequiredApiPermission(name) => match name.as_str() {
+            "alarms" if alarm_persistence_degraded => Some(Degraded),
             "alarms" | "scripting" | "storage" => Some(Compatible),
             "fontSettings" => Some(Degraded),
             _ => None,

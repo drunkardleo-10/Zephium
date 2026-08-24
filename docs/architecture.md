@@ -2112,7 +2112,7 @@ the externally signed deterministic Vimium CRX3
 and the separately signed Dark Reader CRX3
 (`523516c9550b15fd2cd97ce722348313da32deccb777caae4dc0a127e13d2c1a`)
 under mixed catalog SHA-256
-`e1cc8aa85eacd6df7c99f24263a1e1f35767fd83b3df4894c9a4e00b309dea5a`.
+`8462dad95e46ed68bf03760607a293c99afd45f9b7b0a9cb98942ba5c858f0bd`.
 The catalog selects Dark Reader's `MacosNative` profile and Vimium's
 `MacosNativeBrokered` profile as one canonical cohort. That feature has a
 separate application identifier and a fixed five-object in-process transport;
@@ -2187,13 +2187,19 @@ The isolated packaged staging application exercises the complete profile path:
 first-run profile registration, authenticated catalog synchronization,
 permission review, install, enable, content/action execution, popup and options
 presentation, disable/re-enable, uninstall, clean shutdown, and restart.
-Revision 8 is active, with revisions 6 and 7 retained as the two bounded
+Revision 9 is active, with revisions 7 and 8 retained as the two bounded
 rollback generations. Revision 7 kept Vimium's exact revision-6 package bytes
 and added Dark Reader revision 1, proving that one catalog transaction can grow
 from one brokered package to a mixed native/brokered cohort. Revision 8 keeps
 both byte streams and advances Dark Reader to package revision 2 so its newly
 observed background-lifecycle degradation cannot mutate an already admitted
-profile in place. Revisions 5 and 6 deliberately reused the same Vimium package
+profile in place. Revision 9 reuses every revision-8 package byte but advances
+Dark Reader's update-line revision from 2 to 3 so the reviewed `alarms`
+degradation reaches the normal consent transaction after the long-duration
+native gate proved live delivery but no context-restart persistence. Its
+metadata-reissue review, pre-review profile inputs, final
+review, classified output, and hashes are retained together; revision 8 remains
+immutable as rollback. Revisions 5 and 6 deliberately reused the same Vimium package
 bytes to isolate the live runtime-generation update contract. The service
 retires every regular/private native owner, Store atomically advances the
 catalog, stable install, and package-bound grant revisions, and only then

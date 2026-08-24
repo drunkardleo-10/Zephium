@@ -1351,9 +1351,9 @@ mod tests {
         let rollback_two = authority
             .admit_rollback_catalog(crate::staging_catalog::ROLLBACK_GENERATIONS[1].catalog_bytes)
             .unwrap();
-        assert_eq!(admitted.revision().get(), 8);
-        assert_eq!(rollback_one.revision().get(), 6);
-        assert_eq!(rollback_two.revision().get(), 7);
+        assert_eq!(admitted.revision().get(), 9);
+        assert_eq!(rollback_one.revision().get(), 7);
+        assert_eq!(rollback_two.revision().get(), 8);
         for rollback in [rollback_one, rollback_two] {
             assert_eq!(
                 authority.recognize_generation(&rollback.generation_anchor()),

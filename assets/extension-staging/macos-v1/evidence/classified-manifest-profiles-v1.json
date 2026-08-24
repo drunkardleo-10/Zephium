@@ -2,7 +2,7 @@
   "schema": 1,
   "kind": "zephium-extension-classified-manifest-profiles",
   "product_authority": false,
-  "catalog_sha256": "e1cc8aa85eacd6df7c99f24263a1e1f35767fd83b3df4894c9a4e00b309dea5a",
+  "catalog_sha256": "8462dad95e46ed68bf03760607a293c99afd45f9b7b0a9cb98942ba5c858f0bd",
   "admission_policy": {
     "digest_sha256": "d05d6d14b6c2c81fa0dbefd350e547fe6e269156b0bef5ff5d77e5be5d0a3225",
     "license_rules": [
@@ -182,13 +182,13 @@
     {
       "input": {
         "package_key": "b36c771ac46c6d64c6f62063c5ed29359338d5128be9fdbcb7cddb74c7b4cf98",
-        "package_revision": 2,
+        "package_revision": 3,
         "manifest_sha256": "778718d67d3efea8d488fd08491b40a1f14d7534a1e5243314d17123775096d3",
         "tree_sha256": "ac9611842b883e1c100b2eb0a28e8351783a33ecff319ec3b39dba3b9fc8cb07",
         "tree_index_sha256": "e42d79f3b12e29914cd1e7f50034bd1b63d843da4b7159408584778a2aaecede",
         "tree_index_length": 11949,
-        "manifest_target": "product/profile-inputs/b36c771ac46c6d64c6f62063c5ed29359338d5128be9fdbcb7cddb74c7b4cf98/2/778718d67d3efea8d488fd08491b40a1f14d7534a1e5243314d17123775096d3.manifest.json",
-        "tree_index_target": "product/profile-inputs/b36c771ac46c6d64c6f62063c5ed29359338d5128be9fdbcb7cddb74c7b4cf98/2/e42d79f3b12e29914cd1e7f50034bd1b63d843da4b7159408584778a2aaecede.tree-index.json",
+        "manifest_target": "product/profile-inputs/b36c771ac46c6d64c6f62063c5ed29359338d5128be9fdbcb7cddb74c7b4cf98/3/778718d67d3efea8d488fd08491b40a1f14d7534a1e5243314d17123775096d3.manifest.json",
+        "tree_index_target": "product/profile-inputs/b36c771ac46c6d64c6f62063c5ed29359338d5128be9fdbcb7cddb74c7b4cf98/3/e42d79f3b12e29914cd1e7f50034bd1b63d843da4b7159408584778a2aaecede.tree-index.json",
         "compatibility_target": "macos.wkwebextension.v1",
         "compatibility_receipt_sha256": "91f28142bdc6e0c59adcbbed551087aaf22e151b09c59944e12db6c292953135",
         "declarations": [
@@ -197,7 +197,7 @@
               "kind": "required_api",
               "name": "alarms"
             },
-            "level": "compatible"
+            "level": "degraded"
           },
           {
             "declaration": {
@@ -300,8 +300,8 @@
           }
         ]
       },
-      "compatibility_digest": "4606f04f5784769f5df5dd9e596aa2a056d6724dac5e152648aaff26630c3764",
-      "admission_digest": "ec5f0f866b75da2792a23d1624668f0beb9172e21b9554f95986aa27fc7147e2",
+      "compatibility_digest": "a179a08db73a6725cfccd85fa6997590c1957c94a9f237d0e183fe145e4e5926",
+      "admission_digest": "7c7fc3b715ef1f152d5ed4991e8217a9e471b9ef06c68f60f9cf4039eaf7b8e1",
       "activatable": true
     }
   ]
