@@ -87,6 +87,12 @@ Chromium's full site-isolation model.
    verifies that current WebKit discards the next alarm when the exact context
    unloads/reloads before its deadline; this limitation is disclosed rather
    than repaired with a hidden view or an unbounded background worker.
+   The native WebKit contract also exercises both sides of web-accessible
+   resources from the same hostile product page: one declared dynamic script
+   loads and executes, while an exact present-but-undeclared extension script
+   is rejected and leaves no execution marker. A package file is never treated
+   as page-readable merely because an isolated extension principal can derive
+   its private URL.
    `unlimitedStorage` is product-prohibited on both native macOS grant schemas.
    WebKit exposes per-extension data-size records and deletion, but no quota
    setter; reactive inspection cannot prevent a granted extension from filling

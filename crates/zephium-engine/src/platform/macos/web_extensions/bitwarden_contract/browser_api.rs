@@ -115,6 +115,10 @@ pub(super) fn write_fixture_assets(path: &Path) -> Result<(), String> {
             "document.documentElement.dataset.zephiumBitwardenDynamicResource = 'executed';",
         ),
         (
+            "private-page-script.js",
+            "document.documentElement.dataset.zephiumBitwardenPrivateResource = 'executed';",
+        ),
+        (
             "menu-button.html",
             "<!doctype html><title>unused privileged leaf</title>",
         ),
@@ -140,49 +144,60 @@ pub(super) fn product_tab_content_script(title: &str) -> String {
     format!(
         r#"(() => {{
     const api = globalThis.browser ?? globalThis.chrome;
+    // This complete object crosses the bounded document-title probe channel;
+    // compact keys keep hostile-path evidence below WebKit's 1,000-character
+    // title ceiling without dropping a security assertion.
     const evidence = {{
-        dynamicResourceLoad: "pending",
-        dynamicResourceExecution: "pending",
-        dynamicResourceUrl: "pending",
-        programmaticScript: "pending",
-        sandboxChrome: "pending",
-        sandboxRuntime: "pending",
-        sandboxStorageLocal: "pending",
-        sandboxOrigin: "pending",
-        sandboxLocationOrigin: "pending",
-        sandboxDomAccess: "pending",
-        sandboxLeafDirectExposure: "not-exposed",
-        sandboxTransport: "pending",
+        dLoad: "pending",
+        dExec: "pending",
+        dUrl: "pending",
+        pLoad: "pending",
+        pExec: "pending",
+        prog: "pending",
+        sChrome: "pending",
+        sRuntime: "pending",
+        sStorage: "pending",
+        sOrigin: "pending",
+        sLocation: "pending",
+        sDom: "pending",
+        sLeaf: "not-exposed",
+        sTransport: "pending",
         settled: false
     }};
     addEventListener("DOMContentLoaded", () => {{
         document.title = {title};
         const dynamicUrl = api.runtime.getURL("fido2-page-script.js");
         const parsed = new URL(dynamicUrl);
-        evidence.dynamicResourceUrl = parsed.host === api.runtime.id ? "principal" : "opaque";
+        evidence.dUrl = parsed.host === api.runtime.id ? "principal" : "opaque";
 
         const script = document.createElement("script");
         script.src = dynamicUrl;
-        script.addEventListener("load", () => {{ evidence.dynamicResourceLoad = "loaded"; }}, {{ once: true }});
-        script.addEventListener("error", () => {{ evidence.dynamicResourceLoad = "rejected"; }}, {{ once: true }});
+        script.addEventListener("load", () => {{ evidence.dLoad = "loaded"; }}, {{ once: true }});
+        script.addEventListener("error", () => {{ evidence.dLoad = "rejected"; }}, {{ once: true }});
         document.documentElement.append(script);
+
+        const privateScript = document.createElement("script");
+        privateScript.src = api.runtime.getURL("private-page-script.js");
+        privateScript.addEventListener("load", () => {{ evidence.pLoad = "loaded"; }}, {{ once: true }});
+        privateScript.addEventListener("error", () => {{ evidence.pLoad = "rejected"; }}, {{ once: true }});
+        document.documentElement.append(privateScript);
 
         const sandbox = document.createElement("iframe");
         sandbox.setAttribute("sandbox", "allow-scripts");
         addEventListener("message", (event) => {{
             if (event.source === sandbox.contentWindow
                 && event.data?.kind === "zephium-bitwarden-sandbox") {{
-                evidence.sandboxChrome = event.data.chromeType;
-                evidence.sandboxRuntime = event.data.runtimeType;
-                evidence.sandboxStorageLocal = event.data.storageLocalType;
-                evidence.sandboxOrigin = event.origin;
-                evidence.sandboxLocationOrigin = event.data.locationOrigin;
+                evidence.sChrome = event.data.chromeType;
+                evidence.sRuntime = event.data.runtimeType;
+                evidence.sStorage = event.data.storageLocalType;
+                evidence.sOrigin = event.origin;
+                evidence.sLocation = event.data.locationOrigin;
                 try {{
-                    evidence.sandboxDomAccess = sandbox.contentDocument ? "present" : "absent";
+                    evidence.sDom = sandbox.contentDocument ? "present" : "absent";
                 }} catch (_) {{
-                    evidence.sandboxDomAccess = "denied";
+                    evidence.sDom = "denied";
                 }}
-                evidence.sandboxTransport = "sandbox-message";
+                evidence.sTransport = "sandbox-message";
                 return;
             }}
         }});
@@ -197,62 +212,68 @@ pub(super) fn product_tab_content_script(title: &str) -> String {
                 sandbox.addEventListener("load", () => URL.revokeObjectURL(leafUrl), {{ once: true }});
                 sandbox.src = leafUrl;
                 document.documentElement.append(sandbox);
-                evidence.sandboxTransport = "blob-appended";
+                evidence.sTransport = "blob-appended";
             }} catch (error) {{
-                evidence.sandboxTransport = `error:${{String(error?.message ?? error).slice(0, 80)}}`;
+                evidence.sTransport = `error:${{String(error?.message ?? error).slice(0, 80)}}`;
             }}
         }})();
 
         try {{
             const request = api.runtime.sendMessage({{ type: "zephium-bitwarden-programmatic-script" }});
-            request?.catch?.(() => {{ evidence.programmaticScript = "request-rejected"; }});
+            request?.catch?.(() => {{ evidence.prog = "request-rejected"; }});
         }} catch (_) {{
-            evidence.programmaticScript = "request-rejected";
+            evidence.prog = "request-rejected";
         }}
 
         let polls = 0;
         const settle = () => {{
-            evidence.dynamicResourceExecution =
+            evidence.dExec =
                 document.documentElement.dataset.zephiumBitwardenDynamicResource ?? "pending";
-            evidence.programmaticScript =
+            evidence.pExec =
+                document.documentElement.dataset.zephiumBitwardenPrivateResource ?? "pending";
+            evidence.prog =
                 document.documentElement.dataset.zephiumBitwardenProgrammaticScript
-                ?? evidence.programmaticScript;
+                ?? evidence.prog;
             if (polls >= 40) {{
                 for (const key of [
-                    "sandboxChrome", "sandboxRuntime", "sandboxStorageLocal", "sandboxOrigin",
-                    "sandboxLocationOrigin", "sandboxDomAccess"
+                    "sChrome", "sRuntime", "sStorage", "sOrigin", "sLocation", "sDom"
                 ]) {{
                     if (evidence[key] === "pending") evidence[key] = "unobserved";
                 }}
-                if (evidence.sandboxTransport === "pending") evidence.sandboxTransport = "timeout";
+                if (evidence.sTransport === "pending") evidence.sTransport = "timeout";
             }}
-            const complete = evidence.dynamicResourceLoad !== "pending"
-                && evidence.dynamicResourceExecution !== "pending"
-                && evidence.programmaticScript !== "pending"
-                && evidence.sandboxChrome !== "pending"
-                && evidence.sandboxRuntime !== "pending"
-                && evidence.sandboxStorageLocal !== "pending"
-                && evidence.sandboxOrigin !== "pending"
-                && evidence.sandboxLocationOrigin !== "pending"
-                && evidence.sandboxDomAccess !== "pending"
-                && evidence.sandboxLeafDirectExposure !== "pending"
-                && evidence.sandboxTransport !== "pending";
+            const complete = evidence.dLoad !== "pending"
+                && evidence.dExec !== "pending"
+                && evidence.pLoad !== "pending"
+                && evidence.prog !== "pending"
+                && evidence.sChrome !== "pending"
+                && evidence.sRuntime !== "pending"
+                && evidence.sStorage !== "pending"
+                && evidence.sOrigin !== "pending"
+                && evidence.sLocation !== "pending"
+                && evidence.sDom !== "pending"
+                && evidence.sLeaf !== "pending"
+                && evidence.sTransport !== "pending";
             if (complete || polls >= {SETTLE_POLLS}) {{
-                if (evidence.dynamicResourceExecution === "pending") {{
-                    evidence.dynamicResourceExecution = "not-executed";
+                if (evidence.dExec === "pending") {{
+                    evidence.dExec = "not-executed";
                 }}
-                if (evidence.programmaticScript === "pending") {{
-                    evidence.programmaticScript = "not-executed";
+                if (evidence.pExec === "pending") {{
+                    evidence.pExec = "not-executed";
                 }}
-                evidence.settled = evidence.dynamicResourceLoad !== "pending"
-                    && evidence.sandboxChrome !== "pending"
-                    && evidence.sandboxRuntime !== "pending"
-                    && evidence.sandboxStorageLocal !== "pending"
-                    && evidence.sandboxOrigin !== "pending"
-                    && evidence.sandboxLocationOrigin !== "pending"
-                    && evidence.sandboxDomAccess !== "pending"
-                    && evidence.sandboxLeafDirectExposure !== "pending"
-                    && evidence.sandboxTransport !== "pending";
+                if (evidence.prog === "pending") {{
+                    evidence.prog = "not-executed";
+                }}
+                evidence.settled = evidence.dLoad !== "pending"
+                    && evidence.pLoad !== "pending"
+                    && evidence.sChrome !== "pending"
+                    && evidence.sRuntime !== "pending"
+                    && evidence.sStorage !== "pending"
+                    && evidence.sOrigin !== "pending"
+                    && evidence.sLocation !== "pending"
+                    && evidence.sDom !== "pending"
+                    && evidence.sLeaf !== "pending"
+                    && evidence.sTransport !== "pending";
                 void api.storage.local.set({{ zephiumBitwardenContentApiProbe: evidence }});
                 return;
             }}
@@ -367,7 +388,7 @@ fn validate(evidence: &Value, context_menu_phase: ContextMenuPhase) -> Result<Ob
         }
     };
     let dynamic_resource_url = match content
-        .and_then(|value| value.get("dynamicResourceUrl"))
+        .and_then(|value| value.get("dUrl"))
         .and_then(Value::as_str)
     {
         Some("opaque") => DynamicResourceUrl::Opaque,
@@ -380,25 +401,25 @@ fn validate(evidence: &Value, context_menu_phase: ContextMenuPhase) -> Result<Ob
     };
     let sandbox_isolation = match (
         content
-            .and_then(|value| value.get("sandboxChrome"))
+            .and_then(|value| value.get("sChrome"))
             .and_then(Value::as_str),
         content
-            .and_then(|value| value.get("sandboxRuntime"))
+            .and_then(|value| value.get("sRuntime"))
             .and_then(Value::as_str),
         content
-            .and_then(|value| value.get("sandboxStorageLocal"))
+            .and_then(|value| value.get("sStorage"))
             .and_then(Value::as_str),
         content
-            .and_then(|value| value.get("sandboxOrigin"))
+            .and_then(|value| value.get("sOrigin"))
             .and_then(Value::as_str),
         content
-            .and_then(|value| value.get("sandboxLeafDirectExposure"))
+            .and_then(|value| value.get("sLeaf"))
             .and_then(Value::as_str),
         content
-            .and_then(|value| value.get("sandboxTransport"))
+            .and_then(|value| value.get("sTransport"))
             .and_then(Value::as_str),
         content
-            .and_then(|value| value.get("sandboxDomAccess"))
+            .and_then(|value| value.get("sDom"))
             .and_then(Value::as_str),
     ) {
         (
@@ -433,7 +454,7 @@ fn validate(evidence: &Value, context_menu_phase: ContextMenuPhase) -> Result<Ob
         }
     };
     let sandbox_location_origin = content
-        .and_then(|value| value.get("sandboxLocationOrigin"))
+        .and_then(|value| value.get("sLocation"))
         .and_then(Value::as_str)
         .filter(|origin| origin.len() <= 2_048)
         .and_then(|origin| url::Url::parse(origin).ok());
@@ -467,9 +488,11 @@ fn validate(evidence: &Value, context_menu_phase: ContextMenuPhase) -> Result<Ob
             context_menu_phase.expected_lifecycle(),
         )
         || !matches(background, "menuClick", context_menu_phase.expected_click())
-        || !matches(content, "dynamicResourceLoad", "loaded")
-        || !matches(content, "dynamicResourceExecution", "executed")
-        || !matches(content, "programmaticScript", "executed")
+        || !matches(content, "dLoad", "loaded")
+        || !matches(content, "dExec", "executed")
+        || !matches(content, "pLoad", "rejected")
+        || !matches(content, "pExec", "not-executed")
+        || !matches(content, "prog", "executed")
         || content
             .and_then(|value| value.get("settled"))
             .and_then(Value::as_bool)
@@ -498,9 +521,10 @@ mod tests {
         let content = product_tab_content_script("\"loaded\"");
         assert!(content.contains("DOMContentLoaded"));
         assert!(content.contains("runtime.getURL(\"fido2-page-script.js\")"));
+        assert!(content.contains("runtime.getURL(\"private-page-script.js\")"));
         assert!(content.contains("fetch(api.runtime.getURL(\"menu-button.payload\"))"));
         assert!(content.contains("event.source === sandbox.contentWindow"));
-        assert!(content.contains("sandboxTransport"));
+        assert!(content.contains("sTransport"));
         let probe = probe_script();
         assert!(probe.contains("zephiumBitwardenBackgroundApiProbe"));
         assert!(probe.contains("zephiumBitwardenContentApiProbe"));
@@ -527,18 +551,20 @@ mod tests {
                 "menuClick": "pending"
             },
             "content": {
-                "dynamicResourceLoad": "loaded",
-                "dynamicResourceExecution": "executed",
-                "dynamicResourceUrl": "opaque",
-                "programmaticScript": "executed",
-                "sandboxChrome": "undefined",
-                "sandboxRuntime": "undefined",
-                "sandboxStorageLocal": "undefined",
-                "sandboxOrigin": "null",
-                "sandboxLocationOrigin": "https://fixture.invalid",
-                "sandboxDomAccess": "absent",
-                "sandboxLeafDirectExposure": "not-exposed",
-                "sandboxTransport": "sandbox-message",
+                "dLoad": "loaded",
+                "dExec": "executed",
+                "dUrl": "opaque",
+                "pLoad": "rejected",
+                "pExec": "not-executed",
+                "prog": "executed",
+                "sChrome": "undefined",
+                "sRuntime": "undefined",
+                "sStorage": "undefined",
+                "sOrigin": "null",
+                "sLocation": "https://fixture.invalid",
+                "sDom": "absent",
+                "sLeaf": "not-exposed",
+                "sTransport": "sandbox-message",
                 "settled": true
             },
             "settled": true
@@ -556,11 +582,11 @@ mod tests {
         let mut native = observed.clone();
         native["background"]["executionWorldNamespace"] = Value::String("object".to_owned());
         native["background"]["mainWorldValue"] = Value::String("MAIN".to_owned());
-        native["content"]["sandboxChrome"] = Value::String("undefined".to_owned());
-        native["content"]["sandboxRuntime"] = Value::String("undefined".to_owned());
-        native["content"]["sandboxStorageLocal"] = Value::String("undefined".to_owned());
-        native["content"]["sandboxOrigin"] = Value::String("null".to_owned());
-        native["content"]["sandboxLeafDirectExposure"] = Value::String("not-exposed".to_owned());
+        native["content"]["sChrome"] = Value::String("undefined".to_owned());
+        native["content"]["sRuntime"] = Value::String("undefined".to_owned());
+        native["content"]["sStorage"] = Value::String("undefined".to_owned());
+        native["content"]["sOrigin"] = Value::String("null".to_owned());
+        native["content"]["sLeaf"] = Value::String("not-exposed".to_owned());
         assert_eq!(
             validate_for_native_inspection(&native),
             Ok(Observation {
@@ -572,7 +598,7 @@ mod tests {
         );
 
         let mut ambiguous = observed;
-        ambiguous["content"]["sandboxOrigin"] = Value::String("https://example.invalid".to_owned());
+        ambiguous["content"]["sOrigin"] = Value::String("https://example.invalid".to_owned());
         assert!(validate_for_native_inspection(&ambiguous).is_err());
 
         let mut cleaned = native;

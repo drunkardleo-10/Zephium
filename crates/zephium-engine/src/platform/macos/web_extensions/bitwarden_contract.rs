@@ -675,7 +675,7 @@ pub(super) fn validate_native_grant_round_trip(
             let browser_api = browser_api_observation
                 .expect("successful Bitwarden gate records browser API evidence");
             eprintln!(
-                "native-probe-bitwarden-browser-api: scripting_main_world=passed; execution_world_namespace={}; web_navigation=passed; tabs_same_document={}; alarms_lifecycle=passed; commands_readback=passed; commands_native_event_dispatch=passed; runtime_port_registered=round-trip; runtime_port_early_connect={}; context_menus_lifecycle=passed; context_menus_native_merge_click=passed; dynamic_resource=passed; dynamic_resource_url={}; sandbox_isolation={}",
+                "native-probe-bitwarden-browser-api: scripting_main_world=passed; execution_world_namespace={}; web_navigation=passed; tabs_same_document={}; alarms_lifecycle=passed; commands_readback=passed; commands_native_event_dispatch=passed; runtime_port_registered=round-trip; runtime_port_early_connect={}; context_menus_lifecycle=passed; context_menus_native_merge_click=passed; dynamic_resource=passed; private_resource_denial=passed; dynamic_resource_url={}; sandbox_isolation={}",
                 browser_api.execution_world_namespace(),
                 tabs_same_document_observation
                     .expect("successful Bitwarden gate records same-document evidence"),
