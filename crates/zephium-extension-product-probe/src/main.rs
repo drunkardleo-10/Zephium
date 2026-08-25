@@ -454,7 +454,13 @@ impl ProductBrowserModel {
                 }
                 ExtensionBrowserRequestSettlement::Applied(ExtensionBrowserRequestResult::Complete)
             }
-            ExtensionBrowserRequestAction::ReloadTab { .. }
+            // The product probe intentionally owns no interactive extension
+            // document window. Real-browser local-lab coverage exercises that
+            // native UI trust zone; this noninteractive harness must settle a
+            // spontaneous request instead of retaining a foreground view into
+            // teardown.
+            ExtensionBrowserRequestAction::OpenExtensionPage
+            | ExtensionBrowserRequestAction::ReloadTab { .. }
             | ExtensionBrowserRequestAction::GoBack { .. }
             | ExtensionBrowserRequestAction::GoForward { .. } => {
                 ExtensionBrowserRequestSettlement::Rejected(

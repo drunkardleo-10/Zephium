@@ -1,8 +1,10 @@
 //! Main-thread WKWebExtension window/tab delegate graph.
 //!
-//! The graph mirrors Shell-owned logical identities but never creates a
-//! `WKWebView`. A tab callback returns a native view only when the Shell marks
-//! the tab resident and the engine already owns that exact physical view.
+//! The ordinary graph mirrors Shell-owned logical identities but never creates
+//! a `WKWebView`. A normal tab callback returns a native view only when the
+//! Shell marks the tab resident and the engine already owns that exact
+//! physical view. Same-principal extension documents use the separate bounded
+//! extension-UI host and never enter the ordinary navigation model.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -46,6 +48,7 @@ use super::browser_request_broker::{
 use super::compatibility_broker::{
     CompatibilityBroker, CompatibilityBrokerPool, CompatibilityBrokerSettlementOutcome,
 };
+use super::extension_page::ExtensionPageBroker;
 use super::runtime_grant_broker::{
     RuntimeGrantRequestBroker, RuntimeGrantRequestPool, RuntimeGrantSettlementOutcome,
 };
@@ -516,7 +519,10 @@ pub(super) fn request_url(url: &NSURL) -> Result<std::sync::Arc<str>, ()> {
     })
 }
 
-#[cfg(feature = "native-extension-product-probes")]
+#[cfg(any(
+    feature = "native-extension-product-probes",
+    feature = "native-extension-lab-diagnostics"
+))]
 fn product_probe_create_diagnostic(
     reason: &'static str,
     configuration: &WKWebExtensionTabConfiguration,
@@ -538,7 +544,10 @@ fn product_probe_create_diagnostic(
     }
 }
 
-#[cfg(not(feature = "native-extension-product-probes"))]
+#[cfg(not(any(
+    feature = "native-extension-product-probes",
+    feature = "native-extension-lab-diagnostics"
+)))]
 fn product_probe_create_diagnostic(
     _reason: &'static str,
     _configuration: &WKWebExtensionTabConfiguration,
@@ -662,6 +671,7 @@ struct BrowserControllerDelegateIvars {
     focused: RefCell<Option<Retained<BrowserWindow>>>,
     broker: Rc<BrowserRequestBroker>,
     action_popup: Rc<ActionPopupBroker>,
+    extension_pages: Rc<ExtensionPageBroker>,
     runtime_grants: Rc<RuntimeGrantRequestBroker>,
     compatibility_broker: Rc<CompatibilityBroker>,
     #[cfg(feature = "native-web-extension-probes")]
@@ -684,7 +694,7 @@ define_class!(
             _controller: &WKWebExtensionController,
             _context: &WKWebExtensionContext,
         ) -> Retained<NSArray<ProtocolObject<dyn WKWebExtensionWindow>>> {
-            let windows = self
+            let mut windows = self
                 .ivars()
                 .windows
                 .borrow()
@@ -692,6 +702,9 @@ define_class!(
                 .cloned()
                 .map(ProtocolObject::from_retained)
                 .collect::<Vec<_>>();
+            if let Some(extension_page) = self.ivars().extension_pages.open_window() {
+                windows.push(extension_page);
+            }
             NSArray::from_retained_slice(&windows)
         }
 
@@ -701,12 +714,14 @@ define_class!(
             _controller: &WKWebExtensionController,
             _context: &WKWebExtensionContext,
         ) -> Option<Retained<ProtocolObject<dyn WKWebExtensionWindow>>> {
-            self.ivars()
-                .focused
-                .borrow()
-                .as_ref()
-                .cloned()
-                .map(ProtocolObject::from_retained)
+            self.ivars().extension_pages.focused_window().or_else(|| {
+                self.ivars()
+                    .focused
+                    .borrow()
+                    .as_ref()
+                    .cloned()
+                    .map(ProtocolObject::from_retained)
+            })
         }
 
         #[unsafe(method(webExtensionController:openNewTabUsingConfiguration:forExtensionContext:completionHandler:))]
@@ -746,6 +761,72 @@ define_class!(
                     .open_options_page(controller, context, &ignored);
                 broker.reject_tab(completion, ExtensionBrowserRequestRejection::Unsupported);
                 return;
+            }
+            if let Some(url) = unsafe { configuration.url() } {
+                if self.ivars().extension_pages.accepts_url(context, &url) {
+                    let unsupported = unsafe {
+                        configuration.parentTab().is_some()
+                            || configuration.shouldBePinned()
+                            || configuration.shouldBeMuted()
+                            || configuration.shouldReaderModeBeActive()
+                            || !configuration.shouldBeActive()
+                            || !configuration.shouldAddToSelection()
+                    };
+                    if unsupported {
+                        product_probe_create_diagnostic(
+                            "extension-page-unsupported-configuration",
+                            configuration,
+                        );
+                        broker
+                            .reject_tab(completion, ExtensionBrowserRequestRejection::Unsupported);
+                        return;
+                    }
+                    let target_count = match unsafe { configuration.window() } {
+                        None => self.ivars().extension_pages.focused_window().map_or_else(
+                            || {
+                                self.ivars()
+                                    .focused
+                                    .borrow()
+                                    .as_ref()
+                                    .map(|window| window.tab_count())
+                            },
+                            |_| Some(1),
+                        ),
+                        Some(requested) => self
+                            .window_for(&requested)
+                            .map(|window| window.tab_count())
+                            .or_else(|| {
+                                self.ivars()
+                                    .extension_pages
+                                    .contains_window(&requested)
+                                    .then_some(1)
+                            }),
+                    };
+                    let index = unsafe { configuration.index() };
+                    if target_count.is_none()
+                        || (index != NSNotFound as usize && target_count != Some(index))
+                    {
+                        product_probe_create_diagnostic(
+                            "extension-page-invalid-target",
+                            configuration,
+                        );
+                        broker
+                            .reject_tab(completion, ExtensionBrowserRequestRejection::InvalidScope);
+                        return;
+                    }
+                    product_probe_create_diagnostic("extension-page", configuration);
+                    let Some(context) = (unsafe {
+                        Retained::retain(context as *const _ as *mut WKWebExtensionContext)
+                    }) else {
+                        broker.reject_tab(
+                            completion,
+                            ExtensionBrowserRequestRejection::NativeAdmissionFailed,
+                        );
+                        return;
+                    };
+                    broker.begin_extension_page(context, url, completion);
+                    return;
+                }
             }
             // SAFETY: all configuration properties are immutable snapshots
             // supplied to this main-thread delegate callback.
@@ -804,6 +885,7 @@ define_class!(
             };
             // SAFETY: boolean configuration properties are immutable here.
             let active = unsafe { configuration.shouldBeActive() };
+            product_probe_create_diagnostic("ordinary", configuration);
             broker.begin_tab(
                 ExtensionBrowserRequestAction::CreateTab {
                     window,
@@ -959,6 +1041,7 @@ impl BrowserControllerDelegate {
         mtm: MainThreadMarker,
         broker: Rc<BrowserRequestBroker>,
         action_popup: Rc<ActionPopupBroker>,
+        extension_pages: Rc<ExtensionPageBroker>,
         runtime_grants: Rc<RuntimeGrantRequestBroker>,
         compatibility_broker: Rc<CompatibilityBroker>,
         #[cfg(feature = "native-web-extension-probes")] lifecycle_drops: Arc<AtomicUsize>,
@@ -968,6 +1051,7 @@ impl BrowserControllerDelegate {
             focused: RefCell::new(None),
             broker,
             action_popup,
+            extension_pages,
             runtime_grants,
             compatibility_broker,
             #[cfg(feature = "native-web-extension-probes")]
@@ -1010,6 +1094,7 @@ pub(super) struct MacosExtensionBrowserSurfaceHost {
     delegate: Retained<BrowserControllerDelegate>,
     broker: Rc<BrowserRequestBroker>,
     action_popup: Rc<ActionPopupBroker>,
+    extension_pages: Rc<ExtensionPageBroker>,
     runtime_grants: Rc<RuntimeGrantRequestBroker>,
     compatibility_broker: Rc<CompatibilityBroker>,
     windows: HashMap<WindowId, Retained<BrowserWindow>>,
@@ -1029,6 +1114,7 @@ impl MacosExtensionBrowserSurfaceHost {
         let mtm = MainThreadMarker::new().ok_or(BrowserSurfaceError::MainThreadRequired)?;
         let broker = BrowserRequestBroker::new(profile, sink.clone(), request_pool);
         let action_popup = ActionPopupBroker::new(profile, sink.clone(), Rc::clone(&broker));
+        let extension_pages = ExtensionPageBroker::new(Rc::clone(&broker));
         let runtime_grants =
             RuntimeGrantRequestBroker::new(profile, sink.clone(), runtime_grant_pool);
         let compatibility_broker =
@@ -1042,6 +1128,7 @@ impl MacosExtensionBrowserSurfaceHost {
                 mtm,
                 broker.clone(),
                 action_popup.clone(),
+                extension_pages.clone(),
                 runtime_grants.clone(),
                 compatibility_broker.clone(),
                 #[cfg(feature = "native-web-extension-probes")]
@@ -1049,6 +1136,7 @@ impl MacosExtensionBrowserSurfaceHost {
             ),
             broker,
             action_popup,
+            extension_pages,
             runtime_grants,
             compatibility_broker,
             windows: HashMap::new(),
@@ -1060,6 +1148,7 @@ impl MacosExtensionBrowserSurfaceHost {
 
     pub(super) fn attach(&self, controller: &Retained<WKWebExtensionController>) {
         self.broker.bind_controller(controller);
+        self.extension_pages.bind_controller(controller);
         self.runtime_grants.bind_controller(controller);
         self.compatibility_broker.bind_controller(controller);
         let delegate = ProtocolObject::from_ref(&*self.delegate);
@@ -1311,6 +1400,7 @@ impl MacosExtensionBrowserSurfaceHost {
         &self,
         request: zephium_core::extensions::ExtensionBrowserRequestId,
         settlement: zephium_core::extensions::ExtensionBrowserRequestSettlement,
+        extension_page_lease: Option<crate::host::NativeResourceLease>,
     ) -> BrowserRequestSettlementOutcome {
         let created = match settlement {
             zephium_core::extensions::ExtensionBrowserRequestSettlement::Applied(
@@ -1321,7 +1411,13 @@ impl MacosExtensionBrowserSurfaceHost {
                 .map(|tab| ProtocolObject::from_ref(&**tab)),
             _ => None,
         };
-        self.broker.settle(request, settlement, created)
+        self.broker.settle(
+            request,
+            settlement,
+            created,
+            extension_page_lease,
+            |context, url, lease| self.extension_pages.present(context, url, lease),
+        )
     }
 
     pub(super) fn timeout_request(
@@ -1449,6 +1545,7 @@ impl MacosExtensionBrowserSurfaceHost {
         reason: ExtensionActionRejection,
     ) {
         self.action_popup.cancel_context(context, reason);
+        self.extension_pages.cancel_context(context);
     }
 
     #[cfg(feature = "native-web-extension-probes")]
@@ -1481,6 +1578,7 @@ impl MacosExtensionBrowserSurfaceHost {
     /// surface, and shutdown has already sealed ingress.
     pub(super) fn clear(&mut self, controller: &WKWebExtensionController) {
         self.action_popup.seal_and_close();
+        self.extension_pages.seal_and_close();
         self.broker.seal_and_reject();
         self.runtime_grants.seal_and_reject();
         self.compatibility_broker.seal_and_reject();

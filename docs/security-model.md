@@ -62,6 +62,22 @@ Chromium's full site-isolation model.
    process terminates, the weak navigation delegate schedules a later main-turn
    teardown and releases only the options owner whose exact context and
    WKWebView still match; a delayed callback cannot close a replacement.
+   A same-principal `tabs.create()` request for an internal extension page uses
+   a separate native extension-document host. The exact retained context and
+   URL stay inside the controller delegate; Shell receives only a typed request
+   to authorize the foreground profile, and `webkit-extension:` never enters
+   the ordinary URL or persistence model. Presentation rejoins the context,
+   principal, controller and the one foreground-extension resource lease before
+   constructing a WKWebView from the context's own configuration. The bounded
+   logical window/tab pair is visible only to that controller. Foreign
+   principals, inactive or unselected configurations, invalid window/index
+   targets, parent tabs, pinning, muting and reader mode fail closed. Internal
+   navigation remains exact-origin only. A user-activated external link opens
+   an ordinary Shell HTTP(S) tab; an allowed programmatic top-frame transition
+   does the same and then retires the privileged extension page, while external
+   subframe navigation is denied. Window close, renderer termination, context
+   retirement and shutdown detach delegates on a later main-queue turn where
+   necessary, balance WebKit close notifications and return the same lease.
    An opt-in compatibility receipt may select WebKit's nonpersistent document
    background for an authenticated module worker when the worker resource
    transport cannot complete. Manifest admission binds that environment into

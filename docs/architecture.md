@@ -764,6 +764,25 @@ lifetime; its UI views may be recreated from that context, while destroying the
 session context, controller, and nonpersistent store is the storage-erasure
 boundary.
 
+The same rule now covers extension-owned full documents. A controller callback
+may retain one exact same-principal internal URL while Shell authorizes only the
+foreground profile through `OpenExtensionPage`; the URL itself never crosses
+into ordinary navigation authority. After that typed settlement, the host
+rejoins the request with the context/controller identity and the existing
+process-wide foreground-extension lease, builds the view from
+`WKWebExtensionContext.webViewConfiguration`, and publishes one bounded native
+window/tab pair back to that controller. Configuration shape, target window,
+append index, active/selected state and principal are revalidated before any
+view exists. Same-origin routing remains inside the extension document. Allowed
+external links become ordinary Shell HTTP(S) tabs, and an allowed programmatic
+main-frame transition hands off to an ordinary tab before closing the
+privileged document; external subframes and all non-web schemes remain denied.
+The page, options view and action popup intentionally share the one
+foreground-extension pool, so extension UI cannot consume tab or background
+runtime capacity. Close, process termination, context retirement and shutdown
+release the same lease; renderer callbacks defer teardown so their native
+delegate cannot be destroyed reentrantly.
+
 The macOS Bitwarden contract gate additionally resolves its tab-specific
 `WKWebExtensionAction`, verifies label/enabled/popup state, and opens the
 declared popup `WKWebView`. That view must point to the exact extension
@@ -1210,7 +1229,7 @@ release dependency is finished.
 | Verified staging cohort | Revision 9 carries Vimium 2.4.2 and Dark Reader 4.9.129 with revisions 7/8 as immutable rollback; artifact bytes, classifications, and reissue evidence are exact | Add a publisher-supported authenticated cloud/security extension and define operational support windows |
 | API compatibility | The declaration table below is authoritative; live alarms work, while context-restart persistence is disclosed as degraded | Notifications, idle/system-lock, managed storage, offscreen, arbitrary native messaging, blocking request mutation, and broader browser APIs remain absent or degraded |
 | File/private contexts | File execution is negative-gated and the unavailable control cannot be forged; native private-store isolation is proven | No product file-access claim and no extension-enabled private-window claim until WebKit execution and a separate product runtime pass |
-| Password managers | Platform diagnostics, popup/content/background primitives, sandbox replacement primitive, and explicit failure classifications exist | No password manager is Verified: WebKit resource/WASM, sandbox, offscreen, request-auth, notification, and publisher/legal gates remain |
+| Password managers | Platform diagnostics, popup/content/background primitives, sandbox replacement primitive, explicit failure classifications, and a real 1Password onboarding plus HTTPS sign-in handoff exist | No password manager is Verified: account completion, vault unlock, save/fill/passkeys, offscreen behavior, request-auth, endurance/resource budgets, and publisher/legal gates remain |
 | Performance/release evidence | Optimized product campaigns and a real process-family sampler are implemented; short release samples are recorded | Dedicated clean-runner budgets, maximum-cohort/tab pressure, energy calibration, sleep/wake, multi-profile, and 24-hour endurance |
 | External compatibility mode | Package-neutral offline transformation and authenticated acquisition primitives exist | Chrome Web Store/AMO/Safari/file/developer acquisition UX, legal adapters, diagnostics, and public compatibility policy are not shipped |
 
@@ -1966,13 +1985,19 @@ serialized, and no process is contacted. 1Password consequently records
 extension-first initialization. Callback denial cannot expose a native
 `runtime.lastError`, and the receipt discloses that degradation.
 
-This is a substantial positive gate, not a compatibility claim. The isolated
-probe still does not observe the static content-prelude marker, and autofill,
-save, passkeys, account sign-in, onboarding action routing, offscreen-storage
-migration, clean installed restart, and release resource budgets remain
-unproven. The package dynamically clears its action popup and expects a
-no-popup click to open onboarding; that exact browser-action transition still
-needs an end-to-end gate. Neither stock nor transformed 1Password may enter a
+This is a substantial positive gate, not yet a compatibility claim. The real
+browser now executes the package's no-popup action, receives its exact internal
+`tabs.create()` target, and presents the full same-principal welcome document
+through the bounded extension-UI host. Continue reaches Start setup. Sign in
+then performs the package's programmatic HTTPS transition; Zephium creates a
+normal profile tab at `my.1password.com/signin?auth-only=1`, retires the
+privileged extension document, reopens it on the next action, and exits cleanly
+when that document is still open. This closes onboarding action routing and the
+pre-authentication handoff on the exercised packaged lab. The isolated probe
+still does not observe the static content-prelude marker, and account
+completion, vault unlock, autofill, save, passkeys, offscreen-storage
+migration, complete installed-restart behavior, and release resource/endurance
+budgets remain unproven. Neither stock nor transformed 1Password may enter a
 shipping catalog until those workflows pass and publisher/legal distribution
 approval exists.
 

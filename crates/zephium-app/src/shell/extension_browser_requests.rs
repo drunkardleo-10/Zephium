@@ -15,6 +15,9 @@ impl Shell {
             )
         } else {
             match request.action() {
+                ExtensionBrowserRequestAction::OpenExtensionPage => {
+                    self.extension_open_page(profile)
+                }
                 ExtensionBrowserRequestAction::CreateTab {
                     window,
                     url,
@@ -50,6 +53,19 @@ impl Shell {
             // saturated response queue cannot leave WebKit waiting forever.
             crate::diagnostic!("extensions: native browser request settlement was not admitted");
         }
+    }
+
+    fn extension_open_page(&self, profile: ProfileId) -> ExtensionBrowserRequestSettlement {
+        // Internal extension documents are native-owned and never enter the
+        // ordinary URL/navigation model. The Shell authorizes only the exact
+        // foreground profile; the engine must still rejoin the context-bound
+        // request and a separately accounted native resource.
+        if self.windows.focused().map(|window| window.profile) != Some(profile) {
+            return rejected(ExtensionBrowserRequestRejection::InvalidScope);
+        }
+        ExtensionBrowserRequestSettlement::Applied(
+            ExtensionBrowserRequestResult::ExtensionPageAuthorized,
+        )
     }
 
     fn extension_create_tab(

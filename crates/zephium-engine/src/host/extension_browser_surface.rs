@@ -10,6 +10,8 @@ use zephium_core::ports::extensions::{
     ExtensionRuntimeGrantPromptSettlement, ExtensionRuntimeGrantRequestId,
 };
 
+#[cfg(target_os = "macos")]
+use super::resources::{NativeResourceAdmissionError, NativeResourceClass};
 use super::EngineHost;
 
 impl EngineHost {
@@ -21,9 +23,45 @@ impl EngineHost {
     ) -> bool {
         #[cfg(target_os = "macos")]
         {
+            let mut settlement = settlement;
+            let extension_page_lease = if matches!(
+                settlement,
+                ExtensionBrowserRequestSettlement::Applied(
+                    zephium_core::extensions::ExtensionBrowserRequestResult::ExtensionPageAuthorized
+                )
+            ) {
+                match self
+                    .native_resources
+                    .try_acquire(NativeResourceClass::ExtensionPopup)
+                {
+                    Ok(lease) => Some(lease),
+                    Err(error) => {
+                        let reason = match error {
+                            NativeResourceAdmissionError::ClassExhausted(
+                                NativeResourceClass::ExtensionPopup,
+                            )
+                            | NativeResourceAdmissionError::GlobalExhausted => {
+                                zephium_core::extensions::ExtensionBrowserRequestRejection::CapacityExceeded
+                            }
+                            NativeResourceAdmissionError::ClassExhausted(_)
+                            | NativeResourceAdmissionError::AccountingInvariant => {
+                                zephium_core::extensions::ExtensionBrowserRequestRejection::NativeAdmissionFailed
+                            }
+                        };
+                        settlement = ExtensionBrowserRequestSettlement::Rejected(reason);
+                        None
+                    }
+                }
+            } else {
+                None
+            };
             matches!(
-                self.macos_extension_controllers
-                    .settle_browser_request(profile, request, settlement,),
+                self.macos_extension_controllers.settle_browser_request(
+                    profile,
+                    request,
+                    settlement,
+                    extension_page_lease,
+                ),
                 Ok(
                     crate::platform::imp::ControllerBrowserRequestSettlement::Settled
                         | crate::platform::imp::ControllerBrowserRequestSettlement::Stale

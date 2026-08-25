@@ -344,7 +344,7 @@ pub(super) struct PersistentControllerEntry {
 
 enum PersistentControllerSlot {
     #[allow(dead_code)] // Constructed only by the cfg-gated native probe seam.
-    Prepared(PersistentControllerEntry),
+    Prepared(Box<PersistentControllerEntry>),
     Erasing(Rc<ControllerErasureWitness>),
 }
 
@@ -1028,6 +1028,7 @@ impl PersistentControllerRegistry {
         profile: ProfileId,
         request: zephium_core::extensions::ExtensionBrowserRequestId,
         settlement: zephium_core::extensions::ExtensionBrowserRequestSettlement,
+        extension_page_lease: Option<crate::host::NativeResourceLease>,
     ) -> Result<ControllerBrowserRequestSettlement, ControllerRegistryError> {
         self.slots.admission(profile)?;
         let Some(slot) = self.slots.entries.get(&profile) else {
@@ -1037,7 +1038,10 @@ impl PersistentControllerRegistry {
             return Ok(ControllerBrowserRequestSettlement::Stale);
         };
         validate_entry_identity(entry)?;
-        match entry.browser_surface.settle_request(request, settlement) {
+        match entry
+            .browser_surface
+            .settle_request(request, settlement, extension_page_lease)
+        {
             BrowserRequestSettlementOutcome::Settled => {
                 Ok(ControllerBrowserRequestSettlement::Settled)
             }
@@ -1387,7 +1391,7 @@ impl PersistentControllerRegistry {
                     profile,
                     generation,
                     attempt,
-                    Some(entry),
+                    Some(*entry),
                 ));
                 self.slots
                     .entries
@@ -1584,10 +1588,10 @@ impl PersistentControllerRegistry {
             self.slots.poison();
             return Err(ControllerRegistryError::StoreAlias);
         }
-        if let Err(error) = self
-            .slots
-            .insert_vacant(profile, PersistentControllerSlot::Prepared(candidate))
-        {
+        if let Err(error) = self.slots.insert_vacant(
+            profile,
+            PersistentControllerSlot::Prepared(Box::new(candidate)),
+        ) {
             self.slots.poison();
             return Err(error);
         }
@@ -2070,6 +2074,13 @@ mod tests {
         assert!(registry.slots.entries.is_empty());
         assert_eq!(registry.runtime, RuntimeAvailability::Unprobed);
         assert!(registry.command_monitor.is_none());
+    }
+
+    #[test]
+    fn registry_slot_keeps_large_prepared_state_out_of_line() {
+        assert!(
+            std::mem::size_of::<PersistentControllerSlot>() <= 2 * std::mem::size_of::<usize>()
+        );
     }
 
     #[test]

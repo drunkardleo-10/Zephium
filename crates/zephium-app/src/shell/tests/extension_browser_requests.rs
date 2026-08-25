@@ -128,6 +128,39 @@ fn prebootstrap_browser_request_is_explicitly_rejected() {
 }
 
 #[test]
+fn extension_page_authority_is_limited_to_the_active_profile() {
+    let (mut shell, engine, _) = setup();
+    shell.handle(Command::Bootstrap);
+    let profile = shell.windows.focused().unwrap().profile;
+    activate_extensions(&mut shell, profile);
+
+    shell.handle(Command::Engine(request(
+        profile,
+        1,
+        ExtensionBrowserRequestAction::OpenExtensionPage,
+    )));
+    shell.handle(Command::Engine(request(
+        ProfileId::from(99_999),
+        2,
+        ExtensionBrowserRequestAction::OpenExtensionPage,
+    )));
+
+    let settlements = engine.extension_browser_settlements();
+    assert_eq!(
+        settlements[0].2,
+        ExtensionBrowserRequestSettlement::Applied(
+            ExtensionBrowserRequestResult::ExtensionPageAuthorized,
+        )
+    );
+    assert_eq!(
+        settlements[1].2,
+        ExtensionBrowserRequestSettlement::Rejected(
+            ExtensionBrowserRequestRejection::InvalidContext,
+        )
+    );
+}
+
+#[test]
 fn extension_navigation_controls_require_a_resident_tab_and_never_wake_a_discard() {
     let (mut shell, engine, screen) = setup();
     shell.handle(Command::Bootstrap);

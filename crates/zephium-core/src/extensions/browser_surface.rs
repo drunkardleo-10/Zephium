@@ -89,6 +89,11 @@ impl ExtensionBrowserRequest {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ExtensionBrowserRequestAction {
+    /// Presents one same-principal extension document through the native
+    /// extension UI trust zone. The native broker retains the authenticated
+    /// context and URL; neither crosses the Shell boundary as an ambient
+    /// `webkit-extension:` navigation capability.
+    OpenExtensionPage,
     CreateTab {
         window: Option<WindowId>,
         url: Option<Arc<str>>,
@@ -120,7 +125,8 @@ impl ExtensionBrowserRequestAction {
         match self {
             Self::CreateTab { url, .. } => url.as_deref(),
             Self::LoadTabUrl { url, .. } => Some(url),
-            Self::ActivateTab { .. }
+            Self::OpenExtensionPage
+            | Self::ActivateTab { .. }
             | Self::CloseTab { .. }
             | Self::ReloadTab { .. }
             | Self::GoBack { .. }
@@ -138,6 +144,10 @@ pub enum ExtensionBrowserRequestError {
 pub enum ExtensionBrowserRequestResult {
     Complete,
     CreatedTab(ItemId),
+    /// The Shell admitted presentation in the profile's extension-only trust
+    /// zone. The native broker must still rejoin the exact context, URL and
+    /// resource lease before completing WebKit's request.
+    ExtensionPageAuthorized,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -607,6 +617,17 @@ mod tests {
         .unwrap();
         assert_eq!(valid.profile(), profile);
         assert_eq!(valid.id(), id);
+
+        let internal = ExtensionBrowserRequest::new(
+            profile,
+            id,
+            ExtensionBrowserRequestAction::OpenExtensionPage,
+        )
+        .unwrap();
+        assert_eq!(
+            internal.action(),
+            &ExtensionBrowserRequestAction::OpenExtensionPage
+        );
 
         assert_eq!(
             ExtensionBrowserRequest::new(

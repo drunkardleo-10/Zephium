@@ -12,6 +12,7 @@ mod command_monitor;
 mod compatibility_broker;
 mod controller_registry;
 mod erasure;
+mod extension_page;
 mod grant_application;
 mod grants;
 mod native_runtime;

@@ -703,6 +703,7 @@ impl ProfileGeneration {
                 profile,
                 request.id(),
                 ExtensionBrowserRequestSettlement::Applied(ExtensionBrowserRequestResult::Complete),
+                None,
             )
             .map_err(|error| format!("cannot settle browser mutation: {error}"))?;
         if settlement != ControllerBrowserRequestSettlement::Settled
@@ -822,6 +823,7 @@ impl ProfileGeneration {
                 profile,
                 request.id(),
                 ExtensionBrowserRequestSettlement::Applied(ExtensionBrowserRequestResult::Complete),
+                None,
             )
             .map_err(|error| format!("cannot settle native browser mutation: {error}"))?;
         if settlement != ControllerBrowserRequestSettlement::Settled
