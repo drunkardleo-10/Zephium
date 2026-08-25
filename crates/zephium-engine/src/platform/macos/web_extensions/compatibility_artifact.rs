@@ -111,6 +111,8 @@ pub(super) struct ArtifactSurfaces {
     pub(super) options_page: bool,
     pub(super) notifications_fallback: bool,
     pub(super) native_messaging_omitted: bool,
+    pub(super) managed_storage_fallback: bool,
+    pub(super) created_navigation_target_fallback: bool,
 }
 
 #[derive(Debug)]
@@ -174,6 +176,10 @@ struct Surfaces {
     notifications: Option<String>,
     #[serde(default)]
     native_messaging: Option<String>,
+    #[serde(default)]
+    managed_storage: Option<String>,
+    #[serde(default)]
+    created_navigation_target: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -185,6 +191,8 @@ struct ContractFeatures {
     options_page: bool,
     notifications_fallback: bool,
     native_messaging_omitted: bool,
+    managed_storage_fallback: bool,
+    created_navigation_target_fallback: bool,
 }
 
 pub(super) fn validate(root: &Path) -> Result<ValidatedCompatibilityArtifact, String> {
@@ -225,6 +233,10 @@ pub(super) fn validate(root: &Path) -> Result<ValidatedCompatibilityArtifact, St
         metadata.surfaces.notifications.as_deref() == Some("native-preserved-or-inert-no-delivery");
     let native_messaging_omitted =
         metadata.surfaces.native_messaging.as_deref() == Some("omitted-product-prohibited");
+    let managed_storage_fallback =
+        metadata.surfaces.managed_storage.as_deref() == Some("native-preserved-or-empty-read-only");
+    let created_navigation_target_fallback =
+        metadata.surfaces.created_navigation_target.as_deref() == Some("inert-event");
     let (adaptations, limitations) = expected_contract(
         target,
         ContractFeatures {
@@ -235,6 +247,8 @@ pub(super) fn validate(root: &Path) -> Result<ValidatedCompatibilityArtifact, St
             options_page,
             notifications_fallback,
             native_messaging_omitted,
+            managed_storage_fallback,
+            created_navigation_target_fallback,
         },
     )?;
     if metadata.adaptations != adaptations || metadata.limitations != limitations {
@@ -284,6 +298,8 @@ fn expected_contract(
         options_page,
         notifications_fallback,
         native_messaging_omitted,
+        managed_storage_fallback,
+        created_navigation_target_fallback,
     } = features;
     if target == CompatibilityArtifactTarget::NativeV3 {
         if bookmarked || favicon || search || sessions {
@@ -302,6 +318,14 @@ fn expected_contract(
         if native_messaging_omitted {
             adaptations.push("product-prohibited-native-messaging-omission-v1");
             limitations.push("arbitrary-native-messaging-unavailable");
+        }
+        if managed_storage_fallback {
+            adaptations.push("declared-storage-managed-fallback-v1");
+            limitations.push("managed-storage-empty-read-only");
+        }
+        if created_navigation_target_fallback {
+            adaptations.push("created-navigation-target-event-fallback-v1");
+            limitations.push("created-navigation-target-events-not-emitted");
         }
         return Ok((adaptations, limitations));
     }
@@ -355,6 +379,14 @@ fn expected_contract(
     if notifications_fallback {
         adaptations.push("declared-notifications-fallback-v1");
         limitations.push("notifications-fallback-never-delivers-or-emits-events");
+    }
+    if managed_storage_fallback {
+        adaptations.push("declared-storage-managed-fallback-v1");
+        limitations.push("managed-storage-empty-read-only");
+    }
+    if created_navigation_target_fallback {
+        adaptations.push("created-navigation-target-event-fallback-v1");
+        limitations.push("created-navigation-target-events-not-emitted");
     }
     adaptations.extend([
         "extension-page-runtime-messaging-session-v1",
@@ -504,6 +536,20 @@ fn validate_surfaces(
         (CompatibilityArtifactTarget::NativeBrokeredV1, None) => false,
         _ => return Err("compatibility artifact native-messaging surface is invalid".into()),
     };
+    let managed_storage_fallback = match surfaces.managed_storage.as_deref() {
+        None => false,
+        Some("native-preserved-or-empty-read-only") => true,
+        _ => return Err("compatibility artifact managed-storage surface is invalid".into()),
+    };
+    let created_navigation_target_fallback = match surfaces.created_navigation_target.as_deref() {
+        None => false,
+        Some("inert-event") if !matches!(background, BackgroundAdaptation::Absent) => true,
+        _ => {
+            return Err(
+                "compatibility artifact created-navigation-target surface is invalid".into(),
+            )
+        }
+    };
     Ok(ArtifactSurfaces {
         background,
         isolated_content_scripts: surfaces.isolated_content_scripts,
@@ -520,6 +566,8 @@ fn validate_surfaces(
         options_page,
         notifications_fallback,
         native_messaging_omitted,
+        managed_storage_fallback,
+        created_navigation_target_fallback,
     })
 }
 

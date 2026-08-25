@@ -361,8 +361,10 @@ where
     if transient_host_capacity > MAX_MACOS_NATIVE_GRANTED_HOST_PATTERNS {
         return Err(MacosNativeGrantPlanError::HostEntryLimitExceeded);
     }
-    let mut granted_host_patterns: Vec<WebPatternKey<'a>> =
-        Vec::with_capacity(transient_host_capacity);
+    let mut host_grants = Vec::new();
+    host_grants
+        .try_reserve_exact(input.host_count)
+        .map_err(|_| MacosNativeGrantPlanError::HostEntryLimitExceeded)?;
     let mut seen_host = 0_usize;
     for grant in input.host_grants {
         seen_host = seen_host
@@ -373,6 +375,29 @@ where
         }
         if seen_host > input.host_count {
             return Err(MacosNativeGrantPlanError::DeclaredCountMismatch);
+        }
+        host_grants.push(grant);
+    }
+    if seen_host != input.host_count {
+        return Err(MacosNativeGrantPlanError::DeclaredCountMismatch);
+    }
+    let grants_all_web = host_grants.iter().any(|grant| {
+        grant.decision.is_granted()
+            && matches!(grant.pattern.components(), MatchPatternComponents::AllUrls)
+    });
+    let mut granted_host_patterns: Vec<WebPatternKey<'a>> =
+        Vec::with_capacity(transient_host_capacity);
+    for grant in host_grants {
+        // Static content-script routes are independently retained as required
+        // authorities. When an effective `<all_urls>` grant is present, every
+        // narrower HTTP/HTTPS route is already covered by the exact native
+        // http/https wildcard pair. Do not widen or reject its path while
+        // redundantly translating it into WebKit's origin-only permission set.
+        if grants_all_web
+            && grant.decision.is_granted()
+            && !matches!(grant.pattern.components(), MatchPatternComponents::AllUrls)
+        {
+            continue;
         }
         translate_host_pattern(
             grant.pattern,
@@ -387,9 +412,6 @@ where
         if granted_host_patterns.len() > MAX_MACOS_NATIVE_GRANTED_HOST_PATTERNS {
             return Err(MacosNativeGrantPlanError::HostEntryLimitExceeded);
         }
-    }
-    if seen_host != input.host_count {
-        return Err(MacosNativeGrantPlanError::DeclaredCountMismatch);
     }
     granted_host_patterns.sort_unstable();
     granted_host_patterns.dedup();
@@ -555,8 +577,10 @@ impl MacosNativeGrantSchema {
             "webNavigation" => Ok(Native(MacosNativeApiPermission::WebNavigation)),
             "webRequest" => Ok(Native(MacosNativeApiPermission::WebRequest)),
             "clipboardRead"
+            | "downloads"
             | "fontSettings"
             | "idle"
+            | "management"
             | "offscreen"
             | "privacy"
             | "sidePanel"

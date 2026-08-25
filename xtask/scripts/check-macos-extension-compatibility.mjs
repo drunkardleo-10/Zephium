@@ -18,6 +18,14 @@ const notificationsSource = await readFile(fileURLToPath(notificationsAssetUrl),
 const notificationsScript = new vm.Script(notificationsSource, {
   filename: fileURLToPath(notificationsAssetUrl),
 });
+const managedStorageAssetUrl = new URL(
+  "../../crates/zephium-extension-package/assets/macos/webkit-managed-storage-v1.js",
+  import.meta.url,
+);
+const managedStorageSource = await readFile(fileURLToPath(managedStorageAssetUrl), "utf8");
+const managedStorageScript = new vm.Script(managedStorageSource, {
+  filename: fileURLToPath(managedStorageAssetUrl),
+});
 const historyAssetUrl = new URL(
   "../../crates/zephium-extension-package/assets/macos/webkit-history-v1.js",
   import.meta.url,
@@ -61,10 +69,17 @@ const optionsScript = new vm.Script(optionsSource, {
 
 for (const forbidden of ["document", "window", "fetch", "XMLHttpRequest", "WebSocket"]) {
   assert.equal(source.includes(forbidden), false, `compatibility asset exposes ${forbidden}`);
+}
+for (const forbidden of ["window", "fetch", "XMLHttpRequest", "WebSocket"]) {
   assert.equal(
     notificationsSource.includes(forbidden),
     false,
     `notifications asset exposes ${forbidden}`,
+  );
+  assert.equal(
+    managedStorageSource.includes(forbidden),
+    false,
+    `managed-storage asset exposes ${forbidden}`,
   );
 }
 for (const forbidden of [
@@ -200,6 +215,10 @@ const notificationsNative = nativeNamespace("notifications-fixture");
 const notificationsContext = run({
   chrome: notificationsNative,
   queueMicrotask,
+  setTimeout: (callback) => {
+    callback();
+    return 1;
+  },
 });
 notificationsScript.runInContext(notificationsContext, { timeout: 1_000 });
 const notifications = notificationsContext.chrome.notifications;
@@ -222,16 +241,57 @@ assert.equal(await notifications.clear("requested-id"), false);
 notificationsScript.runInContext(notificationsContext, { timeout: 1_000 });
 assert.equal(notificationsContext.chrome.notifications, notifications);
 
-const nativeNotifications = Object.freeze({ native: true });
+const nativeNotificationEvent = {
+  addListener() {},
+  removeListener() {},
+};
+const nativeNotifications = {
+  native: true,
+  onClicked: nativeNotificationEvent,
+  create() {
+    return Promise.resolve("native");
+  },
+};
 const preexistingNotifications = nativeNamespace("native-notifications-fixture");
 preexistingNotifications.notifications = nativeNotifications;
 const preexistingContext = run({
   chrome: preexistingNotifications,
   queueMicrotask,
+  setTimeout: (callback) => {
+    callback();
+    return 1;
+  },
 });
 notificationsScript.runInContext(preexistingContext, { timeout: 1_000 });
 assert.equal(preexistingContext.chrome.notifications, nativeNotifications);
 assert.equal(preexistingContext.browser.notifications, nativeNotifications);
+assert.equal(preexistingContext.chrome.notifications.onClicked, nativeNotificationEvent);
+assert.equal(await preexistingContext.chrome.notifications.create(), "native");
+assert.equal(typeof preexistingContext.chrome.notifications.onClosed.addListener, "function");
+
+const managedTasks = [];
+const managedNative = nativeNamespace("managed-storage-fixture");
+const managedContext = run({
+  chrome: managedNative,
+  queueMicrotask: (callback) => managedTasks.push(callback),
+  setTimeout: (callback) => {
+    managedTasks.push(callback);
+    return 1;
+  },
+});
+managedStorageScript.runInContext(managedContext, { timeout: 1_000 });
+const managed = managedContext.chrome.storage.managed;
+assert.equal(managedContext.browser.storage.managed, managed);
+assert.equal(Object.isFrozen(managed), true);
+assert.equal(managed.onChanged.hasListeners(), false);
+assert.equal(Object.keys(await managed.get(null)).length, 0);
+managedNative.storage = { local: managedNative.storage.local };
+for (const task of managedTasks.splice(0)) task();
+assert.equal(
+  managedContext.chrome.storage.managed,
+  managed,
+  "bounded reconciliation did not restore managed storage after namespace replacement",
+);
 
 assert.throws(
   () => run({}),

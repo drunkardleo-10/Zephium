@@ -1776,6 +1776,20 @@ handler route. The stock Bitwarden deadline therefore remains blocked unless
 upstream output changes, WebKit changes its private loader, or a separately
 approved sealed adaptation removes the dependency on that resource behavior.
 
+The August 25, 2026 stock 1Password 8.12.32.33 gate also closes the remaining
+"intercept before native streaming" variant. Its exact 17,466,756-byte module
+can be read and compiled from an extension popup in 15–17 ms. A package-neutral
+background prelude that recognizes only same-principal `webkit-extension:`
+`.wasm` responses with status 200 and `application/octet-stream`, avoids the
+native streaming call entirely, and invokes `arrayBuffer()` first still makes
+no body progress in the MV3 worker. The native MIME warning disappears, but the
+worker remains at `WASM: Initializing`, never publishes `Finished initializing
+1Password`, and the stock popup remains at its loading state. The adapter was
+therefore rejected rather than shipped. This separates CPU/compile cost from
+the WebKit worker-resource transport ceiling and rules out a global fetch shim,
+a `WebAssembly.instantiateStreaming` shim, or a longer popup timeout as valid
+product fixes.
+
 The package-neutral Chrome acquisition boundary now authenticates CRX3 before
 materialization. It bounds the package and protobuf header, verifies every
 recognized RSA/ECDSA proof, requires the signed developer proof to derive the
@@ -1894,44 +1908,49 @@ public load callback within 12 seconds, records
 `WKWebExtensionContextErrorDomain` code 6, and leaves the content/autofill
 orchestrator unconfigured. The package contains seven WASM resources; the
 largest is 17,466,756 bytes, and its generated loaders try streaming before an
-`arrayBuffer` fallback. A package-specific trace rules that resource out as the
-startup blocker: WebKit returns status 200 and `application/octet-stream`, but
-the complete body arrives and `WebAssembly.compile` settles in 14–17 ms on the
-reviewed machine. The MIME is still wrong, but neither body progress nor raw
-compilation explains the 12-second background failure.
+`arrayBuffer` fallback. WebKit returns status 200 and
+`application/octet-stream`. The complete body arrives and
+`WebAssembly.compile` settles in 14–17 ms in an extension popup, proving raw
+compilation is cheap on the reviewed machine; the same response body does not
+make progress in the MV3 worker, which is the startup blocker.
 
-The popup surface instead exposes the relevant API gap. WebKit provides
-`action`, `alarms`, `commands`, `contextMenus`,
-`declarativeNetRequest`, `scripting`, `storage`, `tabs`, `webNavigation`,
-`webRequest`, `windows`, and native-messaging methods, but omits
-`downloads`, `idle`, `management`, `notifications`, `offscreen`, and
-`privacy`. The Chrome build installs `chrome.notifications` event listeners
-during background module initialization. A declared-permission-gated,
-package-neutral notifications fallback now preserves a future native namespace
-when present and otherwise supplies only inert events, promise/callback
-settlement, permission level `denied`, and no-delivery results. It performs no
-I/O, creates no timer or view, and is injected only into adapted background and
-extension-page realms; it is never exposed to content or page worlds.
+The popup surface also exposes a separate API gap. WebKit provides `action`,
+`alarms`, `commands`, `contextMenus`, `declarativeNetRequest`, `scripting`,
+`storage`, `tabs`, `webNavigation`, `webRequest`, and `windows`, but omits
+`downloads`, `idle`, `management`, `offscreen`, and `privacy`. Its
+`notifications` surface is absent in some extension realms and partial in
+others. The Chrome build installs notification and navigation listeners during
+background initialization. Declared-permission-gated, package-neutral adapters
+therefore preserve valid native members, fill only missing notification
+members with inert/no-delivery behavior, expose empty read-only managed
+storage, and add an inert `onCreatedNavigationTarget`. Reconciliation is
+bounded to startup microtask/task frontiers; no poller, view, network port, or
+page-world authority remains resident.
 
-With that exact fallback, the independently indexed 1Password artifact has
-1,002 files and 45,127,086 bytes, tree SHA-256
-`3a5c59b90860ca3b9e44fe1e3f0c612fb50e0fa927656e6d05859048865fa8ed`,
+The independently indexed current 1Password compatibility artifact has 1,003
+files and 45,133,937 bytes, tree SHA-256
+`25e53288061703fbf7be41576a8da73b2a0a230acd9d82feaa58cd87f7096228`,
 and index SHA-256
-`24f6ba293d06c1d63a5ebec5f743dd146e628b129d1a507e231d850178200266`.
-Its real background completes in 174 ms with zero context errors and its popup
-retains native runtime identity. This isolates the stock startup failure to the
-missing notifications namespace and proves a reusable compatibility seam.
-It does **not** make 1Password Verified: no account/vault is configured in the
-automated gate, so inline discovery, sign-in, save, fill, passkeys, popup flows,
-native desktop integration, restart behavior, and resource budgets remain
-unassessed. After correcting the probe's regular/private window projection,
-the extension sees exactly one current active tab and `scripting.executeScript`
-runs in its isolated world; that world observes native runtime identities but
-not the static content-prelude marker. Closing the popup and unloading the
-context still leave its popup/page/controller/store graph retained beyond a
-30-second diagnostic window. Neither stock nor transformed 1Password may enter
-a shipping catalog until the missing marker is classified, native teardown is
-bounded, and real account workflows pass.
+`915ba53f0f52a1ba1a1950c878a74c6cdf63260fe45e9484e944dc01b6b08e4b`.
+WebKit's public background-load callback settles in approximately 174–195 ms
+with zero native context errors, the action popup executes with native runtime
+identity, and one current active tab is visible. That callback is not extension
+readiness: 1Password's own log remains at `WASM: Initializing`, never publishes
+`Finished initializing 1Password`, and its popup stays in the loading state.
+The exact module reads and compiles in 15–17 ms from the popup, while the MV3
+worker cannot make body progress even when a preflight adapter bypasses native
+streaming and calls `arrayBuffer()` first. That rejected adapter is not part of
+the artifact.
+
+The probe also observes native runtime identities from
+`scripting.executeScript` but not the static content-prelude marker, and the
+stock content scripts produce no login-field effect without a ready core.
+Native controller, context, page, popup, and data-store objects now release
+after the failing gate. This is useful isolation evidence, not compatibility:
+inline discovery, account sign-in, save/fill, passkeys, desktop integration,
+restart behavior, and resource budgets cannot pass while the worker-resource
+ceiling remains. Neither stock nor transformed 1Password may enter a shipping
+catalog on this WebKit runtime.
 
 Authenticating this real package exposed one legitimate package-admission
 ceiling: a current major extension contains a single resource slightly above

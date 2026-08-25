@@ -550,10 +550,9 @@ fn map_native_failure(failure: MacosNativeRuntimeFailure) -> ExtensionRuntimeFai
         }
         _ => ExtensionRuntimeFailure::Internal,
     };
-    if mapped == ExtensionRuntimeFailure::Internal {
-        crate::diagnostic!(
-            "extensions: macOS native runtime failed with closed reason {failure:?}"
-        );
-    }
+    // Every variant is a closed, path-free classification. Preserve the
+    // native reason for actionable diagnostics instead of collapsing all
+    // package/grant failures into an indistinguishable public rejection.
+    crate::diagnostic!("extensions: macOS native runtime failed: {failure}");
     mapped
 }

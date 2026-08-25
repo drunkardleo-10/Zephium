@@ -483,6 +483,9 @@ fn admit_compatibility_artifact(
             != output.same_document_navigation_routes
         || artifact.surfaces.notifications_fallback != output.notifications_fallback
         || artifact.surfaces.native_messaging_omitted != output.native_messaging_omitted
+        || artifact.surfaces.managed_storage_fallback != output.managed_storage_fallback
+        || artifact.surfaces.created_navigation_target_fallback
+            != output.created_navigation_target_fallback
         || artifact.surfaces.history_search
     {
         return Err("stock compatibility artifact surface contract drifted".into());
@@ -657,6 +660,10 @@ fn run_native(
     let extension = super::load_extension(&admitted.extension_root, &run_loop, mtm)?;
     super::validate_extension(&extension, contract.display_name())?;
     let context = super::new_context(&extension, contract.context_identifier())?;
+    unsafe { context.setInspectable(true) };
+    if !unsafe { context.isInspectable() } {
+        return Err("stock extension probe context did not become inspectable".into());
+    }
     let native_permissions = contract
         .native_permissions()
         .iter()

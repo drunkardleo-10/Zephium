@@ -215,18 +215,22 @@ impl StockContract {
                 same_document_navigation_routes: 2,
                 notifications_fallback: false,
                 native_messaging_omitted: false,
+                managed_storage_fallback: false,
+                created_navigation_target_fallback: false,
             },
             Self::OnePassword8123233 => CompatibilityOutputContract {
-                files: 1_002,
-                bytes: 45_127_068,
+                files: 1_003,
+                bytes: 45_133_937,
                 manifest_sha256: "f498087294176d2e357579fd75eb34dc2f5fd556b57d9308f26d5cd51ad68e00",
-                tree_sha256: "15f37657ee69447ac15bdbcdc453e2736e795b558f4bea0f6444011cf97f9c75",
-                index_sha256: "7fb8941393f12461a665f2899f05aa82715418859b03f1ff12c9d982332b81bb",
+                tree_sha256: "25e53288061703fbf7be41576a8da73b2a0a230acd9d82feaa58cd87f7096228",
+                index_sha256: "915ba53f0f52a1ba1a1950c878a74c6cdf63260fe45e9484e944dc01b6b08e4b",
                 background: BackgroundAdaptationKind::Module,
                 isolated_content_scripts: 7,
                 same_document_navigation_routes: 7,
                 notifications_fallback: true,
                 native_messaging_omitted: true,
+                managed_storage_fallback: true,
+                created_navigation_target_fallback: true,
             },
         }
     }
@@ -308,6 +312,8 @@ pub(super) struct CompatibilityOutputContract {
     pub(super) same_document_navigation_routes: usize,
     pub(super) notifications_fallback: bool,
     pub(super) native_messaging_omitted: bool,
+    pub(super) managed_storage_fallback: bool,
+    pub(super) created_navigation_target_fallback: bool,
 }
 
 fn validate_proton_manifest(manifest: &Value) -> Result<(), String> {
@@ -551,7 +557,6 @@ fn validate_onepassword_compatibility_manifest(manifest: &Value) -> Result<(), S
             "downloads",
             "idle",
             "management",
-            "nativeMessaging",
             "notifications",
             "offscreen",
             "privacy",

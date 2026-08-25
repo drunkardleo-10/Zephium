@@ -58,6 +58,32 @@
       };
     };
 
+    const inertEvent = Object.freeze({
+      addListener(listener) {
+        if (typeof listener !== "function") throw new TypeError("listener must be a function");
+      },
+      removeListener() {},
+      hasListener() {
+        return false;
+      },
+      hasListeners() {
+        return false;
+      },
+    });
+
+    const installInertEvent = (name) => {
+      if (webNavigation[name] != null) return;
+      Object.defineProperty(webNavigation, name, {
+        value: inertEvent,
+        writable: false,
+        enumerable: true,
+        configurable: false,
+      });
+      if (webNavigation[name] !== inertEvent) {
+        throw new Error(`Zephium WebKit navigation event ${name} was not installed`);
+      }
+    };
+
     const installEvent = (name) => {
       if (webNavigation[name] != null) return null;
       const synthetic = createEvent();
@@ -75,6 +101,39 @@
 
     const historyState = installEvent("onHistoryStateUpdated");
     const referenceFragment = installEvent("onReferenceFragmentUpdated");
+    installInertEvent("onCreatedNavigationTarget");
+    const retainedEvents = Object.freeze([
+      ["onHistoryStateUpdated", webNavigation.onHistoryStateUpdated],
+      ["onReferenceFragmentUpdated", webNavigation.onReferenceFragmentUpdated],
+      ["onCreatedNavigationTarget", webNavigation.onCreatedNavigationTarget],
+    ]);
+    const reconcileEvents = () => {
+      const namespaces = [...new Set([globalThis.chrome, globalThis.browser])].filter(
+        (namespace) => namespace?.runtime?.id != null && namespace?.webNavigation != null,
+      );
+      if (namespaces.length === 0) {
+        throw new Error("Zephium WebKit navigation bridge lost its native event surface");
+      }
+      for (const namespace of namespaces) {
+        for (const [name, event] of retainedEvents) {
+          if (namespace.webNavigation[name] == null) {
+            Object.defineProperty(namespace.webNavigation, name, {
+              value: event,
+              writable: false,
+              enumerable: true,
+              configurable: false,
+            });
+          }
+          if (namespace.webNavigation[name] == null) {
+            throw new Error(`Zephium WebKit navigation event ${name} was not reconciled`);
+          }
+        }
+      }
+    };
+    // Rebind at bounded event-loop frontiers after vendor polyfills replace
+    // nested namespace objects. Every task is one-shot; no polling remains.
+    queueMicrotask(reconcileEvents);
+    setTimeout(reconcileEvents, 0);
     if (historyState != null || referenceFragment != null) {
       runtime.onMessage.addListener((message, sender) => {
         if (message == null || typeof message !== "object" || Array.isArray(message)) return;

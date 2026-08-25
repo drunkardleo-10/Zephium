@@ -221,8 +221,10 @@ fn prohibited_unknown_and_manifest_only_api_tokens_remain_distinct() {
 
     for name in [
         "clipboardRead",
+        "downloads",
         "fontSettings",
         "idle",
+        "management",
         "offscreen",
         "privacy",
         "sidePanel",
@@ -316,7 +318,6 @@ fn every_required_denial_refuses_the_complete_plan() {
 #[test]
 fn rendered_bytes_define_adversarial_sort_and_deduplication_order() {
     let patterns = [
-        parse("<all_urls>"),
         parse("*://*.example.com/*"),
         parse("http://127.0.0.1/*"),
         parse("http://alpha.example/*"),
@@ -334,7 +335,6 @@ fn rendered_bytes_define_adversarial_sort_and_deduplication_order() {
         "http://127.0.0.1/*",
         "http://alpha.example/*",
         "https://*.example.com/*",
-        "https://*/*",
     ];
     assert_eq!(compiled_host_patterns(&plan), expected);
     assert_eq!(
@@ -511,6 +511,39 @@ fn exact_ports_non_root_paths_and_ipv6_are_rejected_independently() {
             MacosNativeGrantPlanError::Ipv6HostUnsupported
         );
     }
+}
+
+#[test]
+fn all_urls_native_grant_subsumes_narrow_content_routes_without_widening() {
+    let all_urls = parse("<all_urls>");
+    let path_route = parse("https://example.com/account/*");
+    let query_route = parse("https://example.com/*?query=*");
+    let exact_port = parse("https://example.com:8443/*");
+    let ipv6 = parse("https://[2001:db8::1]/*");
+    let plan = regular(
+        &[],
+        &[
+            host(&all_urls, REQUIRED, GRANTED),
+            host(&path_route, REQUIRED, GRANTED),
+            host(&query_route, REQUIRED, GRANTED),
+            host(&exact_port, REQUIRED, GRANTED),
+            host(&ipv6, REQUIRED, GRANTED),
+        ],
+    )
+    .expect("the broad effective authority subsumes narrower content routes");
+    assert_eq!(compiled_host_patterns(&plan), ["http://*/*", "https://*/*"]);
+
+    assert_eq!(
+        regular(
+            &[],
+            &[
+                host(&all_urls, REQUIRED, GRANTED),
+                host(&path_route, REQUIRED, DENIED),
+            ],
+        )
+        .expect_err("a denied required route is never hidden by broad authority"),
+        MacosNativeGrantPlanError::PathSemanticsUnsupported
+    );
 }
 
 #[test]

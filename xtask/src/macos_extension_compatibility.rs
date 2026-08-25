@@ -42,6 +42,7 @@ const SEARCH_BRIDGE: &str = "__zephium__/webkit-search-v1.js";
 const SESSIONS_BRIDGE: &str = "__zephium__/webkit-sessions-v1.js";
 const OPTIONS_PAGE_BRIDGE: &str = "__zephium__/webkit-options-page-v1.js";
 const WEB_NAVIGATION_BRIDGE: &str = "__zephium__/webkit-web-navigation-v1.js";
+const MANAGED_STORAGE_BRIDGE: &str = "__zephium__/webkit-managed-storage-v1.js";
 const BACKGROUND_WRAPPER: &str = "__zephium_background_v1.js";
 const MAX_POPUP_HTML_BYTES: u64 = 2 * 1024 * 1024;
 
@@ -68,6 +69,9 @@ const OPTIONS_PAGE_BRIDGE_SOURCE: &str =
     include_str!("../../crates/zephium-extension-package/assets/macos/webkit-options-page-v1.js");
 const WEB_NAVIGATION_BRIDGE_SOURCE: &str =
     include_str!("../../crates/zephium-extension-package/assets/macos/webkit-web-navigation-v1.js");
+const MANAGED_STORAGE_BRIDGE_SOURCE: &str = include_str!(
+    "../../crates/zephium-extension-package/assets/macos/webkit-managed-storage-v1.js"
+);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ArtifactTarget {
@@ -117,6 +121,8 @@ struct TransformPlan {
     same_document_navigation_routes: usize,
     notifications_fallback: bool,
     native_messaging_omitted: bool,
+    managed_storage_fallback: bool,
+    created_navigation_target_fallback: bool,
     history_broker_search: bool,
     empty_bookmarks: bool,
     empty_favicon: bool,
@@ -135,6 +141,8 @@ struct ExtensionBridgePlan {
     default_search: bool,
     recent_sessions: bool,
     notifications_fallback: bool,
+    managed_storage_fallback: bool,
+    created_navigation_target_fallback: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -146,6 +154,8 @@ struct ReceiptFeatures {
     options_page: bool,
     notifications_fallback: bool,
     native_messaging_omitted: bool,
+    managed_storage_fallback: bool,
+    created_navigation_target_fallback: bool,
 }
 
 #[derive(Deserialize)]
@@ -200,6 +210,10 @@ struct CompatibilitySurfaces {
     notifications: Option<String>,
     #[serde(default)]
     native_messaging: Option<String>,
+    #[serde(default)]
+    managed_storage: Option<String>,
+    #[serde(default)]
+    created_navigation_target: Option<String>,
 }
 
 pub(crate) struct ValidatedCompatibilityReleaseInput {
@@ -402,6 +416,18 @@ fn validate_receipt_surfaces(
         Some("omitted-product-prohibited") => true,
         _ => return Err("compatibility receipt native-messaging surface is invalid".into()),
     };
+    let managed_storage_fallback = match surfaces.managed_storage.as_deref() {
+        None => false,
+        Some("native-preserved-or-empty-read-only") => true,
+        _ => return Err("compatibility receipt managed-storage surface is invalid".into()),
+    };
+    let created_navigation_target_fallback = match surfaces.created_navigation_target.as_deref() {
+        None => false,
+        Some("inert-event") if surfaces.background != "absent" => true,
+        _ => {
+            return Err("compatibility receipt created-navigation-target surface is invalid".into())
+        }
+    };
     match target {
         ArtifactTarget::NativeV3 => {
             if surfaces.history_search.is_some()
@@ -417,6 +443,8 @@ fn validate_receipt_surfaces(
                 options_page,
                 notifications_fallback,
                 native_messaging_omitted,
+                managed_storage_fallback,
+                created_navigation_target_fallback,
                 ..ReceiptFeatures::default()
             })
         }
@@ -458,6 +486,8 @@ fn validate_receipt_surfaces(
                 options_page,
                 notifications_fallback,
                 native_messaging_omitted: false,
+                managed_storage_fallback,
+                created_navigation_target_fallback,
             })
         }
     }
@@ -475,6 +505,8 @@ fn receipt_contract(
         options_page,
         notifications_fallback,
         native_messaging_omitted,
+        managed_storage_fallback,
+        created_navigation_target_fallback,
     } = features;
     let mut adaptations = vec![
         "native-api-identity-preservation-v1",
@@ -528,6 +560,14 @@ fn receipt_contract(
     if native_messaging_omitted {
         adaptations.push("product-prohibited-native-messaging-omission-v1");
         limitations.push("arbitrary-native-messaging-unavailable");
+    }
+    if managed_storage_fallback {
+        adaptations.push("declared-storage-managed-fallback-v1");
+        limitations.push("managed-storage-empty-read-only");
+    }
+    if created_navigation_target_fallback {
+        adaptations.push("created-navigation-target-event-fallback-v1");
+        limitations.push("created-navigation-target-events-not-emitted");
     }
     if target.requires_history_broker() {
         limitations.retain(|limitation| *limitation != "non-action-extension-pages-not-adapted");
@@ -611,6 +651,13 @@ fn materialize_target(
             NOTIFICATIONS_BRIDGE_SOURCE.as_bytes(),
         )?;
     }
+    if plan.managed_storage_fallback {
+        write_new_file(
+            &staged_extension,
+            MANAGED_STORAGE_BRIDGE,
+            MANAGED_STORAGE_BRIDGE_SOURCE.as_bytes(),
+        )?;
+    }
     if plan.empty_bookmarks {
         write_new_file(
             &staged_extension,
@@ -665,7 +712,7 @@ fn materialize_target(
             HISTORY_BRIDGE_SOURCE.as_bytes(),
         )?;
     }
-    if plan.same_document_navigation_routes != 0 {
+    if plan.same_document_navigation_routes != 0 || plan.created_navigation_target_fallback {
         write_new_file(
             &staged_extension,
             WEB_NAVIGATION_BRIDGE,
@@ -688,6 +735,8 @@ fn materialize_target(
             options_page: plan.options_page.is_some(),
             notifications_fallback: plan.notifications_fallback,
             native_messaging_omitted: plan.native_messaging_omitted,
+            managed_storage_fallback: plan.managed_storage_fallback,
+            created_navigation_target_fallback: plan.created_navigation_target_fallback,
         },
     );
     let mut surfaces = serde_json::json!({
@@ -768,6 +817,24 @@ fn materialize_target(
                 Value::String("omitted-product-prohibited".to_owned()),
             );
     }
+    if plan.managed_storage_fallback {
+        surfaces
+            .as_object_mut()
+            .expect("compatibility surfaces are an object")
+            .insert(
+                "managed_storage".to_owned(),
+                Value::String("native-preserved-or-empty-read-only".to_owned()),
+            );
+    }
+    if plan.created_navigation_target_fallback {
+        surfaces
+            .as_object_mut()
+            .expect("compatibility surfaces are an object")
+            .insert(
+                "created_navigation_target".to_owned(),
+                Value::String("inert-event".to_owned()),
+            );
+    }
     let metadata = serde_json::to_vec_pretty(&serde_json::json!({
         "schema": 1,
         "kind": ARTIFACT_KIND,
@@ -844,6 +911,7 @@ fn build_plan(
 
     let history_broker_search = target.requires_history_broker();
     let notifications_fallback = declares_permission(&root, "permissions", "notifications")?;
+    let managed_storage_fallback = declares_permission(&root, "permissions", "storage")?;
     let native_messaging_omitted = if target == ArtifactTarget::NativeV3 {
         remove_permission(&mut root, "permissions", "nativeMessaging")?
             | remove_permission(&mut root, "optional_permissions", "nativeMessaging")?
@@ -883,6 +951,7 @@ fn build_plan(
     let bridge_same_document_navigation =
         declares_permission(&root, "permissions", "webNavigation")?
             && root.get("background").is_some();
+    let created_navigation_target_fallback = bridge_same_document_navigation;
     let bridges = ExtensionBridgePlan {
         same_document_navigation: bridge_same_document_navigation,
         history_search: history_broker_search,
@@ -892,6 +961,8 @@ fn build_plan(
         default_search,
         recent_sessions,
         notifications_fallback,
+        managed_storage_fallback,
+        created_navigation_target_fallback,
     };
     let content_scripts = adapt_content_scripts(
         &mut root,
@@ -926,6 +997,7 @@ fn build_plan(
                     &source,
                     ExtensionBridgePlan {
                         notifications_fallback,
+                        managed_storage_fallback,
                         ..ExtensionBridgePlan::default()
                     },
                     options_page.as_deref(),
@@ -960,6 +1032,8 @@ fn build_plan(
         same_document_navigation_routes,
         notifications_fallback,
         native_messaging_omitted,
+        managed_storage_fallback,
+        created_navigation_target_fallback,
         history_broker_search,
         empty_bookmarks,
         empty_favicon,
@@ -1247,6 +1321,10 @@ fn adapt_background(
                 .notifications_fallback
                 .then(|| js_string(&format!("/{NOTIFICATIONS_BRIDGE}")))
                 .transpose()?;
+            let managed_storage = bridges
+                .managed_storage_fallback
+                .then(|| js_string(&format!("/{MANAGED_STORAGE_BRIDGE}")))
+                .transpose()?;
             let messaging = bridges
                 .extension_page_messaging
                 .then(|| js_string(&format!("/{RUNTIME_MESSAGING_BRIDGE}")))
@@ -1271,14 +1349,15 @@ fn adapt_background(
                 .recent_sessions
                 .then(|| js_string(&format!("/{SESSIONS_BRIDGE}")))
                 .transpose()?;
-            let navigation = bridges
-                .same_document_navigation
+            let navigation = (bridges.same_document_navigation
+                || bridges.created_navigation_target_fallback)
                 .then(|| js_string(&format!("/{WEB_NAVIGATION_BRIDGE}")))
                 .transpose()?;
             let original = js_string(&format!("/{original}"))?;
             let imports = [
                 Some(prelude),
                 notifications,
+                managed_storage,
                 bookmarks,
                 favicon,
                 messaging,
@@ -1299,6 +1378,10 @@ fn adapt_background(
             let notifications = bridges
                 .notifications_fallback
                 .then(|| js_string(&format!("./{NOTIFICATIONS_BRIDGE}")))
+                .transpose()?;
+            let managed_storage = bridges
+                .managed_storage_fallback
+                .then(|| js_string(&format!("./{MANAGED_STORAGE_BRIDGE}")))
                 .transpose()?;
             let messaging = bridges
                 .extension_page_messaging
@@ -1324,14 +1407,17 @@ fn adapt_background(
                 .recent_sessions
                 .then(|| js_string(&format!("./{SESSIONS_BRIDGE}")))
                 .transpose()?;
-            let navigation = bridges
-                .same_document_navigation
+            let navigation = (bridges.same_document_navigation
+                || bridges.created_navigation_target_fallback)
                 .then(|| js_string(&format!("./{WEB_NAVIGATION_BRIDGE}")))
                 .transpose()?;
             let original = js_string(&format!("./{original}"))?;
             let mut wrapper = format!("import {prelude};\n");
             if let Some(notifications) = notifications {
                 wrapper.push_str(&format!("import {notifications};\n"));
+            }
+            if let Some(managed_storage) = managed_storage {
+                wrapper.push_str(&format!("import {managed_storage};\n"));
             }
             if let Some(bookmarks) = bookmarks {
                 wrapper.push_str(&format!("import {bookmarks};\n"));
@@ -1503,6 +1589,11 @@ fn inject_extension_page_preludes(
     if bridges.notifications_fallback {
         tags.push_str(&format!(
             "<script src=\"/{NOTIFICATIONS_BRIDGE}\"></script>"
+        ));
+    }
+    if bridges.managed_storage_fallback {
+        tags.push_str(&format!(
+            "<script src=\"/{MANAGED_STORAGE_BRIDGE}\"></script>"
         ));
     }
     if bridges.empty_bookmarks {
@@ -1679,6 +1770,7 @@ fn enforce_output_budgets(
     let added_files = 1_usize
         + usize::from(plan.background_wrapper.is_some())
         + usize::from(plan.notifications_fallback)
+        + usize::from(plan.managed_storage_fallback)
         + usize::from(plan.empty_bookmarks)
         + (usize::from(plan.empty_favicon) * 2)
         + usize::from(plan.history_broker_search)
@@ -1686,9 +1778,12 @@ fn enforce_output_budgets(
         + usize::from(plan.default_search)
         + usize::from(plan.recent_sessions)
         + usize::from(plan.options_page.is_some())
-        + usize::from(plan.same_document_navigation_routes != 0);
+        + usize::from(
+            plan.same_document_navigation_routes != 0 || plan.created_navigation_target_fallback,
+        );
     let added_entries = 3_usize
         + usize::from(plan.notifications_fallback)
+        + usize::from(plan.managed_storage_fallback)
         + usize::from(plan.empty_bookmarks)
         + (usize::from(plan.empty_favicon) * 2)
         + usize::from(plan.history_broker_search)
@@ -1696,7 +1791,9 @@ fn enforce_output_budgets(
         + usize::from(plan.default_search)
         + usize::from(plan.recent_sessions)
         + usize::from(plan.options_page.is_some())
-        + usize::from(plan.same_document_navigation_routes != 0);
+        + usize::from(
+            plan.same_document_navigation_routes != 0 || plan.created_navigation_target_fallback,
+        );
     if source.files().len().saturating_add(added_files) > MAX_EXTENSION_TREE_FILES
         || source.total_entry_count().saturating_add(added_entries) > MAX_EXTENSION_TREE_ENTRIES
     {
@@ -1707,6 +1804,8 @@ fn enforce_output_budgets(
         Some(API_PRELUDE_SOURCE.as_bytes()),
         plan.notifications_fallback
             .then_some(NOTIFICATIONS_BRIDGE_SOURCE.as_bytes()),
+        plan.managed_storage_fallback
+            .then_some(MANAGED_STORAGE_BRIDGE_SOURCE.as_bytes()),
         plan.empty_bookmarks
             .then_some(BOOKMARKS_BRIDGE_SOURCE.as_bytes()),
         plan.empty_favicon
@@ -1724,7 +1823,7 @@ fn enforce_output_budgets(
         plan.options_page
             .as_ref()
             .map(|_| OPTIONS_PAGE_BRIDGE_SOURCE.as_bytes()),
-        (plan.same_document_navigation_routes != 0)
+        (plan.same_document_navigation_routes != 0 || plan.created_navigation_target_fallback)
             .then_some(WEB_NAVIGATION_BRIDGE_SOURCE.as_bytes()),
         plan.background_wrapper.as_deref(),
     ]
@@ -1772,6 +1871,13 @@ fn enforce_output_budgets(
         .and_then(|bytes| {
             bytes.checked_add(if plan.notifications_fallback {
                 NOTIFICATIONS_BRIDGE_SOURCE.len() as u64
+            } else {
+                0
+            })
+        })
+        .and_then(|bytes| {
+            bytes.checked_add(if plan.managed_storage_fallback {
+                MANAGED_STORAGE_BRIDGE_SOURCE.len() as u64
             } else {
                 0
             })
@@ -1826,7 +1932,9 @@ fn enforce_output_budgets(
             })
         })
         .and_then(|bytes| {
-            let navigation_bytes = if plan.same_document_navigation_routes != 0 {
+            let navigation_bytes = if plan.same_document_navigation_routes != 0
+                || plan.created_navigation_target_fallback
+            {
                 WEB_NAVIGATION_BRIDGE_SOURCE.len() as u64
             } else {
                 0
@@ -2141,7 +2249,8 @@ mod tests {
         let bridge = fs::read_to_string(extension.join(NOTIFICATIONS_BRIDGE)).unwrap();
         assert!(bridge.contains("getPermissionLevel"));
         assert!(bridge.contains("return settle(args, \"denied\")"));
-        assert!(bridge.contains("notifications compatibility found divergent native namespaces"));
+        assert!(bridge.contains("installMissingMembers"));
+        assert!(bridge.contains("queueMicrotask(install)"));
 
         let wrapper = fs::read_to_string(extension.join(BACKGROUND_WRAPPER)).unwrap();
         let api = wrapper.find(API_PRELUDE).unwrap();
@@ -2198,22 +2307,46 @@ mod tests {
         )
         .unwrap();
         assert_eq!(transformed["permissions"], serde_json::json!(["storage"]));
+        let extension = artifact.join(ARTIFACT_EXTENSION);
+        assert_eq!(
+            fs::read(extension.join(MANAGED_STORAGE_BRIDGE)).unwrap(),
+            MANAGED_STORAGE_BRIDGE_SOURCE.as_bytes()
+        );
+        assert!(fs::read_to_string(extension.join(BACKGROUND_WRAPPER))
+            .unwrap()
+            .contains(MANAGED_STORAGE_BRIDGE));
         let metadata: Value =
             serde_json::from_slice(&fs::read(artifact.join(ARTIFACT_METADATA)).unwrap()).unwrap();
         assert_eq!(
             metadata.pointer("/surfaces/native_messaging"),
             Some(&Value::String("omitted-product-prohibited".to_owned()))
         );
+        assert_eq!(
+            metadata.pointer("/surfaces/managed_storage"),
+            Some(&Value::String(
+                "native-preserved-or-empty-read-only".to_owned()
+            ))
+        );
         assert!(metadata["adaptations"]
             .as_array()
             .unwrap()
             .iter()
             .any(|value| value == "product-prohibited-native-messaging-omission-v1"));
+        assert!(metadata["adaptations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == "declared-storage-managed-fallback-v1"));
         assert!(metadata["limitations"]
             .as_array()
             .unwrap()
             .iter()
             .any(|value| value == "arbitrary-native-messaging-unavailable"));
+        assert!(metadata["limitations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == "managed-storage-empty-read-only"));
         validate_release_input(&artifact).unwrap();
     }
 
@@ -2307,6 +2440,11 @@ mod tests {
             metadata["surfaces"]["same_document_navigation_routes"],
             serde_json::json!(2)
         );
+        assert_eq!(
+            metadata["surfaces"]["created_navigation_target"],
+            serde_json::json!("inert-event")
+        );
+        assert!(WEB_NAVIGATION_BRIDGE_SOURCE.contains("onCreatedNavigationTarget"));
         extension_tree::verify_closed_tree(&extension, &output.join(ARTIFACT_TREE_INDEX)).unwrap();
     }
 
@@ -2378,8 +2516,12 @@ mod tests {
         assert_eq!(
             wrapper,
             format!(
-                "import \"./{API_PRELUDE}\";\nimport \"./{BOOKMARKS_BRIDGE}\";\nimport \"./{FAVICON_BRIDGE}\";\nimport \"./{RUNTIME_MESSAGING_BRIDGE}\";\nimport \"./{HISTORY_BRIDGE}\";\nimport \"./{SEARCH_BRIDGE}\";\nimport \"./{SESSIONS_BRIDGE}\";\nimport \"./worker.js\";\n"
+                "import \"./{API_PRELUDE}\";\nimport \"./{MANAGED_STORAGE_BRIDGE}\";\nimport \"./{BOOKMARKS_BRIDGE}\";\nimport \"./{FAVICON_BRIDGE}\";\nimport \"./{RUNTIME_MESSAGING_BRIDGE}\";\nimport \"./{HISTORY_BRIDGE}\";\nimport \"./{SEARCH_BRIDGE}\";\nimport \"./{SESSIONS_BRIDGE}\";\nimport \"./worker.js\";\n"
             )
+        );
+        assert_eq!(
+            fs::read(extension.join(MANAGED_STORAGE_BRIDGE)).unwrap(),
+            MANAGED_STORAGE_BRIDGE_SOURCE.as_bytes()
         );
         assert_eq!(
             fs::read(extension.join(BOOKMARKS_BRIDGE)).unwrap(),
@@ -2415,7 +2557,7 @@ mod tests {
         );
         let popup = fs::read_to_string(extension.join("ui/popup.html")).unwrap();
         assert!(popup.contains(&format!(
-            "<head><script src=\"/{API_PRELUDE}\"></script><script src=\"/{BOOKMARKS_BRIDGE}\"></script><script src=\"/{FAVICON_BRIDGE}\"></script><script src=\"/{RUNTIME_MESSAGING_BRIDGE}\"></script><script src=\"/{HISTORY_BRIDGE}\"></script><script src=\"/{SEARCH_BRIDGE}\"></script><script src=\"/{SESSIONS_BRIDGE}\"></script>"
+            "<head><script src=\"/{API_PRELUDE}\"></script><script src=\"/{MANAGED_STORAGE_BRIDGE}\"></script><script src=\"/{BOOKMARKS_BRIDGE}\"></script><script src=\"/{FAVICON_BRIDGE}\"></script><script src=\"/{RUNTIME_MESSAGING_BRIDGE}\"></script><script src=\"/{HISTORY_BRIDGE}\"></script><script src=\"/{SEARCH_BRIDGE}\"></script><script src=\"/{SESSIONS_BRIDGE}\"></script>"
         )));
         assert!(popup.contains(
             "<meta name=\"zephium-extension-options-page\" content=\"ui/options.html\">"
@@ -2423,7 +2565,7 @@ mod tests {
         assert!(popup.contains(&format!("<script src=\"/{OPTIONS_PAGE_BRIDGE}\"></script>")));
         let options = fs::read_to_string(extension.join("ui/options.html")).unwrap();
         assert!(options.contains(&format!(
-            "<head><script src=\"/{API_PRELUDE}\"></script><script src=\"/{BOOKMARKS_BRIDGE}\"></script><script src=\"/{FAVICON_BRIDGE}\"></script><script src=\"/{RUNTIME_MESSAGING_BRIDGE}\"></script><script src=\"/{HISTORY_BRIDGE}\"></script><script src=\"/{SEARCH_BRIDGE}\"></script><script src=\"/{SESSIONS_BRIDGE}\"></script>"
+            "<head><script src=\"/{API_PRELUDE}\"></script><script src=\"/{MANAGED_STORAGE_BRIDGE}\"></script><script src=\"/{BOOKMARKS_BRIDGE}\"></script><script src=\"/{FAVICON_BRIDGE}\"></script><script src=\"/{RUNTIME_MESSAGING_BRIDGE}\"></script><script src=\"/{HISTORY_BRIDGE}\"></script><script src=\"/{SEARCH_BRIDGE}\"></script><script src=\"/{SESSIONS_BRIDGE}\"></script>"
         )));
         assert_eq!(
             fs::read_to_string(extension.join("ui/sandbox.html")).unwrap(),
