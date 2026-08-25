@@ -555,6 +555,8 @@ fn classify_mutation_error(error: JournalMutationFailure) -> SettleEntryOutcome 
 }
 
 fn classify_open_error(error: ServiceRepositoryOpenError) -> CleanupStartupOutcome {
+    #[cfg(feature = "local-extension-lab")]
+    eprintln!("extension lab: repository open failed: {error:?}");
     match error {
         ServiceRepositoryOpenError::OutstandingAuthority => {
             // Startup cannot manufacture same-open runtime authority, and the

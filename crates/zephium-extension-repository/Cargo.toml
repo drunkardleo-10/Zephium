@@ -6,6 +6,7 @@ license.workspace = true
 
 [features]
 acquired-packages = ["dep:zephium-extension-acquisition"]
+local-extension-lab-diagnostics = []
 
 [dependencies]
 serde.workspace = true

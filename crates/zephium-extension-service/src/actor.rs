@@ -3912,6 +3912,21 @@ fn publish_startup_settlement(
     if !startup.settle(attempt, outcome) {
         return false;
     }
+    #[cfg(feature = "local-extension-lab")]
+    match outcome {
+        ExtensionServiceStartupOutcome::Unavailable(unavailable) => eprintln!(
+            "extension lab: startup unavailable: {:?}",
+            unavailable.reason()
+        ),
+        ExtensionServiceStartupOutcome::FailedClosed(failure) => {
+            eprintln!(
+                "extension lab: startup failed closed: {:?}",
+                failure.reason()
+            );
+        }
+        ExtensionServiceStartupOutcome::Ready(_)
+        | ExtensionServiceStartupOutcome::CleanupRequired(_) => {}
+    }
     // Startup evidence is authoritative. Make it observable before the
     // informational lifecycle phase can advertise a terminal startup state.
     after_evidence();

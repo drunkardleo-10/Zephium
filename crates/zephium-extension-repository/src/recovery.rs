@@ -21,6 +21,22 @@ use crate::storage::{
 };
 use crate::ExtensionRepositoryError;
 
+macro_rules! open_step {
+    ($label:literal, $operation:expr) => {{
+        match $operation {
+            Ok(value) => value,
+            Err(error) => {
+                #[cfg(feature = "local-extension-lab-diagnostics")]
+                eprintln!(
+                    "extension lab: repository recovery failed at {}: {error:?}",
+                    $label
+                );
+                return Err(error.into());
+            }
+        }
+    }};
+}
+
 pub(crate) struct OpenedRepository {
     pub(crate) namespace: LockedPrivateNamespace,
     pub(crate) catalogs: PrivateDirectory,
@@ -37,7 +53,7 @@ pub(crate) fn open_repository(
     namespace: LockedPrivateNamespace,
 ) -> Result<OpenedRepository, ExtensionRepositoryError> {
     let root = namespace.directory();
-    let mut root_shape = validate_root_shape(root)?;
+    let mut root_shape = open_step!("root-shape", validate_root_shape(root));
     let catalogs = if root_shape.has_catalogs {
         root.open_private_child(&names::catalogs_directory())?
     } else {
@@ -45,46 +61,61 @@ pub(crate) fn open_repository(
     };
     // Validate an existing catalogs directory before completing a partial
     // catalogs-only initialization with a new journals directory.
-    let catalog_inventory = inspect_catalogs(&catalogs)?;
+    let catalog_inventory = open_step!("catalog-inventory", inspect_catalogs(&catalogs));
     let journals = if root_shape.has_journals {
         root.open_private_child(&names::journals_directory())?
     } else {
         root.create_new_private_child(&names::journals_directory())?
     };
-    let journal_inventory = inspect_journals(&journals)?;
-    root_shape = initialize_controls(root, root_shape, &catalog_inventory, &journal_inventory)?;
-    let (state, state_bytes) = read_state(root)?;
-    let checkpoint = read_checkpoint(root)?;
-    let disposition = assess_recovery(
-        &catalog_inventory,
-        &state,
-        &state_bytes,
-        checkpoint,
-        journal_inventory.prepared.as_ref(),
-    )?;
-    inspect_control_stages(
-        root,
-        root_shape,
-        checkpoint,
-        journal_inventory.prepared.as_ref(),
-        disposition,
-    )?;
-    cleanup_stages(
-        root,
-        &catalogs,
-        &journals,
-        catalog_inventory.stages,
-        journal_inventory.stages,
-        root_shape,
-    )?;
-    let (state, state_bytes) = apply_recovery(
-        root,
-        &journals,
-        state,
-        state_bytes,
-        journal_inventory.prepared,
-        disposition,
-    )?;
+    let journal_inventory = open_step!("journal-inventory", inspect_journals(&journals));
+    root_shape = open_step!(
+        "outer-controls",
+        initialize_controls(root, root_shape, &catalog_inventory, &journal_inventory)
+    );
+    let (state, state_bytes) = open_step!("outer-state", read_state(root));
+    let checkpoint = open_step!("outer-checkpoint", read_checkpoint(root));
+    let disposition = open_step!(
+        "outer-assessment",
+        assess_recovery(
+            &catalog_inventory,
+            &state,
+            &state_bytes,
+            checkpoint,
+            journal_inventory.prepared.as_ref(),
+        )
+    );
+    open_step!(
+        "outer-control-stages",
+        inspect_control_stages(
+            root,
+            root_shape,
+            checkpoint,
+            journal_inventory.prepared.as_ref(),
+            disposition,
+        )
+    );
+    open_step!(
+        "outer-stage-cleanup",
+        cleanup_stages(
+            root,
+            &catalogs,
+            &journals,
+            catalog_inventory.stages,
+            journal_inventory.stages,
+            root_shape,
+        )
+    );
+    let (state, state_bytes) = open_step!(
+        "outer-recovery",
+        apply_recovery(
+            root,
+            &journals,
+            state,
+            state_bytes,
+            journal_inventory.prepared,
+            disposition,
+        )
+    );
     let mut catalog_admission_cache = ProductCatalogAdmissionCache::new();
     let catalog_recovery = materialization::ProductCatalogRecovery::new(
         &catalogs,
@@ -93,12 +124,15 @@ pub(crate) fn open_repository(
         &mut catalog_admission_cache,
         state.checkpoint(),
     );
-    let materialization = materialization::open_or_recover(
-        root,
-        catalog_recovery,
-        root_shape.has_materialization,
-        materialization::FaultPoint::None,
-    )?;
+    let materialization = open_step!(
+        "materialization",
+        materialization::open_or_recover(
+            root,
+            catalog_recovery,
+            root_shape.has_materialization,
+            materialization::FaultPoint::None,
+        )
+    );
     Ok(OpenedRepository {
         namespace,
         catalogs,
