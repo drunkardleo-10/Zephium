@@ -18,7 +18,9 @@ mod native_lifecycle;
 use std::mem::size_of;
 use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::{mpsc, Arc, Condvar, Mutex};
+#[cfg(target_os = "macos")]
+use std::sync::mpsc;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
 use crate::MainThreadDispatch;
@@ -3091,11 +3093,9 @@ impl AdapterAvailability {
         }
     }
 
+    #[cfg(target_os = "macos")]
     const fn supports_extension_data_erasure(self) -> bool {
         match self {
-            #[cfg(not(target_os = "macos"))]
-            Self::Unsupported => false,
-            #[cfg(target_os = "macos")]
             Self::MacosNative => true,
             #[cfg(test)]
             Self::LogicalHarness => false,
@@ -3243,51 +3243,61 @@ impl ExtensionRuntimeHostFactoryPort for EngineFactoryPort {
         identity: ExtensionRuntimeNativeOwnerId,
         deadline: Instant,
     ) -> ExtensionRuntimeHostDataErasureDisposition {
-        if !self.adapters.supports_extension_data_erasure() {
-            return ExtensionRuntimeHostDataErasureDisposition::Unsupported;
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (profile, identity, deadline);
+            ExtensionRuntimeHostDataErasureDisposition::Unsupported
         }
-        if Instant::now() >= deadline {
-            return ExtensionRuntimeHostDataErasureDisposition::TimedOut;
-        }
-        let Some(admission) = self.profile_fence_ingress.try_admit() else {
-            return ExtensionRuntimeHostDataErasureDisposition::Unavailable;
-        };
-        let (settlement, observation) = mpsc::sync_channel(1);
-        let started = dispatch_bounded_host_fence(&self.dispatch, deadline, move |host| {
-            let completion = Box::new(move |outcome| {
-                drop(admission);
-                let _ = settlement.send(outcome);
+        #[cfg(target_os = "macos")]
+        {
+            if !self.adapters.supports_extension_data_erasure() {
+                return ExtensionRuntimeHostDataErasureDisposition::Unsupported;
+            }
+            if Instant::now() >= deadline {
+                return ExtensionRuntimeHostDataErasureDisposition::TimedOut;
+            }
+            let Some(admission) = self.profile_fence_ingress.try_admit() else {
+                return ExtensionRuntimeHostDataErasureDisposition::Unavailable;
+            };
+            let (settlement, observation) = mpsc::sync_channel(1);
+            let started = dispatch_bounded_host_fence(&self.dispatch, deadline, move |host| {
+                let completion = Box::new(move |outcome| {
+                    drop(admission);
+                    let _ = settlement.send(outcome);
+                });
+                let _ = host.macos_extension_controllers.erase_extension_data(
+                    profile,
+                    zephium_core::extensions::ExtensionNativeNamespaceScope::MacosControllerV1,
+                    identity,
+                    deadline,
+                    completion,
+                );
             });
-            let _ = host.macos_extension_controllers.erase_extension_data(
-                profile,
-                zephium_core::extensions::ExtensionNativeNamespaceScope::MacosControllerV1,
-                identity,
-                deadline,
-                completion,
-            );
-        });
-        if let Err(failure) = started {
-            return match failure {
-                HostCallFailure::TimedOut => ExtensionRuntimeHostDataErasureDisposition::TimedOut,
-                HostCallFailure::Unavailable => {
-                    ExtensionRuntimeHostDataErasureDisposition::Unavailable
+            if let Err(failure) = started {
+                return match failure {
+                    HostCallFailure::TimedOut => {
+                        ExtensionRuntimeHostDataErasureDisposition::TimedOut
+                    }
+                    HostCallFailure::Unavailable => {
+                        ExtensionRuntimeHostDataErasureDisposition::Unavailable
+                    }
+                    HostCallFailure::Invariant => {
+                        ExtensionRuntimeHostDataErasureDisposition::FailedClosed
+                    }
+                };
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return ExtensionRuntimeHostDataErasureDisposition::TimedOut;
+            }
+            match observation.recv_timeout(remaining) {
+                Ok(outcome) => outcome,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    ExtensionRuntimeHostDataErasureDisposition::TimedOut
                 }
-                HostCallFailure::Invariant => {
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
                     ExtensionRuntimeHostDataErasureDisposition::FailedClosed
                 }
-            };
-        }
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return ExtensionRuntimeHostDataErasureDisposition::TimedOut;
-        }
-        match observation.recv_timeout(remaining) {
-            Ok(outcome) => outcome,
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                ExtensionRuntimeHostDataErasureDisposition::TimedOut
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                ExtensionRuntimeHostDataErasureDisposition::FailedClosed
             }
         }
     }
