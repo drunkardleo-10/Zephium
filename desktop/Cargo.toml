@@ -29,6 +29,7 @@ staging-extension-catalog = [
 # object bytes are generated beneath target/ and remain outside source control.
 local-extension-lab = [
     "curated-extension-distribution",
+    "zephium-engine/native-extension-lab-diagnostics",
     "zephium-extension-service/local-extension-lab",
     "zephium-extension-authority/local-extension-lab",
     "zephium-extension-distribution/local-extension-lab",

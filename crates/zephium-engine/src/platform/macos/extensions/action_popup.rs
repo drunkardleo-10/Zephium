@@ -318,9 +318,12 @@ impl ActionPopupBroker {
     }
 
     /// Reserves the exact native callback expected from `performActionForTab:`.
-    /// The host acquires the global resource lease before this call.
+    /// The host acquires the global resource lease and revalidates the action
+    /// before this call. A background-bearing extension is warmed only for
+    /// this trusted gesture so its MV3 listeners exist before popup messaging;
+    /// ordinary startup remains fully lazy.
     pub(super) fn begin(
-        &self,
+        self: &Rc<Self>,
         request: ExtensionActionRequest,
         controller: Retained<WKWebExtensionController>,
         context: Retained<WKWebExtensionContext>,
@@ -352,6 +355,8 @@ impl ActionPopupBroker {
         let request_id = request.id();
         let Some(watchdog) =
             crate::platform::imp::schedule_content_policy_timeout(POPUP_LOAD_TIMEOUT, move || {
+                #[cfg(feature = "native-extension-lab-diagnostics")]
+                eprintln!("extension lab: popup action timed out before native presentation");
                 let _ = crate::host::with_extension_action_popup_terminal(move |host| {
                     host.timeout_extension_action_popup(profile, request_id);
                 });
@@ -368,7 +373,82 @@ impl ActionPopupBroker {
             _lease: lease,
             watchdog,
         });
+        self.warm_background_and_perform(request_id);
         Ok(())
+    }
+
+    fn warm_background_and_perform(self: &Rc<Self>, request: ExtensionActionRequestId) {
+        let context =
+            self.pending.borrow().as_ref().and_then(|pending| {
+                (pending.request.id() == request).then(|| pending.context.clone())
+            });
+        let Some(context) = context else {
+            self.cancel_pending(request, ExtensionActionRejection::NativeAdmissionFailed);
+            return;
+        };
+        let has_background = match objc2::exception::catch(AssertUnwindSafe(|| unsafe {
+            context.webExtension().hasBackgroundContent()
+        })) {
+            Ok(has_background) => has_background,
+            Err(_) => {
+                self.cancel_pending(request, ExtensionActionRejection::NativeAdmissionFailed);
+                return;
+            }
+        };
+        if !has_background {
+            self.perform_pending_action(request);
+            return;
+        }
+
+        let broker = Rc::downgrade(self);
+        let completion: RcBlock<dyn Fn(*mut NSError)> = RcBlock::new(move |error: *mut NSError| {
+            let Some(broker) = broker.upgrade() else {
+                return;
+            };
+            if !error.is_null() {
+                #[cfg(feature = "native-extension-lab-diagnostics")]
+                {
+                    // SAFETY: WebKit guarantees a live NSError for the
+                    // duration of this completion callback.
+                    let error = unsafe { &*error };
+                    eprintln!(
+                        "extension lab: popup background warm-up failed: domain={}; code={}",
+                        error.domain(),
+                        error.code()
+                    );
+                }
+                crate::diagnostic!(
+                    "extensions: popup background warm-up failed before presentation"
+                );
+                broker.cancel_pending(request, ExtensionActionRejection::PopupUnavailable);
+                return;
+            }
+            broker.perform_pending_action(request);
+        });
+        if objc2::exception::catch(AssertUnwindSafe(|| unsafe {
+            context.loadBackgroundContentWithCompletionHandler(&completion);
+        }))
+        .is_err()
+        {
+            self.cancel_pending(request, ExtensionActionRejection::PopupUnavailable);
+        }
+    }
+
+    fn perform_pending_action(&self, request: ExtensionActionRequestId) {
+        let target = self.pending.borrow().as_ref().and_then(|pending| {
+            (pending.request.id() == request)
+                .then(|| (pending.context.clone(), pending.tab.clone()))
+        });
+        let Some((context, tab)) = target else {
+            return;
+        };
+        if objc2::exception::catch(AssertUnwindSafe(|| unsafe {
+            context.performActionForTab(Some(&tab));
+        }))
+        .is_err()
+        {
+            self.cancel_pending(request, ExtensionActionRejection::NativeAdmissionFailed);
+        }
     }
 
     /// Transfers the one already-admitted popup surface into an unprivileged
@@ -554,6 +634,12 @@ impl ActionPopupBroker {
                 .ok_or(ExtensionActionRejection::InvalidRequest)?;
             let size = clamp_popup_size(popover.contentSize());
             popover.setContentSize(size);
+            // Lab diagnostics must survive the application losing
+            // focus so Safari can attach to the exact popup WKWebView. The
+            // ordinary desktop keeps native transient dismissal semantics.
+            #[cfg(feature = "native-extension-lab-diagnostics")]
+            popover.setBehavior(NSPopoverBehavior::ApplicationDefined);
+            #[cfg(not(feature = "native-extension-lab-diagnostics"))]
             popover.setBehavior(NSPopoverBehavior::Transient);
             popover.setAnimates(true);
             let delegate = ActionPopoverDelegate::new(mtm, Rc::downgrade(self));

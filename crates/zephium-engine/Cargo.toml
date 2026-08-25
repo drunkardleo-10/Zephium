@@ -37,6 +37,10 @@ native-web-extension-probes = [
 # authenticated product-path probe. Ordinary engine and desktop builds do not
 # compile these diagnostics.
 native-extension-product-probes = []
+# Enables inspectable native extension contexts and persistent popovers only
+# in the separately identified private browser lab. Shipping contexts remain
+# non-inspectable and transient.
+native-extension-lab-diagnostics = []
 # Compiles the intentionally non-product Windows CDP feasibility harness. The
 # default product must not contain this path until Phase 0a's live gates pass.
 windows-cdp-spike = []

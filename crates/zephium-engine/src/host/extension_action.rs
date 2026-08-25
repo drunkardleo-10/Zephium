@@ -149,6 +149,22 @@ impl EngineHost {
         }
 
         let popup_reserved = if state.presents_popup() {
+            let validated =
+                self.extension_runtime_registry
+                    .with_owned_macos_runtime(&runtime, |owner| {
+                        owner.validate_popup_action_for_tab(
+                            runtime.instance(),
+                            request.tab(),
+                            &native_tab,
+                            request.action_revision(),
+                        )
+                    });
+            match validated {
+                Ok(Some(Ok(()))) => {}
+                Ok(Some(Err(error))) => return settled(map_native_error(error)),
+                Ok(None) => return settled(ExtensionActionRejection::RuntimeUnavailable),
+                Err(error) => return settled(map_runtime_error(error)),
+            }
             let popup_owner = match self
                 .extension_runtime_registry
                 .with_owned_macos_runtime(&runtime, |owner| owner.action_popup_owner())
@@ -231,26 +247,6 @@ impl EngineHost {
         }
 
         if popup_reserved {
-            let result =
-                self.extension_runtime_registry
-                    .with_owned_macos_runtime(&runtime, |owner| {
-                        owner.perform_popup_action_for_tab(
-                            runtime.instance(),
-                            request.tab(),
-                            &native_tab,
-                            request.action_revision(),
-                        )
-                    });
-            if !matches!(result, Ok(Some(Ok(())))) {
-                let reason = match result {
-                    Ok(Some(Err(error))) => map_native_error(error),
-                    Ok(None) => ExtensionActionRejection::RuntimeUnavailable,
-                    Err(error) => map_runtime_error(error),
-                    Ok(Some(Ok(()))) => unreachable!(),
-                };
-                self.macos_extension_controllers
-                    .cancel_action_popup(profile, request.id(), reason);
-            }
             return ExtensionActionInvocationOutcome::Pending;
         }
 

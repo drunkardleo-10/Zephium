@@ -494,7 +494,7 @@ impl MacosNativeRuntimeOwner {
 
     /// Enters WebKit only after the host has retained the popup resource lease
     /// and installed the exact delegate callback expectation.
-    pub(crate) fn perform_popup_action_for_tab(
+    pub(crate) fn validate_popup_action_for_tab(
         &mut self,
         runtime: zephium_core::extensions::ExtensionRuntimeInstance,
         tab_id: zephium_core::ids::ItemId,
@@ -511,10 +511,7 @@ impl MacosNativeRuntimeOwner {
         if !state.presents_popup() {
             return Err(MacosNativeActionFailure::StaleAction);
         }
-        objc2::exception::catch(AssertUnwindSafe(|| unsafe {
-            self.context.performActionForTab(Some(tab));
-        }))
-        .map_err(|_| MacosNativeActionFailure::NativeException)
+        Ok(())
     }
 
     fn prove_absence(
@@ -927,10 +924,11 @@ fn set_and_verify_identity(
     owner_id: ExtensionRuntimeNativeOwnerId,
 ) -> Result<(), MacosNativeRuntimeFailure> {
     let identity = native_context_identity(owner_id)?;
+    let inspectable = cfg!(feature = "native-extension-lab-diagnostics");
     catch_native(|| unsafe {
         context.setBaseURL(&identity.base_url);
         context.setUniqueIdentifier(&identity.identifier);
-        context.setInspectable(false);
+        context.setInspectable(inspectable);
         let base_url_matches = context
             .baseURL()
             .absoluteString()
@@ -939,7 +937,7 @@ fn set_and_verify_identity(
             && context
                 .uniqueIdentifier()
                 .isEqualToString(&identity.identifier)
-            && !context.isInspectable()
+            && context.isInspectable() == inspectable
             && !context.isLoaded()
             && context.webExtensionController().is_none()
         {
