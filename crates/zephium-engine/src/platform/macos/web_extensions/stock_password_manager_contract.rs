@@ -42,7 +42,7 @@ const ONEPASSWORD_PRIMARY_WASM_BYTES: usize = 17_466_756;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum BackgroundAdaptationKind {
     Classic,
-    Module,
+    ModuleDocument,
 }
 
 const PROTON_NATIVE_PERMISSIONS: [Permission; 7] = [
@@ -219,12 +219,12 @@ impl StockContract {
                 created_navigation_target_fallback: false,
             },
             Self::OnePassword8123233 => CompatibilityOutputContract {
-                files: 1_003,
-                bytes: 45_133_937,
-                manifest_sha256: "f498087294176d2e357579fd75eb34dc2f5fd556b57d9308f26d5cd51ad68e00",
-                tree_sha256: "25e53288061703fbf7be41576a8da73b2a0a230acd9d82feaa58cd87f7096228",
-                index_sha256: "915ba53f0f52a1ba1a1950c878a74c6cdf63260fe45e9484e944dc01b6b08e4b",
-                background: BackgroundAdaptationKind::Module,
+                files: 1_005,
+                bytes: 45_140_692,
+                manifest_sha256: "901937289daf1f75c4a48507e8023af312d52144cf61cb6000fb6f913c0bebf0",
+                tree_sha256: "e1271e34edbf7c9a79c09da93b4e8a73b427d3eefe270af7a570627864ca1388",
+                index_sha256: "287673c89c85059bdffa67f4e514fef80d5f68e67ecbc886f0da9326980ece51",
+                background: BackgroundAdaptationKind::ModuleDocument,
                 isolated_content_scripts: 7,
                 same_document_navigation_routes: 7,
                 notifications_fallback: true,
@@ -539,6 +539,14 @@ fn validate_onepassword_compatibility_manifest(manifest: &Value) -> Result<(), S
             Value::from(super::compatibility_artifact::BACKGROUND_WRAPPER),
         ),
         ("/background/type", Value::from("module")),
+        (
+            "/background/scripts",
+            serde_json::json!([super::compatibility_artifact::BACKGROUND_WRAPPER]),
+        ),
+        (
+            "/background/preferred_environment",
+            serde_json::json!(["document", "service_worker"]),
+        ),
         ("/action/default_popup", Value::from("popup/index.html")),
     ] {
         if manifest.pointer(pointer) != Some(&expected) {

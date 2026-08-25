@@ -4,10 +4,11 @@ use std::collections::BTreeSet;
 
 use serde_json::Value;
 use zephium_core::extensions::{
-    ExtensionActionDeclaration, ExtensionBackgroundDeclaration, ExtensionBackgroundWorkerType,
-    ExtensionContentScriptDeclaration, ExtensionContentScriptGlobDeclaration,
-    ExtensionContentScriptResourceDigest, ExtensionContentScriptRunAt, ExtensionContentScriptWorld,
-    ExtensionHostPermissionSet, ExtensionManifestResourceDigest, ExtensionOverrideTarget,
+    ExtensionActionDeclaration, ExtensionBackgroundDeclaration, ExtensionBackgroundEnvironment,
+    ExtensionBackgroundWorkerType, ExtensionContentScriptDeclaration,
+    ExtensionContentScriptGlobDeclaration, ExtensionContentScriptResourceDigest,
+    ExtensionContentScriptRunAt, ExtensionContentScriptWorld, ExtensionHostPermissionSet,
+    ExtensionManifestResourceDigest, ExtensionOverrideTarget,
     ExtensionWebAccessibleResourceDeclaration, MAX_EXTENSION_CONTENT_SCRIPT_DECLARATIONS,
     MAX_EXTENSION_CONTENT_SCRIPT_FILES, MAX_EXTENSION_CONTENT_SCRIPT_GLOBS,
     MAX_EXTENSION_HOST_PERMISSION_PATTERNS, MAX_EXTENSION_SANDBOX_RESOURCES,
@@ -178,9 +179,30 @@ pub(super) fn parse_background(
         return Ok((None, None));
     };
     let mut object = into_object(value, "background")?;
-    reject_unknown_nested(&object, &["service_worker", "type"], "background")?;
-    let worker = super::take_owned_string(&mut object, "service_worker")?;
-    let worker = bind_resource(binding, &worker, "background.service_worker")?;
+    reject_unknown_nested(
+        &object,
+        &["service_worker", "type", "scripts", "preferred_environment"],
+        "background",
+    )?;
+    let worker_path = super::take_owned_string(&mut object, "service_worker")?;
+    let scripts = optional_string_array(object.remove("scripts"), "background.scripts", 1)?;
+    let preferred_environment = optional_string_array(
+        object.remove("preferred_environment"),
+        "background.preferred_environment",
+        2,
+    )?;
+    let environment = match (scripts.as_slice(), preferred_environment.as_slice()) {
+        ([], []) => ExtensionBackgroundEnvironment::ServiceWorker,
+        ([script], [document, service_worker])
+            if script == &worker_path
+                && document == "document"
+                && service_worker == "service_worker" =>
+        {
+            ExtensionBackgroundEnvironment::Document
+        }
+        _ => return Err(invalid("background")),
+    };
+    let worker = bind_resource(binding, &worker_path, "background.service_worker")?;
     let worker_type = match optional_string(&mut object, "type", "classic", "background")? {
         "classic" => ExtensionBackgroundWorkerType::Classic,
         "module" => ExtensionBackgroundWorkerType::Module,
@@ -191,7 +213,11 @@ pub(super) fn parse_background(
         &[],
     ));
     Ok((
-        Some(ExtensionBackgroundDeclaration::new(worker_type, digest)),
+        Some(ExtensionBackgroundDeclaration::new(
+            worker_type,
+            environment,
+            digest,
+        )),
         Some(worker),
     ))
 }

@@ -26,6 +26,28 @@ const managedStorageSource = await readFile(fileURLToPath(managedStorageAssetUrl
 const managedStorageScript = new vm.Script(managedStorageSource, {
   filename: fileURLToPath(managedStorageAssetUrl),
 });
+const backgroundDocumentAssetUrl = new URL(
+  "../../crates/zephium-extension-package/assets/macos/webkit-background-document-v1.js",
+  import.meta.url,
+);
+const backgroundDocumentSource = await readFile(
+  fileURLToPath(backgroundDocumentAssetUrl),
+  "utf8",
+);
+const backgroundDocumentScript = new vm.Script(backgroundDocumentSource, {
+  filename: fileURLToPath(backgroundDocumentAssetUrl),
+});
+const nativeMessagingDenyAssetUrl = new URL(
+  "../../crates/zephium-extension-package/assets/macos/webkit-native-messaging-deny-v1.js",
+  import.meta.url,
+);
+const nativeMessagingDenySource = await readFile(
+  fileURLToPath(nativeMessagingDenyAssetUrl),
+  "utf8",
+);
+const nativeMessagingDenyScript = new vm.Script(nativeMessagingDenySource, {
+  filename: fileURLToPath(nativeMessagingDenyAssetUrl),
+});
 const historyAssetUrl = new URL(
   "../../crates/zephium-extension-package/assets/macos/webkit-history-v1.js",
   import.meta.url,
@@ -80,6 +102,20 @@ for (const forbidden of ["window", "fetch", "XMLHttpRequest", "WebSocket"]) {
     managedStorageSource.includes(forbidden),
     false,
     `managed-storage asset exposes ${forbidden}`,
+  );
+}
+for (const forbidden of ["fetch", "XMLHttpRequest", "WebSocket"]) {
+  assert.equal(
+    nativeMessagingDenySource.includes(forbidden),
+    false,
+    `native-messaging denial asset exposes ${forbidden}`,
+  );
+}
+for (const forbidden of ["fetch", "XMLHttpRequest", "WebSocket", "connectNative"]) {
+  assert.equal(
+    backgroundDocumentSource.includes(forbidden),
+    false,
+    `background-document asset exposes ${forbidden}`,
   );
 }
 for (const forbidden of [
@@ -291,6 +327,107 @@ assert.equal(
   managedContext.chrome.storage.managed,
   managed,
   "bounded reconciliation did not restore managed storage after namespace replacement",
+);
+
+const backgroundNative = nativeNamespace("background-document-fixture");
+backgroundNative.runtime.getURL = function (path) {
+  assert.equal(this, backgroundNative.runtime);
+  return `https://background-document-fixture.example${path}`;
+};
+const backgroundDocumentContext = run({
+  chrome: backgroundNative,
+  document: {},
+  location: { origin: "https://background-document-fixture.example" },
+  URL,
+});
+backgroundDocumentScript.runInContext(backgroundDocumentContext, { timeout: 1_000 });
+assert.equal(Object.isFrozen(backgroundDocumentContext.clients), true);
+assert.deepEqual(
+  JSON.parse(JSON.stringify(await backgroundDocumentContext.clients.matchAll({ type: "window" }))),
+  [],
+);
+await assert.rejects(
+  backgroundDocumentContext.clients.matchAll("window"),
+  /options must be an object/,
+);
+assert.throws(
+  () =>
+    backgroundDocumentScript.runInContext(
+      run({
+        chrome: nativeNamespace("page-fixture"),
+        document: {},
+        location: { origin: "https://page.example" },
+        URL,
+      }),
+      { timeout: 1_000 },
+    ),
+  /refused a page context/,
+);
+
+const nativeMessagingTasks = [];
+const nativeMessagingNative = nativeNamespace("native-messaging-denied-fixture");
+const nativeMessagingContext = run({
+  chrome: nativeMessagingNative,
+  queueMicrotask: (callback) => nativeMessagingTasks.push(callback),
+});
+nativeMessagingDenyScript.runInContext(nativeMessagingContext, { timeout: 1_000 });
+assert.equal(
+  nativeMessagingContext.chrome.runtime.connectNative,
+  nativeMessagingContext.browser.runtime.connectNative,
+);
+assert.equal(
+  nativeMessagingContext.chrome.runtime.sendNativeMessage,
+  nativeMessagingContext.browser.runtime.sendNativeMessage,
+);
+const deniedPort = nativeMessagingContext.browser.runtime.connectNative("com.example.host");
+assert.equal(Object.isFrozen(deniedPort), true);
+assert.equal(deniedPort.name, "com.example.host");
+let disconnects = 0;
+deniedPort.onDisconnect.addListener((port) => {
+  assert.equal(port, deniedPort);
+  disconnects += 1;
+});
+deniedPort.postMessage({ ignored: true });
+for (const task of nativeMessagingTasks.splice(0)) task();
+assert.equal(disconnects, 1);
+assert.throws(() => deniedPort.postMessage({}), /port is disconnected/);
+deniedPort.disconnect();
+assert.equal(disconnects, 1, "manual disconnect repeated the terminal event");
+await assert.rejects(
+  nativeMessagingContext.browser.runtime.sendNativeMessage("com.example.host", { ping: true }),
+  /host is unavailable/,
+);
+let deniedCallbackCalls = 0;
+assert.equal(
+  nativeMessagingContext.chrome.runtime.sendNativeMessage("", { ping: true }, (response) => {
+    assert.equal(response, undefined);
+    deniedCallbackCalls += 1;
+  }),
+  undefined,
+);
+for (const task of nativeMessagingTasks.splice(0)) task();
+assert.equal(deniedCallbackCalls, 1);
+for (const invalid of ["", "space separated", "../host", "x".repeat(257)]) {
+  assert.throws(
+    () => nativeMessagingContext.chrome.runtime.connectNative(invalid),
+    /identifier is invalid/,
+  );
+}
+nativeMessagingDenyScript.runInContext(nativeMessagingContext, { timeout: 1_000 });
+assert.equal(
+  nativeMessagingContext.chrome.runtime.connectNative,
+  nativeMessagingContext.browser.runtime.connectNative,
+  "idempotent denial setup replaced connectNative",
+);
+
+const unsafeNativeMessaging = nativeNamespace("unsafe-native-messaging-fixture");
+unsafeNativeMessaging.runtime.connectNative = () => ({ native: true });
+unsafeNativeMessaging.runtime.sendNativeMessage = () => Promise.resolve({ native: true });
+const unsafeNativeMessagingContext = run({ chrome: unsafeNativeMessaging, queueMicrotask });
+assert.throws(
+  () => nativeMessagingDenyScript.runInContext(unsafeNativeMessagingContext, { timeout: 1_000 }),
+  /denial facade was not installed/,
+  "a preexisting native-messaging capability was preserved after permission omission",
 );
 
 assert.throws(

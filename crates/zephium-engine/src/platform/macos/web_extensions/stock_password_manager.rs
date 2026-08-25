@@ -468,8 +468,8 @@ fn admit_compatibility_artifact(
             BackgroundAdaptationKind::Classic,
             super::compatibility_artifact::BackgroundAdaptation::ClassicWrapper
         ) | (
-            BackgroundAdaptationKind::Module,
-            super::compatibility_artifact::BackgroundAdaptation::ModuleWrapper
+            BackgroundAdaptationKind::ModuleDocument,
+            super::compatibility_artifact::BackgroundAdaptation::ModuleDocumentWrapper
         )
     );
     if artifact.target != super::compatibility_artifact::CompatibilityArtifactTarget::NativeV3

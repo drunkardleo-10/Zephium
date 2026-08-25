@@ -62,6 +62,17 @@ Chromium's full site-isolation model.
    process terminates, the weak navigation delegate schedules a later main-turn
    teardown and releases only the options owner whose exact context and
    WKWebView still match; a delayed callback cannot close a replacement.
+   An opt-in compatibility receipt may select WebKit's nonpersistent document
+   background for an authenticated module worker when the worker resource
+   transport cannot complete. Manifest admission binds that environment into
+   compatibility identity, and the transform retains no hidden `WKWebView`.
+   The document receives only two service-worker-shaped failure facades: a
+   frozen empty `clients.matchAll()` cohort, and native-messaging calls that
+   disconnect or reject without resolving a host, serializing a payload, or
+   contacting a process. Existing native-messaging functions make adaptation
+   fail closed. The receipt discloses the missing WindowClient inventory,
+   absent host, and callback denial without `runtime.lastError`; none of these
+   facades grants native or page-world authority.
    Native extension keyboard commands use no startup monitor. The observer
    exists only while a context is loaded, gives browser-menu accelerators first
    refusal, and accepts only the focused resident regular tab's WKWebView. It

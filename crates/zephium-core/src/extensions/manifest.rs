@@ -873,27 +873,40 @@ pub enum ExtensionBackgroundWorkerType {
     Module,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ExtensionBackgroundEnvironment {
+    ServiceWorker,
+    Document,
+}
+
 /// Path-free background declaration. Package identity binds the actual worker
 /// resource; adapters receive it only through a separately authenticated lease.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ExtensionBackgroundDeclaration {
     worker_type: ExtensionBackgroundWorkerType,
+    environment: ExtensionBackgroundEnvironment,
     worker_resource_digest: ExtensionManifestResourceDigest,
 }
 
 impl ExtensionBackgroundDeclaration {
     pub const fn new(
         worker_type: ExtensionBackgroundWorkerType,
+        environment: ExtensionBackgroundEnvironment,
         worker_resource_digest: ExtensionManifestResourceDigest,
     ) -> Self {
         Self {
             worker_type,
+            environment,
             worker_resource_digest,
         }
     }
 
     pub const fn worker_type(self) -> ExtensionBackgroundWorkerType {
         self.worker_type
+    }
+
+    pub const fn environment(self) -> ExtensionBackgroundEnvironment {
+        self.environment
     }
 
     pub const fn worker_resource_digest(self) -> ExtensionManifestResourceDigest {
@@ -2475,6 +2488,11 @@ fn update_compatibility_semantics(
                 ExtensionBackgroundWorkerType::Module => 2,
             }]);
             digest.update(background.worker_resource_digest().as_bytes());
+            if background.environment() == ExtensionBackgroundEnvironment::Document {
+                // Preserve the existing service-worker digest stream while
+                // assigning document execution a distinct, non-colliding tag.
+                digest.update([3]);
+            }
         }
     }
 
@@ -2751,6 +2769,7 @@ mod tests {
     #[derive(Clone, Copy)]
     struct CompatibilitySemanticFixture {
         background_worker: ExtensionBackgroundWorkerType,
+        background_environment: ExtensionBackgroundEnvironment,
         background_resource: u8,
         popup_resource: Option<u8>,
         extension_csp: u8,
@@ -2769,6 +2788,7 @@ mod tests {
         fn default() -> Self {
             Self {
                 background_worker: ExtensionBackgroundWorkerType::Module,
+                background_environment: ExtensionBackgroundEnvironment::ServiceWorker,
                 background_resource: 41,
                 popup_resource: Some(42),
                 extension_csp: 43,
@@ -2804,6 +2824,7 @@ mod tests {
                 None,
                 Some(ExtensionBackgroundDeclaration::new(
                     self.background_worker,
+                    self.background_environment,
                     ExtensionManifestResourceDigest::from_bytes([self.background_resource; 32]),
                 )),
                 Some(ExtensionActionDeclaration::new(self.popup_resource.map(
@@ -2846,6 +2867,7 @@ mod tests {
             Some(hosts(&["file:///*"])),
             Some(ExtensionBackgroundDeclaration::new(
                 ExtensionBackgroundWorkerType::Module,
+                ExtensionBackgroundEnvironment::ServiceWorker,
                 ExtensionManifestResourceDigest::from_bytes([26; 32]),
             )),
             Some(ExtensionActionDeclaration::new(Some(
@@ -3454,6 +3476,10 @@ mod tests {
         let variants = [
             CompatibilitySemanticFixture {
                 background_worker: ExtensionBackgroundWorkerType::Classic,
+                ..baseline
+            },
+            CompatibilitySemanticFixture {
+                background_environment: ExtensionBackgroundEnvironment::Document,
                 ..baseline
             },
             CompatibilitySemanticFixture {

@@ -434,6 +434,66 @@ fn admits_complete_mv3_authority_without_losing_runtime_paths() {
 }
 
 #[test]
+fn document_background_is_typed_exact_and_fail_closed() {
+    let manifest = json!({
+        "manifest_version": 3,
+        "name": "Document Background",
+        "version": "1.0.0",
+        "background": {
+            "service_worker": "worker.js",
+            "scripts": ["worker.js"],
+            "preferred_environment": ["document", "service_worker"],
+            "type": "module"
+        }
+    });
+    let fixture = make_fixture(
+        manifest.clone(),
+        &[("other.js", b"void 0"), ("worker.js", b"void 0")],
+        false,
+    );
+    let policy = CompletePolicy::new(ExtensionCompatibilityLevel::Unsupported);
+    let admitted = admit_extension_manifest(fixture.binding(), &fixture.manifest, &policy).unwrap();
+    let background = admitted.descriptor().declarations().background().unwrap();
+    assert_eq!(
+        background.environment(),
+        zephium_core::extensions::ExtensionBackgroundEnvironment::Document
+    );
+    assert_eq!(
+        background.worker_type(),
+        zephium_core::extensions::ExtensionBackgroundWorkerType::Module
+    );
+
+    for background in [
+        json!({
+            "service_worker": "worker.js",
+            "scripts": ["other.js"],
+            "preferred_environment": ["document", "service_worker"],
+            "type": "module"
+        }),
+        json!({
+            "service_worker": "worker.js",
+            "scripts": ["worker.js"],
+            "preferred_environment": ["service_worker", "document"],
+            "type": "module"
+        }),
+        json!({
+            "service_worker": "worker.js",
+            "scripts": ["worker.js"],
+            "type": "module"
+        }),
+    ] {
+        let mut invalid = manifest.clone();
+        invalid["background"] = background;
+        let fixture = make_fixture(
+            invalid,
+            &[("other.js", b"void 0"), ("worker.js", b"void 0")],
+            false,
+        );
+        assert!(admit_extension_manifest(fixture.binding(), &fixture.manifest, &policy).is_err());
+    }
+}
+
+#[test]
 fn admits_the_pinned_bitwarden_manifest_shape_without_unmodeled_authority() {
     let fixture = bitwarden_2026_7_0_contract_fixture();
     let policy = CompletePolicy::new(ExtensionCompatibilityLevel::Unsupported);

@@ -1924,33 +1924,57 @@ background initialization. Declared-permission-gated, package-neutral adapters
 therefore preserve valid native members, fill only missing notification
 members with inert/no-delivery behavior, expose empty read-only managed
 storage, and add an inert `onCreatedNavigationTarget`. Reconciliation is
-bounded to startup microtask/task frontiers; no poller, view, network port, or
-page-world authority remains resident.
+bounded to startup microtask/task frontiers; no poller, hidden view, network
+port, or page-world authority remains resident.
 
-The independently indexed current 1Password compatibility artifact has 1,003
-files and 45,133,937 bytes, tree SHA-256
-`25e53288061703fbf7be41576a8da73b2a0a230acd9d82feaa58cd87f7096228`,
+The worker-resource failure is now bypassed by a narrower standards-shaped
+gate rather than a byte or MIME workaround. Apple documents nonpersistent
+background pages as a supported alternative to MV3 service workers. The
+opt-in transform retains the module service worker for source identity, adds
+the same wrapper to `background.scripts`, and selects
+`preferred_environment: ["document", "service_worker"]`. The environment is
+typed into manifest admission and compatibility identity and is bound in the
+receipt as a degradation. Classic workers, existing page/script declarations,
+and ambiguous environment declarations fail closed. A document background is
+still event-managed by WebKit; Zephium does not create or retain a hidden
+`WKWebView` for it.
+
+The independently indexed current 1Password compatibility artifact has 1,005
+files and 45,140,692 bytes, manifest SHA-256
+`901937289daf1f75c4a48507e8023af312d52144cf61cb6000fb6f913c0bebf0`,
+tree SHA-256
+`e1271e34edbf7c9a79c09da93b4e8a73b427d3eefe270af7a570627864ca1388`,
 and index SHA-256
-`915ba53f0f52a1ba1a1950c878a74c6cdf63260fe45e9484e944dc01b6b08e4b`.
-WebKit's public background-load callback settles in approximately 174–195 ms
-with zero native context errors, the action popup executes with native runtime
-identity, and one current active tab is visible. That callback is not extension
-readiness: 1Password's own log remains at `WASM: Initializing`, never publishes
-`Finished initializing 1Password`, and its popup stays in the loading state.
-The exact module reads and compiles in 15–17 ms from the popup, while the MV3
-worker cannot make body progress even when a preflight adapter bypasses native
-streaming and calls `arrayBuffer()` first. That rejected adapter is not part of
-the artifact.
+`287673c89c85059bdffa67f4e514fef80d5f68e67ecbc886f0da9326980ece51`.
+The native probe reports the background-load callback in approximately
+175–192 ms with zero context errors; the 17,466,756-byte WASM fallback compiles
+in 16–17 ms. In the real browser, the generated background document reaches
+1Password's `Finished initializing 1Password` milestone, analyzes the active
+page, and returns a successful `get-popup-config` payload. This proves that the
+WASM worker transport was the startup blocker and that document execution is a
+viable compatibility lever on the reviewed WebKit runtime.
 
-The probe also observes native runtime identities from
-`scripting.executeScript` but not the static content-prelude marker, and the
-stock content scripts produce no login-field effect without a ready core.
-Native controller, context, page, popup, and data-store objects now release
-after the failing gate. This is useful isolation evidence, not compatibility:
-inline discovery, account sign-in, save/fill, passkeys, desktop integration,
-restart behavior, and resource budgets cannot pass while the worker-resource
-ceiling remains. Neither stock nor transformed 1Password may enter a shipping
-catalog on this WebKit runtime.
+Two deny-only facades preserve safe failure semantics without granting the
+missing authority. A document-scoped `clients.matchAll()` returns one frozen
+empty cohort because a background document has no ServiceWorker WindowClient
+inventory and Zephium independently enforces the single-popup lease. Native
+messaging permission is removed; `connectNative()` returns a bounded Port that
+disconnects on the next microtask, while `sendNativeMessage()` rejects (or
+settles its callback with no response). No identifier is resolved, no bytes are
+serialized, and no process is contacted. 1Password consequently records
+`PortClosed`, resets its desktop-connection state, and continues its
+extension-first initialization. Callback denial cannot expose a native
+`runtime.lastError`, and the receipt discloses that degradation.
+
+This is a substantial positive gate, not a compatibility claim. The isolated
+probe still does not observe the static content-prelude marker, and autofill,
+save, passkeys, account sign-in, onboarding action routing, offscreen-storage
+migration, clean installed restart, and release resource budgets remain
+unproven. The package dynamically clears its action popup and expects a
+no-popup click to open onboarding; that exact browser-action transition still
+needs an end-to-end gate. Neither stock nor transformed 1Password may enter a
+shipping catalog until those workflows pass and publisher/legal distribution
+approval exists.
 
 Authenticating this real package exposed one legitimate package-admission
 ceiling: a current major extension contains a single resource slightly above

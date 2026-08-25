@@ -12,6 +12,17 @@
     throw new Error("Zephium WebKit navigation bridge has no extension runtime");
   }
 
+  const isExtensionExecutionContext = () => {
+    if (typeof document === "undefined") return true;
+    if (typeof runtime.getURL !== "function") return false;
+    try {
+      const extensionRoot = new URL(runtime.getURL("/"));
+      return extensionRoot.origin === location.origin;
+    } catch (_) {
+      return false;
+    }
+  };
+
   const installMarker = () => {
     Object.defineProperty(globalThis, installed, {
       value: true,
@@ -21,7 +32,7 @@
     });
   };
 
-  if (typeof document === "undefined") {
+  if (isExtensionExecutionContext()) {
     const webNavigation = api?.webNavigation;
     if (webNavigation == null || runtime.onMessage == null) {
       throw new Error("Zephium WebKit navigation bridge has no native event surface");

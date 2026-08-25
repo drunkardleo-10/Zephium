@@ -60,6 +60,7 @@ pub(super) enum BackgroundAdaptation {
     Absent,
     ClassicWrapper,
     ModuleWrapper,
+    ModuleDocumentWrapper,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -184,6 +185,7 @@ struct Surfaces {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct ContractFeatures {
+    document_background: bool,
     bookmarked: bool,
     favicon: bool,
     search: bool,
@@ -237,9 +239,11 @@ pub(super) fn validate(root: &Path) -> Result<ValidatedCompatibilityArtifact, St
         metadata.surfaces.managed_storage.as_deref() == Some("native-preserved-or-empty-read-only");
     let created_navigation_target_fallback =
         metadata.surfaces.created_navigation_target.as_deref() == Some("inert-event");
+    let document_background = metadata.surfaces.background == "module-document-wrapper";
     let (adaptations, limitations) = expected_contract(
         target,
         ContractFeatures {
+            document_background,
             bookmarked,
             favicon,
             search,
@@ -291,6 +295,7 @@ fn expected_contract(
     features: ContractFeatures,
 ) -> Result<(Vec<&'static str>, Vec<&'static str>), String> {
     let ContractFeatures {
+        document_background,
         bookmarked,
         favicon,
         search,
@@ -307,6 +312,16 @@ fn expected_contract(
         }
         let mut adaptations = NATIVE_ADAPTATIONS.to_vec();
         let mut limitations = NATIVE_LIMITATIONS.to_vec();
+        if document_background {
+            adaptations.extend([
+                "module-background-document-fallback-v1",
+                "module-background-document-clients-facade-v1",
+            ]);
+            limitations.extend([
+                "background-executes-as-nonpersistent-extension-document",
+                "background-document-client-inventory-empty",
+            ]);
+        }
         if options_page {
             adaptations.push("extension-options-page-routing-v1");
             limitations.push("options-page-opens-in-dedicated-window");
@@ -316,8 +331,16 @@ fn expected_contract(
             limitations.push("notifications-fallback-never-delivers-or-emits-events");
         }
         if native_messaging_omitted {
-            adaptations.push("product-prohibited-native-messaging-omission-v1");
-            limitations.push("arbitrary-native-messaging-unavailable");
+            adaptations.extend([
+                "product-prohibited-native-messaging-omission-v1",
+                "native-messaging-host-unavailable-facade-v1",
+            ]);
+            limitations.extend([
+                "arbitrary-native-messaging-unavailable",
+                "native-messaging-ports-disconnect-without-host",
+                "native-messaging-one-shot-requests-reject-without-host",
+                "native-messaging-callback-denial-has-no-last-error",
+            ]);
         }
         if managed_storage_fallback {
             adaptations.push("declared-storage-managed-fallback-v1");
@@ -328,6 +351,9 @@ fn expected_contract(
             limitations.push("created-navigation-target-events-not-emitted");
         }
         return Ok((adaptations, limitations));
+    }
+    if document_background {
+        return Err("brokered compatibility artifact declared a document background".into());
     }
     if native_messaging_omitted {
         return Err("brokered compatibility artifact omitted native messaging".into());
@@ -462,6 +488,7 @@ fn validate_surfaces(
         "absent" => BackgroundAdaptation::Absent,
         "classic-wrapper" => BackgroundAdaptation::ClassicWrapper,
         "module-wrapper" => BackgroundAdaptation::ModuleWrapper,
+        "module-document-wrapper" => BackgroundAdaptation::ModuleDocumentWrapper,
         _ => return Err("compatibility artifact background surface is invalid".into()),
     };
     let action_popup = match surfaces.action_popup.as_str() {

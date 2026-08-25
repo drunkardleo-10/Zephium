@@ -43,6 +43,8 @@ const SESSIONS_BRIDGE: &str = "__zephium__/webkit-sessions-v1.js";
 const OPTIONS_PAGE_BRIDGE: &str = "__zephium__/webkit-options-page-v1.js";
 const WEB_NAVIGATION_BRIDGE: &str = "__zephium__/webkit-web-navigation-v1.js";
 const MANAGED_STORAGE_BRIDGE: &str = "__zephium__/webkit-managed-storage-v1.js";
+const BACKGROUND_DOCUMENT_BRIDGE: &str = "__zephium__/webkit-background-document-v1.js";
+const NATIVE_MESSAGING_DENY_BRIDGE: &str = "__zephium__/webkit-native-messaging-deny-v1.js";
 const BACKGROUND_WRAPPER: &str = "__zephium_background_v1.js";
 const MAX_POPUP_HTML_BYTES: u64 = 2 * 1024 * 1024;
 
@@ -72,6 +74,12 @@ const WEB_NAVIGATION_BRIDGE_SOURCE: &str =
 const MANAGED_STORAGE_BRIDGE_SOURCE: &str = include_str!(
     "../../crates/zephium-extension-package/assets/macos/webkit-managed-storage-v1.js"
 );
+const BACKGROUND_DOCUMENT_BRIDGE_SOURCE: &str = include_str!(
+    "../../crates/zephium-extension-package/assets/macos/webkit-background-document-v1.js"
+);
+const NATIVE_MESSAGING_DENY_BRIDGE_SOURCE: &str = include_str!(
+    "../../crates/zephium-extension-package/assets/macos/webkit-native-messaging-deny-v1.js"
+);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ArtifactTarget {
@@ -97,6 +105,7 @@ enum WorkerKind {
     Absent,
     Classic,
     Module,
+    ModuleDocument,
 }
 
 impl WorkerKind {
@@ -105,8 +114,20 @@ impl WorkerKind {
             Self::Absent => "absent",
             Self::Classic => "classic-wrapper",
             Self::Module => "module-wrapper",
+            Self::ModuleDocument => "module-document-wrapper",
         }
     }
+
+    const fn uses_document_background(self) -> bool {
+        matches!(self, Self::ModuleDocument)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum BackgroundEnvironment {
+    #[default]
+    ServiceWorker,
+    Document,
 }
 
 struct TransformPlan {
@@ -142,11 +163,13 @@ struct ExtensionBridgePlan {
     recent_sessions: bool,
     notifications_fallback: bool,
     managed_storage_fallback: bool,
+    native_messaging_denied: bool,
     created_navigation_target_fallback: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct ReceiptFeatures {
+    document_background: bool,
     empty_bookmarks: bool,
     empty_favicon: bool,
     default_search: bool,
@@ -248,7 +271,33 @@ pub(crate) fn materialize(
     tree_index: &Path,
     output: &Path,
 ) -> Result<(), String> {
-    materialize_target(extension, tree_index, output, ArtifactTarget::NativeV3)
+    materialize_target(
+        extension,
+        tree_index,
+        output,
+        ArtifactTarget::NativeV3,
+        BackgroundEnvironment::ServiceWorker,
+    )
+}
+
+/// Materializes the same native compatibility profile while requesting
+/// WebKit's nonpersistent document background for a module MV3 worker.
+///
+/// This is an explicit compatibility adaptation, not an automatic fallback:
+/// the receipt binds it, product admission must review it, and classic workers
+/// are rejected because `importScripts` is not available in a document.
+pub(crate) fn materialize_document_background(
+    extension: &Path,
+    tree_index: &Path,
+    output: &Path,
+) -> Result<(), String> {
+    materialize_target(
+        extension,
+        tree_index,
+        output,
+        ArtifactTarget::NativeV3,
+        BackgroundEnvironment::Document,
+    )
 }
 
 /// Materializes the distinct brokered profile used by reviewed packages that
@@ -263,6 +312,7 @@ pub(crate) fn materialize_brokered(
         tree_index,
         output,
         ArtifactTarget::NativeBrokeredV1,
+        BackgroundEnvironment::ServiceWorker,
     )
 }
 
@@ -383,9 +433,10 @@ fn validate_receipt_surfaces(
     surfaces: &CompatibilitySurfaces,
     target: ArtifactTarget,
 ) -> Result<ReceiptFeatures, String> {
+    let document_background = surfaces.background == "module-document-wrapper";
     let background_valid = matches!(
         surfaces.background.as_str(),
-        "absent" | "classic-wrapper" | "module-wrapper"
+        "absent" | "classic-wrapper" | "module-wrapper" | "module-document-wrapper"
     );
     let popup_valid = matches!(
         surfaces.action_popup.as_str(),
@@ -440,6 +491,7 @@ fn validate_receipt_surfaces(
                 return Err("native compatibility receipt declared brokered surfaces".into());
             }
             Ok(ReceiptFeatures {
+                document_background,
                 options_page,
                 notifications_fallback,
                 native_messaging_omitted,
@@ -449,7 +501,8 @@ fn validate_receipt_surfaces(
             })
         }
         ArtifactTarget::NativeBrokeredV1 => {
-            if surfaces.background == "absent"
+            if document_background
+                || surfaces.background == "absent"
                 || native_messaging_omitted
                 || surfaces.history_search.as_deref() != Some("bounded-native-broker")
                 || !surfaces
@@ -479,6 +532,7 @@ fn validate_receipt_surfaces(
                 _ => return Err("compatibility receipt sessions surface is invalid".into()),
             };
             Ok(ReceiptFeatures {
+                document_background,
                 empty_bookmarks,
                 empty_favicon,
                 default_search,
@@ -498,6 +552,7 @@ fn receipt_contract(
     features: ReceiptFeatures,
 ) -> (Vec<&'static str>, Vec<&'static str>) {
     let ReceiptFeatures {
+        document_background,
         empty_bookmarks,
         empty_favicon,
         default_search,
@@ -523,6 +578,16 @@ fn receipt_contract(
         "same-document-web-navigation-limited-to-injected-frames",
         "history-state-navigation-requires-host-signal",
     ];
+    if document_background {
+        adaptations.extend([
+            "module-background-document-fallback-v1",
+            "module-background-document-clients-facade-v1",
+        ]);
+        limitations.extend([
+            "background-executes-as-nonpersistent-extension-document",
+            "background-document-client-inventory-empty",
+        ]);
+    }
     if empty_bookmarks {
         adaptations.push("empty-bookmarks-read-facade-v1");
         limitations.extend([
@@ -558,8 +623,16 @@ fn receipt_contract(
         limitations.push("notifications-fallback-never-delivers-or-emits-events");
     }
     if native_messaging_omitted {
-        adaptations.push("product-prohibited-native-messaging-omission-v1");
-        limitations.push("arbitrary-native-messaging-unavailable");
+        adaptations.extend([
+            "product-prohibited-native-messaging-omission-v1",
+            "native-messaging-host-unavailable-facade-v1",
+        ]);
+        limitations.extend([
+            "arbitrary-native-messaging-unavailable",
+            "native-messaging-ports-disconnect-without-host",
+            "native-messaging-one-shot-requests-reject-without-host",
+            "native-messaging-callback-denial-has-no-last-error",
+        ]);
     }
     if managed_storage_fallback {
         adaptations.push("declared-storage-managed-fallback-v1");
@@ -601,6 +674,7 @@ fn materialize_target(
     tree_index: &Path,
     output: &Path,
     target: ArtifactTarget,
+    background_environment: BackgroundEnvironment,
 ) -> Result<(), String> {
     let (source_root, source_index) = extension_tree::verify_closed_tree(extension, tree_index)?;
     let final_output = absent_output_path(output)?;
@@ -610,7 +684,13 @@ fn materialize_target(
     reject_reserved_paths(&source_index)?;
 
     let manifest = read_indexed_file(&source_root, manifest_file(&source_index)?)?;
-    let plan = build_plan(&source_root, &source_index, &manifest, target)?;
+    let plan = build_plan(
+        &source_root,
+        &source_index,
+        &manifest,
+        target,
+        background_environment,
+    )?;
     enforce_output_budgets(&source_index, &plan)?;
 
     let parent = final_output
@@ -656,6 +736,20 @@ fn materialize_target(
             &staged_extension,
             MANAGED_STORAGE_BRIDGE,
             MANAGED_STORAGE_BRIDGE_SOURCE.as_bytes(),
+        )?;
+    }
+    if plan.worker.uses_document_background() {
+        write_new_file(
+            &staged_extension,
+            BACKGROUND_DOCUMENT_BRIDGE,
+            BACKGROUND_DOCUMENT_BRIDGE_SOURCE.as_bytes(),
+        )?;
+    }
+    if plan.native_messaging_omitted {
+        write_new_file(
+            &staged_extension,
+            NATIVE_MESSAGING_DENY_BRIDGE,
+            NATIVE_MESSAGING_DENY_BRIDGE_SOURCE.as_bytes(),
         )?;
     }
     if plan.empty_bookmarks {
@@ -728,6 +822,7 @@ fn materialize_target(
     let (adaptations, limitations) = receipt_contract(
         target,
         ReceiptFeatures {
+            document_background: plan.worker.uses_document_background(),
             empty_bookmarks: plan.empty_bookmarks,
             empty_favicon: plan.empty_favicon,
             default_search: plan.default_search,
@@ -898,6 +993,7 @@ fn build_plan(
     index: &CanonicalExtensionTreeIndex,
     manifest_bytes: &[u8],
     target: ArtifactTarget,
+    background_environment: BackgroundEnvironment,
 ) -> Result<TransformPlan, String> {
     let bounded = parse_bounded_json(manifest_bytes, BoundedJsonLimits::extension_manifest())
         .map_err(|error| format!("cannot adapt invalid extension manifest: {error}"))?;
@@ -962,6 +1058,7 @@ fn build_plan(
         recent_sessions,
         notifications_fallback,
         managed_storage_fallback,
+        native_messaging_denied: native_messaging_omitted,
         created_navigation_target_fallback,
     };
     let content_scripts = adapt_content_scripts(
@@ -975,7 +1072,8 @@ fn build_plan(
         same_document_navigation: same_document_navigation_routes != 0,
         ..bridges
     };
-    let (worker, background_wrapper) = adapt_background(&mut root, index, background_bridges)?;
+    let (worker, background_wrapper) =
+        adapt_background(&mut root, index, background_bridges, background_environment)?;
     let popup_path = action_popup_path(&root)?;
     let action_popup = popup_path.is_some();
     let extension_pages = if history_broker_search {
@@ -998,6 +1096,7 @@ fn build_plan(
                     ExtensionBridgePlan {
                         notifications_fallback,
                         managed_storage_fallback,
+                        native_messaging_denied: native_messaging_omitted,
                         ..ExtensionBridgePlan::default()
                     },
                     options_page.as_deref(),
@@ -1290,18 +1389,34 @@ fn adapt_background(
     root: &mut Map<String, Value>,
     tree: &CanonicalExtensionTreeIndex,
     bridges: ExtensionBridgePlan,
+    environment: BackgroundEnvironment,
 ) -> Result<(WorkerKind, Option<Vec<u8>>), String> {
     let Some(background) = root.get_mut("background") else {
+        if environment == BackgroundEnvironment::Document {
+            return Err("document background compatibility requires an MV3 module worker".into());
+        }
         return Ok((WorkerKind::Absent, None));
     };
     let background = background
         .as_object_mut()
         .ok_or_else(|| "extension background is not an object".to_owned())?;
-    let kind = match background.get("type").and_then(Value::as_str) {
+    let source_kind = match background.get("type").and_then(Value::as_str) {
         None | Some("classic") => WorkerKind::Classic,
         Some("module") => WorkerKind::Module,
         Some(_) => return Err("extension background type is unsupported".into()),
     };
+    if environment == BackgroundEnvironment::Document {
+        if source_kind != WorkerKind::Module {
+            return Err("document background compatibility requires a module worker".into());
+        }
+        for field in ["page", "scripts", "persistent", "preferred_environment"] {
+            if background.contains_key(field) {
+                return Err(format!(
+                    "document background compatibility refuses existing background.{field}"
+                ));
+            }
+        }
+    }
     let original = background
         .get("service_worker")
         .ok_or_else(|| "extension background omitted service_worker".to_owned())?;
@@ -1314,6 +1429,22 @@ fn adapt_background(
         "service_worker".to_owned(),
         Value::String(BACKGROUND_WRAPPER.to_owned()),
     );
+    let kind = if environment == BackgroundEnvironment::Document {
+        background.insert(
+            "scripts".to_owned(),
+            Value::Array(vec![Value::String(BACKGROUND_WRAPPER.to_owned())]),
+        );
+        background.insert(
+            "preferred_environment".to_owned(),
+            Value::Array(vec![
+                Value::String("document".to_owned()),
+                Value::String("service_worker".to_owned()),
+            ]),
+        );
+        WorkerKind::ModuleDocument
+    } else {
+        source_kind
+    };
     let wrapper = match kind {
         WorkerKind::Classic => {
             let prelude = js_string(&format!("/{API_PRELUDE}"))?;
@@ -1324,6 +1455,10 @@ fn adapt_background(
             let managed_storage = bridges
                 .managed_storage_fallback
                 .then(|| js_string(&format!("/{MANAGED_STORAGE_BRIDGE}")))
+                .transpose()?;
+            let native_messaging = bridges
+                .native_messaging_denied
+                .then(|| js_string(&format!("/{NATIVE_MESSAGING_DENY_BRIDGE}")))
                 .transpose()?;
             let messaging = bridges
                 .extension_page_messaging
@@ -1358,6 +1493,7 @@ fn adapt_background(
                 Some(prelude),
                 notifications,
                 managed_storage,
+                native_messaging,
                 bookmarks,
                 favicon,
                 messaging,
@@ -1373,8 +1509,11 @@ fn adapt_background(
             .join(", ");
             format!("importScripts({imports});\n")
         }
-        WorkerKind::Module => {
+        WorkerKind::Module | WorkerKind::ModuleDocument => {
             let prelude = js_string(&format!("./{API_PRELUDE}"))?;
+            let background_document = (environment == BackgroundEnvironment::Document)
+                .then(|| js_string(&format!("./{BACKGROUND_DOCUMENT_BRIDGE}")))
+                .transpose()?;
             let notifications = bridges
                 .notifications_fallback
                 .then(|| js_string(&format!("./{NOTIFICATIONS_BRIDGE}")))
@@ -1382,6 +1521,10 @@ fn adapt_background(
             let managed_storage = bridges
                 .managed_storage_fallback
                 .then(|| js_string(&format!("./{MANAGED_STORAGE_BRIDGE}")))
+                .transpose()?;
+            let native_messaging = bridges
+                .native_messaging_denied
+                .then(|| js_string(&format!("./{NATIVE_MESSAGING_DENY_BRIDGE}")))
                 .transpose()?;
             let messaging = bridges
                 .extension_page_messaging
@@ -1413,11 +1556,17 @@ fn adapt_background(
                 .transpose()?;
             let original = js_string(&format!("./{original}"))?;
             let mut wrapper = format!("import {prelude};\n");
+            if let Some(background_document) = background_document {
+                wrapper.push_str(&format!("import {background_document};\n"));
+            }
             if let Some(notifications) = notifications {
                 wrapper.push_str(&format!("import {notifications};\n"));
             }
             if let Some(managed_storage) = managed_storage {
                 wrapper.push_str(&format!("import {managed_storage};\n"));
+            }
+            if let Some(native_messaging) = native_messaging {
+                wrapper.push_str(&format!("import {native_messaging};\n"));
             }
             if let Some(bookmarks) = bookmarks {
                 wrapper.push_str(&format!("import {bookmarks};\n"));
@@ -1596,6 +1745,11 @@ fn inject_extension_page_preludes(
             "<script src=\"/{MANAGED_STORAGE_BRIDGE}\"></script>"
         ));
     }
+    if bridges.native_messaging_denied {
+        tags.push_str(&format!(
+            "<script src=\"/{NATIVE_MESSAGING_DENY_BRIDGE}\"></script>"
+        ));
+    }
     if bridges.empty_bookmarks {
         tags.push_str(&format!("<script src=\"/{BOOKMARKS_BRIDGE}\"></script>"));
     }
@@ -1769,6 +1923,8 @@ fn enforce_output_budgets(
 ) -> Result<(), String> {
     let added_files = 1_usize
         + usize::from(plan.background_wrapper.is_some())
+        + usize::from(plan.worker.uses_document_background())
+        + usize::from(plan.native_messaging_omitted)
         + usize::from(plan.notifications_fallback)
         + usize::from(plan.managed_storage_fallback)
         + usize::from(plan.empty_bookmarks)
@@ -1782,6 +1938,8 @@ fn enforce_output_budgets(
             plan.same_document_navigation_routes != 0 || plan.created_navigation_target_fallback,
         );
     let added_entries = 3_usize
+        + usize::from(plan.worker.uses_document_background())
+        + usize::from(plan.native_messaging_omitted)
         + usize::from(plan.notifications_fallback)
         + usize::from(plan.managed_storage_fallback)
         + usize::from(plan.empty_bookmarks)
@@ -1806,6 +1964,11 @@ fn enforce_output_budgets(
             .then_some(NOTIFICATIONS_BRIDGE_SOURCE.as_bytes()),
         plan.managed_storage_fallback
             .then_some(MANAGED_STORAGE_BRIDGE_SOURCE.as_bytes()),
+        plan.worker
+            .uses_document_background()
+            .then_some(BACKGROUND_DOCUMENT_BRIDGE_SOURCE.as_bytes()),
+        plan.native_messaging_omitted
+            .then_some(NATIVE_MESSAGING_DENY_BRIDGE_SOURCE.as_bytes()),
         plan.empty_bookmarks
             .then_some(BOOKMARKS_BRIDGE_SOURCE.as_bytes()),
         plan.empty_favicon
@@ -1878,6 +2041,20 @@ fn enforce_output_budgets(
         .and_then(|bytes| {
             bytes.checked_add(if plan.managed_storage_fallback {
                 MANAGED_STORAGE_BRIDGE_SOURCE.len() as u64
+            } else {
+                0
+            })
+        })
+        .and_then(|bytes| {
+            bytes.checked_add(if plan.worker.uses_document_background() {
+                BACKGROUND_DOCUMENT_BRIDGE_SOURCE.len() as u64
+            } else {
+                0
+            })
+        })
+        .and_then(|bytes| {
+            bytes.checked_add(if plan.native_messaging_omitted {
+                NATIVE_MESSAGING_DENY_BRIDGE_SOURCE.len() as u64
             } else {
                 0
             })
@@ -2191,6 +2368,10 @@ mod tests {
                 .and_then(Value::as_str),
             Some(BACKGROUND_WRAPPER)
         );
+        assert!(manifest.pointer("/background/scripts").is_none());
+        assert!(manifest
+            .pointer("/background/preferred_environment")
+            .is_none());
         assert_eq!(
             manifest
                 .pointer("/content_scripts/0/js/0")
@@ -2221,6 +2402,92 @@ mod tests {
             &first.join(ARTIFACT_TREE_INDEX),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn document_background_is_explicit_module_only_and_receipt_bound() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir(&source).unwrap();
+        let index = fixture(
+            &source,
+            Some("module"),
+            b"<!doctype html><html><head></head><body></body></html>",
+        );
+        let output = temp.path().join("document-background");
+        materialize_document_background(&source, &index, &output).unwrap();
+
+        let manifest: Value = serde_json::from_slice(
+            &fs::read(output.join(ARTIFACT_EXTENSION).join("manifest.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            manifest.pointer("/background/service_worker"),
+            Some(&Value::String(BACKGROUND_WRAPPER.to_owned()))
+        );
+        assert_eq!(
+            manifest.pointer("/background/scripts"),
+            Some(&serde_json::json!([BACKGROUND_WRAPPER]))
+        );
+        assert_eq!(
+            manifest.pointer("/background/preferred_environment"),
+            Some(&serde_json::json!(["document", "service_worker"]))
+        );
+        assert_eq!(
+            manifest.pointer("/background/type"),
+            Some(&Value::from("module"))
+        );
+        let wrapper =
+            fs::read_to_string(output.join(ARTIFACT_EXTENSION).join(BACKGROUND_WRAPPER)).unwrap();
+        assert!(wrapper.contains(&format!("import \"./{BACKGROUND_DOCUMENT_BRIDGE}\";")));
+        assert!(output
+            .join(ARTIFACT_EXTENSION)
+            .join(BACKGROUND_DOCUMENT_BRIDGE)
+            .is_file());
+
+        let receipt: Value =
+            serde_json::from_slice(&fs::read(output.join(ARTIFACT_METADATA)).unwrap()).unwrap();
+        assert_eq!(
+            receipt.pointer("/surfaces/background"),
+            Some(&Value::from("module-document-wrapper"))
+        );
+        assert!(receipt
+            .pointer("/adaptations")
+            .and_then(Value::as_array)
+            .unwrap()
+            .contains(&Value::from("module-background-document-fallback-v1")));
+        assert!(receipt
+            .pointer("/adaptations")
+            .and_then(Value::as_array)
+            .unwrap()
+            .contains(&Value::from("module-background-document-clients-facade-v1")));
+        assert!(receipt
+            .pointer("/limitations")
+            .and_then(Value::as_array)
+            .unwrap()
+            .contains(&Value::from(
+                "background-executes-as-nonpersistent-extension-document"
+            )));
+        assert!(receipt
+            .pointer("/limitations")
+            .and_then(Value::as_array)
+            .unwrap()
+            .contains(&Value::from("background-document-client-inventory-empty")));
+        validate_release_input(&output).unwrap();
+
+        let classic = temp.path().join("classic");
+        fs::create_dir(&classic).unwrap();
+        let classic_index = fixture(
+            &classic,
+            None,
+            b"<!doctype html><html><head></head><body></body></html>",
+        );
+        assert!(materialize_document_background(
+            &classic,
+            &classic_index,
+            &temp.path().join("classic-output")
+        )
+        .is_err());
     }
 
     #[test]
@@ -2312,9 +2579,20 @@ mod tests {
             fs::read(extension.join(MANAGED_STORAGE_BRIDGE)).unwrap(),
             MANAGED_STORAGE_BRIDGE_SOURCE.as_bytes()
         );
-        assert!(fs::read_to_string(extension.join(BACKGROUND_WRAPPER))
-            .unwrap()
-            .contains(MANAGED_STORAGE_BRIDGE));
+        assert_eq!(
+            fs::read(extension.join(NATIVE_MESSAGING_DENY_BRIDGE)).unwrap(),
+            NATIVE_MESSAGING_DENY_BRIDGE_SOURCE.as_bytes()
+        );
+        let wrapper = fs::read_to_string(extension.join(BACKGROUND_WRAPPER)).unwrap();
+        let api = wrapper.find(API_PRELUDE).unwrap();
+        let managed = wrapper.find(MANAGED_STORAGE_BRIDGE).unwrap();
+        let denied = wrapper.find(NATIVE_MESSAGING_DENY_BRIDGE).unwrap();
+        let worker = wrapper.find("worker.js").unwrap();
+        assert!(api < managed && managed < denied && denied < worker);
+        let popup = fs::read_to_string(extension.join("ui/popup.html")).unwrap();
+        assert!(popup.contains(&format!(
+            "<script src=\"/{MANAGED_STORAGE_BRIDGE}\"></script><script src=\"/{NATIVE_MESSAGING_DENY_BRIDGE}\"></script>"
+        )));
         let metadata: Value =
             serde_json::from_slice(&fs::read(artifact.join(ARTIFACT_METADATA)).unwrap()).unwrap();
         assert_eq!(
@@ -2336,12 +2614,32 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
+            .any(|value| value == "native-messaging-host-unavailable-facade-v1"));
+        assert!(metadata["adaptations"]
+            .as_array()
+            .unwrap()
+            .iter()
             .any(|value| value == "declared-storage-managed-fallback-v1"));
         assert!(metadata["limitations"]
             .as_array()
             .unwrap()
             .iter()
             .any(|value| value == "arbitrary-native-messaging-unavailable"));
+        assert!(metadata["limitations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == "native-messaging-ports-disconnect-without-host"));
+        assert!(metadata["limitations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == "native-messaging-one-shot-requests-reject-without-host"));
+        assert!(metadata["limitations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == "native-messaging-callback-denial-has-no-last-error"));
         assert!(metadata["limitations"]
             .as_array()
             .unwrap()
@@ -2722,8 +3020,13 @@ mod tests {
             "background".into(),
             serde_json::json!({"service_worker":"workers/original.js"}),
         );
-        let (kind, wrapper) =
-            adapt_background(&mut root, &tree, ExtensionBridgePlan::default()).unwrap();
+        let (kind, wrapper) = adapt_background(
+            &mut root,
+            &tree,
+            ExtensionBridgePlan::default(),
+            BackgroundEnvironment::ServiceWorker,
+        )
+        .unwrap();
         assert_eq!(kind, WorkerKind::Classic);
         assert_eq!(
             String::from_utf8(wrapper.unwrap()).unwrap(),
