@@ -30,6 +30,7 @@ const ARTIFACT_METADATA: &str = "ZEPHIUM-COMPATIBILITY.json";
 const ARTIFACT_EXTENSION: &str = "extension";
 const ARTIFACT_TREE_INDEX: &str = "authenticated-extension-tree.json";
 const NATIVE_TARGET: &str = "webkit-macos-native-v3";
+const PUBLISHER_NATIVE_TARGET: &str = "webkit-macos-native-publisher-v1";
 const BROKERED_TARGET: &str = "webkit-macos-native-brokered-v1";
 const API_PRELUDE: &str = "__zephium__/webkit-api-v1.js";
 const NOTIFICATIONS_BRIDGE: &str = "__zephium__/webkit-notifications-v1.js";
@@ -84,6 +85,7 @@ const NATIVE_MESSAGING_DENY_BRIDGE_SOURCE: &str = include_str!(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ArtifactTarget {
     NativeV3,
+    NativePublisherV1,
     NativeBrokeredV1,
 }
 
@@ -91,12 +93,17 @@ impl ArtifactTarget {
     const fn label(self) -> &'static str {
         match self {
             Self::NativeV3 => NATIVE_TARGET,
+            Self::NativePublisherV1 => PUBLISHER_NATIVE_TARGET,
             Self::NativeBrokeredV1 => BROKERED_TARGET,
         }
     }
 
     const fn requires_history_broker(self) -> bool {
         matches!(self, Self::NativeBrokeredV1)
+    }
+
+    const fn requires_publisher_native_messaging(self) -> bool {
+        matches!(self, Self::NativePublisherV1)
     }
 }
 
@@ -142,6 +149,7 @@ struct TransformPlan {
     same_document_navigation_routes: usize,
     notifications_fallback: bool,
     native_messaging_omitted: bool,
+    publisher_native_messaging: bool,
     managed_storage_fallback: bool,
     created_navigation_target_fallback: bool,
     history_broker_search: bool,
@@ -177,6 +185,7 @@ struct ReceiptFeatures {
     options_page: bool,
     notifications_fallback: bool,
     native_messaging_omitted: bool,
+    publisher_native_messaging: bool,
     managed_storage_fallback: bool,
     created_navigation_target_fallback: bool,
 }
@@ -300,6 +309,22 @@ pub(crate) fn materialize_document_background(
     )
 }
 
+/// Materializes the native profile that preserves a source `nativeMessaging`
+/// declaration for a separately sealed exact publisher-host policy.
+pub(crate) fn materialize_publisher_native(
+    extension: &Path,
+    tree_index: &Path,
+    output: &Path,
+) -> Result<(), String> {
+    materialize_target(
+        extension,
+        tree_index,
+        output,
+        ArtifactTarget::NativePublisherV1,
+        BackgroundEnvironment::ServiceWorker,
+    )
+}
+
 /// Materializes the distinct brokered profile used by reviewed packages that
 /// require Zephium's bounded read-only history adapter.
 pub(crate) fn materialize_brokered(
@@ -368,11 +393,13 @@ pub(crate) fn validate_release_input(
     }
     let target = match receipt.target.as_str() {
         NATIVE_TARGET => ArtifactTarget::NativeV3,
+        PUBLISHER_NATIVE_TARGET => ArtifactTarget::NativePublisherV1,
         BROKERED_TARGET => ArtifactTarget::NativeBrokeredV1,
         _ => return Err("compatibility receipt authority header drifted".into()),
     };
     let compatibility_target = match target {
         ArtifactTarget::NativeV3 => "macos.wkwebextension.v1",
+        ArtifactTarget::NativePublisherV1 => "macos.wkwebextension.v1",
         ArtifactTarget::NativeBrokeredV1 => "macos.wkwebextension-brokered.v1",
     };
     validate_compatibility_identity(&receipt.source, "source")?;
@@ -462,11 +489,13 @@ fn validate_receipt_surfaces(
         Some("native-preserved-or-inert-no-delivery") => true,
         _ => return Err("compatibility receipt notifications surface is invalid".into()),
     };
-    let native_messaging_omitted = match surfaces.native_messaging.as_deref() {
-        None => false,
-        Some("omitted-product-prohibited") => true,
-        _ => return Err("compatibility receipt native-messaging surface is invalid".into()),
-    };
+    let (native_messaging_omitted, publisher_native_messaging) =
+        match surfaces.native_messaging.as_deref() {
+            None => (false, false),
+            Some("omitted-product-prohibited") => (true, false),
+            Some("publisher-host-brokered") => (false, true),
+            _ => return Err("compatibility receipt native-messaging surface is invalid".into()),
+        };
     let managed_storage_fallback = match surfaces.managed_storage.as_deref() {
         None => false,
         Some("native-preserved-or-empty-read-only") => true,
@@ -480,13 +509,15 @@ fn validate_receipt_surfaces(
         }
     };
     match target {
-        ArtifactTarget::NativeV3 => {
+        ArtifactTarget::NativeV3 | ArtifactTarget::NativePublisherV1 => {
             if surfaces.history_search.is_some()
                 || surfaces.extension_pages.is_some()
                 || surfaces.bookmarks.is_some()
                 || surfaces.favicon.is_some()
                 || surfaces.search.is_some()
                 || surfaces.sessions.is_some()
+                || publisher_native_messaging != target.requires_publisher_native_messaging()
+                || (publisher_native_messaging && native_messaging_omitted)
             {
                 return Err("native compatibility receipt declared brokered surfaces".into());
             }
@@ -495,6 +526,7 @@ fn validate_receipt_surfaces(
                 options_page,
                 notifications_fallback,
                 native_messaging_omitted,
+                publisher_native_messaging,
                 managed_storage_fallback,
                 created_navigation_target_fallback,
                 ..ReceiptFeatures::default()
@@ -540,6 +572,7 @@ fn validate_receipt_surfaces(
                 options_page,
                 notifications_fallback,
                 native_messaging_omitted: false,
+                publisher_native_messaging: false,
                 managed_storage_fallback,
                 created_navigation_target_fallback,
             })
@@ -560,6 +593,7 @@ fn receipt_contract(
         options_page,
         notifications_fallback,
         native_messaging_omitted,
+        publisher_native_messaging,
         managed_storage_fallback,
         created_navigation_target_fallback,
     } = features;
@@ -632,6 +666,13 @@ fn receipt_contract(
             "native-messaging-ports-disconnect-without-host",
             "native-messaging-one-shot-requests-reject-without-host",
             "native-messaging-callback-denial-has-no-last-error",
+        ]);
+    }
+    if publisher_native_messaging {
+        adaptations.push("publisher-native-messaging-preservation-v1");
+        limitations.extend([
+            "native-messaging-requires-sealed-publisher-host-policy",
+            "native-messaging-requires-publisher-signed-host",
         ]);
     }
     if managed_storage_fallback {
@@ -830,6 +871,7 @@ fn materialize_target(
             options_page: plan.options_page.is_some(),
             notifications_fallback: plan.notifications_fallback,
             native_messaging_omitted: plan.native_messaging_omitted,
+            publisher_native_messaging: plan.publisher_native_messaging,
             managed_storage_fallback: plan.managed_storage_fallback,
             created_navigation_target_fallback: plan.created_navigation_target_fallback,
         },
@@ -910,6 +952,15 @@ fn materialize_target(
             .insert(
                 "native_messaging".to_owned(),
                 Value::String("omitted-product-prohibited".to_owned()),
+            );
+    }
+    if plan.publisher_native_messaging {
+        surfaces
+            .as_object_mut()
+            .expect("compatibility surfaces are an object")
+            .insert(
+                "native_messaging".to_owned(),
+                Value::String("publisher-host-brokered".to_owned()),
             );
     }
     if plan.managed_storage_fallback {
@@ -1014,6 +1065,16 @@ fn build_plan(
     } else {
         false
     };
+    let publisher_native_messaging = target.requires_publisher_native_messaging();
+    if publisher_native_messaging
+        && (!declares_permission(&root, "permissions", "nativeMessaging")?
+            || declares_permission(&root, "optional_permissions", "nativeMessaging")?)
+    {
+        return Err(
+            "publisher-native compatibility requires one required source nativeMessaging declaration"
+                .into(),
+        );
+    }
     let empty_bookmarks =
         history_broker_search && declares_permission(&root, "permissions", "bookmarks")?;
     let empty_favicon =
@@ -1131,6 +1192,7 @@ fn build_plan(
         same_document_navigation_routes,
         notifications_fallback,
         native_messaging_omitted,
+        publisher_native_messaging,
         managed_storage_fallback,
         created_navigation_target_fallback,
         history_broker_search,
@@ -2646,6 +2708,71 @@ mod tests {
             .iter()
             .any(|value| value == "managed-storage-empty-read-only"));
         validate_release_input(&artifact).unwrap();
+    }
+
+    #[test]
+    fn publisher_native_target_preserves_only_a_required_source_declaration() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir(&source).unwrap();
+        let index = fixture(
+            &source,
+            Some("module"),
+            b"<!doctype html><html><head></head><body></body></html>",
+        );
+        let manifest_path = source.join("manifest.json");
+        let mut manifest: Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["permissions"] = serde_json::json!(["nativeMessaging", "storage"]);
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        reindex(&source, &index);
+
+        let first = temp.path().join("first");
+        let second = temp.path().join("second");
+        materialize_publisher_native(&source, &index, &first).unwrap();
+        materialize_publisher_native(&source, &index, &second).unwrap();
+        assert_eq!(
+            fs::read(first.join(ARTIFACT_TREE_INDEX)).unwrap(),
+            fs::read(second.join(ARTIFACT_TREE_INDEX)).unwrap()
+        );
+        assert_eq!(
+            fs::read(first.join(ARTIFACT_METADATA)).unwrap(),
+            fs::read(second.join(ARTIFACT_METADATA)).unwrap()
+        );
+        let extension = first.join(ARTIFACT_EXTENSION);
+        let transformed: Value =
+            serde_json::from_slice(&fs::read(extension.join("manifest.json")).unwrap()).unwrap();
+        assert_eq!(
+            transformed["permissions"],
+            serde_json::json!(["nativeMessaging", "storage"])
+        );
+        assert!(!extension.join(NATIVE_MESSAGING_DENY_BRIDGE).exists());
+        let metadata: Value =
+            serde_json::from_slice(&fs::read(first.join(ARTIFACT_METADATA)).unwrap()).unwrap();
+        assert_eq!(
+            metadata["target"],
+            serde_json::json!(PUBLISHER_NATIVE_TARGET)
+        );
+        assert_eq!(
+            metadata["surfaces"]["native_messaging"],
+            serde_json::json!("publisher-host-brokered")
+        );
+        assert!(metadata["adaptations"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!(
+                "publisher-native-messaging-preservation-v1"
+            )));
+        validate_release_input(&first).unwrap();
+
+        manifest["permissions"] = serde_json::json!(["storage"]);
+        manifest["optional_permissions"] = serde_json::json!(["nativeMessaging"]);
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        reindex(&source, &index);
+        assert!(
+            materialize_publisher_native(&source, &index, &temp.path().join("optional-only"))
+                .is_err()
+        );
     }
 
     #[test]

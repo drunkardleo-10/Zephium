@@ -2072,6 +2072,19 @@ evidence rather than a compatibility claim. In a fresh real-browser profile,
 the clean 8.12.34.34 popup also remains at its loading surface and does not
 expose onboarding.
 
+The distinct non-authorizing `webkit-macos-native-publisher-v1` transform
+preserves that release's required `nativeMessaging` declaration without
+installing the ordinary deny facade. Its current 1Password lab output contains
+1,005 files and 45,169,856 bytes; manifest, tree, and canonical-index SHA-256
+values are `b64691fe84c02fed1299844c7ad532fbcccf47545a7dba96972628a20b95b025`,
+`5700796c6c56562bfe922dbbba966912d8394ceb2b87141a7e9d133f01831141`,
+and `78271c86738b68c057c3090382c86a3fe30acc03a90f771e567f0ec1890698c0`.
+The receipt explicitly requires a sealed publisher-host policy and a
+publisher-signed executable. It mints no such authority itself; until the exact
+installed 1Password host Team/signing identity is inspected and sealed into
+the lab profile, this artifact remains intentionally non-activatable through
+the publisher schema.
+
 A separate non-authorizing experiment bound the module's exported
 `initializeFinishedPromise` into a generated wrapper with an eight-second
 one-shot deadline. WebKit's public background-load callback returned in about
