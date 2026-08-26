@@ -20,6 +20,7 @@ mod native_namespace;
 mod native_ownership;
 mod package_pin;
 mod profile_policy;
+mod publisher_native_host;
 mod runtime;
 mod transient;
 
@@ -143,6 +144,12 @@ pub use profile_policy::{
     ExtensionProfilePolicyRevision, ExtensionSiteAccessScope,
     MAX_EXTENSION_PROFILE_POLICY_MUTATION_RETAINED_BYTES,
     MAX_EXTENSION_PROFILE_POLICY_RETAINED_BYTES, MAX_EXTENSION_SITE_DENIALS_PER_PROFILE,
+};
+pub use publisher_native_host::{
+    ExtensionMacosPublisherIdentity, ExtensionPublisherNativeHostError,
+    ExtensionPublisherNativeHostRequirement, MAX_EXTENSION_MACOS_SIGNING_IDENTIFIER_BYTES,
+    MAX_EXTENSION_MACOS_TEAM_IDENTIFIER_BYTES, MAX_EXTENSION_NATIVE_HOST_NAME_BYTES,
+    MAX_EXTENSION_PUBLISHER_NATIVE_HOST_RETAINED_BYTES,
 };
 pub use runtime::{
     ExtensionActiveTabGrantWitness, ExtensionCommittedRuntimeEligibilityError,

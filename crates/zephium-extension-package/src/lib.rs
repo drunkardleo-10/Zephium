@@ -31,6 +31,7 @@ mod digest;
 mod json;
 mod limits;
 mod manifest;
+mod native_messaging;
 mod relative_path;
 mod release;
 mod tree;
@@ -53,6 +54,11 @@ pub use manifest::{
     ExtensionUnresolvedDisplayText, ExtensionWebAccessibleAudience,
     ExtensionWebAccessibleResourceGroup, ResolvedExtensionManifestMetadata,
     TrustedExtensionDisplayText,
+};
+pub use native_messaging::{
+    decode_native_messaging_frame, encode_native_messaging_frame, NativeMessagingFrameLength,
+    NativeMessagingHostManifest, NativeMessagingHostManifestError, NativeMessagingHostName,
+    NativeMessagingMessageError,
 };
 pub use relative_path::{PortableRelativePath, PortableRelativePathError};
 pub use release::{

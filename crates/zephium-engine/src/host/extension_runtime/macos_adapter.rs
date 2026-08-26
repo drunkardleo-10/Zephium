@@ -129,6 +129,7 @@ pub(super) fn begin_native_activation(
         match prepare_native_runtime_activation(
             native_root,
             grants.native_snapshot(),
+            grants.publisher_native_host(),
             reservation.owner().backend,
             expected_owner,
             controller,

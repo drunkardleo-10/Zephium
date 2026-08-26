@@ -212,12 +212,15 @@ impl Error for MacosNativeGrantPlanError {}
 pub(super) fn compile_native_grant_plan(
     snapshot: &ExtensionNativeGrantSnapshot,
     backend: zephium_core::extensions::ExtensionRuntimeBackendTarget,
+    publisher_native_messaging: bool,
 ) -> Result<MacosNativeGrantPlan, MacosNativeGrantPlanError> {
     let runtime = snapshot.runtime();
     if backend != zephium_core::extensions::ExtensionRuntimeBackendTarget::MacosNative {
         return Err(MacosNativeGrantPlanError::UnsupportedApiPermission);
     }
-    let schema = if snapshot.compatibility_target().as_str()
+    let schema = if publisher_native_messaging {
+        MacosNativeGrantSchema::WkWebExtensionPublisherNativeMessagingV1
+    } else if snapshot.compatibility_target().as_str()
         == zephium_core::extensions::MACOS_NATIVE_BROKERED_COMPATIBILITY_TARGET
     {
         MacosNativeGrantSchema::WkWebExtensionBrokeredV1
@@ -505,6 +508,7 @@ enum MacosNativeApiPermissionDisposition {
 pub(super) enum MacosNativeGrantSchema {
     WkWebExtensionV1 = 1,
     WkWebExtensionBrokeredV1 = 2,
+    WkWebExtensionPublisherNativeMessagingV1 = 3,
 }
 
 /// Mandatory semantics for applying one complete compiled plan.
@@ -526,6 +530,20 @@ impl MacosNativeGrantSchema {
         match self {
             Self::WkWebExtensionV1 => Self::wk_web_extension_v1_permission(name),
             Self::WkWebExtensionBrokeredV1 => Self::wk_web_extension_brokered_v1_permission(name),
+            Self::WkWebExtensionPublisherNativeMessagingV1 => {
+                Self::wk_web_extension_publisher_native_messaging_v1_permission(name)
+            }
+        }
+    }
+
+    fn wk_web_extension_publisher_native_messaging_v1_permission(
+        name: &str,
+    ) -> Result<MacosNativeApiPermissionDisposition, MacosNativeGrantPlanError> {
+        match name {
+            "nativeMessaging" => Ok(MacosNativeApiPermissionDisposition::Native(
+                MacosNativeApiPermission::NativeMessaging,
+            )),
+            _ => Self::wk_web_extension_v1_permission(name),
         }
     }
 

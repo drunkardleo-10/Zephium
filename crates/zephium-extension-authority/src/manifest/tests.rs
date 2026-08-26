@@ -1,8 +1,9 @@
 use sha2::{Digest, Sha256};
 use zephium_core::extensions::{
     ApiPermissionName, ExtensionAuthorityId, ExtensionCompatibilityLevel,
-    ExtensionCompatibilityTargetId, ExtensionManifestDeclaration, ExtensionManifestDigest,
-    ExtensionPackageIdentity, ExtensionPackageKey, ExtensionPackageRevision,
+    ExtensionCompatibilityTargetId, ExtensionMacosPublisherIdentity, ExtensionManifestDeclaration,
+    ExtensionManifestDigest, ExtensionPackageIdentity, ExtensionPackageKey,
+    ExtensionPackageRevision, ExtensionPublisherNativeHostRequirement,
     ExtensionUnmodeledDeclarationName, MAX_EXTENSION_API_PERMISSIONS,
     MAX_EXTENSION_UNMODELED_DECLARATIONS,
 };
@@ -274,7 +275,79 @@ fn profile_for_catalog(
             admission_digest: admitted.admission_digest(),
         },
         policy,
+        publisher_native_host: None,
     }
+}
+
+#[test]
+fn publisher_native_host_requirement_is_sealed_package_and_declaration_bound() {
+    let fixture = make_fixture(
+        br#"{"manifest_version":3,"name":"Fixture","version":"1","permissions":["nativeMessaging"]}"#,
+        71,
+        73,
+        1,
+        1,
+        1,
+    );
+    let mut sealed = profile(
+        &fixture,
+        ProductExtensionRuntimeTarget::MacosNative,
+        MACOS_NATIVE_COMPATIBILITY_TARGET,
+        ExtensionCompatibilityLevel::Compatible,
+    );
+    let publisher =
+        ExtensionMacosPublisherIdentity::new("A1B2C3D4E5", "com.example.browser-support").unwrap();
+    sealed.publisher_native_host = Some(
+        ExtensionPublisherNativeHostRequirement::new(
+            fixture.catalog.catalog().packages()[0].identity().clone(),
+            "com.example.publisher",
+            "aeblfdkhhhdcdjpifhhbdiojplfjncoa",
+            publisher,
+        )
+        .unwrap(),
+    );
+    let authority = authority(sealed);
+    let admitted = authority
+        .admit_manifest(
+            &fixture.catalog,
+            ProductExtensionRuntimeTarget::MacosNative,
+            key(&fixture),
+            &fixture.tree,
+            &fixture.manifest,
+        )
+        .unwrap();
+    let requirement = admitted.publisher_native_host().unwrap();
+    assert_eq!(requirement.package(), admitted.package_identity());
+    assert_eq!(requirement.host_name(), "com.example.publisher");
+
+    let mut mismatch = profile(
+        &fixture,
+        ProductExtensionRuntimeTarget::MacosNative,
+        MACOS_NATIVE_COMPATIBILITY_TARGET,
+        ExtensionCompatibilityLevel::Compatible,
+    );
+    let wrong_package = ExtensionPackageIdentity::new(
+        mismatch.package.identity.authority(),
+        ExtensionPackageKey::from_bytes([99; 32]),
+        mismatch.package.identity.revision(),
+        mismatch.package.identity.payload(),
+        mismatch.package.identity.manifest_sha256(),
+        mismatch.package.identity.tree_sha256(),
+    );
+    mismatch.publisher_native_host = Some(
+        ExtensionPublisherNativeHostRequirement::new(
+            wrong_package,
+            "com.example.publisher",
+            "aeblfdkhhhdcdjpifhhbdiojplfjncoa",
+            ExtensionMacosPublisherIdentity::new("A1B2C3D4E5", "com.example.browser-support")
+                .unwrap(),
+        )
+        .unwrap(),
+    );
+    assert!(matches!(
+        ProductExtensionManifestAuthority::from_sealed_profiles(vec![mismatch].into_boxed_slice()),
+        Err(ProductExtensionManifestAuthorityError::InvalidProductConfiguration)
+    ));
 }
 
 fn authority(profile: SealedManifestProfile) -> ProductExtensionManifestAuthority {

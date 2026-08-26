@@ -12,6 +12,24 @@ pub const MAX_EXTENSION_MANIFEST_BYTES: usize = 1024 * 1024;
 /// than extension resources. Keeping this substantially below the manifest
 /// ceiling bounds release-channel reads without constraining package trees.
 pub const MAX_EXTENSION_COMPATIBILITY_RECEIPT_BYTES: usize = 64 * 1024;
+/// Maximum native-messaging host manifest bytes accepted before parsing.
+pub const MAX_NATIVE_MESSAGING_HOST_MANIFEST_BYTES: usize = 64 * 1024;
+/// Maximum retained heap charge for one parsed native-messaging host manifest.
+pub const MAX_NATIVE_MESSAGING_HOST_MANIFEST_RETAINED_BYTES: usize = 16 * 1024;
+/// Maximum bytes in one native-messaging host identifier.
+pub const MAX_NATIVE_MESSAGING_HOST_NAME_BYTES: usize = 255;
+/// Maximum bytes in one native-messaging host description.
+pub const MAX_NATIVE_MESSAGING_HOST_DESCRIPTION_BYTES: usize = 4 * 1024;
+/// Maximum bytes in one native-messaging executable path.
+pub const MAX_NATIVE_MESSAGING_HOST_PATH_BYTES: usize = 4 * 1024;
+/// Maximum exact Chromium origins admitted by one native host manifest.
+pub const MAX_NATIVE_MESSAGING_ALLOWED_ORIGINS: usize = 64;
+/// Maximum JSON payload bytes in either direction for one Zephium native port.
+///
+/// Chromium allows much larger browser-to-host frames, but one symmetric MiB
+/// ceiling bounds allocation and backpressure while retaining compatibility
+/// with its documented host-to-browser limit.
+pub const MAX_NATIVE_MESSAGING_MESSAGE_BYTES: usize = 1024 * 1024;
 /// Maximum heap charge retained by one admitted manifest resource plan.
 pub const MAX_EXTENSION_MANIFEST_PLAN_RETAINED_BYTES: usize = 2 * 1024 * 1024;
 /// Maximum bytes in one content-script include/exclude glob.
@@ -95,6 +113,12 @@ const _: () = assert!(MAX_EXTENSION_PATH_COMPONENT_BYTES <= MAX_EXTENSION_RELATI
 const _: () = assert!(MAX_CHROMIUM_MANIFEST_KEY_BASE64_BYTES <= MAX_EXTENSION_MANIFEST_BYTES);
 const _: () = assert!(MAX_CRX3_HEADER_BYTES <= MAX_EXTENSION_MANIFEST_BYTES);
 const _: () = assert!(MAX_EXTENSION_COMPATIBILITY_RECEIPT_BYTES <= MAX_EXTENSION_MANIFEST_BYTES);
+const _: () = assert!(MAX_NATIVE_MESSAGING_HOST_MANIFEST_BYTES <= MAX_EXTENSION_MANIFEST_BYTES);
+const _: () =
+    assert!(MAX_NATIVE_MESSAGING_HOST_NAME_BYTES < MAX_NATIVE_MESSAGING_HOST_MANIFEST_BYTES);
+const _: () =
+    assert!(MAX_NATIVE_MESSAGING_HOST_PATH_BYTES < MAX_NATIVE_MESSAGING_HOST_MANIFEST_BYTES);
+const _: () = assert!(MAX_NATIVE_MESSAGING_MESSAGE_BYTES <= u32::MAX as usize);
 const _: () = assert!(MAX_EXTENSION_LOCALE_MESSAGES_BYTES <= MAX_EXTENSION_TREE_FILE_BYTES);
 const _: () =
     assert!(MAX_EXTENSION_LOCALE_MESSAGE_KEY_BYTES <= MAX_EXTENSION_METADATA_STRING_BYTES);

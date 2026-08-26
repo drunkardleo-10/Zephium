@@ -2057,6 +2057,12 @@ macro_rules! impl_runtime_provider {
                 self.retained_bytes
             }
 
+            fn publisher_native_host(
+                &self,
+            ) -> Option<&zephium_core::extensions::ExtensionPublisherNativeHostRequirement> {
+                self.core.snapshot.publisher_native_host()
+            }
+
             fn visit_resource(
                 &mut self,
                 descriptor: ExtensionRuntimeResource,

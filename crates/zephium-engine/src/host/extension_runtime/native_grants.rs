@@ -4,7 +4,8 @@ use std::fmt;
 use std::mem::size_of;
 
 use zephium_core::extensions::{
-    ExtensionNativeGrantRequirement, ExtensionNativeGrantSnapshot, ExtensionRuntimeBackendTarget,
+    ExtensionNativeGrantDecision, ExtensionNativeGrantRequirement, ExtensionNativeGrantSnapshot,
+    ExtensionPublisherNativeHostRequirement, ExtensionRuntimeBackendTarget,
     ExtensionRuntimeFingerprint,
 };
 use zephium_extension_runtime_api::{
@@ -19,6 +20,7 @@ use zephium_extension_runtime_api::{
 /// the complete lifetime of the reservation.
 pub(super) struct EngineNativeGrantSnapshot {
     grants: ExtensionNativeGrantSnapshot,
+    publisher_native_host: Option<Box<ExtensionPublisherNativeHostRequirement>>,
 }
 
 impl EngineNativeGrantSnapshot {
@@ -29,22 +31,30 @@ impl EngineNativeGrantSnapshot {
         if !activation_shape_is_consistent(&context)
             || !owner_matches_runtime(&context)
             || !complete_required_grants_are_satisfied(context.native_grants())
+            || !publisher_native_host_is_consistent(&context)
         {
             return Err(ExtensionRuntimeHostBindError::InternalInvariant);
         }
 
         let expected_runtime = context.fingerprint().clone();
+        let publisher_native_host = context.publisher_native_host().cloned().map(Box::new);
         let grants = context.into_native_grant_snapshot();
         if grants.runtime() != &expected_runtime {
             return Err(ExtensionRuntimeHostBindError::InternalInvariant);
         }
-        Ok(Self { grants })
+        Ok(Self {
+            grants,
+            publisher_native_host,
+        })
     }
 
     #[cfg(test)]
     pub(super) fn from_valid_core_snapshot_for_test(grants: ExtensionNativeGrantSnapshot) -> Self {
         assert!(complete_required_snapshot_grants_are_satisfied(&grants));
-        Self { grants }
+        Self {
+            grants,
+            publisher_native_host: None,
+        }
     }
 
     pub(super) const fn runtime(&self) -> &ExtensionRuntimeFingerprint {
@@ -59,6 +69,10 @@ impl EngineNativeGrantSnapshot {
         &self.grants
     }
 
+    pub(super) fn publisher_native_host(&self) -> Option<&ExtensionPublisherNativeHostRequirement> {
+        self.publisher_native_host.as_deref()
+    }
+
     /// Exact reservation storage charged beside the matching authority state.
     ///
     /// The shared manifest/grant allocations are already charged in full by
@@ -66,9 +80,14 @@ impl EngineNativeGrantSnapshot {
     /// method therefore includes only this wrapper and snapshot's new inline
     /// storage. The enclosing reservation separately charges its Box.
     pub(super) const fn operation_authority_companion_retained_bytes(&self) -> usize {
+        let publisher_native_host_bytes = match &self.publisher_native_host {
+            Some(requirement) => requirement.retained_bytes(),
+            None => 0,
+        };
         size_of::<Self>()
             .saturating_sub(size_of::<ExtensionNativeGrantSnapshot>())
             .saturating_add(self.grants.operation_authority_companion_retained_bytes())
+            .saturating_add(publisher_native_host_bytes)
     }
 }
 
@@ -78,6 +97,10 @@ impl fmt::Debug for EngineNativeGrantSnapshot {
             .debug_struct("EngineNativeGrantSnapshot")
             .field("runtime", &"<redacted>")
             .field("grants", &"<redacted>")
+            .field(
+                "publisher_native_host",
+                &self.publisher_native_host.as_ref().map(|_| "<redacted>"),
+            )
             .finish()
     }
 }
@@ -116,6 +139,19 @@ fn owner_matches_runtime(context: &ExtensionRuntimeHostActivationContext<'_>) ->
         && context.native_grants().grant_revision() == runtime.grant_revision()
         && context.native_grants().grant_digest() == runtime.grant_digest()
         && context.native_grants().browsing_context() == runtime.browsing_context()
+}
+
+fn publisher_native_host_is_consistent(
+    context: &ExtensionRuntimeHostActivationContext<'_>,
+) -> bool {
+    let Some(requirement) = context.publisher_native_host() else {
+        return true;
+    };
+    requirement.package() == context.fingerprint().package()
+        && context.native_grants().api_grants().any(|grant| {
+            grant.name().as_str() == "nativeMessaging"
+                && grant.decision() == ExtensionNativeGrantDecision::Granted
+        })
 }
 
 fn complete_required_grants_are_satisfied(

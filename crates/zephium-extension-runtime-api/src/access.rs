@@ -8,6 +8,8 @@ use std::io::{self, Read};
 use std::marker::PhantomData;
 use std::path::{Component, Path, PathBuf};
 
+use zephium_core::extensions::ExtensionPublisherNativeHostRequirement;
+
 use crate::{ExtensionRuntimeResource, ExtensionRuntimeResourcePlan, ExtensionRuntimeTarget};
 
 /// Maximum deterministic control-plane memory attributed to one runtime owner,
@@ -208,6 +210,15 @@ pub trait ExtensionPackageAccessPort: Any + Send {
     /// include the Rust access wrapper itself. The query must be side-effect-free
     /// so a construction refusal returns unchanged provider state.
     fn retained_bytes(&self) -> usize;
+
+    /// Returns package-authority-derived publisher native-host metadata.
+    ///
+    /// The default keeps ordinary providers allocation-free. Implementations
+    /// that return a value must retain it inside the same authenticated
+    /// provider snapshot and include its memory in [`Self::retained_bytes`].
+    fn publisher_native_host(&self) -> Option<&ExtensionPublisherNativeHostRequirement> {
+        None
+    }
 
     /// Visits an authenticated package resource.
     fn visit_resource(
@@ -540,6 +551,13 @@ impl ExtensionPackageAccess {
     #[must_use]
     pub const fn resources(&self) -> &ExtensionRuntimeResourcePlan {
         &self.resources
+    }
+
+    /// Returns the exact publisher native-host requirement retained from the
+    /// authenticated package witness, when present.
+    #[must_use]
+    pub fn publisher_native_host(&self) -> Option<&ExtensionPublisherNativeHostRequirement> {
+        self.provider.publisher_native_host()
     }
 
     /// Returns bounded retained bytes attributed to this access object.

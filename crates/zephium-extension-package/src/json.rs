@@ -11,6 +11,7 @@ use crate::{
     MAX_EXTENSION_JSON_STRING_BYTES, MAX_EXTENSION_LOCALE_MESSAGES_BYTES,
     MAX_EXTENSION_MANIFEST_BYTES, MAX_EXTENSION_PACKAGE_LINES, MAX_EXTENSION_RELEASE_CATALOG_BYTES,
     MAX_EXTENSION_TREE_FILES, MAX_EXTENSION_TREE_INDEX_BYTES,
+    MAX_NATIVE_MESSAGING_HOST_MANIFEST_BYTES, MAX_NATIVE_MESSAGING_MESSAGE_BYTES,
 };
 
 // Root and package/provenance slack plus every scalar and container in the
@@ -82,6 +83,16 @@ impl BoundedJsonLimits {
     /// Limits for one non-authorizing compatibility-review receipt.
     pub const fn compatibility_receipt() -> Self {
         Self::for_bytes(MAX_EXTENSION_COMPATIBILITY_RECEIPT_BYTES)
+    }
+
+    /// Limits for a native-messaging host registration document.
+    pub const fn native_messaging_host_manifest() -> Self {
+        Self::for_bytes(MAX_NATIVE_MESSAGING_HOST_MANIFEST_BYTES)
+    }
+
+    /// Limits for one JSON native-messaging frame payload.
+    pub const fn native_messaging_message() -> Self {
+        Self::for_bytes(MAX_NATIVE_MESSAGING_MESSAGE_BYTES)
     }
 
     /// Limits for one authenticated default-locale `messages.json` document.

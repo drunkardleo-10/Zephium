@@ -23,8 +23,9 @@ use zephium_core::extensions::{
     ExtensionNativeGrantSnapshot, ExtensionNativeOwnershipEntry, ExtensionNativeOwnershipEntryCas,
     ExtensionNativeOwnershipIdentityError, ExtensionNativeOwnershipIntent,
     ExtensionNativeOwnershipPhase, ExtensionOperationAuthorityDenial,
-    ExtensionRuntimeBackendTarget, ExtensionRuntimeEligibility, ExtensionRuntimeFingerprint,
-    ExtensionRuntimeOperationAuthority, ExtensionUserInvocationKind,
+    ExtensionPublisherNativeHostRequirement, ExtensionRuntimeBackendTarget,
+    ExtensionRuntimeEligibility, ExtensionRuntimeFingerprint, ExtensionRuntimeOperationAuthority,
+    ExtensionUserInvocationKind,
 };
 use zephium_core::ids::ProfileId;
 
@@ -853,6 +854,7 @@ pub struct ExtensionRuntimeHostActivationContext<'binding> {
     expectation: ExtensionRuntimeNativeIdentityExpectation,
     target: ExtensionRuntimeTarget,
     native_grants: ExtensionNativeGrantProjection<'binding>,
+    publisher_native_host: Option<&'binding ExtensionPublisherNativeHostRequirement>,
 }
 
 impl<'binding> ExtensionRuntimeHostActivationContext<'binding> {
@@ -887,6 +889,17 @@ impl<'binding> ExtensionRuntimeHostActivationContext<'binding> {
     /// or serialized.
     pub const fn native_grants(&self) -> &ExtensionNativeGrantProjection<'binding> {
         &self.native_grants
+    }
+
+    /// Returns package-authority-derived publisher native-host metadata.
+    ///
+    /// This remains non-authorizing until the engine joins the same runtime,
+    /// native permission grant, user consent, host manifest, executable file
+    /// identity, and platform code-signature requirement.
+    pub const fn publisher_native_host(
+        &self,
+    ) -> Option<&'binding ExtensionPublisherNativeHostRequirement> {
+        self.publisher_native_host
     }
 
     /// Derives the only absence-evidence issuer authorized for this exact
@@ -1775,6 +1788,7 @@ impl ExtensionRuntimeHostFactory {
             expectation: binding.expectation,
             target: binding.access.target(),
             native_grants,
+            publisher_native_host: binding.access.publisher_native_host(),
         };
         let ExtensionRuntimeHostActivationPorts {
             generation,

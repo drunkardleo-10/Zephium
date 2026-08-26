@@ -18,8 +18,9 @@ use zephium_core::extensions::{
     ExtensionAuthorityId, ExtensionCompatibilityLevel, ExtensionCompatibilityProfileDigest,
     ExtensionCompatibilityTargetId, ExtensionManifestDeclaration, ExtensionManifestDescriptor,
     ExtensionManifestDigest, ExtensionPackageIdentity, ExtensionPackageKey,
-    ExtensionPackageRevision, ExtensionTreeDigest, MACOS_NATIVE_BROKERED_COMPATIBILITY_TARGET,
-    MAX_EXTENSION_MANIFEST_DECLARATIONS, MAX_EXTENSION_MANIFEST_RETAINED_BYTES,
+    ExtensionPackageRevision, ExtensionPublisherNativeHostRequirement, ExtensionTreeDigest,
+    MACOS_NATIVE_BROKERED_COMPATIBILITY_TARGET, MAX_EXTENSION_MANIFEST_DECLARATIONS,
+    MAX_EXTENSION_MANIFEST_RETAINED_BYTES,
 };
 use zephium_core::ports::extensions::{
     acquired_runtime_selections_are_canonical, ExtensionAcquiredRuntimeProfile,
@@ -573,6 +574,14 @@ impl ProductExtensionManifestAuthority {
                 profile.validate_configuration()?;
                 let profile_bytes = PROFILE_ACCOUNTING_OVERHEAD
                     .checked_add(profile.policy.retained_bytes)
+                    .and_then(|bytes| {
+                        bytes.checked_add(
+                            profile
+                                .publisher_native_host
+                                .as_ref()
+                                .map_or(0, ExtensionPublisherNativeHostRequirement::retained_bytes),
+                        )
+                    })
                     .ok_or(ProductExtensionManifestAuthorityError::InvalidProductConfiguration)?;
                 generation_retained_bytes = generation_retained_bytes
                     .checked_add(size_of::<SealedManifestProfile>())
@@ -647,6 +656,14 @@ fn admit_manifest_data(
     let retained_bytes = admitted
         .retained_bytes()
         .checked_add(WITNESS_ACCOUNTING_OVERHEAD)
+        .and_then(|bytes| {
+            bytes.checked_add(
+                profile
+                    .publisher_native_host
+                    .as_ref()
+                    .map_or(0, ExtensionPublisherNativeHostRequirement::retained_bytes),
+            )
+        })
         .ok_or(ProductExtensionManifestAdmissionError::RetainedBytesExceeded)?;
     if retained_bytes > MAX_PRODUCT_ADMITTED_EXTENSION_MANIFEST_RETAINED_BYTES {
         return Err(ProductExtensionManifestAdmissionError::RetainedBytesExceeded);
@@ -654,6 +671,7 @@ fn admit_manifest_data(
 
     Ok(ProductAdmittedManifestData {
         manifest: admitted,
+        publisher_native_host: profile.publisher_native_host.clone(),
         runtime_target,
         catalog_authority: profile.catalog.authority,
         catalog_revision: profile.catalog.revision,
@@ -695,6 +713,7 @@ pub struct ProductAdmittedExtensionManifest {
 
 struct ProductAdmittedManifestData {
     manifest: AdmittedExtensionManifest,
+    publisher_native_host: Option<ExtensionPublisherNativeHostRequirement>,
     runtime_target: ProductExtensionRuntimeTarget,
     catalog_authority: ExtensionAuthorityId,
     catalog_revision: ExtensionReleaseCatalogRevision,
@@ -795,6 +814,12 @@ impl ProductAdmittedExtensionManifest {
     /// Returns the product-owned versioned compatibility target identifier.
     pub const fn compatibility_target(&self) -> &ExtensionCompatibilityTargetId {
         self.data.manifest.descriptor().compatibility_target()
+    }
+
+    /// Returns the exact sealed publisher native-host requirement, when one
+    /// was provisioned for this package/backend profile.
+    pub const fn publisher_native_host(&self) -> Option<&ExtensionPublisherNativeHostRequirement> {
+        self.data.publisher_native_host.as_ref()
     }
 
     /// Returns the complete path-free descriptor as a read-only projection.
@@ -955,6 +980,12 @@ impl ProductAdmittedRollbackExtensionManifest {
         self.data.manifest.descriptor().compatibility_target()
     }
 
+    /// Returns the exact sealed publisher native-host requirement, when one
+    /// was provisioned for this rollback package/backend profile.
+    pub const fn publisher_native_host(&self) -> Option<&ExtensionPublisherNativeHostRequirement> {
+        self.data.publisher_native_host.as_ref()
+    }
+
     /// Returns the complete path-free descriptor as a read-only projection.
     pub const fn descriptor(&self) -> &ExtensionManifestDescriptor {
         self.data.manifest.descriptor()
@@ -994,6 +1025,7 @@ struct SealedManifestProfile {
     catalog: SealedManifestCatalogAnchor,
     package: SealedManifestPackageAnchor,
     policy: SealedManifestCompatibilityPolicy,
+    publisher_native_host: Option<ExtensionPublisherNativeHostRequirement>,
 }
 
 impl SealedManifestProfile {
@@ -1010,6 +1042,10 @@ impl SealedManifestProfile {
             || self.policy.target != self.package.compatibility_target
             || self.package.compatibility_target.as_str()
                 != self.runtime_target.compatibility_target_id()
+            || self
+                .publisher_native_host
+                .as_ref()
+                .is_some_and(|requirement| requirement.package() != &self.package.identity)
         {
             return Err(ProductExtensionManifestAuthorityError::InvalidProductConfiguration);
         }
@@ -1082,6 +1118,17 @@ impl SealedManifestProfile {
         }
         if admitted.admission_digest() != self.package.admission_digest {
             return Err(ProductExtensionManifestAdmissionError::AdmissionDigestMismatch);
+        }
+        if self.publisher_native_host.is_some()
+            && (!descriptor.declarations().declares_native_messaging()
+                || !classifications.iter().any(|classification| {
+                    matches!(
+                        classification.declaration(),
+                        ExtensionManifestDeclaration::NativeMessaging
+                    ) && classification.level() == ExtensionCompatibilityLevel::Compatible
+                }))
+        {
+            return Err(ProductExtensionManifestAdmissionError::PolicyDeclarationMismatch);
         }
         Ok(())
     }
@@ -1410,6 +1457,7 @@ fn sealed_product_manifest_provisioning(
                 admission_digest: admitted.admission_digest(),
             },
             policy,
+            publisher_native_host: None,
         }]
         .into_boxed_slice(),
     }))
@@ -1617,6 +1665,7 @@ fn staging_manifest_profile(
             admission_digest: admitted.admission_digest(),
         },
         policy,
+        publisher_native_host: None,
     })
 }
 
@@ -1866,6 +1915,7 @@ fn repository_e2e_manifest_profile(
             admission_digest: admitted.admission_digest(),
         },
         policy,
+        publisher_native_host: None,
     })
 }
 

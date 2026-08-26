@@ -20,7 +20,10 @@ use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2_foundation::{MainThreadMarker, NSError, NSProcessInfo, NSString, NSURL};
 use objc2_web_kit::{WKWebExtension, WKWebExtensionContext, WKWebExtensionController};
-use zephium_core::extensions::{ExtensionBackgroundEnvironment, ExtensionNativeGrantSnapshot};
+use zephium_core::extensions::{
+    ExtensionBackgroundEnvironment, ExtensionNativeGrantSnapshot,
+    ExtensionPublisherNativeHostRequirement,
+};
 use zephium_extension_runtime_api::{
     ExtensionPackageAccessError, ExtensionRuntimeMacosAbsenceAudit, ExtensionRuntimeNativeOwnerId,
     ExtensionRuntimeNativeRootLease, ExtensionRuntimeVisitorError,
@@ -222,8 +225,18 @@ pub(crate) struct PreparedMacosNativeRuntimeActivation {
     grants: MacosNativeGrantPlan,
     expected_owner_id: ExtensionRuntimeNativeOwnerId,
     controller: Retained<WKWebExtensionController>,
-    background_environment: Option<ExtensionBackgroundEnvironment>,
+    metadata: MacosNativeRuntimeMetadata,
     mtm: MainThreadMarker,
+}
+
+/// Bounded metadata carried across WebKit's asynchronous parse callback.
+///
+/// Grouping this state keeps the native entry functions narrow and prevents
+/// independently adding optional words to every activation and error shape.
+#[derive(Clone)]
+struct MacosNativeRuntimeMetadata {
+    background_environment: Option<ExtensionBackgroundEnvironment>,
+    publisher_native_host: Option<Box<ExtensionPublisherNativeHostRequirement>>,
 }
 
 /// Copy-only exact identity retained while the move-only owner is inside a
@@ -264,7 +277,17 @@ pub(crate) struct MacosNativeRuntimeOwner {
     controller: Retained<WKWebExtensionController>,
     background_environment: Option<ExtensionBackgroundEnvironment>,
     applied_grants: Option<AppliedMacosGrantSet>,
-    action_projection: Option<Box<ActionProjectionCache>>,
+    optional_state: Option<Box<MacosNativeRuntimeOptionalState>>,
+}
+
+/// Cold-path state shared by publisher-native messaging and toolbar actions.
+///
+/// The owner pays one nullable pointer while neither capability is used. A
+/// publisher requirement or the first action projection allocates one bounded
+/// block; no hidden renderer, worker, timer, or process is created here.
+struct MacosNativeRuntimeOptionalState {
+    publisher_native_host: Option<Box<ExtensionPublisherNativeHostRequirement>>,
+    action_projection: ActionProjectionCache,
 }
 
 struct ActionProjectionCache {
@@ -371,6 +394,14 @@ impl MacosNativeRuntimeOwner {
         })
     }
 
+    /// Returns the sealed publisher-host requirement retained for this exact
+    /// native context, when provisioned.
+    pub(crate) fn publisher_native_host(&self) -> Option<&ExtensionPublisherNativeHostRequirement> {
+        self.optional_state
+            .as_ref()
+            .and_then(|state| state.publisher_native_host.as_deref())
+    }
+
     /// Bounded authenticated display label for browser-owned consent UI.
     /// The package was parsed from the held content-addressed root before this
     /// owner existed; this value remains display-only and grants no authority.
@@ -441,12 +472,10 @@ impl MacosNativeRuntimeOwner {
         {
             return Err(MacosNativeActionFailure::InvalidProjection);
         }
-        let projection = self.action_projection.get_or_insert_with(|| {
-            Box::new(ActionProjectionCache {
-                next_revision: Some(1),
-                last: None,
-            })
-        });
+        let projection = &mut self
+            .optional_state
+            .get_or_insert_with(|| Box::new(MacosNativeRuntimeOptionalState::new(None)))
+            .action_projection;
         // An exhausted counter must still permit an unchanged read. Use the
         // cached revision as a comparison-only candidate, then reject only if
         // WebKit actually presents a new value that cannot be numbered.
@@ -592,8 +621,24 @@ impl fmt::Debug for MacosNativeRuntimeOwner {
             .field("extension", &"<native>")
             .field("context", &"<native>")
             .field("controller", &"<native>")
+            .field(
+                "publisher_native_host",
+                &self.publisher_native_host().map(|_| "<redacted>"),
+            )
             .field("has_applied_grants", &self.applied_grants.is_some())
             .finish()
+    }
+}
+
+impl MacosNativeRuntimeOptionalState {
+    fn new(publisher_native_host: Option<Box<ExtensionPublisherNativeHostRequirement>>) -> Self {
+        Self {
+            publisher_native_host,
+            action_projection: ActionProjectionCache {
+                next_revision: Some(1),
+                last: None,
+            },
+        }
     }
 }
 
@@ -602,21 +647,26 @@ impl fmt::Debug for MacosNativeRuntimeOwner {
 pub(crate) fn prepare_native_runtime_activation(
     native_root: &mut ExtensionRuntimeNativeRootLease,
     grants: &ExtensionNativeGrantSnapshot,
+    publisher_native_host: Option<&ExtensionPublisherNativeHostRequirement>,
     backend: zephium_core::extensions::ExtensionRuntimeBackendTarget,
     expected_owner_id: ExtensionRuntimeNativeOwnerId,
     controller: Retained<WKWebExtensionController>,
 ) -> Result<PreparedMacosNativeRuntimeActivation, MacosNativeRuntimeFailure> {
     let mtm = admit_runtime()?;
     let background_environment = grants.background_environment();
-    let grants =
-        compile_native_grant_plan(grants, backend).map_err(MacosNativeRuntimeFailure::GrantPlan)?;
+    let publisher_native_host = publisher_native_host.cloned().map(Box::new);
+    let grants = compile_native_grant_plan(grants, backend, publisher_native_host.is_some())
+        .map_err(MacosNativeRuntimeFailure::GrantPlan)?;
     let resource_url = verified_resource_url(native_root)?;
     Ok(PreparedMacosNativeRuntimeActivation {
         resource_url,
         grants,
         expected_owner_id,
         controller,
-        background_environment,
+        metadata: MacosNativeRuntimeMetadata {
+            background_environment,
+            publisher_native_host,
+        },
         mtm,
     })
 }
@@ -634,7 +684,7 @@ pub(crate) fn begin_prepared_native_runtime_activation(
         grants,
         expected_owner_id,
         controller,
-        background_environment,
+        metadata,
         mtm,
     } = prepared;
     begin_with_grants(
@@ -642,7 +692,7 @@ pub(crate) fn begin_prepared_native_runtime_activation(
         NativeGrantSource::Compiled(grants),
         expected_owner_id,
         controller,
-        background_environment,
+        metadata,
         completion,
         mtm,
     )
@@ -671,7 +721,10 @@ pub(crate) fn begin_probe_native_runtime_activation(
         },
         expected_owner_id,
         controller,
-        None,
+        MacosNativeRuntimeMetadata {
+            background_environment: None,
+            publisher_native_host: None,
+        },
         completion,
         mtm,
     )
@@ -710,7 +763,7 @@ fn begin_with_grants(
     grants: NativeGrantSource,
     expected_owner_id: ExtensionRuntimeNativeOwnerId,
     controller: Retained<WKWebExtensionController>,
-    background_environment: Option<ExtensionBackgroundEnvironment>,
+    metadata: MacosNativeRuntimeMetadata,
     completion: impl FnOnce(MacosNativeRuntimeActivation) + 'static,
     mtm: MainThreadMarker,
 ) -> Result<(), MacosNativeRuntimeFailure> {
@@ -732,7 +785,7 @@ fn begin_with_grants(
             &grants,
             expected_owner_id,
             controller.clone(),
-            background_environment,
+            metadata.clone(),
         );
         completion(outcome);
     });
@@ -753,7 +806,7 @@ fn settle_parse_callback(
     grants: &NativeGrantSource,
     expected_owner_id: ExtensionRuntimeNativeOwnerId,
     controller: Retained<WKWebExtensionController>,
-    background_environment: Option<ExtensionBackgroundEnvironment>,
+    metadata: MacosNativeRuntimeMetadata,
 ) -> MacosNativeRuntimeActivation {
     let Some(extension) = (unsafe { Retained::retain(extension) }) else {
         return MacosNativeRuntimeActivation::RejectedWithoutAbsenceProof(
@@ -771,7 +824,7 @@ fn settle_parse_callback(
         grants,
         expected_owner_id,
         controller,
-        background_environment,
+        metadata,
     ) {
         Ok(owner) => MacosNativeRuntimeActivation::Activated(owner),
         Err((failure, owner)) => match owner {
@@ -787,7 +840,7 @@ fn construct_loaded_owner(
     grants: &NativeGrantSource,
     expected_owner_id: ExtensionRuntimeNativeOwnerId,
     controller: Retained<WKWebExtensionController>,
-    background_environment: Option<ExtensionBackgroundEnvironment>,
+    metadata: MacosNativeRuntimeMetadata,
 ) -> Result<MacosNativeRuntimeOwner, (MacosNativeRuntimeFailure, Option<MacosNativeRuntimeOwner>)> {
     let extension_valid = catch_native(|| unsafe {
         Ok(extension.errors().count() == 0 && extension.manifestVersion() == 3.0)
@@ -814,6 +867,12 @@ fn construct_loaded_owner(
         Ok(context) => context,
         Err(failure) => return Err((failure, None)),
     };
+    let MacosNativeRuntimeMetadata {
+        background_environment,
+        publisher_native_host,
+    } = metadata;
+    let optional_state = publisher_native_host
+        .map(|requirement| Box::new(MacosNativeRuntimeOptionalState::new(Some(requirement))));
     let mut owner = MacosNativeRuntimeOwner {
         owner_id: expected_owner_id,
         _resource_url: resource_url,
@@ -822,7 +881,7 @@ fn construct_loaded_owner(
         controller,
         background_environment,
         applied_grants: None,
-        action_projection: None,
+        optional_state,
     };
 
     if let Err(failure) = set_and_verify_identity(&owner.context, expected_owner_id) {

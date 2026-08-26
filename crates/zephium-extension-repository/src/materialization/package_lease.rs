@@ -545,6 +545,12 @@ macro_rules! impl_snapshot_projection {
                 self.manifest.chromium_key()
             }
 
+            pub(crate) const fn publisher_native_host(
+                &self,
+            ) -> Option<&zephium_core::extensions::ExtensionPublisherNativeHostRequirement> {
+                self.manifest.publisher_native_host()
+            }
+
             pub(crate) const fn index(&self) -> &CanonicalExtensionTreeIndex {
                 &self.index
             }
@@ -572,6 +578,8 @@ macro_rules! impl_snapshot_projection {
                         == other.manifest.catalog_inventory_digest()
                     && self.manifest.admission_digest() == other.manifest.admission_digest()
                     && self.manifest.chromium_key() == other.manifest.chromium_key()
+                    && self.manifest.publisher_native_host()
+                        == other.manifest.publisher_native_host()
                     && self.manifest.descriptor() == other.manifest.descriptor()
             }
         }
