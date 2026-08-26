@@ -2129,17 +2129,32 @@ impl ExtensionRuntimeRegistry {
         &mut self,
         profile: ProfileId,
     ) -> Result<Vec<ExtensionRuntimeFingerprint>, ExtensionRuntimeHostBindError> {
+        let slots = self.published_runtime_slots(profile)?;
+        Ok(slots.into_iter().flatten().collect())
+    }
+
+    /// Allocation-free counterpart used by provisional navigation, where an
+    /// extension-free or small-runtime browser must not allocate a temporary
+    /// `Vec` on every top-level URL transition.
+    #[cfg(target_os = "macos")]
+    pub(super) fn published_runtime_slots(
+        &mut self,
+        profile: ProfileId,
+    ) -> Result<
+        [Option<ExtensionRuntimeFingerprint>;
+            zephium_extension_runtime_api::MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES],
+        ExtensionRuntimeHostBindError,
+    > {
         if self.sealed {
             return Err(ExtensionRuntimeHostBindError::Sealed);
         }
         if self.invariant_failed {
             return Err(ExtensionRuntimeHostBindError::InternalInvariant);
         }
-        let mut runtimes = Vec::with_capacity(
-            self.entries
-                .len()
-                .min(zephium_extension_runtime_api::MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES),
-        );
+        let mut runtimes: [Option<ExtensionRuntimeFingerprint>;
+            zephium_extension_runtime_api::MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES] =
+            std::array::from_fn(|_| None);
+        let mut runtime_count = 0_usize;
         let mut invariant_failed = false;
         for entry in &self.entries {
             if !matches!(
@@ -2170,20 +2185,21 @@ impl ExtensionRuntimeRegistry {
             } = &*state
             {
                 if authority.fingerprint().instance().profile() == profile {
-                    runtimes.push(authority.fingerprint().clone());
+                    if runtime_count == runtimes.len()
+                        || runtimes[..runtime_count]
+                            .iter()
+                            .flatten()
+                            .any(|runtime| runtime.instance() == authority.fingerprint().instance())
+                    {
+                        invariant_failed = true;
+                        break;
+                    }
+                    runtimes[runtime_count] = Some(authority.fingerprint().clone());
+                    runtime_count += 1;
                 }
             }
         }
-        let runtimes_are_unique = runtimes.iter().enumerate().all(|(index, runtime)| {
-            runtimes[index + 1..]
-                .iter()
-                .all(|other| other.instance() != runtime.instance())
-        });
-        if invariant_failed
-            || !runtimes_are_unique
-            || runtimes.len()
-                > zephium_extension_runtime_api::MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES
-        {
+        if invariant_failed {
             self.fail_invariant();
             return Err(ExtensionRuntimeHostBindError::InternalInvariant);
         }

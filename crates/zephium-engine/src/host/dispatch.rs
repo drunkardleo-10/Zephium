@@ -270,6 +270,8 @@ enum HostTaskKey {
     Source(ItemId),
     Title(ItemId),
     NavigationCommit(ItemId),
+    #[cfg(target_os = "macos")]
+    ExtensionBackgroundWake(ItemId),
     ExtensionPermitInvalidation(ItemId),
     NavigationSettlement(ItemId),
     Discard(ItemId),
@@ -1187,6 +1189,22 @@ where
     with_priority(
         HostTaskPriority::Lifecycle,
         Some(HostTaskKey::NavigationCommit(id)),
+        f,
+    )
+}
+
+/// Coalesces provisional navigation wake hints per physical view. The hint is
+/// compatibility work rather than ownership authority: losing it degrades the
+/// extension request but never authorizes page access or consumes the reserved
+/// commit/lifecycle bands.
+#[cfg(target_os = "macos")]
+pub(super) fn with_extension_background_wake<F>(id: ItemId, f: F) -> bool
+where
+    F: FnOnce(&mut EngineHost) + 'static,
+{
+    with_priority(
+        HostTaskPriority::Lifecycle,
+        Some(HostTaskKey::ExtensionBackgroundWake(id)),
         f,
     )
 }

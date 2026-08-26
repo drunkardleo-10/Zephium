@@ -89,6 +89,17 @@ Chromium's full site-isolation model.
    fail closed. The receipt discloses the missing WindowClient inventory,
    absent host, and callback denial without `runtime.lastError`; none of these
    facades grants native or page-world authority.
+   WebKit's document-background fallback receives one additional native wake
+   hint for an exact provisional top-level URL. The host first rejoins the
+   physical view's event permit, current navigation epoch and canonical target,
+   its profile partition, the complete published runtime fingerprint, and the
+   exact retained native owner. It calls the public background-load API only
+   when the authenticated manifest selected the document environment and
+   WebKit reports injected content for that URL. Redirect replacement and
+   per-view coalescing cannot move an old target forward. The hint grants no
+   host permission, script execution, page-world channel, view allocation or
+   persistence, and service-worker runtimes keep WebKit's native event path.
+   Failure degrades the extension request without changing ordinary browsing.
    Native extension keyboard commands use no startup monitor. The observer
    exists only while a context is loaded, gives browser-menu accelerators first
    refusal, and accepts only the focused resident regular tab's WKWebView. It

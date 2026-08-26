@@ -11,10 +11,83 @@ use zephium_core::ports::extensions::{
 };
 
 #[cfg(target_os = "macos")]
+use super::permits::{navigation_callback_matches, EventPermit};
+#[cfg(target_os = "macos")]
 use super::resources::{NativeResourceAdmissionError, NativeResourceClass};
 use super::EngineHost;
+#[cfg(target_os = "macos")]
+use crate::navigation_epoch::{NavigationEpoch, NavigationEpochTracker};
+#[cfg(target_os = "macos")]
+use objc2_foundation::{NSString, NSURL};
 
 impl EngineHost {
+    #[cfg(target_os = "macos")]
+    pub(super) fn wake_matching_document_backgrounds(
+        &mut self,
+        id: ItemId,
+        source_permit: &EventPermit,
+        source_navigation: &NavigationEpochTracker,
+        epoch: NavigationEpoch,
+        target: &str,
+    ) -> usize {
+        let Some(view) = self.views.get(&id) else {
+            return 0;
+        };
+        if !navigation_callback_matches(
+            &view.event_permit,
+            &view.navigation,
+            source_permit,
+            source_navigation,
+            epoch,
+        ) || !source_navigation.matches_current_target(epoch, target)
+        {
+            return 0;
+        }
+        let Some(profile) = self
+            .partitions
+            .get(&id)
+            .map(|partition| partition.profile())
+        else {
+            return 0;
+        };
+        if !zephium_core::navigation::is_allowed_str(target) {
+            return 0;
+        }
+        let runtimes = match self
+            .extension_runtime_registry
+            .published_runtime_slots(profile)
+        {
+            Ok(runtimes) => runtimes,
+            Err(_) => {
+                crate::diagnostic!(
+                    "extensions: published runtime cohort was unavailable for background wake"
+                );
+                return 0;
+            }
+        };
+        if runtimes.iter().all(Option::is_none) {
+            return 0;
+        }
+        let Some(url) = NSURL::URLWithString(&NSString::from_str(target)) else {
+            return 0;
+        };
+        let mut scheduled = 0_usize;
+        for runtime in runtimes.into_iter().flatten() {
+            match self
+                .extension_runtime_registry
+                .with_owned_macos_runtime(&runtime, |owner| {
+                    owner.begin_matching_document_background_wake(&url)
+                }) {
+                Ok(Some(Ok(true))) => scheduled = scheduled.saturating_add(1),
+                Ok(Some(Ok(false))) | Ok(None) => {}
+                Ok(Some(Err(_))) | Err(_) => {
+                    crate::diagnostic!("extensions: matching document background wake was refused")
+                }
+            }
+        }
+        scheduled
+    }
+
     pub(crate) fn settle_extension_browser_request(
         &mut self,
         profile: ProfileId,

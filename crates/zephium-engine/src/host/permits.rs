@@ -7,6 +7,8 @@ use zephium_core::ports::engine::EngineEvent;
 
 use crate::navigation_epoch::{NavigationEpoch, NavigationEpochTracker};
 
+#[cfg(target_os = "macos")]
+use super::dispatch::with_extension_background_wake;
 use super::dispatch::{
     with_extension_permit_invalidation, with_navigation_commit, with_navigation_settlement,
 };
@@ -166,6 +168,40 @@ pub(super) fn queue_navigation_commit(
         permit.revoke();
         navigation.revoke();
         eprintln!("security: committed-document presentation gate was not admitted");
+    }
+}
+
+/// Wakes only matching authenticated document-background runtimes for one
+/// exact provisional navigation. This reconstructs the event wake which WebKit
+/// provides to service workers but does not reliably provide to its document
+/// background compatibility environment.
+#[cfg(target_os = "macos")]
+pub(super) fn queue_extension_background_wake(
+    id: ItemId,
+    permit: &EventPermit,
+    navigation: &NavigationEpochTracker,
+    epoch: NavigationEpoch,
+    target: String,
+) {
+    if permit.active_token().is_none() || !navigation.matches_current_target(epoch, &target) {
+        return;
+    }
+    let queued_permit = permit.clone();
+    let queued_navigation = navigation.clone();
+    let admitted = with_extension_background_wake(id, move |host| {
+        host.wake_matching_document_backgrounds(
+            id,
+            &queued_permit,
+            &queued_navigation,
+            epoch,
+            &target,
+        );
+    });
+    if !admitted {
+        // This is a usability compatibility hint, not a security mutation.
+        // WebKit retains its native behavior and the extension call may fail
+        // closed; ordinary browsing remains valid.
+        eprintln!("engine: matching extension background wake was not admitted");
     }
 }
 

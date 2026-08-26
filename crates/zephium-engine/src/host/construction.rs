@@ -2,6 +2,8 @@
 use super::dispatch::with_profile_exit;
 use super::dispatch::{with_renderer_exit, with_source_observation, with_title_observation};
 use super::navigation::bounded_title;
+#[cfg(target_os = "macos")]
+use super::permits::queue_extension_background_wake;
 use super::permits::{
     queue_navigation_authority_invalidation, queue_navigation_commit, queue_navigation_completion,
     queue_navigation_failure, EventPermit,
@@ -999,6 +1001,14 @@ impl EngineHost {
             match transition {
                 NavigationTransition::Started(epoch) => {
                     #[cfg(target_os = "macos")]
+                    queue_extension_background_wake(
+                        id,
+                        &load_permit,
+                        &load_navigation,
+                        epoch,
+                        event.url.clone(),
+                    );
+                    #[cfg(target_os = "macos")]
                     super::page_permissions::queue_navigation_revocation(
                         id,
                         &load_permit,
@@ -1013,7 +1023,15 @@ impl EngineHost {
                             .emit(&on_load, EngineEvent::LoadingChanged { id, loading: true });
                     }
                 }
-                NavigationTransition::Redirected(_) => {
+                NavigationTransition::Redirected(epoch) => {
+                    #[cfg(target_os = "macos")]
+                    queue_extension_background_wake(
+                        id,
+                        &load_permit,
+                        &load_navigation,
+                        epoch,
+                        event.url.clone(),
+                    );
                     if extension_document_permits_pending.load(Ordering::Acquire) {
                         queue_navigation_authority_invalidation(id, &load_permit, &load_navigation);
                     }

@@ -2001,6 +2001,48 @@ budgets remain unproven. Neither stock nor transformed 1Password may enter a
 shipping catalog until those workflows pass and publisher/legal distribution
 approval exists.
 
+The August 26 signed-account restart gate narrows that remaining blocker. A
+preserved profile proves that onboarding and the HTTPS account handoff can
+durably create the account database, but a cold process restart does not
+complete 1Password's exported `initializeFinishedPromise`; its popup and the
+account-completion page remain at their loading states. The background module
+graph evaluates and its document reaches `complete`. A lab-only bounded trace
+proved that both private WASM responses finish `arrayBuffer()` in 1--8 ms,
+both fallback instantiations settle in 9--22 ms, local and session extension
+storage settle, startup runtime messages receive callbacks, and queued
+microtasks and timers run. The trace observed no pending IndexedDB, Web Locks,
+WebCrypto, extension-storage, or WASM loader operation. 1Password's signed-
+account B5X request remains pending inside its own JS/WASM transport, and
+WebKit later unloads the nonpersistent background. Attaching Web Inspector is
+the only exercised condition under which a manual background reload completed
+that initialization; an uninspected reload did not.
+
+Surface-before-runtime ordering, a replayed `load` event, a `scheduler.yield`
+fallback, an explicit generated WASM `start()` call, an uninspected reload,
+and a self-connected runtime port were each tested and falsified, then removed.
+No timer, hidden view, private WebKit background handle, persistent-background
+conversion, source rewrite, or 1Password identifier branch remains in the
+browser. This exact Chrome build therefore remains **not compatible** for
+signed-account daily use. A future target needs either publisher cooperation,
+a separately reviewed and legally authorized package adapter with an explicit
+readiness/keepalive contract, or an upstream WebKit/package lifecycle change;
+the current evidence is not authority to keep the background resident.
+
+One independent compatibility repair remains valid. The authenticated native
+grant projection now retains whether the admitted background is WebKit's
+document fallback. On each exact top-level Started or Redirected epoch, macOS
+attempts `loadBackgroundContent` only for published document runtimes whose
+native extension reports injected content for that exact provisional URL.
+Service-worker runtimes and nonmatching extensions pay no native wake call.
+Stale, replaced, terminal, disallowed, cross-profile, or unowned callbacks are
+rejected before URL construction or WebKit entry; the bounded runtime cohort
+uses fixed slots, so the ordinary extension-free navigation path performs no
+temporary heap allocation. The call uses WebKit's public event-background API,
+creates no view or timer, and remains a usability hint rather than navigation,
+permission, or content-script authority. In the signed-account gate it removed
+the earlier undefined content-message responses during direct navigation, but
+it does not claim to repair 1Password's separate cold-start core blocker.
+
 Authenticating this real package exposed one legitimate package-admission
 ceiling: a current major extension contains a single resource slightly above
 16 MiB while remaining well under the 128 MiB aggregate tree bound. The exact

@@ -554,6 +554,53 @@ fn every_identity_bearing_commit_rearms_presentation_but_history_observation_doe
 }
 
 #[test]
+fn document_background_wake_is_navigation_exact_and_precedes_shell_loading_projection() {
+    let construction = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/host/construction.rs"
+    ));
+    let permits = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/permits.rs"));
+    let handler = construction
+        .split("builder = builder.with_navigation_event_handler")
+        .nth(1)
+        .expect("raw navigation event handler")
+        .split("#[cfg(target_os = \"windows\")]")
+        .next()
+        .expect("bounded raw navigation event handler");
+    let started = handler
+        .split("NavigationTransition::Started(epoch)")
+        .nth(1)
+        .expect("navigation-start branch")
+        .split("NavigationTransition::Redirected(epoch)")
+        .next()
+        .expect("bounded navigation-start branch");
+    assert!(started.contains("queue_extension_background_wake"));
+    assert!(
+        started.find("queue_extension_background_wake")
+            < started.find("EngineEvent::LoadingChanged")
+    );
+    let redirected = handler
+        .split("NavigationTransition::Redirected(epoch)")
+        .nth(1)
+        .expect("redirect branch")
+        .split("NavigationTransition::Committed(epoch)")
+        .next()
+        .expect("bounded redirect branch");
+    assert!(redirected.contains("queue_extension_background_wake"));
+
+    let wake = permits
+        .split("fn queue_extension_background_wake(")
+        .nth(1)
+        .expect("bounded extension background wake queue")
+        .split("fn queue_navigation_authority_invalidation(")
+        .next()
+        .expect("isolated extension background wake queue");
+    assert!(wake.contains("matches_current_target"));
+    assert!(wake.contains("wake_matching_document_backgrounds"));
+    assert!(!wake.contains("permit.revoke()"));
+}
+
+#[test]
 fn every_native_stage_revalidates_the_generation_permit_around_reveal() {
     let mac = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),

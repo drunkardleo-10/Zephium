@@ -20,7 +20,7 @@ use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2_foundation::{MainThreadMarker, NSError, NSProcessInfo, NSString, NSURL};
 use objc2_web_kit::{WKWebExtension, WKWebExtensionContext, WKWebExtensionController};
-use zephium_core::extensions::ExtensionNativeGrantSnapshot;
+use zephium_core::extensions::{ExtensionBackgroundEnvironment, ExtensionNativeGrantSnapshot};
 use zephium_extension_runtime_api::{
     ExtensionPackageAccessError, ExtensionRuntimeMacosAbsenceAudit, ExtensionRuntimeNativeOwnerId,
     ExtensionRuntimeNativeRootLease, ExtensionRuntimeVisitorError,
@@ -222,6 +222,7 @@ pub(crate) struct PreparedMacosNativeRuntimeActivation {
     grants: MacosNativeGrantPlan,
     expected_owner_id: ExtensionRuntimeNativeOwnerId,
     controller: Retained<WKWebExtensionController>,
+    background_environment: Option<ExtensionBackgroundEnvironment>,
     mtm: MainThreadMarker,
 }
 
@@ -261,6 +262,7 @@ pub(crate) struct MacosNativeRuntimeOwner {
     extension: Retained<WKWebExtension>,
     context: Retained<WKWebExtensionContext>,
     controller: Retained<WKWebExtensionController>,
+    background_environment: Option<ExtensionBackgroundEnvironment>,
     applied_grants: Option<AppliedMacosGrantSet>,
     action_projection: Option<Box<ActionProjectionCache>>,
 }
@@ -337,6 +339,36 @@ impl MacosNativeRuntimeOwner {
     /// to the exact published runtime that already owns this context.
     pub(crate) fn runtime_grant_context_identity(&self) -> *const WKWebExtensionContext {
         Retained::as_ptr(&self.context)
+    }
+
+    /// Wakes an event-managed document background only when this exact
+    /// authenticated runtime injects content into the provisional top-level
+    /// URL. Service-worker runtimes keep WebKit's native event wake path and
+    /// pay no navigation-time call.
+    pub(crate) fn begin_matching_document_background_wake(
+        &self,
+        url: &NSURL,
+    ) -> Result<bool, MacosNativeRuntimeFailure> {
+        if !background_environment_requires_navigation_wake(self.background_environment) {
+            return Ok(false);
+        }
+        validate_loaded_owner_membership(self)?;
+        catch_native(|| unsafe {
+            if !self.extension.hasBackgroundContent() || !self.context.hasInjectedContentForURL(url)
+            {
+                return Ok(false);
+            }
+            let completion: RcBlock<dyn Fn(*mut NSError)> = RcBlock::new(|error: *mut NSError| {
+                if !error.is_null() {
+                    crate::diagnostic!(
+                        "extensions: matching document background failed to wake for provisional navigation"
+                    );
+                }
+            });
+            self.context
+                .loadBackgroundContentWithCompletionHandler(&completion);
+            Ok(true)
+        })
     }
 
     /// Bounded authenticated display label for browser-owned consent UI.
@@ -545,6 +577,12 @@ impl MacosNativeRuntimeOwner {
     }
 }
 
+const fn background_environment_requires_navigation_wake(
+    environment: Option<ExtensionBackgroundEnvironment>,
+) -> bool {
+    matches!(environment, Some(ExtensionBackgroundEnvironment::Document))
+}
+
 impl fmt::Debug for MacosNativeRuntimeOwner {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -569,6 +607,7 @@ pub(crate) fn prepare_native_runtime_activation(
     controller: Retained<WKWebExtensionController>,
 ) -> Result<PreparedMacosNativeRuntimeActivation, MacosNativeRuntimeFailure> {
     let mtm = admit_runtime()?;
+    let background_environment = grants.background_environment();
     let grants =
         compile_native_grant_plan(grants, backend).map_err(MacosNativeRuntimeFailure::GrantPlan)?;
     let resource_url = verified_resource_url(native_root)?;
@@ -577,6 +616,7 @@ pub(crate) fn prepare_native_runtime_activation(
         grants,
         expected_owner_id,
         controller,
+        background_environment,
         mtm,
     })
 }
@@ -594,6 +634,7 @@ pub(crate) fn begin_prepared_native_runtime_activation(
         grants,
         expected_owner_id,
         controller,
+        background_environment,
         mtm,
     } = prepared;
     begin_with_grants(
@@ -601,6 +642,7 @@ pub(crate) fn begin_prepared_native_runtime_activation(
         NativeGrantSource::Compiled(grants),
         expected_owner_id,
         controller,
+        background_environment,
         completion,
         mtm,
     )
@@ -629,6 +671,7 @@ pub(crate) fn begin_probe_native_runtime_activation(
         },
         expected_owner_id,
         controller,
+        None,
         completion,
         mtm,
     )
@@ -667,6 +710,7 @@ fn begin_with_grants(
     grants: NativeGrantSource,
     expected_owner_id: ExtensionRuntimeNativeOwnerId,
     controller: Retained<WKWebExtensionController>,
+    background_environment: Option<ExtensionBackgroundEnvironment>,
     completion: impl FnOnce(MacosNativeRuntimeActivation) + 'static,
     mtm: MainThreadMarker,
 ) -> Result<(), MacosNativeRuntimeFailure> {
@@ -688,6 +732,7 @@ fn begin_with_grants(
             &grants,
             expected_owner_id,
             controller.clone(),
+            background_environment,
         );
         completion(outcome);
     });
@@ -708,6 +753,7 @@ fn settle_parse_callback(
     grants: &NativeGrantSource,
     expected_owner_id: ExtensionRuntimeNativeOwnerId,
     controller: Retained<WKWebExtensionController>,
+    background_environment: Option<ExtensionBackgroundEnvironment>,
 ) -> MacosNativeRuntimeActivation {
     let Some(extension) = (unsafe { Retained::retain(extension) }) else {
         return MacosNativeRuntimeActivation::RejectedWithoutAbsenceProof(
@@ -725,6 +771,7 @@ fn settle_parse_callback(
         grants,
         expected_owner_id,
         controller,
+        background_environment,
     ) {
         Ok(owner) => MacosNativeRuntimeActivation::Activated(owner),
         Err((failure, owner)) => match owner {
@@ -740,6 +787,7 @@ fn construct_loaded_owner(
     grants: &NativeGrantSource,
     expected_owner_id: ExtensionRuntimeNativeOwnerId,
     controller: Retained<WKWebExtensionController>,
+    background_environment: Option<ExtensionBackgroundEnvironment>,
 ) -> Result<MacosNativeRuntimeOwner, (MacosNativeRuntimeFailure, Option<MacosNativeRuntimeOwner>)> {
     let extension_valid = catch_native(|| unsafe {
         Ok(extension.errors().count() == 0 && extension.manifestVersion() == 3.0)
@@ -772,6 +820,7 @@ fn construct_loaded_owner(
         extension,
         context,
         controller,
+        background_environment,
         applied_grants: None,
         action_projection: None,
     };
@@ -1066,5 +1115,16 @@ mod tests {
             first_identity.base_url_string,
             second_identity.base_url_string
         );
+    }
+
+    #[test]
+    fn navigation_wake_is_reserved_for_document_backgrounds() {
+        assert!(background_environment_requires_navigation_wake(Some(
+            ExtensionBackgroundEnvironment::Document
+        )));
+        assert!(!background_environment_requires_navigation_wake(Some(
+            ExtensionBackgroundEnvironment::ServiceWorker
+        )));
+        assert!(!background_environment_requires_navigation_wake(None));
     }
 }

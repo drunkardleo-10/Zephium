@@ -1071,19 +1071,20 @@ mod tests {
     use super::*;
     use crate::extensions::{
         ExtensionApiPermissionSet, ExtensionArchiveDigest, ExtensionAuthorityId,
-        ExtensionCompatibilityClassification, ExtensionCompatibilityLevel,
-        ExtensionCompatibilityTargetId, ExtensionContentScriptDeclaration,
-        ExtensionContentScriptGlobDeclaration, ExtensionContentScriptResourceDigest,
-        ExtensionContentScriptRunAt, ExtensionContentScriptWorld,
-        ExtensionContentSecurityPolicyDeclaration, ExtensionGrantCohort, ExtensionGrantDenial,
-        ExtensionGrantManifestBinding, ExtensionGrantManifestBindings, ExtensionHostPermissionSet,
-        ExtensionInstall, ExtensionInstallCatalog, ExtensionManifestDeclarations,
-        ExtensionManifestDigest, ExtensionManifestExecutionSurfaces,
-        ExtensionManifestResourceDigest, ExtensionNativeGrantDecision,
-        ExtensionNativeGrantRequirement, ExtensionNativeGrantSnapshot,
-        ExtensionNativeOwnershipEntryRevision, ExtensionNativeOwnershipKey, ExtensionPackageKey,
-        ExtensionPackagePayloadIdentity, ExtensionPackageRevision, ExtensionTreeDigest,
-        MAX_EXTENSION_CONTENT_SCRIPT_DECLARATIONS,
+        ExtensionBackgroundDeclaration, ExtensionBackgroundEnvironment,
+        ExtensionBackgroundWorkerType, ExtensionCompatibilityClassification,
+        ExtensionCompatibilityLevel, ExtensionCompatibilityTargetId,
+        ExtensionContentScriptDeclaration, ExtensionContentScriptGlobDeclaration,
+        ExtensionContentScriptResourceDigest, ExtensionContentScriptRunAt,
+        ExtensionContentScriptWorld, ExtensionContentSecurityPolicyDeclaration,
+        ExtensionGrantCohort, ExtensionGrantDenial, ExtensionGrantManifestBinding,
+        ExtensionGrantManifestBindings, ExtensionHostPermissionSet, ExtensionInstall,
+        ExtensionInstallCatalog, ExtensionManifestDeclarations, ExtensionManifestDigest,
+        ExtensionManifestExecutionSurfaces, ExtensionManifestResourceDigest,
+        ExtensionNativeGrantDecision, ExtensionNativeGrantRequirement,
+        ExtensionNativeGrantSnapshot, ExtensionNativeOwnershipEntryRevision,
+        ExtensionNativeOwnershipKey, ExtensionPackageKey, ExtensionPackagePayloadIdentity,
+        ExtensionPackageRevision, ExtensionTreeDigest, MAX_EXTENSION_CONTENT_SCRIPT_DECLARATIONS,
     };
     use crate::injection::{MatchOptions, MatchPattern, MatchSet};
     use proptest::prelude::*;
@@ -1186,6 +1187,26 @@ mod tests {
         content_script_hosts: &[&[&str]],
         compatibility_target: &str,
     ) -> Arc<ExtensionManifestDescriptor> {
+        projection_manifest_for_target_and_background(
+            required_api,
+            optional_api,
+            required_hosts,
+            optional_hosts,
+            content_script_hosts,
+            compatibility_target,
+            None,
+        )
+    }
+
+    fn projection_manifest_for_target_and_background(
+        required_api: &[&str],
+        optional_api: &[&str],
+        required_hosts: &[&str],
+        optional_hosts: &[&str],
+        content_script_hosts: &[&[&str]],
+        compatibility_target: &str,
+        background: Option<ExtensionBackgroundDeclaration>,
+    ) -> Arc<ExtensionManifestDescriptor> {
         let scripts = content_script_hosts
             .iter()
             .filter(|patterns| !patterns.is_empty())
@@ -1197,7 +1218,7 @@ mod tests {
             api(optional_api),
             (!required_hosts.is_empty()).then(|| hosts(required_hosts)),
             (!optional_hosts.is_empty()).then(|| hosts(optional_hosts)),
-            None,
+            background,
             None,
             Vec::new(),
             ExtensionManifestExecutionSurfaces::new(
@@ -1232,6 +1253,42 @@ mod tests {
             )
             .unwrap(),
         )
+    }
+
+    #[test]
+    fn native_projection_retains_the_authenticated_background_environment() {
+        let manifest = projection_manifest_for_target_and_background(
+            &[],
+            &[],
+            &[],
+            &[],
+            &[&[ALL_URLS]],
+            "test.runtime.document-background.v1",
+            Some(ExtensionBackgroundDeclaration::new(
+                ExtensionBackgroundWorkerType::Module,
+                ExtensionBackgroundEnvironment::Document,
+                ExtensionManifestResourceDigest::from_bytes([91; 32]),
+            )),
+        );
+        let (authority, runtime) = eligible_runtime_with_manifest(
+            ProfileId::from(191),
+            ExtensionInstallId::from(193),
+            ExtensionRuntimeGeneration::new(197).unwrap(),
+            manifest,
+            &[],
+            &[ALL_URLS],
+            false,
+            false,
+        );
+        let projection = authority.native_grant_projection(&runtime).unwrap();
+        assert_eq!(
+            projection.background_environment(),
+            Some(ExtensionBackgroundEnvironment::Document)
+        );
+        assert_eq!(
+            projection.into_owned_snapshot().background_environment(),
+            Some(ExtensionBackgroundEnvironment::Document)
+        );
     }
 
     #[allow(clippy::too_many_arguments)]

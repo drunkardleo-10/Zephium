@@ -16,12 +16,13 @@ use std::sync::Arc;
 use crate::injection::MatchPattern;
 
 use super::{
-    ApiPermissionName, ExtensionApiGrantDecision, ExtensionCompatibilityTargetId,
-    ExtensionGrantAuthority, ExtensionGrantBrowsingContext, ExtensionGrantDigest,
-    ExtensionGrantRevision, ExtensionManifestDeclarations, ExtensionManifestDescriptor,
-    ExtensionProfilePolicy, ExtensionProfilePolicyDigest, ExtensionProfilePolicyRevision,
-    ExtensionRuntimeFingerprint, ExtensionSiteAccessScope, ExtensionUrlScopeDecision,
-    MAX_EXTENSION_CONTENT_SCRIPT_DECLARATIONS, MAX_EXTENSION_HOST_GRANTS,
+    ApiPermissionName, ExtensionApiGrantDecision, ExtensionBackgroundEnvironment,
+    ExtensionCompatibilityTargetId, ExtensionGrantAuthority, ExtensionGrantBrowsingContext,
+    ExtensionGrantDigest, ExtensionGrantRevision, ExtensionManifestDeclarations,
+    ExtensionManifestDescriptor, ExtensionProfilePolicy, ExtensionProfilePolicyDigest,
+    ExtensionProfilePolicyRevision, ExtensionRuntimeFingerprint, ExtensionSiteAccessScope,
+    ExtensionUrlScopeDecision, MAX_EXTENSION_CONTENT_SCRIPT_DECLARATIONS,
+    MAX_EXTENSION_HOST_GRANTS,
 };
 
 const REQUIRED_HOST_SOURCE_INDEX: usize = 0;
@@ -235,6 +236,14 @@ impl<'a> ExtensionNativeGrantProjection<'a> {
         self.profile_policy.denied_sites().iter()
     }
 
+    /// Authenticated execution environment selected for background content.
+    pub fn background_environment(&self) -> Option<ExtensionBackgroundEnvironment> {
+        self.manifest
+            .declarations()
+            .background()
+            .map(|background| background.environment())
+    }
+
     /// Canonically ordered complete API declaration stream.
     ///
     /// Required and optional declarations are merged by exact permission name.
@@ -412,6 +421,11 @@ impl ExtensionNativeGrantSnapshot {
 
     pub fn denied_sites(&self) -> impl ExactSizeIterator<Item = &ExtensionSiteAccessScope> {
         self.profile_policy.denied_sites().iter()
+    }
+
+    /// Authenticated execution environment selected for background content.
+    pub fn background_environment(&self) -> Option<ExtensionBackgroundEnvironment> {
+        self.projection().background_environment()
     }
 
     /// Exact reviewed compatibility profile bound into the admitted manifest.

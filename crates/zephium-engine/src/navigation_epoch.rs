@@ -435,6 +435,28 @@ impl NavigationEpochTracker {
             .flatten()
     }
 
+    /// Verifies the exact current provisional or committed top-level target.
+    /// Terminal/restored generations and stale redirect callbacks cannot
+    /// authorize work for another URL.
+    pub(crate) fn matches_current_target(&self, epoch: NavigationEpoch, target: &str) -> bool {
+        let Some(target) = canonical_navigation_target(target) else {
+            return false;
+        };
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        !state.revoked
+            && state.current.as_ref().is_some_and(|current| {
+                current.epoch == epoch
+                    && matches!(
+                        current.phase,
+                        TrackedNavigationPhase::Started | TrackedNavigationPhase::Committed
+                    )
+                    && current.target == target
+            })
+    }
+
     pub(crate) fn committed_snapshot(&self) -> Option<(NavigationEpoch, String)> {
         let state = self
             .state
@@ -654,6 +676,7 @@ mod tests {
             )),
             Some(NavigationTransition::Started(epoch))
         );
+        assert!(tracker.matches_current_target(epoch, "https://example.test/start"));
         assert_eq!(
             tracker.observe_navigation(&event(
                 7,
@@ -662,6 +685,8 @@ mod tests {
             )),
             Some(NavigationTransition::Redirected(epoch))
         );
+        assert!(!tracker.matches_current_target(epoch, "https://example.test/start"));
+        assert!(tracker.matches_current_target(epoch, "https://example.test/final"));
         assert_eq!(
             tracker.observe_navigation(&event(
                 7,
@@ -674,6 +699,7 @@ mod tests {
             tracker.committed_snapshot(),
             Some((epoch, "https://example.test/final".into()))
         );
+        assert!(tracker.matches_current_target(epoch, "https://example.test/final"));
     }
 
     #[test]
