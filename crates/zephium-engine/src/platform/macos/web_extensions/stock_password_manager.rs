@@ -310,7 +310,7 @@ pub(super) fn run_onepassword(extension: &Path, tree_index: &Path) -> Result<boo
         extension,
         tree_index,
         ProbeMode::Stock,
-        StockContract::OnePassword8123233,
+        StockContract::OnePassword8123434,
     )?;
     run_admitted(admitted)
 }
@@ -321,7 +321,7 @@ pub(super) fn run_compatibility_artifact(artifact: &Path) -> Result<bool, String
 }
 
 pub(super) fn run_onepassword_compatibility_artifact(artifact: &Path) -> Result<bool, String> {
-    let admitted = admit_compatibility_artifact(artifact, StockContract::OnePassword8123233)?;
+    let admitted = admit_compatibility_artifact(artifact, StockContract::OnePassword8123434)?;
     run_admitted(admitted)
 }
 
@@ -670,7 +670,7 @@ fn run_native(
         .copied()
         .filter(|permission| {
             admitted.probe_mode == ProbeMode::Stock
-                || contract != StockContract::OnePassword8123233
+                || contract != StockContract::OnePassword8123434
                 || *permission
                     != super::super::extensions::MacosNativeApiPermission::NativeMessaging
         })
@@ -762,7 +762,7 @@ fn run_native(
                 (StockContract::ProtonPass1390, Err(error)) => return Err(error),
                 (_, result) => (Some(started.elapsed().as_millis()), result.err()),
             }
-        } else if contract == StockContract::OnePassword8123233 {
+        } else if contract == StockContract::OnePassword8123434 {
             // This explicit stock load is diagnostic only. It does not modify
             // the package or claim a product preload policy; it captures the
             // public completion error before content/popup effects obscure the
@@ -1541,7 +1541,7 @@ fn wait_for_teardown(teardown: &NativeTeardown) -> Result<(), String> {
         if now >= budget_deadline {
             budget_exceeded = true;
         }
-        let terminal_deadline = if teardown.contract == StockContract::OnePassword8123233 {
+        let terminal_deadline = if teardown.contract == StockContract::OnePassword8123434 {
             extended_deadline
         } else {
             budget_deadline

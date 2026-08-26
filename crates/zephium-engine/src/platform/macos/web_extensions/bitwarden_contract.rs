@@ -961,6 +961,19 @@ fn validate_native_context_menu(
         NSMenuItem::sectionHeaderWithTitle(&NSString::from_str("Zephium default menu probe"), mtm);
     let default_identity = Retained::as_ptr(&default_item);
     default_menu.addItem(&default_item);
+    // Model WebKit's nested native AutoFill prefix rather than proving only a
+    // flat item. The real browser gate observed `AutoFill -> Passwords…`
+    // beside an extension menu. Zephium must retain that opaque native graph
+    // byte-for-byte while appending extension-owned items.
+    let autofill_menu = NSMenu::new(mtm);
+    let passwords_item = NSMenuItem::sectionHeaderWithTitle(&NSString::from_str("Passwords…"), mtm);
+    let passwords_identity = Retained::as_ptr(&passwords_item);
+    autofill_menu.addItem(&passwords_item);
+    let autofill_item = NSMenuItem::sectionHeaderWithTitle(&NSString::from_str("AutoFill"), mtm);
+    let autofill_identity = Retained::as_ptr(&autofill_item);
+    let autofill_menu_identity = Retained::as_ptr(&autofill_menu);
+    autofill_item.setSubmenu(Some(&autofill_menu));
+    default_menu.addItem(&autofill_item);
     let context_identity = context as *const WKWebExtensionContext;
     let menu = registry
         .context_menu_for_tab(
@@ -973,24 +986,36 @@ fn validate_native_context_menu(
         .map_err(|error| format!("Bitwarden native context-menu merge failed: {error}"))?
         .ok_or_else(|| "Bitwarden native context-menu merge returned no menu".to_owned())?;
     let items = menu.itemArray();
-    if items.count() != 3 {
+    if items.count() != 4 {
         return Err(format!(
-            "Bitwarden native context-menu merge returned {} items instead of three",
+            "Bitwarden native context-menu merge returned {} items instead of four",
             items.count()
         ));
     }
     if Retained::as_ptr(&items.objectAtIndex(0)) != default_identity
-        || !items.objectAtIndex(1).isSeparatorItem()
+        || Retained::as_ptr(&items.objectAtIndex(1)) != autofill_identity
+        || !items.objectAtIndex(2).isSeparatorItem()
     {
         return Err("Bitwarden native context-menu merge replaced the default prefix".into());
     }
-    let title = items.objectAtIndex(2).title().to_string();
+    let retained_autofill_menu = items
+        .objectAtIndex(1)
+        .submenu()
+        .ok_or_else(|| "Bitwarden native context-menu merge removed AutoFill submenu".to_owned())?;
+    let autofill_items = retained_autofill_menu.itemArray();
+    if Retained::as_ptr(&retained_autofill_menu) != autofill_menu_identity
+        || autofill_items.count() != 1
+        || Retained::as_ptr(&autofill_items.objectAtIndex(0)) != passwords_identity
+    {
+        return Err("Bitwarden native context-menu merge changed AutoFill submenu identity".into());
+    }
+    let title = items.objectAtIndex(3).title().to_string();
     if title != "Zephium Bitwarden probe updated" {
         return Err(format!(
             "Bitwarden native context-menu projection returned an unexpected title: {title:?}"
         ));
     }
-    menu.performActionForItemAtIndex(2);
+    menu.performActionForItemAtIndex(3);
     let native_items = unsafe { context.menuItemsForTab(tab) };
     if native_items.count() != 1 {
         return Err("Bitwarden context-menu item disappeared after native click".into());

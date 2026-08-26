@@ -25,19 +25,19 @@ const PROTON_EXPECTED_MANIFEST_SHA256: &str =
 const PROTON_EXPECTED_WASM_FILES: usize = 5;
 
 const ONEPASSWORD_DISPLAY_NAME: &str = "1Password – Password Manager";
-const ONEPASSWORD_VERSION: &str = "8.12.32.33";
-const ONEPASSWORD_CONTEXT_IDENTIFIER: &str = "zephium-stock-1password-8-12-32-33-probe";
-const ONEPASSWORD_EXPECTED_FILE_COUNT: usize = 998;
-const ONEPASSWORD_EXPECTED_TOTAL_BYTES: u64 = 45_115_978;
+const ONEPASSWORD_VERSION: &str = "8.12.34.34";
+const ONEPASSWORD_CONTEXT_IDENTIFIER: &str = "zephium-stock-1password-8-12-34-34-probe";
+const ONEPASSWORD_EXPECTED_FILE_COUNT: usize = 1_000;
+const ONEPASSWORD_EXPECTED_TOTAL_BYTES: u64 = 45_151_539;
 const ONEPASSWORD_EXPECTED_INDEX_SHA256: &str =
-    "633f2cbe9ce15b12e89e6276c76565834618fb5403d5e6969b7f488122291de4";
+    "45a749822287874b93f147ae2b26720342c25e7fe4a8a940fe1efc35b2b8c31d";
 const ONEPASSWORD_EXPECTED_TREE_SHA256: &str =
-    "873bd553f05fda33c2227b40682cfa4ff2988e0e53944291432e4869f6caaa4e";
+    "7a0ba69b85aed523e22b7e4e63c002cdf12bfd77156186a02ecefedba3e20aad";
 const ONEPASSWORD_EXPECTED_MANIFEST_SHA256: &str =
-    "cc7c40234e93d17641ca9b77a10bb1bfe35fa1f58fc07fdaacabc9916b039568";
+    "388326228cad52ddc0bc860101a27d571ca52736018526a2b45ddae05ed1622d";
 const ONEPASSWORD_EXPECTED_WASM_FILES: usize = 7;
-const ONEPASSWORD_PRIMARY_WASM_PATH: &str = "assets/wasm/op_wasm_b5x_bg-KCDDU7LY.wasm";
-const ONEPASSWORD_PRIMARY_WASM_BYTES: usize = 17_466_756;
+const ONEPASSWORD_PRIMARY_WASM_PATH: &str = "assets/wasm/op_wasm_b5x_bg-ATVVAPRM.wasm";
+const ONEPASSWORD_PRIMARY_WASM_BYTES: usize = 17_461_788;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum BackgroundAdaptationKind {
@@ -71,84 +71,84 @@ const ONEPASSWORD_NATIVE_PERMISSIONS: [Permission; 10] = [
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum StockContract {
     ProtonPass1390,
-    OnePassword8123233,
+    OnePassword8123434,
 }
 
 impl StockContract {
     pub(super) const fn target(self) -> &'static str {
         match self {
             Self::ProtonPass1390 => "proton-pass",
-            Self::OnePassword8123233 => "1password",
+            Self::OnePassword8123434 => "1password",
         }
     }
 
     pub(super) const fn display_name(self) -> &'static str {
         match self {
             Self::ProtonPass1390 => PROTON_DISPLAY_NAME,
-            Self::OnePassword8123233 => ONEPASSWORD_DISPLAY_NAME,
+            Self::OnePassword8123434 => ONEPASSWORD_DISPLAY_NAME,
         }
     }
 
     pub(super) const fn version(self) -> &'static str {
         match self {
             Self::ProtonPass1390 => PROTON_VERSION,
-            Self::OnePassword8123233 => ONEPASSWORD_VERSION,
+            Self::OnePassword8123434 => ONEPASSWORD_VERSION,
         }
     }
 
     pub(super) const fn context_identifier(self) -> &'static str {
         match self {
             Self::ProtonPass1390 => PROTON_CONTEXT_IDENTIFIER,
-            Self::OnePassword8123233 => ONEPASSWORD_CONTEXT_IDENTIFIER,
+            Self::OnePassword8123434 => ONEPASSWORD_CONTEXT_IDENTIFIER,
         }
     }
 
     pub(super) const fn expected_file_count(self) -> usize {
         match self {
             Self::ProtonPass1390 => PROTON_EXPECTED_FILE_COUNT,
-            Self::OnePassword8123233 => ONEPASSWORD_EXPECTED_FILE_COUNT,
+            Self::OnePassword8123434 => ONEPASSWORD_EXPECTED_FILE_COUNT,
         }
     }
 
     pub(super) const fn expected_total_bytes(self) -> u64 {
         match self {
             Self::ProtonPass1390 => PROTON_EXPECTED_TOTAL_BYTES,
-            Self::OnePassword8123233 => ONEPASSWORD_EXPECTED_TOTAL_BYTES,
+            Self::OnePassword8123434 => ONEPASSWORD_EXPECTED_TOTAL_BYTES,
         }
     }
 
     pub(super) const fn expected_index_sha256(self) -> &'static str {
         match self {
             Self::ProtonPass1390 => PROTON_EXPECTED_INDEX_SHA256,
-            Self::OnePassword8123233 => ONEPASSWORD_EXPECTED_INDEX_SHA256,
+            Self::OnePassword8123434 => ONEPASSWORD_EXPECTED_INDEX_SHA256,
         }
     }
 
     pub(super) const fn expected_tree_sha256(self) -> &'static str {
         match self {
             Self::ProtonPass1390 => PROTON_EXPECTED_TREE_SHA256,
-            Self::OnePassword8123233 => ONEPASSWORD_EXPECTED_TREE_SHA256,
+            Self::OnePassword8123434 => ONEPASSWORD_EXPECTED_TREE_SHA256,
         }
     }
 
     pub(super) const fn expected_manifest_sha256(self) -> &'static str {
         match self {
             Self::ProtonPass1390 => PROTON_EXPECTED_MANIFEST_SHA256,
-            Self::OnePassword8123233 => ONEPASSWORD_EXPECTED_MANIFEST_SHA256,
+            Self::OnePassword8123434 => ONEPASSWORD_EXPECTED_MANIFEST_SHA256,
         }
     }
 
     const fn expected_wasm_files(self) -> usize {
         match self {
             Self::ProtonPass1390 => PROTON_EXPECTED_WASM_FILES,
-            Self::OnePassword8123233 => ONEPASSWORD_EXPECTED_WASM_FILES,
+            Self::OnePassword8123434 => ONEPASSWORD_EXPECTED_WASM_FILES,
         }
     }
 
     pub(super) const fn native_permissions(self) -> &'static [Permission] {
         match self {
             Self::ProtonPass1390 => &PROTON_NATIVE_PERMISSIONS,
-            Self::OnePassword8123233 => &ONEPASSWORD_NATIVE_PERMISSIONS,
+            Self::OnePassword8123434 => &ONEPASSWORD_NATIVE_PERMISSIONS,
         }
     }
 
@@ -161,14 +161,14 @@ impl StockContract {
             // Preserve the original Proton diagnostic contract. The newer
             // 1Password gate exercises the ordinary regular context only.
             Self::ProtonPass1390 => true,
-            Self::OnePassword8123233 => false,
+            Self::OnePassword8123434 => false,
         }
     }
 
     pub(super) const fn inline_marker_selector(self) -> &'static str {
         match self {
             Self::ProtonPass1390 => "[data-protonpass-role]",
-            Self::OnePassword8123233 => {
+            Self::OnePassword8123434 => {
                 "com-1password-button, com-1password-menu, com-1password-notification"
             }
         }
@@ -179,7 +179,7 @@ impl StockContract {
             Self::ProtonPass1390 => {
                 "[id^=\"protonpass-root-\"], [class*=\"protonpass-control-\"]"
             }
-            Self::OnePassword8123233 => {
+            Self::OnePassword8123434 => {
                 "com-1password-button, com-1password-menu, com-1password-modal, com-1password-notification, com-1password-uso"
             }
         }
@@ -188,14 +188,14 @@ impl StockContract {
     pub(super) const fn popup_root_selector(self) -> &'static str {
         match self {
             Self::ProtonPass1390 => ".app-root",
-            Self::OnePassword8123233 => "#root",
+            Self::OnePassword8123434 => "#root",
         }
     }
 
     pub(super) const fn wasm_resource_probe(self) -> Option<(&'static str, usize)> {
         match self {
             Self::ProtonPass1390 => None,
-            Self::OnePassword8123233 => Some((
+            Self::OnePassword8123434 => Some((
                 ONEPASSWORD_PRIMARY_WASM_PATH,
                 ONEPASSWORD_PRIMARY_WASM_BYTES,
             )),
@@ -218,12 +218,12 @@ impl StockContract {
                 managed_storage_fallback: false,
                 created_navigation_target_fallback: false,
             },
-            Self::OnePassword8123233 => CompatibilityOutputContract {
-                files: 1_005,
-                bytes: 45_140_692,
-                manifest_sha256: "901937289daf1f75c4a48507e8023af312d52144cf61cb6000fb6f913c0bebf0",
-                tree_sha256: "e1271e34edbf7c9a79c09da93b4e8a73b427d3eefe270af7a570627864ca1388",
-                index_sha256: "287673c89c85059bdffa67f4e514fef80d5f68e67ecbc886f0da9326980ece51",
+            Self::OnePassword8123434 => CompatibilityOutputContract {
+                files: 1_007,
+                bytes: 45_176_262,
+                manifest_sha256: "08caefed1cd5c8945a60799257b41aa8586be0e2a5a5860285af06d4c7bbb169",
+                tree_sha256: "365cf4abd2db6bc137a6a9bd055ecd56ab466565210d3aac4126d672d27c5240",
+                index_sha256: "c03d3dd3e4b7c42ad436602f95ff731cd88afe0b38386d9bab7a5ed55a0fed81",
                 background: BackgroundAdaptationKind::ModuleDocument,
                 isolated_content_scripts: 7,
                 same_document_navigation_routes: 7,
@@ -285,7 +285,7 @@ impl StockContract {
             .into_value();
         match self {
             Self::ProtonPass1390 => validate_proton_manifest(&manifest),
-            Self::OnePassword8123233 => validate_onepassword_manifest(&manifest),
+            Self::OnePassword8123434 => validate_onepassword_manifest(&manifest),
         }
     }
 
@@ -295,7 +295,7 @@ impl StockContract {
             .into_value();
         match self {
             Self::ProtonPass1390 => validate_proton_compatibility_manifest(&manifest),
-            Self::OnePassword8123233 => validate_onepassword_compatibility_manifest(&manifest),
+            Self::OnePassword8123434 => validate_onepassword_compatibility_manifest(&manifest),
         }
     }
 }
@@ -394,6 +394,7 @@ fn validate_onepassword_manifest(manifest: &Value) -> Result<(), String> {
             "downloads",
             "idle",
             "management",
+            "nativeMessaging",
             "notifications",
             "offscreen",
             "privacy",

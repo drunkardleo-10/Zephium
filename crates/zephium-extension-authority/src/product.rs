@@ -1425,6 +1425,24 @@ mod tests {
         );
     }
 
+    #[cfg(all(feature = "local-extension-lab", not(zephium_internal_repository_e2e)))]
+    #[test]
+    fn local_lab_authority_admits_and_recognizes_its_exact_acquired_catalog() {
+        let authority = BundledPackageAuthority::product().unwrap();
+        assert_eq!(
+            BundledPackageAuthority::product_status(),
+            BundledProductAuthorityStatus::Configured
+        );
+        let admitted = authority
+            .admit_acquired_catalog(crate::local_lab_catalog::CATALOG_BYTES)
+            .unwrap();
+        assert_eq!(admitted.catalog().packages().len(), 1);
+        assert_eq!(
+            authority.recognize_generation(&admitted.generation_anchor()),
+            Some(ProductBundledCatalogGenerationRole::Active)
+        );
+    }
+
     #[cfg(zephium_internal_repository_e2e)]
     #[test]
     fn internal_repository_fixture_admits_only_its_active_and_rollback_generations() {

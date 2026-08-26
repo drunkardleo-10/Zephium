@@ -879,10 +879,13 @@ items, the merged cohort at most 32, and the complete submenu graph at most 64
 unique items, 32 unique menus, depth four, and 512 UTF-8 title bytes per item.
 Cycles, aliases, inconsistent native counts, stale contexts, and over-budget
 trees fail closed to WebKit's unchanged default menu. A live gate preserves the
-default prefix, adds the native separator/item, performs that item through
-`NSMenu`, observes the exact `contextMenus.onClicked` tab, and then proves
-removal. Packaged physical right-click and page-context variants remain release
-evidence rather than an architecture gap.
+default prefix, including a nested `AutoFill -> Passwords…` stand-in with the
+exact original item and submenu identities, adds the native separator/item,
+performs that item through `NSMenu`, observes the exact
+`contextMenus.onClicked` tab, and then proves removal. A real Extension Lab run
+also observed WebKit's native AutoFill submenu beside 1Password's extension
+menu. Packaged physical right-click and broader page-context variants remain
+release evidence rather than an architecture gap.
 
 The privileged frame receives an actor-revisioned exact-replacement action
 cohort only for the focused profile and active logical tab. Fixed RGBA icons
@@ -2042,6 +2045,49 @@ creates no view or timer, and remains a usability hint rather than navigation,
 permission, or content-script authority. In the signed-account gate it removed
 the earlier undefined content-message responses during direct navigation, but
 it does not claim to repair 1Password's separate cold-start core blocker.
+
+The August 26, 2026 refresh separately pins the then-current stock 1Password
+8.12.34.34 Chrome package. Its authenticated CRX SHA-256 is
+`7f0b3a8f66469091c74dc6943d77d01fda657a0eb3ff3247afc3be8b841edb75`;
+the developer-key SHA-256 and Chrome identifier remain unchanged. The exact
+1,000-file, 45,151,539-byte source tree has SHA-256
+`7a0ba69b85aed523e22b7e4e63c002cdf12bfd77156186a02ecefedba3e20aad`,
+canonical-index SHA-256
+`45a749822287874b93f147ae2b26720342c25e7fe4a8a940fe1efc35b2b8c31d`,
+and manifest SHA-256
+`388326228cad52ddc0bc860101a27d571ca52736018526a2b45ddae05ed1622d`.
+The release adds a required `nativeMessaging` declaration; the ordinary native
+target removes it and retains the same explicit no-process deny facade. No
+third-party package byte is committed.
+
+The clean package-neutral document transform produces 1,007 files and
+45,176,262 bytes with manifest, tree, and index SHA-256 values
+`08caefed1cd5c8945a60799257b41aa8586be0e2a5a5860285af06d4c7bbb169`,
+`365cf4abd2db6bc137a6a9bd055ecd56ab466565210d3aac4126d672d27c5240`,
+and `c03d3dd3e4b7c42ad436602f95ff731cd88afe0b38386d9bab7a5ed55a0fed81`.
+The stock worker still reaches WebKit context error 6 after the bounded
+12-second load, while the clean document background loads without a context
+error in about 172 ms. The isolated-content compatibility marker is still not
+observable through `scripting.executeScript`, so this remains diagnostic
+evidence rather than a compatibility claim. In a fresh real-browser profile,
+the clean 8.12.34.34 popup also remains at its loading surface and does not
+expose onboarding.
+
+A separate non-authorizing experiment bound the module's exported
+`initializeFinishedPromise` into a generated wrapper with an eight-second
+one-shot deadline. WebKit's public background-load callback returned in about
+89 ms, before that promise could serve as host-visible readiness, and the real
+product popup still remained at its loading surface. The experiment was
+rejected and removed: no readiness-export adapter, timer, hidden view, or
+package-specific runtime branch remains. The result proves that module
+top-level completion cannot be treated as the settlement contract for
+`loadBackgroundContent` on the exercised WebKit runtime.
+
+One earlier instrumented 8.12.32.33 session and a separate user-observed run did
+reach the authenticated dashboard and expose real 1Password fill entries in
+the page context menu. That establishes conditional vault/UI/page integration
+once the background is healthy. It does not close the reproducible cold-start,
+restart, autofill/save/passkey, resource, publisher, or release gates.
 
 Authenticating this real package exposed one legitimate package-admission
 ceiling: a current major extension contains a single resource slightly above
