@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 use zephium_core::extensions::{
-    ExtensionCompatibilityLevel, ExtensionCompatibilityTargetId, ExtensionPackageKey,
+    ExtensionCompatibilityLevel, ExtensionCompatibilityTargetId, ExtensionMacosPublisherIdentity,
+    ExtensionManifestDeclaration, ExtensionPackageKey, ExtensionPublisherNativeHostRequirement,
 };
 use zephium_extension_package::{
     admit_extension_manifest, parse_bounded_json, BoundedJsonLimits, CanonicalExtensionTreeIndex,
@@ -274,6 +275,7 @@ fn classify_profile(
             return Err("reviewed manifest classification changed during admission".into());
         }
     }
+    validate_publisher_native_host(&input, package.identity(), &admitted)?;
     let activatable = admitted
         .descriptor()
         .compatibility()
@@ -293,6 +295,66 @@ fn classify_profile(
     })
 }
 
+fn validate_publisher_native_host(
+    input: &ManifestProfileInput,
+    package: &zephium_core::extensions::ExtensionPackageIdentity,
+    admitted: &zephium_extension_package::AdmittedExtensionManifest,
+) -> Result<(), String> {
+    let compatible_required_permission =
+        admitted
+            .descriptor()
+            .compatibility()
+            .iter()
+            .any(|classification| {
+                matches!(
+                    classification.declaration(),
+                    ExtensionManifestDeclaration::RequiredApiPermission(name)
+                        if name.as_str() == "nativeMessaging"
+                ) && classification.level() == ExtensionCompatibilityLevel::Compatible
+            });
+    let compatible_native_surface =
+        admitted
+            .descriptor()
+            .compatibility()
+            .iter()
+            .any(|classification| {
+                classification.declaration() == &ExtensionManifestDeclaration::NativeMessaging
+                    && classification.level() == ExtensionCompatibilityLevel::Compatible
+            });
+    let Some(review) = input.publisher_native_host.as_ref() else {
+        if input.compatibility_target.as_deref() == Some("macos.wkwebextension.v1")
+            && (compatible_required_permission || compatible_native_surface)
+        {
+            return Err(
+                "compatible nativeMessaging requires an exact publisher native host review".into(),
+            );
+        }
+        return Ok(());
+    };
+    if input.compatibility_target.as_deref() != Some("macos.wkwebextension.v1") {
+        return Err("publisher native host is bound to a non-native macOS profile".into());
+    }
+    if !compatible_required_permission || !compatible_native_surface {
+        return Err(
+            "publisher native host requires compatible required nativeMessaging declarations"
+                .into(),
+        );
+    }
+    let publisher = ExtensionMacosPublisherIdentity::new(
+        review.macos_team_identifier.clone(),
+        review.macos_signing_identifier.clone(),
+    )
+    .map_err(|_| "publisher native host macOS identity is invalid".to_owned())?;
+    ExtensionPublisherNativeHostRequirement::new(
+        package.clone(),
+        review.host_name.clone(),
+        review.upstream_chromium_extension_id.clone(),
+        publisher,
+    )
+    .map_err(|_| "publisher native host requirement is invalid".to_owned())?;
+    Ok(())
+}
+
 fn validate_review_identity(
     generated: &ManifestProfileInput,
     reviewed: &ManifestProfileInput,
@@ -307,6 +369,7 @@ fn validate_review_identity(
         || generated.tree_index_target != reviewed.tree_index_target
         || generated.compatibility_target != reviewed.compatibility_target
         || generated.compatibility_receipt_sha256 != reviewed.compatibility_receipt_sha256
+        || generated.publisher_native_host.is_some()
         || generated.declarations.len() != reviewed.declarations.len()
         || generated
             .declarations

@@ -19,6 +19,14 @@ pub(crate) enum StagingCompatibilityContract {
 }
 
 #[derive(Clone, Copy)]
+pub(crate) struct StagingPublisherNativeHost {
+    pub(crate) host_name: &'static str,
+    pub(crate) upstream_chromium_extension_id: &'static str,
+    pub(crate) macos_team_identifier: &'static str,
+    pub(crate) macos_signing_identifier: &'static str,
+}
+
+#[derive(Clone, Copy)]
 pub(crate) struct StagingManifestProfile {
     pub(crate) runtime_target: ProductExtensionRuntimeTarget,
     pub(crate) contract: StagingCompatibilityContract,
@@ -31,6 +39,7 @@ pub(crate) struct StagingManifestProfile {
     pub(crate) tree_sha256: [u8; 32],
     pub(crate) compatibility_sha256: [u8; 32],
     pub(crate) admission_sha256: [u8; 32],
+    pub(crate) publisher_native_host: Option<StagingPublisherNativeHost>,
 }
 
 pub(crate) struct StagingCatalogGeneration {
@@ -127,6 +136,7 @@ const ACTIVE_PROFILES: [StagingManifestProfile; 2] = [
         admission_sha256: decode_lower_hex_32(
             "310ce75fdb22e8487b6681eebd64a7ce4bc5853ad0410abc9f6e94631010a8ab",
         ),
+        publisher_native_host: None,
     },
     StagingManifestProfile {
         runtime_target: ProductExtensionRuntimeTarget::MacosNative,
@@ -150,6 +160,7 @@ const ACTIVE_PROFILES: [StagingManifestProfile; 2] = [
         admission_sha256: decode_lower_hex_32(
             "7c7fc3b715ef1f152d5ed4991e8217a9e471b9ef06c68f60f9cf4039eaf7b8e1",
         ),
+        publisher_native_host: None,
     },
 ];
 
@@ -166,6 +177,7 @@ const ROLLBACK_PROFILES: [StagingManifestProfile; 2] = [
         tree_sha256: ACTIVE_PROFILES[0].tree_sha256,
         compatibility_sha256: ACTIVE_PROFILES[0].compatibility_sha256,
         admission_sha256: ACTIVE_PROFILES[0].admission_sha256,
+        publisher_native_host: None,
     },
     StagingManifestProfile {
         runtime_target: ProductExtensionRuntimeTarget::MacosNative,
@@ -183,6 +195,7 @@ const ROLLBACK_PROFILES: [StagingManifestProfile; 2] = [
         admission_sha256: decode_lower_hex_32(
             "ec5f0f866b75da2792a23d1624668f0beb9172e21b9554f95986aa27fc7147e2",
         ),
+        publisher_native_host: None,
     },
 ];
 
@@ -199,6 +212,7 @@ const ROLLBACK_TWO_PROFILES: [StagingManifestProfile; 2] = [
         tree_sha256: ACTIVE_PROFILES[0].tree_sha256,
         compatibility_sha256: ACTIVE_PROFILES[0].compatibility_sha256,
         admission_sha256: ACTIVE_PROFILES[0].admission_sha256,
+        publisher_native_host: None,
     },
     StagingManifestProfile {
         runtime_target: ProductExtensionRuntimeTarget::MacosNative,
@@ -216,6 +230,7 @@ const ROLLBACK_TWO_PROFILES: [StagingManifestProfile; 2] = [
         admission_sha256: decode_lower_hex_32(
             "b2582e9ba4f02629a0d0c66cd538ba8df605c8641bf626cdcf3c35f7821e828d",
         ),
+        publisher_native_host: None,
     },
 ];
 

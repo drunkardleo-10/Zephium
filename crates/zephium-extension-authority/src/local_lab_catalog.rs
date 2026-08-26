@@ -59,7 +59,18 @@ pub(crate) struct LocalLabProfileInput {
     pub(crate) tree_index_target: String,
     pub(crate) compatibility_target: Option<String>,
     pub(crate) compatibility_receipt_sha256: Option<String>,
+    #[serde(default)]
+    pub(crate) publisher_native_host: Option<LocalLabPublisherNativeHost>,
     pub(crate) declarations: Vec<LocalLabDeclarationReviewRow>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LocalLabPublisherNativeHost {
+    pub(crate) host_name: String,
+    pub(crate) upstream_chromium_extension_id: String,
+    pub(crate) macos_team_identifier: String,
+    pub(crate) macos_signing_identifier: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]

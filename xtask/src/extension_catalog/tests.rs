@@ -22,12 +22,23 @@ fn p256_spki(point: &[u8]) -> Vec<u8> {
 }
 
 fn fixture(root: &Path) -> (PathBuf, PathBuf, PathBuf) {
+    fixture_with_publisher_native(root, false)
+}
+
+fn fixture_with_publisher_native(
+    root: &Path,
+    publisher_native: bool,
+) -> (PathBuf, PathBuf, PathBuf) {
     let source = root.join("source");
     fs::create_dir(&source).unwrap();
     write(
         &source,
         "manifest.json",
-        br#"{"background":{"service_worker":"worker.js"},"manifest_version":3,"name":"Publisher fixture","version":"1.0.0"}"#,
+        if publisher_native {
+            br#"{"background":{"service_worker":"worker.js"},"manifest_version":3,"name":"Publisher fixture","permissions":["nativeMessaging"],"version":"1.0.0"}"#
+        } else {
+            br#"{"background":{"service_worker":"worker.js"},"manifest_version":3,"name":"Publisher fixture","version":"1.0.0"}"#
+        },
     );
     write(&source, "worker.js", b"globalThis.ready = true;");
     let index = root.join("source-tree.json");
@@ -45,7 +56,16 @@ fn fixture(root: &Path) -> (PathBuf, PathBuf, PathBuf) {
     let public_key_path = root.join("public-key.der");
     fs::write(&public_key_path, &public_key).unwrap();
     let compatibility = root.join("compatibility");
-    crate::macos_extension_compatibility::materialize(&source, &index, &compatibility).unwrap();
+    if publisher_native {
+        crate::macos_extension_compatibility::materialize_publisher_native(
+            &source,
+            &index,
+            &compatibility,
+        )
+        .unwrap();
+    } else {
+        crate::macos_extension_compatibility::materialize(&source, &index, &compatibility).unwrap();
+    }
     let prepared = root.join("prepared");
     crate::extension_release::prepare_compatibility(&compatibility, &public_key_path, &prepared)
         .unwrap();
@@ -264,4 +284,61 @@ fn manifest_profile_finalization_rejects_unassessed_and_identity_drift() {
         &temporary.path().join("identity-drift")
     )
     .is_err());
+}
+
+#[test]
+fn publisher_native_host_is_review_only_exact_and_native_messaging_bound() {
+    let temporary = tempfile::tempdir().unwrap();
+    fixture_with_publisher_native(temporary.path(), true);
+    let publication_review = review(temporary.path());
+    let publication = temporary.path().join("publication");
+    publish(&publication_review, &publication).unwrap();
+    let mut manifest_review: serde_json::Value =
+        serde_json::from_slice(&fs::read(publication.join(MANIFEST_INPUTS_TARGET)).unwrap())
+            .unwrap();
+    manifest_review["kind"] = serde_json::Value::String(MANIFEST_REVIEW_KIND.into());
+    manifest_review["classification_settled"] = serde_json::Value::Bool(true);
+    for row in manifest_review["profiles"][0]["declarations"]
+        .as_array_mut()
+        .unwrap()
+    {
+        row["level"] = serde_json::Value::String("compatible".into());
+    }
+    let review_path = temporary.path().join("manifest-review.json");
+    fs::write(&review_path, serde_json::to_vec(&manifest_review).unwrap()).unwrap();
+    assert!(finalize_manifest_profiles(
+        &publication,
+        &review_path,
+        &temporary.path().join("missing-publisher")
+    )
+    .is_err());
+
+    manifest_review["profiles"][0]["publisher_native_host"] = serde_json::json!({
+        "host_name": "com.example.host",
+        "upstream_chromium_extension_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "macos_team_identifier": "invalid",
+        "macos_signing_identifier": "com.example.host"
+    });
+    fs::write(&review_path, serde_json::to_vec(&manifest_review).unwrap()).unwrap();
+    assert!(finalize_manifest_profiles(
+        &publication,
+        &review_path,
+        &temporary.path().join("invalid-publisher")
+    )
+    .is_err());
+
+    manifest_review["profiles"][0]["publisher_native_host"]["macos_team_identifier"] =
+        serde_json::json!("A1B2C3D4E5");
+    fs::write(&review_path, serde_json::to_vec(&manifest_review).unwrap()).unwrap();
+    let classified = temporary.path().join("classified");
+    finalize_manifest_profiles(&publication, &review_path, &classified).unwrap();
+    let output: serde_json::Value = serde_json::from_slice(
+        &fs::read(classified.join("classified-manifest-profiles-v1.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        output["profiles"][0]["input"]["publisher_native_host"],
+        manifest_review["profiles"][0]["publisher_native_host"]
+    );
+    assert_eq!(output["profiles"][0]["activatable"], true);
 }

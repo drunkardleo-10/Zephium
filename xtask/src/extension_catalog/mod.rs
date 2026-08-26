@@ -328,7 +328,18 @@ struct ManifestProfileInput {
     tree_index_target: String,
     compatibility_target: Option<String>,
     compatibility_receipt_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    publisher_native_host: Option<PublisherNativeHostReview>,
     declarations: Vec<ManifestDeclarationReviewRow>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PublisherNativeHostReview {
+    host_name: String,
+    upstream_chromium_extension_id: String,
+    macos_team_identifier: String,
+    macos_signing_identifier: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -688,6 +699,7 @@ fn publish_package(
             .compatibility
             .as_ref()
             .map(|compatibility| compatibility.sha256.clone()),
+        publisher_native_host: None,
         declarations: Vec::new(),
     };
     let catalog = CatalogPackage {

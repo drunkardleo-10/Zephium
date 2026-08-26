@@ -14,6 +14,11 @@ use std::fmt;
 use std::mem::size_of;
 
 use thiserror::Error;
+#[cfg(all(
+    any(feature = "local-extension-lab", feature = "staging-extension-catalog"),
+    not(zephium_internal_repository_e2e)
+))]
+use zephium_core::extensions::ExtensionMacosPublisherIdentity;
 use zephium_core::extensions::{
     ExtensionAuthorityId, ExtensionCompatibilityLevel, ExtensionCompatibilityProfileDigest,
     ExtensionCompatibilityTargetId, ExtensionManifestDeclaration, ExtensionManifestDescriptor,
@@ -1431,6 +1436,24 @@ fn sealed_product_manifest_provisioning(
         .collect::<Vec<_>>()
         .into_boxed_slice();
     let policy = SealedManifestCompatibilityPolicy::new(target.clone(), rows)?;
+    let publisher_native_host = profile
+        .publisher_native_host
+        .as_ref()
+        .map(|review| {
+            let publisher = ExtensionMacosPublisherIdentity::new(
+                review.macos_team_identifier.clone(),
+                review.macos_signing_identifier.clone(),
+            )
+            .map_err(invalid_local_lab_configuration)?;
+            ExtensionPublisherNativeHostRequirement::new(
+                package.identity().clone(),
+                review.host_name.clone(),
+                review.upstream_chromium_extension_id.clone(),
+                publisher,
+            )
+            .map_err(invalid_local_lab_configuration)
+        })
+        .transpose()?;
     let catalog_anchor = SealedManifestCatalogAnchor {
         authority: catalog.authority(),
         revision: catalog.revision(),
@@ -1457,7 +1480,7 @@ fn sealed_product_manifest_provisioning(
                 admission_digest: admitted.admission_digest(),
             },
             policy,
-            publisher_native_host: None,
+            publisher_native_host,
         }]
         .into_boxed_slice(),
     }))
@@ -1649,6 +1672,23 @@ fn staging_manifest_profile(
         .collect::<Vec<_>>()
         .into_boxed_slice();
     let policy = SealedManifestCompatibilityPolicy::new(target.clone(), rows)?;
+    let publisher_native_host = input
+        .publisher_native_host
+        .map(|review| {
+            let publisher = ExtensionMacosPublisherIdentity::new(
+                review.macos_team_identifier,
+                review.macos_signing_identifier,
+            )
+            .map_err(invalid_staging_configuration)?;
+            ExtensionPublisherNativeHostRequirement::new(
+                package.identity().clone(),
+                review.host_name,
+                review.upstream_chromium_extension_id,
+                publisher,
+            )
+            .map_err(invalid_staging_configuration)
+        })
+        .transpose()?;
     Ok(SealedManifestProfile {
         runtime_target: input.runtime_target,
         catalog: catalog_anchor,
@@ -1665,7 +1705,7 @@ fn staging_manifest_profile(
             admission_digest: admitted.admission_digest(),
         },
         policy,
-        publisher_native_host: None,
+        publisher_native_host,
     })
 }
 
