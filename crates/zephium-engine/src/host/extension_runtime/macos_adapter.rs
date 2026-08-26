@@ -191,6 +191,11 @@ pub(super) fn begin_native_retirement(
             ticket.owner().key.profile(),
             owner.runtime_grant_context_identity(),
         );
+    host.macos_extension_controllers
+        .cancel_native_messaging_context(
+            ticket.owner().key.profile(),
+            owner.runtime_grant_context_identity(),
+        );
     let observed_owner = owner.owner_id();
     let (disposition, returned_owner) = match owner.retire() {
         MacosNativeRuntimeRetirement::Absent(audit) => {

@@ -5,9 +5,9 @@
 //! read-only history-facade request and one port, and a nonpersistent
 //! controller/store. It publishes a real regular window/tab surface before a
 //! document-idle content script asks a module worker for an asynchronous
-//! response. Passing proves that response and the full facade-to-host-to-facade
-//! round trip, while separately recording the asymmetric persistent-port
-//! behavior. It grants no generic native-host authority.
+//! response. Passing proves that response, the full facade-to-host-to-facade
+//! round trip, and an exact bidirectional persistent-port exchange. It grants
+//! no generic native-host authority.
 
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
@@ -37,7 +37,6 @@ const ONE_SHOT_REQUEST: &str = "v1/history.recent/2";
 const ONE_SHOT_REPLY: &str = r#"{"v":1,"items":[{"url":"https://first.example/path","title":"First visited page","lastVisit":1000},{"url":"https://second.example/path","title":"Second visited page","lastVisit":2000}]}"#;
 const PORT_REQUEST: &str = "zephium-broker-port-request";
 const PORT_REPLY: &str = "zephium-broker-port-reply";
-const PORT_REPLY_UNOBSERVED: &str = "host-reply-unobserved";
 
 #[derive(Default)]
 struct BrokerState {
@@ -403,14 +402,24 @@ globalThis.chrome.runtime.onMessage.addListener((message, sender, sendResponse) 
     Number.isInteger(sender?.tab?.id) &&
     /^http:\/\//.test(sender?.url ?? "") &&
     /^http:\/\//.test(sender?.tab?.url ?? "");
-  historyEvidence().then((history) => {{
-    const evidence = senderValid ? history : "sender-invalid";
+  const portEvidence = () => new Promise((resolve) => {{
     const port = globalThis.chrome.runtime.connectNative({application_identifier:?});
+    let settled = false;
+    const settle = (evidence) => {{
+      if (settled) return;
+      settled = true;
+      try {{ port.disconnect(); }} catch {{}}
+      resolve(evidence);
+    }};
+    port.onMessage.addListener((reply) => {{
+      settle(reply?.reply === {port_reply:?} ? {port_reply:?} : "host-reply-invalid");
+    }});
+    port.onDisconnect.addListener(() => settle("host-disconnected-before-reply"));
     port.postMessage({port_request:?});
-    setTimeout(() => {{
-      port.disconnect();
-      sendResponse(evidence);
-    }}, 100);
+    setTimeout(() => settle("host-reply-unobserved"), 2000);
+  }});
+  Promise.all([historyEvidence(), portEvidence()]).then(([history, port]) => {{
+    sendResponse({{ history: senderValid ? history : "sender-invalid", port }});
   }});
   return true;
 }});
@@ -418,30 +427,28 @@ globalThis.chrome.runtime.onMessage.addListener((message, sender, sendResponse) 
             super::compatibility_artifact::HISTORY_BRIDGE,
             application_identifier = APPLICATION_IDENTIFIER,
             port_request = PORT_REQUEST,
+            port_reply = PORT_REPLY,
         ),
     )?;
-    let script = format!(
-        r#"(() => {{
+    let script = r#"(() => {
     'use strict';
     const runtime = globalThis.chrome?.runtime;
-    const settle = (oneShot, port) => {{
-        document.title = JSON.stringify({{ history: "worker-bounded-recent-search", oneShot, port }});
-    }};
-    if (!runtime?.sendMessage) {{
+    const settle = (oneShot, port) => {
+        document.title = JSON.stringify({ history: "worker-bounded-recent-search", oneShot, port });
+    };
+    if (!runtime?.sendMessage) {
         settle("absent", "absent");
         return;
-    }}
-    setTimeout(() => {{
-      Promise.resolve(runtime.sendMessage({{
+    }
+    setTimeout(() => {
+      Promise.resolve(runtime.sendMessage({
       kind: "zephium-native-broker-worker-evidence-v1",
-      }})).then((oneShot) => {{
-        settle(oneShot, {port_reply_unobserved:?});
-      }}, (error) => settle(`error:${{String(error?.message ?? error)}}`, "not-started"));
-    }}, 100);
-}})()"#,
-        port_reply_unobserved = PORT_REPLY_UNOBSERVED,
-    );
-    write(&path, "probe.js", &script)?;
+      })).then((evidence) => {
+        settle(evidence?.history ?? "history-evidence-missing", evidence?.port ?? "port-evidence-missing");
+      }, (error) => settle(`error:${String(error?.message ?? error)}`, "not-started"));
+    }, 100);
+})()"#;
+    write(&path, "probe.js", script)?;
     Ok(path)
 }
 
@@ -693,7 +700,7 @@ fn wait_for_evidence(
                     != json!({
                         "history": "worker-bounded-recent-search",
                         "oneShot": "history-search-passed",
-                        "port": PORT_REPLY_UNOBSERVED
+                        "port": PORT_REPLY
                     })
                 {
                     return Err(format!(

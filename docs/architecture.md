@@ -1618,19 +1618,18 @@ round trip. Mutation methods remain absent. This proves the facade-to-host-to-
 facade primitive; product authority still comes only from the distinct
 brokered runtime profile and its operation witness.
 
-Persistent native ports are asymmetric on the exercised runtime. The delegate
-receives the exact context-bound connection and one extension message; a
-native object-shaped reply reports successful send completion after being
-retained and dispatched non-reentrantly on the main queue, but JavaScript does
-not observe it within the two-second gate. The extension then disconnects and
-the native handler, port, delegate, view, context, controller, and store all
-release. The classification is therefore `extension-to-host-only / native
-host-send accepted-unobserved`, not a bidirectional port. The initial native
-grant schema continues to prohibit `nativeMessaging`, ordinary builds do not
-enable the message-port binding feature, and the probe does not make an
-unmodified extension call this identifier. Any reviewed adapter using the
-one-shot channel belongs to a new compatibility/grant schema; it cannot silently
-change `macos.wkwebextension.v1` or expose arbitrary native application names.
+The corrected persistent-port gate is bidirectional on the exercised runtime.
+The delegate receives the exact context-bound connection and one extension
+message; a retained native object reply is dispatched non-reentrantly on the
+main queue, the extension's registered `port.onMessage` listener observes the
+exact value, and both sides then disconnect. The native handler, port,
+delegate, view, context, controller, and store all release. An earlier gate
+incorrectly reported `accepted-unobserved` because its JavaScript never
+registered an `onMessage` listener; that claim is withdrawn. The ordinary
+native grant schema still prohibits `nativeMessaging`. A separate sealed
+publisher-host requirement must bind the exact package, upstream Chromium ID,
+host name, and macOS Team/signing identifiers before the publisher schema can
+grant it; arbitrary native application names remain unavailable.
 
 The first production-shaped operations on that new profile are bounded recent
 history, default search, and restoration of the newest closed tab. The
@@ -1690,7 +1689,7 @@ mandatory before Vimium is presented as compatible.
 | Unlimited local storage | Unsupported in the initial target | WebKit can report per-extension stored bytes but exposes no quota setter. Zephium therefore refuses `unlimitedStorage` in both product grant schemas; the feature-only platform probe may exercise the native token, but no product runtime can remove WebKit's finite default quota without a separately reviewed bounded storage design. |
 | Chrome side panel | Degraded | The pinned [`BrowserApi`](https://github.com/bitwarden/clients/blob/browser-v2026.7.0/apps/browser/src/platform/browser/browser-api.ts) capability-checks the namespace and makes side-panel operations no-ops. Zephium's native toolbar popup remains the primary extension UI. |
 | Enterprise managed storage | Unsupported in the initial target | `storage.managed` is absent, so enterprise policy supplied through that browser API is not exposed. This does not authorize approximating managed policy with writable extension storage. |
-| Native messaging | Unsupported in the initial native target | The optional permission is parsed, but `macos.wkwebextension.v1` product grant compilation prohibits it. The separate brokered profile grants only Zephium's fixed internal one-shot channel to an exact reviewed adapter; persistent ports are extension-to-host-only on the exercised runtime. It exposes neither arbitrary native applications nor Bitwarden's optional native integration. Native biometric/application integration must be disclosed separately from core vault use. |
+| Native messaging | Native-brokered for exact sealed publishers; otherwise unsupported | `macos.wkwebextension.v1` prohibits the permission by default. A package-specific sealed publisher requirement may select the narrower publisher schema, after which the broker reauthenticates the live context, exact host name, upstream extension allowlist, fixed Chromium registration root, and Apple Team/signing identity before launching one bounded cold stdio worker. The corrected live gate proves bidirectional persistent ports. Arbitrary native hosts remain unavailable, and each password-manager integration still requires a real signed-app interoperability gate. |
 | Programmatic main-world scripting | Native literal supported; pinned source requires a sealed adapter | `scripting.executeScript` injects the exact extension file into the product tab when passed literal `"MAIN"`, but WebKit exposes no `chrome.scripting.ExecutionWorld` enum. The sealed build must substitute the absent enum access without adding page-world privilege or a generic bridge. |
 | Runtime ports | Registered routing compatible; pre-listener connection not queued | A Zephium-owned extension page opens a named port only after the MV3 worker registers `runtime.onConnect`; the worker receives the port and completes an exact message round trip. A separate connection created immediately before listener registration returns a port, then disconnects without `runtime.lastError` and is not delivered after registration. Extensions that depend on Chrome queuing that startup race require a reviewed compatibility decision; ordinary registered port routing does not. |
 | Non-blocking top-level navigation observation | Compatible on the exercised runtime | A background `webNavigation.onCommitted` listener observes the real regular product-tab HTTP navigation. Frame/detail behavior remains outside this gate. |

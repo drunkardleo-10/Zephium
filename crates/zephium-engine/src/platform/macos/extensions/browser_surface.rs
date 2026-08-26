@@ -26,16 +26,16 @@ use objc2_foundation::{
 };
 use objc2_web_kit::{
     WKWebExtensionAction, WKWebExtensionContext, WKWebExtensionController,
-    WKWebExtensionControllerDelegate, WKWebExtensionMatchPattern, WKWebExtensionPermission,
-    WKWebExtensionTab, WKWebExtensionTabConfiguration, WKWebExtensionWindow, WKWebView,
+    WKWebExtensionControllerDelegate, WKWebExtensionMatchPattern, WKWebExtensionMessagePort,
+    WKWebExtensionPermission, WKWebExtensionTab, WKWebExtensionTabConfiguration,
+    WKWebExtensionWindow, WKWebView,
 };
 use zephium_core::extensions::{
     ExtensionActionRejection, ExtensionActionRequest, ExtensionActionRequestId,
     ExtensionBrowserRequestAction, ExtensionBrowserRequestRejection, ExtensionBrowserSurface,
-    ExtensionBrowserSurfaceGeneration, ExtensionCompatibilityBrokerRejection,
-    ExtensionCompatibilityBrokerRequestId, ExtensionCompatibilityBrokerSettlement,
-    ExtensionCompatibilityBrokerWitness, EXTENSION_COMPATIBILITY_BROKER_APPLICATION_ID,
-    MAX_EXTENSION_BROWSER_REQUEST_URL_BYTES,
+    ExtensionBrowserSurfaceGeneration, ExtensionCompatibilityBrokerRequestId,
+    ExtensionCompatibilityBrokerSettlement, ExtensionCompatibilityBrokerWitness,
+    EXTENSION_COMPATIBILITY_BROKER_APPLICATION_ID, MAX_EXTENSION_BROWSER_REQUEST_URL_BYTES,
 };
 use zephium_core::ids::{ItemId, ProfileId, WindowId};
 
@@ -49,6 +49,10 @@ use super::compatibility_broker::{
     CompatibilityBroker, CompatibilityBrokerPool, CompatibilityBrokerSettlementOutcome,
 };
 use super::extension_page::ExtensionPageBroker;
+use super::native_messaging::{
+    NativeHostProcessPool, PublisherNativeMessagingAuthorization, PublisherNativeMessagingBroker,
+    PublisherNativeMessagingRequestId,
+};
 use super::runtime_grant_broker::{
     RuntimeGrantRequestBroker, RuntimeGrantRequestPool, RuntimeGrantSettlementOutcome,
 };
@@ -674,8 +678,18 @@ struct BrowserControllerDelegateIvars {
     extension_pages: Rc<ExtensionPageBroker>,
     runtime_grants: Rc<RuntimeGrantRequestBroker>,
     compatibility_broker: Rc<CompatibilityBroker>,
+    publisher_native_messaging: Rc<PublisherNativeMessagingBroker>,
     #[cfg(feature = "native-web-extension-probes")]
     lifecycle_drops: Arc<AtomicUsize>,
+}
+
+struct BrowserControllerDelegateServices {
+    broker: Rc<BrowserRequestBroker>,
+    action_popup: Rc<ActionPopupBroker>,
+    extension_pages: Rc<ExtensionPageBroker>,
+    runtime_grants: Rc<RuntimeGrantRequestBroker>,
+    compatibility_broker: Rc<CompatibilityBroker>,
+    publisher_native_messaging: Rc<PublisherNativeMessagingBroker>,
 }
 
 define_class!(
@@ -1021,17 +1035,37 @@ define_class!(
             context: &WKWebExtensionContext,
             reply: &block2::DynBlock<dyn Fn(*mut AnyObject, *mut NSError)>,
         ) {
-            let broker = &self.ivars().compatibility_broker;
-            if !application_identifier.is_some_and(|identifier| {
+            if application_identifier.is_some_and(|identifier| {
                 identifier.isEqualToString(&NSString::from_str(
                     EXTENSION_COMPATIBILITY_BROKER_APPLICATION_ID,
                 ))
             }) {
-                broker.reject(reply, ExtensionCompatibilityBrokerRejection::Unsupported);
+                crate::diagnostic!("extensions: compatibility broker native request received");
+                self.ivars()
+                    .compatibility_broker
+                    .begin(controller, context, message, reply);
                 return;
             }
-            crate::diagnostic!("extensions: compatibility broker native request received");
-            broker.begin(controller, context, message, reply);
+            self.ivars().publisher_native_messaging.begin_one_shot(
+                controller,
+                context,
+                application_identifier,
+                message,
+                reply,
+            );
+        }
+
+        #[unsafe(method(webExtensionController:connectUsingMessagePort:forExtensionContext:completionHandler:))]
+        unsafe fn connect_native_message_port(
+            &self,
+            controller: &WKWebExtensionController,
+            port: &WKWebExtensionMessagePort,
+            context: &WKWebExtensionContext,
+            completion: &block2::DynBlock<dyn Fn(*mut NSError)>,
+        ) {
+            self.ivars()
+                .publisher_native_messaging
+                .begin_port(controller, context, port, completion);
         }
     }
 );
@@ -1039,13 +1073,17 @@ define_class!(
 impl BrowserControllerDelegate {
     fn new(
         mtm: MainThreadMarker,
-        broker: Rc<BrowserRequestBroker>,
-        action_popup: Rc<ActionPopupBroker>,
-        extension_pages: Rc<ExtensionPageBroker>,
-        runtime_grants: Rc<RuntimeGrantRequestBroker>,
-        compatibility_broker: Rc<CompatibilityBroker>,
+        services: BrowserControllerDelegateServices,
         #[cfg(feature = "native-web-extension-probes")] lifecycle_drops: Arc<AtomicUsize>,
     ) -> Retained<Self> {
+        let BrowserControllerDelegateServices {
+            broker,
+            action_popup,
+            extension_pages,
+            runtime_grants,
+            compatibility_broker,
+            publisher_native_messaging,
+        } = services;
         let object = Self::alloc(mtm).set_ivars(BrowserControllerDelegateIvars {
             windows: RefCell::new(Vec::new()),
             focused: RefCell::new(None),
@@ -1054,6 +1092,7 @@ impl BrowserControllerDelegate {
             extension_pages,
             runtime_grants,
             compatibility_broker,
+            publisher_native_messaging,
             #[cfg(feature = "native-web-extension-probes")]
             lifecycle_drops,
         });
@@ -1097,6 +1136,7 @@ pub(super) struct MacosExtensionBrowserSurfaceHost {
     extension_pages: Rc<ExtensionPageBroker>,
     runtime_grants: Rc<RuntimeGrantRequestBroker>,
     compatibility_broker: Rc<CompatibilityBroker>,
+    publisher_native_messaging: Rc<PublisherNativeMessagingBroker>,
     windows: HashMap<WindowId, Retained<BrowserWindow>>,
     tabs: HashMap<ItemId, Retained<BrowserTab>>,
     #[cfg(feature = "native-web-extension-probes")]
@@ -1110,6 +1150,7 @@ impl MacosExtensionBrowserSurfaceHost {
         request_pool: Rc<BrowserRequestPool>,
         runtime_grant_pool: Rc<RuntimeGrantRequestPool>,
         compatibility_broker_pool: Rc<CompatibilityBrokerPool>,
+        native_host_process_pool: std::sync::Arc<NativeHostProcessPool>,
     ) -> Result<Self, BrowserSurfaceError> {
         let mtm = MainThreadMarker::new().ok_or(BrowserSurfaceError::MainThreadRequired)?;
         let broker = BrowserRequestBroker::new(profile, sink.clone(), request_pool);
@@ -1119,6 +1160,8 @@ impl MacosExtensionBrowserSurfaceHost {
             RuntimeGrantRequestBroker::new(profile, sink.clone(), runtime_grant_pool);
         let compatibility_broker =
             CompatibilityBroker::new(profile, sink, compatibility_broker_pool);
+        let publisher_native_messaging =
+            PublisherNativeMessagingBroker::new(profile, native_host_process_pool);
         #[cfg(feature = "native-web-extension-probes")]
         let lifecycle_drops = Arc::new(AtomicUsize::new(0));
         Ok(Self {
@@ -1126,11 +1169,14 @@ impl MacosExtensionBrowserSurfaceHost {
             generation: None,
             delegate: BrowserControllerDelegate::new(
                 mtm,
-                broker.clone(),
-                action_popup.clone(),
-                extension_pages.clone(),
-                runtime_grants.clone(),
-                compatibility_broker.clone(),
+                BrowserControllerDelegateServices {
+                    broker: broker.clone(),
+                    action_popup: action_popup.clone(),
+                    extension_pages: extension_pages.clone(),
+                    runtime_grants: runtime_grants.clone(),
+                    compatibility_broker: compatibility_broker.clone(),
+                    publisher_native_messaging: publisher_native_messaging.clone(),
+                },
                 #[cfg(feature = "native-web-extension-probes")]
                 lifecycle_drops.clone(),
             ),
@@ -1139,6 +1185,7 @@ impl MacosExtensionBrowserSurfaceHost {
             extension_pages,
             runtime_grants,
             compatibility_broker,
+            publisher_native_messaging,
             windows: HashMap::new(),
             tabs: HashMap::new(),
             #[cfg(feature = "native-web-extension-probes")]
@@ -1151,6 +1198,7 @@ impl MacosExtensionBrowserSurfaceHost {
         self.extension_pages.bind_controller(controller);
         self.runtime_grants.bind_controller(controller);
         self.compatibility_broker.bind_controller(controller);
+        self.publisher_native_messaging.bind_controller(controller);
         let delegate = ProtocolObject::from_ref(&*self.delegate);
         // SAFETY: the host retains the main-thread delegate for at least as
         // long as the owning controller entry remains live.
@@ -1514,6 +1562,42 @@ impl MacosExtensionBrowserSurfaceHost {
         self.compatibility_broker.cancel_context(context);
     }
 
+    pub(super) fn native_messaging_subject(
+        &self,
+        request: PublisherNativeMessagingRequestId,
+    ) -> Option<(*const WKWebExtensionContext, Box<str>)> {
+        self.publisher_native_messaging.pending_subject(request)
+    }
+
+    pub(super) fn authorize_native_messaging(
+        &self,
+        request: PublisherNativeMessagingRequestId,
+        authorization: Option<PublisherNativeMessagingAuthorization>,
+    ) -> bool {
+        self.publisher_native_messaging
+            .authorize(request, authorization)
+    }
+
+    pub(super) fn handle_native_messaging_worker_event(
+        &self,
+        request: PublisherNativeMessagingRequestId,
+        event: super::native_messaging::NativeHostWorkerEvent,
+    ) -> bool {
+        self.publisher_native_messaging
+            .handle_worker_event(request, event)
+    }
+
+    pub(super) fn timeout_native_messaging(
+        &self,
+        request: PublisherNativeMessagingRequestId,
+    ) -> bool {
+        self.publisher_native_messaging.timeout(request)
+    }
+
+    pub(super) fn cancel_native_messaging_context(&self, context: *const WKWebExtensionContext) {
+        self.publisher_native_messaging.cancel_context(context);
+    }
+
     pub(super) fn begin_action_popup(
         &self,
         request: ExtensionActionRequest,
@@ -1582,6 +1666,7 @@ impl MacosExtensionBrowserSurfaceHost {
         self.broker.seal_and_reject();
         self.runtime_grants.seal_and_reject();
         self.compatibility_broker.seal_and_reject();
+        self.publisher_native_messaging.seal_and_reject();
         let old_windows = std::mem::take(&mut self.windows);
         let old_tabs = std::mem::take(&mut self.tabs);
         let had_focus = self.delegate.ivars().focused.borrow().is_some();

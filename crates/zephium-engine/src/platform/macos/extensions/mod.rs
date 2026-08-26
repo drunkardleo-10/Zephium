@@ -15,6 +15,7 @@ mod erasure;
 mod extension_page;
 mod grant_application;
 mod grants;
+mod native_messaging;
 mod native_runtime;
 mod record_erasure;
 mod runtime_grant_broker;
@@ -34,6 +35,9 @@ pub(crate) use erasure::{ControllerErasureTicket, ProfileControllerErasure};
 pub(crate) use grant_application::{apply_probe_grants, apply_probe_grants_with_denied_patterns};
 #[cfg(feature = "native-web-extension-probes")]
 pub(crate) use grants::MacosNativeApiPermission;
+pub(crate) use native_messaging::{
+    NativeHostWorkerEvent, PublisherNativeMessagingAuthorization, PublisherNativeMessagingRequestId,
+};
 #[cfg(feature = "native-web-extension-probes")]
 pub(crate) use native_runtime::begin_probe_native_runtime_activation;
 pub(crate) use native_runtime::{

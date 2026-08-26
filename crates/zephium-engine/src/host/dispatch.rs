@@ -71,7 +71,8 @@ const EXTENSION_RUNTIME_TERMINAL_CAPACITY: usize =
 #[cfg(target_os = "macos")]
 const EXTENSION_BROWSER_REQUEST_TERMINAL_CAPACITY: usize = 2
     * (zephium_core::extensions::MAX_PENDING_EXTENSION_BROWSER_REQUESTS
-        + zephium_core::extensions::MAX_PENDING_EXTENSION_COMPATIBILITY_BROKER_REQUESTS);
+        + zephium_core::extensions::MAX_PENDING_EXTENSION_COMPATIBILITY_BROKER_REQUESTS
+        + zephium_core::extensions::MAX_EXTENSION_NATIVE_HOST_CONNECTIONS);
 
 type ExtensionRuntimeTerminalSlots = ExactTerminalSlots<EXTENSION_RUNTIME_TERMINAL_CAPACITY>;
 #[cfg(target_os = "macos")]

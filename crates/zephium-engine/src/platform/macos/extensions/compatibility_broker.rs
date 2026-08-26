@@ -212,14 +212,6 @@ impl CompatibilityBroker {
         }
     }
 
-    pub(super) fn reject(
-        &self,
-        reply: &DynBlock<dyn Fn(*mut AnyObject, *mut NSError)>,
-        reason: ExtensionCompatibilityBrokerRejection,
-    ) {
-        complete_rejected(reply.copy(), reason);
-    }
-
     fn accepts(
         &self,
         controller: &WKWebExtensionController,

@@ -14,8 +14,9 @@ pub(crate) use extensions::{
     ControllerNamespaceRecoveryAudit, ControllerPreparation, ControllerRegistryError,
     ControllerRuntimeGrantSettlement, MacosNativeActionFailure, MacosNativeRuntimeActivation,
     MacosNativeRuntimeFailure, MacosNativeRuntimeOwner, MacosNativeRuntimeOwnerIdentity,
-    MacosNativeRuntimeReconciliation, MacosNativeRuntimeRetirement, PersistentControllerRegistry,
-    ProfileControllerErasure,
+    MacosNativeRuntimeReconciliation, MacosNativeRuntimeRetirement, NativeHostWorkerEvent,
+    PersistentControllerRegistry, ProfileControllerErasure, PublisherNativeMessagingAuthorization,
+    PublisherNativeMessagingRequestId,
 };
 #[cfg(feature = "native-web-extension-probes")]
 pub(crate) use extensions::{ControllerSurfaceApplication, ProbeControllerPreparation};

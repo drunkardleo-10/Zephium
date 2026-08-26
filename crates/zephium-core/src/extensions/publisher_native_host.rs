@@ -19,6 +19,10 @@ pub const MAX_EXTENSION_MACOS_TEAM_IDENTIFIER_BYTES: usize = 10;
 pub const MAX_EXTENSION_MACOS_SIGNING_IDENTIFIER_BYTES: usize = 255;
 /// Maximum logical retained bytes for one publisher-host requirement.
 pub const MAX_EXTENSION_PUBLISHER_NATIVE_HOST_RETAINED_BYTES: usize = 2 * 1024;
+/// Maximum simultaneously live publisher-native host processes in one browser.
+pub const MAX_EXTENSION_NATIVE_HOST_CONNECTIONS: usize = 8;
+/// Per-profile subset of the global publisher-native host process ceiling.
+pub const MAX_EXTENSION_NATIVE_HOST_CONNECTIONS_PER_PROFILE: usize = 2;
 
 /// Exact publisher identity required of a macOS native host executable.
 #[derive(Clone, Eq, PartialEq)]

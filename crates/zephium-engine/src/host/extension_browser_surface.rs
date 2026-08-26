@@ -18,6 +18,10 @@ use super::EngineHost;
 #[cfg(target_os = "macos")]
 use crate::navigation_epoch::{NavigationEpoch, NavigationEpochTracker};
 #[cfg(target_os = "macos")]
+use crate::platform::imp::{
+    NativeHostWorkerEvent, PublisherNativeMessagingAuthorization, PublisherNativeMessagingRequestId,
+};
+#[cfg(target_os = "macos")]
 use objc2_foundation::{NSString, NSURL};
 
 impl EngineHost {
@@ -223,6 +227,74 @@ impl EngineHost {
         let _ = self
             .macos_extension_controllers
             .timeout_compatibility_broker_request(profile, request);
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn finalize_extension_native_messaging_request(
+        &mut self,
+        profile: ProfileId,
+        request: PublisherNativeMessagingRequestId,
+    ) {
+        let subject = self
+            .macos_extension_controllers
+            .native_messaging_subject(profile, request)
+            .ok()
+            .flatten();
+        let authorization = subject.and_then(|(context, requested_host)| {
+            let runtime = self
+                .extension_runtime_registry
+                .published_runtime_for_macos_context(profile, context)
+                .ok()
+                .flatten()?;
+            let requirement = self
+                .extension_runtime_registry
+                .with_owned_macos_runtime(&runtime, |owner| {
+                    owner
+                        .publisher_native_host()
+                        .filter(|requirement| requirement.host_name() == &*requested_host)
+                        .cloned()
+                })
+                .ok()
+                .flatten()
+                .flatten()?;
+            Some(PublisherNativeMessagingAuthorization::new(
+                runtime.instance(),
+                requirement,
+            ))
+        });
+        if authorization.is_none() {
+            crate::diagnostic!(
+                "extensions: publisher native messaging authorization was unavailable"
+            );
+        }
+        let _ = self.macos_extension_controllers.authorize_native_messaging(
+            profile,
+            request,
+            authorization,
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn handle_extension_native_messaging_worker_event(
+        &mut self,
+        profile: ProfileId,
+        request: PublisherNativeMessagingRequestId,
+        event: NativeHostWorkerEvent,
+    ) -> bool {
+        self.macos_extension_controllers
+            .handle_native_messaging_worker_event(profile, request, event)
+            .unwrap_or(false)
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn timeout_extension_native_messaging_request(
+        &mut self,
+        profile: ProfileId,
+        request: PublisherNativeMessagingRequestId,
+    ) {
+        let _ = self
+            .macos_extension_controllers
+            .timeout_native_messaging(profile, request);
     }
 
     #[cfg(target_os = "macos")]

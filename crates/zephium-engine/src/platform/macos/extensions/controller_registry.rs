@@ -49,6 +49,9 @@ use super::erasure::{
     ControllerErasureTicket, ControllerErasureWitness, PersistentControllerErasure,
     ProfileControllerErasure,
 };
+use super::native_messaging::{
+    NativeHostProcessPool, PublisherNativeMessagingAuthorization, PublisherNativeMessagingRequestId,
+};
 use super::runtime_grant_broker::{RuntimeGrantRequestPool, RuntimeGrantSettlementOutcome};
 
 const MAX_PERSISTENT_CONTROLLERS: usize = zephium_core::session::MAX_SESSION_PROFILES;
@@ -400,6 +403,7 @@ pub(crate) struct PersistentControllerRegistry {
     browser_request_pool: Rc<BrowserRequestPool>,
     runtime_grant_pool: Rc<RuntimeGrantRequestPool>,
     compatibility_broker_pool: Option<Rc<CompatibilityBrokerPool>>,
+    native_host_process_pool: Option<Arc<NativeHostProcessPool>>,
     command_monitor: Option<super::command_monitor::ExtensionCommandMonitor>,
 }
 
@@ -455,6 +459,7 @@ impl PersistentControllerRegistry {
             browser_request_pool: Rc::new(BrowserRequestPool::new()),
             runtime_grant_pool: Rc::new(RuntimeGrantRequestPool::new()),
             compatibility_broker_pool: None,
+            native_host_process_pool: None,
             command_monitor: None,
         }
     }
@@ -1250,6 +1255,78 @@ impl PersistentControllerRegistry {
         }
     }
 
+    pub(crate) fn native_messaging_subject(
+        &mut self,
+        profile: ProfileId,
+        request: PublisherNativeMessagingRequestId,
+    ) -> Result<Option<(*const WKWebExtensionContext, Box<str>)>, ControllerRegistryError> {
+        self.slots.admission(profile)?;
+        let Some(PersistentControllerSlot::Prepared(entry)) = self.slots.entries.get(&profile)
+        else {
+            return Ok(None);
+        };
+        validate_entry_identity(entry)?;
+        Ok(entry.browser_surface.native_messaging_subject(request))
+    }
+
+    pub(crate) fn authorize_native_messaging(
+        &mut self,
+        profile: ProfileId,
+        request: PublisherNativeMessagingRequestId,
+        authorization: Option<PublisherNativeMessagingAuthorization>,
+    ) -> Result<bool, ControllerRegistryError> {
+        self.slots.admission(profile)?;
+        let Some(PersistentControllerSlot::Prepared(entry)) = self.slots.entries.get(&profile)
+        else {
+            return Ok(false);
+        };
+        validate_entry_identity(entry)?;
+        Ok(entry
+            .browser_surface
+            .authorize_native_messaging(request, authorization))
+    }
+
+    pub(crate) fn handle_native_messaging_worker_event(
+        &mut self,
+        profile: ProfileId,
+        request: PublisherNativeMessagingRequestId,
+        event: super::native_messaging::NativeHostWorkerEvent,
+    ) -> Result<bool, ControllerRegistryError> {
+        self.slots.admission(profile)?;
+        let Some(PersistentControllerSlot::Prepared(entry)) = self.slots.entries.get(&profile)
+        else {
+            return Ok(false);
+        };
+        validate_entry_identity(entry)?;
+        Ok(entry
+            .browser_surface
+            .handle_native_messaging_worker_event(request, event))
+    }
+
+    pub(crate) fn timeout_native_messaging(
+        &mut self,
+        profile: ProfileId,
+        request: PublisherNativeMessagingRequestId,
+    ) -> bool {
+        let Some(PersistentControllerSlot::Prepared(entry)) = self.slots.entries.get(&profile)
+        else {
+            return false;
+        };
+        entry.browser_surface.timeout_native_messaging(request)
+    }
+
+    pub(crate) fn cancel_native_messaging_context(
+        &mut self,
+        profile: ProfileId,
+        context: *const WKWebExtensionContext,
+    ) {
+        if let Some(PersistentControllerSlot::Prepared(entry)) = self.slots.entries.get(&profile) {
+            entry
+                .browser_surface
+                .cancel_native_messaging_context(context);
+        }
+    }
+
     /// Clears an authorized profile's delegate graph after all of its views
     /// and runtime contexts have retired. An absent controller is inert; no
     /// native namespace is created by cleanup.
@@ -1553,6 +1630,12 @@ impl PersistentControllerRegistry {
             .compatibility_broker_pool
             .get_or_insert_with(|| Rc::new(CompatibilityBrokerPool::new()))
             .clone();
+        let native_host_process_pool = self
+            .native_host_process_pool
+            .get_or_insert_with(|| {
+                super::native_messaging::PublisherNativeMessagingBroker::new_process_pool()
+            })
+            .clone();
         let candidate = match catch_native(|| {
             create_entry(
                 profile,
@@ -1560,6 +1643,7 @@ impl PersistentControllerRegistry {
                 request_pool,
                 runtime_grant_pool,
                 compatibility_broker_pool,
+                native_host_process_pool,
             )
         }) {
             Ok(candidate) => candidate,
@@ -1904,6 +1988,7 @@ fn create_entry(
     browser_request_pool: Rc<BrowserRequestPool>,
     runtime_grant_pool: Rc<RuntimeGrantRequestPool>,
     compatibility_broker_pool: Rc<CompatibilityBrokerPool>,
+    native_host_process_pool: Arc<NativeHostProcessPool>,
 ) -> Result<PersistentControllerEntry, ControllerRegistryError> {
     let mtm = MainThreadMarker::new().ok_or(ControllerRegistryError::MainThreadRequired)?;
     let identifier = NSUUID::from_bytes(profile.bytes());
@@ -1931,6 +2016,7 @@ fn create_entry(
         browser_request_pool,
         runtime_grant_pool,
         compatibility_broker_pool,
+        native_host_process_pool,
     )
     .map_err(map_browser_surface_error)?;
     browser_surface.attach(&controller);
@@ -1958,6 +2044,7 @@ fn discover_runtime() -> Result<RuntimeAvailability, ControllerRegistryError> {
     let context = required_class("WKWebExtensionContext")?;
     let command = required_class("WKWebExtensionCommand")?;
     let data_record = required_class("WKWebExtensionDataRecord")?;
+    let message_port = required_class("WKWebExtensionMessagePort")?;
     let webview_configuration = required_class("WKWebViewConfiguration")?;
     let website_data_store = required_class("WKWebsiteDataStore")?;
 
@@ -1997,6 +2084,17 @@ fn discover_runtime() -> Result<RuntimeAvailability, ControllerRegistryError> {
             sel!(identifier),
             sel!(activationKey),
             sel!(modifierFlags),
+        ],
+    )?;
+    require_instance_selectors(
+        message_port,
+        &[
+            sel!(applicationIdentifier),
+            sel!(setMessageHandler:),
+            sel!(setDisconnectHandler:),
+            sel!(isDisconnected),
+            sel!(sendMessage:completionHandler:),
+            sel!(disconnectWithError:),
         ],
     )?;
     require_class_selectors(configuration, &[sel!(configurationWithIdentifier:)])?;

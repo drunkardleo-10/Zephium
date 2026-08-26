@@ -18,7 +18,6 @@ native-web-extension-probes = [
     "dep:tempfile",
     "dep:sha2",
     "dep:serde",
-    "dep:zephium-extension-package",
     "objc2-web-kit/WKWebExtension",
     "objc2-web-kit/WKWebExtensionAction",
     "objc2-web-kit/WKWebExtensionContext",
@@ -99,7 +98,6 @@ serde = { workspace = true, optional = true }
 sha2 = { version = "=0.10.9", optional = true }
 tempfile = { workspace = true, optional = true }
 url.workspace = true
-zephium-extension-package = { path = "../zephium-extension-package", version = "=0.1.0", optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true
@@ -126,10 +124,17 @@ webkit2gtk = { version = "=2.0.2", features = ["v2_40"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6"
 dispatch2 = { version = "0.3.1", default-features = false, features = ["block2", "std"] }
+libc = "0.2"
 objc2 = "0.6"
 objc2-app-kit = "0.3"
+objc2-core-foundation = { version = "0.3", features = ["CFString", "CFURL"] }
 objc2-core-graphics = "0.3"
 objc2-foundation = "0.3"
+objc2-security = { version = "0.3", default-features = false, features = [
+    "CSCommon",
+    "SecRequirement",
+    "SecStaticCode",
+] }
 objc2-web-kit = { version = "0.3", default-features = false, features = [
     "block2",
     "objc2-app-kit",
@@ -151,6 +156,7 @@ objc2-web-kit = { version = "0.3", default-features = false, features = [
     "WKWebExtensionDataRecord",
     "WKWebExtensionDataType",
     "WKWebExtensionMatchPattern",
+    "WKWebExtensionMessagePort",
     "WKWebExtensionPermission",
     "WKWebExtensionTab",
     "WKWebExtensionTabConfiguration",
@@ -162,3 +168,4 @@ objc2-web-kit = { version = "0.3", default-features = false, features = [
 ] }
 objc2-quartz-core = "0.3"
 raw-window-handle.workspace = true
+zephium-extension-package = { path = "../zephium-extension-package", version = "=0.1.0" }
