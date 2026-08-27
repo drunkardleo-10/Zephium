@@ -2186,9 +2186,20 @@ tree ceiling; this does not authorize a runtime to retain 32 MiB buffers.
 This extension result does not remove the platform credential baseline. Apple
 documents that [`WKWebView` handles website credential challenges and works
 with keychain and third-party credential managers](https://developer.apple.com/documentation/authenticationservices/password-use-in-web-browsers).
-Zephium should preserve and separately verify that native Password AutoFill
-path for passwords and passkeys. It is not a substitute for a manager's full
-popup, vault, save, inline-menu, settings, or desktop-integration workflows.
+Zephium now preserves that division explicitly. Password AutoFill remains
+entirely WebKit-owned. An on-demand AuthenticationServices boundary reads only
+the browser's passkey authorization state; it never enumerates credentials or
+relying parties, and a future native enum value fails closed as unknown. The
+Extensions Center starts that query only while visible and offers the platform
+authorization request only from a trusted user click. Rust authorizes the main
+caller, dispatches the request on the native main thread, admits one request at
+a time, and projects settlement only to the fixed main label. An installed,
+Developer-ID-signed lab build reported `notDetermined`, rendered the system
+Password AutoFill/passkey row, and exposed the explicit Enable passkeys action;
+the permission was not changed during automated verification. Physical
+password fill/save and passkey registration/assertion remain release gates.
+This native baseline is not a substitute for a manager's full popup, vault,
+save, inline-menu, settings, or desktop-integration workflows.
 
 A separate authenticated-tree diagnostic now identifies two narrow WebKit API
 compatibility requirements without changing production authority. It copies

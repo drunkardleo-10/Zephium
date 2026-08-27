@@ -126,6 +126,10 @@ block2 = "0.6"
 dispatch2 = { version = "0.3.1", default-features = false, features = ["block2", "std"] }
 libc = "0.2"
 objc2 = "0.6"
+objc2-authentication-services = { version = "=0.3.2", default-features = false, features = [
+    "ASAuthorizationWebBrowserPublicKeyCredentialManager",
+    "block2",
+] }
 objc2-app-kit = "0.3"
 objc2-core-foundation = { version = "0.3", features = ["CFString", "CFURL"] }
 objc2-core-graphics = "0.3"

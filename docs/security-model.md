@@ -194,7 +194,11 @@ Any change that breaks one of these invariants must fail review and release:
    IDs, URLs, strings, and coordinates in Rust. The panel has no generic Tauri
    capabilities; the main view has only its required window controls. Rust projections
    are delivered directly to a fixed target label, so the panel cannot select the main
-   view as a generic event-listener target.
+   view as a generic event-listener target. The macOS browser-credential query is
+   main-only, on-demand, and reads authorization state without enumerating credentials
+   or relying parties. Passkey authorization requires a trusted UI request, is
+   process-single-flight, executes on the native main thread, and settles only to the
+   fixed main label.
 5. Raw content permissions are denied by the pinned Wry permission callback. Raw and
    privileged downloads and popups/new windows are denied rather than silently
    forwarded to the OS or converted into a tab without trustworthy gesture metadata.

@@ -1,4 +1,5 @@
 mod content_filter;
+mod credentials;
 // Pure policy translation and the profile-scoped native extension lifecycle.
 mod extensions;
 mod native;
@@ -27,6 +28,10 @@ pub(crate) use content_filter::{
     same_policy as same_content_policy, ContentPolicyCacheMaintenanceCancellation,
     ContentPolicyCachePage, ContentPolicyCompilationCancellation, ContentPolicyRegistration,
     NativeContentPolicy,
+};
+pub use credentials::{
+    passkey_authorization_state, request_passkey_authorization,
+    MacosPasskeyAuthorizationRequestFailure, MacosPasskeyAuthorizationState,
 };
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;

@@ -54,6 +54,17 @@ export const commands = {
 	 */
 	extensionRuntimeGrantRespond: (profileId: string, installId: string, runtimeGeneration: string, requestId: string, allow: boolean) => __TAURI_INVOKE<OperationAdmission>("extension_runtime_grant_respond", { profileId, installId, runtimeGeneration, requestId, allow }),
 	/**
+	 *  Reads only platform capability state. It never enumerates credentials,
+	 *  relying parties, or extension-owned vault data and never opens native UI.
+	 */
+	browserCredentialCapability: () => __TAURI_INVOKE<BrowserCredentialCapabilityView>("browser_credential_capability"),
+	/**
+	 *  Admits one user-initiated AuthenticationServices request. Native
+	 *  settlement is projected back only to privileged browser chrome, and a
+	 *  second request cannot overlap the first.
+	 */
+	browserPasskeyAuthorizationRequest: () => __TAURI_INVOKE<boolean>("browser_passkey_authorization_request"),
+	/**
 	 *  Answers only the exact Shell-projected foreground page request. Origin and
 	 *  capability names are intentionally absent: chrome can choose a disposition
 	 *  but cannot mint or alter authority.
@@ -91,6 +102,7 @@ export const commands = {
 /** Events */
 export const events = {
 	blockerStatusChanged: makeEvent<BlockerStatusChanged>("blocker-status-changed"),
+	browserCredentialCapabilityChanged: makeEvent<BrowserCredentialCapabilityChanged>("browser-credential-capability-changed"),
 	extensionActionFailed: makeEvent<ExtensionActionFailed>("extension-action-failed"),
 	extensionActionShortcut: makeEvent<ExtensionActionShortcut>("extension-action-shortcut"),
 	extensionActionsChanged: makeEvent<ExtensionActionsChanged>("extension-actions-changed"),
@@ -248,6 +260,16 @@ export type BlockerStatusView = {
 	/**  Authoritative refresh admission capability for the active supply mode. */
 	can_refresh_sources: boolean,
 };
+
+export type BrowserCredentialCapabilityChanged = BrowserCredentialCapabilityView;
+
+export type BrowserCredentialCapabilityView = {
+	system_password_autofill: boolean,
+	passkey_authorization: BrowserPasskeyAuthorizationView,
+	can_request_passkey_authorization: boolean,
+};
+
+export type BrowserPasskeyAuthorizationView = "authorized" | "denied" | "not_determined" | "unknown" | "unavailable" | "unsupported";
 
 /**
  *  Split divider hit-strip in window logical coordinates; the chrome renders

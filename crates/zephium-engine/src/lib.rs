@@ -6,6 +6,13 @@ mod navigation_epoch;
 mod pane_geometry;
 mod platform;
 
+#[cfg(target_os = "macos")]
+pub use platform::macos::{
+    passkey_authorization_state as macos_passkey_authorization_state,
+    request_passkey_authorization as request_macos_passkey_authorization,
+    MacosPasskeyAuthorizationRequestFailure, MacosPasskeyAuthorizationState,
+};
+
 macro_rules! diagnostic {
     ($($argument:tt)*) => {{
         crate::diagnostics::write(format_args!($($argument)*));

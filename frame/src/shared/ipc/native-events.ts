@@ -1,5 +1,6 @@
 import type {
   BlockerStatusChanged,
+  BrowserCredentialCapabilityChanged,
   ExtensionActionFailed,
   ExtensionActionShortcut,
   ExtensionActionsChanged,
@@ -35,6 +36,9 @@ function scopedEvent<T>(name: string) {
 // with @tauri-apps/api/event: its listen command accepts a caller-selected
 // target, which would let the launcher panel subscribe to main-window state.
 export const events = {
+  browserCredentialCapabilityChanged: scopedEvent<BrowserCredentialCapabilityChanged>(
+    "zephium:browser-credential-capability",
+  ),
   itemsChanged: scopedEvent<ItemsChanged>("zephium:items"),
   tabChanged: scopedEvent<TabChanged>("zephium:tab"),
   extensionActionsChanged: scopedEvent<ExtensionActionsChanged>("zephium:extension-actions"),

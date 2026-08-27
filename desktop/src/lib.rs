@@ -11,6 +11,7 @@ compile_error!("the private extension lab is a macOS-only product gate");
 compile_error!("staging-extension-catalog and local-extension-lab are mutually exclusive");
 
 mod blocker_service;
+mod browser_credentials;
 #[cfg(feature = "curated-extension-distribution")]
 mod extension_distribution;
 #[cfg(target_os = "linux")]
@@ -1505,6 +1506,8 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             extension_management_open_options,
             extension_management_uninstall,
             extension_runtime_grant_respond,
+            browser_credentials::browser_credential_capability,
+            browser_credentials::browser_passkey_authorization_request,
             page_permission_respond,
             blocker_status,
             blocker_set_enabled,
@@ -1544,6 +1547,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             ExtensionManagementChanged,
             ExtensionDistributionChanged,
             ExtensionRuntimeGrantPromptChanged,
+            browser_credentials::BrowserCredentialCapabilityChanged,
             PagePermissionPromptChanged,
             UiCommand,
             SearchChanged,

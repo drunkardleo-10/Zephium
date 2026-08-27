@@ -2,10 +2,11 @@
   import {
     Cancel01Icon,
     Delete02Icon,
+    Key01Icon,
     PuzzleIcon,
     Refresh01Icon,
   } from "@hugeicons/core-free-icons";
-  import { untrack } from "svelte";
+  import { onDestroy, untrack } from "svelte";
   import type {
     ExtensionInstallCandidateView,
     ExtensionManagementEntryView,
@@ -14,6 +15,7 @@
     ExtensionManagementSourceView,
   } from "../../../shared/ipc/bindings";
   import * as extensions from "../../../domain/extensions/extensions.svelte";
+  import * as browserCredentials from "../../../domain/credentials/browser-credentials.svelte";
   import {
     apiPermissionLabel,
     compatibilityLimitationLabel,
@@ -72,6 +74,10 @@
     management?.phase === "update_consent_required" ? management.pending_update : null,
   );
   let profilePolicy = $derived(management?.phase === "ready" ? management.profile_policy : null);
+  let credentialCapability = $derived(browserCredentials.current());
+  let passkeyRequestBusy = $derived(browserCredentials.busy());
+
+  onDestroy(() => browserCredentials.deactivate());
 
   async function load() {
     requestFailed = !(await extensions.setManagementVisible(true));
@@ -141,6 +147,7 @@
     section = "installed";
     sectionChosen = false;
     open = true;
+    void browserCredentials.activate();
     queueMicrotask(() => closeButton?.focus());
   }
 
@@ -157,6 +164,7 @@
     showAllRequiredHosts = false;
     section = "installed";
     sectionChosen = false;
+    browserCredentials.deactivate();
     void extensions.setManagementVisible(false);
     if (returnFocus) queueMicrotask(() => trigger?.focus());
   }
@@ -173,6 +181,22 @@
 
   function refreshDistribution() {
     void extensions.refreshDistribution();
+  }
+
+  function passkeyStatus(): string {
+    switch (credentialCapability?.passkey_authorization) {
+      case "authorized":
+        return "Passkeys are enabled for Zephium.";
+      case "denied":
+        return "Passkey access is disabled in System Settings.";
+      case "not_determined":
+        return "Enable passkeys to use system and third-party credential providers.";
+      case "unknown":
+      case "unavailable":
+        return "Passkey status is unavailable on this system.";
+      default:
+        return "Passkeys are not provided by this platform integration.";
+    }
   }
 
   function selectSection(next: ExtensionCenterSection) {
@@ -679,6 +703,52 @@
             : "extensions-verified-tab"}
         >
           {#if section === "installed"}
+            {#if credentialCapability !== null && (credentialCapability.system_password_autofill || credentialCapability.passkey_authorization !== "unsupported")}
+              <article class="mb-2 rounded-md bg-fill px-2.5 py-2">
+                <div class="flex items-start gap-2">
+                  <span
+                    class="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-raised text-muted"
+                    aria-hidden="true"
+                  >
+                    <Icon icon={Key01Icon} size={15} />
+                  </span>
+                  <div class="min-w-0 flex-1">
+                    <div class="flex items-start justify-between gap-3">
+                      <div class="min-w-0">
+                        <h3 class="text-[12.5px] leading-4 font-medium text-text">
+                          System passwords & passkeys
+                        </h3>
+                        {#if credentialCapability.system_password_autofill}
+                          <p class="mt-0.5 text-[10.5px] leading-4 text-muted">
+                            Password AutoFill is available through macOS credential providers.
+                          </p>
+                        {/if}
+                        <p
+                          class="mt-0.5 text-[10.5px] leading-4 text-faint"
+                          class:text-warning={credentialCapability.passkey_authorization ===
+                            "denied" ||
+                            credentialCapability.passkey_authorization === "unknown" ||
+                            credentialCapability.passkey_authorization === "unavailable"}
+                          role="status"
+                        >
+                          {passkeyStatus()}
+                        </p>
+                      </div>
+                      {#if credentialCapability.can_request_passkey_authorization}
+                        <button
+                          type="button"
+                          class="hover:bg-fill-strong h-7 shrink-0 rounded-md px-2 text-[11px] font-medium text-text disabled:opacity-45"
+                          disabled={passkeyRequestBusy}
+                          onclick={() => void browserCredentials.requestPasskeyAuthorization()}
+                        >
+                          {passkeyRequestBusy ? "Waiting…" : "Enable passkeys"}
+                        </button>
+                      {/if}
+                    </div>
+                  </div>
+                </div>
+              </article>
+            {/if}
             {#if management.entries.length === 0}
               <p class="rounded-md bg-fill px-2.5 py-3 text-[11.5px] leading-4 text-muted">
                 No extensions are installed in this profile.
