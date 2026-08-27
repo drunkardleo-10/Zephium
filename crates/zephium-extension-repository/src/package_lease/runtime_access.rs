@@ -1754,10 +1754,7 @@ impl RuntimePackageBinding {
         let binding = Self {
             target,
             product_target: snapshot.runtime_target(),
-            native_identity: runtime_native_identity(
-                snapshot.runtime_target(),
-                snapshot.chromium_key(),
-            )?,
+            native_identity: runtime_native_identity_for_snapshot(snapshot)?,
             owner: acquisition.key(),
             catalog_set_digest: acquisition.catalog_set_digest(),
             catalog_role: acquisition.catalog_role(),
@@ -1784,8 +1781,7 @@ impl RuntimePackageBinding {
     fn matches_snapshot<Snapshot: RuntimePackageSnapshot>(&self, snapshot: &Snapshot) -> bool {
         snapshot.runtime_target() == self.product_target
             && runtime_target(snapshot.runtime_target()).ok() == Some(self.target)
-            && runtime_native_identity(snapshot.runtime_target(), snapshot.chromium_key()).ok()
-                == Some(self.native_identity)
+            && runtime_native_identity_for_snapshot(snapshot).ok() == Some(self.native_identity)
             && usize::try_from(self.resource_count).ok() == Some(snapshot.index().files().len())
     }
 
@@ -1895,6 +1891,9 @@ trait RuntimePackageSnapshot {
     fn package(&self) -> &ExtensionPackageIdentity;
     fn runtime_target(&self) -> ProductExtensionRuntimeTarget;
     fn chromium_key(&self) -> Option<&ChromiumManifestKey>;
+    fn publisher_native_host(
+        &self,
+    ) -> Option<&zephium_core::extensions::ExtensionPublisherNativeHostRequirement>;
     fn index(&self) -> &CanonicalExtensionTreeIndex;
     fn root(&self) -> &Arc<SealedPrivateDirectory>;
 }
@@ -1912,6 +1911,12 @@ macro_rules! impl_runtime_snapshot {
 
             fn chromium_key(&self) -> Option<&ChromiumManifestKey> {
                 self.chromium_key()
+            }
+
+            fn publisher_native_host(
+                &self,
+            ) -> Option<&zephium_core::extensions::ExtensionPublisherNativeHostRequirement> {
+                self.publisher_native_host()
             }
 
             fn index(&self) -> &CanonicalExtensionTreeIndex {
@@ -2505,21 +2510,49 @@ fn runtime_target(
     }
 }
 
+#[cfg(test)]
 fn runtime_native_identity(
     target: ProductExtensionRuntimeTarget,
     chromium_key: Option<&ChromiumManifestKey>,
 ) -> Result<ExtensionRuntimeNativeIdentityExpectation, BundledRuntimePackageAccessBuildError> {
-    // Product policy deliberately assigns the catalog-authenticated Chromium
-    // ID to both native backends. WebView2 reports that ID directly; the macOS
-    // adapter must set WKWebExtensionContext.uniqueIdentifier to this exact
-    // value before load and verify readback. This does not infer WebKit's
-    // default identity. Compatibility runtimes have no platform-native owner.
-    let native_id = || {
-        let extension_id = chromium_key
-            .ok_or(BundledRuntimePackageAccessBuildError::NativeIdentityUnavailable)?
-            .extension_id();
+    runtime_native_identity_with_publisher(target, chromium_key, None)
+}
+
+fn runtime_native_identity_for_snapshot(
+    snapshot: &impl RuntimePackageSnapshot,
+) -> Result<ExtensionRuntimeNativeIdentityExpectation, BundledRuntimePackageAccessBuildError> {
+    runtime_native_identity_with_publisher(
+        snapshot.runtime_target(),
+        snapshot.chromium_key(),
+        snapshot.publisher_native_host(),
+    )
+}
+
+fn runtime_native_identity_with_publisher(
+    target: ProductExtensionRuntimeTarget,
+    chromium_key: Option<&ChromiumManifestKey>,
+    publisher_native_host: Option<
+        &zephium_core::extensions::ExtensionPublisherNativeHostRequirement,
+    >,
+) -> Result<ExtensionRuntimeNativeIdentityExpectation, BundledRuntimePackageAccessBuildError> {
+    // Product policy assigns the catalog-authenticated Chromium ID to native
+    // backends by default. An exact package-bound macOS publisher-host profile
+    // instead uses its separately sealed upstream Chromium ID so the native
+    // host, extension runtime, and WebKit principal authenticate one identity.
+    // WebView2 never consumes that macOS-only override. Compatibility runtimes
+    // have no platform-native owner.
+    let native_id = |publisher_override: bool| {
+        let extension_id = if publisher_override {
+            publisher_native_host
+                .ok_or(BundledRuntimePackageAccessBuildError::NativeIdentityUnavailable)?
+                .upstream_chromium_extension_id()
+        } else {
+            chromium_key
+                .ok_or(BundledRuntimePackageAccessBuildError::NativeIdentityUnavailable)?
+                .extension_id()
+                .as_str()
+        };
         let bytes: [u8; EXTENSION_RUNTIME_NATIVE_OWNER_ID_BYTES] = extension_id
-            .as_str()
             .as_bytes()
             .try_into()
             .map_err(|_| BundledRuntimePackageAccessBuildError::InternalBindingMismatch)?;
@@ -2528,12 +2561,15 @@ fn runtime_native_identity(
     };
     match target {
         ProductExtensionRuntimeTarget::MacosNative
-        | ProductExtensionRuntimeTarget::MacosNativeBrokered => {
-            Ok(ExtensionRuntimeNativeIdentityExpectation::MacosWebExtension(native_id()?))
-        }
-        ProductExtensionRuntimeTarget::WindowsNative => {
-            Ok(ExtensionRuntimeNativeIdentityExpectation::WindowsWebView2Extension(native_id()?))
-        }
+        | ProductExtensionRuntimeTarget::MacosNativeBrokered => Ok(
+            ExtensionRuntimeNativeIdentityExpectation::MacosWebExtension(native_id(
+                target == ProductExtensionRuntimeTarget::MacosNative
+                    && publisher_native_host.is_some(),
+            )?),
+        ),
+        ProductExtensionRuntimeTarget::WindowsNative => Ok(
+            ExtensionRuntimeNativeIdentityExpectation::WindowsWebView2Extension(native_id(false)?),
+        ),
         ProductExtensionRuntimeTarget::MacosCompatibility
         | ProductExtensionRuntimeTarget::LinuxCompatibility => {
             Ok(ExtensionRuntimeNativeIdentityExpectation::Compatibility)
@@ -3040,6 +3076,53 @@ mod tests {
                     .unwrap()
             ),
             expected
+        );
+    }
+
+    #[test]
+    fn sealed_publisher_profile_projects_its_upstream_macos_principal_only() {
+        let package = ExtensionPackageIdentity::new(
+            zephium_core::extensions::ExtensionAuthorityId::from_bytes([1; 32]),
+            zephium_core::extensions::ExtensionPackageKey::from_bytes([2; 32]),
+            zephium_core::extensions::ExtensionPackageRevision::new(3).unwrap(),
+            zephium_core::extensions::ExtensionPackagePayloadIdentity::BundledTree,
+            zephium_core::extensions::ExtensionManifestDigest::from_bytes([4; 32]),
+            zephium_core::extensions::ExtensionTreeDigest::from_bytes([5; 32]),
+        );
+        let requirement = zephium_core::extensions::ExtensionPublisherNativeHostRequirement::new(
+            package,
+            "com.example.host",
+            "aeblfdkhhhdcdjpifhhbdiojplfjncoa",
+            zephium_core::extensions::ExtensionMacosPublisherIdentity::new(
+                "A1B2C3D4E5",
+                "com.example.browser-support",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let local_key = key("Xw==");
+
+        assert_eq!(
+            encoded_id(
+                runtime_native_identity_with_publisher(
+                    ProductExtensionRuntimeTarget::MacosNative,
+                    Some(&local_key),
+                    Some(&requirement),
+                )
+                .unwrap()
+            ),
+            *b"aeblfdkhhhdcdjpifhhbdiojplfjncoa"
+        );
+        assert_eq!(
+            encoded_id(
+                runtime_native_identity_with_publisher(
+                    ProductExtensionRuntimeTarget::WindowsNative,
+                    Some(&local_key),
+                    Some(&requirement),
+                )
+                .unwrap()
+            ),
+            *b"ncocknphbhhlhkikpnnlmbcnbgdempcd"
         );
     }
 

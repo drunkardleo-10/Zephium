@@ -542,6 +542,23 @@ impl ProductExtensionManifestAuthority {
         }) {
             return Err(ProductExtensionManifestAuthorityError::InvalidProductConfiguration);
         }
+        if profiles.iter().enumerate().any(|(index, profile)| {
+            let Some(requirement) = profile.publisher_native_host.as_ref() else {
+                return false;
+            };
+            profiles[index + 1..].iter().any(|other| {
+                other.catalog == profile.catalog
+                    && other
+                        .publisher_native_host
+                        .as_ref()
+                        .is_some_and(|candidate| {
+                            candidate.upstream_chromium_extension_id()
+                                == requirement.upstream_chromium_extension_id()
+                        })
+            })
+        }) {
+            return Err(ProductExtensionManifestAuthorityError::InvalidProductConfiguration);
+        }
 
         let mut retained_bytes = AUTHORITY_ACCOUNTING_OVERHEAD
             .checked_add(
@@ -1051,6 +1068,8 @@ impl SealedManifestProfile {
                 .publisher_native_host
                 .as_ref()
                 .is_some_and(|requirement| requirement.package() != &self.package.identity)
+            || (self.publisher_native_host.is_some()
+                && self.runtime_target != ProductExtensionRuntimeTarget::MacosNative)
         {
             return Err(ProductExtensionManifestAuthorityError::InvalidProductConfiguration);
         }

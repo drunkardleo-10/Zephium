@@ -306,6 +306,51 @@ fn publisher_native_host_requirement_is_sealed_package_and_declaration_bound() {
         )
         .unwrap(),
     );
+    let mut wrong_target = sealed.clone();
+    wrong_target.runtime_target = ProductExtensionRuntimeTarget::MacosNativeBrokered;
+    wrong_target.package.compatibility_target =
+        ExtensionCompatibilityTargetId::parse_exact(MACOS_NATIVE_BROKERED_COMPATIBILITY_TARGET)
+            .unwrap();
+    wrong_target.policy.target = wrong_target.package.compatibility_target.clone();
+    assert!(matches!(
+        ProductExtensionManifestAuthority::from_sealed_profiles(
+            vec![wrong_target].into_boxed_slice()
+        ),
+        Err(ProductExtensionManifestAuthorityError::InvalidProductConfiguration)
+    ));
+
+    let mut aliased = sealed.clone();
+    let aliased_identity = ExtensionPackageIdentity::new(
+        aliased.package.identity.authority(),
+        ExtensionPackageKey::from_bytes([98; 32]),
+        aliased.package.identity.revision(),
+        aliased.package.identity.payload(),
+        aliased.package.identity.manifest_sha256(),
+        aliased.package.identity.tree_sha256(),
+    );
+    aliased.package.key = aliased_identity.key();
+    aliased.package.identity = aliased_identity.clone();
+    aliased.publisher_native_host = Some(
+        ExtensionPublisherNativeHostRequirement::new(
+            aliased_identity,
+            "com.example.publisher",
+            "aeblfdkhhhdcdjpifhhbdiojplfjncoa",
+            ExtensionMacosPublisherIdentity::new("A1B2C3D4E5", "com.example.browser-support")
+                .unwrap(),
+        )
+        .unwrap(),
+    );
+    let mut aliased_profiles = vec![sealed.clone(), aliased];
+    aliased_profiles.sort_unstable_by_key(|profile| {
+        (profile.catalog, profile.runtime_target, profile.package.key)
+    });
+    assert!(matches!(
+        ProductExtensionManifestAuthority::from_sealed_profiles(
+            aliased_profiles.into_boxed_slice()
+        ),
+        Err(ProductExtensionManifestAuthorityError::InvalidProductConfiguration)
+    ));
+
     let authority = authority(sealed);
     let admitted = authority
         .admit_manifest(

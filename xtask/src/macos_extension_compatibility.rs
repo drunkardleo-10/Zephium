@@ -325,6 +325,22 @@ pub(crate) fn materialize_publisher_native(
     )
 }
 
+/// Preserves exact publisher-native messaging while applying the separately
+/// reviewed nonpersistent document fallback for an MV3 module background.
+pub(crate) fn materialize_publisher_native_document_background(
+    extension: &Path,
+    tree_index: &Path,
+    output: &Path,
+) -> Result<(), String> {
+    materialize_target(
+        extension,
+        tree_index,
+        output,
+        ArtifactTarget::NativePublisherV1,
+        BackgroundEnvironment::Document,
+    )
+}
+
 /// Materializes the distinct brokered profile used by reviewed packages that
 /// require Zephium's bounded read-only history adapter.
 pub(crate) fn materialize_brokered(
@@ -2764,6 +2780,29 @@ mod tests {
                 "publisher-native-messaging-preservation-v1"
             )));
         validate_release_input(&first).unwrap();
+
+        let document = temp.path().join("document");
+        materialize_publisher_native_document_background(&source, &index, &document).unwrap();
+        let document_metadata: Value =
+            serde_json::from_slice(&fs::read(document.join(ARTIFACT_METADATA)).unwrap()).unwrap();
+        assert_eq!(
+            document_metadata["surfaces"]["background"],
+            serde_json::json!("module-document-wrapper")
+        );
+        assert_eq!(
+            document_metadata["surfaces"]["native_messaging"],
+            serde_json::json!("publisher-host-brokered")
+        );
+        let document_extension = document.join(ARTIFACT_EXTENSION);
+        assert!(!document_extension
+            .join(NATIVE_MESSAGING_DENY_BRIDGE)
+            .exists());
+        assert!(
+            fs::read_to_string(document_extension.join(BACKGROUND_WRAPPER))
+                .unwrap()
+                .contains(BACKGROUND_DOCUMENT_BRIDGE)
+        );
+        validate_release_input(&document).unwrap();
 
         manifest["permissions"] = serde_json::json!(["storage"]);
         manifest["optional_permissions"] = serde_json::json!(["nativeMessaging"]);
