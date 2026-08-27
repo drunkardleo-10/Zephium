@@ -9,7 +9,8 @@ try {
   });
   const passed = response?.kind === "popup-background-ready"
     && response?.token === token
-    && response?.async === true;
+    && response?.async === true
+    && response?.privacy === "disabled-only";
   state.textContent = passed ? "passed" : "invalid-response";
   document.title = passed
     ? "ZEPHIUM_COMPAT_POPUP:passed"

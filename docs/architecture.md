@@ -2059,11 +2059,11 @@ The release adds a required `nativeMessaging` declaration; the ordinary native
 target removes it and retains the same explicit no-process deny facade. No
 third-party package byte is committed.
 
-The clean package-neutral document transform produces 1,007 files and
-45,179,349 bytes with manifest, tree, and index SHA-256 values
+The clean package-neutral document transform now produces 1,008 files and
+45,185,162 bytes with manifest, tree, and index SHA-256 values
 `08caefed1cd5c8945a60799257b41aa8586be0e2a5a5860285af06d4c7bbb169`,
-`8cf52aecd68aa6bc53130d31f9edf0ce92b06feca7d36d1b20f948c3d342bd0a`,
-and `3dae560e26e0147fea16a3e8bd7857d5426b9114ef51d7aa026ac61f6230983a`.
+`b8334a31f79d1c12c215e1147c13be5d50fb9efe8b83d6ddfec1f1016bc807bb`,
+and `85bc5a940523ca41168f9575481e8277c3cb7157c0358138aa915f19d7dfd7c2c`.
 The stock worker still reaches WebKit context error 6 after the bounded
 12-second load, while the clean document background loads without a context
 error in about 172 ms. The isolated-content compatibility marker is still not
@@ -2075,15 +2075,16 @@ expose onboarding.
 The distinct non-authorizing `webkit-macos-native-publisher-v1` transform
 preserves that release's required `nativeMessaging` declaration without
 installing the ordinary deny facade. Its current 1Password lab output contains
-1,005 files and 45,169,856 bytes; manifest, tree, and canonical-index SHA-256
-values are `b64691fe84c02fed1299844c7ad532fbcccf47545a7dba96972628a20b95b025`,
-`5700796c6c56562bfe922dbbba966912d8394ceb2b87141a7e9d133f01831141`,
-and `78271c86738b68c057c3090382c86a3fe30acc03a90f771e567f0ec1890698c0`.
+1,007 files and 45,180,920 bytes; manifest, tree, and canonical-index SHA-256
+values are `35a3ee69fb4caeb27db4be80b4fa68ee66f904145ee1ef0109fc2ba1f007980c`,
+`976951f803b1ad41ee70eb7f61e25c1138badb53fe12d2ac01dbd6f7727f6f0e`,
+and `6a434c5430e98bfe6e9793f9e25b561f2e8f1b113b0642534d8e96fd279c0c2c`.
 The receipt explicitly requires a sealed publisher-host policy and a
-publisher-signed executable. It mints no such authority itself; until the exact
-installed 1Password host Team/signing identity is inspected and sealed into
-the lab profile, this artifact remains intentionally non-activatable through
-the publisher schema.
+publisher-signed executable. It mints no such authority itself. The private
+lab profile now compiles the inspected 1Password host, Team, signing, and
+upstream-extension identities and activates them only from a correctly signed
+Zephium bundle; the generic transform remains non-authorizing and cannot make
+an arbitrary package or native host eligible.
 
 A separate non-authorizing experiment bound the module's exported
 `initializeFinishedPromise` into a generated wrapper with an eight-second
@@ -2103,6 +2104,36 @@ messages through the sealed upstream Chromium principal. The authenticated
 vault popup rendered real account content, and a public HTTPS login form
 exposed 1Password's inline field affordance. No 1Password package byte or
 package-specific execution branch is compiled into Zephium.
+
+The August 28 follow-up identified one package-neutral startup failure rather
+than treating the intermittent result as a timeout problem. The stock
+background rejected initialization while evaluating
+`chrome.privacy.services`: current WebKit exposes no such namespace, while
+1Password reads `passwordSavingEnabled` and conditionally disables browser
+password, address, and card autofill. A declared-`privacy` compatibility asset
+now preserves every valid native member and supplies only those four settings
+when absent. Zephium has no competing browser password/address/card service, so
+each value is truthfully fixed to `false`; disabling and clearing are accepted,
+enabling fails with `NotSupportedError`, and change events are inert. The
+5,813-byte asset has no credential/passkey access, network API, native message,
+hidden view, worker, polling loop, or idle timer. Its permission gate, exact
+receipt surface, disabled-only semantics, native-member preservation, and both
+service-worker and document-background execution are automated release
+contracts.
+
+With that exact publisher artifact in a fresh private profile, the native port
+callback arrived at about 233 ms and the worker was ready at about 334 ms. The
+publisher onboarding completed against the installed desktop application, the
+real vault popup rendered, the content script exposed its field affordance on
+public HTTPS login forms, and an explicit popup `Autofill` action filled a
+synthetic username/password pair and dismissed the popup. This is the first
+complete real-vault fill through Zephium, but it is not yet a Verified-package
+claim. Clicking the in-field icon changes 1Password's logical open/close state
+without presenting its inline menu, and invoking the already-visible toolbar
+action does not yet toggle-dismiss the popup. Save/update, lock/restart,
+passkeys, request authentication, long-running resource behavior, and upstream
+support remain open gates. No real credential or Apple Passwords entry was
+used by this test.
 
 That gate also found and fixed two package-neutral lifecycle defects. WebKit
 delivers an extension's first `Port.postMessage` only after the delegate

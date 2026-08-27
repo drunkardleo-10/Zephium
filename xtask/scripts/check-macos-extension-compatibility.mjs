@@ -26,6 +26,14 @@ const managedStorageSource = await readFile(fileURLToPath(managedStorageAssetUrl
 const managedStorageScript = new vm.Script(managedStorageSource, {
   filename: fileURLToPath(managedStorageAssetUrl),
 });
+const privacyServicesAssetUrl = new URL(
+  "../../crates/zephium-extension-package/assets/macos/webkit-privacy-services-v1.js",
+  import.meta.url,
+);
+const privacyServicesSource = await readFile(fileURLToPath(privacyServicesAssetUrl), "utf8");
+const privacyServicesScript = new vm.Script(privacyServicesSource, {
+  filename: fileURLToPath(privacyServicesAssetUrl),
+});
 const backgroundDocumentAssetUrl = new URL(
   "../../crates/zephium-extension-package/assets/macos/webkit-background-document-v1.js",
   import.meta.url,
@@ -102,6 +110,18 @@ for (const forbidden of ["window", "fetch", "XMLHttpRequest", "WebSocket"]) {
     managedStorageSource.includes(forbidden),
     false,
     `managed-storage asset exposes ${forbidden}`,
+  );
+  assert.equal(
+    privacyServicesSource.includes(forbidden),
+    false,
+    `privacy-services asset exposes ${forbidden}`,
+  );
+}
+for (const forbidden of ["platformCredentialsForRelyingParty", "passwords", "passkeys"]) {
+  assert.equal(
+    privacyServicesSource.includes(forbidden),
+    false,
+    `privacy-services asset reaches credential material through ${forbidden}`,
   );
 }
 for (const forbidden of ["fetch", "XMLHttpRequest", "WebSocket"]) {
@@ -327,6 +347,91 @@ assert.equal(
   managedContext.chrome.storage.managed,
   managed,
   "bounded reconciliation did not restore managed storage after namespace replacement",
+);
+
+const privacyTasks = [];
+const privacyNative = nativeNamespace("privacy-services-fixture");
+const privacyContext = run({
+  chrome: privacyNative,
+  DOMException,
+  queueMicrotask: (callback) => privacyTasks.push(callback),
+  setTimeout: (callback) => {
+    privacyTasks.push(callback);
+    return 1;
+  },
+});
+privacyServicesScript.runInContext(privacyContext, { timeout: 1_000 });
+const privacy = privacyContext.chrome.privacy;
+const services = privacy.services;
+assert.equal(privacyContext.browser.privacy, privacy);
+assert.equal(Object.isFrozen(privacy), true);
+assert.equal(Object.isFrozen(services), true);
+for (const name of [
+  "autofillEnabled",
+  "autofillAddressEnabled",
+  "autofillCreditCardEnabled",
+  "passwordSavingEnabled",
+]) {
+  const setting = services[name];
+  assert.equal(Object.isFrozen(setting), true);
+  assert.equal(setting.onChange.hasListeners(), false);
+  assert.deepEqual(JSON.parse(JSON.stringify(await setting.get({}))), {
+    value: false,
+    levelOfControl: "controllable_by_this_extension",
+  });
+  assert.equal(await setting.set({ value: false }), undefined);
+  assert.deepEqual(JSON.parse(JSON.stringify(await setting.get({}))), {
+    value: false,
+    levelOfControl: "controlled_by_this_extension",
+  });
+  assert.equal(await setting.clear({}), undefined);
+  assert.throws(() => setting.set({ value: true }), /no browser password/);
+}
+let privacyCallback;
+assert.equal(
+  services.passwordSavingEnabled.get({}, (value) => {
+    privacyCallback = JSON.parse(JSON.stringify(value));
+  }),
+  undefined,
+);
+for (const task of privacyTasks.splice(0)) task();
+assert.deepEqual(privacyCallback, {
+  value: false,
+  levelOfControl: "controllable_by_this_extension",
+});
+
+const nativePrivacySetting = Object.freeze({
+  get() {
+    return Promise.resolve({ value: false, levelOfControl: "not_controllable" });
+  },
+  set() {
+    return Promise.resolve();
+  },
+  clear() {
+    return Promise.resolve();
+  },
+});
+const preexistingPrivacyNative = nativeNamespace("native-privacy-services-fixture");
+preexistingPrivacyNative.privacy = {
+  services: { passwordSavingEnabled: nativePrivacySetting },
+};
+const preexistingPrivacyContext = run({
+  chrome: preexistingPrivacyNative,
+  DOMException,
+  queueMicrotask,
+  setTimeout: (callback) => {
+    callback();
+    return 1;
+  },
+});
+privacyServicesScript.runInContext(preexistingPrivacyContext, { timeout: 1_000 });
+assert.equal(
+  preexistingPrivacyContext.chrome.privacy.services.passwordSavingEnabled,
+  nativePrivacySetting,
+);
+assert.equal(
+  typeof preexistingPrivacyContext.chrome.privacy.services.autofillEnabled.get,
+  "function",
 );
 
 const backgroundNative = nativeNamespace("background-document-fixture");

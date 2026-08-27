@@ -34,13 +34,41 @@ api.runtime.onMessage.addListener((message, sender, sendResponse) => {
     message?.kind === "popup-background-lifecycle"
     && message?.token === "zephium-popup-background-lifecycle-v1"
   ) {
-    setTimeout(() => {
-      sendResponse({
-        kind: "popup-background-ready",
-        token: message.token,
-        async: true,
-      });
-    }, 750);
+    const setting = api.privacy?.services?.passwordSavingEnabled;
+    void Promise.resolve()
+      .then(async () => {
+        if (
+          typeof setting?.get !== "function"
+          || typeof setting?.set !== "function"
+          || typeof setting?.clear !== "function"
+        ) {
+          throw new Error("privacy-setting-missing");
+        }
+        const initial = await setting.get({});
+        await setting.set({ value: false });
+        const controlled = await setting.get({});
+        await setting.clear({});
+        const cleared = await setting.get({});
+        if (
+          initial?.value !== false
+          || initial?.levelOfControl !== "controllable_by_this_extension"
+          || controlled?.value !== false
+          || controlled?.levelOfControl !== "controlled_by_this_extension"
+          || cleared?.value !== false
+          || cleared?.levelOfControl !== "controllable_by_this_extension"
+        ) {
+          throw new Error("privacy-setting-invalid");
+        }
+        setTimeout(() => {
+          sendResponse({
+            kind: "popup-background-ready",
+            token: message.token,
+            async: true,
+            privacy: "disabled-only",
+          });
+        }, 750);
+      })
+      .catch(() => sendResponse({ kind: "popup-background-invalid", token: message.token }));
     return true;
   }
   if (message?.kind === "credential-selection" && message?.token === credentialToken) {

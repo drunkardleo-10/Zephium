@@ -115,6 +115,7 @@ pub(super) struct ArtifactSurfaces {
     pub(super) notifications_fallback: bool,
     pub(super) native_messaging_omitted: bool,
     pub(super) managed_storage_fallback: bool,
+    pub(super) privacy_services_fallback: bool,
     pub(super) created_navigation_target_fallback: bool,
 }
 
@@ -182,6 +183,8 @@ struct Surfaces {
     #[serde(default)]
     managed_storage: Option<String>,
     #[serde(default)]
+    privacy_services: Option<String>,
+    #[serde(default)]
     created_navigation_target: Option<String>,
 }
 
@@ -196,6 +199,7 @@ struct ContractFeatures {
     notifications_fallback: bool,
     native_messaging_omitted: bool,
     managed_storage_fallback: bool,
+    privacy_services_fallback: bool,
     created_navigation_target_fallback: bool,
 }
 
@@ -239,6 +243,8 @@ pub(super) fn validate(root: &Path) -> Result<ValidatedCompatibilityArtifact, St
         metadata.surfaces.native_messaging.as_deref() == Some("omitted-product-prohibited");
     let managed_storage_fallback =
         metadata.surfaces.managed_storage.as_deref() == Some("native-preserved-or-empty-read-only");
+    let privacy_services_fallback = metadata.surfaces.privacy_services.as_deref()
+        == Some("native-preserved-or-disabled-browser-services");
     let created_navigation_target_fallback =
         metadata.surfaces.created_navigation_target.as_deref() == Some("inert-event");
     let document_background = metadata.surfaces.background == "module-document-wrapper";
@@ -254,6 +260,7 @@ pub(super) fn validate(root: &Path) -> Result<ValidatedCompatibilityArtifact, St
             notifications_fallback,
             native_messaging_omitted,
             managed_storage_fallback,
+            privacy_services_fallback,
             created_navigation_target_fallback,
         },
     )?;
@@ -306,6 +313,7 @@ fn expected_contract(
         notifications_fallback,
         native_messaging_omitted,
         managed_storage_fallback,
+        privacy_services_fallback,
         created_navigation_target_fallback,
     } = features;
     if target == CompatibilityArtifactTarget::NativeV3 {
@@ -347,6 +355,14 @@ fn expected_contract(
         if managed_storage_fallback {
             adaptations.push("declared-storage-managed-fallback-v1");
             limitations.push("managed-storage-empty-read-only");
+        }
+        if privacy_services_fallback {
+            adaptations.push("declared-privacy-services-fallback-v1");
+            limitations.extend([
+                "privacy-services-browser-autofill-and-password-saving-fixed-disabled",
+                "privacy-services-onchange-events-not-emitted",
+                "privacy-services-enablement-unsupported",
+            ]);
         }
         if created_navigation_target_fallback {
             adaptations.push("created-navigation-target-event-fallback-v1");
@@ -413,6 +429,14 @@ fn expected_contract(
     if managed_storage_fallback {
         adaptations.push("declared-storage-managed-fallback-v1");
         limitations.push("managed-storage-empty-read-only");
+    }
+    if privacy_services_fallback {
+        adaptations.push("declared-privacy-services-fallback-v1");
+        limitations.extend([
+            "privacy-services-browser-autofill-and-password-saving-fixed-disabled",
+            "privacy-services-onchange-events-not-emitted",
+            "privacy-services-enablement-unsupported",
+        ]);
     }
     if created_navigation_target_fallback {
         adaptations.push("created-navigation-target-event-fallback-v1");
@@ -572,6 +596,11 @@ fn validate_surfaces(
         Some("native-preserved-or-empty-read-only") => true,
         _ => return Err("compatibility artifact managed-storage surface is invalid".into()),
     };
+    let privacy_services_fallback = match surfaces.privacy_services.as_deref() {
+        None => false,
+        Some("native-preserved-or-disabled-browser-services") => true,
+        _ => return Err("compatibility artifact privacy-services surface is invalid".into()),
+    };
     let created_navigation_target_fallback = match surfaces.created_navigation_target.as_deref() {
         None => false,
         Some("inert-event") if !matches!(background, BackgroundAdaptation::Absent) => true,
@@ -598,6 +627,7 @@ fn validate_surfaces(
         notifications_fallback,
         native_messaging_omitted,
         managed_storage_fallback,
+        privacy_services_fallback,
         created_navigation_target_fallback,
     })
 }

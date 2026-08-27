@@ -44,6 +44,7 @@ const SESSIONS_BRIDGE: &str = "__zephium__/webkit-sessions-v1.js";
 const OPTIONS_PAGE_BRIDGE: &str = "__zephium__/webkit-options-page-v1.js";
 const WEB_NAVIGATION_BRIDGE: &str = "__zephium__/webkit-web-navigation-v1.js";
 const MANAGED_STORAGE_BRIDGE: &str = "__zephium__/webkit-managed-storage-v1.js";
+const PRIVACY_SERVICES_BRIDGE: &str = "__zephium__/webkit-privacy-services-v1.js";
 const BACKGROUND_DOCUMENT_BRIDGE: &str = "__zephium__/webkit-background-document-v1.js";
 const NATIVE_MESSAGING_DENY_BRIDGE: &str = "__zephium__/webkit-native-messaging-deny-v1.js";
 const BACKGROUND_WRAPPER: &str = "__zephium_background_v1.js";
@@ -74,6 +75,9 @@ const WEB_NAVIGATION_BRIDGE_SOURCE: &str =
     include_str!("../../crates/zephium-extension-package/assets/macos/webkit-web-navigation-v1.js");
 const MANAGED_STORAGE_BRIDGE_SOURCE: &str = include_str!(
     "../../crates/zephium-extension-package/assets/macos/webkit-managed-storage-v1.js"
+);
+const PRIVACY_SERVICES_BRIDGE_SOURCE: &str = include_str!(
+    "../../crates/zephium-extension-package/assets/macos/webkit-privacy-services-v1.js"
 );
 const BACKGROUND_DOCUMENT_BRIDGE_SOURCE: &str = include_str!(
     "../../crates/zephium-extension-package/assets/macos/webkit-background-document-v1.js"
@@ -151,6 +155,7 @@ struct TransformPlan {
     native_messaging_omitted: bool,
     publisher_native_messaging: bool,
     managed_storage_fallback: bool,
+    privacy_services_fallback: bool,
     created_navigation_target_fallback: bool,
     history_broker_search: bool,
     empty_bookmarks: bool,
@@ -171,6 +176,7 @@ struct ExtensionBridgePlan {
     recent_sessions: bool,
     notifications_fallback: bool,
     managed_storage_fallback: bool,
+    privacy_services_fallback: bool,
     native_messaging_denied: bool,
     created_navigation_target_fallback: bool,
 }
@@ -187,6 +193,7 @@ struct ReceiptFeatures {
     native_messaging_omitted: bool,
     publisher_native_messaging: bool,
     managed_storage_fallback: bool,
+    privacy_services_fallback: bool,
     created_navigation_target_fallback: bool,
 }
 
@@ -244,6 +251,8 @@ struct CompatibilitySurfaces {
     native_messaging: Option<String>,
     #[serde(default)]
     managed_storage: Option<String>,
+    #[serde(default)]
+    privacy_services: Option<String>,
     #[serde(default)]
     created_navigation_target: Option<String>,
 }
@@ -517,6 +526,11 @@ fn validate_receipt_surfaces(
         Some("native-preserved-or-empty-read-only") => true,
         _ => return Err("compatibility receipt managed-storage surface is invalid".into()),
     };
+    let privacy_services_fallback = match surfaces.privacy_services.as_deref() {
+        None => false,
+        Some("native-preserved-or-disabled-browser-services") => true,
+        _ => return Err("compatibility receipt privacy-services surface is invalid".into()),
+    };
     let created_navigation_target_fallback = match surfaces.created_navigation_target.as_deref() {
         None => false,
         Some("inert-event") if surfaces.background != "absent" => true,
@@ -544,6 +558,7 @@ fn validate_receipt_surfaces(
                 native_messaging_omitted,
                 publisher_native_messaging,
                 managed_storage_fallback,
+                privacy_services_fallback,
                 created_navigation_target_fallback,
                 ..ReceiptFeatures::default()
             })
@@ -590,6 +605,7 @@ fn validate_receipt_surfaces(
                 native_messaging_omitted: false,
                 publisher_native_messaging: false,
                 managed_storage_fallback,
+                privacy_services_fallback,
                 created_navigation_target_fallback,
             })
         }
@@ -611,6 +627,7 @@ fn receipt_contract(
         native_messaging_omitted,
         publisher_native_messaging,
         managed_storage_fallback,
+        privacy_services_fallback,
         created_navigation_target_fallback,
     } = features;
     let mut adaptations = vec![
@@ -696,6 +713,14 @@ fn receipt_contract(
     if managed_storage_fallback {
         adaptations.push("declared-storage-managed-fallback-v1");
         limitations.push("managed-storage-empty-read-only");
+    }
+    if privacy_services_fallback {
+        adaptations.push("declared-privacy-services-fallback-v1");
+        limitations.extend([
+            "privacy-services-browser-autofill-and-password-saving-fixed-disabled",
+            "privacy-services-onchange-events-not-emitted",
+            "privacy-services-enablement-unsupported",
+        ]);
     }
     if created_navigation_target_fallback {
         adaptations.push("created-navigation-target-event-fallback-v1");
@@ -797,6 +822,13 @@ fn materialize_target(
             MANAGED_STORAGE_BRIDGE_SOURCE.as_bytes(),
         )?;
     }
+    if plan.privacy_services_fallback {
+        write_new_file(
+            &staged_extension,
+            PRIVACY_SERVICES_BRIDGE,
+            PRIVACY_SERVICES_BRIDGE_SOURCE.as_bytes(),
+        )?;
+    }
     if plan.worker.uses_document_background() {
         write_new_file(
             &staged_extension,
@@ -891,6 +923,7 @@ fn materialize_target(
             native_messaging_omitted: plan.native_messaging_omitted,
             publisher_native_messaging: plan.publisher_native_messaging,
             managed_storage_fallback: plan.managed_storage_fallback,
+            privacy_services_fallback: plan.privacy_services_fallback,
             created_navigation_target_fallback: plan.created_navigation_target_fallback,
         },
     );
@@ -990,6 +1023,15 @@ fn materialize_target(
                 Value::String("native-preserved-or-empty-read-only".to_owned()),
             );
     }
+    if plan.privacy_services_fallback {
+        surfaces
+            .as_object_mut()
+            .expect("compatibility surfaces are an object")
+            .insert(
+                "privacy_services".to_owned(),
+                Value::String("native-preserved-or-disabled-browser-services".to_owned()),
+            );
+    }
     if plan.created_navigation_target_fallback {
         surfaces
             .as_object_mut()
@@ -1077,6 +1119,7 @@ fn build_plan(
     let history_broker_search = target.requires_history_broker();
     let notifications_fallback = declares_permission(&root, "permissions", "notifications")?;
     let managed_storage_fallback = declares_permission(&root, "permissions", "storage")?;
+    let privacy_services_fallback = declares_permission(&root, "permissions", "privacy")?;
     let native_messaging_omitted = if target == ArtifactTarget::NativeV3 {
         remove_permission(&mut root, "permissions", "nativeMessaging")?
             | remove_permission(&mut root, "optional_permissions", "nativeMessaging")?
@@ -1137,6 +1180,7 @@ fn build_plan(
         recent_sessions,
         notifications_fallback,
         managed_storage_fallback,
+        privacy_services_fallback,
         native_messaging_denied: native_messaging_omitted,
         created_navigation_target_fallback,
     };
@@ -1175,6 +1219,7 @@ fn build_plan(
                     ExtensionBridgePlan {
                         notifications_fallback,
                         managed_storage_fallback,
+                        privacy_services_fallback,
                         native_messaging_denied: native_messaging_omitted,
                         ..ExtensionBridgePlan::default()
                     },
@@ -1212,6 +1257,7 @@ fn build_plan(
         native_messaging_omitted,
         publisher_native_messaging,
         managed_storage_fallback,
+        privacy_services_fallback,
         created_navigation_target_fallback,
         history_broker_search,
         empty_bookmarks,
@@ -1536,6 +1582,10 @@ fn adapt_background(
                 .managed_storage_fallback
                 .then(|| js_string(&format!("/{MANAGED_STORAGE_BRIDGE}")))
                 .transpose()?;
+            let privacy_services = bridges
+                .privacy_services_fallback
+                .then(|| js_string(&format!("/{PRIVACY_SERVICES_BRIDGE}")))
+                .transpose()?;
             let native_messaging = bridges
                 .native_messaging_denied
                 .then(|| js_string(&format!("/{NATIVE_MESSAGING_DENY_BRIDGE}")))
@@ -1573,6 +1623,7 @@ fn adapt_background(
                 Some(prelude),
                 notifications,
                 managed_storage,
+                privacy_services,
                 native_messaging,
                 bookmarks,
                 favicon,
@@ -1601,6 +1652,10 @@ fn adapt_background(
             let managed_storage = bridges
                 .managed_storage_fallback
                 .then(|| js_string(&format!("./{MANAGED_STORAGE_BRIDGE}")))
+                .transpose()?;
+            let privacy_services = bridges
+                .privacy_services_fallback
+                .then(|| js_string(&format!("./{PRIVACY_SERVICES_BRIDGE}")))
                 .transpose()?;
             let native_messaging = bridges
                 .native_messaging_denied
@@ -1644,6 +1699,9 @@ fn adapt_background(
             }
             if let Some(managed_storage) = managed_storage {
                 wrapper.push_str(&format!("import {managed_storage};\n"));
+            }
+            if let Some(privacy_services) = privacy_services {
+                wrapper.push_str(&format!("import {privacy_services};\n"));
             }
             if let Some(native_messaging) = native_messaging {
                 wrapper.push_str(&format!("import {native_messaging};\n"));
@@ -1823,6 +1881,11 @@ fn inject_extension_page_preludes(
     if bridges.managed_storage_fallback {
         tags.push_str(&format!(
             "<script src=\"/{MANAGED_STORAGE_BRIDGE}\"></script>"
+        ));
+    }
+    if bridges.privacy_services_fallback {
+        tags.push_str(&format!(
+            "<script src=\"/{PRIVACY_SERVICES_BRIDGE}\"></script>"
         ));
     }
     if bridges.native_messaging_denied {
@@ -2007,6 +2070,7 @@ fn enforce_output_budgets(
         + usize::from(plan.native_messaging_omitted)
         + usize::from(plan.notifications_fallback)
         + usize::from(plan.managed_storage_fallback)
+        + usize::from(plan.privacy_services_fallback)
         + usize::from(plan.empty_bookmarks)
         + (usize::from(plan.empty_favicon) * 2)
         + usize::from(plan.history_broker_search)
@@ -2022,6 +2086,7 @@ fn enforce_output_budgets(
         + usize::from(plan.native_messaging_omitted)
         + usize::from(plan.notifications_fallback)
         + usize::from(plan.managed_storage_fallback)
+        + usize::from(plan.privacy_services_fallback)
         + usize::from(plan.empty_bookmarks)
         + (usize::from(plan.empty_favicon) * 2)
         + usize::from(plan.history_broker_search)
@@ -2044,6 +2109,8 @@ fn enforce_output_budgets(
             .then_some(NOTIFICATIONS_BRIDGE_SOURCE.as_bytes()),
         plan.managed_storage_fallback
             .then_some(MANAGED_STORAGE_BRIDGE_SOURCE.as_bytes()),
+        plan.privacy_services_fallback
+            .then_some(PRIVACY_SERVICES_BRIDGE_SOURCE.as_bytes()),
         plan.worker
             .uses_document_background()
             .then_some(BACKGROUND_DOCUMENT_BRIDGE_SOURCE.as_bytes()),
@@ -2121,6 +2188,13 @@ fn enforce_output_budgets(
         .and_then(|bytes| {
             bytes.checked_add(if plan.managed_storage_fallback {
                 MANAGED_STORAGE_BRIDGE_SOURCE.len() as u64
+            } else {
+                0
+            })
+        })
+        .and_then(|bytes| {
+            bytes.checked_add(if plan.privacy_services_fallback {
+                PRIVACY_SERVICES_BRIDGE_SOURCE.len() as u64
             } else {
                 0
             })
@@ -2637,6 +2711,67 @@ mod tests {
                 "native-preserved-or-inert-no-delivery".to_owned()
             ))
         );
+        validate_release_input(&artifact).unwrap();
+    }
+
+    #[test]
+    fn privacy_services_fallback_is_permission_gated_disabled_and_receipt_bound() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir(&source).unwrap();
+        let index = fixture(
+            &source,
+            Some("module"),
+            b"<!doctype html><html><head></head><body></body></html>",
+        );
+        let manifest_path = source.join("manifest.json");
+        let mut manifest: Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["permissions"] = serde_json::json!(["privacy"]);
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        reindex(&source, &index);
+
+        let artifact = temp.path().join("privacy-services");
+        materialize(&source, &index, &artifact).unwrap();
+        let extension = artifact.join(ARTIFACT_EXTENSION);
+        assert_eq!(
+            fs::read(extension.join(PRIVACY_SERVICES_BRIDGE)).unwrap(),
+            PRIVACY_SERVICES_BRIDGE_SOURCE.as_bytes()
+        );
+        let wrapper = fs::read_to_string(extension.join(BACKGROUND_WRAPPER)).unwrap();
+        let api = wrapper.find(API_PRELUDE).unwrap();
+        let privacy = wrapper.find(PRIVACY_SERVICES_BRIDGE).unwrap();
+        let worker = wrapper.find("worker.js").unwrap();
+        assert!(api < privacy && privacy < worker);
+        let popup = fs::read_to_string(extension.join("ui/popup.html")).unwrap();
+        assert!(popup.contains(&format!(
+            "<head><script src=\"/{API_PRELUDE}\"></script><script src=\"/{PRIVACY_SERVICES_BRIDGE}\"></script>"
+        )));
+
+        let metadata: Value =
+            serde_json::from_slice(&fs::read(artifact.join(ARTIFACT_METADATA)).unwrap()).unwrap();
+        assert_eq!(
+            metadata.pointer("/surfaces/privacy_services"),
+            Some(&Value::String(
+                "native-preserved-or-disabled-browser-services".to_owned()
+            ))
+        );
+        assert!(metadata["adaptations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == "declared-privacy-services-fallback-v1"));
+        for limitation in [
+            "privacy-services-browser-autofill-and-password-saving-fixed-disabled",
+            "privacy-services-onchange-events-not-emitted",
+            "privacy-services-enablement-unsupported",
+        ] {
+            assert!(metadata["limitations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|value| value == limitation));
+        }
         validate_release_input(&artifact).unwrap();
     }
 

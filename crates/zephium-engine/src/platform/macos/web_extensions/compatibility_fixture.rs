@@ -61,28 +61,28 @@ const CREDENTIAL_CLICK_X: f64 = 126.0;
 const CREDENTIAL_CLICK_TOP: f64 = 38.0;
 
 const SOURCE_FILES: usize = 6;
-const SOURCE_BYTES: u64 = 13_794;
+const SOURCE_BYTES: u64 = 15_017;
 const SOURCE_MANIFEST_SHA256: &str =
-    "01ee8724d461385dfaeb1c5a7e5cb9a80fc7df7aca41ac79d50a5cfa92919f96";
-const SOURCE_TREE_SHA256: &str = "98c91e676629e5137712c67434ab92077200a496ec4052439d70a8e5d62675be";
+    "42d6793b3064d1b519ce30eb43d570e70c43ce286e32e44565fa3fe8f4e06864";
+const SOURCE_TREE_SHA256: &str = "dda82a47f45dd298b81158c9bfcd2bd76a66fb6ea47566cdbc9379c805578d68";
 const SOURCE_INDEX_SHA256: &str =
-    "bb3c6e1ed06da39ac6f315fc9c8404fadf0199d0ec0414f63bd76053b4a3098e";
-const SERVICE_WORKER_OUTPUT_FILES: usize = 8;
-const SERVICE_WORKER_OUTPUT_BYTES: u64 = 20_183;
+    "dbdfa72e224321837f6d796f00d7e175d28ad5727fba2b69e3740e3695ddd7df";
+const SERVICE_WORKER_OUTPUT_FILES: usize = 9;
+const SERVICE_WORKER_OUTPUT_BYTES: u64 = 27_219;
 const SERVICE_WORKER_OUTPUT_MANIFEST_SHA256: &str =
-    "11001215353b81c838416ab3a4e8a5fd068df6fbd82be4a77cc8397410560d35";
+    "1a8f5f4253c925a617ff239f33116bdbfa80d744c20fefca3800ee7c2712bef7";
 const SERVICE_WORKER_OUTPUT_TREE_SHA256: &str =
-    "1876763aaf26e4016ab5f77b6dae1c247579ed6134e3ee6e9f2ddbe55bee07f5";
+    "cdd4a12d16886a27236e27d3595e99fe5663e0c7bfb104e86d39e479a6e63554";
 const SERVICE_WORKER_OUTPUT_INDEX_SHA256: &str =
-    "556dcb1cc0b60591ea0cbebe6bcfeeeb118e6aabb070e21b4eacc9f802eadd59";
-const DOCUMENT_OUTPUT_FILES: usize = 9;
-const DOCUMENT_OUTPUT_BYTES: u64 = 22_347;
+    "22078cfc8e40c3ad668ba53cebafd21950b7a42413ee259265543212f21cb178";
+const DOCUMENT_OUTPUT_FILES: usize = 10;
+const DOCUMENT_OUTPUT_BYTES: u64 = 29_383;
 const DOCUMENT_OUTPUT_MANIFEST_SHA256: &str =
-    "168a9fd06d336ae90cbf8f5b3e772ba4c47d1eb8fe8463daf06fe84b91d6d91e";
+    "9dbac3bc88f28dad6024bf6471931dd2aae4d32039fd27bd0ae4bcd7357af1ff";
 const DOCUMENT_OUTPUT_TREE_SHA256: &str =
-    "07a73a44603c0f84419f4ebb1481a3d63fa33c0b04a92ce148d72a181545326a";
+    "d4cfb233cfaf06438e538c1baa8bcf236e3e5aaaeab315f2e871913132903687";
 const DOCUMENT_OUTPUT_INDEX_SHA256: &str =
-    "9695b64c370c6b4ba191273403b1c97b02abc36755475eae73c5a4dd0aa502a4";
+    "d66446ce48e3e2bbe06dae9fd7d19b517327d19621b526fa802df6cc105789f6";
 
 struct Teardown {
     controller: Weak<WKWebExtensionController>,
@@ -240,7 +240,7 @@ pub(super) fn run(artifact: &Path) -> Result<bool, String> {
             (None, Ok(())) => {}
         }
         println!(
-            "native-probe: macOS package-neutral compatibility fixture passed; os={}; exact_source_tree=passed; exact_output_tree=passed; background_adaptation={}; content_compatibility_mode={}; background_compatibility_mode={}; scheduler_yield={}; scheduler_yield_mode={}; runtime_response_round_trip=passed; tabs_message_round_trip=passed; background_preload_ms={}; background_wake=runtime-message; background_action_label={:?}; popup_background_lifecycle={}; popup_async_response=passed; sender_tab_routing=passed; page_world_adapter_absent=passed; page_world_extension_api_absent=passed; credential_field_discovery=passed; credential_inline_isolation=closed-shadow-null-origin; credential_page_forgery_ignored=passed; credential_selection_transport={}; credential_background_round_trip=passed; credential_page_events=passed; controller_visible_scripts={}; webview_callbacks={}; product_authority=false; native_objects_released=passed",
+            "native-probe: macOS package-neutral compatibility fixture passed; os={}; exact_source_tree=passed; exact_output_tree=passed; background_adaptation={}; content_compatibility_mode={}; background_compatibility_mode={}; privacy_services=disabled-only; scheduler_yield={}; scheduler_yield_mode={}; runtime_response_round_trip=passed; tabs_message_round_trip=passed; background_preload_ms={}; background_wake=runtime-message; background_action_label={:?}; popup_background_lifecycle={}; popup_async_response=passed; sender_tab_routing=passed; page_world_adapter_absent=passed; page_world_extension_api_absent=passed; credential_field_discovery=passed; credential_inline_isolation=closed-shadow-null-origin; credential_page_forgery_ignored=passed; credential_selection_transport={}; credential_background_round_trip=passed; credential_page_events=passed; controller_visible_scripts={}; webview_callbacks={}; product_authority=false; native_objects_released=passed",
             teardown.operating_system,
             teardown.background_adaptation,
             teardown.content_mode.as_str(),
@@ -300,6 +300,7 @@ fn admit(
         || admitted.surfaces.removed_file_match_patterns != 0
         || admitted.surfaces.same_document_navigation_routes != 0
         || admitted.surfaces.history_search
+        || !admitted.surfaces.privacy_services_fallback
     {
         return Err("compatibility fixture artifact surface contract drifted".into());
     }
@@ -359,7 +360,7 @@ fn validate_manifest(path: &Path, background: BackgroundAdaptation) -> Result<()
         "name": DISPLAY_NAME,
         "description": "Zephium-owned package-neutral WebKit compatibility fixture.",
         "version": "1.0.0",
-        "permissions": ["tabs"],
+        "permissions": ["tabs", "privacy"],
         "background": expected_background,
         "action": {
             "default_title": "Wake compatibility fixture",
@@ -880,6 +881,9 @@ mod tests {
         assert!(CREDENTIAL_CONTENT.contains("event.data.trusted !== true"));
         assert!(CREDENTIAL_CONTENT.contains("payload.length > 8192"));
         assert!(CREDENTIAL_BACKGROUND.contains("Number.isInteger(sender?.tab?.id)"));
+        assert!(CREDENTIAL_BACKGROUND.contains("api.privacy?.services?.passwordSavingEnabled"));
+        assert!(CREDENTIAL_BACKGROUND.contains("privacy-setting-invalid"));
+        assert!(CREDENTIAL_BACKGROUND.contains("privacy: \"disabled-only\""));
         assert!(CREDENTIAL_BACKGROUND.contains("return true;"));
         assert!(POPUP_LIFECYCLE.contains("await api.runtime.sendMessage"));
         assert!(POPUP_LIFECYCLE.contains("ZEPHIUM_COMPAT_POPUP:passed"));
