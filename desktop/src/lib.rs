@@ -4555,6 +4555,15 @@ pub fn run() {
                 )
                 .into());
             }
+            #[cfg(feature = "local-extension-lab")]
+            if shutdown.request_extension_distribution_refresh()
+                != ExtensionDistributionRefreshAdmissionView::Accepted
+            {
+                return Err(std::io::Error::other(
+                    "private extension lab initial synchronization was not admitted",
+                )
+                .into());
+            }
             #[cfg(target_os = "windows")]
             if pending_runtime_update.swap(false, Ordering::AcqRel) {
                 engine.notify_runtime_restart_required();
@@ -6089,6 +6098,9 @@ mod tests {
         let post_admission_terminal_gate = setup
             .find("terminal shutdown overtook Shell actor admission")
             .expect("post-admission terminal gate");
+        let local_lab_initial_sync = setup
+            .find("private extension lab initial synchronization was not admitted")
+            .expect("post-admission local lab synchronization");
         let pre_panel_terminal_gate = setup
             .find("terminal shutdown started before privileged panel construction")
             .expect("pre-panel terminal gate");
@@ -6139,6 +6151,8 @@ mod tests {
         assert!(store_transfer < callback_publication);
         assert!(callback_publication < actor_admission);
         assert!(actor_admission < post_admission_terminal_gate);
+        assert!(post_admission_terminal_gate < local_lab_initial_sync);
+        assert!(local_lab_initial_sync < pre_panel_terminal_gate);
         assert!(post_admission_terminal_gate < pre_panel_terminal_gate);
         assert!(pre_panel_terminal_gate < panel_webview);
         assert!(actor_admission < panel_webview);

@@ -14,8 +14,6 @@ use zephium_extension_authority::{
     ProductExtensionManifestAuthority, ProductExtensionRuntimeTarget,
 };
 use zephium_extension_distribution::ExtensionDistributionClient;
-#[cfg(feature = "local-extension-lab")]
-use zephium_extension_updater::ExtensionDistributionRefreshAdmission;
 use zephium_extension_updater::{ExtensionDistributionPlan, ExtensionDistributionWorker};
 
 #[cfg(not(any(feature = "staging-extension-catalog", feature = "local-extension-lab")))]
@@ -65,13 +63,9 @@ pub(super) fn launch(
         .map_err(|_| invalid_configuration("local lab distribution client"))?;
     let plan = ExtensionDistributionPlan::new(client, selections)
         .map_err(|_| invalid_configuration("update plan"))?;
-    let worker = ExtensionDistributionWorker::launch(plan, shell)
-        .map_err(|_| invalid_configuration("worker launch"))?;
-    #[cfg(feature = "local-extension-lab")]
-    if worker.handle().request_synchronize() != ExtensionDistributionRefreshAdmission::Accepted {
-        return Err(invalid_configuration("initial local lab synchronization"));
-    }
-    Ok(Some(worker))
+    ExtensionDistributionWorker::launch(plan, shell)
+        .map(Some)
+        .map_err(|_| invalid_configuration("worker launch"))
 }
 
 fn invalid_configuration(component: &'static str) -> std::io::Error {
