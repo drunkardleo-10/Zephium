@@ -445,6 +445,17 @@ impl BrowserTab {
         *self.ivars().webview.borrow_mut() = webview.map(Weak::from_retained);
     }
 
+    fn has_bound_resident_webview(&self) -> bool {
+        self.is_resident()
+            && self
+                .ivars()
+                .webview
+                .borrow()
+                .as_ref()
+                .and_then(Weak::load)
+                .is_some()
+    }
+
     fn index(&self) -> usize {
         self.ivars().index.get()
     }
@@ -1426,6 +1437,15 @@ impl MacosExtensionBrowserSurfaceHost {
         }
     }
 
+    pub(super) fn is_ready_for_document_background(&self) -> bool {
+        document_background_surface_ready(
+            self.generation.is_some(),
+            self.tabs
+                .values()
+                .map(|tab| (tab.is_resident(), tab.has_bound_resident_webview())),
+        )
+    }
+
     /// Resolves one logical tab inside the exact already-published generation.
     /// This clones only the retained protocol wrapper and never consults the
     /// tab's weak webview, so action enumeration cannot resurrect a discarded
@@ -1569,6 +1589,14 @@ impl MacosExtensionBrowserSurfaceHost {
         self.publisher_native_messaging.pending_subject(request)
     }
 
+    pub(super) fn reserve_native_messaging_authorization_retry(
+        &self,
+        request: PublisherNativeMessagingRequestId,
+    ) -> bool {
+        self.publisher_native_messaging
+            .reserve_authorization_retry(request)
+    }
+
     pub(super) fn authorize_native_messaging(
         &self,
         request: PublisherNativeMessagingRequestId,
@@ -1693,6 +1721,13 @@ impl MacosExtensionBrowserSurfaceHost {
     }
 }
 
+fn document_background_surface_ready(
+    has_generation: bool,
+    tabs: impl IntoIterator<Item = (bool, bool)>,
+) -> bool {
+    has_generation && tabs.into_iter().any(|(resident, bound)| resident && bound)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1731,5 +1766,18 @@ mod tests {
         assert!(resolved.is_none());
         assert!(resolver_called.get());
         assert_eq!(broker.discarded_tab_webview_refusals(), 0);
+    }
+
+    #[test]
+    fn document_background_requires_a_published_resident_native_surface() {
+        assert!(!document_background_surface_ready(false, [(true, true)]));
+        assert!(!document_background_surface_ready(
+            true,
+            [(false, true), (true, false)]
+        ));
+        assert!(document_background_surface_ready(
+            true,
+            [(false, true), (true, true)]
+        ));
     }
 }

@@ -34,7 +34,7 @@ use zephium_extension_package::{
 };
 
 const MAX_DISCOVERY_ROOTS: usize = 4;
-const OUTBOUND_FRAME_QUEUE_CAPACITY: usize = 2;
+pub(super) const OUTBOUND_FRAME_QUEUE_CAPACITY: usize = 2;
 const WORKER_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const CHROMIUM_ORIGIN_PREFIX: &str = "chrome-extension://";
 const CHROMIUM_ORIGIN_SUFFIX: &str = "/";
@@ -388,9 +388,22 @@ fn spawn_host(path: &Path, extension_id: &str) -> Result<Child, NativeHostProces
         ))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(native_host_stderr())
         .spawn()
         .map_err(|_| NativeHostProcessFailure::SpawnFailed)
+}
+
+#[cfg(feature = "native-extension-lab-diagnostics")]
+fn native_host_stderr() -> Stdio {
+    // The private lab uses a fresh development vault and captures this stream
+    // only to diagnose publisher-host startup. Shipping builds always discard
+    // host stderr so an extension cannot create an unbounded browser log.
+    Stdio::inherit()
+}
+
+#[cfg(not(feature = "native-extension-lab-diagnostics"))]
+fn native_host_stderr() -> Stdio {
+    Stdio::null()
 }
 
 fn run_stdio_actor(

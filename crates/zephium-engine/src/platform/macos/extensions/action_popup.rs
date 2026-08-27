@@ -395,6 +395,11 @@ impl ActionPopupBroker {
                 return;
             }
         };
+        #[cfg(feature = "native-extension-lab-diagnostics")]
+        eprintln!(
+            "extension lab: popup background warm-up requested; has-background={has_background}; context-errors={}",
+            unsafe { context.errors() }.count()
+        );
         if !has_background {
             self.perform_pending_action(request);
             return;
@@ -423,6 +428,8 @@ impl ActionPopupBroker {
                 broker.cancel_pending(request, ExtensionActionRejection::PopupUnavailable);
                 return;
             }
+            #[cfg(feature = "native-extension-lab-diagnostics")]
+            eprintln!("extension lab: popup background warm-up completed");
             broker.perform_pending_action(request);
         });
         if objc2::exception::catch(AssertUnwindSafe(|| unsafe {

@@ -36,7 +36,8 @@ pub(crate) use grant_application::{apply_probe_grants, apply_probe_grants_with_d
 #[cfg(feature = "native-web-extension-probes")]
 pub(crate) use grants::MacosNativeApiPermission;
 pub(crate) use native_messaging::{
-    NativeHostWorkerEvent, PublisherNativeMessagingAuthorization, PublisherNativeMessagingRequestId,
+    schedule_authorization_retry, NativeHostWorkerEvent, PublisherNativeMessagingAuthorization,
+    PublisherNativeMessagingRequestId,
 };
 #[cfg(feature = "native-web-extension-probes")]
 pub(crate) use native_runtime::begin_probe_native_runtime_activation;

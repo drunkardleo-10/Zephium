@@ -74,6 +74,16 @@ pub(super) fn begin_native_activation(
         report_product_probe_failure("browser-surface reconciliation", error);
         return complete_pre_entry_failure(host, ticket, map_controller_failure(error));
     }
+    let browser_surface_ready = match host
+        .macos_extension_controllers
+        .browser_surface_ready_for_document_background(profile)
+    {
+        Ok(ready) => ready,
+        Err(error) => {
+            report_product_probe_failure("browser-surface readiness", error);
+            return complete_pre_entry_failure(host, ticket, map_controller_failure(error));
+        }
+    };
     let controller = match host
         .macos_extension_controllers
         .controller_for_native_runtime(profile, ExtensionNativeNamespaceScope::MacosControllerV1)
@@ -133,6 +143,7 @@ pub(super) fn begin_native_activation(
             reservation.owner().backend,
             expected_owner,
             controller,
+            browser_surface_ready,
         ) {
             Ok(prepared) => prepared,
             Err(failure) => {
@@ -501,6 +512,7 @@ fn settle_native_activation(
             host.extension_runtime_registry.fail_invariant();
             return Err(ExtensionRuntimeHostBindError::InternalInvariant);
         }
+        let _ = host.wake_resident_document_backgrounds(profile);
     }
     Ok(settled)
 }

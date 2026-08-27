@@ -9,7 +9,7 @@
 mod process;
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::CStr;
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::PathBuf;
@@ -42,11 +42,12 @@ pub(super) use self::process::NativeHostProcessPool;
 pub(crate) use self::process::NativeHostWorkerEvent;
 use self::process::{
     spawn_native_host_worker, NativeHostDiscoveryRoots, NativeHostProcessFailure,
-    NativeHostSessionControl,
+    NativeHostSessionControl, OUTBOUND_FRAME_QUEUE_CAPACITY,
 };
 
 const AUTHORIZATION_TIMEOUT: Duration = Duration::from_secs(5);
 const WORKER_EVENT_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_AUTHORIZATION_RETRIES: u8 = 8;
 const ERROR_DOMAIN: &str = "app.zephium.extension-native-messaging";
 
 type OneShotReply = RcBlock<dyn Fn(*mut AnyObject, *mut NSError)>;
@@ -139,6 +140,49 @@ struct PendingSession {
     runtime: Option<ExtensionRuntimeInstance>,
     control: Option<NativeHostSessionControl>,
     watchdog: Option<crate::platform::imp::ContentPolicyTimeout>,
+    authorization_retries: AuthorizationRetryBudget,
+    deferred_port_frames: DeferredPortFrames,
+}
+
+struct DeferredPortFrames {
+    frames: VecDeque<Box<[u8]>>,
+}
+
+impl Default for DeferredPortFrames {
+    fn default() -> Self {
+        Self {
+            frames: VecDeque::with_capacity(OUTBOUND_FRAME_QUEUE_CAPACITY),
+        }
+    }
+}
+
+impl DeferredPortFrames {
+    fn try_push(&mut self, frame: Box<[u8]>) -> Result<(), Box<[u8]>> {
+        if self.frames.len() >= OUTBOUND_FRAME_QUEUE_CAPACITY {
+            return Err(frame);
+        }
+        self.frames.push_back(frame);
+        Ok(())
+    }
+
+    fn pop_front(&mut self) -> Option<Box<[u8]>> {
+        self.frames.pop_front()
+    }
+}
+
+#[derive(Default)]
+struct AuthorizationRetryBudget {
+    used: u8,
+}
+
+impl AuthorizationRetryBudget {
+    fn reserve(&mut self) -> bool {
+        if self.used >= MAX_AUTHORIZATION_RETRIES {
+            return false;
+        }
+        self.used += 1;
+        true
+    }
 }
 
 pub(super) struct PublisherNativeMessagingBroker {
@@ -180,6 +224,7 @@ impl PublisherNativeMessagingBroker {
         message: &AnyObject,
         reply: &DynBlock<dyn Fn(*mut AnyObject, *mut NSError)>,
     ) {
+        lab_diagnostic("one-shot-callback");
         let endpoint = match encode_webkit_message(message) {
             Ok(frame) => Endpoint::OneShot {
                 reply: reply.copy(),
@@ -200,6 +245,7 @@ impl PublisherNativeMessagingBroker {
         port: &WKWebExtensionMessagePort,
         completion: &DynBlock<dyn Fn(*mut NSError)>,
     ) {
+        lab_diagnostic("port-callback");
         let Some(port) = (unsafe { Retained::retain(NonNull::from(port).as_ptr()) }) else {
             complete_port_rejected(
                 completion.copy(),
@@ -268,8 +314,19 @@ impl PublisherNativeMessagingBroker {
                 runtime: None,
                 control: None,
                 watchdog: Some(watchdog),
+                authorization_retries: AuthorizationRetryBudget::default(),
+                deferred_port_frames: DeferredPortFrames::default(),
             },
         );
+        if !self.install_port_handlers(id) {
+            self.reject_exact(id, PublisherNativeMessagingRejection::HostUnavailable);
+            return;
+        }
+        if !self.complete_port_connection(id) {
+            self.reject_exact(id, PublisherNativeMessagingRejection::HostUnavailable);
+            return;
+        }
+        lab_diagnostic("authorization-staged");
         if !crate::host::with_extension_browser_request_terminal(move |host| {
             host.finalize_extension_native_messaging_request(profile, id);
         }) {
@@ -290,27 +347,46 @@ impl PublisherNativeMessagingBroker {
         Some((Retained::as_ptr(&context), pending.host_name.clone()))
     }
 
+    pub(super) fn reserve_authorization_retry(
+        &self,
+        id: PublisherNativeMessagingRequestId,
+    ) -> bool {
+        let mut pending = self.pending.borrow_mut();
+        let Some(session) = pending.get_mut(&id) else {
+            return false;
+        };
+        if session.phase != SessionPhase::Authorizing || !session.authorization_retries.reserve() {
+            return false;
+        }
+        lab_diagnostic("authorization-retry-reserved");
+        true
+    }
+
     pub(super) fn authorize(
         &self,
         id: PublisherNativeMessagingRequestId,
         authorization: Option<PublisherNativeMessagingAuthorization>,
     ) -> bool {
+        lab_diagnostic("authorization-entered");
         let Some(authorization) = authorization else {
+            lab_diagnostic("authorization-refused");
             return self.reject_exact(id, PublisherNativeMessagingRejection::Unauthorized);
         };
         let roots = match self.process_pool.roots() {
             Some(roots) => roots,
             None => {
+                lab_diagnostic("discovery-roots-unavailable");
                 return self.reject_exact(
                     id,
                     PublisherNativeMessagingRejection::RegistrationUnavailable,
-                )
+                );
             }
         };
         let permit = match self.process_pool.try_reserve() {
             Some(permit) => permit,
             None => {
-                return self.reject_exact(id, PublisherNativeMessagingRejection::CapacityExceeded)
+                lab_diagnostic("process-capacity-refused");
+                return self.reject_exact(id, PublisherNativeMessagingRejection::CapacityExceeded);
             }
         };
         {
@@ -339,6 +415,7 @@ impl PublisherNativeMessagingBroker {
             session.phase = SessionPhase::Starting;
             session.runtime = Some(authorization.runtime);
         }
+        lab_diagnostic("worker-spawn-started");
 
         let profile = self.profile;
         let control =
@@ -359,9 +436,13 @@ impl PublisherNativeMessagingBroker {
                         .reject_exact(id, PublisherNativeMessagingRejection::HostUnavailable);
                 }
                 session.control = Some(control);
+                lab_diagnostic("worker-spawned");
                 true
             }
-            Err(reason) => self.reject_exact(id, map_process_failure(reason)),
+            Err(reason) => {
+                lab_diagnostic("worker-spawn-refused");
+                self.reject_exact(id, map_process_failure(reason))
+            }
         }
     }
 
@@ -371,9 +452,17 @@ impl PublisherNativeMessagingBroker {
         event: NativeHostWorkerEvent,
     ) -> bool {
         match event {
-            NativeHostWorkerEvent::Ready => self.handle_ready(id),
-            NativeHostWorkerEvent::Message(message) => self.handle_message(id, &message),
+            NativeHostWorkerEvent::Ready => {
+                lab_diagnostic("worker-ready");
+                self.handle_ready(id)
+            }
+            NativeHostWorkerEvent::Message(message) => {
+                lab_diagnostic("worker-message");
+                self.handle_message(id, &message)
+            }
             NativeHostWorkerEvent::Closed(reason) => {
+                lab_diagnostic("worker-closed");
+                lab_process_failure_diagnostic(reason);
                 self.reject_exact(id, map_process_failure(reason))
             }
         }
@@ -382,10 +471,7 @@ impl PublisherNativeMessagingBroker {
     fn handle_ready(&self, id: PublisherNativeMessagingRequestId) -> bool {
         enum ReadyEndpoint {
             OneShot,
-            Port {
-                port: Retained<WKWebExtensionMessagePort>,
-                completion: Option<PortCompletion>,
-            },
+            Port { completion: Option<PortCompletion> },
         }
         let mut pending = self.pending.borrow_mut();
         let Some(session) = pending.get_mut(&id) else {
@@ -395,7 +481,6 @@ impl PublisherNativeMessagingBroker {
             drop(pending);
             return self.reject_exact(id, PublisherNativeMessagingRejection::HostUnavailable);
         }
-        session.phase = SessionPhase::Active;
         session.watchdog.take();
         let endpoint = match &mut session.endpoint {
             Endpoint::OneShot { initial_frame, .. } => {
@@ -415,44 +500,25 @@ impl PublisherNativeMessagingBroker {
                 }
                 ReadyEndpoint::OneShot
             }
-            Endpoint::Port { port, completion } => ReadyEndpoint::Port {
-                port: port.clone(),
+            Endpoint::Port { completion, .. } => ReadyEndpoint::Port {
                 completion: completion.take(),
             },
         };
+        while let Some(frame) = session.deferred_port_frames.pop_front() {
+            let rejection = match session.control.as_mut() {
+                Some(control) => control.try_send(frame).err().map(map_process_failure),
+                None => Some(PublisherNativeMessagingRejection::HostUnavailable),
+            };
+            if let Some(reason) = rejection {
+                drop(pending);
+                return self.reject_exact(id, reason);
+            }
+        }
+        session.phase = SessionPhase::Active;
         drop(pending);
-        let ReadyEndpoint::Port { port, completion } = endpoint else {
+        let ReadyEndpoint::Port { completion } = endpoint else {
             return true;
         };
-        let weak = self.self_weak.clone();
-        let message_handler = RcBlock::new(move |message: *mut AnyObject, error: *mut NSError| {
-            let Some(broker) = weak.upgrade() else {
-                return;
-            };
-            if !error.is_null() {
-                broker.reject_exact(id, PublisherNativeMessagingRejection::MessageInvalid);
-                return;
-            }
-            let Some(message) = (unsafe { message.as_ref() }) else {
-                broker.reject_exact(id, PublisherNativeMessagingRejection::MessageInvalid);
-                return;
-            };
-            broker.send_port_message(id, message);
-        });
-        let weak = self.self_weak.clone();
-        let disconnect_handler = RcBlock::new(move |_error: *mut NSError| {
-            if let Some(broker) = weak.upgrade() {
-                broker.close_port(id);
-            }
-        });
-        let installed = objc2::exception::catch(std::panic::AssertUnwindSafe(|| unsafe {
-            port.setMessageHandler(Some(&message_handler));
-            port.setDisconnectHandler(Some(&disconnect_handler));
-        }))
-        .is_ok();
-        if !installed {
-            return self.reject_exact(id, PublisherNativeMessagingRejection::HostUnavailable);
-        }
         if let Some(completion) = completion {
             if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 completion.call((std::ptr::null_mut(),));
@@ -465,6 +531,67 @@ impl PublisherNativeMessagingBroker {
         true
     }
 
+    fn install_port_handlers(&self, id: PublisherNativeMessagingRequestId) -> bool {
+        let port = {
+            let pending = self.pending.borrow();
+            let Some(session) = pending.get(&id) else {
+                return false;
+            };
+            match &session.endpoint {
+                Endpoint::OneShot { .. } => return true,
+                Endpoint::Port { port, .. } => port.clone(),
+            }
+        };
+        let weak = self.self_weak.clone();
+        let message_handler = RcBlock::new(move |message: *mut AnyObject, error: *mut NSError| {
+            let Some(broker) = weak.upgrade() else {
+                return;
+            };
+            lab_diagnostic("port-message");
+            if !error.is_null() {
+                broker.reject_exact(id, PublisherNativeMessagingRejection::MessageInvalid);
+                return;
+            }
+            let Some(message) = (unsafe { message.as_ref() }) else {
+                broker.reject_exact(id, PublisherNativeMessagingRejection::MessageInvalid);
+                return;
+            };
+            broker.send_port_message(id, message);
+        });
+        let weak = self.self_weak.clone();
+        let disconnect_handler = RcBlock::new(move |_error: *mut NSError| {
+            lab_diagnostic("port-disconnected");
+            if let Some(broker) = weak.upgrade() {
+                broker.close_port(id);
+            }
+        });
+        objc2::exception::catch(std::panic::AssertUnwindSafe(|| unsafe {
+            port.setMessageHandler(Some(&message_handler));
+            port.setDisconnectHandler(Some(&disconnect_handler));
+        }))
+        .is_ok()
+    }
+
+    fn complete_port_connection(&self, id: PublisherNativeMessagingRequestId) -> bool {
+        let completion = {
+            let mut pending = self.pending.borrow_mut();
+            let Some(session) = pending.get_mut(&id) else {
+                return false;
+            };
+            match &mut session.endpoint {
+                Endpoint::OneShot { .. } => return true,
+                Endpoint::Port { completion, .. } => completion.take(),
+            }
+        };
+        let Some(completion) = completion else {
+            return false;
+        };
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            completion.call((std::ptr::null_mut(),));
+        }))
+        .is_ok()
+    }
+
     fn send_port_message(&self, id: PublisherNativeMessagingRequestId, message: &AnyObject) {
         let frame = match encode_webkit_message(message) {
             Ok(frame) => frame,
@@ -473,15 +600,28 @@ impl PublisherNativeMessagingBroker {
                 return;
             }
         };
-        let sent = self
-            .pending
-            .borrow_mut()
-            .get_mut(&id)
-            .filter(|session| session.phase == SessionPhase::Active)
-            .and_then(|session| session.control.as_mut())
-            .is_some_and(|control| control.try_send(frame).is_ok());
-        if !sent {
-            self.reject_exact(id, PublisherNativeMessagingRejection::HostUnavailable);
+        let mut pending = self.pending.borrow_mut();
+        let Some(session) = pending.get_mut(&id) else {
+            return;
+        };
+        let rejection = match session.phase {
+            SessionPhase::Authorizing | SessionPhase::Starting => {
+                if !matches!(session.endpoint, Endpoint::Port { .. }) {
+                    Some(PublisherNativeMessagingRejection::InvalidRequest)
+                } else if session.deferred_port_frames.try_push(frame).is_err() {
+                    Some(PublisherNativeMessagingRejection::CapacityExceeded)
+                } else {
+                    None
+                }
+            }
+            SessionPhase::Active => match session.control.as_mut() {
+                Some(control) => control.try_send(frame).err().map(map_process_failure),
+                None => Some(PublisherNativeMessagingRejection::HostUnavailable),
+            },
+        };
+        drop(pending);
+        if let Some(reason) = rejection {
+            self.reject_exact(id, reason);
         }
     }
 
@@ -624,6 +764,40 @@ impl PublisherNativeMessagingBroker {
     }
 }
 
+#[cfg(feature = "native-extension-lab-diagnostics")]
+fn lab_diagnostic(phase: &'static str) {
+    let elapsed = LAB_RUNTIME_STARTED
+        .get()
+        .map(std::time::Instant::elapsed)
+        .unwrap_or_default();
+    crate::diagnostic!(
+        "extensions: publisher native messaging lab phase={phase}; runtime-elapsed-ms={}",
+        elapsed.as_millis()
+    );
+}
+
+#[cfg(not(feature = "native-extension-lab-diagnostics"))]
+fn lab_diagnostic(_phase: &'static str) {}
+
+#[cfg(feature = "native-extension-lab-diagnostics")]
+fn lab_process_failure_diagnostic(reason: NativeHostProcessFailure) {
+    crate::diagnostic!("extensions: publisher native messaging worker failure={reason:?}");
+}
+
+#[cfg(not(feature = "native-extension-lab-diagnostics"))]
+fn lab_process_failure_diagnostic(_reason: NativeHostProcessFailure) {}
+
+#[cfg(feature = "native-extension-lab-diagnostics")]
+static LAB_RUNTIME_STARTED: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+#[cfg(feature = "native-extension-lab-diagnostics")]
+pub(super) fn begin_lab_runtime_timing() {
+    let _ = LAB_RUNTIME_STARTED.set(std::time::Instant::now());
+}
+
+#[cfg(not(feature = "native-extension-lab-diagnostics"))]
+pub(super) fn begin_lab_runtime_timing() {}
+
 impl Drop for PublisherNativeMessagingBroker {
     fn drop(&mut self) {
         self.seal_and_reject();
@@ -648,6 +822,19 @@ fn dispatch_worker_event(
     acknowledged
         .recv_timeout(WORKER_EVENT_TIMEOUT)
         .unwrap_or(false)
+}
+
+pub(crate) fn schedule_authorization_retry(
+    profile: ProfileId,
+    id: PublisherNativeMessagingRequestId,
+) {
+    DispatchQueue::main().exec_async(move || {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::host::with_extension_browser_request_terminal(move |host| {
+                host.finalize_extension_native_messaging_request(profile, id);
+            })
+        }));
+    });
 }
 
 fn parse_host_name(application_identifier: Option<&NSString>) -> Option<Box<str>> {
@@ -792,5 +979,33 @@ mod tests {
             PublisherNativeMessagingRequestId::new(1),
             Some(PublisherNativeMessagingRequestId(1))
         );
+    }
+
+    #[test]
+    fn authorization_retry_budget_is_exact_and_never_wraps() {
+        let mut retries = AuthorizationRetryBudget::default();
+        for _ in 0..MAX_AUTHORIZATION_RETRIES {
+            assert!(retries.reserve());
+        }
+        assert_eq!(retries.used, MAX_AUTHORIZATION_RETRIES);
+        assert!(!retries.reserve());
+    }
+
+    #[test]
+    fn deferred_port_frames_are_bounded_and_preserve_wire_order() {
+        let mut frames = DeferredPortFrames::default();
+        for value in 0..OUTBOUND_FRAME_QUEUE_CAPACITY {
+            assert!(frames
+                .try_push(vec![value as u8].into_boxed_slice())
+                .is_ok());
+        }
+        assert_eq!(
+            frames.try_push(vec![0xff].into_boxed_slice()),
+            Err(vec![0xff].into_boxed_slice())
+        );
+        for value in 0..OUTBOUND_FRAME_QUEUE_CAPACITY {
+            assert_eq!(frames.pop_front().as_deref(), Some(&[value as u8][..]));
+        }
+        assert!(frames.pop_front().is_none());
     }
 }

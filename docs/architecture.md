@@ -1232,7 +1232,7 @@ release dependency is finished.
 | Verified staging cohort | Revision 9 carries Vimium 2.4.2 and Dark Reader 4.9.129 with revisions 7/8 as immutable rollback; artifact bytes, classifications, and reissue evidence are exact | Add a publisher-supported authenticated cloud/security extension and define operational support windows |
 | API compatibility | The declaration table below is authoritative; live alarms work, while context-restart persistence is disclosed as degraded | Notifications, idle/system-lock, managed storage, offscreen, arbitrary native messaging, blocking request mutation, and broader browser APIs remain absent or degraded |
 | File/private contexts | File execution is negative-gated and the unavailable control cannot be forged; native private-store isolation is proven | No product file-access claim and no extension-enabled private-window claim until WebKit execution and a separate product runtime pass |
-| Password managers | Platform diagnostics, popup/content/background primitives, sandbox replacement primitive, explicit failure classifications, and a real 1Password onboarding plus HTTPS sign-in handoff exist | No password manager is Verified: account completion, vault unlock, save/fill/passkeys, offscreen behavior, request-auth, endurance/resource budgets, and publisher/legal gates remain |
+| Password managers | Platform diagnostics, popup/content/background primitives, sandbox replacement primitive, explicit failure classifications, and a signed stock 1Password run have reached the authenticated vault popup plus inline field UI | No password manager is Verified: deterministic cold readiness, save/fill/passkeys, offscreen behavior, request-auth, endurance/resource budgets, and publisher/legal gates remain |
 | Performance/release evidence | Optimized product campaigns and a real process-family sampler are implemented; short release samples are recorded | Dedicated clean-runner budgets, maximum-cohort/tab pressure, energy calibration, sleep/wake, multi-profile, and 24-hour endurance |
 | External compatibility mode | Package-neutral offline transformation and authenticated acquisition primitives exist | Chrome Web Store/AMO/Safari/file/developer acquisition UX, legal adapters, diagnostics, and public compatibility policy are not shipped |
 
@@ -2095,11 +2095,38 @@ package-specific runtime branch remains. The result proves that module
 top-level completion cannot be treated as the settlement contract for
 `loadBackgroundContent` on the exercised WebKit runtime.
 
-One earlier instrumented 8.12.32.33 session and a separate user-observed run did
-reach the authenticated dashboard and expose real 1Password fill entries in
-the page context menu. That establishes conditional vault/UI/page integration
-once the background is healthy. It does not close the reproducible cold-start,
-restart, autofill/save/passkey, resource, publisher, or release gates.
+The August 27 signed product gate advances that evidence with the exact stock
+8.12.34.34 package and publisher-native document artifact. The installed
+1Password BrowserSupport helper verified Zephium's Developer ID team, connected
+to the desktop app over its own XPC boundary, and exchanged framed native
+messages through the sealed upstream Chromium principal. The authenticated
+vault popup rendered real account content, and a public HTTPS login form
+exposed 1Password's inline field affordance. No 1Password package byte or
+package-specific execution branch is compiled into Zephium.
+
+That gate also found and fixed two package-neutral lifecycle defects. WebKit
+delivers an extension's first `Port.postMessage` only after the delegate
+completion, while stock MV3 code may post immediately after `connectNative`.
+Zephium now arms the retained port and completes that logical connection
+before native process startup, holds at most the existing two-frame outbound
+capacity before the signed host is ready, and drains in order only after exact
+runtime, registration, origin, and publisher admission. Separately, WebKit can
+report a successful document-background load while exposing no background
+target when the context was activated before a published resident browser
+surface. The runtime records that ordering race and performs one authenticated
+unload/load reconciliation only after the first real surface and legitimate
+navigation or toolbar wake. Service workers, discarded tabs, extension-free
+profiles, and already-ready document runtimes pay no reconciliation.
+
+One fresh, incomplete-onboarding data-store run reached the first native port
+at 60.786 seconds; after that callback, the signed worker was ready in 52 ms
+and the first host response arrived 45 ms later. The background's own WASM
+marks completed in about 31 ms on that run, so the minute was not attributed
+to Zephium's native transport or to WASM compilation. This remains a cold UX
+and readiness input, not permission to add a hidden view, permanent worker,
+global fetch shim, or blind timeout. Password-manager verification still
+requires repeatable completed-onboarding restarts, save/fill/passkey workflows,
+resource/endurance budgets, and publisher/legal release gates.
 
 Authenticating this real package exposed one legitimate package-admission
 ceiling: a current major extension contains a single resource slightly above

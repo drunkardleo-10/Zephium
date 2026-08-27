@@ -9,7 +9,7 @@ mod web_extensions;
 
 pub(crate) use extensions::{
     begin_prepared_native_runtime_activation, prepare_native_runtime_activation,
-    ControllerBrowserRequestSettlement, ControllerCommandDispatch,
+    schedule_authorization_retry, ControllerBrowserRequestSettlement, ControllerCommandDispatch,
     ControllerCompatibilityBrokerSettlement, ControllerErasureSettlement, ControllerErasureTicket,
     ControllerNamespaceRecoveryAudit, ControllerPreparation, ControllerRegistryError,
     ControllerRuntimeGrantSettlement, MacosNativeActionFailure, MacosNativeRuntimeActivation,

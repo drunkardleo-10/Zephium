@@ -1009,23 +1009,37 @@ impl PersistentControllerRegistry {
         profile: ProfileId,
         id: ItemId,
         webview: Option<&Retained<WKWebView>>,
-    ) -> Result<(), ControllerRegistryError> {
+    ) -> Result<bool, ControllerRegistryError> {
         self.slots.admission(profile)?;
         let Some(slot) = self.slots.entries.get(&profile) else {
-            return Ok(());
+            return Ok(false);
         };
         let PersistentControllerSlot::Prepared(entry) = slot else {
             return Err(ControllerRegistryError::ErasureInFlight);
         };
         let result = catch_native(|| {
             validate_entry_identity(entry)?;
+            let was_ready = entry.browser_surface.is_ready_for_document_background();
             entry.browser_surface.bind_webview(id, webview);
-            Ok(())
+            Ok(!was_ready && entry.browser_surface.is_ready_for_document_background())
         });
         if result.is_err() {
             self.slots.poison();
         }
         result
+    }
+
+    pub(crate) fn browser_surface_ready_for_document_background(
+        &mut self,
+        profile: ProfileId,
+    ) -> Result<bool, ControllerRegistryError> {
+        self.slots.admission(profile)?;
+        let Some(PersistentControllerSlot::Prepared(entry)) = self.slots.entries.get(&profile)
+        else {
+            return Ok(false);
+        };
+        validate_entry_identity(entry)?;
+        Ok(entry.browser_surface.is_ready_for_document_background())
     }
 
     pub(crate) fn settle_browser_request(
@@ -1284,6 +1298,22 @@ impl PersistentControllerRegistry {
         Ok(entry
             .browser_surface
             .authorize_native_messaging(request, authorization))
+    }
+
+    pub(crate) fn reserve_native_messaging_authorization_retry(
+        &mut self,
+        profile: ProfileId,
+        request: PublisherNativeMessagingRequestId,
+    ) -> Result<bool, ControllerRegistryError> {
+        self.slots.admission(profile)?;
+        let Some(PersistentControllerSlot::Prepared(entry)) = self.slots.entries.get(&profile)
+        else {
+            return Ok(false);
+        };
+        validate_entry_identity(entry)?;
+        Ok(entry
+            .browser_surface
+            .reserve_native_messaging_authorization_retry(request))
     }
 
     pub(crate) fn handle_native_messaging_worker_event(

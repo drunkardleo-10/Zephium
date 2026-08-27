@@ -237,6 +237,7 @@ pub(crate) struct PreparedMacosNativeRuntimeActivation {
 struct MacosNativeRuntimeMetadata {
     background_environment: Option<ExtensionBackgroundEnvironment>,
     publisher_native_host: Option<Box<ExtensionPublisherNativeHostRequirement>>,
+    browser_surface_ready: bool,
 }
 
 /// Copy-only exact identity retained while the move-only owner is inside a
@@ -276,6 +277,7 @@ pub(crate) struct MacosNativeRuntimeOwner {
     context: Retained<WKWebExtensionContext>,
     controller: Retained<WKWebExtensionController>,
     background_environment: Option<ExtensionBackgroundEnvironment>,
+    document_background_surface_pending: bool,
     applied_grants: Option<AppliedMacosGrantSet>,
     optional_state: Option<Box<MacosNativeRuntimeOptionalState>>,
 }
@@ -369,18 +371,21 @@ impl MacosNativeRuntimeOwner {
     /// URL. Service-worker runtimes keep WebKit's native event wake path and
     /// pay no navigation-time call.
     pub(crate) fn begin_matching_document_background_wake(
-        &self,
+        &mut self,
         url: &NSURL,
     ) -> Result<bool, MacosNativeRuntimeFailure> {
         if !background_environment_requires_navigation_wake(self.background_environment) {
             return Ok(false);
         }
         validate_loaded_owner_membership(self)?;
+        let matches = catch_native(|| unsafe {
+            Ok(self.extension.hasBackgroundContent() && self.context.hasInjectedContentForURL(url))
+        })?;
+        if !matches {
+            return Ok(false);
+        }
+        self.reconcile_document_background_surface_if_needed()?;
         catch_native(|| unsafe {
-            if !self.extension.hasBackgroundContent() || !self.context.hasInjectedContentForURL(url)
-            {
-                return Ok(false);
-            }
             let completion: RcBlock<dyn Fn(*mut NSError)> = RcBlock::new(|error: *mut NSError| {
                 if !error.is_null() {
                     crate::diagnostic!(
@@ -392,6 +397,31 @@ impl MacosNativeRuntimeOwner {
                 .loadBackgroundContentWithCompletionHandler(&completion);
             Ok(true)
         })
+    }
+
+    fn reconcile_document_background_surface_if_needed(
+        &mut self,
+    ) -> Result<bool, MacosNativeRuntimeFailure> {
+        if !self.document_background_surface_pending {
+            return Ok(false);
+        }
+        validate_loaded_owner_membership(self)?;
+        catch_native(|| unsafe {
+            self.controller
+                .unloadExtensionContext_error(&self.context)
+                .map_err(|_| MacosNativeRuntimeFailure::ControllerUnloadFailed)
+        })?;
+        if context_is_loaded(&self.context)? {
+            return Err(MacosNativeRuntimeFailure::AbsenceReadbackMismatch);
+        }
+        catch_native(|| unsafe {
+            self.controller
+                .loadExtensionContext_error(&self.context)
+                .map_err(|_| MacosNativeRuntimeFailure::ControllerLoadFailed)
+        })?;
+        validate_loaded_owner_membership(self)?;
+        self.document_background_surface_pending = false;
+        Ok(true)
     }
 
     /// Returns the sealed publisher-host requirement retained for this exact
@@ -562,6 +592,8 @@ impl MacosNativeRuntimeOwner {
         tab: &objc2::runtime::ProtocolObject<dyn objc2_web_kit::WKWebExtensionTab>,
         expected_revision: zephium_core::extensions::ExtensionActionRevision,
     ) -> Result<(), MacosNativeActionFailure> {
+        self.reconcile_document_background_surface_if_needed()
+            .map_err(|_| MacosNativeActionFailure::NativeException)?;
         let state = self.action_state_for_tab(runtime, tab_id, tab)?;
         if state.revision() != expected_revision {
             return Err(MacosNativeActionFailure::StaleAction);
@@ -612,6 +644,13 @@ const fn background_environment_requires_navigation_wake(
     matches!(environment, Some(ExtensionBackgroundEnvironment::Document))
 }
 
+const fn document_background_surface_reconciliation_pending(
+    environment: Option<ExtensionBackgroundEnvironment>,
+    browser_surface_ready: bool,
+) -> bool {
+    background_environment_requires_navigation_wake(environment) && !browser_surface_ready
+}
+
 impl fmt::Debug for MacosNativeRuntimeOwner {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -651,10 +690,17 @@ pub(crate) fn prepare_native_runtime_activation(
     backend: zephium_core::extensions::ExtensionRuntimeBackendTarget,
     expected_owner_id: ExtensionRuntimeNativeOwnerId,
     controller: Retained<WKWebExtensionController>,
+    browser_surface_ready: bool,
 ) -> Result<PreparedMacosNativeRuntimeActivation, MacosNativeRuntimeFailure> {
     let mtm = admit_runtime()?;
+    super::native_messaging::begin_lab_runtime_timing();
     let background_environment = grants.background_environment();
     let publisher_native_host = publisher_native_host.cloned().map(Box::new);
+    #[cfg(feature = "native-extension-lab-diagnostics")]
+    eprintln!(
+        "extension lab: preparing native runtime; background-environment={background_environment:?}; publisher-native-host={}",
+        publisher_native_host.is_some()
+    );
     let grants = compile_native_grant_plan(grants, backend, publisher_native_host.is_some())
         .map_err(MacosNativeRuntimeFailure::GrantPlan)?;
     let resource_url = verified_resource_url(native_root)?;
@@ -666,6 +712,7 @@ pub(crate) fn prepare_native_runtime_activation(
         metadata: MacosNativeRuntimeMetadata {
             background_environment,
             publisher_native_host,
+            browser_surface_ready,
         },
         mtm,
     })
@@ -724,6 +771,7 @@ pub(crate) fn begin_probe_native_runtime_activation(
         MacosNativeRuntimeMetadata {
             background_environment: None,
             publisher_native_host: None,
+            browser_surface_ready: false,
         },
         completion,
         mtm,
@@ -870,6 +918,7 @@ fn construct_loaded_owner(
     let MacosNativeRuntimeMetadata {
         background_environment,
         publisher_native_host,
+        browser_surface_ready,
     } = metadata;
     let optional_state = publisher_native_host
         .map(|requirement| Box::new(MacosNativeRuntimeOptionalState::new(Some(requirement))));
@@ -880,6 +929,10 @@ fn construct_loaded_owner(
         context,
         controller,
         background_environment,
+        document_background_surface_pending: document_background_surface_reconciliation_pending(
+            background_environment,
+            browser_surface_ready,
+        ),
         applied_grants: None,
         optional_state,
     };
@@ -1185,5 +1238,17 @@ mod tests {
             ExtensionBackgroundEnvironment::ServiceWorker
         )));
         assert!(!background_environment_requires_navigation_wake(None));
+        assert!(document_background_surface_reconciliation_pending(
+            Some(ExtensionBackgroundEnvironment::Document),
+            false
+        ));
+        assert!(!document_background_surface_reconciliation_pending(
+            Some(ExtensionBackgroundEnvironment::Document),
+            true
+        ));
+        assert!(!document_background_surface_reconciliation_pending(
+            Some(ExtensionBackgroundEnvironment::ServiceWorker),
+            false
+        ));
     }
 }

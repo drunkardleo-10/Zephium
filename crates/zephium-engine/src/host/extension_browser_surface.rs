@@ -19,10 +19,13 @@ use super::EngineHost;
 use crate::navigation_epoch::{NavigationEpoch, NavigationEpochTracker};
 #[cfg(target_os = "macos")]
 use crate::platform::imp::{
-    NativeHostWorkerEvent, PublisherNativeMessagingAuthorization, PublisherNativeMessagingRequestId,
+    schedule_authorization_retry, NativeHostWorkerEvent, PublisherNativeMessagingAuthorization,
+    PublisherNativeMessagingRequestId,
 };
 #[cfg(target_os = "macos")]
 use objc2_foundation::{NSString, NSURL};
+#[cfg(target_os = "macos")]
+use zephium_extension_runtime_api::ExtensionRuntimeHostBindError;
 
 impl EngineHost {
     #[cfg(target_os = "macos")]
@@ -54,6 +57,13 @@ impl EngineHost {
         else {
             return 0;
         };
+        if !matches!(
+            self.macos_extension_controllers
+                .browser_surface_ready_for_document_background(profile),
+            Ok(true)
+        ) {
+            return 0;
+        }
         if !zephium_core::navigation::is_allowed_str(target) {
             return 0;
         }
@@ -86,6 +96,61 @@ impl EngineHost {
                 Ok(Some(Ok(false))) | Ok(None) => {}
                 Ok(Some(Err(_))) | Err(_) => {
                     crate::diagnostic!("extensions: matching document background wake was refused")
+                }
+            }
+        }
+        scheduled
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn wake_resident_document_backgrounds(&mut self, profile: ProfileId) -> usize {
+        if !matches!(
+            self.macos_extension_controllers
+                .browser_surface_ready_for_document_background(profile),
+            Ok(true)
+        ) {
+            return 0;
+        }
+        let targets = self
+            .views
+            .iter()
+            .filter_map(|(id, view)| {
+                self.partitions
+                    .get(id)
+                    .filter(|partition| partition.profile() == profile)
+                    .and_then(|_| crate::platform::imp::current_url(&view.view))
+                    .filter(|target| zephium_core::navigation::is_allowed_str(target))
+                    .and_then(|target| NSURL::URLWithString(&NSString::from_str(&target)))
+            })
+            .collect::<Vec<_>>();
+        if targets.is_empty() {
+            return 0;
+        }
+        let runtimes = match self
+            .extension_runtime_registry
+            .published_runtime_slots(profile)
+        {
+            Ok(runtimes) => runtimes,
+            Err(_) => return 0,
+        };
+        let mut scheduled = 0_usize;
+        for runtime in runtimes.into_iter().flatten() {
+            for target in &targets {
+                match self
+                    .extension_runtime_registry
+                    .with_owned_macos_runtime(&runtime, |owner| {
+                        owner.begin_matching_document_background_wake(target)
+                    }) {
+                    Ok(Some(Ok(true))) => {
+                        scheduled = scheduled.saturating_add(1);
+                        break;
+                    }
+                    Ok(Some(Ok(false))) | Ok(None) => {}
+                    Ok(Some(Err(_))) | Err(_) => {
+                        crate::diagnostic!(
+                            "extensions: resident document background wake was refused"
+                        );
+                    }
                 }
             }
         }
@@ -240,38 +305,119 @@ impl EngineHost {
             .native_messaging_subject(profile, request)
             .ok()
             .flatten();
-        let authorization = subject.and_then(|(context, requested_host)| {
-            let runtime = self
-                .extension_runtime_registry
-                .published_runtime_for_macos_context(profile, context)
-                .ok()
-                .flatten()?;
-            let requirement = self
+        let Some((context, requested_host)) = subject else {
+            publisher_native_messaging_lab_diagnostic("subject-absent");
+            crate::diagnostic!(
+                "extensions: publisher native messaging authorization was unavailable"
+            );
+            let _ = self
+                .macos_extension_controllers
+                .authorize_native_messaging(profile, request, None);
+            return;
+        };
+        let runtime = match self
+            .extension_runtime_registry
+            .published_runtime_for_macos_context(profile, context)
+        {
+            Ok(Some(runtime)) => runtime,
+            Err(ExtensionRuntimeHostBindError::Unavailable)
+                if self.defer_extension_native_messaging_authorization(profile, request) =>
+            {
+                publisher_native_messaging_lab_diagnostic("runtime-retry");
+                return;
+            }
+            Ok(None) => {
+                publisher_native_messaging_lab_diagnostic("runtime-absent");
+                crate::diagnostic!(
+                    "extensions: publisher native messaging authorization was unavailable"
+                );
+                let _ = self
+                    .macos_extension_controllers
+                    .authorize_native_messaging(profile, request, None);
+                return;
+            }
+            Err(_) => {
+                publisher_native_messaging_lab_diagnostic("runtime-error");
+                crate::diagnostic!(
+                    "extensions: publisher native messaging authorization was unavailable"
+                );
+                let _ = self
+                    .macos_extension_controllers
+                    .authorize_native_messaging(profile, request, None);
+                return;
+            }
+        };
+        let requirement =
+            match self
                 .extension_runtime_registry
                 .with_owned_macos_runtime(&runtime, |owner| {
                     owner
                         .publisher_native_host()
                         .filter(|requirement| requirement.host_name() == &*requested_host)
                         .cloned()
-                })
-                .ok()
-                .flatten()
-                .flatten()?;
-            Some(PublisherNativeMessagingAuthorization::new(
-                runtime.instance(),
-                requirement,
-            ))
-        });
-        if authorization.is_none() {
-            crate::diagnostic!(
-                "extensions: publisher native messaging authorization was unavailable"
-            );
-        }
+                }) {
+                Ok(Some(Some(requirement))) => requirement,
+                Err(ExtensionRuntimeHostBindError::Unavailable)
+                    if self.defer_extension_native_messaging_authorization(profile, request) =>
+                {
+                    publisher_native_messaging_lab_diagnostic("owner-retry");
+                    return;
+                }
+                Ok(None) => {
+                    publisher_native_messaging_lab_diagnostic("owner-absent");
+                    crate::diagnostic!(
+                        "extensions: publisher native messaging authorization was unavailable"
+                    );
+                    let _ = self
+                        .macos_extension_controllers
+                        .authorize_native_messaging(profile, request, None);
+                    return;
+                }
+                Ok(Some(None)) => {
+                    publisher_native_messaging_lab_diagnostic("requirement-absent");
+                    publisher_native_messaging_host_lab_diagnostic(&requested_host);
+                    crate::diagnostic!(
+                        "extensions: publisher native messaging authorization was unavailable"
+                    );
+                    let _ = self
+                        .macos_extension_controllers
+                        .authorize_native_messaging(profile, request, None);
+                    return;
+                }
+                Err(_) => {
+                    publisher_native_messaging_lab_diagnostic("owner-error");
+                    crate::diagnostic!(
+                        "extensions: publisher native messaging authorization was unavailable"
+                    );
+                    let _ = self
+                        .macos_extension_controllers
+                        .authorize_native_messaging(profile, request, None);
+                    return;
+                }
+            };
+        let authorization =
+            PublisherNativeMessagingAuthorization::new(runtime.instance(), requirement);
         let _ = self.macos_extension_controllers.authorize_native_messaging(
             profile,
             request,
-            authorization,
+            Some(authorization),
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    fn defer_extension_native_messaging_authorization(
+        &mut self,
+        profile: ProfileId,
+        request: PublisherNativeMessagingRequestId,
+    ) -> bool {
+        let reserved = self
+            .macos_extension_controllers
+            .reserve_native_messaging_authorization_retry(profile, request)
+            .unwrap_or(false);
+        if reserved {
+            schedule_authorization_retry(profile, request);
+        }
+        reserved
     }
 
     #[cfg(target_os = "macos")]
@@ -442,6 +588,10 @@ impl EngineHost {
         };
         let views = &self.views;
         let partitions = &self.partitions;
+        let was_ready = self
+            .macos_extension_controllers
+            .browser_surface_ready_for_document_background(profile)
+            .unwrap_or(false);
         self.macos_extension_controllers
             .apply_browser_surface(&surface, |id| {
                 partitions
@@ -449,8 +599,16 @@ impl EngineHost {
                     .filter(|partition| partition.profile() == profile)
                     .and_then(|_| views.get(&id))
                     .map(|view| crate::platform::imp::native_webview(&view.view))
-            })
-            .map(|_| ())
+            })?;
+        let became_ready = !was_ready
+            && self
+                .macos_extension_controllers
+                .browser_surface_ready_for_document_background(profile)
+                .unwrap_or(false);
+        if became_ready {
+            let _ = self.wake_resident_document_backgrounds(profile);
+        }
+        Ok(())
     }
 
     #[cfg(target_os = "macos")]
@@ -463,9 +621,15 @@ impl EngineHost {
             .views
             .get(&id)
             .map(|view| crate::platform::imp::native_webview(&view.view));
-        self.macos_extension_controllers
-            .bind_browser_surface_view(profile, id, webview.as_ref())
-            .is_ok()
+        let binding = self.macos_extension_controllers.bind_browser_surface_view(
+            profile,
+            id,
+            webview.as_ref(),
+        );
+        if matches!(binding, Ok(true)) {
+            let _ = self.wake_resident_document_backgrounds(profile);
+        }
+        binding.is_ok()
     }
 
     #[cfg(target_os = "macos")]
@@ -490,3 +654,21 @@ impl EngineHost {
             .is_ok()
     }
 }
+
+#[cfg(all(target_os = "macos", feature = "native-extension-lab-diagnostics"))]
+fn publisher_native_messaging_lab_diagnostic(phase: &'static str) {
+    crate::diagnostic!("extensions: publisher native messaging host phase={phase}");
+}
+
+#[cfg(all(target_os = "macos", not(feature = "native-extension-lab-diagnostics")))]
+fn publisher_native_messaging_lab_diagnostic(_phase: &'static str) {}
+
+#[cfg(all(target_os = "macos", feature = "native-extension-lab-diagnostics"))]
+fn publisher_native_messaging_host_lab_diagnostic(requested_host: &str) {
+    crate::diagnostic!(
+        "extensions: publisher native messaging requested unmatched host={requested_host}"
+    );
+}
+
+#[cfg(all(target_os = "macos", not(feature = "native-extension-lab-diagnostics")))]
+fn publisher_native_messaging_host_lab_diagnostic(_requested_host: &str) {}
