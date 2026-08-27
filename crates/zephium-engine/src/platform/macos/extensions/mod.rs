@@ -21,10 +21,10 @@ mod record_erasure;
 mod runtime_grant_broker;
 
 pub(crate) use controller_registry::{
-    ControllerBrowserRequestSettlement, ControllerCommandDispatch,
-    ControllerCompatibilityBrokerSettlement, ControllerErasureSettlement,
-    ControllerNamespaceRecoveryAudit, ControllerPreparation, ControllerRegistryError,
-    ControllerRuntimeGrantSettlement, PersistentControllerRegistry,
+    ControllerActionPopupPreparation, ControllerBrowserRequestSettlement,
+    ControllerCommandDispatch, ControllerCompatibilityBrokerSettlement,
+    ControllerErasureSettlement, ControllerNamespaceRecoveryAudit, ControllerPreparation,
+    ControllerRegistryError, ControllerRuntimeGrantSettlement, PersistentControllerRegistry,
 };
 #[cfg(feature = "native-web-extension-probes")]
 pub(crate) use controller_registry::{

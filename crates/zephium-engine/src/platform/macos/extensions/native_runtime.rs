@@ -320,6 +320,10 @@ impl MacosNativeActionPopupOwner {
         self.controller
     }
 
+    pub(super) fn context(&self) -> &WKWebExtensionContext {
+        &self.context
+    }
+
     pub(super) fn into_context(self) -> Retained<WKWebExtensionContext> {
         self.context
     }

@@ -345,6 +345,9 @@ pub enum ExtensionActionSettlement {
     Dispatched,
     /// A custom popup is visible at the returned bounded logical size.
     PopupPresented(Size),
+    /// A second invocation dismissed the already-visible popup for the exact
+    /// same runtime and tab without allocating another native surface.
+    PopupDismissed,
     Rejected(ExtensionActionRejection),
 }
 

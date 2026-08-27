@@ -38,6 +38,7 @@ use zephium_extension_runtime_api::{
     ExtensionRuntimeNativeOwnerId,
 };
 
+use super::action_popup::ActionPopupPreparation;
 use super::browser_request_broker::{BrowserRequestPool, BrowserRequestSettlementOutcome};
 #[cfg(feature = "native-web-extension-probes")]
 use super::browser_surface::BrowserSurfaceDiagnostics;
@@ -110,6 +111,12 @@ impl ContextMenuInventory {
 pub(crate) struct ControllerActionTab {
     tab: super::browser_surface::NativeExtensionTab,
     resident: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ControllerActionPopupPreparation {
+    Present,
+    Dismissed,
 }
 
 impl ControllerActionTab {
@@ -859,6 +866,36 @@ impl PersistentControllerRegistry {
             .browser_surface
             .notify_actions_invalidated_after_activation();
         Ok(())
+    }
+
+    /// Revalidates the popup owner and applies exact-target toggle semantics
+    /// before the host acquires another native resource lease.
+    pub(crate) fn prepare_action_popup(
+        &mut self,
+        profile: ProfileId,
+        request: ExtensionActionRequest,
+        owner: &super::native_runtime::MacosNativeActionPopupOwner,
+        tab: &super::browser_surface::NativeExtensionTab,
+    ) -> Result<
+        Result<ControllerActionPopupPreparation, ExtensionActionRejection>,
+        ControllerRegistryError,
+    > {
+        self.slots.admission(profile)?;
+        let Some(PersistentControllerSlot::Prepared(entry)) = self.slots.entries.get(&profile)
+        else {
+            return Ok(Err(ExtensionActionRejection::RuntimeUnavailable));
+        };
+        validate_entry_identity(entry)?;
+        if Retained::as_ptr(&entry.controller) != owner.controller_identity() {
+            return Ok(Err(ExtensionActionRejection::NativeAdmissionFailed));
+        }
+        Ok(entry
+            .browser_surface
+            .prepare_action_popup(request, owner.context(), tab)
+            .map(|preparation| match preparation {
+                ActionPopupPreparation::Present => ControllerActionPopupPreparation::Present,
+                ActionPopupPreparation::Dismissed => ControllerActionPopupPreparation::Dismissed,
+            }))
     }
 
     /// Installs the one exact popup callback expectation after the host has

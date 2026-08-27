@@ -268,6 +268,9 @@ impl ExtensionActionState {
             ExtensionActionSettlement::PopupPresented(_) => {
                 ExtensionActionInvocationObservation::PopupPresented
             }
+            ExtensionActionSettlement::PopupDismissed => {
+                ExtensionActionInvocationObservation::PopupDismissed
+            }
             ExtensionActionSettlement::Rejected(reason) => {
                 ExtensionActionInvocationObservation::Rejected {
                     tab: pending.tab(),
@@ -292,6 +295,7 @@ pub(super) enum ExtensionActionObservation {
 pub(super) enum ExtensionActionInvocationObservation {
     Dispatched,
     PopupPresented,
+    PopupDismissed,
     Rejected {
         tab: ItemId,
         reason: ExtensionActionRejection,

@@ -88,7 +88,7 @@ fn main() {
     match outcome {
         Ok(ProbeDisposition::Passed(measurements)) => {
             println!(
-                "extension-product-probe: passed; runtime={}; authenticated_startup_ms={}; durable_grant_rebind_ms={}; profile_view_ms={}; popup_presentation_ms={}; extension_live_idle_window_ms={}; extension_live_main_process_user_cpu_ms={}; extension_live_main_process_system_cpu_ms={}; extension_live_main_process_voluntary_context_switches={}; extension_live_main_process_involuntary_context_switches={}; runtime_retired_idle_window_ms={}; runtime_retired_main_process_user_cpu_ms={}; runtime_retired_main_process_system_cpu_ms={}; runtime_retired_main_process_voluntary_context_switches={}; runtime_retired_main_process_involuntary_context_switches={}; service_shutdown_ms={}; engine_shutdown_ms={}; main_process_peak_rss_bytes={}; process_user_cpu_ms={}; process_system_cpu_ms={}; voluntary_context_switches={}; involuntary_context_switches={}; hostile_page_world_isolation=passed; optional_api_host_grant_rebind=passed; privileged_optional_grant_revocation=passed; tabs_create_activate_update_remove=passed; same_document_history_signal=passed; signed_compatibility_receipt={}; brokered_recent_history={}; popup_capacity_discard_reopen=passed; repository_cleanup=passed; uninstall_data_erasure=passed; store_restart_cleanup=passed",
+                "extension-product-probe: passed; runtime={}; authenticated_startup_ms={}; durable_grant_rebind_ms={}; profile_view_ms={}; popup_presentation_ms={}; extension_live_idle_window_ms={}; extension_live_main_process_user_cpu_ms={}; extension_live_main_process_system_cpu_ms={}; extension_live_main_process_voluntary_context_switches={}; extension_live_main_process_involuntary_context_switches={}; runtime_retired_idle_window_ms={}; runtime_retired_main_process_user_cpu_ms={}; runtime_retired_main_process_system_cpu_ms={}; runtime_retired_main_process_voluntary_context_switches={}; runtime_retired_main_process_involuntary_context_switches={}; service_shutdown_ms={}; engine_shutdown_ms={}; main_process_peak_rss_bytes={}; process_user_cpu_ms={}; process_system_cpu_ms={}; voluntary_context_switches={}; involuntary_context_switches={}; hostile_page_world_isolation=passed; optional_api_host_grant_rebind=passed; privileged_optional_grant_revocation=passed; tabs_create_activate_update_remove=passed; same_document_history_signal=passed; signed_compatibility_receipt={}; brokered_recent_history={}; popup_toggle_discard_reopen=passed; repository_cleanup=passed; uninstall_data_erasure=passed; store_restart_cleanup=passed",
                 runtime_target_argument(runtime_target),
                 measurements.authenticated_startup.as_millis(),
                 measurements.durable_grant_rebind.as_millis(),
@@ -1047,8 +1047,13 @@ fn run(runtime_target: ProductExtensionRuntimeTarget) -> Result<ProbeDisposition
     validate_popup_size("first", first_size)?;
     engine.wait_for_popup_execution(item, 1, deadline())?;
 
-    let parallel_popup = extension_action_request(3, &popup_action, item, popup_generation)?;
-    engine.reject_parallel_popup(parallel_popup, deadline())?;
+    let dismiss_popup = extension_action_request(3, &popup_action, item, popup_generation)?;
+    engine.dismiss_popup_action(dismiss_popup, deadline())?;
+
+    let toggled_popup = extension_action_request(4, &popup_action, item, popup_generation)?;
+    let toggled_size = engine.invoke_popup_action(toggled_popup, deadline())?;
+    validate_popup_size("toggled", toggled_size)?;
+    engine.wait_for_popup_execution(item, 2, deadline())?;
 
     // A discarded logical tab closes the active transient surface without
     // destroying or recreating its physical content view. Re-publishing that
@@ -1061,10 +1066,10 @@ fn run(runtime_target: ProductExtensionRuntimeTarget) -> Result<ProbeDisposition
     if !reopened_action.is_enabled() || !reopened_action.presents_popup() {
         return Err("extension popup action did not survive tab residency reconciliation".into());
     }
-    let reopened_popup = extension_action_request(4, &reopened_action, item, restored_generation)?;
+    let reopened_popup = extension_action_request(5, &reopened_action, item, restored_generation)?;
     let reopened_size = engine.invoke_popup_action(reopened_popup, deadline())?;
     validate_popup_size("reopened", reopened_size)?;
-    engine.wait_for_popup_execution(item, 2, deadline())?;
+    engine.wait_for_popup_execution(item, 3, deadline())?;
     let popup_presentation = popup_started.elapsed();
 
     set_phase("profile-site-policy");

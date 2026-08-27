@@ -7,6 +7,8 @@
 //! cannot surface privileged browser chrome on its own.
 
 use std::cell::{Cell, RefCell};
+#[cfg(feature = "native-extension-lab-diagnostics")]
+use std::ffi::OsStr;
 use std::panic::AssertUnwindSafe;
 use std::rc::{Rc, Weak as RcWeak};
 use std::time::Duration;
@@ -47,6 +49,8 @@ use super::browser_surface::request_url;
 
 const POPUP_LOAD_TIMEOUT: Duration = Duration::from_secs(10);
 const POPUP_ERROR_DOMAIN: &str = "app.zephium.extension-action";
+#[cfg(feature = "native-extension-lab-diagnostics")]
+const LAB_RETAIN_POPUP_ENV: &str = "ZEPHIUM_EXTENSION_LAB_RETAIN_POPUP";
 
 struct PendingPopup {
     request: ExtensionActionRequest,
@@ -298,6 +302,12 @@ pub(super) struct ActionPopupBroker {
     sealed: Cell<bool>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ActionPopupPreparation {
+    Present,
+    Dismissed,
+}
+
 impl ActionPopupBroker {
     pub(super) fn new(
         profile: ProfileId,
@@ -315,6 +325,105 @@ impl ActionPopupBroker {
             options: RefCell::new(None),
             sealed: Cell::new(false),
         })
+    }
+
+    /// Applies native toolbar-toggle semantics before a new popup lease is
+    /// acquired. Only the exact same authenticated context and native tab may
+    /// dismiss its pending or visible popup. A different target continues to
+    /// observe the one-popup capacity boundary, while a new trusted gesture
+    /// may supersede the short post-close options-navigation grace period for
+    /// its own context.
+    pub(super) fn prepare_toggle(
+        &self,
+        request: ExtensionActionRequest,
+        context: &WKWebExtensionContext,
+        tab: &Retained<ProtocolObject<dyn WKWebExtensionTab>>,
+    ) -> Result<ActionPopupPreparation, ExtensionActionRejection> {
+        if request.runtime().profile() != self.profile {
+            return Err(ExtensionActionRejection::InvalidRequest);
+        }
+        if self.sealed.get() {
+            return Err(ExtensionActionRejection::ShuttingDown);
+        }
+        if self
+            .options
+            .try_borrow()
+            .map_err(|_| ExtensionActionRejection::NativeAdmissionFailed)?
+            .is_some()
+        {
+            return Err(ExtensionActionRejection::PopupCapacityExceeded);
+        }
+
+        let pending_target = self
+            .pending
+            .try_borrow()
+            .map_err(|_| ExtensionActionRejection::NativeAdmissionFailed)?
+            .as_ref()
+            .map(|pending| {
+                (
+                    pending.request,
+                    std::ptr::eq(&*pending.context, context) && std::ptr::eq(&*pending.tab, &**tab),
+                )
+            });
+        if let Some((pending, native_target_matches)) = pending_target {
+            if pending.runtime() != request.runtime()
+                || pending.tab() != request.tab()
+                || !native_target_matches
+            {
+                return Err(ExtensionActionRejection::PopupCapacityExceeded);
+            }
+            if !self.cancel_pending(pending.id(), ExtensionActionRejection::RuntimeSuperseded) {
+                return Err(ExtensionActionRejection::NativeAdmissionFailed);
+            }
+            crate::diagnostic!("extensions: pending native popup toggle-dismissed");
+            return Ok(ActionPopupPreparation::Dismissed);
+        }
+
+        let active_target = self
+            .active
+            .try_borrow()
+            .map_err(|_| ExtensionActionRejection::NativeAdmissionFailed)?
+            .as_ref()
+            .map(|active| {
+                let associated_tab = unsafe { active.action.associatedTab() };
+                (
+                    active.request,
+                    std::ptr::eq(&*active.context, context)
+                        && associated_tab
+                            .as_ref()
+                            .is_some_and(|actual| std::ptr::eq(&**actual, &**tab)),
+                )
+            });
+        if let Some((active, native_target_matches)) = active_target {
+            if active.runtime() != request.runtime()
+                || active.tab() != request.tab()
+                || !native_target_matches
+            {
+                return Err(ExtensionActionRejection::PopupCapacityExceeded);
+            }
+            self.close_active();
+            crate::diagnostic!("extensions: visible native popup toggle-dismissed");
+            return Ok(ActionPopupPreparation::Dismissed);
+        }
+
+        let closing_matches = self
+            .closing
+            .try_borrow()
+            .map_err(|_| ExtensionActionRejection::NativeAdmissionFailed)?
+            .as_ref()
+            .map(|closing| std::ptr::eq(&*closing.context, context));
+        match closing_matches {
+            Some(false) => return Err(ExtensionActionRejection::PopupCapacityExceeded),
+            Some(true) => {
+                self.closing
+                    .try_borrow_mut()
+                    .map_err(|_| ExtensionActionRejection::NativeAdmissionFailed)?
+                    .take();
+            }
+            None => {}
+        }
+
+        Ok(ActionPopupPreparation::Present)
     }
 
     /// Reserves the exact native callback expected from `performActionForTab:`.
@@ -641,13 +750,16 @@ impl ActionPopupBroker {
                 .ok_or(ExtensionActionRejection::InvalidRequest)?;
             let size = clamp_popup_size(popover.contentSize());
             popover.setContentSize(size);
-            // Lab diagnostics must survive the application losing
-            // focus so Safari can attach to the exact popup WKWebView. The
-            // ordinary desktop keeps native transient dismissal semantics.
+            // Product and ordinary lab runs use native transient dismissal.
+            // A diagnostic run may explicitly retain the popup while Safari
+            // attaches to this exact WKWebView; merely compiling diagnostics
+            // must not change the user-facing close behavior.
             #[cfg(feature = "native-extension-lab-diagnostics")]
-            popover.setBehavior(NSPopoverBehavior::ApplicationDefined);
+            let retain_for_inspection =
+                std::env::var_os(LAB_RETAIN_POPUP_ENV).as_deref() == Some(OsStr::new("1"));
             #[cfg(not(feature = "native-extension-lab-diagnostics"))]
-            popover.setBehavior(NSPopoverBehavior::Transient);
+            let retain_for_inspection = false;
+            popover.setBehavior(popup_behavior(retain_for_inspection));
             popover.setAnimates(true);
             let delegate = ActionPopoverDelegate::new(mtm, Rc::downgrade(self));
             popover.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
@@ -1245,6 +1357,14 @@ fn clamp_popup_size(size: NSSize) -> NSSize {
     NSSize::new(width, height)
 }
 
+const fn popup_behavior(retain_for_inspection: bool) -> NSPopoverBehavior {
+    if retain_for_inspection {
+        NSPopoverBehavior::ApplicationDefined
+    } else {
+        NSPopoverBehavior::Transient
+    }
+}
+
 fn complete_rejected(
     completion: &DynBlock<dyn Fn(*mut NSError)>,
     reason: ExtensionActionRejection,
@@ -1289,6 +1409,12 @@ mod tests {
             clamp_popup_size(NSSize::new(10_000.0, 10_000.0)),
             NSSize::new(MAX_EXTENSION_POPUP_WIDTH, MAX_EXTENSION_POPUP_HEIGHT)
         );
+    }
+
+    #[test]
+    fn native_popup_dismissal_is_default_and_inspector_retention_is_explicit() {
+        assert_eq!(popup_behavior(false), NSPopoverBehavior::Transient);
+        assert_eq!(popup_behavior(true), NSPopoverBehavior::ApplicationDefined);
     }
 
     #[test]

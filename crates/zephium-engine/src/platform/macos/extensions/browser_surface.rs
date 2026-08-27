@@ -41,7 +41,7 @@ use zephium_core::ids::{ItemId, ProfileId, WindowId};
 
 pub(super) type NativeExtensionTab = Retained<ProtocolObject<dyn WKWebExtensionTab>>;
 
-use super::action_popup::ActionPopupBroker;
+use super::action_popup::{ActionPopupBroker, ActionPopupPreparation};
 use super::browser_request_broker::{
     BrowserRequestBroker, BrowserRequestPool, BrowserRequestSettlementOutcome,
 };
@@ -1637,6 +1637,15 @@ impl MacosExtensionBrowserSurfaceHost {
     ) -> Result<(), ExtensionActionRejection> {
         self.action_popup
             .begin(request, controller, context, tab, parent, lease)
+    }
+
+    pub(super) fn prepare_action_popup(
+        &self,
+        request: ExtensionActionRequest,
+        context: &WKWebExtensionContext,
+        tab: &NativeExtensionTab,
+    ) -> Result<ActionPopupPreparation, ExtensionActionRejection> {
+        self.action_popup.prepare_toggle(request, context, tab)
     }
 
     pub(super) fn cancel_action_popup(

@@ -8,7 +8,9 @@ use zephium_core::extensions::{
 use zephium_core::ids::{ItemId, ProfileId};
 use zephium_extension_runtime_api::ExtensionRuntimeHostBindError;
 
-use crate::platform::imp::{ControllerRegistryError, MacosNativeActionFailure};
+use crate::platform::imp::{
+    ControllerActionPopupPreparation, ControllerRegistryError, MacosNativeActionFailure,
+};
 
 use objc2::rc::Retained;
 use objc2_app_kit::NSView;
@@ -174,6 +176,21 @@ impl EngineHost {
                 Ok(None) => return settled(ExtensionActionRejection::RuntimeUnavailable),
                 Err(error) => return settled(map_runtime_error(error)),
             };
+            match self.macos_extension_controllers.prepare_action_popup(
+                profile,
+                request,
+                &popup_owner,
+                &native_tab,
+            ) {
+                Ok(Ok(ControllerActionPopupPreparation::Present)) => {}
+                Ok(Ok(ControllerActionPopupPreparation::Dismissed)) => {
+                    return ExtensionActionInvocationOutcome::Settled(
+                        ExtensionActionSettlement::PopupDismissed,
+                    );
+                }
+                Ok(Err(reason)) => return settled(reason),
+                Err(error) => return settled(map_controller_error(error)),
+            }
             let Some(parent) = popup_parent_view(&self.parent) else {
                 return settled(ExtensionActionRejection::NativeAdmissionFailed);
             };

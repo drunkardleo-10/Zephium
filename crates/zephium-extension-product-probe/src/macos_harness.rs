@@ -21,9 +21,8 @@ use objc2_foundation::{
 use raw_window_handle::{AppKitWindowHandle, RawWindowHandle};
 use zephium_core::blocker::ContentPolicyGeneration;
 use zephium_core::extensions::{
-    ExtensionActionRejection, ExtensionActionRequest, ExtensionActionSettlement,
-    ExtensionActionSnapshotSettlement, ExtensionActionState, ExtensionBrowserRequest,
-    ExtensionCompatibilityBrokerRequest,
+    ExtensionActionRequest, ExtensionActionSettlement, ExtensionActionSnapshotSettlement,
+    ExtensionActionState, ExtensionBrowserRequest, ExtensionCompatibilityBrokerRequest,
 };
 use zephium_core::geometry::Size;
 use zephium_core::ids::{ItemId, ProfileId};
@@ -604,7 +603,7 @@ impl MacosEngineHarness {
         presented.ok_or_else(|| "extension popup completed without a size".to_owned())
     }
 
-    pub(crate) fn reject_parallel_popup(
+    pub(crate) fn dismiss_popup_action(
         &mut self,
         request: ExtensionActionRequest,
         deadline: Instant,
@@ -612,36 +611,36 @@ impl MacosEngineHarness {
         if self.engine.invoke_extension_action(request)
             != zephium_core::ports::engine::NativeDispatch::Scheduled
         {
-            return Err("parallel extension popup invocation was not scheduled".into());
+            return Err("extension popup dismissal was not scheduled".into());
         }
-        self.pump_until("extension popup capacity rejection", deadline, |harness| loop {
-            match harness.events.try_recv() {
-                Ok(EngineEvent::ExtensionActionSettled {
-                    profile,
-                    request: event_request,
-                    settlement,
-                }) if profile == request.runtime().profile()
-                    && event_request == request.id() =>
-                {
-                    return match settlement {
-                        ExtensionActionSettlement::Rejected(
-                            ExtensionActionRejection::PopupCapacityExceeded,
-                        ) => Ok(true),
-                        other => Err(format!(
-                            "parallel extension popup did not fail at the capacity boundary: {other:?}"
-                        )),
-                    };
-                }
-                Ok(EngineEvent::ViewCreationFailed { .. }) => {
-                    return Err("profile view failed during popup capacity proof".into())
-                }
-                Ok(EngineEvent::Crashed { .. }) => {
-                    return Err("profile view crashed during popup capacity proof".into())
-                }
-                Ok(_) => {}
-                Err(mpsc::TryRecvError::Empty) => return Ok(false),
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    return Err("engine event ingress disconnected".to_owned())
+        self.pump_until("extension popup toggle dismissal", deadline, |harness| {
+            loop {
+                match harness.events.try_recv() {
+                    Ok(EngineEvent::ExtensionActionSettled {
+                        profile,
+                        request: event_request,
+                        settlement,
+                    }) if profile == request.runtime().profile()
+                        && event_request == request.id() =>
+                    {
+                        return match settlement {
+                            ExtensionActionSettlement::PopupDismissed => Ok(true),
+                            other => {
+                                Err(format!("extension popup did not toggle-dismiss: {other:?}"))
+                            }
+                        };
+                    }
+                    Ok(EngineEvent::ViewCreationFailed { .. }) => {
+                        return Err("profile view failed during popup toggle proof".into())
+                    }
+                    Ok(EngineEvent::Crashed { .. }) => {
+                        return Err("profile view crashed during popup toggle proof".into())
+                    }
+                    Ok(_) => {}
+                    Err(mpsc::TryRecvError::Empty) => return Ok(false),
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        return Err("engine event ingress disconnected".to_owned())
+                    }
                 }
             }
         })

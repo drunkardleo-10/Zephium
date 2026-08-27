@@ -161,6 +161,17 @@ fn newest_exact_action_snapshot_replaces_and_failures_retain() {
         request: invocation,
         settlement: zephium_core::extensions::ExtensionActionSettlement::Dispatched,
     }));
+    let dismissed_invocation = shell
+        .invoke_extension_action(runtime, ExtensionActionRevision::INITIAL, anchor)
+        .unwrap();
+    assert_eq!(
+        shell.extension_actions.settle_invocation(
+            profile,
+            dismissed_invocation,
+            zephium_core::extensions::ExtensionActionSettlement::PopupDismissed,
+        ),
+        ExtensionActionInvocationObservation::PopupDismissed
+    );
     let rejected_invocation = shell
         .invoke_extension_action(runtime, ExtensionActionRevision::INITIAL, anchor)
         .unwrap();

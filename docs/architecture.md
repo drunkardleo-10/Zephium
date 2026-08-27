@@ -836,7 +836,17 @@ mismatched WebKit callback is rejected. A matching loaded popup is shown as a
 transient native `NSPopover` relative to the privileged Shell anchor, with
 finite clipped anchor geometry, continuously clamped 64x48--800x600 content,
 outside-click/Escape dismissal, a ten-second load watchdog, and exact-once
-terminal settlement. Surface replacement closes a popup when its tab becomes
+terminal settlement. Before acquiring another lease, a second trusted
+invocation reauthenticates the complete action cohort and toggle-dismisses only
+a pending or visible popup owned by the exact same runtime context and native
+tab. A pending first request settles as superseded and the second settles as a
+typed dismissal; a different extension or tab still receives the one-popup
+capacity refusal. The authenticated native and brokered product probes require
+open, toggle-dismiss, reopen, discard-close, and final reopen in one lifecycle.
+Diagnostic builds retain normal transient behavior by default; setting
+`ZEPHIUM_EXTENSION_LAB_RETAIN_POPUP=1` is the explicit opt-in that keeps a
+popup alive while Safari attaches to its WKWebView. Surface replacement closes
+a popup when its tab becomes
 discarded, inactive, or absent; runtime retirement, profile erasure, and host
 shutdown cancel loading and close the native popup before owner release. The
 lease covers only the pending/presented interval and is released even though
