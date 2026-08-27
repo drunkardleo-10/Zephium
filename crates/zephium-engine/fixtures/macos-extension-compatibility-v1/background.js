@@ -30,6 +30,19 @@ api.action.onClicked.addListener(() => {
   api.action.setTitle({ title: `ZEPHIUM_COMPAT_CLICKED:${diagnostic}` });
 });
 api.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (
+    message?.kind === "popup-background-lifecycle"
+    && message?.token === "zephium-popup-background-lifecycle-v1"
+  ) {
+    setTimeout(() => {
+      sendResponse({
+        kind: "popup-background-ready",
+        token: message.token,
+        async: true,
+      });
+    }, 750);
+    return true;
+  }
   if (message?.kind === "credential-selection" && message?.token === credentialToken) {
     if (!Number.isInteger(sender?.tab?.id) || message.credentialId !== fixtureCredential.credentialId) {
       sendResponse({ kind: "credential-refused", token: credentialToken });

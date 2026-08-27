@@ -2142,6 +2142,28 @@ native teardown. A stock 1Password A/B still reached its first native port at
 about 60.8 seconds, so this primitive is an API/responsiveness improvement and
 is not claimed as the password-manager startup fix.
 
+A separate Zephium-owned lifecycle gate now removes the browser action seam as
+an explanation for that stall. The exact compatibility fixture has a real
+action popup that sends a runtime message at module evaluation; its background
+returns the response asynchronously after 750 ms. The native probe executes
+the same artifact as both a module service-worker wrapper and WebKit's
+nonpersistent module-document wrapper. Both modes complete the popup-to-
+background response, preserve isolated extension identity, and release the
+controller, context, page, popup, data store, and browser-surface graph. CI
+materializes and runs both variants, so a regression in event-scoped popup
+readiness cannot hide behind the simpler content-script round trip.
+
+The public persistent-background alternative was also exercised and rejected,
+not merely dismissed for resource cost. Apple allows [persistent extension
+background content](https://developer.apple.com/documentation/webkit/wkwebextension/haspersistentbackgroundcontent)
+on macOS in general, but WebKit rejects `persistent: true`
+for this Manifest V3 artifact with `WKWebExtensionErrorDomain` code 8: MV3 must
+remain nonpersistent. The experimental target was removed. These two results
+bound the current engineering posture: Zephium must preserve event-managed MV3
+semantics, and the stock 1Password initialization needs a publisher-owned
+event/readiness contract or an upstream lifecycle change; it is not authority
+for a timer, hidden view, permanent worker, or package-identifier branch.
+
 The private lab now admits one initial synchronization from its immutable
 embedded plan, making an empty repository reproducible without hand seeding;
 staging and shipping workers remain dormant until their own product policy

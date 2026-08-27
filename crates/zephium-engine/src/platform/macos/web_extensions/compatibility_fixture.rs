@@ -24,7 +24,8 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRunLoop};
 use objc2_web_kit::{
-    WKWebExtensionContext, WKWebExtensionController, WKWebView, WKWebsiteDataStore,
+    WKWebExtensionAction, WKWebExtensionContext, WKWebExtensionController, WKWebExtensionTab,
+    WKWebView, WKWebsiteDataStore,
 };
 use serde::Deserialize;
 use wry::WebViewBuilderExtMacos as _;
@@ -53,41 +54,55 @@ const CREDENTIAL_FORGERY_ATTRIBUTE: &str = "data-zephium-credential-forgery";
 const CREDENTIAL_HOST_ATTRIBUTE: &str = "data-zephium-credential-host";
 const COMPATIBILITY_SYMBOL: &str = "zephium.webkit-api-compatibility.v1";
 const PAGE_STATE_PREFIX: &str = "ZEPHIUM_COMPATIBILITY_STATE:";
+const POPUP_LIFECYCLE_PASSED_TITLE: &str = "ZEPHIUM_COMPAT_POPUP:passed";
+const POPUP_LIFECYCLE_FAILURE_PREFIX: &str = "ZEPHIUM_COMPAT_POPUP:";
 const NATIVE_PERMISSIONS: [Permission; 1] = [Permission::Tabs];
 const CREDENTIAL_CLICK_X: f64 = 126.0;
 const CREDENTIAL_CLICK_TOP: f64 = 38.0;
 
-const SOURCE_FILES: usize = 4;
-const SOURCE_BYTES: u64 = 12_627;
+const SOURCE_FILES: usize = 6;
+const SOURCE_BYTES: u64 = 13_794;
 const SOURCE_MANIFEST_SHA256: &str =
-    "64acab3c045112e5e700cfc67e6d63f5ae73414a09dd24ad685b1bf6483aca3f";
-const SOURCE_TREE_SHA256: &str = "2b447d296c03a9825da0c5d39ff6e7ad5f8bd538834f1a7a21bdb7c12989b50b";
+    "01ee8724d461385dfaeb1c5a7e5cb9a80fc7df7aca41ac79d50a5cfa92919f96";
+const SOURCE_TREE_SHA256: &str = "98c91e676629e5137712c67434ab92077200a496ec4052439d70a8e5d62675be";
 const SOURCE_INDEX_SHA256: &str =
-    "41225aeed527c41456674ea923995fb5b0ad210558e0f640ebc9b3dc6e1271cc";
-const OUTPUT_FILES: usize = 6;
-const OUTPUT_BYTES: u64 = 18_963;
-const OUTPUT_MANIFEST_SHA256: &str =
-    "537c1d7611c7993eeb2e7a9cd7895b0ed7992b8aada37df4957c1f237857551e";
-const OUTPUT_TREE_SHA256: &str = "ce5fd21559b4dc2c285362acd292b512d60d26c86fd09cd413e8c76c1cc315da";
-const OUTPUT_INDEX_SHA256: &str =
-    "217a49f3e32cb6ab0e806ac92236492043fe19611a97db8005e451752ea99dce";
+    "bb3c6e1ed06da39ac6f315fc9c8404fadf0199d0ec0414f63bd76053b4a3098e";
+const SERVICE_WORKER_OUTPUT_FILES: usize = 8;
+const SERVICE_WORKER_OUTPUT_BYTES: u64 = 20_183;
+const SERVICE_WORKER_OUTPUT_MANIFEST_SHA256: &str =
+    "11001215353b81c838416ab3a4e8a5fd068df6fbd82be4a77cc8397410560d35";
+const SERVICE_WORKER_OUTPUT_TREE_SHA256: &str =
+    "1876763aaf26e4016ab5f77b6dae1c247579ed6134e3ee6e9f2ddbe55bee07f5";
+const SERVICE_WORKER_OUTPUT_INDEX_SHA256: &str =
+    "556dcb1cc0b60591ea0cbebe6bcfeeeb118e6aabb070e21b4eacc9f802eadd59";
+const DOCUMENT_OUTPUT_FILES: usize = 9;
+const DOCUMENT_OUTPUT_BYTES: u64 = 22_347;
+const DOCUMENT_OUTPUT_MANIFEST_SHA256: &str =
+    "168a9fd06d336ae90cbf8f5b3e772ba4c47d1eb8fe8463daf06fe84b91d6d91e";
+const DOCUMENT_OUTPUT_TREE_SHA256: &str =
+    "07a73a44603c0f84419f4ebb1481a3d63fa33c0b04a92ce148d72a181545326a";
+const DOCUMENT_OUTPUT_INDEX_SHA256: &str =
+    "9695b64c370c6b4ba191273403b1c97b02abc36755475eae73c5a4dd0aa502a4";
 
 struct Teardown {
     controller: Weak<WKWebExtensionController>,
     context: Weak<WKWebExtensionContext>,
     page: Weak<WKWebView>,
+    popup: Option<Weak<WKWebView>>,
     store: Weak<WKWebsiteDataStore>,
     lifecycle_drops: Arc<AtomicUsize>,
     operating_system: String,
     extension_script_count: usize,
     webview_requests: usize,
     background_preload_ms: u128,
+    background_adaptation: &'static str,
     content_mode: CompatibilityMode,
     background_mode: CompatibilityMode,
     scheduler_yield: String,
     scheduler_yield_mode: String,
     background_action_label: String,
     credential_selection: String,
+    popup_lifecycle: String,
     failure: Option<String>,
 }
 
@@ -201,7 +216,12 @@ pub(super) fn run(artifact: &Path) -> Result<bool, String> {
         let _ = app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
         app.finishLaunching();
         let teardown = objc2::rc::autoreleasepool(|_| {
-            run_native(&admitted.extension_root, operating_system, mtm)
+            run_native(
+                &admitted.extension_root,
+                admitted.surfaces.background,
+                operating_system,
+                mtm,
+            )
         })?;
         super::set_phase("compatibility-fixture-teardown-wait");
         let released = wait_for_teardown(&teardown);
@@ -220,14 +240,16 @@ pub(super) fn run(artifact: &Path) -> Result<bool, String> {
             (None, Ok(())) => {}
         }
         println!(
-            "native-probe: macOS package-neutral compatibility fixture passed; os={}; exact_source_tree=passed; exact_output_tree=passed; module_background_wrapper=passed; content_compatibility_mode={}; background_compatibility_mode={}; scheduler_yield={}; scheduler_yield_mode={}; runtime_response_round_trip=passed; tabs_message_round_trip=passed; background_preload_ms={}; background_wake=runtime-message; background_action_label={:?}; sender_tab_routing=passed; page_world_adapter_absent=passed; page_world_extension_api_absent=passed; credential_field_discovery=passed; credential_inline_isolation=closed-shadow-null-origin; credential_page_forgery_ignored=passed; credential_selection_transport={}; credential_background_round_trip=passed; credential_page_events=passed; controller_visible_scripts={}; webview_callbacks={}; product_authority=false; native_objects_released=passed",
+            "native-probe: macOS package-neutral compatibility fixture passed; os={}; exact_source_tree=passed; exact_output_tree=passed; background_adaptation={}; content_compatibility_mode={}; background_compatibility_mode={}; scheduler_yield={}; scheduler_yield_mode={}; runtime_response_round_trip=passed; tabs_message_round_trip=passed; background_preload_ms={}; background_wake=runtime-message; background_action_label={:?}; popup_background_lifecycle={}; popup_async_response=passed; sender_tab_routing=passed; page_world_adapter_absent=passed; page_world_extension_api_absent=passed; credential_field_discovery=passed; credential_inline_isolation=closed-shadow-null-origin; credential_page_forgery_ignored=passed; credential_selection_transport={}; credential_background_round_trip=passed; credential_page_events=passed; controller_visible_scripts={}; webview_callbacks={}; product_authority=false; native_objects_released=passed",
             teardown.operating_system,
+            teardown.background_adaptation,
             teardown.content_mode.as_str(),
             teardown.background_mode.as_str(),
             teardown.scheduler_yield,
             teardown.scheduler_yield_mode,
             teardown.background_preload_ms,
             teardown.background_action_label,
+            teardown.popup_lifecycle,
             teardown.credential_selection,
             teardown.extension_script_count,
             teardown.webview_requests,
@@ -248,19 +270,32 @@ fn admit(
         SOURCE_MANIFEST_SHA256,
         SOURCE_TREE_SHA256,
         SOURCE_INDEX_SHA256,
-    ) || !admitted.output.matches(
-        OUTPUT_FILES,
-        OUTPUT_BYTES,
-        OUTPUT_MANIFEST_SHA256,
-        OUTPUT_TREE_SHA256,
-        OUTPUT_INDEX_SHA256,
     ) {
         return Err("compatibility fixture artifact identity drifted".into());
     }
+    let output_matches = match admitted.surfaces.background {
+        BackgroundAdaptation::ModuleWrapper => admitted.output.matches(
+            SERVICE_WORKER_OUTPUT_FILES,
+            SERVICE_WORKER_OUTPUT_BYTES,
+            SERVICE_WORKER_OUTPUT_MANIFEST_SHA256,
+            SERVICE_WORKER_OUTPUT_TREE_SHA256,
+            SERVICE_WORKER_OUTPUT_INDEX_SHA256,
+        ),
+        BackgroundAdaptation::ModuleDocumentWrapper => admitted.output.matches(
+            DOCUMENT_OUTPUT_FILES,
+            DOCUMENT_OUTPUT_BYTES,
+            DOCUMENT_OUTPUT_MANIFEST_SHA256,
+            DOCUMENT_OUTPUT_TREE_SHA256,
+            DOCUMENT_OUTPUT_INDEX_SHA256,
+        ),
+        _ => false,
+    };
+    if !output_matches {
+        return Err("compatibility fixture output identity drifted".into());
+    }
     if admitted.target != compatibility_artifact::CompatibilityArtifactTarget::NativeV3
-        || admitted.surfaces.background != BackgroundAdaptation::ModuleWrapper
         || admitted.surfaces.isolated_content_scripts != 1
-        || admitted.surfaces.action_popup != ActionPopupAdaptation::Absent
+        || admitted.surfaces.action_popup != ActionPopupAdaptation::ExplicitHeadInjected
         || admitted.surfaces.omitted_file_content_scripts != 0
         || admitted.surfaces.removed_file_match_patterns != 0
         || admitted.surfaces.same_document_navigation_routes != 0
@@ -268,11 +303,14 @@ fn admit(
     {
         return Err("compatibility fixture artifact surface contract drifted".into());
     }
-    validate_manifest(&admitted.extension_root.join("manifest.json"))?;
+    validate_manifest(
+        &admitted.extension_root.join("manifest.json"),
+        admitted.surfaces.background,
+    )?;
     Ok(admitted)
 }
 
-fn validate_manifest(path: &Path) -> Result<(), String> {
+fn validate_manifest(path: &Path, background: BackgroundAdaptation) -> Result<(), String> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|error| format!("cannot inspect compatibility fixture manifest: {error}"))?;
     if !metadata.is_file()
@@ -303,18 +341,29 @@ fn validate_manifest(path: &Path) -> Result<(), String> {
     let manifest = parse_bounded_json(&bytes, BoundedJsonLimits::extension_manifest())
         .map_err(|error| format!("compatibility fixture manifest is invalid: {error}"))?
         .into_value();
+    let expected_background = match background {
+        BackgroundAdaptation::ModuleWrapper => serde_json::json!({
+            "service_worker": BACKGROUND_WRAPPER,
+            "type": "module"
+        }),
+        BackgroundAdaptation::ModuleDocumentWrapper => serde_json::json!({
+            "service_worker": BACKGROUND_WRAPPER,
+            "type": "module",
+            "scripts": [BACKGROUND_WRAPPER],
+            "preferred_environment": ["document", "service_worker"]
+        }),
+        _ => return Err("compatibility fixture background is unsupported".into()),
+    };
     let expected = serde_json::json!({
         "manifest_version": 3,
         "name": DISPLAY_NAME,
         "description": "Zephium-owned package-neutral WebKit compatibility fixture.",
         "version": "1.0.0",
         "permissions": ["tabs"],
-        "background": {
-            "service_worker": BACKGROUND_WRAPPER,
-            "type": "module"
-        },
+        "background": expected_background,
         "action": {
-            "default_title": "Wake compatibility fixture"
+            "default_title": "Wake compatibility fixture",
+            "default_popup": "popup.html"
         },
         "content_scripts": [{
             "matches": [HOST_MATCH_PATTERN],
@@ -335,6 +384,7 @@ fn validate_manifest(path: &Path) -> Result<(), String> {
 
 fn run_native(
     extension_root: &Path,
+    background_adaptation: BackgroundAdaptation,
     operating_system: String,
     mtm: MainThreadMarker,
 ) -> Result<Teardown, String> {
@@ -463,9 +513,29 @@ fn run_native(
         |_| "missing".to_owned(),
         |state| state.scheduler_yield_mode.clone(),
     );
-    let background_action_label = unsafe { context.actionForTab(Some(tab_protocol)) }
+    let action = unsafe { context.actionForTab(Some(tab_protocol)) };
+    let background_action_label = action
+        .as_ref()
         .map(|action| unsafe { action.label() }.to_string())
         .unwrap_or_else(|| "<missing-action>".to_owned());
+    let popup_result = action
+        .as_ref()
+        .ok_or_else(|| "compatibility fixture exposed no action".to_owned())
+        .and_then(|action| {
+            run_popup_background_lifecycle(
+                action,
+                &context,
+                &bundle.controller,
+                &bundle._data_store,
+                &run_loop,
+                tab_protocol,
+            )
+        });
+    let (popup, popup_lifecycle, popup_failure) = match popup_result {
+        Ok(popup) => (Some(popup), "passed".to_owned(), None),
+        Err(error) => (None, "failed".to_owned(), Some(error)),
+    };
+    drop(action);
     let extension_scripts =
         super::extension_script_delta(&native_page, &baseline, "compatibility fixture navigation")?;
     let extension_script_count = extension_scripts.values().sum::<usize>();
@@ -496,28 +566,33 @@ fn run_native(
             "compatibility fixture reported {context_error_count} native context errors: {context_error_summary:?}"
         )
     });
-    let failure = match (round_trip_failure, context_failure) {
-        (Some(round_trip), Some(context)) => Some(format!("{round_trip}; {context}")),
-        (Some(round_trip), None) => Some(round_trip),
-        (None, Some(context)) => Some(context),
-        (None, None) => None,
-    };
+    let failure = [round_trip_failure, popup_failure, context_failure]
+        .into_iter()
+        .flatten()
+        .reduce(|mut combined, failure| {
+            combined.push_str("; ");
+            combined.push_str(&failure);
+            combined
+        });
     let teardown = Teardown {
         controller: Weak::from_retained(&bundle.controller),
         context: Weak::from_retained(&context),
         page: Weak::from_retained(&native_page),
+        popup,
         store: Weak::from_retained(&bundle._data_store),
         lifecycle_drops: Arc::clone(&lifecycle_drops),
         operating_system,
         extension_script_count,
         webview_requests: webview_requests.load(Ordering::Acquire),
         background_preload_ms,
+        background_adaptation: background_adaptation_label(background_adaptation),
         content_mode,
         background_mode,
         scheduler_yield,
         scheduler_yield_mode,
         background_action_label,
         credential_selection,
+        popup_lifecycle,
         failure,
     };
     drop(delegate);
@@ -532,6 +607,79 @@ fn run_native(
     drop(bundle);
     drop(server);
     Ok(teardown)
+}
+
+const fn background_adaptation_label(background: BackgroundAdaptation) -> &'static str {
+    match background {
+        BackgroundAdaptation::ModuleWrapper => "module-service-worker-wrapper",
+        BackgroundAdaptation::ModuleDocumentWrapper => "module-document-wrapper",
+        BackgroundAdaptation::Absent => "absent",
+        BackgroundAdaptation::ClassicWrapper => "classic-wrapper",
+    }
+}
+
+fn run_popup_background_lifecycle(
+    action: &WKWebExtensionAction,
+    context: &WKWebExtensionContext,
+    controller: &WKWebExtensionController,
+    data_store: &WKWebsiteDataStore,
+    run_loop: &NSRunLoop,
+    tab: &ProtocolObject<dyn WKWebExtensionTab>,
+) -> Result<Weak<WKWebView>, String> {
+    if !unsafe { action.isEnabled() } || !unsafe { action.presentsPopup() } {
+        return Err("compatibility fixture action is not enabled with a popup".into());
+    }
+    super::set_phase("compatibility-fixture-popup-background-lifecycle");
+    unsafe { context.performActionForTab(Some(tab)) };
+    let deadline = Instant::now() + super::PROBE_TIMEOUT;
+    loop {
+        if unsafe { action.popupPopover() }.is_some_and(|popover| popover.isShown()) {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err("compatibility fixture popup was not presented".into());
+        }
+        super::validate_context_errors(context, "compatibility fixture popup presentation")?;
+        super::drain_run_loop_once(run_loop);
+    }
+
+    let popover = unsafe { action.popupPopover() }
+        .ok_or_else(|| "compatibility fixture popup popover disappeared".to_owned())?;
+    let popup = unsafe { action.popupWebView() }
+        .ok_or_else(|| "compatibility fixture popup view disappeared".to_owned())?;
+    let popup_weak = Weak::from_retained(&popup);
+    let result = (|| {
+        super::assert_attached_controller(&popup, controller)?;
+        super::profile_isolation::assert_attached_store(&popup, data_store)?;
+        let deadline = Instant::now() + super::PROBE_TIMEOUT;
+        loop {
+            let title = unsafe { popup.title() }.map(|title| title.to_string());
+            if title.as_deref() == Some(POPUP_LIFECYCLE_PASSED_TITLE) {
+                return Ok(());
+            }
+            if title
+                .as_deref()
+                .is_some_and(|title| title.starts_with(POPUP_LIFECYCLE_FAILURE_PREFIX))
+            {
+                return Err(format!(
+                    "compatibility fixture popup background round trip failed: {title:?}"
+                ));
+            }
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "compatibility fixture popup background round trip timed out: title={title:?}"
+                ));
+            }
+            super::validate_context_errors(context, "compatibility fixture popup execution")?;
+            super::drain_run_loop_once(run_loop);
+        }
+    })();
+    popover.close();
+    unsafe { action.closePopup() };
+    drop(popup);
+    drop(popover);
+    result?;
+    Ok(popup_weak)
 }
 
 fn dispatch_credential_selection(window: &NSWindow, page: &WKWebView) -> Result<(), String> {
@@ -649,14 +797,18 @@ fn wait_for_teardown(teardown: &Teardown) -> Result<(), String> {
         let controller = teardown.controller.load().is_none();
         let context = teardown.context.load().is_none();
         let page = teardown.page.load().is_none();
+        let popup = teardown
+            .popup
+            .as_ref()
+            .is_none_or(|popup| popup.load().is_none());
         let store = teardown.store.load().is_none();
         let lifecycle = teardown.lifecycle_drops.load(Ordering::Acquire) == 3;
-        if controller && context && page && store && lifecycle {
+        if controller && context && page && popup && store && lifecycle {
             return Ok(());
         }
         if Instant::now() >= deadline {
             return Err(format!(
-                "compatibility fixture teardown did not settle: controller={controller}, context={context}, page={page}, store={store}, lifecycle={}/3",
+                "compatibility fixture teardown did not settle: controller={controller}, context={context}, page={page}, popup={popup}, store={store}, lifecycle={}/3",
                 teardown.lifecycle_drops.load(Ordering::Acquire),
             ));
         }
@@ -667,7 +819,8 @@ fn wait_for_teardown(teardown: &Teardown) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        admit, CREDENTIAL_CLICK_TOP, CREDENTIAL_CLICK_X, OUTPUT_TREE_SHA256, SOURCE_TREE_SHA256,
+        admit, CREDENTIAL_CLICK_TOP, CREDENTIAL_CLICK_X, DOCUMENT_OUTPUT_TREE_SHA256,
+        SERVICE_WORKER_OUTPUT_TREE_SHA256, SOURCE_TREE_SHA256,
     };
 
     const CREDENTIAL_CONTENT: &str =
@@ -677,11 +830,22 @@ mod tests {
     const CREDENTIAL_PAYLOAD: &str = include_str!(
         "../../../../fixtures/macos-extension-compatibility-v1/credential-inline.payload"
     );
+    const POPUP_LIFECYCLE: &str =
+        include_str!("../../../../fixtures/macos-extension-compatibility-v1/popup.js");
 
     #[test]
     fn exact_fixture_hashes_are_distinct_and_lowercase() {
-        assert_ne!(SOURCE_TREE_SHA256, OUTPUT_TREE_SHA256);
-        for digest in [SOURCE_TREE_SHA256, OUTPUT_TREE_SHA256] {
+        assert_ne!(SOURCE_TREE_SHA256, SERVICE_WORKER_OUTPUT_TREE_SHA256);
+        assert_ne!(SOURCE_TREE_SHA256, DOCUMENT_OUTPUT_TREE_SHA256);
+        assert_ne!(
+            SERVICE_WORKER_OUTPUT_TREE_SHA256,
+            DOCUMENT_OUTPUT_TREE_SHA256
+        );
+        for digest in [
+            SOURCE_TREE_SHA256,
+            SERVICE_WORKER_OUTPUT_TREE_SHA256,
+            DOCUMENT_OUTPUT_TREE_SHA256,
+        ] {
             assert_eq!(digest.len(), 64);
             assert!(digest
                 .bytes()
@@ -716,6 +880,9 @@ mod tests {
         assert!(CREDENTIAL_CONTENT.contains("event.data.trusted !== true"));
         assert!(CREDENTIAL_CONTENT.contains("payload.length > 8192"));
         assert!(CREDENTIAL_BACKGROUND.contains("Number.isInteger(sender?.tab?.id)"));
+        assert!(CREDENTIAL_BACKGROUND.contains("return true;"));
+        assert!(POPUP_LIFECYCLE.contains("await api.runtime.sendMessage"));
+        assert!(POPUP_LIFECYCLE.contains("ZEPHIUM_COMPAT_POPUP:passed"));
         assert_eq!(CREDENTIAL_CLICK_X, 16.0 + 220.0 / 2.0);
         assert_eq!(CREDENTIAL_CLICK_TOP, 16.0 + 44.0 / 2.0);
     }

@@ -1846,17 +1846,22 @@ fn run_macos_extension_compatibility_probe() {
             eprintln!("cannot create macOS compatibility CI stage: {error}");
             exit(1);
         });
-    let artifact = stage.path().join("artifact");
+    let service_worker_artifact = stage.path().join("service-worker-artifact");
     if let Err(error) =
-        macos_extension_compatibility::materialize(&source, &source_index, &artifact)
+        macos_extension_compatibility::materialize(&source, &source_index, &service_worker_artifact)
     {
-        eprintln!("cannot materialize macOS compatibility CI artifact: {error}");
+        eprintln!("cannot materialize macOS service-worker compatibility CI artifact: {error}");
         exit(1);
     }
-    let Some(artifact) = artifact.to_str() else {
-        eprintln!("macOS compatibility CI artifact path is not UTF-8");
+    let document_artifact = stage.path().join("document-artifact");
+    if let Err(error) = macos_extension_compatibility::materialize_document_background(
+        &source,
+        &source_index,
+        &document_artifact,
+    ) {
+        eprintln!("cannot materialize macOS document compatibility CI artifact: {error}");
         exit(1);
-    };
+    }
 
     const COMMON: [&str; 7] = [
         "--locked",
@@ -1872,10 +1877,16 @@ fn run_macos_extension_compatibility_probe() {
     clippy.extend(["--", "-D", "warnings"]);
     run("cargo", &clippy);
 
-    let mut execute = vec!["run"];
-    execute.extend(COMMON);
-    execute.extend(["--", "--artifact", artifact]);
-    run("cargo", &execute);
+    for artifact in [&service_worker_artifact, &document_artifact] {
+        let Some(artifact) = artifact.to_str() else {
+            eprintln!("macOS compatibility CI artifact path is not UTF-8");
+            exit(1);
+        };
+        let mut execute = vec!["run"];
+        execute.extend(COMMON);
+        execute.extend(["--", "--artifact", artifact]);
+        run("cargo", &execute);
+    }
 }
 
 #[cfg(target_os = "macos")]
