@@ -706,6 +706,20 @@ fn local_lab_manifest_authority_admits_only_the_exact_private_profile() {
         admitted.compatibility_target().as_str(),
         ProductExtensionRuntimeTarget::MacosNative.compatibility_target_id()
     );
+    let publisher = admitted
+        .publisher_native_host()
+        .expect("the private 1Password lab profile seals its native host");
+    assert_eq!(publisher.package(), package.identity());
+    assert_eq!(publisher.host_name(), "com.1password.1password");
+    assert_eq!(
+        publisher.upstream_chromium_extension_id(),
+        "aeblfdkhhhdcdjpifhhbdiojplfjncoa"
+    );
+    assert_eq!(publisher.macos_publisher().team_identifier(), "2BUA8C4S2C");
+    assert_eq!(
+        publisher.macos_publisher().signing_identifier(),
+        "com.1password.browser-support"
+    );
     assert!(authority
         .admit_acquired_manifest(
             &catalog,

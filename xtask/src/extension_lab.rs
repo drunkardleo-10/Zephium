@@ -12,6 +12,9 @@ use ring::rand::SystemRandom;
 use ring::signature::{EcdsaKeyPair, KeyPair as _, ECDSA_P256_SHA256_ASN1_SIGNING};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
+use zephium_core::extensions::{
+    ExtensionMacosPublisherIdentity, ExtensionPublisherNativeHostRequirement,
+};
 use zephium_extension_package::{
     parse_bounded_json, BoundedJsonLimits, CanonicalExtensionTreeIndex, Crx3SigningRequest,
     ExtensionPackageAdmissionPolicyDigest, ExtensionReleaseAdmissionPolicy,
@@ -90,7 +93,18 @@ struct ClassifiedManifestProfileInput {
     tree_index_target: String,
     compatibility_target: Option<String>,
     compatibility_receipt_sha256: Option<String>,
+    #[serde(default)]
+    publisher_native_host: Option<ClassifiedPublisherNativeHost>,
     declarations: Vec<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClassifiedPublisherNativeHost {
+    host_name: String,
+    upstream_chromium_extension_id: String,
+    macos_team_identifier: String,
+    macos_signing_identifier: String,
 }
 
 #[derive(Serialize)]
@@ -292,6 +306,20 @@ pub(crate) fn stage(
     package.bind_tree_index(&tree).map_err(|error| {
         format!("local extension tree does not bind to its catalog row: {error}")
     })?;
+    if let Some(review) = profile.input.publisher_native_host.as_ref() {
+        let publisher = ExtensionMacosPublisherIdentity::new(
+            review.macos_team_identifier.clone(),
+            review.macos_signing_identifier.clone(),
+        )
+        .map_err(|_| "classified publisher native-host identity is invalid".to_owned())?;
+        ExtensionPublisherNativeHostRequirement::new(
+            package.identity().clone(),
+            review.host_name.clone(),
+            review.upstream_chromium_extension_id.clone(),
+            publisher,
+        )
+        .map_err(|_| "classified publisher native-host requirement is invalid".to_owned())?;
+    }
 
     let (archive_length, archive_digest) = package
         .payload()
