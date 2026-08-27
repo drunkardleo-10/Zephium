@@ -2060,10 +2060,10 @@ target removes it and retains the same explicit no-process deny facade. No
 third-party package byte is committed.
 
 The clean package-neutral document transform produces 1,007 files and
-45,176,262 bytes with manifest, tree, and index SHA-256 values
+45,179,349 bytes with manifest, tree, and index SHA-256 values
 `08caefed1cd5c8945a60799257b41aa8586be0e2a5a5860285af06d4c7bbb169`,
-`365cf4abd2db6bc137a6a9bd055ecd56ab466565210d3aac4126d672d27c5240`,
-and `c03d3dd3e4b7c42ad436602f95ff731cd88afe0b38386d9bab7a5ed55a0fed81`.
+`8cf52aecd68aa6bc53130d31f9edf0ce92b06feca7d36d1b20f948c3d342bd0a`,
+and `3dae560e26e0147fea16a3e8bd7857d5426b9114ef51d7aa026ac61f6230983a`.
 The stock worker still reaches WebKit context error 6 after the bounded
 12-second load, while the clean document background loads without a context
 error in about 172 ms. The isolated-content compatibility marker is still not
@@ -2127,6 +2127,31 @@ and readiness input, not permission to add a hidden view, permanent worker,
 global fetch shim, or blind timeout. Password-manager verification still
 requires repeatable completed-onboarding restarts, save/fill/passkey workflows,
 resource/endurance budgets, and publisher/legal release gates.
+
+The same gate found that current WebKit lacks `scheduler.yield()`, which modern
+Chromium extensions use to split long tasks without timer clamping. The
+package-neutral extension-world prelude now preserves a native implementation
+when present and otherwise installs only `yield()`: a lazy fixed 128-slot
+MessageChannel ring whose two ports close immediately when the queue drains.
+It creates no idle timer, worker, hidden view, or persistent wake source;
+overflow rejects with `QuotaExceededError`. The receipt explicitly discloses
+that a compatibility continuation cannot reproduce native priority and abort
+inheritance. A live Zephium-owned WebKit fixture proved resolution, isolated
+world confinement, bounded mode reporting, credential round trips, and full
+native teardown. A stock 1Password A/B still reached its first native port at
+about 60.8 seconds, so this primitive is an API/responsiveness improvement and
+is not claimed as the password-manager startup fix.
+
+The private lab now admits one initial synchronization from its immutable
+embedded plan, making an empty repository reproducible without hand seeding;
+staging and shipping workers remain dormant until their own product policy
+admits a refresh. The revision-2 private run synchronized one candidate,
+presented the full limitation review, installed it, created the background,
+connected BrowserSupport, and rendered the authenticated vault popup. Two live
+native ports used separate publisher helper processes, as Chromium semantics
+require; the observed helpers were approximately 29 MB RSS each and 0.0% CPU
+at the sample. That cost remains a cohort/endurance input rather than authority
+to multiplex a publisher protocol behind its back.
 
 Authenticating this real package exposed one legitimate package-admission
 ceiling: a current major extension contains a single resource slightly above

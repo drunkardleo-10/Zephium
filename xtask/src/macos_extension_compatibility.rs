@@ -616,12 +616,14 @@ fn receipt_contract(
     let mut adaptations = vec![
         "native-api-identity-preservation-v1",
         "catalog-update-event-stub-v1",
+        "scheduler-yield-message-channel-fallback-v1",
         "file-scheme-content-script-omission-v1",
         "same-document-web-navigation-endpoint-v1",
     ];
     let mut limitations = vec![
         "not-a-product-package",
         "catalog-update-events-owned-by-zephium",
+        "scheduler-yield-priority-and-abort-inheritance-unavailable",
         "sandbox-pages-not-adapted",
         "non-action-extension-pages-not-adapted",
         "file-scheme-content-scripts-omitted",
@@ -2370,6 +2372,16 @@ fn lower_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn api_prelude_scheduler_yield_is_lazy_bounded_and_idle_inert() {
+        assert!(API_PRELUDE_SOURCE.contains("const maxPendingYields = 128;"));
+        assert!(API_PRELUDE_SOURCE.contains("new MessageChannel()"));
+        assert!(API_PRELUDE_SOURCE.contains("queue?.count === maxPendingYields"));
+        assert!(API_PRELUDE_SOURCE.contains("channel.port1.close()"));
+        assert!(API_PRELUDE_SOURCE.contains("channel.port2.close()"));
+        assert!(!API_PRELUDE_SOURCE.contains("setInterval("));
+    }
 
     fn write(root: &Path, relative: &str, bytes: &[u8]) {
         let path = root.join(relative);

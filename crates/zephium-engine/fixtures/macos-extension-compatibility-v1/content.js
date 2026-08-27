@@ -1,10 +1,13 @@
 const api = globalThis.browser ?? globalThis.chrome;
 const marker = Symbol.for("zephium.webkit-api-compatibility.v1");
 const modeMarker = Symbol.for("zephium.webkit-api-compatibility.mode.v1");
+const schedulerYieldMarker = Symbol.for("zephium.webkit-scheduler-yield.v1");
 const token = "zephium-compatibility-round-trip-v1";
 const attribute = "data-zephium-compatibility-round-trip";
 const contentModeAttribute = "data-zephium-compatibility-content-mode";
 const backgroundModeAttribute = "data-zephium-compatibility-background-mode";
+const schedulerYieldAttribute = "data-zephium-scheduler-yield";
+const schedulerYieldModeAttribute = "data-zephium-scheduler-yield-mode";
 const credentialFillAttribute = "data-zephium-credential-fill";
 const credentialSelectionAttribute = "data-zephium-credential-selection";
 const credentialInlineAttribute = "data-zephium-credential-inline";
@@ -25,6 +28,21 @@ function settle(value) {
 root.setAttribute(attribute, "armed");
 root.setAttribute(contentModeAttribute, contentMode);
 root.setAttribute(backgroundModeAttribute, "pending");
+root.setAttribute(schedulerYieldAttribute, "pending");
+const schedulerYieldMode = globalThis[schedulerYieldMarker] ?? "missing";
+root.setAttribute(schedulerYieldModeAttribute, schedulerYieldMode);
+if (
+  typeof globalThis.scheduler?.yield === "function" &&
+  (schedulerYieldMode === "native-preserved" ||
+    schedulerYieldMode === "message-channel-bounded")
+) {
+  void globalThis.scheduler.yield().then(
+    () => root.setAttribute(schedulerYieldAttribute, "passed"),
+    () => root.setAttribute(schedulerYieldAttribute, "invalid:rejected"),
+  );
+} else {
+  root.setAttribute(schedulerYieldAttribute, "invalid:missing");
+}
 function accept(message, expectedChannel) {
   const supportedMode = (value) =>
     value === "native-preserved" || value === "native-aliased";

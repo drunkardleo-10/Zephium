@@ -220,10 +220,10 @@ impl StockContract {
             },
             Self::OnePassword8123434 => CompatibilityOutputContract {
                 files: 1_007,
-                bytes: 45_176_262,
+                bytes: 45_179_349,
                 manifest_sha256: "08caefed1cd5c8945a60799257b41aa8586be0e2a5a5860285af06d4c7bbb169",
-                tree_sha256: "365cf4abd2db6bc137a6a9bd055ecd56ab466565210d3aac4126d672d27c5240",
-                index_sha256: "c03d3dd3e4b7c42ad436602f95ff731cd88afe0b38386d9bab7a5ed55a0fed81",
+                tree_sha256: "8cf52aecd68aa6bc53130d31f9edf0ce92b06feca7d36d1b20f948c3d342bd0a",
+                index_sha256: "3dae560e26e0147fea16a3e8bd7857d5426b9114ef51d7aa026ac61f6230983a",
                 background: BackgroundAdaptationKind::ModuleDocument,
                 isolated_content_scripts: 7,
                 same_document_navigation_routes: 7,

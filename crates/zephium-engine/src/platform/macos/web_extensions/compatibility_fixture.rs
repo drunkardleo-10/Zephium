@@ -43,6 +43,8 @@ const HOST_MATCH_PATTERN: &str = "http://127.0.0.1/*";
 const ROUND_TRIP_ATTRIBUTE: &str = "data-zephium-compatibility-round-trip";
 const CONTENT_MODE_ATTRIBUTE: &str = "data-zephium-compatibility-content-mode";
 const BACKGROUND_MODE_ATTRIBUTE: &str = "data-zephium-compatibility-background-mode";
+const SCHEDULER_YIELD_ATTRIBUTE: &str = "data-zephium-scheduler-yield";
+const SCHEDULER_YIELD_MODE_ATTRIBUTE: &str = "data-zephium-scheduler-yield-mode";
 const CREDENTIAL_FILL_ATTRIBUTE: &str = "data-zephium-credential-fill";
 const CREDENTIAL_SELECTION_ATTRIBUTE: &str = "data-zephium-credential-selection";
 const CREDENTIAL_INLINE_ATTRIBUTE: &str = "data-zephium-credential-inline";
@@ -56,19 +58,19 @@ const CREDENTIAL_CLICK_X: f64 = 126.0;
 const CREDENTIAL_CLICK_TOP: f64 = 38.0;
 
 const SOURCE_FILES: usize = 4;
-const SOURCE_BYTES: u64 = 11_788;
+const SOURCE_BYTES: u64 = 12_627;
 const SOURCE_MANIFEST_SHA256: &str =
     "64acab3c045112e5e700cfc67e6d63f5ae73414a09dd24ad685b1bf6483aca3f";
-const SOURCE_TREE_SHA256: &str = "53762a411029aa28bce9e3b30b2eb6001ee60277cbabcd4180f6510de19ecd07";
+const SOURCE_TREE_SHA256: &str = "2b447d296c03a9825da0c5d39ff6e7ad5f8bd538834f1a7a21bdb7c12989b50b";
 const SOURCE_INDEX_SHA256: &str =
-    "bbba00128ae070aeb65b5d75912fa855ddf2af1ba26b971c45e40ccb7e7fa19a";
+    "41225aeed527c41456674ea923995fb5b0ad210558e0f640ebc9b3dc6e1271cc";
 const OUTPUT_FILES: usize = 6;
-const OUTPUT_BYTES: u64 = 15_037;
+const OUTPUT_BYTES: u64 = 18_963;
 const OUTPUT_MANIFEST_SHA256: &str =
     "537c1d7611c7993eeb2e7a9cd7895b0ed7992b8aada37df4957c1f237857551e";
-const OUTPUT_TREE_SHA256: &str = "9c30da17de9ea808fe83a202ca483d18ba8de574404735ad1e8abd9435226b73";
+const OUTPUT_TREE_SHA256: &str = "ce5fd21559b4dc2c285362acd292b512d60d26c86fd09cd413e8c76c1cc315da";
 const OUTPUT_INDEX_SHA256: &str =
-    "fa6f661ab71c822532fb35be676d6fc0bcfbba37d9a567b3ecaa067db3534acd";
+    "217a49f3e32cb6ab0e806ac92236492043fe19611a97db8005e451752ea99dce";
 
 struct Teardown {
     controller: Weak<WKWebExtensionController>,
@@ -82,6 +84,8 @@ struct Teardown {
     background_preload_ms: u128,
     content_mode: CompatibilityMode,
     background_mode: CompatibilityMode,
+    scheduler_yield: String,
+    scheduler_yield_mode: String,
     background_action_label: String,
     credential_selection: String,
     failure: Option<String>,
@@ -93,6 +97,8 @@ struct PageState {
     round_trip: String,
     content_mode: CompatibilityMode,
     background_mode: CompatibilityMode,
+    scheduler_yield: String,
+    scheduler_yield_mode: String,
     page_adapter: bool,
     page_extension_api: bool,
     credential_fill: String,
@@ -114,11 +120,17 @@ impl PageState {
             && self.credential_host_count == 1
             && self.credential_shadow_closed
             && !self.page_extension_api
+            && self.scheduler_yield == "passed"
+            && matches!(
+                self.scheduler_yield_mode.as_str(),
+                "native-preserved" | "message-channel-bounded"
+            )
     }
 
     fn credential_workflow_failed(&self) -> bool {
         self.page_extension_api
             || self.credential_fill.starts_with("invalid:")
+            || self.scheduler_yield.starts_with("invalid:")
             || self.credential_host_count > 1
             || !matches!(
                 self.credential_selection.as_str(),
@@ -208,10 +220,12 @@ pub(super) fn run(artifact: &Path) -> Result<bool, String> {
             (None, Ok(())) => {}
         }
         println!(
-            "native-probe: macOS package-neutral compatibility fixture passed; os={}; exact_source_tree=passed; exact_output_tree=passed; module_background_wrapper=passed; content_compatibility_mode={}; background_compatibility_mode={}; runtime_response_round_trip=passed; tabs_message_round_trip=passed; background_preload_ms={}; background_wake=runtime-message; background_action_label={:?}; sender_tab_routing=passed; page_world_adapter_absent=passed; page_world_extension_api_absent=passed; credential_field_discovery=passed; credential_inline_isolation=closed-shadow-null-origin; credential_page_forgery_ignored=passed; credential_selection_transport={}; credential_background_round_trip=passed; credential_page_events=passed; controller_visible_scripts={}; webview_callbacks={}; product_authority=false; native_objects_released=passed",
+            "native-probe: macOS package-neutral compatibility fixture passed; os={}; exact_source_tree=passed; exact_output_tree=passed; module_background_wrapper=passed; content_compatibility_mode={}; background_compatibility_mode={}; scheduler_yield={}; scheduler_yield_mode={}; runtime_response_round_trip=passed; tabs_message_round_trip=passed; background_preload_ms={}; background_wake=runtime-message; background_action_label={:?}; sender_tab_routing=passed; page_world_adapter_absent=passed; page_world_extension_api_absent=passed; credential_field_discovery=passed; credential_inline_isolation=closed-shadow-null-origin; credential_page_forgery_ignored=passed; credential_selection_transport={}; credential_background_round_trip=passed; credential_page_events=passed; controller_visible_scripts={}; webview_callbacks={}; product_authority=false; native_objects_released=passed",
             teardown.operating_system,
             teardown.content_mode.as_str(),
             teardown.background_mode.as_str(),
+            teardown.scheduler_yield,
+            teardown.scheduler_yield_mode,
             teardown.background_preload_ms,
             teardown.background_action_label,
             teardown.credential_selection,
@@ -441,6 +455,14 @@ fn run_native(
         |_| "unsettled".to_owned(),
         |state| state.credential_selection.clone(),
     );
+    let scheduler_yield = round_trip.as_ref().map_or_else(
+        |_| "unsettled".to_owned(),
+        |state| state.scheduler_yield.clone(),
+    );
+    let scheduler_yield_mode = round_trip.as_ref().map_or_else(
+        |_| "missing".to_owned(),
+        |state| state.scheduler_yield_mode.clone(),
+    );
     let background_action_label = unsafe { context.actionForTab(Some(tab_protocol)) }
         .map(|action| unsafe { action.label() }.to_string())
         .unwrap_or_else(|| "<missing-action>".to_owned());
@@ -492,6 +514,8 @@ fn run_native(
         background_preload_ms,
         content_mode,
         background_mode,
+        scheduler_yield,
+        scheduler_yield_mode,
         background_action_label,
         credential_selection,
         failure,
@@ -559,6 +583,8 @@ fn wait_for_page_state(
             roundTrip: document.documentElement?.getAttribute({ROUND_TRIP_ATTRIBUTE:?}) ?? "missing",
             contentMode: document.documentElement?.getAttribute({CONTENT_MODE_ATTRIBUTE:?}) ?? "pending",
             backgroundMode: document.documentElement?.getAttribute({BACKGROUND_MODE_ATTRIBUTE:?}) ?? "pending",
+            schedulerYield: document.documentElement?.getAttribute({SCHEDULER_YIELD_ATTRIBUTE:?}) ?? "missing",
+            schedulerYieldMode: document.documentElement?.getAttribute({SCHEDULER_YIELD_MODE_ATTRIBUTE:?}) ?? "missing",
             pageAdapter: globalThis[Symbol.for({COMPATIBILITY_SYMBOL:?})] === true,
             pageExtensionApi: Boolean(globalThis.chrome?.runtime?.id || globalThis.browser?.runtime?.id),
             credentialFill: document.documentElement?.getAttribute({CREDENTIAL_FILL_ATTRIBUTE:?}) ?? "missing",

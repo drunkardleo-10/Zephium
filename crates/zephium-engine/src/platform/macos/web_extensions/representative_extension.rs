@@ -147,6 +147,8 @@ struct PopupState {
     runtime: bool,
     runtime_id: bool,
     compatibility_mode: String,
+    scheduler_yield: bool,
+    scheduler_yield_mode: String,
 }
 
 impl PopupState {
@@ -162,6 +164,12 @@ impl PopupState {
                     self.compatibility_mode.as_str(),
                     "native-preserved" | "native-aliased"
                 ))
+            && (mode == ProbeMode::Stock
+                || (self.scheduler_yield
+                    && matches!(
+                        self.scheduler_yield_mode.as_str(),
+                        "native-preserved" | "message-channel-bounded"
+                    )))
     }
 }
 
@@ -678,6 +686,9 @@ fn wait_for_popup(
           const api = globalThis.chrome ?? globalThis.browser;
           const installed = globalThis[Symbol.for('zephium.webkit-api-compatibility.v1')];
           const compatibility = globalThis[Symbol.for('zephium.webkit-api-compatibility.mode.v1')];
+          const schedulerYieldMode = globalThis[
+            Symbol.for('zephium.webkit-scheduler-yield.v1')
+          ];
           const state = {{
             ready: document.readyState,
             bodyChildren: document.body?.childElementCount ?? 0,
@@ -688,6 +699,10 @@ fn wait_for_popup(
             compatibilityMode: installed === true && typeof compatibility === 'string'
               ? compatibility
               : 'missing',
+            schedulerYield: typeof globalThis.scheduler?.yield === 'function',
+            schedulerYieldMode: typeof schedulerYieldMode === 'string'
+              ? schedulerYieldMode
+              : (typeof globalThis.scheduler?.yield === 'function' ? 'native-preserved' : 'missing'),
           }};
           document.title = {POPUP_STATE_PREFIX:?} + JSON.stringify(state);
         }})()"#
@@ -817,6 +832,8 @@ mod tests {
             runtime: true,
             runtime_id: true,
             compatibility_mode: "native-preserved".into(),
+            scheduler_yield: true,
+            scheduler_yield_mode: "native-preserved".into(),
         };
         assert!(popup.passed(ProbeMode::Compatibility));
     }

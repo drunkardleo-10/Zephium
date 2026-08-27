@@ -33,15 +33,17 @@ const ARTIFACT_EXTENSION: &str = "extension";
 const ARTIFACT_KIND: &str = "zephium-macos-web-extension-compatibility-artifact";
 const NATIVE_TARGET: &str = "webkit-macos-native-v3";
 const BROKERED_TARGET: &str = "webkit-macos-native-brokered-v1";
-const NATIVE_ADAPTATIONS: [&str; 4] = [
+const NATIVE_ADAPTATIONS: [&str; 5] = [
     "native-api-identity-preservation-v1",
     "catalog-update-event-stub-v1",
+    "scheduler-yield-message-channel-fallback-v1",
     "file-scheme-content-script-omission-v1",
     "same-document-web-navigation-endpoint-v1",
 ];
-const NATIVE_LIMITATIONS: [&str; 7] = [
+const NATIVE_LIMITATIONS: [&str; 8] = [
     "not-a-product-package",
     "catalog-update-events-owned-by-zephium",
+    "scheduler-yield-priority-and-abort-inheritance-unavailable",
     "sandbox-pages-not-adapted",
     "non-action-extension-pages-not-adapted",
     "file-scheme-content-scripts-omitted",
@@ -361,12 +363,14 @@ fn expected_contract(
     let mut adaptations = vec![
         "native-api-identity-preservation-v1",
         "catalog-update-event-stub-v1",
+        "scheduler-yield-message-channel-fallback-v1",
         "file-scheme-content-script-omission-v1",
         "same-document-web-navigation-endpoint-v1",
     ];
     let mut limitations = vec![
         "not-a-product-package",
         "catalog-update-events-owned-by-zephium",
+        "scheduler-yield-priority-and-abort-inheritance-unavailable",
         "sandbox-pages-not-adapted",
         "file-scheme-content-scripts-omitted",
         "same-document-web-navigation-limited-to-injected-frames",
