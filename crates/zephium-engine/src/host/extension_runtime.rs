@@ -650,7 +650,7 @@ impl ReservationBinding {
         }
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", test))]
     fn expected_windows_owner(&self) -> Option<ExtensionRuntimeNativeOwnerId> {
         match self {
             Self::Activation {
@@ -2278,7 +2278,7 @@ impl ExtensionRuntimeRegistry {
 
     /// Exact WebView2 owner cohort allowed to exist when a profile content
     /// controller crosses Wry's pre-initialization startup gate.
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", test))]
     pub(super) fn published_windows_native_owner_ids(
         &mut self,
         profile: ProfileId,
@@ -2297,15 +2297,6 @@ impl ExtensionRuntimeRegistry {
         let mut owner_count = 0_usize;
         let mut invariant_failed = false;
         for entry in &self.entries {
-            let ReservationBinding::Activation { expectation, .. } = &entry.reservation.binding
-            else {
-                continue;
-            };
-            let ExtensionRuntimeNativeIdentityExpectation::WindowsWebView2Extension(owner) =
-                expectation
-            else {
-                continue;
-            };
             let state = match entry.reservation.authority_state.try_lock() {
                 Ok(state) => state,
                 Err(std::sync::TryLockError::WouldBlock) => {
@@ -2323,6 +2314,7 @@ impl ExtensionRuntimeRegistry {
                 }
             };
             let ReservationAuthorityState::Published {
+                evidence,
                 authority: Some(authority),
                 ..
             } = &*state
@@ -2332,16 +2324,38 @@ impl ExtensionRuntimeRegistry {
             if authority.fingerprint().instance().profile() != profile {
                 continue;
             }
+            let windows_binding = matches!(
+                &entry.reservation.binding,
+                ReservationBinding::Activation {
+                    expectation:
+                        ExtensionRuntimeNativeIdentityExpectation::WindowsWebView2Extension(_),
+                    ..
+                } | ReservationBinding::Recovery {
+                    expectation: ExtensionRuntimeRecoveryExpectation::WindowsWebView2Extension { .. },
+                    ..
+                }
+            );
+            if !windows_binding {
+                continue;
+            }
+            let Some(owner) = entry.reservation.binding.expected_windows_owner() else {
+                invariant_failed = true;
+                break;
+            };
+            if *evidence != ExtensionRuntimeOwnershipEvidence::WindowsWebView2Extension(owner) {
+                invariant_failed = true;
+                break;
+            }
             if owner_count == owners.len()
                 || owners[..owner_count]
                     .iter()
                     .flatten()
-                    .any(|existing| existing == owner)
+                    .any(|existing| *existing == owner)
             {
                 invariant_failed = true;
                 break;
             }
-            owners[owner_count] = Some(*owner);
+            owners[owner_count] = Some(owner);
             owner_count += 1;
         }
         if invariant_failed {
@@ -3379,18 +3393,44 @@ impl ExtensionRuntimeHostFactoryPort for EngineFactoryPort {
             match status {
                 ProfileObligationStatus::Absent => {
                     #[cfg(target_os = "windows")]
-                    if let Some(native_profile) = host.windows_extension_profiles.get(&profile) {
-                        return match native_profile.inventory_is_empty(deadline) {
-                            Ok(true) => Ok(()),
-                            Ok(false) => Err(
+                    {
+                        match host.windows_extension_environments.content_admission(
+                            profile,
+                            host.environments.contains_key(&profile),
+                            host.windows_extension_profiles.contains_key(&profile),
+                        ) {
+                            super::WindowsExtensionContentAdmission::CreateDisabled
+                            | super::WindowsExtensionContentAdmission::ReuseDisabled => Ok(()),
+                            super::WindowsExtensionContentAdmission::Enabled => {
+                                let Some(native_profile) =
+                                    host.windows_extension_profiles.get(&profile)
+                                else {
+                                    return Err(
+                                        ExtensionRuntimeHostProfileAbsenceDisposition::InvariantFailed,
+                                    );
+                                };
+                                match native_profile.inventory_is_empty(deadline) {
+                                    Ok(true) => Ok(()),
+                                    Ok(false) => Err(
+                                        ExtensionRuntimeHostProfileAbsenceDisposition::ObligationsRemain,
+                                    ),
+                                    Err(_) => Err(
+                                        ExtensionRuntimeHostProfileAbsenceDisposition::Unavailable,
+                                    ),
+                                }
+                            }
+                            super::WindowsExtensionContentAdmission::RestartRequired => Err(
                                 ExtensionRuntimeHostProfileAbsenceDisposition::ObligationsRemain,
                             ),
-                            Err(_) => {
-                                Err(ExtensionRuntimeHostProfileAbsenceDisposition::Unavailable)
+                            super::WindowsExtensionContentAdmission::InvariantFailed => {
+                                Err(ExtensionRuntimeHostProfileAbsenceDisposition::InvariantFailed)
                             }
-                        };
+                        }
                     }
-                    Ok(())
+                    #[cfg(not(target_os = "windows"))]
+                    {
+                        Ok(())
+                    }
                 }
                 ProfileObligationStatus::Present => {
                     Err(ExtensionRuntimeHostProfileAbsenceDisposition::ObligationsRemain)
@@ -5013,6 +5053,133 @@ mod tests {
             rebound_owned,
             rebound_release,
         }
+    }
+
+    fn windows_recovery_binding_for_published_projection(
+        template: &ExtensionNativeOwnershipEntry,
+        expected: Option<ExtensionExpectedNativeOwnershipIdentity>,
+        observed: Option<ExtensionNativeOwnershipIdentity>,
+    ) -> (ReservationBinding, OwnerKey) {
+        let revision = if observed.is_some() { 3 } else { 2 };
+        let entry = ExtensionNativeOwnershipEntry::from_persisted_with_native_identities(
+            template.key(),
+            template.operation(),
+            ExtensionNativeOwnershipEntryRevision::new(revision).expect("entry revision"),
+            template.package().clone(),
+            template.catalog_set_digest(),
+            template.catalog_role(),
+            template.store_catalog_revision(),
+            template.store_install_revision(),
+            template.store_grant_revision(),
+            template.grant_digest(),
+            ExtensionRuntimeBackendTarget::WindowsNative,
+            expected,
+            observed,
+            template.native_incarnation(),
+            ExtensionNativeOwnershipIntent::Acquire,
+            ExtensionNativeOwnershipPhase::NativeMayOwn,
+        )
+        .expect("valid Windows recovery row");
+        let binding = ExtensionRuntimeHostRecoveryBinding::try_new(entry.clone())
+            .expect("valid Windows recovery binding");
+        let context = *binding.context();
+        let owner = OwnerKey::from_address(context.owner());
+        (
+            ReservationBinding::Recovery {
+                owner,
+                expectation: context.expectation(),
+                absence_issuer: context.absence_evidence_issuer(),
+            },
+            owner,
+        )
+    }
+
+    #[test]
+    fn published_windows_recovery_owner_reaches_content_inventory_gate() {
+        let fixture = activation_registry_fixture();
+        let expected_core = ExtensionExpectedNativeOwnershipIdentity::from_encoded_bytes(
+            ExtensionRuntimeBackendTarget::WindowsNative,
+            [b'a'; 32],
+        )
+        .expect("canonical expected owner");
+        let expected_runtime = ExtensionRuntimeNativeOwnerId::from_encoded_bytes([b'a'; 32])
+            .expect("canonical runtime owner");
+        let (binding, owner) = windows_recovery_binding_for_published_projection(
+            &fixture.initial,
+            Some(expected_core),
+            None,
+        );
+        let profile = fixture.fingerprint.instance().profile();
+        let gate = ExtensionRuntimeFactoryGate::new();
+        let mut registry = ExtensionRuntimeRegistry::new(gate.clone());
+        let reservation = gate.reserve(binding).expect("recovery reservation");
+        registry
+            .attach(Arc::clone(&reservation))
+            .expect("registry attachment");
+        *reservation.authority_state.lock().expect("authority state") =
+            ReservationAuthorityState::Published {
+                evidence: ExtensionRuntimeOwnershipEvidence::WindowsWebView2Extension(
+                    expected_runtime,
+                ),
+                authority: Some(fixture.authority),
+            };
+
+        let owners = registry
+            .published_windows_native_owner_ids(profile)
+            .expect("published recovery cohort");
+        assert_eq!(owners[0], Some(expected_runtime));
+        assert!(owners[1..].iter().all(Option::is_none));
+        assert!(!registry.invariant_failed);
+        assert_eq!(owner.backend, ExtensionRuntimeBackendTarget::WindowsNative);
+        drop(registry);
+        drop(fixture._held_pin);
+    }
+
+    #[test]
+    fn conflicting_published_windows_recovery_identity_fails_registry_invariant() {
+        let fixture = activation_registry_fixture();
+        let expected = ExtensionExpectedNativeOwnershipIdentity::from_encoded_bytes(
+            ExtensionRuntimeBackendTarget::WindowsNative,
+            [b'a'; 32],
+        )
+        .expect("canonical expected owner");
+        let observed = ExtensionNativeOwnershipIdentity::from_encoded_bytes(
+            ExtensionRuntimeBackendTarget::WindowsNative,
+            [b'b'; 32],
+        )
+        .expect("canonical conflicting owner");
+        let (binding, _) = windows_recovery_binding_for_published_projection(
+            &fixture.initial,
+            Some(expected),
+            Some(observed),
+        );
+        let profile = fixture.fingerprint.instance().profile();
+        let gate = ExtensionRuntimeFactoryGate::new();
+        let mut registry = ExtensionRuntimeRegistry::new(gate.clone());
+        let reservation = gate.reserve(binding).expect("recovery reservation");
+        registry
+            .attach(Arc::clone(&reservation))
+            .expect("registry attachment");
+        *reservation.authority_state.lock().expect("authority state") =
+            ReservationAuthorityState::Published {
+                evidence: ExtensionRuntimeOwnershipEvidence::WindowsWebView2Extension(
+                    ExtensionRuntimeNativeOwnerId::from_encoded_bytes([b'a'; 32])
+                        .expect("canonical evidence"),
+                ),
+                authority: Some(fixture.authority),
+            };
+
+        assert_eq!(
+            registry.published_windows_native_owner_ids(profile),
+            Err(ExtensionRuntimeHostBindError::InternalInvariant),
+        );
+        assert!(registry.invariant_failed);
+        assert_eq!(
+            gate.preflight(),
+            Err(ExtensionRuntimeHostBindError::InternalInvariant)
+        );
+        drop(registry);
+        drop(fixture._held_pin);
     }
 
     #[test]

@@ -1581,7 +1581,9 @@ fn run_internal_acquired_repository_e2e_tests() {
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn run_internal_acquired_extension_service_e2e_tests() {
     const FILTER: &str = "runtime_coordinator::e2e::";
-    const EXPECTED_TESTS: usize = 17;
+    // The acquired-package feature adds its materialization case to the same
+    // 17 sealed coordinator paths enforced by the regular internal inventory.
+    const EXPECTED_TESTS: usize = 18;
     let list_args = [
         "test",
         "--locked",
@@ -1659,7 +1661,11 @@ fn list_extension_repository_tests(internal: bool) -> std::collections::BTreeSet
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn run_internal_extension_service_e2e_tests() {
     const FILTER: &str = "runtime_coordinator::e2e::";
-    const EXPECTED_TESTS: usize = 16;
+    // Keep this count explicit: adding or removing a cfg-only authority test
+    // must update the CI inventory deliberately instead of silently changing
+    // the release gate. The Windows restart-required settlement is the 17th
+    // sealed coordinator path.
+    const EXPECTED_TESTS: usize = 17;
 
     let regular_inventory = list_extension_service_tests(false);
     let internal_inventory = list_extension_service_tests(true);

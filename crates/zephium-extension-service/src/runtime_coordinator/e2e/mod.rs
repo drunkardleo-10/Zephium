@@ -6,7 +6,7 @@ mod host;
 mod support;
 
 use zephium_core::extensions::ExtensionRuntimeGeneration;
-use zephium_extension_runtime_api::ExtensionRuntimeHostBindError;
+use zephium_extension_runtime_api::{ExtensionRuntimeFailure, ExtensionRuntimeHostBindError};
 
 use super::{
     RuntimeActivationOutcome, RuntimeActivationUnavailableReason, RuntimeCoordinator,
@@ -15,6 +15,39 @@ use super::{
 };
 use host::{AbsenceEvidenceMode, PublicationMode};
 use support::{deadline, RealAuthorityHarness};
+
+#[test]
+fn pre_entry_restart_requirement_remains_retryable_through_real_coordinator_authority() {
+    let mut harness = RealAuthorityHarness::new(1, PublicationMode::Immediate);
+    let key = harness.keys[0];
+    let mut coordinator = RuntimeCoordinator::new();
+    harness
+        .probe
+        .fail_next_activation_before_native(ExtensionRuntimeFailure::RestartRequired);
+
+    assert_eq!(
+        coordinator.activate_until(harness.resources(), key, false, deadline()),
+        RuntimeActivationOutcome::Unavailable(RuntimeActivationUnavailableReason::NativeRetryable(
+            ExtensionRuntimeFailure::RestartRequired,
+        ),),
+    );
+    assert_eq!(harness.probe.activation_calls(), 1);
+    assert_eq!(harness.probe.publication_calls(), 0);
+    assert!(!coordinator.has_attached_obligation());
+
+    assert_eq!(
+        coordinator.activate_until(harness.resources(), key, false, deadline()),
+        RuntimeActivationOutcome::Activated(ExtensionRuntimeGeneration::INITIAL),
+    );
+    assert_eq!(harness.probe.activation_calls(), 2);
+    assert_eq!(harness.probe.publication_calls(), 1);
+    assert_eq!(
+        coordinator.retire_key_until(harness.resources(), key, deadline()),
+        RuntimeRetirementOutcome::Retired,
+    );
+    drop(coordinator);
+    harness.finish();
+}
 
 #[test]
 fn real_authority_activation_reloads_unknown_projection_and_retires_exact_runtime() {

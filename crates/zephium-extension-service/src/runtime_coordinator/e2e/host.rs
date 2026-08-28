@@ -56,6 +56,7 @@ pub(super) struct HostProbe {
     reclaim_calls: AtomicUsize,
     profile_absence_calls: AtomicUsize,
     live_reservations: AtomicUsize,
+    next_pre_entry_failure: Mutex<Option<ExtensionRuntimeFailure>>,
     registry: Mutex<RegistryState>,
 }
 
@@ -92,6 +93,7 @@ impl Default for HostProbe {
             reclaim_calls: AtomicUsize::new(0),
             profile_absence_calls: AtomicUsize::new(0),
             live_reservations: AtomicUsize::new(0),
+            next_pre_entry_failure: Mutex::new(None),
             registry: Mutex::new(RegistryState {
                 records: std::array::from_fn(|_| None),
             }),
@@ -100,6 +102,21 @@ impl Default for HostProbe {
 }
 
 impl HostProbe {
+    pub(super) fn fail_next_activation_before_native(&self, failure: ExtensionRuntimeFailure) {
+        let mut pending = self
+            .next_pre_entry_failure
+            .lock()
+            .expect("scripted pre-entry failure mutex remains healthy");
+        assert!(pending.replace(failure).is_none());
+    }
+
+    fn take_pre_entry_failure(&self) -> Option<ExtensionRuntimeFailure> {
+        self.next_pre_entry_failure
+            .lock()
+            .ok()
+            .and_then(|mut failure| failure.take())
+    }
+
     pub(super) fn bind_calls(&self) -> usize {
         self.bind_calls.load(Ordering::Acquire)
     }
@@ -327,6 +344,32 @@ impl HostProbe {
         if record.authority.is_none() {
             registry.records[index] = None;
         }
+        Ok(())
+    }
+
+    fn reopen_after_retryable_absence(
+        &self,
+        reservation: &ReservationControl,
+    ) -> Result<(), ExtensionRuntimeHostBindError> {
+        let mut registry = self.try_lock_registry()?;
+        if registry.records.iter().flatten().any(|record| {
+            record.owner == reservation.owner && record.generation == reservation.generation
+        }) {
+            return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+        }
+        let slot = registry
+            .records
+            .iter_mut()
+            .find(|record| record.is_none())
+            .ok_or(ExtensionRuntimeHostBindError::CapacityExceeded)?;
+        *slot = Some(RegistryRecord {
+            owner: reservation.owner,
+            generation: reservation.generation,
+            // The proxy reservation remains attached across a retryable
+            // activation result; only its definite native-owner state reset.
+            phase: RegistryPhase::Attached,
+            authority: None,
+        });
         Ok(())
     }
 
@@ -786,7 +829,16 @@ impl ScriptedLifecycle {
                 let absence = self.mint_activation_absence(attempt);
                 match kind {
                     ScriptedActivationAbsence::Retryable => {
-                        ExtensionRuntimeActivationDisposition::Retryable { failure, absence }
+                        if self
+                            .reservation
+                            .probe
+                            .reopen_after_retryable_absence(&self.reservation)
+                            .is_ok()
+                        {
+                            ExtensionRuntimeActivationDisposition::Retryable { failure, absence }
+                        } else {
+                            Self::uncertain_activation(ExtensionRuntimeFailure::Internal, None)
+                        }
                     }
                     ScriptedActivationAbsence::Rejected => {
                         ExtensionRuntimeActivationDisposition::Rejected { failure, absence }
@@ -977,6 +1029,13 @@ impl ExtensionRuntimeLifecyclePort for ScriptedLifecycle {
             .probe
             .activation_calls
             .fetch_add(1, Ordering::AcqRel);
+        if let Some(failure) = self.reservation.probe.take_pre_entry_failure() {
+            return self.settle_definite_activation_absence(
+                attempt,
+                ScriptedActivationAbsence::Retryable,
+                failure,
+            );
+        }
         if Instant::now() >= deadline {
             return self.settle_definite_activation_absence(
                 attempt,

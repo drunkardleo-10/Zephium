@@ -5,6 +5,7 @@ const STARTUP_GATE_OWNER: &str = "crates/zephium-engine/src/host/construction.rs
 const STARTUP_GATE_API: &str = "vendor/wry/src/lib.rs";
 const LIFECYCLE_ADAPTER: &str =
     "crates/zephium-engine/src/host/extension_runtime/windows_adapter.rs";
+const RUNTIME_REGISTRY: &str = "crates/zephium-engine/src/host/extension_runtime.rs";
 const REVIEWED_ENVIRONMENT_FORWARDERS: [(&str, usize); 4] = [
     ("crates/zephium-engine/src/host/construction.rs", 1),
     ("vendor/tauri-runtime-wry/src/lib.rs", 1),
@@ -23,6 +24,7 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     validate_native_owner(&native_owner_source)?;
     validate_startup_gate_owner(&read_source(&repository.join(STARTUP_GATE_OWNER))?)?;
     validate_lifecycle_adapter(&read_source(&repository.join(LIFECYCLE_ADAPTER))?)?;
+    validate_runtime_registry(&read_source(&repository.join(RUNTIME_REGISTRY))?)?;
 
     let mut wry_sources = Vec::new();
     collect_rust_sources(&wry_root, &mut wry_sources)?;
@@ -348,6 +350,8 @@ fn validate_startup_gate_owner(source: &str) -> Result<(), String> {
     for required in [
         "published_windows_native_owner_ids(partition.profile())",
         "profile.attest_controller(environment,core,deadline,&owners)",
+        "self.windows_extension_environments.content_admission(",
+        "self.windows_extension_environments.record_disabled(profile)",
         "pub(super)fnpreflight_windows_extension_profile(",
         "pub(super)fnensure_windows_extension_profile(",
         ".try_acquire(NativeResourceClass::TransientConstruction)",
@@ -359,6 +363,9 @@ fn validate_startup_gate_owner(source: &str) -> Result<(), String> {
         "self.capture_windows_environment(profile,environment)",
         "crate::platform::imp::configure(view,0.0,false,&path)",
         "wry::WebViewExtWindows::close(view)",
+        "self.windows_extension_environments.begin(profile)",
+        "self.windows_extension_environments.fail(profile)",
+        "self.windows_extension_environments.publish(profile)",
         "self.windows_extension_profiles.insert(profile,native_profile)",
     ] {
         if !source.contains(required) {
@@ -387,7 +394,9 @@ fn validate_startup_gate_owner(source: &str) -> Result<(), String> {
         "WindowsNativeExtensionProfile::from_startup_gate(",
         "self.capture_windows_environment(profile,environment)",
         "wry::WebViewExtWindows::close(view)",
+        "ifletSome(failure)=failure{self.windows_extension_profiles.remove(&profile);self.windows_extension_environments.fail(profile);returnErr(failure);}",
         "self.windows_extension_profiles.insert(profile,native_profile)",
+        "self.windows_extension_environments.publish(profile)",
     ];
     let mut cursor = 0;
     for required in ordered {
@@ -414,6 +423,7 @@ fn validate_lifecycle_adapter(source: &str) -> Result<(), String> {
         "WindowsNativeExtensionRetirement::Absent(audit)",
         "native_profile.reconcile_recovery(expected,deadline)",
         "Failure::ExistingEnvironmentModeConflict=>ExtensionRuntimeFailure::RestartRequired",
+        "ExtensionRuntimeFailure::BackendUnavailable|ExtensionRuntimeFailure::CapacityExceeded|ExtensionRuntimeFailure::RestartRequired|ExtensionRuntimeFailure::TimedOut",
     ] {
         if !source.contains(required) {
             return Err(format!(
@@ -436,6 +446,29 @@ fn validate_lifecycle_adapter(source: &str) -> Result<(), String> {
             ));
         };
         cursor += offset + required.len();
+    }
+    Ok(())
+}
+
+fn validate_runtime_registry(source: &str) -> Result<(), String> {
+    let source = compact(source);
+    let registry = source
+        .split_once("pub(super)fnpublished_windows_native_owner_ids(")
+        .map(|(_, registry)| registry)
+        .ok_or_else(|| format!("{RUNTIME_REGISTRY} is missing Windows owner projection"))?;
+    for required in [
+        "ReservationBinding::Activation{expectation:ExtensionRuntimeNativeIdentityExpectation::WindowsWebView2Extension(_),..}|ReservationBinding::Recovery{expectation:ExtensionRuntimeRecoveryExpectation::WindowsWebView2Extension{..},..}",
+        "entry.reservation.binding.expected_windows_owner()",
+        "*evidence!=ExtensionRuntimeOwnershipEvidence::WindowsWebView2Extension(owner)",
+        "owner_count==owners.len()",
+        ".any(|existing|*existing==owner)",
+        "self.fail_invariant()",
+    ] {
+        if !registry.contains(required) {
+            return Err(format!(
+                "{RUNTIME_REGISTRY} is missing published Windows recovery projection: {required}"
+            ));
+        }
     }
     Ok(())
 }
@@ -785,6 +818,16 @@ fn create_environment() {
             1,
         );
         assert!(validate_lifecycle_adapter(&late_entry).is_err());
+
+        let registry =
+            read_source(&repository.join(RUNTIME_REGISTRY)).expect("runtime registry source");
+        assert!(validate_runtime_registry(&registry).is_ok());
+        assert!(validate_runtime_registry(&registry.replacen(
+            "| ReservationBinding::Recovery {",
+            "| ReservationBinding::Activation {",
+            1,
+        ))
+        .is_err());
     }
 
     #[test]

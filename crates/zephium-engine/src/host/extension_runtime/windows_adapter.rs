@@ -363,6 +363,7 @@ fn complete_pre_entry_failure(
         failure,
         ExtensionRuntimeFailure::BackendUnavailable
             | ExtensionRuntimeFailure::CapacityExceeded
+            | ExtensionRuntimeFailure::RestartRequired
             | ExtensionRuntimeFailure::TimedOut
     ) {
         ExtensionRuntimeActivationDisposition::Retryable { failure, absence }

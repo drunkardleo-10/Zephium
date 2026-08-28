@@ -694,6 +694,17 @@ impl EngineHost {
         #[cfg(target_os = "windows")]
         let had_environment = self.environments.contains_key(&profile);
         #[cfg(target_os = "windows")]
+        let extension_environment_binding_valid = self
+            .windows_extension_environments
+            .profile_binding_is_consistent(
+                profile,
+                had_environment,
+                self.windows_extension_profiles.contains_key(&profile),
+            )
+            && self
+                .windows_extension_environments
+                .profile_allows_erasure(profile);
+        #[cfg(target_os = "windows")]
         let browser_process_exit_proof = self
             .browser_process_exit_observers
             .get(&profile)
@@ -719,7 +730,8 @@ impl EngineHost {
             && !self.construction_unproven.contains(&profile)
             && !self.unproven_browser_processes.contains_key(&profile)
             && !self.unproven_environments.contains_key(&profile)
-            && !self.windows_cleanup_invariant_failed;
+            && !self.windows_cleanup_invariant_failed
+            && extension_environment_binding_valid;
 
         let mut ids: Vec<ItemId> = self
             .partitions
@@ -751,6 +763,8 @@ impl EngineHost {
         self.browser_version_observers.remove(&profile);
         #[cfg(target_os = "windows")]
         self.windows_extension_profiles.remove(&profile);
+        #[cfg(target_os = "windows")]
+        self.windows_extension_environments.remove(profile);
         #[cfg(target_os = "windows")]
         self.environments.remove(&profile);
 
@@ -1119,6 +1133,7 @@ impl EngineHost {
         }
         self.browser_version_observers.remove(&profile);
         self.windows_extension_profiles.remove(&profile);
+        self.windows_extension_environments.remove(profile);
         self.environments.remove(&profile);
         self.browser_processes.remove(&profile);
         self.browser_process_exit_observers.remove(&profile);

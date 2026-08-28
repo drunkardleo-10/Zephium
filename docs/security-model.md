@@ -1051,6 +1051,20 @@ These inherited properties must not be overstated:
   available when the environment starts, before an embedder can enumerate the
   profile, so the bootstrap controller is deliberately page-inert and no raw
   content controller is admitted at that point.
+- An allocation-free, eight-slot engine-owned mode registry records every captured Windows profile
+  environment as ordinary disabled or extension preparing/ready/failed. The
+  extension profile object is published only after native hardening, explicit
+  controller close, cleanup-debt collection, and deadline checks succeed. A
+  configure failure, close failure, late deadline, interrupted preparation, or
+  mismatch between mode/environment/profile maps leaves a sticky refusal; the
+  captured enabled environment can never fall through the ordinary gate-less
+  content path. Only exact browser-process exit or process restart removes that
+  generation's mode state.
+- Content inventory comparison includes exact published owners from both fresh
+  activation and restart recovery bindings. A Windows recovery binding must
+  resolve its catalog and prior adapter identity to one owner and its published
+  evidence must match. Conflicting, identityless, duplicate, or over-capacity
+  recovered cohorts fail the registry invariant and admit no content view.
 - Before any later extension-enabled content controller initializes, the host
   enumerates the complete bounded native extension snapshot and requires exact
   equality with the published runtime-owner cohort. Activation, removal, and

@@ -1258,6 +1258,19 @@ lease transfers to the existing teardown-debt registry if close is not proven.
 Only the attested environment/profile pair remains, alongside the existing
 browser-process exit and runtime-update observers.
 
+Environment mode is not inferred from either native map. A separate
+allocation-free eight-slot registry, sharing the native process-group ceiling,
+records ordinary `Disabled`, extension `Preparing`,
+extension `Ready`, or sticky extension `Failed`. The host records ordinary
+disabled environments when their exact process capture succeeds. Extension
+profile authority is published only after environment/profile attestation,
+controller hardening, explicit close, cleanup-debt collection, and the caller's
+deadline all succeed. Any failure removes the provisional profile and records
+`Failed`; a captured environment without matching mode state, or a `Ready`
+state without both environment and profile authority, is an invariant failure.
+`Preparing`/`Failed` refuses later content and extension preflight until exact
+process exit or restart clears that generation.
+
 Activation consumes the authenticated package-root lease only after the
 durable lifecycle has entered its native phase. It checks every asynchronous
 HRESULT, retains the returned extension object, reads back its exact Chromium
@@ -1272,6 +1285,13 @@ runtime-owner cohort; an extra, missing, duplicate, timed-out, or mismatched
 owner prevents page initialization. Profiles without product authority still
 construct the default extension-disabled environment and allocate no native
 extension host.
+The published cohort includes both fresh activation reservations and recovered
+reservations reconstructed after restart. A recovery row contributes an owner
+only when its catalog-expected and previously adapter-observed Windows IDs
+resolve unambiguously and the published ownership evidence matches that exact
+ID. Conflicting anchors, duplicate owners, or capacity overflow fail the whole
+registry invariant instead of projecting an empty cohort that can never match
+WebView2.
 
 This is not yet a Windows product-support claim. A profile whose ordinary
 extension-disabled WebView2 environment is already running cannot switch the

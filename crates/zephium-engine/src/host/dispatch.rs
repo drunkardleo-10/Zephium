@@ -498,6 +498,9 @@ pub(crate) fn install(
             #[cfg(target_os = "windows")]
             windows_extension_profiles: HashMap::new(),
             #[cfg(target_os = "windows")]
+            windows_extension_environments:
+                super::WindowsExtensionEnvironmentRegistry::default(),
+            #[cfg(target_os = "windows")]
             browser_processes: HashMap::new(),
             #[cfg(target_os = "windows")]
             browser_process_exit_observers: HashMap::new(),

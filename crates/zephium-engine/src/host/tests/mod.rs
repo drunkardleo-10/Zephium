@@ -9,6 +9,90 @@ fn raw_view_construction_policy() -> &'static str {
 }
 
 #[test]
+fn windows_extension_configure_failure_is_sticky_for_preflight_and_content() {
+    let profile = zephium_core::ids::ProfileId::from(1);
+    let mut registry = super::WindowsExtensionEnvironmentRegistry::default();
+    assert_eq!(
+        registry.preflight(profile, false, false),
+        super::WindowsExtensionEnvironmentPreflight::Create,
+    );
+    assert!(registry.begin(profile));
+    // The environment callback may already have published the COM environment
+    // when later controller hardening fails.
+    registry.fail(profile);
+    assert_eq!(
+        registry.preflight(profile, true, false),
+        super::WindowsExtensionEnvironmentPreflight::RestartRequired,
+    );
+    assert_eq!(
+        registry.content_admission(profile, true, false),
+        super::WindowsExtensionContentAdmission::RestartRequired,
+    );
+    assert!(!registry.publish(profile));
+    assert!(!registry.record_disabled(profile));
+}
+
+#[test]
+fn windows_extension_close_debt_cannot_publish_the_attested_profile() {
+    let profile = zephium_core::ids::ProfileId::from(2);
+    let mut registry = super::WindowsExtensionEnvironmentRegistry::default();
+    assert!(registry.begin(profile));
+    // Profile attestation can succeed before explicit controller close. A
+    // close/cleanup failure must still dominate that provisional object.
+    registry.fail(profile);
+    assert_eq!(
+        registry.content_admission(profile, true, true),
+        super::WindowsExtensionContentAdmission::RestartRequired,
+    );
+    assert_eq!(
+        registry.preflight(profile, true, true),
+        super::WindowsExtensionEnvironmentPreflight::RestartRequired,
+    );
+    assert!(!registry.publish(profile));
+}
+
+#[test]
+fn windows_extension_environment_and_profile_map_divergence_is_never_reused() {
+    let profile = zephium_core::ids::ProfileId::from(3);
+    let mut registry = super::WindowsExtensionEnvironmentRegistry::default();
+    assert_eq!(
+        registry.content_admission(profile, true, false),
+        super::WindowsExtensionContentAdmission::InvariantFailed,
+        "an unclassified captured environment is not implicitly disabled",
+    );
+    assert_eq!(
+        registry.content_admission(profile, false, true),
+        super::WindowsExtensionContentAdmission::InvariantFailed,
+    );
+
+    assert!(registry.begin(profile));
+    assert!(registry.publish(profile));
+    assert_eq!(
+        registry.content_admission(profile, true, true),
+        super::WindowsExtensionContentAdmission::Enabled,
+    );
+    for (environment_present, profile_authority_present) in
+        [(true, false), (false, true), (false, false)]
+    {
+        assert_eq!(
+            registry.content_admission(profile, environment_present, profile_authority_present,),
+            super::WindowsExtensionContentAdmission::InvariantFailed,
+        );
+    }
+
+    registry.remove(profile);
+    assert!(registry.record_disabled(profile));
+    assert_eq!(
+        registry.content_admission(profile, true, false),
+        super::WindowsExtensionContentAdmission::ReuseDisabled,
+    );
+    assert_eq!(
+        registry.preflight(profile, true, false),
+        super::WindowsExtensionEnvironmentPreflight::RestartRequired,
+    );
+}
+
+#[test]
 fn protected_document_start_scripts_flow_through_the_ordered_builder_path() {
     let source = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),

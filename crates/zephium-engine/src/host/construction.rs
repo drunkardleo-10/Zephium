@@ -585,31 +585,61 @@ impl EngineHost {
         #[cfg(target_os = "windows")]
         let cached_environment = self.environments.get(&partition.profile()).cloned();
         #[cfg(target_os = "windows")]
-        let extension_startup_gate = if let Some(profile) = self
-            .windows_extension_profiles
-            .get(&partition.profile())
-            .cloned()
-        {
-            let owners = match self
-                .extension_runtime_registry
-                .published_windows_native_owner_ids(partition.profile())
-            {
-                Ok(owners) => owners,
-                Err(error) => {
-                    eprintln!(
-                        "security: cannot project authenticated WebView2 extension inventory: {error:?}"
-                    );
-                    if report_failure {
-                        event_permit
-                            .emit(&self.sink, EngineEvent::ViewCreationFailed { id: id.get() });
-                    }
+        let extension_startup_gate = match self.windows_extension_environments.content_admission(
+            partition.profile(),
+            cached_environment.is_some(),
+            self.windows_extension_profiles
+                .contains_key(&partition.profile()),
+        ) {
+            super::WindowsExtensionContentAdmission::CreateDisabled
+            | super::WindowsExtensionContentAdmission::ReuseDisabled => None,
+            super::WindowsExtensionContentAdmission::Enabled => {
+                let Some(profile) = self
+                    .windows_extension_profiles
+                    .get(&partition.profile())
+                    .cloned()
+                else {
+                    self.native_resource_accounting_failed = true;
                     return None;
+                };
+                let owners = match self
+                    .extension_runtime_registry
+                    .published_windows_native_owner_ids(partition.profile())
+                {
+                    Ok(owners) => owners,
+                    Err(error) => {
+                        eprintln!(
+                            "security: cannot project authenticated WebView2 extension inventory: {error:?}"
+                        );
+                        if report_failure {
+                            event_permit
+                                .emit(&self.sink, EngineEvent::ViewCreationFailed { id: id.get() });
+                        }
+                        return None;
+                    }
+                };
+                Some((profile, owners))
+            }
+            super::WindowsExtensionContentAdmission::RestartRequired => {
+                eprintln!(
+                    "security: refused content construction after failed WebView2 extension bootstrap"
+                );
+                if report_failure {
+                    event_permit.emit(&self.sink, EngineEvent::ViewCreationFailed { id: id.get() });
                 }
-            };
-            Some((profile, owners))
-        } else {
-            None
+                return None;
+            }
+            super::WindowsExtensionContentAdmission::InvariantFailed => {
+                self.native_resource_accounting_failed = true;
+                eprintln!("security: WebView2 extension environment/profile state diverged");
+                if report_failure {
+                    event_permit.emit(&self.sink, EngineEvent::ViewCreationFailed { id: id.get() });
+                }
+                return None;
+            }
         };
+        #[cfg(target_os = "windows")]
+        let extension_environment_enabled = extension_startup_gate.is_some();
         #[cfg(target_os = "windows")]
         let construction_environment: Rc<RefCell<Option<ICoreWebView2Environment>>> =
             Rc::new(RefCell::new(None));
@@ -1184,7 +1214,23 @@ impl EngineHost {
             // is no longer needed in either case.
             self.construction_unproven.remove(&profile);
             match captured {
-                Ok(captured) => captured,
+                Ok(captured) => {
+                    if !extension_environment_enabled
+                        && !self.windows_extension_environments.record_disabled(profile)
+                    {
+                        self.native_resource_accounting_failed = true;
+                        self.quarantine_unverifiable_windows_profile(profile);
+                        eprintln!(
+                            "security: WebView2 disabled environment mode contradicted its registry"
+                        );
+                        if report_failure {
+                            event_permit
+                                .emit(&self.sink, EngineEvent::ViewCreationFailed { id: id.get() });
+                        }
+                        return None;
+                    }
+                    captured
+                }
                 Err(error) => {
                     self.quarantine_unverifiable_windows_profile(profile);
                     eprintln!("engine: cannot retain early WebView2 process obligation: {error}");
@@ -1567,6 +1613,23 @@ impl EngineHost {
                 crate::platform::imp::WindowsNativeExtensionFailure::ProfileHostUnavailable,
             );
         }
+        match self.windows_extension_environments.preflight(
+            profile,
+            self.environments.contains_key(&profile),
+            self.windows_extension_profiles.contains_key(&profile),
+        ) {
+            super::WindowsExtensionEnvironmentPreflight::Create
+            | super::WindowsExtensionEnvironmentPreflight::Ready => {}
+            super::WindowsExtensionEnvironmentPreflight::RestartRequired => {
+                return Err(
+                    crate::platform::imp::WindowsNativeExtensionFailure::ExistingEnvironmentModeConflict,
+                )
+            }
+            super::WindowsExtensionEnvironmentPreflight::InvariantFailed => {
+                self.native_resource_accounting_failed = true;
+                return Err(crate::platform::imp::WindowsNativeExtensionFailure::AdapterInvariant);
+            }
+        }
         if self.windows_view_admission_blocked(profile)
             || !self.windows_profile_process_group_capacity_allows(profile)
         {
@@ -1574,11 +1637,13 @@ impl EngineHost {
                 crate::platform::imp::WindowsNativeExtensionFailure::ProfileHostUnavailable,
             );
         }
-        if self.windows_extension_profiles.contains_key(&profile) {
+        if self
+            .windows_extension_environments
+            .is_extension_ready(profile)
+        {
             return Ok(());
         }
-        if self.environments.contains_key(&profile)
-            || self.has_live_profile_view(profile)
+        if self.has_live_profile_view(profile)
             || self
                 .spare
                 .as_ref()
@@ -1602,7 +1667,10 @@ impl EngineHost {
         deadline: std::time::Instant,
     ) -> Result<(), crate::platform::imp::WindowsNativeExtensionFailure> {
         self.preflight_windows_extension_profile(profile, deadline)?;
-        if self.windows_extension_profiles.contains_key(&profile) {
+        if self
+            .windows_extension_environments
+            .is_extension_ready(profile)
+        {
             return Ok(());
         }
 
@@ -1639,6 +1707,11 @@ impl EngineHost {
             return Err(
                 crate::platform::imp::WindowsNativeExtensionFailure::ProfileHostUnavailable,
             );
+        }
+        if !self.windows_extension_environments.begin(profile) {
+            self.construction_unproven.remove(&profile);
+            self.native_resource_accounting_failed = true;
+            return Err(crate::platform::imp::WindowsNativeExtensionFailure::AdapterInvariant);
         }
         let builder = {
             let observed = observed_environment.clone();
@@ -1794,17 +1867,32 @@ impl EngineHost {
         }
         drop(built);
         drop(construction_resource.take());
-        if let Ok(native_profile) = native_profile {
-            self.windows_extension_profiles
-                .insert(profile, native_profile);
-        }
         if let Some(failure) = failure {
+            self.windows_extension_profiles.remove(&profile);
+            self.windows_extension_environments.fail(profile);
             return Err(failure);
         }
         if std::time::Instant::now() >= deadline {
+            self.windows_extension_profiles.remove(&profile);
+            self.windows_extension_environments.fail(profile);
             return Err(
                 crate::platform::imp::WindowsNativeExtensionFailure::ProfileHostUnavailable,
             );
+        }
+        let native_profile = match native_profile {
+            Ok(native_profile) => native_profile,
+            Err(failure) => {
+                self.windows_extension_environments.fail(profile);
+                return Err(failure);
+            }
+        };
+        self.windows_extension_profiles
+            .insert(profile, native_profile);
+        if !self.windows_extension_environments.publish(profile) {
+            self.windows_extension_profiles.remove(&profile);
+            self.windows_extension_environments.fail(profile);
+            self.native_resource_accounting_failed = true;
+            return Err(crate::platform::imp::WindowsNativeExtensionFailure::AdapterInvariant);
         }
         Ok(())
     }

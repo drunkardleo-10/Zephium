@@ -136,6 +136,9 @@ impl EngineHost {
     ) {
         self.shutdown_common();
         self.retry_windows_cleanup_debts(3);
+        let extension_environment_bindings_valid = self
+            .windows_extension_environments
+            .bindings_are_consistent(&self.environments, &self.windows_extension_profiles);
         // Runtime owners are already quiescent at this boundary. Release the
         // read-only profile COM authorities before environment/process
         // shutdown so they cannot keep an otherwise viewless profile alive.
@@ -149,6 +152,7 @@ impl EngineHost {
             && !self.windows_cleanup_invariant_failed
             && !crate::platform::imp::native_extension_cleanup_invariant_failed()
             && !self.native_resource_accounting_failed
+            && extension_environment_bindings_valid
             && self.extension_runtime_registry.is_quiescent()
             && self.native_resources.is_quiescent()
             && self
@@ -184,6 +188,7 @@ impl EngineHost {
         // initiates normal runtime shutdown. Observer guards intentionally
         // remain UI-thread-owned until process exit signals their proofs.
         self.browser_version_observers.clear();
+        self.windows_extension_environments.clear();
         self.environments.clear();
         self.exiting_browser_processes.clear();
         self.pending_profile_recovery.clear();

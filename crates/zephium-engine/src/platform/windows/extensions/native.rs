@@ -1,11 +1,13 @@
 //! Exact WebView2 extension installation and teardown primitives.
 //!
 //! The caller must already own an authenticated native-root lease and the
-//! durable `NativeMayOwn` lifecycle transition. This adapter derives both the
-//! environment and profile from one existing profile-bound content WebView,
-//! attests its user-data directory, and retains every native object returned by
-//! WebView2. It does not create an environment or hidden controller and it
-//! grants no package, catalog, page, or IPC authority.
+//! durable `NativeMayOwn` lifecycle transition. The engine host constructs one
+//! short-lived page-inert controller through Wry's authenticated startup gate;
+//! [`WindowsNativeExtensionProfile::from_startup_gate`] then binds the exact
+//! UDF, environment, controller-reported environment, and non-private profile.
+//! This adapter consumes only that published authority and retains every native
+//! object returned by WebView2. It does not itself create an environment or
+//! controller and grants no package, catalog, page, or IPC authority.
 
 use std::cell::{Cell, RefCell};
 use std::fmt;
