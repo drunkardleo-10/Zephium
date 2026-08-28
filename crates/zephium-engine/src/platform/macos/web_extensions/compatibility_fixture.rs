@@ -49,6 +49,7 @@ const SCHEDULER_YIELD_MODE_ATTRIBUTE: &str = "data-zephium-scheduler-yield-mode"
 const CREDENTIAL_FILL_ATTRIBUTE: &str = "data-zephium-credential-fill";
 const CREDENTIAL_SELECTION_ATTRIBUTE: &str = "data-zephium-credential-selection";
 const CREDENTIAL_INLINE_ATTRIBUTE: &str = "data-zephium-credential-inline";
+const EXTENSION_PAGE_ATTRIBUTE: &str = "data-zephium-extension-page";
 const CREDENTIAL_PAGE_EVENTS_ATTRIBUTE: &str = "data-zephium-credential-page-events";
 const CREDENTIAL_FORGERY_ATTRIBUTE: &str = "data-zephium-credential-forgery";
 const CREDENTIAL_HOST_ATTRIBUTE: &str = "data-zephium-credential-host";
@@ -60,29 +61,29 @@ const NATIVE_PERMISSIONS: [Permission; 1] = [Permission::Tabs];
 const CREDENTIAL_CLICK_X: f64 = 126.0;
 const CREDENTIAL_CLICK_TOP: f64 = 38.0;
 
-const SOURCE_FILES: usize = 6;
-const SOURCE_BYTES: u64 = 15_017;
+const SOURCE_FILES: usize = 8;
+const SOURCE_BYTES: u64 = 17_920;
 const SOURCE_MANIFEST_SHA256: &str =
-    "42d6793b3064d1b519ce30eb43d570e70c43ce286e32e44565fa3fe8f4e06864";
-const SOURCE_TREE_SHA256: &str = "dda82a47f45dd298b81158c9bfcd2bd76a66fb6ea47566cdbc9379c805578d68";
+    "ff3ca029b3712c952395a051fa2e636074dcbb2630bb7b6810bf7b23245b332c";
+const SOURCE_TREE_SHA256: &str = "f713550d3a0fd041379986f4bb82453ef0fc9c7af6476328fcd717bfb8ddead5";
 const SOURCE_INDEX_SHA256: &str =
-    "dbdfa72e224321837f6d796f00d7e175d28ad5727fba2b69e3740e3695ddd7df";
-const SERVICE_WORKER_OUTPUT_FILES: usize = 9;
-const SERVICE_WORKER_OUTPUT_BYTES: u64 = 27_219;
+    "13a5be01c56f433c3e42a2daef529893dddfc2e0a560155db8aa8d828f85a267";
+const SERVICE_WORKER_OUTPUT_FILES: usize = 11;
+const SERVICE_WORKER_OUTPUT_BYTES: u64 = 30_241;
 const SERVICE_WORKER_OUTPUT_MANIFEST_SHA256: &str =
-    "1a8f5f4253c925a617ff239f33116bdbfa80d744c20fefca3800ee7c2712bef7";
+    "33870cfeaacaaca370fd52e8cb7f3daf997657584658b6c11f687b7f89f373f5";
 const SERVICE_WORKER_OUTPUT_TREE_SHA256: &str =
-    "cdd4a12d16886a27236e27d3595e99fe5663e0c7bfb104e86d39e479a6e63554";
+    "363a532874931e33aafbc44ac736843d5c22d39ed90a63a24eee4924d9f25f4e";
 const SERVICE_WORKER_OUTPUT_INDEX_SHA256: &str =
-    "22078cfc8e40c3ad668ba53cebafd21950b7a42413ee259265543212f21cb178";
-const DOCUMENT_OUTPUT_FILES: usize = 10;
-const DOCUMENT_OUTPUT_BYTES: u64 = 29_383;
+    "011d7725de66fe776acb6cd4b4a61c3599901c287a280c01f90848bd2455e74b";
+const DOCUMENT_OUTPUT_FILES: usize = 12;
+const DOCUMENT_OUTPUT_BYTES: u64 = 32_405;
 const DOCUMENT_OUTPUT_MANIFEST_SHA256: &str =
-    "9dbac3bc88f28dad6024bf6471931dd2aae4d32039fd27bd0ae4bcd7357af1ff";
+    "e83172cb383c4bc1c1853e564254a5e08688d296069074fe78e1dc409c838956";
 const DOCUMENT_OUTPUT_TREE_SHA256: &str =
-    "d4cfb233cfaf06438e538c1baa8bcf236e3e5aaaeab315f2e871913132903687";
+    "1dc5904cd68d1b3501f0a17626963d7eec6ab718f1e77c740394d86f31f6d65a";
 const DOCUMENT_OUTPUT_INDEX_SHA256: &str =
-    "d66446ce48e3e2bbe06dae9fd7d19b517327d19621b526fa802df6cc105789f6";
+    "189df158c16ee2760919860dd10454d4a3fb14b24576481a609e74bb21fec537";
 
 struct Teardown {
     controller: Weak<WKWebExtensionController>,
@@ -119,6 +120,7 @@ struct PageState {
     credential_fill: String,
     credential_selection: String,
     credential_inline: String,
+    extension_page: String,
     credential_page_events: String,
     credential_forgery: String,
     credential_host_count: usize,
@@ -130,6 +132,7 @@ impl PageState {
         self.credential_fill == "passed"
             && self.credential_selection == "trusted"
             && self.credential_inline == "ready"
+            && self.extension_page == "passed"
             && self.credential_page_events == "passed"
             && self.credential_forgery == "sent"
             && self.credential_host_count == 1
@@ -145,6 +148,7 @@ impl PageState {
     fn credential_workflow_failed(&self) -> bool {
         self.page_extension_api
             || self.credential_fill.starts_with("invalid:")
+            || self.extension_page.starts_with("invalid:")
             || self.scheduler_yield.starts_with("invalid:")
             || self.credential_host_count > 1
             || !matches!(
@@ -240,7 +244,7 @@ pub(super) fn run(artifact: &Path) -> Result<bool, String> {
             (None, Ok(())) => {}
         }
         println!(
-            "native-probe: macOS package-neutral compatibility fixture passed; os={}; exact_source_tree=passed; exact_output_tree=passed; background_adaptation={}; content_compatibility_mode={}; background_compatibility_mode={}; privacy_services=disabled-only; scheduler_yield={}; scheduler_yield_mode={}; runtime_response_round_trip=passed; tabs_message_round_trip=passed; background_preload_ms={}; background_wake=runtime-message; background_action_label={:?}; popup_background_lifecycle={}; popup_async_response=passed; sender_tab_routing=passed; page_world_adapter_absent=passed; page_world_extension_api_absent=passed; credential_field_discovery=passed; credential_inline_isolation=closed-shadow-null-origin; credential_page_forgery_ignored=passed; credential_selection_transport={}; credential_background_round_trip=passed; credential_page_events=passed; controller_visible_scripts={}; webview_callbacks={}; product_authority=false; native_objects_released=passed",
+            "native-probe: macOS package-neutral compatibility fixture passed; os={}; exact_source_tree=passed; exact_output_tree=passed; background_adaptation={}; content_compatibility_mode={}; background_compatibility_mode={}; privacy_services=disabled-only; web_accessible_extension_page=closed-shadow-native-identity; scheduler_yield={}; scheduler_yield_mode={}; runtime_response_round_trip=passed; tabs_message_round_trip=passed; background_preload_ms={}; background_wake=runtime-message; background_action_label={:?}; popup_background_lifecycle={}; popup_async_response=passed; sender_tab_routing=passed; page_world_adapter_absent=passed; page_world_extension_api_absent=passed; credential_field_discovery=passed; credential_inline_isolation=closed-shadow-null-origin; credential_page_forgery_ignored=passed; credential_selection_transport={}; credential_background_round_trip=passed; credential_page_events=passed; controller_visible_scripts={}; webview_callbacks={}; product_authority=false; native_objects_released=passed",
             teardown.operating_system,
             teardown.background_adaptation,
             teardown.content_mode.as_str(),
@@ -301,6 +305,7 @@ fn admit(
         || admitted.surfaces.same_document_navigation_routes != 0
         || admitted.surfaces.history_search
         || !admitted.surfaces.privacy_services_fallback
+        || admitted.surfaces.web_accessible_extension_pages != 1
     {
         return Err("compatibility fixture artifact surface contract drifted".into());
     }
@@ -372,7 +377,7 @@ fn validate_manifest(path: &Path, background: BackgroundAdaptation) -> Result<()
             "run_at": "document_start"
         }],
         "web_accessible_resources": [{
-            "resources": ["credential-inline.payload"],
+            "resources": ["credential-inline.payload", "extension-inline.html", "extension-inline.js"],
             "matches": [HOST_MATCH_PATTERN],
             "use_dynamic_url": true
         }]
@@ -739,6 +744,7 @@ fn wait_for_page_state(
             credentialFill: document.documentElement?.getAttribute({CREDENTIAL_FILL_ATTRIBUTE:?}) ?? "missing",
             credentialSelection: document.documentElement?.getAttribute({CREDENTIAL_SELECTION_ATTRIBUTE:?}) ?? "missing",
             credentialInline: document.documentElement?.getAttribute({CREDENTIAL_INLINE_ATTRIBUTE:?}) ?? "missing",
+            extensionPage: document.documentElement?.getAttribute({EXTENSION_PAGE_ATTRIBUTE:?}) ?? "missing",
             credentialPageEvents: document.documentElement?.getAttribute({CREDENTIAL_PAGE_EVENTS_ATTRIBUTE:?}) ?? "missing",
             credentialForgery: document.documentElement?.getAttribute({CREDENTIAL_FORGERY_ATTRIBUTE:?}) ?? "missing",
             credentialHostCount: document.querySelectorAll(`[${{String({CREDENTIAL_HOST_ATTRIBUTE:?})}}]`).length,
@@ -833,6 +839,8 @@ mod tests {
     );
     const POPUP_LIFECYCLE: &str =
         include_str!("../../../../fixtures/macos-extension-compatibility-v1/popup.js");
+    const EXTENSION_INLINE: &str =
+        include_str!("../../../../fixtures/macos-extension-compatibility-v1/extension-inline.js");
 
     #[test]
     fn exact_fixture_hashes_are_distinct_and_lowercase() {
@@ -884,6 +892,11 @@ mod tests {
         assert!(CREDENTIAL_BACKGROUND.contains("api.privacy?.services?.passwordSavingEnabled"));
         assert!(CREDENTIAL_BACKGROUND.contains("privacy-setting-invalid"));
         assert!(CREDENTIAL_BACKGROUND.contains("privacy: \"disabled-only\""));
+        assert!(CREDENTIAL_CONTENT.contains("event.source !== frame.contentWindow"));
+        assert!(CREDENTIAL_CONTENT.contains("origin.protocol !== \"webkit-extension:\""));
+        assert!(EXTENSION_INLINE.contains("globalThis[marker] === true"));
+        assert!(EXTENSION_INLINE.contains("chromeId === browserId"));
+        assert!(EXTENSION_INLINE.contains("parent.postMessage"));
         assert!(CREDENTIAL_BACKGROUND.contains("return true;"));
         assert!(POPUP_LIFECYCLE.contains("await api.runtime.sendMessage"));
         assert!(POPUP_LIFECYCLE.contains("ZEPHIUM_COMPAT_POPUP:passed"));

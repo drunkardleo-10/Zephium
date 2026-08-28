@@ -2070,10 +2070,10 @@ target removes it and retains the same explicit no-process deny facade. No
 third-party package byte is committed.
 
 The clean package-neutral document transform now produces 1,008 files and
-45,185,162 bytes with manifest, tree, and index SHA-256 values
+45,186,434 bytes with manifest, tree, and index SHA-256 values
 `08caefed1cd5c8945a60799257b41aa8586be0e2a5a5860285af06d4c7bbb169`,
-`b8334a31f79d1c12c215e1147c13be5d50fb9efe8b83d6ddfec1f1016bc807bb`,
-and `85bc5a940523ca41168f9575481e8277c3cb7157c0358138aa915f19d7dfd7c2c`.
+`e56cb28e0cbdb7ebb26d52d181f7a222b701af532ca7604b58245086fd2fd77d`,
+and `82532476eb19d8ccc2b6bfccc33809b7342884e961d82c64898b1acbb6a68c66`.
 The stock worker still reaches WebKit context error 6 after the bounded
 12-second load, while the clean document background loads without a context
 error in about 172 ms. The isolated-content compatibility marker is still not
@@ -2085,10 +2085,10 @@ expose onboarding.
 The distinct non-authorizing `webkit-macos-native-publisher-v1` transform
 preserves that release's required `nativeMessaging` declaration without
 installing the ordinary deny facade. Its current 1Password lab output contains
-1,007 files and 45,180,920 bytes; manifest, tree, and canonical-index SHA-256
+1,007 files and 45,181,908 bytes; manifest, tree, and canonical-index SHA-256
 values are `35a3ee69fb4caeb27db4be80b4fa68ee66f904145ee1ef0109fc2ba1f007980c`,
-`976951f803b1ad41ee70eb7f61e25c1138badb53fe12d2ac01dbd6f7727f6f0e`,
-and `6a434c5430e98bfe6e9793f9e25b561f2e8f1b113b0642534d8e96fd279c0c2c`.
+`beefd591018b35405bb0b6488f869a3e84e377ee362ad8332692983be9a3238d`,
+and `f83a7a3682384b42a064d6af7e7db179fc22e964414dc8cb2c720e1ae836e8b5`.
 The receipt explicitly requires a sealed publisher-host policy and a
 publisher-signed executable. It mints no such authority itself. The private
 lab profile now compiles the inspected 1Password host, Team, signing, and
@@ -2138,12 +2138,40 @@ real vault popup rendered, the content script exposed its field affordance on
 public HTTPS login forms, and an explicit popup `Autofill` action filled a
 synthetic username/password pair and dismissed the popup. This is the first
 complete real-vault fill through Zephium, but it is not yet a Verified-package
-claim. Clicking the in-field icon changes 1Password's logical open/close state
-without presenting its inline menu, and invoking the already-visible toolbar
-action does not yet toggle-dismiss the popup. Save/update, lock/restart,
+claim. In that first candidate, clicking the in-field icon changed 1Password's
+logical open/close state without presenting its inline menu, and invoking the
+already-visible toolbar action did not toggle-dismiss the popup. Save/update, lock/restart,
 passkeys, request authentication, long-running resource behavior, and upstream
 support remain open gates. No real credential or Apple Passwords entry was
 used by this test.
+
+The next package-neutral slice closes both browser-side causes disclosed by
+that run. Native toolbar actions now reauthenticate and toggle-dismiss only an
+exact same-context, same-tab popup before acquiring another resource lease;
+competing targets still receive the one-popup capacity refusal. Ordinary lab
+runs also use production transient outside-click/Escape behavior, while
+`ZEPHIUM_EXTENSION_LAB_RETAIN_POPUP=1` is the explicit inspector-only opt-in.
+Native and brokered product probes require open, toggle-dismiss, reopen,
+discard-close, and final reopen in one lifecycle.
+
+The offline transform also adapts manifest-declared web-accessible HTML pages,
+instead of limiting the native-preserving prelude to the action popup. Resource
+patterns are bounded portable ASCII with `*` as the only wildcard; expansion
+runs against the already-authenticated closed tree, deduplicates exact paths,
+and fails a missing literal HTML declaration. Declared sandbox pages remain
+byte-identical, undeclared extension pages remain explicitly unsupported, and
+the receipt binds the exact adapted-page count. A Zephium-owned fixture embeds
+one such page in a closed-shadow extension-origin iframe, authenticates its
+response by child-window identity and a random nonce, requires both native
+runtime aliases plus the compatibility marker, keeps the page world without
+extension APIs, and releases every native owner. Both service-worker and
+document-background WebKit runs pass. The current 1Password artifact expands
+exactly four declared pages: inline menu, notification, modal, and universal
+sign-on. Its newly signed private candidate installs, reconnects the publisher
+host after restart (native callback about 325 ms; worker ready about 434 ms),
+renders the real vault popup, and toggle-dismisses correctly. The field icon is
+present; final unlocked inline-menu selection remains a manual E2E gate rather
+than an asserted result.
 
 That gate also found and fixed two package-neutral lifecycle defects. WebKit
 delivers an extension's first `Port.postMessage` only after the delegate
@@ -2342,8 +2370,10 @@ reserved-namespace collisions, and emits a separately indexed artifact. Its
 `webkit-macos-native-v3` adapter preserves and locks native namespace identities,
 supplies only the inert catalog-update event owned by Zephium, wraps classic or
 module background workers, prepends isolated content scripts, leaves `MAIN`
-scripts unchanged, and inserts the local prelude only into an explicit leading
-action-popup `<head>`. A declared `notifications` permission conditionally adds
+scripts unchanged, and inserts the local prelude into an explicit leading
+action-popup `<head>` plus manifest-declared web-accessible HTML pages selected
+from the authenticated closed tree. Sandboxed and undeclared pages remain
+unchanged and disclosed. A declared `notifications` permission conditionally adds
 the separately typed native-preserving/inert fallback described above; packages
 without that declaration receive no namespace or extra resource. It does not
 proxy extension APIs: live WebKit evidence showed that proxy replacement

@@ -485,6 +485,7 @@ fn admit_compatibility_artifact(
         || artifact.surfaces.native_messaging_omitted != output.native_messaging_omitted
         || artifact.surfaces.managed_storage_fallback != output.managed_storage_fallback
         || artifact.surfaces.privacy_services_fallback != output.privacy_services_fallback
+        || artifact.surfaces.web_accessible_extension_pages != output.web_accessible_extension_pages
         || artifact.surfaces.created_navigation_target_fallback
             != output.created_navigation_target_fallback
         || artifact.surfaces.history_search

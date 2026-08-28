@@ -107,6 +107,7 @@ pub(super) struct ArtifactSurfaces {
     pub(super) same_document_navigation_routes: usize,
     pub(super) history_search: bool,
     pub(super) extension_pages: usize,
+    pub(super) web_accessible_extension_pages: usize,
     pub(super) empty_bookmarks: bool,
     pub(super) empty_favicon: bool,
     pub(super) default_search: bool,
@@ -167,6 +168,8 @@ struct Surfaces {
     #[serde(default)]
     extension_pages: Option<usize>,
     #[serde(default)]
+    web_accessible_extension_pages: Option<usize>,
+    #[serde(default)]
     bookmarks: Option<String>,
     #[serde(default)]
     favicon: Option<String>,
@@ -200,6 +203,7 @@ struct ContractFeatures {
     native_messaging_omitted: bool,
     managed_storage_fallback: bool,
     privacy_services_fallback: bool,
+    web_accessible_extension_pages: bool,
     created_navigation_target_fallback: bool,
 }
 
@@ -245,6 +249,7 @@ pub(super) fn validate(root: &Path) -> Result<ValidatedCompatibilityArtifact, St
         metadata.surfaces.managed_storage.as_deref() == Some("native-preserved-or-empty-read-only");
     let privacy_services_fallback = metadata.surfaces.privacy_services.as_deref()
         == Some("native-preserved-or-disabled-browser-services");
+    let web_accessible_extension_pages = metadata.surfaces.web_accessible_extension_pages.is_some();
     let created_navigation_target_fallback =
         metadata.surfaces.created_navigation_target.as_deref() == Some("inert-event");
     let document_background = metadata.surfaces.background == "module-document-wrapper";
@@ -261,6 +266,7 @@ pub(super) fn validate(root: &Path) -> Result<ValidatedCompatibilityArtifact, St
             native_messaging_omitted,
             managed_storage_fallback,
             privacy_services_fallback,
+            web_accessible_extension_pages,
             created_navigation_target_fallback,
         },
     )?;
@@ -314,6 +320,7 @@ fn expected_contract(
         native_messaging_omitted,
         managed_storage_fallback,
         privacy_services_fallback,
+        web_accessible_extension_pages,
         created_navigation_target_fallback,
     } = features;
     if target == CompatibilityArtifactTarget::NativeV3 {
@@ -363,6 +370,12 @@ fn expected_contract(
                 "privacy-services-onchange-events-not-emitted",
                 "privacy-services-enablement-unsupported",
             ]);
+        }
+        if web_accessible_extension_pages {
+            limitations
+                .retain(|limitation| *limitation != "non-action-extension-pages-not-adapted");
+            adaptations.push("declared-web-accessible-extension-pages-v1");
+            limitations.push("undeclared-extension-pages-not-adapted");
         }
         if created_navigation_target_fallback {
             adaptations.push("created-navigation-target-event-fallback-v1");
@@ -546,6 +559,20 @@ fn validate_surfaces(
         }
         _ => return Err("compatibility artifact extension-page surface is invalid".into()),
     };
+    let web_accessible_extension_pages = match (target, surfaces.web_accessible_extension_pages) {
+        (CompatibilityArtifactTarget::NativeV3, None)
+        | (CompatibilityArtifactTarget::NativeBrokeredV1, None) => 0,
+        (CompatibilityArtifactTarget::NativeV3, Some(pages))
+            if (1..=MAX_EXTENSION_TREE_FILES).contains(&pages) =>
+        {
+            pages
+        }
+        _ => {
+            return Err(
+                "compatibility artifact web-accessible extension-page surface is invalid".into(),
+            )
+        }
+    };
     let empty_bookmarks = match (target, surfaces.bookmarks.as_deref()) {
         (CompatibilityArtifactTarget::NativeV3, None)
         | (CompatibilityArtifactTarget::NativeBrokeredV1, None) => false,
@@ -619,6 +646,7 @@ fn validate_surfaces(
         same_document_navigation_routes: surfaces.same_document_navigation_routes,
         history_search,
         extension_pages,
+        web_accessible_extension_pages,
         empty_bookmarks,
         empty_favicon,
         default_search,

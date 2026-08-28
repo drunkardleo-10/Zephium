@@ -217,14 +217,15 @@ impl StockContract {
                 native_messaging_omitted: false,
                 managed_storage_fallback: false,
                 privacy_services_fallback: false,
+                web_accessible_extension_pages: 0,
                 created_navigation_target_fallback: false,
             },
             Self::OnePassword8123434 => CompatibilityOutputContract {
                 files: 1_008,
-                bytes: 45_185_162,
+                bytes: 45_186_434,
                 manifest_sha256: "08caefed1cd5c8945a60799257b41aa8586be0e2a5a5860285af06d4c7bbb169",
-                tree_sha256: "b8334a31f79d1c12c215e1147c13be5d50fb9efe8b83d6ddfec1f1016bc807bb",
-                index_sha256: "85bc5a940523ca41168f9575481e8277c3cb7157c0358138aa915f19d7dfd7c2",
+                tree_sha256: "e56cb28e0cbdb7ebb26d52d181f7a222b701af532ca7604b58245086fd2fd77d",
+                index_sha256: "82532476eb19d8ccc2b6bfccc33809b7342884e961d82c64898b1acbb6a68c66",
                 background: BackgroundAdaptationKind::ModuleDocument,
                 isolated_content_scripts: 7,
                 same_document_navigation_routes: 7,
@@ -232,6 +233,7 @@ impl StockContract {
                 native_messaging_omitted: true,
                 managed_storage_fallback: true,
                 privacy_services_fallback: true,
+                web_accessible_extension_pages: 4,
                 created_navigation_target_fallback: true,
             },
         }
@@ -316,6 +318,7 @@ pub(super) struct CompatibilityOutputContract {
     pub(super) native_messaging_omitted: bool,
     pub(super) managed_storage_fallback: bool,
     pub(super) privacy_services_fallback: bool,
+    pub(super) web_accessible_extension_pages: usize,
     pub(super) created_navigation_target_fallback: bool,
 }
 

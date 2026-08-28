@@ -16,11 +16,14 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use sha2::{Digest as _, Sha256};
+use zephium_core::extensions::{
+    MAX_EXTENSION_WEB_ACCESSIBLE_DECLARATIONS, MAX_EXTENSION_WEB_ACCESSIBLE_RESOURCES,
+};
 use zephium_extension_package::{
     parse_bounded_json, BoundedJsonLimits, CanonicalExtensionTreeIndex, PortableRelativePath,
     MAX_EXTENSION_COMPATIBILITY_RECEIPT_BYTES, MAX_EXTENSION_MANIFEST_BYTES,
-    MAX_EXTENSION_TREE_BYTES, MAX_EXTENSION_TREE_ENTRIES, MAX_EXTENSION_TREE_FILES,
-    MAX_EXTENSION_TREE_FILE_BYTES,
+    MAX_EXTENSION_RESOURCE_PATTERN_BYTES, MAX_EXTENSION_TREE_BYTES, MAX_EXTENSION_TREE_ENTRIES,
+    MAX_EXTENSION_TREE_FILES, MAX_EXTENSION_TREE_FILE_BYTES,
 };
 
 use crate::extension_tree;
@@ -148,6 +151,7 @@ struct TransformPlan {
     background_wrapper: Option<Vec<u8>>,
     worker: WorkerKind,
     isolated_content_scripts: usize,
+    web_accessible_extension_pages: usize,
     omitted_file_content_scripts: usize,
     removed_file_match_patterns: usize,
     same_document_navigation_routes: usize,
@@ -194,6 +198,7 @@ struct ReceiptFeatures {
     publisher_native_messaging: bool,
     managed_storage_fallback: bool,
     privacy_services_fallback: bool,
+    web_accessible_extension_pages: bool,
     created_navigation_target_fallback: bool,
 }
 
@@ -235,6 +240,8 @@ struct CompatibilitySurfaces {
     history_search: Option<String>,
     #[serde(default)]
     extension_pages: Option<usize>,
+    #[serde(default)]
+    web_accessible_extension_pages: Option<usize>,
     #[serde(default)]
     bookmarks: Option<String>,
     #[serde(default)]
@@ -538,6 +545,20 @@ fn validate_receipt_surfaces(
             return Err("compatibility receipt created-navigation-target surface is invalid".into())
         }
     };
+    let web_accessible_extension_pages = match (target, surfaces.web_accessible_extension_pages) {
+        (ArtifactTarget::NativeV3 | ArtifactTarget::NativePublisherV1, None)
+        | (ArtifactTarget::NativeBrokeredV1, None) => false,
+        (ArtifactTarget::NativeV3 | ArtifactTarget::NativePublisherV1, Some(pages))
+            if (1..=MAX_EXTENSION_TREE_FILES).contains(&pages) =>
+        {
+            true
+        }
+        _ => {
+            return Err(
+                "compatibility receipt web-accessible extension-page surface is invalid".into(),
+            )
+        }
+    };
     match target {
         ArtifactTarget::NativeV3 | ArtifactTarget::NativePublisherV1 => {
             if surfaces.history_search.is_some()
@@ -559,6 +580,7 @@ fn validate_receipt_surfaces(
                 publisher_native_messaging,
                 managed_storage_fallback,
                 privacy_services_fallback,
+                web_accessible_extension_pages,
                 created_navigation_target_fallback,
                 ..ReceiptFeatures::default()
             })
@@ -606,6 +628,7 @@ fn validate_receipt_surfaces(
                 publisher_native_messaging: false,
                 managed_storage_fallback,
                 privacy_services_fallback,
+                web_accessible_extension_pages,
                 created_navigation_target_fallback,
             })
         }
@@ -628,6 +651,7 @@ fn receipt_contract(
         publisher_native_messaging,
         managed_storage_fallback,
         privacy_services_fallback,
+        web_accessible_extension_pages,
         created_navigation_target_fallback,
     } = features;
     let mut adaptations = vec![
@@ -721,6 +745,11 @@ fn receipt_contract(
             "privacy-services-onchange-events-not-emitted",
             "privacy-services-enablement-unsupported",
         ]);
+    }
+    if web_accessible_extension_pages && !target.requires_history_broker() {
+        limitations.retain(|limitation| *limitation != "non-action-extension-pages-not-adapted");
+        adaptations.push("declared-web-accessible-extension-pages-v1");
+        limitations.push("undeclared-extension-pages-not-adapted");
     }
     if created_navigation_target_fallback {
         adaptations.push("created-navigation-target-event-fallback-v1");
@@ -924,6 +953,8 @@ fn materialize_target(
             publisher_native_messaging: plan.publisher_native_messaging,
             managed_storage_fallback: plan.managed_storage_fallback,
             privacy_services_fallback: plan.privacy_services_fallback,
+            web_accessible_extension_pages: plan.web_accessible_extension_pages != 0
+                && !plan.history_broker_search,
             created_navigation_target_fallback: plan.created_navigation_target_fallback,
         },
     );
@@ -936,6 +967,15 @@ fn materialize_target(
         "removed_file_match_patterns": plan.removed_file_match_patterns,
         "same_document_navigation_routes": plan.same_document_navigation_routes,
     });
+    if plan.web_accessible_extension_pages != 0 && !plan.history_broker_search {
+        surfaces
+            .as_object_mut()
+            .expect("compatibility surfaces are an object")
+            .insert(
+                "web_accessible_extension_pages".to_owned(),
+                Value::from(plan.web_accessible_extension_pages),
+            );
+    }
     if plan.history_broker_search {
         let surfaces = surfaces
             .as_object_mut()
@@ -1082,7 +1122,7 @@ fn materialize_target(
     })?;
     sync_directory(parent)?;
     println!(
-        "macOS extension compatibility artifact materialized: target={}; source_tree={}; output_tree={}; files={}; bytes={}; background={}; isolated_content_scripts={}; omitted_file_content_scripts={}; removed_file_match_patterns={}; same_document_navigation_routes={}; history_search={}; action_popup={}; product_authority=false",
+        "macOS extension compatibility artifact materialized: target={}; source_tree={}; output_tree={}; files={}; bytes={}; background={}; isolated_content_scripts={}; web_accessible_extension_pages={}; omitted_file_content_scripts={}; removed_file_match_patterns={}; same_document_navigation_routes={}; history_search={}; action_popup={}; product_authority=false",
         target.label(),
         lower_hex(source_index.tree_sha256().as_bytes()),
         lower_hex(generated.parsed.tree_sha256().as_bytes()),
@@ -1090,6 +1130,7 @@ fn materialize_target(
         generated.parsed.total_bytes(),
         plan.worker.label(),
         plan.isolated_content_scripts,
+        plan.web_accessible_extension_pages,
         plan.omitted_file_content_scripts,
         plan.removed_file_match_patterns,
         plan.same_document_navigation_routes,
@@ -1199,37 +1240,28 @@ fn build_plan(
         adapt_background(&mut root, index, background_bridges, background_environment)?;
     let popup_path = action_popup_path(&root)?;
     let action_popup = popup_path.is_some();
+    let web_accessible_pages = declared_web_accessible_extension_pages(&root, index)?;
+    let web_accessible_extension_pages = web_accessible_pages.len();
     let extension_pages = if history_broker_search {
         adapt_extension_pages(source_root, index, &root, bridges, options_page.as_deref())?
     } else {
-        popup_path
-            .clone()
-            .map(|path| {
-                let portable = PortableRelativePath::parse(&path)
-                    .map_err(|error| format!("action popup path is not portable: {error}"))?;
-                let indexed = index.file(&portable).ok_or_else(|| {
-                    "action popup is absent from the closed source tree".to_owned()
-                })?;
-                if indexed.length() > MAX_POPUP_HTML_BYTES {
-                    return Err("action popup exceeds the compatibility HTML ceiling".into());
-                }
-                let source = read_indexed_file(source_root, indexed)?;
-                inject_extension_page_preludes(
-                    &source,
-                    ExtensionBridgePlan {
-                        notifications_fallback,
-                        managed_storage_fallback,
-                        privacy_services_fallback,
-                        native_messaging_denied: native_messaging_omitted,
-                        ..ExtensionBridgePlan::default()
-                    },
-                    options_page.as_deref(),
-                )
-                .map(|bytes| (path, bytes))
-            })
-            .transpose()?
-            .into_iter()
-            .collect()
+        let mut selected = web_accessible_pages;
+        if let Some(path) = popup_path.as_ref() {
+            selected.insert(path.clone());
+        }
+        adapt_selected_extension_pages(
+            source_root,
+            index,
+            &selected,
+            ExtensionBridgePlan {
+                notifications_fallback,
+                managed_storage_fallback,
+                privacy_services_fallback,
+                native_messaging_denied: native_messaging_omitted,
+                ..ExtensionBridgePlan::default()
+            },
+            options_page.as_deref(),
+        )?
     };
     if popup_path
         .as_ref()
@@ -1250,6 +1282,7 @@ fn build_plan(
         background_wrapper,
         worker,
         isolated_content_scripts: content_scripts.isolated,
+        web_accessible_extension_pages,
         omitted_file_content_scripts: content_scripts.omitted_file_entries,
         removed_file_match_patterns: content_scripts.removed_file_patterns,
         same_document_navigation_routes,
@@ -1862,6 +1895,161 @@ fn sandbox_page_keys(
         }
     }
     Ok(result)
+}
+
+fn declared_web_accessible_extension_pages(
+    manifest: &Map<String, Value>,
+    tree: &CanonicalExtensionTreeIndex,
+) -> Result<BTreeSet<String>, String> {
+    let sandboxed = sandbox_page_keys(manifest, tree)?;
+    let Some(groups) = manifest.get("web_accessible_resources") else {
+        return Ok(BTreeSet::new());
+    };
+    let groups = groups
+        .as_array()
+        .ok_or_else(|| "web_accessible_resources is not an array".to_owned())?;
+    if groups.is_empty() || groups.len() > MAX_EXTENSION_WEB_ACCESSIBLE_DECLARATIONS {
+        return Err("web_accessible_resources has invalid cardinality".into());
+    }
+    let mut pages = BTreeSet::new();
+    let mut total_resources = 0_usize;
+    for (group_index, group) in groups.iter().enumerate() {
+        let group = group
+            .as_object()
+            .ok_or_else(|| format!("web_accessible_resources[{group_index}] is not an object"))?;
+        let resources = group
+            .get("resources")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                format!("web_accessible_resources[{group_index}].resources is not an array")
+            })?;
+        if resources.is_empty() {
+            return Err(format!(
+                "web_accessible_resources[{group_index}].resources is empty"
+            ));
+        }
+        total_resources = total_resources
+            .checked_add(resources.len())
+            .ok_or_else(|| "web_accessible_resources cardinality overflowed".to_owned())?;
+        if total_resources > MAX_EXTENSION_WEB_ACCESSIBLE_RESOURCES {
+            return Err("web_accessible_resources exceeds the resource-pattern ceiling".into());
+        }
+        let mut canonical_patterns = BTreeSet::new();
+        for (resource_index, resource) in resources.iter().enumerate() {
+            let declared = resource.as_str().ok_or_else(|| {
+                format!(
+                    "web_accessible_resources[{group_index}].resources[{resource_index}] is not a string"
+                )
+            })?;
+            if declared.is_empty()
+                || declared.len() > MAX_EXTENSION_RESOURCE_PATTERN_BYTES
+                || !declared.is_ascii()
+                || declared.bytes().any(|byte| byte.is_ascii_control())
+            {
+                return Err(format!(
+                    "web_accessible_resources[{group_index}].resources[{resource_index}] is invalid"
+                ));
+            }
+            let canonical = declared.strip_prefix('/').unwrap_or(declared);
+            if canonical.is_empty() || canonical.starts_with('/') {
+                return Err(format!(
+                    "web_accessible_resources[{group_index}].resources[{resource_index}] is invalid"
+                ));
+            }
+            let portable_probe = canonical.replace('*', "a");
+            PortableRelativePath::parse(&portable_probe).map_err(|error| {
+                format!(
+                    "web_accessible_resources[{group_index}].resources[{resource_index}] is not portable: {error}"
+                )
+            })?;
+            if !canonical_patterns.insert(canonical) {
+                return Err(format!(
+                    "web_accessible_resources[{group_index}].resources contains a duplicate path"
+                ));
+            }
+
+            let wildcard = canonical.contains('*');
+            let mut matched_html = false;
+            for indexed in tree.files() {
+                let path = indexed.path().as_str();
+                if !is_html_path(path)
+                    || !star_pattern_matches(canonical.as_bytes(), path.as_bytes())
+                {
+                    continue;
+                }
+                matched_html = true;
+                if !sandboxed.contains(indexed.path().collision_key().as_ref()) {
+                    pages.insert(path.to_owned());
+                }
+            }
+            if !wildcard && is_html_path(canonical) && !matched_html {
+                return Err(format!(
+                    "web_accessible_resources[{group_index}].resources[{resource_index}] HTML page is absent from the closed source tree"
+                ));
+            }
+        }
+    }
+    Ok(pages)
+}
+
+fn adapt_selected_extension_pages(
+    source_root: &Path,
+    tree: &CanonicalExtensionTreeIndex,
+    paths: &BTreeSet<String>,
+    bridges: ExtensionBridgePlan,
+    options_page: Option<&str>,
+) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let mut pages = Vec::with_capacity(paths.len());
+    for path in paths {
+        let portable = PortableRelativePath::parse(path)
+            .map_err(|error| format!("extension page {path} is not portable: {error}"))?;
+        let indexed = tree.file(&portable).ok_or_else(|| {
+            format!("extension page {path} is absent from the closed source tree")
+        })?;
+        if indexed.length() > MAX_POPUP_HTML_BYTES {
+            return Err(format!(
+                "extension page {path} exceeds the compatibility HTML ceiling"
+            ));
+        }
+        let source = read_indexed_file(source_root, indexed)?;
+        let adapted = inject_extension_page_preludes(&source, bridges, options_page)
+            .map_err(|error| format!("cannot adapt extension page {path}: {error}"))?;
+        pages.push((path.clone(), adapted));
+    }
+    Ok(pages)
+}
+
+fn is_html_path(path: &str) -> bool {
+    path.as_bytes()
+        .get(path.len().saturating_sub(5)..)
+        .is_some_and(|suffix| suffix.eq_ignore_ascii_case(b".html"))
+}
+
+fn star_pattern_matches(pattern: &[u8], candidate: &[u8]) -> bool {
+    let mut pattern_index = 0;
+    let mut candidate_index = 0;
+    let mut last_star = None;
+    let mut star_candidate_index = 0;
+    while candidate_index < candidate.len() {
+        if pattern.get(pattern_index) == candidate.get(candidate_index) {
+            pattern_index += 1;
+            candidate_index += 1;
+        } else if pattern.get(pattern_index) == Some(&b'*') {
+            last_star = Some(pattern_index);
+            pattern_index += 1;
+            star_candidate_index = candidate_index;
+        } else if let Some(star) = last_star {
+            pattern_index = star + 1;
+            star_candidate_index += 1;
+            candidate_index = star_candidate_index;
+        } else {
+            return false;
+        }
+    }
+    while pattern.get(pattern_index) == Some(&b'*') {
+        pattern_index += 1;
+    }
+    pattern_index == pattern.len()
 }
 
 fn inject_extension_page_preludes(
@@ -2773,6 +2961,83 @@ mod tests {
                 .any(|value| value == limitation));
         }
         validate_release_input(&artifact).unwrap();
+    }
+
+    #[test]
+    fn declared_web_accessible_html_pages_are_exact_sandbox_safe_and_receipt_bound() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir(&source).unwrap();
+        let index = fixture(
+            &source,
+            Some("module"),
+            b"<!doctype html><html><head></head><body></body></html>",
+        );
+        let public = b"<!doctype html><html><head></head><body>public</body></html>";
+        let sandbox = b"<!doctype html><html><head></head><body>sandbox</body></html>";
+        let private = b"<!doctype html><html><head></head><body>private</body></html>";
+        write(&source, "ui/public-menu.html", public);
+        write(&source, "ui/public-sandbox.html", sandbox);
+        write(&source, "ui/private.html", private);
+        let manifest_path = source.join("manifest.json");
+        let mut manifest: Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["web_accessible_resources"] = serde_json::json!([{
+            "resources": ["/ui/public-*.html", "ui/not-html.js"],
+            "matches": ["https://example.com/*"]
+        }]);
+        manifest["sandbox"] = serde_json::json!({ "pages": ["ui/public-sandbox.html"] });
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        reindex(&source, &index);
+
+        let artifact = temp.path().join("web-accessible-pages");
+        materialize(&source, &index, &artifact).unwrap();
+        let extension = artifact.join(ARTIFACT_EXTENSION);
+        let adapted = fs::read_to_string(extension.join("ui/public-menu.html")).unwrap();
+        assert!(adapted.contains(&format!("<head><script src=\"/{API_PRELUDE}\"></script>")));
+        assert_eq!(
+            fs::read(extension.join("ui/public-sandbox.html")).unwrap(),
+            sandbox
+        );
+        assert_eq!(
+            fs::read(extension.join("ui/private.html")).unwrap(),
+            private
+        );
+
+        let receipt: Value =
+            serde_json::from_slice(&fs::read(artifact.join(ARTIFACT_METADATA)).unwrap()).unwrap();
+        assert_eq!(
+            receipt.pointer("/surfaces/web_accessible_extension_pages"),
+            Some(&Value::from(1))
+        );
+        assert!(receipt["adaptations"]
+            .as_array()
+            .unwrap()
+            .contains(&Value::from("declared-web-accessible-extension-pages-v1")));
+        assert!(receipt["limitations"]
+            .as_array()
+            .unwrap()
+            .contains(&Value::from("undeclared-extension-pages-not-adapted")));
+        assert!(!receipt["limitations"]
+            .as_array()
+            .unwrap()
+            .contains(&Value::from("non-action-extension-pages-not-adapted")));
+        validate_release_input(&artifact).unwrap();
+
+        for (pattern, candidate, expected) in [
+            ("*.html", "menu.html", true),
+            ("inline/*/menu.html", "inline/menu/menu.html", true),
+            ("inline/*/menu.html", "inline/menu/deep/menu.html", true),
+            ("inline/*.html", "popup/menu.js", false),
+            ("a**b", "ab", true),
+            ("a**b", "axxb", true),
+        ] {
+            assert_eq!(
+                star_pattern_matches(pattern.as_bytes(), candidate.as_bytes()),
+                expected,
+                "pattern={pattern}, candidate={candidate}"
+            );
+        }
     }
 
     #[test]

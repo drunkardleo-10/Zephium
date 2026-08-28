@@ -11,6 +11,7 @@ const schedulerYieldModeAttribute = "data-zephium-scheduler-yield-mode";
 const credentialFillAttribute = "data-zephium-credential-fill";
 const credentialSelectionAttribute = "data-zephium-credential-selection";
 const credentialInlineAttribute = "data-zephium-credential-inline";
+const extensionPageAttribute = "data-zephium-extension-page";
 const credentialToken = "zephium-credential-selection-v1";
 const credentialId = "fixture-login-v1";
 const root = document.documentElement;
@@ -18,6 +19,53 @@ const contentMode = globalThis[modeMarker] ?? "missing";
 let settled = false;
 let responsePassed = false;
 let tabsPassed = false;
+
+function installExtensionPageSurface() {
+  if (typeof globalThis.crypto?.getRandomValues !== "function") {
+    root.setAttribute(extensionPageAttribute, "invalid:random-source");
+    return;
+  }
+  const random = new Uint32Array(4);
+  crypto.getRandomValues(random);
+  const nonce = [...random].map((value) => value.toString(16).padStart(8, "0")).join("");
+  const host = document.createElement("span");
+  host.setAttribute("data-zephium-extension-page-host", "v1");
+  const shadow = host.attachShadow({ mode: "closed" });
+  const frame = document.createElement("iframe");
+  frame.title = "Extension-origin inline surface";
+  frame.style.cssText = "position:fixed;width:1px;height:1px;border:0;opacity:0";
+  shadow.append(frame);
+  document.body.append(host);
+
+  const onMessage = (event) => {
+    let origin;
+    try {
+      origin = new URL(event.origin);
+    } catch {
+      return;
+    }
+    if (
+      event.source !== frame.contentWindow ||
+      origin.protocol !== "webkit-extension:" ||
+      origin.username !== "" ||
+      origin.password !== "" ||
+      origin.port !== "" ||
+      event.data?.kind !== "zephium-web-accessible-extension-page-v1" ||
+      event.data?.nonce !== nonce
+    ) {
+      return;
+    }
+    removeEventListener("message", onMessage);
+    const supportedMode =
+      event.data?.mode === "native-preserved" || event.data?.mode === "native-aliased";
+    root.setAttribute(
+      extensionPageAttribute,
+      event.data?.passed === true && supportedMode ? "passed" : "invalid:contract",
+    );
+  };
+  addEventListener("message", onMessage);
+  frame.src = api.runtime.getURL(`extension-inline.html?nonce=${nonce}`);
+}
 
 function settle(value) {
   if (settled) return;
@@ -235,7 +283,15 @@ root.setAttribute(credentialFillAttribute, "pending");
 root.setAttribute(credentialSelectionAttribute, "pending");
 root.setAttribute(credentialInlineAttribute, "pending");
 if (document.readyState === "loading") {
-  addEventListener("DOMContentLoaded", installCredentialSurface, { once: true });
+  addEventListener(
+    "DOMContentLoaded",
+    () => {
+      installCredentialSurface();
+      installExtensionPageSurface();
+    },
+    { once: true },
+  );
 } else {
   installCredentialSurface();
+  installExtensionPageSurface();
 }
