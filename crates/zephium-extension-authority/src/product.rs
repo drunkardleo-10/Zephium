@@ -980,11 +980,25 @@ fn sealed_product_bundled_catalog_generations(
 #[cfg(all(feature = "local-extension-lab", not(zephium_internal_repository_e2e)))]
 fn sealed_product_bundled_catalog_generations(
 ) -> Result<Option<SealedBundledCatalogGenerations>, BundledCatalogAdmissionError> {
-    use crate::local_lab_catalog::{decode_lower_hex_32, LocalLabConfiguration, CATALOG_BYTES};
+    use crate::local_lab_catalog::{LocalLabConfiguration, ACTIVE_GENERATION, ROLLBACK_GENERATION};
 
-    let configuration = LocalLabConfiguration::load()
+    let active_configuration = LocalLabConfiguration::load(&ACTIVE_GENERATION)
         .map_err(|()| BundledCatalogAdmissionError::InvalidProductConfiguration)?;
-    let catalog = ExtensionReleaseCatalog::parse_canonical(CATALOG_BYTES)
+    let rollback_configuration = LocalLabConfiguration::load(&ROLLBACK_GENERATION)
+        .map_err(|()| BundledCatalogAdmissionError::InvalidProductConfiguration)?;
+    let active = local_lab_bundled_generation(&active_configuration, &ACTIVE_GENERATION)?;
+    let rollback = local_lab_bundled_generation(&rollback_configuration, &ROLLBACK_GENERATION)?;
+    Ok(Some((active, vec![rollback].into_boxed_slice())))
+}
+
+#[cfg(all(feature = "local-extension-lab", not(zephium_internal_repository_e2e)))]
+fn local_lab_bundled_generation(
+    configuration: &crate::local_lab_catalog::LocalLabConfiguration,
+    generation: &crate::local_lab_catalog::LocalLabGeneration,
+) -> Result<SealedBundledCatalogGeneration, BundledCatalogAdmissionError> {
+    use crate::local_lab_catalog::decode_lower_hex_32;
+
+    let catalog = ExtensionReleaseCatalog::parse_canonical(generation.catalog_bytes)
         .map_err(BundledCatalogAdmissionError::Catalog)?;
     let catalog_digest = decode_lower_hex_32(&configuration.catalog_sha256)
         .map_err(|()| BundledCatalogAdmissionError::InvalidProductConfiguration)?;
@@ -1014,7 +1028,7 @@ fn sealed_product_bundled_catalog_generations(
     .map_err(|_| BundledCatalogAdmissionError::InvalidProductConfiguration)?;
     let active = SealedBundledCatalogGeneration {
         anchor: SealedBundledCatalogAnchor {
-            catalog_length: CATALOG_BYTES.len(),
+            catalog_length: generation.catalog_bytes.len(),
             catalog_digest: catalog.digest(),
             authority: catalog.authority(),
             catalog_revision: catalog.revision(),
@@ -1023,7 +1037,7 @@ fn sealed_product_bundled_catalog_generations(
         },
         policy,
     };
-    Ok(Some((active, Box::new([]))))
+    Ok(active)
 }
 
 #[cfg(all(
@@ -1434,12 +1448,19 @@ mod tests {
             BundledProductAuthorityStatus::Configured
         );
         let admitted = authority
-            .admit_acquired_catalog(crate::local_lab_catalog::CATALOG_BYTES)
+            .admit_acquired_catalog(crate::local_lab_catalog::ACTIVE_GENERATION.catalog_bytes)
             .unwrap();
         assert_eq!(admitted.catalog().packages().len(), 1);
         assert_eq!(
             authority.recognize_generation(&admitted.generation_anchor()),
             Some(ProductBundledCatalogGenerationRole::Active)
+        );
+        let rollback = authority
+            .admit_rollback_catalog(crate::local_lab_catalog::ROLLBACK_GENERATION.catalog_bytes)
+            .unwrap();
+        assert_eq!(
+            authority.recognize_generation(&rollback.generation_anchor()),
+            Some(ProductBundledCatalogGenerationRole::Rollback)
         );
     }
 

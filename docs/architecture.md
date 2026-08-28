@@ -1242,7 +1242,7 @@ release dependency is finished.
 | Verified staging cohort | Revision 9 carries Vimium 2.4.2 and Dark Reader 4.9.129 with revisions 7/8 as immutable rollback; artifact bytes, classifications, and reissue evidence are exact | Add a publisher-supported authenticated cloud/security extension and define operational support windows |
 | API compatibility | The declaration table below is authoritative; live alarms work, while context-restart persistence is disclosed as degraded | Notifications, idle/system-lock, managed storage, offscreen, arbitrary native messaging, blocking request mutation, and broader browser APIs remain absent or degraded |
 | File/private contexts | File execution is negative-gated and the unavailable control cannot be forged; native private-store isolation is proven | No product file-access claim and no extension-enabled private-window claim until WebKit execution and a separate product runtime pass |
-| Password managers | Platform diagnostics, popup/content/background primitives, sandbox replacement primitive, explicit failure classifications, and a signed stock 1Password run have reached the authenticated vault popup plus inline field UI | No password manager is Verified: deterministic cold readiness, save/fill/passkeys, offscreen behavior, request-auth, endurance/resource budgets, and publisher/legal gates remain |
+| Password managers | Platform diagnostics, popup/content/background primitives, sandbox replacement primitive, explicit failure classifications, and a signed stock 1Password run now cover authenticated vault UI, inline fill, synthetic save, passkey registration, desktop-unlock recovery, forced background reload, and completed-profile restart | No password manager is Verified: saved-item update, passkey assertion, request-auth, longer endurance/resource budgets, and publisher/legal gates remain |
 | Performance/release evidence | Optimized product campaigns and a real process-family sampler are implemented; short release samples are recorded | Dedicated clean-runner budgets, maximum-cohort/tab pressure, energy calibration, sleep/wake, multi-profile, and 24-hour endurance |
 | External compatibility mode | Package-neutral offline transformation and authenticated acquisition primitives exist | Chrome Web Store/AMO/Safari/file/developer acquisition UX, legal adapters, diagnostics, and public compatibility policy are not shipped |
 
@@ -1698,7 +1698,7 @@ mandatory before Vimium is presented as compatible.
 | System notifications | Degraded | The pinned composition selects `UnsupportedSystemNotificationsService` when `chrome.notifications` is absent. In-extension auth-request flows may remain available, but OS notification presentation/click handling is unavailable. |
 | Unlimited local storage | Unsupported in the initial target | WebKit can report per-extension stored bytes but exposes no quota setter. Zephium therefore refuses `unlimitedStorage` in both product grant schemas; the feature-only platform probe may exercise the native token, but no product runtime can remove WebKit's finite default quota without a separately reviewed bounded storage design. |
 | Chrome side panel | Degraded | The pinned [`BrowserApi`](https://github.com/bitwarden/clients/blob/browser-v2026.7.0/apps/browser/src/platform/browser/browser-api.ts) capability-checks the namespace and makes side-panel operations no-ops. Zephium's native toolbar popup remains the primary extension UI. |
-| Enterprise managed storage | Unsupported in the initial target | `storage.managed` is absent, so enterprise policy supplied through that browser API is not exposed. This does not authorize approximating managed policy with writable extension storage. |
+| Enterprise managed storage | Degraded to an empty read-only compatibility surface | WebKit exposes no enterprise policy. A package-neutral facade supplies `get()` with an empty frozen result and an inert `onChanged` event so optional enterprise features can initialize, while preserving any future native members. It never approximates managed policy with writable extension storage. |
 | Native messaging | Native-brokered for exact sealed publishers; otherwise unsupported | `macos.wkwebextension.v1` prohibits the permission by default. A package-specific sealed publisher requirement may select the narrower publisher schema, after which the broker reauthenticates the live context, exact host name, upstream extension allowlist, fixed Chromium registration root, and Apple Team/signing identity before launching one bounded cold stdio worker. The corrected live gate proves bidirectional persistent ports. Arbitrary native hosts remain unavailable, and each password-manager integration still requires a real signed-app interoperability gate. |
 | Programmatic main-world scripting | Native literal supported; pinned source requires a sealed adapter | `scripting.executeScript` injects the exact extension file into the product tab when passed literal `"MAIN"`, but WebKit exposes no `chrome.scripting.ExecutionWorld` enum. The sealed build must substitute the absent enum access without adding page-world privilege or a generic bridge. |
 | Runtime ports | Registered routing compatible; pre-listener connection not queued | A Zephium-owned extension page opens a named port only after the MV3 worker registers `runtime.onConnect`; the worker receives the port and completes an exact message round trip. A separate connection created immediately before listener registration returns a port, then disconnects without `runtime.lastError` and is not delivered after registration. Extensions that depend on Chrome queuing that startup race require a reviewed compatibility decision; ordinary registered port routing does not. |
@@ -2198,9 +2198,8 @@ closed-shadow resource round trip through both service-worker and document
 background artifacts. A Developer-ID-signed lab build then rendered the real
 1Password inline menu, selected the synthetic QA item, filled the controlled
 login form, and dismissed the menu; no Apple Passwords item was used. This
-closes inline fill as an engineering gate, but save/update, lock/restart,
-passkeys, request authentication, endurance/resource budgets, and publisher
-release approval still gate a Verified-package claim.
+closes inline fill as an engineering gate, while the later signed workflow
+evidence below narrows the remaining password-manager gates further.
 
 The same signed build produced a controlled 60-second process-coalition
 comparison with three resident test tabs. With 1Password active, the coalition
@@ -2217,6 +2216,70 @@ must receive an explicit resource classification and endurance gate before a
 Verified badge. They are not authority to keep a hidden background view,
 multiplex the publisher's per-port native-host contract, or charge this cost to
 profiles with no active extensions.
+
+A later August 28 signed candidate closed the first durable save and passkey
+workflows. The publisher artifact's unmodified inline save UI accepted one
+generated synthetic login, and a fresh vault search found the exact item after
+the dialog retired. Three
+consecutive completed-onboarding process restarts restored the inline field
+surface and authenticated vault popup; action-to-render time under the UI
+harness was approximately 1.2--1.3 seconds. The user separately confirmed that
+unlocking the installed 1Password desktop application unlocks its browser
+extension. A synthetic passkey registration completed through 1Password and
+remained visible in the vault after the package update and clean restart. No
+real credential or Apple Passwords item entered these gates. Saved-item update,
+passkey assertion, and HTTP request-authentication behavior remain separate.
+
+That run also made the intermittent infinite-loading popup deterministic.
+After WebKit reloaded the nonpersistent document background, 1Password aborted
+initialization while evaluating `browser.storage.managed.onChanged`. Zephium's
+empty read-only facade had run before the package's browser polyfill, but the
+polyfill replaced the nested `storage` object after the facade's original
+microtask/task reconciliation had already completed. The compatibility asset
+now preserves complete native managed-storage objects, fills only missing
+`get`/`onChanged` members, and reconciles across four fixed microtask plus four
+fixed task frontiers. It installs no interval, proxy, worker, hidden view,
+network path, or idle keepalive. Node contracts prove native identity
+preservation, incomplete-native completion, replacement after both frontier
+classes, and bounded termination. A Developer-ID-signed package revision then
+survived a forced background reload, popup close/reopen, a detached 60-second
+idle interval, and a clean process restart; the post-idle popup rendered in
+about 1.45 seconds and the clean-restart popup in about 1.05 seconds.
+
+Testing that revision also exposed a missing lab-only authority invariant. The
+private lab previously sealed only its new active catalog, so an existing
+profile on the prior exact generation correctly failed repository recovery as
+unrecognized. The generated lab can now carry one separately validated older
+generation. Core authority authenticates its catalog and manifest only through
+rollback APIs, while distribution still serves only the active generation. In
+the tooling, `prepare-local-extension-lab-generation` produces a non-launchable
+reviewed seed, while `stage-local-extension-lab` requires that exact older seed
+and is the only command that emits the fixed launchable layout. In
+the live run catalog revision 7/package revision 2 recognized revision 6 as
+rollback, installed atomically, retained the previous catalog set, and
+restarted with the signed-in WebKit data intact. This is explicit rollback
+authority, not a recovery bypass or mutable local trust input.
+
+The same lifecycle campaign found a synchronous AppKit recursion in popup size
+clamping: `NSPopover::setContentSize` can emit the observed frame-change
+notification before Auto Layout returns, re-entering the setter until stack
+overflow. A main-thread reentrancy guard now rejects only that nested clamp and
+reopens immediately after the outer call. Dynamic later frame changes remain
+eligible. The guard has a focused unit contract; native and brokered product
+probes remain the behavioral regression gate.
+
+Resource measurements remain deliberately state-labelled. The update plus Web
+Inspector reload interval reached 604,826,496 bytes terminal physical footprint
+across 14 processes and was treated as transient diagnostic state. Pausing the
+profile removed both publisher helpers and ended a 30-second control at
+266,494,040 bytes with about 9 ms combined CPU. After a clean restart, the
+active 30-second interval ended at 425,502,032 bytes across 12 processes with
+about 181 ms combined CPU. The approximately 159 MB active-versus-paused
+difference is consistent with the earlier password-manager delta, while the
+absolute browser baseline changed with page/process state. These observations
+prove reclamation and reject the transient 605 MB number as a steady-state
+budget; clean-runner energy, tab-pressure, sleep/wake, multi-profile, and
+24-hour gates still define release readiness.
 
 That gate also found and fixed two package-neutral lifecycle defects. WebKit
 delivers an extension's first `Port.postMessage` only after the delegate

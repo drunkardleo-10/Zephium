@@ -37,6 +37,12 @@ const LAB_TREE_INDEX_TARGET: &str = "product/tree-index.json";
 const LAB_CRX_TARGET: &str = "targets/package.crx3";
 const LAB_LEGAL_TARGET: &str = "targets/legal.notice";
 const LAB_EVIDENCE_TARGET: &str = "evidence/local-extension-lab-v1.json";
+const LAB_ROLLBACK_CATALOG_TARGET: &str = "rollback/metadata/catalog-v1.json";
+const LAB_ROLLBACK_CLASSIFIED_TARGET: &str =
+    "rollback/product/classified-manifest-profiles-v1.json";
+const LAB_ROLLBACK_MANIFEST_TARGET: &str = "rollback/product/manifest.json";
+const LAB_ROLLBACK_TREE_INDEX_TARGET: &str = "rollback/product/tree-index.json";
+const LAB_ROLLBACK_EVIDENCE_TARGET: &str = "rollback/evidence/local-extension-lab-v1.json";
 const LOCAL_SIGNING_EVIDENCE_TARGET: &str = "evidence/local-signing-v1.json";
 const CLASSIFIED_KIND: &str = "zephium-extension-classified-manifest-profiles";
 const P256_ALGORITHM_IDENTIFIER: &[u8] = &[
@@ -120,10 +126,11 @@ struct LocalSigningEvidence {
     crx3_sha256: String,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct LocalLabEvidence {
     schema: u32,
-    kind: &'static str,
+    kind: String,
     product_authority: bool,
     source_paths_retained: bool,
     package_count: usize,
@@ -138,6 +145,23 @@ struct LocalLabEvidence {
     compatibility_target: String,
     compatibility_digest: String,
     admission_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rollback_catalog_sha256: Option<String>,
+}
+
+struct ValidatedRollbackLab {
+    catalog_bytes: Vec<u8>,
+    classified_bytes: Vec<u8>,
+    manifest_bytes: Vec<u8>,
+    tree_index_bytes: Vec<u8>,
+    evidence_bytes: Vec<u8>,
+    authority_id: [u8; 32],
+    catalog_revision: u64,
+    admission_policy_sha256: [u8; 32],
+    package_key: [u8; 32],
+    package_revision: u64,
+    compatibility_target: String,
+    catalog_sha256: [u8; 32],
 }
 
 pub(crate) fn prepare_release(compatibility_artifact: &Path, output: &Path) -> Result<(), String> {
@@ -222,9 +246,30 @@ pub(crate) fn prepare_release(compatibility_artifact: &Path, output: &Path) -> R
     Ok(())
 }
 
+/// Prepares one authenticated generation for later use as the required
+/// rollback input of a launchable local lab. The output deliberately omits a
+/// rollback generation and must not be installed at the fixed build path.
+pub(crate) fn prepare_generation(
+    publication: &Path,
+    classified_profiles: &Path,
+    output: &Path,
+) -> Result<(), String> {
+    stage_inner(publication, classified_profiles, None, output)
+}
+
 pub(crate) fn stage(
     publication: &Path,
     classified_profiles: &Path,
+    rollback_lab: &Path,
+    output: &Path,
+) -> Result<(), String> {
+    stage_inner(publication, classified_profiles, Some(rollback_lab), output)
+}
+
+fn stage_inner(
+    publication: &Path,
+    classified_profiles: &Path,
+    rollback_lab: Option<&Path>,
     output: &Path,
 ) -> Result<(), String> {
     let publication = canonical_directory(publication, "catalog publication")?;
@@ -306,19 +351,26 @@ pub(crate) fn stage(
     package.bind_tree_index(&tree).map_err(|error| {
         format!("local extension tree does not bind to its catalog row: {error}")
     })?;
-    if let Some(review) = profile.input.publisher_native_host.as_ref() {
-        let publisher = ExtensionMacosPublisherIdentity::new(
-            review.macos_team_identifier.clone(),
-            review.macos_signing_identifier.clone(),
-        )
-        .map_err(|_| "classified publisher native-host identity is invalid".to_owned())?;
-        ExtensionPublisherNativeHostRequirement::new(
-            package.identity().clone(),
-            review.host_name.clone(),
-            review.upstream_chromium_extension_id.clone(),
-            publisher,
-        )
-        .map_err(|_| "classified publisher native-host requirement is invalid".to_owned())?;
+    validate_publisher_native_host_review(&profile.input, package.identity())?;
+    let rollback = rollback_lab.map(load_rollback_lab).transpose()?;
+    if let Some(rollback) = rollback.as_ref() {
+        if rollback.authority_id != catalog.authority().bytes()
+            || rollback.catalog_revision >= catalog.revision().get()
+            || rollback.admission_policy_sha256 != catalog.admission_policy_sha256().bytes()
+            || rollback.package_key != package.identity().key().bytes()
+            || rollback.package_revision >= package.identity().revision().get()
+            || rollback.compatibility_target
+                != profile
+                    .input
+                    .compatibility_target
+                    .as_deref()
+                    .expect("validated above")
+        {
+            return Err(
+                "local extension-lab rollback is not an older exact generation of the active package"
+                    .into(),
+            );
+        }
     }
 
     let (archive_length, archive_digest) = package
@@ -375,9 +427,36 @@ pub(crate) fn stage(
     write_new_file(staging.path(), LAB_TREE_INDEX_TARGET, &tree_index)?;
     write_new_file(staging.path(), LAB_CRX_TARGET, &crx)?;
     write_new_file(staging.path(), LAB_LEGAL_TARGET, &legal_bytes)?;
+    if let Some(rollback) = rollback.as_ref() {
+        write_new_file(
+            staging.path(),
+            LAB_ROLLBACK_CATALOG_TARGET,
+            &rollback.catalog_bytes,
+        )?;
+        write_new_file(
+            staging.path(),
+            LAB_ROLLBACK_CLASSIFIED_TARGET,
+            &rollback.classified_bytes,
+        )?;
+        write_new_file(
+            staging.path(),
+            LAB_ROLLBACK_MANIFEST_TARGET,
+            &rollback.manifest_bytes,
+        )?;
+        write_new_file(
+            staging.path(),
+            LAB_ROLLBACK_TREE_INDEX_TARGET,
+            &rollback.tree_index_bytes,
+        )?;
+        write_new_file(
+            staging.path(),
+            LAB_ROLLBACK_EVIDENCE_TARGET,
+            &rollback.evidence_bytes,
+        )?;
+    }
     let evidence = LocalLabEvidence {
         schema: 1,
-        kind: "zephium-local-extension-lab",
+        kind: "zephium-local-extension-lab".into(),
         product_authority: false,
         source_paths_retained: false,
         package_count: 1,
@@ -396,20 +475,182 @@ pub(crate) fn stage(
             .expect("validated above"),
         compatibility_digest: profile.compatibility_digest.clone(),
         admission_digest: profile.admission_digest.clone(),
+        rollback_catalog_sha256: rollback
+            .as_ref()
+            .map(|rollback| lower_hex(&rollback.catalog_sha256)),
     };
     let evidence = serde_json::to_vec_pretty(&evidence)
         .map_err(|error| format!("cannot serialize local lab evidence: {error}"))?;
     write_new_file(staging.path(), LAB_EVIDENCE_TARGET, &evidence)?;
     sync_directory_tree(staging.path())?;
-    publish_named_components_no_replace(
-        staging,
-        &final_output,
-        &["metadata", "targets", "product", "evidence"],
-    )?;
+    let (components, kind) = if rollback.is_some() {
+        (
+            &["metadata", "targets", "product", "evidence", "rollback"][..],
+            "staged",
+        )
+    } else {
+        (
+            &["metadata", "targets", "product", "evidence"][..],
+            "generation-prepared",
+        )
+    };
+    publish_named_components_no_replace(staging, &final_output, components)?;
     println!(
-        "local extension lab staged: packages=1; product_authority=false; source_paths_retained=false; output={}",
+        "local extension lab {kind}: packages=1; rollback={}; launchable={}; product_authority=false; source_paths_retained=false; output={}",
+        rollback.is_some(),
+        rollback.is_some(),
         final_output.display()
     );
+    Ok(())
+}
+
+fn load_rollback_lab(path: &Path) -> Result<ValidatedRollbackLab, String> {
+    let root = canonical_directory(path, "local extension-lab rollback")?;
+    let catalog_bytes = read_publication_file(
+        &root,
+        CATALOG_TARGET,
+        MAX_EXTENSION_RELEASE_CATALOG_BYTES as u64,
+        "rollback catalog",
+    )?;
+    let catalog = ExtensionReleaseCatalog::parse_canonical(&catalog_bytes)
+        .map_err(|error| format!("rollback catalog is invalid: {error}"))?;
+    let classified_bytes = read_publication_file(
+        &root,
+        LAB_CLASSIFIED_TARGET,
+        MAX_EXTENSION_RELEASE_CATALOG_BYTES as u64,
+        "rollback classified manifest profiles",
+    )?;
+    let classified = parse_classified(&classified_bytes)?;
+    let profile = classified
+        .profiles
+        .first()
+        .filter(|_| classified.profiles.len() == 1)
+        .ok_or_else(|| "rollback lab requires exactly one manifest profile".to_owned())?;
+    let package_key = decode_lower_hex_32(&profile.input.package_key, "rollback package key")?;
+    let package = catalog
+        .package(zephium_core::extensions::ExtensionPackageKey::from_bytes(
+            package_key,
+        ))
+        .filter(|package| package.identity().revision().get() == profile.input.package_revision)
+        .ok_or_else(|| "rollback manifest profile package is absent from its catalog".to_owned())?;
+    if classified.schema != 1
+        || classified.kind != CLASSIFIED_KIND
+        || classified.product_authority
+        || !classified.all_activatable
+        || !profile.activatable
+        || profile.input.declarations.is_empty()
+        || profile.input.compatibility_receipt_sha256.is_none()
+        || profile.input.compatibility_target.as_deref().is_none()
+        || classified.catalog_sha256 != lower_hex(&Sha256::digest(&catalog_bytes))
+    {
+        return Err("rollback classified manifest profile is invalid".into());
+    }
+    let admission_policy = build_admission_policy(&classified.admission_policy)?;
+    catalog
+        .bind_admission_policy(&admission_policy)
+        .map_err(|error| format!("rollback catalog admission policy is invalid: {error}"))?;
+
+    let manifest_bytes = read_publication_file(
+        &root,
+        LAB_MANIFEST_TARGET,
+        MAX_EXTENSION_MANIFEST_BYTES as u64,
+        "rollback manifest",
+    )?;
+    let tree_index_bytes = read_publication_file(
+        &root,
+        LAB_TREE_INDEX_TARGET,
+        MAX_EXTENSION_TREE_INDEX_BYTES as u64,
+        "rollback tree index",
+    )?;
+    if profile.input.tree_index_length != tree_index_bytes.len() as u64
+        || profile.input.manifest_sha256 != lower_hex(&Sha256::digest(&manifest_bytes))
+        || profile.input.tree_index_sha256 != lower_hex(&Sha256::digest(&tree_index_bytes))
+    {
+        return Err("rollback manifest profile inputs drifted".into());
+    }
+    let tree = CanonicalExtensionTreeIndex::parse_canonical(&tree_index_bytes)
+        .map_err(|error| format!("rollback tree index is invalid: {error}"))?;
+    if profile.input.tree_sha256 != lower_hex(tree.tree_sha256().as_bytes())
+        || profile.input.manifest_sha256 != lower_hex(tree.manifest_sha256().as_bytes())
+    {
+        return Err("rollback extension tree identity drifted".into());
+    }
+    package
+        .bind_tree_index(&tree)
+        .map_err(|error| format!("rollback package tree binding failed: {error}"))?;
+    validate_publisher_native_host_review(&profile.input, package.identity())?;
+
+    let evidence_bytes = read_publication_file(
+        &root,
+        LAB_EVIDENCE_TARGET,
+        MAX_EXTENSION_RELEASE_CATALOG_BYTES as u64,
+        "rollback lab evidence",
+    )?;
+    let evidence: LocalLabEvidence = serde_json::from_slice(&evidence_bytes)
+        .map_err(|error| format!("rollback lab evidence is invalid: {error}"))?;
+    let catalog_sha256: [u8; 32] = Sha256::digest(&catalog_bytes).into();
+    if evidence.schema != 1
+        || evidence.kind != "zephium-local-extension-lab"
+        || evidence.product_authority
+        || evidence.source_paths_retained
+        || evidence.package_count != 1
+        || evidence.catalog_sha256 != lower_hex(&catalog_sha256)
+        || evidence.package_key != profile.input.package_key
+        || evidence.package_revision != profile.input.package_revision
+        || evidence.manifest_sha256 != profile.input.manifest_sha256
+        || evidence.tree_sha256 != profile.input.tree_sha256
+        || evidence.tree_index_sha256 != profile.input.tree_index_sha256
+        || evidence.compatibility_target
+            != profile
+                .input
+                .compatibility_target
+                .as_deref()
+                .expect("validated above")
+        || evidence.compatibility_digest != profile.compatibility_digest
+        || evidence.admission_digest != profile.admission_digest
+    {
+        return Err("rollback lab evidence does not bind its exact generation".into());
+    }
+
+    Ok(ValidatedRollbackLab {
+        catalog_bytes,
+        classified_bytes,
+        manifest_bytes,
+        tree_index_bytes,
+        evidence_bytes,
+        authority_id: catalog.authority().bytes(),
+        catalog_revision: catalog.revision().get(),
+        admission_policy_sha256: catalog.admission_policy_sha256().bytes(),
+        package_key,
+        package_revision: package.identity().revision().get(),
+        compatibility_target: profile
+            .input
+            .compatibility_target
+            .clone()
+            .expect("validated above"),
+        catalog_sha256,
+    })
+}
+
+fn validate_publisher_native_host_review(
+    profile: &ClassifiedManifestProfileInput,
+    package: &zephium_core::extensions::ExtensionPackageIdentity,
+) -> Result<(), String> {
+    let Some(review) = profile.publisher_native_host.as_ref() else {
+        return Ok(());
+    };
+    let publisher = ExtensionMacosPublisherIdentity::new(
+        review.macos_team_identifier.clone(),
+        review.macos_signing_identifier.clone(),
+    )
+    .map_err(|_| "classified publisher native-host identity is invalid".to_owned())?;
+    ExtensionPublisherNativeHostRequirement::new(
+        package.clone(),
+        review.host_name.clone(),
+        review.upstream_chromium_extension_id.clone(),
+        publisher,
+    )
+    .map_err(|_| "classified publisher native-host requirement is invalid".to_owned())?;
     Ok(())
 }
 

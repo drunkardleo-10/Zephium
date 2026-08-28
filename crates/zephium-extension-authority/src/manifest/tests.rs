@@ -730,12 +730,13 @@ fn staging_manifest_authority_admits_the_exact_mixed_runtime_cohort() {
 fn local_lab_manifest_authority_admits_only_the_exact_private_profile() {
     let package_authority = BundledPackageAuthority::product().unwrap();
     let catalog = package_authority
-        .admit_acquired_catalog(crate::local_lab_catalog::CATALOG_BYTES)
+        .admit_acquired_catalog(crate::local_lab_catalog::ACTIVE_GENERATION.catalog_bytes)
         .unwrap();
     let package = &catalog.catalog().packages()[0];
-    let tree =
-        CanonicalExtensionTreeIndex::parse_canonical(crate::local_lab_catalog::TREE_INDEX_BYTES)
-            .unwrap();
+    let tree = CanonicalExtensionTreeIndex::parse_canonical(
+        crate::local_lab_catalog::ACTIVE_GENERATION.tree_index_bytes,
+    )
+    .unwrap();
     let authority = ProductExtensionManifestAuthority::product().unwrap();
     let admitted = authority
         .admit_acquired_manifest(
@@ -743,7 +744,7 @@ fn local_lab_manifest_authority_admits_only_the_exact_private_profile() {
             ProductExtensionRuntimeTarget::MacosNative,
             package.identity().key(),
             &tree,
-            crate::local_lab_catalog::MANIFEST_BYTES,
+            crate::local_lab_catalog::ACTIVE_GENERATION.manifest_bytes,
         )
         .unwrap();
     assert_eq!(admitted.package_identity(), package.identity());
@@ -771,9 +772,28 @@ fn local_lab_manifest_authority_admits_only_the_exact_private_profile() {
             ProductExtensionRuntimeTarget::MacosNativeBrokered,
             package.identity().key(),
             &tree,
-            crate::local_lab_catalog::MANIFEST_BYTES,
+            crate::local_lab_catalog::ACTIVE_GENERATION.manifest_bytes,
         )
         .is_err());
+
+    let rollback_catalog = package_authority
+        .admit_rollback_catalog(crate::local_lab_catalog::ROLLBACK_GENERATION.catalog_bytes)
+        .unwrap();
+    let rollback_package = &rollback_catalog.catalog().packages()[0];
+    let rollback_tree = CanonicalExtensionTreeIndex::parse_canonical(
+        crate::local_lab_catalog::ROLLBACK_GENERATION.tree_index_bytes,
+    )
+    .unwrap();
+    let rollback = authority
+        .admit_rollback_manifest(
+            &rollback_catalog,
+            ProductExtensionRuntimeTarget::MacosNative,
+            rollback_package.identity().key(),
+            &rollback_tree,
+            crate::local_lab_catalog::ROLLBACK_GENERATION.manifest_bytes,
+        )
+        .unwrap();
+    assert_eq!(rollback.package_identity(), rollback_package.identity());
 }
 
 #[test]

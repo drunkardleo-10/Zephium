@@ -12,22 +12,60 @@ use zephium_extension_package::{
     MAX_EXTENSION_RELEASE_CATALOG_BYTES,
 };
 
-pub(crate) const CATALOG_BYTES: &[u8] = include_bytes!(concat!(
+const ACTIVE_CATALOG_BYTES: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../target/zephium-extension-lab/v1/metadata/catalog-v1.json"
 ));
-pub(crate) const MANIFEST_BYTES: &[u8] = include_bytes!(concat!(
+const ACTIVE_MANIFEST_BYTES: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../target/zephium-extension-lab/v1/product/manifest.json"
 ));
-pub(crate) const TREE_INDEX_BYTES: &[u8] = include_bytes!(concat!(
+const ACTIVE_TREE_INDEX_BYTES: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../target/zephium-extension-lab/v1/product/tree-index.json"
 ));
-const CLASSIFIED_PROFILE_BYTES: &[u8] = include_bytes!(concat!(
+const ACTIVE_CLASSIFIED_PROFILE_BYTES: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../target/zephium-extension-lab/v1/product/classified-manifest-profiles-v1.json"
 ));
+const ROLLBACK_CATALOG_BYTES: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../target/zephium-extension-lab/v1/rollback/metadata/catalog-v1.json"
+));
+const ROLLBACK_MANIFEST_BYTES: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../target/zephium-extension-lab/v1/rollback/product/manifest.json"
+));
+const ROLLBACK_TREE_INDEX_BYTES: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../target/zephium-extension-lab/v1/rollback/product/tree-index.json"
+));
+const ROLLBACK_CLASSIFIED_PROFILE_BYTES: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../target/zephium-extension-lab/v1/rollback/product/classified-manifest-profiles-v1.json"
+));
+
+#[derive(Clone, Copy)]
+pub(crate) struct LocalLabGeneration {
+    pub(crate) catalog_bytes: &'static [u8],
+    pub(crate) manifest_bytes: &'static [u8],
+    pub(crate) tree_index_bytes: &'static [u8],
+    classified_profile_bytes: &'static [u8],
+}
+
+pub(crate) const ACTIVE_GENERATION: LocalLabGeneration = LocalLabGeneration {
+    catalog_bytes: ACTIVE_CATALOG_BYTES,
+    manifest_bytes: ACTIVE_MANIFEST_BYTES,
+    tree_index_bytes: ACTIVE_TREE_INDEX_BYTES,
+    classified_profile_bytes: ACTIVE_CLASSIFIED_PROFILE_BYTES,
+};
+
+pub(crate) const ROLLBACK_GENERATION: LocalLabGeneration = LocalLabGeneration {
+    catalog_bytes: ROLLBACK_CATALOG_BYTES,
+    manifest_bytes: ROLLBACK_MANIFEST_BYTES,
+    tree_index_bytes: ROLLBACK_TREE_INDEX_BYTES,
+    classified_profile_bytes: ROLLBACK_CLASSIFIED_PROFILE_BYTES,
+};
 
 const SCHEMA: u32 = 1;
 const KIND: &str = "zephium-extension-classified-manifest-profiles";
@@ -160,14 +198,14 @@ enum LocalLabDeclarationReviewKey {
 }
 
 impl LocalLabConfiguration {
-    pub(crate) fn load() -> Result<Self, ()> {
-        if CLASSIFIED_PROFILE_BYTES.is_empty()
-            || CLASSIFIED_PROFILE_BYTES.len() > MAX_EXTENSION_RELEASE_CATALOG_BYTES
+    pub(crate) fn load(generation: &LocalLabGeneration) -> Result<Self, ()> {
+        if generation.classified_profile_bytes.is_empty()
+            || generation.classified_profile_bytes.len() > MAX_EXTENSION_RELEASE_CATALOG_BYTES
         {
             return Err(());
         }
         let bounded = parse_bounded_json(
-            CLASSIFIED_PROFILE_BYTES,
+            generation.classified_profile_bytes,
             BoundedJsonLimits::manifest_profile_review(),
         )
         .map_err(|_| ())?;
@@ -179,7 +217,7 @@ impl LocalLabConfiguration {
             || configuration.profiles.len() != 1
             || !configuration.profiles[0].activatable
             || configuration.admission_policy.license_rules.is_empty()
-            || lower_hex(&Sha256::digest(CATALOG_BYTES)) != configuration.catalog_sha256
+            || lower_hex(&Sha256::digest(generation.catalog_bytes)) != configuration.catalog_sha256
         {
             return Err(());
         }

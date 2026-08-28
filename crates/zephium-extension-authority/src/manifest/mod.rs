@@ -1346,20 +1346,45 @@ fn sealed_product_manifest_provisioning(
 #[cfg(all(feature = "local-extension-lab", not(zephium_internal_repository_e2e)))]
 fn sealed_product_manifest_provisioning(
 ) -> Result<Option<SealedManifestAuthorityProvisioning>, ProductExtensionManifestAuthorityError> {
+    use crate::local_lab_catalog::{ACTIVE_GENERATION, ROLLBACK_GENERATION};
+
+    let (active_catalog, mut profiles) = local_lab_manifest_profiles(&ACTIVE_GENERATION)?;
+    let (rollback_catalog, mut rollback_profiles) =
+        local_lab_manifest_profiles(&ROLLBACK_GENERATION)?;
+    profiles.append(&mut rollback_profiles);
+    profiles.sort_unstable_by(|left, right| {
+        (left.catalog, left.runtime_target, left.package.key).cmp(&(
+            right.catalog,
+            right.runtime_target,
+            right.package.key,
+        ))
+    });
+    Ok(Some(SealedManifestAuthorityProvisioning {
+        active_catalog,
+        rollback_catalogs: vec![rollback_catalog].into_boxed_slice(),
+        profiles: profiles.into_boxed_slice(),
+    }))
+}
+
+#[cfg(all(feature = "local-extension-lab", not(zephium_internal_repository_e2e)))]
+fn local_lab_manifest_profiles(
+    generation: &crate::local_lab_catalog::LocalLabGeneration,
+) -> Result<
+    (SealedManifestCatalogAnchor, Vec<SealedManifestProfile>),
+    ProductExtensionManifestAuthorityError,
+> {
     use sha2::{Digest as _, Sha256};
 
-    use crate::local_lab_catalog::{
-        decode_lower_hex_32, LocalLabConfiguration, CATALOG_BYTES, MANIFEST_BYTES, TREE_INDEX_BYTES,
-    };
+    use crate::local_lab_catalog::{decode_lower_hex_32, LocalLabConfiguration};
 
-    let configuration = LocalLabConfiguration::load()
+    let configuration = LocalLabConfiguration::load(generation)
         .map_err(|()| ProductExtensionManifestAuthorityError::InvalidProductConfiguration)?;
     let input = configuration
         .profiles
         .first()
         .ok_or(ProductExtensionManifestAuthorityError::InvalidProductConfiguration)?;
     let profile = &input.input;
-    let catalog = ExtensionReleaseCatalog::parse_canonical(CATALOG_BYTES)
+    let catalog = ExtensionReleaseCatalog::parse_canonical(generation.catalog_bytes)
         .map_err(invalid_local_lab_configuration)?;
     let inventory_digest = crate::inventory::digest_catalog_inventory(&catalog)
         .ok_or(ProductExtensionManifestAuthorityError::InvalidProductConfiguration)?;
@@ -1375,18 +1400,18 @@ fn sealed_product_manifest_provisioning(
         .ok_or(ProductExtensionManifestAuthorityError::InvalidProductConfiguration)?;
     if catalog.packages().len() != 1
         || catalog.digest().as_bytes() != &expected_catalog
-        || MANIFEST_BYTES.len() > MAX_EXTENSION_MANIFEST_BYTES
-        || TREE_INDEX_BYTES.len() as u64 != profile.tree_index_length
-        || <[u8; 32]>::from(Sha256::digest(MANIFEST_BYTES))
+        || generation.manifest_bytes.len() > MAX_EXTENSION_MANIFEST_BYTES
+        || generation.tree_index_bytes.len() as u64 != profile.tree_index_length
+        || <[u8; 32]>::from(Sha256::digest(generation.manifest_bytes))
             != decode_lower_hex_32(&profile.manifest_sha256)
                 .map_err(|()| ProductExtensionManifestAuthorityError::InvalidProductConfiguration)?
-        || <[u8; 32]>::from(Sha256::digest(TREE_INDEX_BYTES))
+        || <[u8; 32]>::from(Sha256::digest(generation.tree_index_bytes))
             != decode_lower_hex_32(&profile.tree_index_sha256)
                 .map_err(|()| ProductExtensionManifestAuthorityError::InvalidProductConfiguration)?
     {
         return Err(ProductExtensionManifestAuthorityError::InvalidProductConfiguration);
     }
-    let tree = CanonicalExtensionTreeIndex::parse_canonical(TREE_INDEX_BYTES)
+    let tree = CanonicalExtensionTreeIndex::parse_canonical(generation.tree_index_bytes)
         .map_err(invalid_local_lab_configuration)?;
     if tree.manifest_sha256().as_bytes()
         != &decode_lower_hex_32(&profile.manifest_sha256)
@@ -1416,7 +1441,7 @@ fn sealed_product_manifest_provisioning(
         package
             .bind_tree_index(&tree)
             .map_err(invalid_local_lab_configuration)?,
-        MANIFEST_BYTES,
+        generation.manifest_bytes,
         &classifier,
     )
     .map_err(invalid_local_lab_configuration)?;
@@ -1476,14 +1501,13 @@ fn sealed_product_manifest_provisioning(
     let catalog_anchor = SealedManifestCatalogAnchor {
         authority: catalog.authority(),
         revision: catalog.revision(),
-        length: CATALOG_BYTES.len() as u64,
+        length: generation.catalog_bytes.len() as u64,
         digest: catalog.digest(),
         inventory_digest,
     };
-    Ok(Some(SealedManifestAuthorityProvisioning {
-        active_catalog: catalog_anchor,
-        rollback_catalogs: Box::new([]),
-        profiles: vec![SealedManifestProfile {
+    Ok((
+        catalog_anchor,
+        vec![SealedManifestProfile {
             runtime_target,
             catalog: catalog_anchor,
             package: SealedManifestPackageAnchor {
@@ -1500,9 +1524,8 @@ fn sealed_product_manifest_provisioning(
             },
             policy,
             publisher_native_host,
-        }]
-        .into_boxed_slice(),
-    }))
+        }],
+    ))
 }
 
 #[cfg(all(feature = "local-extension-lab", not(zephium_internal_repository_e2e)))]
