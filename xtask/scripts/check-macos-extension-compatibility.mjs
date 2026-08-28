@@ -117,6 +117,13 @@ for (const forbidden of ["window", "fetch", "XMLHttpRequest", "WebSocket"]) {
     `privacy-services asset exposes ${forbidden}`,
   );
 }
+for (const forbidden of ["setInterval", "Proxy"]) {
+  assert.equal(
+    managedStorageSource.includes(forbidden),
+    false,
+    `managed-storage asset retains a forbidden long-lived mechanism through ${forbidden}`,
+  );
+}
 for (const forbidden of ["platformCredentialsForRelyingParty", "passwords", "passkeys"]) {
   assert.equal(
     privacyServicesSource.includes(forbidden),
@@ -325,11 +332,12 @@ assert.equal(preexistingContext.chrome.notifications.onClicked, nativeNotificati
 assert.equal(await preexistingContext.chrome.notifications.create(), "native");
 assert.equal(typeof preexistingContext.chrome.notifications.onClosed.addListener, "function");
 
+const managedMicrotasks = [];
 const managedTasks = [];
 const managedNative = nativeNamespace("managed-storage-fixture");
 const managedContext = run({
   chrome: managedNative,
-  queueMicrotask: (callback) => managedTasks.push(callback),
+  queueMicrotask: (callback) => managedMicrotasks.push(callback),
   setTimeout: (callback) => {
     managedTasks.push(callback);
     return 1;
@@ -342,12 +350,70 @@ assert.equal(Object.isFrozen(managed), true);
 assert.equal(managed.onChanged.hasListeners(), false);
 assert.equal(Object.keys(await managed.get(null)).length, 0);
 managedNative.storage = { local: managedNative.storage.local };
-for (const task of managedTasks.splice(0)) task();
+managedMicrotasks.shift()();
 assert.equal(
   managedContext.chrome.storage.managed,
   managed,
-  "bounded reconciliation did not restore managed storage after namespace replacement",
+  "microtask reconciliation did not restore managed storage after namespace replacement",
 );
+managedNative.storage = { local: managedNative.storage.local };
+managedTasks.shift()();
+assert.equal(
+  managedContext.chrome.storage.managed,
+  managed,
+  "task reconciliation did not restore managed storage after a later replacement",
+);
+while (managedMicrotasks.length > 0) managedMicrotasks.shift()();
+while (managedTasks.length > 0) managedTasks.shift()();
+assert.equal(managedMicrotasks.length, 0, "managed microtask reconciliation did not terminate");
+assert.equal(managedTasks.length, 0, "managed task reconciliation did not terminate");
+
+const nativeManagedEvent = {
+  addListener() {},
+  removeListener() {},
+};
+const nativeManaged = {
+  native: true,
+  get() {
+    return Promise.resolve({ native: true });
+  },
+  onChanged: nativeManagedEvent,
+};
+const partialManagedNative = nativeNamespace("partial-managed-storage-fixture");
+partialManagedNative.storage.managed = nativeManaged;
+const partialManagedContext = run({
+  chrome: partialManagedNative,
+  queueMicrotask,
+  setTimeout: (callback) => {
+    callback();
+    return 1;
+  },
+});
+managedStorageScript.runInContext(partialManagedContext, { timeout: 1_000 });
+assert.equal(partialManagedContext.chrome.storage.managed, nativeManaged);
+assert.equal(partialManagedContext.browser.storage.managed, nativeManaged);
+assert.equal(nativeManaged.onChanged, nativeManagedEvent);
+assert.deepEqual(await nativeManaged.get(), { native: true });
+
+const incompleteManaged = {
+  get() {
+    return Promise.resolve({ native: true });
+  },
+};
+const incompleteManagedNative = nativeNamespace("incomplete-managed-storage-fixture");
+incompleteManagedNative.storage.managed = incompleteManaged;
+const incompleteManagedContext = run({
+  chrome: incompleteManagedNative,
+  queueMicrotask,
+  setTimeout: (callback) => {
+    callback();
+    return 1;
+  },
+});
+managedStorageScript.runInContext(incompleteManagedContext, { timeout: 1_000 });
+assert.equal(incompleteManagedContext.chrome.storage.managed, incompleteManaged);
+assert.equal(typeof incompleteManaged.onChanged.addListener, "function");
+assert.equal(incompleteManaged.onChanged.hasListeners(), false);
 
 const privacyTasks = [];
 const privacyNative = nativeNamespace("privacy-services-fixture");

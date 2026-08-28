@@ -299,7 +299,28 @@ pub(super) struct ActionPopupBroker {
     closing: RefCell<Option<ClosingPopup>>,
     next_closing_token: Cell<u64>,
     options: RefCell<Option<ActiveOptionsPage>>,
+    size_clamp_active: Cell<bool>,
     sealed: Cell<bool>,
+}
+
+/// Prevents AppKit's synchronous frame-change notification from recursively
+/// re-entering `NSPopover::setContentSize`. The notification can fire while
+/// Auto Layout is still applying the requested content size; entering the
+/// setter again from that stack overflows before Rust regains control.
+struct PopupSizeClampGuard<'a> {
+    active: &'a Cell<bool>,
+}
+
+impl<'a> PopupSizeClampGuard<'a> {
+    fn enter(active: &'a Cell<bool>) -> Option<Self> {
+        (!active.replace(true)).then_some(Self { active })
+    }
+}
+
+impl Drop for PopupSizeClampGuard<'_> {
+    fn drop(&mut self) {
+        self.active.set(false);
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -323,6 +344,7 @@ impl ActionPopupBroker {
             closing: RefCell::new(None),
             next_closing_token: Cell::new(1),
             options: RefCell::new(None),
+            size_clamp_active: Cell::new(false),
             sealed: Cell::new(false),
         })
     }
@@ -952,6 +974,9 @@ impl ActionPopupBroker {
     }
 
     fn clamp_active_size(&self) {
+        let Some(_guard) = PopupSizeClampGuard::enter(&self.size_clamp_active) else {
+            return;
+        };
         let Some(popover) = self
             .active
             .borrow()
@@ -1409,6 +1434,15 @@ mod tests {
             clamp_popup_size(NSSize::new(10_000.0, 10_000.0)),
             NSSize::new(MAX_EXTENSION_POPUP_WIDTH, MAX_EXTENSION_POPUP_HEIGHT)
         );
+    }
+
+    #[test]
+    fn popup_size_clamp_rejects_synchronous_reentry_and_reopens_after_return() {
+        let active = Cell::new(false);
+        let outer = PopupSizeClampGuard::enter(&active).expect("first clamp enters");
+        assert!(PopupSizeClampGuard::enter(&active).is_none());
+        drop(outer);
+        assert!(PopupSizeClampGuard::enter(&active).is_some());
     }
 
     #[test]
