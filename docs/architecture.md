@@ -2170,8 +2170,53 @@ exactly four declared pages: inline menu, notification, modal, and universal
 sign-on. Its newly signed private candidate installs, reconnects the publisher
 host after restart (native callback about 325 ms; worker ready about 434 ms),
 renders the real vault popup, and toggle-dismisses correctly. The field icon is
-present; final unlocked inline-menu selection remains a manual E2E gate rather
-than an asserted result.
+present.
+
+The signed August 28 follow-up closed that inline-menu gate and located the
+browser-side defect at the native navigation-policy seam. The exact stock
+1Password artifact can load both its declared inline stylesheet and
+`inline/menu/menu.html` from a controlled cross-origin page, and the
+package-neutral fixture also passes with `<all_urls>`, nested paths, wildcard
+resources, an omitted `use_dynamic_url`, a stable custom context base URL, and
+a named persistent controller. Splitting web-accessible HTML into another
+manifest group did not repair the product and was removed. The product tab was
+instead sending every `WKNavigationAction`, including child frames, through
+Wry's host callback. Zephium's callback intentionally admits only canonical
+browser-level targets, so it cancelled the `webkit-extension:` child
+navigation before WebKit could apply its controller- and
+`web_accessible_resources`-bound authorization.
+
+The pinned Wry adapter now delegates only exact non-main-frame
+`webkit-extension://` navigations to WebKit's native policy. Main-frame and
+target-less actions still require the host callback, other schemes receive no
+bypass, and WebKit remains responsible for proving a loaded context plus the
+manifest resource grant. A pure policy test covers those boundaries. The live
+compatibility fixture installs a hostile host callback that would reject the
+extension URL, proves the callback still handles ordinary navigations, proves
+it never receives the extension child navigation, and completes the
+closed-shadow resource round trip through both service-worker and document
+background artifacts. A Developer-ID-signed lab build then rendered the real
+1Password inline menu, selected the synthetic QA item, filled the controlled
+login form, and dismissed the menu; no Apple Passwords item was used. This
+closes inline fill as an engineering gate, but save/update, lock/restart,
+passkeys, request authentication, endurance/resource budgets, and publisher
+release approval still gate a Verified-package claim.
+
+The same signed build produced a controlled 60-second process-coalition
+comparison with three resident test tabs. With 1Password active, the coalition
+ended at 12 processes and 363,520,880 physical-footprint bytes, consumed about
+632 ms of combined user and system CPU, and reported 811 package-idle plus
+2,002 interrupt wakeups. Pausing extensions in the same profile ended at 10
+processes and 189,455,800 bytes, consumed about 24 ms of CPU, and reported 51
+package-idle plus 154 interrupt wakeups. The paused projection removed the
+1Password BrowserSupport helpers and extension-owned WebContent while retaining
+the three browser tabs, so the inert path does reclaim the optional runtime.
+These numbers are machine- and state-specific release inputs, not universal
+budgets: they show that this publisher extension has a material opt-in cost and
+must receive an explicit resource classification and endurance gate before a
+Verified badge. They are not authority to keep a hidden background view,
+multiplex the publisher's per-port native-host contract, or charge this cost to
+profiles with no active extensions.
 
 That gate also found and fixed two package-neutral lifecycle defects. WebKit
 delivers an extension's first `Port.postMessage` only after the delegate

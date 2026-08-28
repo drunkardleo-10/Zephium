@@ -1,6 +1,6 @@
 schema = 1
 fork = "Zephium Wry native security adapter"
-reviewed_on = "2026-07-15"
+reviewed_on = "2026-08-28"
 production_status = "pre-production; packaged hostile tests and an external native-boundary audit remain required"
 
 [upstream]
@@ -40,6 +40,10 @@ paths = ["src/lib.rs", "src/wkwebview/mod.rs"]
 [[patch_sets]]
 name = "WebKit callback and prompt hardening"
 paths = ["src/wkwebview"]
+
+[[patch_sets]]
+name = "WebKit frame-scoped extension resource admission"
+paths = ["src/wkwebview/navigation.rs"]
 
 [[patch_sets]]
 name = "deny-by-default native media, preview, fullscreen, and file-drag surfaces"

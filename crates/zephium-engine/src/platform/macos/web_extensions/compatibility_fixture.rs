@@ -95,6 +95,8 @@ struct Teardown {
     operating_system: String,
     extension_script_count: usize,
     webview_requests: usize,
+    host_navigation_policy_calls: usize,
+    host_extension_subframe_policy_calls: usize,
     background_preload_ms: u128,
     background_adaptation: &'static str,
     content_mode: CompatibilityMode,
@@ -244,11 +246,13 @@ pub(super) fn run(artifact: &Path) -> Result<bool, String> {
             (None, Ok(())) => {}
         }
         println!(
-            "native-probe: macOS package-neutral compatibility fixture passed; os={}; exact_source_tree=passed; exact_output_tree=passed; background_adaptation={}; content_compatibility_mode={}; background_compatibility_mode={}; privacy_services=disabled-only; web_accessible_extension_page=closed-shadow-native-identity; scheduler_yield={}; scheduler_yield_mode={}; runtime_response_round_trip=passed; tabs_message_round_trip=passed; background_preload_ms={}; background_wake=runtime-message; background_action_label={:?}; popup_background_lifecycle={}; popup_async_response=passed; sender_tab_routing=passed; page_world_adapter_absent=passed; page_world_extension_api_absent=passed; credential_field_discovery=passed; credential_inline_isolation=closed-shadow-null-origin; credential_page_forgery_ignored=passed; credential_selection_transport={}; credential_background_round_trip=passed; credential_page_events=passed; controller_visible_scripts={}; webview_callbacks={}; product_authority=false; native_objects_released=passed",
+            "native-probe: macOS package-neutral compatibility fixture passed; os={}; exact_source_tree=passed; exact_output_tree=passed; background_adaptation={}; content_compatibility_mode={}; background_compatibility_mode={}; privacy_services=disabled-only; web_accessible_extension_page=closed-shadow-native-identity; host_navigation_policy_calls={}; extension_subframe_host_policy_calls={}; extension_subframe_policy=webkit-owned; scheduler_yield={}; scheduler_yield_mode={}; runtime_response_round_trip=passed; tabs_message_round_trip=passed; background_preload_ms={}; background_wake=runtime-message; background_action_label={:?}; popup_background_lifecycle={}; popup_async_response=passed; sender_tab_routing=passed; page_world_adapter_absent=passed; page_world_extension_api_absent=passed; credential_field_discovery=passed; credential_inline_isolation=closed-shadow-null-origin; credential_page_forgery_ignored=passed; credential_selection_transport={}; credential_background_round_trip=passed; credential_page_events=passed; controller_visible_scripts={}; webview_callbacks={}; product_authority=false; native_objects_released=passed",
             teardown.operating_system,
             teardown.background_adaptation,
             teardown.content_mode.as_str(),
             teardown.background_mode.as_str(),
+            teardown.host_navigation_policy_calls,
+            teardown.host_extension_subframe_policy_calls,
             teardown.scheduler_yield,
             teardown.scheduler_yield_mode,
             teardown.background_preload_ms,
@@ -428,8 +432,20 @@ fn run_native(
             .ok_or_else(|| "compatibility fixture window has no content view".to_owned())?,
     };
     let protected_specs = crate::host::protected_script_specs_for_native_probe();
-    let mut builder =
-        wry::WebViewBuilder::new().with_webview_configuration(bundle.webview_configuration.clone());
+    let host_navigation_policy_calls = Arc::new(AtomicUsize::new(0));
+    let host_extension_subframe_policy_calls = Arc::new(AtomicUsize::new(0));
+    let observed_policy_calls = Arc::clone(&host_navigation_policy_calls);
+    let observed_extension_calls = Arc::clone(&host_extension_subframe_policy_calls);
+    let mut builder = wry::WebViewBuilder::new()
+        .with_webview_configuration(bundle.webview_configuration.clone())
+        .with_navigation_handler(move |url| {
+            observed_policy_calls.fetch_add(1, Ordering::AcqRel);
+            if url.starts_with("webkit-extension://") {
+                observed_extension_calls.fetch_add(1, Ordering::AcqRel);
+                return false;
+            }
+            true
+        });
     for (source, all_frames) in protected_specs {
         builder = builder.with_initialization_script_for_main_only(source, !all_frames);
     }
@@ -572,14 +588,29 @@ fn run_native(
             "compatibility fixture reported {context_error_count} native context errors: {context_error_summary:?}"
         )
     });
-    let failure = [round_trip_failure, popup_failure, context_failure]
-        .into_iter()
-        .flatten()
-        .reduce(|mut combined, failure| {
-            combined.push_str("; ");
-            combined.push_str(&failure);
-            combined
+    let host_navigation_policy_call_count = host_navigation_policy_calls.load(Ordering::Acquire);
+    let host_extension_subframe_policy_call_count =
+        host_extension_subframe_policy_calls.load(Ordering::Acquire);
+    let navigation_policy_failure = (host_navigation_policy_call_count == 0
+        || host_extension_subframe_policy_call_count != 0)
+        .then(|| {
+            format!(
+                "compatibility fixture navigation policy drifted: host_calls={host_navigation_policy_call_count}; extension_subframe_calls={host_extension_subframe_policy_call_count}"
+            )
         });
+    let failure = [
+        round_trip_failure,
+        popup_failure,
+        context_failure,
+        navigation_policy_failure,
+    ]
+    .into_iter()
+    .flatten()
+    .reduce(|mut combined, failure| {
+        combined.push_str("; ");
+        combined.push_str(&failure);
+        combined
+    });
     let teardown = Teardown {
         controller: Weak::from_retained(&bundle.controller),
         context: Weak::from_retained(&context),
@@ -590,6 +621,8 @@ fn run_native(
         operating_system,
         extension_script_count,
         webview_requests: webview_requests.load(Ordering::Acquire),
+        host_navigation_policy_calls: host_navigation_policy_call_count,
+        host_extension_subframe_policy_calls: host_extension_subframe_policy_call_count,
         background_preload_ms,
         background_adaptation: background_adaptation_label(background_adaptation),
         content_mode,

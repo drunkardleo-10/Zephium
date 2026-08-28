@@ -25,6 +25,14 @@ use super::class::wry_navigation_delegate::WryNavigationDelegate;
 
 const ACTIVE_APPLE_NAVIGATION_LIMIT: usize = 64;
 const APPLE_REDIRECT_EVENT_LIMIT: usize = 32;
+const WEB_EXTENSION_URL_PREFIX: &str = "webkit-extension://";
+
+fn native_web_extension_subframe_owns_policy(
+  url: &str,
+  target_is_main_frame: Option<bool>,
+) -> bool {
+  target_is_main_frame == Some(false) && url.starts_with(WEB_EXTENSION_URL_PREFIX)
+}
 
 /// URL attribution for WKNavigation's public delegate contract.
 ///
@@ -687,6 +695,16 @@ pub(crate) fn navigation_policy(
         (*handler).call((WKNavigationActionPolicy::Cancel,));
         return;
       };
+      // The embedder's navigation callback owns browser-level top-frame URL
+      // admission. It cannot authenticate a WebExtension child resource and
+      // must not preempt WebKit's controller-bound URL scheme handler, which
+      // verifies both the exact loaded context and `web_accessible_resources`.
+      // Keep main-frame and target-less actions on the host policy path.
+      let target_is_main_frame = action.targetFrame().map(|frame| frame.isMainFrame());
+      if native_web_extension_subframe_owns_policy(&url, target_is_main_frame) {
+        (*handler).call((WKNavigationActionPolicy::Allow,));
+        return;
+      }
       let function = &this.ivars().navigation_policy_function;
       let policy_allows = function(url.clone());
       match policy_allows {
@@ -762,6 +780,28 @@ mod navigation_event_state_tests {
   ) -> AppleNavigationUpdate {
     assert!(state.begin_programmatic());
     state.register_programmatic(key, url.into())
+  }
+
+  #[test]
+  fn web_extension_child_resources_delegate_only_to_native_webkit_policy() {
+    let extension = "webkit-extension://abcdefghijklmnopabcdefghijklmnop/inline/menu.html";
+    assert!(native_web_extension_subframe_owns_policy(
+      extension,
+      Some(false)
+    ));
+    assert!(!native_web_extension_subframe_owns_policy(
+      extension,
+      Some(true)
+    ));
+    assert!(!native_web_extension_subframe_owns_policy(extension, None));
+    assert!(!native_web_extension_subframe_owns_policy(
+      "https://example.com/frame",
+      Some(false)
+    ));
+    assert!(!native_web_extension_subframe_owns_policy(
+      "webkit-extensionx://abcdefghijklmnopabcdefghijklmnop/frame",
+      Some(false)
+    ));
   }
 
   #[test]
