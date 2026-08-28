@@ -6,6 +6,7 @@ import type {
   ExtensionManagementAvailabilityChangedView,
   ExtensionManagementView,
   ExtensionRuntimeGrantPromptView,
+  OperationDisposition,
 } from "../src/shared/ipc/bindings";
 import {
   ExtensionDistributionProjectionModel,
@@ -16,6 +17,7 @@ import {
   ExtensionRuntimeGrantPromptProjectionModel,
   extensionDistributionNotice,
   extensionDistributionRefreshMessage,
+  extensionManagementDispositionMessage,
   failureForContext,
   initialExtensionActions,
   initialExtensionManagement,
@@ -217,6 +219,24 @@ describe("extension projection admission", () => {
 });
 
 describe("extension management projection admission", () => {
+  it("keeps restart-required distinct from generic activation pending", () => {
+    const restart: OperationDisposition = {
+      operation_id: "restart",
+      outcome: "applied",
+      reason: "extension_restart_required",
+    };
+    expect(extensionManagementDispositionMessage(restart)).toBe(
+      "Restart Zephium to activate this extension.",
+    );
+    expect(
+      extensionManagementDispositionMessage({
+        ...restart,
+        operation_id: "pending",
+        reason: "extension_activation_pending",
+      }),
+    ).toBe("The extension is enabled and will activate when its runtime becomes available.");
+  });
+
   it("keeps the product entry point hidden until a newer availability fact arrives", () => {
     expect(initialExtensionManagementAvailability()).toEqual({
       projection_revision: ZERO_PROJECTION_REVISION,

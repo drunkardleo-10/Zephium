@@ -83,7 +83,7 @@ fn sealed_product_distribution_configuration() -> Option<SealedProductDistributi
     None
 }
 
-#[cfg(feature = "local-extension-lab")]
+#[cfg(all(feature = "local-extension-lab", target_os = "macos"))]
 fn sealed_product_distribution_configuration() -> Option<SealedProductDistributionConfiguration> {
     const MACOS_LAB_TARGETS: &[ProductExtensionRuntimeTarget] = &[
         ProductExtensionRuntimeTarget::MacosNative,
@@ -94,7 +94,7 @@ fn sealed_product_distribution_configuration() -> Option<SealedProductDistributi
     })
 }
 
-#[cfg(feature = "staging-extension-catalog")]
+#[cfg(all(feature = "staging-extension-catalog", target_os = "macos"))]
 fn sealed_product_distribution_configuration() -> Option<SealedProductDistributionConfiguration> {
     const MACOS_STAGING_TARGETS: &[ProductExtensionRuntimeTarget] = &[
         ProductExtensionRuntimeTarget::MacosNative,
@@ -103,6 +103,19 @@ fn sealed_product_distribution_configuration() -> Option<SealedProductDistributi
     Some(SealedProductDistributionConfiguration {
         runtime_targets: MACOS_STAGING_TARGETS,
     })
+}
+
+// The acquired staging assets currently carry only reviewed macOS
+// compatibility profiles. A Windows build must not reinterpret those rows as
+// WebView2 evidence or start a worker whose exact target selection is absent.
+// Adding WindowsNative here is permitted only in the same change that adds a
+// reviewed Windows manifest/classification profile to the sealed authority.
+#[cfg(all(
+    any(feature = "staging-extension-catalog", feature = "local-extension-lab"),
+    not(target_os = "macos")
+))]
+fn sealed_product_distribution_configuration() -> Option<SealedProductDistributionConfiguration> {
+    None
 }
 
 #[cfg(test)]
@@ -114,7 +127,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "staging-extension-catalog")]
+    #[cfg(all(feature = "staging-extension-catalog", target_os = "macos"))]
     fn staging_build_selects_the_complete_native_macos_profile_cohort() {
         let configuration = super::sealed_product_distribution_configuration().unwrap();
         assert_eq!(
@@ -127,7 +140,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "local-extension-lab")]
+    #[cfg(all(feature = "local-extension-lab", target_os = "macos"))]
     fn local_lab_selects_only_native_macos_profiles() {
         let configuration = super::sealed_product_distribution_configuration().unwrap();
         assert_eq!(
@@ -137,5 +150,14 @@ mod tests {
                 zephium_extension_authority::ProductExtensionRuntimeTarget::MacosNativeBrokered,
             ]
         );
+    }
+
+    #[test]
+    #[cfg(all(
+        any(feature = "staging-extension-catalog", feature = "local-extension-lab"),
+        not(target_os = "macos")
+    ))]
+    fn non_macos_staging_builds_do_not_relabel_macos_profiles() {
+        assert!(super::sealed_product_distribution_configuration().is_none());
     }
 }

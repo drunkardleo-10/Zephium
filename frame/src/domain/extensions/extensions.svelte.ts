@@ -27,6 +27,7 @@ import {
   ExtensionRuntimeGrantPromptProjectionModel,
   extensionDistributionNotice,
   extensionDistributionRefreshMessage,
+  extensionManagementDispositionMessage,
   failureForContext,
   initialExtensionManagement,
   initialExtensionManagementAvailability,
@@ -445,31 +446,6 @@ export async function refreshDistribution(): Promise<void> {
   }
 }
 
-function managementDispositionMessage(disposition: OperationDisposition): string | null {
-  if (disposition.outcome === "applied" || disposition.outcome === "no_op") {
-    if (disposition.reason === "extension_activation_pending") {
-      return "The extension is enabled and will activate when its runtime becomes available.";
-    }
-    if (disposition.reason === "extension_enablement_pending") {
-      return "The extension was installed, but enabling it is still pending.";
-    }
-    return null;
-  }
-  switch (disposition.reason) {
-    case "store_conflict":
-      return "Extensions changed. Review the refreshed list and try again.";
-    case "store_outcome_unknown":
-    case "store_reconciliation_failed":
-      return "Zephium couldn't verify the extension change. Restart before trying again.";
-    case "store_admission_rejected":
-      return "Extension management is temporarily unavailable.";
-    case "invalid_scope":
-      return "This extension can no longer be changed from the current profile.";
-    default:
-      return "Zephium couldn't apply the extension change.";
-  }
-}
-
 async function settleManagementMutation(
   mutation: ManagementMutation,
   dispatch: () => Promise<OperationAdmission>,
@@ -497,7 +473,7 @@ async function settleManagementMutation(
       MANAGEMENT_SETTLEMENT_TIMEOUT_MS,
     );
     if (resolution.state === "processed") {
-      managementNotice = managementDispositionMessage(resolution.disposition);
+      managementNotice = extensionManagementDispositionMessage(resolution.disposition);
     } else if (resolution.state === "pending") {
       managementNotice = "The extension change is still pending.";
     } else {

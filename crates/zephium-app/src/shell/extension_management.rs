@@ -3,10 +3,10 @@
 use std::collections::HashMap;
 
 use zephium_core::ports::extensions::{
-    ExtensionGrantEditOutcome, ExtensionGrantEditRequest, ExtensionInitialGrantSelection,
-    ExtensionInstallCandidateSelector, ExtensionInstallOutcome, ExtensionInstallSelector,
-    ExtensionInstallUpdateSelector, ExtensionInstalledRuntimeState, ExtensionManagementAdmission,
-    ExtensionManagementAvailability, ExtensionManagementCatalog,
+    ExtensionActivationPendingReason, ExtensionGrantEditOutcome, ExtensionGrantEditRequest,
+    ExtensionInitialGrantSelection, ExtensionInstallCandidateSelector, ExtensionInstallOutcome,
+    ExtensionInstallSelector, ExtensionInstallUpdateSelector, ExtensionInstalledRuntimeState,
+    ExtensionManagementAdmission, ExtensionManagementAvailability, ExtensionManagementCatalog,
     ExtensionManagementCatalogAdmission, ExtensionManagementCatalogOutcome,
     ExtensionProfilePolicyEditOutcome, ExtensionSetEnabledOutcome, ExtensionUninstallOutcome,
     ExtensionUpdateConsentEntry, ExtensionUpdateOutcome, ExtensionUpdateRuntimeState,
@@ -19,6 +19,23 @@ const EXTENSION_MANAGEMENT_OPERATION_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(20);
 const EXTENSION_MANAGEMENT_CATALOG_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(10);
+
+const fn activation_pending_operation_reason(
+    reason: ExtensionActivationPendingReason,
+) -> OperationReason {
+    match reason {
+        ExtensionActivationPendingReason::RestartRequired => {
+            OperationReason::ExtensionRestartRequired
+        }
+        ExtensionActivationPendingReason::Unavailable
+        | ExtensionActivationPendingReason::Rejected
+        | ExtensionActivationPendingReason::CapacityExceeded
+        | ExtensionActivationPendingReason::ProfileFenced
+        | ExtensionActivationPendingReason::FailedClosed => {
+            OperationReason::ExtensionActivationPending
+        }
+    }
+}
 
 #[derive(Default)]
 pub(super) struct ExtensionManagementState {
@@ -1142,8 +1159,8 @@ impl Shell {
                         ExtensionInstalledRuntimeState::Active(_) => {
                             OperationReason::MutationApplied
                         }
-                        ExtensionInstalledRuntimeState::PendingActivation(_) => {
-                            OperationReason::ExtensionActivationPending
+                        ExtensionInstalledRuntimeState::PendingActivation(reason) => {
+                            activation_pending_operation_reason(reason)
                         }
                         ExtensionInstalledRuntimeState::Disabled(_) => {
                             OperationReason::ExtensionEnablementPending
@@ -1188,8 +1205,8 @@ impl Shell {
                     match runtime {
                         ExtensionUpdateRuntimeState::Active(_)
                         | ExtensionUpdateRuntimeState::Disabled => OperationReason::MutationApplied,
-                        ExtensionUpdateRuntimeState::PendingActivation(_) => {
-                            OperationReason::ExtensionActivationPending
+                        ExtensionUpdateRuntimeState::PendingActivation(reason) => {
+                            activation_pending_operation_reason(reason)
                         }
                     },
                     false,
@@ -1236,9 +1253,9 @@ impl Shell {
                         },
                         false,
                     ),
-                    ExtensionSetEnabledOutcome::PendingActivation(_) => (
+                    ExtensionSetEnabledOutcome::PendingActivation(reason) => (
                         OperationOutcome::Applied,
-                        OperationReason::ExtensionActivationPending,
+                        activation_pending_operation_reason(reason),
                         false,
                     ),
                     ExtensionSetEnabledOutcome::Conflict => (
@@ -1310,8 +1327,8 @@ impl Shell {
                             | ExtensionUpdateRuntimeState::Disabled => {
                                 OperationReason::MutationApplied
                             }
-                            ExtensionUpdateRuntimeState::PendingActivation(_) => {
-                                OperationReason::ExtensionActivationPending
+                            ExtensionUpdateRuntimeState::PendingActivation(reason) => {
+                                activation_pending_operation_reason(reason)
                             }
                         },
                         false,
@@ -1515,5 +1532,25 @@ mod state_tests {
         state.set_visible(None);
         assert!(!state.authorizes(exact));
         assert!(state.options_runtime(exact).is_none());
+    }
+
+    #[test]
+    fn restart_required_is_not_collapsed_into_generic_activation_pending() {
+        assert_eq!(
+            activation_pending_operation_reason(ExtensionActivationPendingReason::RestartRequired,),
+            OperationReason::ExtensionRestartRequired,
+        );
+        for reason in [
+            ExtensionActivationPendingReason::Unavailable,
+            ExtensionActivationPendingReason::Rejected,
+            ExtensionActivationPendingReason::CapacityExceeded,
+            ExtensionActivationPendingReason::ProfileFenced,
+            ExtensionActivationPendingReason::FailedClosed,
+        ] {
+            assert_eq!(
+                activation_pending_operation_reason(reason),
+                OperationReason::ExtensionActivationPending,
+            );
+        }
     }
 }

@@ -985,9 +985,11 @@ fn approved_update_runtime_state(
         | RuntimeActivationOutcome::AlreadyActive(generation) => {
             ExtensionUpdateRuntimeState::Active(generation)
         }
-        RuntimeActivationOutcome::Unavailable(_) => ExtensionUpdateRuntimeState::PendingActivation(
-            ExtensionActivationPendingReason::Unavailable,
-        ),
+        RuntimeActivationOutcome::Unavailable(reason) => {
+            ExtensionUpdateRuntimeState::PendingActivation(
+                super::management::activation_unavailable_pending_reason(reason),
+            )
+        }
         RuntimeActivationOutcome::Rejected(_) => ExtensionUpdateRuntimeState::PendingActivation(
             ExtensionActivationPendingReason::Rejected,
         ),

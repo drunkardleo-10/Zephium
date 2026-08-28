@@ -15,15 +15,31 @@ use zephium_core::ports::store::{
     ExtensionNativeNamespaceLoadOutcome,
 };
 use zephium_extension_runtime_api::{
-    ExtensionRuntimeHostDataErasureDisposition, ExtensionRuntimeNativeOwnerId,
+    ExtensionRuntimeFailure, ExtensionRuntimeHostDataErasureDisposition,
+    ExtensionRuntimeNativeOwnerId,
 };
 use zephium_store::ExtensionServiceStoreCallOutcome;
 
 use super::WorkerStartupState;
 use crate::runtime_coordinator::{
-    RuntimeActivationOutcome, RuntimeCoordinator, RuntimeCoordinatorResources,
-    RuntimeRetirementOutcome,
+    RuntimeActivationOutcome, RuntimeActivationUnavailableReason, RuntimeCoordinator,
+    RuntimeCoordinatorResources, RuntimeRetirementOutcome,
 };
+
+pub(super) const fn activation_unavailable_pending_reason(
+    reason: RuntimeActivationUnavailableReason,
+) -> ExtensionActivationPendingReason {
+    if matches!(
+        reason,
+        RuntimeActivationUnavailableReason::NativeRetryable(
+            ExtensionRuntimeFailure::RestartRequired
+        )
+    ) {
+        ExtensionActivationPendingReason::RestartRequired
+    } else {
+        ExtensionActivationPendingReason::Unavailable
+    }
+}
 
 pub(super) fn set_enabled_until(
     startup: &mut WorkerStartupState,
@@ -80,9 +96,9 @@ pub(super) fn set_enabled_until(
                     changed: !current.desired_enabled(),
                 }
             }
-            RuntimeActivationOutcome::Unavailable(_) => {
+            RuntimeActivationOutcome::Unavailable(reason) => {
                 ExtensionSetEnabledOutcome::PendingActivation(
-                    ExtensionActivationPendingReason::Unavailable,
+                    activation_unavailable_pending_reason(reason),
                 )
             }
             RuntimeActivationOutcome::Rejected(_) => ExtensionSetEnabledOutcome::PendingActivation(
@@ -592,6 +608,37 @@ const fn map_set_enabled_to_uninstall(
         | ExtensionSetEnabledOutcome::Disabled { .. }
         | ExtensionSetEnabledOutcome::PendingActivation(_) => {
             ExtensionUninstallOutcome::FailedClosed
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_definite_pre_entry_mode_conflict_projects_restart_required() {
+        assert_eq!(
+            activation_unavailable_pending_reason(
+                RuntimeActivationUnavailableReason::NativeRetryable(
+                    ExtensionRuntimeFailure::RestartRequired,
+                ),
+            ),
+            ExtensionActivationPendingReason::RestartRequired,
+        );
+        for reason in [
+            RuntimeActivationUnavailableReason::DeadlineReached,
+            RuntimeActivationUnavailableReason::NativeRetryable(
+                ExtensionRuntimeFailure::BackendUnavailable,
+            ),
+            RuntimeActivationUnavailableReason::NativeOwnershipUncertain(
+                ExtensionRuntimeFailure::RestartRequired,
+            ),
+        ] {
+            assert_eq!(
+                activation_unavailable_pending_reason(reason),
+                ExtensionActivationPendingReason::Unavailable,
+            );
         }
     }
 }

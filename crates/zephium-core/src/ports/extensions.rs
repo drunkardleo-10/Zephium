@@ -548,6 +548,10 @@ impl ExtensionInstallSelector {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExtensionActivationPendingReason {
     Unavailable,
+    /// Durable enabled intent was accepted, but this process already created
+    /// the profile's immutable native environment in an incompatible mode.
+    /// A browser restart or exact profile reconstruction is required.
+    RestartRequired,
     Rejected,
     CapacityExceeded,
     ProfileFenced,

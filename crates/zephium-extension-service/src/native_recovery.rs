@@ -850,7 +850,8 @@ fn classify_bind_error(error: ExtensionRuntimeHostBindError) -> NativeRecoverySt
 fn classify_runtime_failure(failure: ExtensionRuntimeFailure) -> NativeRecoveryStep {
     match failure {
         ExtensionRuntimeFailure::UnsupportedTarget
-        | ExtensionRuntimeFailure::BackendUnavailable => {
+        | ExtensionRuntimeFailure::BackendUnavailable
+        | ExtensionRuntimeFailure::RestartRequired => {
             NativeRecoveryStep::Unavailable(NativeRecoveryUnavailable::BackendUnavailable)
         }
         ExtensionRuntimeFailure::CapacityExceeded => {

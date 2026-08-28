@@ -413,6 +413,7 @@ fn validate_lifecycle_adapter(source: &str) -> Result<(), String> {
         "mint_windows_profile_owner_absent(ticket.attempt(),audit)",
         "WindowsNativeExtensionRetirement::Absent(audit)",
         "native_profile.reconcile_recovery(expected,deadline)",
+        "Failure::ExistingEnvironmentModeConflict=>ExtensionRuntimeFailure::RestartRequired",
     ] {
         if !source.contains(required) {
             return Err(format!(

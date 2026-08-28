@@ -418,9 +418,8 @@ fn map_native_failure(failure: WindowsNativeExtensionFailure) -> ExtensionRuntim
             ExtensionRuntimeFailure::PackageRejected
         }
         Failure::NativeCallTimedOut(_) => ExtensionRuntimeFailure::TimedOut,
-        Failure::ProfileHostUnavailable | Failure::ExistingEnvironmentModeConflict => {
-            ExtensionRuntimeFailure::BackendUnavailable
-        }
+        Failure::ProfileHostUnavailable => ExtensionRuntimeFailure::BackendUnavailable,
+        Failure::ExistingEnvironmentModeConflict => ExtensionRuntimeFailure::RestartRequired,
         Failure::IdentityMalformed
         | Failure::IdentityMismatchQuarantined
         | Failure::InstalledOwnerDisabled => ExtensionRuntimeFailure::PackageRejected,

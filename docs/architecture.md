@@ -1276,10 +1276,22 @@ extension host.
 This is not yet a Windows product-support claim. A profile whose ordinary
 extension-disabled WebView2 environment is already running cannot switch the
 environment option in place; the current adapter returns a retryable native
-pre-entry refusal rather than enabling globally or silently mixing modes. The
-Windows catalog/runtime selection, user-visible restart/reconstruction
-flow, toolbar/popup host, packaged live install/restart/remove/crash probes,
-and measured process-family budgets remain release gates. Linux still needs
+pre-entry `RestartRequired` refusal rather than enabling globally or silently
+mixing modes. That closed reason survives service activation, install/update/
+enable/grant settlements, Shell's bounded operation ledger, generated IPC, and
+the Extensions Center, which tells the user to restart Zephium. It is not a
+restart command and grants no permission to tear down a live profile behind
+Shell's tab/session authority. Exact in-process reconstruction remains future
+work; restart re-enters ordinary authenticated startup before any content view.
+
+The sealed staging and local-lab authorities still carry only reviewed macOS
+profiles, and the desktop build boundary still limits those feature graphs to
+macOS. Non-macOS configuration additionally resolves to no distribution target
+rather than relabelling macOS classification as Windows evidence. A
+`WindowsNative` catalog profile must land atomically with its own reviewed
+classification/admission digest and Windows runner evidence. The Windows
+toolbar/popup host, packaged live install/restart/remove/crash probes, and
+measured process-family budgets remain release gates. Linux still needs
 the package-neutral compatibility runtime built on the already-proven
 principal and injection boundaries.
 Distribution reuses the blocker stack's generic package-authority model—fixed origins,

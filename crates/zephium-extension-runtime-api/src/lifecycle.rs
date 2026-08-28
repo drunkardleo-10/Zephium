@@ -19,6 +19,11 @@ pub enum ExtensionRuntimeFailure {
     UnsupportedTarget,
     /// The runtime backend is temporarily unavailable.
     BackendUnavailable,
+    /// The exact profile already owns a running native environment whose
+    /// immutable startup mode cannot host this runtime. Durable enabled intent
+    /// may remain accepted, but the browser process must be reconstructed or
+    /// Zephium restarted before activation can be retried.
+    RestartRequired,
     /// A bounded runtime capacity was exhausted.
     CapacityExceeded,
     /// Native validation rejected the package.
@@ -34,6 +39,7 @@ impl fmt::Display for ExtensionRuntimeFailure {
         formatter.write_str(match self {
             Self::UnsupportedTarget => "extension runtime target is unsupported",
             Self::BackendUnavailable => "extension runtime backend is unavailable",
+            Self::RestartRequired => "extension runtime activation requires browser restart",
             Self::CapacityExceeded => "extension runtime capacity was exceeded",
             Self::PackageRejected => "extension runtime rejected the package",
             Self::TimedOut => "extension runtime operation timed out",

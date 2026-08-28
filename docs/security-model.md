@@ -1062,8 +1062,17 @@ These inherited properties must not be overstated:
 - WebView2 fixes extension enablement at environment creation. If a profile
   already owns an extension-disabled browser-process generation, Zephium does
   not attempt to change it in place or enable all profiles preemptively. The
-  current Windows adapter returns a retryable native pre-entry refusal; product
-  restart/reconstruction UX and live Windows validation remain release gates.
+  current Windows adapter returns a retryable native pre-entry
+  `RestartRequired` refusal. That reason is projected through typed management
+  settlement and bounded IPC into restart copy in the Extensions Center; it
+  does not trigger automatic teardown or weaken tab/session ownership.
+  Restart re-enters cleanup-first authenticated startup. Exact live-profile
+  reconstruction and live Windows validation remain release gates.
+- No reviewed Windows catalog/classification profile is currently sealed. The
+  macOS staging and private-lab feature graphs remain macOS-only at the desktop
+  build boundary, and non-macOS target configuration is empty. Windows must not
+  reinterpret a macOS compatibility digest as WebView2 evidence; enabling the
+  target requires an atomic reviewed profile plus native-runner proof.
 
 - Raw persistent and private-content controllers use profile-specific WebView2
   contexts; the privileged Tauri user-data folder is not reused by raw content.

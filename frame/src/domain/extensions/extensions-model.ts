@@ -8,6 +8,7 @@ import type {
   ExtensionManagementAvailabilityChangedView,
   ExtensionManagementView,
   ExtensionRuntimeGrantPromptView,
+  OperationDisposition,
 } from "../../shared/ipc/bindings";
 import { ZERO_PROJECTION_REVISION } from "../tabs/tabs-model";
 
@@ -38,6 +39,37 @@ export function initialExtensionManagementAvailability(): ExtensionManagementAva
     projection_revision: ZERO_PROJECTION_REVISION,
     availability: "unavailable",
   };
+}
+
+/** Closed user copy for one actor-settled extension management mutation. */
+export function extensionManagementDispositionMessage(
+  disposition: OperationDisposition,
+): string | null {
+  if (disposition.outcome === "applied" || disposition.outcome === "no_op") {
+    if (disposition.reason === "extension_restart_required") {
+      return "Restart Zephium to activate this extension.";
+    }
+    if (disposition.reason === "extension_activation_pending") {
+      return "The extension is enabled and will activate when its runtime becomes available.";
+    }
+    if (disposition.reason === "extension_enablement_pending") {
+      return "The extension was installed, but enabling it is still pending.";
+    }
+    return null;
+  }
+  switch (disposition.reason) {
+    case "store_conflict":
+      return "Extensions changed. Review the refreshed list and try again.";
+    case "store_outcome_unknown":
+    case "store_reconciliation_failed":
+      return "Zephium couldn't verify the extension change. Restart before trying again.";
+    case "store_admission_rejected":
+      return "Extension management is temporarily unavailable.";
+    case "invalid_scope":
+      return "This extension can no longer be changed from the current profile.";
+    default:
+      return "Zephium couldn't apply the extension change.";
+  }
 }
 
 /** Independent revision admission for the process-immutable product fact. */
