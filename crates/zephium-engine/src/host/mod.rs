@@ -463,6 +463,13 @@ pub(crate) struct EngineHost {
     browser_version_observers: HashMap<ProfileId, crate::platform::imp::BrowserVersionObserver>,
     #[cfg(target_os = "windows")]
     environments: HashMap<ProfileId, ICoreWebView2Environment>,
+    // Exact profile objects admitted through Wry's pre-initialization
+    // extension startup gate. Presence means the matching environment was
+    // created extension-enabled and every later content controller must pass
+    // a complete native-inventory comparison before initialization.
+    #[cfg(target_os = "windows")]
+    windows_extension_profiles:
+        HashMap<ProfileId, crate::platform::imp::WindowsNativeExtensionProfile>,
     #[cfg(target_os = "windows")]
     browser_processes: HashMap<ProfileId, crate::platform::imp::BrowserProcess>,
     #[cfg(target_os = "windows")]

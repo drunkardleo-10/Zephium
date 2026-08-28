@@ -14,6 +14,8 @@ mod activation_issuer_test_support;
 mod macos_adapter;
 mod native_grants;
 mod native_lifecycle;
+#[cfg(target_os = "windows")]
+mod windows_adapter;
 
 use std::mem::size_of;
 use std::num::NonZeroU64;
@@ -645,6 +647,48 @@ impl ReservationBinding {
             Self::Activation { absence_issuer, .. } | Self::Recovery { absence_issuer, .. } => {
                 absence_issuer.bind(generation)
             }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn expected_windows_owner(&self) -> Option<ExtensionRuntimeNativeOwnerId> {
+        match self {
+            Self::Activation {
+                expectation:
+                    ExtensionRuntimeNativeIdentityExpectation::WindowsWebView2Extension(owner),
+                ..
+            } => Some(*owner),
+            Self::Recovery {
+                expectation:
+                    ExtensionRuntimeRecoveryExpectation::WindowsWebView2Extension {
+                        catalog_expected,
+                        adapter_observed,
+                    },
+                ..
+            } => match (*catalog_expected, *adapter_observed) {
+                (Some(expected), Some(observed)) if expected == observed => Some(expected),
+                (Some(expected), None) => Some(expected),
+                (None, Some(observed)) => Some(observed),
+                (None, None) | (Some(_), Some(_)) => None,
+            },
+            _ => None,
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    const fn known_windows_evidence(&self) -> Option<ExtensionRuntimeOwnershipEvidence> {
+        match self {
+            Self::Recovery {
+                expectation:
+                    ExtensionRuntimeRecoveryExpectation::WindowsWebView2Extension {
+                        adapter_observed: Some(observed),
+                        ..
+                    },
+                ..
+            } => Some(ExtensionRuntimeOwnershipEvidence::WindowsWebView2Extension(
+                *observed,
+            )),
+            _ => None,
         }
     }
 }
@@ -2031,6 +2075,16 @@ impl ExtensionRuntimeRegistry {
         self.publish_native_terminal(index, ticket, effect)
     }
 
+    #[cfg(target_os = "windows")]
+    fn native_deadline(&mut self, ticket: NativeCallTicket) -> Option<Instant> {
+        let index = self
+            .entry_index(ticket.owner(), ticket.registry_generation())
+            .ok()?;
+        (self.entries[index].native.current_ticket() == Some(ticket))
+            .then(|| self.entries[index].native.deadline())
+            .flatten()
+    }
+
     fn complete_native_retirement(
         &mut self,
         ticket: NativeCallTicket,
@@ -2121,6 +2175,22 @@ impl ExtensionRuntimeRegistry {
             .map_err(|reason| self.transition_error(reason))
     }
 
+    #[cfg(target_os = "windows")]
+    fn with_windows_reconciliation_owner<T>(
+        &mut self,
+        ticket: NativeCallTicket,
+        audit: impl FnOnce(&mut crate::platform::imp::WindowsNativeExtensionOwner) -> T,
+    ) -> Result<Option<T>, ExtensionRuntimeHostBindError> {
+        let index = self.entry_index(ticket.owner(), ticket.registry_generation())?;
+        if !self.callback_is_pending(index, ticket)? {
+            return Err(ExtensionRuntimeHostBindError::OwnerConflict);
+        }
+        self.entries[index]
+            .native
+            .with_windows_reconciliation_owner(ticket, audit)
+            .map_err(|reason| self.transition_error(reason))
+    }
+
     /// Returns the exact published runtime fingerprints for one profile. The
     /// bounded clone contains no package bytes or native object and is used
     /// only to join Shell action projection with stable native ownership.
@@ -2204,6 +2274,81 @@ impl ExtensionRuntimeRegistry {
             return Err(ExtensionRuntimeHostBindError::InternalInvariant);
         }
         Ok(runtimes)
+    }
+
+    /// Exact WebView2 owner cohort allowed to exist when a profile content
+    /// controller crosses Wry's pre-initialization startup gate.
+    #[cfg(target_os = "windows")]
+    pub(super) fn published_windows_native_owner_ids(
+        &mut self,
+        profile: ProfileId,
+    ) -> Result<
+        [Option<ExtensionRuntimeNativeOwnerId>;
+            zephium_extension_runtime_api::MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES],
+        ExtensionRuntimeHostBindError,
+    > {
+        if self.sealed {
+            return Err(ExtensionRuntimeHostBindError::Sealed);
+        }
+        if self.invariant_failed {
+            return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+        }
+        let mut owners = std::array::from_fn(|_| None);
+        let mut owner_count = 0_usize;
+        let mut invariant_failed = false;
+        for entry in &self.entries {
+            let ReservationBinding::Activation { expectation, .. } = &entry.reservation.binding
+            else {
+                continue;
+            };
+            let ExtensionRuntimeNativeIdentityExpectation::WindowsWebView2Extension(owner) =
+                expectation
+            else {
+                continue;
+            };
+            let state = match entry.reservation.authority_state.try_lock() {
+                Ok(state) => state,
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    return Err(ExtensionRuntimeHostBindError::Unavailable);
+                }
+                Err(std::sync::TryLockError::Poisoned(_)) => {
+                    entry
+                        .reservation
+                        .gate
+                        .inner
+                        .invariant_failed
+                        .store(true, Ordering::Release);
+                    invariant_failed = true;
+                    break;
+                }
+            };
+            let ReservationAuthorityState::Published {
+                authority: Some(authority),
+                ..
+            } = &*state
+            else {
+                continue;
+            };
+            if authority.fingerprint().instance().profile() != profile {
+                continue;
+            }
+            if owner_count == owners.len()
+                || owners[..owner_count]
+                    .iter()
+                    .flatten()
+                    .any(|existing| existing == owner)
+            {
+                invariant_failed = true;
+                break;
+            }
+            owners[owner_count] = Some(*owner);
+            owner_count += 1;
+        }
+        if invariant_failed {
+            self.fail_invariant();
+            return Err(ExtensionRuntimeHostBindError::InternalInvariant);
+        }
+        Ok(owners)
     }
 
     /// Runs one operation against the stable native owner authenticated by a
@@ -3061,10 +3206,12 @@ where
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AdapterAvailability {
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     Unsupported,
     #[cfg(target_os = "macos")]
     MacosNative,
+    #[cfg(target_os = "windows")]
+    WindowsNative,
     #[cfg(test)]
     LogicalHarness,
 }
@@ -3075,7 +3222,11 @@ impl AdapterAvailability {
         {
             Self::MacosNative
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "windows")]
+        {
+            Self::WindowsNative
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
             Self::Unsupported
         }
@@ -3083,12 +3234,17 @@ impl AdapterAvailability {
 
     fn accepts_activation(self, expectation: ExtensionRuntimeNativeIdentityExpectation) -> bool {
         match self {
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
             Self::Unsupported => false,
             #[cfg(target_os = "macos")]
             Self::MacosNative => matches!(
                 expectation,
                 ExtensionRuntimeNativeIdentityExpectation::MacosWebExtension(_)
+            ),
+            #[cfg(target_os = "windows")]
+            Self::WindowsNative => matches!(
+                expectation,
+                ExtensionRuntimeNativeIdentityExpectation::WindowsWebView2Extension(_)
             ),
             #[cfg(test)]
             Self::LogicalHarness => true,
@@ -3097,12 +3253,17 @@ impl AdapterAvailability {
 
     fn accepts_recovery(self, expectation: ExtensionRuntimeRecoveryExpectation) -> bool {
         match self {
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
             Self::Unsupported => false,
             #[cfg(target_os = "macos")]
             Self::MacosNative => matches!(
                 expectation,
                 ExtensionRuntimeRecoveryExpectation::MacosWebExtension { .. }
+            ),
+            #[cfg(target_os = "windows")]
+            Self::WindowsNative => matches!(
+                expectation,
+                ExtensionRuntimeRecoveryExpectation::WindowsWebView2Extension { .. }
             ),
             #[cfg(test)]
             Self::LogicalHarness => true,
@@ -3216,7 +3377,21 @@ impl ExtensionRuntimeHostFactoryPort for EngineFactoryPort {
                 return Err(ExtensionRuntimeHostProfileAbsenceDisposition::TimedOut);
             }
             match status {
-                ProfileObligationStatus::Absent => Ok(()),
+                ProfileObligationStatus::Absent => {
+                    #[cfg(target_os = "windows")]
+                    if let Some(native_profile) = host.windows_extension_profiles.get(&profile) {
+                        return match native_profile.inventory_is_empty(deadline) {
+                            Ok(true) => Ok(()),
+                            Ok(false) => Err(
+                                ExtensionRuntimeHostProfileAbsenceDisposition::ObligationsRemain,
+                            ),
+                            Err(_) => {
+                                Err(ExtensionRuntimeHostProfileAbsenceDisposition::Unavailable)
+                            }
+                        };
+                    }
+                    Ok(())
+                }
                 ProfileObligationStatus::Present => {
                     Err(ExtensionRuntimeHostProfileAbsenceDisposition::ObligationsRemain)
                 }
@@ -3473,7 +3648,7 @@ fn begin_activation_adapter(
     ticket: NativeCallTicket,
 ) -> Result<(), ExtensionRuntimeHostBindError> {
     match reservation.adapter {
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         AdapterAvailability::Unsupported => {
             host.extension_runtime_registry.fail_invariant();
             Err(ExtensionRuntimeHostBindError::InternalInvariant)
@@ -3481,6 +3656,10 @@ fn begin_activation_adapter(
         #[cfg(target_os = "macos")]
         AdapterAvailability::MacosNative => {
             macos_adapter::begin_native_activation(host, reservation, ticket)
+        }
+        #[cfg(target_os = "windows")]
+        AdapterAvailability::WindowsNative => {
+            windows_adapter::begin_native_activation(host, reservation, ticket)
         }
         #[cfg(test)]
         AdapterAvailability::LogicalHarness => {
@@ -3603,7 +3782,7 @@ fn begin_retirement_adapter(
     platform_owner: PlatformOwnerBundle,
 ) -> Result<(), ExtensionRuntimeHostBindError> {
     match reservation.adapter {
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         AdapterAvailability::Unsupported => {
             platform_owner.quarantine_unattributed();
             host.extension_runtime_registry.fail_invariant();
@@ -3612,6 +3791,11 @@ fn begin_retirement_adapter(
         #[cfg(target_os = "macos")]
         AdapterAvailability::MacosNative => {
             macos_adapter::begin_native_retirement(host, ticket, platform_owner)
+        }
+        #[cfg(target_os = "windows")]
+        AdapterAvailability::WindowsNative => {
+            let _ = reservation;
+            windows_adapter::begin_native_retirement(host, ticket, platform_owner)
         }
         #[cfg(test)]
         AdapterAvailability::LogicalHarness => {
@@ -3704,7 +3888,7 @@ fn begin_reconciliation_adapter(
     ticket: NativeCallTicket,
 ) -> Result<(), ExtensionRuntimeHostBindError> {
     match reservation.adapter {
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         AdapterAvailability::Unsupported => {
             host.extension_runtime_registry.fail_invariant();
             Err(ExtensionRuntimeHostBindError::InternalInvariant)
@@ -3712,6 +3896,10 @@ fn begin_reconciliation_adapter(
         #[cfg(target_os = "macos")]
         AdapterAvailability::MacosNative => {
             macos_adapter::begin_native_reconciliation(host, reservation, ticket)
+        }
+        #[cfg(target_os = "windows")]
+        AdapterAvailability::WindowsNative => {
+            windows_adapter::begin_native_reconciliation(host, reservation, ticket)
         }
         #[cfg(test)]
         AdapterAvailability::LogicalHarness => {

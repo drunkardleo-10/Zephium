@@ -1034,6 +1034,37 @@ These inherited properties must not be overstated:
 
 ### Windows / WebView2
 
+- Browser extensions remain disabled in every ordinary WebView2 environment.
+  A direct `browser_extensions_enabled(true)` request and every unmanaged
+  extension path fail before COM/HWND construction. The only enabled path is
+  an engine-owned Wry startup gate invoked after exact controller retention but
+  before WebView initialization or initial navigation. It pointer-attests the
+  controller environment through canonical `IUnknown` identity, the exact UDF,
+  and a non-private `ICoreWebView2Profile7`.
+- The first enabled environment uses a short-lived 1x1 hidden controller with
+  no IPC, DevTools, focus, autoplay, download, permission, popup, or arbitrary
+  navigation authority. It is explicitly closed before the lifecycle call
+  continues. Construction and close failures retain the exact process and
+  controller cleanup obligations and make admission fail closed. The extension
+  service's durable journal and authenticated package state must already have
+  selected this native operation: WebView2 can make persisted extensions
+  available when the environment starts, before an embedder can enumerate the
+  profile, so the bootstrap controller is deliberately page-inert and no raw
+  content controller is admitted at that point.
+- Before any later extension-enabled content controller initializes, the host
+  enumerates the complete bounded native extension snapshot and requires exact
+  equality with the published runtime-owner cohort. Activation, removal, and
+  recovery consume callback HRESULTs and native objects under one absolute
+  deadline and a reentrancy-bounded UI message pump. Missing or duplicate
+  identities, late callbacks, inventory overflow/mismatch, cleanup debt, or a
+  changed environment/profile identity blocks new content views and prevents a
+  clean shutdown claim.
+- WebView2 fixes extension enablement at environment creation. If a profile
+  already owns an extension-disabled browser-process generation, Zephium does
+  not attempt to change it in place or enable all profiles preemptively. The
+  current Windows adapter returns a retryable native pre-entry refusal; product
+  restart/reconstruction UX and live Windows validation remain release gates.
+
 - Raw persistent and private-content controllers use profile-specific WebView2
   contexts; the privileged Tauri user-data folder is not reused by raw content.
 - The main and panel are InPrivate and use distinct UDFs inside a fresh per-run

@@ -15,6 +15,8 @@ use zephium_extension_runtime_api::{
     ExtensionRuntimeRetirementDisposition,
 };
 
+#[cfg(target_os = "windows")]
+use crate::platform::imp::WindowsNativeExtensionOwner;
 #[cfg(target_os = "macos")]
 use crate::platform::imp::{MacosNativeRuntimeOwner, MacosNativeRuntimeOwnerIdentity};
 
@@ -463,6 +465,8 @@ pub(super) enum PlatformOwnerBundle {
     #[cfg(target_os = "macos")]
     #[allow(dead_code)] // Constructed when the guarded product adapter is enabled.
     Macos(MacosNativeRuntimeOwner),
+    #[cfg(target_os = "windows")]
+    Windows(WindowsNativeExtensionOwner),
     #[cfg(test)]
     Logical(LogicalPlatformOwner),
 }
@@ -471,6 +475,8 @@ pub(super) enum PlatformOwnerBundle {
 enum PlatformOwnerIdentity {
     #[cfg(target_os = "macos")]
     Macos(MacosNativeRuntimeOwnerIdentity),
+    #[cfg(target_os = "windows")]
+    Windows(zephium_extension_runtime_api::ExtensionRuntimeNativeOwnerId),
     #[cfg(test)]
     Logical(NonZeroU64),
 }
@@ -485,6 +491,8 @@ impl PlatformOwnerBundle {
             (Self::Vacant, Self::Vacant) => true,
             #[cfg(target_os = "macos")]
             (Self::Macos(left), Self::Macos(right)) => left.is_exactly(right),
+            #[cfg(target_os = "windows")]
+            (Self::Windows(left), Self::Windows(right)) => left.owner_id() == right.owner_id(),
             #[cfg(test)]
             (Self::Logical(left), Self::Logical(right)) => left.token == right.token,
             _ => false,
@@ -496,6 +504,8 @@ impl PlatformOwnerBundle {
             Self::Vacant => None,
             #[cfg(target_os = "macos")]
             Self::Macos(owner) => Some(PlatformOwnerIdentity::Macos(owner.identity())),
+            #[cfg(target_os = "windows")]
+            Self::Windows(owner) => Some(PlatformOwnerIdentity::Windows(owner.owner_id())),
             #[cfg(test)]
             Self::Logical(owner) => Some(PlatformOwnerIdentity::Logical(owner.token)),
         }
@@ -506,6 +516,10 @@ impl PlatformOwnerBundle {
             #[cfg(target_os = "macos")]
             (Self::Macos(owner), PlatformOwnerIdentity::Macos(expected)) => {
                 owner.identity() == expected
+            }
+            #[cfg(target_os = "windows")]
+            (Self::Windows(owner), PlatformOwnerIdentity::Windows(expected)) => {
+                owner.owner_id() == expected
             }
             #[cfg(test)]
             (Self::Logical(owner), PlatformOwnerIdentity::Logical(expected)) => {
@@ -622,6 +636,16 @@ impl PlatformOwnerSet {
     fn retained_macos_mut(&mut self) -> Option<&mut MacosNativeRuntimeOwner> {
         match &mut self.retained {
             PlatformOwnerBundle::Macos(owner) => Some(owner),
+            PlatformOwnerBundle::Vacant => None,
+            #[cfg(test)]
+            PlatformOwnerBundle::Logical(_) => None,
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn retained_windows_mut(&mut self) -> Option<&mut WindowsNativeExtensionOwner> {
+        match &mut self.retained {
+            PlatformOwnerBundle::Windows(owner) => Some(owner),
             PlatformOwnerBundle::Vacant => None,
             #[cfg(test)]
             PlatformOwnerBundle::Logical(_) => None,
@@ -1016,6 +1040,29 @@ impl NativeLifecycleSlot {
             return Err(NativeBeginError::WrongState);
         }
         Ok(self.platform_owners.retained_macos_mut().map(audit))
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(super) fn with_windows_reconciliation_owner<T>(
+        &mut self,
+        ticket: NativeCallTicket,
+        audit: impl FnOnce(&mut WindowsNativeExtensionOwner) -> T,
+    ) -> Result<Option<T>, NativeBeginError> {
+        if !self.accepts_ticket(ticket, NativeCallKind::Reconciliation)
+            || self.current_ticket() != Some(ticket)
+        {
+            return Err(NativeBeginError::StaleTicket);
+        }
+        if self.platform_owners.is_quarantined()
+            || !matches!(
+                self.state,
+                TypedNativeState::Activation(ActivationState::Reconciling(_))
+                    | TypedNativeState::Recovery(RecoveryState::Reconciling(_))
+            )
+        {
+            return Err(NativeBeginError::WrongState);
+        }
+        Ok(self.platform_owners.retained_windows_mut().map(audit))
     }
 
     /// Borrows the exact retained macOS owner only while native ownership is
@@ -1711,8 +1758,8 @@ impl NativeLifecycleSlot {
         }
     }
 
-    #[cfg(test)]
-    fn deadline(&self) -> Option<Instant> {
+    #[cfg(any(target_os = "windows", test))]
+    pub(super) fn deadline(&self) -> Option<Instant> {
         match &self.state {
             TypedNativeState::Activation(ActivationState::Activating(active))
             | TypedNativeState::Activation(ActivationState::Reconciling(active)) => {
@@ -1736,6 +1783,8 @@ impl NativeLifecycleSlot {
             PlatformOwnerBundle::Vacant => None,
             #[cfg(target_os = "macos")]
             PlatformOwnerBundle::Macos(_) => None,
+            #[cfg(target_os = "windows")]
+            PlatformOwnerBundle::Windows(_) => None,
         }
     }
 
@@ -1746,6 +1795,8 @@ impl NativeLifecycleSlot {
             PlatformOwnerBundle::Vacant => None,
             #[cfg(target_os = "macos")]
             PlatformOwnerBundle::Macos(_) => None,
+            #[cfg(target_os = "windows")]
+            PlatformOwnerBundle::Windows(_) => None,
         }
     }
 }

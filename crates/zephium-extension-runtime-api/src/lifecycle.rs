@@ -1443,10 +1443,26 @@ impl RecoveryEvidenceObservation {
                                 && absence.observed_native_identity() == adapter_observed
                         }
                         crate::ExtensionRuntimeAbsenceProofKind::ActivationNeverEntered
+                        | crate::ExtensionRuntimeAbsenceProofKind::WindowsProfileOwnerAbsent
                         | crate::ExtensionRuntimeAbsenceProofKind::CompatibilityRegistryAbsentAndQuiescent => false,
                     }
             }
-            ExtensionRuntimeRecoveryExpectation::WindowsWebView2Extension { .. } => false,
+            ExtensionRuntimeRecoveryExpectation::WindowsWebView2Extension {
+                catalog_expected,
+                adapter_observed,
+            } => {
+                absence.target() == ExtensionRuntimeTarget::NativeWebExtension
+                    && absence.backend() == ExtensionRuntimeBackendTarget::WindowsNative
+                    && absence.expected_native_identity() == catalog_expected
+                    && matches!(
+                        absence.proof_kind(),
+                        crate::ExtensionRuntimeAbsenceProofKind::WindowsProfileOwnerAbsent
+                    )
+                    && catalog_expected
+                        .zip(adapter_observed)
+                        .is_none_or(|(expected, observed)| expected == observed)
+                    && absence.observed_native_identity() == adapter_observed
+            }
             ExtensionRuntimeRecoveryExpectation::Compatibility => {
                 absence.target() == ExtensionRuntimeTarget::Compatibility
                     && matches!(

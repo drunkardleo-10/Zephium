@@ -127,6 +127,11 @@ pub enum ExtensionRuntimeAbsenceProofKind {
     /// the namespace, no per-context grant surface or native runtime owner
     /// exists to clear.
     MacosControllerNamespaceAbsent,
+    /// Windows enumerated the complete bounded WebView2 extension snapshot for
+    /// the exact attested profile after a completed removal or during crash
+    /// recovery and observed the expected native owner absent. The profile and
+    /// environment remain retained through the observation.
+    WindowsProfileOwnerAbsent,
     /// The compatibility-runtime registry proved the exact owner absent, all
     /// owned native resources and injected content removed, and every owned
     /// callback/task drained.
@@ -187,6 +192,36 @@ pub struct ExtensionRuntimeMacosAbsenceAudit {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ExtensionRuntimeMacosControllerAbsenceAudit {
     _validated: (),
+}
+
+/// Validated WebView2 observations required to prove one expected owner absent
+/// from an exact profile.
+///
+/// The witness does not claim the whole profile inventory is empty. Other
+/// independently journaled extensions may coexist in the same profile; the
+/// startup content-view gate compares that complete cohort separately.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExtensionRuntimeWindowsAbsenceAudit {
+    _validated: (),
+}
+
+impl ExtensionRuntimeWindowsAbsenceAudit {
+    /// Validates the complete Windows owner-absence observation set.
+    #[must_use]
+    pub const fn try_from_observations(
+        environment_profile_binding_exact: bool,
+        inventory_bounded_and_complete: bool,
+        expected_owner_absent: bool,
+    ) -> Option<Self> {
+        if environment_profile_binding_exact
+            && inventory_bounded_and_complete
+            && expected_owner_absent
+        {
+            Some(Self { _validated: () })
+        } else {
+            None
+        }
+    }
 }
 
 impl ExtensionRuntimeMacosControllerAbsenceAudit {
@@ -468,6 +503,18 @@ impl ExtensionRuntimeAbsenceEvidence {
             }
             ExtensionRuntimeAbsenceProofKind::MacosControllerNamespaceAbsent => {
                 self.backend == ExtensionRuntimeBackendTarget::MacosNative
+                    && self.target == ExtensionRuntimeTarget::NativeWebExtension
+                    && self
+                        .expected_native_identity
+                        .zip(self.observed_native_identity)
+                        .is_none_or(|(expected, observed)| expected == observed)
+                    && self
+                        .observed_native_identity
+                        .map(|identity| identity.encoded_bytes())
+                        == entry.native_identity().map(|identity| identity.bytes())
+            }
+            ExtensionRuntimeAbsenceProofKind::WindowsProfileOwnerAbsent => {
+                self.backend == ExtensionRuntimeBackendTarget::WindowsNative
                     && self.target == ExtensionRuntimeTarget::NativeWebExtension
                     && self
                         .expected_native_identity
@@ -1104,6 +1151,25 @@ mod tests {
                 )
                 .is_none(),
                 "macOS controller observation {flipped} must be mandatory"
+            );
+        }
+
+        let windows = [true; 3];
+        assert!(ExtensionRuntimeWindowsAbsenceAudit::try_from_observations(
+            windows[0], windows[1], windows[2],
+        )
+        .is_some());
+        for flipped in 0..windows.len() {
+            let mut observations = windows;
+            observations[flipped] = false;
+            assert!(
+                ExtensionRuntimeWindowsAbsenceAudit::try_from_observations(
+                    observations[0],
+                    observations[1],
+                    observations[2],
+                )
+                .is_none(),
+                "Windows observation {flipped} must be mandatory"
             );
         }
     }

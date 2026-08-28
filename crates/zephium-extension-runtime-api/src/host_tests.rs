@@ -420,6 +420,25 @@ impl ActivationFixture {
         )
     }
 
+    fn windows(seed: u8) -> Self {
+        let owner = ExtensionRuntimeNativeOwnerId::parse_exact(EXPECTED_NATIVE_ID)
+            .expect("canonical native owner ID");
+        let native_identity = ExtensionNativeOwnershipIdentity::parse(
+            ExtensionRuntimeBackendTarget::WindowsNative,
+            EXPECTED_NATIVE_ID,
+        )
+        .expect("canonical durable native ID");
+        Self::new(
+            seed,
+            ExtensionRuntimeBackendTarget::WindowsNative,
+            ExtensionRuntimeTarget::NativeWebExtension,
+            ExtensionRuntimeNativeIdentityExpectation::WindowsWebView2Extension(owner),
+            Some(native_identity),
+            ExtensionRuntimeOwnershipEvidence::WindowsWebView2Extension(owner),
+            0,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn new(
         seed: u8,
@@ -1869,6 +1888,59 @@ fn controller_namespace_absence_preserves_lineage_without_guessing_identity() {
         issuer.mint_macos_controller_namespace_absent(attempt, audit),
         None,
         "a macOS native proof cannot cross backend families"
+    );
+}
+
+#[test]
+fn windows_profile_absence_preserves_exact_lineage_without_guessing_identity() {
+    let generation = ExtensionRuntimeHostRegistryGeneration::new(7).expect("nonzero generation");
+    let attempt = std::num::NonZeroU64::new(9).expect("nonzero attempt");
+    let audit = ExtensionRuntimeWindowsAbsenceAudit::try_from_observations(true, true, true)
+        .expect("complete WebView2 profile audit");
+    let native = ActivationFixture::windows(65);
+
+    let catalog_only = native.initial.clone();
+    let binding = ExtensionRuntimeHostRecoveryBinding::try_new(catalog_only.clone())
+        .expect("catalog-only Windows row is recoverable");
+    let issuer = binding.context().absence_evidence_issuer().bind(generation);
+    let evidence = issuer
+        .mint_windows_profile_owner_absent(attempt, audit)
+        .expect("exact profile inventory proves the catalog owner absent");
+    assert_eq!(
+        evidence.proof_kind(),
+        ExtensionRuntimeAbsenceProofKind::WindowsProfileOwnerAbsent
+    );
+    assert_eq!(
+        evidence.expected_native_identity(),
+        Some(
+            ExtensionRuntimeNativeOwnerId::parse_exact(EXPECTED_NATIVE_ID)
+                .expect("canonical expected ID")
+        )
+    );
+    assert_eq!(evidence.observed_native_identity(), None);
+    assert!(issuer.accepts(evidence, attempt));
+    assert!(evidence.structurally_matches_entry(&catalog_only));
+
+    let identityless = native.template.may_own();
+    let binding = ExtensionRuntimeHostRecoveryBinding::try_new(identityless.clone())
+        .expect("identityless legacy Windows row is recoverable");
+    let issuer = binding.context().absence_evidence_issuer().bind(generation);
+    let evidence = issuer
+        .mint_windows_profile_owner_absent(attempt, audit)
+        .expect("empty exact inventory needs no guessed owner identity");
+    assert_eq!(evidence.expected_native_identity(), None);
+    assert_eq!(evidence.observed_native_identity(), None);
+    assert!(issuer.accepts(evidence, attempt));
+    assert!(evidence.structurally_matches_entry(&identityless));
+
+    let macos = ActivationFixture::macos(66);
+    let binding = ExtensionRuntimeHostRecoveryBinding::try_new(macos.initial)
+        .expect("macOS row is recoverable");
+    let issuer = binding.context().absence_evidence_issuer().bind(generation);
+    assert_eq!(
+        issuer.mint_windows_profile_owner_absent(attempt, audit),
+        None,
+        "Windows absence evidence cannot cross backend families"
     );
 }
 

@@ -679,6 +679,11 @@ impl EngineHost {
                     .filter(|spare| spare.partition.profile() == profile)
                     .map(|spare| crate::platform::imp::profile_for_erasure(&spare.view))
             })
+            .or_else(|| {
+                self.windows_extension_profiles
+                    .get(&profile)
+                    .map(crate::platform::imp::WindowsNativeExtensionProfile::profile_for_erasure)
+            })
             .and_then(|result| match result {
                 Ok(profile) => Some(profile),
                 Err(error) => {
@@ -744,6 +749,8 @@ impl EngineHost {
         self.web_contexts.remove(&profile);
         #[cfg(target_os = "windows")]
         self.browser_version_observers.remove(&profile);
+        #[cfg(target_os = "windows")]
+        self.windows_extension_profiles.remove(&profile);
         #[cfg(target_os = "windows")]
         self.environments.remove(&profile);
 
@@ -1111,6 +1118,7 @@ impl EngineHost {
             return false;
         }
         self.browser_version_observers.remove(&profile);
+        self.windows_extension_profiles.remove(&profile);
         self.environments.remove(&profile);
         self.browser_processes.remove(&profile);
         self.browser_process_exit_observers.remove(&profile);

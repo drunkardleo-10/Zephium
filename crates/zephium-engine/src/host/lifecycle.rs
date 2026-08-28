@@ -136,6 +136,10 @@ impl EngineHost {
     ) {
         self.shutdown_common();
         self.retry_windows_cleanup_debts(3);
+        // Runtime owners are already quiescent at this boundary. Release the
+        // read-only profile COM authorities before environment/process
+        // shutdown so they cannot keep an otherwise viewless profile alive.
+        self.windows_extension_profiles.clear();
 
         let mut provenance_valid = self.unverifiable_browser_processes.is_empty()
             && self.construction_unproven.is_empty()
@@ -143,6 +147,7 @@ impl EngineHost {
             && self.unproven_environments.is_empty()
             && self.windows_cleanup_debts.is_empty()
             && !self.windows_cleanup_invariant_failed
+            && !crate::platform::imp::native_extension_cleanup_invariant_failed()
             && !self.native_resource_accounting_failed
             && self.extension_runtime_registry.is_quiescent()
             && self.native_resources.is_quiescent()

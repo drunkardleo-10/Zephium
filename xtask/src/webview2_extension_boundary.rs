@@ -1,6 +1,10 @@
 use std::path::{Path, PathBuf};
 
 const NATIVE_OWNER: &str = "crates/zephium-engine/src/platform/windows/extensions/native.rs";
+const STARTUP_GATE_OWNER: &str = "crates/zephium-engine/src/host/construction.rs";
+const STARTUP_GATE_API: &str = "vendor/wry/src/lib.rs";
+const LIFECYCLE_ADAPTER: &str =
+    "crates/zephium-engine/src/host/extension_runtime/windows_adapter.rs";
 const REVIEWED_ENVIRONMENT_FORWARDERS: [(&str, usize); 4] = [
     ("crates/zephium-engine/src/host/construction.rs", 1),
     ("vendor/tauri-runtime-wry/src/lib.rs", 1),
@@ -17,6 +21,8 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     let native_owner_path = repository.join(NATIVE_OWNER);
     let native_owner_source = read_source(&native_owner_path)?;
     validate_native_owner(&native_owner_source)?;
+    validate_startup_gate_owner(&read_source(&repository.join(STARTUP_GATE_OWNER))?)?;
+    validate_lifecycle_adapter(&read_source(&repository.join(LIFECYCLE_ADAPTER))?)?;
 
     let mut wry_sources = Vec::new();
     collect_rust_sources(&wry_root, &mut wry_sources)?;
@@ -121,10 +127,11 @@ fn validate_constructor(source: &str) -> Result<(), String> {
         .ok_or_else(|| "WebView2 extension startup-refusal policy is missing".to_owned())?;
     let required_policy = concat!(
         "extension_path_configured:bool,browser_extensions_enabled:bool,",
+        "startup_gate_configured:bool,",
         ")->Option<WebView2ExtensionStartupRefusal>{",
         "ifextension_path_configured{",
         "Some(WebView2ExtensionStartupRefusal::ExtensionPath)",
-        "}elseifbrowser_extensions_enabled{",
+        "}elseifbrowser_extensions_enabled&&!startup_gate_configured{",
         "Some(WebView2ExtensionStartupRefusal::StartupFence)",
         "}else{None}}"
     );
@@ -148,6 +155,7 @@ fn validate_constructor(source: &str) -> Result<(), String> {
         "ifletSome(refusal)=extension_startup_refusal(",
         "pl_attrs.extension_path.is_some(),",
         "pl_attrs.browser_extensions_enabled,",
+        "pl_attrs.browser_extension_startup_gate.is_some(),",
         "){returnErr(matchrefusal{",
         "WebView2ExtensionStartupRefusal::ExtensionPath=>",
         "Error::WebView2ExtensionPathUnsupported,",
@@ -169,10 +177,32 @@ fn validate_constructor(source: &str) -> Result<(), String> {
 
     let source = compact(source);
     let native_setter = ["set_are_browser_extensions_", "enabled"].concat();
-    let closed_setter = ["set_are_browser_extensions_", "enabled(false)"].concat();
-    if source.matches(&native_setter).count() != 1 || !source.contains(&closed_setter) {
+    let gated_setter = [
+        "set_are_browser_extensions_",
+        "enabled(pl_attrs.browser_extensions_enabled)",
+    ]
+    .concat();
+    if source.matches(&native_setter).count() != 1 || !source.contains(&gated_setter) {
         return Err(
-            "Wry must create WebView2 environments with native extension enablement fixed false"
+            "Wry must derive native extension enablement only from the startup-gated platform attributes"
+                .to_owned(),
+        );
+    }
+    let startup_gate = "ifletSome(startup_gate)=&pl_attrs.browser_extension_startup_gate{";
+    let controller_retention = "construction.retain_controller(&controller);";
+    let initialization = "letcustom_protocol_admission=InFlightAdmission::new(";
+    let Some(retained_at) = source.find(controller_retention) else {
+        return Err("Wry no longer retains the controller before the startup gate".to_owned());
+    };
+    let Some(gate_at) = source.find(startup_gate) else {
+        return Err("Wry's authenticated WebView2 startup gate is missing".to_owned());
+    };
+    let Some(initialization_at) = source.find(initialization) else {
+        return Err("Wry WebView initialization boundary is missing".to_owned());
+    };
+    if !(retained_at < gate_at && gate_at < initialization_at) {
+        return Err(
+            "Wry must run the startup gate after controller retention and before WebView initialization"
                 .to_owned(),
         );
     }
@@ -255,7 +285,10 @@ fn validate_native_owner(source: &str) -> Result<(), String> {
         "environment:ICoreWebView2Environment",
         "profile:ICoreWebView2Profile7",
         "native_root:ExtensionRuntimeNativeRootLease",
-        "super::super::attest_environment(&environment,expected_user_data_folder)",
+        "pub(crate)fnfrom_startup_gate(",
+        "super::super::attest_environment(environment,expected_user_data_folder)",
+        "pub(crate)fnattest_controller(",
+        "observed.attest_exact_slots(expected_owners)",
         "ExtensionRuntimeNativeOwnerId::parse_exact(&owner)",
         "observed_owner!=expected_owner",
         "observed_owner:Option<ExtensionRuntimeNativeOwnerId>",
@@ -282,6 +315,7 @@ fn validate_native_owner(source: &str) -> Result<(), String> {
     }
     for (required, count) in [
         ("NativeCallbackReservation::acquire()?", 3),
+        ("NativeLifecycleReservation::acquire()", 2),
         ("wait_for_native_callback_until(receiver,deadline)", 3),
         ("ifnative_extension_cleanup_invariant_failed()", 2),
         ("quarantine_unregistered(owner)", 7),
@@ -296,7 +330,7 @@ fn validate_native_owner(source: &str) -> Result<(), String> {
         ["CreateCoreWebView2Environment", "WithOptions"].concat(),
         ["CoreWebView2Environment", "Options"].concat(),
         "with_browser_extensions_enabled(true)".to_owned(),
-        "with_webview2_extension_startup_gate".to_owned(),
+        "with_browser_extension_startup_gate".to_owned(),
         "webview2_com::wait_with_pump".to_owned(),
         "std::mem::forget".to_owned(),
     ] {
@@ -309,7 +343,133 @@ fn validate_native_owner(source: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_startup_gate_owner(source: &str) -> Result<(), String> {
+    let source = compact(source);
+    for required in [
+        "published_windows_native_owner_ids(partition.profile())",
+        "profile.attest_controller(environment,core,deadline,&owners)",
+        "pub(super)fnpreflight_windows_extension_profile(",
+        "pub(super)fnensure_windows_extension_profile(",
+        ".try_acquire(NativeResourceClass::TransientConstruction)",
+        ".with_visible(false)",
+        ".with_focused(false)",
+        ".with_devtools(false)",
+        ".with_navigation_handler(|target|target==\"about:blank\")",
+        "WindowsNativeExtensionProfile::from_startup_gate(",
+        "self.capture_windows_environment(profile,environment)",
+        "crate::platform::imp::configure(view,0.0,false,&path)",
+        "wry::WebViewExtWindows::close(view)",
+        "self.windows_extension_profiles.insert(profile,native_profile)",
+    ] {
+        if !source.contains(required) {
+            return Err(format!(
+                "{STARTUP_GATE_OWNER} is missing startup/content inventory contract: {required}"
+            ));
+        }
+    }
+    if source
+        .matches("with_browser_extension_startup_gate(")
+        .count()
+        != 1
+        || source.contains("with_ipc_handler(")
+    {
+        return Err(format!(
+            "{STARTUP_GATE_OWNER} must have one page-inert WebView2 startup-gate entry"
+        ));
+    }
+    let ensure = source
+        .split_once("pub(super)fnensure_windows_extension_profile(")
+        .map(|(_, ensure)| ensure)
+        .ok_or_else(|| format!("{STARTUP_GATE_OWNER} is missing the exact profile constructor"))?;
+    let ordered = [
+        ".try_acquire(NativeResourceClass::TransientConstruction)",
+        "with_windows_extension_startup_gate(builder,move|environment,core|",
+        "WindowsNativeExtensionProfile::from_startup_gate(",
+        "self.capture_windows_environment(profile,environment)",
+        "wry::WebViewExtWindows::close(view)",
+        "self.windows_extension_profiles.insert(profile,native_profile)",
+    ];
+    let mut cursor = 0;
+    for required in ordered {
+        let Some(offset) = ensure[cursor..].find(required) else {
+            return Err(format!(
+                "{STARTUP_GATE_OWNER} has an invalid startup-gate ordering at {required}"
+            ));
+        };
+        cursor += offset + required.len();
+    }
+    Ok(())
+}
+
+fn validate_lifecycle_adapter(source: &str) -> Result<(), String> {
+    let source = compact(source);
+    for required in [
+        "host.preflight_windows_extension_profile(profile,deadline)",
+        ".mark_activation_native_entered(ticket)",
+        "host.ensure_windows_extension_profile(profile,deadline)",
+        "prepare_native_extension_activation(",
+        "begin_native_extension_activation(prepared,deadline)",
+        "PlatformOwnerBundle::Windows(owner)",
+        "mint_windows_profile_owner_absent(ticket.attempt(),audit)",
+        "WindowsNativeExtensionRetirement::Absent(audit)",
+        "native_profile.reconcile_recovery(expected,deadline)",
+    ] {
+        if !source.contains(required) {
+            return Err(format!(
+                "{LIFECYCLE_ADAPTER} is missing exact Windows lifecycle contract: {required}"
+            ));
+        }
+    }
+    let ordered = [
+        "host.preflight_windows_extension_profile(profile,deadline)",
+        ".mark_activation_native_entered(ticket)",
+        "host.ensure_windows_extension_profile(profile,deadline)",
+        "prepare_native_extension_activation(",
+        "begin_native_extension_activation(prepared,deadline)",
+    ];
+    let mut cursor = 0;
+    for required in ordered {
+        let Some(offset) = source[cursor..].find(required) else {
+            return Err(format!(
+                "{LIFECYCLE_ADAPTER} has an invalid native-entry ordering at {required}"
+            ));
+        };
+        cursor += offset + required.len();
+    }
+    Ok(())
+}
+
 fn reject_direct_enablement(relative: &Path, compact: &str) -> Result<(), String> {
+    let startup_gate = "with_browser_extension_startup_gate";
+    let observed_gates = identifier_occurrences(compact, startup_gate);
+    let expected_gates = usize::from(
+        relative == Path::new(STARTUP_GATE_OWNER) || relative == Path::new(STARTUP_GATE_API),
+    );
+    if observed_gates != expected_gates {
+        return Err(format!(
+            "{} contains {observed_gates} WebView2 startup gates, expected {expected_gates}",
+            relative.display()
+        ));
+    }
+    if relative == Path::new(STARTUP_GATE_API) {
+        let required = concat!(
+            "fnwith_browser_extension_startup_gate(",
+            "mutself,gate:implFn(&ICoreWebView2Environment,&ICoreWebView2)",
+            "->windows_core::Result<()>+'static,)->Self{",
+            "self.platform_specific.browser_extensions_enabled=true;",
+            "self.platform_specific.browser_extension_startup_gate=Some(std::sync::Arc::new(gate));",
+            "self}"
+        );
+        if !compact.contains(required)
+            || compact.matches("browser_extensions_enabled=true").count() != 1
+        {
+            return Err(
+                "Wry's browser-extension startup gate must be the sole direct enablement API"
+                    .to_owned(),
+            );
+        }
+        return Ok(());
+    }
     for direct_true in [
         [".with_browser_extensions_", "enabled(true)"].concat(),
         [".browser_extensions_", "enabled(true)"].concat(),
@@ -365,10 +525,11 @@ mod tests {
 const fn extension_startup_refusal(
     extension_path_configured: bool,
     browser_extensions_enabled: bool,
+    startup_gate_configured: bool,
 ) -> Option<WebView2ExtensionStartupRefusal> {
     if extension_path_configured {
         Some(WebView2ExtensionStartupRefusal::ExtensionPath)
-    } else if browser_extensions_enabled {
+    } else if browser_extensions_enabled && !startup_gate_configured {
         Some(WebView2ExtensionStartupRefusal::StartupFence)
     } else {
         None
@@ -379,6 +540,7 @@ fn new_in_hwnd() -> Result<Self> {
     if let Some(refusal) = extension_startup_refusal(
         pl_attrs.extension_path.is_some(),
         pl_attrs.browser_extensions_enabled,
+        pl_attrs.browser_extension_startup_gate.is_some(),
     ) {
         return Err(match refusal {
             WebView2ExtensionStartupRefusal::ExtensionPath =>
@@ -388,11 +550,16 @@ fn new_in_hwnd() -> Result<Self> {
             }
         });
     }
+    construction.retain_controller(&controller);
+    if let Some(startup_gate) = &pl_attrs.browser_extension_startup_gate {
+        startup_gate(&env, &core)?;
+    }
+    let custom_protocol_admission = InFlightAdmission::new(1);
     initialize_com();
 }
 
 fn create_environment() {
-    options.set_are_browser_extensions_enabled(false);
+    options.set_are_browser_extensions_enabled(pl_attrs.browser_extensions_enabled);
 }
 "#;
 
@@ -418,11 +585,9 @@ fn create_environment() {
         );
         assert!(validate_constructor(&reversed_precedence).is_err());
 
-        let dynamic_native_enablement = SAFE_WRY_SOURCE.replace(
-            "set_are_browser_extensions_enabled(false)",
-            "set_are_browser_extensions_enabled(pl_attrs.browser_extensions_enabled)",
-        );
-        assert!(validate_constructor(&dynamic_native_enablement).is_err());
+        let missing_native_gate =
+            SAFE_WRY_SOURCE.replace("pl_attrs.browser_extensions_enabled)", "false)");
+        assert!(validate_constructor(&missing_native_gate).is_err());
 
         let setter = ["set_are_browser_extensions_", "enabled"].concat();
         let second_setter = SAFE_WRY_SOURCE.replace(
@@ -461,12 +626,16 @@ fn create_environment() {
         )
         .is_ok());
 
-        for reviewed in [
-            "crates/zephium-engine/src/host/construction.rs",
-            "vendor/tauri-runtime-wry/src/lib.rs",
-        ] {
-            assert!(validate_shipping_source(Path::new(reviewed), &one_forward).is_ok());
-        }
+        assert!(validate_shipping_source(
+            Path::new("crates/zephium-engine/src/host/construction.rs"),
+            &format!("builder.with_browser_extension_startup_gate(gate);{one_forward}")
+        )
+        .is_ok());
+        assert!(validate_shipping_source(
+            Path::new("vendor/tauri-runtime-wry/src/lib.rs"),
+            &one_forward
+        )
+        .is_ok());
         let two_forwards = format!("{one_forward}{one_forward}");
         assert!(validate_shipping_source(
             Path::new("vendor/tauri/src/webview/mod.rs"),
@@ -540,7 +709,7 @@ fn create_environment() {
         assert!(validate_native_owner(&dropped_identity).is_err());
 
         let unbound_environment = source.replacen(
-            "super::super::attest_environment(&environment, expected_user_data_folder)",
+            "super::super::attest_environment(environment, expected_user_data_folder)",
             "Ok::<(), ()>(())",
             1,
         );
@@ -583,6 +752,38 @@ fn create_environment() {
             1,
         );
         assert!(validate_native_owner(&unbounded_owners).is_err());
+    }
+
+    #[test]
+    fn startup_gate_and_shared_lifecycle_keep_their_exact_ordering() {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("xtask has repository parent");
+        let startup =
+            read_source(&repository.join(STARTUP_GATE_OWNER)).expect("startup gate owner source");
+        assert!(validate_startup_gate_owner(&startup).is_ok());
+        assert!(validate_startup_gate_owner(&startup.replacen(
+            ".with_visible(false)",
+            ".with_visible(true)",
+            1
+        ))
+        .is_err());
+        assert!(validate_startup_gate_owner(&startup.replacen(
+            "wry::WebViewExtWindows::close(view)",
+            "drop(view)",
+            1,
+        ))
+        .is_err());
+
+        let lifecycle = read_source(&repository.join(LIFECYCLE_ADAPTER))
+            .expect("Windows lifecycle adapter source");
+        assert!(validate_lifecycle_adapter(&lifecycle).is_ok());
+        let late_entry = lifecycle.replacen(
+            "host.extension_runtime_registry\n        .mark_activation_native_entered(ticket)?;",
+            "// native entry marker removed",
+            1,
+        );
+        assert!(validate_lifecycle_adapter(&late_entry).is_err());
     }
 
     #[test]

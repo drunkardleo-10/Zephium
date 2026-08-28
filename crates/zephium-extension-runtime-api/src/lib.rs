@@ -75,7 +75,8 @@ pub use ownership_evidence::{
     ExtensionRuntimeCompatibilityAbsenceAudit, ExtensionRuntimeMacosAbsenceAudit,
     ExtensionRuntimeMacosControllerAbsenceAudit, ExtensionRuntimeNativeOwnerId,
     ExtensionRuntimeNativeOwnerIdError, ExtensionRuntimeOwnershipEvidence,
-    ExtensionRuntimeRecoveryExpectation, EXTENSION_RUNTIME_NATIVE_OWNER_ID_BYTES,
+    ExtensionRuntimeRecoveryExpectation, ExtensionRuntimeWindowsAbsenceAudit,
+    EXTENSION_RUNTIME_NATIVE_OWNER_ID_BYTES,
 };
 pub use resource_plan::{
     ExtensionRuntimeResource, ExtensionRuntimeResourceBinding, ExtensionRuntimeResourceBuildError,

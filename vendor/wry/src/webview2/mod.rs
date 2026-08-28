@@ -911,10 +911,11 @@ enum WebView2ExtensionStartupRefusal {
 const fn extension_startup_refusal(
   extension_path_configured: bool,
   browser_extensions_enabled: bool,
+  startup_gate_configured: bool,
 ) -> Option<WebView2ExtensionStartupRefusal> {
   if extension_path_configured {
     Some(WebView2ExtensionStartupRefusal::ExtensionPath)
-  } else if browser_extensions_enabled {
+  } else if browser_extensions_enabled && !startup_gate_configured {
     Some(WebView2ExtensionStartupRefusal::StartupFence)
   } else {
     None
@@ -959,6 +960,7 @@ impl InnerWebView {
     if let Some(refusal) = extension_startup_refusal(
       pl_attrs.extension_path.is_some(),
       pl_attrs.browser_extensions_enabled,
+      pl_attrs.browser_extension_startup_gate.is_some(),
     ) {
       return Err(match refusal {
         WebView2ExtensionStartupRefusal::ExtensionPath => Error::WebView2ExtensionPathUnsupported,
@@ -1009,6 +1011,20 @@ impl InnerWebView {
       Err(error) => return Err(construction.finish_failure(error)),
     };
     construction.retain_controller(&controller);
+    if let Some(startup_gate) = &pl_attrs.browser_extension_startup_gate {
+      let core = unsafe { controller.CoreWebView2() }
+        .map_err(webview2_com::Error::WindowsError)
+        .map_err(Error::WebView2Error);
+      let core = match core {
+        Ok(core) => core,
+        Err(error) => return Err(construction.finish_failure(error)),
+      };
+      if let Err(error) = startup_gate(&env, &core) {
+        return Err(construction.finish_failure(Error::WebView2Error(
+          webview2_com::Error::WindowsError(error),
+        )));
+      }
+    }
     let custom_protocol_admission = InFlightAdmission::new(CUSTOM_PROTOCOL_IN_FLIGHT_LIMIT);
     let webview = match Self::init_webview(
       parent,
@@ -1228,10 +1244,10 @@ impl InnerWebView {
     let options = CoreWebView2EnvironmentOptions::default();
     unsafe {
       options.set_additional_browser_arguments(additional_browser_args);
-      // Construction above rejects every enabled request before COM/HWND
-      // work. Keep the native environment closed as a second, independent
-      // defense against persisted extensions starting from the profile.
-      options.set_are_browser_extensions_enabled(false);
+      // A true value can reach this boundary only with the startup gate
+      // retained above. The gate runs against the exact controller/profile
+      // before WebView initialization or initial navigation.
+      options.set_are_browser_extensions_enabled(pl_attrs.browser_extensions_enabled);
 
       // Get user's system language
       let lcid = GetUserDefaultUILanguage();
@@ -3325,17 +3341,18 @@ mod tests {
 
   #[test]
   fn extension_startup_refusal_is_complete_and_path_precedes_enablement() {
-    assert_eq!(extension_startup_refusal(false, false), None);
+    assert_eq!(extension_startup_refusal(false, false, false), None);
     assert_eq!(
-      extension_startup_refusal(false, true),
+      extension_startup_refusal(false, true, false),
       Some(WebView2ExtensionStartupRefusal::StartupFence)
     );
+    assert_eq!(extension_startup_refusal(false, true, true), None);
     assert_eq!(
-      extension_startup_refusal(true, false),
+      extension_startup_refusal(true, false, false),
       Some(WebView2ExtensionStartupRefusal::ExtensionPath)
     );
     assert_eq!(
-      extension_startup_refusal(true, true),
+      extension_startup_refusal(true, true, true),
       Some(WebView2ExtensionStartupRefusal::ExtensionPath),
       "a configured unmanaged path is the first reported refusal"
     );

@@ -1246,8 +1246,41 @@ release dependency is finished.
 | Performance/release evidence | Optimized product campaigns and a real process-family sampler are implemented; short release samples are recorded | Dedicated clean-runner budgets, maximum-cohort/tab pressure, energy calibration, sleep/wake, multi-profile, and 24-hour endurance |
 | External compatibility mode | Package-neutral offline transformation and authenticated acquisition primitives exist | Chrome Web Store/AMO/Safari/file/developer acquisition UX, legal adapters, diagnostics, and public compatibility policy are not shipped |
 
-Windows still needs its separate native admission/resource policy, while Linux
-needs the package-neutral compatibility runtime built on the already-proven
+Windows now has a compile-time-complete native ownership/admission seam around
+WebView2's `ICoreWebView2Profile7` APIs. Direct builder enablement and unmanaged
+extension paths remain refused. An authenticated lifecycle reservation may
+instead create one 1x1 hidden, unfocused, non-inspectable, page-inert
+controller through Wry's pre-initialization startup gate. The gate binds the
+exact UDF, environment, controller-reported environment, non-private profile,
+and canonical COM identities before Wry initializes or navigates the view. The
+controller is explicitly closed immediately; its transient native-resource
+lease transfers to the existing teardown-debt registry if close is not proven.
+Only the attested environment/profile pair remains, alongside the existing
+browser-process exit and runtime-update observers.
+
+Activation consumes the authenticated package-root lease only after the
+durable lifecycle has entered its native phase. It checks every asynchronous
+HRESULT, retains the returned extension object, reads back its exact Chromium
+identifier and enabled state, and verifies a bounded complete profile
+inventory. Removal and crash recovery use the same deadline-bounded UI message
+pump and can mint absence only from a complete exact-profile inventory in
+which the reservation's owner is absent. A late callback fail-stops subsequent
+extension and content-view admission while retaining its bounded COM owner.
+Every extension-enabled content controller must then pass a pre-initialization
+comparison between the complete native inventory and the exact published
+runtime-owner cohort; an extra, missing, duplicate, timed-out, or mismatched
+owner prevents page initialization. Profiles without product authority still
+construct the default extension-disabled environment and allocate no native
+extension host.
+
+This is not yet a Windows product-support claim. A profile whose ordinary
+extension-disabled WebView2 environment is already running cannot switch the
+environment option in place; the current adapter returns a retryable native
+pre-entry refusal rather than enabling globally or silently mixing modes. The
+Windows catalog/runtime selection, user-visible restart/reconstruction
+flow, toolbar/popup host, packaged live install/restart/remove/crash probes,
+and measured process-family budgets remain release gates. Linux still needs
+the package-neutral compatibility runtime built on the already-proven
 principal and injection boundaries.
 Distribution reuses the blocker stack's generic package-authority model—fixed origins,
 authenticated content-addressed packages, monotonic candidate/current/previous

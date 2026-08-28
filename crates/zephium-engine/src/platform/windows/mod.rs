@@ -17,6 +17,7 @@ pub(crate) use content_filter::{
     install_on_view as install_content_policy_on_view, prepare as prepare_content_policy,
     same_policy as same_content_policy, ContentPolicyRegistration, NativeContentPolicy,
 };
+pub(crate) use extensions::*;
 pub use stage::Stage;
 
 use std::cell::{Cell, RefCell};

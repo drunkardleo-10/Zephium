@@ -15,8 +15,9 @@ use std::sync::mpsc;
 use std::time::Instant;
 
 use webview2_com::Microsoft::Web::WebView2::Win32::{
-    ICoreWebView2BrowserExtension, ICoreWebView2BrowserExtensionList, ICoreWebView2Environment,
-    ICoreWebView2Profile7, ICoreWebView2_13,
+    ICoreWebView2, ICoreWebView2BrowserExtension, ICoreWebView2BrowserExtensionList,
+    ICoreWebView2Environment, ICoreWebView2Profile2, ICoreWebView2Profile7, ICoreWebView2_13,
+    ICoreWebView2_2,
 };
 use webview2_com::{
     BrowserExtensionRemoveCompletedHandler, ProfileAddBrowserExtensionCompletedHandler,
@@ -29,13 +30,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, MsgWaitForMultipleObjectsEx, PeekMessageW, PostQuitMessage, TranslateMessage,
     MSG, MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT, WM_QUIT,
 };
-use windows_core::{Interface, HSTRING, PWSTR};
-use wry::WebViewExtWindows;
+use windows_core::{IUnknown, Interface, HSTRING, PWSTR};
 use zephium_core::extensions::MAX_EXTENSION_INSTALLS_PER_PROFILE;
 use zephium_core::ids::ProfileId;
 use zephium_extension_runtime_api::{
     ExtensionPackageAccessError, ExtensionRuntimeNativeOwnerId, ExtensionRuntimeNativeRootLease,
-    ExtensionRuntimeVisitorError, MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES,
+    ExtensionRuntimeVisitorError, ExtensionRuntimeWindowsAbsenceAudit,
+    MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES,
 };
 
 // One callback owner and one lifecycle owner may be retained for each of the
@@ -388,6 +389,12 @@ pub(crate) enum WindowsNativeExtensionFailure {
     InventoryOwnerMissing,
     RemovedOwnerStillPresent,
     AdapterInvariant,
+    ProfileMismatch,
+    InventoryMismatch,
+    ProfileHostUnavailable,
+    ProfileHostConstructionFailed,
+    ProfileHostCleanupFailed,
+    ExistingEnvironmentModeConflict,
 }
 
 impl fmt::Display for WindowsNativeExtensionFailure {
@@ -439,9 +446,195 @@ impl fmt::Display for WindowsNativeExtensionFailure {
                 "WebView2 retained an extension after completed removal"
             }
             Self::AdapterInvariant => "the WebView2 extension adapter invariant failed",
+            Self::ProfileMismatch => "the WebView2 extension profile binding changed",
+            Self::InventoryMismatch => {
+                "the WebView2 extension inventory did not match authenticated runtime state"
+            }
+            Self::ProfileHostUnavailable => "the WebView2 extension profile host is unavailable",
+            Self::ProfileHostConstructionFailed => {
+                "the WebView2 extension profile host could not be constructed"
+            }
+            Self::ProfileHostCleanupFailed => {
+                "the WebView2 extension profile host could not be retired exactly"
+            }
+            Self::ExistingEnvironmentModeConflict => {
+                "the existing WebView2 environment was created without extension authority"
+            }
         };
         formatter.write_str(message)
     }
+}
+
+/// Exact extension-enabled WebView2 environment/profile authority retained by
+/// the engine before any content controller may reuse the environment.
+///
+/// Construction is limited to Wry's pre-initialization startup gate. The type
+/// carries no package authority and cannot install an extension by itself.
+#[derive(Clone)]
+pub(crate) struct WindowsNativeExtensionProfile {
+    profile_id: ProfileId,
+    environment: ICoreWebView2Environment,
+    profile: ICoreWebView2Profile7,
+}
+
+impl WindowsNativeExtensionProfile {
+    pub(crate) fn from_startup_gate(
+        environment: &ICoreWebView2Environment,
+        core: &ICoreWebView2,
+        profile_id: ProfileId,
+        expected_user_data_folder: &Path,
+    ) -> Result<Self, WindowsNativeExtensionFailure> {
+        super::super::attest_environment(environment, expected_user_data_folder)
+            .map_err(|_| WindowsNativeExtensionFailure::EnvironmentAttestation)?;
+        let controller_environment = core
+            .cast::<ICoreWebView2_2>()
+            .and_then(|core| unsafe { core.Environment() })
+            .map_err(|_| WindowsNativeExtensionFailure::EnvironmentAttestation)?;
+        if !same_interface(environment, &controller_environment) {
+            return Err(WindowsNativeExtensionFailure::EnvironmentAttestation);
+        }
+        let profile = core
+            .cast::<ICoreWebView2_13>()
+            .and_then(|core| unsafe { core.Profile() })
+            .and_then(|profile| profile.cast::<ICoreWebView2Profile7>())
+            .map_err(|_| WindowsNativeExtensionFailure::ProfileInterfaceUnavailable)?;
+        let mut is_private = windows_core::BOOL::default();
+        unsafe { profile.IsInPrivateModeEnabled(&mut is_private) }
+            .map_err(|_| WindowsNativeExtensionFailure::ProfileInterfaceUnavailable)?;
+        if is_private.as_bool() {
+            return Err(WindowsNativeExtensionFailure::PrivateProfileUnsupported);
+        }
+        Ok(Self {
+            profile_id,
+            environment: environment.clone(),
+            profile,
+        })
+    }
+
+    pub(crate) const fn profile_id(&self) -> ProfileId {
+        self.profile_id
+    }
+
+    pub(crate) fn profile_for_erasure(&self) -> windows_core::Result<ICoreWebView2Profile2> {
+        self.profile.cast::<ICoreWebView2Profile2>()
+    }
+
+    pub(crate) fn attest_controller(
+        &self,
+        environment: &ICoreWebView2Environment,
+        core: &ICoreWebView2,
+        deadline: Instant,
+        expected_owners: &[Option<ExtensionRuntimeNativeOwnerId>],
+    ) -> Result<(), WindowsNativeExtensionFailure> {
+        if !same_interface(&self.environment, environment) {
+            return Err(WindowsNativeExtensionFailure::ProfileMismatch);
+        }
+        let controller_environment = core
+            .cast::<ICoreWebView2_2>()
+            .and_then(|core| unsafe { core.Environment() })
+            .map_err(|_| WindowsNativeExtensionFailure::ProfileMismatch)?;
+        if !same_interface(&self.environment, &controller_environment) {
+            return Err(WindowsNativeExtensionFailure::ProfileMismatch);
+        }
+        let profile = core
+            .cast::<ICoreWebView2_13>()
+            .and_then(|core| unsafe { core.Profile() })
+            .and_then(|profile| profile.cast::<ICoreWebView2Profile7>())
+            .map_err(|_| WindowsNativeExtensionFailure::ProfileInterfaceUnavailable)?;
+        if !same_interface(&self.profile, &profile) {
+            return Err(WindowsNativeExtensionFailure::ProfileMismatch);
+        }
+        let observed = inventory(&self.profile, deadline)?;
+        observed.attest_exact_slots(expected_owners)
+    }
+
+    pub(crate) fn audit_owner_absent(
+        &self,
+        expected_owner: ExtensionRuntimeNativeOwnerId,
+        deadline: Instant,
+    ) -> Result<ExtensionRuntimeWindowsAbsenceAudit, WindowsNativeExtensionFailure> {
+        let mut observed = inventory(&self.profile, deadline)?;
+        if observed.take_exact(expected_owner)?.is_some() {
+            return Err(WindowsNativeExtensionFailure::RemovedOwnerStillPresent);
+        }
+        ExtensionRuntimeWindowsAbsenceAudit::try_from_observations(true, true, true)
+            .ok_or(WindowsNativeExtensionFailure::AdapterInvariant)
+    }
+
+    pub(crate) fn inventory_is_empty(
+        &self,
+        deadline: Instant,
+    ) -> Result<bool, WindowsNativeExtensionFailure> {
+        Ok(inventory(&self.profile, deadline)?.entries.is_empty())
+    }
+
+    pub(crate) fn reconcile_recovery(
+        &self,
+        expected_owner: Option<ExtensionRuntimeNativeOwnerId>,
+        deadline: Instant,
+    ) -> WindowsNativeExtensionProfileReconciliation {
+        let mut observed = match inventory(&self.profile, deadline) {
+            Ok(observed) => observed,
+            Err(failure) => {
+                return WindowsNativeExtensionProfileReconciliation::StillUncertain(failure)
+            }
+        };
+        let Some(expected_owner) = expected_owner else {
+            return if observed.entries.is_empty() {
+                WindowsNativeExtensionProfileReconciliation::Absent(
+                    WindowsNativeExtensionAbsenceAudit::new(self.profile_id, None),
+                )
+            } else {
+                WindowsNativeExtensionProfileReconciliation::StillUncertain(
+                    WindowsNativeExtensionFailure::InventoryIdentityConflict,
+                )
+            };
+        };
+        match observed.take_exact(expected_owner) {
+            Ok(Some(extension)) => {
+                let lifecycle = match NativeLifecycleReservation::acquire() {
+                    Ok(lifecycle) => lifecycle,
+                    Err(failure) => {
+                        return WindowsNativeExtensionProfileReconciliation::StillUncertain(failure)
+                    }
+                };
+                WindowsNativeExtensionProfileReconciliation::Owned(
+                    WindowsNativeExtensionOwner::from_validated(RetainedWindowsNativeObjects {
+                        profile_id: self.profile_id,
+                        expected_owner,
+                        environment: self.environment.clone(),
+                        profile: self.profile.clone(),
+                        extension: Some(extension),
+                        observed_owner: Some(expected_owner),
+                        native_root: None,
+                        _lifecycle: lifecycle,
+                    }),
+                )
+            }
+            Ok(None) => WindowsNativeExtensionProfileReconciliation::Absent(
+                WindowsNativeExtensionAbsenceAudit::new(self.profile_id, Some(expected_owner)),
+            ),
+            Err(failure) => WindowsNativeExtensionProfileReconciliation::StillUncertain(failure),
+        }
+    }
+}
+
+impl fmt::Debug for WindowsNativeExtensionProfile {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WindowsNativeExtensionProfile")
+            .field("profile", &"[redacted]")
+            .field("environment", &"[native]")
+            .field("profile_object", &"[native]")
+            .finish()
+    }
+}
+
+fn same_interface<L: Interface, R: Interface>(left: &L, right: &R) -> bool {
+    left.cast::<IUnknown>()
+        .ok()
+        .zip(right.cast::<IUnknown>().ok())
+        .is_some_and(|(left, right)| left.as_raw() == right.as_raw())
 }
 
 impl std::error::Error for WindowsNativeExtensionFailure {}
@@ -509,51 +702,22 @@ impl fmt::Debug for PreparedWindowsNativeExtensionActivation {
 /// Attests the exact existing view environment/UDF and derives the matching
 /// WebView2 profile before any ownership-changing extension call.
 pub(crate) fn prepare_native_extension_activation(
-    view: &wry::WebView,
+    native_profile: &WindowsNativeExtensionProfile,
     profile_id: ProfileId,
-    expected_user_data_folder: &Path,
     expected_owner: ExtensionRuntimeNativeOwnerId,
     native_root: ExtensionRuntimeNativeRootLease,
 ) -> Result<PreparedWindowsNativeExtensionActivation, WindowsNativeExtensionPreparationRefusal> {
-    let environment = view.environment();
-    if super::super::attest_environment(&environment, expected_user_data_folder).is_err() {
+    if native_profile.profile_id != profile_id {
         return Err(WindowsNativeExtensionPreparationRefusal {
-            failure: WindowsNativeExtensionFailure::EnvironmentAttestation,
-            native_root,
-        });
-    }
-    let profile = match view
-        .webview()
-        .cast::<ICoreWebView2_13>()
-        .and_then(|core| unsafe { core.Profile() })
-        .and_then(|profile| profile.cast::<ICoreWebView2Profile7>())
-    {
-        Ok(profile) => profile,
-        Err(_) => {
-            return Err(WindowsNativeExtensionPreparationRefusal {
-                failure: WindowsNativeExtensionFailure::ProfileInterfaceUnavailable,
-                native_root,
-            });
-        }
-    };
-    let mut is_private = windows_core::BOOL::default();
-    if unsafe { profile.IsInPrivateModeEnabled(&mut is_private) }.is_err() {
-        return Err(WindowsNativeExtensionPreparationRefusal {
-            failure: WindowsNativeExtensionFailure::ProfileInterfaceUnavailable,
-            native_root,
-        });
-    }
-    if is_private.as_bool() {
-        return Err(WindowsNativeExtensionPreparationRefusal {
-            failure: WindowsNativeExtensionFailure::PrivateProfileUnsupported,
+            failure: WindowsNativeExtensionFailure::ProfileMismatch,
             native_root,
         });
     }
     Ok(PreparedWindowsNativeExtensionActivation {
         profile_id,
         expected_owner,
-        environment,
-        profile,
+        environment: native_profile.environment.clone(),
+        profile: native_profile.profile.clone(),
         native_root,
     })
 }
@@ -565,7 +729,7 @@ struct RetainedWindowsNativeObjects {
     profile: ICoreWebView2Profile7,
     extension: Option<ICoreWebView2BrowserExtension>,
     observed_owner: Option<ExtensionRuntimeNativeOwnerId>,
-    native_root: ExtensionRuntimeNativeRootLease,
+    native_root: Option<ExtensionRuntimeNativeRootLease>,
     _lifecycle: NativeLifecycleReservation,
 }
 
@@ -627,10 +791,10 @@ impl WindowsNativeExtensionCleanupDebt {
                     )
                 }
                 Ok(None) => WindowsNativeExtensionReconciliation::Absent(
-                    WindowsNativeExtensionAbsenceAudit {
-                        profile_id: retained.profile_id,
-                        owner: retained.expected_owner,
-                    },
+                    WindowsNativeExtensionAbsenceAudit::new(
+                        retained.profile_id,
+                        Some(retained.expected_owner),
+                    ),
                 ),
                 Err(failure) => WindowsNativeExtensionReconciliation::Retained {
                     failure,
@@ -682,17 +846,72 @@ impl WindowsNativeExtensionOwner {
         }
     }
 
+    pub(crate) fn from_uncertain(debt: WindowsNativeExtensionCleanupDebt) -> Self {
+        Self { debt: Some(debt) }
+    }
+
     pub(crate) fn owner_id(&self) -> ExtensionRuntimeNativeOwnerId {
         self.debt
             .as_ref()
             .and_then(|debt| debt.retained.as_ref())
-            .and_then(|retained| retained.observed_owner)
-            .expect("live owner retains exact identity")
+            .map(|retained| retained.expected_owner)
+            .expect("live owner retains its authenticated expected identity")
+    }
+
+    pub(crate) fn reconcile(
+        &mut self,
+        deadline: Instant,
+    ) -> WindowsNativeExtensionOwnerReconciliation {
+        let Some(retained) = self.debt.as_mut().and_then(|debt| debt.retained.as_mut()) else {
+            return WindowsNativeExtensionOwnerReconciliation::StillUncertain(
+                WindowsNativeExtensionFailure::AdapterInvariant,
+            );
+        };
+        if retained
+            .extension
+            .as_ref()
+            .is_some_and(|extension| extension_owner_id(extension) != Ok(retained.expected_owner))
+        {
+            return WindowsNativeExtensionOwnerReconciliation::StillUncertain(
+                WindowsNativeExtensionFailure::IdentityMismatchQuarantined,
+            );
+        }
+        match inventory(&retained.profile, deadline) {
+            Ok(mut inventory) => match inventory.take_exact(retained.expected_owner) {
+                Ok(Some(extension)) => {
+                    retained.extension = Some(extension);
+                    retained.observed_owner = Some(retained.expected_owner);
+                    WindowsNativeExtensionOwnerReconciliation::Owned
+                }
+                Ok(None) => {
+                    let audit = WindowsNativeExtensionAbsenceAudit::new(
+                        retained.profile_id,
+                        Some(retained.expected_owner),
+                    );
+                    let mut debt = self
+                        .debt
+                        .take()
+                        .expect("validated owner retains cleanup debt");
+                    let released = debt.retained.take();
+                    drop(released);
+                    drop(debt);
+                    WindowsNativeExtensionOwnerReconciliation::Absent(audit)
+                }
+                Err(failure) => WindowsNativeExtensionOwnerReconciliation::StillUncertain(failure),
+            },
+            Err(failure) => WindowsNativeExtensionOwnerReconciliation::StillUncertain(failure),
+        }
     }
 
     pub(crate) fn retire(mut self, deadline: Instant) -> WindowsNativeExtensionRetirement {
         let mut debt = self.debt.take().expect("native owner is consumed once");
         let mut retained = debt.take();
+        if retained.observed_owner != Some(retained.expected_owner) {
+            return WindowsNativeExtensionRetirement::Retained {
+                failure: WindowsNativeExtensionFailure::AdapterInvariant,
+                debt: WindowsNativeExtensionCleanupDebt::new(retained),
+            };
+        }
         let Some(extension) = retained.extension.as_ref() else {
             return WindowsNativeExtensionRetirement::Retained {
                 failure: WindowsNativeExtensionFailure::AdapterInvariant,
@@ -707,12 +926,12 @@ impl WindowsNativeExtensionOwner {
         }
         match inventory(&retained.profile, deadline) {
             Ok(mut inventory) => match inventory.take_exact(retained.expected_owner) {
-                Ok(None) => {
-                    WindowsNativeExtensionRetirement::Absent(WindowsNativeExtensionAbsenceAudit {
-                        profile_id: retained.profile_id,
-                        owner: retained.expected_owner,
-                    })
-                }
+                Ok(None) => WindowsNativeExtensionRetirement::Absent(
+                    WindowsNativeExtensionAbsenceAudit::new(
+                        retained.profile_id,
+                        Some(retained.expected_owner),
+                    ),
+                ),
                 Ok(Some(still_present)) => {
                     retained.extension = Some(still_present);
                     WindowsNativeExtensionRetirement::Retained {
@@ -786,13 +1005,41 @@ pub(crate) enum WindowsNativeExtensionReconciliation {
     },
 }
 
-/// Internal exact-profile absence observation. The shared lifecycle cannot
-/// consume this until a separately reviewed Windows absence issuer is added;
-/// this slice therefore does not publish product absence evidence.
+#[must_use = "borrowed owner reconciliation must settle the exact lifecycle ticket"]
+pub(crate) enum WindowsNativeExtensionOwnerReconciliation {
+    Owned,
+    Absent(WindowsNativeExtensionAbsenceAudit),
+    StillUncertain(WindowsNativeExtensionFailure),
+}
+
+#[must_use = "profile recovery reconciliation must settle the exact lifecycle ticket"]
+pub(crate) enum WindowsNativeExtensionProfileReconciliation {
+    Owned(WindowsNativeExtensionOwner),
+    Absent(WindowsNativeExtensionAbsenceAudit),
+    StillUncertain(WindowsNativeExtensionFailure),
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) struct WindowsNativeExtensionAbsenceAudit {
     profile_id: ProfileId,
-    owner: ExtensionRuntimeNativeOwnerId,
+    owner: Option<ExtensionRuntimeNativeOwnerId>,
+    audit: ExtensionRuntimeWindowsAbsenceAudit,
+}
+
+impl WindowsNativeExtensionAbsenceAudit {
+    fn new(profile_id: ProfileId, owner: Option<ExtensionRuntimeNativeOwnerId>) -> Self {
+        let audit = ExtensionRuntimeWindowsAbsenceAudit::try_from_observations(true, true, true)
+            .expect("bounded exact inventory established owner absence");
+        Self {
+            profile_id,
+            owner,
+            audit,
+        }
+    }
+
+    pub(crate) const fn into_runtime_audit(self) -> ExtensionRuntimeWindowsAbsenceAudit {
+        self.audit
+    }
 }
 
 impl fmt::Debug for WindowsNativeExtensionAbsenceAudit {
@@ -865,7 +1112,7 @@ pub(crate) fn begin_native_extension_activation(
         profile,
         extension: attempted_extension,
         observed_owner: None,
-        native_root,
+        native_root: Some(native_root),
         _lifecycle: lifecycle,
     };
 
@@ -1042,6 +1289,38 @@ impl ExtensionInventory {
             }
         }
         Ok(found.map(|index| self.entries.swap_remove(index).1))
+    }
+
+    fn attest_exact(
+        self,
+        expected: &[ExtensionRuntimeNativeOwnerId],
+    ) -> Result<(), WindowsNativeExtensionFailure> {
+        if expected.len() > MAX_EXTENSION_INSTALLS_PER_PROFILE
+            || self.entries.len() != expected.len()
+        {
+            return Err(WindowsNativeExtensionFailure::InventoryMismatch);
+        }
+        let mut expected = expected.to_vec();
+        expected.sort_unstable();
+        if expected.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(WindowsNativeExtensionFailure::InventoryMismatch);
+        }
+        let mut observed: Vec<_> = self.entries.into_iter().map(|(owner, _)| owner).collect();
+        observed.sort_unstable();
+        (observed == expected)
+            .then_some(())
+            .ok_or(WindowsNativeExtensionFailure::InventoryMismatch)
+    }
+
+    fn attest_exact_slots(
+        self,
+        expected: &[Option<ExtensionRuntimeNativeOwnerId>],
+    ) -> Result<(), WindowsNativeExtensionFailure> {
+        if expected.len() > MAX_EXTENSION_INSTALLS_PER_PROFILE {
+            return Err(WindowsNativeExtensionFailure::InventoryMismatch);
+        }
+        let expected: Vec<_> = expected.iter().copied().flatten().collect();
+        self.attest_exact(&expected)
     }
 }
 

@@ -2030,6 +2030,11 @@ pub(crate) struct PlatformSpecificWebViewAttributes {
   use_https: bool,
   scroll_bar_style: ScrollBarStyle,
   browser_extensions_enabled: bool,
+  browser_extension_startup_gate: Option<
+    std::sync::Arc<
+      dyn Fn(&ICoreWebView2Environment, &ICoreWebView2) -> windows_core::Result<()> + 'static,
+    >,
+  >,
   extension_path: Option<PathBuf>,
   default_context_menus: bool,
   environment: Option<ICoreWebView2Environment>,
@@ -2048,6 +2053,7 @@ impl Default for PlatformSpecificWebViewAttributes {
       use_https: false, // To match macOS & Linux behavior in the context of mixed content.
       scroll_bar_style: ScrollBarStyle::default(),
       browser_extensions_enabled: false,
+      browser_extension_startup_gate: None,
       extension_path: None,
       environment: None,
       environment_created_handler: None,
@@ -2125,14 +2131,32 @@ pub trait WebViewBuilderExtWindows {
   ///
   /// ## Warning
   ///
-  /// On Windows, construction with this setting enabled fails with
+  /// On Windows, construction with this setting enabled directly fails with
   /// [`Error::WebView2ExtensionsStartupFenceUnavailable`] before Wry
-  /// initializes COM or creates a native child window. Persisted extensions
-  /// must not start until the embedder has authenticated and fenced the exact
-  /// startup inventory.
+  /// initializes COM or creates a native child window. Trusted embedders must
+  /// instead use [`Self::with_browser_extension_startup_gate`], so the exact
+  /// environment/profile is authenticated before WebView initialization.
   ///
   /// Webview instances with different browser extensions enabled settings must also have different [data directories](WebContext::new).
   fn with_browser_extensions_enabled(self, enabled: bool) -> Self;
+
+  /// Enables browser extensions only behind an embedder-owned startup gate.
+  ///
+  /// Wry invokes this gate after it has created the exact controller and
+  /// obtained its profile-bound `ICoreWebView2`, but before WebView
+  /// initialization, script installation, or initial navigation. Returning an
+  /// error aborts construction through Wry's owned controller-cleanup path.
+  /// The callback must authenticate and retain the exact environment/profile
+  /// authority; merely returning `Ok(())` is not a safe product policy.
+  ///
+  /// A supplied environment must have been created through the same admitted
+  /// mode. WebView2 exposes no environment-side readback for this option, so
+  /// the embedder remains responsible for binding that fact to the environment
+  /// it reuses.
+  fn with_browser_extension_startup_gate(
+    self,
+    gate: impl Fn(&ICoreWebView2Environment, &ICoreWebView2) -> windows_core::Result<()> + 'static,
+  ) -> Self;
 
   /// Retains an unpacked-extension path for source compatibility.
   ///
@@ -2150,9 +2174,9 @@ pub trait WebViewBuilderExtWindows {
   /// Useful if you need to share the same environment, for instance when using the [`WebViewBuilder::with_new_window_req_handler`].
   ///
   /// A supplied COM environment has opaque extension-enablement state and
-  /// bypasses Wry's closed environment construction. Until authenticated
-  /// startup inventory fencing exists, Zephium may only reuse an environment
-  /// observed from an earlier closed Wry construction.
+  /// bypasses Wry's environment-option construction. Extension-enabled reuse
+  /// must therefore carry the same authenticated startup gate and an
+  /// embedder-owned binding to the mode used for the original environment.
   fn with_environment(self, environment: ICoreWebView2Environment) -> Self;
 
   /// Observe the exact environment selected for this construction before Wry
@@ -2215,6 +2239,15 @@ impl WebViewBuilderExtWindows for WebViewBuilder<'_> {
 
   fn with_browser_extensions_enabled(mut self, enabled: bool) -> Self {
     self.platform_specific.browser_extensions_enabled = enabled;
+    self
+  }
+
+  fn with_browser_extension_startup_gate(
+    mut self,
+    gate: impl Fn(&ICoreWebView2Environment, &ICoreWebView2) -> windows_core::Result<()> + 'static,
+  ) -> Self {
+    self.platform_specific.browser_extensions_enabled = true;
+    self.platform_specific.browser_extension_startup_gate = Some(std::sync::Arc::new(gate));
     self
   }
 

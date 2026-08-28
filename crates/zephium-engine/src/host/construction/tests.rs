@@ -128,7 +128,7 @@ fn explicit_content_policy_brackets_every_first_native_navigation() {
         .split_once("fn build_view_inner(")
         .expect("construction lost build_view_inner")
         .1
-        .split_once("\nfn to_wry(")
+        .split_once("\n#[cfg(target_os = \"windows\")]\nimpl EngineHost {")
         .expect("construction lost build_view_inner's end")
         .0;
     let policy_gate = source

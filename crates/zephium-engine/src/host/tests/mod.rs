@@ -1,3 +1,13 @@
+fn raw_view_construction_policy() -> &'static str {
+    include_str!("../construction.rs")
+        .split_once("let mut builder = builder")
+        .expect("raw view policy builder")
+        .1
+        .split_once("/// Side-effect-free admission for the first extension-enabled environment")
+        .expect("extension profile constructor boundary")
+        .0
+}
+
 #[test]
 fn protected_document_start_scripts_flow_through_the_ordered_builder_path() {
     let source = include_str!(concat!(
@@ -17,17 +27,7 @@ fn protected_document_start_scripts_flow_through_the_ordered_builder_path() {
 
 #[test]
 fn raw_popups_use_wrys_synchronous_deny_without_metadata_path() {
-    let source = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/host/construction.rs"
-    ));
-    let raw_policy = source
-        .split("let mut builder = builder")
-        .nth(1)
-        .expect("raw view policy builder")
-        .split("// This host-owned guard")
-        .next()
-        .expect("pre-script raw view policy");
+    let raw_policy = raw_view_construction_policy();
     assert!(!raw_policy.contains("with_new_window_req_handler"));
     assert!(raw_policy.contains("Intentionally do not install a new-window callback"));
 }
@@ -412,17 +412,7 @@ fn linux_stage_exhaustion_retains_one_coalesced_idle_redrive() {
 
 #[test]
 fn raw_native_views_never_request_focus_during_construction() {
-    let source = include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/host/construction.rs"
-    ));
-    let raw_policy = source
-        .split("let mut builder = builder")
-        .nth(1)
-        .expect("raw view policy builder")
-        .split("// This host-owned guard")
-        .next()
-        .expect("pre-script raw view policy");
+    let raw_policy = raw_view_construction_policy();
     assert_eq!(raw_policy.matches(".with_focused(false)").count(), 1);
 }
 
@@ -500,13 +490,7 @@ fn every_identity_bearing_commit_rearms_presentation_but_history_observation_doe
     // Reload, history traversal, explicit navigation and page-driven
     // navigation all converge on the same native Committed transition.
     // The Wry guard hides before callback admission on all desktop ports.
-    let raw_policy = host
-        .split("let mut builder = builder")
-        .nth(1)
-        .expect("raw view policy builder")
-        .split("// This host-owned guard")
-        .next()
-        .expect("pre-script raw view policy");
+    let raw_policy = raw_view_construction_policy();
     assert!(raw_policy.contains("with_navigation_presentation_guard(move ||"));
     assert!(raw_policy.contains("guard_presentation_permit.store(false, Ordering::Release)"));
     let webview2 = include_str!(concat!(
@@ -811,13 +795,7 @@ fn raw_native_media_surfaces_are_deny_only_or_exactly_brokered_per_view() {
         env!("CARGO_MANIFEST_DIR"),
         "/src/host/construction.rs"
     ));
-    let raw_policy = source
-        .split("let mut builder = builder")
-        .nth(1)
-        .expect("raw view policy builder")
-        .split("// This host-owned guard")
-        .next()
-        .expect("pre-script raw view policy");
+    let raw_policy = raw_view_construction_policy();
     assert!(raw_policy.contains("with_fullscreen_enabled(false)"));
     assert!(raw_policy.contains("with_picture_in_picture_enabled(false)"));
     assert!(raw_policy.contains("with_permission_handler(|_| wry::PermissionResponse::Deny)"));

@@ -37,7 +37,7 @@ use crate::{
     ExtensionRuntimeNativeOwnerId, ExtensionRuntimeOwnershipEvidence,
     ExtensionRuntimeOwnershipPort, ExtensionRuntimeRecoveryBuildError,
     ExtensionRuntimeRecoveryExpectation, ExtensionRuntimeRecoveryRequest, ExtensionRuntimeTarget,
-    MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES,
+    ExtensionRuntimeWindowsAbsenceAudit, MAX_EXTENSION_RUNTIME_OWNER_RETAINED_BYTES,
 };
 
 /// Hard envelope for one fail-stop authority-routing quarantine.
@@ -469,6 +469,41 @@ impl ExtensionRuntimeBoundAbsenceEvidenceIssuer {
         ))
     }
 
+    /// Mints a Windows proof after the exact WebView2 profile inventory no
+    /// longer contains this reservation's owner.
+    ///
+    /// Recovery preserves an independently persisted native identity when it
+    /// exists; a fresh activation may carry only the catalog expectation. The
+    /// inventory witness never fabricates an observation for an identityless
+    /// legacy row and refuses conflicting durable anchors.
+    #[must_use]
+    pub fn mint_windows_profile_owner_absent(
+        self,
+        attempt: NonZeroU64,
+        _audit: ExtensionRuntimeWindowsAbsenceAudit,
+    ) -> Option<ExtensionRuntimeAbsenceEvidence> {
+        if self.lineage.owner.backend() != ExtensionRuntimeBackendTarget::WindowsNative
+            || self.lineage.target != ExtensionRuntimeTarget::NativeWebExtension
+            || self
+                .lineage
+                .expected_native_identity
+                .zip(self.lineage.previously_observed_native_identity)
+                .is_some_and(|(expected, observed)| expected != observed)
+        {
+            return None;
+        }
+        Some(ExtensionRuntimeAbsenceEvidence::from_trusted_host(
+            self.lineage.owner.cas(),
+            self.lineage.owner.backend(),
+            self.lineage.target,
+            self.generation,
+            attempt,
+            ExtensionRuntimeAbsenceProofKind::WindowsProfileOwnerAbsent,
+            self.lineage.expected_native_identity,
+            self.lineage.previously_observed_native_identity,
+        ))
+    }
+
     /// Revalidates complete evidence lineage and exact native attempt.
     #[must_use]
     pub fn accepts(self, evidence: ExtensionRuntimeAbsenceEvidence, attempt: NonZeroU64) -> bool {
@@ -506,6 +541,18 @@ impl ExtensionRuntimeBoundAbsenceEvidenceIssuer {
             }
             ExtensionRuntimeAbsenceProofKind::MacosControllerNamespaceAbsent => {
                 self.lineage.owner.backend() == ExtensionRuntimeBackendTarget::MacosNative
+                    && self.lineage.target == ExtensionRuntimeTarget::NativeWebExtension
+                    && evidence.expected_native_identity() == self.lineage.expected_native_identity
+                    && evidence.observed_native_identity()
+                        == self.lineage.previously_observed_native_identity
+                    && self
+                        .lineage
+                        .expected_native_identity
+                        .zip(self.lineage.previously_observed_native_identity)
+                        .is_none_or(|(expected, observed)| expected == observed)
+            }
+            ExtensionRuntimeAbsenceProofKind::WindowsProfileOwnerAbsent => {
+                self.lineage.owner.backend() == ExtensionRuntimeBackendTarget::WindowsNative
                     && self.lineage.target == ExtensionRuntimeTarget::NativeWebExtension
                     && evidence.expected_native_identity() == self.lineage.expected_native_identity
                     && evidence.observed_native_identity()
