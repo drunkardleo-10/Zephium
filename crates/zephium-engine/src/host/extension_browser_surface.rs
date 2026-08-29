@@ -1,11 +1,16 @@
 //! Host-side ownership of Shell-projected extension window/tab routing.
 
+#[cfg(target_os = "macos")]
 use zephium_core::extensions::{
-    ExtensionBrowserRequestId, ExtensionBrowserRequestSettlement, ExtensionBrowserSurface,
+    ExtensionBrowserRequestId, ExtensionBrowserRequestSettlement,
     ExtensionCompatibilityBrokerRequestId, ExtensionCompatibilityBrokerSettlement,
-    ExtensionRuntimeInstance, MAX_EXTENSION_BROWSER_WINDOWS,
+    ExtensionRuntimeInstance,
 };
-use zephium_core::ids::{ItemId, ProfileId};
+use zephium_core::extensions::{ExtensionBrowserSurface, MAX_EXTENSION_BROWSER_WINDOWS};
+#[cfg(target_os = "macos")]
+use zephium_core::ids::ItemId;
+use zephium_core::ids::ProfileId;
+#[cfg(target_os = "macos")]
 use zephium_core::ports::extensions::{
     ExtensionRuntimeGrantPromptSettlement, ExtensionRuntimeGrantRequestId,
 };
@@ -157,64 +162,57 @@ impl EngineHost {
         scheduled
     }
 
+    #[cfg(target_os = "macos")]
     pub(crate) fn settle_extension_browser_request(
         &mut self,
         profile: ProfileId,
         request: ExtensionBrowserRequestId,
         settlement: ExtensionBrowserRequestSettlement,
     ) -> bool {
-        #[cfg(target_os = "macos")]
-        {
-            let mut settlement = settlement;
-            let extension_page_lease = if matches!(
-                settlement,
-                ExtensionBrowserRequestSettlement::Applied(
-                    zephium_core::extensions::ExtensionBrowserRequestResult::ExtensionPageAuthorized
-                )
-            ) {
-                match self
-                    .native_resources
-                    .try_acquire(NativeResourceClass::ExtensionPopup)
-                {
-                    Ok(lease) => Some(lease),
-                    Err(error) => {
-                        let reason = match error {
-                            NativeResourceAdmissionError::ClassExhausted(
-                                NativeResourceClass::ExtensionPopup,
-                            )
-                            | NativeResourceAdmissionError::GlobalExhausted => {
-                                zephium_core::extensions::ExtensionBrowserRequestRejection::CapacityExceeded
-                            }
-                            NativeResourceAdmissionError::ClassExhausted(_)
-                            | NativeResourceAdmissionError::AccountingInvariant => {
-                                zephium_core::extensions::ExtensionBrowserRequestRejection::NativeAdmissionFailed
-                            }
-                        };
-                        settlement = ExtensionBrowserRequestSettlement::Rejected(reason);
-                        None
-                    }
-                }
-            } else {
-                None
-            };
-            matches!(
-                self.macos_extension_controllers.settle_browser_request(
-                    profile,
-                    request,
-                    settlement,
-                    extension_page_lease,
-                ),
-                Ok(
-                    crate::platform::imp::ControllerBrowserRequestSettlement::Settled
-                        | crate::platform::imp::ControllerBrowserRequestSettlement::Stale
-                )
+        let mut settlement = settlement;
+        let extension_page_lease = if matches!(
+            settlement,
+            ExtensionBrowserRequestSettlement::Applied(
+                zephium_core::extensions::ExtensionBrowserRequestResult::ExtensionPageAuthorized
             )
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = (profile, request, settlement);
-            false
-        }
+        ) {
+            match self
+                .native_resources
+                .try_acquire(NativeResourceClass::ExtensionPopup)
+            {
+                Ok(lease) => Some(lease),
+                Err(error) => {
+                    let reason = match error {
+                        NativeResourceAdmissionError::ClassExhausted(
+                            NativeResourceClass::ExtensionPopup,
+                        )
+                        | NativeResourceAdmissionError::GlobalExhausted => {
+                            zephium_core::extensions::ExtensionBrowserRequestRejection::CapacityExceeded
+                        }
+                        NativeResourceAdmissionError::ClassExhausted(_)
+                        | NativeResourceAdmissionError::AccountingInvariant => {
+                            zephium_core::extensions::ExtensionBrowserRequestRejection::NativeAdmissionFailed
+                        }
+                    };
+                    settlement = ExtensionBrowserRequestSettlement::Rejected(reason);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        matches!(
+            self.macos_extension_controllers.settle_browser_request(
+                profile,
+                request,
+                settlement,
+                extension_page_lease,
+            ),
+            Ok(
+                crate::platform::imp::ControllerBrowserRequestSettlement::Settled
+                    | crate::platform::imp::ControllerBrowserRequestSettlement::Stale
+            )
+        )
     }
 
     #[cfg(target_os = "macos")]
@@ -259,28 +257,21 @@ impl EngineHost {
             .finalize_compatibility_broker_request(profile, request, witness);
     }
 
+    #[cfg(target_os = "macos")]
     pub(crate) fn settle_extension_compatibility_broker_request(
         &mut self,
         runtime: ExtensionRuntimeInstance,
         request: ExtensionCompatibilityBrokerRequestId,
         settlement: ExtensionCompatibilityBrokerSettlement,
     ) -> bool {
-        #[cfg(target_os = "macos")]
-        {
-            matches!(
-                self.macos_extension_controllers
-                    .settle_compatibility_broker_request(runtime, request, settlement),
-                Ok(
-                    crate::platform::imp::ControllerCompatibilityBrokerSettlement::Settled
-                        | crate::platform::imp::ControllerCompatibilityBrokerSettlement::Stale
-                )
+        matches!(
+            self.macos_extension_controllers
+                .settle_compatibility_broker_request(runtime, request, settlement),
+            Ok(
+                crate::platform::imp::ControllerCompatibilityBrokerSettlement::Settled
+                    | crate::platform::imp::ControllerCompatibilityBrokerSettlement::Stale
             )
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = (runtime, request, settlement);
-            false
-        }
+        )
     }
 
     #[cfg(target_os = "macos")]

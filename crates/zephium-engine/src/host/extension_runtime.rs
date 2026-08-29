@@ -1223,6 +1223,7 @@ impl ReservationControl {
         authority.mint_document_authority_witness(runtime, purpose)
     }
 
+    #[cfg(target_os = "macos")]
     fn mint_compatibility_broker_witness(
         &self,
         owner: OwnerKey,

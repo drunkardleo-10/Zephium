@@ -1292,6 +1292,7 @@ fn run_with_internal_repository_cfg(args: &[&str]) {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn run_with_extension_product_measurement_cfg(args: &[&str]) {
     eprintln!(
         "> [non-shipping extension product measurement] cargo {}",

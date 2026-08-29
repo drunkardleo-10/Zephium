@@ -65,10 +65,12 @@ impl EngineNativeGrantSnapshot {
     /// selected platform adapter. This is structural authority only; the
     /// operation-authority capability remains separately captive until native
     /// ownership is durably published.
+    #[cfg(any(target_os = "macos", test))]
     pub(super) const fn native_snapshot(&self) -> &ExtensionNativeGrantSnapshot {
         &self.grants
     }
 
+    #[cfg(target_os = "macos")]
     pub(super) fn publisher_native_host(&self) -> Option<&ExtensionPublisherNativeHostRequirement> {
         self.publisher_native_host.as_deref()
     }
