@@ -109,8 +109,91 @@ def assert_fixture_policy
   raise "mutable-source fixture did not produce exactly three errors: #{errors.inspect}" unless errors.length == 3
 end
 
+def named_step(document, job_name, step_name)
+  job = document.fetch("jobs").fetch(job_name)
+  steps = job.fetch("steps")
+  index = steps.index { |step| step["name"] == step_name }
+  raise "#{job_name} is missing #{step_name.inspect}" unless index
+
+  [index, steps.fetch(index)]
+end
+
+def assert_ci_dependency_staging(root)
+  ci = parse_workflow(
+    File.read(File.join(root, ".github/workflows/ci.yml"), encoding: "UTF-8"),
+    ".github/workflows/ci.yml"
+  )
+
+  [
+    [
+      "blocker-security-fork",
+      "Fetch exact locked blocker graphs",
+      "Check the complete blocker security-fork boundary"
+    ],
+    [
+      "rust",
+      "Fetch exact locked security-fork graphs",
+      "Enforce vendored security-fork sources and fixture provenance"
+    ]
+  ].each do |job_name, fetch_name, gate_name|
+    fetch_index, fetch = named_step(ci, job_name, fetch_name)
+    gate_index, = named_step(ci, job_name, gate_name)
+    raise "#{job_name} must fetch before its offline provenance gate" unless fetch_index < gate_index
+
+    fetch_run = fetch.fetch("run")
+    unless fetch_run.include?("cargo fetch --locked\n")
+      raise "#{job_name} locked prefetch omits the complete root lock"
+    end
+    %w[
+      x86_64-pc-windows-msvc
+      x86_64-apple-darwin
+      aarch64-apple-darwin
+      x86_64-unknown-linux-gnu
+      vendor/adblock/Cargo.toml
+    ].each do |required|
+      raise "#{job_name} locked prefetch omits #{required}" unless fetch_run.include?(required)
+    end
+  end
+
+  linux_fetch_index, linux_fetch = named_step(
+    ci,
+    "linux-native-security",
+    "Fetch exact locked Linux blocker graph"
+  )
+  linux_gate_index, = named_step(
+    ci,
+    "linux-native-security",
+    "Prove the exact bundled blocker seed compiles in native WebKitGTK"
+  )
+  linux_fetch_run = linux_fetch.fetch("run")
+  unless linux_fetch_index < linux_gate_index &&
+         linux_fetch_run.include?("cargo fetch --locked\n") &&
+         linux_fetch_run.include?("cargo fetch --locked --target x86_64-unknown-linux-gnu")
+    raise "Linux native blocker proof must stage its exact locked graph before offline materialization"
+  end
+
+  fuzz_steps = ci.fetch("jobs").fetch("blocker-fuzz-smoke").fetch("steps")
+  installer = fuzz_steps.find do |step|
+    step["uses"] == "taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853"
+  end
+  raise "blocker fuzz smoke is missing its pinned tool installer" unless installer
+  unless installer.fetch("with").fetch("tool") == "cargo-deny@0.20.2" &&
+         installer.fetch("with").fetch("fallback") == "none"
+    raise "blocker fuzz binary installer must remain exact and fallback-free"
+  end
+  _, cargo_fuzz = named_step(
+    ci,
+    "blocker-fuzz-smoke",
+    "Install exact cargo-fuzz toolchain"
+  )
+  unless cargo_fuzz.fetch("run") == "cargo install --locked --version 0.13.2 cargo-fuzz"
+    raise "cargo-fuzz must be built from the exact crates.io release lockfile"
+  end
+end
+
 assert_fixture_policy
 root = File.expand_path("../..", __dir__)
+assert_ci_dependency_staging(root)
 workflows = Dir[File.join(root, ".github/workflows/*.{yml,yaml}")].sort
 raise "repository contains no GitHub Actions workflows" if workflows.empty?
 

@@ -111,6 +111,23 @@ jobs:
         with:
           shared-key: blocker-security-fork
 
+      # The provenance gate deliberately resolves every platform graph with
+      # `--offline`. Populate Cargo's checksum-verified cache from the exact
+      # root and standalone lockfiles before crossing that offline boundary.
+      - name: Fetch exact locked blocker graphs
+        run: |
+          set -euo pipefail
+          cargo fetch --locked
+          for target in \
+            x86_64-pc-windows-msvc \
+            x86_64-apple-darwin \
+            aarch64-apple-darwin \
+            x86_64-unknown-linux-gnu
+          do
+            cargo fetch --locked --target "${target}"
+          done
+          cargo fetch --locked --manifest-path vendor/adblock/Cargo.toml
+
       # This single local/CI entrypoint verifies exact local lock identities,
       # formatting, every shipped feature graph, strict Clippy, the adapter
       # tests, and one full upstream-derived serialization suite.
@@ -143,8 +160,14 @@ jobs:
 
       - uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2
         with:
-          tool: cargo-fuzz@0.13.2,cargo-deny@0.20.2
+          tool: cargo-deny@0.20.2
           fallback: none
+
+      # install-action has no binary recipe for cargo-fuzz 0.13.2. Build the
+      # exact crates.io release from its packaged lockfile instead of silently
+      # selecting another version or enabling the action's mutable fallback.
+      - name: Install exact cargo-fuzz toolchain
+        run: cargo install --locked --version 0.13.2 cargo-fuzz
 
       - name: Audit the independently locked fuzz harness
         run: >-
@@ -217,6 +240,20 @@ jobs:
 
       - name: Enforce advisory-exception owners and expiry
         run: cargo xtask check-advisory-exceptions
+
+      - name: Fetch exact locked security-fork graphs
+        run: |
+          set -euo pipefail
+          cargo fetch --locked
+          for target in \
+            x86_64-pc-windows-msvc \
+            x86_64-apple-darwin \
+            aarch64-apple-darwin \
+            x86_64-unknown-linux-gnu
+          do
+            cargo fetch --locked --target "${target}"
+          done
+          cargo fetch --locked --manifest-path vendor/adblock/Cargo.toml
 
       - name: Enforce vendored security-fork sources and fixture provenance
         run: cargo xtask check-security-fork-locks
@@ -542,6 +579,12 @@ jobs:
           persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@eac0f66a48bc4b70a10b9acd4c4e930f835d95ff # 1.95.0
+
+      - name: Fetch exact locked Linux blocker graph
+        run: |
+          set -euo pipefail
+          cargo fetch --locked
+          cargo fetch --locked --target x86_64-unknown-linux-gnu
 
       - name: Prove native WebKitGTK sandbox package prerequisites
         run: |
