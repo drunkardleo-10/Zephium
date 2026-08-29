@@ -346,11 +346,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # GitHub's 20260720 macos-26 image still ships macOS/Safari 26.4,
-        # below Zephium's 26.5.2 Tahoe floor. The macos-15 image ships the
-        # admitted Sequoia 15.7.7 / Safari 26.5.2 floor. The probe below still
-        # reads and admits the exact loaded runtime, so image drift fails
-        # closed rather than trusting this label or comment.
+        # GitHub's hosted macOS images currently lag Zephium's hard floor:
+        # macos-15 is Sequoia 15.7.7 and reports a Safari/WebKit build
+        # mismatch, while macos-26 is Tahoe 26.6.1 below the 26.6.2 floor.
+        # The hosted Sequoia image remains useful for source/unit/API coverage,
+        # but ordinary push/PR runs mint no native runtime evidence. A reusable
+        # release call executes the exact probes below and therefore remains
+        # blocked until its runner satisfies the embedded policy.
         os: [windows-2025, macos-15]
     runs-on: ${{ matrix.os }}
     env:
@@ -462,49 +464,58 @@ jobs:
         if: runner.os == 'macOS'
         run: cargo nextest run --locked --retries 2 --workspace
 
+      - name: Keep macOS native security probe graphs warning-clean
+        if: runner.os == 'macOS'
+        run: |
+          cargo clippy --locked -p zephium-engine \
+            --features native-isolation-probes \
+            --bin macos-principal-isolation-probe -- -D warnings
+          cargo clippy --locked -p zephium-engine \
+            --features native-web-extension-probes \
+            --bin macos-web-extension-probe -- -D warnings
+          cargo clippy --locked -p zephium-engine \
+            --features native-web-extension-probes \
+            --bin macos-web-extension-resource-probe -- -D warnings
+
+      - name: Record hosted macOS runtime-evidence boundary
+        if: runner.os == 'macOS' && inputs.checkout_ref == ''
+        run: >-
+          echo '::notice title=Native macOS release evidence unavailable::The hosted macos-15 image is retained for source coverage only and this job will mint no native runtime evidence; exact Safari/WebKit admission and native extension execution remain mandatory in reusable release CI and on admitted release runners.'
+
       # libtest always runs tests on worker threads, including with
       # --test-threads=1, so an ordinary ignored test cannot construct AppKit
       # or WKWebView safely. This feature-gated executable owns process main
       # and exercises Zephium's real Rust world/handler adapter against a
       # hostile page plus three mutually untrusted principals.
       - name: Prove macOS principal worlds and handlers are mutually isolated
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && inputs.checkout_ref != ''
         timeout-minutes: 3
-        run: |
-          cargo clippy --locked -p zephium-engine \
-            --features native-isolation-probes \
-            --bin macos-principal-isolation-probe -- -D warnings
-          cargo run --locked -p zephium-engine \
-            --features native-isolation-probes \
-            --bin macos-principal-isolation-probe
+        run: >-
+          cargo run --locked -p zephium-engine
+          --features native-isolation-probes
+          --bin macos-principal-isolation-probe
 
       # This is deliberately a feature-gated public-API proof, not product
       # enablement. CI requires actual execution so an image regression below
       # macOS 15.4 cannot turn the native extension gate into a green skip.
       - name: Prove public macOS WKWebExtension admission and isolation
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && inputs.checkout_ref != ''
         timeout-minutes: 4
-        run: |
-          cargo clippy --locked -p zephium-engine \
-            --features native-web-extension-probes \
-            --bin macos-web-extension-probe -- -D warnings
-          cargo run --locked -p zephium-engine \
-            --features native-web-extension-probes \
-            --bin macos-web-extension-probe -- --require-supported-runtime
+        run: >-
+          cargo run --locked -p zephium-engine
+          --features native-web-extension-probes
+          --bin macos-web-extension-probe -- --require-supported-runtime
 
       # Keep the stock-extension resource boundary explicit. The control view
       # proves our exact handler can preserve WASM MIME; the extension context
       # must continue to report whether WebKit bypasses that public handler.
       - name: Classify macOS extension resource transport
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && inputs.checkout_ref != ''
         timeout-minutes: 3
-        run: |
-          cargo clippy --locked -p zephium-engine \
-            --features native-web-extension-probes \
-            --bin macos-web-extension-resource-probe -- -D warnings
-          cargo run --locked -p zephium-engine \
-            --features native-web-extension-probes \
-            --bin macos-web-extension-resource-probe -- --require-supported-runtime
+        run: >-
+          cargo run --locked -p zephium-engine
+          --features native-web-extension-probes
+          --bin macos-web-extension-resource-probe -- --require-supported-runtime
 
       - name: Test vendored Wry security adapter directly
         run: cargo test --manifest-path vendor/wry/Cargo.toml --locked --all-targets

@@ -191,9 +191,55 @@ def assert_ci_dependency_staging(root)
   end
 end
 
+def assert_macos_runtime_evidence_boundary(root)
+  ci = parse_workflow(
+    File.read(File.join(root, ".github/workflows/ci.yml"), encoding: "UTF-8"),
+    ".github/workflows/ci.yml"
+  )
+  source_if = "runner.os == 'macOS'"
+  release_if = "runner.os == 'macOS' && inputs.checkout_ref != ''"
+  ordinary_if = "runner.os == 'macOS' && inputs.checkout_ref == ''"
+
+  _, source = named_step(
+    ci,
+    "rust-platforms",
+    "Keep macOS native security probe graphs warning-clean"
+  )
+  raise "macOS native probe source gate must run on every macOS job" unless source.fetch("if") == source_if
+  %w[
+    macos-principal-isolation-probe
+    macos-web-extension-probe
+    macos-web-extension-resource-probe
+  ].each do |binary|
+    raise "macOS native probe source gate omits #{binary}" unless source.fetch("run").include?(binary)
+  end
+
+  _, notice = named_step(ci, "rust-platforms", "Record hosted macOS runtime-evidence boundary")
+  unless notice.fetch("if") == ordinary_if &&
+         notice.fetch("run").include?("mint no native runtime evidence")
+    raise "ordinary hosted macOS CI must disclose that it mints no native evidence"
+  end
+
+  [
+    "Prove macOS principal worlds and handlers are mutually isolated",
+    "Prove public macOS WKWebExtension admission and isolation",
+    "Classify macOS extension resource transport"
+  ].each do |step_name|
+    _, step = named_step(ci, "rust-platforms", step_name)
+    raise "#{step_name} must remain release-call-only" unless step.fetch("if") == release_if
+  end
+
+  desktop = File.read(File.join(root, "desktop/src/platform/macos.rs"), encoding: "UTF-8")
+  ignore = "requires a release-qualified system Safari/WebKit pair; the explicit native security probe owns this environment-dependent gate"
+  unless desktop.include?(%[#[ignore = "#{ignore}"]\n    fn system_safari_matches_the_framework_owning_wkwebview()])
+    raise "the environment-dependent Safari/WebKit test must stay captive to the explicit native release probe"
+  end
+end
+
 assert_fixture_policy
 root = File.expand_path("../..", __dir__)
 assert_ci_dependency_staging(root)
+assert_macos_runtime_evidence_boundary(root)
 workflows = Dir[File.join(root, ".github/workflows/*.{yml,yaml}")].sort
 raise "repository contains no GitHub Actions workflows" if workflows.empty?
 

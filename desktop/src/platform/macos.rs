@@ -746,6 +746,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a release-qualified system Safari/WebKit pair; the explicit native security probe owns this environment-dependent gate"]
     fn system_safari_matches_the_framework_owning_wkwebview() {
         let safari = NSBundle::bundleWithPath(ns_string!("/Applications/Safari.app"))
             .expect("system Safari bundle");
