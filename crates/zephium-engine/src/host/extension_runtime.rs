@@ -27,14 +27,17 @@ use std::time::Instant;
 
 use crate::MainThreadDispatch;
 use zephium_core::extensions::{
-    ExtensionActiveTabGrantWitness, ExtensionCompatibilityBrokerPurpose,
-    ExtensionCompatibilityBrokerWitness, ExtensionDocumentAuthorityWitness,
-    ExtensionDocumentPurpose, ExtensionNativeIncarnation, ExtensionNativeOwnershipEntry,
+    ExtensionActiveTabGrantWitness, ExtensionDocumentAuthorityWitness, ExtensionDocumentPurpose,
+    ExtensionNativeIncarnation, ExtensionNativeOwnershipEntry,
     ExtensionNativeOwnershipEntryRevision, ExtensionNativeOwnershipIntent,
     ExtensionNativeOwnershipKey, ExtensionNativeOwnershipOperation, ExtensionNativeOwnershipPhase,
     ExtensionOperationAuthorityDenial, ExtensionRuntimeBackendTarget, ExtensionRuntimeEligibility,
     ExtensionRuntimeFingerprint, ExtensionRuntimeGrantRebindDenial,
     ExtensionRuntimeOperationAuthority, ExtensionUserInvocationKind,
+};
+#[cfg(target_os = "macos")]
+use zephium_core::extensions::{
+    ExtensionCompatibilityBrokerPurpose, ExtensionCompatibilityBrokerWitness,
 };
 use zephium_core::ids::ProfileId;
 #[cfg(test)]

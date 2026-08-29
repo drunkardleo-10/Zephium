@@ -354,6 +354,7 @@ fn validate_label(value: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn parse_single_asn(output: &str) -> Result<&str, String> {
     let mut asns = output.split_ascii_whitespace().filter(|word| {
         word.starts_with("ASN:")
@@ -371,6 +372,7 @@ fn parse_single_asn(output: &str) -> Result<&str, String> {
     Ok(asn)
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn parse_integer_value(output: &str, key: &str) -> Result<i32, String> {
     let prefix = format!("\"{key}\"=");
     let value = output
@@ -385,6 +387,7 @@ fn parse_integer_value(output: &str, key: &str) -> Result<i32, String> {
         .map_err(|_| format!("LaunchServices {key} is out of range"))
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn parse_string_value(output: &str, key: &str, maximum: usize) -> Result<String, String> {
     let prefix = format!("\"{key}\"=\"");
     let value = output
@@ -398,6 +401,7 @@ fn parse_string_value(output: &str, key: &str, maximum: usize) -> Result<String,
     Ok(value.to_owned())
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn parse_coalition_pids(output: &str) -> Result<Vec<i32>, String> {
     let prefix = "\"LSApplicationCoalitionPIDsKey\"=(";
     let cohort = output
@@ -428,6 +432,7 @@ fn parse_coalition_pids(output: &str) -> Result<Vec<i32>, String> {
     Ok(pids)
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn role_for_process(root: i32, pid: i32, name: &str) -> ProcessRole {
     if pid == root {
         return ProcessRole::Application;
