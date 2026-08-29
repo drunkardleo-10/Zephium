@@ -1250,7 +1250,7 @@ release dependency is finished.
 | Verified staging cohort | Revision 9 carries Vimium 2.4.2 and Dark Reader 4.9.129 with revisions 7/8 as immutable rollback; artifact bytes, classifications, and reissue evidence are exact | Add a publisher-supported authenticated cloud/security extension and define operational support windows |
 | API compatibility | The declaration table below is authoritative; live alarms work, while context-restart persistence is disclosed as degraded | Notifications, idle/system-lock, managed storage, offscreen, arbitrary native messaging, blocking request mutation, and broader browser APIs remain absent or degraded |
 | File/private contexts | File execution is negative-gated and the unavailable control cannot be forged; native private-store isolation is proven | No product file-access claim and no extension-enabled private-window claim until WebKit execution and a separate product runtime pass |
-| Password managers | Platform diagnostics, popup/content/background primitives, sandbox replacement primitive, explicit failure classifications, and a signed stock 1Password run now cover authenticated vault UI, inline fill, synthetic save, passkey registration, desktop-unlock recovery, forced background reload, and completed-profile restart | No password manager is Verified: saved-item update, passkey assertion, request-auth, longer endurance/resource budgets, and publisher/legal gates remain |
+| Password managers | Platform diagnostics, popup/content/background primitives, sandbox replacement primitive, explicit failure classifications, and a signed stock 1Password run now cover authenticated vault UI, inline fill, synthetic save, extension-mediated passkey registration, desktop-unlock recovery, forced background reload, and completed-profile restart | No password manager is Verified: saved-item update, passkey assertion, request-auth, Apple browser-passkey entitlement approval, longer endurance/resource budgets, and publisher/legal gates remain |
 | Performance/release evidence | Optimized product campaigns and a real process-family sampler are implemented; short release samples are recorded | Dedicated clean-runner budgets, maximum-cohort/tab pressure, energy calibration, sleep/wake, multi-profile, and 24-hour endurance |
 | External compatibility mode | Package-neutral offline transformation and authenticated acquisition primitives exist | Chrome Web Store/AMO/Safari/file/developer acquisition UX, legal adapters, diagnostics, and public compatibility policy are not shipped |
 
@@ -2453,14 +2453,32 @@ with keychain and third-party credential managers](https://developer.apple.com/d
 Zephium now preserves that division explicitly. Password AutoFill remains
 entirely WebKit-owned. An on-demand AuthenticationServices boundary reads only
 the browser's passkey authorization state; it never enumerates credentials or
-relying parties, and a future native enum value fails closed as unknown. The
-Extensions Center starts that query only while visible and offers the platform
-authorization request only from a trusted user click. Rust authorizes the main
-caller, dispatches the request on the native main thread, admits one request at
-a time, and projects settlement only to the fixed main label. An installed,
-Developer-ID-signed lab build reported `notDetermined`, rendered the system
-Password AutoFill/passkey row, and exposed the explicit Enable passkeys action;
-the permission was not changed during automated verification. Physical
+relying parties, and a future native enum value fails closed as unknown. Before
+touching that manager it now reads the current task's exact signed
+[`com.apple.developer.web-browser.public-key-credential`](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.developer.web-browser.public-key-credential)
+Boolean. Absence, false, an unexpected Core Foundation type, lookup failure, or
+a native exception returns `Unavailable`; a request fails as
+`MissingEntitlement`. Apple restricts arbitrary relying-party registration and
+assertion to this reviewed managed capability, so adding a plist key without
+account approval is not an implementation. The Extensions Center starts the
+query only while visible and offers the platform authorization request only
+from a trusted user click in an entitled build. Rust authorizes the main caller,
+dispatches the request on the native main thread, admits one request at a time,
+and projects settlement only to the fixed main label.
+
+An earlier Developer-ID-signed lab build without the entitlement reported
+`notDetermined`; that platform value was not evidence that WebAuthn was usable.
+The exact signed-entitlement guard now reports the build as unavailable. A
+self-authored `cargo xtask serve-password-manager-webauthn-qa` loopback gate
+uses random one-use challenges, exact Host/Origin checks, strict CSP, bounded
+HTTP/JSON, P-256 registration evidence, and server-side assertion-signature,
+relying-party, user-presence, and user-verification checks. The unentitled lab
+reached WebKit's `NotAllowedError` before provider UI, which is retained as a
+negative entitlement result rather than attributed to 1Password. Once Apple
+grants the managed capability, the same signed/notarized packaged gate must
+pass without Apple Passwords or real credentials. The earlier 1Password
+passkey-registration evidence remains extension-mediated evidence on a
+supported HTTPS site, not proof of the browser-native baseline. Physical
 password fill/save and passkey registration/assertion remain release gates.
 This native baseline is not a substitute for a manager's full popup, vault,
 save, inline-menu, settings, or desktop-integration workflows.

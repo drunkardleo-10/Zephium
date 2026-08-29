@@ -190,13 +190,14 @@ objc2-authentication-services = { version = "=0.3.2", default-features = false, 
     "block2",
 ] }
 objc2-app-kit = "0.3"
-objc2-core-foundation = { version = "0.3", features = ["CFString", "CFURL"] }
+objc2-core-foundation = { version = "0.3", features = ["CFNumber", "CFString", "CFURL"] }
 objc2-core-graphics = "0.3"
 objc2-foundation = "0.3"
 objc2-security = { version = "0.3", default-features = false, features = [
     "CSCommon",
     "SecRequirement",
     "SecStaticCode",
+    "SecTask",
 ] }
 objc2-web-kit = { version = "0.3", default-features = false, features = [
     "block2",

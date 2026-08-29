@@ -1271,6 +1271,15 @@ These inherited properties must not be overstated:
   not atomic with native construction.
 - WKWebView does not expose Safari's complete browser UI or Safari-only Safe Browsing
   behavior to Zephium.
+- Arbitrary relying-party passkey registration and assertion require Apple's
+  managed `com.apple.developer.web-browser.public-key-credential` entitlement.
+  The credential boundary reads the current task's exact signed Boolean before
+  constructing AuthenticationServices state. Missing, false, malformed, or
+  unreadable entitlement state fails closed as unavailable and cannot present
+  the authorization action. No entitlement is currently configured or claimed;
+  Apple account approval plus signed/notarized packaged WebAuthn workflows are
+  release gates. Extension-mediated provider behavior does not substitute for
+  this browser-native capability.
 - Engine profile retirement clear/fetch-verifies retained non-persistent stores, removes
   the profile's named store only after releasing its WKWebViews, and re-enumerates data
   store identifiers before reporting native-store verification.
@@ -1535,7 +1544,8 @@ risk. The recurring engine-floor, advisory, and fork-review procedure is defined
 1. Close the platform integration gaps above: independently test the blank-bootstrap
    privileged construction path and native deny handlers, attach the macOS privileged
    UIDelegate at construction, decide and document the Windows file-picker and
-   page-initiated print limitations,
+   page-initiated print limitations, obtain and verify the macOS browser public-key
+   credential managed entitlement before enabling browser-native passkeys,
    establish privileged process-group teardown seams, continuously refresh all three
    engine security floors, provide a release/update SLA before their review expiries,
    and handle WebView2 runtime replacement for long-lived processes.
