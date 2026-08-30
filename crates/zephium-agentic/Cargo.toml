@@ -1,0 +1,21 @@
+[package]
+name = "zephium-agentic"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+default = []
+# Fixed loopback fixtures and native-probe support are diagnostic code. The
+# crate-level optimized-build refusal makes this feature mechanically
+# unavailable to every release graph, even if a downstream manifest enables it.
+probe-harness = []
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

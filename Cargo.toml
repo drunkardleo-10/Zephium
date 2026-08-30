@@ -16,6 +16,7 @@ authors = ["crynta"]
 repository = "https://github.com/zephium/zephium"
 
 [workspace.dependencies]
+zephium-agentic = { path = "crates/zephium-agentic", version = "=0.1.0" }
 zephium-blocker = { path = "crates/zephium-blocker", version = "=0.1.0", default-features = false }
 zephium-blocker-service = { path = "crates/zephium-blocker-service", version = "=0.1.0", default-features = false }
 zephium-blocker-update = { path = "crates/zephium-blocker-update", version = "=0.1.0", default-features = false }

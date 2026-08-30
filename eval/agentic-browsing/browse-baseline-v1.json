@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "reviewed_on": "2026-08-31",
+  "status": "pending_named_device_capture",
+  "reason": "No authorized named Windows and macOS Browse measurement has been supplied. Values are intentionally absent rather than inferred.",
+  "procedure": {
+    "build": "locked production-equivalent build with diagnostic logging disabled",
+    "network": "deterministic loopback pages except the separately authorized concurrent-use scenario",
+    "warmup_seconds": 30,
+    "sample_seconds": 300,
+    "repetitions": 5,
+    "scenarios": [
+      "cold_start_to_first_presented_page",
+      "one_presented_idle_tab",
+      "ten_tabs_with_one_presented_and_nine_hidden",
+      "concurrent_visible_navigation_and_media_control"
+    ],
+    "metrics": [
+      "startup_wall_ms",
+      "main_process_user_cpu_ms",
+      "main_process_system_cpu_ms",
+      "process_family_peak_rss_bytes",
+      "browser_helper_processes",
+      "native_views",
+      "wakeups_or_context_switches",
+      "gpu_or_compositor_measure_available",
+      "energy_measure_available",
+      "foreground_input_latency_ms"
+    ]
+  },
+  "devices": [],
+  "measurements": [],
+  "reviewed_acceptable_agent_deltas": []
+}

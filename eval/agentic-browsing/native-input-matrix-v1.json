@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "protocol_version": 1,
+  "reviewed_on": "2026-08-31",
+  "status": "pending_native_probe_execution",
+  "fixture_cases": [
+    "button",
+    "link",
+    "text_input",
+    "content_editable",
+    "select",
+    "pointer_mouse",
+    "keyboard",
+    "transient_activation",
+    "popup",
+    "clipboard_gate",
+    "drag",
+    "iframe",
+    "open_shadow",
+    "closed_shadow"
+  ],
+  "presentation_states": [
+    "visible_focused",
+    "visible_background",
+    "hidden"
+  ],
+  "required_observations": [
+    "event_sequence",
+    "event_is_trusted",
+    "target_verification",
+    "dom_focus",
+    "native_key_focus",
+    "browse_focus_theft",
+    "transient_activation_lifetime",
+    "popup_observation",
+    "clipboard_gate_without_contents",
+    "resource_counts",
+    "teardown"
+  ],
+  "macos_backends": [
+    "fixed_dom_recipe",
+    "macos_app_kit_event",
+    "macos_accessibility",
+    "macos_focused_os_input",
+    "human_baseline"
+  ],
+  "windows_backends": [
+    "fixed_dom_recipe",
+    "windows_hwnd_input",
+    "windows_composition_input",
+    "windows_cdp_input",
+    "human_baseline"
+  ],
+  "results": [],
+  "backend_order_decisions": [],
+  "unsupported_interactions": [],
+  "real_site_runs": []
+}

@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "reviewed_on": "2026-08-31",
+  "repository_revision": "6fcf29c",
+  "pinned_components": {
+    "wry": {
+      "version": "0.55.1",
+      "upstream_commit": "fe9e7fb73bb6ad2637cb0b4b1685676c86970aeb",
+      "source": "vendor/wry/UPSTREAM.md"
+    },
+    "tauri": {
+      "version": "2.11.3",
+      "upstream_commit": "6f6ab1207bb3923c2721fbc67d2fdb1c8deb0c7a",
+      "source": "vendor/tauri/UPSTREAM.md"
+    },
+    "tauri_runtime_wry": {
+      "version": "2.11.3",
+      "upstream_commit": "6f6ab1207bb3923c2721fbc67d2fdb1c8deb0c7a",
+      "source": "vendor/tauri-runtime-wry/UPSTREAM.md"
+    }
+  },
+  "capabilities": [
+    {
+      "platform": "macos",
+      "mechanism": "fixed_content_world_evaluation",
+      "code_status": "pinned_api_available",
+      "device_status": "pending_device_capture",
+      "evidence": [
+        "objc2-web-kit WKContentWorld and WKWebView frame/content-world APIs",
+        "https://developer.apple.com/documentation/webkit/wkwebview/evaluatejavascript(_:in:in:completionhandler:)"
+      ],
+      "limitations": "No agent runtime is installed in a product context yet. The M1 fixture uses only fixed diagnostic expressions."
+    },
+    {
+      "platform": "macos",
+      "mechanism": "appkit_window_event_routing",
+      "code_status": "existing_diagnostic_route",
+      "device_status": "pending_device_capture",
+      "evidence": [
+        "crates/zephium-engine/src/platform/macos/web_extensions/compatibility_fixture.rs",
+        "crates/zephium-engine/src/platform/macos/web_extensions/vimium_contract.rs"
+      ],
+      "limitations": "Existing diagnostics make a probe window key or route through the application queue. They do not prove invisible background input or no focus theft."
+    },
+    {
+      "platform": "macos",
+      "mechanism": "accessibility_perform_press",
+      "code_status": "public_os_api_not_integrated",
+      "device_status": "pending_permission_and_device_capture",
+      "evidence": [
+        "https://developer.apple.com/documentation/appkit/nsaccessibilityprotocol/accessibilityperformpress()",
+        "https://developer.apple.com/documentation/applicationservices/1460720-axisprocesstrusted"
+      ],
+      "limitations": "The API reports action dispatch, not intended page effect. Zephium must not prompt for Accessibility permission from unattended tests."
+    },
+    {
+      "platform": "windows",
+      "mechanism": "ordinary_webview2_hwnd_input",
+      "code_status": "ordinary_child_hwnd_integration_present",
+      "device_status": "pending_device_capture",
+      "evidence": [
+        "vendor/wry/src/webview2/mod.rs"
+      ],
+      "limitations": "The pinned integration does not yet prove hidden/background trusted input or no focus theft."
+    },
+    {
+      "platform": "windows",
+      "mechanism": "composition_controller_send_mouse_input",
+      "code_status": "not_exposed_by_pinned_wry_integration",
+      "device_status": "pending_device_capture",
+      "evidence": [
+        "https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2compositioncontroller"
+      ],
+      "limitations": "Composition-controller input cannot be generalized to Zephium's ordinary HWND controller. Adopting it would change rendering/ownership integration and requires a separate evidence-backed design decision."
+    },
+    {
+      "platform": "windows",
+      "mechanism": "devtools_input_dispatch",
+      "code_status": "diagnostics_only_spike_without_input_commands",
+      "device_status": "pending_device_capture",
+      "evidence": [
+        "crates/zephium-engine/src/platform/windows/cdp.rs"
+      ],
+      "limitations": "The existing CDP spike is release-gated and does not implement Input.dispatch*. CDP cannot enter domain or model contracts."
+    }
+  ],
+  "security_facts": {
+    "raw_page_ipc_when_no_handler": "absent_by_pinned_wry_policy",
+    "probe_profile": "explicit_ephemeral_only",
+    "probe_extensions": "none",
+    "model_facing_javascript_or_selectors": "absent",
+    "release_probe_graph": "forbidden"
+  }
+}

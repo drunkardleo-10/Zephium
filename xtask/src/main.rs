@@ -1,6 +1,7 @@
 //! Single deterministic entrypoint for the workspace gate: `cargo xtask ci`.
 
 mod adblock_provenance;
+mod agentic_probe_boundary;
 mod bitwarden_core;
 mod blocker_seed;
 mod crx3;
@@ -52,6 +53,7 @@ fn main() {
         }
         Some("check-engine-floors") => check_engine_floors(),
         Some("check-release-engine-security") => check_release_engine_security(),
+        Some("check-agentic-probe-boundary") => check_agentic_probe_boundary(),
         Some("check-advisory-exceptions") => check_advisory_exceptions(),
         Some("check-security-fork-locks") | Some("check-native-adapter-locks") => {
             check_security_fork_locks()
@@ -412,7 +414,7 @@ fn main() {
         Some("check-webview2-floor") => check_engine_floors(),
         _ => {
             eprintln!(
-                "usage: cargo xtask <ci|check-engine-floors|check-release-engine-security|check-advisory-exceptions|check-security-fork-locks|check-native-adapter-locks|check-blocker-security-fork|check-extension-runtime-host-assembler|check-extension-runtime-acquisition-boundary|check-webview2-extension-boundary|check-macos-extension-compatibility-asset|measure-macos-extension-product|classify-macos-extension-alarms|measure-macos-process-family --bundle-id ID --duration-seconds N [--interval-millis N] [--label LABEL]|check-blocker-seed|check-crx3 --archive PATH --expected-id ID|materialize-crx3-probe --archive PATH --expected-id ID --output PATH|prepare-extension-crx3-signing-message --archive PATH --public-key PATH --output PATH|assemble-extension-crx3 --archive PATH --public-key PATH --signature PATH --output PATH|prepare-extension-crx3-release-archive --extension PATH --tree-index PATH --public-key PATH --output PATH|prepare-extension-compatibility-crx3-release-archive --compatibility-artifact PATH --public-key PATH --output PATH|publish-extension-catalog --review PATH --output PATH|finalize-extension-manifest-profiles --publication PATH --review PATH --output PATH|prepare-local-extension-lab-release --compatibility-artifact PATH --output PATH|prepare-local-extension-lab-generation --publication PATH --classified-profiles PATH --output PATH|stage-local-extension-lab --publication PATH --classified-profiles PATH --rollback-lab PATH --output PATH|index-extension-probe-tree --extension PATH --output PATH|materialize-macos-extension-compatibility --extension PATH --tree-index PATH --output PATH|materialize-macos-extension-compatibility-document-background --extension PATH --tree-index PATH --output PATH|materialize-macos-extension-compatibility-publisher-native --extension PATH --tree-index PATH --output PATH|materialize-macos-extension-compatibility-publisher-native-document-background --extension PATH --tree-index PATH --output PATH|materialize-macos-extension-compatibility-brokered --extension PATH --tree-index PATH --output PATH|check-bitwarden-core-source --source PATH|materialize-bitwarden-core-macos-probe-overlay --source PATH --output PATH|finalize-bitwarden-core-macos-probe-artifact --build PATH --output PATH [--wasm-response-mime-adapter]|materialize-blocker-seed-webkit --output PATH|update-blocker-seed --easylist PATH --easyprivacy PATH --license PATH|check-webview2-floor>"
+                "usage: cargo xtask <ci|check-engine-floors|check-release-engine-security|check-agentic-probe-boundary|check-advisory-exceptions|check-security-fork-locks|check-native-adapter-locks|check-blocker-security-fork|check-extension-runtime-host-assembler|check-extension-runtime-acquisition-boundary|check-webview2-extension-boundary|check-macos-extension-compatibility-asset|measure-macos-extension-product|classify-macos-extension-alarms|measure-macos-process-family --bundle-id ID --duration-seconds N [--interval-millis N] [--label LABEL]|check-blocker-seed|check-crx3 --archive PATH --expected-id ID|materialize-crx3-probe --archive PATH --expected-id ID --output PATH|prepare-extension-crx3-signing-message --archive PATH --public-key PATH --output PATH|assemble-extension-crx3 --archive PATH --public-key PATH --signature PATH --output PATH|prepare-extension-crx3-release-archive --extension PATH --tree-index PATH --public-key PATH --output PATH|prepare-extension-compatibility-crx3-release-archive --compatibility-artifact PATH --public-key PATH --output PATH|publish-extension-catalog --review PATH --output PATH|finalize-extension-manifest-profiles --publication PATH --review PATH --output PATH|prepare-local-extension-lab-release --compatibility-artifact PATH --output PATH|prepare-local-extension-lab-generation --publication PATH --classified-profiles PATH --output PATH|stage-local-extension-lab --publication PATH --classified-profiles PATH --rollback-lab PATH --output PATH|index-extension-probe-tree --extension PATH --output PATH|materialize-macos-extension-compatibility --extension PATH --tree-index PATH --output PATH|materialize-macos-extension-compatibility-document-background --extension PATH --tree-index PATH --output PATH|materialize-macos-extension-compatibility-publisher-native --extension PATH --tree-index PATH --output PATH|materialize-macos-extension-compatibility-publisher-native-document-background --extension PATH --tree-index PATH --output PATH|materialize-macos-extension-compatibility-brokered --extension PATH --tree-index PATH --output PATH|check-bitwarden-core-source --source PATH|materialize-bitwarden-core-macos-probe-overlay --source PATH --output PATH|finalize-bitwarden-core-macos-probe-artifact --build PATH --output PATH [--wasm-response-mime-adapter]|materialize-blocker-seed-webkit --output PATH|update-blocker-seed --easylist PATH --easyprivacy PATH --license PATH|check-webview2-floor>"
             );
             exit(2);
         }
@@ -840,6 +842,7 @@ fn check_engine_floors() {
 /// that the immutable blocker sources are still within their upstream
 /// recommended refresh cadence at the exact publication boundary.
 fn check_release_engine_security() {
+    check_agentic_probe_boundary();
     check_engine_floors();
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -867,6 +870,7 @@ fn check_release_engine_security() {
 fn ci() {
     reject_ambient_internal_repository_cfg();
     share_workspace_target_dir();
+    check_agentic_probe_boundary();
     check_extension_runtime_host_assembler_call_sites();
     check_extension_runtime_acquisition_boundary();
     check_webview2_extension_boundary();
@@ -940,6 +944,14 @@ fn ci() {
         run_native_adapter_tests(manifest, features);
     }
     run("pnpm", &["--dir", "frame", "run", "check"]);
+}
+
+fn check_agentic_probe_boundary() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    if let Err(error) = agentic_probe_boundary::check(&repository) {
+        eprintln!("agentic diagnostic release boundary failed: {error}");
+        exit(1);
+    }
 }
 
 #[cfg(target_os = "macos")]
