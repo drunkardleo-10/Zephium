@@ -269,7 +269,7 @@ export type BrowserCredentialCapabilityView = {
 	can_request_passkey_authorization: boolean,
 };
 
-export type BrowserPasskeyAuthorizationView = "authorized" | "denied" | "not_determined" | "unknown" | "unavailable" | "unsupported";
+export type BrowserPasskeyAuthorizationView = "authorized" | "denied" | "not_determined" | "entitlement_required" | "unknown" | "unavailable" | "unsupported";
 
 /**
  *  Split divider hit-strip in window logical coordinates; the chrome renders

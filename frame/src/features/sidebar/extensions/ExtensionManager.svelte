@@ -14,6 +14,7 @@
     ExtensionManagementRuntimeView,
     ExtensionManagementSourceView,
   } from "../../../shared/ipc/bindings";
+  import { browserPasskeyStatus } from "../../../domain/credentials/browser-credentials-model";
   import * as extensions from "../../../domain/extensions/extensions.svelte";
   import * as browserCredentials from "../../../domain/credentials/browser-credentials.svelte";
   import {
@@ -181,22 +182,6 @@
 
   function refreshDistribution() {
     void extensions.refreshDistribution();
-  }
-
-  function passkeyStatus(): string {
-    switch (credentialCapability?.passkey_authorization) {
-      case "authorized":
-        return "Passkeys are enabled for Zephium.";
-      case "denied":
-        return "Passkey access is disabled in System Settings.";
-      case "not_determined":
-        return "Enable passkeys to use system and third-party credential providers.";
-      case "unknown":
-      case "unavailable":
-        return "Passkey status is unavailable on this system.";
-      default:
-        return "Passkeys are not provided by this platform integration.";
-    }
   }
 
   function selectSection(next: ExtensionCenterSection) {
@@ -727,11 +712,12 @@
                           class="mt-0.5 text-[10.5px] leading-4 text-faint"
                           class:text-warning={credentialCapability.passkey_authorization ===
                             "denied" ||
+                            credentialCapability.passkey_authorization === "entitlement_required" ||
                             credentialCapability.passkey_authorization === "unknown" ||
                             credentialCapability.passkey_authorization === "unavailable"}
                           role="status"
                         >
-                          {passkeyStatus()}
+                          {browserPasskeyStatus(credentialCapability.passkey_authorization)}
                         </p>
                       </div>
                       {#if credentialCapability.can_request_passkey_authorization}

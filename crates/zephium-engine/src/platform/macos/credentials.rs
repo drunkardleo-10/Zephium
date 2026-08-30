@@ -31,6 +31,7 @@ pub enum MacosPasskeyAuthorizationState {
     Authorized,
     Denied,
     NotDetermined,
+    EntitlementRequired,
     Unknown,
     Unavailable,
 }
@@ -48,7 +49,7 @@ pub enum MacosPasskeyAuthorizationRequestFailure {
 /// credentials, enumerate relying parties, show UI, or change authorization.
 pub fn passkey_authorization_state() -> MacosPasskeyAuthorizationState {
     if !has_web_browser_passkey_entitlement() {
-        return MacosPasskeyAuthorizationState::Unavailable;
+        return MacosPasskeyAuthorizationState::EntitlementRequired;
     }
     objc2::exception::catch(AssertUnwindSafe(|| {
         // SAFETY: a fresh manager is uniquely owned for this single non-atomic
@@ -176,7 +177,7 @@ mod tests {
                     | MacosPasskeyAuthorizationState::NotDetermined
             ));
         } else {
-            assert_eq!(state, MacosPasskeyAuthorizationState::Unavailable);
+            assert_eq!(state, MacosPasskeyAuthorizationState::EntitlementRequired);
         }
     }
 }

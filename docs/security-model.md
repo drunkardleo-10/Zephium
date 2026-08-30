@@ -1275,8 +1275,9 @@ These inherited properties must not be overstated:
   managed `com.apple.developer.web-browser.public-key-credential` entitlement.
   The credential boundary reads the current task's exact signed Boolean before
   constructing AuthenticationServices state. Missing, false, malformed, or
-  unreadable entitlement state fails closed as unavailable and cannot present
-  the authorization action. No entitlement is currently configured or claimed;
+  absent or false entitlement state fails closed as entitlement-required;
+  malformed or unreadable state fails closed as unavailable. Neither can
+  present the authorization action. No entitlement is currently configured or claimed;
   Apple account approval plus signed/notarized packaged WebAuthn workflows are
   release gates. Extension-mediated provider behavior does not substitute for
   this browser-native capability.

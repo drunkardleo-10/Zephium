@@ -2509,9 +2509,9 @@ the browser's passkey authorization state; it never enumerates credentials or
 relying parties, and a future native enum value fails closed as unknown. Before
 touching that manager it now reads the current task's exact signed
 [`com.apple.developer.web-browser.public-key-credential`](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.developer.web-browser.public-key-credential)
-Boolean. Absence, false, an unexpected Core Foundation type, lookup failure, or
-a native exception returns `Unavailable`; a request fails as
-`MissingEntitlement`. Apple restricts arbitrary relying-party registration and
+Boolean. Absence or false returns the distinct `EntitlementRequired` product
+state; an unexpected Core Foundation type, lookup failure, or native exception
+returns `Unavailable`; a request fails as `MissingEntitlement`. Apple restricts arbitrary relying-party registration and
 assertion to this reviewed managed capability, so adding a plist key without
 account approval is not an implementation. The Extensions Center starts the
 query only while visible and offers the platform authorization request only
@@ -2521,7 +2521,8 @@ and projects settlement only to the fixed main label.
 
 An earlier Developer-ID-signed lab build without the entitlement reported
 `notDetermined`; that platform value was not evidence that WebAuthn was usable.
-The exact signed-entitlement guard now reports the build as unavailable. A
+The exact signed-entitlement guard now reports that the build requires the
+managed capability instead of blaming the user's system. A
 self-authored `cargo xtask serve-password-manager-webauthn-qa` loopback gate
 uses random one-use challenges, exact Host/Origin checks, strict CSP, bounded
 HTTP/JSON, P-256 registration evidence, and server-side assertion-signature,
