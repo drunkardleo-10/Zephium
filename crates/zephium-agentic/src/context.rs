@@ -12,7 +12,7 @@ use thiserror::Error;
 use ulid::Ulid;
 use zephium_core::ids::ProfileId;
 
-const MAX_CONTEXT_CAPABILITIES: usize = 10;
+const MAX_CONTEXT_CAPABILITIES: usize = 11;
 
 macro_rules! durable_id {
     ($name:ident, $description:literal) => {
@@ -38,7 +38,7 @@ macro_rules! durable_id {
             }
 
             #[cfg(test)]
-            const fn from_raw(value: u128) -> Self {
+            pub(crate) const fn from_raw(value: u128) -> Self {
                 Self(Ulid(value))
             }
         }
@@ -183,6 +183,8 @@ pub enum ContextCapability {
     Present,
     /// Suspend and resume the native page.
     Suspend,
+    /// Reconstruct a native page after renderer loss.
+    Recover,
     /// Transfer input exclusively to and from a person.
     HumanControl,
     /// Explicitly adopt an owned context into ordinary Browse.
@@ -209,6 +211,7 @@ impl ContextCapability {
                     | Self::Act
                     | Self::Present
                     | Self::Suspend
+                    | Self::Recover
                     | Self::HumanControl
                     | Self::Adopt
                     | Self::ImportCookies
@@ -220,6 +223,7 @@ impl ContextCapability {
                     | Self::Act
                     | Self::Present
                     | Self::Suspend
+                    | Self::Recover
                     | Self::HumanControl
                     | Self::Release
             ),
@@ -227,6 +231,7 @@ impl ContextCapability {
                 self,
                 Self::Navigate
                     | Self::Present
+                    | Self::Recover
                     | Self::HumanControl
                     | Self::Release
                     | Self::ExportCookies
@@ -253,6 +258,7 @@ pub enum ContextCapabilityError {
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub struct ContextCapabilities {
     bits: u16,
+    kind: ContextKind,
 }
 
 impl ContextCapabilities {
@@ -275,7 +281,7 @@ impl ContextCapabilities {
             }
             bits |= bit;
         }
-        Ok(Self { bits })
+        Ok(Self { bits, kind })
     }
 
     /// Reports whether this inventory contains `capability`.
@@ -292,12 +298,18 @@ impl ContextCapabilities {
     pub const fn is_empty(self) -> bool {
         self.bits == 0
     }
+
+    /// Context kind against which this complete inventory was validated.
+    pub const fn kind(self) -> ContextKind {
+        self.kind
+    }
 }
 
 impl fmt::Debug for ContextCapabilities {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ContextCapabilities")
+            .field("kind", &self.kind)
             .field("count", &self.len())
             .finish()
     }
@@ -488,6 +500,8 @@ pub enum ContextLifecycle {
     Suspended,
     /// A resume request is in flight.
     Resuming,
+    /// The renderer is absent and recovery is queued or intentionally deferred.
+    RendererLost,
     /// Renderer-loss recovery is in flight.
     Recovering,
     /// Native destruction is in flight.
@@ -587,6 +601,15 @@ impl ContextStatus {
     pub const fn pending_operation(self) -> Option<ContextOperationKind> {
         self.pending_operation
     }
+
+    /// Returns true only when reference-based agent work may safely proceed.
+    pub const fn can_automate(self) -> bool {
+        matches!(self.lifecycle, ContextLifecycle::Ready)
+            && matches!(self.control, ContextControl::Agent)
+            && matches!(self.freshness, ContextFreshness::Observed)
+            && !self.run_cancelled
+            && self.pending_operation.is_none()
+    }
 }
 
 /// Closed native settlement without page or platform error text.
@@ -671,21 +694,8 @@ impl ContextRecord {
         capabilities: ContextCapabilities,
         operation: ContextOperationId,
     ) -> Result<(Self, ContextOperationJoin), ContextTransitionError> {
-        for capability in [
-            ContextCapability::Navigate,
-            ContextCapability::Observe,
-            ContextCapability::Act,
-            ContextCapability::Present,
-            ContextCapability::Suspend,
-            ContextCapability::HumanControl,
-            ContextCapability::Adopt,
-            ContextCapability::Release,
-            ContextCapability::ImportCookies,
-            ContextCapability::ExportCookies,
-        ] {
-            if capabilities.contains(capability) && !capability.allowed_for(identity.kind()) {
-                return Err(ContextTransitionError::InvalidKind);
-            }
+        if capabilities.kind() != identity.kind() {
+            return Err(ContextTransitionError::InvalidKind);
         }
         let record = Self {
             identity,
@@ -748,16 +758,6 @@ impl ContextRecord {
                 None => None,
             },
         }
-    }
-
-    /// Returns true only when reference-based agent work may safely proceed.
-    pub const fn can_automate(&self) -> bool {
-        matches!(self.lifecycle, ContextLifecycle::Ready)
-            && matches!(self.control, ContextControl::Agent)
-            && matches!(self.freshness, ContextFreshness::Observed)
-            && !self.run_cancelled
-            && self.pending.is_none()
-            && self.pending_navigation.is_none()
     }
 
     /// Settles the exact initial native construction.
@@ -969,39 +969,57 @@ impl ContextRecord {
         Ok(())
     }
 
-    /// Invalidates authority after exact renderer loss and starts recovery.
+    /// Invalidates authority after exact renderer loss without starting work.
     pub fn renderer_lost(
         &mut self,
         prior: ContextJoin,
-        operation: ContextOperationId,
-    ) -> Result<ContextOperationJoin, ContextTransitionError> {
+    ) -> Result<ContextJoin, ContextTransitionError> {
         self.require_join(prior)?;
         self.require_nonterminal()?;
-        if self.run_cancelled {
-            return Err(ContextTransitionError::RunCancelled);
-        }
         if matches!(
             self.lifecycle,
             ContextLifecycle::Closing
                 | ContextLifecycle::Adopting
                 | ContextLifecycle::Releasing
+                | ContextLifecycle::RendererLost
                 | ContextLifecycle::Faulted
         ) {
             return Err(ContextTransitionError::InvalidLifecycle);
         }
-        let recovery_target = (self.control, self.visibility);
+        let recovery_target = self
+            .recovery_target
+            .unwrap_or((self.control, self.visibility));
         self.advance(true, true, true, true)?;
-        self.lifecycle = ContextLifecycle::Recovering;
+        self.lifecycle = ContextLifecycle::RendererLost;
         self.visibility = ContextVisibility::Hidden;
-        self.control = ContextControl::Agent;
         self.freshness = ContextFreshness::ObservationRequired;
         self.native_view_resident = false;
         self.pending_navigation = None;
+        self.pending = None;
+        self.recovery_target = Some(recovery_target);
+        Ok(self.join())
+    }
+
+    /// Starts exact renderer recovery after scheduler/resource admission.
+    pub fn begin_recovery(
+        &mut self,
+        operation: ContextOperationId,
+    ) -> Result<ContextOperationJoin, ContextTransitionError> {
+        self.require_nonterminal()?;
+        if self.run_cancelled {
+            return Err(ContextTransitionError::RunCancelled);
+        }
+        self.require_capability(ContextCapability::Recover)?;
+        if self.lifecycle != ContextLifecycle::RendererLost || self.recovery_target.is_none() {
+            return Err(ContextTransitionError::InvalidLifecycle);
+        }
+        self.require_no_operation()?;
+        self.advance(true, true, true, true)?;
+        self.lifecycle = ContextLifecycle::Recovering;
         self.pending = Some(PendingOperation {
             id: operation,
             kind: ContextOperationKind::Recover,
         });
-        self.recovery_target = Some(recovery_target);
         Ok(self.operation_join(operation, ContextOperationKind::Recover))
     }
 
@@ -1169,7 +1187,10 @@ impl ContextRecord {
         self.require_capability(ContextCapability::Release)?;
         if !matches!(
             self.lifecycle,
-            ContextLifecycle::Ready | ContextLifecycle::Suspended | ContextLifecycle::Faulted
+            ContextLifecycle::Ready
+                | ContextLifecycle::Suspended
+                | ContextLifecycle::RendererLost
+                | ContextLifecycle::Faulted
         ) {
             return Err(ContextTransitionError::InvalidLifecycle);
         }
@@ -1179,6 +1200,7 @@ impl ContextRecord {
         }
         self.lifecycle = ContextLifecycle::Releasing;
         self.freshness = ContextFreshness::ObservationRequired;
+        self.recovery_target = None;
         self.pending = Some(PendingOperation {
             id: operation,
             kind: ContextOperationKind::Release,
@@ -1356,12 +1378,13 @@ impl fmt::Debug for ContextRecord {
 mod tests {
     use super::*;
 
-    const OWNED_CAPABILITIES: [ContextCapability; 8] = [
+    const OWNED_CAPABILITIES: [ContextCapability; 9] = [
         ContextCapability::Navigate,
         ContextCapability::Observe,
         ContextCapability::Act,
         ContextCapability::Present,
         ContextCapability::Suspend,
+        ContextCapability::Recover,
         ContextCapability::HumanControl,
         ContextCapability::Adopt,
         ContextCapability::ImportCookies,
@@ -1441,7 +1464,7 @@ mod tests {
     #[test]
     fn construction_observation_and_navigation_are_exactly_joined() {
         let (mut record, construction) = owned();
-        assert!(!record.can_automate());
+        assert!(!record.status().can_automate());
         record
             .settle_construction(construction, ContextSettlement::Applied)
             .expect("construction");
@@ -1449,7 +1472,7 @@ mod tests {
         record
             .acknowledge_observation(initial)
             .expect("observation");
-        assert!(record.can_automate());
+        assert!(record.status().can_automate());
 
         let navigation = record.begin_navigation(operation(2)).expect("navigation");
         assert_ne!(
@@ -1460,7 +1483,7 @@ mod tests {
             navigation.context().frame_generation(),
             initial.frame_generation()
         );
-        assert!(!record.can_automate());
+        assert!(!record.status().can_automate());
         assert_eq!(
             record.settle_navigation(
                 ContextOperationJoin {
@@ -1481,7 +1504,7 @@ mod tests {
         record
             .acknowledge_observation(record.join())
             .expect("fresh observation");
-        assert!(record.can_automate());
+        assert!(record.status().can_automate());
     }
 
     #[test]
@@ -1528,11 +1551,11 @@ mod tests {
         );
         let returned = record.end_human_control().expect("return control");
         assert_ne!(returned.context_generation(), human.context_generation());
-        assert!(!record.can_automate());
+        assert!(!record.status().can_automate());
         record
             .acknowledge_observation(returned)
             .expect("new observation");
-        assert!(record.can_automate());
+        assert!(record.status().can_automate());
     }
 
     #[test]
@@ -1566,10 +1589,11 @@ mod tests {
     fn renderer_loss_requires_exact_recovery_before_new_observation() {
         let mut record = ready_owned();
         let old = record.join();
-        let recovery = record
-            .renderer_lost(old, operation(2))
-            .expect("renderer loss");
+        let lost = record.renderer_lost(old).expect("renderer loss");
         assert!(!record.status().native_view_resident());
+        assert_eq!(record.status().lifecycle(), ContextLifecycle::RendererLost);
+        assert_eq!(record.join(), lost);
+        let recovery = record.begin_recovery(operation(2)).expect("recovery");
         assert_eq!(record.status().lifecycle(), ContextLifecycle::Recovering);
         assert_eq!(
             record.settle_recovery(
@@ -1585,22 +1609,22 @@ mod tests {
             .settle_recovery(recovery, ContextSettlement::Applied)
             .expect("recovery");
         assert!(record.status().native_view_resident());
-        assert!(!record.can_automate());
+        assert!(!record.status().can_automate());
     }
 
     #[test]
     fn renderer_recovery_preserves_existing_human_control() {
         let mut record = ready_owned();
         let human = record.begin_human_control().expect("human control");
-        let recovery = record
-            .renderer_lost(human, operation(2))
-            .expect("renderer loss");
+        record.renderer_lost(human).expect("renderer loss");
+        assert_eq!(record.status().control(), ContextControl::Human);
+        let recovery = record.begin_recovery(operation(2)).expect("recovery");
         record
             .settle_recovery(recovery, ContextSettlement::Applied)
             .expect("recovery");
         assert_eq!(record.status().control(), ContextControl::Human);
         assert_eq!(record.status().visibility(), ContextVisibility::Visible);
-        assert!(!record.can_automate());
+        assert!(!record.status().can_automate());
     }
 
     #[test]
@@ -1655,7 +1679,7 @@ mod tests {
         assert_eq!(record.status().control(), ContextControl::Human);
         assert_eq!(record.status().visibility(), ContextVisibility::Visible);
         assert!(record.status().run_cancelled());
-        assert!(!record.can_automate());
+        assert!(!record.status().can_automate());
     }
 
     #[test]

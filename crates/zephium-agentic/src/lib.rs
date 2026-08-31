@@ -14,6 +14,7 @@
 compile_error!("the agentic probe harness is forbidden in optimized builds");
 
 mod context;
+mod context_registry;
 mod contract;
 mod control;
 mod evidence;
@@ -26,10 +27,14 @@ mod protocol;
 pub use context::{
     ContextCapabilities, ContextCapability, ContextCapabilityError, ContextControl,
     ContextFreshness, ContextGeneration, ContextId, ContextIdentity, ContextJoin, ContextKind,
-    ContextLifecycle, ContextOperationId, ContextOperationJoin, ContextOperationKind,
-    ContextRecord, ContextRunId, ContextSettlement, ContextStatus, ContextTerminal,
-    ContextTransitionError, ContextVisibility, FrameGeneration, FrameId, NavigationEpoch,
-    RunCancellationGeneration,
+    ContextLifecycle, ContextOperationId, ContextOperationJoin, ContextOperationKind, ContextRunId,
+    ContextSettlement, ContextStatus, ContextTerminal, ContextTransitionError, ContextVisibility,
+    FrameGeneration, FrameId, NavigationEpoch, RunCancellationGeneration,
+};
+pub use context_registry::{
+    ContextRegistry, ContextRegistryEntry, ContextRegistryEntryState, ContextRegistryError,
+    ContextRegistryStatus, ContextResourceDisposition, RetiredContext, MAX_EXECUTING_CONTEXTS,
+    MAX_LIVE_CONTEXTS,
 };
 pub use contract::{
     FixtureCase, FixtureTarget, FocusOwner, GateOutcome, InputBackend, InputEventKind,

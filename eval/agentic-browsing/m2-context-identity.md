@@ -1,7 +1,7 @@
 # M2 context identity and lifecycle core
 
-Status: pure domain contract implemented; bounded registry and native adapters
-pending.
+Status: pure domain contract and bounded registry implemented; shell/native
+port and platform adapters pending.
 
 This evidence records code properties only. It does not claim that an owned
 native context, extension inventory proof, Windows cookie bridge, borrowed-tab
@@ -41,6 +41,21 @@ The aggregate is a functional core. Construction creates no timer, thread,
 native page, queue, or background work, so the unused product has zero runtime
 agent overhead.
 
+`ContextRegistry` is the single-owner admission and accounting boundary. It
+retains at most eight live rows, at most four execution permits, and never
+evicts. Rows above the execution ceiling remain queued; successful suspension
+and renderer loss release a permit, while resume and deferred recovery must
+reacquire one. A separate owned-native reservation count distinguishes new
+owned/handoff resources from borrowed-tab leases. Terminal rows remain until
+the shell observes an exact `Destroyed`, `TransferredToBrowse`, or
+`ExistingBrowseRetained` disposition.
+
+The shutdown seal permanently rejects admission, drops only never-started
+rows, enumerates a bounded exact cleanup cohort, and reports quiescence only
+after every active row reaches and exposes its terminal disposition. Bounded
+run/profile indexes support cancellation and profile-erasure barriers without
+granting authority.
+
 ## Deterministic evidence
 
 ```sh
@@ -50,13 +65,15 @@ cargo clippy --locked -p zephium-agentic --all-targets -- -D warnings
 
 The tests cover canonical/redacted identity, kind-scoped capability sets,
 construction and navigation correlation, stale settlements, visibility and
-ownership separation, takeover, cancellation, suspension, renderer recovery,
-adoption/release exclusivity, and non-wrapping exhaustion.
+ownership separation, takeover, cancellation, suspension, deferred renderer
+recovery, adoption/release exclusivity, non-wrapping exhaustion, both registry
+ceilings, no-eviction pressure, terminal resource disposition, and shutdown
+quiescence.
 
 ## Remaining M2 work
 
-1. add the bounded process registry, hot/native resource leases, shutdown
-   barrier, and shell/native port;
+1. add the closed shell/native port and bind registry execution/native
+   reservations to the engine's authoritative resource leases;
 2. implement extension-free owned construction and inventory assertions on
    both platform adapters without weakening current extension principals;
 3. implement explicit profile leasing, the bounded Windows cookie bridge, and
