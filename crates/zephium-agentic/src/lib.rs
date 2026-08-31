@@ -28,6 +28,7 @@ mod probe_recipes;
 mod profile_lease;
 mod protocol;
 mod semantic;
+mod semantic_model;
 mod semantic_observation;
 mod semantic_wire;
 mod sign_in_handoff;
@@ -98,12 +99,22 @@ pub use protocol::{
 };
 pub use semantic::{
     SemanticCompleteness, SemanticContractError, SemanticFrameJoin, SemanticFrameTrust,
-    SemanticInvocationId, SemanticNode, SemanticOperationClass, SemanticOperations, SemanticOrigin,
-    SemanticRect, SemanticReference, SemanticReferenceError, SemanticReferenceId, SemanticRole,
-    SemanticSensitivity, SemanticSnapshot, SemanticSnapshotGeneration, SemanticState,
-    SemanticStates, SemanticText, SemanticTruncation, SemanticTrust, SemanticValueSummary,
-    MAX_SEMANTIC_DEPTH, MAX_SEMANTIC_FRAMES, MAX_SEMANTIC_NAME_BYTES, MAX_SEMANTIC_NODES,
-    MAX_SEMANTIC_TEXT_BYTES, MAX_SEMANTIC_TOTAL_TEXT_BYTES, MAX_SEMANTIC_VALUE_BYTES,
+    SemanticHeadingLevel, SemanticInvocationId, SemanticNode, SemanticOperationClass,
+    SemanticOperations, SemanticOrigin, SemanticRect, SemanticReference, SemanticReferenceError,
+    SemanticReferenceId, SemanticRole, SemanticSensitivity, SemanticSnapshot,
+    SemanticSnapshotGeneration, SemanticState, SemanticStates, SemanticText, SemanticTruncation,
+    SemanticTrust, SemanticValueSummary, MAX_SEMANTIC_DEPTH, MAX_SEMANTIC_FRAMES,
+    MAX_SEMANTIC_NAME_BYTES, MAX_SEMANTIC_NODES, MAX_SEMANTIC_TEXT_BYTES,
+    MAX_SEMANTIC_TOTAL_TEXT_BYTES, MAX_SEMANTIC_VALUE_BYTES,
+};
+pub use semantic_model::{
+    encode_semantic_observation, SemanticEncodedObservation, SemanticEncodingStats,
+    SemanticModelEncodingBudget, SemanticModelEncodingError, SemanticModelPayload,
+    SemanticTokenCountQuality, SemanticTokenCountRequirement, SemanticTokenCounter,
+    SemanticTokenCounterError, SemanticTokenMeasurement, SemanticTokenMeasurementError,
+    SemanticTokenizerRevision, SemanticTokenizerRevisionError, INITIAL_SEMANTIC_MODEL_TOKEN_TARGET,
+    MAX_SEMANTIC_MODEL_BYTES, MAX_SEMANTIC_MODEL_TOKENS, MAX_SEMANTIC_TOKENIZER_REVISION_BYTES,
+    SEMANTIC_MODEL_SCHEMA_VERSION,
 };
 pub use semantic_observation::{
     SemanticExpansionKind, SemanticFrameBoundary, SemanticFrameBoundaryStatus,

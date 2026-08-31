@@ -1,0 +1,1128 @@
+//! Deterministic compact model encoding and explicit token-admission port.
+//!
+//! Encoded page content remains private until a trusted tokenizer adapter
+//! measures it under the request's byte/token budget. Debug output contains
+//! only aggregate metadata. The format contains semantic values and opaque
+//! references, never HTML, selectors, internal node keys, or native handles.
+
+use std::fmt;
+use std::fmt::Write as _;
+
+use thiserror::Error;
+
+use crate::{
+    SemanticCompleteness, SemanticFrameBoundaryStatus, SemanticFrameDeferral, SemanticFrameTrust,
+    SemanticFrameUnsupported, SemanticObservation, SemanticOperationClass, SemanticRole,
+    SemanticScope, SemanticSensitivity, SemanticState, SemanticTruncation, SemanticTrust,
+    SemanticValueSummary,
+};
+
+/// Version of the compact semantic model-input grammar.
+pub const SEMANTIC_MODEL_SCHEMA_VERSION: u16 = 1;
+/// Absolute encoded semantic payload byte ceiling.
+pub const MAX_SEMANTIC_MODEL_BYTES: u32 = 512 * 1024;
+/// Absolute admitted semantic payload token ceiling.
+pub const MAX_SEMANTIC_MODEL_TOKENS: u32 = 128 * 1024;
+/// Initial-snapshot token target from the product qualification contract.
+pub const INITIAL_SEMANTIC_MODEL_TOKEN_TARGET: u32 = 2_000;
+/// Maximum bounded provider/model/tokenizer revision label bytes.
+pub const MAX_SEMANTIC_TOKENIZER_REVISION_BYTES: usize = 96;
+
+/// Whether token admission requires an exact tokenizer/model count.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SemanticTokenCountRequirement {
+    /// A conservative trusted local upper bound is sufficient.
+    ConservativeAllowed,
+    /// A provider preflight estimate or exact measurement is sufficient.
+    ProviderEstimateAllowed,
+    /// Only an exact local tokenizer or provider-guaranteed exact count is sufficient.
+    Exact,
+}
+
+/// Hard model-encoding and token-admission ceilings.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SemanticModelEncodingBudget {
+    max_bytes: u32,
+    max_tokens: u32,
+    token_requirement: SemanticTokenCountRequirement,
+}
+
+impl SemanticModelEncodingBudget {
+    /// Initial snapshot budget for a provider with an exact counting path.
+    pub const INITIAL_EXACT: Self = Self {
+        max_bytes: 32 * 1024,
+        max_tokens: INITIAL_SEMANTIC_MODEL_TOKEN_TARGET,
+        token_requirement: SemanticTokenCountRequirement::Exact,
+    };
+
+    /// Initial snapshot budget for an explicitly estimated provider count.
+    pub const INITIAL_PROVIDER_ESTIMATE: Self = Self {
+        max_bytes: 32 * 1024,
+        max_tokens: INITIAL_SEMANTIC_MODEL_TOKEN_TARGET,
+        token_requirement: SemanticTokenCountRequirement::ProviderEstimateAllowed,
+    };
+
+    /// Validates nonzero byte and token limits under global hard ceilings.
+    pub const fn try_new(
+        max_bytes: u32,
+        max_tokens: u32,
+        token_requirement: SemanticTokenCountRequirement,
+    ) -> Result<Self, SemanticModelEncodingError> {
+        if max_bytes == 0
+            || max_bytes > MAX_SEMANTIC_MODEL_BYTES
+            || max_tokens == 0
+            || max_tokens > MAX_SEMANTIC_MODEL_TOKENS
+        {
+            return Err(SemanticModelEncodingError::Budget);
+        }
+        Ok(Self {
+            max_bytes,
+            max_tokens,
+            token_requirement,
+        })
+    }
+
+    /// Maximum encoded UTF-8 bytes.
+    pub const fn max_bytes(self) -> u32 {
+        self.max_bytes
+    }
+
+    /// Maximum measured semantic-payload tokens.
+    pub const fn max_tokens(self) -> u32 {
+        self.max_tokens
+    }
+
+    /// Required measurement quality.
+    pub const fn token_requirement(self) -> SemanticTokenCountRequirement {
+        self.token_requirement
+    }
+}
+
+/// Bounded provider/model/tokenizer revision identity.
+#[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
+pub struct SemanticTokenizerRevision(String);
+
+impl SemanticTokenizerRevision {
+    /// Validates an ASCII revision label without accepting paths, URLs, or whitespace.
+    pub fn try_new(value: String) -> Result<Self, SemanticTokenizerRevisionError> {
+        if value.is_empty()
+            || value.len() > MAX_SEMANTIC_TOKENIZER_REVISION_BYTES
+            || value.contains("://")
+            || !value.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':')
+            })
+        {
+            return Err(SemanticTokenizerRevisionError::Invalid);
+        }
+        Ok(Self(value))
+    }
+
+    /// Revision label for metrics and exact model-adapter matching.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for SemanticTokenizerRevision {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SemanticTokenizerRevision")
+            .field("bytes", &self.0.len())
+            .field("value", &"[redacted]")
+            .finish()
+    }
+}
+
+/// Refusal to admit a tokenizer revision label.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum SemanticTokenizerRevisionError {
+    /// Revision is empty, oversized, path/URL-like, or contains unsafe characters.
+    #[error("semantic tokenizer revision is invalid")]
+    Invalid,
+}
+
+/// Provenance/quality of one trusted token measurement.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SemanticTokenCountQuality {
+    /// Exact count from the pinned tokenizer implementation used by the model.
+    ExactLocal,
+    /// Provider count whose primary contract explicitly guarantees exactness.
+    ProviderExact,
+    /// Provider preflight estimate, which may differ from observed usage.
+    ProviderEstimate,
+    /// Trusted conservative local upper bound, not an actual tokenizer count.
+    Conservative,
+}
+
+impl SemanticTokenCountQuality {
+    const fn is_exact(self) -> bool {
+        matches!(self, Self::ExactLocal | Self::ProviderExact)
+    }
+
+    const fn satisfies(self, requirement: SemanticTokenCountRequirement) -> bool {
+        match requirement {
+            SemanticTokenCountRequirement::ConservativeAllowed => true,
+            SemanticTokenCountRequirement::ProviderEstimateAllowed => matches!(
+                self,
+                Self::ExactLocal | Self::ProviderExact | Self::ProviderEstimate
+            ),
+            SemanticTokenCountRequirement::Exact => self.is_exact(),
+        }
+    }
+}
+
+/// Bounded token measurement tied to one explicit tokenizer revision.
+#[derive(Clone, Eq, PartialEq)]
+pub struct SemanticTokenMeasurement {
+    revision: SemanticTokenizerRevision,
+    tokens: u32,
+    quality: SemanticTokenCountQuality,
+}
+
+impl SemanticTokenMeasurement {
+    /// Constructs a nonzero measurement under the global hard token ceiling.
+    pub fn try_new(
+        revision: SemanticTokenizerRevision,
+        tokens: u32,
+        quality: SemanticTokenCountQuality,
+    ) -> Result<Self, SemanticTokenMeasurementError> {
+        if tokens == 0 || tokens > MAX_SEMANTIC_MODEL_TOKENS {
+            return Err(SemanticTokenMeasurementError::Invalid);
+        }
+        Ok(Self {
+            revision,
+            tokens,
+            quality,
+        })
+    }
+
+    /// Pinned tokenizer/model/counting revision used for this count.
+    pub const fn revision(&self) -> &SemanticTokenizerRevision {
+        &self.revision
+    }
+
+    /// Counted or conservatively bounded tokens.
+    pub const fn tokens(&self) -> u32 {
+        self.tokens
+    }
+
+    /// Exact/provider/conservative measurement class.
+    pub const fn quality(&self) -> SemanticTokenCountQuality {
+        self.quality
+    }
+}
+
+impl fmt::Debug for SemanticTokenMeasurement {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SemanticTokenMeasurement")
+            .field("revision", &self.revision)
+            .field("tokens", &self.tokens)
+            .field("quality", &self.quality)
+            .finish()
+    }
+}
+
+/// Refusal to construct an invalid token measurement.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum SemanticTokenMeasurementError {
+    /// Count was zero or beyond the process-wide hard ceiling.
+    #[error("semantic token measurement is invalid")]
+    Invalid,
+}
+
+/// Closed failure from a trusted provider/model tokenizer adapter.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum SemanticTokenCounterError {
+    /// Pinned tokenizer/model revision is not available.
+    #[error("semantic token counter is unavailable")]
+    Unavailable,
+    /// Counter refused this bounded input without returning provider text.
+    #[error("semantic token counter refused input")]
+    Refused,
+    /// Counter produced an internally invalid result.
+    #[error("semantic token counter returned an invalid result")]
+    InvalidResult,
+}
+
+/// Explicit trusted port for provider/model-specific token accounting.
+///
+/// This port grants no network, credential, or provider authority. A
+/// provider-backed implementation must already hold the same selected-provider
+/// and page-data disclosure admission required by the eventual model request.
+pub trait SemanticTokenCounter {
+    /// Measures the compact payload without logging or retaining its content.
+    fn count_tokens(
+        &self,
+        input: &str,
+    ) -> Result<SemanticTokenMeasurement, SemanticTokenCounterError>;
+}
+
+/// Content-free deterministic encoding metrics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SemanticEncodingStats {
+    bytes: u32,
+    lines: u16,
+    frames: u8,
+    nodes: u16,
+    secret_nodes: u16,
+}
+
+impl SemanticEncodingStats {
+    /// Encoded UTF-8 bytes.
+    pub const fn bytes(self) -> u32 {
+        self.bytes
+    }
+
+    /// Deterministic line count.
+    pub const fn lines(self) -> u16 {
+        self.lines
+    }
+
+    /// Encoded frame count.
+    pub const fn frames(self) -> u8 {
+        self.frames
+    }
+
+    /// Encoded node count.
+    pub const fn nodes(self) -> u16 {
+        self.nodes
+    }
+
+    /// Nodes classified secret after Rust-side upgrading/redaction.
+    pub const fn secret_nodes(self) -> u16 {
+        self.secret_nodes
+    }
+}
+
+/// Private compact bytes awaiting required token measurement.
+pub struct SemanticEncodedObservation {
+    content: String,
+    budget: SemanticModelEncodingBudget,
+    stats: SemanticEncodingStats,
+}
+
+impl SemanticEncodedObservation {
+    /// Content-free encoding statistics.
+    pub const fn stats(&self) -> SemanticEncodingStats {
+        self.stats
+    }
+
+    /// Measures without exposing content to any caller other than the explicit counter port.
+    pub fn measure(
+        &self,
+        counter: &dyn SemanticTokenCounter,
+        expected_revision: &SemanticTokenizerRevision,
+    ) -> Result<SemanticTokenMeasurement, SemanticModelEncodingError> {
+        let measurement = counter
+            .count_tokens(&self.content)
+            .map_err(SemanticModelEncodingError::TokenCounter)?;
+        self.validate_measurement(&measurement, expected_revision)?;
+        Ok(measurement)
+    }
+
+    /// Admits model-facing bytes only after the required count fits the exact budget.
+    pub fn admit(
+        self,
+        counter: &dyn SemanticTokenCounter,
+        expected_revision: &SemanticTokenizerRevision,
+    ) -> Result<SemanticModelPayload, SemanticModelEncodingError> {
+        let measurement = self.measure(counter, expected_revision)?;
+        Ok(SemanticModelPayload {
+            content: self.content,
+            stats: self.stats,
+            measurement,
+        })
+    }
+
+    fn validate_measurement(
+        &self,
+        measurement: &SemanticTokenMeasurement,
+        expected_revision: &SemanticTokenizerRevision,
+    ) -> Result<(), SemanticModelEncodingError> {
+        if measurement.revision != *expected_revision {
+            return Err(SemanticModelEncodingError::TokenizerRevisionMismatch);
+        }
+        if !measurement.quality.satisfies(self.budget.token_requirement) {
+            return Err(SemanticModelEncodingError::TokenQuality);
+        }
+        if measurement.tokens > self.budget.max_tokens {
+            return Err(SemanticModelEncodingError::TokenLimit);
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for SemanticEncodedObservation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SemanticEncodedObservation")
+            .field("content", &"[redacted]")
+            .field("budget", &self.budget)
+            .field("stats", &self.stats)
+            .finish()
+    }
+}
+
+/// Token-admitted compact semantic bytes for the selected model adapter only.
+pub struct SemanticModelPayload {
+    content: String,
+    stats: SemanticEncodingStats,
+    measurement: SemanticTokenMeasurement,
+}
+
+impl SemanticModelPayload {
+    /// Returns compact semantic input to the already-selected model transport.
+    pub fn as_str(&self) -> &str {
+        &self.content
+    }
+
+    /// Content-free encoding statistics.
+    pub const fn stats(&self) -> SemanticEncodingStats {
+        self.stats
+    }
+
+    /// Admitted bounded token measurement and tokenizer revision.
+    pub const fn token_measurement(&self) -> &SemanticTokenMeasurement {
+        &self.measurement
+    }
+}
+
+impl fmt::Debug for SemanticModelPayload {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SemanticModelPayload")
+            .field("content", &"[redacted]")
+            .field("stats", &self.stats)
+            .field("measurement", &self.measurement)
+            .finish()
+    }
+}
+
+/// Encodes one complete observation into deterministic compact `ZSEM1` lines.
+pub fn encode_semantic_observation(
+    observation: &SemanticObservation,
+    budget: SemanticModelEncodingBudget,
+) -> Result<SemanticEncodedObservation, SemanticModelEncodingError> {
+    let capacity = usize::try_from(budget.max_bytes.min(16 * 1024))
+        .map_err(|_| SemanticModelEncodingError::Budget)?;
+    let mut output = BoundedModelBuffer::new(capacity, budget.max_bytes);
+    checked_write(
+        &mut output,
+        format_args!(
+            "ZSEM{} content=untrusted scope={} generation={} frames={} nodes={}\n",
+            SEMANTIC_MODEL_SCHEMA_VERSION,
+            scope_label(observation.request().scope()),
+            observation.request().generation().get(),
+            observation.frames().len(),
+            observation.node_count(),
+        ),
+    )?;
+
+    let mut encoded_nodes = 0_usize;
+    let mut secret_nodes = 0_usize;
+    for (frame_index, frame) in observation.frames().iter().enumerate() {
+        checked_write(&mut output, format_args!("F f{} origin=", frame_index + 1))?;
+        write_quoted(&mut output, frame.frame().origin().as_url().as_str())?;
+        checked_write(
+            &mut output,
+            format_args!(
+                " trust={} snapshot={} complete={}\n",
+                frame_trust_label(frame.frame().trust()),
+                frame.generation().get(),
+                completeness_label(frame.completeness()),
+            ),
+        )?;
+
+        for node in frame.nodes() {
+            encoded_nodes = encoded_nodes
+                .checked_add(1)
+                .ok_or(SemanticModelEncodingError::Invariant)?;
+            if node.sensitivity() == SemanticSensitivity::Secret {
+                secret_nodes = secret_nodes
+                    .checked_add(1)
+                    .ok_or(SemanticModelEncodingError::Invariant)?;
+            }
+            checked_write(
+                &mut output,
+                format_args!("N {} p=", node.reference().model_token()),
+            )?;
+            if let Some(parent) = node.parent() {
+                let parent = frame
+                    .nodes()
+                    .get(usize::from(parent))
+                    .ok_or(SemanticModelEncodingError::Invariant)?;
+                checked_write(
+                    &mut output,
+                    format_args!("{}", parent.reference().model_token()),
+                )?;
+            } else {
+                output.push("-")?;
+            }
+            checked_write(
+                &mut output,
+                format_args!(
+                    " r={} q={} src={}",
+                    role_label(node.role()),
+                    sensitivity_label(node.sensitivity()),
+                    source_label(node.trust()),
+                ),
+            )?;
+            if let Some(level) = node.heading_level() {
+                checked_write(&mut output, format_args!(" level={}", level.get()))?;
+            }
+            write_states(&mut output, node.states())?;
+            write_operations(&mut output, node.operations())?;
+            if let Some(name) = node.name() {
+                output.push(" name=")?;
+                write_quoted(&mut output, name.as_str())?;
+            }
+            if let Some(text) = node.text() {
+                output.push(" text=")?;
+                write_quoted(&mut output, text.as_str())?;
+            }
+            if let Some(value) = node.value() {
+                output.push(" value=")?;
+                write_value(&mut output, value)?;
+            }
+            if let Some(rect) = node.geometry() {
+                checked_write(
+                    &mut output,
+                    format_args!(
+                        " rect={},{},{},{}",
+                        rect.x(),
+                        rect.y(),
+                        rect.width(),
+                        rect.height()
+                    ),
+                )?;
+            }
+            if node.role() == SemanticRole::FrameBoundary {
+                let boundary = observation
+                    .frame_boundaries()
+                    .iter()
+                    .find(|boundary| {
+                        boundary.parent_frame() == frame.frame().frame()
+                            && boundary.reference() == node.reference()
+                    })
+                    .ok_or(SemanticModelEncodingError::Invariant)?;
+                output.push(" frame=")?;
+                write_frame_boundary(&mut output, observation, boundary.status())?;
+            }
+            output.push("\n")?;
+        }
+    }
+
+    if encoded_nodes != usize::from(observation.node_count()) {
+        return Err(SemanticModelEncodingError::Invariant);
+    }
+    let content = output.finish();
+    let lines = content.bytes().filter(|byte| *byte == b'\n').count();
+    let stats = SemanticEncodingStats {
+        bytes: u32::try_from(content.len()).map_err(|_| SemanticModelEncodingError::Budget)?,
+        lines: u16::try_from(lines).map_err(|_| SemanticModelEncodingError::Invariant)?,
+        frames: u8::try_from(observation.frames().len())
+            .map_err(|_| SemanticModelEncodingError::Invariant)?,
+        nodes: observation.node_count(),
+        secret_nodes: u16::try_from(secret_nodes)
+            .map_err(|_| SemanticModelEncodingError::Invariant)?,
+    };
+    Ok(SemanticEncodedObservation {
+        content,
+        budget,
+        stats,
+    })
+}
+
+fn checked_write(
+    output: &mut BoundedModelBuffer,
+    arguments: fmt::Arguments<'_>,
+) -> Result<(), SemanticModelEncodingError> {
+    output
+        .write_fmt(arguments)
+        .map_err(|_| SemanticModelEncodingError::OutputLimit)
+}
+
+fn write_quoted(
+    output: &mut BoundedModelBuffer,
+    value: &str,
+) -> Result<(), SemanticModelEncodingError> {
+    output.push("\"")?;
+    for character in value.chars() {
+        match character {
+            '\\' => output.push("\\\\")?,
+            '"' => output.push("\\\"")?,
+            '\n' => output.push("\\n")?,
+            '\r' => output.push("\\r")?,
+            '\t' => output.push("\\t")?,
+            '\u{2028}' => output.push("\\u2028")?,
+            '\u{2029}' => output.push("\\u2029")?,
+            character if character.is_control() => {
+                checked_write(output, format_args!("\\u{:04x}", u32::from(character)))?;
+            }
+            character => output
+                .write_char(character)
+                .map_err(|_| SemanticModelEncodingError::OutputLimit)?,
+        }
+    }
+    output.push("\"")
+}
+
+fn write_states(
+    output: &mut BoundedModelBuffer,
+    states: crate::SemanticStates,
+) -> Result<(), SemanticModelEncodingError> {
+    let values = [
+        (SemanticState::Checked, "checked"),
+        (SemanticState::Selected, "selected"),
+        (SemanticState::Expanded, "expanded"),
+        (SemanticState::Disabled, "disabled"),
+        (SemanticState::Required, "required"),
+        (SemanticState::Invalid, "invalid"),
+        (SemanticState::Focused, "focused"),
+    ];
+    let mut separator = " states=";
+    for (state, label) in values {
+        if states.contains(state) {
+            output.push(separator)?;
+            output.push(label)?;
+            separator = ",";
+        }
+    }
+    Ok(())
+}
+
+fn write_operations(
+    output: &mut BoundedModelBuffer,
+    operations: crate::SemanticOperations,
+) -> Result<(), SemanticModelEncodingError> {
+    let values = [
+        (SemanticOperationClass::Click, "click"),
+        (SemanticOperationClass::Fill, "fill"),
+        (SemanticOperationClass::Select, "select"),
+        (SemanticOperationClass::Press, "press"),
+        (SemanticOperationClass::Scroll, "scroll"),
+    ];
+    let mut separator = " ops=";
+    for (operation, label) in values {
+        if operations.contains(operation) {
+            output.push(separator)?;
+            output.push(label)?;
+            separator = ",";
+        }
+    }
+    Ok(())
+}
+
+fn write_value(
+    output: &mut BoundedModelBuffer,
+    value: &SemanticValueSummary,
+) -> Result<(), SemanticModelEncodingError> {
+    match value {
+        SemanticValueSummary::Text(text) => write_quoted(output, text.as_str()),
+        SemanticValueSummary::Redacted => output.push("[redacted]"),
+        SemanticValueSummary::Boolean(value) => output.push(if *value { "true" } else { "false" }),
+        SemanticValueSummary::Ordinal(value) => checked_write(output, format_args!("{value}")),
+    }
+}
+
+fn write_frame_boundary(
+    output: &mut BoundedModelBuffer,
+    observation: &SemanticObservation,
+    status: SemanticFrameBoundaryStatus,
+) -> Result<(), SemanticModelEncodingError> {
+    match status {
+        SemanticFrameBoundaryStatus::Observed { frame, trust } => {
+            let child_index = observation
+                .frames()
+                .iter()
+                .position(|snapshot| snapshot.frame().frame() == frame)
+                .ok_or(SemanticModelEncodingError::Invariant)?;
+            checked_write(
+                output,
+                format_args!("observed:f{}:{}", child_index + 1, frame_trust_label(trust)),
+            )
+        }
+        SemanticFrameBoundaryStatus::Deferred(reason) => {
+            output.push("deferred:")?;
+            output.push(frame_deferral_label(reason))
+        }
+        SemanticFrameBoundaryStatus::Unsupported(reason) => {
+            output.push("unsupported:")?;
+            output.push(frame_unsupported_label(reason))
+        }
+    }
+}
+
+fn scope_label(scope: &SemanticScope) -> &'static str {
+    match scope {
+        SemanticScope::Initial => "initial",
+        SemanticScope::Region(_) => "region",
+        SemanticScope::Subtree(_) => "subtree",
+        SemanticScope::Table(_) => "table",
+        SemanticScope::Frame(_) => "frame",
+        SemanticScope::SurroundingText { .. } => "surrounding_text",
+    }
+}
+
+fn frame_trust_label(trust: SemanticFrameTrust) -> &'static str {
+    match trust {
+        SemanticFrameTrust::SameOrigin => "same",
+        SemanticFrameTrust::CrossOriginIsolated => "cross_isolated",
+        SemanticFrameTrust::Unsupported => "unsupported",
+    }
+}
+
+fn completeness_label(completeness: SemanticCompleteness) -> &'static str {
+    match completeness {
+        SemanticCompleteness::Complete => "complete",
+        SemanticCompleteness::Truncated(SemanticTruncation::NodeLimit) => "truncated_nodes",
+        SemanticCompleteness::Truncated(SemanticTruncation::TextLimit) => "truncated_text",
+        SemanticCompleteness::Truncated(SemanticTruncation::DepthLimit) => "truncated_depth",
+        SemanticCompleteness::Truncated(SemanticTruncation::ScopeBoundary) => "truncated_scope",
+        SemanticCompleteness::Truncated(SemanticTruncation::UnsupportedFrame) => "truncated_frame",
+    }
+}
+
+fn role_label(role: SemanticRole) -> &'static str {
+    match role {
+        SemanticRole::Group => "group",
+        SemanticRole::Document => "document",
+        SemanticRole::Landmark => "landmark",
+        SemanticRole::Heading => "heading",
+        SemanticRole::Paragraph => "paragraph",
+        SemanticRole::Link => "link",
+        SemanticRole::Button => "button",
+        SemanticRole::Textbox => "textbox",
+        SemanticRole::Password => "password",
+        SemanticRole::Searchbox => "searchbox",
+        SemanticRole::Checkbox => "checkbox",
+        SemanticRole::Radio => "radio",
+        SemanticRole::Combobox => "combobox",
+        SemanticRole::Listbox => "listbox",
+        SemanticRole::Option => "option",
+        SemanticRole::Spinbutton => "spinbutton",
+        SemanticRole::Slider => "slider",
+        SemanticRole::Tab => "tab",
+        SemanticRole::MenuItem => "menu_item",
+        SemanticRole::Dialog => "dialog",
+        SemanticRole::List => "list",
+        SemanticRole::ListItem => "list_item",
+        SemanticRole::Table => "table",
+        SemanticRole::Row => "row",
+        SemanticRole::CellHeader => "cell_header",
+        SemanticRole::Cell => "cell",
+        SemanticRole::Image => "image",
+        SemanticRole::Progress => "progress",
+        SemanticRole::Status => "status",
+        SemanticRole::FrameBoundary => "frame_boundary",
+    }
+}
+
+fn sensitivity_label(sensitivity: SemanticSensitivity) -> &'static str {
+    match sensitivity {
+        SemanticSensitivity::Public => "public",
+        SemanticSensitivity::Sensitive => "sensitive",
+        SemanticSensitivity::Secret => "secret",
+    }
+}
+
+fn source_label(trust: SemanticTrust) -> &'static str {
+    match trust {
+        SemanticTrust::UntrustedPage => "page",
+        SemanticTrust::BrowserDerived => "browser",
+    }
+}
+
+fn frame_deferral_label(reason: SemanticFrameDeferral) -> &'static str {
+    match reason {
+        SemanticFrameDeferral::OutsideScope => "outside_scope",
+        SemanticFrameDeferral::FrameBudget => "frame_budget",
+        SemanticFrameDeferral::NodeBudget => "node_budget",
+        SemanticFrameDeferral::TextBudget => "text_budget",
+    }
+}
+
+fn frame_unsupported_label(reason: SemanticFrameUnsupported) -> &'static str {
+    match reason {
+        SemanticFrameUnsupported::PlatformIsolationUnavailable => "platform_isolation",
+        SemanticFrameUnsupported::PolicyBlocked => "policy_blocked",
+        SemanticFrameUnsupported::RuntimeUnavailable => "runtime_unavailable",
+    }
+}
+
+struct BoundedModelBuffer {
+    content: String,
+    max_bytes: usize,
+}
+
+impl BoundedModelBuffer {
+    fn new(capacity: usize, max_bytes: u32) -> Self {
+        Self {
+            content: String::with_capacity(capacity),
+            max_bytes: max_bytes as usize,
+        }
+    }
+
+    fn push(&mut self, value: &str) -> Result<(), SemanticModelEncodingError> {
+        self.write_str(value)
+            .map_err(|_| SemanticModelEncodingError::OutputLimit)
+    }
+
+    fn finish(self) -> String {
+        self.content
+    }
+}
+
+impl fmt::Write for BoundedModelBuffer {
+    fn write_str(&mut self, value: &str) -> fmt::Result {
+        let next = self
+            .content
+            .len()
+            .checked_add(value.len())
+            .ok_or(fmt::Error)?;
+        if next > self.max_bytes {
+            return Err(fmt::Error);
+        }
+        self.content.push_str(value);
+        Ok(())
+    }
+}
+
+/// Closed deterministic encoding or token-admission refusal.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum SemanticModelEncodingError {
+    /// Requested byte/token budget is zero or beyond a hard ceiling.
+    #[error("semantic model encoding budget is invalid")]
+    Budget,
+    /// Compact bytes exceeded the exact request ceiling.
+    #[error("semantic model encoding byte ceiling exceeded")]
+    OutputLimit,
+    /// Observation invariants disagreed during encoding.
+    #[error("semantic model encoding observation invariant is invalid")]
+    Invariant,
+    /// Trusted tokenizer adapter failed with a closed reason.
+    #[error("semantic model token counter failed")]
+    TokenCounter(SemanticTokenCounterError),
+    /// Measurement quality did not meet the request's exactness requirement.
+    #[error("semantic model token measurement quality is insufficient")]
+    TokenQuality,
+    /// Measurement revision did not match the already-selected model adapter.
+    #[error("semantic model tokenizer revision does not match")]
+    TokenizerRevisionMismatch,
+    /// Measured tokens exceeded the exact request ceiling.
+    #[error("semantic model token ceiling exceeded")]
+    TokenLimit,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        decode_semantic_snapshot, ContextCapabilities, ContextCapability, ContextId,
+        ContextIdentity, ContextKind, ContextOperationId, ContextRegistry, ContextRunId,
+        ContextSettlement, FrameGeneration, FrameId, SemanticDecodeContext, SemanticFrameJoin,
+        SemanticInvocationId, SemanticObservationAssembler, SemanticObservationBudget,
+        SemanticObservationId, SemanticObservationRequest, SemanticOrigin,
+        SemanticSnapshotGeneration, SEMANTIC_WIRE_VERSION,
+    };
+    use serde_json::json;
+    use zephium_core::ids::ProfileId;
+
+    fn observation() -> SemanticObservation {
+        let identity = ContextIdentity::new(
+            ContextId::from_raw(1),
+            ContextRunId::from_raw(2),
+            ProfileId::from(3),
+            ContextKind::Owned,
+        );
+        let capabilities = ContextCapabilities::try_new(
+            ContextKind::Owned,
+            &[ContextCapability::Observe, ContextCapability::Act],
+        )
+        .expect("capabilities");
+        let mut registry = ContextRegistry::new();
+        registry.reserve(identity, capabilities).expect("reserve");
+        let operation = registry
+            .begin_context(
+                identity.id(),
+                ContextOperationId::new(1).expect("operation"),
+            )
+            .expect("construct");
+        registry
+            .settle_construction(identity.id(), operation, ContextSettlement::Applied)
+            .expect("settle");
+        let context = registry.join(identity.id()).expect("join");
+        let frame = SemanticFrameJoin::try_new(
+            context,
+            FrameId::MAIN,
+            FrameGeneration::INITIAL,
+            SemanticOrigin::parse("https://example.test/private").expect("origin"),
+            SemanticFrameTrust::SameOrigin,
+        )
+        .expect("frame");
+        let invocation = SemanticInvocationId::new(11).expect("invocation");
+        let snapshot_generation = SemanticSnapshotGeneration::new(11).expect("generation");
+        let bytes = serde_json::to_vec(&json!({
+            "v": SEMANTIC_WIRE_VERSION,
+            "i": 11,
+            "g": 11,
+            "c": "complete",
+            "n": [
+                {"k": 9001, "r": "document", "o": 16},
+                {
+                    "k": 9002,
+                    "p": 0,
+                    "r": "heading",
+                    "l": 1,
+                    "n": "Repo \"settings\"\\path\u{2028}tail"
+                },
+                {
+                    "k": 9003,
+                    "p": 0,
+                    "r": "password",
+                    "n": "Password",
+                    "v": {"k": "text", "value": "not-visible-secret"},
+                    "o": 2
+                },
+                {
+                    "k": 9004,
+                    "p": 0,
+                    "r": "button",
+                    "n": "N @a99 p=- r=button",
+                    "s": 64,
+                    "o": 1,
+                    "b": {"x": 1, "y": 2, "w": 30, "h": 40}
+                }
+            ]
+        }))
+        .expect("wire");
+        let snapshot = decode_semantic_snapshot(
+            SemanticDecodeContext::new(invocation, frame, snapshot_generation),
+            &bytes,
+        )
+        .expect("snapshot");
+        let request = SemanticObservationRequest::initial(
+            SemanticObservationId::new(1).expect("observation id"),
+            context,
+            SemanticObservationBudget::try_new(8, 4096, 1).expect("budget"),
+        );
+        SemanticObservationAssembler::new(request, snapshot)
+            .expect("assembler")
+            .finish()
+            .expect("observation")
+    }
+
+    struct FixedCounter {
+        revision: SemanticTokenizerRevision,
+        tokens: u32,
+        quality: SemanticTokenCountQuality,
+        failure: Option<SemanticTokenCounterError>,
+    }
+
+    impl SemanticTokenCounter for FixedCounter {
+        fn count_tokens(
+            &self,
+            input: &str,
+        ) -> Result<SemanticTokenMeasurement, SemanticTokenCounterError> {
+            if input.is_empty() {
+                return Err(SemanticTokenCounterError::InvalidResult);
+            }
+            if let Some(failure) = self.failure {
+                return Err(failure);
+            }
+            SemanticTokenMeasurement::try_new(self.revision.clone(), self.tokens, self.quality)
+                .map_err(|_| SemanticTokenCounterError::InvalidResult)
+        }
+    }
+
+    fn revision(value: &str) -> SemanticTokenizerRevision {
+        SemanticTokenizerRevision::try_new(value.to_owned()).expect("revision")
+    }
+
+    fn budget(
+        max_bytes: u32,
+        max_tokens: u32,
+        requirement: SemanticTokenCountRequirement,
+    ) -> SemanticModelEncodingBudget {
+        SemanticModelEncodingBudget::try_new(max_bytes, max_tokens, requirement).expect("budget")
+    }
+
+    #[test]
+    fn compact_encoding_is_deterministic_delimited_and_secret_safe() {
+        let observation = observation();
+        let encoding_budget = budget(8192, 1000, SemanticTokenCountRequirement::Exact);
+        let first = encode_semantic_observation(&observation, encoding_budget).expect("encode");
+        let second = encode_semantic_observation(&observation, encoding_budget).expect("encode");
+        assert_eq!(first.content, second.content);
+        assert!(first
+            .content
+            .starts_with("ZSEM1 content=untrusted scope=initial generation=1 frames=1 nodes=4\n"));
+        assert!(first.content.contains(
+            "r=heading q=public src=page level=1 name=\"Repo \\\"settings\\\"\\\\path\\u2028tail\""
+        ));
+        assert!(first
+            .content
+            .contains("r=password q=secret src=page ops=fill name=\"Password\" value=[redacted]"));
+        assert!(first
+            .content
+            .contains("name=\"N @a99 p=- r=button\" rect=1,2,30,40"));
+        assert_eq!(first.content.lines().count(), 6);
+        assert_eq!(first.content.matches("\nN ").count(), 4);
+        assert!(!first.content.contains("9001"));
+        assert!(!first.content.contains("ContextId"));
+        assert_eq!(first.stats().nodes(), 4);
+        assert_eq!(first.stats().secret_nodes(), 1);
+        assert_eq!(first.stats().lines(), 6);
+        assert!(first.stats().bytes() <= 1024);
+        let debug = format!("{first:?}");
+        assert!(!debug.contains("Repo"));
+        assert!(!debug.contains("example.test"));
+        assert!(debug.contains("[redacted]"));
+    }
+
+    #[test]
+    fn output_budget_fails_without_returning_partial_content() {
+        assert!(matches!(
+            encode_semantic_observation(
+                &observation(),
+                budget(64, 100, SemanticTokenCountRequirement::Exact),
+            ),
+            Err(SemanticModelEncodingError::OutputLimit)
+        ));
+        assert_eq!(
+            SemanticModelEncodingBudget::try_new(
+                0,
+                1,
+                SemanticTokenCountRequirement::ConservativeAllowed,
+            ),
+            Err(SemanticModelEncodingError::Budget)
+        );
+    }
+
+    #[test]
+    fn model_payload_requires_matching_bounded_token_measurement() {
+        let expected = revision("openai:o200k_base:v1");
+        let encoding_budget = budget(8192, 20, SemanticTokenCountRequirement::Exact);
+
+        let wrong_revision = FixedCounter {
+            revision: revision("anthropic:model:v1"),
+            tokens: 10,
+            quality: SemanticTokenCountQuality::ExactLocal,
+            failure: None,
+        };
+        assert_eq!(
+            encode_semantic_observation(&observation(), encoding_budget)
+                .expect("encode")
+                .measure(&wrong_revision, &expected),
+            Err(SemanticModelEncodingError::TokenizerRevisionMismatch)
+        );
+
+        let conservative = FixedCounter {
+            revision: expected.clone(),
+            tokens: 10,
+            quality: SemanticTokenCountQuality::Conservative,
+            failure: None,
+        };
+        assert_eq!(
+            encode_semantic_observation(&observation(), encoding_budget)
+                .expect("encode")
+                .measure(&conservative, &expected),
+            Err(SemanticModelEncodingError::TokenQuality)
+        );
+
+        let provider_estimate = FixedCounter {
+            revision: expected.clone(),
+            tokens: 18,
+            quality: SemanticTokenCountQuality::ProviderEstimate,
+            failure: None,
+        };
+        assert_eq!(
+            encode_semantic_observation(&observation(), encoding_budget)
+                .expect("encode")
+                .measure(&provider_estimate, &expected),
+            Err(SemanticModelEncodingError::TokenQuality)
+        );
+        let estimated_payload = encode_semantic_observation(
+            &observation(),
+            budget(
+                8192,
+                20,
+                SemanticTokenCountRequirement::ProviderEstimateAllowed,
+            ),
+        )
+        .expect("encode")
+        .admit(&provider_estimate, &expected)
+        .expect("estimated admission");
+        assert_eq!(
+            estimated_payload.token_measurement().quality(),
+            SemanticTokenCountQuality::ProviderEstimate
+        );
+
+        let oversized = FixedCounter {
+            revision: expected.clone(),
+            tokens: 21,
+            quality: SemanticTokenCountQuality::ProviderExact,
+            failure: None,
+        };
+        assert_eq!(
+            encode_semantic_observation(&observation(), encoding_budget)
+                .expect("encode")
+                .measure(&oversized, &expected),
+            Err(SemanticModelEncodingError::TokenLimit)
+        );
+
+        let failed = FixedCounter {
+            revision: expected.clone(),
+            tokens: 10,
+            quality: SemanticTokenCountQuality::ExactLocal,
+            failure: Some(SemanticTokenCounterError::Unavailable),
+        };
+        assert_eq!(
+            encode_semantic_observation(&observation(), encoding_budget)
+                .expect("encode")
+                .measure(&failed, &expected),
+            Err(SemanticModelEncodingError::TokenCounter(
+                SemanticTokenCounterError::Unavailable
+            ))
+        );
+
+        let exact = FixedCounter {
+            revision: expected.clone(),
+            tokens: 19,
+            quality: SemanticTokenCountQuality::ExactLocal,
+            failure: None,
+        };
+        let payload = encode_semantic_observation(&observation(), encoding_budget)
+            .expect("encode")
+            .admit(&exact, &expected)
+            .expect("admit");
+        assert_eq!(payload.token_measurement().tokens(), 19);
+        assert_eq!(payload.token_measurement().revision(), &expected);
+        assert!(payload.as_str().starts_with("ZSEM1"));
+        let debug = format!("{payload:?}");
+        assert!(!debug.contains("Repo"));
+        assert!(!debug.contains("example.test"));
+    }
+
+    #[test]
+    fn tokenizer_revisions_and_measurements_are_closed_and_bounded() {
+        for invalid in ["", "openai/o200k", "https://tokenizer", "contains space"] {
+            assert_eq!(
+                SemanticTokenizerRevision::try_new(invalid.to_owned()),
+                Err(SemanticTokenizerRevisionError::Invalid)
+            );
+        }
+        assert_eq!(
+            SemanticTokenMeasurement::try_new(
+                revision("openai:o200k:v1"),
+                0,
+                SemanticTokenCountQuality::ExactLocal,
+            ),
+            Err(SemanticTokenMeasurementError::Invalid)
+        );
+        let value = revision("openai:o200k:v1");
+        assert_eq!(value.as_str(), "openai:o200k:v1");
+        assert!(!format!("{value:?}").contains("openai"));
+    }
+}

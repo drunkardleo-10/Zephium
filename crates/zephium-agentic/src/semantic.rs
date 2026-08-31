@@ -267,6 +267,26 @@ pub enum SemanticRole {
     FrameBoundary,
 }
 
+/// Valid HTML/ARIA heading level.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct SemanticHeadingLevel(u8);
+
+impl SemanticHeadingLevel {
+    /// Validates a heading level in the inclusive range 1 through 6.
+    pub const fn new(value: u8) -> Option<Self> {
+        if value >= 1 && value <= 6 {
+            Some(Self(value))
+        } else {
+            None
+        }
+    }
+
+    /// Numeric heading level.
+    pub const fn get(self) -> u8 {
+        self.0
+    }
+}
+
 /// Closed operation class bound into opaque references.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum SemanticOperationClass {
@@ -478,10 +498,17 @@ fn invalid_semantic_char(character: char) -> bool {
     character.is_control()
         || matches!(
             character,
-            '\u{200b}'..='\u{200f}'
+            '\u{00ad}'
+                | '\u{061c}'
+                | '\u{180e}'
+                | '\u{200b}'..='\u{200f}'
                 | '\u{202a}'..='\u{202e}'
-                | '\u{2066}'..='\u{2069}'
+                | '\u{2060}'..='\u{2064}'
+                | '\u{2066}'..='\u{206f}'
                 | '\u{feff}'
+                | '\u{fff9}'..='\u{fffb}'
+                | '\u{e0001}'
+                | '\u{e0020}'..='\u{e007f}'
         )
 }
 
@@ -716,6 +743,7 @@ pub struct SemanticNode {
     parent: Option<u16>,
     depth: u8,
     role: SemanticRole,
+    heading_level: Option<SemanticHeadingLevel>,
     name: Option<SemanticText>,
     text: Option<SemanticText>,
     value: Option<SemanticValueSummary>,
@@ -741,6 +769,11 @@ impl SemanticNode {
     /// Allowlisted semantic role.
     pub const fn role(&self) -> SemanticRole {
         self.role
+    }
+
+    /// Heading level, present exactly for heading nodes.
+    pub const fn heading_level(&self) -> Option<SemanticHeadingLevel> {
+        self.heading_level
     }
 
     /// Bounded accessible name.
@@ -801,6 +834,7 @@ impl fmt::Debug for SemanticNode {
             .field("parent", &self.parent)
             .field("depth", &self.depth)
             .field("role", &self.role)
+            .field("heading_level", &self.heading_level)
             .field("name_bytes", &self.name.as_ref().map(SemanticText::len))
             .field("text_bytes", &self.text.as_ref().map(SemanticText::len))
             .field("has_value", &self.value.is_some())
@@ -819,6 +853,7 @@ pub(crate) struct SemanticNodeInput {
     pub(crate) parent: Option<u16>,
     pub(crate) depth: u8,
     pub(crate) role: SemanticRole,
+    pub(crate) heading_level: Option<SemanticHeadingLevel>,
     pub(crate) name: Option<SemanticText>,
     pub(crate) text: Option<SemanticText>,
     pub(crate) value: Option<SemanticValueSummary>,
@@ -995,6 +1030,7 @@ impl SemanticSnapshot {
                 parent: input.parent,
                 depth: input.depth,
                 role: input.role,
+                heading_level: input.heading_level,
                 name: input.name,
                 text: input.text,
                 value: input.value,
@@ -1138,6 +1174,7 @@ mod tests {
             parent: None,
             depth: 0,
             role: SemanticRole::Button,
+            heading_level: None,
             name: Some(SemanticText::try_new("Save".to_owned(), 10).expect("name")),
             text: None,
             value: None,
@@ -1335,6 +1372,10 @@ mod tests {
         );
         assert_eq!(
             SemanticText::try_new("spoof\u{202e}txt".to_owned(), 100),
+            Err(SemanticContractError::InvalidText)
+        );
+        assert_eq!(
+            SemanticText::try_new("hidden\u{2060}join".to_owned(), 100),
             Err(SemanticContractError::InvalidText)
         );
         assert_eq!(

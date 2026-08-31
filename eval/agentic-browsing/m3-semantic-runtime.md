@@ -2,8 +2,9 @@
 
 Status: bounded semantic identity, snapshot, opaque-reference, hostile wire
 decoder, progressive scopes, and deterministic multi-frame assembly
-implemented; fixed isolated-world page program, native installation, diffs,
-and compact model encoding pending.
+plus compact model encoding/token-admission ports implemented; fixed
+isolated-world page program, native installation, diffs, and actual pinned
+provider token measurements pending.
 
 This evidence records deterministic Rust contract properties only. It does not
 claim that arbitrary pages have been instrumented or observed on either
@@ -27,8 +28,9 @@ platform.
   and generation; mismatch is rejected.
 - The version-1 JSON schema denies unknown and duplicate struct fields and has
   only compact allowlisted roles, state/operation bitsets, safe value variants,
-  integer geometry, parent indices, internal node keys, sensitivity, and a
-  typed completeness/truncation result. It cannot carry HTML, selectors,
+  typed 1–6 heading levels, integer geometry, parent indices, internal node
+  keys, sensitivity, and a typed completeness/truncation result. It cannot
+  carry HTML, selectors,
   attributes, scripts, event listeners, native handles, cookies, headers,
   storage, profile data, or platform errors.
 - Internal node keys are nonzero, unique, private to the runtime, and absent
@@ -68,6 +70,36 @@ platform.
   agrees with canonical parent/child origins. Every retained boundary must be
   explicitly observed, deferred for a typed budget/scope reason, or marked
   unsupported for a typed safe-runtime reason; omission is a failure.
+- Deterministic `ZSEM1` output uses one bounded writer and observation-global
+  references, frame aliases, parent relationships, roles, state/operation
+  inventories, trust/sensitivity/freshness labels, typed frame dispositions,
+  optional action geometry, and quoted semantic strings. The header marks all
+  page content untrusted; quoting escapes delimiters, backslashes, controls,
+  and Unicode line separators. The format contains no internal node key,
+  context/profile identity, selector, HTML, script, attribute, native handle,
+  cookie, storage value, or platform error.
+- Encoded content remains private and has redacted `Debug` output until an
+  explicit trusted tokenizer port returns a bounded measurement for the exact
+  already-selected tokenizer revision. Exact budgets reject provider estimates
+  and conservative bounds as well as revision mismatches, unavailable counters,
+  and over-limit counts before a model payload can be obtained. Separate exact
+  and provider-estimate initial budgets both cap the encoding at 32 KiB and
+  2,000 measured tokens; the byte cap is not represented as a provider-neutral
+  token estimate.
+- The port distinction follows current primary contracts. The
+  [OpenAI Responses input-token endpoint](https://developers.openai.com/api/reference/typescript/resources/responses/subresources/input_tokens/methods/count)
+  accepts a model and the structured response inputs and returns
+  `input_tokens`. The
+  [Anthropic token-counting endpoint](https://platform.claude.com/docs/en/build-with-claude/token-counting)
+  accepts the same structured message inputs, but Anthropic explicitly states
+  that its result is an estimate and actual message usage may differ slightly.
+  Therefore Anthropic preflight is typed `ProviderEstimate`; it cannot satisfy
+  an exact qualification gate, which must use a pinned exact local counter or
+  observed provider usage from the eventual model call.
+- The counter trait itself grants no network or credential access. A
+  provider-backed counter must enter through the same selected-provider,
+  secret-injection, page-data disclosure, cancellation, and deadline authority
+  as the eventual model request; semantic encoding alone cannot send content.
 
 The crate remains a zero-idle-cost functional core: decoding happens only for
 an admitted observation and creates no timer, thread, page, queue, or worker.
@@ -92,11 +124,15 @@ and wire limits, hostile debug strings, aggregate observation budgets,
 out-of-order sibling-frame completion, global reference rebasing, mandatory
 frame dispositions, frame trust/invocation refusal without partial mutation,
 exact progressive chains, stale anchor generations, missing anchor frames,
-scope/role compatibility, and the absence of page content from diagnostics.
+scope/role compatibility, deterministic compact escaping, model-line spoofing,
+heading-level compatibility, byte refusal without partial output, exact token
+quality/revision/limit admission, and the absence of page content from
+diagnostics.
 
 ## Remaining M3 work
 
-1. add deterministic compact model encoding and measure actual token counts;
+1. pin the first OpenAI and Anthropic proof model/tokenizer revisions, implement
+   their trusted counters, and record actual fixture token/latency measurements;
 2. add snapshot acknowledgement, stable-id diffing, and fresh-snapshot fallback
    when a confident diff cannot be formed;
 3. implement and freeze the immutable isolated-world runtime plus closed

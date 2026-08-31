@@ -13,12 +13,12 @@ use thiserror::Error;
 
 use crate::semantic::{SemanticNodeInput, SemanticNodeKey};
 use crate::{
-    SemanticCompleteness, SemanticFrameJoin, SemanticInvocationId, SemanticOperationClass,
-    SemanticOperations, SemanticRect, SemanticRole, SemanticSensitivity, SemanticSnapshot,
-    SemanticSnapshotGeneration, SemanticState, SemanticStates, SemanticText, SemanticTruncation,
-    SemanticTrust, SemanticValueSummary, MAX_SEMANTIC_DEPTH, MAX_SEMANTIC_NAME_BYTES,
-    MAX_SEMANTIC_NODES, MAX_SEMANTIC_TEXT_BYTES, MAX_SEMANTIC_TOTAL_TEXT_BYTES,
-    MAX_SEMANTIC_VALUE_BYTES,
+    SemanticCompleteness, SemanticFrameJoin, SemanticHeadingLevel, SemanticInvocationId,
+    SemanticOperationClass, SemanticOperations, SemanticRect, SemanticRole, SemanticSensitivity,
+    SemanticSnapshot, SemanticSnapshotGeneration, SemanticState, SemanticStates, SemanticText,
+    SemanticTruncation, SemanticTrust, SemanticValueSummary, MAX_SEMANTIC_DEPTH,
+    MAX_SEMANTIC_NAME_BYTES, MAX_SEMANTIC_NODES, MAX_SEMANTIC_TEXT_BYTES,
+    MAX_SEMANTIC_TOTAL_TEXT_BYTES, MAX_SEMANTIC_VALUE_BYTES,
 };
 
 /// Exact production semantic wire schema version.
@@ -187,6 +187,15 @@ pub fn decode_semantic_snapshot(
         depths.push(depth);
 
         let role = raw_node.role.into();
+        let heading_level = match (role, raw_node.heading_level) {
+            (SemanticRole::Heading, Some(level)) => {
+                Some(SemanticHeadingLevel::new(level).ok_or(SemanticDecodeError::NodeContract)?)
+            }
+            (SemanticRole::Heading, None) | (_, Some(_)) => {
+                return Err(SemanticDecodeError::NodeContract);
+            }
+            (_, None) => None,
+        };
         let states = SemanticStates::from_bits(raw_node.states)
             .map_err(|_| SemanticDecodeError::NodeContract)?;
         let operations = SemanticOperations::from_bits(raw_node.operations)
@@ -269,6 +278,7 @@ pub fn decode_semantic_snapshot(
             parent,
             depth,
             role,
+            heading_level,
             name: raw_name,
             text: raw_text,
             value,
@@ -551,6 +561,8 @@ struct RawNode {
     parent: Option<u16>,
     #[serde(rename = "r")]
     role: RawRole,
+    #[serde(rename = "l", default)]
+    heading_level: Option<u8>,
     #[serde(rename = "n", default)]
     name: Option<String>,
     #[serde(rename = "t", default)]
@@ -751,13 +763,21 @@ mod tests {
                 "s": 64,
                 "o": 1,
                 "b": {"x": 10, "y": 20, "w": 120, "h": 30}
-            }
+            },
+            {"k": 3, "p": 0, "r": "heading", "l": 2}
         ]));
         let snapshot = decode_semantic_snapshot(decode_context(), &bytes).expect("snapshot");
-        assert_eq!(snapshot.nodes().len(), 2);
+        assert_eq!(snapshot.nodes().len(), 3);
         assert_eq!(snapshot.nodes()[1].parent(), Some(0));
         assert_eq!(snapshot.nodes()[1].depth(), 1);
         assert_eq!(snapshot.nodes()[1].reference().model_token(), "@a2");
+        assert_eq!(
+            snapshot.nodes()[2]
+                .heading_level()
+                .expect("heading level")
+                .get(),
+            2
+        );
         assert_eq!(snapshot.total_text_bytes(), 12);
     }
 
@@ -921,6 +941,9 @@ mod tests {
             json!([{"k": 1, "r": "paragraph", "o": 1}]),
             json!([{"k": 1, "r": "button", "s": 8, "o": 1}]),
             json!([{"k": 1, "r": "button", "v": {"k": "text", "value": "x"}}]),
+            json!([{"k": 1, "r": "heading"}]),
+            json!([{"k": 1, "r": "heading", "l": 7}]),
+            json!([{"k": 1, "r": "button", "l": 2}]),
             json!([{"k": 1, "r": "button", "o": 128}]),
             json!([{"k": 1, "r": "button", "s": 128}]),
         ] {
