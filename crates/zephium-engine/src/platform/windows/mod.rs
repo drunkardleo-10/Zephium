@@ -5,6 +5,8 @@
 // Phase 0a feasibility probe. Unit/cross-target test builds keep it compiling,
 // and an explicit feature admits a future native harness. Product builds do
 // not contain it until native Windows QA ratifies the live isolation gate.
+#[cfg(feature = "native-agentic-input-probe")]
+mod agentic_input_probe;
 #[cfg(any(test, feature = "windows-cdp-spike"))]
 #[allow(dead_code)]
 mod cdp;
@@ -19,6 +21,9 @@ pub(crate) use content_filter::{
 };
 pub(crate) use extensions::*;
 pub use stage::Stage;
+
+#[cfg(feature = "native-agentic-input-probe")]
+pub(crate) use agentic_input_probe::run as run_agentic_input_matrix;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;

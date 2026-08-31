@@ -37,7 +37,8 @@ pub use evidence::{
 pub use fixture_server::{FixtureRoute, FixtureServer, FixtureServerError};
 #[cfg(feature = "probe-harness")]
 pub use probe_recipes::{
-    FixedProbeScript, ProbeScriptWorld, MACOS_NATIVE_INPUT_RUNTIME_V1,
+    windows_input_plan, FixedProbeScript, ProbeScriptWorld, WindowsInputStep, WindowsProbeGeometry,
+    WindowsProbeKey, WindowsProbePoint, MACOS_NATIVE_INPUT_RUNTIME_V1,
     MACOS_PROBE_CONTENT_WORLD_V1, MACOS_PROBE_HANDLER_V1, MAX_NATIVE_INPUT_RUNTIME_ROW,
     NATIVE_INPUT_RUNTIME_PROTOCOL_V1,
 };

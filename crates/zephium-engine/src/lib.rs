@@ -40,6 +40,22 @@ pub fn run_macos_agentic_input_matrix(
     platform::macos::run_agentic_input_matrix(request_id, matrix, permit, poll_control)
 }
 
+/// Runs one bounded Windows native-input matrix on the owning STA thread.
+///
+/// This diagnostic API is absent from ordinary and optimized builds. It owns
+/// one ephemeral WebView2 user-data folder, accepts only the closed probe
+/// vocabulary, and exposes no page IPC, selector, script, or native bridge.
+#[cfg(all(target_os = "windows", feature = "native-agentic-input-probe"))]
+#[doc(hidden)]
+pub fn run_windows_agentic_input_matrix(
+    request_id: u64,
+    matrix: &zephium_agentic::RunMatrixRequest,
+    permit: &zephium_agentic::ProbeRunPermit,
+    poll_control: impl FnMut(),
+) -> Result<zephium_agentic::RunEvidence, zephium_agentic::ProbeFailure> {
+    platform::windows::run_agentic_input_matrix(request_id, matrix, permit, poll_control)
+}
+
 #[cfg(target_os = "windows")]
 pub use platform::windows::{
     detach_privileged_environment_update, finalize_privileged_environment_registrations,

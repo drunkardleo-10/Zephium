@@ -246,7 +246,13 @@ the production fixed-recipe invocation mechanism remains evidence-driven and
 must not rely on private WebKit SPI. On Windows, isolated CDP worlds may be an
 internal adapter mechanism, but CDP remains absent from domain and model
 contracts. Every use is fixed, audited, generation-bound, and covered by
-hostile tests.
+hostile tests. The release-excluded M1 Windows fixture adapter uses only fixed
+`Runtime.evaluate` expressions with `userGesture: false` for bounded fixture
+observation and fixed semantic recipes. It issues only one CDP request at a
+time and waits for its completion before the next because WebView2 explicitly
+permits CDP methods to be processed out of dispatch order. This main-world
+fixture mechanism is not the production semantic-world implementation and is
+never available for arbitrary pages, selectors, or model input.
 
 ## 6. Semantic observation
 
@@ -834,6 +840,18 @@ sources rather than copying another browser agent's architecture:
   defines supported cookie transfer primitives.
 - [WebView2 frame APIs](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/frames)
   define platform frame observation constraints.
+- [WebView2 `CallDevToolsProtocolMethod`](https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2#calldevtoolsprotocolmethod)
+  documents asynchronous completion and the fact that dispatched methods may
+  be processed out of order; the M1 adapter therefore permits one in-flight
+  fixed command.
+- [WebView2 composition hosting](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/overview-features-apis#rendering-webview2-using-composition)
+  ties `SendMouseInput` and `SendPointerInput` to a composition controller.
+  Pinned Wry owns an ordinary controller, so the adapter reports composition
+  input as unsupported instead of casting across controller kinds.
+- [Chrome DevTools Protocol Input](https://chromedevtools.github.io/devtools-protocol/tot/Input/)
+  defines the fixed diagnostic mouse and key command coordinates and fields.
+- [Chrome DevTools Protocol `Runtime.evaluate`](https://chromedevtools.github.io/devtools-protocol/tot/Runtime/#method-evaluate)
+  defines the explicit `userGesture` control used for M1 fixture observation.
 - [OWASP LLM prompt-injection prevention](https://cheatsheetseries.owasp.org/cheatsheets/LLM_Prompt_Injection_Prevention_Cheat_Sheet.html)
   summarizes the threat class; Zephium's deterministic source-to-sink policy
   remains the actual product boundary.

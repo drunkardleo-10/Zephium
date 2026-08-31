@@ -11,8 +11,11 @@ const AGENTIC_ROOT: &str = "crates/zephium-agentic/src/lib.rs";
 const ENGINE_MANIFEST: &str = "crates/zephium-engine/Cargo.toml";
 const ENGINE_ROOT: &str = "crates/zephium-engine/src/lib.rs";
 const ENGINE_MACOS_MODULE: &str = "crates/zephium-engine/src/platform/macos/mod.rs";
-const ENGINE_PROBE_BINARY: &str = "crates/zephium-engine/src/bin/macos_agentic_input_probe.rs";
-const ENGINE_PROBE_BINARY_MANIFEST_PATH: &str = "src/bin/macos_agentic_input_probe.rs";
+const ENGINE_WINDOWS_MODULE: &str = "crates/zephium-engine/src/platform/windows/mod.rs";
+const ENGINE_MACOS_PROBE_BINARY: &str =
+    "crates/zephium-engine/src/bin/macos_agentic_input_probe.rs";
+const ENGINE_WINDOWS_PROBE_BINARY: &str =
+    "crates/zephium-engine/src/bin/windows_agentic_input_probe.rs";
 const SHIPPING_ROOTS: [&str; 2] = ["desktop", "crates/zephium-app"];
 const RELEASE_REFUSAL: &str = concat!(
     "#[cfg(all(feature=\"probe-harness\",not(debug_assertions)))]",
@@ -28,8 +31,10 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     validate_root(&read(repository.join(AGENTIC_ROOT))?)?;
     validate_engine_manifest(&read(repository.join(ENGINE_MANIFEST))?)?;
     validate_engine_root(&read(repository.join(ENGINE_ROOT))?)?;
-    validate_engine_macos_module(&read(repository.join(ENGINE_MACOS_MODULE))?)?;
-    let _ = read(repository.join(ENGINE_PROBE_BINARY))?;
+    validate_engine_platform_module(&read(repository.join(ENGINE_MACOS_MODULE))?, "macOS")?;
+    validate_engine_platform_module(&read(repository.join(ENGINE_WINDOWS_MODULE))?, "Windows")?;
+    let _ = read(repository.join(ENGINE_MACOS_PROBE_BINARY))?;
+    let _ = read(repository.join(ENGINE_WINDOWS_PROBE_BINARY))?;
     validate_shipping_sources(repository)?;
     let metadata = cargo_metadata(repository)?;
     validate_release_graph(&metadata)
@@ -49,6 +54,7 @@ fn validate_engine_manifest(source: &str) -> Result<(), String> {
         .collect::<BTreeSet<_>>();
     let expected = [
         "dep:serde",
+        "dep:tempfile",
         "dep:zephium-agentic",
         "zephium-agentic/probe-harness",
     ]
@@ -69,25 +75,39 @@ fn validate_engine_manifest(source: &str) -> Result<(), String> {
     {
         return Err("engine zephium-agentic dependency must remain optional".to_owned());
     }
-    let binary = manifest
+    let binaries = manifest
         .get("bin")
         .and_then(toml::Value::as_array)
-        .and_then(|binaries| {
-            binaries.iter().find(|binary| {
-                binary.get("name").and_then(toml::Value::as_str)
-                    == Some("macos-agentic-input-probe")
-            })
-        })
-        .ok_or_else(|| "engine macOS agentic probe binary is missing".to_owned())?;
-    if binary.get("path").and_then(toml::Value::as_str) != Some(ENGINE_PROBE_BINARY_MANIFEST_PATH)
-        || binary
-            .get("required-features")
-            .and_then(toml::Value::as_array)
-            .is_none_or(|features| {
-                features.as_slice() != [toml::Value::String("native-agentic-input-probe".into())]
-            })
-    {
-        return Err("engine macOS agentic probe binary gate drifted".to_owned());
+        .ok_or_else(|| "engine agentic probe binaries are missing".to_owned())?;
+    for (name, path, platform) in [
+        (
+            "macos-agentic-input-probe",
+            "src/bin/macos_agentic_input_probe.rs",
+            "macOS",
+        ),
+        (
+            "windows-agentic-input-probe",
+            "src/bin/windows_agentic_input_probe.rs",
+            "Windows",
+        ),
+    ] {
+        let binary = binaries
+            .iter()
+            .find(|binary| binary.get("name").and_then(toml::Value::as_str) == Some(name))
+            .ok_or_else(|| format!("engine {platform} agentic probe binary is missing"))?;
+        if binary.get("path").and_then(toml::Value::as_str) != Some(path)
+            || binary
+                .get("required-features")
+                .and_then(toml::Value::as_array)
+                .is_none_or(|features| {
+                    features.as_slice()
+                        != [toml::Value::String("native-agentic-input-probe".into())]
+                })
+        {
+            return Err(format!(
+                "engine {platform} agentic probe binary gate drifted"
+            ));
+        }
     }
     Ok(())
 }
@@ -99,14 +119,16 @@ fn validate_engine_root(source: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_engine_macos_module(source: &str) -> Result<(), String> {
+fn validate_engine_platform_module(source: &str, platform: &str) -> Result<(), String> {
     let source = compact(source);
     for required in [
         "#[cfg(feature=\"native-agentic-input-probe\")]modagentic_input_probe;",
         "#[cfg(feature=\"native-agentic-input-probe\")]pub(crate)useagentic_input_probe::runasrun_agentic_input_matrix;",
     ] {
         if !source.contains(required) {
-            return Err("macOS agentic probe module escaped or drifted from its feature gate".into());
+            return Err(format!(
+                "{platform} agentic probe module escaped or drifted from its feature gate"
+            ));
         }
     }
     Ok(())
@@ -378,12 +400,17 @@ mod tests {
             [features]
             native-agentic-input-probe = [
               "dep:serde",
+              "dep:tempfile",
               "dep:zephium-agentic",
               "zephium-agentic/probe-harness",
             ]
             [[bin]]
             name = "macos-agentic-input-probe"
             path = "src/bin/macos_agentic_input_probe.rs"
+            required-features = ["native-agentic-input-probe"]
+            [[bin]]
+            name = "windows-agentic-input-probe"
+            path = "src/bin/windows_agentic_input_probe.rs"
             required-features = ["native-agentic-input-probe"]
             [dependencies]
             zephium-agentic = { optional = true }
@@ -414,7 +441,7 @@ mod tests {
             #[cfg(feature = "native-agentic-input-probe")]
             pub(crate) use agentic_input_probe::run as run_agentic_input_matrix;
         "#;
-        validate_engine_macos_module(module).expect("valid module gates");
-        assert!(validate_engine_macos_module("mod agentic_input_probe;").is_err());
+        validate_engine_platform_module(module, "test").expect("valid module gates");
+        assert!(validate_engine_platform_module("mod agentic_input_probe;", "test").is_err());
     }
 }

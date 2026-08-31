@@ -2,7 +2,7 @@
   "schema_version": 1,
   "protocol_version": 2,
   "reviewed_on": "2026-08-31",
-  "status": "macos_hidden_fixed_dom_qualified_native_backends_and_windows_pending",
+  "status": "macos_hidden_fixed_dom_qualified_windows_adapter_cross_compiled_device_evidence_pending",
   "fixture_cases": [
     "button",
     "link",
@@ -52,25 +52,48 @@
     "windows_cdp_input",
     "human_baseline"
   ],
-  "deterministic_ci": {
-    "platform": "macos",
-    "presentation": "hidden",
-    "backend": "fixed_dom_recipe",
-    "cases": 14,
-    "required_invariants": [
-      "fresh_document_per_row",
-      "zero_trusted_effect_events",
-      "trusted_focus_blur_counted_separately",
-      "zero_transient_activation",
-      "zero_focus_theft",
-      "zero_admitted_popups",
-      "zero_retained_native_views",
-      "drained_teardown"
-    ]
-  },
+  "deterministic_ci": [
+    {
+      "platform": "macos",
+      "presentation": "hidden",
+      "backend": "fixed_dom_recipe",
+      "cases": 14,
+      "status": "qualified",
+      "required_invariants": [
+        "fresh_document_per_row",
+        "zero_trusted_effect_events",
+        "trusted_focus_blur_counted_separately",
+        "zero_transient_activation",
+        "zero_focus_theft",
+        "zero_admitted_popups",
+        "zero_retained_native_views",
+        "drained_teardown"
+      ]
+    },
+    {
+      "platform": "windows",
+      "presentation": "hidden",
+      "backend": "fixed_dom_recipe",
+      "cases": 14,
+      "status": "runner_implemented_cross_compiled_live_result_pending",
+      "required_invariants": [
+        "fresh_exact_navigation_id_per_row",
+        "one_in_flight_cdp_command",
+        "runtime_evaluate_user_gesture_false",
+        "zero_trusted_effect_events",
+        "trusted_focus_blur_counted_separately",
+        "zero_transient_activation",
+        "zero_focus_theft",
+        "zero_admitted_popups",
+        "exact_browser_process_exit_before_udf_deletion",
+        "zero_retained_native_views",
+        "drained_teardown"
+      ]
+    }
+  ],
   "blocking_evidence": [
     "authorized_named_macos_device_matrix",
-    "physical_windows_adapter_and_matrix",
+    "physical_windows_matrix",
     "one_authorized_difficult_real_site_per_platform",
     "named_device_browse_baselines"
   ],

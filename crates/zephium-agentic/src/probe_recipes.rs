@@ -4,6 +4,8 @@ use std::borrow::Cow;
 
 use crate::{FixtureCase, InputBackend};
 
+const MAX_WINDOWS_INPUT_STEPS: usize = 16;
+
 /// Native handler name compiled into the macOS probe runtime.
 ///
 /// The handler is registered only in [`MACOS_PROBE_CONTENT_WORLD_V1`]; page
@@ -231,6 +233,206 @@ pub enum FixedProbeScript {
     DomRecipe(FixtureCase),
 }
 
+/// A bounded client-coordinate point used by the Windows probe adapters.
+///
+/// Values are derived only from the fixed fixture's validated geometry. They
+/// are never model or caller coordinates.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WindowsProbePoint {
+    x: f64,
+    y: f64,
+}
+
+impl WindowsProbePoint {
+    /// Horizontal client coordinate in CSS pixels.
+    pub const fn x(self) -> f64 {
+        self.x
+    }
+
+    /// Vertical client coordinate in CSS pixels.
+    pub const fn y(self) -> f64 {
+        self.y
+    }
+}
+
+/// Closed keyboard vocabulary used by the Windows native-input probe.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WindowsProbeKey {
+    /// The printable `x` key used by fixed editable fixtures.
+    X,
+    /// The down-arrow key used by the fixed select fixture.
+    ArrowDown,
+    /// The Enter key used to commit the fixed select fixture.
+    Enter,
+}
+
+/// One closed, platform-neutral step translated by either Windows adapter.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum WindowsInputStep {
+    /// Move the primary mouse pointer within the owned WebView client area.
+    MouseMove {
+        /// Destination point in CSS client coordinates.
+        point: WindowsProbePoint,
+        /// Whether the primary button is held during this move.
+        primary_down: bool,
+    },
+    /// Depress the primary mouse button at one fixed-fixture point.
+    PrimaryDown(WindowsProbePoint),
+    /// Release the primary mouse button at one fixed-fixture point.
+    PrimaryUp(WindowsProbePoint),
+    /// Depress one allowlisted keyboard key.
+    KeyDown(WindowsProbeKey),
+    /// Emit the fixed printable character associated with [`WindowsProbeKey::X`].
+    TextX,
+    /// Release one allowlisted keyboard key.
+    KeyUp(WindowsProbeKey),
+}
+
+/// Validated fixed-fixture geometry used to build Windows input plans.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WindowsProbeGeometry {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    end_x: Option<f64>,
+    end_y: Option<f64>,
+    device_pixel_ratio: f64,
+}
+
+impl WindowsProbeGeometry {
+    /// Validates one fixed fixture geometry result before any native step is built.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new(
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
+        end_x: Option<f64>,
+        end_y: Option<f64>,
+        device_pixel_ratio: f64,
+    ) -> Option<Self> {
+        let scalar_values = [x, y, width, height, device_pixel_ratio];
+        if !scalar_values.into_iter().all(f64::is_finite)
+            || width <= 0.0
+            || height <= 0.0
+            || width > 2_000.0
+            || height > 2_000.0
+            || x < 0.0
+            || y < 0.0
+            || x > 4_000.0
+            || y > 4_000.0
+            || !(0.25..=8.0).contains(&device_pixel_ratio)
+            || end_x.is_some_and(|value| !value.is_finite() || !(0.0..=4_000.0).contains(&value))
+            || end_y.is_some_and(|value| !value.is_finite() || !(0.0..=4_000.0).contains(&value))
+            || end_x.is_some() != end_y.is_some()
+        {
+            return None;
+        }
+        Some(Self {
+            x,
+            y,
+            width,
+            height,
+            end_x,
+            end_y,
+            device_pixel_ratio,
+        })
+    }
+
+    /// Device-pixel ratio reported by the fixed fixture document.
+    pub const fn device_pixel_ratio(self) -> f64 {
+        self.device_pixel_ratio
+    }
+
+    fn center(self) -> WindowsProbePoint {
+        WindowsProbePoint {
+            x: self.x + self.width / 2.0,
+            y: self.y + self.height / 2.0,
+        }
+    }
+
+    fn end(self) -> Option<WindowsProbePoint> {
+        Some(WindowsProbePoint {
+            x: self.end_x?,
+            y: self.end_y?,
+        })
+    }
+}
+
+/// Builds the sole closed Windows input sequence for one fixed fixture case.
+///
+/// The result has at most sixteen steps. Closed-shadow targeting uses only the
+/// public host geometry; no selector or internal shadow identity is exposed.
+pub fn windows_input_plan(
+    case: FixtureCase,
+    geometry: WindowsProbeGeometry,
+) -> Option<Vec<WindowsInputStep>> {
+    let start = geometry.center();
+    let mut steps = Vec::with_capacity(MAX_WINDOWS_INPUT_STEPS);
+    if case == FixtureCase::Drag {
+        let end = geometry.end()?;
+        steps.push(WindowsInputStep::MouseMove {
+            point: start,
+            primary_down: false,
+        });
+        steps.push(WindowsInputStep::PrimaryDown(start));
+        // Several bounded intermediate moves let the engine cross its native
+        // drag threshold without relying on timing or page-provided paths.
+        for index in 1..=6 {
+            let fraction = f64::from(index) / 6.0;
+            steps.push(WindowsInputStep::MouseMove {
+                point: WindowsProbePoint {
+                    x: start.x + (end.x - start.x) * fraction,
+                    y: start.y + (end.y - start.y) * fraction,
+                },
+                primary_down: true,
+            });
+        }
+        steps.push(WindowsInputStep::PrimaryUp(end));
+        debug_assert!(steps.len() <= MAX_WINDOWS_INPUT_STEPS);
+        return Some(steps);
+    }
+
+    steps.extend([
+        WindowsInputStep::MouseMove {
+            point: start,
+            primary_down: false,
+        },
+        WindowsInputStep::PrimaryDown(start),
+        WindowsInputStep::PrimaryUp(start),
+    ]);
+    match case {
+        FixtureCase::TextInput | FixtureCase::ContentEditable | FixtureCase::Keyboard => {
+            steps.extend([
+                WindowsInputStep::KeyDown(WindowsProbeKey::X),
+                WindowsInputStep::TextX,
+                WindowsInputStep::KeyUp(WindowsProbeKey::X),
+            ]);
+        }
+        FixtureCase::Select => {
+            steps.extend([
+                WindowsInputStep::KeyDown(WindowsProbeKey::ArrowDown),
+                WindowsInputStep::KeyUp(WindowsProbeKey::ArrowDown),
+                WindowsInputStep::KeyDown(WindowsProbeKey::Enter),
+                WindowsInputStep::KeyUp(WindowsProbeKey::Enter),
+            ]);
+        }
+        FixtureCase::Button
+        | FixtureCase::Link
+        | FixtureCase::PointerMouse
+        | FixtureCase::TransientActivation
+        | FixtureCase::Popup
+        | FixtureCase::ClipboardGate
+        | FixtureCase::Iframe
+        | FixtureCase::OpenShadow
+        | FixtureCase::ClosedShadow => {}
+        FixtureCase::Drag => unreachable!("drag returned above"),
+    }
+    debug_assert!(steps.len() <= MAX_WINDOWS_INPUT_STEPS);
+    Some(steps)
+}
+
 impl FixedProbeScript {
     /// Returns the fixed source associated with this closed recipe.
     ///
@@ -422,5 +624,43 @@ mod tests {
         assert!(!MACOS_NATIVE_INPUT_RUNTIME_V1.contains("eval("));
         assert!(!MACOS_NATIVE_INPUT_RUNTIME_V1.contains("new Function"));
         assert!(!MACOS_NATIVE_INPUT_RUNTIME_V1.contains("await endpoint.postMessage"));
+    }
+
+    #[test]
+    fn windows_plan_is_closed_and_bounded_for_every_case() {
+        for case in CASES {
+            let (end_x, end_y) = if case == FixtureCase::Drag {
+                (Some(320.0), Some(240.0))
+            } else {
+                (None, None)
+            };
+            let geometry =
+                WindowsProbeGeometry::try_new(20.0, 30.0, 100.0, 40.0, end_x, end_y, 2.0)
+                    .expect("valid fixed geometry");
+            let plan = windows_input_plan(case, geometry).expect("closed plan");
+            assert!(!plan.is_empty());
+            assert!(plan.len() <= MAX_WINDOWS_INPUT_STEPS);
+            assert!(plan.iter().all(|step| match step {
+                WindowsInputStep::MouseMove { point, .. }
+                | WindowsInputStep::PrimaryDown(point)
+                | WindowsInputStep::PrimaryUp(point) => {
+                    point.x().is_finite() && point.y().is_finite()
+                }
+                WindowsInputStep::KeyDown(_)
+                | WindowsInputStep::TextX
+                | WindowsInputStep::KeyUp(_) => true,
+            }));
+        }
+    }
+
+    #[test]
+    fn windows_plan_rejects_unbounded_or_partial_geometry() {
+        assert!(
+            WindowsProbeGeometry::try_new(0.0, 0.0, 10.0, 10.0, Some(20.0), None, 1.0,).is_none()
+        );
+        assert!(
+            WindowsProbeGeometry::try_new(f64::NAN, 0.0, 10.0, 10.0, None, None, 1.0,).is_none()
+        );
+        assert!(WindowsProbeGeometry::try_new(0.0, 0.0, 10.0, 10.0, None, None, 16.0,).is_none());
     }
 }

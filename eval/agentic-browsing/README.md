@@ -24,6 +24,9 @@ cargo test --locked -p zephium-engine \
 cargo clippy --locked -p zephium-engine \
   --features native-agentic-input-probe \
   --bin macos-agentic-input-probe --lib -- -D warnings
+cargo check --locked --target x86_64-pc-windows-msvc \
+  -p zephium-engine --features native-agentic-input-probe \
+  --bin windows-agentic-input-probe
 cargo xtask check-agentic-probe-boundary
 ```
 
@@ -45,6 +48,32 @@ accessibility, focused OS input, a real site, or a production backend order.
 Other matrices must run only on an explicitly authorized named device. Their
 JSONL result remains in a local ignored location and is reviewed into aggregate
 non-sensitive fields rather than committed raw.
+
+The Windows adapter can be compile-qualified from another host, but only a
+physical Windows run is behavioral evidence. On an authorized named Windows
+device, run these exact closed modes in order:
+
+```powershell
+cargo run --locked -p zephium-engine `
+  --features native-agentic-input-probe `
+  --bin windows-agentic-input-probe -- --ci-hidden-fixed-dom
+cargo run --locked -p zephium-engine `
+  --features native-agentic-input-probe `
+  --bin windows-agentic-input-probe -- --ci-hidden-hwnd
+cargo run --locked -p zephium-engine `
+  --features native-agentic-input-probe `
+  --bin windows-agentic-input-probe -- --ci-hidden-cdp
+cargo run --locked -p zephium-engine `
+  --features native-agentic-input-probe `
+  --bin windows-agentic-input-probe -- --visible-background-windows-all
+```
+
+These modes use only an ephemeral user-data directory, InPrivate controller,
+loopback fixtures, one owned probe window, and fixed commands. They do not use
+OS-wide input, accounts, credentials, external sites, or extension-owned
+native seams. The visible-focused mode is separately gated by the literal
+`--allow-visible-focused` argument and must not be run without explicit
+foreground authorization.
 
 The authorized hidden fixed-DOM macOS safety result is recorded only as reviewed
 aggregate fields. Native AppKit/accessibility, visible/background behavior,
