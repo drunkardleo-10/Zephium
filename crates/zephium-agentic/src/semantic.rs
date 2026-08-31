@@ -898,6 +898,45 @@ impl SemanticSnapshot {
             .map(|(_, node)| node)
     }
 
+    pub(crate) fn reference_capability(
+        &self,
+        id: SemanticReferenceId,
+    ) -> Option<SemanticReference> {
+        self.references
+            .iter()
+            .find(|reference| reference.id == id)
+            .cloned()
+    }
+
+    pub(crate) fn rebase_references(
+        &mut self,
+        first_ordinal: usize,
+    ) -> Result<(), SemanticContractError> {
+        if self.references.len() != self.nodes.len() || first_ordinal == 0 {
+            return Err(SemanticContractError::ReferenceInvariant);
+        }
+        for (offset, (reference, node)) in self
+            .references
+            .iter_mut()
+            .zip(self.nodes.iter_mut())
+            .enumerate()
+        {
+            if reference.node != node.key || reference.id != node.reference {
+                return Err(SemanticContractError::ReferenceInvariant);
+            }
+            let ordinal = first_ordinal
+                .checked_add(offset)
+                .ok_or(SemanticContractError::SnapshotLimit)?;
+            let ordinal = u16::try_from(ordinal)
+                .ok()
+                .and_then(SemanticReferenceId::new)
+                .ok_or(SemanticContractError::SnapshotLimit)?;
+            reference.id = ordinal;
+            node.reference = ordinal;
+        }
+        Ok(())
+    }
+
     fn resolve_exact(
         &self,
         id: SemanticReferenceId,
@@ -1028,6 +1067,9 @@ pub enum SemanticContractError {
     /// Snapshot nodes or total retained text exceed a hard ceiling.
     #[error("semantic snapshot ceiling exceeded")]
     SnapshotLimit,
+    /// Internal node and reference cohorts disagree.
+    #[error("semantic reference invariant is invalid")]
+    ReferenceInvariant,
 }
 
 /// Typed opaque-reference resolution refusal.

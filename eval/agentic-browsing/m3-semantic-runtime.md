@@ -1,9 +1,9 @@
 # M3 semantic runtime
 
-Status: bounded semantic identity, snapshot, opaque-reference, and hostile wire
-decoder implemented; fixed isolated-world page program, native installation,
-multi-frame assembly, progressive scopes, diffs, and compact model encoding
-pending.
+Status: bounded semantic identity, snapshot, opaque-reference, hostile wire
+decoder, progressive scopes, and deterministic multi-frame assembly
+implemented; fixed isolated-world page program, native installation, diffs,
+and compact model encoding pending.
 
 This evidence records deterministic Rust contract properties only. It does not
 claim that arbitrary pages have been instrumented or observed on either
@@ -13,8 +13,14 @@ platform.
 
 - One frame payload is capped at 256 KiB, 512 nodes, depth 32, 128 KiB total
   page-derived text, 512 bytes per accessible name, 4 KiB per visible-text
-  segment, and 1 KiB per safe value summary. A complete observation can later
+  segment, and 1 KiB per safe value summary. A complete observation can
   assemble at most sixteen supported frame snapshots.
+- One complete observation is capped at 512 nodes, 256 KiB retained text, and
+  sixteen frames even though individual frame decoders have independent
+  ceilings. Each request selects smaller nonzero ceilings; the conservative
+  initial filtered budget is 128 nodes, 16 KiB, and four frames. This is a
+  safety bound, not yet a claim that compact encoding meets the 2,000-token
+  target.
 - Native code supplies context/document authority, frame id and generation,
   canonical origin, same/cross-origin trust class, invocation id, and expected
   snapshot generation out of band. Hostile bytes can only echo the invocation
@@ -48,6 +54,20 @@ platform.
   generation, canonical origin/trust boundary, snapshot generation, private
   node key, and closed operation inventory. Resolution fails on an unknown id,
   any stale frame/snapshot join, or an operation not issued for that node.
+- The initial scope is a fixed filtered view of the viewport, dialogs, active
+  element, meaningful landmarks, and interactive controls. Expansion is a
+  closed region, subtree, table, frame, or bounded surrounding-text request
+  anchored by a capability from the exact preceding observation. Chains are
+  capped at eight expansions, cannot reuse any request identity in the chain,
+  and require the anchored frame snapshot generation to advance exactly once.
+  Surrounding text is capped at 8 KiB before any smaller request budget.
+- Frame callbacks may arrive in any order, but final snapshots and global
+  `@aN` references are deterministically rebased in document-boundary preorder.
+  Each child must share the exact context/document/cancellation join, use a
+  unique invocation and frame identity, and carry same/cross-origin trust that
+  agrees with canonical parent/child origins. Every retained boundary must be
+  explicitly observed, deferred for a typed budget/scope reason, or marked
+  unsupported for a typed safe-runtime reason; omission is a failure.
 
 The crate remains a zero-idle-cost functional core: decoding happens only for
 an admitted observation and creates no timer, thread, page, queue, or worker.
@@ -68,19 +88,20 @@ resolution, duplicate/unknown operation and state inventories, geometry and
 text limits, valid deterministic decoding, unknown fields, invocation and
 generation substitution, password/token redaction, duplicate internal ids,
 forward/self parents, depth, role/state/value/operation contradictions, node
-and wire limits, hostile debug strings, and the absence of page content from
-diagnostics.
+and wire limits, hostile debug strings, aggregate observation budgets,
+out-of-order sibling-frame completion, global reference rebasing, mandatory
+frame dispositions, frame trust/invocation refusal without partial mutation,
+exact progressive chains, stale anchor generations, missing anchor frames,
+scope/role compatibility, and the absence of page content from diagnostics.
 
 ## Remaining M3 work
 
-1. add bounded progressive observation request/scope contracts and multi-frame
-   assembly with explicit unsupported boundaries;
-2. add deterministic compact model encoding and measure actual token counts;
-3. add snapshot acknowledgement, stable-id diffing, and fresh-snapshot fallback
+1. add deterministic compact model encoding and measure actual token counts;
+2. add snapshot acknowledgement, stable-id diffing, and fresh-snapshot fallback
    when a confident diff cannot be formed;
-4. implement and freeze the immutable isolated-world runtime plus closed
+3. implement and freeze the immutable isolated-world runtime plus closed
    invocation vocabulary after the native M2 adapter provides exact world,
    frame, navigation, cancellation, and teardown joins;
-5. add fixture/runtime hostile tests for page-world bridge access, spoofing,
+4. add fixture/runtime hostile tests for page-world bridge access, spoofing,
    open/closed shadow roots, frame replacement, stale nodes, collisions,
    mutation pressure, redaction, and release-build exclusion.

@@ -28,6 +28,7 @@ mod probe_recipes;
 mod profile_lease;
 mod protocol;
 mod semantic;
+mod semantic_observation;
 mod semantic_wire;
 mod sign_in_handoff;
 
@@ -103,6 +104,15 @@ pub use semantic::{
     SemanticStates, SemanticText, SemanticTruncation, SemanticTrust, SemanticValueSummary,
     MAX_SEMANTIC_DEPTH, MAX_SEMANTIC_FRAMES, MAX_SEMANTIC_NAME_BYTES, MAX_SEMANTIC_NODES,
     MAX_SEMANTIC_TEXT_BYTES, MAX_SEMANTIC_TOTAL_TEXT_BYTES, MAX_SEMANTIC_VALUE_BYTES,
+};
+pub use semantic_observation::{
+    SemanticExpansionKind, SemanticFrameBoundary, SemanticFrameBoundaryStatus,
+    SemanticFrameDeferral, SemanticFrameUnsupported, SemanticObservation,
+    SemanticObservationAssembler, SemanticObservationBudget, SemanticObservationError,
+    SemanticObservationGeneration, SemanticObservationId, SemanticObservationParent,
+    SemanticObservationRequest, SemanticScope, SemanticScopeAnchor, SemanticTextWindow,
+    MAX_SEMANTIC_OBSERVATION_EXPANSIONS, MAX_SEMANTIC_OBSERVATION_NODES,
+    MAX_SEMANTIC_OBSERVATION_TEXT_BYTES, MAX_SEMANTIC_SURROUNDING_TEXT_BYTES,
 };
 pub use semantic_wire::{
     decode_semantic_snapshot, SemanticDecodeContext, SemanticDecodeError, MAX_SEMANTIC_WIRE_BYTES,
