@@ -143,8 +143,10 @@ pub use semantic_observation::{
 pub use semantic_runtime::{
     encode_semantic_runtime_invocation, SemanticRuntimeBudget, SemanticRuntimeBudgetError,
     SemanticRuntimeFault, SemanticRuntimeInvocation, SemanticRuntimeInvocationError,
-    SemanticRuntimeResultError, SemanticRuntimeScopeClass, MAX_SEMANTIC_RUNTIME_REQUEST_BYTES,
-    MAX_SEMANTIC_RUNTIME_VISITED_NODES, MIN_SEMANTIC_RUNTIME_WIRE_BYTES,
+    SemanticRuntimeProgram, SemanticRuntimeResultError, SemanticRuntimeScopeClass,
+    MAX_SEMANTIC_RUNTIME_REQUEST_BYTES, MAX_SEMANTIC_RUNTIME_SAFE_INTEGER,
+    MAX_SEMANTIC_RUNTIME_SOURCE_BYTES, MAX_SEMANTIC_RUNTIME_VISITED_NODES,
+    MIN_SEMANTIC_RUNTIME_WIRE_BYTES, SEMANTIC_RUNTIME_GLOBAL_NAME, SEMANTIC_RUNTIME_PROGRAM,
     SEMANTIC_RUNTIME_PROTOCOL_VERSION,
 };
 pub use semantic_wire::{

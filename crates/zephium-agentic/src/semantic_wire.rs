@@ -533,6 +533,8 @@ enum RawCompleteness {
     NodeLimit,
     TextLimit,
     DepthLimit,
+    InspectionLimit,
+    WireLimit,
     ScopeBoundary,
     UnsupportedFrame,
 }
@@ -544,6 +546,10 @@ impl From<RawCompleteness> for SemanticCompleteness {
             RawCompleteness::NodeLimit => Self::Truncated(SemanticTruncation::NodeLimit),
             RawCompleteness::TextLimit => Self::Truncated(SemanticTruncation::TextLimit),
             RawCompleteness::DepthLimit => Self::Truncated(SemanticTruncation::DepthLimit),
+            RawCompleteness::InspectionLimit => {
+                Self::Truncated(SemanticTruncation::InspectionLimit)
+            }
+            RawCompleteness::WireLimit => Self::Truncated(SemanticTruncation::WireLimit),
             RawCompleteness::ScopeBoundary => Self::Truncated(SemanticTruncation::ScopeBoundary),
             RawCompleteness::UnsupportedFrame => {
                 Self::Truncated(SemanticTruncation::UnsupportedFrame)
@@ -779,6 +785,35 @@ mod tests {
             2
         );
         assert_eq!(snapshot.total_text_bytes(), 12);
+    }
+
+    #[test]
+    fn inspection_and_wire_truncation_are_preserved() {
+        for (wire, expected) in [
+            (
+                "inspection_limit",
+                SemanticCompleteness::Truncated(SemanticTruncation::InspectionLimit),
+            ),
+            (
+                "wire_limit",
+                SemanticCompleteness::Truncated(SemanticTruncation::WireLimit),
+            ),
+        ] {
+            let bytes = serde_json::to_vec(&json!({
+                "v": SEMANTIC_WIRE_VERSION,
+                "i": 7,
+                "g": 9,
+                "c": wire,
+                "n": []
+            }))
+            .expect("encode");
+            assert_eq!(
+                decode_semantic_snapshot(decode_context(), &bytes)
+                    .expect("snapshot")
+                    .completeness(),
+                expected
+            );
+        }
     }
 
     #[test]

@@ -27,6 +27,57 @@ pub const MAX_SEMANTIC_RUNTIME_REQUEST_BYTES: usize = 2 * 1024;
 pub const MIN_SEMANTIC_RUNTIME_WIRE_BYTES: u32 = 1024;
 /// Maximum DOM/shadow-tree nodes one invocation may inspect.
 pub const MAX_SEMANTIC_RUNTIME_VISITED_NODES: u32 = 32 * 1024;
+/// Largest integer represented exactly by every supported JavaScript runtime.
+pub const MAX_SEMANTIC_RUNTIME_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+/// Maximum immutable production runtime source bytes installed per document.
+pub const MAX_SEMANTIC_RUNTIME_SOURCE_BYTES: usize = 64 * 1024;
+/// Sole fixed isolated-world global installed by the production runtime.
+pub const SEMANTIC_RUNTIME_GLOBAL_NAME: &str = "__zephiumSemanticRuntimeV1";
+
+const SEMANTIC_RUNTIME_SOURCE: &str = include_str!("../assets/semantic-runtime-v1.js");
+const SEMANTIC_RUNTIME_SOURCE_SHA256: [u8; 32] = [
+    0x5d, 0xa2, 0x9b, 0xf1, 0x29, 0x65, 0x09, 0x76, 0xd9, 0x0b, 0xd7, 0x7d, 0x1e, 0x44, 0x40, 0x88,
+    0x24, 0x05, 0xcf, 0xd1, 0xd1, 0x32, 0x19, 0xd7, 0xed, 0xfe, 0x10, 0x5a, 0x7b, 0x7d, 0xa7, 0xe7,
+];
+
+/// Immutable production program passed only to a trusted isolated-world adapter.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct SemanticRuntimeProgram;
+
+impl SemanticRuntimeProgram {
+    /// Returns the reviewed program bytes for document-start isolated-world installation.
+    ///
+    /// The adapter must never log, dynamically modify, append to, or install this
+    /// source in page world. Invocation remains limited to the separately encoded
+    /// closed request grammar.
+    pub const fn source(self) -> &'static str {
+        SEMANTIC_RUNTIME_SOURCE
+    }
+
+    /// Pinned SHA-256 digest of the exact reviewed source bytes.
+    pub const fn sha256(self) -> [u8; 32] {
+        SEMANTIC_RUNTIME_SOURCE_SHA256
+    }
+
+    /// Sole fixed property the native adapter may invoke in its private world.
+    pub const fn global_name(self) -> &'static str {
+        SEMANTIC_RUNTIME_GLOBAL_NAME
+    }
+}
+
+impl fmt::Debug for SemanticRuntimeProgram {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SemanticRuntimeProgram")
+            .field("version", &SEMANTIC_RUNTIME_PROTOCOL_VERSION)
+            .field("source", &"[redacted]")
+            .field("sha256", &"[redacted]")
+            .finish()
+    }
+}
+
+/// Exact immutable production semantic program.
+pub const SEMANTIC_RUNTIME_PROGRAM: SemanticRuntimeProgram = SemanticRuntimeProgram;
 
 /// Closed semantic runtime scope class for metrics and native routing.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -220,6 +271,11 @@ pub fn encode_semantic_runtime_invocation(
     snapshot_generation: SemanticSnapshotGeneration,
     budget: SemanticRuntimeBudget,
 ) -> Result<SemanticRuntimeInvocation, SemanticRuntimeInvocationError> {
+    if invocation.get() > MAX_SEMANTIC_RUNTIME_SAFE_INTEGER
+        || snapshot_generation.get() > MAX_SEMANTIC_RUNTIME_SAFE_INTEGER
+    {
+        return Err(SemanticRuntimeInvocationError::NumericRange);
+    }
     if frame.context() != request.context() {
         return Err(SemanticRuntimeInvocationError::ContextMismatch);
     }
@@ -232,46 +288,38 @@ pub fn encode_semantic_runtime_invocation(
     let (scope, scope_class) = match request.scope() {
         SemanticScope::Initial => (RuntimeScope::Initial, SemanticRuntimeScopeClass::Initial),
         SemanticScope::Region(anchor) => {
-            validate_anchor(frame.clone(), anchor, snapshot_generation)?;
+            let anchor = validate_anchor(frame.clone(), anchor, snapshot_generation)?;
             (
-                RuntimeScope::Region {
-                    anchor: anchor.capability().node_key().get(),
-                },
+                RuntimeScope::Region { anchor },
                 SemanticRuntimeScopeClass::Region,
             )
         }
         SemanticScope::Subtree(anchor) => {
-            validate_anchor(frame.clone(), anchor, snapshot_generation)?;
+            let anchor = validate_anchor(frame.clone(), anchor, snapshot_generation)?;
             (
-                RuntimeScope::Subtree {
-                    anchor: anchor.capability().node_key().get(),
-                },
+                RuntimeScope::Subtree { anchor },
                 SemanticRuntimeScopeClass::Subtree,
             )
         }
         SemanticScope::Table(anchor) => {
-            validate_anchor(frame.clone(), anchor, snapshot_generation)?;
+            let anchor = validate_anchor(frame.clone(), anchor, snapshot_generation)?;
             (
-                RuntimeScope::Table {
-                    anchor: anchor.capability().node_key().get(),
-                },
+                RuntimeScope::Table { anchor },
                 SemanticRuntimeScopeClass::Table,
             )
         }
         SemanticScope::Frame(anchor) => {
-            validate_anchor(frame.clone(), anchor, snapshot_generation)?;
+            let anchor = validate_anchor(frame.clone(), anchor, snapshot_generation)?;
             (
-                RuntimeScope::Frame {
-                    anchor: anchor.capability().node_key().get(),
-                },
+                RuntimeScope::Frame { anchor },
                 SemanticRuntimeScopeClass::Frame,
             )
         }
         SemanticScope::SurroundingText { anchor, window } => {
-            validate_anchor(frame.clone(), anchor, snapshot_generation)?;
+            let stable_anchor = validate_anchor(frame.clone(), anchor, snapshot_generation)?;
             (
                 RuntimeScope::SurroundingText {
-                    anchor: anchor.capability().node_key().get(),
+                    anchor: stable_anchor,
                     before_bytes: window.before_bytes(),
                     after_bytes: window.after_bytes(),
                 },
@@ -312,19 +360,26 @@ fn validate_anchor(
     frame: SemanticFrameJoin,
     anchor: &crate::SemanticScopeAnchor,
     snapshot_generation: SemanticSnapshotGeneration,
-) -> Result<(), SemanticRuntimeInvocationError> {
+) -> Result<u64, SemanticRuntimeInvocationError> {
     if anchor.frame() != &frame {
         return Err(SemanticRuntimeInvocationError::ScopeFrameMismatch);
     }
     if anchor.snapshot_generation().next() != Some(snapshot_generation) {
         return Err(SemanticRuntimeInvocationError::ScopeGenerationMismatch);
     }
-    Ok(())
+    let anchor = anchor.capability().node_key().get();
+    if anchor > MAX_SEMANTIC_RUNTIME_SAFE_INTEGER {
+        return Err(SemanticRuntimeInvocationError::NumericRange);
+    }
+    Ok(anchor)
 }
 
 /// Closed refusal to encode an isolated-world invocation.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum SemanticRuntimeInvocationError {
+    /// An identity cannot round-trip exactly through the fixed JavaScript wire.
+    #[error("semantic runtime identity exceeds the exact numeric wire range")]
+    NumericRange,
     /// Request and frame do not share exact context/document/cancellation authority.
     #[error("semantic runtime context does not match")]
     ContextMismatch,
@@ -463,6 +518,7 @@ mod tests {
         SemanticOrigin, SemanticReferenceId, SemanticSnapshotGeneration, SEMANTIC_WIRE_VERSION,
     };
     use serde_json::json;
+    use sha2::{Digest, Sha256};
     use zephium_core::ids::ProfileId;
 
     fn context(raw: u128) -> crate::ContextJoin {
@@ -503,6 +559,13 @@ mod tests {
     }
 
     fn observation(context: crate::ContextJoin) -> SemanticObservation {
+        observation_with_node_key(context, 9002)
+    }
+
+    fn observation_with_node_key(
+        context: crate::ContextJoin,
+        node_key: u64,
+    ) -> SemanticObservation {
         let frame = frame(context);
         let wire = serde_json::to_vec(&json!({
             "v": SEMANTIC_WIRE_VERSION,
@@ -511,7 +574,7 @@ mod tests {
             "c": "complete",
             "n": [
                 {"k": 9001, "r": "document"},
-                {"k": 9002, "p": 0, "r": "landmark", "n": "Private account"}
+                {"k": node_key, "p": 0, "r": "landmark", "n": "Private account"}
             ]
         }))
         .expect("wire");
@@ -533,6 +596,83 @@ mod tests {
             .expect("assembler")
             .finish()
             .expect("observation")
+    }
+
+    #[test]
+    fn immutable_program_is_size_bounded_digest_pinned_and_bridge_free() {
+        let source = SEMANTIC_RUNTIME_PROGRAM.source();
+        assert!(source.len() <= MAX_SEMANTIC_RUNTIME_SOURCE_BYTES);
+        assert!(source.is_ascii());
+        assert_eq!(
+            SEMANTIC_RUNTIME_PROGRAM.global_name(),
+            SEMANTIC_RUNTIME_GLOBAL_NAME
+        );
+        assert_eq!(
+            Sha256::digest(source.as_bytes()).as_slice(),
+            SEMANTIC_RUNTIME_PROGRAM.sha256()
+        );
+        assert_eq!(
+            source
+                .matches("objectDefineProperty(globalThis, GLOBAL_NAME")
+                .count(),
+            1
+        );
+        for forbidden in [
+            "eval(",
+            "new Function",
+            "querySelector",
+            "innerHTML",
+            "outerHTML",
+            "document.cookie",
+            "localStorage",
+            "sessionStorage",
+            "indexedDB",
+            "fetch(",
+            "XMLHttpRequest",
+            "WebSocket",
+            "EventSource",
+            "MutationObserver",
+            "setTimeout",
+            "setInterval",
+            "requestAnimationFrame",
+            "addEventListener",
+            "dispatchEvent",
+            ".click(",
+            ".focus(",
+            "postMessage",
+            "console.",
+            "Math.random",
+            "navigator.",
+            "location.",
+            "history.",
+            "performance.",
+            "sendBeacon",
+            "BroadcastChannel",
+            "SharedWorker",
+            "new Worker",
+            "Notification",
+            "clipboard",
+            "FileReader",
+            "URL.createObjectURL",
+            "createElement",
+            "setAttribute",
+            "appendChild",
+            "replaceChildren",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "forbidden runtime surface: {forbidden}"
+            );
+        }
+        assert!(source.contains("const nodeKeys = new WeakMap()"));
+        assert!(source.contains("keyNodes.set(key, { node, generation })"));
+        assert!(source.contains("sweepIdentities(request.g);"));
+        assert!(!source.contains("new WeakRef"));
+        assert!(source.contains("writable: false"));
+        assert!(source.contains("configurable: false"));
+        let debug = format!("{SEMANTIC_RUNTIME_PROGRAM:?}");
+        assert!(debug.contains("[redacted]"));
+        assert!(!debug.contains("WeakMap"));
     }
 
     #[test]
@@ -652,6 +792,49 @@ mod tests {
                 SemanticRuntimeBudget::INITIAL_FILTERED,
             ),
             Err(SemanticRuntimeInvocationError::Budget)
+        ));
+    }
+
+    #[test]
+    fn javascript_numeric_authority_must_round_trip_exactly() {
+        let context = context(41);
+        let request = SemanticObservationRequest::initial(
+            SemanticObservationId::new(41).expect("observation id"),
+            context,
+            SemanticObservationBudget::INITIAL_FILTERED,
+        );
+        assert!(matches!(
+            encode_semantic_runtime_invocation(
+                &request,
+                frame(context),
+                SemanticInvocationId::new(MAX_SEMANTIC_RUNTIME_SAFE_INTEGER + 1)
+                    .expect("invocation"),
+                SemanticSnapshotGeneration::INITIAL,
+                SemanticRuntimeBudget::INITIAL_FILTERED,
+            ),
+            Err(SemanticRuntimeInvocationError::NumericRange)
+        ));
+
+        let prior = observation_with_node_key(context, MAX_SEMANTIC_RUNTIME_SAFE_INTEGER + 1);
+        let prior_frame = prior.frames()[0].frame().clone();
+        let expansion = prior
+            .begin_expansion(
+                SemanticObservationId::new(42).expect("observation id"),
+                SemanticReferenceId::new(2).expect("reference"),
+                &prior_frame,
+                SemanticExpansionKind::Region,
+                SemanticObservationBudget::INITIAL_FILTERED,
+            )
+            .expect("expansion");
+        assert!(matches!(
+            encode_semantic_runtime_invocation(
+                &expansion,
+                prior_frame,
+                SemanticInvocationId::new(42).expect("invocation"),
+                SemanticSnapshotGeneration::new(22).expect("generation"),
+                SemanticRuntimeBudget::INITIAL_FILTERED,
+            ),
+            Err(SemanticRuntimeInvocationError::NumericRange)
         ));
     }
 

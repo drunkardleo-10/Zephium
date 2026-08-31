@@ -1199,6 +1199,8 @@ fn hash_completeness(hasher: &mut FingerprintHasher, completeness: SemanticCompl
         SemanticCompleteness::Truncated(SemanticTruncation::DepthLimit) => 4,
         SemanticCompleteness::Truncated(SemanticTruncation::ScopeBoundary) => 5,
         SemanticCompleteness::Truncated(SemanticTruncation::UnsupportedFrame) => 6,
+        SemanticCompleteness::Truncated(SemanticTruncation::InspectionLimit) => 7,
+        SemanticCompleteness::Truncated(SemanticTruncation::WireLimit) => 8,
     });
 }
 

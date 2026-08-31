@@ -621,6 +621,10 @@ pub enum SemanticTruncation {
     TextLimit,
     /// Fixed tree-depth ceiling reached.
     DepthLimit,
+    /// Fixed DOM/open-shadow inspection ceiling reached before the scope completed.
+    InspectionLimit,
+    /// Fixed encoded response ceiling omitted a suffix of otherwise valid nodes.
+    WireLimit,
     /// Requested progressive-observation boundary reached.
     ScopeBoundary,
     /// Child frame could not be observed safely.

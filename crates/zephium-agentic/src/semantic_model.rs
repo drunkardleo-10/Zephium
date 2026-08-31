@@ -743,6 +743,10 @@ fn completeness_label(completeness: SemanticCompleteness) -> &'static str {
         SemanticCompleteness::Truncated(SemanticTruncation::NodeLimit) => "truncated_nodes",
         SemanticCompleteness::Truncated(SemanticTruncation::TextLimit) => "truncated_text",
         SemanticCompleteness::Truncated(SemanticTruncation::DepthLimit) => "truncated_depth",
+        SemanticCompleteness::Truncated(SemanticTruncation::InspectionLimit) => {
+            "truncated_inspection"
+        }
+        SemanticCompleteness::Truncated(SemanticTruncation::WireLimit) => "truncated_wire",
         SemanticCompleteness::Truncated(SemanticTruncation::ScopeBoundary) => "truncated_scope",
         SemanticCompleteness::Truncated(SemanticTruncation::UnsupportedFrame) => "truncated_frame",
     }
