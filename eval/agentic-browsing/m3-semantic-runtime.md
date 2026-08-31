@@ -1,15 +1,15 @@
 # M3 semantic runtime
 
 Status: bounded semantic identity, snapshot, opaque-reference, hostile wire
-decoder, progressive scopes, and deterministic multi-frame assembly
-plus compact model encoding/token-admission ports and acknowledged stable-id
-diffs plus compact diff token-admission implemented; fixed isolated-world page
-program, native installation, and actual pinned provider token measurements
-pending.
+decoder, progressive scopes, deterministic multi-frame assembly, compact model
+encoding/token-admission ports, acknowledged stable-id diffs, compact diff
+token admission, and the immutable bounded page-projection program implemented;
+native isolated-world installation, live-engine hostile qualification, and
+actual pinned provider token measurements pending.
 
-This evidence records deterministic Rust contract properties only. It does not
-claim that arbitrary pages have been instrumented or observed on either
-platform.
+This evidence records deterministic Rust contracts plus static and synthetic
+DOM execution of the fixed program. It does not claim that arbitrary pages
+have been instrumented or observed on either platform.
 
 ## Implemented boundary
 
@@ -162,6 +162,62 @@ platform.
   responses are seven fixed detail-free `E1` fault codes (invalid request,
   busy, missing anchor, identity exhaustion, unsupported scope, output limit,
   or internal invariant); unknown/page-supplied fault detail is rejected.
+- The production document-start asset is 49,812 ASCII bytes under a 64 KiB hard
+  source ceiling. Rust owns its exact bytes, sole private-world global name,
+  and pinned SHA-256 digest
+  `5da29bf129650976d90bd77d1e4440882405cfd1d13219d7edfe105a7b7da7e7`.
+  The adapter receives an opaque program object whose diagnostics redact both
+  source and digest; there is no source concatenation or dynamic script input.
+- The program installs one frozen, non-enumerable, non-writable,
+  non-configurable object with one `invoke` method. It performs no work until a
+  request arrives and creates no observer, timer, event listener, task,
+  network/storage channel, page-world message channel, or DOM mutation path.
+  A source gate rejects generic evaluation, selectors, HTML serialization,
+  cookies/storage, network APIs, event synthesis, focus/click methods, and
+  asynchronous scheduling surfaces.
+- Request parsing accepts only ASCII and the exact closed field inventory.
+  Invocation, snapshot, and stable-node identities must be positive integers at
+  or below JavaScript's exact integer ceiling (`2^53 - 1`); Rust rejects larger
+  authority before dispatch. Stable identities use a `WeakMap` plus a bounded
+  strong reverse index and mint only for retained semantic nodes. The reverse
+  index is required to preserve wrapper/node identity across invocations;
+  `WeakRef` guarantees current-turn read consistency, not survival across later
+  turns. Every invocation synchronously drops disconnected/wrong-document
+  entries and entries older than the immediately preceding snapshot generation.
+  Since both the prior and current snapshots are capped at 512 nodes, the
+  reverse index is capped at 2,048 entries with explicit headroom; capacity
+  fails with a content-free identity-exhaustion code rather than retaining an
+  unbounded DOM.
+- One synchronous single-flight traversal is bounded by the admitted retained
+  node/text/wire ceilings and a separate DOM/open-shadow inspection ceiling.
+  Semantic depth, retained-node, retained-text, inspection, scope-boundary,
+  unsupported-frame, and response-wire truncation remain distinct typed
+  snapshot states. UTF-8 output size is counted before return; a parent-valid
+  suffix is omitted under `wire_limit`, and even the minimum result refuses
+  with `output_limit` if it cannot fit.
+- The initial projection is viewport-filtered while retaining document,
+  meaningful landmark, dialog, and focused-element semantics. Closed anchored
+  region, subtree, table, frame-boundary, and surrounding-text requests resolve
+  only a still-connected stable node from the exact document. The program
+  descends open shadow roots but never obtains or guesses a closed root;
+  cross-frame content remains a separate native-attested frame invocation and
+  observation-assembly responsibility.
+- DOM methods and Web IDL getters used by traversal are captured at document
+  start rather than read from hostile element properties. The allowlist maps
+  fixed HTML/ARIA roles, native/ARIA state, compatible operation classes,
+  quantized geometry, labels, and safe primitive value summaries. Password and
+  credential-labelled input values are never read into a returned payload;
+  recognized token forms are replaced before serialization, with the hostile
+  Rust decoder retaining its independent defense.
+- Accessible-name extraction follows the standards priority for bounded
+  `aria-labelledby`, `aria-label`, native labels, host-language alternatives,
+  and name-from-content, but this implementation does not claim full user-agent
+  accessibility-tree parity. The ordering is grounded in the
+  [W3C Accessible Name and Description Computation 1.2](https://www.w3.org/TR/accname-1.2/)
+  and [WAI-ARIA 1.2](https://www.w3.org/TR/wai-aria/). The rejected weak-only
+  reverse-index alternative follows from the deliberately narrow current-turn
+  liveness guarantee in
+  [ECMAScript WeakRef](https://tc39.es/ecma262/2023/multipage/managing-memory.html#sec-weak-ref-objects).
 
 The crate remains a zero-idle-cost functional core: decoding happens only for
 an admitted observation and creates no timer, thread, page, queue, or worker.
@@ -174,6 +230,8 @@ cargo test --locked -p zephium-agentic --features probe-harness
 cargo clippy --locked -p zephium-agentic --all-targets -- -D warnings
 cargo clippy --locked -p zephium-agentic --all-targets --features probe-harness -- -D warnings
 cargo xtask check-agentic-probe-boundary
+node --check crates/zephium-agentic/assets/semantic-runtime-v1.js
+node eval/agentic-browsing/semantic-runtime-smoke-v1.js
 ```
 
 Tests cover canonical/redacted origins and page text, main/child-frame joins,
@@ -201,7 +259,26 @@ leaked page content. Runtime-invocation tests cover the sole compact initial
 shape, absence of URLs/selectors/scripts, stable-anchor diagnostic redaction,
 aggregate/per-frame budgets, exact anchor frame and generation joins, hostile
 invocation substitution, fixed faults, unknown-fault rejection, and response
-wire limits.
+wire limits. Program gates additionally pin exact source bytes and digest,
+source size, the single immutable global, exact JavaScript numeric authority,
+and absence of generic bridge/evaluation/network/storage/event/scheduling
+surfaces. The deterministic synthetic-DOM smoke exercises exact request
+parsing, captured-method resistance, stable anchored expansion, password
+redaction before return, open-shadow traversal, closed-shadow exclusion,
+detached-anchor refusal, distinct node/inspection/wire truncation, byte-bounded
+output, detached-node reclamation with reattachment identity recovery, and API
+immutability. Its current content-free result is 7 initial
+nodes, 6 expanded nodes, 620/374 encoded bytes, and an 881-byte wire-truncated
+result under a 1,024-byte request ceiling.
+
+The synthetic smoke is not live-browser or isolated-world evidence. It cannot
+prove WebKit/WebView2 wrapper identity, content-world separation, frame
+installation, navigation replacement, style/layout equivalence, or teardown;
+those claims remain blocked on the coordinated native adapter and hostile
+fixed-DOM engine qualification. Surrounding-text windows are admitted up to
+8 KiB by the domain contract, but one runtime node field remains capped at
+4 KiB, so a larger single-node context is returned with truthful `text_limit`
+rather than silently widening the hostile wire schema.
 
 ## Remaining M3 work
 
@@ -210,10 +287,11 @@ wire limits.
 2. record actual fixture action-diff token/latency distributions for the pinned
    proof models/tokenizers and bind acknowledgement settlement to the eventual
    model request/response lifecycle adapter;
-3. implement and freeze the immutable isolated-world DOM projection program,
-   then install its already-closed invocation vocabulary after the native M2
-   adapter provides exact world, frame, navigation, cancellation, and teardown
-   joins;
-4. add fixture/runtime hostile tests for page-world bridge access, spoofing,
-   open/closed shadow roots, frame replacement, stale nodes, collisions,
-   mutation pressure, redaction, and release-build exclusion.
+3. install the frozen program and its already-closed invocation vocabulary
+   after the native M2 adapter provides exact world, frame, navigation,
+   cancellation, and teardown joins;
+4. add live-engine hostile tests for page-world bridge access, wrapper identity,
+   spoofing, frame replacement, stale nodes, collisions, mutation pressure,
+   redaction, and teardown/release behavior. Open/closed shadow behavior and
+   source exclusion currently have deterministic synthetic/static coverage but
+   still require that engine evidence.
