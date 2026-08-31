@@ -24,7 +24,7 @@ use crate::{
 /// Absolute number of entries allowed in one semantic delta.
 pub const MAX_SEMANTIC_DIFF_ENTRIES: u16 = 512;
 
-/// Hard entry ceiling for one semantic delta.
+/// Hard record ceiling for one semantic delta.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SemanticDiffBudget {
     max_entries: u16,
@@ -43,7 +43,7 @@ impl SemanticDiffBudget {
         }
     }
 
-    /// Maximum returned entries.
+    /// Maximum semantic entries plus required unchanged-reference rebase records.
     pub const fn max_entries(self) -> u16 {
         self.max_entries
     }
@@ -84,7 +84,7 @@ pub enum SemanticFreshSnapshotReason {
 #[derive(Clone, Eq, PartialEq)]
 pub enum SemanticDiffOutcome {
     /// A complete, confidently formed bounded delta.
-    Diff(SemanticDiff),
+    Diff(Box<SemanticDiff>),
     /// Caller must send a newly encoded full snapshot.
     FreshSnapshot(SemanticFreshSnapshotReason),
 }
@@ -111,6 +111,42 @@ impl SemanticRetiredReferenceId {
     /// No parser or resolver accepts this type as current action authority.
     pub fn model_token(self) -> String {
         format!("old:{}", self.0.model_token())
+    }
+}
+
+/// Required old-to-current reference mapping for an otherwise unchanged node.
+#[derive(Clone, Eq, PartialEq)]
+pub struct SemanticReferenceRebase {
+    frame: SemanticFrameJoin,
+    previous_reference: SemanticRetiredReferenceId,
+    current_reference: SemanticReferenceId,
+}
+
+impl SemanticReferenceRebase {
+    /// Exact unchanged frame authority.
+    pub const fn frame(&self) -> &SemanticFrameJoin {
+        &self.frame
+    }
+
+    /// Explicitly non-actionable reference from the acknowledged baseline.
+    pub const fn previous_reference(&self) -> SemanticRetiredReferenceId {
+        self.previous_reference
+    }
+
+    /// Current actionable reference for the same validated stable node.
+    pub const fn current_reference(&self) -> SemanticReferenceId {
+        self.current_reference
+    }
+}
+
+impl fmt::Debug for SemanticReferenceRebase {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SemanticReferenceRebase")
+            .field("frame", &self.frame)
+            .field("previous_reference", &self.previous_reference)
+            .field("current_reference", &self.current_reference)
+            .finish()
     }
 }
 
@@ -333,16 +369,63 @@ impl fmt::Debug for SemanticDiffEntry {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SemanticDiffStats {
     entries: u16,
+    reference_rebases: u16,
     added: u16,
     removed: u16,
     changed: u16,
     moved: u16,
 }
 
+/// Exact ordered frame freshness represented by one complete semantic delta.
+#[derive(Clone, Eq, PartialEq)]
+pub struct SemanticDiffFrame {
+    frame: SemanticFrameJoin,
+    previous_snapshot: crate::SemanticSnapshotGeneration,
+    current_snapshot: crate::SemanticSnapshotGeneration,
+}
+
+impl SemanticDiffFrame {
+    /// Exact context/document/frame authority.
+    pub const fn frame(&self) -> &SemanticFrameJoin {
+        &self.frame
+    }
+
+    /// Snapshot generation acknowledged by the prior model payload.
+    pub const fn previous_snapshot(&self) -> crate::SemanticSnapshotGeneration {
+        self.previous_snapshot
+    }
+
+    /// Exact current snapshot generation represented by this delta.
+    pub const fn current_snapshot(&self) -> crate::SemanticSnapshotGeneration {
+        self.current_snapshot
+    }
+}
+
+impl fmt::Debug for SemanticDiffFrame {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SemanticDiffFrame")
+            .field("frame", &self.frame)
+            .field("previous_snapshot", &self.previous_snapshot)
+            .field("current_snapshot", &self.current_snapshot)
+            .finish()
+    }
+}
+
 impl SemanticDiffStats {
     /// Total entries.
     pub const fn entries(self) -> u16 {
         self.entries
+    }
+
+    /// Otherwise-unchanged nodes whose snapshot-local reference changed.
+    pub const fn reference_rebases(self) -> u16 {
+        self.reference_rebases
+    }
+
+    /// Total bounded records that must be encoded for this delta.
+    pub const fn records(self) -> u16 {
+        self.entries + self.reference_rebases
     }
 
     /// Added nodes.
@@ -373,8 +456,11 @@ pub struct SemanticDiff {
     previous_generation: SemanticObservationGeneration,
     current_observation: SemanticObservationId,
     current_generation: SemanticObservationGeneration,
+    frames: Vec<SemanticDiffFrame>,
     entries: Vec<SemanticDiffEntry>,
+    reference_rebases: Vec<SemanticReferenceRebase>,
     stats: SemanticDiffStats,
+    current_fingerprint: SemanticObservationFingerprint,
 }
 
 impl SemanticDiff {
@@ -398,14 +484,28 @@ impl SemanticDiff {
         self.current_generation
     }
 
+    /// Exact current frame-boundary preorder with consecutive freshness coordinates.
+    pub fn frames(&self) -> &[SemanticDiffFrame] {
+        &self.frames
+    }
+
     /// Deterministic removed-first then current-frame/current-node order.
     pub fn entries(&self) -> &[SemanticDiffEntry] {
         &self.entries
     }
 
+    /// Current-frame-order mappings required to retire shifted snapshot-local references.
+    pub fn reference_rebases(&self) -> &[SemanticReferenceRebase] {
+        &self.reference_rebases
+    }
+
     /// Content-free aggregate counts.
     pub const fn stats(&self) -> SemanticDiffStats {
         self.stats
+    }
+
+    pub(crate) const fn current_fingerprint(&self) -> &SemanticObservationFingerprint {
+        &self.current_fingerprint
     }
 }
 
@@ -567,6 +667,7 @@ pub fn compute_semantic_diff(
     }
 
     let mut entries = Vec::with_capacity(usize::from(budget.max_entries));
+    let mut reference_rebases = Vec::new();
     for (before, after) in previous.frames().iter().zip(current.frames()) {
         let previous_nodes = node_map(before);
         let current_nodes = node_map(after);
@@ -577,7 +678,7 @@ pub fn compute_semantic_diff(
 
         for node in before.nodes() {
             if !current_nodes.contains_key(&node.key()) {
-                if entries.len() == usize::from(budget.max_entries) {
+                if at_record_limit(&entries, &reference_rebases, budget) {
                     return SemanticDiffOutcome::FreshSnapshot(
                         SemanticFreshSnapshotReason::DiffLimit,
                     );
@@ -600,7 +701,7 @@ pub fn compute_semantic_diff(
         for (current_index, node) in after.nodes().iter().enumerate() {
             let Some((previous_index, previous_node)) = previous_nodes.get(&node.key()).copied()
             else {
-                if entries.len() == usize::from(budget.max_entries) {
+                if at_record_limit(&entries, &reference_rebases, budget) {
                     return SemanticDiffOutcome::FreshSnapshot(
                         SemanticFreshSnapshotReason::DiffLimit,
                     );
@@ -639,12 +740,28 @@ pub fn compute_semantic_diff(
                     current_sibling_ordinal: current_position.1,
                 });
             let kind = match (changes.is_empty(), movement.is_some()) {
-                (true, false) => continue,
+                (true, false) => {
+                    if previous_node.reference() != node.reference() {
+                        if at_record_limit(&entries, &reference_rebases, budget) {
+                            return SemanticDiffOutcome::FreshSnapshot(
+                                SemanticFreshSnapshotReason::DiffLimit,
+                            );
+                        }
+                        reference_rebases.push(SemanticReferenceRebase {
+                            frame: after.frame().clone(),
+                            previous_reference: SemanticRetiredReferenceId(
+                                previous_node.reference(),
+                            ),
+                            current_reference: node.reference(),
+                        });
+                    }
+                    continue;
+                }
                 (false, false) => SemanticDiffEntryKind::Changed,
                 (true, true) => SemanticDiffEntryKind::Moved,
                 (false, true) => SemanticDiffEntryKind::ChangedAndMoved,
             };
-            if entries.len() == usize::from(budget.max_entries) {
+            if at_record_limit(&entries, &reference_rebases, budget) {
                 return SemanticDiffOutcome::FreshSnapshot(SemanticFreshSnapshotReason::DiffLimit);
             }
             entries.push(SemanticDiffEntry {
@@ -664,15 +781,29 @@ pub fn compute_semantic_diff(
         }
     }
 
-    let stats = diff_stats(&entries);
-    SemanticDiffOutcome::Diff(SemanticDiff {
+    let frames = previous
+        .frames()
+        .iter()
+        .zip(current.frames())
+        .map(|(before, after)| SemanticDiffFrame {
+            frame: after.frame().clone(),
+            previous_snapshot: before.generation(),
+            current_snapshot: after.generation(),
+        })
+        .collect();
+    let stats = diff_stats(&entries, &reference_rebases);
+    let current_fingerprint = SemanticObservationFingerprint::from_observation(current);
+    SemanticDiffOutcome::Diff(Box::new(SemanticDiff {
         previous_observation: previous.request().id(),
         previous_generation: previous.request().generation(),
         current_observation: current.request().id(),
         current_generation: current.request().generation(),
+        frames,
         entries,
+        reference_rebases,
         stats,
-    })
+        current_fingerprint,
+    }))
 }
 
 fn scopes_match(previous: &SemanticScope, current: &SemanticScope) -> bool {
@@ -813,9 +944,21 @@ fn changed_fields(previous: &SemanticNode, current: &SemanticNode) -> SemanticNo
     changes
 }
 
-fn diff_stats(entries: &[SemanticDiffEntry]) -> SemanticDiffStats {
+fn at_record_limit(
+    entries: &[SemanticDiffEntry],
+    reference_rebases: &[SemanticReferenceRebase],
+    budget: SemanticDiffBudget,
+) -> bool {
+    entries.len() + reference_rebases.len() == usize::from(budget.max_entries)
+}
+
+fn diff_stats(
+    entries: &[SemanticDiffEntry],
+    reference_rebases: &[SemanticReferenceRebase],
+) -> SemanticDiffStats {
     let mut stats = SemanticDiffStats {
         entries: entries.len() as u16,
+        reference_rebases: reference_rebases.len() as u16,
         added: 0,
         removed: 0,
         changed: 0,
@@ -1373,6 +1516,8 @@ mod tests {
             ]
         );
         assert_eq!(diff.stats().entries(), 4);
+        assert_eq!(diff.stats().reference_rebases(), 0);
+        assert_eq!(diff.stats().records(), 4);
         assert_eq!(diff.stats().removed(), 1);
         assert_eq!(diff.stats().added(), 1);
         assert_eq!(diff.stats().changed(), 1);
@@ -1644,6 +1789,29 @@ mod tests {
         assert_eq!(diff.entries().len(), 1);
         assert_eq!(diff.entries()[0].kind(), SemanticDiffEntryKind::Added);
         assert_eq!(diff.entries()[0].current_sibling_ordinal(), Some(0));
+        assert_eq!(diff.reference_rebases().len(), 2);
+        assert_eq!(diff.stats().records(), 3);
+        assert_eq!(
+            diff.reference_rebases()[0]
+                .previous_reference()
+                .model_token(),
+            "old:@a2"
+        );
+        assert_eq!(
+            diff.reference_rebases()[0]
+                .current_reference()
+                .model_token(),
+            "@a3"
+        );
+        assert_eq!(
+            expect_fresh(compute_semantic_diff(
+                &previous,
+                &acknowledgement,
+                &current,
+                SemanticDiffBudget::try_new(2).expect("budget"),
+            )),
+            SemanticFreshSnapshotReason::DiffLimit
+        );
     }
 
     #[test]

@@ -29,6 +29,7 @@ mod profile_lease;
 mod protocol;
 mod semantic;
 mod semantic_diff;
+mod semantic_diff_model;
 mod semantic_model;
 mod semantic_observation;
 mod semantic_wire;
@@ -110,9 +111,14 @@ pub use semantic::{
 };
 pub use semantic_diff::{
     compute_semantic_diff, SemanticDiff, SemanticDiffBudget, SemanticDiffBudgetError,
-    SemanticDiffEntry, SemanticDiffEntryKind, SemanticDiffOutcome, SemanticDiffStats,
-    SemanticFreshSnapshotReason, SemanticNodeChange, SemanticNodeChanges, SemanticNodeMove,
-    SemanticObservationAcknowledgement, SemanticRetiredReferenceId, MAX_SEMANTIC_DIFF_ENTRIES,
+    SemanticDiffEntry, SemanticDiffEntryKind, SemanticDiffFrame, SemanticDiffOutcome,
+    SemanticDiffStats, SemanticFreshSnapshotReason, SemanticNodeChange, SemanticNodeChanges,
+    SemanticNodeMove, SemanticObservationAcknowledgement, SemanticReferenceRebase,
+    SemanticRetiredReferenceId, MAX_SEMANTIC_DIFF_ENTRIES,
+};
+pub use semantic_diff_model::{
+    encode_semantic_diff, SemanticDiffEncodingStats, SemanticDiffModelPayload, SemanticEncodedDiff,
+    SEMANTIC_DIFF_MODEL_SCHEMA_VERSION,
 };
 pub use semantic_model::{
     encode_semantic_observation, SemanticEncodedObservation, SemanticEncodingStats,
@@ -120,9 +126,9 @@ pub use semantic_model::{
     SemanticModelEncodingError, SemanticModelPayload, SemanticTokenCountQuality,
     SemanticTokenCountRequirement, SemanticTokenCounter, SemanticTokenCounterError,
     SemanticTokenMeasurement, SemanticTokenMeasurementError, SemanticTokenizerRevision,
-    SemanticTokenizerRevisionError, INITIAL_SEMANTIC_MODEL_TOKEN_TARGET, MAX_SEMANTIC_MODEL_BYTES,
-    MAX_SEMANTIC_MODEL_TOKENS, MAX_SEMANTIC_TOKENIZER_REVISION_BYTES,
-    SEMANTIC_MODEL_SCHEMA_VERSION,
+    SemanticTokenizerRevisionError, ACTION_SEMANTIC_DIFF_TOKEN_TARGET,
+    INITIAL_SEMANTIC_MODEL_TOKEN_TARGET, MAX_SEMANTIC_MODEL_BYTES, MAX_SEMANTIC_MODEL_TOKENS,
+    MAX_SEMANTIC_TOKENIZER_REVISION_BYTES, SEMANTIC_MODEL_SCHEMA_VERSION,
 };
 pub use semantic_observation::{
     SemanticExpansionKind, SemanticFrameBoundary, SemanticFrameBoundaryStatus,

@@ -3,8 +3,9 @@
 Status: bounded semantic identity, snapshot, opaque-reference, hostile wire
 decoder, progressive scopes, and deterministic multi-frame assembly
 plus compact model encoding/token-admission ports and acknowledged stable-id
-diffs implemented; fixed isolated-world page program, native installation,
-compact diff encoding, and actual pinned provider token measurements pending.
+diffs plus compact diff token-admission implemented; fixed isolated-world page
+program, native installation, and actual pinned provider token measurements
+pending.
 
 This evidence records deterministic Rust contract properties only. It does not
 claim that arbitrary pages have been instrumented or observed on either
@@ -125,6 +126,25 @@ platform.
   current frame/node order and have content-free aggregate metrics. Movement
   detection compares relative order among shared stable siblings, so a simple
   insertion or removal does not create a cascade of false move entries.
+- Snapshot-local references for otherwise unchanged nodes are never silently
+  left stale. A bounded old-to-current rebase record is emitted whenever an
+  unchanged stable node's `@aN` shifts, and those records count against the
+  same delta ceiling. Excessive rebase fan-out therefore causes a typed fresh
+  snapshot rather than an incomplete reference map.
+- Deterministic `ZDIFF1` output carries the untrusted-content label, exact
+  previous/current observation generations, frame-boundary preorder with
+  canonical origin/trust and consecutive snapshot freshness, changed-field
+  values, tree movement, add/remove records, and required unchanged-reference
+  rebases. It contains no internal stable key, selector, HTML, script, native
+  handle, profile identity, or provider secret. Optional-field removal and
+  empty state/operation inventories have explicit unambiguous spellings.
+- Diff bytes remain private until the selected tokenizer revision admits them
+  under the same exact/provider-estimate quality rules as full observations.
+  Normal exact and provider-estimate action budgets cap encoded bytes at 16 KiB
+  and measured tokens at 200. Committed diff delivery acknowledges the exact
+  current observation for the next baseline; refusal or cancellation cannot.
+  This is the production admission seam, not yet an actual provider/tokenizer
+  measurement claim.
 
 The crate remains a zero-idle-cost functional core: decoding happens only for
 an admitted observation and creates no timer, thread, page, queue, or worker.
@@ -156,15 +176,19 @@ diagnostics. Diff coverage includes commit-only acknowledgement, exact-content
 digest binding, current-reference rebasing, non-actionable retired references,
 field changes, sibling moves, add/remove ordering, empty deltas, context and
 generation changes, truncation, stable-key role reuse/loss, entry ceilings,
-and fresh-snapshot fallback without leaked page content.
+unchanged-reference shifts and fan-out limits, compact diff determinism and
+escaping, current frame freshness, byte refusal without partial output,
+exact/estimated quality and revision admission, the 200-token target gate,
+commit-only next-baseline acknowledgement, and fresh-snapshot fallback without
+leaked page content.
 
 ## Remaining M3 work
 
 1. pin the first OpenAI and Anthropic proof model/tokenizer revisions, implement
    their trusted counters, and record actual fixture token/latency measurements;
-2. add deterministic compact diff encoding, enforce the 200-token action-diff
-   target with the same exact/estimated provider accounting boundary, and bind
-   acknowledgements to the eventual model request/response lifecycle adapter;
+2. record actual fixture action-diff token/latency distributions for the pinned
+   proof models/tokenizers and bind acknowledgement settlement to the eventual
+   model request/response lifecycle adapter;
 3. implement and freeze the immutable isolated-world runtime plus closed
    invocation vocabulary after the native M2 adapter provides exact world,
    frame, navigation, cancellation, and teardown joins;

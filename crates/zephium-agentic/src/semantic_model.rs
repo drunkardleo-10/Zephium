@@ -26,6 +26,8 @@ pub const MAX_SEMANTIC_MODEL_BYTES: u32 = 512 * 1024;
 pub const MAX_SEMANTIC_MODEL_TOKENS: u32 = 128 * 1024;
 /// Initial-snapshot token target from the product qualification contract.
 pub const INITIAL_SEMANTIC_MODEL_TOKEN_TARGET: u32 = 2_000;
+/// Normal action-diff token target from the product qualification contract.
+pub const ACTION_SEMANTIC_DIFF_TOKEN_TARGET: u32 = 200;
 /// Maximum bounded provider/model/tokenizer revision label bytes.
 pub const MAX_SEMANTIC_TOKENIZER_REVISION_BYTES: usize = 96;
 
@@ -60,6 +62,20 @@ impl SemanticModelEncodingBudget {
     pub const INITIAL_PROVIDER_ESTIMATE: Self = Self {
         max_bytes: 32 * 1024,
         max_tokens: INITIAL_SEMANTIC_MODEL_TOKEN_TARGET,
+        token_requirement: SemanticTokenCountRequirement::ProviderEstimateAllowed,
+    };
+
+    /// Normal action-diff budget for a provider with an exact counting path.
+    pub const ACTION_DIFF_EXACT: Self = Self {
+        max_bytes: 16 * 1024,
+        max_tokens: ACTION_SEMANTIC_DIFF_TOKEN_TARGET,
+        token_requirement: SemanticTokenCountRequirement::Exact,
+    };
+
+    /// Normal action-diff budget for an explicitly estimated provider count.
+    pub const ACTION_DIFF_PROVIDER_ESTIMATE: Self = Self {
+        max_bytes: 16 * 1024,
+        max_tokens: ACTION_SEMANTIC_DIFF_TOKEN_TARGET,
         token_requirement: SemanticTokenCountRequirement::ProviderEstimateAllowed,
     };
 
@@ -319,7 +335,7 @@ impl SemanticEncodedObservation {
         let measurement = counter
             .count_tokens(&self.content)
             .map_err(SemanticModelEncodingError::TokenCounter)?;
-        self.validate_measurement(&measurement, expected_revision)?;
+        validate_semantic_token_measurement(&self.budget, &measurement, expected_revision)?;
         Ok(measurement)
     }
 
@@ -337,23 +353,23 @@ impl SemanticEncodedObservation {
             fingerprint: self.fingerprint,
         })
     }
+}
 
-    fn validate_measurement(
-        &self,
-        measurement: &SemanticTokenMeasurement,
-        expected_revision: &SemanticTokenizerRevision,
-    ) -> Result<(), SemanticModelEncodingError> {
-        if measurement.revision != *expected_revision {
-            return Err(SemanticModelEncodingError::TokenizerRevisionMismatch);
-        }
-        if !measurement.quality.satisfies(self.budget.token_requirement) {
-            return Err(SemanticModelEncodingError::TokenQuality);
-        }
-        if measurement.tokens > self.budget.max_tokens {
-            return Err(SemanticModelEncodingError::TokenLimit);
-        }
-        Ok(())
+pub(crate) fn validate_semantic_token_measurement(
+    budget: &SemanticModelEncodingBudget,
+    measurement: &SemanticTokenMeasurement,
+    expected_revision: &SemanticTokenizerRevision,
+) -> Result<(), SemanticModelEncodingError> {
+    if measurement.revision != *expected_revision {
+        return Err(SemanticModelEncodingError::TokenizerRevisionMismatch);
     }
+    if !measurement.quality.satisfies(budget.token_requirement) {
+        return Err(SemanticModelEncodingError::TokenQuality);
+    }
+    if measurement.tokens > budget.max_tokens {
+        return Err(SemanticModelEncodingError::TokenLimit);
+    }
+    Ok(())
 }
 
 impl fmt::Debug for SemanticEncodedObservation {
@@ -582,7 +598,7 @@ pub fn encode_semantic_observation(
     })
 }
 
-fn checked_write(
+pub(crate) fn checked_write(
     output: &mut BoundedModelBuffer,
     arguments: fmt::Arguments<'_>,
 ) -> Result<(), SemanticModelEncodingError> {
@@ -591,7 +607,7 @@ fn checked_write(
         .map_err(|_| SemanticModelEncodingError::OutputLimit)
 }
 
-fn write_quoted(
+pub(crate) fn write_quoted(
     output: &mut BoundedModelBuffer,
     value: &str,
 ) -> Result<(), SemanticModelEncodingError> {
@@ -616,7 +632,7 @@ fn write_quoted(
     output.push("\"")
 }
 
-fn write_states(
+pub(crate) fn write_states(
     output: &mut BoundedModelBuffer,
     states: crate::SemanticStates,
 ) -> Result<(), SemanticModelEncodingError> {
@@ -640,7 +656,7 @@ fn write_states(
     Ok(())
 }
 
-fn write_operations(
+pub(crate) fn write_operations(
     output: &mut BoundedModelBuffer,
     operations: crate::SemanticOperations,
 ) -> Result<(), SemanticModelEncodingError> {
@@ -662,7 +678,7 @@ fn write_operations(
     Ok(())
 }
 
-fn write_value(
+pub(crate) fn write_value(
     output: &mut BoundedModelBuffer,
     value: &SemanticValueSummary,
 ) -> Result<(), SemanticModelEncodingError> {
@@ -713,7 +729,7 @@ fn scope_label(scope: &SemanticScope) -> &'static str {
     }
 }
 
-fn frame_trust_label(trust: SemanticFrameTrust) -> &'static str {
+pub(crate) fn frame_trust_label(trust: SemanticFrameTrust) -> &'static str {
     match trust {
         SemanticFrameTrust::SameOrigin => "same",
         SemanticFrameTrust::CrossOriginIsolated => "cross_isolated",
@@ -732,7 +748,7 @@ fn completeness_label(completeness: SemanticCompleteness) -> &'static str {
     }
 }
 
-fn role_label(role: SemanticRole) -> &'static str {
+pub(crate) fn role_label(role: SemanticRole) -> &'static str {
     match role {
         SemanticRole::Group => "group",
         SemanticRole::Document => "document",
@@ -767,7 +783,7 @@ fn role_label(role: SemanticRole) -> &'static str {
     }
 }
 
-fn sensitivity_label(sensitivity: SemanticSensitivity) -> &'static str {
+pub(crate) fn sensitivity_label(sensitivity: SemanticSensitivity) -> &'static str {
     match sensitivity {
         SemanticSensitivity::Public => "public",
         SemanticSensitivity::Sensitive => "sensitive",
@@ -775,7 +791,7 @@ fn sensitivity_label(sensitivity: SemanticSensitivity) -> &'static str {
     }
 }
 
-fn source_label(trust: SemanticTrust) -> &'static str {
+pub(crate) fn source_label(trust: SemanticTrust) -> &'static str {
     match trust {
         SemanticTrust::UntrustedPage => "page",
         SemanticTrust::BrowserDerived => "browser",
@@ -799,25 +815,25 @@ fn frame_unsupported_label(reason: SemanticFrameUnsupported) -> &'static str {
     }
 }
 
-struct BoundedModelBuffer {
+pub(crate) struct BoundedModelBuffer {
     content: String,
     max_bytes: usize,
 }
 
 impl BoundedModelBuffer {
-    fn new(capacity: usize, max_bytes: u32) -> Self {
+    pub(crate) fn new(capacity: usize, max_bytes: u32) -> Self {
         Self {
             content: String::with_capacity(capacity),
             max_bytes: max_bytes as usize,
         }
     }
 
-    fn push(&mut self, value: &str) -> Result<(), SemanticModelEncodingError> {
+    pub(crate) fn push(&mut self, value: &str) -> Result<(), SemanticModelEncodingError> {
         self.write_str(value)
             .map_err(|_| SemanticModelEncodingError::OutputLimit)
     }
 
-    fn finish(self) -> String {
+    pub(crate) fn finish(self) -> String {
         self.content
     }
 }
