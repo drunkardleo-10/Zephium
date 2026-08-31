@@ -221,6 +221,9 @@ jobs:
       - name: Enforce vendored security-fork sources and fixture provenance
         run: cargo xtask check-security-fork-locks
 
+      - name: Enforce agentic diagnostic release exclusion
+        run: cargo xtask check-agentic-probe-boundary
+
       - uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2
         with:
           tool: cargo-nextest@0.9.137,cargo-machete@0.9.2,cargo-deny@0.20.2
@@ -242,6 +245,11 @@ jobs:
 
       - name: cargo clippy
         run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Test the bounded agentic probe contract and fixtures
+        run: |
+          cargo test --locked -p zephium-agentic --features probe-harness
+          cargo clippy --locked -p zephium-agentic --all-targets --features probe-harness -- -D warnings
 
       - name: Clippy dormant TUF blocker graph
         run: |
@@ -440,6 +448,20 @@ jobs:
           cargo run --locked -p zephium-engine \
             --features native-isolation-probes \
             --bin macos-principal-isolation-probe
+
+      # This matrix never requests focus, OS accessibility authority, an
+      # external URL, or a persistent profile. A fresh loopback document per
+      # row prevents sticky user activation from contaminating later results.
+      - name: Prove hidden fixed-DOM input remains untrusted and focus-isolated
+        if: runner.os == 'macOS'
+        timeout-minutes: 3
+        run: |
+          cargo clippy --locked -p zephium-engine \
+            --features native-agentic-input-probe \
+            --bin macos-agentic-input-probe -- -D warnings
+          cargo run --locked -p zephium-engine \
+            --features native-agentic-input-probe \
+            --bin macos-agentic-input-probe -- --ci-hidden-fixed-dom
 
       # This is deliberately a feature-gated public-API proof, not product
       # enablement. CI requires actual execution so an image regression below

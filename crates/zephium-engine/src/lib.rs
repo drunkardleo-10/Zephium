@@ -6,6 +6,9 @@ mod navigation_epoch;
 mod pane_geometry;
 mod platform;
 
+#[cfg(all(feature = "native-agentic-input-probe", not(debug_assertions)))]
+compile_error!("the native agentic input probe is forbidden in optimized builds");
+
 #[cfg(target_os = "macos")]
 pub use platform::macos::{
     passkey_authorization_state as macos_passkey_authorization_state,
@@ -20,6 +23,22 @@ macro_rules! diagnostic {
 }
 
 pub(crate) use diagnostic;
+
+/// Runs one bounded macOS native-input matrix on the process main thread.
+///
+/// This diagnostic API is absent from ordinary and optimized builds. It
+/// accepts only the closed probe vocabulary and never configures page IPC,
+/// extensions, userscripts, a persistent profile, or arbitrary evaluation.
+#[cfg(all(target_os = "macos", feature = "native-agentic-input-probe"))]
+#[doc(hidden)]
+pub fn run_macos_agentic_input_matrix(
+    request_id: u64,
+    matrix: &zephium_agentic::RunMatrixRequest,
+    permit: &zephium_agentic::ProbeRunPermit,
+    poll_control: impl FnMut(),
+) -> Result<zephium_agentic::RunEvidence, zephium_agentic::ProbeFailure> {
+    platform::macos::run_agentic_input_matrix(request_id, matrix, permit, poll_control)
+}
 
 #[cfg(target_os = "windows")]
 pub use platform::windows::{

@@ -10,9 +10,10 @@ use std::time::Duration;
 use thiserror::Error;
 
 const MAX_REQUEST_BYTES: usize = 4 * 1_024;
-const MAX_REQUESTS: usize = 256;
+// A maximum 112-row matrix reloads the top document for activation isolation;
+// each load may fetch the fixed child frame and one favicon.
+const MAX_REQUESTS: usize = 512;
 const IO_TIMEOUT: Duration = Duration::from_secs(1);
-const ACCEPT_POLL: Duration = Duration::from_millis(2);
 
 /// Closed fixture routes. Arbitrary files and caller-supplied responses are impossible.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -47,7 +48,6 @@ impl FixtureServer {
     /// Starts a server bound only to an ephemeral IPv4 loopback port.
     pub fn start() -> Result<Self, FixtureServerError> {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
-        listener.set_nonblocking(true)?;
         let address = listener.local_addr()?;
         if !address.ip().is_loopback() {
             return Err(FixtureServerError::NonLoopbackBind);
@@ -89,7 +89,7 @@ impl FixtureServer {
 
     fn stop_and_join(&mut self) {
         self.stop.store(true, Ordering::Release);
-        // Wake the nonblocking loop promptly. No bytes are sent and this
+        // Wake the blocking accept promptly. No bytes are sent and this
         // connection remains loopback-only.
         let _ = TcpStream::connect_timeout(&self.address, Duration::from_millis(50));
         if let Some(thread) = self.thread.take() {
@@ -111,6 +111,9 @@ fn serve(listener: TcpListener, stop: &AtomicBool, failed: &AtomicBool) {
     while !stop.load(Ordering::Acquire) {
         match listener.accept() {
             Ok((stream, peer)) => {
+                if stop.load(Ordering::Acquire) {
+                    return;
+                }
                 if !peer.ip().is_loopback() {
                     failed.store(true, Ordering::Release);
                     continue;
@@ -126,9 +129,6 @@ fn serve(listener: TcpListener, stop: &AtomicBool, failed: &AtomicBool) {
                     failed.store(true, Ordering::Release);
                 }
             }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                thread::sleep(ACCEPT_POLL);
-            }
             Err(_) => {
                 failed.store(true, Ordering::Release);
                 return;
@@ -138,6 +138,9 @@ fn serve(listener: TcpListener, stop: &AtomicBool, failed: &AtomicBool) {
 }
 
 fn handle(mut stream: TcpStream) -> Result<(), std::io::Error> {
+    // Keep this explicit if the listener implementation changes: each
+    // connection uses blocking I/O under a hard deadline.
+    stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(IO_TIMEOUT))?;
     stream.set_write_timeout(Some(IO_TIMEOUT))?;
     let mut request = [0_u8; MAX_REQUEST_BYTES];
@@ -272,10 +275,11 @@ const NATIVE_INPUT_HTML: &str = r###"<!doctype html>
     ]);
     let state;
     const emptyState = (caseName) => ({
-      caseName, events: [], actualTarget: null, targetVerified: false,
+      case: caseName, events: [], actualTarget: null, targetVerified: false,
       activeBefore: navigator.userActivation ? navigator.userActivation.isActive : false,
       activeDuringEvent: false, activeAfterEvent: false, activeAfterSettle: false,
       hasBeenActive: navigator.userActivation ? navigator.userActivation.hasBeenActive : false,
+      activationCaptureScheduled: false,
       navigationObserved: false, popupObserved: false, clipboardGate: 'not_applicable',
       buttonCount: 0, inputLength: 0, contentLength: 0, selectedIndex: 0,
       dropObserved: false
@@ -315,6 +319,17 @@ const NATIVE_INPUT_HTML: &str = r###"<!doctype html>
         .replace('dragstart', 'drag_start').replace('dragenter', 'drag_enter')
         .replace('dragover', 'drag_over').replace('dragend', 'drag_end'),
         isTrusted: event.isTrusted, target});
+      if (!state.activationCaptureScheduled && (event.type === 'click' || event.type === 'keydown')) {
+        state.activationCaptureScheduled = true;
+        queueMicrotask(() => {
+          state.activeAfterEvent = !!(navigator.userActivation && navigator.userActivation.isActive);
+          state.hasBeenActive = !!(navigator.userActivation && navigator.userActivation.hasBeenActive);
+        });
+        setTimeout(() => {
+          state.activeAfterSettle = !!(navigator.userActivation && navigator.userActivation.isActive);
+          state.hasBeenActive = !!(navigator.userActivation && navigator.userActivation.hasBeenActive);
+        }, 50);
+      }
     };
     for (const kind of eventKinds) document.addEventListener(kind, record, true);
 
@@ -359,17 +374,19 @@ const NATIVE_INPUT_HTML: &str = r###"<!doctype html>
         content_editable: 'content_editable', select: 'select', pointer_mouse: 'button',
         keyboard: 'text_input', transient_activation: 'activation_button', popup: 'popup_button',
         clipboard_gate: 'clipboard_button', drag: 'drop_target', iframe: 'frame_button',
-        open_shadow: 'open_shadow_button', closed_shadow: 'closed_shadow_host'})[state.caseName];
+        open_shadow: 'open_shadow_button', closed_shadow: 'closed_shadow_host'})[state.case];
       const effect = ({button: state.buttonCount > 0, link: state.navigationObserved,
         text_input: state.inputLength > 7, content_editable: state.contentLength > 7,
         select: state.selectedIndex === 1, pointer_mouse: state.events.some(e => e.kind === 'click'),
         keyboard: state.events.some(e => e.kind === 'key_down'),
-        transient_activation: state.events.some(e => e.kind === 'click'), popup: state.popupObserved,
+        transient_activation: state.events.some(e => e.kind === 'click'),
+        popup: state.events.some(e => e.kind === 'click'),
         clipboard_gate: state.clipboardGate !== 'not_applicable', drag: state.dropObserved,
         iframe: state.actualTarget === 'frame_button', open_shadow: state.actualTarget === 'open_shadow_button',
-        closed_shadow: state.actualTarget === 'closed_shadow_host'})[state.caseName] === true;
-      state.targetVerified = state.actualTarget === expected && effect;
-      state.activeAfterEvent = !!(navigator.userActivation && navigator.userActivation.isActive);
+        closed_shadow: state.actualTarget === 'closed_shadow_host'})[state.case] === true;
+      const intendedTargetObserved = state.events.some(event => event.target === expected);
+      if (intendedTargetObserved) state.actualTarget = expected;
+      state.targetVerified = intendedTargetObserved && effect;
       state.hasBeenActive = !!(navigator.userActivation && navigator.userActivation.hasBeenActive);
     };
     const api = Object.freeze({
@@ -383,7 +400,6 @@ const NATIVE_INPUT_HTML: &str = r###"<!doctype html>
       },
       readJson() {
         verify();
-        state.activeAfterSettle = !!(navigator.userActivation && navigator.userActivation.isActive);
         return JSON.stringify(state);
       }
     });
@@ -442,10 +458,18 @@ mod tests {
         let server = FixtureServer::start().expect("server");
         assert!(server.address.ip().is_loopback());
         let input = fetch(&server, FixtureRoute::NativeInput);
-        assert!(input.starts_with("HTTP/1.1 200 OK"));
+        assert!(
+            input.starts_with("HTTP/1.1 200 OK"),
+            "unexpected fixed-route status: {:?}",
+            input.lines().next()
+        );
         assert!(input.contains("__zephiumNativeInputFixtureV1"));
         let hostile = fetch(&server, FixtureRoute::HostilePage);
-        assert!(hostile.starts_with("HTTP/1.1 200 OK"));
+        assert!(
+            hostile.starts_with("HTTP/1.1 200 OK"),
+            "unexpected hostile-route status: {:?}",
+            hostile.lines().next()
+        );
         assert!(server.is_healthy());
         server.shutdown().expect("clean shutdown");
     }
@@ -461,5 +485,22 @@ mod tests {
         stream.read_to_string(&mut response).expect("response");
         assert!(response.starts_with("HTTP/1.1 404 Not Found"));
         assert!(!response.contains("token=value"));
+    }
+
+    #[test]
+    fn fragmented_request_headers_are_read_under_the_connection_deadline() {
+        let server = FixtureServer::start().expect("server");
+        let mut stream = TcpStream::connect(server.address).expect("connect");
+        stream
+            .write_all(b"GET /native-input-v1.html HTTP/1.1\r\n")
+            .expect("first fragment");
+        thread::sleep(Duration::from_millis(5));
+        stream
+            .write_all(b"Host: 127.0.0.1\r\n\r\n")
+            .expect("second fragment");
+        let mut response = String::new();
+        stream.read_to_string(&mut response).expect("response");
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        server.shutdown().expect("clean shutdown");
     }
 }

@@ -8,7 +8,7 @@ use thiserror::Error;
 use crate::{FixtureCase, InputBackend, PresentationState, ProbeFailure, RunEvidence};
 
 /// Current native-probe protocol version.
-pub const PROBE_PROTOCOL_VERSION: u16 = 1;
+pub const PROBE_PROTOCOL_VERSION: u16 = 2;
 /// Maximum bytes accepted for one request line, including a trailing newline.
 pub const MAX_PROTOCOL_INPUT_BYTES: usize = 8 * 1_024;
 /// Maximum bytes emitted for one response line, including a trailing newline.
@@ -31,7 +31,8 @@ pub struct ProbeRequest {
 }
 
 impl ProbeRequest {
-    fn validate(&self) -> Result<(), ProbeProtocolError> {
+    /// Revalidates a request constructed in-process rather than decoded.
+    pub fn validate(&self) -> Result<(), ProbeProtocolError> {
         if self.protocol_version != PROBE_PROTOCOL_VERSION {
             return Err(ProbeProtocolError::UnsupportedVersion);
         }
@@ -85,7 +86,8 @@ pub struct RunMatrixRequest {
 }
 
 impl RunMatrixRequest {
-    fn validate(&self) -> Result<(), ProbeProtocolError> {
+    /// Revalidates all list, uniqueness, and Cartesian-product ceilings.
+    pub fn validate(&self) -> Result<(), ProbeProtocolError> {
         if self.cases.is_empty() || self.cases.len() > MAX_CASES_PER_REQUEST {
             return Err(ProbeProtocolError::CaseLimit);
         }
@@ -192,7 +194,7 @@ impl HelloReply {
     /// Returns the exact current negotiation response.
     pub fn current() -> Self {
         Self {
-            evidence_schema_version: 1,
+            evidence_schema_version: 2,
             max_input_bytes: MAX_PROTOCOL_INPUT_BYTES as u32,
             max_output_bytes: MAX_PROTOCOL_OUTPUT_BYTES as u32,
             max_cases: MAX_CASES_PER_REQUEST as u8,
@@ -370,10 +372,19 @@ mod tests {
 
     #[test]
     fn multiple_jsonl_records_are_rejected() {
-        let input = b"{\"protocol_version\":1}\n{\"protocol_version\":1}\n";
+        let input = b"{\"protocol_version\":2}\n{\"protocol_version\":2}\n";
         assert!(matches!(
             decode_request_line(input),
             Err(ProbeProtocolError::InvalidFraming)
+        ));
+    }
+
+    #[test]
+    fn prior_popup_ambiguous_protocol_is_rejected() {
+        let input = br#"{"protocol_version":1,"request_id":7,"command":{"hello":{}}}"#;
+        assert!(matches!(
+            decode_request_line(input),
+            Err(ProbeProtocolError::UnsupportedVersion)
         ));
     }
 

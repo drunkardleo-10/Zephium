@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "protocol_version": 1,
+  "protocol_version": 2,
   "reviewed_on": "2026-08-31",
-  "status": "pending_native_probe_execution",
+  "status": "macos_adapter_implemented_device_and_windows_evidence_pending",
   "fixture_cases": [
     "button",
     "link",
@@ -32,7 +32,8 @@
     "native_key_focus",
     "browse_focus_theft",
     "transient_activation_lifetime",
-    "popup_observation",
+    "popup_request",
+    "popup_admitted_page",
     "clipboard_gate_without_contents",
     "resource_counts",
     "teardown"
@@ -50,6 +51,27 @@
     "windows_composition_input",
     "windows_cdp_input",
     "human_baseline"
+  ],
+  "deterministic_ci": {
+    "platform": "macos",
+    "presentation": "hidden",
+    "backend": "fixed_dom_recipe",
+    "cases": 14,
+    "required_invariants": [
+      "fresh_document_per_row",
+      "zero_trusted_events",
+      "zero_transient_activation",
+      "zero_focus_theft",
+      "zero_admitted_popups",
+      "zero_retained_native_views",
+      "drained_teardown"
+    ]
+  },
+  "blocking_evidence": [
+    "authorized_named_macos_device_matrix",
+    "physical_windows_adapter_and_matrix",
+    "one_authorized_difficult_real_site_per_platform",
+    "named_device_browse_baselines"
   ],
   "results": [],
   "backend_order_decisions": [],

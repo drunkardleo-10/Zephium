@@ -218,7 +218,9 @@ pub struct TargetEvidence {
     pub target_verified: bool,
     /// Whether a same-document or committed navigation was observed.
     pub navigation_observed: bool,
-    /// Whether the popup attempt produced a native page.
+    /// Whether the native popup policy callback received a request.
+    pub popup_requested: bool,
+    /// Whether the popup attempt produced an admitted native page.
     pub popup_observed: bool,
     /// Privacy-preserving clipboard gate result; clipboard contents are absent.
     pub clipboard_gate: GateOutcome,
@@ -333,8 +335,22 @@ impl RunEvidence {
             }
             validate_resource(evidence.resources_before)?;
             validate_resource(evidence.resources_after)?;
+            if evidence.target.intended != evidence.case.target()
+                || (evidence.target.target_verified
+                    && evidence.target.actual != Some(evidence.target.intended))
+            {
+                return Err(EvidenceValidationError::InvalidTargetProof);
+            }
+            if evidence.case != FixtureCase::Popup
+                && (evidence.target.popup_requested || evidence.target.popup_observed)
+            {
+                return Err(EvidenceValidationError::InvalidPopupEvidence);
+            }
             if evidence.outcome == CaseOutcome::Verified && !evidence.target.target_verified {
                 return Err(EvidenceValidationError::UnverifiedSuccess);
+            }
+            if !capability_backends.contains(&evidence.backend) {
+                return Err(EvidenceValidationError::MissingCapability);
             }
         }
         if self.peak_queue_depth as usize > MAX_CASE_EVIDENCE {
@@ -362,7 +378,11 @@ fn validate_resource(resource: ResourceEvidence) -> Result<(), EvidenceValidatio
 }
 
 fn validate_teardown(teardown: TeardownEvidence) -> Result<(), EvidenceValidationError> {
-    if teardown.retained_native_views > 48 || teardown.cleanup_ms > MAX_CASE_DURATION_MS {
+    if teardown.retained_native_views > 48
+        || teardown.cleanup_ms > MAX_CASE_DURATION_MS
+        || teardown.view_closed != (teardown.retained_native_views == 0)
+        || (teardown.view_closed && !teardown.work_drained)
+    {
         return Err(EvidenceValidationError::InvalidTeardown);
     }
     Ok(())
@@ -450,6 +470,9 @@ pub enum EvidenceValidationError {
     /// One backend appeared more than once in capability inventory.
     #[error("duplicate backend capability")]
     DuplicateCapability,
+    /// A case used a backend absent from the run capability inventory.
+    #[error("case backend is absent from capability inventory")]
+    MissingCapability,
     /// Case evidence exceeded the per-run ceiling.
     #[error("too many case observations")]
     TooManyCases,
@@ -462,6 +485,12 @@ pub enum EvidenceValidationError {
     /// A verified outcome lacked independent target proof.
     #[error("verified outcome lacks target verification")]
     UnverifiedSuccess,
+    /// Intended, actual, and independently verified target fields disagreed.
+    #[error("invalid target proof")]
+    InvalidTargetProof,
+    /// Popup request/admission evidence appeared on a non-popup case.
+    #[error("invalid popup evidence")]
+    InvalidPopupEvidence,
     /// One case exceeded its absolute duration ceiling.
     #[error("case duration exceeded")]
     CaseDurationExceeded,
@@ -540,6 +569,7 @@ mod tests {
                     actual: Some(FixtureTarget::Button),
                     target_verified: true,
                     navigation_observed: false,
+                    popup_requested: false,
                     popup_observed: false,
                     clipboard_gate: GateOutcome::NotApplicable,
                 },
@@ -574,6 +604,47 @@ mod tests {
         assert_eq!(
             evidence.validate().unwrap_err(),
             EvidenceValidationError::UnverifiedSuccess
+        );
+    }
+
+    #[test]
+    fn target_popup_and_capability_proofs_are_joined() {
+        let mut wrong_target = evidence();
+        wrong_target.cases[0].target.intended = FixtureTarget::Link;
+        assert_eq!(
+            wrong_target.validate().unwrap_err(),
+            EvidenceValidationError::InvalidTargetProof
+        );
+
+        let mut popup_on_button = evidence();
+        popup_on_button.cases[0].target.popup_requested = true;
+        assert_eq!(
+            popup_on_button.validate().unwrap_err(),
+            EvidenceValidationError::InvalidPopupEvidence
+        );
+
+        let mut missing_capability = evidence();
+        missing_capability.capabilities.clear();
+        assert_eq!(
+            missing_capability.validate().unwrap_err(),
+            EvidenceValidationError::MissingCapability
+        );
+    }
+
+    #[test]
+    fn teardown_release_and_drain_claims_must_agree() {
+        let mut retained = evidence();
+        retained.teardown.retained_native_views = 1;
+        assert_eq!(
+            retained.validate().unwrap_err(),
+            EvidenceValidationError::InvalidTeardown
+        );
+
+        let mut undrained = evidence();
+        undrained.teardown.work_drained = false;
+        assert_eq!(
+            undrained.validate().unwrap_err(),
+            EvidenceValidationError::InvalidTeardown
         );
     }
 

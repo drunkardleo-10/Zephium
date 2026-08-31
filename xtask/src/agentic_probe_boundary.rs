@@ -8,18 +8,108 @@ use serde::Deserialize;
 
 const AGENTIC_MANIFEST: &str = "crates/zephium-agentic/Cargo.toml";
 const AGENTIC_ROOT: &str = "crates/zephium-agentic/src/lib.rs";
+const ENGINE_MANIFEST: &str = "crates/zephium-engine/Cargo.toml";
+const ENGINE_ROOT: &str = "crates/zephium-engine/src/lib.rs";
+const ENGINE_MACOS_MODULE: &str = "crates/zephium-engine/src/platform/macos/mod.rs";
+const ENGINE_PROBE_BINARY: &str = "crates/zephium-engine/src/bin/macos_agentic_input_probe.rs";
+const ENGINE_PROBE_BINARY_MANIFEST_PATH: &str = "src/bin/macos_agentic_input_probe.rs";
 const SHIPPING_ROOTS: [&str; 2] = ["desktop", "crates/zephium-app"];
 const RELEASE_REFUSAL: &str = concat!(
     "#[cfg(all(feature=\"probe-harness\",not(debug_assertions)))]",
     "compile_error!(\"theagenticprobeharnessisforbiddeninoptimizedbuilds\");"
 );
+const ENGINE_RELEASE_REFUSAL: &str = concat!(
+    "#[cfg(all(feature=\"native-agentic-input-probe\",not(debug_assertions)))]",
+    "compile_error!(\"thenativeagenticinputprobeisforbiddeninoptimizedbuilds\");"
+);
 
 pub(crate) fn check(repository: &Path) -> Result<(), String> {
     validate_manifest(&read(repository.join(AGENTIC_MANIFEST))?)?;
     validate_root(&read(repository.join(AGENTIC_ROOT))?)?;
+    validate_engine_manifest(&read(repository.join(ENGINE_MANIFEST))?)?;
+    validate_engine_root(&read(repository.join(ENGINE_ROOT))?)?;
+    validate_engine_macos_module(&read(repository.join(ENGINE_MACOS_MODULE))?)?;
+    let _ = read(repository.join(ENGINE_PROBE_BINARY))?;
     validate_shipping_sources(repository)?;
     let metadata = cargo_metadata(repository)?;
     validate_release_graph(&metadata)
+}
+
+fn validate_engine_manifest(source: &str) -> Result<(), String> {
+    let manifest: toml::Value = toml::from_str(source)
+        .map_err(|error| format!("cannot parse {ENGINE_MANIFEST}: {error}"))?;
+    let feature = manifest
+        .get("features")
+        .and_then(|features| features.get("native-agentic-input-probe"))
+        .and_then(toml::Value::as_array)
+        .ok_or_else(|| "engine native-agentic-input-probe feature is missing".to_owned())?;
+    let actual = feature
+        .iter()
+        .filter_map(toml::Value::as_str)
+        .collect::<BTreeSet<_>>();
+    let expected = [
+        "dep:serde",
+        "dep:zephium-agentic",
+        "zephium-agentic/probe-harness",
+    ]
+    .into_iter()
+    .collect::<BTreeSet<_>>();
+    if actual != expected || actual.len() != feature.len() {
+        return Err("engine native-agentic-input-probe feature graph drifted".to_owned());
+    }
+    let agentic_dependency = manifest
+        .get("dependencies")
+        .and_then(|dependencies| dependencies.get("zephium-agentic"))
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| "engine zephium-agentic dependency is missing".to_owned())?;
+    if agentic_dependency
+        .get("optional")
+        .and_then(toml::Value::as_bool)
+        != Some(true)
+    {
+        return Err("engine zephium-agentic dependency must remain optional".to_owned());
+    }
+    let binary = manifest
+        .get("bin")
+        .and_then(toml::Value::as_array)
+        .and_then(|binaries| {
+            binaries.iter().find(|binary| {
+                binary.get("name").and_then(toml::Value::as_str)
+                    == Some("macos-agentic-input-probe")
+            })
+        })
+        .ok_or_else(|| "engine macOS agentic probe binary is missing".to_owned())?;
+    if binary.get("path").and_then(toml::Value::as_str) != Some(ENGINE_PROBE_BINARY_MANIFEST_PATH)
+        || binary
+            .get("required-features")
+            .and_then(toml::Value::as_array)
+            .is_none_or(|features| {
+                features.as_slice() != [toml::Value::String("native-agentic-input-probe".into())]
+            })
+    {
+        return Err("engine macOS agentic probe binary gate drifted".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_engine_root(source: &str) -> Result<(), String> {
+    if !compact(source).contains(ENGINE_RELEASE_REFUSAL) {
+        return Err("engine must retain its optimized agentic-probe compile refusal".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_engine_macos_module(source: &str) -> Result<(), String> {
+    let source = compact(source);
+    for required in [
+        "#[cfg(feature=\"native-agentic-input-probe\")]modagentic_input_probe;",
+        "#[cfg(feature=\"native-agentic-input-probe\")]pub(crate)useagentic_input_probe::runasrun_agentic_input_matrix;",
+    ] {
+        if !source.contains(required) {
+            return Err("macOS agentic probe module escaped or drifted from its feature gate".into());
+        }
+    }
+    Ok(())
 }
 
 fn validate_manifest(source: &str) -> Result<(), String> {
@@ -280,5 +370,51 @@ mod tests {
         "#;
         validate_root(valid).expect("valid guard");
         assert!(validate_root("mod fixture_server;").is_err());
+    }
+
+    #[test]
+    fn engine_probe_requires_optional_dependency_binary_and_exact_feature() {
+        let valid = r#"
+            [features]
+            native-agentic-input-probe = [
+              "dep:serde",
+              "dep:zephium-agentic",
+              "zephium-agentic/probe-harness",
+            ]
+            [[bin]]
+            name = "macos-agentic-input-probe"
+            path = "src/bin/macos_agentic_input_probe.rs"
+            required-features = ["native-agentic-input-probe"]
+            [dependencies]
+            zephium-agentic = { optional = true }
+        "#;
+        validate_engine_manifest(valid).expect("valid engine probe gate");
+        assert!(
+            validate_engine_manifest(&valid.replace("optional = true", "optional = false"))
+                .is_err()
+        );
+        assert!(validate_engine_manifest(
+            &valid.replace("zephium-agentic/probe-harness", "shipping-probe")
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn engine_source_guards_are_exact() {
+        let root = r#"
+            #[cfg(all(feature = "native-agentic-input-probe", not(debug_assertions)))]
+            compile_error!("the native agentic input probe is forbidden in optimized builds");
+        "#;
+        validate_engine_root(root).expect("valid engine release refusal");
+        assert!(validate_engine_root("pub fn shipping() {}").is_err());
+
+        let module = r#"
+            #[cfg(feature = "native-agentic-input-probe")]
+            mod agentic_input_probe;
+            #[cfg(feature = "native-agentic-input-probe")]
+            pub(crate) use agentic_input_probe::run as run_agentic_input_matrix;
+        "#;
+        validate_engine_macos_module(module).expect("valid module gates");
+        assert!(validate_engine_macos_module("mod agentic_input_probe;").is_err());
     }
 }

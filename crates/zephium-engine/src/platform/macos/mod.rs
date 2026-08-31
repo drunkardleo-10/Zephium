@@ -1,3 +1,5 @@
+#[cfg(feature = "native-agentic-input-probe")]
+mod agentic_input_probe;
 mod content_filter;
 mod credentials;
 // Pure policy translation and the profile-scoped native extension lifecycle.
@@ -38,6 +40,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use std::{cell::Cell, cell::RefCell, rc::Rc};
+
+#[cfg(feature = "native-agentic-input-probe")]
+pub(crate) use agentic_input_probe::run as run_agentic_input_matrix;
 
 use dispatch2::DispatchObject as _;
 

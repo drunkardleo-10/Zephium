@@ -44,6 +44,14 @@ native-extension-lab-diagnostics = []
 # Compiles the intentionally non-product Windows CDP feasibility harness. The
 # default product must not contain this path until Phase 0a's live gates pass.
 windows-cdp-spike = []
+# Builds the non-shipping macOS native-input/isTrusted risk probe. Its fixture
+# dependency independently refuses optimized builds, and the engine repeats
+# that refusal at its own boundary below.
+native-agentic-input-probe = [
+    "dep:serde",
+    "dep:zephium-agentic",
+    "zephium-agentic/probe-harness",
+]
 
 [[bin]]
 name = "macos-principal-isolation-probe"
@@ -86,11 +94,17 @@ path = "src/bin/macos_vimium_probe.rs"
 required-features = ["native-web-extension-probes"]
 
 [[bin]]
+name = "macos-agentic-input-probe"
+path = "src/bin/macos_agentic_input_probe.rs"
+required-features = ["native-agentic-input-probe"]
+
+[[bin]]
 name = "macos-representative-extension-probe"
 path = "src/bin/macos_representative_extension_probe.rs"
 required-features = ["native-web-extension-probes"]
 
 [dependencies]
+zephium-agentic = { workspace = true, optional = true }
 zephium-core.workspace = true
 zephium-extension-runtime-api.workspace = true
 wry.workspace = true

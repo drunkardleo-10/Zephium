@@ -6300,6 +6300,7 @@ dependencies = [
  "windows",
  "windows-core 0.61.2",
  "wry",
+ "zephium-agentic",
  "zephium-core",
  "zephium-extension-package",
  "zephium-extension-runtime-api",

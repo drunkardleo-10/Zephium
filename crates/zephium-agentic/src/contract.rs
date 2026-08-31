@@ -36,6 +36,26 @@ pub enum FixtureCase {
     ClosedShadow,
 }
 
+impl FixtureCase {
+    /// Returns the one closed fixture target that proves this case's effect.
+    pub const fn target(self) -> FixtureTarget {
+        match self {
+            Self::Button | Self::PointerMouse => FixtureTarget::Button,
+            Self::Link => FixtureTarget::Link,
+            Self::TextInput | Self::Keyboard => FixtureTarget::TextInput,
+            Self::ContentEditable => FixtureTarget::ContentEditable,
+            Self::Select => FixtureTarget::Select,
+            Self::TransientActivation => FixtureTarget::ActivationButton,
+            Self::Popup => FixtureTarget::PopupButton,
+            Self::ClipboardGate => FixtureTarget::ClipboardButton,
+            Self::Drag => FixtureTarget::DropTarget,
+            Self::Iframe => FixtureTarget::FrameButton,
+            Self::OpenShadow => FixtureTarget::OpenShadowButton,
+            Self::ClosedShadow => FixtureTarget::ClosedShadowHost,
+        }
+    }
+}
+
 /// Candidate execution mechanisms. A model can never select this enum.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]

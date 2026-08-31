@@ -73,7 +73,7 @@ The complete machine-readable classifications and primary-source links are in
 - closed redacted failures and a result schema containing only enums,
   booleans, bounded counters, durations, and validated runtime labels;
 - a fixed loopback-only fixture server with three routes, a 4 KiB request cap,
-  256-request lifetime, one worker, one-second I/O deadlines, no request logs,
+  512-request lifetime, one worker, one-second I/O deadlines, no request logs,
   no external fetches, and no native bridge;
 - compile-time optimized-build refusal for fixture/probe code plus a Cargo
   resolved-graph gate proving ordinary `zephium-desktop` cannot reach the
@@ -86,3 +86,37 @@ real-site result is fabricated. The corresponding JSON manifests remain in a
 `pending_*` state until authorized named macOS and physical Windows runs occur.
 Those gaps block M0/M1 qualification but do not block deterministic harness and
 adapter implementation.
+
+## M1 macOS adapter status
+
+The feature-gated macOS adapter is implemented in the commit containing this
+evidence. It owns one main-thread child WKWebView, a fresh explicit ephemeral
+profile identity and non-persistent data store, no extension controller, no
+page IPC, no user script, and no arbitrary evaluation API. Every matrix row
+reloads the fixed loopback document before execution, so WebKit's sticky and
+transient user-activation state cannot contaminate a later row.
+
+The adapter implements fixed default-client-world DOM recipes, direct AppKit
+event routing, and in-process AppKit accessibility hit-test/press. The latter
+does not use cross-process `AXUIElement` authority or prompt for system-wide
+Accessibility access. Focused system input and the human baseline remain
+explicit `NeedsHuman` outcomes; no diagnostic silently moves the real pointer
+or types into the foreground session.
+
+Popup request and admitted-page evidence are separate. The native new-window
+policy callback records a request and synchronously denies it; an unexpectedly
+admitted page is a verification failure. Cancellation, navigation/evaluation
+deadlines, controller transport, server shutdown, and native view teardown are
+bounded. All post-construction failure paths execute the same explicit teardown
+before returning a redacted typed failure.
+
+CI executes only the hidden fixed-DOM matrix. It requires 14 deterministic
+terminal rows, zero trusted events, zero transient activation, zero focus
+theft, popup denial, drained work, and zero retained native views. AppKit and
+accessibility behavior remains `pending_device_capture`; the CI result is not a
+backend-order decision or real-site claim.
+
+Visible-focused matrices additionally require the local
+`--allow-visible-focused` process flag. Without it, admission returns the closed
+`focus_policy_violation` failure before constructing a view. The flag never
+authorizes global pointer or keyboard synthesis.

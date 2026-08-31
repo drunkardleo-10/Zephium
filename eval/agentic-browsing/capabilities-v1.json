@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "reviewed_on": "2026-08-31",
-  "repository_revision": "6fcf29c",
+  "repository_revision": "commit-containing-this-manifest",
   "pinned_components": {
     "wry": {
       "version": "0.55.1",
@@ -23,35 +23,45 @@
     {
       "platform": "macos",
       "mechanism": "fixed_content_world_evaluation",
-      "code_status": "pinned_api_available",
+      "code_status": "implemented_in_release_excluded_m1_adapter",
       "device_status": "pending_device_capture",
       "evidence": [
         "objc2-web-kit WKContentWorld and WKWebView frame/content-world APIs",
         "https://developer.apple.com/documentation/webkit/wkwebview/evaluatejavascript(_:in:in:completionhandler:)"
       ],
-      "limitations": "No agent runtime is installed in a product context yet. The M1 fixture uses only fixed diagnostic expressions."
+      "limitations": "No agent runtime is installed in a product context yet. The M1 adapter exposes only closed fixed diagnostic expressions, and reloads a fresh document for every matrix row."
     },
     {
       "platform": "macos",
       "mechanism": "appkit_window_event_routing",
-      "code_status": "existing_diagnostic_route",
+      "code_status": "implemented_in_release_excluded_m1_adapter",
       "device_status": "pending_device_capture",
       "evidence": [
         "crates/zephium-engine/src/platform/macos/web_extensions/compatibility_fixture.rs",
         "crates/zephium-engine/src/platform/macos/web_extensions/vimium_contract.rs"
       ],
-      "limitations": "Existing diagnostics make a probe window key or route through the application queue. They do not prove invisible background input or no focus theft."
+      "limitations": "The adapter can route directly to its owned WKWebView without moving the system pointer. Hidden/background trust, effect, and no-focus-theft behavior remain pending named-device execution."
     },
     {
       "platform": "macos",
-      "mechanism": "accessibility_perform_press",
-      "code_status": "public_os_api_not_integrated",
-      "device_status": "pending_permission_and_device_capture",
+      "mechanism": "in_process_appkit_accessibility_perform_press",
+      "code_status": "implemented_in_release_excluded_m1_adapter",
+      "device_status": "pending_device_capture",
       "evidence": [
         "https://developer.apple.com/documentation/appkit/nsaccessibilityprotocol/accessibilityperformpress()",
+        "https://developer.apple.com/documentation/appkit/nsaccessibility"
+      ],
+      "limitations": "The adapter calls the owned AppKit accessibility element directly and does not use cross-process AXUIElement authority. Apple's Boolean reports dispatch only, so the fixed fixture independently verifies the page effect."
+    },
+    {
+      "platform": "macos",
+      "mechanism": "focused_os_input",
+      "code_status": "intentionally_fail_closed_needs_human",
+      "device_status": "pending_explicit_authorization",
+      "evidence": [
         "https://developer.apple.com/documentation/applicationservices/1460720-axisprocesstrusted"
       ],
-      "limitations": "The API reports action dispatch, not intended page effect. Zephium must not prompt for Accessibility permission from unattended tests."
+      "limitations": "The current probe does not post global pointer or keyboard events. Adding and running this baseline requires explicit operator authorization and visible foreground control."
     },
     {
       "platform": "windows",
