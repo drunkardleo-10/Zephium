@@ -443,6 +443,14 @@ pub enum ContextOperationKind {
     Resume,
     /// Recover after renderer loss.
     Recover,
+    /// Present the exact native page for inspection.
+    Show,
+    /// Hide the exact native page.
+    Hide,
+    /// Transfer exclusive input to a person.
+    BeginHumanControl,
+    /// Return exclusive input to the agent.
+    EndHumanControl,
     /// Close and destroy an owned context.
     Close,
     /// Adopt an owned context into ordinary Browse.
@@ -842,50 +850,143 @@ impl ContextRecord {
         Ok(self.join())
     }
 
-    /// Presents the exact native page for inspection without changing ownership.
-    pub fn show_for_inspection(&mut self) -> Result<(), ContextTransitionError> {
+    /// Starts presentation for inspection without changing ownership.
+    pub fn begin_show(
+        &mut self,
+        operation: ContextOperationId,
+    ) -> Result<ContextOperationJoin, ContextTransitionError> {
         self.require_ready_agent()?;
         self.require_capability(ContextCapability::Present)?;
-        self.visibility = ContextVisibility::Visible;
+        self.require_no_operation()?;
+        self.pending = Some(PendingOperation {
+            id: operation,
+            kind: ContextOperationKind::Show,
+        });
+        Ok(self.operation_join(operation, ContextOperationKind::Show))
+    }
+
+    /// Settles exact presentation for inspection.
+    pub fn settle_show(
+        &mut self,
+        join: ContextOperationJoin,
+        settlement: ContextSettlement,
+    ) -> Result<(), ContextTransitionError> {
+        self.require_pending(join, ContextOperationKind::Show)?;
+        if self.lifecycle != ContextLifecycle::Ready || self.control != ContextControl::Agent {
+            return Err(ContextTransitionError::InvalidLifecycle);
+        }
+        self.pending = None;
+        if settlement == ContextSettlement::Applied {
+            self.visibility = ContextVisibility::Visible;
+        }
         Ok(())
     }
 
-    /// Hides the exact native page without changing ownership.
-    pub fn hide(&mut self) -> Result<(), ContextTransitionError> {
+    /// Starts hiding the exact native page without changing ownership.
+    pub fn begin_hide(
+        &mut self,
+        operation: ContextOperationId,
+    ) -> Result<ContextOperationJoin, ContextTransitionError> {
         self.require_ready_agent()?;
         self.require_capability(ContextCapability::Present)?;
-        self.visibility = ContextVisibility::Hidden;
+        self.require_no_operation()?;
+        self.pending = Some(PendingOperation {
+            id: operation,
+            kind: ContextOperationKind::Hide,
+        });
+        Ok(self.operation_join(operation, ContextOperationKind::Hide))
+    }
+
+    /// Settles exact native hiding.
+    pub fn settle_hide(
+        &mut self,
+        join: ContextOperationJoin,
+        settlement: ContextSettlement,
+    ) -> Result<(), ContextTransitionError> {
+        self.require_pending(join, ContextOperationKind::Hide)?;
+        if self.lifecycle != ContextLifecycle::Ready || self.control != ContextControl::Agent {
+            return Err(ContextTransitionError::InvalidLifecycle);
+        }
+        self.pending = None;
+        if settlement == ContextSettlement::Applied {
+            self.visibility = ContextVisibility::Hidden;
+        }
         Ok(())
     }
 
     /// Revokes agent input and transfers exclusive visible control to a person.
-    pub fn begin_human_control(&mut self) -> Result<ContextJoin, ContextTransitionError> {
+    pub fn begin_human_control(
+        &mut self,
+        operation: ContextOperationId,
+    ) -> Result<ContextOperationJoin, ContextTransitionError> {
         self.require_ready_agent()?;
         self.require_capability(ContextCapability::HumanControl)?;
-        if self.pending.is_some() {
-            return Err(ContextTransitionError::OperationInFlight);
-        }
-        // Human input wins over a queued or settling navigation. Advancing
-        // every join coordinate makes its eventual callback stale.
+        // Human input wins over queued navigation and presentation work.
+        // Advancing every join coordinate makes their callbacks stale.
+        self.pending = None;
         self.pending_navigation = None;
         self.advance(true, true, true, true)?;
-        self.visibility = ContextVisibility::Visible;
         self.control = ContextControl::Human;
         self.freshness = ContextFreshness::ObservationRequired;
-        Ok(self.join())
+        self.pending = Some(PendingOperation {
+            id: operation,
+            kind: ContextOperationKind::BeginHumanControl,
+        });
+        Ok(self.operation_join(operation, ContextOperationKind::BeginHumanControl))
     }
 
-    /// Returns control to the agent, requiring a complete fresh observation.
-    pub fn end_human_control(&mut self) -> Result<ContextJoin, ContextTransitionError> {
+    /// Settles native presentation for human control without restoring agent input on refusal.
+    pub fn settle_begin_human_control(
+        &mut self,
+        join: ContextOperationJoin,
+        settlement: ContextSettlement,
+    ) -> Result<(), ContextTransitionError> {
+        self.require_pending(join, ContextOperationKind::BeginHumanControl)?;
+        if self.lifecycle != ContextLifecycle::Ready || self.control != ContextControl::Human {
+            return Err(ContextTransitionError::InvalidLifecycle);
+        }
+        self.pending = None;
+        if settlement == ContextSettlement::Applied {
+            self.visibility = ContextVisibility::Visible;
+        }
+        Ok(())
+    }
+
+    /// Starts return of human input to the agent.
+    pub fn begin_end_human_control(
+        &mut self,
+        operation: ContextOperationId,
+    ) -> Result<ContextOperationJoin, ContextTransitionError> {
         self.require_nonterminal()?;
         if self.lifecycle != ContextLifecycle::Ready || self.control != ContextControl::Human {
             return Err(ContextTransitionError::InvalidLifecycle);
         }
         self.require_no_operation()?;
         self.advance(true, true, true, true)?;
-        self.control = ContextControl::Agent;
         self.freshness = ContextFreshness::ObservationRequired;
-        Ok(self.join())
+        self.pending = Some(PendingOperation {
+            id: operation,
+            kind: ContextOperationKind::EndHumanControl,
+        });
+        Ok(self.operation_join(operation, ContextOperationKind::EndHumanControl))
+    }
+
+    /// Settles return from human control and requires a complete fresh observation.
+    pub fn settle_end_human_control(
+        &mut self,
+        join: ContextOperationJoin,
+        settlement: ContextSettlement,
+    ) -> Result<(), ContextTransitionError> {
+        self.require_pending(join, ContextOperationKind::EndHumanControl)?;
+        if self.lifecycle != ContextLifecycle::Ready || self.control != ContextControl::Human {
+            return Err(ContextTransitionError::InvalidLifecycle);
+        }
+        self.pending = None;
+        if settlement == ContextSettlement::Applied {
+            self.control = ContextControl::Agent;
+        }
+        self.freshness = ContextFreshness::ObservationRequired;
+        Ok(())
     }
 
     /// Starts suspension after proving the context is hidden and agent-owned.
@@ -1351,7 +1452,6 @@ impl ContextRecord {
     fn fault(&mut self) {
         self.lifecycle = ContextLifecycle::Faulted;
         self.visibility = ContextVisibility::Hidden;
-        self.control = ContextControl::Agent;
         self.freshness = ContextFreshness::ObservationRequired;
         self.pending = None;
         self.pending_navigation = None;
@@ -1423,6 +1523,40 @@ mod tests {
             .settle_construction(join, ContextSettlement::Applied)
             .expect("construct");
         record
+    }
+
+    fn show(record: &mut ContextRecord, value: u64) {
+        let join = record.begin_show(operation(value)).expect("show");
+        record
+            .settle_show(join, ContextSettlement::Applied)
+            .expect("shown");
+    }
+
+    fn hide(record: &mut ContextRecord, value: u64) {
+        let join = record.begin_hide(operation(value)).expect("hide");
+        record
+            .settle_hide(join, ContextSettlement::Applied)
+            .expect("hidden");
+    }
+
+    fn begin_human(record: &mut ContextRecord, value: u64) -> ContextJoin {
+        let join = record
+            .begin_human_control(operation(value))
+            .expect("human control");
+        record
+            .settle_begin_human_control(join, ContextSettlement::Applied)
+            .expect("human control presented");
+        join.context()
+    }
+
+    fn end_human(record: &mut ContextRecord, value: u64) -> ContextJoin {
+        let join = record
+            .begin_end_human_control(operation(value))
+            .expect("end human control");
+        record
+            .settle_end_human_control(join, ContextSettlement::Applied)
+            .expect("agent control restored");
+        join.context()
     }
 
     #[test]
@@ -1512,12 +1646,79 @@ mod tests {
         let mut record = ready_owned();
         let identity = record.identity();
         let generation = record.join().context_generation();
-        record.show_for_inspection().expect("show");
+        show(&mut record, 2);
         assert_eq!(record.identity(), identity);
         assert_eq!(record.join().context_generation(), generation);
         assert_eq!(record.status().control(), ContextControl::Agent);
-        record.hide().expect("hide");
+        hide(&mut record, 3);
         assert_eq!(record.status().visibility(), ContextVisibility::Hidden);
+    }
+
+    #[test]
+    fn presentation_changes_only_after_exact_native_settlement() {
+        let mut record = ready_owned();
+        let show_operation = record.begin_show(operation(2)).expect("show");
+        assert_eq!(record.status().visibility(), ContextVisibility::Hidden);
+        assert_eq!(
+            record.status().pending_operation(),
+            Some(ContextOperationKind::Show)
+        );
+        record
+            .settle_show(show_operation, ContextSettlement::Refused)
+            .expect("show refused");
+        assert_eq!(record.status().visibility(), ContextVisibility::Hidden);
+
+        show(&mut record, 3);
+        let hide = record.begin_hide(operation(4)).expect("hide");
+        assert_eq!(record.status().visibility(), ContextVisibility::Visible);
+        record
+            .settle_hide(hide, ContextSettlement::Refused)
+            .expect("hide refused");
+        assert_eq!(record.status().visibility(), ContextVisibility::Visible);
+    }
+
+    #[test]
+    fn native_refusal_never_returns_input_from_a_person() {
+        let mut record = ready_owned();
+        let human = record
+            .begin_human_control(operation(2))
+            .expect("begin human control");
+        record
+            .settle_begin_human_control(human, ContextSettlement::Refused)
+            .expect("presentation refused");
+        assert_eq!(record.status().control(), ContextControl::Human);
+        assert_eq!(record.status().visibility(), ContextVisibility::Hidden);
+
+        let agent = record
+            .begin_end_human_control(operation(3))
+            .expect("begin agent return");
+        record
+            .settle_end_human_control(agent, ContextSettlement::Refused)
+            .expect("agent return refused");
+        assert_eq!(record.status().control(), ContextControl::Human);
+        assert_eq!(
+            record.status().freshness(),
+            ContextFreshness::ObservationRequired
+        );
+        assert!(!record.status().can_automate());
+    }
+
+    #[test]
+    fn human_takeover_preempts_pending_presentation() {
+        let mut record = ready_owned();
+        let show = record.begin_show(operation(2)).expect("show");
+        let human = record
+            .begin_human_control(operation(3))
+            .expect("human control");
+        assert_eq!(record.status().control(), ContextControl::Human);
+        assert_eq!(
+            record.settle_show(show, ContextSettlement::Applied),
+            Err(ContextTransitionError::StaleJoin)
+        );
+        record
+            .settle_begin_human_control(human, ContextSettlement::Applied)
+            .expect("human control presented");
+        assert_eq!(record.status().visibility(), ContextVisibility::Visible);
     }
 
     #[test]
@@ -1530,7 +1731,10 @@ mod tests {
         let pending_navigation = record
             .begin_navigation(operation(2))
             .expect("pending navigation");
-        let human = record.begin_human_control().expect("human control");
+        let human_operation = record
+            .begin_human_control(operation(3))
+            .expect("human control");
+        let human = human_operation.context();
         assert_ne!(old.context_generation(), human.context_generation());
         assert_ne!(
             old.cancellation_generation(),
@@ -1546,10 +1750,13 @@ mod tests {
             Err(ContextTransitionError::StaleJoin)
         );
         assert_eq!(
-            record.hide(),
+            record.begin_hide(operation(4)),
             Err(ContextTransitionError::HumanControlActive)
         );
-        let returned = record.end_human_control().expect("return control");
+        record
+            .settle_begin_human_control(human_operation, ContextSettlement::Applied)
+            .expect("human control presented");
+        let returned = end_human(&mut record, 5);
         assert_ne!(returned.context_generation(), human.context_generation());
         assert!(!record.status().can_automate());
         record
@@ -1562,12 +1769,12 @@ mod tests {
     fn suspend_resume_preserve_native_ownership_but_invalidate_references() {
         let mut record = ready_owned();
         let old = record.join();
-        record.show_for_inspection().expect("show");
+        show(&mut record, 2);
         assert_eq!(
             record.begin_suspend(operation(2)),
             Err(ContextTransitionError::MustBeHidden)
         );
-        record.hide().expect("hide");
+        hide(&mut record, 3);
         let suspend = record.begin_suspend(operation(2)).expect("suspend");
         record
             .settle_suspend(suspend, ContextSettlement::Applied)
@@ -1615,7 +1822,7 @@ mod tests {
     #[test]
     fn renderer_recovery_preserves_existing_human_control() {
         let mut record = ready_owned();
-        let human = record.begin_human_control().expect("human control");
+        let human = begin_human(&mut record, 2);
         record.renderer_lost(human).expect("renderer loss");
         assert_eq!(record.status().control(), ContextControl::Human);
         let recovery = record.begin_recovery(operation(2)).expect("recovery");
@@ -1674,7 +1881,7 @@ mod tests {
     #[test]
     fn cancellation_never_takes_input_from_a_person() {
         let mut record = ready_owned();
-        let human = record.begin_human_control().expect("human control");
+        let human = begin_human(&mut record, 2);
         record.cancel_run(human).expect("cancel");
         assert_eq!(record.status().control(), ContextControl::Human);
         assert_eq!(record.status().visibility(), ContextVisibility::Visible);
@@ -1689,8 +1896,8 @@ mod tests {
             owned.begin_adoption(operation(2)),
             Err(ContextTransitionError::HumanControlRequired)
         );
-        owned.begin_human_control().expect("human control");
-        let adoption = owned.begin_adoption(operation(2)).expect("adoption");
+        begin_human(&mut owned, 2);
+        let adoption = owned.begin_adoption(operation(3)).expect("adoption");
         owned
             .settle_adoption(adoption, ContextSettlement::Applied)
             .expect("adopted");
@@ -1745,7 +1952,7 @@ mod tests {
         let mut record = ready_owned();
         record.context_generation = ContextGeneration::new(u64::MAX).expect("max");
         assert_eq!(
-            record.begin_human_control(),
+            record.begin_human_control(operation(2)),
             Err(ContextTransitionError::GenerationExhausted)
         );
         assert_eq!(record.status().lifecycle(), ContextLifecycle::Faulted);

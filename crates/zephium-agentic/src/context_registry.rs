@@ -507,36 +507,106 @@ impl ContextRegistry {
         Ok(result)
     }
 
-    /// Presents a context for inspection without transferring input.
-    pub fn show_for_inspection(&mut self, context: ContextId) -> Result<(), ContextRegistryError> {
-        self.active_mut(context)?.record.show_for_inspection()?;
+    /// Starts native presentation for inspection without transferring input.
+    pub fn begin_show(
+        &mut self,
+        context: ContextId,
+        operation: ContextOperationId,
+    ) -> Result<ContextOperationJoin, ContextRegistryError> {
+        let result = self.active_mut(context)?.record.begin_show(operation)?;
+        self.validate()?;
+        Ok(result)
+    }
+
+    /// Settles native presentation for inspection.
+    pub fn settle_show(
+        &mut self,
+        context: ContextId,
+        join: ContextOperationJoin,
+        settlement: ContextSettlement,
+    ) -> Result<(), ContextRegistryError> {
+        self.active_mut(context)?
+            .record
+            .settle_show(join, settlement)?;
         self.validate()
     }
 
-    /// Hides one agent-controlled context.
-    pub fn hide(&mut self, context: ContextId) -> Result<(), ContextRegistryError> {
-        self.active_mut(context)?.record.hide()?;
+    /// Starts hiding one agent-controlled native page.
+    pub fn begin_hide(
+        &mut self,
+        context: ContextId,
+        operation: ContextOperationId,
+    ) -> Result<ContextOperationJoin, ContextRegistryError> {
+        let result = self.active_mut(context)?.record.begin_hide(operation)?;
+        self.validate()?;
+        Ok(result)
+    }
+
+    /// Settles exact native hiding.
+    pub fn settle_hide(
+        &mut self,
+        context: ContextId,
+        join: ContextOperationJoin,
+        settlement: ContextSettlement,
+    ) -> Result<(), ContextRegistryError> {
+        self.active_mut(context)?
+            .record
+            .settle_hide(join, settlement)?;
         self.validate()
     }
 
-    /// Transfers exclusive input to a person, preempting pending navigation.
+    /// Revokes agent input and starts exclusive human presentation.
     pub fn begin_human_control(
         &mut self,
         context: ContextId,
-    ) -> Result<ContextJoin, ContextRegistryError> {
-        let result = self.active_mut(context)?.record.begin_human_control()?;
+        operation: ContextOperationId,
+    ) -> Result<ContextOperationJoin, ContextRegistryError> {
+        let result = self
+            .active_mut(context)?
+            .record
+            .begin_human_control(operation)?;
         self.validate()?;
         Ok(result)
     }
 
-    /// Returns input to the agent under a fresh-observation requirement.
-    pub fn end_human_control(
+    /// Settles native presentation for human control.
+    pub fn settle_begin_human_control(
         &mut self,
         context: ContextId,
-    ) -> Result<ContextJoin, ContextRegistryError> {
-        let result = self.active_mut(context)?.record.end_human_control()?;
+        join: ContextOperationJoin,
+        settlement: ContextSettlement,
+    ) -> Result<(), ContextRegistryError> {
+        self.active_mut(context)?
+            .record
+            .settle_begin_human_control(join, settlement)?;
+        self.validate()
+    }
+
+    /// Starts return of exclusive input to the agent.
+    pub fn begin_end_human_control(
+        &mut self,
+        context: ContextId,
+        operation: ContextOperationId,
+    ) -> Result<ContextOperationJoin, ContextRegistryError> {
+        let result = self
+            .active_mut(context)?
+            .record
+            .begin_end_human_control(operation)?;
         self.validate()?;
         Ok(result)
+    }
+
+    /// Settles return from human control under a fresh-observation requirement.
+    pub fn settle_end_human_control(
+        &mut self,
+        context: ContextId,
+        join: ContextOperationJoin,
+        settlement: ContextSettlement,
+    ) -> Result<(), ContextRegistryError> {
+        self.active_mut(context)?
+            .record
+            .settle_end_human_control(join, settlement)?;
+        self.validate()
     }
 
     /// Starts exact hidden-context suspension.
@@ -1057,11 +1127,14 @@ mod tests {
         let mut registry = ContextRegistry::new();
         reserve(&mut registry, 1, ContextKind::Owned);
         activate(&mut registry, 1, 1);
-        registry
-            .begin_human_control(context(1))
+        let human = registry
+            .begin_human_control(context(1), operation(2))
             .expect("human control");
+        registry
+            .settle_begin_human_control(context(1), human, ContextSettlement::Applied)
+            .expect("human control presented");
         let adoption = registry
-            .begin_adoption(context(1), operation(2))
+            .begin_adoption(context(1), operation(3))
             .expect("adopt");
         registry
             .settle_adoption(context(1), adoption, ContextSettlement::Applied)
@@ -1073,10 +1146,10 @@ mod tests {
         );
 
         reserve(&mut registry, 2, ContextKind::BorrowedTab);
-        activate(&mut registry, 2, 3);
+        activate(&mut registry, 2, 4);
         assert_eq!(registry.status().borrowed_tab_leases(), 1);
         let release = registry
-            .begin_release(context(2), operation(4))
+            .begin_release(context(2), operation(5))
             .expect("release");
         registry
             .settle_release(context(2), release, ContextSettlement::Applied)
