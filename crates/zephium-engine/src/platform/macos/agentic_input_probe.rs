@@ -1,35 +1,40 @@
 //! Release-excluded macOS native-input/isTrusted risk probe.
 
-use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
-use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use objc2::rc::{Retained, Weak};
-use objc2::runtime::AnyObject;
-use objc2::MainThreadOnly as _;
-use objc2_foundation::{
-    MainThreadMarker, NSDate, NSError, NSPoint, NSProcessInfo, NSRect, NSRunLoop, NSSize, NSString,
+use objc2::{
+    define_class, msg_send,
+    rc::{Retained, Weak},
+    runtime::{NSObject, ProtocolObject},
+    DefinedClass, MainThreadOnly,
 };
-use objc2_web_kit::WKContentWorld;
+use objc2_foundation::{
+    MainThreadMarker, NSDate, NSObjectProtocol, NSPoint, NSProcessInfo, NSRect, NSRunLoop, NSSize,
+    NSString,
+};
+use objc2_web_kit::{
+    WKContentWorld, WKScriptMessage, WKScriptMessageHandler, WKUserContentController, WKUserScript,
+    WKUserScriptInjectionTime, WKWebViewConfiguration,
+};
 use raw_window_handle::{
     AppKitWindowHandle, HandleError, HasWindowHandle, RawWindowHandle, WindowHandle,
 };
 use serde::Deserialize;
 use wry::{
-    NavigationEvent, NavigationEventPhase, NavigationId, NewWindowResponse, PageLoadEvent,
-    WebViewBuilderExtMacos as _, WebViewExtMacOS as _, WryWebView,
+    NewWindowResponse, PageLoadEvent, WebViewBuilderExtMacos as _, WebViewExtMacOS as _, WryWebView,
 };
 use zephium_agentic::{
     ActivationEvidence, BackendAvailability, BackendCapability, CaseEvidence, CaseOutcome,
-    EvidenceLabel, FixtureCase, FixtureRoute, FixtureServer, FixtureTarget, FocusEvidence,
-    FocusOwner, GateOutcome, InputBackend, InputEventEvidence, InputEventKind, Platform,
-    PresentationState, ProbeFailure, ProbeFailureCode, ProbeRunPermit, ProbeStage,
-    ResourceEvidence, RunEvidence, RunMatrixRequest, RuntimeFingerprint, TargetEvidence,
-    TeardownEvidence,
+    EvidenceLabel, FixtureCase, FixtureServer, FixtureTarget, FocusEvidence, FocusOwner,
+    GateOutcome, InputBackend, InputEventEvidence, InputEventKind, Platform, PresentationState,
+    ProbeFailure, ProbeFailureCode, ProbeRunPermit, ProbeStage, ResourceEvidence, RunEvidence,
+    RunMatrixRequest, RuntimeFingerprint, TargetEvidence, TeardownEvidence,
+    MACOS_NATIVE_INPUT_RUNTIME_V1, MACOS_PROBE_CONTENT_WORLD_V1, MACOS_PROBE_HANDLER_V1,
+    MAX_NATIVE_INPUT_RUNTIME_ROW, NATIVE_INPUT_RUNTIME_PROTOCOL_V1,
 };
 use zephium_core::ids::ProfileId;
 use zephium_core::ports::engine::Partition;
@@ -42,13 +47,11 @@ use objc2_app_kit::{
 
 const RUN_TIMEOUT: Duration = Duration::from_secs(60);
 const NAVIGATION_TIMEOUT: Duration = Duration::from_secs(10);
-const EVALUATION_TIMEOUT: Duration = Duration::from_secs(5);
-const SETTLE_WINDOW: Duration = Duration::from_millis(90);
+const RUNTIME_RESULT_TIMEOUT: Duration = Duration::from_secs(2);
 const TEARDOWN_WINDOW: Duration = Duration::from_millis(250);
 const RUN_LOOP_SLICE: Duration = Duration::from_millis(5);
-const MAX_EVALUATION_RESULT_UTF16: usize = 32 * 1_024;
-const MAX_EVALUATION_RESULT_UTF8: usize = 32 * 1_024;
-const MAX_PENDING_NAVIGATION_TERMINALS: usize = 8;
+const MAX_RUNTIME_MESSAGE_UTF16: usize = 32 * 1_024;
+const MAX_RUNTIME_MESSAGE_UTF8: usize = 32 * 1_024;
 
 struct ProbeHostView {
     view: Retained<NSView>,
@@ -78,68 +81,6 @@ impl EphemeralProbeProfile {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum NavigationTerminal {
-    Finished,
-    Failed,
-}
-
-#[derive(Default)]
-struct NavigationTracker {
-    terminals: RefCell<VecDeque<(NavigationId, NavigationTerminal)>>,
-    failed: Cell<bool>,
-}
-
-impl NavigationTracker {
-    fn observe(&self, event: NavigationEvent) {
-        let terminal = match event.phase {
-            NavigationEventPhase::Finished => NavigationTerminal::Finished,
-            NavigationEventPhase::Failed => NavigationTerminal::Failed,
-            NavigationEventPhase::Started
-            | NavigationEventPhase::Redirected
-            | NavigationEventPhase::Committed => return,
-        };
-        let Ok(mut terminals) = self.terminals.try_borrow_mut() else {
-            self.failed.set(true);
-            return;
-        };
-        if terminals.iter().any(|(id, _)| *id == event.id) {
-            self.failed.set(true);
-            return;
-        }
-        if terminals.len() >= MAX_PENDING_NAVIGATION_TERMINALS {
-            self.failed.set(true);
-            return;
-        }
-        terminals.push_back((event.id, terminal));
-    }
-
-    fn take(&self, expected: NavigationId) -> Result<Option<NavigationTerminal>, AdapterError> {
-        if self.failed.get() {
-            return Err(AdapterError::Navigation);
-        }
-        let mut terminals = self
-            .terminals
-            .try_borrow_mut()
-            .map_err(|_| AdapterError::Navigation)?;
-        let Some(index) = terminals.iter().position(|(id, _)| *id == expected) else {
-            return Ok(None);
-        };
-        Ok(terminals.remove(index).map(|(_, terminal)| terminal))
-    }
-
-    fn reset_for_reload(&self) -> Result<(), AdapterError> {
-        if self.failed.get() {
-            return Err(AdapterError::Navigation);
-        }
-        self.terminals
-            .try_borrow_mut()
-            .map_err(|_| AdapterError::Navigation)?
-            .clear();
-        Ok(())
-    }
-}
-
 impl HasWindowHandle for ProbeHostView {
     fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
         let pointer = NonNull::from(&*self.view).cast::<c_void>();
@@ -156,9 +97,10 @@ enum AdapterError {
     Timeout,
     NativeConstruction,
     Navigation,
-    Evaluation,
     InvalidEvidence,
-    Teardown,
+    NativeTeardown,
+    ProfileTeardown,
+    FixtureTeardown,
 }
 
 impl AdapterError {
@@ -166,16 +108,34 @@ impl AdapterError {
         match self {
             Self::Cancelled => ProbeFailureCode::Cancelled,
             Self::Timeout => ProbeFailureCode::Timeout,
-            Self::NativeConstruction | Self::Navigation | Self::Evaluation | Self::Teardown => {
-                ProbeFailureCode::HarnessFailure
-            }
+            Self::NativeConstruction | Self::Navigation => ProbeFailureCode::HarnessFailure,
+            Self::NativeTeardown => ProbeFailureCode::NativeTeardownIncomplete,
+            Self::ProfileTeardown => ProbeFailureCode::ProfileTeardownIncomplete,
+            Self::FixtureTeardown => ProbeFailureCode::FixtureTeardownIncomplete,
             Self::InvalidEvidence => ProbeFailureCode::VerificationFailed,
         }
     }
 
     const fn retryable(self) -> bool {
-        matches!(self, Self::Timeout | Self::Navigation | Self::Evaluation)
+        matches!(self, Self::Timeout | Self::Navigation)
     }
+}
+
+type RunParts = (
+    RuntimeFingerprint,
+    Vec<BackendCapability>,
+    Vec<CaseEvidence>,
+);
+
+struct PendingTeardown {
+    run_id: u64,
+    started: Instant,
+    execution: Result<RunParts, ProbeFailure>,
+    page: Weak<WryWebView>,
+    window: Weak<NSWindow>,
+    profile_store: Weak<objc2_web_kit::WKWebsiteDataStore>,
+    server: FixtureServer,
+    teardown_started: Instant,
 }
 
 #[derive(Debug, Deserialize)]
@@ -241,11 +201,18 @@ struct Geometry {
     height: f64,
     end_x: Option<f64>,
     end_y: Option<f64>,
+    device_pixel_ratio: f64,
 }
 
 impl Geometry {
     fn validate(self) -> Result<Self, AdapterError> {
-        let values = [self.x, self.y, self.width, self.height];
+        let values = [
+            self.x,
+            self.y,
+            self.width,
+            self.height,
+            self.device_pixel_ratio,
+        ];
         if !values.into_iter().all(f64::is_finite)
             || self.width <= 0.0
             || self.height <= 0.0
@@ -253,6 +220,7 @@ impl Geometry {
             || self.height > 2_000.0
             || self.x.abs() > 4_000.0
             || self.y.abs() > 4_000.0
+            || !(0.25..=8.0).contains(&self.device_pixel_ratio)
             || self
                 .end_x
                 .is_some_and(|value| !value.is_finite() || value.abs() > 4_000.0)
@@ -266,40 +234,367 @@ impl Geometry {
     }
 }
 
-enum FixedScript {
-    Ready,
-    Reset(FixtureCase),
-    Read,
-    Geometry(FixtureCase),
-    DomRecipe(FixtureCase),
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ProbeRowKey {
+    row: u16,
+    case: FixtureCase,
+    backend: InputBackend,
 }
 
-impl FixedScript {
-    fn source(&self) -> Option<Cow<'static, str>> {
-        match *self {
-            Self::Ready => Some(Cow::Borrowed(
-                "typeof window.__zephiumNativeInputFixtureV1 === 'object' && document.documentElement.dataset.fixtureReady === 'v1' ? 'ready' : 'pending'",
-            )),
-            Self::Reset(case) => Some(Cow::Owned(format!(
-                "window.__zephiumNativeInputFixtureV1.reset('{}') ? 'ok' : 'failed'",
-                case_name(case)
-            ))),
-            Self::Read => Some(Cow::Borrowed(
-                "window.__zephiumNativeInputFixtureV1.readJson()",
-            )),
-            Self::Geometry(case) => geometry_script(case).map(Cow::Owned),
-            Self::DomRecipe(case) => dom_recipe(case).map(Cow::Borrowed),
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum ProbeRuntimeFaultCode {
+    FixtureNotReady,
+    MissingTarget,
+    InvalidEvidence,
+    MissingEvidence,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "phase", rename_all = "snake_case", deny_unknown_fields)]
+enum ProbeRuntimeMessage {
+    Ready {
+        protocol: u8,
+        row: u16,
+        case: FixtureCase,
+        backend: InputBackend,
+        geometry: Geometry,
+    },
+    Result {
+        protocol: u8,
+        row: u16,
+        case: FixtureCase,
+        backend: InputBackend,
+        state: FixtureState,
+    },
+    Fault {
+        protocol: u8,
+        row: u16,
+        case: FixtureCase,
+        backend: InputBackend,
+        code: ProbeRuntimeFaultCode,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProbeMailboxPhase {
+    Idle,
+    AwaitingReady,
+    AwaitingResult,
+    Complete,
+}
+
+struct ProbeRuntimeMailbox {
+    expected: Cell<Option<ProbeRowKey>>,
+    expected_url: RefCell<Option<String>>,
+    page: RefCell<Option<Weak<WryWebView>>>,
+    phase: Cell<ProbeMailboxPhase>,
+    ready: RefCell<Option<Geometry>>,
+    result: RefCell<Option<FixtureState>>,
+    failed: Cell<bool>,
+}
+
+impl ProbeRuntimeMailbox {
+    fn new() -> Self {
+        Self {
+            expected: Cell::new(None),
+            expected_url: RefCell::new(None),
+            page: RefCell::new(None),
+            phase: Cell::new(ProbeMailboxPhase::Idle),
+            ready: RefCell::new(None),
+            result: RefCell::new(None),
+            failed: Cell::new(false),
         }
     }
 
-    fn world(&self, mtm: MainThreadMarker) -> Retained<WKContentWorld> {
-        match self {
-            Self::Ready | Self::Reset(_) | Self::Read => unsafe { WKContentWorld::pageWorld(mtm) },
-            Self::Geometry(_) | Self::DomRecipe(_) => unsafe {
-                WKContentWorld::defaultClientWorld(mtm)
-            },
+    fn bind_page(&self, page: &Retained<WryWebView>) -> Result<(), AdapterError> {
+        let mut slot = self
+            .page
+            .try_borrow_mut()
+            .map_err(|_| AdapterError::NativeConstruction)?;
+        if slot.is_some() {
+            return Err(AdapterError::NativeConstruction);
+        }
+        *slot = Some(Weak::from_retained(page));
+        Ok(())
+    }
+
+    fn arm(&self, key: ProbeRowKey, expected_url: String) -> Result<(), AdapterError> {
+        if key.row == 0
+            || key.row > MAX_NATIVE_INPUT_RUNTIME_ROW
+            || self.failed.get()
+            || self.phase.get() != ProbeMailboxPhase::Idle
+            || self.expected.get().is_some()
+            || self.ready.borrow().is_some()
+            || self.result.borrow().is_some()
+        {
+            return Err(AdapterError::InvalidEvidence);
+        }
+        self.expected.set(Some(key));
+        *self
+            .expected_url
+            .try_borrow_mut()
+            .map_err(|_| AdapterError::InvalidEvidence)? = Some(expected_url);
+        self.phase.set(ProbeMailboxPhase::AwaitingReady);
+        Ok(())
+    }
+
+    fn receive(&self, message: &WKScriptMessage) {
+        if self.receive_checked(message).is_err() {
+            self.failed.set(true);
         }
     }
+
+    fn receive_checked(&self, message: &WKScriptMessage) -> Result<(), AdapterError> {
+        if self.failed.get() || self.phase.get() == ProbeMailboxPhase::Idle {
+            return Err(AdapterError::InvalidEvidence);
+        }
+        let expected_page = self
+            .page
+            .try_borrow()
+            .map_err(|_| AdapterError::InvalidEvidence)?
+            .as_ref()
+            .and_then(Weak::load)
+            .ok_or(AdapterError::InvalidEvidence)?;
+        let message_page = unsafe { message.webView() }.ok_or(AdapterError::InvalidEvidence)?;
+        if Retained::as_ptr(&message_page).cast::<c_void>()
+            != Retained::as_ptr(&expected_page).cast::<c_void>()
+        {
+            return Err(AdapterError::InvalidEvidence);
+        }
+        let frame = unsafe { message.frameInfo() };
+        if !unsafe { frame.isMainFrame() } {
+            return Err(AdapterError::InvalidEvidence);
+        }
+        let frame_page = unsafe { frame.webView() }.ok_or(AdapterError::InvalidEvidence)?;
+        if Retained::as_ptr(&frame_page).cast::<c_void>()
+            != Retained::as_ptr(&expected_page).cast::<c_void>()
+        {
+            return Err(AdapterError::InvalidEvidence);
+        }
+        let request = unsafe { frame.request() };
+        let frame_url = request
+            .URL()
+            .and_then(|url| url.absoluteString())
+            .map(|url| url.to_string())
+            .ok_or(AdapterError::InvalidEvidence)?;
+        let frame_url = frame_url.split('#').next().unwrap_or_default();
+        let expected_url = self
+            .expected_url
+            .try_borrow()
+            .map_err(|_| AdapterError::InvalidEvidence)?;
+        if expected_url.as_deref() != Some(frame_url) {
+            return Err(AdapterError::InvalidEvidence);
+        }
+
+        let body = unsafe { message.body() }
+            .downcast::<NSString>()
+            .map_err(|_| AdapterError::InvalidEvidence)?;
+        if body.length() > MAX_RUNTIME_MESSAGE_UTF16 {
+            return Err(AdapterError::InvalidEvidence);
+        }
+        let body = body.to_string();
+        if body.len() > MAX_RUNTIME_MESSAGE_UTF8 {
+            return Err(AdapterError::InvalidEvidence);
+        }
+        let envelope: ProbeRuntimeMessage =
+            serde_json::from_str(&body).map_err(|_| AdapterError::InvalidEvidence)?;
+        let expected = self.expected.get().ok_or(AdapterError::InvalidEvidence)?;
+        match envelope {
+            ProbeRuntimeMessage::Ready {
+                protocol,
+                row,
+                case,
+                backend,
+                geometry,
+            } => {
+                if protocol != NATIVE_INPUT_RUNTIME_PROTOCOL_V1
+                    || (ProbeRowKey { row, case, backend }) != expected
+                    || self.phase.get() != ProbeMailboxPhase::AwaitingReady
+                {
+                    return Err(AdapterError::InvalidEvidence);
+                }
+                *self
+                    .ready
+                    .try_borrow_mut()
+                    .map_err(|_| AdapterError::InvalidEvidence)? = Some(geometry.validate()?);
+                self.phase.set(ProbeMailboxPhase::AwaitingResult);
+            }
+            ProbeRuntimeMessage::Result {
+                protocol,
+                row,
+                case,
+                backend,
+                state,
+            } => {
+                if protocol != NATIVE_INPUT_RUNTIME_PROTOCOL_V1
+                    || (ProbeRowKey { row, case, backend }) != expected
+                    || self.phase.get() != ProbeMailboxPhase::AwaitingResult
+                {
+                    return Err(AdapterError::InvalidEvidence);
+                }
+                state.validate(case)?;
+                *self
+                    .result
+                    .try_borrow_mut()
+                    .map_err(|_| AdapterError::InvalidEvidence)? = Some(state);
+                self.phase.set(ProbeMailboxPhase::Complete);
+            }
+            ProbeRuntimeMessage::Fault {
+                protocol,
+                row,
+                case,
+                backend,
+                code,
+            } => {
+                let _ = code;
+                if protocol != NATIVE_INPUT_RUNTIME_PROTOCOL_V1
+                    || (ProbeRowKey { row, case, backend }) != expected
+                {
+                    return Err(AdapterError::InvalidEvidence);
+                }
+                return Err(AdapterError::InvalidEvidence);
+            }
+        }
+        Ok(())
+    }
+
+    fn take_ready(&self) -> Result<Option<Geometry>, AdapterError> {
+        if self.failed.get() {
+            return Err(AdapterError::InvalidEvidence);
+        }
+        self.ready
+            .try_borrow_mut()
+            .map(|mut ready| ready.take())
+            .map_err(|_| AdapterError::InvalidEvidence)
+    }
+
+    fn take_result(&self) -> Result<Option<FixtureState>, AdapterError> {
+        if self.failed.get() {
+            return Err(AdapterError::InvalidEvidence);
+        }
+        if self.phase.get() != ProbeMailboxPhase::Complete {
+            return Ok(None);
+        }
+        let result = self
+            .result
+            .try_borrow_mut()
+            .map_err(|_| AdapterError::InvalidEvidence)?
+            .take()
+            .ok_or(AdapterError::InvalidEvidence)?;
+        self.expected.set(None);
+        self.expected_url
+            .try_borrow_mut()
+            .map_err(|_| AdapterError::InvalidEvidence)?
+            .take();
+        self.phase.set(ProbeMailboxPhase::Idle);
+        Ok(Some(result))
+    }
+}
+
+struct ProbeMessageHandlerIvars {
+    world: Retained<WKContentWorld>,
+    handler_name: Retained<NSString>,
+    mailbox: Rc<ProbeRuntimeMailbox>,
+}
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "ZephiumAgenticProbeMessageHandler"]
+    #[ivars = ProbeMessageHandlerIvars]
+    struct ProbeMessageHandler;
+
+    unsafe impl NSObjectProtocol for ProbeMessageHandler {}
+
+    unsafe impl WKScriptMessageHandler for ProbeMessageHandler {
+        #[unsafe(method(userContentController:didReceiveScriptMessage:))]
+        fn did_receive_script_message(
+            this: &ProbeMessageHandler,
+            _controller: &WKUserContentController,
+            message: &WKScriptMessage,
+        ) {
+            let ivars = this.ivars();
+            let (world, name) = unsafe { (message.world(), message.name()) };
+            if Retained::as_ptr(&world) != Retained::as_ptr(&ivars.world)
+                || !name.isEqualToString(&ivars.handler_name)
+            {
+                ivars.mailbox.failed.set(true);
+                return;
+            }
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                ivars.mailbox.receive(message);
+            }))
+            .is_err()
+            {
+                ivars.mailbox.failed.set(true);
+            }
+        }
+    }
+);
+
+struct ProbeRuntimeRegistration {
+    controller: Retained<WKUserContentController>,
+    world: Retained<WKContentWorld>,
+    handler_name: Retained<NSString>,
+    _handler: Retained<ProbeMessageHandler>,
+}
+
+impl Drop for ProbeRuntimeRegistration {
+    fn drop(&mut self) {
+        let _ = objc2::exception::catch(std::panic::AssertUnwindSafe(|| unsafe {
+            self.controller
+                .removeScriptMessageHandlerForName_contentWorld(&self.handler_name, &self.world);
+            self.controller.removeAllUserScripts();
+        }));
+    }
+}
+
+fn install_probe_runtime(
+    mtm: MainThreadMarker,
+    configuration: &WKWebViewConfiguration,
+    mailbox: Rc<ProbeRuntimeMailbox>,
+) -> Result<ProbeRuntimeRegistration, AdapterError> {
+    let controller = unsafe { configuration.userContentController() };
+    let world_name = NSString::from_str(MACOS_PROBE_CONTENT_WORLD_V1);
+    let world = unsafe { WKContentWorld::worldWithName(&world_name, mtm) };
+    let handler_name = NSString::from_str(MACOS_PROBE_HANDLER_V1);
+    let handler = ProbeMessageHandler::alloc(mtm).set_ivars(ProbeMessageHandlerIvars {
+        world: world.clone(),
+        handler_name: handler_name.clone(),
+        mailbox,
+    });
+    let handler: Retained<ProbeMessageHandler> = unsafe { msg_send![super(handler), init] };
+    let protocol_handler = ProtocolObject::from_ref(&*handler);
+    objc2::exception::catch(std::panic::AssertUnwindSafe(|| unsafe {
+        controller.addScriptMessageHandler_contentWorld_name(
+            protocol_handler,
+            &world,
+            &handler_name,
+        );
+    }))
+    .map_err(|_| AdapterError::NativeConstruction)?;
+    let registration = ProbeRuntimeRegistration {
+        controller: controller.clone(),
+        world: world.clone(),
+        handler_name,
+        _handler: handler,
+    };
+    let source = NSString::from_str(MACOS_NATIVE_INPUT_RUNTIME_V1);
+    let script = unsafe {
+        WKUserScript::initWithSource_injectionTime_forMainFrameOnly_inContentWorld(
+            WKUserScript::alloc(mtm),
+            &source,
+            WKUserScriptInjectionTime::AtDocumentEnd,
+            true,
+            &world,
+        )
+    };
+    objc2::exception::catch(std::panic::AssertUnwindSafe(|| unsafe {
+        controller.addUserScript(&script);
+    }))
+    .map_err(|_| AdapterError::NativeConstruction)?;
+    Ok(registration)
 }
 
 pub(crate) fn run(
@@ -317,17 +612,18 @@ pub(crate) fn run(
             false,
         ));
     }
-    objc2::rc::autoreleasepool(|_| {
-        run_in_autorelease_pool(request_id, matrix, permit, &mut poll_control)
-    })
+    let pending = objc2::rc::autoreleasepool(|_| {
+        begin_in_autorelease_pool(request_id, matrix, permit, &mut poll_control)
+    })?;
+    finish_teardown(pending, &mut poll_control)
 }
 
-fn run_in_autorelease_pool(
+fn begin_in_autorelease_pool(
     request_id: u64,
     matrix: &RunMatrixRequest,
     permit: &ProbeRunPermit,
     poll_control: &mut impl FnMut(),
-) -> Result<RunEvidence, ProbeFailure> {
+) -> Result<PendingTeardown, ProbeFailure> {
     let started = Instant::now();
     let run_deadline = started.checked_add(RUN_TIMEOUT).ok_or_else(|| {
         failure(
@@ -360,6 +656,10 @@ fn run_in_autorelease_pool(
             None,
         ));
     }
+    let runtime_mailbox = Rc::new(ProbeRuntimeMailbox::new());
+    let runtime_registration =
+        install_probe_runtime(mtm, &configuration, Rc::clone(&runtime_mailbox))
+            .map_err(|error| adapter_failure(error, ProbeStage::Construct, None, None))?;
     let server = FixtureServer::start().map_err(|_| {
         failure(
             ProbeFailureCode::HarnessFailure,
@@ -391,8 +691,6 @@ fn run_in_autorelease_pool(
     let load_generation_callback = Rc::clone(&load_generation);
     let load_counter_failed = Rc::new(Cell::new(false));
     let load_counter_failed_callback = Rc::clone(&load_counter_failed);
-    let navigation_tracker = Rc::new(NavigationTracker::default());
-    let navigation_tracker_callback = Rc::clone(&navigation_tracker);
     let popup_requested = Rc::new(Cell::new(false));
     let popup_request_callback = Rc::clone(&popup_requested);
     let webview = wry::WebViewBuilder::new()
@@ -408,7 +706,6 @@ fn run_in_autorelease_pool(
                 }
             }
         })
-        .with_navigation_event_handler(move |event| navigation_tracker_callback.observe(event))
         .with_new_window_req_handler(move |_url, _features| {
             popup_request_callback.set(true);
             NewWindowResponse::Deny
@@ -423,6 +720,9 @@ fn run_in_autorelease_pool(
             )
         })?;
     let page = webview.webview();
+    runtime_mailbox
+        .bind_page(&page)
+        .map_err(|error| adapter_failure(error, ProbeStage::Construct, None, None))?;
     let page_configuration = unsafe { page.configuration() };
     let page_store = unsafe { page_configuration.websiteDataStore() };
     let page_configuration_valid = !unsafe { page_store.isPersistent() }
@@ -438,23 +738,6 @@ fn run_in_autorelease_pool(
                 None,
             ));
         }
-        webview
-            .load_url(&server.url(FixtureRoute::NativeInput))
-            .map_err(|_| {
-                adapter_failure(AdapterError::Navigation, ProbeStage::Navigate, None, None)
-            })?;
-        wait_for_fixture(
-            mtm,
-            &page,
-            &run_loop,
-            &load_generation,
-            &load_counter_failed,
-            0,
-            permit,
-            poll_control,
-            run_deadline,
-        )
-        .map_err(|error| adapter_failure(error, ProbeStage::Navigate, None, None))?;
         apply_presentation(&app, &window, &page, &webview, matrix.presentation)
             .map_err(|error| adapter_failure(error, ProbeStage::Construct, None, None))?;
 
@@ -462,8 +745,8 @@ fn run_in_autorelease_pool(
             .map_err(|error| adapter_failure(error, ProbeStage::Construct, None, None))?;
         let capabilities = macos_capabilities();
         let mut cases = Vec::with_capacity(matrix.cases.len() * matrix.backends.len());
-        let mut document_consumed = false;
         let mut cancelled = false;
+        let mut row = 0_u16;
         for case in matrix.cases.iter().copied() {
             for backend in matrix.backends.iter().copied() {
                 poll_control();
@@ -472,31 +755,41 @@ fn run_in_autorelease_pool(
                     cancelled = true;
                     break;
                 }
-                if document_consumed {
-                    reload_fixture(
-                        mtm,
-                        &page,
-                        &run_loop,
-                        &navigation_tracker,
-                        permit,
-                        poll_control,
-                        run_deadline,
+                row = row.checked_add(1).ok_or_else(|| {
+                    adapter_failure(
+                        AdapterError::InvalidEvidence,
+                        ProbeStage::Admit,
+                        Some(case),
+                        Some(backend),
                     )
-                    .map_err(|error| {
-                        adapter_failure(error, ProbeStage::Navigate, Some(case), Some(backend))
-                    })?;
-                }
-                document_consumed = true;
+                })?;
+                popup_requested.set(false);
+                let geometry = load_probe_row(
+                    &webview,
+                    &server,
+                    &runtime_mailbox,
+                    &run_loop,
+                    &load_generation,
+                    &load_counter_failed,
+                    ProbeRowKey { row, case, backend },
+                    permit,
+                    poll_control,
+                    run_deadline,
+                )
+                .map_err(|error| {
+                    adapter_failure(error, ProbeStage::Navigate, Some(case), Some(backend))
+                })?;
                 let evidence = run_case(
-                    mtm,
                     &app,
                     &window,
                     &page,
                     &run_loop,
+                    &runtime_mailbox,
                     &popup_requested,
                     case,
                     backend,
                     matrix.presentation,
+                    geometry,
                     permit,
                     poll_control,
                     run_deadline,
@@ -514,10 +807,26 @@ fn run_in_autorelease_pool(
         Ok((runtime, capabilities, cases))
     })();
 
+    let mut execution = execution;
+    if let Ok((_, _, cases)) = execution.as_mut() {
+        // If a non-focused route activated this process, retain the
+        // process-level transition in one row before releasing AppKit owners.
+        if matrix.presentation != PresentationState::VisibleFocused
+            && !app_active_before_presentation
+            && app.isActive()
+            && !cases.is_empty()
+            && !cases.iter().any(|case| case.focus.browse_focus_was_stolen)
+        {
+            cases[0].focus.browse_focus_was_stolen = true;
+        }
+    }
+
     let teardown_started = Instant::now();
     let page_weak = Weak::from_retained(&page);
     let window_weak = Weak::from_retained(&window);
     let profile_store_weak = Weak::from_retained(&profile.store);
+    drop(runtime_registration);
+    drop(runtime_mailbox);
     drop(page_store);
     drop(page_configuration);
     drop(page);
@@ -526,48 +835,70 @@ fn run_in_autorelease_pool(
     drop(host);
     drop(window);
     drop(profile);
+    drop(run_loop);
+
+    Ok(PendingTeardown {
+        run_id: request_id,
+        started,
+        execution,
+        page: page_weak,
+        window: window_weak,
+        profile_store: profile_store_weak,
+        server,
+        teardown_started,
+    })
+}
+
+fn finish_teardown(
+    pending: PendingTeardown,
+    poll_control: &mut impl FnMut(),
+) -> Result<RunEvidence, ProbeFailure> {
+    let run_loop = NSRunLoop::mainRunLoop();
     pump_for(&run_loop, TEARDOWN_WINDOW, poll_control);
-    let retained_native_views = u8::from(page_weak.load().is_some());
-    let work_drained = window_weak.load().is_none() && profile_store_weak.load().is_none();
-    server
-        .shutdown()
-        .map_err(|_| adapter_failure(AdapterError::Teardown, ProbeStage::Teardown, None, None))?;
-    if !work_drained {
+    let page_drained = pending.page.load().is_none();
+    let window_drained = pending.window.load().is_none();
+    let profile_drained = pending.profile_store.load().is_none();
+    let fixture_drained = pending.server.shutdown().is_ok();
+    if !page_drained || !window_drained {
         return Err(adapter_failure(
-            AdapterError::Teardown,
+            AdapterError::NativeTeardown,
+            ProbeStage::Teardown,
+            None,
+            None,
+        ));
+    }
+    if !profile_drained {
+        return Err(adapter_failure(
+            AdapterError::ProfileTeardown,
+            ProbeStage::Teardown,
+            None,
+            None,
+        ));
+    }
+    if !fixture_drained {
+        return Err(adapter_failure(
+            AdapterError::FixtureTeardown,
             ProbeStage::Teardown,
             None,
             None,
         ));
     }
     let teardown = TeardownEvidence {
-        view_closed: retained_native_views == 0,
-        work_drained,
-        retained_native_views,
-        cleanup_ms: duration_ms_u32(teardown_started.elapsed()),
+        view_closed: page_drained,
+        work_drained: window_drained && profile_drained && fixture_drained,
+        retained_native_views: u8::from(!page_drained),
+        cleanup_ms: duration_ms_u32(pending.teardown_started.elapsed()),
     };
 
-    let (runtime, capabilities, mut cases) = execution?;
-
-    // If a non-focused route activated this process, every case records the
-    // transition. Retain this process-level fact by requiring at least one
-    // row to carry it rather than inventing a separate raw application field.
-    if matrix.presentation != PresentationState::VisibleFocused
-        && !app_active_before_presentation
-        && app.isActive()
-        && !cases.is_empty()
-        && !cases.iter().any(|case| case.focus.browse_focus_was_stolen)
-    {
-        cases[0].focus.browse_focus_was_stolen = true;
-    }
+    let (runtime, capabilities, cases) = pending.execution?;
 
     let evidence = RunEvidence {
-        run_id: request_id,
+        run_id: pending.run_id,
         runtime,
         capabilities,
         peak_queue_depth: u8::from(!cases.is_empty()),
         cases,
-        elapsed_ms: duration_ms_u64(started.elapsed()),
+        elapsed_ms: duration_ms_u64(pending.started.elapsed()),
         teardown,
     };
     evidence.validate().map_err(|_| {
@@ -637,38 +968,42 @@ fn apply_presentation(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn wait_for_fixture(
-    mtm: MainThreadMarker,
-    page: &WryWebView,
+fn load_probe_row(
+    webview: &wry::WebView,
+    server: &FixtureServer,
+    mailbox: &ProbeRuntimeMailbox,
     run_loop: &NSRunLoop,
     load_generation: &Cell<u16>,
     load_counter_failed: &Cell<bool>,
-    after_generation: u16,
+    key: ProbeRowKey,
     permit: &ProbeRunPermit,
     poll_control: &mut impl FnMut(),
     run_deadline: Instant,
-) -> Result<(), AdapterError> {
+) -> Result<Geometry, AdapterError> {
+    let url = server
+        .native_input_url(key.row, key.case, key.backend)
+        .ok_or(AdapterError::InvalidEvidence)?;
+    mailbox.arm(key, url.clone())?;
+    let before_generation = load_generation.get();
+    webview
+        .load_url(&url)
+        .map_err(|_| AdapterError::Navigation)?;
     let deadline = earlier_deadline(run_deadline, NAVIGATION_TIMEOUT)?;
+    let mut ready = None;
     while Instant::now() < deadline {
         poll_control();
         if permit.is_cancelled() {
             return Err(AdapterError::Cancelled);
         }
-        if load_counter_failed.get() {
+        if load_counter_failed.get() || !server.is_healthy() {
             return Err(AdapterError::Navigation);
         }
-        if load_generation.get() > after_generation {
-            let state = evaluate_string(
-                mtm,
-                page,
-                run_loop,
-                FixedScript::Ready,
-                permit,
-                poll_control,
-                deadline,
-            )?;
-            if state == "ready" {
-                return Ok(());
+        if ready.is_none() {
+            ready = mailbox.take_ready()?;
+        }
+        if load_generation.get() > before_generation {
+            if let Some(geometry) = ready {
+                return Ok(geometry);
             }
         }
         pump_once(run_loop);
@@ -676,106 +1011,33 @@ fn wait_for_fixture(
     Err(AdapterError::Timeout)
 }
 
-fn reload_fixture(
-    mtm: MainThreadMarker,
-    page: &WryWebView,
-    run_loop: &NSRunLoop,
-    navigation_tracker: &NavigationTracker,
-    permit: &ProbeRunPermit,
-    poll_control: &mut impl FnMut(),
-    run_deadline: Instant,
-) -> Result<(), AdapterError> {
-    navigation_tracker.reset_for_reload()?;
-    let navigation = unsafe { page.reload() }.ok_or(AdapterError::Navigation)?;
-    let raw_id = u64::try_from(std::ptr::from_ref(&*navigation) as usize)
-        .map_err(|_| AdapterError::Navigation)?;
-    let expected = NavigationId::from_raw(raw_id);
-    let deadline = earlier_deadline(run_deadline, NAVIGATION_TIMEOUT)?;
-    while Instant::now() < deadline {
-        poll_control();
-        if permit.is_cancelled() {
-            return Err(AdapterError::Cancelled);
-        }
-        match navigation_tracker.take(expected)? {
-            Some(NavigationTerminal::Finished) => {
-                let state = evaluate_string(
-                    mtm,
-                    page,
-                    run_loop,
-                    FixedScript::Ready,
-                    permit,
-                    poll_control,
-                    deadline,
-                )?;
-                return if state == "ready" {
-                    Ok(())
-                } else {
-                    Err(AdapterError::Navigation)
-                };
-            }
-            Some(NavigationTerminal::Failed) => return Err(AdapterError::Navigation),
-            None => pump_once(run_loop),
-        }
-    }
-    Err(AdapterError::Timeout)
-}
-
 #[allow(clippy::too_many_arguments)]
 fn run_case(
-    mtm: MainThreadMarker,
     app: &NSApplication,
     window: &NSWindow,
     page: &WryWebView,
     run_loop: &NSRunLoop,
+    mailbox: &ProbeRuntimeMailbox,
     popup_requested: &Cell<bool>,
     case: FixtureCase,
     backend: InputBackend,
     presentation: PresentationState,
+    geometry: Geometry,
     permit: &ProbeRunPermit,
     poll_control: &mut impl FnMut(),
     run_deadline: Instant,
 ) -> Result<CaseEvidence, ProbeFailure> {
     let started = Instant::now();
-    let reset = evaluate_string(
-        mtm,
-        page,
-        run_loop,
-        FixedScript::Reset(case),
-        permit,
-        poll_control,
-        run_deadline,
-    )
-    .map_err(|error| adapter_failure(error, ProbeStage::Observe, Some(case), Some(backend)))?;
-    if reset != "ok" {
-        return Err(adapter_failure(
-            AdapterError::InvalidEvidence,
-            ProbeStage::Observe,
-            Some(case),
-            Some(backend),
-        ));
-    }
-    popup_requested.set(false);
-
     let resources_before = live_resource_sample();
     let app_active_before = app.isActive();
     let key_before = window.isKeyWindow();
     let focus_before = native_focus_owner(window, false);
-    let outcome_hint = execute_backend(
-        mtm,
-        window,
-        page,
-        run_loop,
-        case,
-        backend,
-        presentation,
-        permit,
-        poll_control,
-        run_deadline,
-    )
-    .map_err(|error| adapter_failure(error, ProbeStage::Execute, Some(case), Some(backend)))?;
+    let outcome_hint = execute_backend(window, page, case, backend, presentation, geometry)
+        .map_err(|error| adapter_failure(error, ProbeStage::Execute, Some(case), Some(backend)))?;
     let focus_during = native_focus_owner(window, false);
-    match settle(run_loop, permit, poll_control, run_deadline) {
-        Ok(()) => {}
+    let state = match wait_for_runtime_result(mailbox, run_loop, permit, poll_control, run_deadline)
+    {
+        Ok(state) => state,
         Err(AdapterError::Cancelled) => {
             return Ok(cancelled_case(case, backend, presentation));
         }
@@ -787,36 +1049,7 @@ fn run_case(
                 Some(backend),
             ));
         }
-    }
-    let encoded = evaluate_string(
-        mtm,
-        page,
-        run_loop,
-        FixedScript::Read,
-        permit,
-        poll_control,
-        run_deadline,
-    )
-    .map_err(|error| adapter_failure(error, ProbeStage::Observe, Some(case), Some(backend)))?;
-    if encoded.len() > MAX_EVALUATION_RESULT_UTF8 {
-        return Err(adapter_failure(
-            AdapterError::InvalidEvidence,
-            ProbeStage::Observe,
-            Some(case),
-            Some(backend),
-        ));
-    }
-    let state: FixtureState = serde_json::from_str(&encoded).map_err(|_| {
-        adapter_failure(
-            AdapterError::InvalidEvidence,
-            ProbeStage::Observe,
-            Some(case),
-            Some(backend),
-        )
-    })?;
-    state
-        .validate(case)
-        .map_err(|error| adapter_failure(error, ProbeStage::Observe, Some(case), Some(backend)))?;
+    };
     let target = case.target();
     let target_received_focus = state
         .events
@@ -867,50 +1100,21 @@ fn run_case(
 
 #[allow(clippy::too_many_arguments)]
 fn execute_backend(
-    mtm: MainThreadMarker,
     window: &NSWindow,
     page: &WryWebView,
-    run_loop: &NSRunLoop,
     case: FixtureCase,
     backend: InputBackend,
     presentation: PresentationState,
-    permit: &ProbeRunPermit,
-    poll_control: &mut impl FnMut(),
-    run_deadline: Instant,
+    geometry: Geometry,
 ) -> Result<Option<CaseOutcome>, AdapterError> {
     match backend {
         InputBackend::FixedDomRecipe => {
             if case == FixtureCase::ClosedShadow {
                 return Ok(Some(CaseOutcome::Unsupported));
             }
-            let Some(_) = FixedScript::DomRecipe(case).source() else {
-                return Ok(Some(CaseOutcome::Unsupported));
-            };
-            let result = evaluate_string(
-                mtm,
-                page,
-                run_loop,
-                FixedScript::DomRecipe(case),
-                permit,
-                poll_control,
-                run_deadline,
-            )?;
-            if result == "ok" {
-                Ok(None)
-            } else {
-                Ok(Some(CaseOutcome::VerificationFailed))
-            }
+            Ok(None)
         }
         InputBackend::MacosAppKitEvent => {
-            let geometry = geometry(
-                mtm,
-                page,
-                run_loop,
-                case,
-                permit,
-                poll_control,
-                run_deadline,
-            )?;
             dispatch_appkit(window, page, case, geometry)?;
             Ok(None)
         }
@@ -918,15 +1122,6 @@ fn execute_backend(
             if !accessibility_supported_case(case) {
                 return Ok(Some(CaseOutcome::Unsupported));
             }
-            let geometry = geometry(
-                mtm,
-                page,
-                run_loop,
-                case,
-                permit,
-                poll_control,
-                run_deadline,
-            )?;
             if dispatch_accessibility(window, page, geometry)? {
                 Ok(None)
             } else {
@@ -947,30 +1142,27 @@ fn execute_backend(
     }
 }
 
-fn geometry(
-    mtm: MainThreadMarker,
-    page: &WryWebView,
+fn wait_for_runtime_result(
+    mailbox: &ProbeRuntimeMailbox,
     run_loop: &NSRunLoop,
-    case: FixtureCase,
     permit: &ProbeRunPermit,
     poll_control: &mut impl FnMut(),
     run_deadline: Instant,
-) -> Result<Geometry, AdapterError> {
-    let encoded = evaluate_string(
-        mtm,
-        page,
-        run_loop,
-        FixedScript::Geometry(case),
-        permit,
-        poll_control,
-        run_deadline,
-    )?;
-    if encoded.len() > 512 {
-        return Err(AdapterError::InvalidEvidence);
+) -> Result<FixtureState, AdapterError> {
+    let deadline = earlier_deadline(run_deadline, RUNTIME_RESULT_TIMEOUT)?;
+    loop {
+        poll_control();
+        if permit.is_cancelled() {
+            return Err(AdapterError::Cancelled);
+        }
+        if let Some(state) = mailbox.take_result()? {
+            return Ok(state);
+        }
+        if Instant::now() >= deadline {
+            return Err(AdapterError::Timeout);
+        }
+        pump_once(run_loop);
     }
-    serde_json::from_str::<Geometry>(&encoded)
-        .map_err(|_| AdapterError::InvalidEvidence)?
-        .validate()
 }
 
 fn dispatch_appkit(
@@ -1121,72 +1313,6 @@ fn window_point(page: &WryWebView, x: f64, y: f64) -> Result<NSPoint, AdapterErr
     ))
 }
 
-fn evaluate_string(
-    mtm: MainThreadMarker,
-    page: &WryWebView,
-    run_loop: &NSRunLoop,
-    recipe: FixedScript,
-    permit: &ProbeRunPermit,
-    poll_control: &mut impl FnMut(),
-    outer_deadline: Instant,
-) -> Result<String, AdapterError> {
-    poll_control();
-    if permit.is_cancelled() {
-        return Err(AdapterError::Cancelled);
-    }
-    if Instant::now() >= outer_deadline {
-        return Err(AdapterError::Timeout);
-    }
-    let source = recipe.source().ok_or(AdapterError::InvalidEvidence)?;
-    let world = recipe.world(mtm);
-    let result = Rc::new(RefCell::new(None::<Result<String, AdapterError>>));
-    let settlements = Rc::new(Cell::new(0_u8));
-    let callback_result = Rc::clone(&result);
-    let callback_settlements = Rc::clone(&settlements);
-    let completion = block2::RcBlock::new(move |value: *mut AnyObject, error: *mut NSError| {
-        let count = callback_settlements.get().saturating_add(1);
-        callback_settlements.set(count);
-        let settlement = if count != 1 || !error.is_null() {
-            Err(AdapterError::Evaluation)
-        } else {
-            unsafe { value.as_ref() }
-                .and_then(AnyObject::downcast_ref::<NSString>)
-                .filter(|value| value.length() <= MAX_EVALUATION_RESULT_UTF16)
-                .map(ToString::to_string)
-                .filter(|value| value.len() <= MAX_EVALUATION_RESULT_UTF8)
-                .ok_or(AdapterError::Evaluation)
-        };
-        if let Ok(mut slot) = callback_result.try_borrow_mut() {
-            *slot = Some(settlement);
-        }
-    });
-    let source = NSString::from_str(&source);
-    objc2::exception::catch(std::panic::AssertUnwindSafe(|| unsafe {
-        page.evaluateJavaScript_inFrame_inContentWorld_completionHandler(
-            &source,
-            None,
-            &world,
-            Some(&completion),
-        );
-    }))
-    .map_err(|_| AdapterError::Evaluation)?;
-
-    let deadline = earlier_deadline(outer_deadline, EVALUATION_TIMEOUT)?;
-    loop {
-        poll_control();
-        if permit.is_cancelled() {
-            return Err(AdapterError::Cancelled);
-        }
-        if let Some(result) = result.borrow_mut().take() {
-            return result;
-        }
-        if Instant::now() >= deadline {
-            return Err(AdapterError::Timeout);
-        }
-        pump_once(run_loop);
-    }
-}
-
 fn classify_outcome(
     case: FixtureCase,
     state: &FixtureState,
@@ -1335,100 +1461,6 @@ fn accessibility_supported_case(case: FixtureCase) -> bool {
     )
 }
 
-fn case_name(case: FixtureCase) -> &'static str {
-    match case {
-        FixtureCase::Button => "button",
-        FixtureCase::Link => "link",
-        FixtureCase::TextInput => "text_input",
-        FixtureCase::ContentEditable => "content_editable",
-        FixtureCase::Select => "select",
-        FixtureCase::PointerMouse => "pointer_mouse",
-        FixtureCase::Keyboard => "keyboard",
-        FixtureCase::TransientActivation => "transient_activation",
-        FixtureCase::Popup => "popup",
-        FixtureCase::ClipboardGate => "clipboard_gate",
-        FixtureCase::Drag => "drag",
-        FixtureCase::Iframe => "iframe",
-        FixtureCase::OpenShadow => "open_shadow",
-        FixtureCase::ClosedShadow => "closed_shadow",
-    }
-}
-
-fn dom_recipe(case: FixtureCase) -> Option<&'static str> {
-    Some(match case {
-        FixtureCase::Button | FixtureCase::PointerMouse => {
-            "(()=>{const e=document.getElementById('button');if(!e)return 'failed';e.click();return 'ok';})()"
-        }
-        FixtureCase::Link => {
-            "(()=>{const e=document.getElementById('link');if(!e)return 'failed';e.click();return 'ok';})()"
-        }
-        FixtureCase::TextInput => {
-            "(()=>{const e=document.getElementById('text-input');if(!e)return 'failed';e.focus();e.value='fixturex';e.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:'x'}));return 'ok';})()"
-        }
-        FixtureCase::ContentEditable => {
-            "(()=>{const e=document.getElementById('content-editable');if(!e)return 'failed';e.focus();e.textContent='fixturex';e.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:'x'}));return 'ok';})()"
-        }
-        FixtureCase::Select => {
-            "(()=>{const e=document.getElementById('select');if(!e)return 'failed';e.focus();e.selectedIndex=1;e.dispatchEvent(new Event('change',{bubbles:true}));return 'ok';})()"
-        }
-        FixtureCase::Keyboard => {
-            "(()=>{const e=document.getElementById('text-input');if(!e)return 'failed';e.focus();e.dispatchEvent(new KeyboardEvent('keydown',{key:'x',code:'KeyX',bubbles:true}));e.dispatchEvent(new KeyboardEvent('keyup',{key:'x',code:'KeyX',bubbles:true}));return 'ok';})()"
-        }
-        FixtureCase::TransientActivation => {
-            "(()=>{const e=document.getElementById('activation-button');if(!e)return 'failed';e.click();return 'ok';})()"
-        }
-        FixtureCase::Popup => {
-            "(()=>{const e=document.getElementById('popup-button');if(!e)return 'failed';e.click();return 'ok';})()"
-        }
-        FixtureCase::ClipboardGate => {
-            "(()=>{const e=document.getElementById('clipboard-button');if(!e)return 'failed';e.click();return 'ok';})()"
-        }
-        FixtureCase::Drag => {
-            "(()=>{try{const s=document.getElementById('drag-source');const d=document.getElementById('drop-target');if(!s||!d)return 'failed';const t=new DataTransfer();s.dispatchEvent(new DragEvent('dragstart',{bubbles:true,dataTransfer:t}));d.dispatchEvent(new DragEvent('dragenter',{bubbles:true,dataTransfer:t}));d.dispatchEvent(new DragEvent('dragover',{bubbles:true,cancelable:true,dataTransfer:t}));d.dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:t}));s.dispatchEvent(new DragEvent('dragend',{bubbles:true,dataTransfer:t}));return 'ok';}catch{return 'failed';}})()"
-        }
-        FixtureCase::Iframe => {
-            "(()=>{const e=document.getElementById('frame')?.contentDocument?.getElementById('frame-button');if(!e)return 'failed';e.click();return 'ok';})()"
-        }
-        FixtureCase::OpenShadow => {
-            "(()=>{const e=document.getElementById('open-shadow-host')?.shadowRoot?.getElementById('open-shadow-button');if(!e)return 'failed';e.click();return 'ok';})()"
-        }
-        FixtureCase::ClosedShadow => return None,
-    })
-}
-
-fn geometry_script(case: FixtureCase) -> Option<String> {
-    if case == FixtureCase::Drag {
-        return Some(
-            "(()=>{const s=document.getElementById('drag-source');const d=document.getElementById('drop-target');if(!s||!d)return '';const r=s.getBoundingClientRect();const q=d.getBoundingClientRect();return JSON.stringify({x:r.x,y:r.y,width:r.width,height:r.height,endX:q.x+q.width/2,endY:q.y+q.height/2});})()".to_owned(),
-        );
-    }
-    if case == FixtureCase::Iframe {
-        return Some(
-            "(()=>{const f=document.getElementById('frame');const e=f?.contentDocument?.getElementById('frame-button');if(!f||!e)return '';const a=f.getBoundingClientRect();const r=e.getBoundingClientRect();return JSON.stringify({x:a.x+r.x,y:a.y+r.y,width:r.width,height:r.height,endX:null,endY:null});})()".to_owned(),
-        );
-    }
-    let expression = match case {
-        FixtureCase::Button | FixtureCase::PointerMouse => "document.getElementById('button')",
-        FixtureCase::Link => "document.getElementById('link')",
-        FixtureCase::TextInput | FixtureCase::Keyboard => {
-            "document.getElementById('text-input')"
-        }
-        FixtureCase::ContentEditable => "document.getElementById('content-editable')",
-        FixtureCase::Select => "document.getElementById('select')",
-        FixtureCase::TransientActivation => "document.getElementById('activation-button')",
-        FixtureCase::Popup => "document.getElementById('popup-button')",
-        FixtureCase::ClipboardGate => "document.getElementById('clipboard-button')",
-        FixtureCase::OpenShadow => {
-            "document.getElementById('open-shadow-host')?.shadowRoot?.getElementById('open-shadow-button')"
-        }
-        FixtureCase::ClosedShadow => "document.getElementById('closed-shadow-host')",
-        FixtureCase::Drag | FixtureCase::Iframe => return None,
-    };
-    Some(format!(
-        "(()=>{{const e={expression};if(!e)return '';const r=e.getBoundingClientRect();return JSON.stringify({{x:r.x,y:r.y,width:r.width,height:r.height,endX:null,endY:null}});}})()"
-    ))
-}
-
 fn pump_once(run_loop: &NSRunLoop) {
     objc2::rc::autoreleasepool(|_| {
         run_loop.runUntilDate(&NSDate::dateWithTimeIntervalSinceNow(
@@ -1444,27 +1476,6 @@ fn pump_for(run_loop: &NSRunLoop, duration: Duration, poll_control: &mut impl Fn
     while Instant::now() < deadline {
         poll_control();
         pump_once(run_loop);
-    }
-}
-
-fn settle(
-    run_loop: &NSRunLoop,
-    permit: &ProbeRunPermit,
-    poll_control: &mut impl FnMut(),
-    run_deadline: Instant,
-) -> Result<(), AdapterError> {
-    let deadline = earlier_deadline(run_deadline, SETTLE_WINDOW)?;
-    while Instant::now() < deadline {
-        poll_control();
-        if permit.is_cancelled() {
-            return Err(AdapterError::Cancelled);
-        }
-        pump_once(run_loop);
-    }
-    if Instant::now() >= run_deadline {
-        Err(AdapterError::Timeout)
-    } else {
-        Ok(())
     }
 }
 
@@ -1540,7 +1551,7 @@ mod tests {
     }
 
     #[test]
-    fn every_case_has_a_closed_target_and_geometry_route() {
+    fn every_case_has_a_closed_target() {
         for case in [
             FixtureCase::Button,
             FixtureCase::Link,
@@ -1558,15 +1569,36 @@ mod tests {
             FixtureCase::ClosedShadow,
         ] {
             let _ = case.target();
-            assert!(geometry_script(case).is_some());
-            assert_eq!(case_name(case).len() <= 32, true);
         }
     }
 
     #[test]
     fn closed_shadow_has_no_dom_bypass_recipe() {
-        assert!(dom_recipe(FixtureCase::ClosedShadow).is_none());
+        assert!(MACOS_NATIVE_INPUT_RUNTIME_V1.contains("name === 'closed_shadow'"));
+        assert!(MACOS_NATIVE_INPUT_RUNTIME_V1.contains("return 'unsupported'"));
         assert!(accessibility_supported_case(FixtureCase::ClosedShadow));
+    }
+
+    #[test]
+    fn isolated_runtime_envelope_is_closed_and_versioned() {
+        let ready = serde_json::from_str::<ProbeRuntimeMessage>(
+            r#"{"phase":"ready","protocol":1,"row":1,"case":"button","backend":"fixed_dom_recipe","geometry":{"x":1.0,"y":2.0,"width":3.0,"height":4.0,"endX":null,"endY":null,"devicePixelRatio":2.0}}"#,
+        )
+        .expect("closed ready envelope");
+        assert!(matches!(
+            ready,
+            ProbeRuntimeMessage::Ready {
+                protocol: NATIVE_INPUT_RUNTIME_PROTOCOL_V1,
+                row: 1,
+                case: FixtureCase::Button,
+                backend: InputBackend::FixedDomRecipe,
+                ..
+            }
+        ));
+        assert!(serde_json::from_str::<ProbeRuntimeMessage>(
+            r##"{"phase":"ready","protocol":1,"row":1,"case":"button","backend":"fixed_dom_recipe","geometry":{"x":1.0,"y":2.0,"width":3.0,"height":4.0,"endX":null,"endY":null,"devicePixelRatio":2.0},"selector":"#button"}"##,
+        )
+        .is_err());
     }
 
     #[test]
@@ -1621,48 +1653,5 @@ mod tests {
             classify_outcome(FixtureCase::Button, &state(FixtureCase::Button), false),
             CaseOutcome::Verified
         );
-    }
-
-    #[test]
-    fn navigation_tracker_correlates_exact_terminal_identity() {
-        let tracker = NavigationTracker::default();
-        let first = NavigationId::from_raw(1);
-        let second = NavigationId::from_raw(2);
-        tracker.observe(NavigationEvent {
-            id: first,
-            phase: NavigationEventPhase::Finished,
-            url: "http://127.0.0.1/fixture".to_owned(),
-        });
-        tracker.observe(NavigationEvent {
-            id: second,
-            phase: NavigationEventPhase::Failed,
-            url: "http://127.0.0.1/fixture".to_owned(),
-        });
-        assert_eq!(
-            tracker.take(second).expect("tracker"),
-            Some(NavigationTerminal::Failed)
-        );
-        assert_eq!(
-            tracker.take(first).expect("tracker"),
-            Some(NavigationTerminal::Finished)
-        );
-        assert_eq!(tracker.take(first).expect("tracker"), None);
-    }
-
-    #[test]
-    fn navigation_tracker_overflow_is_sticky() {
-        let tracker = NavigationTracker::default();
-        for raw in 1..=MAX_PENDING_NAVIGATION_TERMINALS + 1 {
-            tracker.observe(NavigationEvent {
-                id: NavigationId::from_raw(raw as u64),
-                phase: NavigationEventPhase::Finished,
-                url: "http://127.0.0.1/fixture".to_owned(),
-            });
-        }
-        assert_eq!(
-            tracker.take(NavigationId::from_raw(1)).unwrap_err(),
-            AdapterError::Navigation
-        );
-        assert_eq!(tracker.reset_for_reload(), Err(AdapterError::Navigation));
     }
 }

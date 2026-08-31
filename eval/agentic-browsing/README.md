@@ -46,6 +46,8 @@ Other matrices must run only on an explicitly authorized named device. Their
 JSONL result remains in a local ignored location and is reviewed into aggregate
 non-sensitive fields rather than committed raw.
 
-Named-device results remain empty until the native probe is run on authorized
-macOS and Windows hosts. `pending_device_capture` is a blocking evidence state,
-not a passing result or an inferred zero.
+The authorized hidden fixed-DOM macOS safety result is recorded only as reviewed
+aggregate fields. Native AppKit/accessibility, visible/background behavior,
+physical Windows, real-site, and Browse baseline results remain empty until
+their separately authorized runs occur. `pending_device_capture` is a blocking
+evidence state, not a passing result or an inferred zero.

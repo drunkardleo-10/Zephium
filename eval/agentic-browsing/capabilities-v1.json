@@ -22,14 +22,15 @@
   "capabilities": [
     {
       "platform": "macos",
-      "mechanism": "fixed_content_world_evaluation",
+      "mechanism": "immutable_isolated_world_runtime",
       "code_status": "implemented_in_release_excluded_m1_adapter",
-      "device_status": "pending_device_capture",
+      "device_status": "hidden_fixed_dom_qualified_other_routes_pending",
       "evidence": [
-        "objc2-web-kit WKContentWorld and WKWebView frame/content-world APIs",
-        "https://developer.apple.com/documentation/webkit/wkwebview/evaluatejavascript(_:in:in:completionhandler:)"
+        "objc2-web-kit WKContentWorld, WKUserScript, and content-world-scoped WKScriptMessageHandler APIs",
+        "https://developer.apple.com/documentation/webkit/wkusercontentcontroller/add(_:contentworld:name:)",
+        "https://github.com/WebKit/WebKit/blob/main/Source/WebKit/UIProcess/API/Cocoa/WKWebView.mm"
       ],
-      "limitations": "No agent runtime is installed in a product context yet. The M1 adapter exposes only closed fixed diagnostic expressions, and reloads a fresh document for every matrix row."
+      "limitations": "No agent runtime is installed in a product context yet. The M1 adapter installs one immutable diagnostic runtime at document end, accepts only closed query rows, emits bounded one-way typed messages, and loads a fresh document for every row. Public evaluateJavaScript and callAsyncJavaScript are rejected because current WebKit invokes both with a forced user gesture; private no-user-gesture SPI is prohibited."
     },
     {
       "platform": "macos",
@@ -96,6 +97,7 @@
   ],
   "security_facts": {
     "raw_page_ipc_when_no_handler": "absent_by_pinned_wry_policy",
+    "probe_isolated_message_channel": "one_way_closed_schema_world_frame_webview_origin_generation_and_size_bound",
     "probe_profile": "explicit_ephemeral_only",
     "probe_extensions": "none",
     "model_facing_javascript_or_selectors": "absent",

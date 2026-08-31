@@ -1,10 +1,11 @@
 //! Bounded domain contracts for Zephium's browser-execution proof.
 //!
-//! This crate deliberately contains no browser engine, native object, page
-//! script, selector, URL, profile path, provider secret, or model adapter. It
-//! defines the closed vocabulary shared by the non-shipping probe and the
-//! eventual product ports. Diagnostic fixtures are behind `probe-harness` and
-//! cannot be compiled in an optimized build.
+//! The default contract deliberately contains no browser engine, native
+//! object, page script, selector, URL, profile path, provider secret, or model
+//! adapter. It defines the closed vocabulary shared by the non-shipping probe
+//! and the eventual product ports. Diagnostic fixtures and their fixed recipe
+//! enum are behind `probe-harness` and cannot be compiled in an optimized
+//! build.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -17,6 +18,8 @@ mod control;
 mod evidence;
 #[cfg(feature = "probe-harness")]
 mod fixture_server;
+#[cfg(feature = "probe-harness")]
+mod probe_recipes;
 mod protocol;
 
 pub use contract::{
@@ -32,6 +35,12 @@ pub use evidence::{
 };
 #[cfg(feature = "probe-harness")]
 pub use fixture_server::{FixtureRoute, FixtureServer, FixtureServerError};
+#[cfg(feature = "probe-harness")]
+pub use probe_recipes::{
+    FixedProbeScript, ProbeScriptWorld, MACOS_NATIVE_INPUT_RUNTIME_V1,
+    MACOS_PROBE_CONTENT_WORLD_V1, MACOS_PROBE_HANDLER_V1, MAX_NATIVE_INPUT_RUNTIME_ROW,
+    NATIVE_INPUT_RUNTIME_PROTOCOL_V1,
+};
 pub use protocol::{
     decode_request_line, encode_response_line, CancelRequest, CancelledReply, HelloReply,
     HelloRequest, ProbeCommand, ProbeProtocolError, ProbeReply, ProbeRequest, ProbeResponse,

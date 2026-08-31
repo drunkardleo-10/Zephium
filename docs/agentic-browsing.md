@@ -234,9 +234,19 @@ It may not:
 - grant page content a handle to another frame or native context.
 
 On macOS, use WebKit content-world and frame APIs where the supported deployment
-floor provides them. On Windows, isolated CDP worlds may be an internal adapter
-mechanism, but CDP remains absent from domain and model contracts. Every use is
-fixed, audited, generation-bound, and covered by hostile tests.
+floor provides them. Activation-sensitive code must not use public
+`WKWebView.evaluateJavaScript` or `callAsyncJavaScript`: current WebKit routes
+both through `ForceUserGesture::Yes`, which contaminates transient and sticky
+user-activation evidence. Install the immutable runtime as a `WKUserScript` in
+a dedicated content world. Any native channel is registered only in that exact
+world, accepts a closed versioned schema under hard size/generation/frame
+bounds, and exposes neither native authority nor a callable function to page
+world. The M1 fixture runtime uses one-way ready/result messages and no reply;
+the production fixed-recipe invocation mechanism remains evidence-driven and
+must not rely on private WebKit SPI. On Windows, isolated CDP worlds may be an
+internal adapter mechanism, but CDP remains absent from domain and model
+contracts. Every use is fixed, audited, generation-bound, and covered by
+hostile tests.
 
 ## 6. Semantic observation
 
@@ -812,7 +822,12 @@ sources rather than copying another browser agent's architecture:
 - [WebKit `WKContentWorld`](https://developer.apple.com/documentation/webkit/wkcontentworld)
   defines the native content-world primitive used on supported macOS versions.
 - [WebKit JavaScript evaluation in a frame and content world](https://developer.apple.com/documentation/webkit/wkwebview/evaluatejavascript%28_%3Ain%3Ain%3Acompletionhandler%3A%29)
-  is the relevant bounded native evaluation seam.
+  documents the public evaluation surface; WebKit source and M1 device evidence
+  show that it is unsuitable for activation-sensitive execution because it
+  forces a user gesture.
+- [WebKit content-world-scoped script-message handlers](https://developer.apple.com/documentation/webkit/wkusercontentcontroller/add%28_%3Acontentworld%3Aname%3A%29)
+  define the supported page-world-isolated observation channel used by the M1
+  fixture runtime.
 - [WebView2 profiles](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/multi-profile-support)
   describe profile-scoped browser data and extension behavior.
 - [WebView2 cookie management](https://learn.microsoft.com/en-us/microsoft-edge/webview2/how-to/cookies)

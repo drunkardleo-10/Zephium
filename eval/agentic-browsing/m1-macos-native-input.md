@@ -1,7 +1,7 @@
 # M1 macOS native-input probe
 
-Status: adapter and deterministic safety gate implemented; named-device
-qualification pending.
+Status: adapter and authorized hidden fixed-DOM safety gate qualified;
+native-backend named-device qualification pending.
 
 This evidence describes the release-excluded native-input risk spike. It does
 not authorize a product backend, claim real-site compatibility, or complete
@@ -17,9 +17,12 @@ Milestone 1 on Windows.
   uses a non-persistent `WKWebsiteDataStore`, verifies persistence and
   identifier postconditions before navigation, and verifies the constructed
   page configuration again.
-- The configuration has no `WKWebExtensionController`. Wry receives no IPC
-  handler, initialization script, userscript, custom protocol, file path, raw
-  HTML, selector, or caller-supplied JavaScript.
+- The configuration has no `WKWebExtensionController`. Wry receives no generic
+  IPC handler, custom protocol, file path, raw HTML, selector, or
+  caller-supplied JavaScript. Before navigation, the adapter installs one
+  immutable release-excluded `WKUserScript` and one handler into the same
+  dedicated `WKContentWorld`; page world receives neither program state nor a
+  handler function.
 - The only network surface is an IPv4-loopback listener with three fixed
   routes, one worker, 4 KiB request headers, one-second connection deadlines,
   and a 512-request lifetime. The worker blocks in `accept` and is woken by one
@@ -30,17 +33,29 @@ Milestone 1 on Windows.
 
 ## Fixed runtime seam
 
-The adapter's evaluation type has five closed variants: fixture readiness,
-fixture reset, fixture read, case geometry, and one fixed DOM recipe per case.
-The trusted fixture's readiness/reset/read methods execute in page world. DOM
-geometry and recipes execute in WebKit's default client content world. There is
-no public string-evaluation function and no route from JSONL fields to script
-source.
+The first authorized hidden run invalidated the original evaluation mechanism:
+the fixture reported `navigator.userActivation.isActive` and
+`hasBeenActive` before Button input. Current WebKit source confirms that both
+public `evaluateJavaScript` and public `callAsyncJavaScript` pass
+`forceUserGesture:YES`; only private SPI exposes a no-user-gesture variant.
+The adapter therefore uses neither public evaluation nor private SPI.
 
-Every case/backend row gets a newly reloaded top-level document. After the
-initial load, the adapter binds each wait to the exact native navigation object
-returned by `reload`, then requires that identity's finished event and fixture
-readiness before running it. This prevents a late or same-document callback,
+The replacement is an immutable program installed at document end in a custom
+client world. It accepts no native command, selector, expression, or reply. It
+derives one row from an exact loopback URL whose values are emitted only from a
+bounded integer and closed Rust enums, emits a `ready` envelope with validated
+geometry, autonomously executes the compiled fixed-DOM recipe when selected,
+and emits one `result` or closed `fault` envelope. The native handler is
+registered only in that same content world and accepts a 32 KiB maximum string.
+It rechecks handler name, world identity, webview identity, main-frame identity,
+exact loopback URL without fragment, runtime protocol, row, case, backend,
+phase ordering, geometry bounds, event bounds, and evidence schema. It provides
+no reply and no native authority.
+
+Every case/backend row gets a fresh top-level document at an exact unique URL.
+The adapter arms the expected identity before navigation, then requires both a
+new main-page finished generation and the correlated isolated-world `ready`
+message. This prevents a late or same-document callback,
 `navigator.userActivation.hasBeenActive`, transient activation, focus, form
 values, timers, or popup state from one row becoming evidence for another.
 
@@ -48,7 +63,7 @@ values, timers, or popup state from one row becoming evidence for another.
 
 | Route | Implemented behavior | Qualification state |
 | --- | --- | --- |
-| Fixed DOM recipe | Fixed per-case recipe in the default client content world | Hidden CI gate only; emits untrusted events and must not activate/focus the process |
+| Fixed DOM recipe | Fixed per-case recipe in the dedicated immutable client runtime | Authorized hidden gate passed; effect events remain untrusted and the route does not activate/focus the process |
 | AppKit event | Geometry-bound `NSEvent` mouse/key delivery to the owned window/WKWebView | Device run pending for each presentation state |
 | AppKit accessibility | In-process accessibility hit-test followed by `accessibilityPerformPress` on supported public controls | Device run pending; dispatch Boolean is never treated as effect success |
 | Focused OS input | No global event is posted | `NeedsHuman` in visible focus; otherwise `BlockedByPolicy` |
@@ -70,13 +85,15 @@ silently.
   close-on-exec and therefore does not leak into WebKit helpers. The reader
   blocks on stdin plus a close-on-exec stop pipe; it has no idle polling timer,
   and closing the pipe wakes shutdown without a signal-prone write.
-- The run has one 60-second absolute deadline; navigation and evaluation also
-  have 10-second and five-second local ceilings. Settle is 90 ms and checks
-  cancellation every run-loop slice.
+- The run has one 60-second absolute deadline; each navigation has a 10-second
+  ceiling and each correlated runtime result has a two-second ceiling. The
+  fixed runtime samples settled activation after 50 ms and emits final evidence
+  after 200 ms. Native waits check cancellation every five-millisecond run-loop
+  slice.
 - Cancellation is exact, non-reusable, and polled during navigation,
-  evaluation, settle, and matrix iteration. Post-construction errors and
-  cancellation converge on explicit view close, worker shutdown, and teardown
-  observation before a result is returned.
+  runtime-message wait, teardown, and matrix iteration. Post-construction errors
+  and cancellation converge on explicit view close, worker shutdown, and
+  teardown observation before a result is returned.
 - Evidence contains closed enums, Booleans, counters, durations, and validated
   runtime labels only. URLs, profile identifiers/paths, page text, HTML,
   screenshots, native errors, provider data, and clipboard contents are absent.
@@ -89,14 +106,24 @@ The `--ci-hidden-fixed-dom` executable mode runs all 14 cases against one
 backend and requires:
 
 - a correct typed terminal result for every case;
-- no trusted event and no transient activation;
+- no trusted effect event and no transient activation;
 - no probe/Browse focus theft;
 - no admitted popup;
 - a drained fixture worker and no retained native view.
 
+Trusted focus and blur events generated by WebKit while a fixed recipe focuses
+an editable control are counted separately: `isTrusted` alone is not accepted
+as proof of native input. The authorized 2026-08-31 exact command completed 14
+rows on macOS 27.0.0 / WebKit 22625.1.29.11.25 with zero trusted effect
+events, four trusted focus/blur events, zero activation, zero focus theft, and
+zero retained views. It used a hidden window, fresh ephemeral data store,
+loopback-only fixtures, no system-wide input, no Accessibility prompt, no
+accounts, and no external site.
+
 The JSONL controller framing, capacity refusal, close-on-exec descriptor,
-release graph, optimized-build refusal, target/capability joins, and fixture
-server fragmentation behavior also have deterministic tests.
+release graph, optimized-build refusal, target/capability joins, closed fixture
+URL parser, isolated envelope parser, and fixture server fragmentation behavior
+also have deterministic tests.
 
 ## Blocking evidence
 

@@ -2,7 +2,7 @@
   "schema_version": 1,
   "protocol_version": 2,
   "reviewed_on": "2026-08-31",
-  "status": "macos_adapter_implemented_device_and_windows_evidence_pending",
+  "status": "macos_hidden_fixed_dom_qualified_native_backends_and_windows_pending",
   "fixture_cases": [
     "button",
     "link",
@@ -59,7 +59,8 @@
     "cases": 14,
     "required_invariants": [
       "fresh_document_per_row",
-      "zero_trusted_events",
+      "zero_trusted_effect_events",
+      "trusted_focus_blur_counted_separately",
       "zero_transient_activation",
       "zero_focus_theft",
       "zero_admitted_popups",
@@ -73,7 +74,30 @@
     "one_authorized_difficult_real_site_per_platform",
     "named_device_browse_baselines"
   ],
-  "results": [],
+  "results": [
+    {
+      "reviewed_on": "2026-08-31",
+      "scope": "authorized_hidden_fixed_dom_safety_gate",
+      "command": "cargo run --locked -p zephium-engine --features native-agentic-input-probe --bin macos-agentic-input-probe -- --ci-hidden-fixed-dom",
+      "platform": "macos",
+      "os_version": "27.0.0",
+      "engine": "WebKit",
+      "engine_version": "22625.1.29.11.25",
+      "profile": "ephemeral",
+      "extensions": "absent",
+      "page_world_bridge": "absent",
+      "isolated_messages": "bounded_one_way",
+      "presentation": "hidden",
+      "backend": "fixed_dom_recipe",
+      "cases": 14,
+      "trusted_effect_events": 0,
+      "trusted_focus_blur_events": 4,
+      "activation_rows": 0,
+      "focus_theft_rows": 0,
+      "retained_native_views": 0,
+      "status": "passed"
+    }
+  ],
   "backend_order_decisions": [],
   "unsupported_interactions": [],
   "real_site_runs": []

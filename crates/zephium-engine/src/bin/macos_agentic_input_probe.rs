@@ -22,9 +22,9 @@ mod macos {
 
     use zephium_agentic::{
         encode_response_line, CancelledReply, CaseOutcome, FixtureCase, HelloReply, InputBackend,
-        PresentationState, ProbeAdmissionError, ProbeCommand, ProbeFailure, ProbeFailureCode,
-        ProbeGate, ProbeReply, ProbeRequest, ProbeResponse, ProbeStage, RunMatrixRequest,
-        ShutdownReply, MAX_PROTOCOL_INPUT_BYTES, PROBE_PROTOCOL_VERSION,
+        InputEventKind, PresentationState, ProbeAdmissionError, ProbeCommand, ProbeFailure,
+        ProbeFailureCode, ProbeGate, ProbeReply, ProbeRequest, ProbeResponse, ProbeStage,
+        RunMatrixRequest, ShutdownReply, MAX_PROTOCOL_INPUT_BYTES, PROBE_PROTOCOL_VERSION,
     };
 
     const INGRESS_CAPACITY: usize = 16;
@@ -238,29 +238,55 @@ mod macos {
             presentation: PresentationState::Hidden,
         };
         let evidence = zephium_engine::run_macos_agentic_input_matrix(1, &matrix, &permit, || {})
-            .unwrap_or_else(|_| fail("CI hidden fixed-DOM matrix failed"));
+            .unwrap_or_else(|failure| fail_probe("CI hidden fixed-DOM matrix failed", failure));
         if !evidence.teardown.view_closed
             || !evidence.teardown.work_drained
             || evidence.teardown.retained_native_views != 0
-            || evidence.cases.len() != matrix.cases.len()
-            || evidence
-                .cases
-                .iter()
-                .any(|case| case.focus.browse_focus_was_stolen)
-            || evidence
-                .cases
-                .iter()
-                .flat_map(|case| &case.events)
-                .any(|event| event.is_trusted)
-            || evidence.cases.iter().any(|case| {
-                case.activation.active_before
-                    || case.activation.active_during_event
-                    || case.activation.active_after_event
-                    || case.activation.active_after_settle
-                    || case.activation.has_been_active
+        {
+            fail("CI hidden fixed-DOM teardown invariant failed");
+        }
+        if evidence.cases.len() != matrix.cases.len() {
+            fail("CI hidden fixed-DOM row-count invariant failed");
+        }
+        if evidence
+            .cases
+            .iter()
+            .any(|case| case.focus.browse_focus_was_stolen)
+        {
+            fail("CI hidden fixed-DOM focus invariant failed");
+        }
+        if let Some((case, event)) = evidence
+            .cases
+            .iter()
+            .flat_map(|case| case.events.iter().map(move |event| (case.case, event)))
+            .find(|(_, event)| {
+                event.is_trusted
+                    && !matches!(event.kind, InputEventKind::Focus | InputEventKind::Blur)
             })
         {
-            fail("CI hidden fixed-DOM safety invariant failed");
+            eprintln!(
+                "macos-agentic-input-probe: CI hidden fixed-DOM trusted-effect invariant failed; case={case:?}; event={:?}; target={:?}",
+                event.kind, event.target
+            );
+            std::process::exit(2);
+        }
+        if let Some(case) = evidence.cases.iter().find(|case| {
+            case.activation.active_before
+                || case.activation.active_during_event
+                || case.activation.active_after_event
+                || case.activation.active_after_settle
+                || case.activation.has_been_active
+        }) {
+            eprintln!(
+                "macos-agentic-input-probe: CI hidden fixed-DOM activation invariant failed; case={:?}; before={}; during={}; after_event={}; after_settle={}; sticky={}",
+                case.case,
+                case.activation.active_before,
+                case.activation.active_during_event,
+                case.activation.active_after_event,
+                case.activation.active_after_settle,
+                case.activation.has_been_active
+            );
+            std::process::exit(2);
         }
         for case in &evidence.cases {
             let accepted = match case.case {
@@ -279,8 +305,20 @@ mod macos {
                 fail("CI hidden fixed-DOM fixture result drifted");
             }
         }
+        let trusted_focus_events = evidence
+            .cases
+            .iter()
+            .flat_map(|case| &case.events)
+            .filter(|event| {
+                event.is_trusted
+                    && matches!(event.kind, InputEventKind::Focus | InputEventKind::Blur)
+            })
+            .count();
         println!(
-            "macos-agentic-input-probe: passed; profile=ephemeral; extensions=absent; ipc=absent; presentation=hidden; backend=fixed-dom-recipe; cases=14; trusted_events=0; focus_theft=0; retained_views=0"
+            "macos-agentic-input-probe: passed; profile=ephemeral; extensions=absent; page_world_bridge=absent; isolated_messages=bounded_one_way; os={}; engine={}; engine_version={}; presentation=hidden; backend=fixed-dom-recipe; cases=14; trusted_effect_events=0; trusted_focus_events={trusted_focus_events}; activation=0; focus_theft=0; retained_views=0",
+            evidence.runtime.os_version.as_str(),
+            evidence.runtime.engine.as_str(),
+            evidence.runtime.engine_version.as_str(),
         );
     }
 
@@ -314,6 +352,14 @@ mod macos {
 
     fn fail(message: &'static str) -> ! {
         eprintln!("macos-agentic-input-probe: {message}");
+        std::process::exit(2);
+    }
+
+    fn fail_probe(message: &'static str, failure: ProbeFailure) -> ! {
+        eprintln!(
+            "macos-agentic-input-probe: {message}; code={:?}; stage={:?}; case={:?}; backend={:?}; retryable={}",
+            failure.code, failure.stage, failure.case, failure.backend, failure.retryable
+        );
         std::process::exit(2);
     }
 

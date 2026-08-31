@@ -430,6 +430,12 @@ pub enum ProbeFailureCode {
     VerificationFailed,
     /// Fixture server or fixed runtime failed closed.
     HarnessFailure,
+    /// A native view or host window remained retained after bounded teardown.
+    NativeTeardownIncomplete,
+    /// The run's ephemeral platform profile remained retained after teardown.
+    ProfileTeardownIncomplete,
+    /// The fixed loopback fixture worker did not drain cleanly.
+    FixtureTeardownIncomplete,
 }
 
 /// Pipeline stage names retained in redacted errors.

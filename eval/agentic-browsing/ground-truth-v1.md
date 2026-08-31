@@ -11,7 +11,7 @@ for Milestone 0, not a claim that the target architecture already exists.
 | Profile identity | `Partition::{Default,Persistent,Ephemeral}` binds an exact `ProfileId`. `host/profiles.rs` permanently binds each process-lifetime profile id to durable or ephemeral persistence. | Probe construction must always name a fresh ephemeral test profile. Production owned-context storage equivalence is unproved. |
 | macOS data store | `platform/macos/mod.rs` creates and verifies non-persistent `WKWebsiteDataStore` objects for ephemeral profiles and creates a fresh configuration per view. | The M1 probe can use an isolated ephemeral store. Exact selected durable profile plus extension-free configuration remains Milestone 2 work. |
 | Windows profile/process lifetime | `host/profiles.rs` admits at most eight native profile process groups and retains Environment5 exit proof. | A future extension-free `agent-<profile-id>` subprofile must enter the same bounded lifecycle; no extra environment may bypass it. |
-| Extensions | Production native extension state is profile-scoped and separately owned. Existing probe-only extension code is feature-gated. | The agentic input probe does not reuse or modify extension-owned native seams and loads no extension or userscript. |
+| Extensions | Production native extension state is profile-scoped and separately owned. Existing probe-only extension code is feature-gated. | The agentic input probe does not reuse or modify extension-owned native seams and loads no extension. Its immutable diagnostic `WKUserScript` is compiled only in the release-forbidden probe graph and runs in a dedicated non-extension world. |
 | Native construction | `host/construction.rs` stages construction under a native resource lease, commit identity, callback permit, and cleanup-debt path. | The standalone M1 spike can test input without claiming product context ownership. Milestone 2 must reuse these lifecycle obligations rather than a parallel unbounded owner. |
 | Navigation/presentation | Wry emits opaque navigation identity and guards presentation/input at commit; Zephium rejoins an `EventPermit` and `NavigationEpoch`. | Every later agent result must add context/owner/profile/frame/cancellation joins; URL or mutable current page state is not identity. |
 | Stage/view presentation | `host/stages.rs` owns reveal/hide/reparent ordering and resumes Windows views when made visible. | Hidden input must not bypass presentation ownership or foreground another surface. |
@@ -40,11 +40,18 @@ groups at eight and concurrent suspend requests at eight.
   tauri-runtime-wry are 2.11.3 at
   `6f6ab1207bb3923c2721fbc67d2fdb1c8deb0c7a`.
 - With no IPC handler, the fork installs no raw page-to-native message bridge.
-  The agentic probe therefore must not configure one.
+  A handler can be registered to one exact `WKContentWorld`; Apple documents
+  that the resulting JavaScript function exists only in that world. The M1
+  probe uses one such handler for bounded one-way evidence and rechecks the
+  world, name, webview, main frame, loopback URL, row, case, backend, protocol,
+  phase, and payload size before attribution. Page world receives no handler.
 - Wry exposes ordinary initialization/evaluation APIs, not a product agent
-  content-world contract. macOS's public frame/content-world evaluation API is
-  available through the pinned objc2 bindings and is the intended fixed
-  diagnostic seam.
+  content-world contract. Current WebKit source routes both public
+  `evaluateJavaScript` and `callAsyncJavaScript` through a forced user gesture.
+  The first authorized hidden run confirmed that even a fixture reset made
+  `navigator.userActivation` sticky before input. Private no-user-gesture SPI
+  is not an acceptable product or probe mechanism. The adapter now installs an
+  immutable `WKUserScript` in a dedicated client world before navigation.
 - Existing macOS extension diagnostics already route `NSEvent` mouse and key
   events to a WKWebView and observe trusted page events. Their windows are made
   key or receive application-queued events, so they do not establish safe
@@ -81,40 +88,48 @@ The complete machine-readable classifications and primary-source links are in
 
 ## Open evidence gates
 
-No Browse resource baseline, M1 native matrix, backend-order decision, or
-real-site result is fabricated. The corresponding JSON manifests remain in a
-`pending_*` state until authorized named macOS and physical Windows runs occur.
-Those gaps block M0/M1 qualification but do not block deterministic harness and
-adapter implementation.
+No Browse resource baseline, native-backend matrix, backend-order decision, or
+real-site result is fabricated. The authorized hidden fixed-DOM safety matrix
+is recorded, but AppKit/accessibility, visible/background native input, and all
+physical-Windows evidence remain pending. Those gaps block M0/M1 qualification
+but do not block deterministic harness and adapter implementation.
 
 ## M1 macOS adapter status
 
 The feature-gated macOS adapter is implemented in the commit containing this
 evidence. It owns one main-thread child WKWebView, a fresh explicit ephemeral
 profile identity and non-persistent data store, no extension controller, no
-page IPC, no user script, and no arbitrary evaluation API. Every matrix row
-reloads the fixed loopback document before execution, so WebKit's sticky and
-transient user-activation state cannot contaminate a later row.
+page-world bridge, and no arbitrary evaluation API. It installs one immutable
+release-excluded runtime at document end in a dedicated `WKContentWorld` and
+one one-way handler scoped to that world. Every matrix row loads a fresh exact
+loopback URL bearing only a bounded row id and closed case/backend enums, so
+WebKit's sticky and transient user-activation state cannot contaminate a later
+row.
 
-The adapter implements fixed default-client-world DOM recipes, direct AppKit
-event routing, and in-process AppKit accessibility hit-test/press. The latter
-does not use cross-process `AXUIElement` authority or prompt for system-wide
-Accessibility access. Focused system input and the human baseline remain
-explicit `NeedsHuman` outcomes; no diagnostic silently moves the real pointer
-or types into the foreground session.
+The isolated runtime autonomously executes fixed DOM recipes and emits only
+`ready`, `result`, or closed `fault` envelopes. The adapter also implements
+direct AppKit event routing and in-process AppKit accessibility hit-test/press.
+The latter does not use cross-process `AXUIElement` authority or prompt for
+system-wide Accessibility access. Focused system input and the human baseline
+remain explicit `NeedsHuman` outcomes; no diagnostic silently moves the real
+pointer or types into the foreground session.
 
 Popup request and admitted-page evidence are separate. The native new-window
 policy callback records a request and synchronously denies it; an unexpectedly
-admitted page is a verification failure. Cancellation, navigation/evaluation
-deadlines, controller transport, server shutdown, and native view teardown are
-bounded. All post-construction failure paths execute the same explicit teardown
-before returning a redacted typed failure.
+admitted page is a verification failure. Cancellation, navigation/runtime
+message deadlines, controller transport, server shutdown, and native view
+teardown are bounded. All post-construction failure paths execute the same
+explicit teardown before returning a redacted typed failure.
 
 CI executes only the hidden fixed-DOM matrix. It requires 14 deterministic
-terminal rows, zero trusted events, zero transient activation, zero focus
-theft, popup denial, drained work, and zero retained native views. AppKit and
-accessibility behavior remains `pending_device_capture`; the CI result is not a
-backend-order decision or real-site claim.
+terminal rows, zero trusted effect events, zero transient activation, zero
+focus theft, popup denial, drained work, and zero retained native views.
+WebKit-generated trusted focus/blur events are counted separately rather than
+misclassified as input trust. The authorized 2026-08-31 macOS 27.0.0 / WebKit
+22625.1.29.11.25 host run passed with zero trusted effect events, four trusted
+focus/blur events, zero activation, zero focus theft, and zero retained views.
+AppKit and accessibility behavior remains `pending_device_capture`; this result
+is not a backend-order decision or real-site claim.
 
 Visible-focused matrices additionally require the local
 `--allow-visible-focused` process flag. Without it, admission returns the closed

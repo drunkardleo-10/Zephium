@@ -9,6 +9,9 @@ use std::time::Duration;
 
 use thiserror::Error;
 
+use crate::probe_recipes::{backend_name, case_name, MAX_NATIVE_INPUT_RUNTIME_ROW};
+use crate::{FixtureCase, InputBackend};
+
 const MAX_REQUEST_BYTES: usize = 4 * 1_024;
 // A maximum 112-row matrix reloads the top document for activation isolation;
 // each load may fetch the fixed child frame and one favicon.
@@ -70,6 +73,27 @@ impl FixtureServer {
     /// Returns the fixed loopback URL for one closed route.
     pub fn url(&self, route: FixtureRoute) -> String {
         format!("http://127.0.0.1:{}{}", self.address.port(), route.path())
+    }
+
+    /// Returns one closed, correlation-bearing native-input fixture URL.
+    ///
+    /// The fixed server accepts this exact query shape only. Values are
+    /// derived from closed Rust enums and are never caller-provided strings.
+    pub fn native_input_url(
+        &self,
+        row: u16,
+        case: FixtureCase,
+        backend: InputBackend,
+    ) -> Option<String> {
+        if row == 0 || row > MAX_NATIVE_INPUT_RUNTIME_ROW {
+            return None;
+        }
+        Some(format!(
+            "{}?row={row}&case={}&backend={}",
+            self.url(FixtureRoute::NativeInput),
+            case_name(case),
+            backend_name(backend),
+        ))
     }
 
     /// Returns false after an unexpected listener/connection failure or budget exhaustion.
@@ -170,7 +194,7 @@ fn handle(mut stream: TcpStream) -> Result<(), std::io::Error> {
         .unwrap_or(received);
     let first_line = &request[..first_line_end];
     let (status, content_type, body) = match first_line {
-        b"GET /native-input-v1.html HTTP/1.1" | b"GET /native-input-v1.html HTTP/1.0" => (
+        line if is_native_input_request(line) => (
             200,
             "text/html; charset=utf-8",
             NATIVE_INPUT_HTML.as_bytes(),
@@ -187,6 +211,82 @@ fn handle(mut stream: TcpStream) -> Result<(), std::io::Error> {
         _ => (404, "text/plain; charset=utf-8", b"not found" as &[u8]),
     };
     write_response(&mut stream, status, content_type, body)
+}
+
+fn is_native_input_request(line: &[u8]) -> bool {
+    let Ok(line) = std::str::from_utf8(line) else {
+        return false;
+    };
+    let mut fields = line.split(' ');
+    let (Some(method), Some(target), Some(version), None) =
+        (fields.next(), fields.next(), fields.next(), fields.next())
+    else {
+        return false;
+    };
+    if method != "GET" || !matches!(version, "HTTP/1.0" | "HTTP/1.1") {
+        return false;
+    }
+    if target == FixtureRoute::NativeInput.path() {
+        return true;
+    }
+    let Some(query) = target.strip_prefix("/native-input-v1.html?") else {
+        return false;
+    };
+    let mut parts = query.split('&');
+    let (Some(row), Some(case), Some(backend), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    let Some(row) = row.strip_prefix("row=") else {
+        return false;
+    };
+    if row.is_empty()
+        || row.len() > 3
+        || !row.bytes().all(|byte| byte.is_ascii_digit())
+        || row.starts_with('0')
+        || row
+            .parse::<u16>()
+            .map_or(true, |row| row > MAX_NATIVE_INPUT_RUNTIME_ROW)
+    {
+        return false;
+    }
+    let Some(case) = case.strip_prefix("case=") else {
+        return false;
+    };
+    let Some(backend) = backend.strip_prefix("backend=") else {
+        return false;
+    };
+    const CASES: [FixtureCase; 14] = [
+        FixtureCase::Button,
+        FixtureCase::Link,
+        FixtureCase::TextInput,
+        FixtureCase::ContentEditable,
+        FixtureCase::Select,
+        FixtureCase::PointerMouse,
+        FixtureCase::Keyboard,
+        FixtureCase::TransientActivation,
+        FixtureCase::Popup,
+        FixtureCase::ClipboardGate,
+        FixtureCase::Drag,
+        FixtureCase::Iframe,
+        FixtureCase::OpenShadow,
+        FixtureCase::ClosedShadow,
+    ];
+    const BACKENDS: [InputBackend; 8] = [
+        InputBackend::FixedDomRecipe,
+        InputBackend::MacosAppKitEvent,
+        InputBackend::MacosAccessibility,
+        InputBackend::MacosFocusedOsInput,
+        InputBackend::WindowsHwndInput,
+        InputBackend::WindowsCompositionInput,
+        InputBackend::WindowsCdpInput,
+        InputBackend::HumanBaseline,
+    ];
+    CASES.into_iter().any(|value| case_name(value) == case)
+        && BACKENDS
+            .into_iter()
+            .any(|value| backend_name(value) == backend)
 }
 
 fn write_response(
@@ -305,6 +405,20 @@ const NATIVE_INPUT_HTML: &str = r###"<!doctype html>
       }
       return 'document';
     };
+    const scheduleActivationCapture = () => {
+      if (state.activationCaptureScheduled) return;
+      state.activationCaptureScheduled = true;
+      queueMicrotask(() => {
+        state.activeAfterEvent = !!(navigator.userActivation && navigator.userActivation.isActive);
+        state.hasBeenActive = state.hasBeenActive ||
+          !!(navigator.userActivation && navigator.userActivation.hasBeenActive);
+      });
+      setTimeout(() => {
+        state.activeAfterSettle = !!(navigator.userActivation && navigator.userActivation.isActive);
+        state.hasBeenActive = state.hasBeenActive ||
+          !!(navigator.userActivation && navigator.userActivation.hasBeenActive);
+      }, 50);
+    };
     const record = (event) => {
       if (!eventKinds.has(event.type) || state.events.length >= MAX_EVENTS) return;
       const target = targetName(event);
@@ -316,20 +430,11 @@ const NATIVE_INPUT_HTML: &str = r###"<!doctype html>
         .replace('pointerup', 'pointer_up').replace('mouseenter', 'mouse_enter')
         .replace('mousemove', 'mouse_move').replace('mousedown', 'mouse_down')
         .replace('mouseup', 'mouse_up').replace('beforeinput', 'before_input')
+        .replace('keydown', 'key_down').replace('keyup', 'key_up')
         .replace('dragstart', 'drag_start').replace('dragenter', 'drag_enter')
         .replace('dragover', 'drag_over').replace('dragend', 'drag_end'),
-        isTrusted: event.isTrusted, target});
-      if (!state.activationCaptureScheduled && (event.type === 'click' || event.type === 'keydown')) {
-        state.activationCaptureScheduled = true;
-        queueMicrotask(() => {
-          state.activeAfterEvent = !!(navigator.userActivation && navigator.userActivation.isActive);
-          state.hasBeenActive = !!(navigator.userActivation && navigator.userActivation.hasBeenActive);
-        });
-        setTimeout(() => {
-          state.activeAfterSettle = !!(navigator.userActivation && navigator.userActivation.isActive);
-          state.hasBeenActive = !!(navigator.userActivation && navigator.userActivation.hasBeenActive);
-        }, 50);
-      }
+        is_trusted: event.isTrusted, target});
+      if (event.type === 'click' || event.type === 'keydown') scheduleActivationCapture();
     };
     for (const kind of eventKinds) document.addEventListener(kind, record, true);
 
@@ -364,8 +469,11 @@ const NATIVE_INPUT_HTML: &str = r###"<!doctype html>
     window.addEventListener('message', (event) => {
       if (event.origin !== location.origin || !event.data || event.data.fixture !== 'frame-v1') return;
       if (state.events.length < MAX_EVENTS && event.data.kind === 'click') {
-        state.events.push({kind: 'click', isTrusted: event.data.isTrusted === true, target: 'frame_button'});
+        state.events.push({kind: 'click', is_trusted: event.data.isTrusted === true, target: 'frame_button'});
         state.actualTarget = 'frame_button';
+        state.activeDuringEvent = state.activeDuringEvent || event.data.activeDuringEvent === true;
+        state.hasBeenActive = state.hasBeenActive || event.data.hasBeenActive === true;
+        scheduleActivationCapture();
       }
     });
 
@@ -406,6 +514,35 @@ const NATIVE_INPUT_HTML: &str = r###"<!doctype html>
     Object.defineProperty(window, '__zephiumNativeInputFixtureV1', {
       value: api, configurable: false, enumerable: false, writable: false
     });
+
+    const query = new URLSearchParams(location.search);
+    const row = query.get('row');
+    const caseName = query.get('case');
+    const backend = query.get('backend');
+    const allowedCases = new Set([
+      'button', 'link', 'text_input', 'content_editable', 'select',
+      'pointer_mouse', 'keyboard', 'transient_activation', 'popup',
+      'clipboard_gate', 'drag', 'iframe', 'open_shadow', 'closed_shadow'
+    ]);
+    const allowedBackends = new Set([
+      'fixed_dom_recipe', 'macos_app_kit_event', 'macos_accessibility',
+      'macos_focused_os_input', 'windows_hwnd_input',
+      'windows_composition_input', 'windows_cdp_input', 'human_baseline'
+    ]);
+    if (row && /^[1-9][0-9]{0,2}$/.test(row) && Number(row) <= 128 &&
+        caseName && allowedCases.has(caseName) && backend && allowedBackends.has(backend) &&
+        [...query.keys()].length === 3 && api.reset(caseName)) {
+      document.documentElement.dataset.probeRow = row;
+      document.documentElement.dataset.probeCase = caseName;
+      document.documentElement.dataset.probeBackend = backend;
+      new MutationObserver(() => {
+        if (document.documentElement.dataset.probeReadRequest !== row) return;
+        document.documentElement.dataset.probeEvidence = api.readJson();
+        document.documentElement.dataset.probeEvidenceRow = row;
+      }).observe(document.documentElement, {
+        attributes: true, attributeFilter: ['data-probe-read-request']
+      });
+    }
     document.documentElement.dataset.fixtureReady = 'v1';
   })();
   </script>
@@ -417,7 +554,10 @@ const FRAME_HTML: &str = r###"<!doctype html>
 <body><button id="frame-button" type="button">Frame button</button>
 <script>
 document.getElementById('frame-button').addEventListener('click', (event) => {
-  parent.postMessage({fixture: 'frame-v1', kind: 'click', isTrusted: event.isTrusted}, location.origin);
+  parent.postMessage({fixture: 'frame-v1', kind: 'click', isTrusted: event.isTrusted,
+    activeDuringEvent: !!(navigator.userActivation && navigator.userActivation.isActive),
+    hasBeenActive: !!(navigator.userActivation && navigator.userActivation.hasBeenActive)},
+    location.origin);
 });
 document.documentElement.dataset.fixtureReady = 'frame-v1';
 </script></body></html>"###;
@@ -464,6 +604,23 @@ mod tests {
             input.lines().next()
         );
         assert!(input.contains("__zephiumNativeInputFixtureV1"));
+        assert!(input.contains("is_trusted: event.isTrusted"));
+        assert!(input.contains("replace('keydown', 'key_down')"));
+        let row_url = server
+            .native_input_url(1, FixtureCase::Button, InputBackend::FixedDomRecipe)
+            .expect("closed row URL");
+        let row_target = row_url
+            .strip_prefix(&format!("http://{}", server.address))
+            .unwrap();
+        let mut stream = TcpStream::connect(server.address).expect("row connect");
+        stream
+            .write_all(format!("GET {row_target} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").as_bytes())
+            .expect("row request");
+        let mut row_response = String::new();
+        stream
+            .read_to_string(&mut row_response)
+            .expect("row response");
+        assert!(row_response.starts_with("HTTP/1.1 200 OK"));
         let hostile = fetch(&server, FixtureRoute::HostilePage);
         assert!(
             hostile.starts_with("HTTP/1.1 200 OK"),
@@ -485,6 +642,14 @@ mod tests {
         stream.read_to_string(&mut response).expect("response");
         assert!(response.starts_with("HTTP/1.1 404 Not Found"));
         assert!(!response.contains("token=value"));
+
+        let mut stream = TcpStream::connect(server.address).expect("connect invalid row");
+        stream
+            .write_all(b"GET /native-input-v1.html?row=0&case=button&backend=fixed_dom_recipe HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            .expect("invalid row request");
+        let mut response = String::new();
+        stream.read_to_string(&mut response).expect("response");
+        assert!(response.starts_with("HTTP/1.1 404 Not Found"));
     }
 
     #[test]
