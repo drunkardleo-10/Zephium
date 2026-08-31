@@ -18,6 +18,7 @@ mod context_port;
 mod context_registry;
 mod contract;
 mod control;
+mod cookie_transfer;
 mod evidence;
 #[cfg(feature = "probe-harness")]
 mod fixture_server;
@@ -54,6 +55,15 @@ pub use contract::{
     PresentationState,
 };
 pub use control::{ProbeAdmissionError, ProbeGate, ProbeRunPermit};
+pub use cookie_transfer::{
+    ContextCookieOrigin, ContextCookieScope, ContextCookieTransferCounts,
+    ContextCookieTransferDirection, ContextCookieTransferError, ContextCookieTransferFailure,
+    ContextCookieTransferId, ContextCookieTransferOutcome, ContextCookieTransferRegistry,
+    ContextCookieTransferRegistryStatus, ContextCookieTransferRequest,
+    ContextCookieTransferSettlement, ContextCookieTransferStats, MAX_COOKIES_PER_TRANSFER,
+    MAX_COOKIE_BYTES, MAX_COOKIE_TRANSFER_BYTES, MAX_COOKIE_TRANSFER_ORIGINS,
+    MAX_PENDING_COOKIE_TRANSFERS,
+};
 pub use evidence::{
     ActivationEvidence, BackendAvailability, BackendCapability, CaseEvidence, CaseOutcome,
     EvidenceLabel, EvidenceValidationError, FocusEvidence, InputEventEvidence, Platform,

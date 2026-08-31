@@ -95,6 +95,42 @@ immediately revokes agent input and stales pending presentation/navigation;
 native refusal never silently returns input to the agent. Returning input also
 requires exact native success and then a complete fresh observation.
 
+The Windows cookie bridge now has a closed native-only contract and bounded
+correlation registry. A request contains one to eight canonical HTTP(S)
+origins, exact current context joins and profile leases, and no cookie values.
+It is valid only for a clean owned context attested as a Windows automation
+subprofile. Post-auth handoff additionally requires an exact same-run,
+same-profile Windows human-handoff context with export capability. At most two
+transfers may be pending; each accepts at most 256 unique native-exposed
+cookies, 16 KiB per cookie, and 512 KiB total field data.
+
+The adapter contract requires an enumerate/validate/deduplicate preflight with
+zero destination writes before application. Terminal outcomes distinguish
+complete success, refusal with zero writes, and partial application. Partial
+application is never treated as usable authentication state: the owned
+destination must be destroyed/recreated before navigation. Results carry only
+origin/cookie/HttpOnly/byte counts and closed failures. Reverse sync and
+local/session-storage copying are not representable.
+
+This seam deliberately does not use Wry's generic Windows cookie helper. The
+pinned helper allocates from the native-reported count, loops that complete
+count, silently drops conversion failures, blocks through an event-pumping
+wait, and returns cookie values to its caller
+([pinned source](../../vendor/wry/src/webview2/mod.rs)). The production adapter
+will use profile-scoped WebView2 cookie managers with bounded native callback
+reservations and deadlines. Microsoft documents that cookie-manager changes
+apply to the user-profile context, `GetCookies` is URI-scoped, and
+`AddOrUpdateCookie` applies a native cookie; the native cookie object exposes
+`IsHttpOnly` for exact preservation
+([CookieManager](https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2cookiemanager),
+[Cookie](https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/winrt/microsoft_web_webview2_core/corewebview2cookie)).
+
+For extension inventory, an empty `GetBrowserExtensions` result is accepted
+only when extension support was enabled for the inventory environment. The
+API explicitly returns no extensions when `AreBrowserExtensionsEnabled` is
+false, so runtime disabling cannot prove an empty profile
+([GetBrowserExtensionsAsync](https://learn.microsoft.com/en-us/dotnet/api/microsoft.web.webview2.core.corewebview2profile.getbrowserextensionsasync)).
+
 ## Deterministic evidence
 
 ```sh
@@ -113,6 +149,10 @@ redacted debug output, and bounded/consistent native resource snapshots.
 Profile-lease tests cover exact selection, kind compatibility, duplicate and
 capacity refusal without eviction, stale-release rejection, deletion races,
 and shutdown quiescence.
+Cookie-transfer tests cover canonical/deduplicated origins, Windows clean-
+subprofile proof, handoff owner/profile joins, required capabilities, payload
+and HttpOnly count invariants, explicit partial application, destination
+single-flight, process concurrency, redacted debug output, and shutdown drain.
 
 ## Remaining M2 work
 

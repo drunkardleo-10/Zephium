@@ -12,8 +12,9 @@ use thiserror::Error;
 use url::Url;
 
 use crate::{
-    ContextCapabilities, ContextJoin, ContextKind, ContextOperationJoin, ContextOperationKind,
-    ContextProfileLease, MAX_LIVE_CONTEXTS,
+    ContextCapabilities, ContextCookieTransferRequest, ContextCookieTransferSettlement,
+    ContextJoin, ContextKind, ContextOperationJoin, ContextOperationKind, ContextProfileLease,
+    MAX_LIVE_CONTEXTS,
 };
 
 /// Maximum number of lifecycle tasks one native adapter may retain.
@@ -718,6 +719,8 @@ pub enum ContextNativeEvent {
     RendererLost(ContextRendererLoss),
     /// Best-effort native cancellation settled.
     CancellationSettled(ContextCancellationSettlement),
+    /// One bounded native-only cookie transfer reached a terminal outcome.
+    CookieTransferSettled(Box<ContextCookieTransferSettlement>),
     /// One bounded native resource audit settled.
     ResourceAuditSettled(ContextResourceAuditSettlement),
 }
@@ -730,6 +733,9 @@ pub enum ContextNativeEvent {
 pub trait AgentBrowserPort: Send + Sync {
     /// Attempts to admit one exact lifecycle request to the owning native executor.
     fn dispatch(&self, request: ContextNativeRequest) -> ContextDispatch;
+
+    /// Attempts to admit one bounded native-only one-way cookie transfer.
+    fn transfer_cookies(&self, request: ContextCookieTransferRequest) -> ContextDispatch;
 
     /// Attempts to admit one privacy-preserving native resource audit.
     fn audit_resources(&self, audit: ContextResourceAuditId) -> ContextDispatch;
@@ -998,6 +1004,10 @@ mod tests {
                         ContextDispatch::Rejected(ContextPortFailure::Stale)
                     }
                 }
+            }
+
+            fn transfer_cookies(&self, _request: ContextCookieTransferRequest) -> ContextDispatch {
+                ContextDispatch::Unsupported
             }
 
             fn audit_resources(&self, _audit: ContextResourceAuditId) -> ContextDispatch {
