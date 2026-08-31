@@ -31,12 +31,12 @@ cargo xtask check-agentic-probe-boundary
 ```
 
 The default `zephium-agentic` tests also exercise the shipping Milestone 2
-context/profile/cookie/handoff core and the initial Milestone 3 semantic
-contract, hostile decoder, progressive scopes, and multi-frame assembler; they
-also cover deterministic compact encoding and the tokenizer-admission port.
-They require no native view, worker, network listener, profile data, provider
-call, or diagnostic feature. See `m2-context-identity.md` and
-`m3-semantic-runtime.md` for the exact implemented and still-pending boundaries.
+context/profile/cookie/handoff core, the initial Milestone 3 semantic runtime,
+and the initial Milestone 4 pre-policy action contract and exact snapshot
+binding. They require no native view, worker, network listener, profile data,
+provider call, or diagnostic feature. See `m2-context-identity.md`,
+`m3-semantic-runtime.md`, and `m4-action-pipeline.md` for the exact implemented
+and still-pending boundaries.
 
 An optimized build with `probe-harness` is expected to fail at compile time.
 The ordinary `zephium-desktop` resolved graph is separately required not to

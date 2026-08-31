@@ -447,7 +447,7 @@ fn has_credential_label(value: &str) -> bool {
         .any(|label| normalized.contains(label))
 }
 
-fn looks_like_secret_value(value: &str) -> bool {
+pub(crate) fn looks_like_secret_value(value: &str) -> bool {
     let trimmed = value.trim();
     if trimmed.len() < 8 {
         return false;

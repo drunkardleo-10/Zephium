@@ -28,6 +28,7 @@ mod probe_recipes;
 mod profile_lease;
 mod protocol;
 mod semantic;
+mod semantic_action;
 mod semantic_diff;
 mod semantic_diff_model;
 mod semantic_model;
@@ -109,6 +110,17 @@ pub use semantic::{
     SemanticTrust, SemanticValueSummary, MAX_SEMANTIC_DEPTH, MAX_SEMANTIC_FRAMES,
     MAX_SEMANTIC_NAME_BYTES, MAX_SEMANTIC_NODES, MAX_SEMANTIC_TEXT_BYTES,
     MAX_SEMANTIC_TOTAL_TEXT_BYTES, MAX_SEMANTIC_VALUE_BYTES,
+};
+pub use semantic_action::{
+    SemanticActionBatch, SemanticActionBatchId, SemanticActionBindingError,
+    SemanticActionContractError, SemanticActionIntent, SemanticActionKind, SemanticActionProposal,
+    SemanticActionRevalidationError, SemanticActionText, SemanticActionTextError,
+    SemanticBoundAction, SemanticDialogState, SemanticEffectClass, SemanticMutationQuietPeriod,
+    SemanticPressKey, SemanticScrollAmount, SemanticScrollDirection, SemanticSettleBudget,
+    SemanticVerification, SemanticWaitCondition, MAX_SEMANTIC_ACTIONS_PER_BATCH,
+    MAX_SEMANTIC_ACTION_BATCH_SETTLE_MILLIS, MAX_SEMANTIC_ACTION_BATCH_TEXT_BYTES,
+    MAX_SEMANTIC_ACTION_SETTLE_MILLIS, MAX_SEMANTIC_ACTION_TEXT_BYTES,
+    MAX_SEMANTIC_MUTATION_QUIET_MILLIS,
 };
 pub use semantic_diff::{
     compute_semantic_diff, SemanticDiff, SemanticDiffBudget, SemanticDiffBudgetError,
