@@ -14,6 +14,7 @@
 compile_error!("the agentic probe harness is forbidden in optimized builds");
 
 mod context;
+mod context_port;
 mod context_registry;
 mod contract;
 mod control;
@@ -30,6 +31,17 @@ pub use context::{
     ContextLifecycle, ContextOperationId, ContextOperationJoin, ContextOperationKind, ContextRunId,
     ContextSettlement, ContextStatus, ContextTerminal, ContextTransitionError, ContextVisibility,
     FrameGeneration, FrameId, NavigationEpoch, RunCancellationGeneration,
+};
+pub use context_port::{
+    AgentBrowserPort, BorrowedTabLeaseId, ContextCancellationRequest,
+    ContextCancellationSettlement, ContextConstructionProof, ContextConstructionRequest,
+    ContextConstructionSettlement, ContextConstructionSource, ContextDispatch, ContextNativeEvent,
+    ContextNativePlatform, ContextNativeRequest, ContextNativeResourceCounts,
+    ContextNativeResourceSnapshot, ContextNavigationReplacement, ContextNavigationRequest,
+    ContextNavigationSettlement, ContextNavigationTarget, ContextPortContractError,
+    ContextPortFailure, ContextRendererLoss, ContextResourceAuditId,
+    ContextResourceAuditSettlement, ContextTransitionRequest, ContextTransitionSettlement,
+    MAX_PENDING_NATIVE_CONTEXT_TASKS,
 };
 pub use context_registry::{
     ContextRegistry, ContextRegistryEntry, ContextRegistryEntryState, ContextRegistryError,

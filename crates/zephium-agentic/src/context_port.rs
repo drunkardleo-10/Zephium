@@ -1,0 +1,983 @@
+//! Closed shell/native port for agent-browser context lifecycle work.
+//!
+//! This vocabulary is shared only by trusted shell and native adapters. It
+//! cannot carry JavaScript, selectors, DOM data, native handles, profile
+//! paths, cookies, headers, provider data, or platform error text. Every
+//! context result retains the exact lifecycle join that admitted it.
+
+use std::fmt;
+use std::num::NonZeroU64;
+
+use thiserror::Error;
+use url::Url;
+
+use crate::{
+    ContextCapabilities, ContextJoin, ContextKind, ContextOperationJoin, ContextOperationKind,
+    MAX_LIVE_CONTEXTS,
+};
+
+/// Maximum number of lifecycle tasks one native adapter may retain.
+///
+/// The domain registry permits at most one mutating operation per live
+/// context. The second cohort leaves room for cancellation and resource-audit
+/// work without creating an unbounded native queue.
+pub const MAX_PENDING_NATIVE_CONTEXT_TASKS: usize = MAX_LIVE_CONTEXTS * 2;
+
+/// Refusal while constructing a closed native-port value.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum ContextPortContractError {
+    /// The operation join has the wrong closed operation class.
+    #[error("context operation kind does not match native request")]
+    OperationKind,
+    /// The request source, proof, and immutable context kind disagree.
+    #[error("context kind does not match native request")]
+    ContextKind,
+    /// The capability inventory belongs to another context kind.
+    #[error("context capability kind does not match native request")]
+    CapabilityKind,
+    /// The target is malformed or forbidden by the browser navigation gate.
+    #[error("context navigation target is forbidden")]
+    NavigationTarget,
+    /// One resource count exceeds its fixed process ceiling.
+    #[error("native context resource ceiling exceeded")]
+    ResourceLimit,
+    /// Native resource counts contradict each other.
+    #[error("native context resource accounting is contradictory")]
+    ResourceInvariant,
+}
+
+/// Browser navigation target validated at the trusted shell boundary.
+///
+/// This is not policy authorization. Later policy and approval layers still
+/// decide whether a valid web target may be visited for a particular run.
+#[derive(Clone, Eq, PartialEq)]
+pub struct ContextNavigationTarget(Url);
+
+impl ContextNavigationTarget {
+    /// Parses and validates one exact absolute browser target.
+    pub fn parse(value: &str) -> Result<Self, ContextPortContractError> {
+        let target = Url::parse(value).map_err(|_| ContextPortContractError::NavigationTarget)?;
+        Self::try_new(target)
+    }
+
+    /// Validates an already-parsed absolute browser target.
+    pub fn try_new(target: Url) -> Result<Self, ContextPortContractError> {
+        if !zephium_core::navigation::is_allowed(&target) {
+            return Err(ContextPortContractError::NavigationTarget);
+        }
+        Ok(Self(target))
+    }
+
+    /// Returns the validated target to the trusted native adapter.
+    pub const fn as_url(&self) -> &Url {
+        &self.0
+    }
+
+    /// Consumes the wrapper at the trusted native adapter boundary.
+    pub fn into_url(self) -> Url {
+        self.0
+    }
+}
+
+impl fmt::Debug for ContextNavigationTarget {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ContextNavigationTarget([redacted])")
+    }
+}
+
+/// Opaque process-local lease over an existing normal Browse tab.
+#[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct BorrowedTabLeaseId(NonZeroU64);
+
+impl BorrowedTabLeaseId {
+    /// Constructs a nonzero shell-minted lease identity.
+    pub const fn new(value: u64) -> Option<Self> {
+        match NonZeroU64::new(value) {
+            Some(value) => Some(Self(value)),
+            None => None,
+        }
+    }
+
+    /// Returns the process-local value to the private native adapter.
+    pub const fn get(self) -> u64 {
+        self.0.get()
+    }
+}
+
+impl fmt::Debug for BorrowedTabLeaseId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("BorrowedTabLeaseId([redacted])")
+    }
+}
+
+/// Shell-authorized source for one context construction.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub enum ContextConstructionSource {
+    /// Create a new run-owned context absent from ordinary Browse identity.
+    Owned,
+    /// Bind an existing normal tab through an already-admitted lease.
+    BorrowedTab(BorrowedTabLeaseId),
+    /// Create a temporary normal human sign-in handoff context.
+    HumanSignInHandoff,
+}
+
+impl ContextConstructionSource {
+    /// Immutable context kind represented by this source.
+    pub const fn kind(self) -> ContextKind {
+        match self {
+            Self::Owned => ContextKind::Owned,
+            Self::BorrowedTab(_) => ContextKind::BorrowedTab,
+            Self::HumanSignInHandoff => ContextKind::HumanSignInHandoff,
+        }
+    }
+}
+
+impl fmt::Debug for ContextConstructionSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Owned => formatter.write_str("Owned"),
+            Self::BorrowedTab(lease) => formatter.debug_tuple("BorrowedTab").field(lease).finish(),
+            Self::HumanSignInHandoff => formatter.write_str("HumanSignInHandoff"),
+        }
+    }
+}
+
+/// Exact request to construct one native context binding.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct ContextConstructionRequest {
+    operation: ContextOperationJoin,
+    capabilities: ContextCapabilities,
+    source: ContextConstructionSource,
+}
+
+impl ContextConstructionRequest {
+    /// Joins construction, complete capabilities, and the shell-owned source.
+    pub fn try_new(
+        operation: ContextOperationJoin,
+        capabilities: ContextCapabilities,
+        source: ContextConstructionSource,
+    ) -> Result<Self, ContextPortContractError> {
+        require_operation(operation, ContextOperationKind::Construct)?;
+        let kind = operation.context().identity().kind();
+        if source.kind() != kind {
+            return Err(ContextPortContractError::ContextKind);
+        }
+        if capabilities.kind() != kind {
+            return Err(ContextPortContractError::CapabilityKind);
+        }
+        Ok(Self {
+            operation,
+            capabilities,
+            source,
+        })
+    }
+
+    /// Exact construction operation and complete lifecycle join.
+    pub const fn operation(self) -> ContextOperationJoin {
+        self.operation
+    }
+
+    /// Complete, kind-checked native capability inventory.
+    pub const fn capabilities(self) -> ContextCapabilities {
+        self.capabilities
+    }
+
+    /// Shell-authorized construction source.
+    pub const fn source(self) -> ContextConstructionSource {
+        self.source
+    }
+}
+
+impl fmt::Debug for ContextConstructionRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ContextConstructionRequest")
+            .field("operation", &self.operation)
+            .field("capabilities", &self.capabilities)
+            .field("source", &self.source)
+            .finish()
+    }
+}
+
+/// Exact request for one shell-authorized browser navigation.
+#[derive(Clone, Eq, PartialEq)]
+pub struct ContextNavigationRequest {
+    operation: ContextOperationJoin,
+    target: ContextNavigationTarget,
+}
+
+impl ContextNavigationRequest {
+    /// Binds a validated target to the exact navigation operation.
+    pub fn try_new(
+        operation: ContextOperationJoin,
+        target: ContextNavigationTarget,
+    ) -> Result<Self, ContextPortContractError> {
+        require_operation(operation, ContextOperationKind::Navigate)?;
+        Ok(Self { operation, target })
+    }
+
+    /// Exact navigation operation and complete lifecycle join.
+    pub const fn operation(&self) -> ContextOperationJoin {
+        self.operation
+    }
+
+    /// Validated browser target.
+    pub const fn target(&self) -> &ContextNavigationTarget {
+        &self.target
+    }
+}
+
+impl fmt::Debug for ContextNavigationRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ContextNavigationRequest")
+            .field("operation", &self.operation)
+            .field("target", &self.target)
+            .finish()
+    }
+}
+
+/// Exact request for a non-construction, non-navigation lifecycle transition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ContextTransitionRequest {
+    operation: ContextOperationJoin,
+}
+
+impl ContextTransitionRequest {
+    /// Validates that the exact join represents a closed transition class.
+    pub fn try_new(operation: ContextOperationJoin) -> Result<Self, ContextPortContractError> {
+        if !is_transition(operation.kind()) {
+            return Err(ContextPortContractError::OperationKind);
+        }
+        Ok(Self { operation })
+    }
+
+    /// Exact lifecycle transition and complete context join.
+    pub const fn operation(self) -> ContextOperationJoin {
+        self.operation
+    }
+}
+
+/// Best-effort revocation request after the functional core advances authority.
+///
+/// Old callbacks remain unsafe even if native cancellation is refused because
+/// their cancellation generation no longer rejoins the current context.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ContextCancellationRequest {
+    current: ContextJoin,
+}
+
+impl ContextCancellationRequest {
+    /// Captures the post-revocation context join.
+    pub const fn new(current: ContextJoin) -> Self {
+        Self { current }
+    }
+
+    /// Current post-revocation authority.
+    pub const fn current(self) -> ContextJoin {
+        self.current
+    }
+}
+
+/// Closed request vocabulary accepted by a native context adapter.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ContextNativeRequest {
+    /// Construct a new native binding or bind an admitted borrowed lease.
+    Construct(ContextConstructionRequest),
+    /// Navigate one exact context to one validated web target.
+    Navigate(ContextNavigationRequest),
+    /// Apply one exact closed lifecycle transition.
+    Transition(ContextTransitionRequest),
+    /// Revoke pending native work after run cancellation or human takeover.
+    Cancel(ContextCancellationRequest),
+}
+
+impl ContextNativeRequest {
+    /// Complete context join carried by every request class.
+    pub const fn context(&self) -> ContextJoin {
+        match self {
+            Self::Construct(request) => request.operation().context(),
+            Self::Navigate(request) => request.operation().context(),
+            Self::Transition(request) => request.operation().context(),
+            Self::Cancel(request) => request.current(),
+        }
+    }
+}
+
+/// Platform family that established a construction attestation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ContextNativePlatform {
+    /// Pinned WebKit/WKWebView adapter.
+    MacOs,
+    /// Pinned WebView2 adapter.
+    Windows,
+}
+
+/// Closed native attestation for profile binding and extension behavior.
+///
+/// A trusted adapter emits a variant only after checking the actual native
+/// configuration and extension inventory. The paired facts are one enum so a
+/// caller cannot combine an owned storage binding with a normal extension
+/// principal accidentally.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ContextConstructionProof {
+    /// Selected macOS profile data store, no extension controller, extension,
+    /// userscript, or ordinary Zephium script principal attached.
+    MacOsOwnedSelectedProfileExtensionFree,
+    /// Selected Windows profile used only after its extension inventory was
+    /// proven empty for this construction.
+    WindowsOwnedSelectedProfileEmptyInventory,
+    /// Stable selected-profile Windows automation subprofile whose extension
+    /// inventory was proven empty for this construction.
+    WindowsOwnedAutomationSubprofileEmptyInventory,
+    /// Existing macOS Browse tab retaining its normal extension behavior.
+    MacOsBorrowedTabNormalExtensions,
+    /// Existing Windows Browse tab retaining its normal extension behavior.
+    WindowsBorrowedTabNormalExtensions,
+    /// Temporary macOS human handoff retaining normal extension behavior.
+    MacOsHumanSignInHandoffNormalExtensions,
+    /// Temporary Windows human handoff retaining normal extension behavior.
+    WindowsHumanSignInHandoffNormalExtensions,
+}
+
+impl ContextConstructionProof {
+    /// Platform that produced the attestation.
+    pub const fn platform(self) -> ContextNativePlatform {
+        match self {
+            Self::MacOsOwnedSelectedProfileExtensionFree
+            | Self::MacOsBorrowedTabNormalExtensions
+            | Self::MacOsHumanSignInHandoffNormalExtensions => ContextNativePlatform::MacOs,
+            Self::WindowsOwnedSelectedProfileEmptyInventory
+            | Self::WindowsOwnedAutomationSubprofileEmptyInventory
+            | Self::WindowsBorrowedTabNormalExtensions
+            | Self::WindowsHumanSignInHandoffNormalExtensions => ContextNativePlatform::Windows,
+        }
+    }
+
+    /// Context kind for which this paired attestation is truthful.
+    pub const fn kind(self) -> ContextKind {
+        match self {
+            Self::MacOsOwnedSelectedProfileExtensionFree
+            | Self::WindowsOwnedSelectedProfileEmptyInventory
+            | Self::WindowsOwnedAutomationSubprofileEmptyInventory => ContextKind::Owned,
+            Self::MacOsBorrowedTabNormalExtensions | Self::WindowsBorrowedTabNormalExtensions => {
+                ContextKind::BorrowedTab
+            }
+            Self::MacOsHumanSignInHandoffNormalExtensions
+            | Self::WindowsHumanSignInHandoffNormalExtensions => ContextKind::HumanSignInHandoff,
+        }
+    }
+}
+
+/// Closed, redaction-safe reason a native request did not apply.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum ContextPortFailure {
+    /// The pinned native runtime cannot support the requested invariant.
+    #[error("native context operation is unsupported")]
+    Unsupported,
+    /// A bounded native queue or physical resource ceiling is full.
+    #[error("native context resources are exhausted")]
+    ResourceExhausted,
+    /// The exact selected profile is unavailable.
+    #[error("selected context profile is unavailable")]
+    ProfileUnavailable,
+    /// The exact selected profile is already exclusively leased.
+    #[error("selected context profile is busy")]
+    ProfileBusy,
+    /// Extension-free construction could not be proven.
+    #[error("context extension isolation is unproven")]
+    ExtensionIsolationUnproven,
+    /// A bounded platform cookie transfer failed.
+    #[error("context cookie transfer failed")]
+    CookieTransferFailed,
+    /// The native API synchronously or asynchronously refused the operation.
+    #[error("native context operation was refused")]
+    NativeRefused,
+    /// Cancellation terminated the operation before it applied.
+    #[error("native context operation was cancelled")]
+    Cancelled,
+    /// The bounded native deadline elapsed.
+    #[error("native context operation timed out")]
+    TimedOut,
+    /// Native authority no longer matches the request join.
+    #[error("native context operation is stale")]
+    Stale,
+    /// Process teardown permanently sealed the native adapter.
+    #[error("native context adapter is shutting down")]
+    Shutdown,
+}
+
+/// Synchronous admission result from the bounded native task queue.
+#[must_use]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ContextDispatch {
+    /// The exact request entered the owning native executor.
+    Scheduled,
+    /// The adapter synchronously refused the exact request.
+    Rejected(ContextPortFailure),
+    /// The pinned platform does not implement the request class.
+    Unsupported,
+}
+
+/// Exact asynchronous settlement of initial native construction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ContextConstructionSettlement {
+    operation: ContextOperationJoin,
+    outcome: Result<ContextConstructionProof, ContextPortFailure>,
+}
+
+impl ContextConstructionSettlement {
+    /// Validates construction operation class and any successful attestation.
+    pub fn try_new(
+        operation: ContextOperationJoin,
+        outcome: Result<ContextConstructionProof, ContextPortFailure>,
+    ) -> Result<Self, ContextPortContractError> {
+        require_operation(operation, ContextOperationKind::Construct)?;
+        if let Ok(proof) = outcome {
+            if proof.kind() != operation.context().identity().kind() {
+                return Err(ContextPortContractError::ContextKind);
+            }
+        }
+        Ok(Self { operation, outcome })
+    }
+
+    /// Exact construction operation and complete context join.
+    pub const fn operation(self) -> ContextOperationJoin {
+        self.operation
+    }
+
+    /// Successful native attestation or closed refusal.
+    pub const fn outcome(self) -> Result<ContextConstructionProof, ContextPortFailure> {
+        self.outcome
+    }
+}
+
+/// Exact asynchronous settlement of a requested navigation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContextNavigationSettlement {
+    operation: ContextOperationJoin,
+    outcome: Result<ContextNavigationTarget, ContextPortFailure>,
+}
+
+impl ContextNavigationSettlement {
+    /// Validates the navigation operation and binds its committed target.
+    pub fn try_new(
+        operation: ContextOperationJoin,
+        outcome: Result<ContextNavigationTarget, ContextPortFailure>,
+    ) -> Result<Self, ContextPortContractError> {
+        require_operation(operation, ContextOperationKind::Navigate)?;
+        Ok(Self { operation, outcome })
+    }
+
+    /// Exact navigation operation and complete context join.
+    pub const fn operation(&self) -> ContextOperationJoin {
+        self.operation
+    }
+
+    /// Exact committed target or closed refusal.
+    pub const fn outcome(&self) -> &Result<ContextNavigationTarget, ContextPortFailure> {
+        &self.outcome
+    }
+}
+
+/// Exact asynchronous settlement of a closed lifecycle transition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ContextTransitionSettlement {
+    operation: ContextOperationJoin,
+    outcome: Result<(), ContextPortFailure>,
+}
+
+impl ContextTransitionSettlement {
+    /// Validates a non-construction, non-navigation transition result.
+    pub fn try_new(
+        operation: ContextOperationJoin,
+        outcome: Result<(), ContextPortFailure>,
+    ) -> Result<Self, ContextPortContractError> {
+        ContextTransitionRequest::try_new(operation)?;
+        Ok(Self { operation, outcome })
+    }
+
+    /// Exact lifecycle operation and complete context join.
+    pub const fn operation(self) -> ContextOperationJoin {
+        self.operation
+    }
+
+    /// Applied transition or closed refusal.
+    pub const fn outcome(self) -> Result<(), ContextPortFailure> {
+        self.outcome
+    }
+}
+
+/// Exact committed navigation that was not initiated by a shell request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContextNavigationReplacement {
+    prior: ContextJoin,
+    target: ContextNavigationTarget,
+}
+
+impl ContextNavigationReplacement {
+    /// Joins the native commit to the exact document it replaced.
+    pub const fn new(prior: ContextJoin, target: ContextNavigationTarget) -> Self {
+        Self { prior, target }
+    }
+
+    /// Complete join for the document that was replaced.
+    pub const fn prior(&self) -> ContextJoin {
+        self.prior
+    }
+
+    /// Exact committed replacement target.
+    pub const fn target(&self) -> &ContextNavigationTarget {
+        &self.target
+    }
+}
+
+/// Exact native renderer-loss notification.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ContextRendererLoss {
+    prior: ContextJoin,
+}
+
+impl ContextRendererLoss {
+    /// Captures the last native authority known before renderer loss.
+    pub const fn new(prior: ContextJoin) -> Self {
+        Self { prior }
+    }
+
+    /// Complete pre-loss context join.
+    pub const fn prior(self) -> ContextJoin {
+        self.prior
+    }
+}
+
+/// Exact asynchronous result of best-effort native cancellation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ContextCancellationSettlement {
+    current: ContextJoin,
+    outcome: Result<(), ContextPortFailure>,
+}
+
+impl ContextCancellationSettlement {
+    /// Binds cancellation outcome to the post-revocation join.
+    pub const fn new(current: ContextJoin, outcome: Result<(), ContextPortFailure>) -> Self {
+        Self { current, outcome }
+    }
+
+    /// Current post-revocation authority.
+    pub const fn current(self) -> ContextJoin {
+        self.current
+    }
+
+    /// Native cancellation outcome; stale old work remains unauthorized either way.
+    pub const fn outcome(self) -> Result<(), ContextPortFailure> {
+        self.outcome
+    }
+}
+
+/// Nonzero process-local correlation for one native resource audit.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ContextResourceAuditId(NonZeroU64);
+
+impl ContextResourceAuditId {
+    /// Constructs a nonzero shell-minted audit identity.
+    pub const fn new(value: u64) -> Option<Self> {
+        match NonZeroU64::new(value) {
+            Some(value) => Some(Self(value)),
+            None => None,
+        }
+    }
+
+    /// Returns the process-local correlation value.
+    pub const fn get(self) -> u64 {
+        self.0.get()
+    }
+}
+
+/// Requested native resource counts before invariant validation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ContextNativeResourceCounts {
+    /// Context-to-native bindings retained by the adapter.
+    pub known_bindings: u8,
+    /// Resident native page views.
+    pub resident_views: u8,
+    /// Owned or handoff native reservations.
+    pub owned_reservations: u8,
+    /// Leases over existing normal Browse tabs.
+    pub borrowed_leases: u8,
+    /// Interactive native surfaces currently presented.
+    pub visible_surfaces: u8,
+    /// Resident views in the platform's suspended state.
+    pub suspended_views: u8,
+    /// Mutating native lifecycle operations awaiting settlement.
+    pub pending_operations: u8,
+    /// Tasks retained by the native executor but not yet running.
+    pub queued_tasks: u8,
+}
+
+/// Validated privacy-preserving native resource snapshot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ContextNativeResourceSnapshot(ContextNativeResourceCounts);
+
+impl ContextNativeResourceSnapshot {
+    /// Validates every count against the process ceilings and relationships.
+    pub fn try_new(counts: ContextNativeResourceCounts) -> Result<Self, ContextPortContractError> {
+        let live_limit =
+            u8::try_from(MAX_LIVE_CONTEXTS).map_err(|_| ContextPortContractError::ResourceLimit)?;
+        let queue_limit = u8::try_from(MAX_PENDING_NATIVE_CONTEXT_TASKS)
+            .map_err(|_| ContextPortContractError::ResourceLimit)?;
+        if [
+            counts.known_bindings,
+            counts.resident_views,
+            counts.owned_reservations,
+            counts.borrowed_leases,
+            counts.visible_surfaces,
+            counts.suspended_views,
+            counts.pending_operations,
+        ]
+        .into_iter()
+        .any(|count| count > live_limit)
+            || counts.queued_tasks > queue_limit
+        {
+            return Err(ContextPortContractError::ResourceLimit);
+        }
+        let partitioned = counts
+            .owned_reservations
+            .checked_add(counts.borrowed_leases)
+            .ok_or(ContextPortContractError::ResourceInvariant)?;
+        if partitioned != counts.known_bindings
+            || counts.resident_views > counts.known_bindings
+            || counts.visible_surfaces > counts.resident_views
+            || counts.suspended_views > counts.resident_views
+            || counts.pending_operations > counts.known_bindings
+        {
+            return Err(ContextPortContractError::ResourceInvariant);
+        }
+        Ok(Self(counts))
+    }
+
+    /// Complete validated count cohort.
+    pub const fn counts(self) -> ContextNativeResourceCounts {
+        self.0
+    }
+}
+
+/// Exact asynchronous response to one native resource audit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ContextResourceAuditSettlement {
+    audit: ContextResourceAuditId,
+    outcome: Result<ContextNativeResourceSnapshot, ContextPortFailure>,
+}
+
+impl ContextResourceAuditSettlement {
+    /// Binds one validated snapshot or refusal to the exact audit request.
+    pub const fn new(
+        audit: ContextResourceAuditId,
+        outcome: Result<ContextNativeResourceSnapshot, ContextPortFailure>,
+    ) -> Self {
+        Self { audit, outcome }
+    }
+
+    /// Exact resource-audit correlation identity.
+    pub const fn audit(self) -> ContextResourceAuditId {
+        self.audit
+    }
+
+    /// Validated count cohort or closed refusal.
+    pub const fn outcome(self) -> Result<ContextNativeResourceSnapshot, ContextPortFailure> {
+        self.outcome
+    }
+}
+
+/// Closed event vocabulary emitted by the native context adapter.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ContextNativeEvent {
+    /// Initial native construction reached a terminal result.
+    ConstructionSettled(ContextConstructionSettlement),
+    /// Shell-requested navigation committed or reached a terminal refusal.
+    NavigationSettled(ContextNavigationSettlement),
+    /// A closed non-navigation lifecycle transition settled.
+    TransitionSettled(ContextTransitionSettlement),
+    /// Page-initiated, redirect, history, or human navigation replaced a document.
+    NavigationReplaced(ContextNavigationReplacement),
+    /// The exact native renderer disappeared.
+    RendererLost(ContextRendererLoss),
+    /// Best-effort native cancellation settled.
+    CancellationSettled(ContextCancellationSettlement),
+    /// One bounded native resource audit settled.
+    ResourceAuditSettled(ContextResourceAuditSettlement),
+}
+
+/// Trusted imperative boundary implemented by one bounded platform adapter.
+///
+/// Implementations own native handles and private identity mappings. They must
+/// never project owned contexts into tab/session/extension inventories and
+/// must retain no queue, worker, timer, or page when no contexts exist.
+pub trait AgentBrowserPort: Send + Sync {
+    /// Attempts to admit one exact lifecycle request to the owning native executor.
+    fn dispatch(&self, request: ContextNativeRequest) -> ContextDispatch;
+
+    /// Attempts to admit one privacy-preserving native resource audit.
+    fn audit_resources(&self, audit: ContextResourceAuditId) -> ContextDispatch;
+}
+
+fn require_operation(
+    operation: ContextOperationJoin,
+    expected: ContextOperationKind,
+) -> Result<(), ContextPortContractError> {
+    if operation.kind() == expected {
+        Ok(())
+    } else {
+        Err(ContextPortContractError::OperationKind)
+    }
+}
+
+const fn is_transition(kind: ContextOperationKind) -> bool {
+    matches!(
+        kind,
+        ContextOperationKind::Suspend
+            | ContextOperationKind::Resume
+            | ContextOperationKind::Recover
+            | ContextOperationKind::Show
+            | ContextOperationKind::Hide
+            | ContextOperationKind::BeginHumanControl
+            | ContextOperationKind::EndHumanControl
+            | ContextOperationKind::Close
+            | ContextOperationKind::Adopt
+            | ContextOperationKind::Release
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        ContextCapability, ContextId, ContextIdentity, ContextOperationId, ContextRegistry,
+        ContextRunId,
+    };
+    use zephium_core::ids::ProfileId;
+
+    const OWNED_CAPABILITIES: [ContextCapability; 3] = [
+        ContextCapability::Navigate,
+        ContextCapability::Present,
+        ContextCapability::HumanControl,
+    ];
+
+    fn identity(value: u128, kind: ContextKind) -> ContextIdentity {
+        ContextIdentity::new(
+            ContextId::from_raw(value),
+            ContextRunId::from_raw(20),
+            ProfileId::from(30),
+            kind,
+        )
+    }
+
+    fn capabilities(kind: ContextKind) -> ContextCapabilities {
+        let capabilities: &[ContextCapability] = match kind {
+            ContextKind::Owned => &OWNED_CAPABILITIES,
+            ContextKind::BorrowedTab => &[ContextCapability::Navigate],
+            ContextKind::HumanSignInHandoff => &[ContextCapability::HumanControl],
+        };
+        ContextCapabilities::try_new(kind, capabilities).expect("capabilities")
+    }
+
+    fn operation(value: u64) -> ContextOperationId {
+        ContextOperationId::new(value).expect("operation")
+    }
+
+    fn constructing(kind: ContextKind) -> (ContextRegistry, ContextOperationJoin) {
+        let identity = identity(10, kind);
+        let mut registry = ContextRegistry::new();
+        registry
+            .reserve(identity, capabilities(kind))
+            .expect("reserve");
+        let join = registry
+            .begin_context(identity.id(), operation(1))
+            .expect("begin");
+        (registry, join)
+    }
+
+    fn ready_owned() -> ContextRegistry {
+        let (mut registry, construction) = constructing(ContextKind::Owned);
+        registry
+            .settle_construction(
+                construction.context().identity().id(),
+                construction,
+                crate::ContextSettlement::Applied,
+            )
+            .expect("constructed");
+        registry
+    }
+
+    #[test]
+    fn construction_source_capabilities_and_proof_are_kind_exact() {
+        let (_, owned) = constructing(ContextKind::Owned);
+        assert_eq!(
+            ContextConstructionRequest::try_new(
+                owned,
+                capabilities(ContextKind::Owned),
+                ContextConstructionSource::BorrowedTab(BorrowedTabLeaseId::new(1).expect("lease")),
+            ),
+            Err(ContextPortContractError::ContextKind)
+        );
+        assert_eq!(
+            ContextConstructionRequest::try_new(
+                owned,
+                capabilities(ContextKind::BorrowedTab),
+                ContextConstructionSource::Owned,
+            ),
+            Err(ContextPortContractError::CapabilityKind)
+        );
+        assert_eq!(
+            ContextConstructionSettlement::try_new(
+                owned,
+                Ok(ContextConstructionProof::WindowsBorrowedTabNormalExtensions),
+            ),
+            Err(ContextPortContractError::ContextKind)
+        );
+        let settlement = ContextConstructionSettlement::try_new(
+            owned,
+            Ok(ContextConstructionProof::MacOsOwnedSelectedProfileExtensionFree),
+        )
+        .expect("proof");
+        assert_eq!(
+            settlement.outcome().expect("attestation").platform(),
+            ContextNativePlatform::MacOs
+        );
+    }
+
+    #[test]
+    fn navigation_targets_reject_secrets_local_access_and_internal_principals() {
+        for target in [
+            "javascript:alert(1)",
+            "file:///private/secret",
+            "https://user:secret@example.test/",
+            "http://tauri.localhost/index.html",
+            "about:config",
+        ] {
+            assert_eq!(
+                ContextNavigationTarget::parse(target),
+                Err(ContextPortContractError::NavigationTarget),
+                "accepted {target}"
+            );
+        }
+        let target = ContextNavigationTarget::parse("https://example.test/path?token=secret")
+            .expect("ordinary web target");
+        assert_eq!(format!("{target:?}"), "ContextNavigationTarget([redacted])");
+        assert!(!format!("{target:?}").contains("secret"));
+    }
+
+    #[test]
+    fn lifecycle_request_classes_cannot_be_substituted() {
+        let mut registry = ready_owned();
+        let context = identity(10, ContextKind::Owned).id();
+        let navigation = registry
+            .begin_navigation(context, operation(2))
+            .expect("navigation");
+        assert_eq!(
+            ContextTransitionRequest::try_new(navigation),
+            Err(ContextPortContractError::OperationKind)
+        );
+        assert!(ContextNavigationRequest::try_new(
+            navigation,
+            ContextNavigationTarget::parse("https://example.test/").expect("target")
+        )
+        .is_ok());
+        let (_, construction) = constructing(ContextKind::Owned);
+        assert_eq!(
+            ContextNavigationSettlement::try_new(
+                construction,
+                Err(ContextPortFailure::NativeRefused),
+            ),
+            Err(ContextPortContractError::OperationKind)
+        );
+    }
+
+    #[test]
+    fn native_resource_snapshots_are_bounded_and_consistent() {
+        let valid = ContextNativeResourceCounts {
+            known_bindings: 3,
+            resident_views: 2,
+            owned_reservations: 2,
+            borrowed_leases: 1,
+            visible_surfaces: 1,
+            suspended_views: 1,
+            pending_operations: 2,
+            queued_tasks: 4,
+        };
+        assert_eq!(
+            ContextNativeResourceSnapshot::try_new(valid)
+                .expect("snapshot")
+                .counts(),
+            valid
+        );
+        assert_eq!(
+            ContextNativeResourceSnapshot::try_new(ContextNativeResourceCounts {
+                known_bindings: 2,
+                ..valid
+            }),
+            Err(ContextPortContractError::ResourceInvariant)
+        );
+        assert_eq!(
+            ContextNativeResourceSnapshot::try_new(ContextNativeResourceCounts {
+                queued_tasks: u8::try_from(MAX_PENDING_NATIVE_CONTEXT_TASKS + 1)
+                    .expect("small ceiling"),
+                ..valid
+            }),
+            Err(ContextPortContractError::ResourceLimit)
+        );
+    }
+
+    #[test]
+    fn debug_output_redacts_identity_profile_lease_and_navigation() {
+        let (_, operation) = constructing(ContextKind::BorrowedTab);
+        let request = ContextConstructionRequest::try_new(
+            operation,
+            capabilities(ContextKind::BorrowedTab),
+            ContextConstructionSource::BorrowedTab(BorrowedTabLeaseId::new(9001).expect("lease")),
+        )
+        .expect("request");
+        let output = format!("{request:?}");
+        assert!(output.contains("[redacted]"));
+        assert!(!output.contains("9001"));
+        assert!(!output.contains("ProfileId"));
+    }
+
+    #[test]
+    fn fake_port_observes_only_the_closed_request_vocabulary() {
+        struct FakePort;
+
+        impl AgentBrowserPort for FakePort {
+            fn dispatch(&self, request: ContextNativeRequest) -> ContextDispatch {
+                match request {
+                    ContextNativeRequest::Construct(_) => ContextDispatch::Scheduled,
+                    ContextNativeRequest::Navigate(_)
+                    | ContextNativeRequest::Transition(_)
+                    | ContextNativeRequest::Cancel(_) => {
+                        ContextDispatch::Rejected(ContextPortFailure::Stale)
+                    }
+                }
+            }
+
+            fn audit_resources(&self, _audit: ContextResourceAuditId) -> ContextDispatch {
+                ContextDispatch::Scheduled
+            }
+        }
+
+        let (_, operation) = constructing(ContextKind::Owned);
+        let request = ContextConstructionRequest::try_new(
+            operation,
+            capabilities(ContextKind::Owned),
+            ContextConstructionSource::Owned,
+        )
+        .expect("request");
+        let port = FakePort;
+        assert_eq!(
+            port.dispatch(ContextNativeRequest::Construct(request)),
+            ContextDispatch::Scheduled
+        );
+        assert_eq!(
+            port.audit_resources(ContextResourceAuditId::new(1).expect("audit")),
+            ContextDispatch::Scheduled
+        );
+    }
+}
