@@ -30,6 +30,11 @@ cargo check --locked --target x86_64-pc-windows-msvc \
 cargo xtask check-agentic-probe-boundary
 ```
 
+The default `zephium-agentic` tests also exercise the shipping Milestone 2
+identity/lifecycle core; they require no native view, worker, network listener,
+profile data, or diagnostic feature. See `m2-context-identity.md` for the exact
+implemented and still-pending boundary.
+
 An optimized build with `probe-harness` is expected to fail at compile time.
 The ordinary `zephium-desktop` resolved graph is separately required not to
 reach `zephium-agentic`.

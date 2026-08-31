@@ -246,6 +246,9 @@ Single Cargo workspace monorepo, frontend included. Per-platform native code is
 │   ├── zephium-core             domains (slices + reducers + commands/events),
 │   │                            layout/split math, navigation policy, ports.
 │   │                            pure, #![forbid(unsafe_code)], zero I/O.
+│   ├── zephium-agentic          pure browser-execution identity, lifecycle,
+│   │                            semantic, action, policy, and probe contracts;
+│   │                            native fixtures remain release-excluded.
 │   ├── zephium-ipc              DTOs + specta/tauri-specta TS codegen.
 │   ├── zephium-engine           Wry adapter + native stage per platform
 │   │                            (stage_macos / stage_windows / stage_linux,

@@ -13,6 +13,7 @@
 #[cfg(all(feature = "probe-harness", not(debug_assertions)))]
 compile_error!("the agentic probe harness is forbidden in optimized builds");
 
+mod context;
 mod contract;
 mod control;
 mod evidence;
@@ -22,6 +23,14 @@ mod fixture_server;
 mod probe_recipes;
 mod protocol;
 
+pub use context::{
+    ContextCapabilities, ContextCapability, ContextCapabilityError, ContextControl,
+    ContextFreshness, ContextGeneration, ContextId, ContextIdentity, ContextJoin, ContextKind,
+    ContextLifecycle, ContextOperationId, ContextOperationJoin, ContextOperationKind,
+    ContextRecord, ContextRunId, ContextSettlement, ContextStatus, ContextTerminal,
+    ContextTransitionError, ContextVisibility, FrameGeneration, FrameId, NavigationEpoch,
+    RunCancellationGeneration,
+};
 pub use contract::{
     FixtureCase, FixtureTarget, FocusOwner, GateOutcome, InputBackend, InputEventKind,
     PresentationState,

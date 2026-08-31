@@ -16,6 +16,8 @@ probe-harness = []
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+ulid.workspace = true
+zephium-core.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
