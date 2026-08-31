@@ -1,11 +1,12 @@
 //! Bounded domain contracts for Zephium's browser-execution proof.
 //!
 //! The default contract deliberately contains no browser engine, native
-//! object, page script, selector, URL, profile path, provider secret, or model
-//! adapter. It defines the closed vocabulary shared by the non-shipping probe
-//! and the eventual product ports. Diagnostic fixtures and their fixed recipe
-//! enum are behind `probe-harness` and cannot be compiled in an optimized
-//! build.
+//! object, page script, selector, navigable page URL, profile path, provider
+//! secret, or model adapter. It defines the closed vocabulary shared by the
+//! non-shipping probe and the eventual product ports. Canonical origins are
+//! retained only as native-attested provenance with redacted diagnostics.
+//! Diagnostic fixtures and their fixed recipe enum are behind `probe-harness`
+//! and cannot be compiled in an optimized build.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -26,6 +27,8 @@ mod fixture_server;
 mod probe_recipes;
 mod profile_lease;
 mod protocol;
+mod semantic;
+mod semantic_wire;
 mod sign_in_handoff;
 
 pub use context::{
@@ -91,6 +94,19 @@ pub use protocol::{
     RunMatrixRequest, ShutdownReply, ShutdownRequest, MAX_BACKENDS_PER_REQUEST,
     MAX_CASES_PER_REQUEST, MAX_PROTOCOL_INPUT_BYTES, MAX_PROTOCOL_OUTPUT_BYTES,
     PROBE_PROTOCOL_VERSION,
+};
+pub use semantic::{
+    SemanticCompleteness, SemanticContractError, SemanticFrameJoin, SemanticFrameTrust,
+    SemanticInvocationId, SemanticNode, SemanticOperationClass, SemanticOperations, SemanticOrigin,
+    SemanticRect, SemanticReference, SemanticReferenceError, SemanticReferenceId, SemanticRole,
+    SemanticSensitivity, SemanticSnapshot, SemanticSnapshotGeneration, SemanticState,
+    SemanticStates, SemanticText, SemanticTruncation, SemanticTrust, SemanticValueSummary,
+    MAX_SEMANTIC_DEPTH, MAX_SEMANTIC_FRAMES, MAX_SEMANTIC_NAME_BYTES, MAX_SEMANTIC_NODES,
+    MAX_SEMANTIC_TEXT_BYTES, MAX_SEMANTIC_TOTAL_TEXT_BYTES, MAX_SEMANTIC_VALUE_BYTES,
+};
+pub use semantic_wire::{
+    decode_semantic_snapshot, SemanticDecodeContext, SemanticDecodeError, MAX_SEMANTIC_WIRE_BYTES,
+    SEMANTIC_WIRE_VERSION,
 };
 pub use sign_in_handoff::{
     ContextSignInHandoff, ContextSignInHandoffBlocker, ContextSignInHandoffCleanup,
