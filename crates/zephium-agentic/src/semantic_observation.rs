@@ -205,6 +205,10 @@ impl SemanticScopeAnchor {
     pub const fn snapshot_generation(&self) -> SemanticSnapshotGeneration {
         self.capability.snapshot()
     }
+
+    pub(crate) const fn capability(&self) -> &SemanticReference {
+        &self.capability
+    }
 }
 
 impl fmt::Debug for SemanticScopeAnchor {

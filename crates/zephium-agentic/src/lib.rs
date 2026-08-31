@@ -28,6 +28,7 @@ mod probe_recipes;
 mod profile_lease;
 mod protocol;
 mod semantic;
+mod semantic_diff;
 mod semantic_model;
 mod semantic_observation;
 mod semantic_wire;
@@ -107,13 +108,20 @@ pub use semantic::{
     MAX_SEMANTIC_NAME_BYTES, MAX_SEMANTIC_NODES, MAX_SEMANTIC_TEXT_BYTES,
     MAX_SEMANTIC_TOTAL_TEXT_BYTES, MAX_SEMANTIC_VALUE_BYTES,
 };
+pub use semantic_diff::{
+    compute_semantic_diff, SemanticDiff, SemanticDiffBudget, SemanticDiffBudgetError,
+    SemanticDiffEntry, SemanticDiffEntryKind, SemanticDiffOutcome, SemanticDiffStats,
+    SemanticFreshSnapshotReason, SemanticNodeChange, SemanticNodeChanges, SemanticNodeMove,
+    SemanticObservationAcknowledgement, SemanticRetiredReferenceId, MAX_SEMANTIC_DIFF_ENTRIES,
+};
 pub use semantic_model::{
     encode_semantic_observation, SemanticEncodedObservation, SemanticEncodingStats,
-    SemanticModelEncodingBudget, SemanticModelEncodingError, SemanticModelPayload,
-    SemanticTokenCountQuality, SemanticTokenCountRequirement, SemanticTokenCounter,
-    SemanticTokenCounterError, SemanticTokenMeasurement, SemanticTokenMeasurementError,
-    SemanticTokenizerRevision, SemanticTokenizerRevisionError, INITIAL_SEMANTIC_MODEL_TOKEN_TARGET,
-    MAX_SEMANTIC_MODEL_BYTES, MAX_SEMANTIC_MODEL_TOKENS, MAX_SEMANTIC_TOKENIZER_REVISION_BYTES,
+    SemanticModelDeliveryError, SemanticModelDeliverySettlement, SemanticModelEncodingBudget,
+    SemanticModelEncodingError, SemanticModelPayload, SemanticTokenCountQuality,
+    SemanticTokenCountRequirement, SemanticTokenCounter, SemanticTokenCounterError,
+    SemanticTokenMeasurement, SemanticTokenMeasurementError, SemanticTokenizerRevision,
+    SemanticTokenizerRevisionError, INITIAL_SEMANTIC_MODEL_TOKEN_TARGET, MAX_SEMANTIC_MODEL_BYTES,
+    MAX_SEMANTIC_MODEL_TOKENS, MAX_SEMANTIC_TOKENIZER_REVISION_BYTES,
     SEMANTIC_MODEL_SCHEMA_VERSION,
 };
 pub use semantic_observation::{

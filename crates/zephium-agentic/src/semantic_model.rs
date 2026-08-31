@@ -10,6 +10,7 @@ use std::fmt::Write as _;
 
 use thiserror::Error;
 
+use crate::semantic_diff::{SemanticObservationAcknowledgement, SemanticObservationFingerprint};
 use crate::{
     SemanticCompleteness, SemanticFrameBoundaryStatus, SemanticFrameDeferral, SemanticFrameTrust,
     SemanticFrameUnsupported, SemanticObservation, SemanticOperationClass, SemanticRole,
@@ -300,6 +301,7 @@ pub struct SemanticEncodedObservation {
     content: String,
     budget: SemanticModelEncodingBudget,
     stats: SemanticEncodingStats,
+    fingerprint: SemanticObservationFingerprint,
 }
 
 impl SemanticEncodedObservation {
@@ -332,6 +334,7 @@ impl SemanticEncodedObservation {
             content: self.content,
             stats: self.stats,
             measurement,
+            fingerprint: self.fingerprint,
         })
     }
 
@@ -369,6 +372,7 @@ pub struct SemanticModelPayload {
     content: String,
     stats: SemanticEncodingStats,
     measurement: SemanticTokenMeasurement,
+    fingerprint: SemanticObservationFingerprint,
 }
 
 impl SemanticModelPayload {
@@ -386,6 +390,26 @@ impl SemanticModelPayload {
     pub const fn token_measurement(&self) -> &SemanticTokenMeasurement {
         &self.measurement
     }
+
+    /// Settles transport of this exact token-admitted payload.
+    ///
+    /// Only committed delivery mints an acknowledgement usable as a diff
+    /// baseline. Refusal or cancellation consumes the payload without
+    /// creating baseline authority.
+    pub fn settle_delivery(
+        self,
+        settlement: SemanticModelDeliverySettlement,
+    ) -> Result<SemanticObservationAcknowledgement, SemanticModelDeliveryError> {
+        match settlement {
+            SemanticModelDeliverySettlement::Committed => Ok(
+                SemanticObservationAcknowledgement::from_fingerprint(self.fingerprint),
+            ),
+            SemanticModelDeliverySettlement::Refused => Err(SemanticModelDeliveryError::Refused),
+            SemanticModelDeliverySettlement::Cancelled => {
+                Err(SemanticModelDeliveryError::Cancelled)
+            }
+        }
+    }
 }
 
 impl fmt::Debug for SemanticModelPayload {
@@ -397,6 +421,28 @@ impl fmt::Debug for SemanticModelPayload {
             .field("measurement", &self.measurement)
             .finish()
     }
+}
+
+/// Terminal transport settlement for one token-admitted semantic payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SemanticModelDeliverySettlement {
+    /// The selected model transport committed the exact payload for delivery.
+    Committed,
+    /// The selected model transport refused the payload before commitment.
+    Refused,
+    /// Cancellation won before transport commitment.
+    Cancelled,
+}
+
+/// Closed refusal to acknowledge an undelivered semantic payload.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum SemanticModelDeliveryError {
+    /// Model transport refused the admitted payload.
+    #[error("semantic model payload delivery was refused")]
+    Refused,
+    /// Cancellation won before model transport commitment.
+    #[error("semantic model payload delivery was cancelled")]
+    Cancelled,
 }
 
 /// Encodes one complete observation into deterministic compact `ZSEM1` lines.
@@ -527,10 +573,12 @@ pub fn encode_semantic_observation(
         secret_nodes: u16::try_from(secret_nodes)
             .map_err(|_| SemanticModelEncodingError::Invariant)?,
     };
+    let fingerprint = SemanticObservationFingerprint::from_observation(observation);
     Ok(SemanticEncodedObservation {
         content,
         budget,
         stats,
+        fingerprint,
     })
 }
 
@@ -1103,6 +1151,45 @@ mod tests {
         let debug = format!("{payload:?}");
         assert!(!debug.contains("Repo"));
         assert!(!debug.contains("example.test"));
+    }
+
+    #[test]
+    fn only_committed_delivery_acknowledges_an_admitted_payload() {
+        let expected = revision("openai:o200k_base:v1");
+        let exact = FixedCounter {
+            revision: expected.clone(),
+            tokens: 19,
+            quality: SemanticTokenCountQuality::ExactLocal,
+            failure: None,
+        };
+        let encoding_budget = budget(8192, 20, SemanticTokenCountRequirement::Exact);
+        let payload = || {
+            encode_semantic_observation(&observation(), encoding_budget)
+                .expect("encode")
+                .admit(&exact, &expected)
+                .expect("admit")
+        };
+
+        assert_eq!(
+            payload().settle_delivery(SemanticModelDeliverySettlement::Refused),
+            Err(SemanticModelDeliveryError::Refused)
+        );
+        assert_eq!(
+            payload().settle_delivery(SemanticModelDeliverySettlement::Cancelled),
+            Err(SemanticModelDeliveryError::Cancelled)
+        );
+        let acknowledgement = payload()
+            .settle_delivery(SemanticModelDeliverySettlement::Committed)
+            .expect("acknowledgement");
+        assert_eq!(acknowledgement.observation().get(), 1);
+        assert_eq!(
+            acknowledgement.generation(),
+            crate::SemanticObservationGeneration::INITIAL
+        );
+        let debug = format!("{acknowledgement:?}");
+        assert!(!debug.contains("Repo"));
+        assert!(!debug.contains("example.test"));
+        assert!(debug.contains("[redacted]"));
     }
 
     #[test]

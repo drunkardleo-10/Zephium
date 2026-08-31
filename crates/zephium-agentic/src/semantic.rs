@@ -431,6 +431,10 @@ impl SemanticStates {
             Ok(Self(bits))
         }
     }
+
+    pub(crate) const fn bits(self) -> u8 {
+        self.0
+    }
 }
 
 impl fmt::Debug for SemanticStates {
@@ -673,7 +677,7 @@ impl fmt::Debug for SemanticReferenceId {
     }
 }
 
-#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct SemanticNodeKey(NonZeroU64);
 
 impl SemanticNodeKey {
@@ -682,6 +686,10 @@ impl SemanticNodeKey {
             Some(value) => Some(Self(value)),
             None => None,
         }
+    }
+
+    pub(crate) const fn get(self) -> u64 {
+        self.0.get()
     }
 }
 
@@ -720,6 +728,10 @@ impl SemanticReference {
     /// Complete operation inventory bound to this reference.
     pub const fn operations(&self) -> SemanticOperations {
         self.operations
+    }
+
+    pub(crate) const fn node_key(&self) -> SemanticNodeKey {
+        self.node
     }
 }
 

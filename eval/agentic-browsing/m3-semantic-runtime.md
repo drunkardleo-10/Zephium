@@ -2,9 +2,9 @@
 
 Status: bounded semantic identity, snapshot, opaque-reference, hostile wire
 decoder, progressive scopes, and deterministic multi-frame assembly
-plus compact model encoding/token-admission ports implemented; fixed
-isolated-world page program, native installation, diffs, and actual pinned
-provider token measurements pending.
+plus compact model encoding/token-admission ports and acknowledged stable-id
+diffs implemented; fixed isolated-world page program, native installation,
+compact diff encoding, and actual pinned provider token measurements pending.
 
 This evidence records deterministic Rust contract properties only. It does not
 claim that arbitrary pages have been instrumented or observed on either
@@ -100,6 +100,31 @@ platform.
   provider-backed counter must enter through the same selected-provider,
   secret-injection, page-data disclosure, cancellation, and deadline authority
   as the eventual model request; semantic encoding alone cannot send content.
+- A semantic diff baseline can be minted only by consuming a token-admitted
+  payload with a terminal `Committed` model-delivery settlement. Refused and
+  cancelled transports consume the payload without creating baseline
+  authority. The acknowledgement retains exact observation/context coordinates
+  and a SHA-256 digest over the complete bounded semantics, internal stable
+  keys, frame joins, generations, scope, and request metadata; digest and page
+  content remain private and diagnostics-redacted.
+- Diffs are capped at 512 entries process-wide and 64 entries by the default
+  action budget. They require the exact acknowledged baseline, unchanged
+  context and logical scope, complete snapshots, an identical ordered frame
+  cohort, distinct invocations, exactly consecutive per-frame snapshot
+  generations, and unchanged stable-key-addressed frame-boundary dispositions.
+  Stable-key role reuse, total stable-identity loss, request-id reuse, or any
+  failed premise returns a typed fresh-snapshot reason instead of a partial
+  delta.
+- Removed references are a separate non-actionable type with an explicit
+  `old:@aN` model spelling and no parser or resolver. Current references are
+  taken only from the new observation. Complete deltas report added, removed,
+  changed, moved, and changed-and-moved nodes; changed fields use a closed
+  bitset, movements carry old/new parent and sibling positions, and every
+  current node carries its current parent/ordinal plus bounded current
+  semantics. Results are deterministic in removed document order followed by
+  current frame/node order and have content-free aggregate metrics. Movement
+  detection compares relative order among shared stable siblings, so a simple
+  insertion or removal does not create a cascade of false move entries.
 
 The crate remains a zero-idle-cost functional core: decoding happens only for
 an admitted observation and creates no timer, thread, page, queue, or worker.
@@ -127,14 +152,19 @@ exact progressive chains, stale anchor generations, missing anchor frames,
 scope/role compatibility, deterministic compact escaping, model-line spoofing,
 heading-level compatibility, byte refusal without partial output, exact token
 quality/revision/limit admission, and the absence of page content from
-diagnostics.
+diagnostics. Diff coverage includes commit-only acknowledgement, exact-content
+digest binding, current-reference rebasing, non-actionable retired references,
+field changes, sibling moves, add/remove ordering, empty deltas, context and
+generation changes, truncation, stable-key role reuse/loss, entry ceilings,
+and fresh-snapshot fallback without leaked page content.
 
 ## Remaining M3 work
 
 1. pin the first OpenAI and Anthropic proof model/tokenizer revisions, implement
    their trusted counters, and record actual fixture token/latency measurements;
-2. add snapshot acknowledgement, stable-id diffing, and fresh-snapshot fallback
-   when a confident diff cannot be formed;
+2. add deterministic compact diff encoding, enforce the 200-token action-diff
+   target with the same exact/estimated provider accounting boundary, and bind
+   acknowledgements to the eventual model request/response lifecycle adapter;
 3. implement and freeze the immutable isolated-world runtime plus closed
    invocation vocabulary after the native M2 adapter provides exact world,
    frame, navigation, cancellation, and teardown joins;
