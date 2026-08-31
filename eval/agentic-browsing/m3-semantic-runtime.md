@@ -145,6 +145,23 @@ platform.
   current observation for the next baseline; refusal or cancellation cannot.
   This is the production admission seam, not yet an actual provider/tokenizer
   measurement claim.
+- The native-to-isolated-world request is a separate 2 KiB maximum closed JSON
+  grammar containing only protocol/invocation/snapshot generations, one fixed
+  initial/region/subtree/table/frame/surrounding-text scope, an internal stable
+  anchor where required, and hard per-frame budgets. It has no arbitrary
+  string, URL, selector, script, property path, model value, page text, native
+  handle, or provider field; its `Debug` output redacts the complete payload.
+- Per-frame runtime budgets are bounded by both process-wide ceilings and the
+  aggregate observation request: at most 512 retained nodes, 128 KiB retained
+  text, 256 KiB response wire bytes, and 32,768 inspected DOM/open-shadow
+  nodes. The conservative initial invocation requests 128 nodes, 16 KiB text,
+  64 KiB wire, and 16,384 inspected nodes. Anchored requests must target the
+  exact anchor frame/document and advance exactly one snapshot generation.
+- Runtime results decode only through the invocation's out-of-band frame,
+  invocation, generation, and smaller response-wire budget. The only non-wire
+  responses are seven fixed detail-free `E1` fault codes (invalid request,
+  busy, missing anchor, identity exhaustion, unsupported scope, output limit,
+  or internal invariant); unknown/page-supplied fault detail is rejected.
 
 The crate remains a zero-idle-cost functional core: decoding happens only for
 an admitted observation and creates no timer, thread, page, queue, or worker.
@@ -180,7 +197,11 @@ unchanged-reference shifts and fan-out limits, compact diff determinism and
 escaping, current frame freshness, byte refusal without partial output,
 exact/estimated quality and revision admission, the 200-token target gate,
 commit-only next-baseline acknowledgement, and fresh-snapshot fallback without
-leaked page content.
+leaked page content. Runtime-invocation tests cover the sole compact initial
+shape, absence of URLs/selectors/scripts, stable-anchor diagnostic redaction,
+aggregate/per-frame budgets, exact anchor frame and generation joins, hostile
+invocation substitution, fixed faults, unknown-fault rejection, and response
+wire limits.
 
 ## Remaining M3 work
 
@@ -189,9 +210,10 @@ leaked page content.
 2. record actual fixture action-diff token/latency distributions for the pinned
    proof models/tokenizers and bind acknowledgement settlement to the eventual
    model request/response lifecycle adapter;
-3. implement and freeze the immutable isolated-world runtime plus closed
-   invocation vocabulary after the native M2 adapter provides exact world,
-   frame, navigation, cancellation, and teardown joins;
+3. implement and freeze the immutable isolated-world DOM projection program,
+   then install its already-closed invocation vocabulary after the native M2
+   adapter provides exact world, frame, navigation, cancellation, and teardown
+   joins;
 4. add fixture/runtime hostile tests for page-world bridge access, spoofing,
    open/closed shadow roots, frame replacement, stale nodes, collisions,
    mutation pressure, redaction, and release-build exclusion.

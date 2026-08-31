@@ -32,6 +32,7 @@ mod semantic_diff;
 mod semantic_diff_model;
 mod semantic_model;
 mod semantic_observation;
+mod semantic_runtime;
 mod semantic_wire;
 mod sign_in_handoff;
 
@@ -138,6 +139,13 @@ pub use semantic_observation::{
     SemanticObservationRequest, SemanticScope, SemanticScopeAnchor, SemanticTextWindow,
     MAX_SEMANTIC_OBSERVATION_EXPANSIONS, MAX_SEMANTIC_OBSERVATION_NODES,
     MAX_SEMANTIC_OBSERVATION_TEXT_BYTES, MAX_SEMANTIC_SURROUNDING_TEXT_BYTES,
+};
+pub use semantic_runtime::{
+    encode_semantic_runtime_invocation, SemanticRuntimeBudget, SemanticRuntimeBudgetError,
+    SemanticRuntimeFault, SemanticRuntimeInvocation, SemanticRuntimeInvocationError,
+    SemanticRuntimeResultError, SemanticRuntimeScopeClass, MAX_SEMANTIC_RUNTIME_REQUEST_BYTES,
+    MAX_SEMANTIC_RUNTIME_VISITED_NODES, MIN_SEMANTIC_RUNTIME_WIRE_BYTES,
+    SEMANTIC_RUNTIME_PROTOCOL_VERSION,
 };
 pub use semantic_wire::{
     decode_semantic_snapshot, SemanticDecodeContext, SemanticDecodeError, MAX_SEMANTIC_WIRE_BYTES,
