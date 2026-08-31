@@ -131,6 +131,23 @@ API explicitly returns no extensions when `AreBrowserExtensionsEnabled` is
 false, so runtime disabling cannot prove an empty profile
 ([GetBrowserExtensionsAsync](https://learn.microsoft.com/en-us/dotnet/api/microsoft.web.webview2.core.corewebview2profile.getbrowserextensionsasync)).
 
+The sign-in handoff skeleton is an exact-join functional workflow, not a UI or
+implicit retry loop. It admits only a distinct same-run/same-profile temporary
+normal context, validates paired platform construction proofs, transfers input
+exclusively to a person, requires explicit human completion and exact return
+of input, then selects the truthful storage path: shared WKWebsiteDataStore on
+macOS or the bounded one-way cookie bridge on Windows. The temporary context
+must release before a scoped owned-context refresh, and completion requires a
+fresh automatable registry entry for the exact owned join.
+
+Every terminal callback is consumed into a terminal workflow phase. A wrong
+construction proof or committed refresh outside the approved origin cohort
+blocks rather than leaving an in-flight state. Cookie refusal is a typed
+blocker; partial application marks the destination contaminated and cleanup
+requires it to close. Cancellation clears workflow-level pending authority but
+reports completion only from exact `RetiredContext` proofs: owned destroyed as
+closed and handoff destroyed as released.
+
 ## Deterministic evidence
 
 ```sh
@@ -153,6 +170,11 @@ Cookie-transfer tests cover canonical/deduplicated origins, Windows clean-
 subprofile proof, handoff owner/profile joins, required capabilities, payload
 and HttpOnly count invariants, explicit partial application, destination
 single-flight, process concurrency, redacted debug output, and shutdown drain.
+Handoff tests execute complete macOS shared-store and Windows cookie-bridge
+flows through the real context registry, including exclusive human control,
+temporary-context release, scoped refresh, fresh observation, incompatible
+proof, out-of-scope commit, partial-transfer contamination, stale operation,
+redaction, and exact cancellation resource dispositions.
 
 ## Remaining M2 work
 

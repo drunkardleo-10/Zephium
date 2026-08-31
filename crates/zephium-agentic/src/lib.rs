@@ -26,6 +26,7 @@ mod fixture_server;
 mod probe_recipes;
 mod profile_lease;
 mod protocol;
+mod sign_in_handoff;
 
 pub use context::{
     ContextCapabilities, ContextCapability, ContextCapabilityError, ContextControl,
@@ -90,4 +91,9 @@ pub use protocol::{
     RunMatrixRequest, ShutdownReply, ShutdownRequest, MAX_BACKENDS_PER_REQUEST,
     MAX_CASES_PER_REQUEST, MAX_PROTOCOL_INPUT_BYTES, MAX_PROTOCOL_OUTPUT_BYTES,
     PROBE_PROTOCOL_VERSION,
+};
+pub use sign_in_handoff::{
+    ContextSignInHandoff, ContextSignInHandoffBlocker, ContextSignInHandoffCleanup,
+    ContextSignInHandoffError, ContextSignInHandoffId, ContextSignInHandoffPlatform,
+    ContextSignInHandoffState,
 };
