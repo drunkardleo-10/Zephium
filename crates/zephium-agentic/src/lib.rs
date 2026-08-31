@@ -23,6 +23,7 @@ mod evidence;
 mod fixture_server;
 #[cfg(feature = "probe-harness")]
 mod probe_recipes;
+mod profile_lease;
 mod protocol;
 
 pub use context::{
@@ -67,6 +68,11 @@ pub use probe_recipes::{
     WindowsProbeKey, WindowsProbePoint, MACOS_NATIVE_INPUT_RUNTIME_V1,
     MACOS_PROBE_CONTENT_WORLD_V1, MACOS_PROBE_HANDLER_V1, MAX_NATIVE_INPUT_RUNTIME_ROW,
     NATIVE_INPUT_RUNTIME_PROTOCOL_V1,
+};
+pub use profile_lease::{
+    ContextProfileLease, ContextProfileLeaseError, ContextProfileLeaseId,
+    ContextProfileLeasePurpose, ContextProfileLeaseRegistry, ContextProfileLeaseStatus,
+    MAX_CONTEXT_PROFILE_TOMBSTONES,
 };
 pub use protocol::{
     decode_request_line, encode_response_line, CancelRequest, CancelledReply, HelloReply,

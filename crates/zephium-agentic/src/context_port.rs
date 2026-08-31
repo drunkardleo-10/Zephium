@@ -13,7 +13,7 @@ use url::Url;
 
 use crate::{
     ContextCapabilities, ContextJoin, ContextKind, ContextOperationJoin, ContextOperationKind,
-    MAX_LIVE_CONTEXTS,
+    ContextProfileLease, MAX_LIVE_CONTEXTS,
 };
 
 /// Maximum number of lifecycle tasks one native adapter may retain.
@@ -35,6 +35,9 @@ pub enum ContextPortContractError {
     /// The capability inventory belongs to another context kind.
     #[error("context capability kind does not match native request")]
     CapabilityKind,
+    /// The retained profile lease belongs to another context identity.
+    #[error("context profile lease does not match native request")]
+    ProfileLease,
     /// The target is malformed or forbidden by the browser navigation gate.
     #[error("context navigation target is forbidden")]
     NavigationTarget,
@@ -147,6 +150,7 @@ impl fmt::Debug for ContextConstructionSource {
 pub struct ContextConstructionRequest {
     operation: ContextOperationJoin,
     capabilities: ContextCapabilities,
+    profile_lease: ContextProfileLease,
     source: ContextConstructionSource,
 }
 
@@ -155,6 +159,7 @@ impl ContextConstructionRequest {
     pub fn try_new(
         operation: ContextOperationJoin,
         capabilities: ContextCapabilities,
+        profile_lease: ContextProfileLease,
         source: ContextConstructionSource,
     ) -> Result<Self, ContextPortContractError> {
         require_operation(operation, ContextOperationKind::Construct)?;
@@ -165,9 +170,13 @@ impl ContextConstructionRequest {
         if capabilities.kind() != kind {
             return Err(ContextPortContractError::CapabilityKind);
         }
+        if profile_lease.identity() != operation.context().identity() {
+            return Err(ContextPortContractError::ProfileLease);
+        }
         Ok(Self {
             operation,
             capabilities,
+            profile_lease,
             source,
         })
     }
@@ -182,6 +191,11 @@ impl ContextConstructionRequest {
         self.capabilities
     }
 
+    /// Exact retained lease over the explicitly selected profile.
+    pub const fn profile_lease(self) -> ContextProfileLease {
+        self.profile_lease
+    }
+
     /// Shell-authorized construction source.
     pub const fn source(self) -> ContextConstructionSource {
         self.source
@@ -194,6 +208,7 @@ impl fmt::Debug for ContextConstructionRequest {
             .debug_struct("ContextConstructionRequest")
             .field("operation", &self.operation)
             .field("capabilities", &self.capabilities)
+            .field("profile_lease", &self.profile_lease)
             .field("source", &self.source)
             .finish()
     }
@@ -751,8 +766,8 @@ const fn is_transition(kind: ContextOperationKind) -> bool {
 mod tests {
     use super::*;
     use crate::{
-        ContextCapability, ContextId, ContextIdentity, ContextOperationId, ContextRegistry,
-        ContextRunId,
+        ContextCapability, ContextId, ContextIdentity, ContextOperationId, ContextProfileLeaseId,
+        ContextProfileLeasePurpose, ContextProfileLeaseRegistry, ContextRegistry, ContextRunId,
     };
     use zephium_core::ids::ProfileId;
 
@@ -782,6 +797,21 @@ mod tests {
 
     fn operation(value: u64) -> ContextOperationId {
         ContextOperationId::new(value).expect("operation")
+    }
+
+    fn profile_lease(identity: ContextIdentity, value: u64) -> ContextProfileLease {
+        let purpose = match identity.kind() {
+            ContextKind::Owned => ContextProfileLeasePurpose::Owned,
+            ContextKind::BorrowedTab => ContextProfileLeasePurpose::BorrowedTab,
+            ContextKind::HumanSignInHandoff => ContextProfileLeasePurpose::HumanSignInHandoff,
+        };
+        ContextProfileLeaseRegistry::new()
+            .acquire(
+                ContextProfileLeaseId::new(value).expect("profile lease id"),
+                identity,
+                purpose,
+            )
+            .expect("profile lease")
     }
 
     fn constructing(kind: ContextKind) -> (ContextRegistry, ContextOperationJoin) {
@@ -815,6 +845,7 @@ mod tests {
             ContextConstructionRequest::try_new(
                 owned,
                 capabilities(ContextKind::Owned),
+                profile_lease(owned.context().identity(), 1),
                 ContextConstructionSource::BorrowedTab(BorrowedTabLeaseId::new(1).expect("lease")),
             ),
             Err(ContextPortContractError::ContextKind)
@@ -823,9 +854,19 @@ mod tests {
             ContextConstructionRequest::try_new(
                 owned,
                 capabilities(ContextKind::BorrowedTab),
+                profile_lease(owned.context().identity(), 1),
                 ContextConstructionSource::Owned,
             ),
             Err(ContextPortContractError::CapabilityKind)
+        );
+        assert_eq!(
+            ContextConstructionRequest::try_new(
+                owned,
+                capabilities(ContextKind::Owned),
+                profile_lease(identity(11, ContextKind::Owned), 2),
+                ContextConstructionSource::Owned,
+            ),
+            Err(ContextPortContractError::ProfileLease)
         );
         assert_eq!(
             ContextConstructionSettlement::try_new(
@@ -933,6 +974,7 @@ mod tests {
         let request = ContextConstructionRequest::try_new(
             operation,
             capabilities(ContextKind::BorrowedTab),
+            profile_lease(operation.context().identity(), 1),
             ContextConstructionSource::BorrowedTab(BorrowedTabLeaseId::new(9001).expect("lease")),
         )
         .expect("request");
@@ -967,6 +1009,7 @@ mod tests {
         let request = ContextConstructionRequest::try_new(
             operation,
             capabilities(ContextKind::Owned),
+            profile_lease(operation.context().identity(), 1),
             ContextConstructionSource::Owned,
         )
         .expect("request");
