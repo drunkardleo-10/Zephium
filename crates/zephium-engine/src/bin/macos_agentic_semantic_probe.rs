@@ -15,7 +15,7 @@ fn main() {
     }
     match zephium_engine::run_macos_agentic_semantic_probe() {
         Ok(()) => eprintln!(
-            "macos-agentic-semantic-probe: passed; profile=ephemeral; extensions=absent; presentation=hidden; fixture=loopback-only; snapshots=2; world_epochs=2; page_world_bridge=absent; secrets=redacted; focus_theft=0; retained_views=0"
+            "macos-agentic-semantic-probe: passed; profile=ephemeral; extensions=absent; presentation=hidden; viewport=1280x800-logical; fixture=loopback-only; snapshots=2; world_epochs=2; page_world_bridge=absent; secrets=redacted; focus_theft=0; retained_views=0"
         ),
         Err(stage) => {
             eprintln!("macos-agentic-semantic-probe: failed; stage={stage}");

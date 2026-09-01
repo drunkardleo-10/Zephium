@@ -14,16 +14,19 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{
     ICoreWebView2, ICoreWebView2Environment, ICoreWebView2Profile, ICoreWebView2Profile7,
     ICoreWebView2_13, ICoreWebView2_2,
 };
-use windows::Win32::Foundation::HWND;
+use windows::Win32::Foundation::{HWND, RECT};
+use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::GetFocus;
-use windows::Win32::UI::WindowsAndMessaging::{GetParent, IsChild, IsWindow, IsWindowVisible};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetClientRect, GetParent, IsChild, IsWindow, IsWindowVisible,
+};
 use windows_core::{Interface as _, PWSTR};
 use wry::dpi::{LogicalPosition, LogicalSize, Position, Size};
 use wry::{
     DownloadPolicy, PageClosePolicy, Rect, WebView, WebViewBuilder, WebViewBuilderExtWindows as _,
     WebViewExtWindows as _,
 };
-use zephium_agentic::{ContextConstructionProof, ContextProfileStorageClass};
+use zephium_agentic::{ContextConstructionProof, ContextOwnedViewport, ContextProfileStorageClass};
 use zephium_core::ids::ProfileId;
 
 use crate::platform::agent_navigation::AgentNavigationController;
@@ -35,8 +38,6 @@ use super::{
     profile_inventory_is_empty, WindowsNativeExtensionFailure, WindowsNativeExtensionProfile,
 };
 
-const AGENT_VIEW_WIDTH: f64 = 1.0;
-const AGENT_VIEW_HEIGHT: f64 = 1.0;
 const PROFILE_NAME_UTF16_LIMIT: usize = 64;
 const PROFILE_NAME_UTF8_LIMIT: usize = 64;
 
@@ -117,6 +118,7 @@ pub(crate) struct AgentOwnedView {
     storage_class: ContextProfileStorageClass,
     expected_user_data_folder: std::path::PathBuf,
     expected_parent: HWND,
+    viewport: ContextOwnedViewport,
     _crash_observer: super::CrashObserver,
     _security_policy: super::SecurityPolicy,
     view: WebView,
@@ -140,7 +142,7 @@ impl AgentOwnedView {
             &self.expected_user_data_folder,
             deadline,
         )?;
-        attest_hidden_owner(&self.view, self.expected_parent)
+        attest_hidden_owner(&self.view, self.expected_parent, self.viewport)
     }
 
     pub(crate) fn close(&mut self) -> Result<(), wry::WebView2CleanupDebt> {
@@ -212,6 +214,7 @@ fn expected_parent_hwnd(
 fn attest_hidden_owner(
     view: &WebView,
     expected_parent: HWND,
+    viewport: ContextOwnedViewport,
 ) -> Result<(), AgentOwnedViewConstructionError> {
     let container = view.hwnd();
     if !unsafe { IsWindow(Some(expected_parent)) }.as_bool()
@@ -223,11 +226,30 @@ fn attest_hidden_owner(
     let controller = view.controller();
     let mut controller_parent = HWND::default();
     let mut controller_visible = windows_core::BOOL::default();
+    let dpi = unsafe { GetDpiForWindow(container) };
+    let Some(expected_width) = expected_physical_extent(viewport.width(), dpi) else {
+        return Err(AgentOwnedViewConstructionError::Native);
+    };
+    let Some(expected_height) = expected_physical_extent(viewport.height(), dpi) else {
+        return Err(AgentOwnedViewConstructionError::Native);
+    };
+    let mut container_bounds = RECT::default();
+    let mut controller_bounds = RECT::default();
     if unsafe { controller.ParentWindow(&mut controller_parent) }.is_err()
         || controller_parent != container
         || unsafe { controller.IsVisible(&mut controller_visible) }.is_err()
         || controller_visible.as_bool()
         || unsafe { IsWindowVisible(container) }.as_bool()
+        || unsafe { GetClientRect(container, &mut container_bounds) }.is_err()
+        || unsafe { controller.Bounds(&mut controller_bounds) }.is_err()
+        || container_bounds.left != 0
+        || container_bounds.top != 0
+        || container_bounds.right != expected_width
+        || container_bounds.bottom != expected_height
+        || controller_bounds.left != 0
+        || controller_bounds.top != 0
+        || controller_bounds.right != expected_width
+        || controller_bounds.bottom != expected_height
     {
         return Err(AgentOwnedViewConstructionError::Native);
     }
@@ -237,6 +259,17 @@ fn attest_hidden_owner(
         return Err(AgentOwnedViewConstructionError::Native);
     }
     Ok(())
+}
+
+fn expected_physical_extent(logical: u16, dpi: u32) -> Option<i32> {
+    if dpi == 0 {
+        return None;
+    }
+    let scaled = u64::from(logical)
+        .checked_mul(u64::from(dpi))?
+        .checked_add(48)?
+        / 96;
+    i32::try_from(scaled).ok().filter(|extent| *extent > 0)
 }
 
 fn attest_profile_before_initialization(
@@ -299,6 +332,7 @@ const fn map_inventory_failure(
 /// operation and attaches its native content policy.
 pub(crate) fn build_owned_agent_view<Navigation, RendererLost, BrowserLost, Invariant, Panic>(
     parent: &impl HasWindowHandle,
+    viewport: ContextOwnedViewport,
     environment: &ICoreWebView2Environment,
     profile: AgentOwnedProfile,
     storage_class: ContextProfileStorageClass,
@@ -344,7 +378,10 @@ where
         .with_url("about:blank")
         .with_bounds(Rect {
             position: Position::Logical(LogicalPosition::new(0.0, 0.0)),
-            size: Size::Logical(LogicalSize::new(AGENT_VIEW_WIDTH, AGENT_VIEW_HEIGHT)),
+            size: Size::Logical(LogicalSize::new(
+                f64::from(viewport.width()),
+                f64::from(viewport.height()),
+            )),
         })
         .with_visible(false)
         .with_focused(false)
@@ -419,7 +456,7 @@ where
         expected_user_data_folder,
     )
     .map_err(|_| AgentOwnedViewConstructionError::Native)?;
-    attest_hidden_owner(&view, expected_parent)?;
+    attest_hidden_owner(&view, expected_parent, viewport)?;
 
     let crash_observer = super::install_crash_handler(&view, move |failure| match failure {
         super::ProcessFailure::Renderer => match renderer_events.claim_renderer_loss() {
@@ -442,10 +479,24 @@ where
             storage_class,
             expected_user_data_folder: expected_user_data_folder.to_owned(),
             expected_parent,
+            viewport,
             _crash_observer: crash_observer,
             _security_policy: security_policy,
             view,
         },
         proof,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::expected_physical_extent;
+
+    #[test]
+    fn viewport_extent_uses_the_same_positive_half_up_dpi_rounding_as_wry() {
+        assert_eq!(expected_physical_extent(1_280, 96), Some(1_280));
+        assert_eq!(expected_physical_extent(800, 120), Some(1_000));
+        assert_eq!(expected_physical_extent(1, 144), Some(2));
+        assert_eq!(expected_physical_extent(1_280, 0), None);
+    }
 }

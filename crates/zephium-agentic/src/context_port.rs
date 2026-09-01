@@ -26,6 +26,41 @@ use crate::{
 /// work without creating an unbounded native queue.
 pub const MAX_PENDING_NATIVE_CONTEXT_TASKS: usize = MAX_LIVE_CONTEXTS * 2;
 
+/// Fixed logical viewport for a run-owned browser context.
+///
+/// V1 deliberately exposes no arbitrary constructor: page layout, semantic
+/// filtering, and viewport screenshots must not depend on a model-selected or
+/// platform-default size. Borrowed and human-handoff contexts retain the
+/// viewport of their ordinary presentation owner instead.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ContextOwnedViewport {
+    width: u16,
+    height: u16,
+}
+
+impl ContextOwnedViewport {
+    /// Product-standard owned-context viewport in logical/CSS pixels.
+    pub const STANDARD: Self = Self {
+        width: 1_280,
+        height: 800,
+    };
+
+    /// Logical/CSS width admitted by the native adapter.
+    pub const fn width(self) -> u16 {
+        self.width
+    }
+
+    /// Logical/CSS height admitted by the native adapter.
+    pub const fn height(self) -> u16 {
+        self.height
+    }
+
+    /// Fixed logical pixel area used by resource qualification.
+    pub const fn logical_area(self) -> u32 {
+        self.width as u32 * self.height as u32
+    }
+}
+
 /// Refusal while constructing a closed native-port value.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum ContextPortContractError {
@@ -136,6 +171,14 @@ impl ContextConstructionSource {
             Self::HumanSignInHandoff => ContextKind::HumanSignInHandoff,
         }
     }
+
+    /// Returns the closed viewport contract only for a run-owned context.
+    pub const fn owned_viewport(self) -> Option<ContextOwnedViewport> {
+        match self {
+            Self::Owned => Some(ContextOwnedViewport::STANDARD),
+            Self::BorrowedTab(_) | Self::HumanSignInHandoff => None,
+        }
+    }
 }
 
 impl fmt::Debug for ContextConstructionSource {
@@ -202,6 +245,11 @@ impl ContextConstructionRequest {
     /// Shell-authorized construction source.
     pub const fn source(self) -> ContextConstructionSource {
         self.source
+    }
+
+    /// Fixed native viewport derived from the already-validated source.
+    pub const fn owned_viewport(self) -> Option<ContextOwnedViewport> {
+        self.source.owned_viewport()
     }
 }
 
@@ -939,6 +987,37 @@ mod tests {
             settlement.outcome().expect("attestation").platform(),
             ContextNativePlatform::MacOs
         );
+    }
+
+    #[test]
+    fn owned_viewport_is_fixed_and_source_exact() {
+        let viewport = ContextOwnedViewport::STANDARD;
+        assert_eq!(viewport.width(), 1_280);
+        assert_eq!(viewport.height(), 800);
+        assert_eq!(viewport.logical_area(), 1_024_000);
+        assert_eq!(
+            ContextConstructionSource::Owned.owned_viewport(),
+            Some(viewport)
+        );
+        assert_eq!(
+            ContextConstructionSource::BorrowedTab(BorrowedTabLeaseId::new(1).expect("lease"))
+                .owned_viewport(),
+            None
+        );
+        assert_eq!(
+            ContextConstructionSource::HumanSignInHandoff.owned_viewport(),
+            None
+        );
+
+        let (_, operation) = constructing(ContextKind::Owned);
+        let request = ContextConstructionRequest::try_new(
+            operation,
+            capabilities(ContextKind::Owned),
+            profile_lease(operation.context().identity(), 1),
+            ContextConstructionSource::Owned,
+        )
+        .expect("request");
+        assert_eq!(request.owned_viewport(), Some(viewport));
     }
 
     #[test]

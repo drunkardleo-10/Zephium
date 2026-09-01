@@ -12,8 +12,9 @@ responses, machine-local paths, or native traces.
 
 `cargo xtask check-agentic-probe-boundary` is part of ordinary CI and now:
 
-- decodes `browse-baseline-v1.json`, `native-input-matrix-v1.json`, and
-  `capabilities-v1.json` with closed schemas and file-size ceilings;
+- decodes `browse-baseline-v1.json`, `native-input-matrix-v1.json`,
+  `semantic-runtime-macos-v1.json`, and `capabilities-v1.json` with closed
+  schemas and file-size ceilings;
 - rejects unknown fields, machine-local paths, and high-confidence secret or
   raw-content fields;
 - requires the named-device Browse baseline to remain empty while its status is
@@ -21,6 +22,9 @@ responses, machine-local paths, or native traces.
 - binds the reviewed macOS hidden fixed-DOM aggregate to its exact command,
   platform, backend, case count, trust/focus/activation results, and teardown
   result;
+- binds the reviewed macOS production semantic aggregate to its exact command,
+  OS/WebKit build, closed viewport, two snapshots/world epochs, bridge,
+  redaction, focus, teardown, and explicit non-claims;
 - prevents the cross-compiled Windows runner from being represented as
   device-qualified without a reviewed gate change;
 - cross-checks the Wry, Tauri, and `tauri-runtime-wry` capability versions and
@@ -57,6 +61,13 @@ cargo clippy --locked -p xtask --all-targets -- -D warnings
   zero trusted effect events, four separately classified trusted focus/blur
   events, zero activation rows, zero focus-theft rows, and zero retained native
   views. This qualifies only that deterministic safety route.
+- The separately authorized production semantic adapter qualifier passed on
+  macOS 27.0 build 26A5421a / WebKit 22625.1.29.11.25. One hidden,
+  extension-free, ephemeral 1280-by-800 logical view produced two checked
+  snapshots across two isolated-world epochs; page-world bridge exposure and
+  focus theft remained absent and all retained native owners drained. The
+  closed manifest explicitly excludes arbitrary-site, Windows, provider-token,
+  and Browse/resource claims.
 - The Windows adapter is source-guarded and cross-compiles. Cross-compilation is
   not physical-device behavioral evidence.
 - The Browse named-device baseline intentionally has no values. No CPU, memory,
@@ -90,7 +101,8 @@ cargo clippy --locked -p xtask --all-targets -- -D warnings
   exact medians and percentiles still require the qualification harness.
 
 The authoritative aggregate records and exact remaining blockers are in
-`native-input-matrix-v1.json` and `browse-baseline-v1.json`.
+`native-input-matrix-v1.json`, `semantic-runtime-macos-v1.json`, and
+`browse-baseline-v1.json`.
 
 ## Remaining release blockers
 
@@ -102,7 +114,6 @@ The authoritative aggregate records and exact remaining blockers are in
 - retained action/run timing samples and reviewed per-site latency
   distributions from the qualification harness (the local reducer exposes
   only exact observed count/sum/maximum aggregates);
-- the pending hidden ephemeral loopback semantic-runtime qualifier;
 - deterministic semantic/action/policy suite closure, the six-site matrix,
   concurrent production configuration, endurance, and fault-injection evidence;
 - hot-path and zero-unused-agent-overhead measurements; and

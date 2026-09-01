@@ -6,14 +6,15 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use raw_window_handle::HasWindowHandle;
+use wry::dpi::{LogicalPosition, LogicalSize, Position, Size};
 use wry::{
-    DownloadPolicy, NavigationEvent, NavigationEventPhase, PageClosePolicy, WebView,
+    DownloadPolicy, NavigationEvent, NavigationEventPhase, PageClosePolicy, Rect, WebView,
     WebViewBuilder, WebViewBuilderExtDarwin as _, WebViewBuilderExtMacos as _,
 };
 use zephium_agentic::{
-    ContextNavigationTarget, ContextOperationJoin, ContextOperationKind, ContextPortFailure,
-    ContextProfileStorageClass, SemanticRuntimeInvocation, SemanticRuntimePortFailure,
-    SemanticScreenshotNativeCapture, SemanticScreenshotNativeFailure,
+    ContextNavigationTarget, ContextOperationJoin, ContextOperationKind, ContextOwnedViewport,
+    ContextPortFailure, ContextProfileStorageClass, SemanticRuntimeInvocation,
+    SemanticRuntimePortFailure, SemanticScreenshotNativeCapture, SemanticScreenshotNativeFailure,
     SemanticScreenshotNativeRequest, SemanticSnapshot,
 };
 use zephium_core::ids::ProfileId;
@@ -459,6 +460,7 @@ fn new_owned_agent_configuration(
 pub(crate) struct AgentOwnedView {
     navigation: AgentNavigationController,
     semantic: Option<AgentSemanticRuntimeRegistration>,
+    viewport: ContextOwnedViewport,
     view: WebView,
 }
 
@@ -539,6 +541,7 @@ impl AgentOwnedView {
         attest_owned_agent_view(
             &self.view,
             semantic,
+            self.viewport,
             profile,
             storage_class,
             ephemeral_store,
@@ -607,6 +610,7 @@ impl<Navigation, RendererLost, Invariant, Panic>
 /// caller can attach native content policy before any web request exists.
 pub(crate) fn build_owned_agent_view<Navigation, RendererLost, Invariant, Panic>(
     parent: &impl HasWindowHandle,
+    viewport: ContextOwnedViewport,
     profile: ProfileId,
     storage_class: ContextProfileStorageClass,
     ephemeral_store: Option<&WebsiteDataStore>,
@@ -647,6 +651,13 @@ where
     let renderer_semantic = semantic.controller().clone();
     let builder = WebViewBuilder::new()
         .with_url("about:blank")
+        .with_bounds(Rect {
+            position: Position::Logical(LogicalPosition::new(0.0, 0.0)),
+            size: Size::Logical(LogicalSize::new(
+                f64::from(viewport.width()),
+                f64::from(viewport.height()),
+            )),
+        })
         .with_visible(false)
         .with_focused(false)
         .with_devtools(false)
@@ -707,17 +718,38 @@ where
     semantic
         .bind_view(&super::native_webview(&view))
         .map_err(|_| AgentOwnedViewConstructionError::Native)?;
-    attest_owned_agent_view(&view, &semantic, profile, storage_class, ephemeral_store)?;
+    harden_owned_agent_view(&view);
+    attest_owned_agent_view(
+        &view,
+        &semantic,
+        viewport,
+        profile,
+        storage_class,
+        ephemeral_store,
+    )?;
     Ok(AgentOwnedView {
         navigation,
         semantic: Some(semantic),
+        viewport,
         view,
     })
+}
+
+fn harden_owned_agent_view(view: &WebView) {
+    use objc2_app_kit::{NSAutoresizingMaskOptions as Mask, NSView};
+
+    let page = super::native_webview(view);
+    unsafe { page.setInspectable(false) };
+    let native_view: &NSView = &page;
+    native_view.setTranslatesAutoresizingMaskIntoConstraints(true);
+    native_view.setAutoresizingMask(Mask::ViewNotSizable);
+    native_view.setHidden(true);
 }
 
 pub(crate) fn attest_owned_agent_view(
     view: &WebView,
     semantic: &AgentSemanticRuntimeRegistration,
+    viewport: ContextOwnedViewport,
     profile: ProfileId,
     storage_class: ContextProfileStorageClass,
     ephemeral_store: Option<&WebsiteDataStore>,
@@ -754,12 +786,14 @@ pub(crate) fn attest_owned_agent_view(
         return Err(AgentOwnedViewConstructionError::Storage);
     }
 
-    unsafe { page.setInspectable(false) };
     let native_view: &NSView = &page;
-    native_view.setTranslatesAutoresizingMaskIntoConstraints(true);
-    native_view.setAutoresizingMask(Mask::ViewWidthSizable | Mask::ViewHeightSizable);
-    native_view.setHidden(true);
-    if !native_view.isHidden() {
+    let frame = native_view.frame();
+    if unsafe { page.isInspectable() }
+        || native_view.autoresizingMask() != Mask::ViewNotSizable
+        || frame.size.width != f64::from(viewport.width())
+        || frame.size.height != f64::from(viewport.height())
+        || !native_view.isHidden()
+    {
         return Err(AgentOwnedViewConstructionError::Native);
     }
     Ok(())

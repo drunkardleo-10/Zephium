@@ -14,12 +14,14 @@ whole-input counting port, exact policy reservation, and commit-only diff
 transport authority. Concrete reviewed local counters for pinned proof models
 remain absent, so production still falls back to fresh full observations. A
 mechanically release-excluded hidden/ephemeral/loopback-only semantic native
-qualifier is implemented but has not been executed; its named-device result and
-actual pinned provider token measurements remain pending.
+qualifier passed on the authorized macOS/WebKit host and is retained in a
+closed aggregate manifest. Actual pinned provider token measurements remain
+pending.
 
-This evidence records deterministic Rust contracts plus static and synthetic
-DOM execution of the fixed program. It does not claim that arbitrary pages
-have been instrumented or observed on either platform.
+This evidence records deterministic Rust contracts, static and synthetic DOM
+execution of the fixed program, and the narrow reviewed macOS native fixture
+aggregate below. It does not claim that arbitrary pages have been instrumented
+or observed on either platform.
 
 ## Implemented boundary
 
@@ -391,6 +393,35 @@ have been instrumented or observed on either platform.
 
 The crate remains a zero-idle-cost functional core: decoding happens only for
 an admitted observation and creates no timer, thread, page, queue, or worker.
+
+## Reviewed macOS native evidence
+
+On 2026-09-01, the separately authorized production-path qualifier passed on
+macOS 27.0 build 26A5421a with WebKit 22625.1.29.11.25 using this exact command:
+
+```sh
+cargo run --locked -p zephium-engine \
+  --features native-agentic-semantic-probe \
+  --bin macos-agentic-semantic-probe -- --ci-hidden-fixed-dom
+```
+
+The content-free aggregate proves one ephemeral, extension-free, hidden
+1280-by-800 logical owned view across two fixed loopback documents and two
+fresh isolated-world epochs. Both snapshots passed fixed semantic/redaction
+checks, the page-world bridge remained absent, focus theft remained zero, and
+the page, data store, window, fixture listener, and semantic handler drained.
+The closed machine-readable result is
+`semantic-runtime-macos-v1.json`; the ordinary evidence gate rejects field
+widening, retained views, unrecognized fields, raw content, credentials,
+machine-local paths, and claims beyond this fixed fixture.
+
+The first authorized execution exposed that toolkit defaults had produced a
+200-by-200 macOS viewport while Windows used a 1-by-1 placeholder. Production
+construction now derives one domain-owned 1280-by-800 logical viewport, sets it
+explicitly on both native adapters, retains it with the view, and reattests the
+macOS frame/autoresizing mask or DPI-derived Windows container/controller
+bounds. This result is not arbitrary-site or Windows behavior evidence and
+does not supply provider-token or Browse/resource measurements.
 
 ## Deterministic evidence
 

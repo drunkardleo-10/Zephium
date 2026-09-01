@@ -24,7 +24,7 @@ use zephium_agentic::{
     ContextConstructionRequest, ContextConstructionSettlement, ContextConstructionSource,
     ContextId, ContextJoin, ContextNativeRequest, ContextNavigationRequest,
     ContextNavigationSettlement, ContextNavigationTarget, ContextOperationJoin,
-    ContextOperationKind, ContextProfileLease, ContextProfileLeasePurpose,
+    ContextOperationKind, ContextOwnedViewport, ContextProfileLease, ContextProfileLeasePurpose,
     ContextProfileStorageClass, ContextTransitionRequest, ContextTransitionSettlement, FrameId,
     SemanticFrameTrust, SemanticInvocationId, SemanticOrigin, SemanticRuntimePortFailure,
     SemanticRuntimeSettlement, SemanticScreenshotNativeCapture, SemanticScreenshotNativeFailure,
@@ -36,7 +36,7 @@ use zephium_agentic::{
     ContextConstructionRequest, ContextConstructionSettlement, ContextConstructionSource,
     ContextId, ContextJoin, ContextNativeRequest, ContextNavigationRequest,
     ContextNavigationSettlement, ContextNavigationTarget, ContextOperationJoin,
-    ContextOperationKind, ContextProfileLease, ContextProfileLeasePurpose,
+    ContextOperationKind, ContextOwnedViewport, ContextProfileLease, ContextProfileLeasePurpose,
     ContextProfileStorageClass, ContextTransitionRequest, ContextTransitionSettlement,
     MAX_LIVE_CONTEXTS,
 };
@@ -769,6 +769,10 @@ impl EngineHost {
         {
             return Err(ContextPortFailure::Unsupported);
         }
+        let viewport = request
+            .owned_viewport()
+            .filter(|viewport| *viewport == ContextOwnedViewport::STANDARD)
+            .ok_or(ContextPortFailure::NativeRefused)?;
         let join = request.operation().context();
         let identity = join.identity();
         let id = identity.id();
@@ -844,6 +848,7 @@ impl EngineHost {
         let panic_guard = callback_guard.clone();
         let view = crate::platform::imp::build_owned_agent_view(
             &self.parent,
+            viewport,
             profile,
             request.profile_lease().storage_class(),
             ephemeral_store.as_ref(),
@@ -1919,6 +1924,10 @@ impl EngineHost {
         {
             return Err(ContextPortFailure::Unsupported);
         }
+        let viewport = request
+            .owned_viewport()
+            .filter(|viewport| *viewport == ContextOwnedViewport::STANDARD)
+            .ok_or(ContextPortFailure::NativeRefused)?;
         let join = request.operation().context();
         let identity = join.identity();
         let id = identity.id();
@@ -2017,6 +2026,7 @@ impl EngineHost {
         let parent = super::ParentHandle(self.parent.0);
         let built = crate::platform::imp::build_owned_agent_view(
             &parent,
+            viewport,
             &environment,
             owned_profile,
             request.profile_lease().storage_class(),

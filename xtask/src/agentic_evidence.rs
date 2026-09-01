@@ -8,9 +8,11 @@ use serde::Deserialize;
 const BASELINE_PATH: &str = "eval/agentic-browsing/browse-baseline-v1.json";
 const NATIVE_MATRIX_PATH: &str = "eval/agentic-browsing/native-input-matrix-v1.json";
 const CAPABILITIES_PATH: &str = "eval/agentic-browsing/capabilities-v1.json";
+const MACOS_SEMANTIC_RUNTIME_PATH: &str = "eval/agentic-browsing/semantic-runtime-macos-v1.json";
 const MAX_BASELINE_BYTES: usize = 32 * 1024;
 const MAX_NATIVE_MATRIX_BYTES: usize = 64 * 1024;
 const MAX_CAPABILITIES_BYTES: usize = 64 * 1024;
+const MAX_MACOS_SEMANTIC_RUNTIME_BYTES: usize = 16 * 1024;
 
 pub(crate) fn check(repository: &Path) -> Result<(), String> {
     let baseline = read(repository, BASELINE_PATH, MAX_BASELINE_BYTES)?;
@@ -21,9 +23,95 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     validate_hygiene(NATIVE_MATRIX_PATH, &native_matrix)?;
     validate_native_matrix(decode(NATIVE_MATRIX_PATH, &native_matrix)?)?;
 
+    let semantic_runtime = read(
+        repository,
+        MACOS_SEMANTIC_RUNTIME_PATH,
+        MAX_MACOS_SEMANTIC_RUNTIME_BYTES,
+    )?;
+    validate_hygiene(MACOS_SEMANTIC_RUNTIME_PATH, &semantic_runtime)?;
+    validate_macos_semantic_runtime(decode(MACOS_SEMANTIC_RUNTIME_PATH, &semantic_runtime)?)?;
+
     let capabilities = read(repository, CAPABILITIES_PATH, MAX_CAPABILITIES_BYTES)?;
     validate_hygiene(CAPABILITIES_PATH, &capabilities)?;
     validate_capabilities(repository, decode(CAPABILITIES_PATH, &capabilities)?)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MacOsSemanticRuntimeEvidence {
+    schema_version: u32,
+    reviewed_on: String,
+    scope: String,
+    command: String,
+    platform: String,
+    os_version: String,
+    os_build: String,
+    engine: String,
+    engine_version: String,
+    profile: String,
+    extensions: String,
+    presentation: String,
+    viewport: SemanticViewportEvidence,
+    fixture: String,
+    snapshots: u32,
+    world_epochs: u32,
+    page_world_bridge: String,
+    secrets: String,
+    focus_theft: u32,
+    retained_native_views: u32,
+    teardown: String,
+    status: String,
+    non_claims: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SemanticViewportEvidence {
+    width: u32,
+    height: u32,
+    unit: String,
+}
+
+fn validate_macos_semantic_runtime(evidence: MacOsSemanticRuntimeEvidence) -> Result<(), String> {
+    validate_date("macOS semantic-runtime reviewed_on", &evidence.reviewed_on)?;
+    if evidence.schema_version != 1
+        || evidence.reviewed_on != "2026-09-01"
+        || evidence.scope != "authorized_hidden_fixed_dom_semantic_runtime"
+        || evidence.command
+            != "cargo run --locked -p zephium-engine --features native-agentic-semantic-probe --bin macos-agentic-semantic-probe -- --ci-hidden-fixed-dom"
+        || evidence.platform != "macos"
+        || evidence.os_version != "27.0"
+        || evidence.os_build != "26A5421a"
+        || evidence.engine != "WebKit"
+        || evidence.engine_version != "22625.1.29.11.25"
+        || evidence.profile != "ephemeral"
+        || evidence.extensions != "absent"
+        || evidence.presentation != "hidden"
+        || evidence.viewport.width != 1_280
+        || evidence.viewport.height != 800
+        || evidence.viewport.unit != "logical_css_pixels"
+        || evidence.fixture != "loopback_only_fixed_documents"
+        || evidence.snapshots != 2
+        || evidence.world_epochs != 2
+        || evidence.page_world_bridge != "absent"
+        || evidence.secrets != "redacted"
+        || evidence.focus_theft != 0
+        || evidence.retained_native_views != 0
+        || evidence.teardown != "drained"
+        || evidence.status != "passed"
+    {
+        return Err("reviewed macOS semantic-runtime aggregate drifted".to_owned());
+    }
+    exact_strings(
+        "macOS semantic-runtime non-claims",
+        &evidence.non_claims,
+        &[
+            "arbitrary_site_compatibility",
+            "windows_behavior",
+            "provider_token_budget",
+            "browse_or_agent_resource_baseline",
+        ],
+    )
 }
 
 fn read(repository: &Path, relative: &str, maximum: usize) -> Result<String, String> {
@@ -715,6 +803,8 @@ mod tests {
     const BASELINE: &str = include_str!("../../eval/agentic-browsing/browse-baseline-v1.json");
     const NATIVE_MATRIX: &str =
         include_str!("../../eval/agentic-browsing/native-input-matrix-v1.json");
+    const MACOS_SEMANTIC_RUNTIME: &str =
+        include_str!("../../eval/agentic-browsing/semantic-runtime-macos-v1.json");
     const CAPABILITIES: &str = include_str!("../../eval/agentic-browsing/capabilities-v1.json");
 
     fn repository() -> &'static Path {
@@ -743,6 +833,21 @@ mod tests {
         value["deterministic_ci"][1]["status"] = serde_json::json!("qualified");
         let evidence = decode("native matrix", &value.to_string()).expect("native schema");
         assert!(validate_native_matrix(evidence).is_err());
+    }
+
+    #[test]
+    fn semantic_runtime_result_cannot_widen_beyond_the_reviewed_fixed_fixture() {
+        let mut value = serde_json::from_str::<serde_json::Value>(MACOS_SEMANTIC_RUNTIME)
+            .expect("semantic-runtime JSON");
+        value["non_claims"] = serde_json::json!([]);
+        let evidence = decode("semantic runtime", &value.to_string()).expect("semantic schema");
+        assert!(validate_macos_semantic_runtime(evidence).is_err());
+
+        let mut value = serde_json::from_str::<serde_json::Value>(MACOS_SEMANTIC_RUNTIME)
+            .expect("semantic-runtime JSON");
+        value["retained_native_views"] = serde_json::json!(1);
+        let evidence = decode("semantic runtime", &value.to_string()).expect("semantic schema");
+        assert!(validate_macos_semantic_runtime(evidence).is_err());
     }
 
     #[test]

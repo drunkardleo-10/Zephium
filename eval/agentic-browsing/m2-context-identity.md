@@ -184,9 +184,9 @@ synchronously unsupported. Owned construction:
 - reuses the engine's process-lifetime private `WKWebsiteDataStore` per
   ephemeral profile, proves distinct private profiles do not alias, and uses
   the exact profile data-store identifier for durable storage;
-- creates only a hidden, unfocused `about:blank` child with permissions,
-  downloads, popups/page-close, media surfaces, autofill, link previews, and
-  inspection denied;
+- creates only a fixed 1280-by-800 logical, non-autoresizing, hidden, unfocused
+  `about:blank` child with permissions, downloads, popups/page-close, media
+  surfaces, autofill, link previews, and inspection denied;
 - asserts the actual `WKWebViewConfiguration` has no extension controller and
   exactly one pointer-identified document-start script: the pinned private
   semantic runtime in its dedicated `WKContentWorld`; no ordinary Zephium or
@@ -229,7 +229,8 @@ profile store, policy registration, and native reservation rather than
 temporarily constructing a second page or storage binding. The host retains
 the last exact committed web target. Before rearming, it reasserts the actual
 configuration's absent extension controller and scripts, selected durable or
-pointer-identical ephemeral store, disabled inspection, and hidden state. A
+pointer-identical ephemeral store, fixed logical frame/autoresizing mask,
+disabled inspection, and hidden state. A
 lost initial `about:blank` reloads only that internal document, while a lost
 web document uses WKWebView's native reload and the same exact URL policy. The
 recovery operation is admitted only at the double full-generation successor
@@ -304,11 +305,13 @@ It reattests the environment UDF, controller/environment identity, exact
 profile name, InPrivate bit, and bounded empty extension inventory. The adapter
 supplies no initialization script, IPC handler, host object, custom protocol,
 new-window callback, selector, CDP method, or native-input route. It constructs
-one 1-by-1 hidden and unfocused `about:blank` child with devtools, clipboard,
+one fixed 1280-by-800 logical hidden and unfocused `about:blank` child with
+devtools, clipboard,
 permissions, downloads, popups, page-close, autofill, context menus,
 accelerators, autoplay, fullscreen, and picture-in-picture denied. Before
 publication it rechecks the parent/container/controller HWND lineage, hidden
-controller and window state, absence of focus, exact browser-process
+controller and window state, DPI-derived container and controller bounds,
+absence of focus, exact browser-process
 provenance, and installation of the ordinary native content policy.
 
 The controller then enters only the private `ContextId` map; ordinary tab,

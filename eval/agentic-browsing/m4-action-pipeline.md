@@ -326,8 +326,11 @@ are trusted, or that M4 is complete.
   the current owned-view semantic runtime before dispatch, so a screenshot
   cannot use a merely same-document but different observed snapshot as native
   authority.
-- The standard image budget is 1280x800, 1,024,000 pixels, and 5 MiB native PNG;
-  hard ceilings are 2048x2048, 2,097,152 pixels, and 9 MiB. The platform stream
+- The standard image budget is 1280x800, 1,024,000 physical output pixels, and
+  5 MiB native PNG. The owned-context layout is independently fixed at
+  1280-by-800 logical/CSS pixels; device scale therefore does not silently
+  widen the screenshot pixel/byte admission contract. Hard ceilings are
+  2048x2048, 2,097,152 pixels, and 9 MiB. The platform stream
   must enforce the selected byte ceiling while encoding, before returning a
   buffer. Admission scans at most 1,024 chunks, requires matching nonzero
   dimensions, fixed non-interlaced 8-bit RGB/RGBA, exact IHDR/contiguous

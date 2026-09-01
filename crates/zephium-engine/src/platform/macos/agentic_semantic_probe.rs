@@ -26,11 +26,11 @@ use raw_window_handle::{
 use zephium_agentic::{
     encode_semantic_runtime_invocation, ContextCapabilities, ContextCapability, ContextId,
     ContextIdentity, ContextKind, ContextNavigationTarget, ContextOperationId,
-    ContextProfileStorageClass, ContextRegistry, ContextRunId, ContextSettlement, FixtureRoute,
-    FixtureServer, FrameId, SemanticCompleteness, SemanticFrameJoin, SemanticFrameTrust,
-    SemanticInvocationId, SemanticObservationBudget, SemanticObservationId,
-    SemanticObservationRequest, SemanticOperationClass, SemanticOrigin, SemanticRole,
-    SemanticRuntimeBudget, SemanticRuntimeFault, SemanticRuntimePortFailure,
+    ContextOwnedViewport, ContextProfileStorageClass, ContextRegistry, ContextRunId,
+    ContextSettlement, FixtureRoute, FixtureServer, FrameId, SemanticCompleteness,
+    SemanticFrameJoin, SemanticFrameTrust, SemanticInvocationId, SemanticObservationBudget,
+    SemanticObservationId, SemanticObservationRequest, SemanticOperationClass, SemanticOrigin,
+    SemanticRole, SemanticRuntimeBudget, SemanticRuntimeFault, SemanticRuntimePortFailure,
     SemanticRuntimeResultError, SemanticSensitivity, SemanticSnapshot, SemanticSnapshotGeneration,
     SemanticValueSummary,
 };
@@ -135,6 +135,7 @@ fn begin() -> Result<PendingTeardown, &'static str> {
 
     let mut view = super::build_owned_agent_view(
         &host,
+        ContextOwnedViewport::STANDARD,
         profile,
         ContextProfileStorageClass::Ephemeral,
         Some(&store),
@@ -220,6 +221,9 @@ fn begin() -> Result<PendingTeardown, &'static str> {
 
         if callbacks.failed()
             || view.semantic_pending_for_audit() != Some(false)
+            || view
+                .attest(profile, ContextProfileStorageClass::Ephemeral, Some(&store))
+                .is_err()
             || window.isVisible()
             || window.isKeyWindow()
             || !page.isHidden()
@@ -440,57 +444,101 @@ fn capture_snapshot(
 }
 
 fn verify_first_snapshot(snapshot: &SemanticSnapshot) -> Result<(), &'static str> {
+    if snapshot.completeness() != SemanticCompleteness::Complete {
+        return Err("first_incomplete");
+    }
+    for (needle, stage) in [
+        ("First semantic epoch", "first_epoch_missing"),
+        ("Page bridge absent", "first_bridge_absence_missing"),
+        ("Primary semantic action", "first_primary_action_missing"),
+    ] {
+        if !snapshot_contains(snapshot, needle) {
+            return Err(stage);
+        }
+    }
+    for (needle, stage) in [
+        (
+            "Closed internal must remain absent",
+            "first_closed_shadow_exposed",
+        ),
+        ("Page bridge present", "first_page_bridge_exposed"),
+        ("page-world-forgery", "first_page_world_forgery_exposed"),
+        ("fixture-password-value", "first_password_exposed"),
+        ("Bearer abcdefghijklmnop", "first_token_exposed"),
+    ] {
+        if snapshot_contains(snapshot, needle) {
+            return Err(stage);
+        }
+    }
     let password = snapshot
         .nodes()
         .iter()
         .find(|node| node.role() == SemanticRole::Password)
-        .ok_or("first_snapshot")?;
-    let token = snapshot
+        .ok_or("first_password_missing")?;
+    let mut token_candidates = snapshot.nodes().iter().filter(|node| {
+        node.role() == SemanticRole::Textbox
+            && node.value() == Some(&SemanticValueSummary::Redacted)
+            && node.sensitivity() == SemanticSensitivity::Secret
+    });
+    let token = token_candidates.next().ok_or("first_token_missing")?;
+    if token_candidates.next().is_some() {
+        return Err("first_token_ambiguous");
+    }
+    if password.value() != Some(&SemanticValueSummary::Redacted) {
+        return Err("first_password_not_redacted");
+    }
+    if password.sensitivity() != SemanticSensitivity::Secret {
+        return Err("first_password_not_secret");
+    }
+    if token.value() != Some(&SemanticValueSummary::Redacted) {
+        return Err("first_token_not_redacted");
+    }
+    if token.sensitivity() != SemanticSensitivity::Secret {
+        return Err("first_token_not_secret");
+    }
+    if !snapshot_contains(snapshot, "Open shadow semantic action") {
+        return Err("first_open_shadow_missing");
+    }
+    if !snapshot.nodes().iter().any(|node| {
+        node.role() == SemanticRole::Button
+            && node.operations().contains(SemanticOperationClass::Click)
+    }) {
+        return Err("first_click_operation_missing");
+    }
+    if !snapshot
         .nodes()
         .iter()
-        .find(|node| {
-            node.name()
-                .is_some_and(|name| name.as_str() == "Token field")
-        })
-        .ok_or("first_snapshot")?;
-    if snapshot.completeness() != SemanticCompleteness::Complete
-        || !snapshot_contains(snapshot, "First semantic epoch")
-        || !snapshot_contains(snapshot, "Page bridge absent")
-        || !snapshot_contains(snapshot, "Primary semantic action")
-        || !snapshot_contains(snapshot, "Open shadow semantic action")
-        || snapshot_contains(snapshot, "Closed internal must remain absent")
-        || snapshot_contains(snapshot, "Page bridge present")
-        || snapshot_contains(snapshot, "page-world-forgery")
-        || snapshot_contains(snapshot, "fixture-password-value")
-        || snapshot_contains(snapshot, "Bearer abcdefghijklmnop")
-        || password.value() != Some(&SemanticValueSummary::Redacted)
-        || password.sensitivity() != SemanticSensitivity::Secret
-        || token.value() != Some(&SemanticValueSummary::Redacted)
-        || token.sensitivity() != SemanticSensitivity::Secret
-        || !snapshot.nodes().iter().any(|node| {
-            node.role() == SemanticRole::Button
-                && node.operations().contains(SemanticOperationClass::Click)
-        })
-        || !snapshot
-            .nodes()
-            .iter()
-            .any(|node| node.role() == SemanticRole::FrameBoundary)
+        .any(|node| node.role() == SemanticRole::FrameBoundary)
     {
-        return Err("first_snapshot");
+        return Err("first_frame_boundary_missing");
     }
     Ok(())
 }
 
 fn verify_replacement_snapshot(snapshot: &SemanticSnapshot) -> Result<(), &'static str> {
-    if snapshot.completeness() != SemanticCompleteness::Complete
-        || !snapshot_contains(snapshot, "Replacement semantic epoch")
-        || !snapshot_contains(snapshot, "Replacement semantic action")
-        || !snapshot_contains(snapshot, "Page bridge absent")
-        || snapshot_contains(snapshot, "First semantic epoch")
-        || snapshot_contains(snapshot, "Page bridge present")
-        || snapshot_contains(snapshot, "replacement-page-world-forgery")
-    {
-        return Err("replacement_snapshot");
+    if snapshot.completeness() != SemanticCompleteness::Complete {
+        return Err("replacement_incomplete");
+    }
+    for (needle, stage) in [
+        ("Replacement semantic epoch", "replacement_epoch_missing"),
+        ("Replacement semantic action", "replacement_action_missing"),
+        ("Page bridge absent", "replacement_bridge_absence_missing"),
+    ] {
+        if !snapshot_contains(snapshot, needle) {
+            return Err(stage);
+        }
+    }
+    for (needle, stage) in [
+        ("First semantic epoch", "replacement_stale_epoch_exposed"),
+        ("Page bridge present", "replacement_page_bridge_exposed"),
+        (
+            "replacement-page-world-forgery",
+            "replacement_page_world_forgery_exposed",
+        ),
+    ] {
+        if snapshot_contains(snapshot, needle) {
+            return Err(stage);
+        }
     }
     Ok(())
 }

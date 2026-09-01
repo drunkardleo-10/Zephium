@@ -178,6 +178,12 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         &read(repository.join(ENGINE_AGENT_NAVIGATION))?,
         &read(repository.join(ENGINE_AGENT_CONTEXT_HOST))?,
     )?;
+    validate_owned_context_viewport_contract(
+        &read(repository.join(AGENTIC_CONTEXT_PORT))?,
+        &read(repository.join(ENGINE_AGENT_CONTEXT_HOST))?,
+        &read(repository.join(ENGINE_MACOS_AGENT_CONTEXT))?,
+        &read(repository.join(ENGINE_WINDOWS_AGENT_CONTEXT))?,
+    )?;
     let _ = read(repository.join(ENGINE_MACOS_PROBE_BINARY))?;
     validate_windows_probe_binary(
         &read(repository.join(ENGINE_WINDOWS_PROBE_BINARY))?,
@@ -645,6 +651,86 @@ fn validate_engine_windows_agent_context_boundary(
     Ok(())
 }
 
+fn validate_owned_context_viewport_contract(
+    context_port: &str,
+    host: &str,
+    macos: &str,
+    windows: &str,
+) -> Result<(), String> {
+    let context_port = compact(context_port);
+    for required in [
+        "pubstructContextOwnedViewport{",
+        "width:u16,",
+        "height:u16,",
+        "pubconstSTANDARD:Self=Self{width:1_280,height:800,}",
+        "Self::Owned=>Some(ContextOwnedViewport::STANDARD)",
+        "pubconstfnlogical_area(self)->u32",
+    ] {
+        if !context_port.contains(required) {
+            return Err(format!(
+                "owned-context viewport contract lost closed value {required}"
+            ));
+        }
+    }
+    if context_port
+        .matches("pubconstfnowned_viewport(self)->Option<ContextOwnedViewport>")
+        .count()
+        != 2
+    {
+        return Err(
+            "owned-context source and construction request must both retain the fixed viewport"
+                .to_owned(),
+        );
+    }
+
+    let host = compact(host);
+    if host.matches("request.owned_viewport()").count() != 2
+        || host.matches("ContextOwnedViewport::STANDARD").count() != 2
+        || host.matches("build_owned_agent_view(").count() < 2
+    {
+        return Err(
+            "both production platform owners must derive and pass the closed viewport".to_owned(),
+        );
+    }
+
+    let macos = compact(macos);
+    for required in [
+        "viewport:ContextOwnedViewport",
+        "with_bounds(Rect{",
+        "self.viewport",
+        "native_view.setAutoresizingMask(Mask::ViewNotSizable)",
+        "page.isInspectable()",
+        "native_view.autoresizingMask()!=Mask::ViewNotSizable",
+        "frame.size.width!=f64::from(viewport.width())",
+        "frame.size.height!=f64::from(viewport.height())",
+    ] {
+        if !macos.contains(required) {
+            return Err(format!(
+                "production macOS owned viewport lost native attestation {required}"
+            ));
+        }
+    }
+
+    let windows = compact(windows);
+    for required in [
+        "viewport:ContextOwnedViewport",
+        "with_bounds(Rect{",
+        "self.viewport",
+        "GetDpiForWindow(container)",
+        "expected_physical_extent(viewport.width(),dpi)",
+        "expected_physical_extent(viewport.height(),dpi)",
+        "GetClientRect(container,&mutcontainer_bounds)",
+        "controller.Bounds(&mutcontroller_bounds)",
+    ] {
+        if !windows.contains(required) {
+            return Err(format!(
+                "production Windows owned viewport lost DPI-aware attestation {required}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_engine_semantic_runtime_boundary(source: &str) -> Result<(), String> {
     let source = compact(source);
     for required in [
@@ -737,6 +823,7 @@ fn validate_macos_semantic_probe(
         "FixtureServer::start()",
         "new_ephemeral_data_store()",
         "ContextProfileStorageClass::Ephemeral",
+        "ContextOwnedViewport::STANDARD",
         "build_owned_agent_view(",
         "NativeContentPolicy::AllowAll",
         "NSApplicationActivationPolicy::Accessory",
@@ -745,6 +832,7 @@ fn validate_macos_semantic_probe(
         "!page.isHidden()",
         "view.prepare_semantic_document_load()",
         "view.dispatch_semantic(",
+        "view.attest(",
         "SemanticRuntimeFault::DocumentLoading",
         "MAX_DOCUMENT_LOADING_RETRIES",
         "view.retire_semantic_runtime()",
@@ -783,6 +871,7 @@ fn validate_macos_semantic_probe(
         "arguments.as_slice()!=[\"--ci-hidden-fixed-dom\"]",
         "run_macos_agentic_semantic_probe()",
         "profile=ephemeral",
+        "viewport=1280x800-logical",
         "fixture=loopback-only",
         "page_world_bridge=absent",
         "focus_theft=0",
@@ -3029,6 +3118,7 @@ mod tests {
             FixtureServer::start();
             new_ephemeral_data_store();
             ContextProfileStorageClass::Ephemeral;
+            ContextOwnedViewport::STANDARD;
             build_owned_agent_view();
             NativeContentPolicy::AllowAll;
             NSApplicationActivationPolicy::Accessory;
@@ -3037,6 +3127,7 @@ mod tests {
             !page.isHidden();
             view.prepare_semantic_document_load();
             view.dispatch_semantic();
+            view.attest();
             SemanticRuntimeFault::DocumentLoading;
             MAX_DOCUMENT_LOADING_RETRIES;
             view.retire_semantic_runtime();
@@ -3046,7 +3137,7 @@ mod tests {
         let semantic_binary = r#"
             if arguments.as_slice() != ["--ci-hidden-fixed-dom"] {}
             run_macos_agentic_semantic_probe();
-            "profile=ephemeral fixture=loopback-only page_world_bridge=absent focus_theft=0 retained_views=0";
+            "profile=ephemeral viewport=1280x800-logical fixture=loopback-only page_world_bridge=absent focus_theft=0 retained_views=0";
         "#;
         let semantic_fixture = r#"
             TcpListener::bind((Ipv4Addr::LOCALHOST, 0));
@@ -3257,6 +3348,41 @@ mod tests {
             &timeout.replace("MAX_PENDING_NATIVE_CONTEXT_TASKS", "usize::MAX"),
             navigation,
             host,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn production_owned_context_viewport_is_fixed_and_natively_attested() {
+        let context_port = include_str!("../../crates/zephium-agentic/src/context_port.rs");
+        let host = include_str!("../../crates/zephium-engine/src/host/agent_context.rs");
+        let macos = include_str!("../../crates/zephium-engine/src/platform/macos/agent_context.rs");
+        let windows =
+            include_str!("../../crates/zephium-engine/src/platform/windows/agent_context.rs");
+        validate_owned_context_viewport_contract(context_port, host, macos, windows)
+            .expect("fixed native viewport");
+        assert!(validate_owned_context_viewport_contract(
+            &context_port.replace("width: 1_280", "width: 1"),
+            host,
+            macos,
+            windows,
+        )
+        .is_err());
+        assert!(validate_owned_context_viewport_contract(
+            context_port,
+            host,
+            &macos.replace(
+                "native_view.setAutoresizingMask(Mask::ViewNotSizable);",
+                "native_view.setAutoresizingMask(Mask::ViewWidthSizable);",
+            ),
+            windows,
+        )
+        .is_err());
+        assert!(validate_owned_context_viewport_contract(
+            context_port,
+            host,
+            macos,
+            &windows.replace("controller.Bounds(&mut controller_bounds)", "Ok(())"),
         )
         .is_err());
     }

@@ -129,6 +129,16 @@ All asynchronous results rejoin `ContextId`, owner, profile, context
 generation, navigation epoch, frame generation, and run cancellation state.
 A result missing any current join is stale and discarded.
 
+Version 1 run-owned contexts use one domain-selected 1280-by-800 logical/CSS
+pixel viewport. The construction request derives that closed value from the
+owned source; neither a model nor a page can choose an arbitrary layout size.
+Each platform adapter sets the native child bounds explicitly, retains the
+expected viewport, and fails construction or later attestation if the native
+frame diverges. Borrowed tabs and human sign-in handoffs retain their ordinary
+presentation owner's viewport. This logical layout contract is distinct from
+physical screenshot dimensions under device scale and does not replace the
+named-device CPU, memory, GPU, or energy qualification.
+
 ### 3.3 Promotion and takeover
 
 Selecting an owned context in Work presents the exact native page in a

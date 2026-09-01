@@ -62,7 +62,7 @@ HTTPS endpoints, rustls/system-proxy feature graph, redirect/retry refusal,
 sensitive credentials, identity encoding, test-only loopback construction, and
 move-only usage-settlement route.
 
-That gate also decodes all three committed JSON manifests through closed
+That gate also decodes all four committed JSON manifests through closed
 schemas, rejects unknown fields, machine-local paths and high-confidence secret
 material, and cross-checks capability pins against the vendored manifests and
 provenance records. The current pending Browse and Windows states are exact:
@@ -94,14 +94,16 @@ cargo run --locked -p zephium-engine \
   --bin macos-agentic-semantic-probe -- --ci-hidden-fixed-dom
 ```
 
-This command is a pending named-device run and must not be executed merely
-because it compiles. With separate explicit authorization it uses one hidden
+The reviewed 2026-09-01 result for this exact command is recorded in
+`semantic-runtime-macos-v1.json`. It used one fixed 1280-by-800 logical hidden
 owned view, one ephemeral `WKWebsiteDataStore`, two fixed loopback-only
 documents, the ordinary content-policy installation seam, and the production
-semantic registration. It performs no OS-wide input, requests no Accessibility
-permission, opens no account or external site, and emits only a content-free
-aggregate. The source gate mechanically excludes its fixture, runner, and
-feature from optimized and ordinary desktop builds.
+semantic registration. It performed no OS-wide input, requested no
+Accessibility permission, opened no account or external site, and emitted only
+a content-free aggregate. The source gate mechanically excludes its fixture,
+runner, and feature from optimized and ordinary desktop builds. Re-running it
+still requires separate explicit authorization; the committed result does not
+authorize future native execution.
 
 The Windows adapter can be compile-qualified from another host, but only a
 physical Windows run is behavioral evidence. On an authorized named Windows
