@@ -2471,7 +2471,8 @@ mod tests {
         assert_eq!(wire["stream"], true);
         assert_eq!(wire["parallel_tool_calls"], false);
         assert_eq!(wire["truncation"], "disabled");
-        assert_eq!(wire.as_object().expect("request object").len(), 10);
+        assert_eq!(wire["service_tier"], "default");
+        assert_eq!(wire.as_object().expect("request object").len(), 11);
         assert!(wire.get("previous_response_id").is_none());
         assert!(wire.get("metadata").is_none());
         assert!(wire.get("include").is_none());

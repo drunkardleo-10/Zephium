@@ -2022,10 +2022,10 @@ mod tests {
 
     fn openai_success_stream() -> Vec<u8> {
         [
-            "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"status\":\"in_progress\",\"model\":\"gpt-5.6-sol\"}}\n\n",
+            "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"status\":\"in_progress\",\"model\":\"gpt-5.6-sol\",\"service_tier\":\"default\"}}\n\n",
             "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n",
             "event: response.output_text.done\ndata: {\"type\":\"response.output_text.done\",\"text\":\"hello\"}\n\n",
-            "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\":\"completed\",\"model\":\"gpt-5.6-sol\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\"}]}],\"usage\":{\"input_tokens\":17,\"output_tokens\":3,\"total_tokens\":20,\"input_tokens_details\":{\"cached_tokens\":0},\"output_tokens_details\":{\"reasoning_tokens\":0}}}}\n\n",
+            "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\":\"completed\",\"model\":\"gpt-5.6-sol\",\"service_tier\":\"default\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\"}]}],\"usage\":{\"input_tokens\":17,\"output_tokens\":3,\"total_tokens\":20,\"input_tokens_details\":{\"cached_tokens\":0},\"output_tokens_details\":{\"reasoning_tokens\":0}}}}\n\n",
             "data: [DONE]\n\n",
         ]
         .concat()
@@ -2034,7 +2034,7 @@ mod tests {
 
     fn anthropic_failure_stream() -> Vec<u8> {
         [
-            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-opus-5\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":7,\"cache_creation_input_tokens\":3,\"cache_read_input_tokens\":5,\"output_tokens\":1,\"output_tokens_details\":{\"thinking_tokens\":0}}}}\n\n",
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-opus-5\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":7,\"cache_creation_input_tokens\":3,\"cache_read_input_tokens\":5,\"output_tokens\":1,\"output_tokens_details\":{\"thinking_tokens\":0},\"service_tier\":\"standard\",\"inference_geo\":\"global\"}}}\n\n",
             "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"provider-authored-sensitive-detail\"}}\n\n",
         ]
         .concat()
@@ -2206,6 +2206,7 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&captured.body).expect("request body");
         assert_eq!(body["stream"], true);
         assert_eq!(body["store"], false);
+        assert_eq!(body["service_tier"], "default");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2397,6 +2398,9 @@ mod tests {
         assert!(head.contains("x-api-key: synthetic-anthropic-key\r\n"));
         assert!(head.contains("anthropic-version: 2023-06-01\r\n"));
         assert!(!head.contains("authorization:"));
+        let body: serde_json::Value = serde_json::from_slice(&captured.body).expect("request body");
+        assert_eq!(body["service_tier"], "standard_only");
+        assert_eq!(body["inference_geo"], "global");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

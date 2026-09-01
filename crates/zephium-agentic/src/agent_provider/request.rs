@@ -27,7 +27,8 @@ use crate::{
 use super::tool::AgentBrowserToolKind;
 use super::{
     AgentProviderCallConfig, AgentProviderCallIdentity, AgentProviderContractError,
-    AgentProviderKind,
+    AgentProviderKind, ANTHROPIC_GLOBAL_INFERENCE_GEO, ANTHROPIC_STANDARD_SERVICE_TIER_REQUEST,
+    OPENAI_STANDARD_SERVICE_TIER,
 };
 
 /// Maximum UTF-8 bytes in one approved browser objective.
@@ -698,6 +699,7 @@ struct OpenAiRequestWire<'a> {
     parallel_tool_calls: bool,
     max_output_tokens: u32,
     truncation: &'static str,
+    service_tier: &'static str,
     stream: bool,
     store: bool,
 }
@@ -731,6 +733,8 @@ struct AnthropicRequestWire<'a> {
     messages: [AnthropicMessageWire<'a>; 1],
     tools: Vec<AnthropicToolWire<'static>>,
     tool_choice: AnthropicToolChoiceWire,
+    service_tier: &'static str,
+    inference_geo: &'static str,
     stream: bool,
 }
 
@@ -802,6 +806,7 @@ fn encode_openai_body(
         parallel_tool_calls: false,
         max_output_tokens: config.max_output_tokens(),
         truncation: "disabled",
+        service_tier: OPENAI_STANDARD_SERVICE_TIER,
         stream: true,
         store: false,
     };
@@ -863,6 +868,8 @@ fn encode_anthropic_body(
             r#type: "auto",
             disable_parallel_tool_use: true,
         },
+        service_tier: ANTHROPIC_STANDARD_SERVICE_TIER_REQUEST,
+        inference_geo: ANTHROPIC_GLOBAL_INFERENCE_GEO,
         stream: true,
     };
     let body = serde_json::to_vec(&wire).map_err(|_| AgentProviderRequestError::Encoding)?;
@@ -1415,10 +1422,12 @@ mod tests {
         .expect("request body");
         assert!(body.len() < MAX_AGENT_PROVIDER_REQUEST_BYTES);
         let wire: Value = serde_json::from_slice(&body).expect("request JSON");
-        assert_eq!(wire.as_object().expect("request object").len(), 7);
+        assert_eq!(wire.as_object().expect("request object").len(), 9);
         assert_eq!(wire["model"], "claude-opus-5");
         assert_eq!(wire["max_tokens"], 1_024);
         assert_eq!(wire["stream"], true);
+        assert_eq!(wire["service_tier"], "standard_only");
+        assert_eq!(wire["inference_geo"], "global");
         assert_eq!(wire["tool_choice"]["type"], "auto");
         assert_eq!(wire["tool_choice"]["disable_parallel_tool_use"], true);
         assert!(wire.get("metadata").is_none());

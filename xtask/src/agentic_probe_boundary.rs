@@ -8,6 +8,10 @@ use serde::Deserialize;
 
 const AGENTIC_MANIFEST: &str = "crates/zephium-agentic/Cargo.toml";
 const AGENTIC_ROOT: &str = "crates/zephium-agentic/src/lib.rs";
+const AGENTIC_PROVIDER_ROOT: &str = "crates/zephium-agentic/src/agent_provider.rs";
+const AGENTIC_PROVIDER_REQUEST: &str = "crates/zephium-agentic/src/agent_provider/request.rs";
+const AGENTIC_PROVIDER_OPENAI: &str = "crates/zephium-agentic/src/agent_provider/openai.rs";
+const AGENTIC_PROVIDER_ANTHROPIC: &str = "crates/zephium-agentic/src/agent_provider/anthropic.rs";
 const PROVIDER_TRANSPORT_MANIFEST: &str = "crates/zephium-agent-provider-transport/Cargo.toml";
 const PROVIDER_TRANSPORT_ROOT: &str = "crates/zephium-agent-provider-transport/src/lib.rs";
 const ENGINE_MANIFEST: &str = "crates/zephium-engine/Cargo.toml";
@@ -33,6 +37,12 @@ const ENGINE_RELEASE_REFUSAL: &str = concat!(
 pub(crate) fn check(repository: &Path) -> Result<(), String> {
     validate_manifest(&read(repository.join(AGENTIC_MANIFEST))?)?;
     validate_root(&read(repository.join(AGENTIC_ROOT))?)?;
+    validate_provider_billing_contract(
+        &read(repository.join(AGENTIC_PROVIDER_ROOT))?,
+        &read(repository.join(AGENTIC_PROVIDER_REQUEST))?,
+        &read(repository.join(AGENTIC_PROVIDER_OPENAI))?,
+        &read(repository.join(AGENTIC_PROVIDER_ANTHROPIC))?,
+    )?;
     validate_provider_transport_manifest(&read(repository.join(PROVIDER_TRANSPORT_MANIFEST))?)?;
     validate_provider_transport_root(&read(repository.join(PROVIDER_TRANSPORT_ROOT))?)?;
     validate_engine_manifest(&read(repository.join(ENGINE_MANIFEST))?)?;
@@ -293,6 +303,65 @@ fn validate_provider_transport_manifest(source: &str) -> Result<(), String> {
         .collect::<BTreeSet<_>>();
     if actual != expected || actual.len() != features.len() {
         return Err("agent provider transport reqwest feature graph drifted".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_provider_billing_contract(
+    root: &str,
+    request: &str,
+    openai: &str,
+    anthropic: &str,
+) -> Result<(), String> {
+    let root = compact(root);
+    for required in [
+        "constOPENAI_STANDARD_SERVICE_TIER:&str=\"default\";",
+        "constANTHROPIC_STANDARD_SERVICE_TIER_REQUEST:&str=\"standard_only\";",
+        "constANTHROPIC_STANDARD_SERVICE_TIER_RESPONSE:&str=\"standard\";",
+        "constANTHROPIC_GLOBAL_INFERENCE_GEO:&str=\"global\";",
+        "pubenumAgentProviderBillingClass",
+        "pubconstfnbilling_class(&self)->AgentProviderBillingClass",
+    ] {
+        if !root.contains(required) {
+            return Err(format!(
+                "agent provider billing identity lost required boundary {required}"
+            ));
+        }
+    }
+
+    let request = compact(request);
+    for required in [
+        "service_tier:OPENAI_STANDARD_SERVICE_TIER",
+        "service_tier:ANTHROPIC_STANDARD_SERVICE_TIER_REQUEST",
+        "inference_geo:ANTHROPIC_GLOBAL_INFERENCE_GEO",
+    ] {
+        if !request.contains(required) {
+            return Err(format!(
+                "agent provider request lost fixed billing control {required}"
+            ));
+        }
+    }
+    if request.contains("speed:&'staticstr") {
+        return Err(
+            "stable Anthropic Messages request must not acquire beta-only speed control".to_owned(),
+        );
+    }
+
+    let openai = compact(openai);
+    if !openai.contains("event.response.service_tier!=OPENAI_STANDARD_SERVICE_TIER") {
+        return Err("OpenAI decoder lost terminal billing-class attestation".to_owned());
+    }
+
+    let anthropic = compact(anthropic);
+    for required in [
+        "usage.service_tier!=ANTHROPIC_STANDARD_SERVICE_TIER_RESPONSE",
+        "usage.inference_geo!=ANTHROPIC_GLOBAL_INFERENCE_GEO",
+    ] {
+        if !anthropic.contains(required) {
+            return Err(format!(
+                "Anthropic decoder lost terminal billing-class attestation {required}"
+            ));
+        }
     }
     Ok(())
 }
@@ -665,6 +734,50 @@ mod tests {
         assert!(
             validate_provider_transport_root(&format!("{root}\npub fn into_parts() {{}}")).is_err()
         );
+    }
+
+    #[test]
+    fn provider_billing_mode_requires_fixed_requests_and_terminal_attestation() {
+        let root = r#"
+            const OPENAI_STANDARD_SERVICE_TIER: &str = "default";
+            const ANTHROPIC_STANDARD_SERVICE_TIER_REQUEST: &str = "standard_only";
+            const ANTHROPIC_STANDARD_SERVICE_TIER_RESPONSE: &str = "standard";
+            const ANTHROPIC_GLOBAL_INFERENCE_GEO: &str = "global";
+            pub enum AgentProviderBillingClass {}
+            pub const fn billing_class(&self) -> AgentProviderBillingClass {}
+        "#;
+        let request = r#"
+            OpenAiRequestWire { service_tier: OPENAI_STANDARD_SERVICE_TIER };
+            AnthropicRequestWire {
+                service_tier: ANTHROPIC_STANDARD_SERVICE_TIER_REQUEST,
+                inference_geo: ANTHROPIC_GLOBAL_INFERENCE_GEO,
+            };
+        "#;
+        let openai =
+            "if event.response.service_tier != OPENAI_STANDARD_SERVICE_TIER { return Err(()); }";
+        let anthropic = r#"
+            if usage.service_tier != ANTHROPIC_STANDARD_SERVICE_TIER_RESPONSE
+                || usage.inference_geo != ANTHROPIC_GLOBAL_INFERENCE_GEO {}
+        "#;
+
+        validate_provider_billing_contract(root, request, openai, anthropic)
+            .expect("valid fixed billing boundary");
+        assert!(validate_provider_billing_contract(
+            &root.replace("\"default\"", "\"auto\""),
+            request,
+            openai,
+            anthropic,
+        )
+        .is_err());
+        assert!(validate_provider_billing_contract(
+            root,
+            &format!("{request}\nstruct Drift {{ speed: &'static str }}"),
+            openai,
+            anthropic,
+        )
+        .is_err());
+        assert!(validate_provider_billing_contract(root, request, "", anthropic,).is_err());
+        assert!(validate_provider_billing_contract(root, request, openai, "").is_err());
     }
 
     #[test]

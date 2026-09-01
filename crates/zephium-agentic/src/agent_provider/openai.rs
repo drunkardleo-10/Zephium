@@ -20,7 +20,7 @@ use super::{
     AgentProviderProtocolError, AgentProviderStopReason, AgentProviderStreamBatch,
     AgentProviderStreamBudget, AgentProviderStreamConclusion, AgentProviderStreamEvent,
     AgentProviderStreamStats, AgentProviderTerminalFailure, AgentProviderTextDelta,
-    AgentProviderUsage,
+    AgentProviderUsage, OPENAI_STANDARD_SERVICE_TIER,
 };
 
 const MAX_OPENAI_RESPONSE_ID_BYTES: usize = 128;
@@ -235,6 +235,7 @@ impl OpenAiResponsesStreamDecoder {
         if event.kind != "response.created"
             || event.response.status != "in_progress"
             || event.response.model != self.model.as_str()
+            || event.response.service_tier != OPENAI_STANDARD_SERVICE_TIER
         {
             return Err(AgentProviderProtocolError::Event);
         }
@@ -250,6 +251,7 @@ impl OpenAiResponsesStreamDecoder {
         if event.kind != "response.in_progress"
             || event.response.status != "in_progress"
             || event.response.model != self.model.as_str()
+            || event.response.service_tier != OPENAI_STANDARD_SERVICE_TIER
         {
             return Err(AgentProviderProtocolError::Event);
         }
@@ -573,6 +575,7 @@ impl OpenAiResponsesStreamDecoder {
         let event: TerminalEnvelope<'_> = parse(data)?;
         if event.kind != kind
             || event.response.model != self.model.as_str()
+            || event.response.service_tier != OPENAI_STANDARD_SERVICE_TIER
             || event.response.status
                 != if kind == "response.completed" {
                     "completed"
@@ -633,6 +636,7 @@ impl OpenAiResponsesStreamDecoder {
         if event.kind != kind
             || event.response.status != expected_status
             || event.response.model != self.model.as_str()
+            || event.response.service_tier != OPENAI_STANDARD_SERVICE_TIER
         {
             return Err(AgentProviderProtocolError::Event);
         }
@@ -738,6 +742,8 @@ struct ResponseHead<'a> {
     status: &'a str,
     #[serde(borrow)]
     model: &'a str,
+    #[serde(borrow)]
+    service_tier: &'a str,
 }
 
 #[derive(Deserialize)]
@@ -832,6 +838,8 @@ struct TerminalResponse<'a> {
     status: &'a str,
     #[serde(borrow)]
     model: &'a str,
+    #[serde(borrow)]
+    service_tier: &'a str,
     usage: Option<OpenAiUsage>,
     #[serde(borrow)]
     incomplete_details: Option<IncompleteDetails<'a>>,
@@ -1085,7 +1093,7 @@ mod tests {
         sse(
             "response.created",
             &format!(
-                "{{\"type\":\"response.created\",\"response\":{{\"id\":\"{id}\",\"status\":\"in_progress\",\"model\":\"gpt-5.6-sol\"}}}}"
+                "{{\"type\":\"response.created\",\"response\":{{\"id\":\"{id}\",\"status\":\"in_progress\",\"model\":\"gpt-5.6-sol\",\"service_tier\":\"default\"}}}}"
             ),
         )
     }
@@ -1094,7 +1102,7 @@ mod tests {
         sse(
             kind,
             &format!(
-                "{{\"type\":\"{kind}\",\"response\":{{\"id\":\"{id}\",\"status\":\"{status}\",\"model\":\"gpt-5.6-sol\",\"output\":{output},\"usage\":{{\"input_tokens\":17,\"output_tokens\":3,\"total_tokens\":20,\"input_tokens_details\":{{\"cached_tokens\":4}},\"output_tokens_details\":{{\"reasoning_tokens\":1}}}}}}}}"
+                "{{\"type\":\"{kind}\",\"response\":{{\"id\":\"{id}\",\"status\":\"{status}\",\"model\":\"gpt-5.6-sol\",\"service_tier\":\"default\",\"output\":{output},\"usage\":{{\"input_tokens\":17,\"output_tokens\":3,\"total_tokens\":20,\"input_tokens_details\":{{\"cached_tokens\":4}},\"output_tokens_details\":{{\"reasoning_tokens\":1}}}}}}}}"
             ),
         )
     }
@@ -1396,7 +1404,7 @@ mod tests {
             .expect("created");
         let event = sse(
             "response.incomplete",
-            r#"{"type":"response.incomplete","response":{"id":"resp_5","status":"incomplete","model":"gpt-5.6-sol","output":[],"incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":5,"output_tokens":7,"total_tokens":12}}}"#,
+            r#"{"type":"response.incomplete","response":{"id":"resp_5","status":"incomplete","model":"gpt-5.6-sol","service_tier":"default","output":[],"incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":5,"output_tokens":7,"total_tokens":12}}}"#,
         );
         incomplete.push(event.as_bytes()).expect("incomplete");
         let AgentProviderStreamConclusion::Completed(completion) =
@@ -1411,7 +1419,7 @@ mod tests {
         failed.push(created("resp_6").as_bytes()).expect("created");
         let event = sse(
             "response.failed",
-            r#"{"type":"response.failed","response":{"id":"resp_6","status":"failed","model":"gpt-5.6-sol","output":[],"usage":null,"error":{"code":"server_error","message":"must not escape"}}}"#,
+            r#"{"type":"response.failed","response":{"id":"resp_6","status":"failed","model":"gpt-5.6-sol","service_tier":"default","output":[],"usage":null,"error":{"code":"server_error","message":"must not escape"}}}"#,
         );
         failed.push(event.as_bytes()).expect("failure");
         let conclusion = failed.finish().expect("terminal");
@@ -1438,6 +1446,17 @@ mod tests {
 
     #[test]
     fn model_response_identity_usage_and_terminal_sequence_are_exact() {
+        let mut billing_mismatch =
+            OpenAiResponsesStreamDecoder::try_new(call(), &config(64)).expect("decoder");
+        assert_eq!(
+            billing_mismatch.push(
+                created("resp_tier")
+                    .replace("\"default\"", "\"priority\"")
+                    .as_bytes()
+            ),
+            Err(AgentProviderProtocolError::Event)
+        );
+
         let mut decoder =
             OpenAiResponsesStreamDecoder::try_new(call(), &config(64)).expect("decoder");
         assert_eq!(
@@ -1459,7 +1478,7 @@ mod tests {
         decoder.push(created("resp_8").as_bytes()).expect("created");
         let bad_usage = sse(
             "response.completed",
-            r#"{"type":"response.completed","response":{"id":"resp_8","status":"completed","model":"gpt-5.6-sol","output":[],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":99}}}"#,
+            r#"{"type":"response.completed","response":{"id":"resp_8","status":"completed","model":"gpt-5.6-sol","service_tier":"default","output":[],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":99}}}"#,
         );
         assert_eq!(
             decoder.push(bad_usage.as_bytes()),

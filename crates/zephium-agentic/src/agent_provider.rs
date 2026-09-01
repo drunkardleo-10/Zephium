@@ -59,6 +59,11 @@ pub const MAX_AGENT_PROVIDER_TOOL_ARGUMENT_BYTES: u32 = 32 * 1024;
 /// Maximum provider-requested retry delay surfaced to policy.
 pub const MAX_AGENT_PROVIDER_RETRY_AFTER_MILLIS: u64 = 24 * 60 * 60 * 1_000;
 
+pub(crate) const OPENAI_STANDARD_SERVICE_TIER: &str = "default";
+pub(crate) const ANTHROPIC_STANDARD_SERVICE_TIER_REQUEST: &str = "standard_only";
+pub(crate) const ANTHROPIC_STANDARD_SERVICE_TIER_RESPONSE: &str = "standard";
+pub(crate) const ANTHROPIC_GLOBAL_INFERENCE_GEO: &str = "global";
+
 /// First provider protocols qualified through the shared adapter contract.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentProviderKind {
@@ -66,6 +71,18 @@ pub enum AgentProviderKind {
     OpenAiResponses,
     /// Anthropic Messages API.
     AnthropicMessages,
+}
+
+/// Fixed provider billing mode selected by the immutable request contract.
+///
+/// This is pricing identity, not account authority. Provider terminal events
+/// must attest the matching actual mode before reported usage may be priced.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgentProviderBillingClass {
+    /// OpenAI standard performance and pricing via `service_tier: default`.
+    OpenAiDefault,
+    /// Anthropic standard capacity and global inference.
+    AnthropicStandardGlobal,
 }
 
 /// Provider-neutral single-owner decoder for one exact streamed model call.
@@ -355,6 +372,16 @@ impl AgentProviderCallConfig {
     /// Selected provider protocol.
     pub const fn provider(&self) -> AgentProviderKind {
         self.provider
+    }
+
+    /// Exact billing mode encoded into and required from the provider call.
+    pub const fn billing_class(&self) -> AgentProviderBillingClass {
+        match self.provider {
+            AgentProviderKind::OpenAiResponses => AgentProviderBillingClass::OpenAiDefault,
+            AgentProviderKind::AnthropicMessages => {
+                AgentProviderBillingClass::AnthropicStandardGlobal
+            }
+        }
     }
 
     /// Exact selected provider model revision.
@@ -682,9 +709,14 @@ impl AgentProviderUsage {
         cache_write_input_tokens: u64,
         reasoning_output_tokens: u64,
     ) -> Result<Self, AgentProviderContractError> {
+        let priced_input_subsets = match cached_input_tokens.checked_add(cache_write_input_tokens) {
+            Some(tokens) => tokens,
+            None => return Err(AgentProviderContractError::Usage),
+        };
         if input_tokens.checked_add(output_tokens).is_none()
             || cached_input_tokens > input_tokens
             || cache_write_input_tokens > input_tokens
+            || priced_input_subsets > input_tokens
             || reasoning_output_tokens > output_tokens
         {
             return Err(AgentProviderContractError::Usage);
@@ -961,6 +993,10 @@ mod tests {
             AgentProviderStreamBudget::STANDARD,
         )
         .expect("valid config");
+        assert_eq!(
+            config.billing_class(),
+            AgentProviderBillingClass::OpenAiDefault
+        );
         assert_eq!(config.fixed_input_tokens(), 512);
         assert_eq!(config.max_output_tokens(), 4_096);
         assert_eq!(config.stream_budget().max_tool_calls(), 8);
@@ -1040,6 +1076,10 @@ mod tests {
         assert_eq!(usage.reasoning_output_tokens(), 700);
         assert_eq!(
             AgentProviderUsage::try_new(10, 5, 11, 0, 0),
+            Err(AgentProviderContractError::Usage)
+        );
+        assert_eq!(
+            AgentProviderUsage::try_new(10, 5, 7, 4, 0),
             Err(AgentProviderContractError::Usage)
         );
         assert_eq!(

@@ -21,7 +21,7 @@ use super::{
     AgentProviderProtocolError, AgentProviderStopReason, AgentProviderStreamBatch,
     AgentProviderStreamBudget, AgentProviderStreamConclusion, AgentProviderStreamEvent,
     AgentProviderStreamStats, AgentProviderTerminalFailure, AgentProviderTextDelta,
-    AgentProviderUsage,
+    AgentProviderUsage, ANTHROPIC_GLOBAL_INFERENCE_GEO, ANTHROPIC_STANDARD_SERVICE_TIER_RESPONSE,
 };
 
 const MAX_ANTHROPIC_MESSAGE_ID_BYTES: usize = 128;
@@ -67,7 +67,12 @@ struct UsageState {
 }
 
 impl UsageState {
-    fn from_start(usage: AnthropicStartUsage) -> Result<Self, AgentProviderProtocolError> {
+    fn from_start(usage: AnthropicStartUsage<'_>) -> Result<Self, AgentProviderProtocolError> {
+        if usage.service_tier != ANTHROPIC_STANDARD_SERVICE_TIER_RESPONSE
+            || usage.inference_geo != ANTHROPIC_GLOBAL_INFERENCE_GEO
+        {
+            return Err(AgentProviderProtocolError::Usage);
+        }
         let state = Self {
             input_tokens: usage.input_tokens,
             output_tokens: usage.output_tokens,
@@ -685,11 +690,11 @@ struct MessageStartHead<'a> {
     stop_reason: Option<&'a str>,
     #[serde(borrow)]
     stop_sequence: Option<&'a str>,
-    usage: AnthropicStartUsage,
+    usage: AnthropicStartUsage<'a>,
 }
 
 #[derive(Clone, Copy, Deserialize)]
-struct AnthropicStartUsage {
+struct AnthropicStartUsage<'a> {
     input_tokens: u64,
     output_tokens: u64,
     #[serde(default)]
@@ -697,6 +702,10 @@ struct AnthropicStartUsage {
     #[serde(default)]
     cache_creation_input_tokens: u64,
     output_tokens_details: Option<AnthropicOutputDetails>,
+    #[serde(borrow)]
+    service_tier: &'a str,
+    #[serde(borrow)]
+    inference_geo: &'a str,
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -870,7 +879,9 @@ mod tests {
                         "cache_creation_input_tokens": 3,
                         "cache_read_input_tokens": 5,
                         "output_tokens": 1,
-                        "output_tokens_details": {"thinking_tokens": 0}
+                        "output_tokens_details": {"thinking_tokens": 0},
+                        "service_tier": "standard",
+                        "inference_geo": "global"
                     }
                 }
             })
@@ -959,6 +970,25 @@ mod tests {
         assert_eq!(completion.usage().output_tokens(), 9);
         assert_eq!(completion.stats().output_text_bytes(), 11);
         assert_eq!(completion.stats().events(), 9);
+    }
+
+    #[test]
+    fn provider_billing_mode_must_attest_standard_global_processing() {
+        for (expected, replacement) in [
+            (
+                "\"service_tier\":\"standard\"",
+                "\"service_tier\":\"priority\"",
+            ),
+            ("\"inference_geo\":\"global\"", "\"inference_geo\":\"us\""),
+        ] {
+            let mut decoder = AnthropicMessagesStreamDecoder::try_new(call(), &config(64, 1_024))
+                .expect("decoder");
+            let mismatched = start("msg_billing").replace(expected, replacement);
+            assert_eq!(
+                decoder.push(mismatched.as_bytes()),
+                Err(AgentProviderProtocolError::Usage)
+            );
+        }
     }
 
     #[test]

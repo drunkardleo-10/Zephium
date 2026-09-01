@@ -12,11 +12,12 @@ stream-budget, and bounded SSE framing contracts are implemented. OpenAI
 Responses and Anthropic Messages plain-text, tool-call, error, stop, and usage
 stream normalization are implemented behind one provider-neutral decoder.
 The closed browser-tool proposal decoder and fixed request/tool-schema encoding
-for both providers are implemented with atomic model-input commitment. The
-durable Store adapter and fixed BYOK HTTPS transport are implemented. Terminal
-transport evidence now selects exact-zero, reservation-ceiling, or move-only
-pricing-required policy settlement without exposing active authority. Live
-provider and fixed pricing-catalog qualification remain pending.
+for both providers are implemented with atomic model-input commitment and a
+fixed, provider-attested billing class. The durable Store adapter and fixed
+BYOK HTTPS transport are implemented. Terminal transport evidence now selects
+exact-zero, reservation-ceiling, or move-only pricing-required policy
+settlement without exposing active authority. Live provider and fixed
+pricing-catalog qualification remain pending.
 
 This evidence describes policy input facts only. A manifest cannot authorize a
 browser action, model call, tool call, data transfer, cost, or native resource.
@@ -438,12 +439,14 @@ browser action, model call, tool call, data transfer, cost, or native resource.
   instruction, the approved objective, one existing token-admitted
   `ZSEM1`/`ZREAD1` payload, and the same 13 closed browser tools. OpenAI sets
   streaming, `store:false`, disabled truncation, and
-  `parallel_tool_calls:false`. Anthropic uses one user turn with two ordered
-  text blocks because its API combines consecutive same-role turns, and sets
-  `tool_choice:auto` plus `disable_parallel_tool_use:true`. Neither body has an
-  arbitrary system prompt, conversation state, metadata, provider-native
-  browser tool, selector, JavaScript, DOM/HTML, CDP, native handle, or secret
-  field.
+  `parallel_tool_calls:false`, plus `service_tier:default`. Anthropic uses one
+  user turn with two ordered text blocks because its API combines consecutive
+  same-role turns, and sets `tool_choice:auto`,
+  `disable_parallel_tool_use:true`, `service_tier:standard_only`, and
+  `inference_geo:global`. The stable Messages API does not receive its
+  beta-only `speed` field. Neither body has an arbitrary system prompt,
+  conversation state, metadata, provider-native browser tool, selector,
+  JavaScript, DOM/HTML, CDP, native handle, or secret field.
 - Every function uses strict structured output. All object fields are required
   and every object recursively has `additionalProperties:false`. OpenAI
   receives the complete schema ranges. Anthropic receives a deterministic
@@ -491,11 +494,12 @@ browser action, model call, tool call, data transfer, cost, or native resource.
   response-header violations, decoder failures, consumer cancellation, and
   body cancellation therefore cannot manufacture zero usage.
 - The transport retains the exact provider/model/tokenizer configuration and
-  joins it to the decoder conclusion and non-cloneable active policy authority.
-  Active authority has no public extraction path. Pre-dispatch failure settles
-  exact zero, preserving committed semantic taint while releasing unused token
-  and cost reservation. Ambiguous post-dispatch failure/cancellation settles
-  the complete reservation ceiling.
+  fixed billing class, and joins them to the decoder conclusion and
+  non-cloneable active policy authority. Active authority has no public
+  extraction path. Pre-dispatch failure settles exact zero, preserving
+  committed semantic taint while releasing unused token and cost reservation.
+  Ambiguous post-dispatch failure/cancellation settles the complete reservation
+  ceiling.
 - A decoder conclusion with provider usage becomes a move-only
   pricing-required settlement. It exposes only the exact redacted configuration,
   normalized counters, and content-free conclusion to the trusted pricing
@@ -513,8 +517,11 @@ browser action, model call, tool call, data transfer, cost, or native resource.
 - The repository boundary gate mechanically pins the two production endpoints,
   rustls/system-proxy dependency feature set, redirect/retry refusal, sensitive
   credential marking, identity encoding, pre-send cancellation proof, and
-  move-only settlement route. It rejects public loopback/custom-endpoint
-  construction, TLS-verification bypass, or active-authority decomposition.
+  move-only settlement route. It also pins both fixed billing classes, their
+  request controls, their decoder attestations, and refusal of the beta-only
+  Anthropic speed field on the stable endpoint. It rejects public
+  loopback/custom-endpoint construction, TLS-verification bypass, or
+  active-authority decomposition.
 
 ## Implemented OpenAI Responses stream slice
 
@@ -532,11 +539,13 @@ browser action, model call, tool call, data transfer, cost, or native resource.
   cannot be silently accepted.
 - Completed/incomplete responses normalize exact input, output, cached,
   cache-write, and reasoning-token counters. `total_tokens` must equal checked
-  input plus output; detail counters must remain subsets. Output-limit,
-  content-filter, and refusal stops are distinct from provider/cancellation
-  failure. A failed stream may truthfully carry no usage so the later policy
-  integration can apply a documented conservative settlement instead of
-  inventing zero usage.
+  input plus output; cached and cache-write counters are disjoint subsets and
+  reasoning remains an output subset. Every lifecycle and terminal response
+  must attest the requested `default` service tier before its usage is trusted.
+  Output-limit, content-filter, and refusal stops are distinct from
+  provider/cancellation failure. A failed stream may truthfully carry no usage
+  so the later policy integration can apply a documented conservative
+  settlement instead of inventing zero usage.
 - Function-call IDs, names, ordered item lifecycle, delta bytes, final
   arguments, item completion, and terminal output are joined exactly. Up to
   the configured call/argument limits, each completed call is emitted only as
@@ -563,9 +572,12 @@ browser action, model call, tool call, data transfer, cost, or native resource.
   through the same closed Rust browser-tool contract.
 - `input_tokens`, cache-read, and cache-creation counters are normalized using
   Anthropic's documented additive input total. Cumulative usage cannot regress;
-  output-reasoning detail remains a subset. Natural completion, client tool
-  use, output/context limits, refusal, custom stop, and paused turns map to the
-  shared stop vocabulary.
+  cache-read and cache-creation are disjoint within that normalized total, and
+  output-reasoning detail remains a subset. Initial usage must attest
+  `service_tier:standard` and `inference_geo:global`, matching the explicit
+  stable request controls, before any provider usage is trusted. Natural
+  completion, client tool use, output/context limits, refusal, custom stop, and
+  paused turns map to the shared stop vocabulary.
 - Thinking/signature blocks, server tools/results, citations deltas, fallback
   blocks, unknown tool names, a second tool block despite disabled parallel
   use, malformed arguments, index/interleaving errors, model mismatch, usage
@@ -633,10 +645,11 @@ transactional append, exact idempotent replay across process reopen,
 substituted-delivery refusal without mutation, independent eight-batch actor
 admission, asynchronous settlement, callback-panic containment, and
 retained-ledger reconciliation.
-Thirty-six provider/request-boundary tests cover configuration/usage/retry ceilings,
+Thirty-seven provider/request-boundary tests cover configuration/usage/retry ceilings,
 fragmented CR/LF/CRLF SSE framing, multiline data, comments, invalid UTF-8,
 line/event/event-count/aggregate-wire exhaustion, exact model/response joins,
-text hashing, terminal usage, output limits, failed/incomplete responses,
+text hashing, terminal usage and billing-class attestation, output limits,
+failed/incomplete responses,
 typed OpenAI function-call and Anthropic content-block lifecycles, cumulative
 cache-aware Anthropic usage, unknown future events, typed stream errors,
 truncated/malformed/empty tool arguments, every closed browser tool and semantic

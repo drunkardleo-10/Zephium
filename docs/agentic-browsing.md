@@ -545,8 +545,11 @@ settles exact zero provider usage and cost while retaining its already-committed
 semantic taint. Once send may have been polled, a terminal result without
 trustworthy provider usage charges the complete token and cost reservation and
 records that charge as a conservative ceiling. Provider-reported usage retains
-the exact fixed provider, model, and tokenizer revision in a move-only pricing
-requirement; policy authority cannot be extracted or a completed call settled
+the exact fixed provider, model, tokenizer revision, and billing class in a
+move-only pricing requirement. OpenAI requests require the default service
+tier; Anthropic requests require standard-only capacity and global inference.
+The stream decoder must attest those actual classes before provider usage can
+reach pricing. Policy authority cannot be extracted or a completed call settled
 until the matching trusted pricing revision supplies cost.
 This is intentionally stricter than assuming an errored `send` transmitted no
 bytes.
