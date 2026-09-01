@@ -52,6 +52,10 @@ cargo clippy --locked -p xtask --all-targets -- -D warnings
   not physical-device behavioral evidence.
 - The Browse named-device baseline intentionally has no values. No CPU, memory,
   GPU/compositor, energy, wakeup, or input-latency budget has been inferred.
+- Checked-priced model receipts now preserve a content-free exact schedule
+  digest, provider/billing class, catalog revision, and normalized
+  cache/cache-write/reasoning subsets for reproducible aggregate metrics. No
+  production catalog entry or live provider result is implied.
 
 The authoritative aggregate records and exact remaining blockers are in
 `native-input-matrix-v1.json` and `browse-baseline-v1.json`.

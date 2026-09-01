@@ -26,12 +26,12 @@ pub use effect::{
 use crate::semantic_diff::SemanticObservationFingerprint;
 use crate::{
     AgentAccountScope, AgentContextAccountBinding, AgentPlanLeaseId, AgentPlanNodeId,
-    AgentPolicyInstant, AgentProviderPricedUsage, AgentRunBudget, AgentRunManifest,
-    AgentRunManifestId, ContextJoin, SemanticActionAttemptId, SemanticEffectClass,
-    SemanticModelPayload, SemanticObservation, SemanticObservationAcknowledgement,
-    SemanticObservationGeneration, SemanticObservationId, SemanticOrigin,
-    SemanticReadDeliveryReceipt, SemanticReadModelPayload, SemanticReadResult, SemanticReferenceId,
-    SemanticSensitivity, SemanticTrust,
+    AgentPolicyInstant, AgentProviderPricedUsage, AgentProviderPricingAttribution, AgentRunBudget,
+    AgentRunManifest, AgentRunManifestId, ContextJoin, SemanticActionAttemptId,
+    SemanticEffectClass, SemanticModelPayload, SemanticObservation,
+    SemanticObservationAcknowledgement, SemanticObservationGeneration, SemanticObservationId,
+    SemanticOrigin, SemanticReadDeliveryReceipt, SemanticReadModelPayload, SemanticReadResult,
+    SemanticReferenceId, SemanticSensitivity, SemanticTrust,
 };
 
 /// Maximum model calls reserved or active in one run policy.
@@ -582,6 +582,15 @@ pub enum AgentModelUsageAccounting {
     ReservationCeiling,
 }
 
+#[derive(Clone, Copy)]
+struct TerminalModelUsage {
+    accounting: AgentModelUsageAccounting,
+    pricing_attribution: Option<AgentProviderPricingAttribution>,
+    input_tokens: u64,
+    output_tokens: u64,
+    cost_micro_usd: u64,
+}
+
 /// Content-free terminal model-call accounting receipt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AgentModelCallReceipt {
@@ -591,6 +600,7 @@ pub struct AgentModelCallReceipt {
     node: AgentPlanNodeId,
     settlement: AgentModelCallSettlement,
     usage_accounting: AgentModelUsageAccounting,
+    pricing_attribution: Option<AgentProviderPricingAttribution>,
     input_tokens: u64,
     output_tokens: u64,
     cost_micro_usd: u64,
@@ -627,6 +637,11 @@ impl AgentModelCallReceipt {
         self.usage_accounting
     }
 
+    /// Checked provider billing, pricing, and usage-subset attribution, if available.
+    pub const fn pricing_attribution(self) -> Option<AgentProviderPricingAttribution> {
+        self.pricing_attribution
+    }
+
     /// Provider-accounted or conservatively charged input tokens.
     pub const fn input_tokens(self) -> u64 {
         self.input_tokens
@@ -657,6 +672,7 @@ impl AgentModelCallReceipt {
             node,
             settlement,
             usage_accounting: AgentModelUsageAccounting::Exact,
+            pricing_attribution: None,
             input_tokens: 0,
             output_tokens: 0,
             cost_micro_usd: 0,
@@ -880,10 +896,13 @@ impl AgentRunPolicy {
         self.settle_validated_model_call(
             index,
             settlement,
-            AgentModelUsageAccounting::Exact,
-            input_tokens,
-            output_tokens,
-            cost_micro_usd,
+            TerminalModelUsage {
+                accounting: AgentModelUsageAccounting::Exact,
+                pricing_attribution: None,
+                input_tokens,
+                output_tokens,
+                cost_micro_usd,
+            },
         )
     }
 
@@ -900,14 +919,17 @@ impl AgentRunPolicy {
         priced: AgentProviderPricedUsage,
     ) -> Result<AgentModelCallReceipt, AgentPolicyError> {
         let index = self.validate_active_model_call(&active)?;
-        let (usage, cost_ceiling_micro_usd) = priced.into_policy_parts();
+        let (usage, cost_ceiling_micro_usd, pricing_attribution) = priced.into_policy_parts();
         self.settle_validated_model_call(
             index,
             settlement,
-            AgentModelUsageAccounting::PricedCeiling,
-            usage.input_tokens(),
-            usage.output_tokens(),
-            cost_ceiling_micro_usd,
+            TerminalModelUsage {
+                accounting: AgentModelUsageAccounting::PricedCeiling,
+                pricing_attribution: Some(pricing_attribution),
+                input_tokens: usage.input_tokens(),
+                output_tokens: usage.output_tokens(),
+                cost_micro_usd: cost_ceiling_micro_usd,
+            },
         )
     }
 
@@ -930,10 +952,13 @@ impl AgentRunPolicy {
         self.settle_validated_model_call(
             index,
             settlement.terminal(),
-            AgentModelUsageAccounting::ReservationCeiling,
-            input_tokens,
-            output_tokens,
-            cost_micro_usd,
+            TerminalModelUsage {
+                accounting: AgentModelUsageAccounting::ReservationCeiling,
+                pricing_attribution: None,
+                input_tokens,
+                output_tokens,
+                cost_micro_usd,
+            },
         )
     }
 
@@ -959,16 +984,19 @@ impl AgentRunPolicy {
         &mut self,
         index: usize,
         settlement: AgentModelCallSettlement,
-        usage_accounting: AgentModelUsageAccounting,
-        input_tokens: u64,
-        output_tokens: u64,
-        cost_micro_usd: u64,
+        usage: TerminalModelUsage,
     ) -> Result<AgentModelCallReceipt, AgentPolicyError> {
         let call = &self.calls[index];
-        let provider_usage_exceeded = input_tokens > call.input_token_limit
-            || output_tokens > call.output_token_limit
-            || cost_micro_usd > call.cost_limit;
-        let total_tokens = match input_tokens.checked_add(output_tokens) {
+        if matches!(usage.accounting, AgentModelUsageAccounting::PricedCeiling)
+            != usage.pricing_attribution.is_some()
+        {
+            self.sealed = true;
+            return Err(AgentPolicyError::Invariant);
+        }
+        let provider_usage_exceeded = usage.input_tokens > call.input_token_limit
+            || usage.output_tokens > call.output_token_limit
+            || usage.cost_micro_usd > call.cost_limit;
+        let total_tokens = match usage.input_tokens.checked_add(usage.output_tokens) {
             Some(total) => total,
             None => {
                 self.sealed = true;
@@ -982,7 +1010,7 @@ impl AgentRunPolicy {
         let consumed = ConsumedUsage {
             operations: 1,
             model_tokens: total_tokens,
-            cost_micro_usd,
+            cost_micro_usd: usage.cost_micro_usd,
         };
         let run_consumed = match add_usage(self.consumed, consumed) {
             Ok(usage) => usage,
@@ -1011,10 +1039,11 @@ impl AgentRunPolicy {
             lease: call.lease,
             node: call.node,
             settlement,
-            usage_accounting,
-            input_tokens,
-            output_tokens,
-            cost_micro_usd,
+            usage_accounting: usage.accounting,
+            pricing_attribution: usage.pricing_attribution,
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cost_micro_usd: usage.cost_micro_usd,
         })
     }
 
@@ -2355,6 +2384,7 @@ mod tests {
         assert_eq!(receipt.lease(), fixture.lease);
         assert_eq!(receipt.settlement(), AgentModelCallSettlement::Completed);
         assert_eq!(receipt.usage_accounting(), AgentModelUsageAccounting::Exact);
+        assert_eq!(receipt.pricing_attribution(), None);
         assert_eq!(receipt.input_tokens(), 55);
         assert_eq!(receipt.output_tokens(), 10);
         assert_eq!(receipt.cost_micro_usd(), 80);
@@ -2427,6 +2457,7 @@ mod tests {
             receipt.usage_accounting(),
             AgentModelUsageAccounting::ReservationCeiling
         );
+        assert_eq!(receipt.pricing_attribution(), None);
         assert_eq!(receipt.input_tokens(), 60);
         assert_eq!(receipt.output_tokens(), 20);
         assert_eq!(receipt.cost_micro_usd(), 100);

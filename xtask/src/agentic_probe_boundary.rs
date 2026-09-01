@@ -439,7 +439,9 @@ fn validate_provider_pricing_contract(
         ".checked_sub(priced_input_subsets)",
         "u64::try_from(rounded)",
         "pubstructAgentProviderPricedUsage",
-        "pub(crate)fninto_policy_parts(self)->(AgentProviderUsage,u64)",
+        "pubstructAgentProviderPricingAttribution",
+        "schedule_guard:[u8;32]",
+        "AgentProviderPricingAttribution",
     ] {
         if !pricing.contains(required) {
             return Err(format!(
@@ -453,6 +455,8 @@ fn validate_provider_pricing_contract(
         "PricedCeiling",
         "pubfnsettle_model_call_priced(",
         "AgentModelUsageAccounting::PricedCeiling",
+        "pricing_attribution:Option<AgentProviderPricingAttribution>",
+        "pricing_attribution:Some(pricing_attribution)",
     ] {
         if !policy.contains(required) {
             return Err(format!(
@@ -1015,12 +1019,17 @@ mod tests {
             usage.input_tokens().checked_sub(priced_input_subsets);
             u64::try_from(rounded);
             pub struct AgentProviderPricedUsage;
-            pub(crate) fn into_policy_parts(self) -> (AgentProviderUsage, u64) {}
+            pub struct AgentProviderPricingAttribution { schedule_guard: [u8; 32] }
+            fn retain(value: AgentProviderPricingAttribution) {}
         "#;
         let policy = r#"
             enum AgentModelUsageAccounting { PricedCeiling }
+            struct Receipt {
+                pricing_attribution: Option<AgentProviderPricingAttribution>,
+            }
             pub fn settle_model_call_priced() {
                 AgentModelUsageAccounting::PricedCeiling;
+                Receipt { pricing_attribution: Some(pricing_attribution) };
             }
         "#;
         let transport = r#"

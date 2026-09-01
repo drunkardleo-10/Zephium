@@ -21,9 +21,10 @@ use anthropic::AnthropicMessagesStreamDecoder;
 use openai::OpenAiResponsesStreamDecoder;
 
 pub use pricing::{
-    AgentProviderPricedUsage, AgentProviderPricingContractError, AgentProviderPricingError,
-    AgentProviderPricingProfile, AgentProviderPricingRevision, AgentProviderPricingSchedule,
-    AgentProviderTokenRates, MAX_AGENT_PROVIDER_RATE_MICRO_USD_PER_MILLION_TOKENS,
+    AgentProviderPricedUsage, AgentProviderPricingAttribution, AgentProviderPricingContractError,
+    AgentProviderPricingError, AgentProviderPricingProfile, AgentProviderPricingRevision,
+    AgentProviderPricingSchedule, AgentProviderTokenRates,
+    MAX_AGENT_PROVIDER_RATE_MICRO_USD_PER_MILLION_TOKENS,
 };
 
 use crate::{

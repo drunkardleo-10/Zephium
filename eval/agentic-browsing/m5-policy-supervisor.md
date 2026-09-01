@@ -18,7 +18,10 @@ BYOK HTTPS transport are implemented. Terminal transport evidence now selects
 exact-zero, reservation-ceiling, or move-only pricing-required policy
 settlement without exposing active authority. Checked provider pricing and its
 distinct catalog-ceiling accounting are implemented without product rate
-entries. Live provider and production pricing-catalog qualification remain
+entries. A priced terminal receipt retains content-free provider/billing,
+catalog revision, exact schedule digest, and cache/cache-write/reasoning usage
+subsets; it retains no model label, tokenizer label, rates, response, prompt, or
+credential. Live provider and production pricing-catalog qualification remain
 pending.
 
 This evidence describes policy input facts only. A manifest cannot authorize a

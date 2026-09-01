@@ -2288,6 +2288,15 @@ mod tests {
         assert_eq!(receipt.input_tokens(), 17);
         assert_eq!(receipt.output_tokens(), 3);
         assert_eq!(receipt.cost_micro_usd(), 80);
+        let attribution = receipt
+            .pricing_attribution()
+            .expect("checked pricing attribution");
+        assert_eq!(attribution.provider(), AgentProviderKind::OpenAiResponses);
+        assert_eq!(attribution.pricing_revision().value(), 1);
+        assert_eq!(attribution.schedule_guard(), schedule.accounting_guard());
+        assert_eq!(attribution.cached_input_tokens(), 0);
+        assert_eq!(attribution.cache_write_input_tokens(), 0);
+        assert_eq!(attribution.reasoning_output_tokens(), 0);
         assert!(transport.snapshot().expect("snapshot").is_quiescent());
 
         let captured = server.finish();
@@ -2375,6 +2384,14 @@ mod tests {
         assert_eq!(receipt.input_tokens(), 15);
         assert_eq!(receipt.output_tokens(), 1);
         assert_eq!(receipt.cost_micro_usd(), 25);
+        let attribution = receipt
+            .pricing_attribution()
+            .expect("checked pricing attribution");
+        assert_eq!(attribution.provider(), AgentProviderKind::AnthropicMessages);
+        assert_eq!(attribution.schedule_guard(), schedule.accounting_guard());
+        assert_eq!(attribution.cached_input_tokens(), 5);
+        assert_eq!(attribution.cache_write_input_tokens(), 3);
+        assert_eq!(attribution.reasoning_output_tokens(), 0);
         assert!(transport.snapshot().expect("snapshot").is_quiescent());
         server.finish();
     }
