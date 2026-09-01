@@ -542,6 +542,19 @@ time as the settle start. A typed execution failure, contract violation, action
 substitution, or deadline overflow returns the retained policy authority and
 creates no tracker, timer, worker, or retry path.
 
+Pending settlement is retained by one zero-idle single-owner coordinator. Its
+empty vector allocates nothing; it admits at most four applied actions and one
+per logical context. Each accepted fact or borrowed snapshot consumes a
+move-only routing reservation and returns either one replacement reservation
+with the exact next wake or the complete terminal authority for verification.
+A premature wake, replaced schedule, wrong attempt, malformed snapshot, or
+cross-request reservation cannot release retained debt. Shutdown seals new
+pending admission while preserving exact terminal drain. This is bounded timer
+planning only: it creates no timer, callback, task, native object, snapshot
+copy, or retry loop. Pending state exposes neither mutable tracker access nor a
+public destructuring path; only the coordinator-minted terminal owner releases
+the tracker and policy authority for independent verification or typed failure.
+
 ### 8.2 Input backends
 
 The runtime can choose among:

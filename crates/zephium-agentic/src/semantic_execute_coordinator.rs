@@ -9,7 +9,7 @@ use std::fmt;
 
 use thiserror::Error;
 
-use crate::semantic_execute::SemanticActionExecutionCoordinatorKey;
+use crate::semantic_execute::SemanticActionCoordinatorKey;
 use crate::{
     prepare_semantic_action_execution, AgentActiveEffect, ContextDispatch, ContextPortFailure,
     SemanticActionExecutionInstant, SemanticActionExecutionOutcome, SemanticActionExecutionPending,
@@ -24,7 +24,7 @@ pub const MAX_PENDING_SEMANTIC_ACTION_EXECUTIONS: usize = MAX_AGENT_PENDING_EFFE
 /// Move-only cancellation/refusal handle for one coordinator-owned request.
 #[must_use]
 pub struct SemanticActionExecutionReservation {
-    key: SemanticActionExecutionCoordinatorKey,
+    key: SemanticActionCoordinatorKey,
     deadline: SemanticActionExecutionInstant,
 }
 

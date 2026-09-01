@@ -61,6 +61,7 @@ mod semantic_read_model;
 mod semantic_runtime;
 mod semantic_screenshot;
 mod semantic_settle;
+mod semantic_settle_coordinator;
 mod semantic_verify;
 mod semantic_wire;
 mod sign_in_handoff;
@@ -397,6 +398,13 @@ pub use semantic_settle::{
     SemanticActionAttemptId, SemanticActionFailure, SemanticActionRecoveryHint,
     SemanticSettleError, SemanticSettleEvent, SemanticSettleFact, SemanticSettleInstant,
     SemanticSettleStatus, SemanticSettleTracker, MAX_SEMANTIC_SETTLE_EVENTS,
+};
+pub use semantic_settle_coordinator::{
+    SemanticActionSettlementAdmissionRefusal, SemanticActionSettlementAdvanceRefusal,
+    SemanticActionSettlementCoordinator, SemanticActionSettlementCoordinatorError,
+    SemanticActionSettlementCoordinatorStatus, SemanticActionSettlementReservation,
+    SemanticActionSettlementTerminal, SemanticActionSettlementUpdate,
+    MAX_PENDING_SEMANTIC_ACTION_SETTLEMENTS,
 };
 pub use semantic_verify::{
     verify_semantic_action, SemanticEffectEvidence, SemanticEffectProofKind,

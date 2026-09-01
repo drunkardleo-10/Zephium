@@ -6,7 +6,8 @@ fresh-snapshot structural revalidation, event-driven bounded settlement,
 independent effect verification, and acknowledged action-result diff/fresh-state
 finalization and exact bounded batch-terminal aggregation, plus a one-shot
 policy-to-native execution handoff and exact consuming native-to-settlement
-transition, bounded semantic read/transport, closed
+transition with a move-only bounded settlement owner, bounded semantic
+read/transport, closed
 structured extraction admission, exact tool-result/constrained-output
 extraction transport, and the one-shot viewport screenshot contract are
 implemented.
@@ -139,6 +140,21 @@ are trusted, or that M4 is complete.
   deadline overflow returns policy authority without creating a tracker. The
   transition owns no task, timer, queue, retry, native object, or content
   buffer.
+- A zero-idle settlement coordinator retains the complete applied authority
+  while a typed settle condition remains pending. Its empty `Vec` allocates
+  only on first use; it admits at most four applied actions process-wide and
+  one per logical context. Every accepted fact or borrowed exact snapshot
+  consumes a move-only reservation and returns either one replacement
+  reservation carrying the current exact wake or the complete terminal owner.
+  Premature wakes, replaced schedules, wrong attempts, malformed snapshots,
+  unknown/cross-coordinator reservations, duplicate identities, context
+  overlap, and capacity refusal do not release retained debt. Shutdown seals
+  admission but preserves terminal drain, including an already-ready immediate
+  action. The coordinator owns no physical timer, callback, task, native
+  object, snapshot copy, page content, or retry loop.
+  Pending start state has no public mutable-tracker or destructuring escape;
+  only the coordinator-minted terminal owner releases tracker and policy
+  authority for verification or typed failure.
 - A zero-idle single-owner coordinator now retains the active policy half while
   native work is outstanding. Its empty `Vec` allocates only on first use; it
   admits at most four requests process-wide and one per logical context,
@@ -532,7 +548,12 @@ Settlement coverage includes immediate readiness, exact deadline derivation
 and overflow, mutation-quiet restart, exact adjacent target-state snapshots,
 attempt and monotonic-clock correlation, exact navigation/cancellation/human
 takeover transitions, terminal idempotence, event exhaustion, typed recovery,
-and content-redacted diagnostics.
+and content-redacted diagnostics. Settlement-owner coverage additionally
+includes zero-idle immediate passthrough, move-only wake replacement,
+premature/replaced wake refusal, exact borrowed-snapshot routing, reservation
+recovery after rejected facts/snapshots, one-per-context and four-process-wide
+capacity, duplicate identity, cross-coordinator substitution, seal-and-drain,
+and content-bearing action diagnostic redaction.
 
 Verification coverage includes exact fill before/after match and redaction,
 pre-existing-value refusal,

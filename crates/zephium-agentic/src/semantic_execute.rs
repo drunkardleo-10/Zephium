@@ -157,14 +157,14 @@ struct NativeCorrelation {
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
-pub(crate) struct SemanticActionExecutionCoordinatorKey {
+pub(crate) struct SemanticActionCoordinatorKey {
     effect: AgentEffectId,
     attempt: SemanticActionAttemptId,
     context: ContextIdentity,
     guard: [u8; 32],
 }
 
-impl SemanticActionExecutionCoordinatorKey {
+impl SemanticActionCoordinatorKey {
     pub(crate) const fn effect(self) -> AgentEffectId {
         self.effect
     }
@@ -179,8 +179,8 @@ impl SemanticActionExecutionCoordinatorKey {
 }
 
 impl NativeCorrelation {
-    const fn coordinator_key(&self) -> SemanticActionExecutionCoordinatorKey {
-        SemanticActionExecutionCoordinatorKey {
+    const fn coordinator_key(&self) -> SemanticActionCoordinatorKey {
+        SemanticActionCoordinatorKey {
             effect: self.effect,
             attempt: self.attempt,
             context: self.frame.context().identity(),
@@ -228,7 +228,7 @@ impl SemanticActionExecutionPending {
         self.correlation.deadline
     }
 
-    pub(crate) const fn coordinator_key(&self) -> SemanticActionExecutionCoordinatorKey {
+    pub(crate) const fn coordinator_key(&self) -> SemanticActionCoordinatorKey {
         self.correlation.coordinator_key()
     }
 
@@ -531,7 +531,7 @@ impl fmt::Debug for SemanticActionNativeSettlement {
 }
 
 impl SemanticActionNativeSettlement {
-    pub(crate) const fn coordinator_key(&self) -> SemanticActionExecutionCoordinatorKey {
+    pub(crate) const fn coordinator_key(&self) -> SemanticActionCoordinatorKey {
         self.correlation.coordinator_key()
     }
 }
@@ -650,12 +650,17 @@ impl fmt::Debug for SemanticActionExecutionOutcome {
 /// attempt from starting settlement under unrelated policy authority.
 #[must_use]
 pub struct SemanticActionSettlementStart {
+    key: SemanticActionCoordinatorKey,
     active: AgentActiveEffect,
     execution: SemanticActionExecutionApplied,
     tracker: SemanticSettleTracker,
 }
 
 impl SemanticActionSettlementStart {
+    pub(crate) const fn coordinator_key(&self) -> SemanticActionCoordinatorKey {
+        self.key
+    }
+
     /// Exact dispatched policy authority retained through settlement.
     pub const fn active(&self) -> &AgentActiveEffect {
         &self.active
@@ -671,13 +676,11 @@ impl SemanticActionSettlementStart {
         &self.tracker
     }
 
-    /// Mutable settlement state for trusted-shell facts and snapshots.
-    pub const fn tracker_mut(&mut self) -> &mut SemanticSettleTracker {
+    pub(crate) const fn tracker_mut(&mut self) -> &mut SemanticSettleTracker {
         &mut self.tracker
     }
 
-    /// Separates policy authority from settlement state for later verification.
-    pub fn into_parts(
+    pub(crate) fn into_parts(
         self,
     ) -> (
         AgentActiveEffect,
@@ -766,7 +769,14 @@ pub fn begin_semantic_action_settlement(
                     applied.settle_started_at(),
                 ) {
                     Ok(tracker) => {
+                        let key = SemanticActionCoordinatorKey {
+                            effect: active.id(),
+                            attempt: active.attempt(),
+                            context: action.frame().context().identity(),
+                            guard: action.verification_guard(),
+                        };
                         return Ok(SemanticActionSettlementStart {
+                            key,
                             active,
                             execution: applied,
                             tracker,

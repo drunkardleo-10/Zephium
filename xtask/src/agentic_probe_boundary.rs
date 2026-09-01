@@ -42,6 +42,8 @@ const AGENTIC_SEMANTIC_ACTION: &str = "crates/zephium-agentic/src/semantic_actio
 const AGENTIC_SEMANTIC_EXECUTE: &str = "crates/zephium-agentic/src/semantic_execute.rs";
 const AGENTIC_SEMANTIC_EXECUTE_COORDINATOR: &str =
     "crates/zephium-agentic/src/semantic_execute_coordinator.rs";
+const AGENTIC_SEMANTIC_SETTLE_COORDINATOR: &str =
+    "crates/zephium-agentic/src/semantic_settle_coordinator.rs";
 const AGENTIC_SEMANTIC_SETTLE: &str = "crates/zephium-agentic/src/semantic_settle.rs";
 const AGENTIC_CONTEXT_PORT: &str = "crates/zephium-agentic/src/context_port.rs";
 const AGENTIC_SUPERVISOR: &str = "crates/zephium-agentic/src/agent_supervisor.rs";
@@ -194,6 +196,10 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         &read(repository.join(ENGINE_AGENT_CONTEXT_PORT))?,
     )?;
     validate_semantic_settle_wake(&read(repository.join(AGENTIC_SEMANTIC_SETTLE))?)?;
+    validate_semantic_settlement_coordinator(
+        &read(repository.join(AGENTIC_ROOT))?,
+        &read(repository.join(AGENTIC_SEMANTIC_SETTLE_COORDINATOR))?,
+    )?;
     validate_provider_input_evidence_contract(
         &read(repository.join(AGENTIC_ROOT))?,
         &read(repository.join(AGENTIC_PROVIDER_REQUEST))?,
@@ -2749,6 +2755,8 @@ fn validate_semantic_execution_contract(
         "SemanticSettleInstant::from_millis",
         "pubstructSemanticActionSettlementStart{",
         "execution:SemanticActionExecutionApplied",
+        "pub(crate)constfntracker_mut(",
+        "pub(crate)fninto_parts(",
         "pubstructSemanticActionSettlementRefusal{",
         "active:Box<AgentActiveEffect>",
         "pubfnbegin_semantic_action_settlement(",
@@ -2891,6 +2899,77 @@ fn validate_semantic_settle_wake(settle: &str) -> Result<(), String> {
         if settle.contains(forbidden) {
             return Err(format!(
                 "semantic settlement core acquired imperative timer surface {forbidden}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_semantic_settlement_coordinator(root: &str, coordinator: &str) -> Result<(), String> {
+    let root = compact(root);
+    for required in [
+        "modsemantic_settle_coordinator;",
+        "SemanticActionSettlementCoordinator",
+        "SemanticActionSettlementReservation",
+        "SemanticActionSettlementTerminal",
+        "MAX_PENDING_SEMANTIC_ACTION_SETTLEMENTS",
+    ] {
+        if !root.contains(required) {
+            return Err(format!(
+                "agentic root lost bounded semantic settlement owner {required}"
+            ));
+        }
+    }
+
+    let coordinator = compact(coordinator);
+    for required in [
+        "MAX_PENDING_SEMANTIC_ACTION_SETTLEMENTS:usize=MAX_AGENT_PENDING_EFFECTS",
+        "pending:Vec<SettlementEntry>",
+        "start:SemanticActionSettlementStart",
+        "pubstructSemanticActionSettlementTerminal{",
+        "Terminal(Box<SemanticActionSettlementTerminal>)",
+        "SemanticActionSettlementTerminal::new(",
+        "pubfninto_authority(",
+        "next_wake:SemanticSettleInstant",
+        "start.tracker().status().is_terminal()",
+        "entry.key.context()==key.context()",
+        "self.pending.len()>=MAX_PENDING_SEMANTIC_ACTION_SETTLEMENTS",
+        "self.pending.push(SettlementEntry{key,start})",
+        "self.pending.remove(index).start",
+        "self.pending[index].start.tracker().next_wake()!=Some(reservation.next_wake)",
+        "SemanticActionSettlementCoordinatorError::ScheduleMismatch",
+        "SemanticSettleFact::Tick",
+        "now<reservation.next_wake",
+        "pubfnobserve_snapshot(",
+        "self.sealed=true",
+    ] {
+        if !coordinator.contains(required) {
+            return Err(format!(
+                "semantic settlement coordinator lost required bound {required}"
+            ));
+        }
+    }
+    for forbidden in [
+        "evaluateJavaScript",
+        "callAsyncJavaScript",
+        "querySelector",
+        "CGEvent",
+        "NSEvent",
+        "Input.dispatch",
+        "WKWebView",
+        "WebView2",
+        "std::thread",
+        "std::time",
+        "std::fs",
+        "tokio::",
+        "Mutex<",
+        "Arc<",
+        "sleep(",
+        "interval(",
+    ] {
+        if coordinator.contains(forbidden) {
+            return Err(format!(
+                "semantic settlement coordinator acquired forbidden work/program surface {forbidden}"
             ));
         }
     }
@@ -3873,6 +3952,10 @@ mod tests {
             pub struct SemanticActionSettlementStart {
                 execution: SemanticActionExecutionApplied,
             }
+            impl SemanticActionSettlementStart {
+                pub(crate) const fn tracker_mut(&mut self) {}
+                pub(crate) fn into_parts(self) {}
+            }
             pub struct SemanticActionSettlementRefusal {
                 active: Box<AgentActiveEffect>,
             }
@@ -3963,6 +4046,19 @@ mod tests {
         )
         .is_err());
         assert!(validate_semantic_execution_contract(
+            root,
+            effect,
+            action,
+            &execution.replace(
+                "pub(crate) const fn tracker_mut(&mut self) {}",
+                "pub const fn tracker_mut(&mut self) {}",
+            ),
+            coordinator,
+            context_port,
+            engine_port,
+        )
+        .is_err());
+        assert!(validate_semantic_execution_contract(
             &root.replace("begin_semantic_action_settlement,", ""),
             effect,
             action,
@@ -4038,6 +4134,84 @@ mod tests {
             coordinator,
             context_port,
             &engine_port.replace("ContextDispatch::Unsupported", "ContextDispatch::Scheduled"),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn semantic_settlement_coordination_requires_bounded_move_only_wakes() {
+        let root = r#"
+            mod semantic_settle_coordinator;
+            pub use semantic_settle_coordinator::{
+                SemanticActionSettlementCoordinator,
+                SemanticActionSettlementReservation,
+                SemanticActionSettlementTerminal,
+                MAX_PENDING_SEMANTIC_ACTION_SETTLEMENTS,
+            };
+        "#;
+        let coordinator = r#"
+            const MAX_PENDING_SEMANTIC_ACTION_SETTLEMENTS: usize =
+                MAX_AGENT_PENDING_EFFECTS;
+            struct SettlementEntry {
+                start: SemanticActionSettlementStart,
+            }
+            pub struct SemanticActionSettlementTerminal {
+                start: SemanticActionSettlementStart,
+            }
+            enum Update {
+                Terminal(Box<SemanticActionSettlementTerminal>),
+            }
+            fn terminal(start: SemanticActionSettlementStart) {
+                SemanticActionSettlementTerminal::new(start);
+            }
+            pub fn into_authority() {}
+            struct Reservation {
+                next_wake: SemanticSettleInstant,
+            }
+            struct Coordinator {
+                pending: Vec<SettlementEntry>,
+            }
+            fn begin(&mut self, key: Key, start: SemanticActionSettlementStart) {
+                if start.tracker().status().is_terminal() {}
+                entry.key.context() == key.context();
+                self.pending.len() >= MAX_PENDING_SEMANTIC_ACTION_SETTLEMENTS;
+                self.pending.push(SettlementEntry { key, start });
+            }
+            fn advance(&mut self, index: usize, reservation: Reservation, now: Instant) {
+                if self.pending[index].start.tracker().next_wake()
+                    != Some(reservation.next_wake) {
+                        SemanticActionSettlementCoordinatorError::ScheduleMismatch;
+                }
+                SemanticSettleFact::Tick;
+                if now < reservation.next_wake {}
+                self.pending.remove(index).start;
+            }
+            pub fn observe_snapshot() {}
+            fn seal(&mut self) {
+                self.sealed = true;
+            }
+        "#;
+        validate_semantic_settlement_coordinator(root, coordinator)
+            .expect("bounded settlement owner");
+        assert!(validate_semantic_settlement_coordinator(
+            root,
+            &coordinator.replace(
+                "self.pending.len() >= MAX_PENDING_SEMANTIC_ACTION_SETTLEMENTS;",
+                ""
+            ),
+        )
+        .is_err());
+        assert!(validate_semantic_settlement_coordinator(
+            root,
+            &coordinator.replace(
+                "self.pending[index].start.tracker().next_wake()\n                    != Some(reservation.next_wake)",
+                "false"
+            ),
+        )
+        .is_err());
+        assert!(validate_semantic_settlement_coordinator(
+            root,
+            &format!("{coordinator}\nstd::thread::spawn(run);"),
         )
         .is_err());
     }
