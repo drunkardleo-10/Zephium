@@ -17,6 +17,7 @@ const AGENTIC_POLICY: &str = "crates/zephium-agentic/src/agent_policy.rs";
 const AGENTIC_EFFECT_POLICY: &str = "crates/zephium-agentic/src/agent_policy/effect.rs";
 const AGENTIC_AUDIT: &str = "crates/zephium-agentic/src/agent_audit.rs";
 const AGENTIC_METRICS: &str = "crates/zephium-agentic/src/agent_metrics.rs";
+const AGENTIC_PROGRESS_METRICS: &str = "crates/zephium-agentic/src/agent_progress_metrics.rs";
 const AGENTIC_SUPERVISOR: &str = "crates/zephium-agentic/src/agent_supervisor.rs";
 const AGENTIC_SUPERVISOR_PROGRESS: &str =
     "crates/zephium-agentic/src/agent_supervisor/runtime/progress.rs";
@@ -58,6 +59,11 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     validate_agent_metrics_contract(
         &read(repository.join(AGENTIC_ROOT))?,
         &read(repository.join(AGENTIC_METRICS))?,
+    )?;
+    validate_agent_progress_metrics_contract(
+        &read(repository.join(AGENTIC_ROOT))?,
+        &read(repository.join(AGENTIC_PROGRESS_METRICS))?,
+        &read(repository.join(AGENTIC_AUDIT))?,
     )?;
     validate_provider_billing_contract(
         &read(repository.join(AGENTIC_PROVIDER_ROOT))?,
@@ -376,6 +382,80 @@ fn validate_agent_metrics_contract(root: &str, metrics: &str) -> Result<(), Stri
         if metrics.contains(forbidden) {
             return Err(format!(
                 "run-local accounting metrics acquired forbidden telemetry/persistence seam {forbidden}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_agent_progress_metrics_contract(
+    root: &str,
+    metrics: &str,
+    audit: &str,
+) -> Result<(), String> {
+    let root = compact(root);
+    for required in [
+        "modagent_progress_metrics;",
+        "AgentRunProgressMetrics",
+        "AgentRunProgressSnapshot",
+        "AgentProgressMetricError",
+    ] {
+        if !root.contains(required) {
+            return Err(format!(
+                "agent progress metrics lost its default-core export {required}"
+            ));
+        }
+    }
+
+    let metrics = compact(metrics);
+    for required in [
+        "pubstructAgentRunProgressMetrics",
+        "pubfntry_new(manifest:&AgentRunManifest,supervisor:&AgentRunSupervisor",
+        "pubfnrecord_event(&mutself,event:AgentAuditEvent)->Result<(),AgentProgressMetricError>",
+        "event.matches_manifest_revision(self.manifest,self.manifest_guard,self.supervisor)",
+        "pubconstfnsnapshot(&self)->AgentRunProgressSnapshot",
+        "try_reserve_exact(topology_nodes.len())",
+        "self.active_models.try_reserve_exact(1)",
+        "self.active_effects.try_reserve_exact(1)",
+        "self.takeover_cancellations.try_reserve_exact(1)",
+        "MAX_AGENT_PENDING_MODEL_CALLS",
+        "MAX_AGENT_PENDING_EFFECTS",
+        "MAX_AGENT_PLAN_NODES",
+        "pubconstfnqueue_wait(self)->Option<AgentDurationMetrics>",
+        "pubconstfnmodel(self)->Option<AgentDurationMetrics>",
+        "pubconstfneffect(self)->Option<AgentDurationMetrics>",
+        "pubconstfnhuman_wait(self)->Option<AgentDurationMetrics>",
+        "pubconstfntotal_elapsed_millis(self)->Option<u64>",
+    ] {
+        if !metrics.contains(required) {
+            return Err(format!(
+                "agent progress metrics lost required bounded boundary {required}"
+            ));
+        }
+    }
+    for forbidden in [
+        "traitAgentProgressMetricPort",
+        "implAgentAuditPort",
+        "SerializeforAgentRunProgressMetrics",
+        "DeserializeforAgentRunProgressMetrics",
+        "std::time::Instant",
+        "std::time::SystemTime",
+    ] {
+        if metrics.contains(forbidden) {
+            return Err(format!(
+                "run-local progress metrics acquired forbidden runtime/telemetry seam {forbidden}"
+            ));
+        }
+    }
+
+    let audit = compact(audit);
+    for required in [
+        "pub(crate)fnmatches_manifest_revision(self,manifest:AgentRunManifestId,manifest_guard:[u8;32],supervisor:AgentSupervisorId,)->bool",
+        "self.progress.manifest()==manifest&&self.progress.supervisor()==supervisor&&self.guard==event_guard(manifest_guard,self.record)",
+    ] {
+        if !audit.contains(required) {
+            return Err(format!(
+                "canonical audit events lost their private revision seal {required}"
             ));
         }
     }
@@ -1220,6 +1300,80 @@ mod tests {
             &format!("{metrics}\ntrait AgentMetricPort {{}}"),
         )
         .is_err());
+    }
+
+    #[test]
+    fn run_progress_metrics_remain_bounded_local_and_audit_derived() {
+        let root = r#"
+            mod agent_progress_metrics;
+            pub use agent_progress_metrics::{
+                AgentRunProgressMetrics,
+                AgentRunProgressSnapshot,
+                AgentProgressMetricError,
+            };
+        "#;
+        let metrics = r#"
+            use MAX_AGENT_PENDING_MODEL_CALLS;
+            use MAX_AGENT_PENDING_EFFECTS;
+            use MAX_AGENT_PLAN_NODES;
+            pub struct AgentRunProgressMetrics;
+            pub struct AgentRunProgressSnapshot;
+            pub struct AgentDurationMetrics;
+            pub struct AgentProgressMetricError;
+            pub fn try_new(
+                manifest: &AgentRunManifest,
+                supervisor: &AgentRunSupervisor,
+            ) {
+                values.try_reserve_exact(topology_nodes.len());
+            }
+            pub fn record_event(
+                &mut self,
+                event: AgentAuditEvent
+            ) -> Result<(), AgentProgressMetricError> {
+                event.matches_manifest_revision(
+                    self.manifest,
+                    self.manifest_guard,
+                    self.supervisor
+                );
+                self.active_models.try_reserve_exact(1);
+                self.active_effects.try_reserve_exact(1);
+                self.takeover_cancellations.try_reserve_exact(1);
+            }
+            pub const fn snapshot(&self) -> AgentRunProgressSnapshot {}
+            pub const fn queue_wait(self) -> Option<AgentDurationMetrics> {}
+            pub const fn model(self) -> Option<AgentDurationMetrics> {}
+            pub const fn effect(self) -> Option<AgentDurationMetrics> {}
+            pub const fn human_wait(self) -> Option<AgentDurationMetrics> {}
+            pub const fn total_elapsed_millis(self) -> Option<u64> {}
+        "#;
+        let audit = r#"
+            pub(crate) fn matches_manifest_revision(
+                self,
+                manifest: AgentRunManifestId,
+                manifest_guard: [u8; 32],
+                supervisor: AgentSupervisorId,
+            ) -> bool {
+                self.progress.manifest() == manifest
+                    && self.progress.supervisor() == supervisor
+                    && self.guard == event_guard(manifest_guard, self.record)
+            }
+        "#;
+
+        validate_agent_progress_metrics_contract(root, metrics, audit)
+            .expect("bounded local progress metrics");
+        assert!(validate_agent_progress_metrics_contract(
+            root,
+            &metrics.replace("-> Option<AgentDurationMetrics>", "-> AgentDurationMetrics"),
+            audit,
+        )
+        .is_err());
+        assert!(validate_agent_progress_metrics_contract(
+            root,
+            &format!("{metrics}\ntrait AgentProgressMetricPort {{}}"),
+            audit,
+        )
+        .is_err());
+        assert!(validate_agent_progress_metrics_contract(root, metrics, "").is_err());
     }
 
     #[test]

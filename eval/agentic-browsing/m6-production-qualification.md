@@ -36,7 +36,10 @@ replace the pending named-device CPU, memory, wakeup, or energy measurement.
 The gate also pins the receipt-derived accounting reducer to exact manifest
 revision checks, replay-safe out-of-order identities, run/node budgets, and an
 eight-schedule attribution ceiling, while forbidding it from acquiring a
-telemetry or persistence port.
+telemetry or persistence port. A separate gate pins the audit-derived progress
+reducer to the canonical event revision seal, strict event/time ordering,
+bounded topology and active-operation storage, optional observed durations,
+and the absence of runtime clocks, serialization, or telemetry ports.
 
 Run the gate and its focused tests with:
 
@@ -75,6 +78,14 @@ cargo clippy --locked -p xtask --all-targets -- -D warnings
   It is an inert functional core with no application telemetry or persistence
   seam. It does not claim site, latency, native-resource, or machine-resource
   values.
+- A separate optional run-local progress reducer now streams canonical semantic
+  audit events and derives observed initial-queue, model, effect, human-wait,
+  and root elapsed durations, closed `NeedsHuman` counts, distinct human-
+  takeover cancellations, and the root terminal outcome. Event/revision/time
+  replay, skipped operation starts, and invalid node sequences are rejected
+  without partial logical mutation. Unobserved durations remain absent. The
+  reducer retains no site/platform/resource labels and no sample distribution;
+  exact medians and percentiles still require the qualification harness.
 
 The authoritative aggregate records and exact remaining blockers are in
 `native-input-matrix-v1.json` and `browse-baseline-v1.json`.
@@ -86,6 +97,9 @@ The authoritative aggregate records and exact remaining blockers are in
 - one separately authorized difficult real-site run per platform;
 - named macOS and Windows Browse startup, idle, tab-pressure, and concurrent-use
   baselines plus reviewed acceptable agent deltas;
+- retained action/run timing samples and reviewed per-site latency
+  distributions from the qualification harness (the local reducer exposes
+  only exact observed count/sum/maximum aggregates);
 - deterministic semantic/action/policy suite closure, the six-site matrix,
   concurrent production configuration, endurance, and fault-injection evidence;
 - hot-path and zero-unused-agent-overhead measurements; and

@@ -130,6 +130,18 @@ impl AgentAuditEvent {
     pub const fn persistence_record(self) -> AgentAuditRecordV1 {
         self.record
     }
+
+    /// Whether this event was sealed under one exact manifest revision.
+    pub(crate) fn matches_manifest_revision(
+        self,
+        manifest: AgentRunManifestId,
+        manifest_guard: [u8; 32],
+        supervisor: AgentSupervisorId,
+    ) -> bool {
+        self.progress.manifest() == manifest
+            && self.progress.supervisor() == supervisor
+            && self.guard == event_guard(manifest_guard, self.record)
+    }
 }
 
 impl fmt::Debug for AgentAuditEvent {

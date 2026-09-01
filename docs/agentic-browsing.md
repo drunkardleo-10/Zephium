@@ -589,6 +589,19 @@ no site, origin, model/tokenizer label, rate table, prompt, response, page data,
 credential, or timing source and owns no port, persistence, thread, task, or
 clock. If the reducer is not constructed, it has zero runtime state or work.
 
+Run progress measurement is a separate explicitly constructed streaming
+functional reducer. It accepts only canonical semantic audit events sealed to
+the exact manifest revision and supervisor, rejects event/time replay and
+invalid node or operation sequences without partial mutation, and retains at
+most the manifest topology, four active model calls, four active effects, and
+one cancellation identity per topology node. It derives only observed initial
+queue, model, effect, `NeedsHuman`, and root queued-to-terminal durations from
+the audit event's trusted monotonic timestamp, plus closed human-pause counts,
+distinct takeover cancellations, and the root outcome. Unobserved and still
+open durations are `None`, never synthetic zeroes. It owns no clock, telemetry
+or persistence port, task, worker, channel, browser context, or native
+resource; if it is not constructed, it has zero runtime state or work.
+
 ## 12. Probe and test harness
 
 Before Work UI integration, create a non-shipping native probe using the same
@@ -707,10 +720,14 @@ Record at action and run granularity:
   platform, wakeups, energy impact, disk, and network bytes.
 
 The run-local receipt reducer supplies only the exact accounting subset it can
-prove from policy receipts. Site/platform/backend labels, latency distributions,
-semantic encoding sizes, native/process counts, and machine resource measures
-remain explicit qualification-harness inputs; absence is never represented as
-zero.
+prove from policy receipts. The independent audit-derived progress reducer
+supplies observed duration sample counts, sums, and maxima for initial queue,
+model, effect, and human waits, together with root elapsed time and closed
+completion/takeover counts. It deliberately does not retain action samples, so
+exact medians, percentiles, and per-site distributions remain qualification-
+harness inputs. Site/platform/backend labels, semantic encoding sizes,
+native/process counts, and machine resource measures also remain explicit
+harness inputs; absence is never represented as zero.
 
 Initial qualification gates are:
 

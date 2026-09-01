@@ -18,6 +18,7 @@ mod agent_audit;
 mod agent_manifest;
 mod agent_metrics;
 mod agent_policy;
+mod agent_progress_metrics;
 mod agent_provider;
 mod agent_supervisor;
 mod context;
@@ -86,6 +87,10 @@ pub use agent_policy::{
     AgentPlanLeaseBinding, AgentPolicyAccounting, AgentPolicyError, AgentRunPolicy,
     AgentTaintCohort, MAX_AGENT_ACCOUNT_ATTESTATION_AGE_MILLIS, MAX_AGENT_PENDING_EFFECTS,
     MAX_AGENT_PENDING_MODEL_CALLS, MAX_AGENT_TAINT_COHORTS, MAX_AGENT_TAINT_REFERENCES,
+};
+pub use agent_progress_metrics::{
+    AgentDurationMetrics, AgentNeedsHumanMetrics, AgentProgressMetricError,
+    AgentRunProgressMetrics, AgentRunProgressOutcome, AgentRunProgressSnapshot,
 };
 pub use agent_provider::{
     AgentBrowserActProposal, AgentBrowserHumanReason, AgentBrowserScopeProposal,
