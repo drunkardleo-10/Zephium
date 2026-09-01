@@ -26,6 +26,9 @@ const AGENTIC_SEMANTIC_DIFF: &str = "crates/zephium-agentic/src/semantic_diff.rs
 const AGENTIC_SEMANTIC_DIFF_MODEL: &str = "crates/zephium-agentic/src/semantic_diff_model.rs";
 const AGENTIC_SEMANTIC_ACTION: &str = "crates/zephium-agentic/src/semantic_action.rs";
 const AGENTIC_SEMANTIC_EXECUTE: &str = "crates/zephium-agentic/src/semantic_execute.rs";
+const AGENTIC_SEMANTIC_EXECUTE_COORDINATOR: &str =
+    "crates/zephium-agentic/src/semantic_execute_coordinator.rs";
+const AGENTIC_CONTEXT_PORT: &str = "crates/zephium-agentic/src/context_port.rs";
 const AGENTIC_SUPERVISOR: &str = "crates/zephium-agentic/src/agent_supervisor.rs";
 const AGENTIC_SUPERVISOR_PROGRESS: &str =
     "crates/zephium-agentic/src/agent_supervisor/runtime/progress.rs";
@@ -118,6 +121,9 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         &read(repository.join(AGENTIC_EFFECT_POLICY))?,
         &read(repository.join(AGENTIC_SEMANTIC_ACTION))?,
         &read(repository.join(AGENTIC_SEMANTIC_EXECUTE))?,
+        &read(repository.join(AGENTIC_SEMANTIC_EXECUTE_COORDINATOR))?,
+        &read(repository.join(AGENTIC_CONTEXT_PORT))?,
+        &read(repository.join(ENGINE_AGENT_CONTEXT_PORT))?,
     )?;
     validate_provider_input_evidence_contract(
         &read(repository.join(AGENTIC_ROOT))?,
@@ -1294,9 +1300,17 @@ fn validate_semantic_execution_contract(
     effect: &str,
     action: &str,
     execution: &str,
+    coordinator: &str,
+    context_port: &str,
+    engine_port: &str,
 ) -> Result<(), String> {
     let root = compact(root);
-    for required in ["modsemantic_execute;", "prepare_semantic_action_execution"] {
+    for required in [
+        "modsemantic_execute;",
+        "modsemantic_execute_coordinator;",
+        "prepare_semantic_action_execution",
+        "SemanticActionExecutionCoordinator",
+    ] {
         if !root.contains(required) {
             return Err(format!(
                 "agentic root lost semantic execution handoff {required}"
@@ -1359,6 +1373,88 @@ fn validate_semantic_execution_contract(
         if execution.contains(forbidden) {
             return Err(format!(
                 "semantic execution core acquired forbidden native/program surface {forbidden}"
+            ));
+        }
+    }
+
+    let coordinator = compact(coordinator);
+    for required in [
+        "MAX_PENDING_SEMANTIC_ACTION_EXECUTIONS:usize=MAX_AGENT_PENDING_EFFECTS",
+        "pending:Vec<SemanticActionExecutionPending>",
+        "self.pending.len()>=MAX_PENDING_SEMANTIC_ACTION_EXECUTIONS",
+        "entry.coordinator_key().context()==action.frame().context().identity()",
+        "!self.pending[index].matches_native_settlement(&settlement)",
+        "now<self.pending[index].deadline()",
+        "self.sealed=true",
+        "semantic_action_dispatch_failure(dispatch)",
+        "ContextDispatch::Scheduled=>None",
+        "ContextDispatch::Unsupported|ContextDispatch::Rejected(ContextPortFailure::Unsupported)",
+        "ContextPortFailure::ResourceExhausted)=>{Some(SemanticActionFailure::ResourceExhausted)",
+        "SemanticActionExecutionCoordinatorError::PrematureTimeout",
+    ] {
+        if !coordinator.contains(required) {
+            return Err(format!(
+                "semantic execution coordinator lost required bound {required}"
+            ));
+        }
+    }
+    for forbidden in [
+        "evaluateJavaScript",
+        "callAsyncJavaScript",
+        "querySelector",
+        "CGEvent",
+        "NSEvent",
+        "Input.dispatch",
+        "std::thread",
+        "std::fs",
+        "Mutex<",
+        "Arc<",
+    ] {
+        if coordinator.contains(forbidden) {
+            return Err(format!(
+                "semantic execution coordinator acquired forbidden work/program surface {forbidden}"
+            ));
+        }
+    }
+
+    let context_port = compact(context_port);
+    for required in [
+        "pubtypeSemanticActionNativeCompletion=Box<dynFnOnce(SemanticActionNativeSettlement)+Send+'static>;",
+        "fnexecute_semantic_action(&self,request:SemanticActionNativeRequest,completion:SemanticActionNativeCompletion,)->ContextDispatch;",
+    ] {
+        if !context_port.contains(required) {
+            return Err(format!(
+                "agent browser port lost move-only semantic action contract {required}"
+            ));
+        }
+    }
+
+    let engine_port = compact(engine_port);
+    let start = engine_port
+        .find("fnexecute_semantic_action(")
+        .ok_or_else(|| "engine action port lost fail-closed method".to_owned())?;
+    let end = engine_port[start..]
+        .find("fncapture_semantic_screenshot(")
+        .map(|offset| start + offset)
+        .ok_or_else(|| "engine action port lost bounded method boundary".to_owned())?;
+    let action_method = &engine_port[start..end];
+    for required in ["let_=(request,completion);ContextDispatch::Unsupported"] {
+        if !action_method.contains(required) {
+            return Err(format!(
+                "engine action port stopped failing closed before M1 qualification {required}"
+            ));
+        }
+    }
+    for forbidden in [
+        "ContextDispatch::Scheduled",
+        "ContextDispatch::Rejected",
+        "self.schedule",
+        "dispatch_to_host",
+        "platform::",
+    ] {
+        if action_method.contains(forbidden) {
+            return Err(format!(
+                "engine action port admitted an unqualified M1 backend {forbidden}"
             ));
         }
     }
@@ -1967,7 +2063,9 @@ mod tests {
     fn semantic_execution_requires_one_shot_policy_and_native_rejoin() {
         let root = r#"
             mod semantic_execute;
+            mod semantic_execute_coordinator;
             pub use semantic_execute::prepare_semantic_action_execution;
+            pub use semantic_execute_coordinator::SemanticActionExecutionCoordinator;
         "#;
         let effect = r#"
             pub fn matches_action(&self, action: &SemanticPreparedAction) -> bool {
@@ -1991,20 +2089,104 @@ mod tests {
             SemanticActionFailure::BackendRefused;
             SemanticSettleInstant::from_millis(1);
         "#;
-        validate_semantic_execution_contract(root, effect, action, execution)
-            .expect("closed semantic execution handoff");
+        let coordinator = r#"
+            const MAX_PENDING_SEMANTIC_ACTION_EXECUTIONS: usize = MAX_AGENT_PENDING_EFFECTS;
+            pending: Vec<SemanticActionExecutionPending>,
+            self.pending.len() >= MAX_PENDING_SEMANTIC_ACTION_EXECUTIONS;
+            entry.coordinator_key().context() == action.frame().context().identity();
+            !self.pending[index].matches_native_settlement(&settlement);
+            now < self.pending[index].deadline();
+            self.sealed = true;
+            semantic_action_dispatch_failure(dispatch);
+            ContextDispatch::Scheduled => None;
+            ContextDispatch::Unsupported
+                | ContextDispatch::Rejected(ContextPortFailure::Unsupported);
+            ContextPortFailure::ResourceExhausted) => {
+                Some(SemanticActionFailure::ResourceExhausted)
+            }
+            SemanticActionExecutionCoordinatorError::PrematureTimeout;
+        "#;
+        let context_port = r#"
+            pub type SemanticActionNativeCompletion =
+                Box<dyn FnOnce(SemanticActionNativeSettlement) + Send + 'static>;
+            fn execute_semantic_action(
+                &self,
+                request: SemanticActionNativeRequest,
+                completion: SemanticActionNativeCompletion,
+            ) -> ContextDispatch;
+        "#;
+        let engine_port = r#"
+            fn execute_semantic_action(
+                &self,
+                request: SemanticActionNativeRequest,
+                completion: SemanticActionNativeCompletion,
+            ) -> ContextDispatch {
+                let _ = (request, completion);
+                ContextDispatch::Unsupported
+            }
+            fn capture_semantic_screenshot(&self) {}
+        "#;
+        validate_semantic_execution_contract(
+            root,
+            effect,
+            action,
+            execution,
+            coordinator,
+            context_port,
+            engine_port,
+        )
+        .expect("closed semantic execution handoff");
         assert!(validate_semantic_execution_contract(
             root,
             effect,
             action,
-            &format!("{execution}\nquerySelector(target);")
+            &format!("{execution}\nquerySelector(target);"),
+            coordinator,
+            context_port,
+            engine_port,
         )
         .is_err());
         assert!(validate_semantic_execution_contract(
             root,
             effect,
             action,
-            &execution.replace("if applied.completed_at > deadline {}", "")
+            execution,
+            coordinator,
+            context_port,
+            &engine_port.replace(
+                "let _ = (request, completion);",
+                "if qualify() { return ContextDispatch::Scheduled; }\nlet _ = (request, completion);",
+            ),
+        )
+        .is_err());
+        assert!(validate_semantic_execution_contract(
+            root,
+            effect,
+            action,
+            &execution.replace("if applied.completed_at > deadline {}", ""),
+            coordinator,
+            context_port,
+            engine_port,
+        )
+        .is_err());
+        assert!(validate_semantic_execution_contract(
+            root,
+            effect,
+            action,
+            execution,
+            &coordinator.replace("self.sealed = true;", ""),
+            context_port,
+            engine_port,
+        )
+        .is_err());
+        assert!(validate_semantic_execution_contract(
+            root,
+            effect,
+            action,
+            execution,
+            coordinator,
+            context_port,
+            &engine_port.replace("ContextDispatch::Unsupported", "ContextDispatch::Scheduled"),
         )
         .is_err());
     }

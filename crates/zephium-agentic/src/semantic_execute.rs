@@ -13,10 +13,11 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
-    AgentActiveEffect, AgentEffectId, SemanticActionAttemptId, SemanticActionFailure,
-    SemanticActionKind, SemanticActionText, SemanticFrameJoin, SemanticInvocationId,
-    SemanticPreparedAction, SemanticPressKey, SemanticRect, SemanticRole, SemanticScrollAmount,
-    SemanticScrollDirection, SemanticSettleInstant, SemanticSnapshotGeneration,
+    AgentActiveEffect, AgentEffectId, ContextIdentity, SemanticActionAttemptId,
+    SemanticActionFailure, SemanticActionKind, SemanticActionText, SemanticFrameJoin,
+    SemanticInvocationId, SemanticPreparedAction, SemanticPressKey, SemanticRect, SemanticRole,
+    SemanticScrollAmount, SemanticScrollDirection, SemanticSettleInstant,
+    SemanticSnapshotGeneration,
 };
 
 /// Maximum time between final policy dispatch and one native backend terminal.
@@ -155,6 +156,39 @@ struct NativeCorrelation {
     guard: [u8; 32],
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) struct SemanticActionExecutionCoordinatorKey {
+    effect: AgentEffectId,
+    attempt: SemanticActionAttemptId,
+    context: ContextIdentity,
+    guard: [u8; 32],
+}
+
+impl SemanticActionExecutionCoordinatorKey {
+    pub(crate) const fn effect(self) -> AgentEffectId {
+        self.effect
+    }
+
+    pub(crate) const fn attempt(self) -> SemanticActionAttemptId {
+        self.attempt
+    }
+
+    pub(crate) const fn context(self) -> ContextIdentity {
+        self.context
+    }
+}
+
+impl NativeCorrelation {
+    const fn coordinator_key(&self) -> SemanticActionExecutionCoordinatorKey {
+        SemanticActionExecutionCoordinatorKey {
+            effect: self.effect,
+            attempt: self.attempt,
+            context: self.frame.context().identity(),
+            guard: self.guard,
+        }
+    }
+}
+
 #[derive(Eq, PartialEq)]
 enum NativeRecipe {
     Click,
@@ -192,6 +226,17 @@ impl SemanticActionExecutionPending {
     /// Native execution deadline derived before the request left the core.
     pub const fn deadline(&self) -> SemanticActionExecutionInstant {
         self.correlation.deadline
+    }
+
+    pub(crate) const fn coordinator_key(&self) -> SemanticActionExecutionCoordinatorKey {
+        self.correlation.coordinator_key()
+    }
+
+    pub(crate) fn matches_native_settlement(
+        &self,
+        settlement: &SemanticActionNativeSettlement,
+    ) -> bool {
+        self.correlation == settlement.correlation
     }
 
     /// Rejoins a move-only native terminal and always returns policy authority.
@@ -482,6 +527,12 @@ impl fmt::Debug for SemanticActionNativeSettlement {
             .field("outcome", &self.outcome)
             .field("guard", &"[redacted]")
             .finish()
+    }
+}
+
+impl SemanticActionNativeSettlement {
+    pub(crate) const fn coordinator_key(&self) -> SemanticActionExecutionCoordinatorKey {
+        self.correlation.coordinator_key()
     }
 }
 

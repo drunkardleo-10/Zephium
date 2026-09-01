@@ -14,9 +14,9 @@ use url::Url;
 use crate::{
     ContextCapabilities, ContextCookieTransferRequest, ContextCookieTransferSettlement,
     ContextJoin, ContextKind, ContextOperationJoin, ContextOperationKind, ContextProfileLease,
-    SemanticRuntimeInvocation, SemanticRuntimeSettlement, SemanticScreenshotNativeCapture,
-    SemanticScreenshotNativeFailure, SemanticScreenshotNativeRequest, MAX_LIVE_CONTEXTS,
-    MAX_PENDING_SEMANTIC_SCREENSHOTS,
+    SemanticActionNativeRequest, SemanticActionNativeSettlement, SemanticRuntimeInvocation,
+    SemanticRuntimeSettlement, SemanticScreenshotNativeCapture, SemanticScreenshotNativeFailure,
+    SemanticScreenshotNativeRequest, MAX_LIVE_CONTEXTS, MAX_PENDING_SEMANTIC_SCREENSHOTS,
 };
 
 /// Maximum number of lifecycle tasks one native adapter may retain.
@@ -747,6 +747,14 @@ pub type SemanticScreenshotNativeCompletion = Box<
         + 'static,
 >;
 
+/// Move-only terminal callback for one admitted native semantic action.
+///
+/// A port returning [`ContextDispatch::Scheduled`] must invoke this exactly
+/// once with a settlement created by consuming the exact request. Synchronous
+/// `Rejected` or `Unsupported` results transfer no callback obligation.
+pub type SemanticActionNativeCompletion =
+    Box<dyn FnOnce(SemanticActionNativeSettlement) + Send + 'static>;
+
 /// Trusted imperative boundary implemented by one bounded platform adapter.
 ///
 /// Implementations own native handles and private identity mappings. They must
@@ -764,6 +772,13 @@ pub trait AgentBrowserPort: Send + Sync {
 
     /// Attempts to admit one already-encoded fixed semantic-runtime invocation.
     fn invoke_semantic(&self, invocation: SemanticRuntimeInvocation) -> ContextDispatch;
+
+    /// Attempts one already-authorized closed semantic action recipe.
+    fn execute_semantic_action(
+        &self,
+        request: SemanticActionNativeRequest,
+        completion: SemanticActionNativeCompletion,
+    ) -> ContextDispatch;
 
     /// Attempts one bounded viewport capture outside the cloneable event bus.
     fn capture_semantic_screenshot(
@@ -1077,6 +1092,14 @@ mod tests {
             fn invoke_semantic(
                 &self,
                 _invocation: crate::SemanticRuntimeInvocation,
+            ) -> ContextDispatch {
+                ContextDispatch::Unsupported
+            }
+
+            fn execute_semantic_action(
+                &self,
+                _request: crate::SemanticActionNativeRequest,
+                _completion: SemanticActionNativeCompletion,
             ) -> ContextDispatch {
                 ContextDispatch::Unsupported
             }

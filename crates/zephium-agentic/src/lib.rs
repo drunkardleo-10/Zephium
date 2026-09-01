@@ -47,6 +47,7 @@ mod semantic_action_result;
 mod semantic_diff;
 mod semantic_diff_model;
 mod semantic_execute;
+mod semantic_execute_coordinator;
 mod semantic_extract;
 mod semantic_model;
 mod semantic_observation;
@@ -155,7 +156,8 @@ pub use context_port::{
     ContextNavigationSettlement, ContextNavigationTarget, ContextPortContractError,
     ContextPortFailure, ContextRendererLoss, ContextResourceAuditId,
     ContextResourceAuditSettlement, ContextTransitionRequest, ContextTransitionSettlement,
-    SemanticScreenshotNativeCompletion, MAX_PENDING_NATIVE_CONTEXT_TASKS,
+    SemanticActionNativeCompletion, SemanticScreenshotNativeCompletion,
+    MAX_PENDING_NATIVE_CONTEXT_TASKS,
 };
 pub use context_registry::{
     ContextRegistry, ContextRegistryEntry, ContextRegistryEntryState, ContextRegistryError,
@@ -264,6 +266,12 @@ pub use semantic_execute::{
     SemanticActionNativeSettlement, SemanticActionNativeTargetId, SemanticActionNativeViewport,
     SemanticActionNativeViewportError, MAX_SEMANTIC_ACTION_NATIVE_EXECUTION_MILLIS,
     MAX_SEMANTIC_ACTION_VIEWPORT_DIMENSION,
+};
+pub use semantic_execute_coordinator::{
+    semantic_action_dispatch_failure, SemanticActionExecutionCoordinator,
+    SemanticActionExecutionCoordinatorError, SemanticActionExecutionCoordinatorRefusal,
+    SemanticActionExecutionCoordinatorStatus, SemanticActionExecutionDispatch,
+    SemanticActionExecutionReservation, MAX_PENDING_SEMANTIC_ACTION_EXECUTIONS,
 };
 pub use semantic_extract::{
     extract_semantic_read, SemanticExtractedBoolean, SemanticExtractedField, SemanticExtractedText,

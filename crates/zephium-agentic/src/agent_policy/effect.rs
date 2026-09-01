@@ -519,7 +519,7 @@ impl AgentActiveEffect {
         Self {
             manifest: AgentRunManifestId::from_raw(801),
             manifest_guard: [0x81; 32],
-            id: AgentEffectId::new(802).expect("test effect identity"),
+            id: AgentEffectId::new(attempt.get()).expect("test effect identity"),
             lease: AgentPlanLeaseId::from_raw(803),
             node: AgentPlanNodeId::from_raw(804),
             effect: action.effect(),

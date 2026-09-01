@@ -118,6 +118,26 @@ are trusted, or that M4 is complete.
   settle/independent-verification core. Typed backend failures and contract
   violations likewise return that authority for one charged terminal policy
   settlement, with no blind retry path.
+- A zero-idle single-owner coordinator now retains the active policy half while
+  native work is outstanding. Its empty `Vec` allocates only on first use; it
+  admits at most four requests process-wide and one per logical context,
+  rejects duplicate effect or attempt identities, and returns policy authority
+  on every preparation/capacity/shutdown refusal. Exact settlement, synchronous
+  port refusal, cancellation, or a shell-driven deadline releases one entry.
+  Unknown, substituted, replayed, and premature-timeout terminals do not release
+  retained debt. Shutdown seals new admission but keeps accepted entries until
+  their terminal drain.
+- `AgentBrowserPort` has a move-only semantic-action callback contract: a
+  `Scheduled` native request owes exactly one settlement created by consuming
+  that request, while synchronous `Rejected` or `Unsupported` results owe no
+  callback. The production engine currently returns `Unsupported` before task
+  admission on every platform, so this seam adds no queue, task, native object,
+  timer, or idle cost and cannot silently select a backend before M1 physical
+  qualification. Coordinator-owned dispatch reconciliation retains scheduled
+  debt and exhaustively maps every synchronous shared-port refusal into one
+  typed semantic failure before releasing it, avoiding caller-specific charging
+  or leaked authority. A static gate locks the fail-closed engine result, this
+  mapping, and the coordinator bounds.
 - Revalidation is deliberately not an execution proof. The future native
   adapter must still re-resolve connectedness and current geometry, prove
   visibility/occlusion and backend compatibility, hold an exact policy permit,
@@ -384,6 +404,14 @@ on every terminal, settle-clock handoff, and fill/page-content diagnostic
 redaction. The static release boundary also rejects generic script/evaluation,
 selector, OS-event, WebKit/WebView2, filesystem, and thread surfaces in this
 functional core.
+
+Native-execution coordination coverage adds exact-once release, replay,
+duplicate effect/attempt identity, one-per-context serialization, process-wide
+capacity, preparation/refusal authority recovery, cross-request settlement,
+premature and exact-deadline timeout, shutdown seal-and-drain, zero-idle status,
+all synchronous port-dispatch mappings, and diagnostic redaction. The engine
+port is compile-checked on both host and Windows targets while it remains
+mechanically `Unsupported` pending M1 evidence.
 
 Settlement coverage includes immediate readiness, exact deadline derivation
 and overflow, mutation-quiet restart, exact adjacent target-state snapshots,

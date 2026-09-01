@@ -8,8 +8,9 @@ use zephium_agentic::{
     ContextCookieTransferFailure, ContextCookieTransferOutcome, ContextCookieTransferRequest,
     ContextCookieTransferSettlement, ContextDispatch, ContextNativeEvent, ContextNativeRequest,
     ContextPortFailure, ContextResourceAuditId, ContextResourceAuditSettlement,
-    SemanticRuntimeCorrelation, SemanticRuntimeInvocation, SemanticRuntimePortFailure,
-    SemanticRuntimeSettlement, SemanticScreenshotNativeCompletion, SemanticScreenshotNativeRequest,
+    SemanticActionNativeCompletion, SemanticActionNativeRequest, SemanticRuntimeCorrelation,
+    SemanticRuntimeInvocation, SemanticRuntimePortFailure, SemanticRuntimeSettlement,
+    SemanticScreenshotNativeCompletion, SemanticScreenshotNativeRequest,
     MAX_PENDING_NATIVE_CONTEXT_TASKS, MAX_PENDING_SEMANTIC_SCREENSHOTS,
 };
 #[cfg(target_os = "macos")]
@@ -845,6 +846,17 @@ impl AgentBrowserPort for EngineAgentBrowserPort {
             correlation,
             invocation: Some(invocation),
         }))
+    }
+
+    fn execute_semantic_action(
+        &self,
+        request: SemanticActionNativeRequest,
+        completion: SemanticActionNativeCompletion,
+    ) -> ContextDispatch {
+        // M1 device qualification owns backend selection. Retain a real port
+        // seam now, but admit no action until one fixed route is qualified.
+        let _ = (request, completion);
+        ContextDispatch::Unsupported
     }
 
     fn capture_semantic_screenshot(
