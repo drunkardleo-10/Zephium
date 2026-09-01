@@ -12,7 +12,7 @@ use thiserror::Error;
 use crate::semantic_settle::exact_document_successor;
 use crate::{
     ContextJoin, SemanticActionAttemptId, SemanticActionFailure, SemanticActionRevalidationError,
-    SemanticBoundAction, SemanticCompleteness, SemanticDialogState, SemanticScrollAmount,
+    SemanticCompleteness, SemanticDialogState, SemanticPreparedAction, SemanticScrollAmount,
     SemanticScrollDirection, SemanticSettleInstant, SemanticSettleStatus, SemanticSettleTracker,
     SemanticSnapshot, SemanticSnapshotGeneration, SemanticState, SemanticVerification,
     MAX_SEMANTIC_ACTION_TEXT_BYTES,
@@ -69,7 +69,8 @@ enum SemanticEffectEvidenceKind<'a> {
     Snapshot(&'a SemanticSnapshot),
     ExactTargetValue {
         snapshot: &'a SemanticSnapshot,
-        value: &'a str,
+        before: &'a str,
+        after: &'a str,
     },
     Navigation {
         prior: ContextJoin,
@@ -113,20 +114,25 @@ impl<'a> SemanticEffectEvidence<'a> {
         }
     }
 
-    /// Joins a transient exact target value and fresh metadata snapshot.
+    /// Joins transient exact before/after target values and fresh metadata.
     ///
-    /// The value remains borrowed, is never exposed by this type, and is
+    /// Values remain borrowed, are never exposed by this type, and are
     /// compared only against the already bounded fill input.
     pub const fn exact_target_value(
         attempt: SemanticActionAttemptId,
         observed_at: SemanticSettleInstant,
         snapshot: &'a SemanticSnapshot,
-        value: &'a str,
+        before: &'a str,
+        after: &'a str,
     ) -> Self {
         Self {
             attempt,
             observed_at,
-            kind: SemanticEffectEvidenceKind::ExactTargetValue { snapshot, value },
+            kind: SemanticEffectEvidenceKind::ExactTargetValue {
+                snapshot,
+                before,
+                after,
+            },
         }
     }
 
@@ -275,7 +281,7 @@ impl SemanticVerifiedAction {
     }
 
     /// Reports whether this proof was minted for the exact bound action.
-    pub fn matches_action(&self, action: &SemanticBoundAction) -> bool {
+    pub fn matches_action(&self, action: &SemanticPreparedAction) -> bool {
         self.ordinal == action.ordinal() && self.action_guard == action.verification_guard()
     }
 }
@@ -368,7 +374,7 @@ impl SemanticVerificationError {
 /// separately sampled closed evidence vocabulary.
 pub fn verify_semantic_action(
     settlement: &SemanticSettleTracker,
-    action: &SemanticBoundAction,
+    action: &SemanticPreparedAction,
     evidence: SemanticEffectEvidence<'_>,
 ) -> Result<SemanticVerifiedAction, SemanticVerificationError> {
     match settlement.status() {
@@ -410,16 +416,22 @@ pub fn verify_semantic_action(
         }
         (
             SemanticVerification::TargetValueMatchesInput,
-            SemanticEffectEvidenceKind::ExactTargetValue { snapshot, value },
+            SemanticEffectEvidenceKind::ExactTargetValue {
+                snapshot,
+                before,
+                after,
+            },
         ) => {
             let _ = verification_target(action, snapshot)?;
             let expected = action
                 .fill_text()
                 .ok_or(SemanticVerificationError::ActionMismatch)?;
-            if value.len() > MAX_SEMANTIC_ACTION_TEXT_BYTES {
+            if before.len() > MAX_SEMANTIC_ACTION_TEXT_BYTES
+                || after.len() > MAX_SEMANTIC_ACTION_TEXT_BYTES
+            {
                 return Err(SemanticVerificationError::EvidenceLimit);
             }
-            if value != expected.as_str() {
+            if before == expected.as_str() || after != expected.as_str() {
                 return Err(SemanticVerificationError::OutcomeNotObserved);
             }
             (
@@ -530,7 +542,7 @@ pub fn verify_semantic_action(
 }
 
 fn verification_target<'a>(
-    action: &SemanticBoundAction,
+    action: &SemanticPreparedAction,
     snapshot: &'a SemanticSnapshot,
 ) -> Result<(usize, &'a crate::SemanticNode), SemanticVerificationError> {
     if snapshot.completeness() != SemanticCompleteness::Complete {
@@ -710,7 +722,7 @@ mod tests {
         )
     }
 
-    fn immediate(action: &SemanticBoundAction, attempt: u64) -> SemanticSettleTracker {
+    fn immediate(action: &SemanticPreparedAction, attempt: u64) -> SemanticSettleTracker {
         SemanticSettleTracker::begin(
             SemanticActionAttemptId::new(attempt).expect("attempt"),
             action,
@@ -732,7 +744,10 @@ mod tests {
             SemanticVerification::TargetValueMatchesInput,
         )
         .expect("batch");
-        let action = &batch.actions()[0];
+        let prepared = batch.actions()[0]
+            .prepare(&observation.frames()[0])
+            .expect("prepare");
+        let action = &prepared;
         let attempt = SemanticActionAttemptId::new(1).expect("attempt");
         let tracker = immediate(action, 1);
         let snapshot = current(
@@ -752,6 +767,7 @@ mod tests {
                     attempt,
                     SemanticSettleInstant::from_millis(101),
                     &snapshot,
+                    "old",
                     "wrong private title",
                 ),
             ),
@@ -767,6 +783,7 @@ mod tests {
                     SemanticSettleInstant::from_millis(101),
                     &snapshot,
                     &oversized,
+                    "new private title",
                 ),
             ),
             Err(SemanticVerificationError::EvidenceLimit)
@@ -778,6 +795,7 @@ mod tests {
                 attempt,
                 SemanticSettleInstant::from_millis(101),
                 &snapshot,
+                "old",
                 "new private title",
             ),
         )
@@ -793,10 +811,25 @@ mod tests {
                 attempt,
                 SemanticSettleInstant::from_millis(101),
                 &snapshot,
+                "old",
                 "new private title"
             )
         )
         .contains("new private title"));
+        assert_eq!(
+            verify_semantic_action(
+                &tracker,
+                action,
+                SemanticEffectEvidence::exact_target_value(
+                    attempt,
+                    SemanticSettleInstant::from_millis(101),
+                    &snapshot,
+                    "new private title",
+                    "new private title",
+                ),
+            ),
+            Err(SemanticVerificationError::OutcomeNotObserved)
+        );
 
         let other_frame = SemanticFrameJoin::try_new(
             observation.request().context(),
@@ -836,7 +869,10 @@ mod tests {
             SemanticVerification::TargetValueMatchesInput,
         )
         .expect("batch");
-        assert!(!proof.matches_action(&other_batch.actions()[0]));
+        let other_prepared = other_batch.actions()[0]
+            .prepare(&other_observation.frames()[0])
+            .expect("prepare");
+        assert!(!proof.matches_action(&other_prepared));
     }
 
     #[test]
@@ -869,7 +905,10 @@ mod tests {
             },
         )
         .expect("batch");
-        let action = &batch.actions()[0];
+        let prepared = batch.actions()[0]
+            .prepare(&observation.frames()[0])
+            .expect("prepare");
+        let action = &prepared;
         let tracker = immediate(action, 2);
         let snapshot = current(
             &observation,
@@ -949,7 +988,10 @@ mod tests {
             SemanticVerification::TargetSelectionMatchesOption,
         )
         .expect("batch");
-        let action = &batch.actions()[0];
+        let prepared = batch.actions()[0]
+            .prepare(&observation.frames()[0])
+            .expect("prepare");
+        let action = &prepared;
         let tracker = immediate(action, 3);
         let unselected = current(
             &observation,
@@ -1007,7 +1049,10 @@ mod tests {
             SemanticVerification::TargetValueChanged,
         )
         .expect("batch");
-        let action = &batch.actions()[0];
+        let prepared = batch.actions()[0]
+            .prepare(&observation.frames()[0])
+            .expect("prepare");
+        let action = &prepared;
         let tracker = immediate(action, 4);
         let unchanged = current(
             &observation,
@@ -1061,7 +1106,10 @@ mod tests {
             SemanticVerification::NavigationCommitted,
         )
         .expect("batch");
-        let navigation_action = &navigation_batch.actions()[0];
+        let navigation_prepared = navigation_batch.actions()[0]
+            .prepare(&observation.frames()[0])
+            .expect("prepare");
+        let navigation_action = &navigation_prepared;
         let navigation_attempt = SemanticActionAttemptId::new(5).expect("attempt");
         let mut navigation_tracker = SemanticSettleTracker::begin(
             navigation_attempt,
@@ -1108,7 +1156,10 @@ mod tests {
             SemanticVerification::Dialog(SemanticDialogState::Present),
         )
         .expect("batch");
-        let dialog_action = &dialog_batch.actions()[0];
+        let dialog_prepared = dialog_batch.actions()[0]
+            .prepare(&observation.frames()[0])
+            .expect("prepare");
+        let dialog_action = &dialog_prepared;
         let dialog_attempt = SemanticActionAttemptId::new(6).expect("attempt");
         let mut dialog_tracker = SemanticSettleTracker::begin(
             dialog_attempt,
@@ -1172,7 +1223,10 @@ mod tests {
             SemanticVerification::ScrollPositionChanged,
         )
         .expect("batch");
-        let action = &batch.actions()[0];
+        let prepared = batch.actions()[0]
+            .prepare(&observation.frames()[0])
+            .expect("prepare");
+        let action = &prepared;
         let tracker = immediate(action, 7);
         let snapshot = current(&observation, json!([{ "k": 1, "r": "document", "o": 16 }]));
         let before = SemanticScrollPosition::try_new(0, 10).expect("position");
@@ -1221,7 +1275,10 @@ mod tests {
             },
         )
         .expect("batch");
-        let first_action = &first.actions()[0];
+        let first_prepared = first.actions()[0]
+            .prepare(&observation.frames()[0])
+            .expect("prepare");
+        let first_action = &first_prepared;
         let pending = SemanticSettleTracker::begin(
             SemanticActionAttemptId::new(8).expect("attempt"),
             first_action,
@@ -1260,7 +1317,10 @@ mod tests {
             },
         )
         .expect("batch");
-        let first_action = &immediate_first.actions()[0];
+        let immediate_prepared = immediate_first.actions()[0]
+            .prepare(&observation.frames()[0])
+            .expect("prepare");
+        let first_action = &immediate_prepared;
         let tracker = immediate(first_action, 9);
         assert_eq!(
             verify_semantic_action(
@@ -1313,10 +1373,13 @@ mod tests {
             },
         )
         .expect("batch");
+        let other_prepared = other.actions()[0]
+            .prepare(&observation.frames()[0])
+            .expect("prepare");
         assert_eq!(
             verify_semantic_action(
                 &tracker,
-                &other.actions()[0],
+                &other_prepared,
                 SemanticEffectEvidence::snapshot(
                     SemanticActionAttemptId::new(9).expect("attempt"),
                     SemanticSettleInstant::from_millis(101),

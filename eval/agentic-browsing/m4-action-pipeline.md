@@ -1,10 +1,11 @@
 # M4 action pipeline
 
-Status: bounded pre-policy action proposals, exact observation binding, typed
-settle/verification contracts, fresh-snapshot structural revalidation, and the
-event-driven bounded settle and independent effect-verification cores are
-implemented. Policy permits, platform execution, visibility/occlusion checks,
-native observation adapters and timer driving, diff settlement,
+Status: bounded pre-policy action proposals, exact observation binding,
+one-action rolling checkpoints, typed settle/verification contracts,
+fresh-snapshot structural revalidation, and the event-driven bounded settle
+and independent effect-verification cores are implemented. Policy permits,
+platform execution, visibility/occlusion checks, native observation adapters
+and timer driving, diff settlement,
 read/extract/screenshot, and live qualification remain pending.
 
 This evidence describes a functional-core seam. It does not claim that an
@@ -35,8 +36,10 @@ are trusted, or that M4 is complete.
   with a separate verification requirement; it is not blind success.
 - Generic mutation or semantic-change signals are settle triggers, never effect
   proof. Fill requires an exact match to the requested bounded input, select
-  requires the exact bound option, state proof requires the target to transition
-  from the opposite baseline, and a no-op postcondition is refused at binding.
+  requires the exact bound option, and state proof requires the target to
+  transition from the opposite baseline. An already-satisfied state, selection,
+  or exactly projected fill postcondition is refused at binding and again at
+  the pre-execution checkpoint.
   Fixed key recipes may prove a target value/selection change; click proof is
   limited to an exact target state, navigation, or dialog transition.
 - One batch must use a homogeneous declared effect class. External write,
@@ -65,6 +68,13 @@ are trusted, or that M4 is complete.
   select ancestry. Focus and geometry may be freshly sampled rather than
   treated as stable identity. Fill refuses if the target becomes password or
   secret between binding and execution.
+- A batch is prepared one action at a time against the complete snapshot
+  immediately preceding that action, after the prior action has independently
+  settled and verified. Preparation repeats structural and operation
+  revalidation, refuses an already-satisfied projected postcondition, and
+  privately checkpoints the native invocation, generation, target value/state,
+  option state, and a diagnostics-redacted contract guard. Only the current
+  action needs a prepared value, so rolling batch state remains O(1).
 - Revalidation is deliberately not an execution proof. The future native
   adapter must still re-resolve connectedness and current geometry, prove
   visibility/occlusion and backend compatibility, hold an exact policy permit,
@@ -72,9 +82,10 @@ are trusted, or that M4 is complete.
   deadline, verify the declared effect independently, and compute an admitted
   bounded diff before reporting success or continuing a batch.
 - Settlement starts only after the imperative executor claims one backend
-  request terminally applied. One nonzero action-attempt identity, exact bound
-  frame/stable target, source snapshot generation, monotonic completion time,
-  and per-action budget derive one overflow-checked absolute deadline. An
+  request terminally applied. One nonzero action-attempt identity, exact
+  prepared frame/stable target, rolling checkpoint generation, monotonic
+  completion time, and per-action budget derive one overflow-checked absolute
+  deadline. An
   `Immediate` condition becomes ready for verification without allocating or
   consuming an event; it still does not become success.
 - The settle core consumes at most 128 coalesced facts/snapshots and retains
@@ -105,12 +116,13 @@ are trusted, or that M4 is complete.
   snapshot, private stable target identity, unchanged role/trust/sensitivity,
   and non-credential semantics. Missing, skipped, incomplete, cross-frame, or
   secret-upgraded targets fail closed.
-- Exact fill evidence is a transient borrowed string capped at 4 KiB and
-  compared byte-for-byte with the already bounded requested input; ordinary
-  snapshot values are not reused because their safe projection is normalized
-  and capped at 1 KiB. Evidence diagnostics retain neither requested nor
-  observed text. Selection proof resolves the private bound option again and
-  requires its selected state and current target ancestry.
+- Exact fill evidence carries transient borrowed before/after strings, each
+  capped at 4 KiB. The before value must differ from the requested input and
+  the after value must match it byte-for-byte; ordinary snapshot values are not
+  reused because their safe projection is normalized and capped at 1 KiB.
+  Evidence diagnostics retain none of the requested or observed text.
+  Selection proof resolves the private bound option again and requires its
+  selected state and current target ancestry.
 - Navigation proof requires a second exact-next-document authority sample;
   dialog proof requires an opposite-to-expected transition in the same exact
   context; scroll proof requires bounded before/after samples moving in the
@@ -136,7 +148,8 @@ cargo clippy --locked -p zephium-agentic --all-targets \
   --features probe-harness -- -D warnings
 ```
 
-Coverage includes every fixed action shape; action/wait/verification
+Coverage includes every fixed action shape; rolling second-action checkpoint
+preparation and fill replay refusal; action/wait/verification
 compatibility; count, text, settle, and effect-boundary ceilings; current-frame
 cohort joins; wrong-operation and stale-reference refusal; credential targets;
 invalid option ancestry; diagnostic redaction; stable identity across harmless
@@ -150,7 +163,8 @@ attempt and monotonic-clock correlation, exact navigation/cancellation/human
 takeover transitions, terminal idempotence, event exhaustion, typed recovery,
 and content-redacted diagnostics.
 
-Verification coverage includes exact fill match and redaction, no-op refusal,
+Verification coverage includes exact fill before/after match and redaction,
+pre-existing-value refusal,
 adjacent target-state proof and skipped-generation refusal, exact option
 selection, fixed-key value change, independently correlated navigation/dialog
 transitions, directional/visibility-aware scroll proof, coordinate ceilings,

@@ -115,14 +115,14 @@ pub use semantic::{
 };
 pub use semantic_action::{
     SemanticActionBatch, SemanticActionBatchId, SemanticActionBindingError,
-    SemanticActionContractError, SemanticActionIntent, SemanticActionKind, SemanticActionProposal,
-    SemanticActionRevalidationError, SemanticActionText, SemanticActionTextError,
-    SemanticBoundAction, SemanticDialogState, SemanticEffectClass, SemanticMutationQuietPeriod,
-    SemanticPressKey, SemanticScrollAmount, SemanticScrollDirection, SemanticSettleBudget,
-    SemanticVerification, SemanticWaitCondition, MAX_SEMANTIC_ACTIONS_PER_BATCH,
-    MAX_SEMANTIC_ACTION_BATCH_SETTLE_MILLIS, MAX_SEMANTIC_ACTION_BATCH_TEXT_BYTES,
-    MAX_SEMANTIC_ACTION_SETTLE_MILLIS, MAX_SEMANTIC_ACTION_TEXT_BYTES,
-    MAX_SEMANTIC_MUTATION_QUIET_MILLIS,
+    SemanticActionContractError, SemanticActionIntent, SemanticActionKind,
+    SemanticActionPreparationError, SemanticActionProposal, SemanticActionRevalidationError,
+    SemanticActionText, SemanticActionTextError, SemanticBoundAction, SemanticDialogState,
+    SemanticEffectClass, SemanticMutationQuietPeriod, SemanticPreparedAction, SemanticPressKey,
+    SemanticScrollAmount, SemanticScrollDirection, SemanticSettleBudget, SemanticVerification,
+    SemanticWaitCondition, MAX_SEMANTIC_ACTIONS_PER_BATCH, MAX_SEMANTIC_ACTION_BATCH_SETTLE_MILLIS,
+    MAX_SEMANTIC_ACTION_BATCH_TEXT_BYTES, MAX_SEMANTIC_ACTION_SETTLE_MILLIS,
+    MAX_SEMANTIC_ACTION_TEXT_BYTES, MAX_SEMANTIC_MUTATION_QUIET_MILLIS,
 };
 pub use semantic_diff::{
     compute_semantic_diff, SemanticDiff, SemanticDiffBudget, SemanticDiffBudgetError,

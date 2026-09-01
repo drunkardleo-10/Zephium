@@ -12,8 +12,8 @@ use thiserror::Error;
 
 use crate::semantic::SemanticNodeKey;
 use crate::{
-    ContextJoin, FrameId, SemanticActionRevalidationError, SemanticBoundAction,
-    SemanticCompleteness, SemanticDialogState, SemanticFrameJoin, SemanticSnapshot,
+    ContextJoin, FrameId, SemanticActionRevalidationError, SemanticCompleteness,
+    SemanticDialogState, SemanticFrameJoin, SemanticPreparedAction, SemanticSnapshot,
     SemanticSnapshotGeneration, SemanticWaitCondition,
 };
 
@@ -402,7 +402,7 @@ impl SemanticSettleTracker {
     /// before constructing the tracker.
     pub fn begin(
         attempt: SemanticActionAttemptId,
-        action: &SemanticBoundAction,
+        action: &SemanticPreparedAction,
         completed_at: SemanticSettleInstant,
     ) -> Result<Self, SemanticSettleError> {
         let deadline = completed_at
@@ -418,7 +418,7 @@ impl SemanticSettleTracker {
             frame: action.frame().clone(),
             target: action.target_key(),
             action_guard: action.verification_guard(),
-            source_snapshot: action.snapshot_generation(),
+            source_snapshot: action.checkpoint_snapshot(),
             wait: action.wait(),
             started_at: completed_at,
             deadline,
@@ -463,10 +463,10 @@ impl SemanticSettleTracker {
         self.terminal_at
     }
 
-    pub(crate) fn matches_action(&self, action: &SemanticBoundAction) -> bool {
+    pub(crate) fn matches_action(&self, action: &SemanticPreparedAction) -> bool {
         self.frame == *action.frame()
             && self.target == action.target_key()
-            && self.source_snapshot == action.snapshot_generation()
+            && self.source_snapshot == action.checkpoint_snapshot()
             && self.action_guard == action.verification_guard()
     }
 
@@ -791,7 +791,7 @@ mod tests {
         wait: SemanticWaitCondition,
         verification: SemanticVerification,
         budget_millis: u32,
-    ) -> SemanticBoundAction {
+    ) -> SemanticPreparedAction {
         let proposal = SemanticActionProposal::try_new(
             SemanticActionIntent::Click {
                 target: SemanticReferenceId::new(2).expect("button"),
@@ -802,15 +802,16 @@ mod tests {
             SemanticSettleBudget::try_new(budget_millis).expect("budget"),
         )
         .expect("proposal");
-        SemanticActionBatch::bind(
+        let batch = SemanticActionBatch::bind(
             SemanticActionBatchId::new(1).expect("batch"),
             observation,
             &[observation.frames()[0].frame().clone()],
             vec![proposal],
         )
-        .expect("batch")
-        .actions()[0]
-            .clone()
+        .expect("batch");
+        batch.actions()[0]
+            .prepare(&observation.frames()[0])
+            .expect("prepare")
     }
 
     fn event(

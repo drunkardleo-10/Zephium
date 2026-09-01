@@ -14,10 +14,11 @@ use thiserror::Error;
 use crate::semantic::SemanticNodeKey;
 use crate::semantic_wire::looks_like_secret_value;
 use crate::{
-    ContextJoin, FrameId, SemanticFrameJoin, SemanticObservation, SemanticObservationGeneration,
-    SemanticObservationId, SemanticOperationClass, SemanticOperations, SemanticRect,
-    SemanticReferenceError, SemanticReferenceId, SemanticRole, SemanticSensitivity,
-    SemanticSnapshot, SemanticSnapshotGeneration, SemanticState, SemanticStates, SemanticTrust,
+    ContextJoin, FrameId, SemanticCompleteness, SemanticFrameJoin, SemanticInvocationId,
+    SemanticObservation, SemanticObservationGeneration, SemanticObservationId,
+    SemanticOperationClass, SemanticOperations, SemanticRect, SemanticReferenceError,
+    SemanticReferenceId, SemanticRole, SemanticSensitivity, SemanticSnapshot,
+    SemanticSnapshotGeneration, SemanticState, SemanticStates, SemanticTrust, SemanticValueSummary,
     MAX_SEMANTIC_FRAMES,
 };
 
@@ -683,10 +684,6 @@ impl SemanticBoundAction {
         self.intent.target().node_key
     }
 
-    pub(crate) const fn target_value(&self) -> Option<&crate::SemanticValueSummary> {
-        self.intent.target().value.as_ref()
-    }
-
     /// One-based position in the exact batch.
     pub const fn ordinal(&self) -> u8 {
         self.ordinal
@@ -807,28 +804,63 @@ impl SemanticBoundAction {
         Ok(())
     }
 
-    pub(crate) fn verification_target<'a>(
+    /// Revalidates and checkpoints this action against its actual pre-execution snapshot.
+    ///
+    /// A batch must prepare one action at a time after the prior action has
+    /// settled and verified. The returned value still carries no policy permit
+    /// or native execution authority.
+    pub fn prepare(
         &self,
-        current: &'a SemanticSnapshot,
-    ) -> Result<(usize, &'a crate::SemanticNode), SemanticActionRevalidationError> {
-        verification_node(self.intent.target(), current)
-    }
-
-    pub(crate) fn verification_option<'a>(
-        &self,
-        current: &'a SemanticSnapshot,
-        target_index: usize,
-    ) -> Result<(usize, &'a crate::SemanticNode), SemanticActionRevalidationError> {
-        let BoundActionIntent::Select { option, .. } = &self.intent else {
-            return Err(SemanticActionRevalidationError::SelectionTarget);
-        };
-        let (option_index, option_node) = verification_node(option, current)?;
-        if option_node.role() != SemanticRole::Option
-            || !is_descendant(current, option_index, target_index)
-        {
-            return Err(SemanticActionRevalidationError::SelectionTarget);
+        current: &SemanticSnapshot,
+    ) -> Result<SemanticPreparedAction, SemanticActionPreparationError> {
+        if current.completeness() != SemanticCompleteness::Complete {
+            return Err(SemanticActionPreparationError::IncompleteSnapshot);
         }
-        Ok((option_index, option_node))
+        self.revalidate(current)
+            .map_err(SemanticActionPreparationError::Revalidation)?;
+        let target = current
+            .nodes()
+            .iter()
+            .find(|node| node.key() == self.target_key())
+            .ok_or(SemanticActionPreparationError::Revalidation(
+                SemanticActionRevalidationError::TargetMissing,
+            ))?;
+        let option_states = match &self.intent {
+            BoundActionIntent::Select { option, .. } => Some(
+                current
+                    .nodes()
+                    .iter()
+                    .find(|node| node.key() == option.node_key)
+                    .ok_or(SemanticActionPreparationError::Revalidation(
+                        SemanticActionRevalidationError::SelectionTarget,
+                    ))?
+                    .states(),
+            ),
+            _ => None,
+        };
+        validate_prepared_baseline(self, target.value(), target.states(), option_states)?;
+
+        let target_value = target.value().cloned();
+        let target_states = target.states();
+        let checkpoint_invocation = current.invocation();
+        let checkpoint_snapshot = current.generation();
+        let guard = prepared_guard(
+            self,
+            checkpoint_invocation,
+            checkpoint_snapshot,
+            target_value.as_ref(),
+            target_states,
+            option_states,
+        );
+        Ok(SemanticPreparedAction {
+            action: self.clone(),
+            checkpoint_invocation,
+            checkpoint_snapshot,
+            target_value,
+            target_states,
+            option_states,
+            guard,
+        })
     }
 
     pub(crate) fn verification_guard(&self) -> [u8; 32] {
@@ -867,6 +899,138 @@ impl SemanticBoundAction {
             }
         }
         hasher.finalize().into()
+    }
+}
+
+/// One structurally revalidated action checkpointed immediately before execution.
+///
+/// At most the currently executing action needs to be prepared. This keeps the
+/// rolling batch state O(1) while preserving the original bound contract.
+#[derive(Eq, PartialEq)]
+pub struct SemanticPreparedAction {
+    action: SemanticBoundAction,
+    checkpoint_invocation: SemanticInvocationId,
+    checkpoint_snapshot: SemanticSnapshotGeneration,
+    target_value: Option<SemanticValueSummary>,
+    target_states: SemanticStates,
+    option_states: Option<SemanticStates>,
+    guard: [u8; 32],
+}
+
+impl SemanticPreparedAction {
+    /// Original observation-bound action contract.
+    pub const fn bound_action(&self) -> &SemanticBoundAction {
+        &self.action
+    }
+
+    /// One-based position in the exact batch.
+    pub const fn ordinal(&self) -> u8 {
+        self.action.ordinal()
+    }
+
+    /// Closed action class.
+    pub const fn kind(&self) -> SemanticActionKind {
+        self.action.kind()
+    }
+
+    /// Exact action frame at the pre-execution checkpoint.
+    pub const fn frame(&self) -> &SemanticFrameJoin {
+        self.action.frame()
+    }
+
+    /// Native invocation that produced the pre-execution checkpoint.
+    pub const fn checkpoint_invocation(&self) -> SemanticInvocationId {
+        self.checkpoint_invocation
+    }
+
+    /// Snapshot generation immediately before this action executes.
+    pub const fn checkpoint_snapshot(&self) -> SemanticSnapshotGeneration {
+        self.checkpoint_snapshot
+    }
+
+    /// Typed settle condition.
+    pub const fn wait(&self) -> SemanticWaitCondition {
+        self.action.wait()
+    }
+
+    /// Required independent postcondition.
+    pub const fn verification(&self) -> SemanticVerification {
+        self.action.verification()
+    }
+
+    /// Per-action absolute-deadline budget.
+    pub const fn settle_budget(&self) -> SemanticSettleBudget {
+        self.action.settle_budget()
+    }
+
+    /// Bounded exact fill text, when this is a fill action.
+    pub const fn fill_text(&self) -> Option<&SemanticActionText> {
+        self.action.fill_text()
+    }
+
+    /// Fixed scroll recipe, when this is a scroll action.
+    pub const fn scroll_recipe(&self) -> Option<(SemanticScrollDirection, SemanticScrollAmount)> {
+        self.action.scroll_recipe()
+    }
+
+    pub(crate) const fn target_key(&self) -> SemanticNodeKey {
+        self.action.target_key()
+    }
+
+    pub(crate) const fn target_value(&self) -> Option<&SemanticValueSummary> {
+        self.target_value.as_ref()
+    }
+
+    pub(crate) const fn target_states(&self) -> SemanticStates {
+        self.target_states
+    }
+
+    pub(crate) fn verification_target<'a>(
+        &self,
+        current: &'a SemanticSnapshot,
+    ) -> Result<(usize, &'a crate::SemanticNode), SemanticActionRevalidationError> {
+        verification_node_at(
+            self.action.intent.target(),
+            self.checkpoint_snapshot,
+            current,
+        )
+    }
+
+    pub(crate) fn verification_option<'a>(
+        &self,
+        current: &'a SemanticSnapshot,
+        target_index: usize,
+    ) -> Result<(usize, &'a crate::SemanticNode), SemanticActionRevalidationError> {
+        let BoundActionIntent::Select { option, .. } = &self.action.intent else {
+            return Err(SemanticActionRevalidationError::SelectionTarget);
+        };
+        let (option_index, option_node) =
+            verification_node_at(option, self.checkpoint_snapshot, current)?;
+        if option_node.role() != SemanticRole::Option
+            || !is_descendant(current, option_index, target_index)
+        {
+            return Err(SemanticActionRevalidationError::SelectionTarget);
+        }
+        Ok((option_index, option_node))
+    }
+
+    pub(crate) const fn verification_guard(&self) -> [u8; 32] {
+        self.guard
+    }
+}
+
+impl fmt::Debug for SemanticPreparedAction {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SemanticPreparedAction")
+            .field("action", &self.action)
+            .field("checkpoint_invocation", &self.checkpoint_invocation)
+            .field("checkpoint_snapshot", &self.checkpoint_snapshot)
+            .field("has_target_value", &self.target_value.is_some())
+            .field("target_states", &self.target_states)
+            .field("has_option_states", &self.option_states.is_some())
+            .field("guard", &"[redacted]")
+            .finish()
     }
 }
 
@@ -1093,6 +1257,50 @@ fn validate_verification_baseline(
     }
 }
 
+fn validate_prepared_baseline(
+    action: &SemanticBoundAction,
+    target_value: Option<&SemanticValueSummary>,
+    target_states: SemanticStates,
+    option_states: Option<SemanticStates>,
+) -> Result<(), SemanticActionPreparationError> {
+    let already_satisfied = match action.verification() {
+        SemanticVerification::TargetState { state, present } => {
+            target_states.contains(state) == present
+        }
+        SemanticVerification::TargetValueMatchesInput => action
+            .fill_text()
+            .is_some_and(|expected| projected_value_matches(target_value, expected)),
+        SemanticVerification::TargetSelectionMatchesOption => {
+            option_states.is_some_and(|states| states.contains(SemanticState::Selected))
+        }
+        SemanticVerification::TargetValueChanged
+        | SemanticVerification::TargetSelectionChanged
+        | SemanticVerification::NavigationCommitted
+        | SemanticVerification::Dialog(_)
+        | SemanticVerification::ScrollPositionChanged => false,
+    };
+    if already_satisfied {
+        Err(SemanticActionPreparationError::OutcomeAlreadySatisfied)
+    } else {
+        Ok(())
+    }
+}
+
+fn projected_value_matches(
+    current: Option<&SemanticValueSummary>,
+    expected: &SemanticActionText,
+) -> bool {
+    match current {
+        Some(SemanticValueSummary::Text(current)) => current.as_str() == expected.as_str(),
+        None => expected.is_empty(),
+        Some(
+            SemanticValueSummary::Redacted
+            | SemanticValueSummary::Boolean(_)
+            | SemanticValueSummary::Ordinal(_),
+        ) => false,
+    }
+}
+
 impl fmt::Debug for SemanticActionBatch {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -1310,11 +1518,12 @@ fn bind_node(snapshot: &SemanticSnapshot, node: &crate::SemanticNode) -> BoundNo
     }
 }
 
-fn verification_node<'a>(
+fn verification_node_at<'a>(
     bound: &BoundNode,
+    checkpoint: SemanticSnapshotGeneration,
     current: &'a SemanticSnapshot,
 ) -> Result<(usize, &'a crate::SemanticNode), SemanticActionRevalidationError> {
-    if current.frame() != &bound.frame || bound.snapshot.next() != Some(current.generation()) {
+    if current.frame() != &bound.frame || checkpoint.next() != Some(current.generation()) {
         return Err(SemanticActionRevalidationError::StaleAuthority);
     }
     let Some((index, node)) = current
@@ -1335,6 +1544,47 @@ fn verification_node<'a>(
         return Err(SemanticActionRevalidationError::CredentialBoundary);
     }
     Ok((index, node))
+}
+
+fn prepared_guard(
+    action: &SemanticBoundAction,
+    invocation: SemanticInvocationId,
+    snapshot: SemanticSnapshotGeneration,
+    target_value: Option<&SemanticValueSummary>,
+    target_states: SemanticStates,
+    option_states: Option<SemanticStates>,
+) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"ZEPHIUM-SEMANTIC-PREPARED-ACTION-GUARD-1\0");
+    hasher.update(action.verification_guard());
+    hasher.update(invocation.get().to_be_bytes());
+    hasher.update(snapshot.get().to_be_bytes());
+    hash_value(&mut hasher, target_value);
+    hasher.update([target_states.bits()]);
+    match option_states {
+        Some(states) => hasher.update([1, states.bits()]),
+        None => hasher.update([0]),
+    }
+    hasher.finalize().into()
+}
+
+fn hash_value(hasher: &mut Sha256, value: Option<&SemanticValueSummary>) {
+    match value {
+        None => hasher.update([0]),
+        Some(SemanticValueSummary::Text(text)) => {
+            hasher.update([1]);
+            hasher.update((text.len() as u64).to_be_bytes());
+            hasher.update(text.as_str().as_bytes());
+        }
+        Some(SemanticValueSummary::Redacted) => hasher.update([2]),
+        Some(SemanticValueSummary::Boolean(value)) => {
+            hasher.update([3, u8::from(*value)]);
+        }
+        Some(SemanticValueSummary::Ordinal(value)) => {
+            hasher.update([4]);
+            hasher.update(value.to_be_bytes());
+        }
+    }
 }
 
 fn structural_digest(node: &crate::SemanticNode, parent_key: Option<u64>) -> [u8; 32] {
@@ -1665,6 +1915,20 @@ pub enum SemanticActionRevalidationError {
     SelectionTarget,
 }
 
+/// Refusal while checkpointing one bound action immediately before execution.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum SemanticActionPreparationError {
+    /// Pre-execution semantic evidence must be complete.
+    #[error("semantic action preparation snapshot is incomplete")]
+    IncompleteSnapshot,
+    /// Fresh structural/operation revalidation refused the action.
+    #[error("semantic action preparation revalidation failed")]
+    Revalidation(SemanticActionRevalidationError),
+    /// The declared postcondition already held at the exact checkpoint.
+    #[error("semantic action outcome is already satisfied at preparation")]
+    OutcomeAlreadySatisfied,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1889,6 +2153,79 @@ mod tests {
         )
         .expect("scroll");
         assert_eq!(scroll.actions()[0].kind(), SemanticActionKind::Scroll);
+    }
+
+    #[test]
+    fn prepares_sequential_actions_from_the_rolling_complete_checkpoint() {
+        let observation = observation();
+        let batch = SemanticActionBatch::bind(
+            SemanticActionBatchId::new(1).expect("batch"),
+            &observation,
+            &frames(&observation),
+            vec![
+                proposal(
+                    SemanticActionIntent::Fill {
+                        target: SemanticReferenceId::new(3).expect("reference"),
+                        value: SemanticActionText::try_new("new private title".to_owned())
+                            .expect("text"),
+                    },
+                    SemanticEffectClass::LocalWrite,
+                    SemanticVerification::TargetValueMatchesInput,
+                ),
+                proposal(
+                    SemanticActionIntent::Press {
+                        target: SemanticReferenceId::new(3).expect("reference"),
+                        key: SemanticPressKey::Enter,
+                    },
+                    SemanticEffectClass::LocalWrite,
+                    SemanticVerification::TargetState {
+                        state: SemanticState::Focused,
+                        present: true,
+                    },
+                ),
+            ],
+        )
+        .expect("batch");
+
+        let first = batch.actions()[0]
+            .prepare(&observation.frames()[0])
+            .expect("first checkpoint");
+        let after_fill = current_snapshot(
+            &observation,
+            8,
+            10,
+            json!([
+                {"k": 1, "r": "document", "o": 16},
+                {"k": 2, "p": 0, "r": "button", "n": "Save private draft", "o": 9,
+                 "b": {"x": 10, "y": 10, "w": 100, "h": 30}},
+                {"k": 3, "p": 0, "r": "textbox", "n": "Title",
+                 "v": {"k": "text", "value": "new private title"}, "o": 11,
+                 "b": {"x": 10, "y": 50, "w": 200, "h": 30}},
+                {"k": 4, "p": 0, "r": "password", "n": "Password",
+                 "v": {"k": "redacted"}, "o": 11},
+                {"k": 5, "p": 0, "r": "combobox", "n": "Priority",
+                 "v": {"k": "ordinal", "value": 0}, "o": 13},
+                {"k": 6, "p": 4, "r": "option", "n": "High",
+                 "v": {"k": "ordinal", "value": 1}, "o": 9},
+                {"k": 7, "p": 0, "r": "option", "n": "Detached option",
+                 "v": {"k": "ordinal", "value": 2}, "o": 9}
+            ]),
+        );
+        let second = batch.actions()[1]
+            .prepare(&after_fill)
+            .expect("second rolling checkpoint");
+
+        assert_eq!(first.checkpoint_invocation().get(), 7);
+        assert_eq!(first.checkpoint_snapshot().get(), 9);
+        assert_eq!(second.checkpoint_invocation().get(), 8);
+        assert_eq!(second.checkpoint_snapshot().get(), 10);
+        assert_ne!(first.verification_guard(), second.verification_guard());
+        assert_eq!(
+            batch.actions()[0].prepare(&after_fill),
+            Err(SemanticActionPreparationError::OutcomeAlreadySatisfied)
+        );
+        let debug = format!("{second:?}");
+        assert!(!debug.contains("new private title"));
     }
 
     #[test]
