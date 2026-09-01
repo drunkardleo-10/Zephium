@@ -35,8 +35,9 @@ context/profile/cookie/handoff core, the initial Milestone 3 semantic runtime,
 and the bounded Milestone 4 action/read/extract/screenshot functional core.
 They require no native view, worker, network listener, profile data, provider
 call, or diagnostic feature. See `m2-context-identity.md`,
-`m3-semantic-runtime.md`, and `m4-action-pipeline.md` for the exact implemented
-and still-pending boundaries.
+`m3-semantic-runtime.md`, `m4-action-pipeline.md`, and
+`m5-policy-supervisor.md` for the exact implemented and still-pending
+boundaries.
 
 An optimized build with `probe-harness` is expected to fail at compile time.
 The ordinary `zephium-desktop` resolved graph is separately required not to

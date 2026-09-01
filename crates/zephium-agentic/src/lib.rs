@@ -14,6 +14,7 @@
 #[cfg(all(feature = "probe-harness", not(debug_assertions)))]
 compile_error!("the agentic probe harness is forbidden in optimized builds");
 
+mod agent_manifest;
 mod context;
 mod context_port;
 mod context_registry;
@@ -44,6 +45,16 @@ mod semantic_settle;
 mod semantic_verify;
 mod semantic_wire;
 mod sign_in_handoff;
+
+pub use agent_manifest::{
+    AgentAccountAttestationId, AgentAccountId, AgentAccountScope, AgentContextAccountBinding,
+    AgentDataFlowRule, AgentEffectScope, AgentManifestContractError, AgentPlanNodeAuthority,
+    AgentPlanNodeId, AgentPlanNodeScope, AgentPolicyInstant, AgentRunBudget, AgentRunManifest,
+    AgentRunManifestId, AgentRunScope, MAX_AGENT_DATA_FLOW_RULES, MAX_AGENT_PLAN_NODES,
+    MAX_AGENT_RUN_ACCOUNTS, MAX_AGENT_RUN_CONTEXTS, MAX_AGENT_RUN_COST_MICRO_USD,
+    MAX_AGENT_RUN_LIFETIME_MILLIS, MAX_AGENT_RUN_MODEL_TOKENS, MAX_AGENT_RUN_OPERATIONS,
+    MAX_AGENT_RUN_ORIGINS, MAX_AGENT_RUN_PROFILES,
+};
 
 pub use context::{
     ContextCapabilities, ContextCapability, ContextCapabilityError, ContextControl,
