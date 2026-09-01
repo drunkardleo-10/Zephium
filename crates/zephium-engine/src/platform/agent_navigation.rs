@@ -233,6 +233,48 @@ mod tests {
     }
 
     #[test]
+    fn committed_navigation_retains_one_content_free_finished_fact() {
+        let gate = super::AgentNavigationController::default();
+        let operation = operation(zephium_agentic::ContextOperationKind::Navigate);
+        let target =
+            zephium_agentic::ContextNavigationTarget::parse("https://example.test/finished")
+                .expect("target");
+        gate.arm(operation, target.clone(), Arc::new(AtomicBool::new(false)))
+            .expect("arm");
+        assert!(gate.allows(target.as_url().as_str()));
+        gate.observe(event(
+            12,
+            wry::NavigationEventPhase::Started,
+            target.as_url().as_str(),
+        ))
+        .expect("start");
+        gate.observe(event(
+            12,
+            wry::NavigationEventPhase::Committed,
+            target.as_url().as_str(),
+        ))
+        .expect("commit")
+        .expect("terminal");
+        assert_eq!(gate.document_finished_for_audit(operation), Some(false));
+        assert!(gate.disarm(operation));
+        assert_eq!(gate.document_finished_for_audit(operation), Some(false));
+        gate.observe(event(
+            12,
+            wry::NavigationEventPhase::Finished,
+            target.as_url().as_str(),
+        ))
+        .expect("finished");
+        assert_eq!(gate.document_finished_for_audit(operation), Some(true));
+        assert!(gate
+            .observe(event(
+                12,
+                wry::NavigationEventPhase::Finished,
+                target.as_url().as_str(),
+            ))
+            .is_err());
+    }
+
+    #[test]
     fn timeout_claim_blocks_a_late_native_commit() {
         let gate = super::AgentNavigationController::default();
         let operation = operation(zephium_agentic::ContextOperationKind::Navigate);
@@ -340,6 +382,14 @@ struct AgentNavigationArm {
     expected: AgentLoadExpectation,
     terminal_claimed: Arc<AtomicBool>,
     native_id: Option<wry::NavigationId>,
+    committed: bool,
+    finished: bool,
+}
+
+struct AgentCommittedNavigation {
+    operation: ContextOperationJoin,
+    native_id: wry::NavigationId,
+    finished: bool,
 }
 
 struct AgentNavigationState {
@@ -348,6 +398,7 @@ struct AgentNavigationState {
     bootstrap_native_id: Option<wry::NavigationId>,
     renderer_lost: bool,
     armed: Option<AgentNavigationArm>,
+    last_committed: Option<AgentCommittedNavigation>,
 }
 
 impl Default for AgentNavigationState {
@@ -358,6 +409,7 @@ impl Default for AgentNavigationState {
             bootstrap_native_id: None,
             renderer_lost: false,
             armed: None,
+            last_committed: None,
         }
     }
 }
@@ -427,11 +479,14 @@ impl AgentNavigationController {
         state.bootstrap_pending = false;
         state.bootstrap_native_id = None;
         state.renderer_lost = false;
+        state.last_committed = None;
         state.armed = Some(AgentNavigationArm {
             operation,
             expected,
             terminal_claimed,
             native_id: None,
+            committed: false,
+            finished: false,
         });
         Ok(())
     }
@@ -440,16 +495,21 @@ impl AgentNavigationController {
         let Ok(mut state) = self.state.lock() else {
             return false;
         };
-        if state
-            .armed
-            .as_ref()
-            .is_some_and(|armed| armed.operation == operation)
-        {
-            state.armed = None;
-            true
-        } else {
-            false
+        let Some(armed) = state.armed.take_if(|armed| armed.operation == operation) else {
+            return false;
+        };
+        if !armed.committed {
+            return true;
         }
+        let Some(native_id) = armed.native_id else {
+            return false;
+        };
+        state.last_committed = Some(AgentCommittedNavigation {
+            operation,
+            native_id,
+            finished: armed.finished,
+        });
+        true
     }
 
     /// Retires one exact recovery arm and restores loss state on refusal.
@@ -466,6 +526,7 @@ impl AgentNavigationController {
             return false;
         }
         state.armed = None;
+        state.last_committed = None;
         // A termination callback can win after the commit callback has
         // claimed the terminal but before the host consumes either queued
         // callback. Successful settlement must not erase that newer loss.
@@ -505,6 +566,20 @@ impl AgentNavigationController {
             return Ok(AgentNavigationObservation::none());
         }
         let Some(armed) = state.armed.as_mut() else {
+            if let Some(committed) = state.last_committed.as_mut() {
+                if committed.native_id == event.id
+                    && matches!(
+                        event.phase,
+                        wry::NavigationEventPhase::Finished | wry::NavigationEventPhase::Failed
+                    )
+                {
+                    if event.phase != wry::NavigationEventPhase::Finished || committed.finished {
+                        return Err(());
+                    }
+                    committed.finished = true;
+                    return Ok(AgentNavigationObservation::none());
+                }
+            }
             if !state.bootstrap_pending {
                 return Ok(AgentNavigationObservation::none());
             }
@@ -541,6 +616,13 @@ impl AgentNavigationController {
             }
             return Ok(AgentNavigationObservation::none());
         }
+        if event.phase == wry::NavigationEventPhase::Finished && armed.native_id == Some(event.id) {
+            if !armed.committed || !armed.expected.matches(&event.url) || armed.finished {
+                return Err(());
+            }
+            armed.finished = true;
+            return Ok(AgentNavigationObservation::none());
+        }
         if !matches!(
             event.phase,
             wry::NavigationEventPhase::Committed | wry::NavigationEventPhase::Failed
@@ -565,6 +647,7 @@ impl AgentNavigationController {
             | wry::NavigationEventPhase::Finished => return Ok(AgentNavigationObservation::none()),
         };
         let document_committed = outcome.is_ok();
+        armed.committed = document_committed;
         Ok(AgentNavigationObservation::terminal(
             document_committed,
             AgentNavigationTerminal { operation, outcome },
@@ -577,10 +660,34 @@ impl AgentNavigationController {
             return Ok(false);
         }
         state.renderer_lost = true;
+        state.last_committed = None;
         if let Some(armed) = state.armed.as_ref() {
             armed.terminal_claimed.store(true, Ordering::Release);
         }
         Ok(true)
+    }
+
+    /// Reports whether the exact committed navigation has reached native load
+    /// completion. This is a read-only bounded audit seam; it grants no new
+    /// navigation, script, page-content, or input authority.
+    #[allow(dead_code)]
+    pub(crate) fn document_finished_for_audit(
+        &self,
+        operation: ContextOperationJoin,
+    ) -> Option<bool> {
+        let state = self.state.lock().ok()?;
+        if let Some(armed) = state
+            .armed
+            .as_ref()
+            .filter(|armed| armed.operation == operation && armed.committed)
+        {
+            return Some(armed.finished);
+        }
+        state
+            .last_committed
+            .as_ref()
+            .filter(|committed| committed.operation == operation)
+            .map(|committed| committed.finished)
     }
 
     pub(crate) fn matches_for_audit(
