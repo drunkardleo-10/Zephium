@@ -10,7 +10,8 @@ use wry::{
     WebViewBuilder, WebViewBuilderExtDarwin as _, WebViewBuilderExtMacos as _,
 };
 use zephium_agentic::{
-    ContextNavigationTarget, ContextOperationJoin, ContextPortFailure, ContextProfileStorageClass,
+    ContextNavigationTarget, ContextOperationJoin, ContextOperationKind, ContextPortFailure,
+    ContextProfileStorageClass,
 };
 use zephium_core::ids::ProfileId;
 
@@ -27,10 +28,19 @@ pub(crate) enum AgentOwnedViewConstructionError {
     Native,
 }
 
-/// One exact terminal native observation for a shell-requested navigation.
+/// Closed committed target for one exact native page load.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum AgentNavigationCommit {
+    /// A validated HTTP(S) document committed.
+    Web(ContextNavigationTarget),
+    /// The construction/recovery-only empty document committed.
+    Bootstrap,
+}
+
+/// One exact terminal native observation for a shell-requested page load.
 pub(crate) struct AgentNavigationTerminal {
     operation: ContextOperationJoin,
-    outcome: Result<ContextNavigationTarget, ContextPortFailure>,
+    outcome: Result<AgentNavigationCommit, ContextPortFailure>,
 }
 
 impl AgentNavigationTerminal {
@@ -38,14 +48,43 @@ impl AgentNavigationTerminal {
         self.operation
     }
 
-    pub(crate) fn into_outcome(self) -> Result<ContextNavigationTarget, ContextPortFailure> {
+    pub(crate) fn into_outcome(self) -> Result<AgentNavigationCommit, ContextPortFailure> {
         self.outcome
+    }
+}
+
+#[derive(Clone)]
+enum AgentLoadExpectation {
+    Web(ContextNavigationTarget),
+    Bootstrap,
+}
+
+impl AgentLoadExpectation {
+    fn matches(&self, candidate: &str) -> bool {
+        match self {
+            Self::Web(expected) => ContextNavigationTarget::parse(candidate)
+                .ok()
+                .is_some_and(|candidate| candidate == *expected),
+            Self::Bootstrap => candidate == "about:blank",
+        }
+    }
+
+    fn commit(&self, candidate: &str) -> Result<AgentNavigationCommit, ContextPortFailure> {
+        match self {
+            Self::Web(expected) => ContextNavigationTarget::parse(candidate)
+                .ok()
+                .filter(|candidate| candidate == expected)
+                .map(AgentNavigationCommit::Web)
+                .ok_or(ContextPortFailure::NativeRefused),
+            Self::Bootstrap if candidate == "about:blank" => Ok(AgentNavigationCommit::Bootstrap),
+            Self::Bootstrap => Err(ContextPortFailure::NativeRefused),
+        }
     }
 }
 
 struct AgentNavigationArm {
     operation: ContextOperationJoin,
-    target: ContextNavigationTarget,
+    expected: AgentLoadExpectation,
     terminal_claimed: Arc<AtomicBool>,
     native_id: Option<wry::NavigationId>,
 }
@@ -84,19 +123,54 @@ impl AgentNavigationController {
         target: ContextNavigationTarget,
         terminal_claimed: Arc<AtomicBool>,
     ) -> Result<(), ()> {
-        if operation.kind() != zephium_agentic::ContextOperationKind::Navigate
-            || terminal_claimed.load(Ordering::Acquire)
-        {
+        if operation.kind() != ContextOperationKind::Navigate {
+            return Err(());
+        }
+        self.arm_exact(
+            operation,
+            AgentLoadExpectation::Web(target),
+            terminal_claimed,
+            false,
+        )
+    }
+
+    /// Arms the sole page load permitted after exact renderer loss.
+    pub(crate) fn arm_recovery(
+        &self,
+        operation: ContextOperationJoin,
+        target: Option<ContextNavigationTarget>,
+        terminal_claimed: Arc<AtomicBool>,
+    ) -> Result<(), ()> {
+        if operation.kind() != ContextOperationKind::Recover {
+            return Err(());
+        }
+        self.arm_exact(
+            operation,
+            target.map_or(AgentLoadExpectation::Bootstrap, AgentLoadExpectation::Web),
+            terminal_claimed,
+            true,
+        )
+    }
+
+    fn arm_exact(
+        &self,
+        operation: ContextOperationJoin,
+        expected: AgentLoadExpectation,
+        terminal_claimed: Arc<AtomicBool>,
+        requires_renderer_loss: bool,
+    ) -> Result<(), ()> {
+        if terminal_claimed.load(Ordering::Acquire) {
             return Err(());
         }
         let mut state = self.state.lock().map_err(|_| ())?;
-        if state.renderer_lost || state.armed.is_some() {
+        if state.renderer_lost != requires_renderer_loss || state.armed.is_some() {
             return Err(());
         }
         state.bootstrap_available = false;
+        state.renderer_lost = false;
         state.armed = Some(AgentNavigationArm {
             operation,
-            target,
+            expected,
             terminal_claimed,
             native_id: None,
         });
@@ -119,6 +193,29 @@ impl AgentNavigationController {
         }
     }
 
+    /// Retires one exact recovery arm and restores loss state on refusal.
+    pub(crate) fn settle_recovery(&self, operation: ContextOperationJoin, applied: bool) -> bool {
+        let Ok(mut state) = self.state.lock() else {
+            return false;
+        };
+        if operation.kind() != ContextOperationKind::Recover
+            || !state
+                .armed
+                .as_ref()
+                .is_some_and(|armed| armed.operation == operation)
+        {
+            return false;
+        }
+        state.armed = None;
+        // A termination callback can win after the commit callback has
+        // claimed the terminal but before the host consumes either queued
+        // callback. Successful settlement must not erase that newer loss.
+        if !applied {
+            state.renderer_lost = true;
+        }
+        true
+    }
+
     fn allows(&self, candidate: &str) -> bool {
         let Ok(mut state) = self.state.lock() else {
             return false;
@@ -130,9 +227,7 @@ impl AgentNavigationController {
             if armed.terminal_claimed.load(Ordering::Acquire) {
                 return false;
             }
-            return url::Url::parse(candidate)
-                .ok()
-                .is_some_and(|candidate| candidate == *armed.target.as_url());
+            return armed.expected.matches(candidate);
         }
         if state.bootstrap_available && candidate == "about:blank" {
             state.bootstrap_available = false;
@@ -150,9 +245,7 @@ impl AgentNavigationController {
             return Ok(None);
         };
         if event.phase == NavigationEventPhase::Started {
-            let matches_target = ContextNavigationTarget::parse(&event.url)
-                .ok()
-                .is_some_and(|target| target == armed.target);
+            let matches_target = armed.expected.matches(&event.url);
             if matches_target && armed.native_id.is_none() {
                 armed.native_id = Some(event.id);
             }
@@ -173,12 +266,9 @@ impl AgentNavigationController {
             return Ok(None);
         }
         let operation = armed.operation;
-        let expected = armed.target.clone();
+        let expected = armed.expected.clone();
         let outcome = match event.phase {
-            NavigationEventPhase::Committed => match ContextNavigationTarget::parse(&event.url) {
-                Ok(target) if target == expected => Ok(target),
-                Ok(_) | Err(_) => Err(ContextPortFailure::NativeRefused),
-            },
+            NavigationEventPhase::Committed => expected.commit(&event.url),
             NavigationEventPhase::Failed => Err(ContextPortFailure::NativeRefused),
             NavigationEventPhase::Started
             | NavigationEventPhase::Redirected
@@ -369,7 +459,7 @@ where
     Ok(AgentOwnedView { navigation, view })
 }
 
-fn attest_owned_agent_view(
+pub(crate) fn attest_owned_agent_view(
     view: &WebView,
     profile: ProfileId,
     storage_class: ContextProfileStorageClass,
@@ -465,6 +555,45 @@ mod tests {
             .expect("navigation")
     }
 
+    fn recovery_operation() -> zephium_agentic::ContextOperationJoin {
+        let identity = ContextIdentity::new(
+            ContextId::generate(),
+            ContextRunId::generate(),
+            ProfileId::from(5),
+            zephium_agentic::ContextKind::Owned,
+        );
+        let capabilities = ContextCapabilities::try_new(
+            zephium_agentic::ContextKind::Owned,
+            &[zephium_agentic::ContextCapability::Recover],
+        )
+        .expect("capabilities");
+        let mut registry = ContextRegistry::new();
+        registry.reserve(identity, capabilities).expect("reserve");
+        let construction = registry
+            .begin_context(
+                identity.id(),
+                ContextOperationId::new(1).expect("operation"),
+            )
+            .expect("construction");
+        registry
+            .settle_construction(
+                identity.id(),
+                construction,
+                zephium_agentic::ContextSettlement::Applied,
+            )
+            .expect("settle construction");
+        let prior = registry.join(identity.id()).expect("join");
+        registry
+            .renderer_lost(identity.id(), prior)
+            .expect("renderer loss");
+        registry
+            .begin_recovery(
+                identity.id(),
+                ContextOperationId::new(2).expect("operation"),
+            )
+            .expect("recovery")
+    }
+
     #[test]
     fn construction_source_has_no_model_or_page_program_surface() {
         let source = include_str!("agent_context.rs");
@@ -530,7 +659,10 @@ mod tests {
             .expect("state")
             .expect("commit");
         assert_eq!(committed.operation(), operation);
-        assert_eq!(committed.into_outcome(), Ok(target));
+        assert_eq!(
+            committed.into_outcome(),
+            Ok(super::AgentNavigationCommit::Web(target))
+        );
         assert!(!gate.allows("https://example.test/path"));
         assert!(gate
             .observe(wry::NavigationEvent {
@@ -596,5 +728,109 @@ mod tests {
         assert!(gate.matches_for_audit(Some(operation), true));
         assert!(gate.disarm(operation));
         assert!(gate.matches_for_audit(None, true));
+    }
+
+    #[test]
+    fn recovery_rearms_only_from_loss_and_restores_repeatable_loss_detection() {
+        let gate = super::AgentNavigationController::default();
+        let operation = recovery_operation();
+        let terminal = Arc::new(AtomicBool::new(false));
+        assert!(gate
+            .arm_recovery(operation, None, terminal.clone())
+            .is_err());
+        assert_eq!(gate.claim_renderer_loss(), Ok(true));
+        gate.arm_recovery(operation, None, terminal)
+            .expect("recovery arm");
+        assert!(gate.allows("about:blank"));
+        assert!(!gate.allows("https://example.test/"));
+        assert!(gate
+            .observe(wry::NavigationEvent {
+                id: wry::NavigationId::from_raw(4),
+                phase: wry::NavigationEventPhase::Started,
+                url: "about:blank".to_owned(),
+            })
+            .expect("state")
+            .is_none());
+        let committed = gate
+            .observe(wry::NavigationEvent {
+                id: wry::NavigationId::from_raw(4),
+                phase: wry::NavigationEventPhase::Committed,
+                url: "about:blank".to_owned(),
+            })
+            .expect("state")
+            .expect("commit");
+        assert_eq!(committed.operation(), operation);
+        assert_eq!(
+            committed.into_outcome(),
+            Ok(super::AgentNavigationCommit::Bootstrap)
+        );
+        assert!(gate.settle_recovery(operation, true));
+        assert!(gate.matches_for_audit(None, false));
+        assert_eq!(gate.claim_renderer_loss(), Ok(true));
+    }
+
+    #[test]
+    fn loss_after_recovery_commit_survives_terminal_settlement() {
+        let gate = super::AgentNavigationController::default();
+        let operation = recovery_operation();
+        assert_eq!(gate.claim_renderer_loss(), Ok(true));
+        gate.arm_recovery(operation, None, Arc::new(AtomicBool::new(false)))
+            .expect("recovery arm");
+        assert!(gate
+            .observe(wry::NavigationEvent {
+                id: wry::NavigationId::from_raw(5),
+                phase: wry::NavigationEventPhase::Started,
+                url: "about:blank".to_owned(),
+            })
+            .expect("state")
+            .is_none());
+        assert!(gate
+            .observe(wry::NavigationEvent {
+                id: wry::NavigationId::from_raw(5),
+                phase: wry::NavigationEventPhase::Committed,
+                url: "about:blank".to_owned(),
+            })
+            .expect("state")
+            .is_some());
+        assert_eq!(gate.claim_renderer_loss(), Ok(true));
+        assert!(gate.settle_recovery(operation, true));
+        assert!(gate.matches_for_audit(None, true));
+    }
+
+    #[test]
+    fn failed_web_recovery_restores_loss_and_never_widens_its_target() {
+        let gate = super::AgentNavigationController::default();
+        let operation = recovery_operation();
+        let target =
+            zephium_agentic::ContextNavigationTarget::parse("https://example.test/recover")
+                .expect("target");
+        assert_eq!(gate.claim_renderer_loss(), Ok(true));
+        gate.arm_recovery(operation, Some(target), Arc::new(AtomicBool::new(false)))
+            .expect("recovery arm");
+        assert!(gate.allows("https://example.test/recover"));
+        assert!(!gate.allows("https://example.test/redirect"));
+        assert!(gate
+            .observe(wry::NavigationEvent {
+                id: wry::NavigationId::from_raw(6),
+                phase: wry::NavigationEventPhase::Started,
+                url: "https://example.test/recover".to_owned(),
+            })
+            .expect("state")
+            .is_none());
+        let failed = gate
+            .observe(wry::NavigationEvent {
+                id: wry::NavigationId::from_raw(6),
+                phase: wry::NavigationEventPhase::Failed,
+                url: "https://example.test/recover".to_owned(),
+            })
+            .expect("state")
+            .expect("failure");
+        assert_eq!(
+            failed.into_outcome(),
+            Err(zephium_agentic::ContextPortFailure::NativeRefused)
+        );
+        assert!(gate.settle_recovery(operation, false));
+        assert!(gate.matches_for_audit(None, true));
+        assert!(!gate.allows("https://example.test/recover"));
     }
 }

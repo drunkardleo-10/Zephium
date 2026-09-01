@@ -259,6 +259,7 @@ fn validate_engine_agent_context_boundary(
     let port = compact(port);
     for required in [
         "MAX_PENDING_NATIVE_CONTEXT_TASKS",
+        "ContextOperationKind::Recover",
         "ContextOperationKind::Close",
         "constfnsupports_cookie_transfer()->bool{false}",
         "pub(crate)structAgentContextPortSlot",
@@ -280,8 +281,13 @@ fn validate_engine_agent_context_boundary(
         "NativeResourceClass::AgentContext",
         "ContextConstructionProof::MacOsOwnedSelectedProfileExtensionFree",
         "pending_navigation:Option<AgentPendingNavigation>",
+        "pending_recovery:Option<AgentPendingRecovery>",
         "renderer_loss_rejoin_pending:bool",
-        "AGENT_NAVIGATION_COMMIT_TIMEOUT",
+        "attest_owned_agent_view(",
+        "double_full_successor(binding.join,requested)",
+        "binding.view.view().reload()",
+        "binding.view.view().load_url(\"about:blank\")",
+        "AGENT_PAGE_LOAD_COMMIT_TIMEOUT",
         "try_with_agent_context_terminal",
         "emitter.emit_renderer_lost(prior)",
         "force_shutdown_agent_contexts",
@@ -308,6 +314,8 @@ fn validate_engine_agent_context_boundary(
         "terminal_claimed.compare_exchange",
         "with_on_web_content_process_terminate_handler",
         "fnclaim_renderer_loss",
+        "fnarm_recovery",
+        "fnsettle_recovery",
         "renderer_lost_callback",
     ] {
         if !macos.contains(required) {
@@ -2133,6 +2141,7 @@ mod tests {
         "#;
         let port = r#"
             use x::MAX_PENDING_NATIVE_CONTEXT_TASKS;
+            ContextOperationKind::Recover;
             ContextOperationKind::Close;
             const fn supports_cookie_transfer() -> bool { false }
             pub(crate) struct AgentContextPortSlot;
@@ -2146,8 +2155,13 @@ mod tests {
             NativeResourceClass::AgentContext;
             ContextConstructionProof::MacOsOwnedSelectedProfileExtensionFree;
             pending_navigation: Option<AgentPendingNavigation>,
+            pending_recovery: Option<AgentPendingRecovery>,
             renderer_loss_rejoin_pending: bool,
-            const AGENT_NAVIGATION_COMMIT_TIMEOUT: Duration = Duration::from_secs(30);
+            attest_owned_agent_view();
+            double_full_successor(binding.join, requested);
+            binding.view.view().reload();
+            binding.view.view().load_url("about:blank");
+            const AGENT_PAGE_LOAD_COMMIT_TIMEOUT: Duration = Duration::from_secs(30);
             try_with_agent_context_terminal();
             emitter.emit_renderer_lost(prior);
             fn force_shutdown_agent_contexts() {}
@@ -2165,6 +2179,8 @@ mod tests {
             terminal_claimed.compare_exchange();
             with_on_web_content_process_terminate_handler();
             fn claim_renderer_loss() {}
+            fn arm_recovery() {}
+            fn settle_recovery() {}
             renderer_lost_callback();
         "#;
         validate_engine_agent_context_boundary(engine, host_root, port, host, macos)

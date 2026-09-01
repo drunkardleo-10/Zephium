@@ -564,9 +564,11 @@ fn supports_native_request(request: &ContextNativeRequest) -> bool {
                 zephium_agentic::ContextConstructionSource::Owned
             ),
             ContextNativeRequest::Transition(request) => {
-                request.operation().kind() == ContextOperationKind::Close
-                    && request.operation().context().identity().kind()
-                        == zephium_agentic::ContextKind::Owned
+                matches!(
+                    request.operation().kind(),
+                    ContextOperationKind::Recover | ContextOperationKind::Close
+                ) && request.operation().context().identity().kind()
+                    == zephium_agentic::ContextKind::Owned
             }
             ContextNativeRequest::Cancel(request) => {
                 request.current().identity().kind() == zephium_agentic::ContextKind::Owned
@@ -637,6 +639,50 @@ mod tests {
                 ContextConstructionSource::Owned,
             )
             .expect("request"),
+        )
+    }
+
+    #[cfg(target_os = "macos")]
+    fn recovery_request() -> ContextNativeRequest {
+        let identity = ContextIdentity::new(
+            ContextId::generate(),
+            ContextRunId::generate(),
+            ProfileId::generate(),
+            zephium_agentic::ContextKind::Owned,
+        );
+        let capabilities = ContextCapabilities::try_new(
+            zephium_agentic::ContextKind::Owned,
+            &[ContextCapability::Recover],
+        )
+        .expect("capabilities");
+        let mut registry = ContextRegistry::new();
+        registry.reserve(identity, capabilities).expect("reserve");
+        let construction = registry
+            .begin_context(
+                identity.id(),
+                ContextOperationId::new(1).expect("operation"),
+            )
+            .expect("construction");
+        registry
+            .settle_construction(
+                identity.id(),
+                construction,
+                zephium_agentic::ContextSettlement::Applied,
+            )
+            .expect("construction settlement");
+        let prior = registry.join(identity.id()).expect("join");
+        registry
+            .renderer_lost(identity.id(), prior)
+            .expect("renderer loss");
+        let recovery = registry
+            .begin_recovery(
+                identity.id(),
+                ContextOperationId::new(2).expect("operation"),
+            )
+            .expect("recovery");
+        ContextNativeRequest::Transition(
+            zephium_agentic::ContextTransitionRequest::try_new(recovery)
+                .expect("transition request"),
         )
     }
 
@@ -718,6 +764,8 @@ mod tests {
             Arc::new(|_| {}),
         );
         let port = slot.take(Arc::new(|_| {})).expect("port");
+        #[cfg(target_os = "macos")]
+        assert!(supports_native_request(&recovery_request()));
         let outcome = port.dispatch(construction_request());
         #[cfg(target_os = "macos")]
         assert_eq!(

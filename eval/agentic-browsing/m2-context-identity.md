@@ -3,10 +3,10 @@
 Status: pure domain contract, bounded registry, closed shell/native port, and
 the initial feature-gated macOS owned-context construction/close adapter are
 implemented, including exact shell-requested navigation on that first adapter.
-One-shot native renderer-loss detection and resource accounting are also
-implemented. Redirect and page-driven navigation, presentation, suspension,
-renderer recovery, Windows native ownership/cookies, borrowed/handoff
-adapters, and named-device qualification remain pending.
+One-shot native renderer-loss detection, exact same-view recovery, and
+resource accounting are also implemented. Redirect and page-driven
+navigation, presentation, suspension, Windows native ownership/cookies,
+borrowed/handoff adapters, and named-device qualification remain pending.
 
 This evidence records code properties only. It does not claim that an owned
 native context has passed a live host/device qualification, or that a Windows
@@ -174,9 +174,9 @@ dropped. Poisoned admission is sticky, closes the port, and invokes the
 mandatory fatal callback once rather than deadlocking.
 
 The first macOS adapter accepts owned construction, one exact shell-requested
-navigation at a time, exact close, post-revocation cancellation, and
-privacy-preserving resource audit. Cookie transfer remains synchronously
-unsupported. Owned construction:
+navigation at a time, exact renderer recovery, exact close, post-revocation
+cancellation, and privacy-preserving resource audit. Cookie transfer remains
+synchronously unsupported. Owned construction:
 
 - binds the exact context identity, complete capability inventory, profile
   lease, and authoritative durable/ephemeral storage class;
@@ -199,9 +199,10 @@ The WebKit gate admits the canonical requested URL only: its construction-only
 `about:blank` permit is one-shot, and unarmed page navigation plus redirects
 remain denied until their policy contract is implemented. Commit and a
 30-second watchdog share one atomic terminal claim, so exactly one can enqueue
-the settlement. Navigation terminal and renderer loss can each contribute at
-most one callback per live context, so native callbacks own an independent
-fixed 16-entry host band; they cannot compete with the 16-entry request band.
+the settlement. One navigation-or-recovery page-load terminal and one
+renderer loss can each contribute at most one callback per live context, so
+native callbacks own an independent fixed 16-entry host band; they cannot
+compete with the 16-entry request band.
 Cancellation, close, and shutdown stop loading, retire the exact native gate
 and watchdog, and terminally settle the retained navigation before releasing
 its queue permit. Resource audits subtract in-flight operations from
@@ -216,11 +217,35 @@ navigation before emitting the closed `RendererLost` event for its exact prior
 join. Duplicate or stale old-view callbacks are no-ops; a lost renderer reduces
 `resident_views` to zero while its exact binding, view object, policy
 registration, profile lease, and resource reservation remain owned for close
-or later recovery. Close and cancellation accept only the exact one- or
+or recovery. Close and cancellation accept only the exact one- or
 two-generation functional-core rejoin required by the race between a native
-loss callback and its shell observation. `Recover` remains mechanically
-unsupported until replacement construction, policy attestation, navigation,
-and settlement can be one complete operation.
+loss callback and its shell observation.
+
+Recovery reuses that already-attested WKWebView, configuration, selected
+profile store, policy registration, and native reservation rather than
+temporarily constructing a second page or storage binding. The host retains
+the last exact committed web target. Before rearming, it reasserts the actual
+configuration's absent extension controller and scripts, selected durable or
+pointer-identical ephemeral store, disabled inspection, and hidden state. A
+lost initial `about:blank` reloads only that internal document, while a lost
+web document uses WKWebView's native reload and the same exact URL policy. The
+recovery operation is admitted only at the double full-generation successor
+produced by renderer loss followed by `begin_recovery`. Its load commit and
+30-second watchdog share the same atomic terminal claim as ordinary
+navigation. `resident_views` remains zero until an expected target commits
+under the exact Wry navigation identity, after which the functional core still
+requires a complete fresh observation. A timeout, load failure, wrong target,
+cancellation, or second pre-commit termination refuses recovery and leaves
+automation fail-closed; a termination that follows an already-claimed recovery
+commit remains queued as a newer loss and cannot be erased by terminal
+settlement.
+
+The core already caps each canonical target at 8 KiB. Recovery retains one
+steady target per live binding and at most one temporary clone per in-flight
+recovery, so the eight-context ceiling bounds this adapter's serialized target
+retention to 64 KiB steady and 128 KiB during the all-context recovery peak.
+It creates no replacement view, profile store, policy registration, thread,
+or additional native-resource reservation.
 
 With `agentic-browser` enabled, the native resource ledger owns an independent
 eight-context class equal to the functional core's live-context ceiling. Its
@@ -277,9 +302,8 @@ redaction, and exact cancellation resource dispositions.
 
 1. add Windows owned construction with a truthful enabled-inventory proof,
    stable selected-profile/subprofile binding, and cleanup-debt ownership;
-2. add bounded redirect/page-replacement observation, presentation,
-   suspension, and renderer recovery while preserving exact
-   context/world/frame generations;
+2. add bounded redirect/page-replacement observation, presentation, and
+   suspension while preserving exact context/world/frame generations;
 3. implement the bounded Windows cookie adapter and native borrowed/handoff
    transactions without changing ordinary extension principals;
 4. qualify macOS construction/storage/inventory/close and both-platform
