@@ -2,9 +2,10 @@
 
 Status: pure domain contract, bounded registry, closed shell/native port, and
 the initial feature-gated macOS owned-context construction/close adapter are
-implemented. Navigation, presentation, suspension, renderer recovery, Windows
-native ownership/cookies, borrowed/handoff adapters, and named-device
-qualification remain pending.
+implemented, including exact shell-requested navigation on that first adapter.
+Redirect and page-driven navigation, presentation, suspension, renderer
+recovery, Windows native ownership/cookies, borrowed/handoff adapters, and
+named-device qualification remain pending.
 
 This evidence records code properties only. It does not claim that an owned
 native context has passed a live host/device qualification, or that a Windows
@@ -171,9 +172,10 @@ event or emits one closed native-refusal result when its retained owner is
 dropped. Poisoned admission is sticky, closes the port, and invokes the
 mandatory fatal callback once rather than deadlocking.
 
-The first macOS adapter accepts only owned construction, exact close,
-post-revocation cancellation, and privacy-preserving resource audit. Navigation
-and cookie transfer remain synchronously unsupported. Owned construction:
+The first macOS adapter accepts owned construction, one exact shell-requested
+navigation at a time, exact close, post-revocation cancellation, and
+privacy-preserving resource audit. Cookie transfer remains synchronously
+unsupported. Owned construction:
 
 - binds the exact context identity, complete capability inventory, profile
   lease, and authoritative durable/ephemeral storage class;
@@ -189,6 +191,19 @@ and cookie transfer remain synchronously unsupported. Owned construction:
 - retains the content-policy registration, page, and native resource lease in
   teardown order under a private `ContextId` map that is absent from ordinary
   tab, session, stage, navigation-snapshot, and extension-principal maps.
+
+Navigation advances only the exact functional-core navigation/frame successor
+and retains its accepted port task until a native commit or closed refusal.
+The WebKit gate admits the canonical requested URL only: its construction-only
+`about:blank` permit is one-shot, and unarmed page navigation plus redirects
+remain denied until their policy contract is implemented. Commit and a
+30-second watchdog share one atomic terminal claim, so exactly one can enqueue
+the settlement. Native terminals own an independent fixed eight-entry host
+band; they cannot compete with the 16-entry request band. Cancellation, close,
+and shutdown stop loading, retire the exact native gate and watchdog, and
+terminally settle the retained navigation before releasing its queue permit.
+Resource audits subtract in-flight operations from request-queue depth and add
+the independently bounded terminal depth rather than double-counting either.
 
 With `agentic-browser` enabled, the native resource ledger owns an independent
 eight-context class equal to the functional core's live-context ceiling. Its
@@ -245,8 +260,9 @@ redaction, and exact cancellation resource dispositions.
 
 1. add Windows owned construction with a truthful enabled-inventory proof,
    stable selected-profile/subprofile binding, and cleanup-debt ownership;
-2. connect native navigation, presentation, suspension, renderer loss and
-   recovery while preserving exact context/world/frame generations;
+2. add bounded redirect/page-replacement observation, presentation,
+   suspension, renderer loss and recovery while preserving exact
+   context/world/frame generations;
 3. implement the bounded Windows cookie adapter and native borrowed/handoff
    transactions without changing ordinary extension principals;
 4. qualify macOS construction/storage/inventory/close and both-platform

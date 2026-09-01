@@ -259,6 +259,10 @@ enum HostTaskPriority {
     // Exact agent-context lifecycle and audit tasks own an independent fixed
     // band and are never coalesced or replaced.
     AgentContext,
+    #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+    // A commit/timeout winner terminally settles an already-admitted context
+    // operation. It cannot compete with new request ingress for capacity.
+    AgentContextTerminal,
     ProfileErasure,
     Shutdown,
 }
@@ -306,12 +310,22 @@ const PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY: usize =
     zephium_core::session::MAX_SESSION_PROFILES;
 const NON_PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY: usize =
     NON_SHUTDOWN_PENDING_HOST_TASK_CAPACITY - PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY;
+#[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+const AGENT_CONTEXT_TERMINAL_PENDING_HOST_TASK_CAPACITY: usize = zephium_agentic::MAX_LIVE_CONTEXTS;
+#[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+const NON_AGENT_CONTEXT_TERMINAL_PENDING_HOST_TASK_CAPACITY: usize =
+    NON_PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY
+        - AGENT_CONTEXT_TERMINAL_PENDING_HOST_TASK_CAPACITY;
+#[cfg(all(feature = "agentic-browser", not(target_os = "macos")))]
+const NON_AGENT_CONTEXT_TERMINAL_PENDING_HOST_TASK_CAPACITY: usize =
+    NON_PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY;
 #[cfg(feature = "agentic-browser")]
 const AGENT_CONTEXT_PENDING_HOST_TASK_CAPACITY: usize =
     zephium_agentic::MAX_PENDING_NATIVE_CONTEXT_TASKS;
 #[cfg(feature = "agentic-browser")]
 const NON_AGENT_CONTEXT_PENDING_HOST_TASK_CAPACITY: usize =
-    NON_PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY - AGENT_CONTEXT_PENDING_HOST_TASK_CAPACITY;
+    NON_AGENT_CONTEXT_TERMINAL_PENDING_HOST_TASK_CAPACITY
+        - AGENT_CONTEXT_PENDING_HOST_TASK_CAPACITY;
 #[cfg(not(feature = "agentic-browser"))]
 const NON_AGENT_CONTEXT_PENDING_HOST_TASK_CAPACITY: usize =
     NON_PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY;
@@ -722,6 +736,34 @@ where
     F: FnOnce(&mut EngineHost) + 'static,
 {
     with_priority(HostTaskPriority::AgentContext, None, f)
+}
+
+/// Admit one exact terminal for an already-owned agent-context operation.
+#[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+pub(crate) fn try_with_agent_context_terminal<F>(f: F) -> bool
+where
+    F: FnOnce(&mut EngineHost) + 'static,
+{
+    with_priority(HostTaskPriority::AgentContextTerminal, None, f)
+}
+
+/// Exact queued terminal depth used only by the privacy-preserving resource
+/// audit while the host is already running on its owner thread.
+#[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+pub(crate) fn agent_context_terminal_depth_for_audit() -> Option<usize> {
+    PENDING.with(|pending| {
+        pending.try_borrow().ok().map(|pending| {
+            pending
+                .iter()
+                .filter(|task| task.priority == HostTaskPriority::AgentContextTerminal)
+                .count()
+        })
+    })
+}
+
+#[cfg(all(feature = "agentic-browser", not(target_os = "macos")))]
+pub(crate) const fn agent_context_terminal_depth_for_audit() -> Option<usize> {
+    Some(0)
 }
 
 /// Admits one exact native extension terminal independently of ordinary
@@ -1653,6 +1695,16 @@ fn enqueue_pending(pending: &mut VecDeque<QueuedHostTask>, queued: QueuedHostTas
     {
         return false;
     }
+    #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+    if queued.priority == HostTaskPriority::AgentContextTerminal
+        && pending
+            .iter()
+            .filter(|task| task.priority == HostTaskPriority::AgentContextTerminal)
+            .count()
+            >= AGENT_CONTEXT_TERMINAL_PENDING_HOST_TASK_CAPACITY
+    {
+        return false;
+    }
     if queued.priority == HostTaskPriority::ExtensionRuntimeProfileFence
         && pending
             .iter()
@@ -1664,7 +1716,14 @@ fn enqueue_pending(pending: &mut VecDeque<QueuedHostTask>, queued: QueuedHostTas
         // the UI borrow unwinds. Never borrow another band for a duplicate.
         return false;
     }
-    #[cfg(feature = "agentic-browser")]
+    #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+    if matches!(
+        queued.priority,
+        HostTaskPriority::AgentContext | HostTaskPriority::AgentContextTerminal
+    ) {
+        return enqueue_bounded_pending(pending, queued);
+    }
+    #[cfg(all(feature = "agentic-browser", not(target_os = "macos")))]
     if queued.priority == HostTaskPriority::AgentContext {
         return enqueue_bounded_pending(pending, queued);
     }
@@ -1706,8 +1765,10 @@ fn enqueue_bounded_pending(pending: &mut VecDeque<QueuedHostTask>, queued: Queue
     let capacity = match queued.priority {
         HostTaskPriority::Shutdown => PENDING_HOST_TASK_CAPACITY,
         HostTaskPriority::ProfileErasure => NON_SHUTDOWN_PENDING_HOST_TASK_CAPACITY,
+        #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+        HostTaskPriority::AgentContextTerminal => NON_PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY,
         #[cfg(feature = "agentic-browser")]
-        HostTaskPriority::AgentContext => NON_PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY,
+        HostTaskPriority::AgentContext => NON_AGENT_CONTEXT_TERMINAL_PENDING_HOST_TASK_CAPACITY,
         HostTaskPriority::ExtensionRuntime => NON_AGENT_CONTEXT_PENDING_HOST_TASK_CAPACITY,
         HostTaskPriority::ExtensionRuntimeProfileFence => {
             NON_EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY
@@ -1752,7 +1813,9 @@ fn enqueue_bounded_pending(pending: &mut VecDeque<QueuedHostTask>, queued: Queue
         // Accepted owner operations are exact authority debts. Replacing one
         // would leak or fabricate native ownership settlement.
         HostTaskPriority::ExtensionRuntime => None,
-        #[cfg(feature = "agentic-browser")]
+        #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+        HostTaskPriority::AgentContext | HostTaskPriority::AgentContextTerminal => None,
+        #[cfg(all(feature = "agentic-browser", not(target_os = "macos")))]
         HostTaskPriority::AgentContext => None,
         HostTaskPriority::ExtensionRuntimeProfileFence => None,
         // Its dedicated band guarantees the bounded first cohort. Past that
@@ -2302,6 +2365,35 @@ mod tests {
         assert_eq!(pending.len(), AGENT_CONTEXT_PENDING_HOST_TASK_CAPACITY);
     }
 
+    #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+    #[test]
+    fn agent_context_terminals_have_an_independent_exact_band() {
+        let mut pending = VecDeque::new();
+        for _ in 0..AGENT_CONTEXT_PENDING_HOST_TASK_CAPACITY {
+            assert!(enqueue_pending(
+                &mut pending,
+                queued(HostTaskPriority::AgentContext)
+            ));
+        }
+        for _ in 0..AGENT_CONTEXT_TERMINAL_PENDING_HOST_TASK_CAPACITY {
+            assert!(enqueue_pending(
+                &mut pending,
+                queued(HostTaskPriority::AgentContextTerminal)
+            ));
+        }
+        assert!(!enqueue_pending(
+            &mut pending,
+            queued(HostTaskPriority::AgentContextTerminal)
+        ));
+        assert_eq!(
+            pending
+                .iter()
+                .filter(|task| task.priority == HostTaskPriority::AgentContextTerminal)
+                .count(),
+            AGENT_CONTEXT_TERMINAL_PENDING_HOST_TASK_CAPACITY
+        );
+    }
+
     #[test]
     fn extension_runtime_band_recovers_only_after_an_exact_task_leaves() {
         let mut pending = VecDeque::new();
@@ -2449,6 +2541,13 @@ mod tests {
                 queued(HostTaskPriority::AgentContext)
             ));
         }
+        #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+        for _ in 0..AGENT_CONTEXT_TERMINAL_PENDING_HOST_TASK_CAPACITY {
+            assert!(enqueue_pending(
+                &mut pending,
+                queued(HostTaskPriority::AgentContextTerminal)
+            ));
+        }
         assert_eq!(
             pending.len(),
             NON_PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY
@@ -2533,6 +2632,13 @@ mod tests {
             assert!(enqueue_pending(
                 &mut pending,
                 queued(HostTaskPriority::AgentContext)
+            ));
+        }
+        #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+        for _ in 0..AGENT_CONTEXT_TERMINAL_PENDING_HOST_TASK_CAPACITY {
+            assert!(enqueue_pending(
+                &mut pending,
+                queued(HostTaskPriority::AgentContextTerminal)
             ));
         }
         assert_eq!(

@@ -28,8 +28,8 @@ mod stages;
 pub(crate) use dispatch::make_unavailable_for_test;
 #[cfg(target_os = "macos")]
 pub(crate) use dispatch::try_dispatch_macos_extension_command;
-#[cfg(feature = "agentic-browser")]
-pub(crate) use dispatch::try_with_agent_context;
+#[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+pub(crate) use dispatch::try_with_agent_context_terminal;
 #[cfg(target_os = "macos")]
 pub(crate) use dispatch::with_extension_action_popup_terminal;
 #[cfg(target_os = "macos")]
@@ -38,6 +38,8 @@ pub(crate) use dispatch::with_extension_browser_request_terminal;
 pub(crate) use dispatch::with_extension_runtime_grant_terminal;
 #[cfg(target_os = "macos")]
 pub(crate) use dispatch::with_page_permission_terminal;
+#[cfg(feature = "agentic-browser")]
+pub(crate) use dispatch::{agent_context_terminal_depth_for_audit, try_with_agent_context};
 pub(crate) use dispatch::{
     best_effort_with, install, shutdown, try_with, try_with_close, try_with_profile_erasure,
 };

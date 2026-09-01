@@ -17,6 +17,37 @@ use crate::MainThreadDispatch;
 
 pub(crate) type AgentContextEventSink = Arc<dyn Fn(ContextNativeEvent) + Send + Sync>;
 
+/// Cloneable fail-stop authority retained by bounded native callbacks.
+///
+/// A callback rejected during ordinary operation means an accepted native
+/// owner can no longer rejoin the shell. Shutdown sealing is different: the
+/// host teardown path still owns and terminally drops every retained task.
+#[cfg(target_os = "macos")]
+#[derive(Clone)]
+pub(crate) struct AgentContextCallbackGuard {
+    admission: Arc<AgentPortAdmission>,
+}
+
+#[cfg(target_os = "macos")]
+impl AgentContextCallbackGuard {
+    pub(crate) fn callback_dispatch_rejected(&self) {
+        let sealed = match self.admission.state.lock() {
+            Ok(state) => state.sealed,
+            Err(poisoned) => {
+                let mut state = poisoned.into_inner();
+                state.invariant_failed = true;
+                state.sealed = true;
+                drop(state);
+                self.admission.report_fatal_once();
+                return;
+            }
+        };
+        if !sealed {
+            self.admission.fail_invariant();
+        }
+    }
+}
+
 #[derive(Default)]
 struct AgentPortAdmissionState {
     pending: usize,
@@ -125,7 +156,14 @@ impl AgentPortAdmission {
 
     fn report_fatal_once(&self) {
         if !self.fatal_reported.swap(true, Ordering::AcqRel) {
-            (self.fatal)("agent-context port admission invariant failed");
+            // This callback can be reached from native navigation delegates,
+            // timeout handlers, and `AgentContextTask::drop`. A consumer panic
+            // must not cross an Objective-C/libdispatch boundary or trigger a
+            // second panic during unwinding; the admission seal above remains
+            // the authoritative fail-stop state even if reporting misbehaves.
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                (self.fatal)("agent-context port admission invariant failed");
+            }));
         }
     }
 }
@@ -202,6 +240,13 @@ impl AgentContextTask {
         self.permit.pending()
     }
 
+    #[cfg(target_os = "macos")]
+    pub(crate) fn callback_guard(&self) -> AgentContextCallbackGuard {
+        AgentContextCallbackGuard {
+            admission: self.permit.admission.clone(),
+        }
+    }
+
     pub(crate) fn complete(mut self, event: ContextNativeEvent) {
         if !self.matches(&event) {
             self.permit.admission.fail_invariant();
@@ -210,7 +255,7 @@ impl AgentContextTask {
         }
         self.request = None;
         self.permit.release();
-        (self.sink)(event);
+        emit_event(&self.sink, &self.permit.admission, event);
     }
 
     pub(crate) fn refuse(mut self, failure: ContextPortFailure) {
@@ -221,7 +266,7 @@ impl AgentContextTask {
         let event = refusal_event(request, failure);
         self.permit.release();
         match event {
-            Some(event) => (self.sink)(event),
+            Some(event) => emit_event(&self.sink, &self.permit.admission, event),
             None => self.permit.admission.fail_invariant(),
         }
     }
@@ -270,9 +315,19 @@ impl Drop for AgentContextTask {
         let event = refusal_event(request, ContextPortFailure::NativeRefused);
         self.permit.release();
         match event {
-            Some(event) => (self.sink)(event),
+            Some(event) => emit_event(&self.sink, &self.permit.admission, event),
             None => self.permit.admission.fail_invariant(),
         }
+    }
+}
+
+fn emit_event(
+    sink: &AgentContextEventSink,
+    admission: &Arc<AgentPortAdmission>,
+    event: ContextNativeEvent,
+) {
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (sink)(event))).is_err() {
+        admission.fail_invariant();
     }
 }
 
@@ -497,9 +552,16 @@ fn supports_native_request(request: &ContextNativeRequest) -> bool {
             ),
             ContextNativeRequest::Transition(request) => {
                 request.operation().kind() == ContextOperationKind::Close
+                    && request.operation().context().identity().kind()
+                        == zephium_agentic::ContextKind::Owned
             }
-            ContextNativeRequest::Cancel(_) => true,
-            ContextNativeRequest::Navigate(_) => false,
+            ContextNativeRequest::Cancel(request) => {
+                request.current().identity().kind() == zephium_agentic::ContextKind::Owned
+            }
+            ContextNativeRequest::Navigate(request) => {
+                request.operation().context().identity().kind()
+                    == zephium_agentic::ContextKind::Owned
+            }
         }
     }
     #[cfg(not(target_os = "macos"))]
@@ -733,5 +795,86 @@ mod tests {
         );
         slot.seal();
         assert_eq!(fatal.load(Ordering::Relaxed), 1);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn rejected_native_callback_seals_admission_and_reports_fatal_once() {
+        let fatal = Arc::new(AtomicUsize::new(0));
+        let counted = fatal.clone();
+        let slot = AgentContextPortSlot::new(
+            Arc::new(|_| false),
+            Arc::new(move |_| {
+                counted.fetch_add(1, Ordering::Relaxed);
+            }),
+        );
+        let port = slot.take(Arc::new(|_| {})).expect("port");
+        let admission = slot
+            .state
+            .lock()
+            .expect("slot state")
+            .admission
+            .clone()
+            .expect("admission");
+        let guard = AgentContextCallbackGuard { admission };
+        guard.callback_dispatch_rejected();
+        guard.callback_dispatch_rejected();
+        assert_eq!(fatal.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            port.audit_resources(ContextResourceAuditId::new(1).expect("audit")),
+            ContextDispatch::Rejected(ContextPortFailure::Shutdown)
+        );
+    }
+
+    #[test]
+    fn panicking_event_sink_cannot_unwind_a_native_callback() {
+        crate::host::make_unavailable_for_test();
+        let fatal = Arc::new(AtomicUsize::new(0));
+        let counted = fatal.clone();
+        let slot = AgentContextPortSlot::new(
+            Arc::new(|task| {
+                task();
+                true
+            }),
+            Arc::new(move |_| {
+                counted.fetch_add(1, Ordering::Relaxed);
+            }),
+        );
+        let port = slot
+            .take(Arc::new(|_| panic!("external event sink panicked")))
+            .expect("port");
+        assert_eq!(
+            port.audit_resources(ContextResourceAuditId::new(1).expect("audit")),
+            ContextDispatch::Scheduled
+        );
+        assert_eq!(fatal.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            port.audit_resources(ContextResourceAuditId::new(2).expect("audit")),
+            ContextDispatch::Rejected(ContextPortFailure::Shutdown)
+        );
+    }
+
+    #[test]
+    fn panicking_fatal_reporter_cannot_escape_a_panicking_sink() {
+        crate::host::make_unavailable_for_test();
+        let slot = AgentContextPortSlot::new(
+            Arc::new(|task| {
+                task();
+                true
+            }),
+            Arc::new(|_| panic!("external fatal reporter panicked")),
+        );
+        let port = slot
+            .take(Arc::new(|_| panic!("external event sink panicked")))
+            .expect("port");
+
+        assert_eq!(
+            port.audit_resources(ContextResourceAuditId::new(1).expect("audit")),
+            ContextDispatch::Scheduled
+        );
+        assert_eq!(
+            port.audit_resources(ContextResourceAuditId::new(2).expect("audit")),
+            ContextDispatch::Rejected(ContextPortFailure::Shutdown)
+        );
     }
 }

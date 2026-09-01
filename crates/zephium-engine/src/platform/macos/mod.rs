@@ -44,7 +44,10 @@ use std::time::Duration;
 use std::{cell::Cell, cell::RefCell, rc::Rc};
 
 #[cfg(feature = "agentic-browser")]
-pub(crate) use agent_context::{build_owned_agent_view, AgentOwnedViewConstructionError};
+pub(crate) use agent_context::{
+    build_owned_agent_view, AgentNavigationTerminal, AgentOwnedView,
+    AgentOwnedViewConstructionError,
+};
 #[cfg(feature = "native-agentic-input-probe")]
 pub(crate) use agentic_input_probe::run as run_agentic_input_matrix;
 

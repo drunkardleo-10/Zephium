@@ -262,6 +262,7 @@ fn validate_engine_agent_context_boundary(
         "ContextOperationKind::Close",
         "constfnsupports_cookie_transfer()->bool{false}",
         "pub(crate)structAgentContextPortSlot",
+        "catch_unwind",
         "ContextDispatch::Unsupported",
     ] {
         if !port.contains(required) {
@@ -274,9 +275,12 @@ fn validate_engine_agent_context_boundary(
     let host = compact(host);
     for required in [
         "profile_lease:ContextProfileLease",
-        "install_content_policy_on_view(&view,&content_policy)",
+        "install_content_policy_on_view(view.view(),&content_policy)",
         "NativeResourceClass::AgentContext",
         "ContextConstructionProof::MacOsOwnedSelectedProfileExtensionFree",
+        "pending_navigation:Option<AgentPendingNavigation>",
+        "AGENT_NAVIGATION_COMMIT_TIMEOUT",
+        "try_with_agent_context_terminal",
         "force_shutdown_agent_contexts",
     ] {
         if !host.contains(required) {
@@ -294,6 +298,11 @@ fn validate_engine_agent_context_boundary(
         "controller.userScripts()",
         "with_data_store_identifier(profile.bytes())",
         "Retained::as_ptr(&actual_store)==Retained::as_ptr(expected)",
+        "structAgentNavigationController",
+        "state.bootstrap_available=false",
+        "native_id:Option<wry::NavigationId>",
+        "armed.native_id!=Some(event.id)",
+        "terminal_claimed.compare_exchange",
     ] {
         if !macos.contains(required) {
             return Err(format!(
@@ -2121,13 +2130,17 @@ mod tests {
             ContextOperationKind::Close;
             const fn supports_cookie_transfer() -> bool { false }
             pub(crate) struct AgentContextPortSlot;
+            catch_unwind();
             fn closed() { ContextDispatch::Unsupported; }
         "#;
         let host = r#"
             profile_lease: ContextProfileLease,
-            install_content_policy_on_view(&view, &content_policy);
+            install_content_policy_on_view(view.view(), &content_policy);
             NativeResourceClass::AgentContext;
             ContextConstructionProof::MacOsOwnedSelectedProfileExtensionFree;
+            pending_navigation: Option<AgentPendingNavigation>,
+            const AGENT_NAVIGATION_COMMIT_TIMEOUT: Duration = Duration::from_secs(30);
+            try_with_agent_context_terminal();
             fn force_shutdown_agent_contexts() {}
         "#;
         let macos = r#"
@@ -2136,6 +2149,11 @@ mod tests {
             controller.userScripts();
             with_data_store_identifier(profile.bytes());
             Retained::as_ptr(&actual_store) == Retained::as_ptr(expected);
+            struct AgentNavigationController;
+            state.bootstrap_available = false;
+            native_id: Option<wry::NavigationId>;
+            armed.native_id != Some(event.id);
+            terminal_claimed.compare_exchange();
         "#;
         validate_engine_agent_context_boundary(engine, host_root, port, host, macos)
             .expect("closed production adapter");
