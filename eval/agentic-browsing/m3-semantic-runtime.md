@@ -4,9 +4,9 @@ Status: bounded semantic identity, snapshot, opaque-reference, hostile wire
 decoder, progressive scopes, deterministic multi-frame assembly, compact model
 encoding/token-admission ports, acknowledged stable-id diffs, compact diff
 token admission with exact baseline/current delivery proof, and the immutable
-bounded page-projection program implemented;
-native isolated-world installation, live-engine hostile qualification, and
-actual pinned provider token measurements pending.
+bounded page-projection program with its fixed reply-channel pull protocol
+implemented; native isolated-world installation, live-engine hostile
+qualification, and actual pinned provider token measurements pending.
 
 This evidence records deterministic Rust contracts plus static and synthetic
 DOM execution of the fixed program. It does not claim that arbitrary pages
@@ -168,19 +168,35 @@ have been instrumented or observed on either platform.
   responses are seven fixed detail-free `E1` fault codes (invalid request,
   busy, missing anchor, identity exhaustion, unsupported scope, output limit,
   or internal invariant); unknown/page-supplied fault detail is rejected.
-- The production document-start asset is 49,812 ASCII bytes under a 64 KiB hard
+- The production document-start asset is 51,219 ASCII bytes under a 64 KiB hard
   source ceiling. Rust owns its exact bytes, sole private-world global name,
   and pinned SHA-256 digest
-  `5da29bf129650976d90bd77d1e4440882405cfd1d13219d7edfe105a7b7da7e7`.
+  `f8adcdd636063dcac5e7cc9dcd6bbacc30df6d3dfbb1075b8ce6b1114951bb69`.
   The adapter receives an opaque program object whose diagnostics redact both
   source and digest; there is no source concatenation or dynamic script input.
 - The program installs one frozen, non-enumerable, non-writable,
-  non-configurable object with one `invoke` method. It performs no work until a
-  request arrives and creates no observer, timer, event listener, task,
-  network/storage channel, page-world message channel, or DOM mutation path.
+  non-configurable object with one `invoke` method. When its exact native
+  handler exists in the same isolated world, it retains one dormant Promise
+  waiting for a request; absent that handler it performs no transport work.
+  It creates no observer, timer, event listener, worker, network/storage
+  channel, page-world message channel, or DOM mutation path.
   A source gate rejects generic evaluation, selectors, HTML serialization,
   cookies/storage, network APIs, event synthesis, focus/click methods, and
-  asynchronous scheduling surfaces.
+  timer/animation/task scheduling surfaces; only the native reply Promise can
+  resume its bounded pull loop.
+- The only native transport spelling is the fixed
+  `webkit.messageHandlers.zephiumSemanticRuntimeV1.postMessage` function that
+  WebKit installs in the selected content world. One exact `P1` pull may wait
+  without polling; Rust can reply only with the already-closed 2 KiB request
+  grammar. One `R1:` result carries at most the invocation's 256 KiB wire
+  ceiling and must receive exact `A1` acknowledgement. `S1` retires a document
+  and `X1` reports exhaustion after 4,096 completed invocations. There is no
+  arbitrary handler name, native method, page-provided request, or eval route.
+  Apple's public contract says the handler function is scoped to its named
+  `WKContentWorld` and its reply returns a Promise; current WebKit implements
+  the reply as an asynchronous completion retained until reply or finalization
+  ([Apple](https://developer.apple.com/documentation/webkit/wkusercontentcontroller/addscriptmessagehandler%28_%3Acontentworld%3Aname%3A%29?language=objc),
+  [WebKit](https://github.com/WebKit/WebKit/blob/main/Source/WebKit/UIProcess/API/Cocoa/WKUserContentController.mm)).
 - Request parsing accepts only ASCII and the exact closed field inventory.
   Invocation, snapshot, and stable-node identities must be positive integers at
   or below JavaScript's exact integer ceiling (`2^53 - 1`); Rust rejects larger
@@ -269,13 +285,15 @@ aggregate/per-frame budgets, exact anchor frame and generation joins, hostile
 invocation substitution, fixed faults, unknown-fault rejection, and response
 wire limits. Program gates additionally pin exact source bytes and digest,
 source size, the single immutable global, exact JavaScript numeric authority,
-and absence of generic bridge/evaluation/network/storage/event/scheduling
-surfaces. The deterministic synthetic-DOM smoke exercises exact request
+the sole bounded pull/result channel, and absence of generic
+bridge/evaluation/network/storage/event/scheduling surfaces. The deterministic
+synthetic-DOM smoke exercises exact request
 parsing, captured-method resistance, stable anchored expansion, password
 redaction before return, open-shadow traversal, closed-shadow exclusion,
 detached-anchor refusal, distinct node/inspection/wire truncation, byte-bounded
-output, detached-node reclamation with reattachment identity recovery, and API
-immutability. Its current content-free result is 7 initial
+output, detached-node reclamation with reattachment identity recovery, exact
+native-pull settlement, one dormant follow-up pull, and API immutability. Its
+current content-free result is 7 initial
 nodes, 6 expanded nodes, 620/374 encoded bytes, and an 881-byte wire-truncated
 result under a 1,024-byte request ceiling.
 

@@ -151,6 +151,36 @@ openHost._shadow.append(new Element("button", { "aria-label": "Open shadow actio
 const closedHost = new Element("div");
 closedHost._closedInternal = new Element("button", { "aria-label": "Closed shadow secret" });
 
+const nativeTransportResults = [];
+let nativeTransportPulls = 0;
+let stopNativeTransport = null;
+globalThis.webkit = {
+  messageHandlers: {
+    zephiumSemanticRuntimeV1: {
+      postMessage(message) {
+        if (message === "P1") {
+          nativeTransportPulls += 1;
+          if (nativeTransportPulls === 1) {
+            return Promise.resolve(JSON.stringify({
+              v: 1,
+              i: 101,
+              g: 101,
+              s: { k: "initial" },
+              b: { n: 8, t: 2048, w: 8192, x: 256, geo: false }
+            }));
+          }
+          return new Promise((resolve) => { stopNativeTransport = resolve; });
+        }
+        if (typeof message === "string" && message.startsWith("R1:")) {
+          nativeTransportResults.push(message.slice(3));
+          return Promise.resolve("A1");
+        }
+        return Promise.reject(new Error("unexpected semantic transport message"));
+      }
+    }
+  }
+};
+
 main.append(heading);
 main.append(button);
 main.append(password);
@@ -245,19 +275,40 @@ assert(!globalDescriptor.writable && !globalDescriptor.configurable && !globalDe
 assert(Object.isFrozen(runtime) && Object.isFrozen(runtime.invoke), "runtime mutable");
 assert(Object.keys(runtime).join(",") === "invoke", "unexpected runtime API");
 
-process.stdout.write(`${JSON.stringify({
-  schema: "zephium.agentic.semantic-runtime-smoke.v1",
-  initial_nodes: initial.n.length,
-  expanded_nodes: expansion.n.length,
-  initial_bytes: Buffer.byteLength(initialWire),
-  expanded_bytes: Buffer.byteLength(expansionWire),
-  wire_limited_bytes: Buffer.byteLength(wireLimited),
-  password_redacted: true,
-  open_shadow_observed: true,
-  closed_shadow_excluded: true,
-  reattached_identity_preserved: true,
-  immutable: true
-})}\n`);
+finish().catch((error) => {
+  process.stderr.write(`${error.stack || error}\n`);
+  process.exitCode = 1;
+});
+
+async function finish() {
+  await new Promise((resolve) => setImmediate(resolve));
+  assert(nativeTransportResults.length === 1, "native transport did not settle exactly once");
+  const transported = JSON.parse(nativeTransportResults[0]);
+  assert(
+    transported.i === 101 && transported.g === 101 && transported.n.length > 0,
+    "native transport lost exact invocation authority"
+  );
+  assert(nativeTransportPulls === 2, "native transport did not hold one dormant pull");
+  assert(typeof stopNativeTransport === "function", "native transport did not retain its pull");
+  stopNativeTransport("S1");
+  await new Promise((resolve) => setImmediate(resolve));
+
+  process.stdout.write(`${JSON.stringify({
+    schema: "zephium.agentic.semantic-runtime-smoke.v1",
+    initial_nodes: initial.n.length,
+    expanded_nodes: expansion.n.length,
+    initial_bytes: Buffer.byteLength(initialWire),
+    expanded_bytes: Buffer.byteLength(expansionWire),
+    wire_limited_bytes: Buffer.byteLength(wireLimited),
+    password_redacted: true,
+    open_shadow_observed: true,
+    closed_shadow_excluded: true,
+    reattached_identity_preserved: true,
+    native_transport_settled: true,
+    native_transport_dormant_pull: true,
+    immutable: true
+  })}\n`);
+}
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);

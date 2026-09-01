@@ -17,6 +17,12 @@
   const MAX_VALUE_BYTES = 1024;
   const MAX_SURROUNDING_BYTES = 8192;
   const MAX_TRACKED_IDENTITIES = 2048;
+  const MAX_DOCUMENT_INVOCATIONS = 4096;
+  const CHANNEL_PULL = "P1";
+  const CHANNEL_RESULT_PREFIX = "R1:";
+  const CHANNEL_ACK = "A1";
+  const CHANNEL_STOP = "S1";
+  const CHANNEL_EXHAUSTED = "X1";
 
   const objectDefineProperty = Object.defineProperty;
   const objectFreeze = Object.freeze;
@@ -1394,6 +1400,48 @@
     }
   }
 
+  async function serveNativeInvocations(channel, post) {
+    for (let completed = 0; completed < MAX_DOCUMENT_INVOCATIONS; completed += 1) {
+      let encoded;
+      try {
+        encoded = await apply(post, channel, [CHANNEL_PULL]);
+      } catch (_) {
+        return;
+      }
+      if (encoded === CHANNEL_STOP) return;
+
+      const result = invoke(encoded);
+      let acknowledgement;
+      try {
+        acknowledgement = await apply(post, channel, [`${CHANNEL_RESULT_PREFIX}${result}`]);
+      } catch (_) {
+        return;
+      }
+      if (acknowledgement !== CHANNEL_ACK) return;
+    }
+
+    try {
+      await apply(post, channel, [CHANNEL_EXHAUSTED]);
+    } catch (_) {
+      // Native teardown or document replacement rejects the final notice.
+    }
+  }
+
+  function startNativeTransport() {
+    let channel;
+    let post;
+    try {
+      const webkit = globalThis.webkit;
+      const handlers = webkit && webkit.messageHandlers;
+      channel = handlers && handlers.zephiumSemanticRuntimeV1;
+      post = channel && channel.postMessage;
+    } catch (_) {
+      return;
+    }
+    if (typeof post !== "function") return;
+    void serveNativeInvocations(channel, post);
+  }
+
   objectFreeze(invoke);
   const api = objectFreeze({ invoke });
   objectDefineProperty(globalThis, GLOBAL_NAME, {
@@ -1402,4 +1450,5 @@
     configurable: false,
     enumerable: false
   });
+  startNativeTransport();
 })();

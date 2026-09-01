@@ -33,11 +33,28 @@ pub const MAX_SEMANTIC_RUNTIME_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 pub const MAX_SEMANTIC_RUNTIME_SOURCE_BYTES: usize = 64 * 1024;
 /// Sole fixed isolated-world global installed by the production runtime.
 pub const SEMANTIC_RUNTIME_GLOBAL_NAME: &str = "__zephiumSemanticRuntimeV1";
+/// Sole fixed native message handler visible in the production isolated world.
+pub const SEMANTIC_RUNTIME_CHANNEL_NAME: &str = "zephiumSemanticRuntimeV1";
+/// Exact runtime-to-native request for one pending closed invocation.
+pub const SEMANTIC_RUNTIME_CHANNEL_PULL: &str = "P1";
+/// Exact prefix on one runtime result returned to the native adapter.
+pub const SEMANTIC_RUNTIME_CHANNEL_RESULT_PREFIX: &str = "R1:";
+/// Exact native acknowledgement after accepting one runtime result.
+pub const SEMANTIC_RUNTIME_CHANNEL_ACK: &str = "A1";
+/// Exact native settlement that stops a document's dormant pull loop.
+pub const SEMANTIC_RUNTIME_CHANNEL_STOP: &str = "S1";
+/// Exact runtime notice after exhausting its per-document invocation budget.
+pub const SEMANTIC_RUNTIME_CHANNEL_EXHAUSTED: &str = "X1";
+/// Maximum closed invocations accepted by one document before a fresh document is required.
+pub const MAX_SEMANTIC_RUNTIME_DOCUMENT_INVOCATIONS: u16 = 4096;
+/// Largest UTF-8 script-message body accepted from the fixed runtime.
+pub const MAX_SEMANTIC_RUNTIME_CHANNEL_RESULT_BYTES: usize =
+    SEMANTIC_RUNTIME_CHANNEL_RESULT_PREFIX.len() + MAX_SEMANTIC_WIRE_BYTES;
 
 const SEMANTIC_RUNTIME_SOURCE: &str = include_str!("../assets/semantic-runtime-v1.js");
 const SEMANTIC_RUNTIME_SOURCE_SHA256: [u8; 32] = [
-    0x5d, 0xa2, 0x9b, 0xf1, 0x29, 0x65, 0x09, 0x76, 0xd9, 0x0b, 0xd7, 0x7d, 0x1e, 0x44, 0x40, 0x88,
-    0x24, 0x05, 0xcf, 0xd1, 0xd1, 0x32, 0x19, 0xd7, 0xed, 0xfe, 0x10, 0x5a, 0x7b, 0x7d, 0xa7, 0xe7,
+    0xf8, 0xad, 0xcd, 0xd6, 0x36, 0x06, 0x3d, 0xca, 0xc5, 0xe7, 0xcc, 0x9d, 0xcd, 0x6b, 0xba, 0xcc,
+    0x30, 0xdf, 0x6d, 0x3d, 0xfb, 0xb1, 0x07, 0x5b, 0x8c, 0xe6, 0xb1, 0x11, 0x49, 0x51, 0xbb, 0x69,
 ];
 
 /// Immutable production program passed only to a trusted isolated-world adapter.
@@ -639,7 +656,6 @@ mod tests {
             "dispatchEvent",
             ".click(",
             ".focus(",
-            "postMessage",
             "console.",
             "Math.random",
             "navigator.",
@@ -667,6 +683,17 @@ mod tests {
         assert!(source.contains("const nodeKeys = new WeakMap()"));
         assert!(source.contains("keyNodes.set(key, { node, generation })"));
         assert!(source.contains("sweepIdentities(request.g);"));
+        assert_eq!(
+            source
+                .matches("handlers && handlers.zephiumSemanticRuntimeV1")
+                .count(),
+            1
+        );
+        assert_eq!(source.matches("channel.postMessage").count(), 1);
+        assert_eq!(source.matches("await apply(post, channel").count(), 3);
+        assert!(source.contains("completed < MAX_DOCUMENT_INVOCATIONS"));
+        assert!(!source.contains("evaluateJavaScript"));
+        assert!(!source.contains("callAsyncJavaScript"));
         assert!(!source.contains("new WeakRef"));
         assert!(source.contains("writable: false"));
         assert!(source.contains("configurable: false"));
