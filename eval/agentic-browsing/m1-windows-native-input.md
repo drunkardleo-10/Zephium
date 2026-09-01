@@ -93,16 +93,24 @@ no result is attributed to the invalid container route.
 - Evidence contains only closed enums, Booleans, counters, durations, and
   validated runtime labels. Paths, handles, PIDs, URLs, profile data, page
   content, native errors, and CDP responses are not emitted.
-- Each physical mode writes one bounded versioned JSON response to stdout
-  before qualification. A failed behavioral gate therefore retains redacted
-  case evidence instead of collapsing to a generic process error; pass/fail
-  diagnostics remain on stderr and local JSONL paths are gitignored.
+- Each physical mode writes one bounded versioned JSON response to its selected
+  machine-evidence sink before qualification. A failed behavioral gate
+  therefore retains redacted case evidence instead of collapsing to a generic
+  process error; pass/fail diagnostics remain on stderr and local JSONL paths
+  are gitignored.
+- The required device workflow uses the runner's closed
+  `--evidence-directory eval/agentic-browsing/local-results` option instead of
+  shell redirection. Only the four required non-focused modes map to fixed
+  filenames. Each destination must be absent before native work; validated
+  UTF-8 protocol bytes are synced through an in-directory temporary file and
+  atomically published without clobbering prior evidence.
 - The offline review binary decodes those records through the same closed
   protocol and qualification core used by the runner. It accepts only the four
   fixed ignored filenames, real non-symlink files, exact response/run identity,
   exact matrix order and capability inventory, and one identical runtime
   fingerprint. It emits one content-free aggregate and never echoes raw records
-  or paths.
+  or paths. Its exact `--write-summary` option creates the fixed UTF-8 summary
+  file and refuses to replace an existing result.
 
 ## Compile evidence and physical run path
 

@@ -908,7 +908,13 @@ fn validate_windows_probe_binary(source: &str, qualification: &str) -> Result<()
     let source = compact(source);
     for required in [
         "--allow-visible-focused",
+        "--evidence-directory",
+        "eval/agentic-browsing/local-results",
         "WindowsProbeMode::from_argument",
+        "mode.local_result_filename()",
+        "NamedTempFile::new_in(directory)",
+        "pending.file.as_file().sync_all()",
+        "persist_noclobber(pending.destination)",
         "qualify_windows_probe_evidence(mode,&evidence)",
         "encode_response_line(&response)",
         "ProbeReply::RunCompleted(evidence)",
@@ -1110,6 +1116,10 @@ fn validate_windows_review_binary(source: &str, qualification: &str) -> Result<(
         "file.take((MAX_PROTOCOL_OUTPUT_BYTES+1)asu64)",
         "output.len()>MAX_PROTOCOL_OUTPUT_BYTES",
         "stdout.write_all(&output)",
+        "--write-summary",
+        "windows-review-summary-v1.json",
+        ".create_new(true)",
+        "write_new_record(&directory,REVIEW_SUMMARY_FILENAME,&output)",
     ] {
         if !source.contains(required) {
             return Err(format!(
@@ -3450,6 +3460,12 @@ mod tests {
     fn windows_physical_runner_retains_exact_modes_and_jsonl_evidence() {
         let binary = r#"
             WindowsProbeMode::from_argument;
+            "--evidence-directory";
+            "eval/agentic-browsing/local-results";
+            mode.local_result_filename();
+            NamedTempFile::new_in(directory);
+            pending.file.as_file().sync_all();
+            persist_noclobber(pending.destination);
             qualify_windows_probe_evidence(mode, &evidence);
             "--allow-visible-focused";
             encode_response_line(&response);
@@ -3485,6 +3501,10 @@ mod tests {
             file.take((MAX_PROTOCOL_OUTPUT_BYTES + 1) as u64);
             if output.len() > MAX_PROTOCOL_OUTPUT_BYTES {}
             stdout.write_all(&output);
+            "--write-summary";
+            "windows-review-summary-v1.json";
+            OpenOptions::new().create_new(true);
+            write_new_record(&directory, REVIEW_SUMMARY_FILENAME, &output);
         "#;
         let qualification = r#"
             "windows-hidden-fixed-dom.jsonl";

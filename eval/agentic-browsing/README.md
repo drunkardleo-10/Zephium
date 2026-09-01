@@ -118,24 +118,24 @@ cargo check --locked --target x86_64-pc-windows-msvc `
 cargo run --locked -p zephium-engine `
   --features native-agentic-input-probe `
   --bin windows-agentic-input-probe -- --ci-hidden-fixed-dom `
-  > eval/agentic-browsing/local-results/windows-hidden-fixed-dom.jsonl
+  --evidence-directory eval/agentic-browsing/local-results
 cargo run --locked -p zephium-engine `
   --features native-agentic-input-probe `
   --bin windows-agentic-input-probe -- --ci-hidden-hwnd `
-  > eval/agentic-browsing/local-results/windows-hidden-hwnd.jsonl
+  --evidence-directory eval/agentic-browsing/local-results
 cargo run --locked -p zephium-engine `
   --features native-agentic-input-probe `
   --bin windows-agentic-input-probe -- --ci-hidden-cdp `
-  > eval/agentic-browsing/local-results/windows-hidden-cdp.jsonl
+  --evidence-directory eval/agentic-browsing/local-results
 cargo run --locked -p zephium-engine `
   --features native-agentic-input-probe `
   --bin windows-agentic-input-probe -- --visible-background-windows-all `
-  > eval/agentic-browsing/local-results/windows-visible-background-all.jsonl
+  --evidence-directory eval/agentic-browsing/local-results
 cargo run --locked -p zephium-agentic `
   --features probe-harness `
   --bin windows-agentic-input-evidence-review -- `
   --directory eval/agentic-browsing/local-results `
-  > eval/agentic-browsing/local-results/windows-review-summary-v1.json
+  --write-summary
 ```
 
 These modes use only an ephemeral user-data directory, InPrivate controller,
@@ -150,12 +150,21 @@ and thread-focus state before, during, and after dispatch so a transient focus
 transfer fails even if it reverses before fixture settlement.
 
 Each runner process writes exactly one versioned, size-bounded `ProbeResponse`
-JSON record to stdout before applying its pass/fail qualification whenever the
-native matrix returns evidence or a typed rejection. Build progress and the
-aggregate pass/fail summary remain on stderr, so a nonzero exit may still leave
-the redacted evidence needed to diagnose a rejected backend. The ignored local
+JSON record to its selected machine-evidence sink before applying its pass/fail
+qualification whenever the native matrix returns evidence or a typed
+rejection. Build progress and the aggregate pass/fail summary remain on stderr,
+so a nonzero exit may still leave the redacted evidence needed to diagnose a
+rejected backend. The ignored local
 records contain only the closed evidence schema; review must still reject any
 unexpected file before extracting aggregate fields into committed evidence.
+For the required physical workflow, `--evidence-directory` is accepted only
+with the literal ignored directory and four required non-focused modes. It
+preflights a missing fixed destination before native work, writes the validated
+UTF-8 bytes to a temporary file in that directory, syncs them, and atomically
+publishes without replacing any existing record. This avoids PowerShell native
+redirection encoding differences. Archive a prior result directory before a
+rerun; neither runner nor reviewer overwrites evidence. The stdout form remains
+available for an individually authorized diagnostic run.
 
 The final review command is offline and can run on the same Windows device or
 another trusted checkout. It opens only the four fixed filenames as real,
@@ -164,11 +173,13 @@ response from each; requires the response/run identity, Windows/WebView2
 runtime, adapter revision, capability inventory, case/backend order,
 presentation, focus, resource, outcome, trust, activation, and teardown joins;
 and requires one identical runtime fingerprint across all four processes. It
-never emits the captured records or file paths. Its sole stdout record is a
-bounded content-free aggregate suitable for human review; a typed rejection,
-partial matrix, runtime substitution, focus theft, or failed fixture makes the
-review command nonzero. The aggregate remains ignored until reviewed into the
-committed manifest.
+never emits the captured records or file paths. Without `--write-summary`, its
+sole stdout record is a bounded content-free aggregate suitable for human
+review; a typed rejection, partial matrix, runtime substitution, focus theft,
+or failed fixture makes the review command nonzero. The exact
+`--write-summary` form instead writes those same validated UTF-8 aggregate
+bytes to the fixed create-new summary filename. The aggregate remains ignored
+until reviewed into the committed manifest.
 
 The authorized hidden fixed-DOM macOS safety result is recorded only as reviewed
 aggregate fields. Native AppKit/accessibility, visible/background behavior,

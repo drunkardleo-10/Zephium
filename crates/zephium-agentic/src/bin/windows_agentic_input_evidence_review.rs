@@ -11,6 +11,7 @@ use zephium_agentic::{
 };
 
 const REVIEW_SCHEMA_VERSION: u16 = 1;
+const REVIEW_SUMMARY_FILENAME: &str = "windows-review-summary-v1.json";
 
 #[derive(Serialize)]
 #[serde(deny_unknown_fields)]
@@ -40,7 +41,7 @@ impl ReviewError {
     const fn message(self) -> &'static str {
         match self {
             Self::Arguments => {
-                "expected exactly --directory followed by the ignored result directory"
+                "expected --directory followed by the ignored result directory and optional --write-summary"
             }
             Self::Directory => "result directory must be one real non-symlink directory",
             Self::MissingRecord => "one required Windows result record is missing",
@@ -54,7 +55,7 @@ impl ReviewError {
             Self::RecordIdentity => "one Windows result does not use the one-shot runner identity",
             Self::Qualification => "one Windows result failed its exact mode qualification",
             Self::RuntimeMismatch => "Windows result runtime fingerprints do not all match",
-            Self::Output => "content-free Windows review output could not be encoded",
+            Self::Output => "content-free Windows review output could not be encoded or published",
         }
     }
 }
@@ -67,12 +68,17 @@ fn main() {
 }
 
 fn run(arguments: Vec<OsString>) -> Result<(), ReviewError> {
-    let [flag, directory] = arguments.as_slice() else {
+    let [flag, directory, rest @ ..] = arguments.as_slice() else {
         return Err(ReviewError::Arguments);
     };
     if flag != "--directory" {
         return Err(ReviewError::Arguments);
     }
+    let write_summary = match rest {
+        [] => false,
+        [flag] if flag == "--write-summary" => true,
+        _ => return Err(ReviewError::Arguments),
+    };
     let directory = PathBuf::from(directory);
     let metadata = std::fs::symlink_metadata(&directory).map_err(|_| ReviewError::Directory)?;
     if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
@@ -119,9 +125,36 @@ fn run(arguments: Vec<OsString>) -> Result<(), ReviewError> {
     if output.len() > MAX_PROTOCOL_OUTPUT_BYTES {
         return Err(ReviewError::Output);
     }
-    let mut stdout = io::stdout().lock();
-    stdout.write_all(&output).map_err(|_| ReviewError::Output)?;
-    stdout.flush().map_err(|_| ReviewError::Output)
+    if write_summary {
+        write_new_record(&directory, REVIEW_SUMMARY_FILENAME, &output)
+    } else {
+        let mut stdout = io::stdout().lock();
+        stdout.write_all(&output).map_err(|_| ReviewError::Output)?;
+        stdout.flush().map_err(|_| ReviewError::Output)
+    }
+}
+
+fn write_new_record(directory: &Path, filename: &str, bytes: &[u8]) -> Result<(), ReviewError> {
+    let metadata = std::fs::symlink_metadata(directory).map_err(|_| ReviewError::Directory)?;
+    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+        return Err(ReviewError::Directory);
+    }
+    let path = directory.join(filename);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(|_| ReviewError::Output)?;
+    let result = file
+        .write_all(bytes)
+        .and_then(|()| file.flush())
+        .and_then(|()| file.sync_all());
+    if result.is_err() {
+        drop(file);
+        let _ = std::fs::remove_file(path);
+        return Err(ReviewError::Output);
+    }
+    Ok(())
 }
 
 fn read_record(directory: &Path, filename: &str) -> Result<Vec<u8>, ReviewError> {
@@ -216,6 +249,21 @@ mod tests {
         assert_eq!(
             read_record(&directory.0, "valid.jsonl"),
             Ok(b"{}\n".to_vec())
+        );
+    }
+
+    #[test]
+    fn summary_writer_is_create_new_and_byte_exact() {
+        let directory = TestDirectory::new();
+        let bytes = b"{\"schema_version\":1}\n";
+        write_new_record(&directory.0, REVIEW_SUMMARY_FILENAME, bytes).expect("write summary");
+        assert_eq!(
+            std::fs::read(directory.0.join(REVIEW_SUMMARY_FILENAME)).expect("read summary"),
+            bytes
+        );
+        assert_eq!(
+            write_new_record(&directory.0, REVIEW_SUMMARY_FILENAME, b"replacement\n"),
+            Err(ReviewError::Output)
         );
     }
 
