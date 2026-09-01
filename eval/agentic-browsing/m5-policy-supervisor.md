@@ -5,7 +5,8 @@ input accounting, bounded per-origin semantic effect policy, and immutable
 non-widening delegation topology are implemented. The first mutable bounded
 run-tree scheduler and its exact cancellation/drain tree are also implemented;
 manifest-bound context assignment is implemented over the existing bounded
-context registry. Semantic progress, provider adapters, audit sink, and live
+context registry, and content-free semantic progress is projected directly by
+the supervisor. Provider adapters, the durable audit sink, and live
 qualification remain pending.
 
 This evidence describes policy input facts only. A manifest cannot authorize a
@@ -254,6 +255,36 @@ browser action, model call, tool call, data transfer, cost, or native resource.
   identity. When no run reserves a context it has zero task, worker, timer,
   queue, model, page, or native overhead.
 
+## Implemented semantic progress projection
+
+- Every activated scheduler row owns one current semantic-progress projection
+  bound to the exact immutable manifest revision, mutable supervisor
+  incarnation, and responsible plan node. It is current state rather than a
+  transcript and adds no queue, task, timer, worker, channel, provider, page,
+  native view, or persistence operation.
+- The closed vocabulary separately represents operation class, opaque active
+  resource, state, typed result, and typed blocker. It cannot represent an
+  objective, prompt, hidden reasoning, provider output, raw tool chatter, page
+  content, origin, selector, JavaScript, native handle, or arbitrary error.
+- Queue/start/delegation/wait/completion/cancellation and exact context
+  assignment/release update progress inside the same single-owner supervisor
+  mutation. Explicit planning/observation/read/verification/persistence
+  activities require a valid operation/resource pair and the exact current
+  non-cloneable execution token.
+- Model admissions/calls and effect permits/active attempts/receipts now carry
+  their exact manifest revision in addition to their existing SHA-bound
+  authority. Progress accepts their typed active/result evidence only when the
+  manifest and responsible node match the exact executing supervisor.
+- A policy-derived `NeedsHuman` transition can atomically project its exact
+  effect/reason/context and release the execution slot only when the context is
+  already assigned to that supervisor and node. The projection grants no
+  approval or resume authority; later execution still re-enters through normal
+  scheduler and policy checks.
+- Public node snapshots include the current projection. Diagnostics expose
+  only redacted identities and closed enums. Transition history and durable
+  delivery are intentionally not simulated by this projection; the bounded
+  audit sink remains a separate pending persistence boundary.
+
 ## Current tests
 
 Default crate tests exercise canonical order independence, canonical ULID
@@ -295,3 +326,7 @@ run and node context ceilings, duplicate refusal, atomic registry reservation,
 context-wait terminal ordering, queued cancellation, active owned-context
 construction/close/reap disposition, cancellation target reconciliation, and
 retention of node liveness after execution drain until exact context cleanup.
+Four semantic-progress tests cover queue/active/wait/failure projection,
+operation/resource pairing, exact manifest/node typed receipts, model/effect
+results, context ownership and cancellation, policy-derived human waits,
+execution-slot release, and redacted diagnostics.

@@ -17,6 +17,11 @@ pub use context_schedule::{
     AgentSupervisorContextAssignment, AgentSupervisorContextCancellationTarget,
     AgentSupervisorContextRelease, AgentSupervisorContextReleaseOutcome,
 };
+mod progress;
+pub use progress::{
+    AgentProgressActivity, AgentProgressBlocker, AgentProgressOperation, AgentProgressResource,
+    AgentProgressResult, AgentProgressState, AgentSemanticProgress,
+};
 
 /// Process-local identity for one exact mutable supervisor incarnation.
 #[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -279,6 +284,7 @@ impl NodeState {
 struct SupervisorNodeRow {
     node: AgentPlanNodeId,
     state: NodeState,
+    progress: AgentSemanticProgress,
 }
 
 /// Privacy-preserving snapshot of one activated node.
@@ -286,6 +292,7 @@ struct SupervisorNodeRow {
 pub struct AgentSupervisorNodeSnapshot {
     node: AgentPlanNodeId,
     status: AgentSupervisorNodeStatus,
+    progress: AgentSemanticProgress,
 }
 
 impl AgentSupervisorNodeSnapshot {
@@ -297,6 +304,11 @@ impl AgentSupervisorNodeSnapshot {
     /// Current bounded scheduler state.
     pub const fn status(self) -> AgentSupervisorNodeStatus {
         self.status
+    }
+
+    /// Current content-free semantic progress for this responsibility.
+    pub const fn progress(self) -> AgentSemanticProgress {
+        self.progress
     }
 }
 
@@ -570,18 +582,22 @@ impl AgentRunSupervisor {
     /// Activates only the topology root without creating tasks or workers.
     pub fn new(id: AgentSupervisorId, topology: AgentDelegationTopology) -> Self {
         let root = topology.root();
-        Self {
+        let mut supervisor = Self {
             id,
             topology,
-            nodes: vec![SupervisorNodeRow {
-                node: root,
-                state: NodeState::Queued,
-            }],
+            nodes: Vec::new(),
             contexts: Vec::new(),
             last_attempt: None,
             last_cancellation: None,
             sealed: false,
-        }
+        };
+        let progress = supervisor.scheduled_progress(root, AgentProgressState::Queued, None);
+        supervisor.nodes.push(SupervisorNodeRow {
+            node: root,
+            state: NodeState::Queued,
+            progress,
+        });
+        supervisor
     }
 
     /// Exact mutable supervisor incarnation.
@@ -652,6 +668,7 @@ impl AgentRunSupervisor {
         self.nodes.iter().map(|row| AgentSupervisorNodeSnapshot {
             node: row.node,
             status: row.state.public(),
+            progress: row.progress,
         })
     }
 
@@ -702,13 +719,29 @@ impl AgentRunSupervisor {
             .nodes
             .binary_search_by_key(&child, |row| row.node)
             .unwrap_or_else(|index| index);
+        let child_progress = self.scheduled_progress(child, AgentProgressState::Queued, None);
+        let parent_progress = self.progress(
+            parent.node(),
+            AgentProgressActivity::try_new(
+                AgentProgressOperation::Delegation,
+                Some(AgentProgressResource::PlanNode(child)),
+            )?,
+            AgentProgressState::Active,
+            None,
+            None,
+        );
         self.nodes.insert(
             index,
             SupervisorNodeRow {
                 node: child,
                 state: NodeState::Queued,
+                progress: child_progress,
             },
         );
+        let parent_index = self
+            .node_index(parent.node())
+            .ok_or(AgentSupervisorRuntimeError::NodeMissing)?;
+        self.nodes[parent_index].progress = parent_progress;
         Ok(())
     }
 
@@ -753,17 +786,33 @@ impl AgentRunSupervisor {
             }
             match self.nodes[index].state {
                 NodeState::Queued | NodeState::Waiting(_) => {
+                    let activity = self.nodes[index].progress.activity();
                     self.nodes[index].state = NodeState::Cancelling(CancellingState {
                         cancellation,
                         running: None,
                     });
+                    self.nodes[index].progress = self.progress(
+                        node,
+                        activity,
+                        AgentProgressState::Waiting,
+                        None,
+                        Some(AgentProgressBlocker::Cancellation(reason)),
+                    );
                     affected += 1;
                 }
                 NodeState::Running(running) => {
+                    let activity = self.nodes[index].progress.activity();
                     self.nodes[index].state = NodeState::Cancelling(CancellingState {
                         cancellation,
                         running: Some(running),
                     });
+                    self.nodes[index].progress = self.progress(
+                        node,
+                        activity,
+                        AgentProgressState::Waiting,
+                        None,
+                        Some(AgentProgressBlocker::Cancellation(reason)),
+                    );
                     affected += 1;
                 }
                 NodeState::Cancelling(_)
@@ -836,6 +885,11 @@ impl AgentRunSupervisor {
         }
         let guard = execution_guard(self.id, self.topology.guard(), node, attempt);
         self.nodes[index].state = NodeState::Running(RunningState { attempt, guard });
+        self.nodes[index].progress = self.scheduled_progress(
+            node,
+            AgentProgressState::Active,
+            Some(AgentProgressResource::Execution(attempt)),
+        );
         self.last_attempt = Some(attempt);
         Ok(AgentNodeExecution {
             supervisor: self.id,
@@ -855,7 +909,17 @@ impl AgentRunSupervisor {
         if let Some(cancellation) = cancellation {
             return Ok(self.settle_cancelled_execution(index, execution, cancellation));
         }
+        let activity = self.nodes[index].progress.activity();
         self.nodes[index].state = NodeState::Waiting(reason);
+        self.nodes[index].progress = self.progress(
+            execution.node(),
+            activity,
+            AgentProgressState::Waiting,
+            Some(AgentProgressResult::Supervisor(
+                AgentSupervisorExecutionOutcome::Waiting(reason),
+            )),
+            Some(AgentProgressBlocker::Scheduler(reason)),
+        );
         Ok(execution_receipt(
             execution,
             AgentSupervisorExecutionOutcome::Waiting(reason),
@@ -873,14 +937,38 @@ impl AgentRunSupervisor {
             return Ok(self.settle_cancelled_execution(index, execution, cancellation));
         }
         if self.has_assigned_context(execution.node()) {
+            let activity = self.nodes[index].progress.activity();
             self.nodes[index].state = NodeState::Waiting(AgentSupervisorWait::Contexts);
+            self.nodes[index].progress = self.progress(
+                execution.node(),
+                activity,
+                AgentProgressState::Waiting,
+                Some(AgentProgressResult::Supervisor(
+                    AgentSupervisorExecutionOutcome::Waiting(AgentSupervisorWait::Contexts),
+                )),
+                Some(AgentProgressBlocker::Scheduler(
+                    AgentSupervisorWait::Contexts,
+                )),
+            );
             return Ok(execution_receipt(
                 execution,
                 AgentSupervisorExecutionOutcome::Waiting(AgentSupervisorWait::Contexts),
             ));
         }
         if self.has_live_descendant(execution.node()) {
+            let activity = self.nodes[index].progress.activity();
             self.nodes[index].state = NodeState::Waiting(AgentSupervisorWait::Descendants);
+            self.nodes[index].progress = self.progress(
+                execution.node(),
+                activity,
+                AgentProgressState::Waiting,
+                Some(AgentProgressResult::Supervisor(
+                    AgentSupervisorExecutionOutcome::Waiting(AgentSupervisorWait::Descendants),
+                )),
+                Some(AgentProgressBlocker::Scheduler(
+                    AgentSupervisorWait::Descendants,
+                )),
+            );
             return Ok(execution_receipt(
                 execution,
                 AgentSupervisorExecutionOutcome::Waiting(AgentSupervisorWait::Descendants),
@@ -896,6 +984,29 @@ impl AgentRunSupervisor {
                 AgentSupervisorExecutionOutcome::Failed(failure)
             }
         };
+        let activity = self.nodes[index].progress.activity();
+        let (state, blocker) = match outcome {
+            AgentSupervisorExecutionOutcome::Succeeded => (AgentProgressState::Succeeded, None),
+            AgentSupervisorExecutionOutcome::Failed(failure) => (
+                AgentProgressState::Failed,
+                Some(AgentProgressBlocker::Supervisor(failure)),
+            ),
+            AgentSupervisorExecutionOutcome::Waiting(reason) => (
+                AgentProgressState::Waiting,
+                Some(AgentProgressBlocker::Scheduler(reason)),
+            ),
+            AgentSupervisorExecutionOutcome::Cancelled(cancellation) => (
+                AgentProgressState::Cancelled,
+                Some(AgentProgressBlocker::Cancellation(cancellation.reason())),
+            ),
+        };
+        self.nodes[index].progress = self.progress(
+            execution.node(),
+            activity,
+            state,
+            Some(AgentProgressResult::Supervisor(outcome)),
+            blocker,
+        );
         Ok(execution_receipt(execution, outcome))
     }
 
@@ -970,10 +1081,18 @@ impl AgentRunSupervisor {
         execution: AgentNodeExecution,
         cancellation: AgentSupervisorCancellation,
     ) -> AgentSupervisorExecutionReceipt {
+        let activity = self.nodes[index].progress.activity();
         self.nodes[index].state = NodeState::Cancelling(CancellingState {
             cancellation,
             running: None,
         });
+        self.nodes[index].progress = self.progress(
+            execution.node(),
+            activity,
+            AgentProgressState::Waiting,
+            None,
+            Some(AgentProgressBlocker::Cancellation(cancellation.reason())),
+        );
         self.finalize_drained_cancellations();
         execution_receipt(
             execution,
@@ -996,7 +1115,20 @@ impl AgentRunSupervisor {
             let NodeState::Cancelling(cancelling) = self.nodes[index].state else {
                 unreachable!("candidate was proven cancelling");
             };
+            let node = self.nodes[index].node;
+            let activity = self.nodes[index].progress.activity();
             self.nodes[index].state = NodeState::Cancelled(cancelling.cancellation);
+            self.nodes[index].progress = self.progress(
+                node,
+                activity,
+                AgentProgressState::Cancelled,
+                Some(AgentProgressResult::Supervisor(
+                    AgentSupervisorExecutionOutcome::Cancelled(cancelling.cancellation),
+                )),
+                Some(AgentProgressBlocker::Cancellation(
+                    cancelling.cancellation.reason(),
+                )),
+            );
         }
     }
 
@@ -1093,6 +1225,12 @@ pub enum AgentSupervisorRuntimeError {
     /// Registry cleanup proof did not match the retained assignment.
     #[error("agent supervisor context cleanup identity mismatched")]
     ContextIdentityMismatch,
+    /// A semantic operation named an incompatible active resource class.
+    #[error("agent supervisor progress resource mismatched")]
+    ProgressResourceMismatch,
+    /// Typed progress evidence did not belong to the exact executing node.
+    #[error("agent supervisor progress authority mismatched")]
+    ProgressAuthority,
     /// Existing bounded context registry refused the exact operation.
     #[error(transparent)]
     ContextRegistry(#[from] crate::ContextRegistryError),

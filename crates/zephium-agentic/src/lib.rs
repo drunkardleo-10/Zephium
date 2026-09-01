@@ -70,10 +70,11 @@ pub use agent_policy::{
 };
 pub use agent_supervisor::{
     AgentDelegationNode, AgentDelegationSpec, AgentDelegationTopology, AgentNodeExecution,
-    AgentRunSupervisor, AgentSupervisorAttemptId, AgentSupervisorCancellation,
-    AgentSupervisorCancellationBatch, AgentSupervisorCancellationId,
-    AgentSupervisorCancellationReason, AgentSupervisorCancellationTarget,
-    AgentSupervisorCompletion, AgentSupervisorContextAssignment,
+    AgentProgressActivity, AgentProgressBlocker, AgentProgressOperation, AgentProgressResource,
+    AgentProgressResult, AgentProgressState, AgentRunSupervisor, AgentSemanticProgress,
+    AgentSupervisorAttemptId, AgentSupervisorCancellation, AgentSupervisorCancellationBatch,
+    AgentSupervisorCancellationId, AgentSupervisorCancellationReason,
+    AgentSupervisorCancellationTarget, AgentSupervisorCompletion, AgentSupervisorContextAssignment,
     AgentSupervisorContextCancellationTarget, AgentSupervisorContextRelease,
     AgentSupervisorContextReleaseOutcome, AgentSupervisorContractError,
     AgentSupervisorExecutionOutcome, AgentSupervisorExecutionReceipt, AgentSupervisorFailure,

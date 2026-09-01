@@ -1,10 +1,10 @@
-//! Single-flight semantic effect authorization over committed model-context taint.
+//! Bounded semantic effect authorization over committed model-context taint.
 //!
-//! This child of the mutable run policy can reserve one operation and mint a
-//! non-cloneable permit. It owns no browser, page, timer, provider, worker, or
-//! native input. The imperative shell must still resolve/revalidate the action,
-//! dispatch a fixed backend with the permit, settle one absolute deadline, and
-//! independently verify the effect.
+//! This child of the mutable run policy can reserve one operation per exact
+//! prepared action and mint a non-cloneable permit. It owns no browser, page,
+//! timer, provider, worker, or native input. The imperative shell must still
+//! resolve/revalidate each action, dispatch a fixed backend with its permit,
+//! settle one absolute deadline, and independently verify the effect.
 
 use std::fmt;
 use std::num::NonZeroU64;
@@ -286,6 +286,23 @@ impl AgentNeedsHumanTransition {
     pub const fn reason(self) -> AgentNeedsHumanReason {
         self.reason
     }
+
+    #[cfg(test)]
+    pub(crate) const fn for_progress_test(
+        manifest: AgentRunManifestId,
+        node: AgentPlanNodeId,
+        context: ContextJoin,
+        effect: SemanticEffectClass,
+        reason: AgentNeedsHumanReason,
+    ) -> Self {
+        Self {
+            manifest,
+            node,
+            context,
+            effect,
+            reason,
+        }
+    }
 }
 
 impl fmt::Debug for AgentNeedsHumanTransition {
@@ -314,6 +331,7 @@ pub enum AgentEffectAuthorization {
 /// Non-cloneable pre-dispatch operation reservation.
 #[must_use]
 pub struct AgentEffectPermit {
+    manifest: AgentRunManifestId,
     id: AgentEffectId,
     lease: AgentPlanLeaseId,
     node: AgentPlanNodeId,
@@ -323,6 +341,11 @@ pub struct AgentEffectPermit {
 }
 
 impl AgentEffectPermit {
+    /// Exact immutable manifest revision governing this authorization.
+    pub const fn manifest(&self) -> AgentRunManifestId {
+        self.manifest
+    }
+
     /// Exact effect identity.
     pub const fn id(&self) -> AgentEffectId {
         self.id
@@ -353,6 +376,7 @@ impl fmt::Debug for AgentEffectPermit {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("AgentEffectPermit")
+            .field("manifest", &self.manifest)
             .field("id", &self.id)
             .field("lease", &self.lease)
             .field("node", &self.node)
@@ -366,6 +390,7 @@ impl fmt::Debug for AgentEffectPermit {
 /// Non-cloneable exact effect after final policy revalidation accepted dispatch.
 #[must_use]
 pub struct AgentActiveEffect {
+    manifest: AgentRunManifestId,
     id: AgentEffectId,
     lease: AgentPlanLeaseId,
     node: AgentPlanNodeId,
@@ -376,6 +401,11 @@ pub struct AgentActiveEffect {
 }
 
 impl AgentActiveEffect {
+    /// Exact immutable manifest revision governing this dispatched effect.
+    pub const fn manifest(&self) -> AgentRunManifestId {
+        self.manifest
+    }
+
     /// Exact effect identity.
     pub const fn id(&self) -> AgentEffectId {
         self.id
@@ -406,6 +436,7 @@ impl fmt::Debug for AgentActiveEffect {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("AgentActiveEffect")
+            .field("manifest", &self.manifest)
             .field("id", &self.id)
             .field("lease", &self.lease)
             .field("node", &self.node)
@@ -440,6 +471,7 @@ pub enum AgentEffectSettlement {
 /// Content-free receipt after one dispatched effect consumes its operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AgentEffectReceipt {
+    manifest: AgentRunManifestId,
     id: AgentEffectId,
     lease: AgentPlanLeaseId,
     node: AgentPlanNodeId,
@@ -449,6 +481,11 @@ pub struct AgentEffectReceipt {
 }
 
 impl AgentEffectReceipt {
+    /// Exact immutable manifest revision that accounted this effect.
+    pub const fn manifest(self) -> AgentRunManifestId {
+        self.manifest
+    }
+
     /// Exact effect identity.
     pub const fn id(self) -> AgentEffectId {
         self.id
@@ -477,6 +514,27 @@ impl AgentEffectReceipt {
     /// Verified proof class or terminal typed failure.
     pub const fn settlement(self) -> AgentEffectSettlement {
         self.settlement
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn for_progress_test(
+        manifest: AgentRunManifestId,
+        id: AgentEffectId,
+        lease: AgentPlanLeaseId,
+        node: AgentPlanNodeId,
+        effect: SemanticEffectClass,
+        attempt: SemanticActionAttemptId,
+        settlement: AgentEffectSettlement,
+    ) -> Self {
+        Self {
+            manifest,
+            id,
+            lease,
+            node,
+            effect,
+            attempt,
+            settlement,
+        }
     }
 }
 
@@ -672,6 +730,7 @@ impl AgentRunPolicy {
             state: AgentEffectRowState::Authorized,
         });
         Ok(AgentEffectAuthorization::Permit(AgentEffectPermit {
+            manifest: self.manifest.id(),
             id: request.id(),
             lease: request.lease(),
             node: node_id,
@@ -692,7 +751,10 @@ impl AgentRunPolicy {
             return Err(AgentPolicyError::EffectMissing);
         };
         let row = &self.effects[index];
-        if row.state != AgentEffectRowState::Authorized || !row.matches_permit(&permit) {
+        if permit.manifest != self.manifest.id()
+            || row.state != AgentEffectRowState::Authorized
+            || !row.matches_permit(&permit)
+        {
             self.sealed = true;
             return Err(AgentPolicyError::EffectSettlementMismatch);
         }
@@ -717,6 +779,7 @@ impl AgentRunPolicy {
         };
         let row = &self.effects[index];
         if row.state != AgentEffectRowState::Authorized
+            || permit.manifest != self.manifest.id()
             || !row.matches_permit(&permit)
             || permit.action_guard != action.verification_guard()
         {
@@ -763,6 +826,7 @@ impl AgentRunPolicy {
         }
         self.effects[index].state = AgentEffectRowState::Dispatched(request.attempt());
         Ok(AgentActiveEffect {
+            manifest: permit.manifest,
             id: permit.id,
             lease: permit.lease,
             node: permit.node,
@@ -809,7 +873,7 @@ impl AgentRunPolicy {
             return Err(AgentPolicyError::EffectMissing);
         };
         let row = &self.effects[effect_index];
-        if !row.matches_active(&active) {
+        if active.manifest != self.manifest.id() || !row.matches_active(&active) {
             self.sealed = true;
             return Err(AgentPolicyError::EffectSettlementMismatch);
         }
@@ -840,6 +904,7 @@ impl AgentRunPolicy {
         self.leases[lease_index].consumed = lease_consumed;
         let row = self.effects.remove(effect_index);
         Ok(AgentEffectReceipt {
+            manifest: self.manifest.id(),
             id: row.id,
             lease: row.lease,
             node: row.node,

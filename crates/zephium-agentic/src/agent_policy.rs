@@ -26,8 +26,8 @@ pub use effect::{
 use crate::semantic_diff::SemanticObservationFingerprint;
 use crate::{
     AgentAccountScope, AgentContextAccountBinding, AgentPlanLeaseId, AgentPlanNodeId,
-    AgentPolicyInstant, AgentRunBudget, AgentRunManifest, ContextJoin, SemanticActionAttemptId,
-    SemanticEffectClass, SemanticModelPayload, SemanticObservation,
+    AgentPolicyInstant, AgentRunBudget, AgentRunManifest, AgentRunManifestId, ContextJoin,
+    SemanticActionAttemptId, SemanticEffectClass, SemanticModelPayload, SemanticObservation,
     SemanticObservationAcknowledgement, SemanticObservationGeneration, SemanticObservationId,
     SemanticOrigin, SemanticReadDeliveryReceipt, SemanticReadModelPayload, SemanticReadResult,
     SemanticReferenceId, SemanticSensitivity, SemanticTrust,
@@ -417,6 +417,7 @@ struct AdmissionGuardFacts<'a> {
 /// Non-cloneable pre-transport reservation for one exact model input.
 #[must_use]
 pub struct AgentModelCallAdmission {
+    manifest: AgentRunManifestId,
     id: AgentModelCallId,
     lease: AgentPlanLeaseId,
     node: AgentPlanNodeId,
@@ -425,6 +426,11 @@ pub struct AgentModelCallAdmission {
 }
 
 impl AgentModelCallAdmission {
+    /// Exact immutable manifest revision reserving this call.
+    pub const fn manifest(&self) -> AgentRunManifestId {
+        self.manifest
+    }
+
     /// Exact model-call identity.
     pub const fn id(&self) -> AgentModelCallId {
         self.id
@@ -445,6 +451,7 @@ impl fmt::Debug for AgentModelCallAdmission {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("AgentModelCallAdmission")
+            .field("manifest", &self.manifest)
             .field("id", &self.id)
             .field("lease", &self.lease)
             .field("node", &self.node)
@@ -457,6 +464,7 @@ impl fmt::Debug for AgentModelCallAdmission {
 /// Non-cloneable exact call whose model input committed and taint is retained.
 #[must_use]
 pub struct AgentActiveModelCall {
+    manifest: AgentRunManifestId,
     id: AgentModelCallId,
     lease: AgentPlanLeaseId,
     node: AgentPlanNodeId,
@@ -464,6 +472,11 @@ pub struct AgentActiveModelCall {
 }
 
 impl AgentActiveModelCall {
+    /// Exact immutable manifest revision governing this call.
+    pub const fn manifest(&self) -> AgentRunManifestId {
+        self.manifest
+    }
+
     /// Exact committed model-call identity.
     pub const fn id(&self) -> AgentModelCallId {
         self.id
@@ -484,6 +497,7 @@ impl fmt::Debug for AgentActiveModelCall {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("AgentActiveModelCall")
+            .field("manifest", &self.manifest)
             .field("id", &self.id)
             .field("lease", &self.lease)
             .field("node", &self.node)
@@ -515,6 +529,7 @@ pub enum AgentModelCallSettlement {
 /// Content-free terminal model-call accounting receipt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AgentModelCallReceipt {
+    manifest: AgentRunManifestId,
     id: AgentModelCallId,
     lease: AgentPlanLeaseId,
     node: AgentPlanNodeId,
@@ -525,6 +540,11 @@ pub struct AgentModelCallReceipt {
 }
 
 impl AgentModelCallReceipt {
+    /// Exact immutable manifest revision that accounted this call.
+    pub const fn manifest(self) -> AgentRunManifestId {
+        self.manifest
+    }
+
     /// Exact model-call identity.
     pub const fn id(self) -> AgentModelCallId {
         self.id
@@ -558,6 +578,26 @@ impl AgentModelCallReceipt {
     /// Actual provider-accounted cost in micro-USD.
     pub const fn cost_micro_usd(self) -> u64 {
         self.cost_micro_usd
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn for_progress_test(
+        manifest: AgentRunManifestId,
+        id: AgentModelCallId,
+        lease: AgentPlanLeaseId,
+        node: AgentPlanNodeId,
+        settlement: AgentModelCallSettlement,
+    ) -> Self {
+        Self {
+            manifest,
+            id,
+            lease,
+            node,
+            settlement,
+            input_tokens: 0,
+            output_tokens: 0,
+            cost_micro_usd: 0,
+        }
     }
 }
 
@@ -754,6 +794,7 @@ impl AgentRunPolicy {
     ) -> Result<(), AgentPolicyError> {
         let index = self.call_index_or_seal(admission.id)?;
         if self.calls[index].state != ModelCallState::Prepared
+            || admission.manifest != self.manifest.id()
             || !admission_matches(&admission, &self.calls[index])
         {
             self.sealed = true;
@@ -775,6 +816,7 @@ impl AgentRunPolicy {
         let index = self.call_index_or_seal(active.id)?;
         let call = &self.calls[index];
         if call.state != ModelCallState::Delivered
+            || active.manifest != self.manifest.id()
             || call.lease != active.lease
             || call.node != active.node
             || call.admission_guard != active.guard
@@ -823,6 +865,7 @@ impl AgentRunPolicy {
             return Err(AgentPolicyError::ProviderUsageExceeded);
         }
         Ok(AgentModelCallReceipt {
+            manifest: self.manifest.id(),
             id: call.id,
             lease: call.lease,
             node: call.node,
@@ -927,6 +970,7 @@ impl AgentRunPolicy {
         });
         self.last_call = Some(id);
         Ok(AgentModelCallAdmission {
+            manifest: self.manifest.id(),
             id,
             lease,
             node: node_id,
@@ -943,6 +987,7 @@ impl AgentRunPolicy {
     ) -> Result<AgentActiveModelCall, AgentPolicyError> {
         let index = self.call_index_or_seal(admission.id)?;
         if self.calls[index].state != ModelCallState::Prepared
+            || admission.manifest != self.manifest.id()
             || self.calls[index].kind != kind
             || self.calls[index].source_guard != source_guard
             || !admission_matches(&admission, &self.calls[index])
@@ -956,6 +1001,7 @@ impl AgentRunPolicy {
         }
         self.calls[index].state = ModelCallState::Delivered;
         Ok(AgentActiveModelCall {
+            manifest: admission.manifest,
             id: admission.id,
             lease: admission.lease,
             node: admission.node,
@@ -2657,6 +2703,7 @@ mod tests {
             run_budget(10, 1_000, 10_000),
         );
         let missing = AgentModelCallAdmission {
+            manifest: fixture.policy.manifest().id(),
             id: AgentModelCallId::new(99).expect("call"),
             lease: fixture.lease,
             node: AgentPlanNodeId::from_raw(1),

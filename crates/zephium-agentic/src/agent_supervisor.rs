@@ -16,7 +16,9 @@ use crate::{
 
 mod runtime;
 pub use runtime::{
-    AgentNodeExecution, AgentRunSupervisor, AgentSupervisorAttemptId, AgentSupervisorCancellation,
+    AgentNodeExecution, AgentProgressActivity, AgentProgressBlocker, AgentProgressOperation,
+    AgentProgressResource, AgentProgressResult, AgentProgressState, AgentRunSupervisor,
+    AgentSemanticProgress, AgentSupervisorAttemptId, AgentSupervisorCancellation,
     AgentSupervisorCancellationBatch, AgentSupervisorCancellationId,
     AgentSupervisorCancellationReason, AgentSupervisorCancellationTarget,
     AgentSupervisorCompletion, AgentSupervisorContextAssignment,
@@ -373,11 +375,14 @@ fn topology_guard(
 mod tests {
     use super::*;
     use crate::{
-        AgentAccountScope, AgentEffectScope, AgentPlanNodeAuthority, AgentPolicyInstant,
-        AgentRunBudget, AgentRunScope, ContextCapabilities, ContextCapability, ContextId,
-        ContextIdentity, ContextKind, ContextOperationId, ContextRegistry, ContextRegistryError,
-        ContextResourceDisposition, ContextSettlement, ContextTerminal, SemanticActionFailure,
-        SemanticEffectClass, SemanticOrigin, SemanticSensitivity,
+        AgentAccountScope, AgentEffectId, AgentEffectReceipt, AgentEffectScope,
+        AgentEffectSettlement, AgentModelCallId, AgentModelCallReceipt, AgentModelCallSettlement,
+        AgentNeedsHumanReason, AgentNeedsHumanTransition, AgentPlanLeaseId, AgentPlanNodeAuthority,
+        AgentPolicyInstant, AgentRunBudget, AgentRunScope, ContextCapabilities, ContextCapability,
+        ContextId, ContextIdentity, ContextKind, ContextOperationId, ContextRegistry,
+        ContextRegistryError, ContextResourceDisposition, ContextSettlement, ContextTerminal,
+        SemanticActionAttemptId, SemanticActionFailure, SemanticEffectClass, SemanticOrigin,
+        SemanticSensitivity,
     };
     use zephium_core::ids::ProfileId;
 
@@ -1661,5 +1666,296 @@ mod tests {
             .expect("complete after reap");
         assert_eq!(active_supervisor.status().contexts(), 0);
         assert_eq!(active_supervisor.status().terminal(), 1);
+    }
+
+    #[test]
+    fn semantic_progress_tracks_scheduler_activity_result_and_blocker_without_content() {
+        let manifest = standard_manifest();
+        let manifest_id = manifest.id();
+        let supervisor_id = AgentSupervisorId::new(40).expect("supervisor");
+        let root_id = AgentPlanNodeId::from_raw(1);
+        let mut supervisor = AgentRunSupervisor::new(supervisor_id, standard_topology(&manifest));
+
+        let queued = supervisor
+            .semantic_progress(root_id)
+            .expect("queued progress");
+        assert_eq!(queued.manifest(), manifest_id);
+        assert_eq!(queued.supervisor(), supervisor_id);
+        assert_eq!(queued.responsibility(), root_id);
+        assert_eq!(
+            queued.activity().operation(),
+            AgentProgressOperation::Scheduling
+        );
+        assert_eq!(queued.activity().resource(), None);
+        assert_eq!(queued.state(), AgentProgressState::Queued);
+        assert_eq!(queued.result(), None);
+        assert_eq!(queued.blocker(), None);
+        assert_eq!(supervisor.nodes().next().expect("root").progress(), queued);
+
+        let execution = supervisor.start(root_id, attempt(1)).expect("start root");
+        let active = supervisor
+            .semantic_progress(root_id)
+            .expect("active progress");
+        assert_eq!(active.state(), AgentProgressState::Active);
+        assert_eq!(
+            active.activity().resource(),
+            Some(AgentProgressResource::Execution(attempt(1)))
+        );
+        assert_eq!(
+            AgentProgressActivity::try_new(AgentProgressOperation::Observation, None)
+                .expect_err("observation needs a context"),
+            AgentSupervisorRuntimeError::ProgressResourceMismatch
+        );
+
+        let observation = AgentProgressActivity::try_new(
+            AgentProgressOperation::Observation,
+            Some(AgentProgressResource::Context(context(900))),
+        )
+        .expect("typed observation activity");
+        supervisor
+            .record_progress_activity(&execution, observation)
+            .expect("record observation");
+        let waiting = supervisor
+            .wait(execution, AgentSupervisorWait::Yielded)
+            .expect("yield root");
+        assert_eq!(
+            waiting.outcome(),
+            AgentSupervisorExecutionOutcome::Waiting(AgentSupervisorWait::Yielded)
+        );
+        let progress = supervisor
+            .semantic_progress(root_id)
+            .expect("waiting progress");
+        assert_eq!(progress.activity(), observation);
+        assert_eq!(progress.state(), AgentProgressState::Waiting);
+        assert_eq!(
+            progress.result(),
+            Some(AgentProgressResult::Supervisor(
+                AgentSupervisorExecutionOutcome::Waiting(AgentSupervisorWait::Yielded)
+            ))
+        );
+        assert_eq!(
+            progress.blocker(),
+            Some(AgentProgressBlocker::Scheduler(
+                AgentSupervisorWait::Yielded
+            ))
+        );
+
+        let execution = supervisor.start(root_id, attempt(2)).expect("resume root");
+        supervisor
+            .complete(
+                execution,
+                AgentSupervisorCompletion::Failed(AgentSupervisorFailure::PolicyDenied),
+            )
+            .expect("terminal failure");
+        let failed = supervisor
+            .semantic_progress(root_id)
+            .expect("failed progress");
+        assert_eq!(failed.state(), AgentProgressState::Failed);
+        assert_eq!(
+            failed.blocker(),
+            Some(AgentProgressBlocker::Supervisor(
+                AgentSupervisorFailure::PolicyDenied
+            ))
+        );
+        let debug = format!("{supervisor:?} {failed:?}");
+        assert!(debug.contains("[redacted]"));
+        assert!(!debug.contains("a.example.test"));
+    }
+
+    #[test]
+    fn semantic_progress_accepts_only_exact_manifest_node_receipts() {
+        let manifest = standard_manifest();
+        let manifest_id = manifest.id();
+        let root_id = AgentPlanNodeId::from_raw(1);
+        let lease = AgentPlanLeaseId::from_raw(501);
+        let mut supervisor = AgentRunSupervisor::new(
+            AgentSupervisorId::new(41).expect("supervisor"),
+            standard_topology(&manifest),
+        );
+        let execution = supervisor.start(root_id, attempt(1)).expect("start root");
+        let model = AgentModelCallReceipt::for_progress_test(
+            manifest_id,
+            AgentModelCallId::new(1).expect("model call"),
+            lease,
+            root_id,
+            AgentModelCallSettlement::Completed,
+        );
+        let model_progress = supervisor
+            .record_model_call_result(&execution, model)
+            .expect("model progress");
+        assert_eq!(model_progress.state(), AgentProgressState::Succeeded);
+        assert_eq!(
+            model_progress.result(),
+            Some(AgentProgressResult::Model(
+                AgentModelCallSettlement::Completed
+            ))
+        );
+
+        let effect = AgentEffectReceipt::for_progress_test(
+            manifest_id,
+            AgentEffectId::new(1).expect("effect"),
+            lease,
+            root_id,
+            SemanticEffectClass::LocalWrite,
+            SemanticActionAttemptId::new(1).expect("action attempt"),
+            AgentEffectSettlement::Failed(SemanticActionFailure::BackendRefused),
+        );
+        let effect_progress = supervisor
+            .record_effect_result(&execution, effect)
+            .expect("effect progress");
+        assert_eq!(effect_progress.state(), AgentProgressState::Failed);
+        assert_eq!(
+            effect_progress.blocker(),
+            Some(AgentProgressBlocker::Effect(
+                SemanticActionFailure::BackendRefused
+            ))
+        );
+
+        let foreign = AgentModelCallReceipt::for_progress_test(
+            AgentRunManifestId::from_raw(999),
+            AgentModelCallId::new(2).expect("model call"),
+            lease,
+            root_id,
+            AgentModelCallSettlement::Completed,
+        );
+        assert_eq!(
+            supervisor
+                .record_model_call_result(&execution, foreign)
+                .expect_err("foreign manifest"),
+            AgentSupervisorRuntimeError::ProgressAuthority
+        );
+        assert_eq!(supervisor.semantic_progress(root_id), Some(effect_progress));
+        assert!(!supervisor.status().is_sealed());
+        supervisor
+            .complete(execution, AgentSupervisorCompletion::Succeeded)
+            .expect("complete root");
+    }
+
+    #[test]
+    fn context_assignment_and_cancellation_progress_keep_exact_supervisor_identity() {
+        let manifest = standard_manifest();
+        let supervisor_id = AgentSupervisorId::new(42).expect("supervisor");
+        let root_id = AgentPlanNodeId::from_raw(1);
+        let mut supervisor = AgentRunSupervisor::new(supervisor_id, standard_topology(&manifest));
+        let execution = supervisor.start(root_id, attempt(1)).expect("start root");
+        let mut registry = ContextRegistry::new();
+        let identity = context_identity(901, 2, 1);
+        let assignment = supervisor
+            .reserve_context(
+                &execution,
+                &manifest,
+                &mut registry,
+                identity,
+                context_capabilities(),
+            )
+            .expect("reserve context");
+        assert_eq!(assignment.supervisor(), supervisor_id);
+        assert_eq!(
+            supervisor
+                .semantic_progress(root_id)
+                .expect("context progress")
+                .activity()
+                .resource(),
+            Some(AgentProgressResource::Context(identity.id()))
+        );
+
+        let batch = supervisor
+            .cancel_subtree(
+                root_id,
+                cancellation(1),
+                AgentSupervisorCancellationReason::UserRequested,
+            )
+            .expect("cancel root");
+        assert_eq!(
+            batch
+                .contexts()
+                .next()
+                .expect("context target")
+                .assignment(),
+            assignment
+        );
+        let cancelling = supervisor
+            .semantic_progress(root_id)
+            .expect("cancelling progress");
+        assert_eq!(cancelling.state(), AgentProgressState::Waiting);
+        assert_eq!(
+            cancelling.blocker(),
+            Some(AgentProgressBlocker::Cancellation(
+                AgentSupervisorCancellationReason::UserRequested
+            ))
+        );
+        supervisor
+            .drain_cancelled(execution, cancellation(1))
+            .expect("execution drained");
+        supervisor
+            .cancel_queued_context(&mut registry, identity.id())
+            .expect("context cancelled");
+        let cancelled = supervisor
+            .semantic_progress(root_id)
+            .expect("cancelled progress");
+        assert_eq!(cancelled.state(), AgentProgressState::Cancelled);
+        assert_eq!(supervisor.status().live(), 0);
+    }
+
+    #[test]
+    fn policy_derived_human_wait_is_exact_content_free_and_releases_execution() {
+        let manifest = standard_manifest();
+        let root_id = AgentPlanNodeId::from_raw(1);
+        let mut supervisor = AgentRunSupervisor::new(
+            AgentSupervisorId::new(43).expect("supervisor"),
+            standard_topology(&manifest),
+        );
+        let execution = supervisor.start(root_id, attempt(1)).expect("start root");
+        let mut registry = ContextRegistry::new();
+        let identity = context_identity(902, 2, 1);
+        supervisor
+            .reserve_context(
+                &execution,
+                &manifest,
+                &mut registry,
+                identity,
+                context_capabilities(),
+            )
+            .expect("reserve context");
+        let construction = registry
+            .begin_context(identity.id(), context_operation(1))
+            .expect("begin context");
+        registry
+            .settle_construction(identity.id(), construction, ContextSettlement::Applied)
+            .expect("settle context");
+        let join = registry.join(identity.id()).expect("context join");
+        let transition = AgentNeedsHumanTransition::for_progress_test(
+            manifest.id(),
+            root_id,
+            join,
+            SemanticEffectClass::LocalWrite,
+            AgentNeedsHumanReason::HumanControl,
+        );
+
+        let receipt = supervisor
+            .wait_for_human(&execution, transition)
+            .expect("wait for human");
+        assert_eq!(
+            receipt.outcome(),
+            AgentSupervisorExecutionOutcome::Waiting(AgentSupervisorWait::Yielded)
+        );
+        assert_eq!(supervisor.status().executing(), 0);
+        assert_eq!(supervisor.status().waiting(), 1);
+        let progress = supervisor
+            .semantic_progress(root_id)
+            .expect("human wait progress");
+        assert_eq!(
+            progress.activity().operation(),
+            AgentProgressOperation::Approval(SemanticEffectClass::LocalWrite)
+        );
+        assert_eq!(progress.state(), AgentProgressState::Waiting);
+        assert_eq!(
+            progress.blocker(),
+            Some(AgentProgressBlocker::NeedsHuman(
+                AgentNeedsHumanReason::HumanControl
+            ))
+        );
+        let debug = format!("{progress:?}");
+        assert!(!debug.contains("a.example.test"));
     }
 }

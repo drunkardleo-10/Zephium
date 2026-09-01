@@ -13,11 +13,17 @@ use crate::{
 /// One browser context assigned to an exact activated plan node.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AgentSupervisorContextAssignment {
+    supervisor: AgentSupervisorId,
     node: AgentPlanNodeId,
     identity: ContextIdentity,
 }
 
 impl AgentSupervisorContextAssignment {
+    /// Exact mutable supervisor incarnation owning the assignment.
+    pub const fn supervisor(self) -> AgentSupervisorId {
+        self.supervisor
+    }
+
     /// Exact plan node responsible for the context.
     pub const fn node(self) -> AgentPlanNodeId {
         self.node
@@ -123,7 +129,7 @@ impl AgentRunSupervisor {
         identity: ContextIdentity,
         capabilities: ContextCapabilities,
     ) -> Result<AgentSupervisorContextAssignment, AgentSupervisorRuntimeError> {
-        self.require_running_execution(execution)?;
+        let node_index = self.require_running_execution(execution)?;
         if !self.topology.matches_manifest(manifest) {
             return Err(AgentSupervisorRuntimeError::ManifestMismatch);
         }
@@ -145,11 +151,16 @@ impl AgentRunSupervisor {
         if self.context_count_for_node(execution.node()) >= usize::from(node.budget().contexts()) {
             return Err(AgentSupervisorRuntimeError::NodeContextLimit);
         }
+        let progress_activity = AgentProgressActivity::try_new(
+            AgentProgressOperation::Context,
+            Some(AgentProgressResource::Context(identity.id())),
+        )?;
         self.contexts
             .try_reserve_exact(1)
             .map_err(|_| AgentSupervisorRuntimeError::ContextCapacity)?;
         registry.reserve(identity, capabilities)?;
         let assignment = AgentSupervisorContextAssignment {
+            supervisor: self.id,
             node: execution.node(),
             identity,
         };
@@ -159,6 +170,13 @@ impl AgentRunSupervisor {
             .unwrap_or_else(|index| index);
         self.contexts
             .insert(index, SupervisorContextRow { assignment });
+        self.nodes[node_index].progress = self.progress(
+            execution.node(),
+            progress_activity,
+            AgentProgressState::Active,
+            None,
+            None,
+        );
         Ok(assignment)
     }
 
@@ -175,12 +193,27 @@ impl AgentRunSupervisor {
             .context_index(context)
             .ok_or(AgentSupervisorRuntimeError::ContextNotAssigned)?;
         let assignment = self.contexts[index].assignment;
+        let progress_activity = AgentProgressActivity::try_new(
+            AgentProgressOperation::Context,
+            Some(AgentProgressResource::Context(context)),
+        )?;
         let identity = registry.cancel_queued(context)?;
         if identity != assignment.identity() {
             self.sealed = true;
             return Err(AgentSupervisorRuntimeError::ContextIdentityMismatch);
         }
         self.contexts.remove(index);
+        if let Some(node_index) = self.node_index(assignment.node()) {
+            self.nodes[node_index].progress = self.progress(
+                assignment.node(),
+                progress_activity,
+                AgentProgressState::Cancelled,
+                Some(AgentProgressResult::Context(
+                    AgentSupervisorContextReleaseOutcome::QueuedCancelled,
+                )),
+                Some(AgentProgressBlocker::ContextCancelled),
+            );
+        }
         self.finalize_drained_cancellations();
         Ok(AgentSupervisorContextRelease {
             assignment,
@@ -202,19 +235,33 @@ impl AgentRunSupervisor {
             .context_index(context)
             .ok_or(AgentSupervisorRuntimeError::ContextNotAssigned)?;
         let assignment = self.contexts[index].assignment;
+        let progress_activity = AgentProgressActivity::try_new(
+            AgentProgressOperation::Context,
+            Some(AgentProgressResource::Context(context)),
+        )?;
         let retired = registry.reap_terminal(context)?;
         if retired.identity() != assignment.identity() {
             self.sealed = true;
             return Err(AgentSupervisorRuntimeError::ContextIdentityMismatch);
         }
         self.contexts.remove(index);
+        let outcome = AgentSupervisorContextReleaseOutcome::Retired {
+            terminal: retired.terminal(),
+            resource: retired.resource(),
+        };
+        if let Some(node_index) = self.node_index(assignment.node()) {
+            self.nodes[node_index].progress = self.progress(
+                assignment.node(),
+                progress_activity,
+                AgentProgressState::Succeeded,
+                Some(AgentProgressResult::Context(outcome)),
+                None,
+            );
+        }
         self.finalize_drained_cancellations();
         Ok(AgentSupervisorContextRelease {
             assignment,
-            outcome: AgentSupervisorContextReleaseOutcome::Retired {
-                terminal: retired.terminal(),
-                resource: retired.resource(),
-            },
+            outcome,
         })
     }
 
@@ -234,6 +281,18 @@ impl AgentRunSupervisor {
         self.contexts
             .iter()
             .any(|row| row.assignment.node() == node)
+    }
+
+    pub(super) fn owns_context_assignment(
+        &self,
+        node: AgentPlanNodeId,
+        identity: ContextIdentity,
+    ) -> bool {
+        self.contexts.iter().any(|row| {
+            row.assignment.supervisor() == self.id
+                && row.assignment.node() == node
+                && row.assignment.identity() == identity
+        })
     }
 
     fn context_count_for_node(&self, node: AgentPlanNodeId) -> usize {
