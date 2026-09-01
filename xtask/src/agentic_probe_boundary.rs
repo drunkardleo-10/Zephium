@@ -263,6 +263,7 @@ fn validate_engine_agent_context_boundary(
         "constfnsupports_cookie_transfer()->bool{false}",
         "pub(crate)structAgentContextPortSlot",
         "catch_unwind",
+        "fnemit_renderer_lost",
         "ContextDispatch::Unsupported",
     ] {
         if !port.contains(required) {
@@ -279,8 +280,10 @@ fn validate_engine_agent_context_boundary(
         "NativeResourceClass::AgentContext",
         "ContextConstructionProof::MacOsOwnedSelectedProfileExtensionFree",
         "pending_navigation:Option<AgentPendingNavigation>",
+        "renderer_loss_rejoin_pending:bool",
         "AGENT_NAVIGATION_COMMIT_TIMEOUT",
         "try_with_agent_context_terminal",
+        "emitter.emit_renderer_lost(prior)",
         "force_shutdown_agent_contexts",
     ] {
         if !host.contains(required) {
@@ -303,6 +306,9 @@ fn validate_engine_agent_context_boundary(
         "native_id:Option<wry::NavigationId>",
         "armed.native_id!=Some(event.id)",
         "terminal_claimed.compare_exchange",
+        "with_on_web_content_process_terminate_handler",
+        "fnclaim_renderer_loss",
+        "renderer_lost_callback",
     ] {
         if !macos.contains(required) {
             return Err(format!(
@@ -2131,6 +2137,7 @@ mod tests {
             const fn supports_cookie_transfer() -> bool { false }
             pub(crate) struct AgentContextPortSlot;
             catch_unwind();
+            fn emit_renderer_lost() {}
             fn closed() { ContextDispatch::Unsupported; }
         "#;
         let host = r#"
@@ -2139,8 +2146,10 @@ mod tests {
             NativeResourceClass::AgentContext;
             ContextConstructionProof::MacOsOwnedSelectedProfileExtensionFree;
             pending_navigation: Option<AgentPendingNavigation>,
+            renderer_loss_rejoin_pending: bool,
             const AGENT_NAVIGATION_COMMIT_TIMEOUT: Duration = Duration::from_secs(30);
             try_with_agent_context_terminal();
+            emitter.emit_renderer_lost(prior);
             fn force_shutdown_agent_contexts() {}
         "#;
         let macos = r#"
@@ -2154,6 +2163,9 @@ mod tests {
             native_id: Option<wry::NavigationId>;
             armed.native_id != Some(event.id);
             terminal_claimed.compare_exchange();
+            with_on_web_content_process_terminate_handler();
+            fn claim_renderer_loss() {}
+            renderer_lost_callback();
         "#;
         validate_engine_agent_context_boundary(engine, host_root, port, host, macos)
             .expect("closed production adapter");

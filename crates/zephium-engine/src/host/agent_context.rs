@@ -90,9 +90,12 @@ impl AgentPendingNavigation {
 #[cfg(target_os = "macos")]
 pub(super) struct AgentOwnedContext {
     join: ContextJoin,
+    native_view_origin: ContextJoin,
     capabilities: ContextCapabilities,
     profile_lease: ContextProfileLease,
     pending_navigation: Option<AgentPendingNavigation>,
+    renderer_lost: bool,
+    renderer_loss_rejoin_pending: bool,
     content_policy_registration: Option<crate::platform::imp::ContentPolicyRegistration>,
     view: crate::platform::imp::AgentOwnedView,
     native_resource: Option<NativeResourceLease>,
@@ -110,9 +113,12 @@ impl AgentOwnedContext {
     ) -> Self {
         Self {
             join,
+            native_view_origin: join,
             capabilities,
             profile_lease,
             pending_navigation: None,
+            renderer_lost: false,
+            renderer_loss_rejoin_pending: false,
             content_policy_registration: Some(content_policy_registration),
             view,
             native_resource: Some(native_resource),
@@ -137,9 +143,17 @@ impl AgentOwnedContext {
     fn is_consistent_with_key(&self, id: ContextId) -> bool {
         let identity = self.join.identity();
         identity.id() == id
+            && self.native_view_origin.identity() == identity
             && self.capabilities.kind() == identity.kind()
             && self.profile_lease.identity() == identity
             && self.profile_lease.purpose() == ContextProfileLeasePurpose::Owned
+            && (!self.renderer_loss_rejoin_pending || self.renderer_lost)
+            && self.view.navigation().matches_for_audit(
+                self.pending_navigation
+                    .as_ref()
+                    .map(|pending| pending.operation),
+                self.renderer_lost,
+            )
             && self.pending_navigation.as_ref().is_none_or(|pending| {
                 pending.operation.context() == self.join
                     && pending.operation.kind() == ContextOperationKind::Navigate
@@ -227,6 +241,17 @@ impl EngineHost {
         let binding_count = Some(0);
 
         #[cfg(target_os = "macos")]
+        let resident_view_count = u8::try_from(
+            self.agent_contexts
+                .values()
+                .filter(|binding| !binding.renderer_lost)
+                .count(),
+        )
+        .ok();
+        #[cfg(not(target_os = "macos"))]
+        let resident_view_count = Some(0);
+
+        #[cfg(target_os = "macos")]
         let pending_operations = u8::try_from(
             self.agent_contexts
                 .values()
@@ -268,16 +293,25 @@ impl EngineHost {
         #[cfg(not(target_os = "macos"))]
         let resource_count_matches = true;
 
-        let outcome = match (binding_count, pending_operations, queued_tasks) {
-            (Some(binding_count), Some(pending_operations), Some(queued_tasks))
-                if !self.native_resource_accounting_failed
-                    && self.native_resources.is_healthy()
-                    && bindings_consistent
-                    && resource_count_matches =>
+        let outcome = match (
+            binding_count,
+            resident_view_count,
+            pending_operations,
+            queued_tasks,
+        ) {
+            (
+                Some(binding_count),
+                Some(resident_view_count),
+                Some(pending_operations),
+                Some(queued_tasks),
+            ) if !self.native_resource_accounting_failed
+                && self.native_resources.is_healthy()
+                && bindings_consistent
+                && resource_count_matches =>
             {
                 ContextNativeResourceSnapshot::try_new(ContextNativeResourceCounts {
                     known_bindings: binding_count,
-                    resident_views: binding_count,
+                    resident_views: resident_view_count,
                     owned_reservations: binding_count,
                     borrowed_leases: 0,
                     visible_surfaces: 0,
@@ -373,20 +407,37 @@ impl EngineHost {
             }
         };
 
+        let view_origin = join;
         let navigation_guard = callback_guard.clone();
+        let renderer_guard = callback_guard.clone();
+        let invariant_guard = callback_guard.clone();
+        let panic_guard = callback_guard.clone();
         let view = crate::platform::imp::build_owned_agent_view(
             &self.parent,
             profile,
             request.profile_lease().storage_class(),
             ephemeral_store.as_ref(),
-            move |terminal| {
-                let rejected = navigation_guard.clone();
-                if !crate::host::try_with_agent_context_terminal(move |host| {
-                    host.on_owned_agent_navigation_terminal(id, terminal);
-                }) {
-                    rejected.callback_dispatch_rejected();
-                }
-            },
+            crate::platform::imp::AgentOwnedViewCallbacks::new(
+                move |terminal| {
+                    let rejected = navigation_guard.clone();
+                    if !crate::host::try_with_agent_context_terminal(move |host| {
+                        host.on_owned_agent_navigation_terminal(id, terminal);
+                    }) {
+                        rejected.callback_dispatch_rejected();
+                    }
+                },
+                move || {
+                    let emitter = renderer_guard.clone();
+                    let rejected = renderer_guard.clone();
+                    if !crate::host::try_with_agent_context_terminal(move |host| {
+                        host.on_owned_agent_renderer_lost(id, view_origin, emitter);
+                    }) {
+                        rejected.callback_dispatch_rejected();
+                    }
+                },
+                move || invariant_guard.callback_dispatch_rejected(),
+                move || panic_guard.callback_dispatch_rejected(),
+            ),
         )
         .map_err(map_owned_view_construction_failure)?;
         let content_policy_registration =
@@ -441,6 +492,7 @@ impl EngineHost {
         let target = request.target().clone();
         let failure = match self.agent_contexts.get(&id) {
             None => Some(ContextPortFailure::Stale),
+            Some(binding) if binding.renderer_lost => Some(ContextPortFailure::Stale),
             Some(binding) if binding.pending_navigation.is_some() => {
                 Some(ContextPortFailure::ResourceExhausted)
             }
@@ -556,6 +608,44 @@ impl EngineHost {
     }
 
     #[cfg(target_os = "macos")]
+    fn on_owned_agent_renderer_lost(
+        &mut self,
+        id: ContextId,
+        view_origin: ContextJoin,
+        emitter: crate::agent_context_port::AgentContextCallbackGuard,
+    ) {
+        let (prior, pending, navigation_clean) = {
+            let Some(binding) = self.agent_contexts.get_mut(&id) else {
+                return;
+            };
+            if binding.native_view_origin != view_origin || binding.renderer_lost {
+                return;
+            }
+            crate::platform::imp::stop_loading(binding.view.view());
+            let prior = binding.join;
+            let pending = binding.pending_navigation.take();
+            let disarmed = pending
+                .as_ref()
+                .is_none_or(|pending| binding.view.navigation().disarm(pending.operation));
+            let navigation_clean =
+                disarmed && binding.view.navigation().matches_for_audit(None, true);
+            binding.renderer_lost = true;
+            binding.renderer_loss_rejoin_pending = true;
+            (prior, pending, navigation_clean)
+        };
+
+        if let Some(pending) = pending {
+            pending.complete(Err(ContextPortFailure::NativeRefused));
+        }
+        if !navigation_clean {
+            self.fail_agent_context_invariant(
+                "agent-context renderer loss did not retire exact navigation state",
+            );
+        }
+        emitter.emit_renderer_lost(prior);
+    }
+
+    #[cfg(target_os = "macos")]
     fn finish_owned_agent_navigation(
         &mut self,
         id: ContextId,
@@ -608,7 +698,11 @@ impl EngineHost {
         let outcome = self
             .agent_contexts
             .get(&id)
-            .map(|binding| same_or_full_successor(binding.join, requested))
+            .map(|binding| {
+                same_or_full_successor(binding.join, requested)
+                    || (binding.renderer_loss_rejoin_pending
+                        && double_full_successor(binding.join, requested))
+            })
             .filter(|matches| *matches)
             .ok_or(ContextPortFailure::Stale)
             .and_then(|_| {
@@ -645,11 +739,18 @@ impl EngineHost {
                 .agent_contexts
                 .get_mut(&id)
                 .ok_or(ContextPortFailure::Stale)?;
-            if !full_successor(binding.join, current) {
+            let rejoins = if binding.renderer_loss_rejoin_pending {
+                full_successor(binding.join, current)
+                    || double_full_successor(binding.join, current)
+            } else {
+                full_successor(binding.join, current)
+            };
+            if !rejoins {
                 return Err(ContextPortFailure::Stale);
             }
             crate::platform::imp::stop_loading(binding.view.view());
             binding.join = current;
+            binding.renderer_loss_rejoin_pending = false;
             let pending = binding.pending_navigation.take();
             let disarmed = pending
                 .as_ref()
@@ -769,6 +870,32 @@ fn full_successor(prior: ContextJoin, current: ContextJoin) -> bool {
         && prior.navigation_epoch().next() == Some(current.navigation_epoch())
         && prior.frame_generation().next() == Some(current.frame_generation())
         && prior.cancellation_generation().next() == Some(current.cancellation_generation())
+}
+
+#[cfg(target_os = "macos")]
+fn double_full_successor(prior: ContextJoin, current: ContextJoin) -> bool {
+    prior.identity() == current.identity()
+        && prior.frame() == current.frame()
+        && prior
+            .context_generation()
+            .next()
+            .and_then(|generation| generation.next())
+            == Some(current.context_generation())
+        && prior
+            .navigation_epoch()
+            .next()
+            .and_then(|epoch| epoch.next())
+            == Some(current.navigation_epoch())
+        && prior
+            .frame_generation()
+            .next()
+            .and_then(|generation| generation.next())
+            == Some(current.frame_generation())
+        && prior
+            .cancellation_generation()
+            .next()
+            .and_then(|generation| generation.next())
+            == Some(current.cancellation_generation())
 }
 
 #[cfg(target_os = "macos")]
@@ -924,5 +1051,31 @@ mod tests {
             .expect("cancellation");
         assert!(!super::navigation_successor(prior, cancelled));
         assert!(super::full_successor(navigation.context(), cancelled));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn renderer_loss_rejoins_only_the_exact_one_or_two_core_steps() {
+        let (mut registry, id, construction) = owned_context();
+        registry
+            .settle_construction(
+                id,
+                construction,
+                zephium_agentic::ContextSettlement::Applied,
+            )
+            .expect("construction");
+        let prior = registry.join(id).expect("join");
+        let lost = registry.renderer_lost(id, prior).expect("renderer loss");
+        assert!(super::full_successor(prior, lost));
+        assert!(!super::double_full_successor(prior, lost));
+
+        let close = registry
+            .begin_close(
+                id,
+                zephium_agentic::ContextOperationId::new(9).expect("operation"),
+            )
+            .expect("close after loss");
+        assert!(super::double_full_successor(prior, close.context()));
+        assert!(!super::full_successor(prior, close.context()));
     }
 }

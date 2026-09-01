@@ -1,5 +1,6 @@
 //! Extension-free, hidden WKWebView construction for owned agent contexts.
 
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -51,6 +52,7 @@ struct AgentNavigationArm {
 
 struct AgentNavigationState {
     bootstrap_available: bool,
+    renderer_lost: bool,
     armed: Option<AgentNavigationArm>,
 }
 
@@ -58,6 +60,7 @@ impl Default for AgentNavigationState {
     fn default() -> Self {
         Self {
             bootstrap_available: true,
+            renderer_lost: false,
             armed: None,
         }
     }
@@ -87,7 +90,7 @@ impl AgentNavigationController {
             return Err(());
         }
         let mut state = self.state.lock().map_err(|_| ())?;
-        if state.armed.is_some() {
+        if state.renderer_lost || state.armed.is_some() {
             return Err(());
         }
         state.bootstrap_available = false;
@@ -120,6 +123,9 @@ impl AgentNavigationController {
         let Ok(mut state) = self.state.lock() else {
             return false;
         };
+        if state.renderer_lost {
+            return false;
+        }
         if let Some(armed) = state.armed.as_ref() {
             if armed.terminal_claimed.load(Ordering::Acquire) {
                 return false;
@@ -135,9 +141,14 @@ impl AgentNavigationController {
         false
     }
 
-    fn observe(&self, event: NavigationEvent) -> Option<AgentNavigationTerminal> {
-        let mut state = self.state.lock().ok()?;
-        let armed = state.armed.as_mut()?;
+    fn observe(&self, event: NavigationEvent) -> Result<Option<AgentNavigationTerminal>, ()> {
+        let mut state = self.state.lock().map_err(|_| ())?;
+        if state.renderer_lost {
+            return Ok(None);
+        }
+        let Some(armed) = state.armed.as_mut() else {
+            return Ok(None);
+        };
         if event.phase == NavigationEventPhase::Started {
             let matches_target = ContextNavigationTarget::parse(&event.url)
                 .ok()
@@ -145,21 +156,21 @@ impl AgentNavigationController {
             if matches_target && armed.native_id.is_none() {
                 armed.native_id = Some(event.id);
             }
-            return None;
+            return Ok(None);
         }
         if !matches!(
             event.phase,
             NavigationEventPhase::Committed | NavigationEventPhase::Failed
         ) || armed.native_id != Some(event.id)
         {
-            return None;
+            return Ok(None);
         }
         if armed
             .terminal_claimed
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
         {
-            return None;
+            return Ok(None);
         }
         let operation = armed.operation;
         let expected = armed.target.clone();
@@ -171,9 +182,48 @@ impl AgentNavigationController {
             NavigationEventPhase::Failed => Err(ContextPortFailure::NativeRefused),
             NavigationEventPhase::Started
             | NavigationEventPhase::Redirected
-            | NavigationEventPhase::Finished => return None,
+            | NavigationEventPhase::Finished => return Ok(None),
         };
-        Some(AgentNavigationTerminal { operation, outcome })
+        Ok(Some(AgentNavigationTerminal { operation, outcome }))
+    }
+
+    fn claim_renderer_loss(&self) -> Result<bool, ()> {
+        let mut state = self.state.lock().map_err(|_| ())?;
+        if state.renderer_lost {
+            return Ok(false);
+        }
+        state.renderer_lost = true;
+        if let Some(armed) = state.armed.as_ref() {
+            armed.terminal_claimed.store(true, Ordering::Release);
+        }
+        Ok(true)
+    }
+
+    pub(crate) fn matches_for_audit(
+        &self,
+        pending: Option<ContextOperationJoin>,
+        renderer_lost: bool,
+    ) -> bool {
+        self.state.lock().is_ok_and(|state| {
+            state.renderer_lost == renderer_lost
+                && state.armed.as_ref().map(|armed| armed.operation) == pending
+        })
+    }
+}
+
+fn invoke_owned_navigation_callback(
+    callback: &dyn Fn(AgentNavigationTerminal),
+    callback_panicked: &dyn Fn(),
+    terminal: AgentNavigationTerminal,
+) {
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(terminal))).is_err() {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback_panicked));
+    }
+}
+
+fn invoke_owned_unit_callback(callback: &dyn Fn(), callback_panicked: &dyn Fn()) {
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback)).is_err() {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback_panicked));
     }
 }
 
@@ -193,21 +243,68 @@ impl AgentOwnedView {
     }
 }
 
+/// Typed callback cohort retained by one native view delegate graph.
+pub(crate) struct AgentOwnedViewCallbacks<Navigation, RendererLost, Invariant, Panic> {
+    navigation: Navigation,
+    renderer_lost: RendererLost,
+    invariant: Invariant,
+    panic: Panic,
+}
+
+impl<Navigation, RendererLost, Invariant, Panic>
+    AgentOwnedViewCallbacks<Navigation, RendererLost, Invariant, Panic>
+{
+    pub(crate) const fn new(
+        navigation: Navigation,
+        renderer_lost: RendererLost,
+        invariant: Invariant,
+        panic: Panic,
+    ) -> Self {
+        Self {
+            navigation,
+            renderer_lost,
+            invariant,
+            panic,
+        }
+    }
+}
+
 /// Builds one initially hidden, extension-free selected-profile WKWebView.
 ///
 /// The only initial document is `about:blank`. Network navigation remains
 /// denied until a later exact context-navigation adapter is installed, so the
 /// caller can attach native content policy before any web request exists.
-pub(crate) fn build_owned_agent_view(
+pub(crate) fn build_owned_agent_view<Navigation, RendererLost, Invariant, Panic>(
     parent: &impl HasWindowHandle,
     profile: ProfileId,
     storage_class: ContextProfileStorageClass,
     ephemeral_store: Option<&WebsiteDataStore>,
-    on_navigation: impl Fn(AgentNavigationTerminal) + 'static,
-) -> Result<AgentOwnedView, AgentOwnedViewConstructionError> {
+    callbacks: AgentOwnedViewCallbacks<Navigation, RendererLost, Invariant, Panic>,
+) -> Result<AgentOwnedView, AgentOwnedViewConstructionError>
+where
+    Navigation: Fn(AgentNavigationTerminal) + 'static,
+    RendererLost: Fn() + 'static,
+    Invariant: Fn() + 'static,
+    Panic: Fn() + 'static,
+{
+    let AgentOwnedViewCallbacks {
+        navigation: on_navigation,
+        renderer_lost: on_renderer_lost,
+        invariant: on_invariant_failure,
+        panic: on_callback_panic,
+    } = callbacks;
     let navigation = AgentNavigationController::default();
     let navigation_policy = navigation.clone();
     let navigation_events = navigation.clone();
+    let renderer_events = navigation.clone();
+    let navigation_callback = Rc::new(on_navigation);
+    let renderer_lost_callback = Rc::new(on_renderer_lost);
+    let invariant_failure_callback = Rc::new(on_invariant_failure);
+    let navigation_invariant_failure = invariant_failure_callback.clone();
+    let renderer_invariant_failure = invariant_failure_callback.clone();
+    let on_callback_panic = Rc::new(on_callback_panic);
+    let navigation_callback_panicked = on_callback_panic.clone();
+    let renderer_callback_panicked = on_callback_panic.clone();
     let builder = WebViewBuilder::new()
         .with_url("about:blank")
         .with_visible(false)
@@ -218,11 +315,29 @@ pub(crate) fn build_owned_agent_view(
         .with_picture_in_picture_enabled(false)
         .with_general_autofill_enabled(false)
         .with_navigation_handler(move |target| navigation_policy.allows(&target))
-        .with_navigation_event_handler(move |event| {
-            if let Some(terminal) = navigation_events.observe(event) {
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    on_navigation(terminal);
-                }));
+        .with_navigation_event_handler(move |event| match navigation_events.observe(event) {
+            Ok(Some(terminal)) => invoke_owned_navigation_callback(
+                navigation_callback.as_ref(),
+                navigation_callback_panicked.as_ref(),
+                terminal,
+            ),
+            Ok(None) => {}
+            Err(()) => invoke_owned_unit_callback(
+                navigation_invariant_failure.as_ref(),
+                navigation_callback_panicked.as_ref(),
+            ),
+        })
+        .with_on_web_content_process_terminate_handler(move || {
+            match renderer_events.claim_renderer_loss() {
+                Ok(true) => invoke_owned_unit_callback(
+                    renderer_lost_callback.as_ref(),
+                    renderer_callback_panicked.as_ref(),
+                ),
+                Ok(false) => {}
+                Err(()) => invoke_owned_unit_callback(
+                    renderer_invariant_failure.as_ref(),
+                    renderer_callback_panicked.as_ref(),
+                ),
             }
         })
         .with_permission_handler(|_| wry::PermissionResponse::Deny)
@@ -395,6 +510,7 @@ mod tests {
                 phase: wry::NavigationEventPhase::Committed,
                 url: "about:blank".to_owned(),
             })
+            .expect("state")
             .is_none());
         assert!(gate
             .observe(wry::NavigationEvent {
@@ -402,6 +518,7 @@ mod tests {
                 phase: wry::NavigationEventPhase::Started,
                 url: "https://example.test/path".to_owned(),
             })
+            .expect("state")
             .is_none());
 
         let committed = gate
@@ -410,6 +527,7 @@ mod tests {
                 phase: wry::NavigationEventPhase::Committed,
                 url: "https://example.test/path".to_owned(),
             })
+            .expect("state")
             .expect("commit");
         assert_eq!(committed.operation(), operation);
         assert_eq!(committed.into_outcome(), Ok(target));
@@ -420,6 +538,7 @@ mod tests {
                 phase: wry::NavigationEventPhase::Failed,
                 url: "https://example.test/path".to_owned(),
             })
+            .expect("state")
             .is_none());
     }
 
@@ -437,6 +556,7 @@ mod tests {
                 phase: wry::NavigationEventPhase::Started,
                 url: "https://example.test/late".to_owned(),
             })
+            .expect("state")
             .is_none());
         assert!(!terminal.swap(true, std::sync::atomic::Ordering::AcqRel));
         assert!(gate
@@ -445,7 +565,36 @@ mod tests {
                 phase: wry::NavigationEventPhase::Committed,
                 url: "https://example.test/late".to_owned(),
             })
+            .expect("state")
             .is_none());
         assert!(gate.disarm(operation));
+    }
+
+    #[test]
+    fn renderer_loss_is_one_shot_and_revokes_an_armed_navigation() {
+        let gate = super::AgentNavigationController::default();
+        let operation = navigation_operation();
+        let target =
+            zephium_agentic::ContextNavigationTarget::parse("https://example.test/renderer-loss")
+                .expect("target");
+        let terminal = Arc::new(AtomicBool::new(false));
+        gate.arm(operation, target, terminal.clone()).expect("arm");
+        assert!(gate.allows("https://example.test/renderer-loss"));
+
+        assert_eq!(gate.claim_renderer_loss(), Ok(true));
+        assert!(terminal.load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(gate.claim_renderer_loss(), Ok(false));
+        assert!(!gate.allows("https://example.test/renderer-loss"));
+        assert!(gate
+            .observe(wry::NavigationEvent {
+                id: wry::NavigationId::from_raw(3),
+                phase: wry::NavigationEventPhase::Committed,
+                url: "https://example.test/renderer-loss".to_owned(),
+            })
+            .expect("state")
+            .is_none());
+        assert!(gate.matches_for_audit(Some(operation), true));
+        assert!(gate.disarm(operation));
+        assert!(gate.matches_for_audit(None, true));
     }
 }

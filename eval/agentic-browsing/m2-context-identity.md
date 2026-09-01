@@ -3,9 +3,10 @@
 Status: pure domain contract, bounded registry, closed shell/native port, and
 the initial feature-gated macOS owned-context construction/close adapter are
 implemented, including exact shell-requested navigation on that first adapter.
-Redirect and page-driven navigation, presentation, suspension, renderer
-recovery, Windows native ownership/cookies, borrowed/handoff adapters, and
-named-device qualification remain pending.
+One-shot native renderer-loss detection and resource accounting are also
+implemented. Redirect and page-driven navigation, presentation, suspension,
+renderer recovery, Windows native ownership/cookies, borrowed/handoff
+adapters, and named-device qualification remain pending.
 
 This evidence records code properties only. It does not claim that an owned
 native context has passed a live host/device qualification, or that a Windows
@@ -198,12 +199,28 @@ The WebKit gate admits the canonical requested URL only: its construction-only
 `about:blank` permit is one-shot, and unarmed page navigation plus redirects
 remain denied until their policy contract is implemented. Commit and a
 30-second watchdog share one atomic terminal claim, so exactly one can enqueue
-the settlement. Native terminals own an independent fixed eight-entry host
-band; they cannot compete with the 16-entry request band. Cancellation, close,
-and shutdown stop loading, retire the exact native gate and watchdog, and
-terminally settle the retained navigation before releasing its queue permit.
-Resource audits subtract in-flight operations from request-queue depth and add
-the independently bounded terminal depth rather than double-counting either.
+the settlement. Navigation terminal and renderer loss can each contribute at
+most one callback per live context, so native callbacks own an independent
+fixed 16-entry host band; they cannot compete with the 16-entry request band.
+Cancellation, close, and shutdown stop loading, retire the exact native gate
+and watchdog, and terminally settle the retained navigation before releasing
+its queue permit. Resource audits subtract in-flight operations from
+request-queue depth and add the independently bounded terminal depth rather
+than double-counting either.
+
+The pinned Wry WebKit process-termination callback is installed on the private
+view and joined to its construction-time origin join. Its platform
+gate claims renderer loss once, revokes any armed navigation terminal, and
+denies all later navigation. The host retires and settles an accepted
+navigation before emitting the closed `RendererLost` event for its exact prior
+join. Duplicate or stale old-view callbacks are no-ops; a lost renderer reduces
+`resident_views` to zero while its exact binding, view object, policy
+registration, profile lease, and resource reservation remain owned for close
+or later recovery. Close and cancellation accept only the exact one- or
+two-generation functional-core rejoin required by the race between a native
+loss callback and its shell observation. `Recover` remains mechanically
+unsupported until replacement construction, policy attestation, navigation,
+and settlement can be one complete operation.
 
 With `agentic-browser` enabled, the native resource ledger owns an independent
 eight-context class equal to the functional core's live-context ceiling. Its
@@ -261,7 +278,7 @@ redaction, and exact cancellation resource dispositions.
 1. add Windows owned construction with a truthful enabled-inventory proof,
    stable selected-profile/subprofile binding, and cleanup-debt ownership;
 2. add bounded redirect/page-replacement observation, presentation,
-   suspension, renderer loss and recovery while preserving exact
+   suspension, and renderer recovery while preserving exact
    context/world/frame generations;
 3. implement the bounded Windows cookie adapter and native borrowed/handoff
    transactions without changing ordinary extension principals;

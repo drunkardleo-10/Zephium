@@ -45,7 +45,7 @@ use std::{cell::Cell, cell::RefCell, rc::Rc};
 
 #[cfg(feature = "agentic-browser")]
 pub(crate) use agent_context::{
-    build_owned_agent_view, AgentNavigationTerminal, AgentOwnedView,
+    build_owned_agent_view, AgentNavigationTerminal, AgentOwnedView, AgentOwnedViewCallbacks,
     AgentOwnedViewConstructionError,
 };
 #[cfg(feature = "native-agentic-input-probe")]

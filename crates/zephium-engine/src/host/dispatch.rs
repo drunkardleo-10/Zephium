@@ -260,8 +260,8 @@ enum HostTaskPriority {
     // band and are never coalesced or replaced.
     AgentContext,
     #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
-    // A commit/timeout winner terminally settles an already-admitted context
-    // operation. It cannot compete with new request ingress for capacity.
+    // A commit/timeout winner or one renderer-loss callback rejoins an owned
+    // context. Neither can compete with new request ingress for capacity.
     AgentContextTerminal,
     ProfileErasure,
     Shutdown,
@@ -311,7 +311,8 @@ const PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY: usize =
 const NON_PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY: usize =
     NON_SHUTDOWN_PENDING_HOST_TASK_CAPACITY - PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY;
 #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
-const AGENT_CONTEXT_TERMINAL_PENDING_HOST_TASK_CAPACITY: usize = zephium_agentic::MAX_LIVE_CONTEXTS;
+const AGENT_CONTEXT_TERMINAL_PENDING_HOST_TASK_CAPACITY: usize =
+    2 * zephium_agentic::MAX_LIVE_CONTEXTS;
 #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
 const NON_AGENT_CONTEXT_TERMINAL_PENDING_HOST_TASK_CAPACITY: usize =
     NON_PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY
@@ -2368,6 +2369,10 @@ mod tests {
     #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
     #[test]
     fn agent_context_terminals_have_an_independent_exact_band() {
+        assert_eq!(
+            AGENT_CONTEXT_TERMINAL_PENDING_HOST_TASK_CAPACITY,
+            2 * zephium_agentic::MAX_LIVE_CONTEXTS
+        );
         let mut pending = VecDeque::new();
         for _ in 0..AGENT_CONTEXT_PENDING_HOST_TASK_CAPACITY {
             assert!(enqueue_pending(

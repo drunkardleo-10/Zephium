@@ -3,8 +3,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-#[cfg(target_os = "macos")]
-use zephium_agentic::ContextOperationKind;
 use zephium_agentic::{
     AgentBrowserPort, ContextCancellationSettlement, ContextConstructionSettlement,
     ContextCookieTransferFailure, ContextCookieTransferOutcome, ContextCookieTransferRequest,
@@ -12,6 +10,8 @@ use zephium_agentic::{
     ContextPortFailure, ContextResourceAuditId, ContextResourceAuditSettlement,
     MAX_PENDING_NATIVE_CONTEXT_TASKS,
 };
+#[cfg(target_os = "macos")]
+use zephium_agentic::{ContextJoin, ContextOperationKind, ContextRendererLoss};
 
 use crate::MainThreadDispatch;
 
@@ -26,6 +26,7 @@ pub(crate) type AgentContextEventSink = Arc<dyn Fn(ContextNativeEvent) + Send + 
 #[derive(Clone)]
 pub(crate) struct AgentContextCallbackGuard {
     admission: Arc<AgentPortAdmission>,
+    sink: AgentContextEventSink,
 }
 
 #[cfg(target_os = "macos")]
@@ -45,6 +46,17 @@ impl AgentContextCallbackGuard {
         if !sealed {
             self.admission.fail_invariant();
         }
+    }
+
+    pub(crate) fn emit_renderer_lost(&self, prior: ContextJoin) {
+        if self.admission.pending().is_none() {
+            return;
+        }
+        emit_event(
+            &self.sink,
+            &self.admission,
+            ContextNativeEvent::RendererLost(ContextRendererLoss::new(prior)),
+        );
     }
 }
 
@@ -244,6 +256,7 @@ impl AgentContextTask {
     pub(crate) fn callback_guard(&self) -> AgentContextCallbackGuard {
         AgentContextCallbackGuard {
             admission: self.permit.admission.clone(),
+            sink: self.sink.clone(),
         }
     }
 
@@ -816,7 +829,10 @@ mod tests {
             .admission
             .clone()
             .expect("admission");
-        let guard = AgentContextCallbackGuard { admission };
+        let guard = AgentContextCallbackGuard {
+            admission,
+            sink: Arc::new(|_| {}),
+        };
         guard.callback_dispatch_rejected();
         guard.callback_dispatch_rejected();
         assert_eq!(fatal.load(Ordering::Relaxed), 1);
@@ -824,6 +840,33 @@ mod tests {
             port.audit_resources(ContextResourceAuditId::new(1).expect("audit")),
             ContextDispatch::Rejected(ContextPortFailure::Shutdown)
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn retained_callback_guard_emits_only_the_closed_renderer_loss_event() {
+        let prior = construction_request().context();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = events.clone();
+        let sink: AgentContextEventSink = Arc::new(move |event| {
+            captured.lock().expect("events").push(event);
+        });
+        let slot = AgentContextPortSlot::new(Arc::new(|_| false), Arc::new(|_| {}));
+        let _port = slot.take(sink.clone()).expect("port");
+        let admission = slot
+            .state
+            .lock()
+            .expect("slot state")
+            .admission
+            .clone()
+            .expect("admission");
+        AgentContextCallbackGuard { admission, sink }.emit_renderer_lost(prior);
+
+        let events = events.lock().expect("events");
+        assert!(matches!(
+            events.as_slice(),
+            [ContextNativeEvent::RendererLost(loss)] if loss.prior() == prior
+        ));
     }
 
     #[test]
