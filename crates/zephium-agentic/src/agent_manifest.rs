@@ -103,6 +103,10 @@ opaque_agent_id!(
     "Durable identity of one explicit approved plan node."
 );
 opaque_agent_id!(
+    AgentPlanLeaseId,
+    "Durable identity of one mutable consumption lease for an approved plan node."
+);
+opaque_agent_id!(
     AgentAccountId,
     "Opaque trusted account identity; no username or service label is retained."
 );
@@ -838,6 +842,10 @@ impl AgentRunManifest {
     /// Whether another value represents the exact same approved manifest revision.
     pub fn matches_revision(&self, other: &Self) -> bool {
         self.id == other.id && self.guard == other.guard
+    }
+
+    pub(crate) const fn guard(&self) -> [u8; 32] {
+        self.guard
     }
 }
 

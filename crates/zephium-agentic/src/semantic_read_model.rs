@@ -153,6 +153,14 @@ impl SemanticReadModelPayload {
         &self.measurement
     }
 
+    pub(crate) fn matches_read(&self, read: &SemanticReadResult<'_>) -> bool {
+        self.observation == read.observation()
+            && self.observation_generation == read.observation_generation()
+            && self.captured_at == read.captured_at()
+            && self.stats.items == read.stats().items()
+            && self.read_guard == read.guard()
+    }
+
     /// Settles transport of this exact token-admitted read.
     ///
     /// Only committed delivery acknowledges this exact read projection.
@@ -231,6 +239,10 @@ impl SemanticReadDeliveryReceipt {
             && self.captured_at == read.captured_at()
             && self.items == read.stats().items()
             && self.read_guard == read.guard()
+    }
+
+    pub(crate) const fn guard(&self) -> [u8; 32] {
+        self.read_guard
     }
 }
 

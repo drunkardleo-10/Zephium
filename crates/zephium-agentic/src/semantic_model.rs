@@ -407,6 +407,10 @@ impl SemanticModelPayload {
         &self.measurement
     }
 
+    pub(crate) fn matches_observation(&self, observation: &SemanticObservation) -> bool {
+        self.fingerprint == SemanticObservationFingerprint::from_observation(observation)
+    }
+
     /// Settles transport of this exact token-admitted payload.
     ///
     /// Only committed delivery mints an acknowledgement usable as a diff

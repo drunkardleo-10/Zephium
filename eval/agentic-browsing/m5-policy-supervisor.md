@@ -1,7 +1,7 @@
 # M5 policy and supervisor
 
-Status: the immutable approved run-manifest contract is implemented. Mutable
-plan-lease consumption, committed-model-input taint state, effect permits,
+Status: the immutable approved run-manifest contract and the first mutable
+plan-lease/model-input policy layer are implemented. Effect permits,
 `NeedsHuman` transitions, the bounded run tree/scheduler/cancellation tree,
 provider adapters, and live qualification remain pending.
 
@@ -51,10 +51,62 @@ browser action, model call, tool call, data transfer, cost, or native resource.
   only identities already redacted by type, bounded counts/classes/budgets, and
   redacted guards; it never emits profiles, accounts, origins, or content.
 
+## Implemented mutable model-input boundary
+
+- One policy instance installs exactly one unique mutable lease for every
+  approved plan node. Missing nodes, duplicate nodes, and duplicate leases fail
+  before any provider or native resource exists. Lease identity is separate
+  from immutable plan-node identity so copied manifest facts cannot spend.
+- A trusted-shell call request joins one strictly increasing nonzero call ID,
+  exact lease, exact context/account attestation, monotonic admission time, and
+  explicit input-envelope/output/cost ceilings. It is not authority; policy
+  mints a non-cloneable admission only after all checks pass.
+- Model disclosure requires the explicit `Read` effect at both run and node
+  scope in addition to exact run, context/document/cancellation generation,
+  profile, account, canonical source origin, non-secret sensitivity, current
+  account attestation, manifest/node lifetime, and mutable budget.
+- The semantic observation or bounded-read payload must have been encoded from
+  the exact supplied source. Its measured semantic input tokens plus bounded
+  envelope input, output, cost, and one operation are reserved before any
+  provider transport receives bytes. Consumed plus every pending reservation
+  is checked jointly against run and node budgets.
+- At most four prepared or delivered calls exist per run policy. Refusal or
+  pre-delivery cancellation releases the complete reservation but never
+  reopens its monotonic call ID. No provider, task, timer, queue, or worker is
+  created by this functional core.
+- Taint is committed only when the exact opaque delivery acknowledgement or
+  read receipt matches the source guard retained at admission. Callers do not
+  resupply model-facing bytes, selectors, page JavaScript, DOM, or source facts
+  at this boundary, preventing post-transport source substitution.
+- The content-free run-global taint ledger is keyed by exact source
+  context/document/cancellation authority, account, and canonical origin. It
+  retains the oldest trusted account-attestation time plus maximum sensitivity
+  and worst trust for everything committed to the model context. Secret values
+  remain mechanically absent; visible metadata of a redacted secret node is
+  conservatively treated as sensitive.
+- Taint persists after provider failure or post-delivery cancellation because
+  the provider already received the input. Prepared and committed candidate
+  unions are capped at 128 exact cohorts, so concurrent admissions cannot race
+  the persistent ceiling.
+- Actual provider usage atomically replaces its reservation in both run and
+  lease accounting. A provider-reported overage records actual token/cost
+  usage, removes the terminal call, and seals the run; mismatched or missing
+  delivery/admission identity seals while retaining ambiguous reservations.
+- SHA-256 admissions bind the manifest revision, call, lease, node, input kind,
+  exact context, source projection, token/cost ceilings, and every redacted
+  taint fact. Public diagnostics expose only redacted opaque identities,
+  bounded counts/classes, accounting, and redacted guards.
+
 ## Current tests
 
 Default crate tests exercise canonical order independence, canonical ULID
 round trips, redacted diagnostics, every collection/budget/lifetime ceiling,
 secret/read/same-endpoint/out-of-scope/widening/duplicate flow refusal, and
-plan-node identity/scope/budget/expiry inheritance. They allocate no native or
-provider resource and perform no I/O.
+plan-node identity/scope/budget/expiry inheritance. Ten additional policy tests
+execute real semantic observation/read encode, exact token admission, mutable
+reservation, committed delivery receipt, taint, cancellation, and provider
+settlement paths. They cover nonadjacent duplicate leases, four-call and
+128-cohort limits, aggregate pending budgets, replay, empty reads, stale/future
+account authority, wrong run/profile/account/origin/effect/sensitivity,
+payload/receipt substitution, provider failure, provider overage, and redacted
+diagnostics. They allocate no native or provider resource and perform no I/O.

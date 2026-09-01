@@ -15,6 +15,7 @@
 compile_error!("the agentic probe harness is forbidden in optimized builds");
 
 mod agent_manifest;
+mod agent_policy;
 mod context;
 mod context_port;
 mod context_registry;
@@ -48,12 +49,19 @@ mod sign_in_handoff;
 
 pub use agent_manifest::{
     AgentAccountAttestationId, AgentAccountId, AgentAccountScope, AgentContextAccountBinding,
-    AgentDataFlowRule, AgentEffectScope, AgentManifestContractError, AgentPlanNodeAuthority,
-    AgentPlanNodeId, AgentPlanNodeScope, AgentPolicyInstant, AgentRunBudget, AgentRunManifest,
-    AgentRunManifestId, AgentRunScope, MAX_AGENT_DATA_FLOW_RULES, MAX_AGENT_PLAN_NODES,
-    MAX_AGENT_RUN_ACCOUNTS, MAX_AGENT_RUN_CONTEXTS, MAX_AGENT_RUN_COST_MICRO_USD,
-    MAX_AGENT_RUN_LIFETIME_MILLIS, MAX_AGENT_RUN_MODEL_TOKENS, MAX_AGENT_RUN_OPERATIONS,
-    MAX_AGENT_RUN_ORIGINS, MAX_AGENT_RUN_PROFILES,
+    AgentDataFlowRule, AgentEffectScope, AgentManifestContractError, AgentPlanLeaseId,
+    AgentPlanNodeAuthority, AgentPlanNodeId, AgentPlanNodeScope, AgentPolicyInstant,
+    AgentRunBudget, AgentRunManifest, AgentRunManifestId, AgentRunScope, MAX_AGENT_DATA_FLOW_RULES,
+    MAX_AGENT_PLAN_NODES, MAX_AGENT_RUN_ACCOUNTS, MAX_AGENT_RUN_CONTEXTS,
+    MAX_AGENT_RUN_COST_MICRO_USD, MAX_AGENT_RUN_LIFETIME_MILLIS, MAX_AGENT_RUN_MODEL_TOKENS,
+    MAX_AGENT_RUN_OPERATIONS, MAX_AGENT_RUN_ORIGINS, MAX_AGENT_RUN_PROFILES,
+};
+pub use agent_policy::{
+    AgentActiveModelCall, AgentModelCallAdmission, AgentModelCallBudget, AgentModelCallId,
+    AgentModelCallReceipt, AgentModelCallRequest, AgentModelCallSettlement,
+    AgentModelInputCancellation, AgentPlanLeaseBinding, AgentPolicyAccounting, AgentPolicyError,
+    AgentRunPolicy, AgentTaintCohort, MAX_AGENT_ACCOUNT_ATTESTATION_AGE_MILLIS,
+    MAX_AGENT_PENDING_MODEL_CALLS, MAX_AGENT_TAINT_COHORTS,
 };
 
 pub use context::{

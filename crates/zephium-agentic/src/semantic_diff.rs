@@ -576,6 +576,10 @@ impl SemanticObservationAcknowledgement {
     pub(crate) fn matches(&self, observation: &SemanticObservation) -> bool {
         self.fingerprint == SemanticObservationFingerprint::from_observation(observation)
     }
+
+    pub(crate) const fn guard(&self) -> [u8; 32] {
+        self.fingerprint.digest
+    }
 }
 
 impl fmt::Debug for SemanticObservationAcknowledgement {
