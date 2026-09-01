@@ -541,6 +541,10 @@ impl SemanticObservationFingerprint {
             digest: hasher.finish(),
         }
     }
+
+    pub(crate) const fn digest(&self) -> [u8; 32] {
+        self.digest
+    }
 }
 
 /// Opaque proof that one exact semantic baseline reached committed model delivery.

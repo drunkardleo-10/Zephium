@@ -6,9 +6,12 @@
 //! one bounded observation, and diagnostics expose counts rather than values.
 
 use std::fmt;
+use std::num::NonZeroU16;
 
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use crate::semantic_diff::SemanticObservationFingerprint;
 use crate::{
     ContextJoin, SemanticCompleteness, SemanticFrameJoin, SemanticInvocationId, SemanticNode,
     SemanticObservation, SemanticObservationAcknowledgement, SemanticObservationGeneration,
@@ -173,6 +176,10 @@ impl SemanticReadOmissions {
     fn insert(&mut self, omission: SemanticReadOmission) {
         self.0 |= omission.bit();
     }
+
+    pub(crate) const fn bits(self) -> u8 {
+        self.0
+    }
 }
 
 impl fmt::Debug for SemanticReadOmissions {
@@ -197,6 +204,32 @@ pub enum SemanticReadField {
     BooleanValue,
     /// Bounded ordinal form/control value.
     OrdinalValue,
+}
+
+/// Non-actionable model-facing identity for one read fragment.
+#[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct SemanticReadFragmentId(NonZeroU16);
+
+impl SemanticReadFragmentId {
+    /// Returns the canonical provenance token, such as `@r3`.
+    pub fn model_token(self) -> String {
+        format!("@r{}", self.0.get())
+    }
+
+    /// One-based result-local ordinal for trusted validation.
+    pub const fn get(self) -> u16 {
+        self.0.get()
+    }
+
+    fn new(value: u16) -> Option<Self> {
+        NonZeroU16::new(value).map(Self)
+    }
+}
+
+impl fmt::Debug for SemanticReadFragmentId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SemanticReadFragmentId([redacted])")
+    }
 }
 
 /// Borrowed readable primitive from the safe semantic projection.
@@ -349,6 +382,7 @@ impl fmt::Debug for SemanticReadProvenance<'_> {
 /// One bounded readable primitive and its exact source coordinates.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub struct SemanticReadFragment<'a> {
+    id: SemanticReadFragmentId,
     field: SemanticReadField,
     role: SemanticRole,
     content: SemanticReadContent<'a>,
@@ -356,6 +390,11 @@ pub struct SemanticReadFragment<'a> {
 }
 
 impl<'a> SemanticReadFragment<'a> {
+    /// Non-actionable result-local provenance identity.
+    pub const fn id(self) -> SemanticReadFragmentId {
+        self.id
+    }
+
     /// Semantic field class.
     pub const fn field(self) -> SemanticReadField {
         self.field
@@ -381,6 +420,7 @@ impl fmt::Debug for SemanticReadFragment<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("SemanticReadFragment")
+            .field("id", &self.id)
             .field("field", &self.field)
             .field("role", &self.role)
             .field("content", &self.content)
@@ -458,6 +498,7 @@ pub struct SemanticReadResult<'a> {
     fragments: Vec<SemanticReadFragment<'a>>,
     omissions: SemanticReadOmissions,
     stats: SemanticReadStats,
+    guard: [u8; 32],
 }
 
 impl<'a> SemanticReadResult<'a> {
@@ -489,6 +530,10 @@ impl<'a> SemanticReadResult<'a> {
     /// Content-free aggregate counts.
     pub const fn stats(&self) -> SemanticReadStats {
         self.stats
+    }
+
+    pub(crate) const fn guard(&self) -> [u8; 32] {
+        self.guard
     }
 }
 
@@ -730,7 +775,18 @@ impl<'a> SemanticReadBuilder<'a> {
             trust: node.trust(),
             captured_at: self.captured_at,
         };
+        let Some(id) = self
+            .stats
+            .items
+            .checked_add(1)
+            .and_then(SemanticReadFragmentId::new)
+        else {
+            self.omissions.insert(SemanticReadOmission::ItemLimit);
+            self.stats.omitted_items = self.stats.omitted_items.saturating_add(1);
+            return;
+        };
         self.fragments.push(SemanticReadFragment {
+            id,
             field,
             role: node.role(),
             content,
@@ -746,6 +802,14 @@ impl<'a> SemanticReadBuilder<'a> {
     }
 
     fn finish(self) -> SemanticReadResult<'a> {
+        let fingerprint = SemanticObservationFingerprint::from_observation(self.observation);
+        let guard = read_guard(
+            &fingerprint,
+            self.captured_at,
+            &self.fragments,
+            self.omissions,
+            self.stats,
+        );
         SemanticReadResult {
             observation: self.observation.request().id(),
             observation_generation: self.observation.request().generation(),
@@ -753,6 +817,7 @@ impl<'a> SemanticReadBuilder<'a> {
             fragments: self.fragments,
             omissions: self.omissions,
             stats: self.stats,
+            guard,
         }
     }
 }
@@ -769,6 +834,114 @@ fn readable_field_count(node: &SemanticNode) -> u16 {
             ) => true,
             None => false,
         })
+}
+
+fn read_guard(
+    fingerprint: &SemanticObservationFingerprint,
+    captured_at: SemanticCaptureInstant,
+    fragments: &[SemanticReadFragment<'_>],
+    omissions: SemanticReadOmissions,
+    stats: SemanticReadStats,
+) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"ZEPHIUM-SEMANTIC-READ-GUARD-1\0");
+    hasher.update(fingerprint.digest());
+    hasher.update(captured_at.millis().to_be_bytes());
+    hasher.update([omissions.bits()]);
+    hasher.update(stats.items.to_be_bytes());
+    hasher.update(stats.content_bytes.to_be_bytes());
+    hasher.update(stats.public_items.to_be_bytes());
+    hasher.update(stats.sensitive_items.to_be_bytes());
+    hasher.update(stats.omitted_items.to_be_bytes());
+    hasher.update(stats.withheld_sensitive_nodes.to_be_bytes());
+    hasher.update(stats.secret_nodes.to_be_bytes());
+    hasher.update(stats.redacted_values.to_be_bytes());
+    hasher.update([stats.incomplete_frames]);
+    for fragment in fragments {
+        hasher.update(fragment.id.get().to_be_bytes());
+        hasher.update([read_field_code(fragment.field), role_code(fragment.role)]);
+        let provenance = fragment.provenance;
+        hasher.update(provenance.invocation.get().to_be_bytes());
+        hasher.update(provenance.snapshot.get().to_be_bytes());
+        hasher.update(provenance.reference.get().to_be_bytes());
+        hasher.update([
+            sensitivity_code(provenance.sensitivity),
+            trust_code(provenance.trust),
+        ]);
+        match fragment.content {
+            SemanticReadContent::Text(text) => {
+                hasher.update([1]);
+                hasher.update((text.len() as u64).to_be_bytes());
+                hasher.update(text.as_str().as_bytes());
+            }
+            SemanticReadContent::Boolean(value) => hasher.update([2, u8::from(value)]),
+            SemanticReadContent::Ordinal(value) => {
+                hasher.update([3]);
+                hasher.update(value.to_be_bytes());
+            }
+        }
+    }
+    hasher.finalize().into()
+}
+
+const fn read_field_code(field: SemanticReadField) -> u8 {
+    match field {
+        SemanticReadField::AccessibleName => 1,
+        SemanticReadField::VisibleText => 2,
+        SemanticReadField::TextValue => 3,
+        SemanticReadField::BooleanValue => 4,
+        SemanticReadField::OrdinalValue => 5,
+    }
+}
+
+const fn role_code(role: SemanticRole) -> u8 {
+    match role {
+        SemanticRole::Group => 1,
+        SemanticRole::Document => 2,
+        SemanticRole::Landmark => 3,
+        SemanticRole::Heading => 4,
+        SemanticRole::Paragraph => 5,
+        SemanticRole::Link => 6,
+        SemanticRole::Button => 7,
+        SemanticRole::Textbox => 8,
+        SemanticRole::Password => 9,
+        SemanticRole::Searchbox => 10,
+        SemanticRole::Checkbox => 11,
+        SemanticRole::Radio => 12,
+        SemanticRole::Combobox => 13,
+        SemanticRole::Listbox => 14,
+        SemanticRole::Option => 15,
+        SemanticRole::Spinbutton => 16,
+        SemanticRole::Slider => 17,
+        SemanticRole::Tab => 18,
+        SemanticRole::MenuItem => 19,
+        SemanticRole::Dialog => 20,
+        SemanticRole::List => 21,
+        SemanticRole::ListItem => 22,
+        SemanticRole::Table => 23,
+        SemanticRole::Row => 24,
+        SemanticRole::CellHeader => 25,
+        SemanticRole::Cell => 26,
+        SemanticRole::Image => 27,
+        SemanticRole::Progress => 28,
+        SemanticRole::Status => 29,
+        SemanticRole::FrameBoundary => 30,
+    }
+}
+
+const fn sensitivity_code(sensitivity: SemanticSensitivity) -> u8 {
+    match sensitivity {
+        SemanticSensitivity::Public => 1,
+        SemanticSensitivity::Sensitive => 2,
+        SemanticSensitivity::Secret => 3,
+    }
+}
+
+const fn trust_code(trust: SemanticTrust) -> u8 {
+    match trust {
+        SemanticTrust::UntrustedPage => 1,
+        SemanticTrust::BrowserDerived => 2,
+    }
 }
 
 #[cfg(test)]

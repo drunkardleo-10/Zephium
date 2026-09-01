@@ -7,8 +7,7 @@ independent effect verification, and acknowledged action-result diff/fresh-state
 finalization, plus the bounded zero-copy semantic-read core are implemented.
 Policy permits, platform execution,
 visibility/occlusion checks, native observation adapters and timer driving,
-multi-action result aggregation, read-result model encoding, extract,
-screenshot, and live
+multi-action result aggregation, extract, screenshot, and live
 qualification remain pending.
 
 This evidence describes a functional-core seam. It does not claim that an
@@ -177,8 +176,20 @@ are trusted, or that M4 is complete.
   requires a trusted-policy-selected limit; the enum itself grants no authority.
   Source truncation, sensitivity refusal, secret redaction, item exhaustion,
   and byte exhaustion are a complete omission bitset with aggregate counts, so
-  a partial read is never represented as complete. Model encoding/transport
-  remains a separate bounded token-admission step and is not claimed here.
+  a partial read is never represented as complete.
+- Deterministic `ZREAD1` encoding marks content untrusted, carries common
+  capture freshness and omission metadata, assigns non-actionable result-local
+  `@rN` provenance tokens, aliases canonical source frames, and emits only
+  fixed field/role/source/sensitivity labels plus quoted or primitive values.
+  Quoting prevents hostile line/grammar injection, and the encoder rechecks
+  fragment order, source coordinates, type compatibility, and the absence of
+  secret fragments before exposing bytes.
+- Encoded read bytes stay private until the selected tokenizer port admits the
+  exact revision, quality, byte, and token ceilings. Committed transport mints
+  a content-bound read-delivery receipt; refused/cancelled transport consumes
+  the payload without authority. The receipt is intentionally a distinct type,
+  cannot authorize a semantic diff or progressive scope, and fails to match a
+  different sensitivity projection, content cohort, or capture time.
 
 The action core has zero idle overhead. It allocates only when an admitted
 proposal batch is constructed and creates no page/runtime/native work.
@@ -228,6 +239,10 @@ same-coordinate altered-content acknowledgement refusal, public-only and
 policy-admitted sensitive projection, unconditional secret/redacted omission,
 zero-copy source identity, exact provenance coordinates, item/byte ceilings,
 truthful source truncation and omission accounting, invalid budgets, and
-content-free diagnostics.
+content-free diagnostics. Encoding coverage includes deterministic escaping,
+frame/provenance aliases, non-actionable `@rN` identities, byte refusal,
+token quality/revision/count gates, content-redacted diagnostics, committed-only
+delivery receipts, projection/capture mismatch, and the mechanical distinction
+from full-observation acknowledgement authority.
 
 No platform action backend or live page is exercised by these tests.

@@ -1,0 +1,708 @@
+//! Deterministic token-admitted model encoding for bounded semantic reads.
+//!
+//! Read content stays private until the selected tokenizer port admits the
+//! exact `ZREAD1` bytes. Committed transport acknowledges only the exact read
+//! projection; refused or cancelled transport consumes the payload without
+//! creating authority.
+
+use std::fmt;
+
+use crate::semantic_model::{
+    checked_write, frame_trust_label, role_label, sensitivity_label, source_label,
+    validate_semantic_token_measurement, write_quoted, BoundedModelBuffer,
+};
+use crate::{
+    SemanticCaptureInstant, SemanticFrameJoin, SemanticModelDeliveryError,
+    SemanticModelDeliverySettlement, SemanticModelEncodingBudget, SemanticModelEncodingError,
+    SemanticObservationGeneration, SemanticObservationId, SemanticReadContent, SemanticReadField,
+    SemanticReadOmission, SemanticReadResult, SemanticSensitivity, SemanticTokenCounter,
+    SemanticTokenMeasurement, SemanticTokenizerRevision,
+};
+
+/// Version of the compact semantic-read model-input grammar.
+pub const SEMANTIC_READ_MODEL_SCHEMA_VERSION: u16 = 1;
+
+/// Content-free deterministic semantic-read encoding metrics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SemanticReadEncodingStats {
+    bytes: u32,
+    lines: u16,
+    frames: u8,
+    items: u16,
+    sensitive_items: u16,
+    omitted_items: u16,
+}
+
+impl SemanticReadEncodingStats {
+    /// Encoded UTF-8 bytes.
+    pub const fn bytes(self) -> u32 {
+        self.bytes
+    }
+
+    /// Deterministic line count.
+    pub const fn lines(self) -> u16 {
+        self.lines
+    }
+
+    /// Distinct source frames represented by retained values.
+    pub const fn frames(self) -> u8 {
+        self.frames
+    }
+
+    /// Retained readable value count.
+    pub const fn items(self) -> u16 {
+        self.items
+    }
+
+    /// Retained policy-admitted sensitive value count.
+    pub const fn sensitive_items(self) -> u16 {
+        self.sensitive_items
+    }
+
+    /// Truthfully omitted value count.
+    pub const fn omitted_items(self) -> u16 {
+        self.omitted_items
+    }
+}
+
+/// Private compact read bytes awaiting required token measurement.
+pub struct SemanticEncodedRead {
+    content: String,
+    budget: SemanticModelEncodingBudget,
+    stats: SemanticReadEncodingStats,
+    observation: SemanticObservationId,
+    observation_generation: SemanticObservationGeneration,
+    captured_at: SemanticCaptureInstant,
+    read_guard: [u8; 32],
+}
+
+impl SemanticEncodedRead {
+    /// Content-free encoding statistics.
+    pub const fn stats(&self) -> SemanticReadEncodingStats {
+        self.stats
+    }
+
+    /// Measures exact bytes through the selected tokenizer port without exposing them.
+    pub fn measure(
+        &self,
+        counter: &dyn SemanticTokenCounter,
+        expected_revision: &SemanticTokenizerRevision,
+    ) -> Result<SemanticTokenMeasurement, SemanticModelEncodingError> {
+        let measurement = counter
+            .count_tokens(&self.content)
+            .map_err(SemanticModelEncodingError::TokenCounter)?;
+        validate_semantic_token_measurement(&self.budget, &measurement, expected_revision)?;
+        Ok(measurement)
+    }
+
+    /// Admits exact read bytes only after their token count fits.
+    pub fn admit(
+        self,
+        counter: &dyn SemanticTokenCounter,
+        expected_revision: &SemanticTokenizerRevision,
+    ) -> Result<SemanticReadModelPayload, SemanticModelEncodingError> {
+        let measurement = self.measure(counter, expected_revision)?;
+        Ok(SemanticReadModelPayload {
+            content: self.content,
+            stats: self.stats,
+            measurement,
+            observation: self.observation,
+            observation_generation: self.observation_generation,
+            captured_at: self.captured_at,
+            read_guard: self.read_guard,
+        })
+    }
+}
+
+impl fmt::Debug for SemanticEncodedRead {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SemanticEncodedRead")
+            .field("content", &"[redacted]")
+            .field("budget", &self.budget)
+            .field("stats", &self.stats)
+            .field("read_guard", &"[redacted]")
+            .finish()
+    }
+}
+
+/// Token-admitted compact semantic read for the selected model adapter only.
+pub struct SemanticReadModelPayload {
+    content: String,
+    stats: SemanticReadEncodingStats,
+    measurement: SemanticTokenMeasurement,
+    observation: SemanticObservationId,
+    observation_generation: SemanticObservationGeneration,
+    captured_at: SemanticCaptureInstant,
+    read_guard: [u8; 32],
+}
+
+impl SemanticReadModelPayload {
+    /// Returns exact compact read input to the already-selected model transport.
+    pub fn as_str(&self) -> &str {
+        &self.content
+    }
+
+    /// Content-free encoding statistics.
+    pub const fn stats(&self) -> SemanticReadEncodingStats {
+        self.stats
+    }
+
+    /// Admitted bounded token measurement and tokenizer revision.
+    pub const fn token_measurement(&self) -> &SemanticTokenMeasurement {
+        &self.measurement
+    }
+
+    /// Settles transport of this exact token-admitted read.
+    ///
+    /// Only committed delivery acknowledges this exact read projection.
+    ///
+    /// The receipt is deliberately not a full semantic-observation
+    /// acknowledgement and cannot authorize diffs or progressive scopes.
+    pub fn settle_delivery(
+        self,
+        settlement: SemanticModelDeliverySettlement,
+    ) -> Result<SemanticReadDeliveryReceipt, SemanticModelDeliveryError> {
+        match settlement {
+            SemanticModelDeliverySettlement::Committed => Ok(SemanticReadDeliveryReceipt {
+                observation: self.observation,
+                observation_generation: self.observation_generation,
+                captured_at: self.captured_at,
+                items: self.stats.items,
+                read_guard: self.read_guard,
+            }),
+            SemanticModelDeliverySettlement::Refused => Err(SemanticModelDeliveryError::Refused),
+            SemanticModelDeliverySettlement::Cancelled => {
+                Err(SemanticModelDeliveryError::Cancelled)
+            }
+        }
+    }
+}
+
+impl fmt::Debug for SemanticReadModelPayload {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SemanticReadModelPayload")
+            .field("content", &"[redacted]")
+            .field("stats", &self.stats)
+            .field("measurement", &self.measurement)
+            .field("read_guard", &"[redacted]")
+            .finish()
+    }
+}
+
+/// Opaque proof that one exact bounded read reached committed model delivery.
+///
+/// This receipt is not semantic observation, diff, action, or policy authority.
+#[derive(Clone, Eq, PartialEq)]
+pub struct SemanticReadDeliveryReceipt {
+    observation: SemanticObservationId,
+    observation_generation: SemanticObservationGeneration,
+    captured_at: SemanticCaptureInstant,
+    items: u16,
+    read_guard: [u8; 32],
+}
+
+impl SemanticReadDeliveryReceipt {
+    /// Source observation identity.
+    pub const fn observation(&self) -> SemanticObservationId {
+        self.observation
+    }
+
+    /// Source progressive observation generation.
+    pub const fn observation_generation(&self) -> SemanticObservationGeneration {
+        self.observation_generation
+    }
+
+    /// Trusted-shell capture time represented by the delivered read.
+    pub const fn captured_at(&self) -> SemanticCaptureInstant {
+        self.captured_at
+    }
+
+    /// Delivered readable primitive count.
+    pub const fn items(&self) -> u16 {
+        self.items
+    }
+
+    /// Reports whether this receipt was minted for the exact read projection.
+    pub fn matches_read(&self, read: &SemanticReadResult<'_>) -> bool {
+        self.observation == read.observation()
+            && self.observation_generation == read.observation_generation()
+            && self.captured_at == read.captured_at()
+            && self.items == read.stats().items()
+            && self.read_guard == read.guard()
+    }
+}
+
+impl fmt::Debug for SemanticReadDeliveryReceipt {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SemanticReadDeliveryReceipt")
+            .field("observation", &self.observation)
+            .field("observation_generation", &self.observation_generation)
+            .field("captured_at", &self.captured_at)
+            .field("items", &self.items)
+            .field("read_guard", &"[redacted]")
+            .finish()
+    }
+}
+
+/// Encodes one bounded semantic read into deterministic compact `ZREAD1` lines.
+pub fn encode_semantic_read(
+    read: &SemanticReadResult<'_>,
+    budget: SemanticModelEncodingBudget,
+) -> Result<SemanticEncodedRead, SemanticModelEncodingError> {
+    validate_read(read)?;
+    let frames = read_frames(read);
+    let capacity = usize::try_from(budget.max_bytes().min(8 * 1024))
+        .map_err(|_| SemanticModelEncodingError::Budget)?;
+    let mut output = BoundedModelBuffer::new(capacity, budget.max_bytes());
+    checked_write(
+        &mut output,
+        format_args!(
+            "ZREAD{} content=untrusted observation_generation={} captured_at_ms={} items={} omitted={} omissions=",
+            SEMANTIC_READ_MODEL_SCHEMA_VERSION,
+            read.observation_generation().get(),
+            read.captured_at().millis(),
+            read.stats().items(),
+            read.stats().omitted_items(),
+        ),
+    )?;
+    write_omissions(&mut output, read)?;
+    checked_write(&mut output, format_args!("\n"))?;
+
+    for (index, frame) in frames.iter().enumerate() {
+        let source = read
+            .fragments()
+            .iter()
+            .find(|fragment| fragment.provenance().frame() == *frame)
+            .ok_or(SemanticModelEncodingError::Invariant)?
+            .provenance();
+        checked_write(&mut output, format_args!("F f{} origin=", index + 1))?;
+        write_quoted(&mut output, frame.origin().as_url().as_str())?;
+        checked_write(
+            &mut output,
+            format_args!(
+                " trust={} invocation={} snapshot={}\n",
+                frame_trust_label(frame.trust()),
+                source.invocation().get(),
+                source.snapshot().get(),
+            ),
+        )?;
+    }
+
+    for fragment in read.fragments() {
+        let frame = frames
+            .iter()
+            .position(|candidate| *candidate == fragment.provenance().frame())
+            .map(|index| index + 1)
+            .ok_or(SemanticModelEncodingError::Invariant)?;
+        checked_write(
+            &mut output,
+            format_args!(
+                "R id=@r{} f=f{} ref={} field={} role={} source={} sensitivity={} value=",
+                fragment.id().get(),
+                frame,
+                fragment.provenance().reference().model_token(),
+                field_label(fragment.field()),
+                role_label(fragment.role()),
+                source_label(fragment.provenance().trust()),
+                sensitivity_label(fragment.provenance().sensitivity()),
+            ),
+        )?;
+        match fragment.content() {
+            SemanticReadContent::Text(text) => write_quoted(&mut output, text.as_str())?,
+            SemanticReadContent::Boolean(value) => checked_write(
+                &mut output,
+                format_args!("{}", if value { "true" } else { "false" }),
+            )?,
+            SemanticReadContent::Ordinal(value) => {
+                checked_write(&mut output, format_args!("{value}"))?;
+            }
+        }
+        checked_write(&mut output, format_args!("\n"))?;
+    }
+
+    let content = output.finish();
+    let lines = content.bytes().filter(|byte| *byte == b'\n').count();
+    let stats = SemanticReadEncodingStats {
+        bytes: u32::try_from(content.len()).map_err(|_| SemanticModelEncodingError::Budget)?,
+        lines: u16::try_from(lines).map_err(|_| SemanticModelEncodingError::Invariant)?,
+        frames: u8::try_from(frames.len()).map_err(|_| SemanticModelEncodingError::Invariant)?,
+        items: read.stats().items(),
+        sensitive_items: read.stats().sensitive_items(),
+        omitted_items: read.stats().omitted_items(),
+    };
+    Ok(SemanticEncodedRead {
+        content,
+        budget,
+        stats,
+        observation: read.observation(),
+        observation_generation: read.observation_generation(),
+        captured_at: read.captured_at(),
+        read_guard: read.guard(),
+    })
+}
+
+fn validate_read(read: &SemanticReadResult<'_>) -> Result<(), SemanticModelEncodingError> {
+    if usize::from(read.stats().items()) != read.fragments().len() {
+        return Err(SemanticModelEncodingError::Invariant);
+    }
+    for (index, fragment) in read.fragments().iter().enumerate() {
+        let expected =
+            u16::try_from(index + 1).map_err(|_| SemanticModelEncodingError::Invariant)?;
+        let provenance = fragment.provenance();
+        if fragment.id().get() != expected
+            || provenance.observation() != read.observation()
+            || provenance.observation_generation() != read.observation_generation()
+            || provenance.captured_at() != read.captured_at()
+            || provenance.sensitivity() == SemanticSensitivity::Secret
+            || !field_matches_content(fragment.field(), fragment.content())
+        {
+            return Err(SemanticModelEncodingError::Invariant);
+        }
+    }
+    Ok(())
+}
+
+fn read_frames<'a>(read: &'a SemanticReadResult<'a>) -> Vec<&'a SemanticFrameJoin> {
+    let mut frames = Vec::new();
+    for fragment in read.fragments() {
+        let frame = fragment.provenance().frame();
+        if !frames.contains(&frame) {
+            frames.push(frame);
+        }
+    }
+    frames
+}
+
+fn write_omissions(
+    output: &mut BoundedModelBuffer,
+    read: &SemanticReadResult<'_>,
+) -> Result<(), SemanticModelEncodingError> {
+    let mut wrote = false;
+    for (omission, label) in [
+        (SemanticReadOmission::SourceIncomplete, "source_incomplete"),
+        (SemanticReadOmission::SensitivityLimit, "sensitivity_limit"),
+        (SemanticReadOmission::Secret, "secret"),
+        (SemanticReadOmission::ItemLimit, "item_limit"),
+        (SemanticReadOmission::ByteLimit, "byte_limit"),
+    ] {
+        if read.omissions().contains(omission) {
+            if wrote {
+                checked_write(output, format_args!(","))?;
+            }
+            checked_write(output, format_args!("{label}"))?;
+            wrote = true;
+        }
+    }
+    if !wrote {
+        checked_write(output, format_args!("none"))?;
+    }
+    Ok(())
+}
+
+const fn field_label(field: SemanticReadField) -> &'static str {
+    match field {
+        SemanticReadField::AccessibleName => "name",
+        SemanticReadField::VisibleText => "text",
+        SemanticReadField::TextValue => "text_value",
+        SemanticReadField::BooleanValue => "boolean_value",
+        SemanticReadField::OrdinalValue => "ordinal_value",
+    }
+}
+
+const fn field_matches_content(field: SemanticReadField, content: SemanticReadContent<'_>) -> bool {
+    matches!(
+        (field, content),
+        (
+            SemanticReadField::AccessibleName
+                | SemanticReadField::VisibleText
+                | SemanticReadField::TextValue,
+            SemanticReadContent::Text(_)
+        ) | (
+            SemanticReadField::BooleanValue,
+            SemanticReadContent::Boolean(_)
+        ) | (
+            SemanticReadField::OrdinalValue,
+            SemanticReadContent::Ordinal(_)
+        )
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        decode_semantic_snapshot, read_semantic_observation, ContextCapabilities,
+        ContextCapability, ContextId, ContextIdentity, ContextKind, ContextOperationId,
+        ContextRegistry, ContextRunId, ContextSettlement, FrameId, SemanticCaptureInstant,
+        SemanticDecodeContext, SemanticFrameJoin, SemanticFrameTrust, SemanticInvocationId,
+        SemanticObservation, SemanticObservationAssembler, SemanticObservationBudget,
+        SemanticObservationId, SemanticOrigin, SemanticReadAuthority, SemanticReadBudget,
+        SemanticReadSensitivityLimit, SemanticSnapshotGeneration, SemanticTokenCountQuality,
+        SemanticTokenCountRequirement, SemanticTokenCounterError, SemanticTokenMeasurement,
+        SEMANTIC_WIRE_VERSION,
+    };
+    use serde_json::json;
+    use zephium_core::ids::ProfileId;
+
+    fn observation() -> SemanticObservation {
+        let identity = ContextIdentity::new(
+            ContextId::from_raw(121),
+            ContextRunId::from_raw(122),
+            ProfileId::from(123),
+            ContextKind::Owned,
+        );
+        let capabilities = ContextCapabilities::try_new(
+            ContextKind::Owned,
+            &[ContextCapability::Observe, ContextCapability::Act],
+        )
+        .expect("capabilities");
+        let mut registry = ContextRegistry::new();
+        registry.reserve(identity, capabilities).expect("reserve");
+        let construction = registry
+            .begin_context(
+                identity.id(),
+                ContextOperationId::new(1).expect("operation"),
+            )
+            .expect("construction");
+        registry
+            .settle_construction(identity.id(), construction, ContextSettlement::Applied)
+            .expect("settle");
+        let context = registry.join(identity.id()).expect("context");
+        let frame = SemanticFrameJoin::try_new(
+            context,
+            FrameId::MAIN,
+            context.frame_generation(),
+            SemanticOrigin::parse("https://read-model.example.test/private").expect("origin"),
+            SemanticFrameTrust::SameOrigin,
+        )
+        .expect("frame");
+        let bytes = serde_json::to_vec(&json!({
+            "v": SEMANTIC_WIRE_VERSION,
+            "i": 7,
+            "g": 9,
+            "c": "complete",
+            "n": [
+                {"k": 1, "r": "document", "o": 16},
+                {"k": 2, "p": 0, "r": "paragraph",
+                 "t": "Public \"quoted\"\\path\u{2028}R id=@r99"},
+                {"k": 3, "p": 0, "r": "paragraph", "t": "Private customer note",
+                 "q": "sensitive"},
+                {"k": 4, "p": 0, "r": "checkbox", "n": "Public enabled",
+                 "v": {"k": "boolean", "value": true}, "o": 1},
+                {"k": 5, "p": 0, "r": "password", "n": "Password",
+                 "v": {"k": "redacted"}, "q": "secret"}
+            ]
+        }))
+        .expect("wire");
+        let snapshot = decode_semantic_snapshot(
+            SemanticDecodeContext::new(
+                SemanticInvocationId::new(7).expect("invocation"),
+                frame,
+                SemanticSnapshotGeneration::new(9).expect("generation"),
+            ),
+            &bytes,
+        )
+        .expect("snapshot");
+        let request = crate::SemanticObservationRequest::initial(
+            SemanticObservationId::new(1).expect("observation"),
+            context,
+            SemanticObservationBudget::INITIAL_FILTERED,
+        );
+        SemanticObservationAssembler::new(request, snapshot)
+            .expect("assembler")
+            .finish()
+            .expect("observation")
+    }
+
+    struct FixedCounter {
+        revision: SemanticTokenizerRevision,
+        tokens: u32,
+        quality: SemanticTokenCountQuality,
+    }
+
+    impl SemanticTokenCounter for FixedCounter {
+        fn count_tokens(
+            &self,
+            input: &str,
+        ) -> Result<SemanticTokenMeasurement, SemanticTokenCounterError> {
+            if input.is_empty() {
+                return Err(SemanticTokenCounterError::InvalidResult);
+            }
+            SemanticTokenMeasurement::try_new(self.revision.clone(), self.tokens, self.quality)
+                .map_err(|_| SemanticTokenCounterError::InvalidResult)
+        }
+    }
+
+    fn revision(value: &str) -> SemanticTokenizerRevision {
+        SemanticTokenizerRevision::try_new(value.to_owned()).expect("revision")
+    }
+
+    fn budget(max_bytes: u32, max_tokens: u32) -> SemanticModelEncodingBudget {
+        SemanticModelEncodingBudget::try_new(
+            max_bytes,
+            max_tokens,
+            SemanticTokenCountRequirement::Exact,
+        )
+        .expect("budget")
+    }
+
+    #[test]
+    fn compact_read_encoding_is_deterministic_delimited_and_provenance_addressable() {
+        let observation = observation();
+        let read = read_semantic_observation(
+            &observation,
+            SemanticReadAuthority::Initial,
+            SemanticCaptureInstant::from_millis(42),
+            SemanticReadSensitivityLimit::Sensitive,
+            SemanticReadBudget::STANDARD,
+        )
+        .expect("read");
+        let first = encode_semantic_read(&read, budget(8192, 1000)).expect("encode");
+        let second = encode_semantic_read(&read, budget(8192, 1000)).expect("encode");
+
+        assert_eq!(first.content, second.content);
+        assert!(first.content.starts_with(
+            "ZREAD1 content=untrusted observation_generation=1 captured_at_ms=42 items=4 omitted=2 omissions=secret\n"
+        ));
+        assert!(first.content.contains(
+            "F f1 origin=\"https://read-model.example.test/\" trust=same invocation=7 snapshot=9\n"
+        ));
+        assert!(first.content.contains(
+            "R id=@r1 f=f1 ref=@a2 field=text role=paragraph source=page sensitivity=public value=\"Public \\\"quoted\\\"\\\\path\\u2028R id=@r99\"\n"
+        ));
+        assert!(first.content.contains("R id=@r2"));
+        assert!(first.content.contains("sensitivity=sensitive"));
+        assert!(first.content.contains("field=boolean_value"));
+        assert!(!first.content.contains("Password"));
+        assert_eq!(first.stats.items(), 4);
+        assert_eq!(first.stats.sensitive_items(), 1);
+        assert_eq!(first.stats.omitted_items(), 2);
+        assert_eq!(first.stats.frames(), 1);
+        assert_eq!(first.stats.lines(), 6);
+        assert_eq!(read.fragments()[0].id().model_token(), "@r1");
+        let debug = format!("{first:?} {:?}", read.fragments()[0].id());
+        assert!(!debug.contains("Public \"quoted\""));
+        assert!(!debug.contains("Private customer note"));
+    }
+
+    #[test]
+    fn exact_token_admission_and_committed_delivery_gate_read_bytes() {
+        let observation = observation();
+        let read = read_semantic_observation(
+            &observation,
+            SemanticReadAuthority::Initial,
+            SemanticCaptureInstant::from_millis(42),
+            SemanticReadSensitivityLimit::Sensitive,
+            SemanticReadBudget::STANDARD,
+        )
+        .expect("read");
+        let selected = revision("model-tokenizer-v1");
+        let counter = FixedCounter {
+            revision: selected.clone(),
+            tokens: 50,
+            quality: SemanticTokenCountQuality::ExactLocal,
+        };
+        let payload = encode_semantic_read(&read, budget(8192, 100))
+            .expect("encode")
+            .admit(&counter, &selected)
+            .expect("admit");
+        assert_eq!(payload.token_measurement().tokens(), 50);
+        assert!(payload.as_str().starts_with("ZREAD1 content=untrusted"));
+        let debug = format!("{payload:?}");
+        assert!(!debug.contains("Private customer note"));
+        let receipt = payload
+            .settle_delivery(SemanticModelDeliverySettlement::Committed)
+            .expect("commit");
+        assert!(receipt.matches_read(&read));
+        assert_eq!(receipt.observation().get(), 1);
+        assert_eq!(receipt.observation_generation().get(), 1);
+        assert_eq!(receipt.captured_at().millis(), 42);
+        assert_eq!(receipt.items(), 4);
+        assert!(!format!("{receipt:?}").contains("Private customer note"));
+        let narrower = read_semantic_observation(
+            &observation,
+            SemanticReadAuthority::Initial,
+            SemanticCaptureInstant::from_millis(42),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::STANDARD,
+        )
+        .expect("narrower read");
+        assert!(!receipt.matches_read(&narrower));
+        let later = read_semantic_observation(
+            &observation,
+            SemanticReadAuthority::Initial,
+            SemanticCaptureInstant::from_millis(43),
+            SemanticReadSensitivityLimit::Sensitive,
+            SemanticReadBudget::STANDARD,
+        )
+        .expect("later read");
+        assert!(!receipt.matches_read(&later));
+
+        let refused = encode_semantic_read(&read, budget(8192, 100))
+            .expect("encode")
+            .admit(&counter, &selected)
+            .expect("admit");
+        assert_eq!(
+            refused.settle_delivery(SemanticModelDeliverySettlement::Refused),
+            Err(SemanticModelDeliveryError::Refused)
+        );
+    }
+
+    #[test]
+    fn read_encoding_enforces_byte_token_quality_revision_and_count_limits() {
+        let observation = observation();
+        let read = read_semantic_observation(
+            &observation,
+            SemanticReadAuthority::Initial,
+            SemanticCaptureInstant::from_millis(42),
+            SemanticReadSensitivityLimit::Sensitive,
+            SemanticReadBudget::STANDARD,
+        )
+        .expect("read");
+        assert_eq!(
+            encode_semantic_read(&read, budget(32, 100)).expect_err("byte limit"),
+            SemanticModelEncodingError::OutputLimit
+        );
+
+        let selected = revision("model-tokenizer-v1");
+        let estimated = FixedCounter {
+            revision: selected.clone(),
+            tokens: 50,
+            quality: SemanticTokenCountQuality::ProviderEstimate,
+        };
+        assert_eq!(
+            encode_semantic_read(&read, budget(8192, 100))
+                .expect("encode")
+                .admit(&estimated, &selected)
+                .expect_err("quality"),
+            SemanticModelEncodingError::TokenQuality
+        );
+        let exact = FixedCounter {
+            revision: revision("other-tokenizer-v1"),
+            tokens: 50,
+            quality: SemanticTokenCountQuality::ExactLocal,
+        };
+        assert_eq!(
+            encode_semantic_read(&read, budget(8192, 100))
+                .expect("encode")
+                .admit(&exact, &selected)
+                .expect_err("revision"),
+            SemanticModelEncodingError::TokenizerRevisionMismatch
+        );
+        let oversized = FixedCounter {
+            revision: selected.clone(),
+            tokens: 101,
+            quality: SemanticTokenCountQuality::ExactLocal,
+        };
+        assert_eq!(
+            encode_semantic_read(&read, budget(8192, 100))
+                .expect("encode")
+                .admit(&oversized, &selected)
+                .expect_err("tokens"),
+            SemanticModelEncodingError::TokenLimit
+        );
+    }
+}
