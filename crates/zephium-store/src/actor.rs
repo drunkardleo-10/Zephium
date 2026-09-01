@@ -17,8 +17,8 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use zephium_agentic::{
-    AgentAuditCompletion, AgentAuditDelivery, AgentAuditDeliveryOutcome, AgentAuditDispatch,
-    AgentAuditDeliverySettlement, AgentAuditPort, AgentAuditSinkFailure,
+    AgentAuditCompletion, AgentAuditDelivery, AgentAuditDeliveryOutcome,
+    AgentAuditDeliverySettlement, AgentAuditDispatch, AgentAuditPort, AgentAuditSinkFailure,
 };
 use zephium_core::blocker::{BlockerConfig, BlockerConfigRevision};
 use zephium_core::extensions::{

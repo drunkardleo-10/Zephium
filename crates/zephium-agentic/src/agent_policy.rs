@@ -547,6 +547,38 @@ pub enum AgentModelCallSettlement {
     Cancelled,
 }
 
+/// Terminal class when committed provider usage cannot be determined.
+///
+/// A completed response must carry exact provider accounting and therefore is
+/// deliberately absent. Failure and cancellation charge the entire admitted
+/// token and cost reservation so an ambiguous network outcome can never
+/// release budget that the provider may have consumed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgentModelCallUnaccountedSettlement {
+    /// Provider failed after input commitment without trustworthy usage.
+    ProviderFailed,
+    /// Cancellation won after input commitment without trustworthy usage.
+    Cancelled,
+}
+
+impl AgentModelCallUnaccountedSettlement {
+    const fn terminal(self) -> AgentModelCallSettlement {
+        match self {
+            Self::ProviderFailed => AgentModelCallSettlement::ProviderFailed,
+            Self::Cancelled => AgentModelCallSettlement::Cancelled,
+        }
+    }
+}
+
+/// Source of the usage charged by a terminal model-call receipt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgentModelUsageAccounting {
+    /// Exact provider-accounted token and cost values were available.
+    Exact,
+    /// Usage was unknowable, so the complete admitted ceilings were charged.
+    ReservationCeiling,
+}
+
 /// Content-free terminal model-call accounting receipt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AgentModelCallReceipt {
@@ -555,6 +587,7 @@ pub struct AgentModelCallReceipt {
     lease: AgentPlanLeaseId,
     node: AgentPlanNodeId,
     settlement: AgentModelCallSettlement,
+    usage_accounting: AgentModelUsageAccounting,
     input_tokens: u64,
     output_tokens: u64,
     cost_micro_usd: u64,
@@ -586,17 +619,22 @@ impl AgentModelCallReceipt {
         self.settlement
     }
 
-    /// Actual provider-accounted input tokens.
+    /// Whether charged usage is exact or the conservative reservation ceiling.
+    pub const fn usage_accounting(self) -> AgentModelUsageAccounting {
+        self.usage_accounting
+    }
+
+    /// Provider-accounted or conservatively charged input tokens.
     pub const fn input_tokens(self) -> u64 {
         self.input_tokens
     }
 
-    /// Actual provider-accounted output tokens.
+    /// Provider-accounted or conservatively charged output tokens.
     pub const fn output_tokens(self) -> u64 {
         self.output_tokens
     }
 
-    /// Actual provider-accounted cost in micro-USD.
+    /// Provider-accounted or conservatively charged cost in micro-USD.
     pub const fn cost_micro_usd(self) -> u64 {
         self.cost_micro_usd
     }
@@ -615,6 +653,7 @@ impl AgentModelCallReceipt {
             lease,
             node,
             settlement,
+            usage_accounting: AgentModelUsageAccounting::Exact,
             input_tokens: 0,
             output_tokens: 0,
             cost_micro_usd: 0,
@@ -834,6 +873,47 @@ impl AgentRunPolicy {
         output_tokens: u64,
         cost_micro_usd: u64,
     ) -> Result<AgentModelCallReceipt, AgentPolicyError> {
+        let index = self.validate_active_model_call(&active)?;
+        self.settle_validated_model_call(
+            index,
+            settlement,
+            AgentModelUsageAccounting::Exact,
+            input_tokens,
+            output_tokens,
+            cost_micro_usd,
+        )
+    }
+
+    /// Settles a committed call whose provider usage is unknowable.
+    ///
+    /// This is the only safe terminal path after an ambiguous send, stream, or
+    /// cancellation outcome. It consumes the complete admitted input-token,
+    /// output-token, and cost ceilings and therefore cannot make retry budget
+    /// appear available after provider-side work may have occurred.
+    pub fn settle_model_call_unaccounted(
+        &mut self,
+        active: AgentActiveModelCall,
+        settlement: AgentModelCallUnaccountedSettlement,
+    ) -> Result<AgentModelCallReceipt, AgentPolicyError> {
+        let index = self.validate_active_model_call(&active)?;
+        let call = &self.calls[index];
+        let input_tokens = call.input_token_limit;
+        let output_tokens = call.output_token_limit;
+        let cost_micro_usd = call.cost_limit;
+        self.settle_validated_model_call(
+            index,
+            settlement.terminal(),
+            AgentModelUsageAccounting::ReservationCeiling,
+            input_tokens,
+            output_tokens,
+            cost_micro_usd,
+        )
+    }
+
+    fn validate_active_model_call(
+        &mut self,
+        active: &AgentActiveModelCall,
+    ) -> Result<usize, AgentPolicyError> {
         let index = self.call_index_or_seal(active.id)?;
         let call = &self.calls[index];
         if call.state != ModelCallState::Delivered
@@ -845,6 +925,19 @@ impl AgentRunPolicy {
             self.sealed = true;
             return Err(AgentPolicyError::AdmissionMismatch);
         }
+        Ok(index)
+    }
+
+    fn settle_validated_model_call(
+        &mut self,
+        index: usize,
+        settlement: AgentModelCallSettlement,
+        usage_accounting: AgentModelUsageAccounting,
+        input_tokens: u64,
+        output_tokens: u64,
+        cost_micro_usd: u64,
+    ) -> Result<AgentModelCallReceipt, AgentPolicyError> {
+        let call = &self.calls[index];
         let provider_usage_exceeded = input_tokens > call.input_token_limit
             || output_tokens > call.output_token_limit
             || cost_micro_usd > call.cost_limit;
@@ -891,6 +984,7 @@ impl AgentRunPolicy {
             lease: call.lease,
             node: call.node,
             settlement,
+            usage_accounting,
             input_tokens,
             output_tokens,
             cost_micro_usd,
@@ -2214,6 +2308,10 @@ mod tests {
         assert_eq!(receipt.id().get(), 1);
         assert_eq!(receipt.lease(), fixture.lease);
         assert_eq!(receipt.settlement(), AgentModelCallSettlement::Completed);
+        assert_eq!(receipt.usage_accounting(), AgentModelUsageAccounting::Exact);
+        assert_eq!(receipt.input_tokens(), 55);
+        assert_eq!(receipt.output_tokens(), 10);
+        assert_eq!(receipt.cost_micro_usd(), 80);
         assert_eq!(fixture.policy.pending_model_calls(), 0);
         assert_eq!(
             fixture.policy.accounting(),
@@ -2235,6 +2333,63 @@ mod tests {
         assert!(!debug.contains("private marker"));
         assert!(!debug.contains("must-never-escape"));
         assert!(debug.contains("[redacted]"));
+    }
+
+    #[test]
+    fn unknowable_provider_usage_charges_every_reserved_ceiling() {
+        let source = origin("unaccounted-provider");
+        let context = make_context(8_007, 8_008, 8_009);
+        let observation = mixed_observation(context, source.clone(), 1);
+        let payload = observation_payload(&observation, 50);
+        let mut fixture = policy_fixture(
+            8_007,
+            8_008,
+            source,
+            SemanticSensitivity::Sensitive,
+            &[SemanticEffectClass::Read],
+            run_budget(10, 1_000, 10_000),
+        );
+        let admission = fixture
+            .policy
+            .prepare_observation_input(
+                call_request(1, fixture.lease, account(context, NOW), 10, 20, 100, NOW),
+                &observation,
+                &payload,
+            )
+            .expect("admission");
+        let acknowledgement = payload
+            .settle_delivery(SemanticModelDeliverySettlement::Committed)
+            .expect("delivery");
+        let active = fixture
+            .policy
+            .commit_observation_input(admission, &acknowledgement)
+            .expect("commit");
+
+        let receipt = fixture
+            .policy
+            .settle_model_call_unaccounted(
+                active,
+                AgentModelCallUnaccountedSettlement::ProviderFailed,
+            )
+            .expect("conservative settlement");
+
+        assert_eq!(
+            receipt.settlement(),
+            AgentModelCallSettlement::ProviderFailed
+        );
+        assert_eq!(
+            receipt.usage_accounting(),
+            AgentModelUsageAccounting::ReservationCeiling
+        );
+        assert_eq!(receipt.input_tokens(), 60);
+        assert_eq!(receipt.output_tokens(), 20);
+        assert_eq!(receipt.cost_micro_usd(), 100);
+        assert_eq!(fixture.policy.pending_model_calls(), 0);
+        assert_eq!(fixture.policy.accounting().consumed_operations(), 1);
+        assert_eq!(fixture.policy.accounting().consumed_model_tokens(), 80);
+        assert_eq!(fixture.policy.accounting().consumed_cost_micro_usd(), 100);
+        assert_eq!(fixture.policy.accounting().reserved_operations(), 0);
+        assert!(!fixture.policy.is_sealed());
     }
 
     #[test]
@@ -2331,15 +2486,20 @@ mod tests {
         assert!(!debug.contains("Submit the reviewed form"));
         assert!(!debug.contains("private marker"));
 
-        let AgentProviderInputOutcome::Committed(active) = prepared
-            .settle(
-                &mut fixture.policy,
-                AgentProviderRequestSettlement::Committed,
-            )
-            .expect("commit")
-        else {
-            panic!("committed input");
-        };
+        let transport_input = prepared.into_transport_input();
+        assert_eq!(transport_input.request().call().call().get(), 1);
+        let transport_debug = format!("{transport_input:?}");
+        assert!(!transport_debug.contains("Submit the reviewed form"));
+        assert!(!transport_debug.contains("private marker"));
+        let committed = transport_input
+            .commit(&mut fixture.policy)
+            .expect("transport commit");
+        assert!(committed
+            .request()
+            .call()
+            .matches_active(committed.active()));
+        let (request, active) = committed.into_parts();
+        assert_eq!(request.endpoint(), AgentProviderEndpoint::OpenAiResponses);
         assert_eq!(fixture.policy.taints().len(), 1);
         fixture
             .policy
@@ -2365,7 +2525,8 @@ mod tests {
         .expect("prepared request");
         assert!(matches!(
             prepared
-                .settle(&mut refused.policy, AgentProviderRequestSettlement::Refused)
+                .into_transport_input()
+                .refuse(&mut refused.policy)
                 .expect("refusal"),
             AgentProviderInputOutcome::Refused
         ));
@@ -2423,10 +2584,8 @@ mod tests {
         );
         assert!(matches!(
             prepared
-                .settle(
-                    &mut fixture.policy,
-                    AgentProviderRequestSettlement::Cancelled,
-                )
+                .into_transport_input()
+                .cancel(&mut fixture.policy)
                 .expect("cancel"),
             AgentProviderInputOutcome::Cancelled
         ));

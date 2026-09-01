@@ -26,9 +26,10 @@ use crate::{
 };
 
 pub use request::{
-    AgentPreparedObservationRequest, AgentPreparedReadRequest, AgentProviderEndpoint,
-    AgentProviderInputOutcome, AgentProviderObjective, AgentProviderObjectiveError,
-    AgentProviderRequest, AgentProviderRequestError, AgentProviderRequestSettlement,
+    AgentCommittedProviderRequest, AgentPreparedObservationRequest, AgentPreparedReadRequest,
+    AgentProviderEndpoint, AgentProviderInputOutcome, AgentProviderObjective,
+    AgentProviderObjectiveError, AgentProviderRequest, AgentProviderRequestError,
+    AgentProviderRequestSettlement, AgentProviderTransportInput,
     MAX_AGENT_BROWSER_NAVIGATION_URL_BYTES, MAX_AGENT_PROVIDER_OBJECTIVE_BYTES,
     MAX_AGENT_PROVIDER_OBJECTIVE_TOKENS, MAX_AGENT_PROVIDER_REQUEST_BYTES,
 };

@@ -240,6 +240,178 @@ impl fmt::Debug for AgentProviderInputOutcome {
     }
 }
 
+enum AgentProviderInputCommitment {
+    Observation {
+        admission: AgentModelCallAdmission,
+        delivery: crate::semantic_model::SemanticObservationDeliveryAuthority,
+    },
+    Read {
+        admission: AgentModelCallAdmission,
+        delivery: crate::semantic_read_model::SemanticReadDeliveryAuthority,
+    },
+}
+
+impl AgentProviderInputCommitment {
+    fn commit(
+        self,
+        policy: &mut AgentRunPolicy,
+    ) -> Result<AgentActiveModelCall, AgentProviderRequestError> {
+        match self {
+            Self::Observation {
+                admission,
+                delivery,
+            } => {
+                let acknowledgement = delivery.commit();
+                Ok(policy.commit_observation_input(admission, &acknowledgement)?)
+            }
+            Self::Read {
+                admission,
+                delivery,
+            } => {
+                let receipt = delivery.commit();
+                Ok(policy.commit_read_input(admission, &receipt)?)
+            }
+        }
+    }
+
+    fn release(
+        self,
+        policy: &mut AgentRunPolicy,
+        cancellation: AgentModelInputCancellation,
+    ) -> Result<(), AgentProviderRequestError> {
+        let admission = match self {
+            Self::Observation { admission, .. } | Self::Read { admission, .. } => admission,
+        };
+        Ok(policy.cancel_prepared_input(admission, cancellation)?)
+    }
+
+    fn settle(
+        self,
+        policy: &mut AgentRunPolicy,
+        settlement: AgentProviderRequestSettlement,
+    ) -> Result<AgentProviderInputOutcome, AgentProviderRequestError> {
+        match settlement {
+            AgentProviderRequestSettlement::Committed => {
+                Ok(AgentProviderInputOutcome::Committed(self.commit(policy)?))
+            }
+            AgentProviderRequestSettlement::Refused => {
+                self.release(policy, AgentModelInputCancellation::Refused)?;
+                Ok(AgentProviderInputOutcome::Refused)
+            }
+            AgentProviderRequestSettlement::Cancelled => {
+                self.release(policy, AgentModelInputCancellation::Cancelled)?;
+                Ok(AgentProviderInputOutcome::Cancelled)
+            }
+        }
+    }
+}
+
+/// One exact provider body still joined to its pre-disclosure policy authority.
+///
+/// The trusted transport admits this move-only value as one unit. It can inspect
+/// the redacted request metadata and immutable body before choosing refusal or
+/// cancellation, but it cannot obtain a committed request without atomically
+/// retaining the exact active policy authority.
+#[must_use]
+pub struct AgentProviderTransportInput {
+    request: AgentProviderRequest,
+    commitment: AgentProviderInputCommitment,
+}
+
+impl AgentProviderTransportInput {
+    /// Exact immutable request available for bounded transport admission.
+    pub const fn request(&self) -> &AgentProviderRequest {
+        &self.request
+    }
+
+    /// Commits disclosure and returns the request joined to active authority.
+    pub fn commit(
+        self,
+        policy: &mut AgentRunPolicy,
+    ) -> Result<AgentCommittedProviderRequest, AgentProviderRequestError> {
+        let Self {
+            request,
+            commitment,
+        } = self;
+        let active = commitment.commit(policy)?;
+        Ok(AgentCommittedProviderRequest { request, active })
+    }
+
+    /// Releases the reservation after transport refusal before disclosure.
+    pub fn refuse(
+        self,
+        policy: &mut AgentRunPolicy,
+    ) -> Result<AgentProviderInputOutcome, AgentProviderRequestError> {
+        let Self { commitment, .. } = self;
+        commitment.settle(policy, AgentProviderRequestSettlement::Refused)
+    }
+
+    /// Releases the reservation when exact cancellation wins before disclosure.
+    pub fn cancel(
+        self,
+        policy: &mut AgentRunPolicy,
+    ) -> Result<AgentProviderInputOutcome, AgentProviderRequestError> {
+        let Self { commitment, .. } = self;
+        commitment.settle(policy, AgentProviderRequestSettlement::Cancelled)
+    }
+
+    fn settle(
+        self,
+        policy: &mut AgentRunPolicy,
+        settlement: AgentProviderRequestSettlement,
+    ) -> Result<AgentProviderInputOutcome, AgentProviderRequestError> {
+        let Self { commitment, .. } = self;
+        commitment.settle(policy, settlement)
+    }
+}
+
+impl fmt::Debug for AgentProviderTransportInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentProviderTransportInput")
+            .field("request", &self.request)
+            .field("commitment", &"[redacted]")
+            .finish()
+    }
+}
+
+/// Exact provider request after semantic disclosure became irreversible.
+///
+/// The move-only active authority must be returned to the policy owner for one
+/// terminal settlement whether the transport succeeds, fails, or is cancelled.
+#[must_use]
+pub struct AgentCommittedProviderRequest {
+    request: AgentProviderRequest,
+    active: AgentActiveModelCall,
+}
+
+impl AgentCommittedProviderRequest {
+    /// Immutable request bytes and fixed endpoint committed for transmission.
+    pub const fn request(&self) -> &AgentProviderRequest {
+        &self.request
+    }
+
+    /// Exact active call authority paired with this request.
+    pub const fn active(&self) -> &AgentActiveModelCall {
+        &self.active
+    }
+
+    /// Moves the exact request and its terminal-settlement authority together.
+    pub fn into_parts(self) -> (AgentProviderRequest, AgentActiveModelCall) {
+        (self.request, self.active)
+    }
+}
+
+impl fmt::Debug for AgentCommittedProviderRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentCommittedProviderRequest")
+            .field("request", &self.request)
+            .field("active", &self.active)
+            .finish()
+    }
+}
+
 /// Prepared provider request carrying exact observation-delivery authority.
 #[must_use]
 pub struct AgentPreparedObservationRequest {
@@ -332,31 +504,24 @@ impl AgentPreparedObservationRequest {
         self.semantic_stats
     }
 
+    /// Joins the request body and observation authority for transport admission.
+    pub fn into_transport_input(self) -> AgentProviderTransportInput {
+        AgentProviderTransportInput {
+            request: self.request,
+            commitment: AgentProviderInputCommitment::Observation {
+                admission: self.admission,
+                delivery: self.delivery,
+            },
+        }
+    }
+
     /// Consumes request and admission together at the transport commit point.
     pub fn settle(
         self,
         policy: &mut AgentRunPolicy,
         settlement: AgentProviderRequestSettlement,
     ) -> Result<AgentProviderInputOutcome, AgentProviderRequestError> {
-        match settlement {
-            AgentProviderRequestSettlement::Committed => {
-                let acknowledgement = self.delivery.commit();
-                let active = policy.commit_observation_input(self.admission, &acknowledgement)?;
-                Ok(AgentProviderInputOutcome::Committed(active))
-            }
-            AgentProviderRequestSettlement::Refused => {
-                policy
-                    .cancel_prepared_input(self.admission, AgentModelInputCancellation::Refused)?;
-                Ok(AgentProviderInputOutcome::Refused)
-            }
-            AgentProviderRequestSettlement::Cancelled => {
-                policy.cancel_prepared_input(
-                    self.admission,
-                    AgentModelInputCancellation::Cancelled,
-                )?;
-                Ok(AgentProviderInputOutcome::Cancelled)
-            }
-        }
+        self.into_transport_input().settle(policy, settlement)
     }
 }
 
@@ -464,31 +629,24 @@ impl AgentPreparedReadRequest {
         self.semantic_stats
     }
 
+    /// Joins the request body and read authority for transport admission.
+    pub fn into_transport_input(self) -> AgentProviderTransportInput {
+        AgentProviderTransportInput {
+            request: self.request,
+            commitment: AgentProviderInputCommitment::Read {
+                admission: self.admission,
+                delivery: self.delivery,
+            },
+        }
+    }
+
     /// Consumes request and admission together at the transport commit point.
     pub fn settle(
         self,
         policy: &mut AgentRunPolicy,
         settlement: AgentProviderRequestSettlement,
     ) -> Result<AgentProviderInputOutcome, AgentProviderRequestError> {
-        match settlement {
-            AgentProviderRequestSettlement::Committed => {
-                let receipt = self.delivery.commit();
-                let active = policy.commit_read_input(self.admission, &receipt)?;
-                Ok(AgentProviderInputOutcome::Committed(active))
-            }
-            AgentProviderRequestSettlement::Refused => {
-                policy
-                    .cancel_prepared_input(self.admission, AgentModelInputCancellation::Refused)?;
-                Ok(AgentProviderInputOutcome::Refused)
-            }
-            AgentProviderRequestSettlement::Cancelled => {
-                policy.cancel_prepared_input(
-                    self.admission,
-                    AgentModelInputCancellation::Cancelled,
-                )?;
-                Ok(AgentProviderInputOutcome::Cancelled)
-            }
-        }
+        self.into_transport_input().settle(policy, settlement)
     }
 }
 
