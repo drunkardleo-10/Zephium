@@ -259,7 +259,10 @@ enum HostTaskPriority {
     // Exact agent-context lifecycle and audit tasks own an independent fixed
     // band and are never coalesced or replaced.
     AgentContext,
-    #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+    #[cfg(all(
+        feature = "agentic-browser",
+        any(target_os = "macos", target_os = "windows")
+    ))]
     // A commit/timeout winner or one renderer-loss callback rejoins an owned
     // context. Neither can compete with new request ingress for capacity.
     AgentContextTerminal,
@@ -310,14 +313,23 @@ const PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY: usize =
     zephium_core::session::MAX_SESSION_PROFILES;
 const NON_PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY: usize =
     NON_SHUTDOWN_PENDING_HOST_TASK_CAPACITY - PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY;
-#[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+#[cfg(all(
+    feature = "agentic-browser",
+    any(target_os = "macos", target_os = "windows")
+))]
 const AGENT_CONTEXT_TERMINAL_PENDING_HOST_TASK_CAPACITY: usize =
     2 * zephium_agentic::MAX_LIVE_CONTEXTS;
-#[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+#[cfg(all(
+    feature = "agentic-browser",
+    any(target_os = "macos", target_os = "windows")
+))]
 const NON_AGENT_CONTEXT_TERMINAL_PENDING_HOST_TASK_CAPACITY: usize =
     NON_PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY
         - AGENT_CONTEXT_TERMINAL_PENDING_HOST_TASK_CAPACITY;
-#[cfg(all(feature = "agentic-browser", not(target_os = "macos")))]
+#[cfg(all(
+    feature = "agentic-browser",
+    not(any(target_os = "macos", target_os = "windows"))
+))]
 const NON_AGENT_CONTEXT_TERMINAL_PENDING_HOST_TASK_CAPACITY: usize =
     NON_PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY;
 #[cfg(feature = "agentic-browser")]
@@ -458,7 +470,10 @@ pub(crate) fn install(
             #[cfg(target_os = "windows")]
             private_runtime,
             views: HashMap::new(),
-            #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+            #[cfg(all(
+                feature = "agentic-browser",
+                any(target_os = "macos", target_os = "windows")
+            ))]
             agent_contexts: HashMap::new(),
             native_resources: NativeResourceLedger::default(),
             extension_runtime_registry:
@@ -740,7 +755,10 @@ where
 }
 
 /// Admit one exact terminal for an already-owned agent-context operation.
-#[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+#[cfg(all(
+    feature = "agentic-browser",
+    any(target_os = "macos", target_os = "windows")
+))]
 pub(crate) fn try_with_agent_context_terminal<F>(f: F) -> bool
 where
     F: FnOnce(&mut EngineHost) + 'static,
@@ -750,7 +768,10 @@ where
 
 /// Exact queued terminal depth used only by the privacy-preserving resource
 /// audit while the host is already running on its owner thread.
-#[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+#[cfg(all(
+    feature = "agentic-browser",
+    any(target_os = "macos", target_os = "windows")
+))]
 pub(crate) fn agent_context_terminal_depth_for_audit() -> Option<usize> {
     PENDING.with(|pending| {
         pending.try_borrow().ok().map(|pending| {
@@ -762,7 +783,10 @@ pub(crate) fn agent_context_terminal_depth_for_audit() -> Option<usize> {
     })
 }
 
-#[cfg(all(feature = "agentic-browser", not(target_os = "macos")))]
+#[cfg(all(
+    feature = "agentic-browser",
+    not(any(target_os = "macos", target_os = "windows"))
+))]
 pub(crate) const fn agent_context_terminal_depth_for_audit() -> Option<usize> {
     Some(0)
 }
@@ -1696,7 +1720,10 @@ fn enqueue_pending(pending: &mut VecDeque<QueuedHostTask>, queued: QueuedHostTas
     {
         return false;
     }
-    #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+    #[cfg(all(
+        feature = "agentic-browser",
+        any(target_os = "macos", target_os = "windows")
+    ))]
     if queued.priority == HostTaskPriority::AgentContextTerminal
         && pending
             .iter()
@@ -1717,14 +1744,20 @@ fn enqueue_pending(pending: &mut VecDeque<QueuedHostTask>, queued: QueuedHostTas
         // the UI borrow unwinds. Never borrow another band for a duplicate.
         return false;
     }
-    #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+    #[cfg(all(
+        feature = "agentic-browser",
+        any(target_os = "macos", target_os = "windows")
+    ))]
     if matches!(
         queued.priority,
         HostTaskPriority::AgentContext | HostTaskPriority::AgentContextTerminal
     ) {
         return enqueue_bounded_pending(pending, queued);
     }
-    #[cfg(all(feature = "agentic-browser", not(target_os = "macos")))]
+    #[cfg(all(
+        feature = "agentic-browser",
+        not(any(target_os = "macos", target_os = "windows"))
+    ))]
     if queued.priority == HostTaskPriority::AgentContext {
         return enqueue_bounded_pending(pending, queued);
     }
@@ -1766,7 +1799,10 @@ fn enqueue_bounded_pending(pending: &mut VecDeque<QueuedHostTask>, queued: Queue
     let capacity = match queued.priority {
         HostTaskPriority::Shutdown => PENDING_HOST_TASK_CAPACITY,
         HostTaskPriority::ProfileErasure => NON_SHUTDOWN_PENDING_HOST_TASK_CAPACITY,
-        #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+        #[cfg(all(
+            feature = "agentic-browser",
+            any(target_os = "macos", target_os = "windows")
+        ))]
         HostTaskPriority::AgentContextTerminal => NON_PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY,
         #[cfg(feature = "agentic-browser")]
         HostTaskPriority::AgentContext => NON_AGENT_CONTEXT_TERMINAL_PENDING_HOST_TASK_CAPACITY,
@@ -1814,9 +1850,15 @@ fn enqueue_bounded_pending(pending: &mut VecDeque<QueuedHostTask>, queued: Queue
         // Accepted owner operations are exact authority debts. Replacing one
         // would leak or fabricate native ownership settlement.
         HostTaskPriority::ExtensionRuntime => None,
-        #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+        #[cfg(all(
+            feature = "agentic-browser",
+            any(target_os = "macos", target_os = "windows")
+        ))]
         HostTaskPriority::AgentContext | HostTaskPriority::AgentContextTerminal => None,
-        #[cfg(all(feature = "agentic-browser", not(target_os = "macos")))]
+        #[cfg(all(
+            feature = "agentic-browser",
+            not(any(target_os = "macos", target_os = "windows"))
+        ))]
         HostTaskPriority::AgentContext => None,
         HostTaskPriority::ExtensionRuntimeProfileFence => None,
         // Its dedicated band guarantees the bounded first cohort. Past that

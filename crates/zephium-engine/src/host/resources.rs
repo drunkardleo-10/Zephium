@@ -232,7 +232,13 @@ impl NativeResourceLedger {
         self.is_healthy() && self.is_empty()
     }
 
-    #[cfg(any(test, all(feature = "agentic-browser", target_os = "macos")))]
+    #[cfg(any(
+        test,
+        all(
+            feature = "agentic-browser",
+            any(target_os = "macos", target_os = "windows")
+        )
+    ))]
     pub(super) fn count_for_audit(&self, class: NativeResourceClass) -> Option<usize> {
         match self.shared.state.try_borrow() {
             Ok(state) => Some(state.counts[class.index()]),

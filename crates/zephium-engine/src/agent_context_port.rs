@@ -13,7 +13,7 @@ use zephium_agentic::{
     SemanticScreenshotNativeCompletion, SemanticScreenshotNativeRequest,
     MAX_PENDING_NATIVE_CONTEXT_TASKS, MAX_PENDING_SEMANTIC_SCREENSHOTS,
 };
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use zephium_agentic::{ContextJoin, ContextOperationKind, ContextRendererLoss};
 #[cfg(any(target_os = "macos", test))]
 use zephium_agentic::{SemanticScreenshotNativeCapture, SemanticScreenshotNativeFailure};
@@ -27,14 +27,14 @@ pub(crate) type AgentContextEventSink = Arc<dyn Fn(ContextNativeEvent) + Send + 
 /// A callback rejected during ordinary operation means an accepted native
 /// owner can no longer rejoin the shell. Shutdown sealing is different: the
 /// host teardown path still owns and terminally drops every retained task.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 #[derive(Clone)]
 pub(crate) struct AgentContextCallbackGuard {
     admission: Arc<AgentPortAdmission>,
     sink: AgentContextEventSink,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 impl AgentContextCallbackGuard {
     pub(crate) fn callback_dispatch_rejected(&self) {
         let sealed = match self.admission.state.lock() {
@@ -238,7 +238,7 @@ impl AgentPortAdmission {
         }
     }
 
-    #[cfg(any(target_os = "macos", test))]
+    #[cfg(any(target_os = "macos", target_os = "windows", test))]
     fn pending(&self) -> Option<usize> {
         self.counts().map(|(pending, _)| pending)
     }
@@ -489,7 +489,7 @@ impl AgentContextTask {
         self.permit.counts()
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub(crate) fn callback_guard(&self) -> AgentContextCallbackGuard {
         AgentContextCallbackGuard {
             admission: self.permit.admission.clone(),
@@ -925,7 +925,7 @@ fn dispatch_screenshot_to_host(task: AgentScreenshotTask) {
 }
 
 fn supports_native_request(request: &ContextNativeRequest) -> bool {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
         match request {
             ContextNativeRequest::Construct(request) => matches!(
@@ -948,7 +948,7 @@ fn supports_native_request(request: &ContextNativeRequest) -> bool {
             }
         }
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let _ = request;
         false

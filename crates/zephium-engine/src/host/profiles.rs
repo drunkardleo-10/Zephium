@@ -618,7 +618,10 @@ impl EngineHost {
         ) {
             return;
         }
-        #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+        #[cfg(all(
+            feature = "agentic-browser",
+            any(target_os = "macos", target_os = "windows")
+        ))]
         if self.has_agent_context_for_profile(profile) {
             // The shell-side profile lease is the primary deletion fence. A
             // native caller bypassing it still cannot clear storage out from

@@ -489,7 +489,10 @@ impl EngineHost {
     }
 
     #[cfg(target_os = "windows")]
-    fn windows_view_admission_blocked(&self, profile: zephium_core::ids::ProfileId) -> bool {
+    pub(super) fn windows_view_admission_blocked(
+        &self,
+        profile: zephium_core::ids::ProfileId,
+    ) -> bool {
         self.exiting_browser_processes.contains(&profile)
             || self.unverifiable_browser_processes.contains(&profile)
             || self.construction_unproven.contains(&profile)
@@ -1666,18 +1669,38 @@ impl EngineHost {
         profile: zephium_core::ids::ProfileId,
         deadline: std::time::Instant,
     ) -> Result<(), crate::platform::imp::WindowsNativeExtensionFailure> {
+        let path = crate::erasure::prepare_profile_directory(&self.profiles_root, profile)
+            .map_err(|_| {
+                crate::platform::imp::WindowsNativeExtensionFailure::ProfileHostUnavailable
+            })?;
+        self.ensure_windows_extension_profile_at_path(profile, deadline, path)
+    }
+
+    /// Establishes or rejoins the extension-enabled environment at one exact
+    /// already-authorized storage root. Agent-owned ephemeral contexts use
+    /// the private runtime root; normal extension activation retains the
+    /// durable profile root through the wrapper above.
+    pub(super) fn ensure_windows_extension_profile_at_path(
+        &mut self,
+        profile: zephium_core::ids::ProfileId,
+        deadline: std::time::Instant,
+        path: std::path::PathBuf,
+    ) -> Result<(), crate::platform::imp::WindowsNativeExtensionFailure> {
         self.preflight_windows_extension_profile(profile, deadline)?;
         if self
             .windows_extension_environments
             .is_extension_ready(profile)
         {
-            return Ok(());
+            return self
+                .environments
+                .get(&profile)
+                .ok_or(crate::platform::imp::WindowsNativeExtensionFailure::AdapterInvariant)
+                .and_then(|environment| {
+                    crate::platform::imp::attest_environment(environment, &path).map_err(|_| {
+                        crate::platform::imp::WindowsNativeExtensionFailure::EnvironmentAttestation
+                    })
+                });
         }
-
-        let path = crate::erasure::prepare_profile_directory(&self.profiles_root, profile)
-            .map_err(|_| {
-                crate::platform::imp::WindowsNativeExtensionFailure::ProfileHostUnavailable
-            })?;
         let mut construction_resource = Some(
             self.native_resources
                 .try_acquire(NativeResourceClass::TransientConstruction)

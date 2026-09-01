@@ -990,7 +990,10 @@ impl EngineHost {
                 return;
             }
         };
-        #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+        #[cfg(all(
+            feature = "agentic-browser",
+            any(target_os = "macos", target_os = "windows")
+        ))]
         let agent_registrations = {
             let mut context_ids: Vec<_> = self
                 .agent_contexts
@@ -1064,7 +1067,10 @@ impl EngineHost {
                 return;
             }
         }
-        #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+        #[cfg(all(
+            feature = "agentic-browser",
+            any(target_os = "macos", target_os = "windows")
+        ))]
         for (id, registration) in agent_registrations {
             let replaced = self
                 .agent_contexts
@@ -1125,7 +1131,10 @@ impl EngineHost {
         clean
     }
 
-    #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+    #[cfg(all(
+        feature = "agentic-browser",
+        any(target_os = "macos", target_os = "windows")
+    ))]
     fn rollback_agent_content_policy_cohort(
         &mut self,
         registrations: Vec<(
