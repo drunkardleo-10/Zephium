@@ -11,11 +11,15 @@ use std::marker::PhantomData;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
-use std::sync::{Arc, Mutex, TryLockError};
+use std::sync::{Arc, Mutex, OnceLock, TryLockError};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use zephium_agentic::{
+    AgentAuditCompletion, AgentAuditDelivery, AgentAuditDeliveryOutcome, AgentAuditDispatch,
+    AgentAuditDeliverySettlement, AgentAuditPort, AgentAuditSinkFailure,
+};
 use zephium_core::blocker::{BlockerConfig, BlockerConfigRevision};
 use zephium_core::extensions::{
     ExtensionExpectedNativeOwnershipIdentity, ExtensionGrantAuthority, ExtensionGrantDigest,
@@ -75,6 +79,7 @@ const MAX_PENDING_PAGE_PERMISSION_MUTATIONS: usize = 16;
 const MAX_PENDING_EXTENSION_INSTALL_MUTATIONS: usize = 16;
 const MAX_PENDING_EXTENSION_GRANT_REQUESTS: usize = 8;
 const MAX_PENDING_EXTENSION_NATIVE_OWNERSHIP_MUTATIONS: usize = 16;
+const MAX_PENDING_AGENT_AUDIT_DELIVERIES: usize = 8;
 const MAX_EXTENSION_GRANT_MUTATION_REQUEST_RETAINED_BYTES: usize = checked_const_add(
     MAX_EXTENSION_MANIFEST_RETAINED_BYTES,
     MAX_EXTENSION_GRANT_WRITE_RETAINED_BYTES,
@@ -112,6 +117,40 @@ const EXTENSION_NATIVE_OWNERSHIP_MAX_ADMISSION_STATE: usize = checked_const_add(
 const EXTENSION_NATIVE_OWNERSHIP_POISONED_ADMISSION_STATE: usize = usize::MAX;
 
 const _: () = assert!(EXTENSION_NATIVE_OWNERSHIP_MAX_ADMISSION_STATE < usize::MAX);
+
+struct AgentAuditDeliveryPermit {
+    admission: Arc<AtomicUsize>,
+}
+
+impl AgentAuditDeliveryPermit {
+    fn acquire(admission: &OnceLock<Arc<AtomicUsize>>) -> Option<Self> {
+        let admission = admission
+            .get_or_init(|| Arc::new(AtomicUsize::new(0)))
+            .clone();
+        admission
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
+                pending
+                    .checked_add(1)
+                    .filter(|next| *next <= MAX_PENDING_AGENT_AUDIT_DELIVERIES)
+            })
+            .ok()?;
+        Some(Self { admission })
+    }
+}
+
+impl Drop for AgentAuditDeliveryPermit {
+    fn drop(&mut self) {
+        if self
+            .admission
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
+                pending.checked_sub(1)
+            })
+            .is_err()
+        {
+            self.admission.store(usize::MAX, Ordering::Release);
+        }
+    }
+}
 
 const fn checked_const_add(left: usize, right: usize) -> usize {
     match left.checked_add(right) {
@@ -735,6 +774,11 @@ enum Cmd {
         Sender<ProfileDeletionAuthorizeOutcome>,
     ),
     FinalizeProfileDeletion(ProfileId, Sender<ProfileDeletionFinalizeOutcome>),
+    AppendAgentAudit(
+        AgentAuditDelivery,
+        AgentAuditDeliveryPermit,
+        AgentAuditCompletion,
+    ),
     Flush(Sender<bool>),
     Shutdown(Sender<bool>),
 }
@@ -1493,6 +1537,7 @@ pub struct SqliteStore {
     extension_install_mutation_admission: Arc<Mutex<ExtensionInstallMutationAdmission>>,
     extension_grant_request_admission: Arc<Mutex<ExtensionGrantRequestAdmission>>,
     extension_native_ownership_mutation_admission: Arc<ExtensionNativeOwnershipMutationAdmission>,
+    agent_audit_delivery_admission: OnceLock<Arc<AtomicUsize>>,
     lifecycle: Mutex<ActorLifecycle>,
     shutdown_clean: AtomicBool,
     extension_service_store_authority_claimed: AtomicBool,
@@ -1594,6 +1639,7 @@ impl SqliteStore {
             extension_install_mutation_admission,
             extension_grant_request_admission,
             extension_native_ownership_mutation_admission,
+            agent_audit_delivery_admission: OnceLock::new(),
             lifecycle: Mutex::new(ActorLifecycle {
                 join: Some(join),
                 exited: actor_exit,
@@ -2353,6 +2399,50 @@ impl SqliteStore {
         }
         self.shutdown_clean.store(true, Ordering::Release);
         StoreShutdownOutcome::Clean
+    }
+}
+
+impl AgentAuditPort for SqliteStore {
+    fn append(
+        &self,
+        delivery: AgentAuditDelivery,
+        completion: AgentAuditCompletion,
+    ) -> AgentAuditDispatch {
+        let proof = delivery.proof();
+        let lifecycle = match self.lifecycle.try_lock() {
+            Ok(lifecycle) => lifecycle,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => {
+                return AgentAuditDispatch::Refused(proof.settle(
+                    AgentAuditDeliveryOutcome::Refused(AgentAuditSinkFailure::Unavailable),
+                ));
+            }
+        };
+        if lifecycle.terminal_admitted || self.shutdown_clean.load(Ordering::Acquire) {
+            return AgentAuditDispatch::Refused(proof.settle(AgentAuditDeliveryOutcome::Refused(
+                AgentAuditSinkFailure::Shutdown,
+            )));
+        }
+        let Some(permit) = AgentAuditDeliveryPermit::acquire(&self.agent_audit_delivery_admission)
+        else {
+            return AgentAuditDispatch::Refused(proof.settle(AgentAuditDeliveryOutcome::Refused(
+                AgentAuditSinkFailure::Capacity,
+            )));
+        };
+        let dispatch = match self
+            .tx
+            .try_send(Cmd::AppendAgentAudit(delivery, permit, completion))
+        {
+            Ok(()) => AgentAuditDispatch::Accepted(proof),
+            Err(mpsc::TrySendError::Full(_)) => AgentAuditDispatch::Refused(proof.settle(
+                AgentAuditDeliveryOutcome::Refused(AgentAuditSinkFailure::Capacity),
+            )),
+            Err(mpsc::TrySendError::Disconnected(_)) => AgentAuditDispatch::Refused(proof.settle(
+                AgentAuditDeliveryOutcome::Refused(AgentAuditSinkFailure::Shutdown),
+            )),
+        };
+        drop(lifecycle);
+        dispatch
     }
 }
 
@@ -3578,6 +3668,29 @@ fn actor(
                 };
                 let _ = reply.send(result);
             }
+            Some(Cmd::AppendAgentAudit(delivery, _permit, completion)) => {
+                let proof = delivery.proof();
+                match hub.append_agent_audit(&delivery) {
+                    hub::AgentAuditAppendOutcome::Committed => {
+                        complete_agent_audit(
+                            completion,
+                            proof.settle(AgentAuditDeliveryOutcome::Committed),
+                        );
+                    }
+                    hub::AgentAuditAppendOutcome::Refused(failure) => {
+                        complete_agent_audit(
+                            completion,
+                            proof.settle(AgentAuditDeliveryOutcome::Refused(failure)),
+                        );
+                    }
+                    hub::AgentAuditAppendOutcome::Uncertain => {
+                        // Dropping the one-shot callback is intentional. The
+                        // shell retains the ledger's exact in-flight delivery
+                        // and may replay only that identity for reconciliation.
+                        eprintln!("store: agent audit append outcome is uncertain");
+                    }
+                }
+            }
             Some(Cmd::Flush(ack)) => {
                 let settings_durable =
                     flush_settings(&mut hub, &pending_settings, &mut setting_retry, true);
@@ -3642,6 +3755,17 @@ fn actor(
             &mut visit_retry,
             true,
         );
+    }
+}
+
+fn complete_agent_audit(
+    completion: AgentAuditCompletion,
+    settlement: AgentAuditDeliverySettlement,
+) {
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| completion(settlement))).is_err() {
+        // The durable result is already final. Contain an integration callback
+        // panic so it cannot kill the Store actor or strand unrelated state.
+        eprintln!("store: agent audit completion callback panicked");
     }
 }
 

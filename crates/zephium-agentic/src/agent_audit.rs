@@ -26,6 +26,29 @@ use crate::{
 pub const MAX_PENDING_AGENT_AUDIT_EVENTS: usize = 64;
 /// Maximum events transferred in one persistence delivery.
 pub const MAX_AGENT_AUDIT_DELIVERY_EVENTS: usize = 16;
+/// Exact byte width of the version-one durable semantic progress record.
+pub const AGENT_AUDIT_RECORD_V1_BYTES: usize = 128;
+
+/// Canonical fixed-width content-free semantic progress record.
+///
+/// This is the only event payload a durable adapter may retain. The encoding
+/// contains a version byte, opaque identities, monotonic time, and closed enum
+/// codes; unused tail bytes are zero. It cannot represent free-form content.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct AgentAuditRecordV1([u8; AGENT_AUDIT_RECORD_V1_BYTES]);
+
+impl AgentAuditRecordV1 {
+    /// Exact immutable bytes for a trusted durable adapter.
+    pub const fn as_bytes(&self) -> &[u8; AGENT_AUDIT_RECORD_V1_BYTES] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for AgentAuditRecordV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("AgentAuditRecordV1([redacted])")
+    }
+}
 
 /// Strictly increasing identity for one semantic audit event.
 #[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -83,6 +106,7 @@ pub struct AgentAuditEvent {
     id: AgentAuditEventId,
     recorded_at: AgentPolicyInstant,
     progress: AgentSemanticProgress,
+    record: AgentAuditRecordV1,
     guard: [u8; 32],
 }
 
@@ -100,6 +124,11 @@ impl AgentAuditEvent {
     /// Exact supervisor-owned semantic progress projection.
     pub const fn progress(self) -> AgentSemanticProgress {
         self.progress
+    }
+
+    /// Canonical content-free record accepted by the durable adapter.
+    pub const fn persistence_record(self) -> AgentAuditRecordV1 {
+        self.record
     }
 }
 
@@ -268,6 +297,9 @@ pub enum AgentAuditDispatch {
     Refused(AgentAuditDeliverySettlement),
 }
 
+/// One-shot shell callback for an exact asynchronous durable settlement.
+pub type AgentAuditCompletion = Box<dyn FnOnce(AgentAuditDeliverySettlement) + Send + 'static>;
+
 /// Closed trusted-shell port for durable content-free audit append.
 pub trait AgentAuditPort: Send + Sync {
     /// Attempts to transactionally append one exact bounded event batch.
@@ -278,7 +310,16 @@ pub trait AgentAuditPort: Send + Sync {
     /// or cancelled settlement proves that none of the batch committed. An
     /// uncertain or partial durable outcome must remain unsettled for explicit
     /// reconciliation rather than being reported as refusal.
-    fn append(&self, delivery: AgentAuditDelivery) -> AgentAuditDispatch;
+    /// An accepted delivery transfers both values to the adapter. It invokes
+    /// `completion` exactly once only after a definite durable commit or a
+    /// proven pre-commit refusal. A durability-ambiguous result intentionally
+    /// produces no callback and must be reconciled by replaying the ledger's
+    /// exact current delivery.
+    fn append(
+        &self,
+        delivery: AgentAuditDelivery,
+        completion: AgentAuditCompletion,
+    ) -> AgentAuditDispatch;
 }
 
 /// Privacy-preserving bounded audit-ledger counts.
@@ -485,11 +526,13 @@ impl AgentAuditLedger {
                 .map_err(|_| AgentAuditError::Capacity)?;
         }
 
+        let record = event_record_v1(id, recorded_at, progress)?;
         let event = AgentAuditEvent {
             id,
             recorded_at,
             progress,
-            guard: event_guard(self.manifest_guard, id, recorded_at, progress),
+            record,
+            guard: event_guard(self.manifest_guard, record),
         };
         self.events.push_back(event);
         match progress_index {
@@ -706,67 +749,112 @@ fn delivery_proof(
     })
 }
 
-fn event_guard(
-    manifest_guard: [u8; 32],
+fn event_record_v1(
     id: AgentAuditEventId,
     recorded_at: AgentPolicyInstant,
     progress: AgentSemanticProgress,
-) -> [u8; 32] {
+) -> Result<AgentAuditRecordV1, AgentAuditError> {
+    let mut encoder = AuditRecordEncoder::new();
+    encoder.update(id.get().to_be_bytes());
+    encoder.update(recorded_at.millis().to_be_bytes());
+    encoder.update(progress.manifest().bytes());
+    encoder.update(progress.supervisor().get().to_be_bytes());
+    encoder.update(progress.responsibility().bytes());
+    encode_activity(&mut encoder, progress);
+    encoder.finish()
+}
+
+fn event_guard(manifest_guard: [u8; 32], record: AgentAuditRecordV1) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(b"ZEPHIUM-AGENT-AUDIT-EVENT-1\0");
     hasher.update(manifest_guard);
-    hasher.update(id.get().to_be_bytes());
-    hasher.update(recorded_at.millis().to_be_bytes());
-    hasher.update(progress.manifest().bytes());
-    hasher.update(progress.supervisor().get().to_be_bytes());
-    hasher.update(progress.responsibility().bytes());
-    encode_activity(&mut hasher, progress);
+    hasher.update(record.as_bytes());
     hasher.finalize().into()
 }
 
-fn encode_activity(hasher: &mut Sha256, progress: AgentSemanticProgress) {
+struct AuditRecordEncoder {
+    bytes: [u8; AGENT_AUDIT_RECORD_V1_BYTES],
+    len: usize,
+    overflowed: bool,
+}
+
+impl AuditRecordEncoder {
+    fn new() -> Self {
+        let mut bytes = [0_u8; AGENT_AUDIT_RECORD_V1_BYTES];
+        bytes[0] = 1;
+        Self {
+            bytes,
+            len: 1,
+            overflowed: false,
+        }
+    }
+
+    fn update(&mut self, bytes: impl AsRef<[u8]>) {
+        let bytes = bytes.as_ref();
+        let Some(end) = self.len.checked_add(bytes.len()) else {
+            self.overflowed = true;
+            return;
+        };
+        let Some(target) = self.bytes.get_mut(self.len..end) else {
+            self.overflowed = true;
+            return;
+        };
+        target.copy_from_slice(bytes);
+        self.len = end;
+    }
+
+    fn finish(self) -> Result<AgentAuditRecordV1, AgentAuditError> {
+        if self.overflowed {
+            Err(AgentAuditError::Invariant)
+        } else {
+            Ok(AgentAuditRecordV1(self.bytes))
+        }
+    }
+}
+
+fn encode_activity(encoder: &mut AuditRecordEncoder, progress: AgentSemanticProgress) {
     let activity = progress.activity();
     match activity.operation() {
-        AgentProgressOperation::Scheduling => hasher.update([1]),
-        AgentProgressOperation::Planning => hasher.update([2]),
-        AgentProgressOperation::Delegation => hasher.update([3]),
-        AgentProgressOperation::Model => hasher.update([4]),
-        AgentProgressOperation::Observation => hasher.update([5]),
-        AgentProgressOperation::Read => hasher.update([6]),
-        AgentProgressOperation::Context => hasher.update([7]),
+        AgentProgressOperation::Scheduling => encoder.update([1]),
+        AgentProgressOperation::Planning => encoder.update([2]),
+        AgentProgressOperation::Delegation => encoder.update([3]),
+        AgentProgressOperation::Model => encoder.update([4]),
+        AgentProgressOperation::Observation => encoder.update([5]),
+        AgentProgressOperation::Read => encoder.update([6]),
+        AgentProgressOperation::Context => encoder.update([7]),
         AgentProgressOperation::Effect(effect) => {
-            hasher.update([8, effect_code(effect)]);
+            encoder.update([8, effect_code(effect)]);
         }
-        AgentProgressOperation::Verification => hasher.update([9]),
+        AgentProgressOperation::Verification => encoder.update([9]),
         AgentProgressOperation::Approval(effect) => {
-            hasher.update([10, effect_code(effect)]);
+            encoder.update([10, effect_code(effect)]);
         }
-        AgentProgressOperation::Persistence => hasher.update([11]),
+        AgentProgressOperation::Persistence => encoder.update([11]),
     }
     match activity.resource() {
-        None => hasher.update([0]),
+        None => encoder.update([0]),
         Some(AgentProgressResource::Execution(value)) => {
-            hasher.update([1]);
-            hasher.update(value.get().to_be_bytes());
+            encoder.update([1]);
+            encoder.update(value.get().to_be_bytes());
         }
         Some(AgentProgressResource::PlanNode(value)) => {
-            hasher.update([2]);
-            hasher.update(value.bytes());
+            encoder.update([2]);
+            encoder.update(value.bytes());
         }
         Some(AgentProgressResource::ModelCall(value)) => {
-            hasher.update([3]);
-            hasher.update(value.get().to_be_bytes());
+            encoder.update([3]);
+            encoder.update(value.get().to_be_bytes());
         }
         Some(AgentProgressResource::Context(value)) => {
-            hasher.update([4]);
-            hasher.update(value.bytes());
+            encoder.update([4]);
+            encoder.update(value.bytes());
         }
         Some(AgentProgressResource::Effect(value)) => {
-            hasher.update([5]);
-            hasher.update(value.get().to_be_bytes());
+            encoder.update([5]);
+            encoder.update(value.get().to_be_bytes());
         }
     }
-    hasher.update([match progress.state() {
+    encoder.update([match progress.state() {
         AgentProgressState::Queued => 1,
         AgentProgressState::Active => 2,
         AgentProgressState::Waiting => 3,
@@ -774,18 +862,18 @@ fn encode_activity(hasher: &mut Sha256, progress: AgentSemanticProgress) {
         AgentProgressState::Failed => 5,
         AgentProgressState::Cancelled => 6,
     }]);
-    encode_result(hasher, progress.result());
-    encode_blocker(hasher, progress.blocker());
+    encode_result(encoder, progress.result());
+    encode_blocker(encoder, progress.blocker());
 }
 
-fn encode_result(hasher: &mut Sha256, result: Option<AgentProgressResult>) {
+fn encode_result(encoder: &mut AuditRecordEncoder, result: Option<AgentProgressResult>) {
     match result {
-        None => hasher.update([0]),
+        None => encoder.update([0]),
         Some(AgentProgressResult::Supervisor(outcome)) => {
-            hasher.update([1]);
-            encode_supervisor_outcome(hasher, outcome);
+            encoder.update([1]);
+            encode_supervisor_outcome(encoder, outcome);
         }
-        Some(AgentProgressResult::Model(outcome)) => hasher.update([
+        Some(AgentProgressResult::Model(outcome)) => encoder.update([
             2,
             match outcome {
                 crate::AgentModelCallSettlement::Completed => 1,
@@ -794,52 +882,55 @@ fn encode_result(hasher: &mut Sha256, result: Option<AgentProgressResult>) {
             },
         ]),
         Some(AgentProgressResult::Effect(outcome)) => {
-            hasher.update([3]);
+            encoder.update([3]);
             match outcome {
                 crate::AgentEffectSettlement::Verified(proof) => {
-                    hasher.update([1, proof_code(proof)]);
+                    encoder.update([1, proof_code(proof)]);
                 }
                 crate::AgentEffectSettlement::Failed(failure) => {
-                    hasher.update([2, action_failure_code(failure)]);
+                    encoder.update([2, action_failure_code(failure)]);
                 }
             }
         }
         Some(AgentProgressResult::Context(outcome)) => {
-            hasher.update([4]);
+            encoder.update([4]);
             match outcome {
                 crate::AgentSupervisorContextReleaseOutcome::QueuedCancelled => {
-                    hasher.update([1]);
+                    encoder.update([1]);
                 }
                 crate::AgentSupervisorContextReleaseOutcome::Retired { terminal, resource } => {
-                    hasher.update([2, context_terminal_code(terminal), resource_code(resource)]);
+                    encoder.update([2, context_terminal_code(terminal), resource_code(resource)]);
                 }
             }
         }
     }
 }
 
-fn encode_supervisor_outcome(hasher: &mut Sha256, outcome: AgentSupervisorExecutionOutcome) {
+fn encode_supervisor_outcome(
+    encoder: &mut AuditRecordEncoder,
+    outcome: AgentSupervisorExecutionOutcome,
+) {
     match outcome {
         AgentSupervisorExecutionOutcome::Waiting(wait) => {
-            hasher.update([1, wait_code(wait)]);
+            encoder.update([1, wait_code(wait)]);
         }
-        AgentSupervisorExecutionOutcome::Succeeded => hasher.update([2]),
+        AgentSupervisorExecutionOutcome::Succeeded => encoder.update([2]),
         AgentSupervisorExecutionOutcome::Failed(failure) => {
-            hasher.update([3]);
-            encode_supervisor_failure(hasher, failure);
+            encoder.update([3]);
+            encode_supervisor_failure(encoder, failure);
         }
         AgentSupervisorExecutionOutcome::Cancelled(cancellation) => {
-            hasher.update([4, cancellation_reason_code(cancellation.reason())]);
-            hasher.update(cancellation.id().get().to_be_bytes());
+            encoder.update([4, cancellation_reason_code(cancellation.reason())]);
+            encoder.update(cancellation.id().get().to_be_bytes());
         }
     }
 }
 
-fn encode_blocker(hasher: &mut Sha256, blocker: Option<AgentProgressBlocker>) {
+fn encode_blocker(encoder: &mut AuditRecordEncoder, blocker: Option<AgentProgressBlocker>) {
     match blocker {
-        None => hasher.update([0]),
-        Some(AgentProgressBlocker::Scheduler(wait)) => hasher.update([1, wait_code(wait)]),
-        Some(AgentProgressBlocker::NeedsHuman(reason)) => hasher.update([
+        None => encoder.update([0]),
+        Some(AgentProgressBlocker::Scheduler(wait)) => encoder.update([1, wait_code(wait)]),
+        Some(AgentProgressBlocker::NeedsHuman(reason)) => encoder.update([
             2,
             match reason {
                 crate::AgentNeedsHumanReason::HumanControl => 1,
@@ -850,31 +941,31 @@ fn encode_blocker(hasher: &mut Sha256, blocker: Option<AgentProgressBlocker>) {
             },
         ]),
         Some(AgentProgressBlocker::Supervisor(failure)) => {
-            hasher.update([3]);
-            encode_supervisor_failure(hasher, failure);
+            encoder.update([3]);
+            encode_supervisor_failure(encoder, failure);
         }
         Some(AgentProgressBlocker::Effect(failure)) => {
-            hasher.update([4, action_failure_code(failure)]);
+            encoder.update([4, action_failure_code(failure)]);
         }
-        Some(AgentProgressBlocker::Provider) => hasher.update([5]),
-        Some(AgentProgressBlocker::ModelCancelled) => hasher.update([6]),
+        Some(AgentProgressBlocker::Provider) => encoder.update([5]),
+        Some(AgentProgressBlocker::ModelCancelled) => encoder.update([6]),
         Some(AgentProgressBlocker::Cancellation(reason)) => {
-            hasher.update([7, cancellation_reason_code(reason)]);
+            encoder.update([7, cancellation_reason_code(reason)]);
         }
-        Some(AgentProgressBlocker::ContextCancelled) => hasher.update([8]),
+        Some(AgentProgressBlocker::ContextCancelled) => encoder.update([8]),
     }
 }
 
-fn encode_supervisor_failure(hasher: &mut Sha256, failure: AgentSupervisorFailure) {
+fn encode_supervisor_failure(encoder: &mut AuditRecordEncoder, failure: AgentSupervisorFailure) {
     match failure {
-        AgentSupervisorFailure::BudgetExhausted => hasher.update([1]),
-        AgentSupervisorFailure::ProviderFailed => hasher.update([2]),
-        AgentSupervisorFailure::InvalidModelOutput => hasher.update([3]),
-        AgentSupervisorFailure::PolicyDenied => hasher.update([4]),
+        AgentSupervisorFailure::BudgetExhausted => encoder.update([1]),
+        AgentSupervisorFailure::ProviderFailed => encoder.update([2]),
+        AgentSupervisorFailure::InvalidModelOutput => encoder.update([3]),
+        AgentSupervisorFailure::PolicyDenied => encoder.update([4]),
         AgentSupervisorFailure::Action(failure) => {
-            hasher.update([5, action_failure_code(failure)]);
+            encoder.update([5, action_failure_code(failure)]);
         }
-        AgentSupervisorFailure::ResourceExhausted => hasher.update([6]),
+        AgentSupervisorFailure::ResourceExhausted => encoder.update([6]),
     }
 }
 
@@ -1048,6 +1139,17 @@ mod tests {
             queued.progress(),
             supervisor.semantic_progress(root).expect("progress")
         );
+        let record = queued.persistence_record();
+        assert_eq!(record.as_bytes().len(), AGENT_AUDIT_RECORD_V1_BYTES);
+        assert_eq!(record.as_bytes()[0], 1);
+        assert_eq!(&record.as_bytes()[1..9], &1_u64.to_be_bytes());
+        assert_eq!(&record.as_bytes()[9..17], &100_u64.to_be_bytes());
+        assert_eq!(&record.as_bytes()[17..33], &manifest.id().bytes());
+        assert_eq!(&record.as_bytes()[33..41], &1_u64.to_be_bytes());
+        assert_eq!(&record.as_bytes()[41..57], &root.bytes());
+        assert_eq!(&record.as_bytes()[57..62], &[1, 0, 1, 0, 0]);
+        assert!(record.as_bytes()[62..].iter().all(|byte| *byte == 0));
+        assert_eq!(format!("{record:?}"), "AgentAuditRecordV1([redacted])");
         assert_eq!(ledger.status().pending(), 1);
         assert_eq!(
             ledger
@@ -1394,8 +1496,17 @@ mod tests {
         struct RecordingPort;
 
         impl AgentAuditPort for RecordingPort {
-            fn append(&self, delivery: AgentAuditDelivery) -> AgentAuditDispatch {
+            fn append(
+                &self,
+                delivery: AgentAuditDelivery,
+                completion: AgentAuditCompletion,
+            ) -> AgentAuditDispatch {
                 assert_eq!(delivery.events().len(), 1);
+                completion(
+                    delivery
+                        .proof()
+                        .settle(AgentAuditDeliveryOutcome::Committed),
+                );
                 AgentAuditDispatch::Accepted(delivery.proof())
             }
         }
@@ -1413,12 +1524,16 @@ mod tests {
             )
             .expect("queued");
         let delivery = ledger.begin_delivery(delivery_id(1), 1).expect("delivery");
-        let AgentAuditDispatch::Accepted(proof) = RecordingPort.append(delivery) else {
+        let (settled_tx, settled_rx) = std::sync::mpsc::sync_channel(1);
+        let AgentAuditDispatch::Accepted(proof) = RecordingPort.append(
+            delivery,
+            Box::new(move |settlement| settled_tx.send(settlement).expect("settlement receiver")),
+        ) else {
             panic!("port accepted the fixed batch");
         };
-        ledger
-            .settle_delivery(proof.settle(AgentAuditDeliveryOutcome::Committed))
-            .expect("commit");
+        let settlement = settled_rx.recv().expect("settlement");
+        assert_eq!(settlement.proof(), proof);
+        ledger.settle_delivery(settlement).expect("commit");
         assert_eq!(ledger.status().pending(), 0);
     }
 }

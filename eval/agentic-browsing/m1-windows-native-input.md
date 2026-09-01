@@ -84,9 +84,11 @@ cargo check --locked --target x86_64-pc-windows-msvc \
 
 The boundary checker requires both platform binaries and both platform modules
 to remain behind `native-agentic-input-probe`, requires the probe-only
-dependency set exactly, proves the ordinary desktop release graph cannot reach
-`zephium-agentic`, and retains independent optimized-build refusals in the
-engine and contract crates.
+dependency set exactly, proves the ordinary desktop release graph cannot
+activate either diagnostic feature, requires every diagnostic-only agentic
+module to remain feature-gated, and retains independent optimized-build
+refusals in the engine and contract crates. The production functional core may
+now be reached through the durable Store adapter.
 
 Physical Windows qualification must run the exact closed commands in
 `eval/agentic-browsing/README.md` on an authorized named device. No code or

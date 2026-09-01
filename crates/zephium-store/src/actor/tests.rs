@@ -84,6 +84,7 @@ fn test_store_with_sender(tx: SyncSender<Cmd>) -> SqliteStore {
         extension_native_ownership_mutation_admission: Arc::new(
             ExtensionNativeOwnershipMutationAdmission::default(),
         ),
+        agent_audit_delivery_admission: OnceLock::new(),
         lifecycle: Mutex::new(ActorLifecycle {
             join: None,
             exited,
@@ -8318,4 +8319,198 @@ fn legacy_import_resumes_without_duplicating_committed_history() {
         Some("complete")
     );
     assert!(!legacy_path.exists());
+}
+
+fn agent_audit_ledger() -> zephium_agentic::AgentAuditLedger {
+    use zephium_agentic::{
+        AgentAccountScope, AgentAuditEventId, AgentDelegationSpec, AgentDelegationTopology,
+        AgentEffectScope, AgentPlanNodeAuthority, AgentPlanNodeId, AgentPlanNodeScope,
+        AgentPolicyInstant, AgentRunBudget, AgentRunManifest, AgentRunManifestId, AgentRunScope,
+        AgentRunSupervisor, AgentSupervisorId, ContextRunId, SemanticEffectClass, SemanticOrigin,
+        SemanticSensitivity,
+    };
+
+    let profile = ProfileId::from(1);
+    let origin =
+        SemanticOrigin::parse("https://audit.example.test/private?secret=hidden").expect("origin");
+    let effects = AgentEffectScope::try_new(&[SemanticEffectClass::Read]).expect("effects");
+    let node = AgentPlanNodeId::generate();
+    let manifest = AgentRunManifest::try_new(
+        AgentRunManifestId::generate(),
+        ContextRunId::generate(),
+        AgentRunScope::try_new(
+            vec![profile],
+            vec![AgentAccountScope::Anonymous],
+            vec![origin.clone()],
+            SemanticSensitivity::Public,
+            effects,
+            Vec::new(),
+        )
+        .expect("scope"),
+        AgentRunBudget::try_new(10, 1_000, 1_000, 1).expect("budget"),
+        AgentPolicyInstant::from_millis(100),
+        AgentPolicyInstant::from_millis(10_000),
+        vec![AgentPlanNodeScope::new(
+            node,
+            AgentPlanNodeAuthority::try_new(
+                vec![profile],
+                vec![AgentAccountScope::Anonymous],
+                vec![origin],
+                SemanticSensitivity::Public,
+                effects,
+            )
+            .expect("authority"),
+            AgentRunBudget::try_new(10, 1_000, 1_000, 1).expect("node budget"),
+            AgentPolicyInstant::from_millis(9_000),
+        )],
+    )
+    .expect("manifest");
+    let topology =
+        AgentDelegationTopology::try_new(&manifest, vec![AgentDelegationSpec::new(node, None)])
+            .expect("topology");
+    let supervisor =
+        AgentRunSupervisor::new(AgentSupervisorId::new(1).expect("supervisor"), topology);
+    let mut ledger =
+        zephium_agentic::AgentAuditLedger::try_new(&manifest, &supervisor).expect("ledger");
+    ledger
+        .record_current(
+            &supervisor,
+            node,
+            AgentAuditEventId::new(1).expect("event"),
+            AgentPolicyInstant::from_millis(100),
+        )
+        .expect("record");
+    ledger
+}
+
+#[test]
+fn agent_audit_actor_commits_and_reconciles_the_exact_in_flight_delivery() {
+    use zephium_agentic::{
+        AgentAuditDeliveryId, AgentAuditDeliveryOutcome, AgentAuditDispatch, AgentAuditPort,
+    };
+
+    let store = SqliteStore::in_memory().expect("store");
+    let mut ledger = agent_audit_ledger();
+    let delivery = ledger
+        .begin_delivery(AgentAuditDeliveryId::new(1).expect("delivery"), 16)
+        .expect("delivery");
+    let proof = delivery.proof();
+    let (first_tx, first_rx) = mpsc::sync_channel(1);
+    assert_eq!(
+        store.append(
+            delivery,
+            Box::new(move |settlement| first_tx.send(settlement).expect("first receiver")),
+        ),
+        AgentAuditDispatch::Accepted(proof)
+    );
+    let first = first_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("first settlement");
+    assert_eq!(first.outcome(), AgentAuditDeliveryOutcome::Committed);
+
+    // Model a lost shell handoff: retain the ledger, replay only the exact
+    // delivery, and require the Store to acknowledge without a second row.
+    let replay = ledger
+        .current_delivery()
+        .expect("current delivery")
+        .expect("in flight");
+    let (replay_tx, replay_rx) = mpsc::sync_channel(1);
+    assert_eq!(
+        store.append(
+            replay,
+            Box::new(move |settlement| replay_tx.send(settlement).expect("replay receiver")),
+        ),
+        AgentAuditDispatch::Accepted(proof)
+    );
+    let replayed = replay_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("replay settlement");
+    assert_eq!(replayed, first);
+    ledger.settle_delivery(replayed).expect("settle ledger");
+    assert_eq!(ledger.status().committed(), 1);
+    assert_eq!(
+        store.shutdown_until(Instant::now() + Duration::from_secs(2)),
+        StoreShutdownOutcome::Clean
+    );
+}
+
+#[test]
+fn agent_audit_actor_admission_is_independently_bounded_and_releases_commands() {
+    use zephium_agentic::{
+        AgentAuditDeliveryId, AgentAuditDeliveryOutcome, AgentAuditDispatch, AgentAuditPort,
+        AgentAuditSinkFailure,
+    };
+
+    let (tx, rx) = mpsc::sync_channel(MAX_PENDING_AGENT_AUDIT_DELIVERIES);
+    let store = test_store_with_sender(tx);
+    let mut ledger = agent_audit_ledger();
+    let first = ledger
+        .begin_delivery(AgentAuditDeliveryId::new(1).expect("delivery"), 16)
+        .expect("delivery");
+    let proof = first.proof();
+    for delivery in std::iter::once(first).chain(
+        (1..MAX_PENDING_AGENT_AUDIT_DELIVERIES)
+            .map(|_| ledger.current_delivery().unwrap().unwrap()),
+    ) {
+        assert_eq!(
+            store.append(delivery, Box::new(|_| {})),
+            AgentAuditDispatch::Accepted(proof)
+        );
+    }
+    let refused = store.append(
+        ledger.current_delivery().unwrap().unwrap(),
+        Box::new(|_| panic!("capacity refusal transferred callback")),
+    );
+    assert_eq!(
+        refused,
+        AgentAuditDispatch::Refused(proof.settle(AgentAuditDeliveryOutcome::Refused(
+            AgentAuditSinkFailure::Capacity,
+        )))
+    );
+    drop(rx);
+    assert_eq!(
+        store
+            .agent_audit_delivery_admission
+            .get()
+            .expect("admission")
+            .load(Ordering::Acquire),
+        0
+    );
+}
+
+#[test]
+fn agent_audit_completion_panic_is_contained_by_the_actor() {
+    use zephium_agentic::{AgentAuditDeliveryId, AgentAuditDispatch, AgentAuditPort};
+
+    let store = SqliteStore::in_memory().expect("store");
+    let mut ledger = agent_audit_ledger();
+    let delivery = ledger
+        .begin_delivery(AgentAuditDeliveryId::new(1).expect("delivery"), 16)
+        .expect("delivery");
+    let proof = delivery.proof();
+    assert_eq!(
+        store.append(delivery, Box::new(|_| panic!("integration callback"))),
+        AgentAuditDispatch::Accepted(proof)
+    );
+
+    let replay = ledger
+        .current_delivery()
+        .expect("current delivery")
+        .expect("in flight");
+    let (settled_tx, settled_rx) = mpsc::sync_channel(1);
+    assert_eq!(
+        store.append(
+            replay,
+            Box::new(move |settlement| settled_tx.send(settlement).expect("receiver")),
+        ),
+        AgentAuditDispatch::Accepted(proof)
+    );
+    let settlement = settled_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("actor survived callback panic");
+    ledger.settle_delivery(settlement).expect("settle replay");
+    assert_eq!(
+        store.shutdown_until(Instant::now() + Duration::from_secs(2)),
+        StoreShutdownOutcome::Clean
+    );
 }

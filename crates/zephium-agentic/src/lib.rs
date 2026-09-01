@@ -22,15 +22,19 @@ mod agent_supervisor;
 mod context;
 mod context_port;
 mod context_registry;
+#[cfg(feature = "probe-harness")]
 mod contract;
+#[cfg(feature = "probe-harness")]
 mod control;
 mod cookie_transfer;
+#[cfg(feature = "probe-harness")]
 mod evidence;
 #[cfg(feature = "probe-harness")]
 mod fixture_server;
 #[cfg(feature = "probe-harness")]
 mod probe_recipes;
 mod profile_lease;
+#[cfg(feature = "probe-harness")]
 mod protocol;
 mod semantic;
 mod semantic_action;
@@ -51,10 +55,11 @@ mod semantic_wire;
 mod sign_in_handoff;
 
 pub use agent_audit::{
-    AgentAuditDelivery, AgentAuditDeliveryId, AgentAuditDeliveryOutcome, AgentAuditDeliveryProof,
-    AgentAuditDeliverySettlement, AgentAuditDispatch, AgentAuditError, AgentAuditEvent,
-    AgentAuditEventId, AgentAuditLedger, AgentAuditLedgerStatus, AgentAuditPort,
-    AgentAuditSinkFailure, MAX_AGENT_AUDIT_DELIVERY_EVENTS, MAX_PENDING_AGENT_AUDIT_EVENTS,
+    AgentAuditCompletion, AgentAuditDelivery, AgentAuditDeliveryId, AgentAuditDeliveryOutcome,
+    AgentAuditDeliveryProof, AgentAuditDeliverySettlement, AgentAuditDispatch, AgentAuditError,
+    AgentAuditEvent, AgentAuditEventId, AgentAuditLedger, AgentAuditLedgerStatus, AgentAuditPort,
+    AgentAuditRecordV1, AgentAuditSinkFailure, AGENT_AUDIT_RECORD_V1_BYTES,
+    MAX_AGENT_AUDIT_DELIVERY_EVENTS, MAX_PENDING_AGENT_AUDIT_EVENTS,
 };
 pub use agent_manifest::{
     AgentAccountAttestationId, AgentAccountId, AgentAccountScope, AgentContextAccountBinding,
@@ -138,10 +143,12 @@ pub use context_registry::{
     ContextRegistryStatus, ContextResourceDisposition, RetiredContext, MAX_EXECUTING_CONTEXTS,
     MAX_LIVE_CONTEXTS,
 };
+#[cfg(feature = "probe-harness")]
 pub use contract::{
     FixtureCase, FixtureTarget, FocusOwner, GateOutcome, InputBackend, InputEventKind,
     PresentationState,
 };
+#[cfg(feature = "probe-harness")]
 pub use control::{ProbeAdmissionError, ProbeGate, ProbeRunPermit};
 pub use cookie_transfer::{
     ContextCookieOrigin, ContextCookieScope, ContextCookieTransferCounts,
@@ -152,6 +159,7 @@ pub use cookie_transfer::{
     MAX_COOKIE_BYTES, MAX_COOKIE_TRANSFER_BYTES, MAX_COOKIE_TRANSFER_ORIGINS,
     MAX_PENDING_COOKIE_TRANSFERS,
 };
+#[cfg(feature = "probe-harness")]
 pub use evidence::{
     ActivationEvidence, BackendAvailability, BackendCapability, CaseEvidence, CaseOutcome,
     EvidenceLabel, EvidenceValidationError, FocusEvidence, InputEventEvidence, Platform,
@@ -172,6 +180,7 @@ pub use profile_lease::{
     ContextProfileLeasePurpose, ContextProfileLeaseRegistry, ContextProfileLeaseStatus,
     MAX_CONTEXT_PROFILE_TOMBSTONES,
 };
+#[cfg(feature = "probe-harness")]
 pub use protocol::{
     decode_request_line, encode_response_line, CancelRequest, CancelledReply, HelloReply,
     HelloRequest, ProbeCommand, ProbeProtocolError, ProbeReply, ProbeRequest, ProbeResponse,

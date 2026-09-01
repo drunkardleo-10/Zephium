@@ -13,7 +13,8 @@ Responses and Anthropic Messages plain-text, tool-call, error, stop, and usage
 stream normalization are implemented behind one provider-neutral decoder.
 The closed browser-tool proposal decoder and fixed request/tool-schema encoding
 for both providers are implemented with atomic model-input commitment. The
-durable store adapter and live provider qualification remain pending.
+durable Store adapter is implemented; live provider qualification remains
+pending.
 
 This evidence describes policy input facts only. A manifest cannot authorize a
 browser action, model call, tool call, data transfer, cost, or native resource.
@@ -323,11 +324,46 @@ browser action, model call, tool call, data transfer, cost, or native resource.
 - Shutdown sealing rejects new events while preserving delivery and drain.
   Quiescence requires the seal, an empty queue, and no in-flight delivery. The
   ledger and port own no storage, I/O, task, timer, thread, channel, provider,
-  page, or native resource; the durable Store adapter remains pending.
+  page, or native resource; the durable adapter remains a separate imperative
+  shell boundary.
 - Events contain only opaque identities, trusted monotonic time, and the closed
   semantic progress fields. Objective text, prompts, hidden reasoning, model
   output, raw tool chatter, page content, origins, selectors, JavaScript,
   secrets, paths, native handles, and arbitrary errors are unrepresentable.
+
+## Implemented durable Store audit adapter
+
+- The port transfers a one-shot typed completion callback with an accepted
+  delivery. A definite durable commit or proven pre-commit refusal invokes it
+  exactly once. A commit-ambiguous or identity-conflicting result deliberately
+  drops it, leaving the ledger's exact delivery in flight for replay instead of
+  manufacturing retry authority.
+- `SqliteStore` implements the port on its existing single-owner actor. It
+  admits at most eight audit batches independently of the 256-command Store
+  mailbox, uses nonblocking admission, rejects work once terminal shutdown is
+  admitted, and serializes accepted appends before a later Store shutdown
+  barrier. Completion callback panics are contained after the durable result so
+  they cannot terminate the Store actor. Its admission counter allocates
+  lazily; no agent task, worker, timer, connection, or queue exists while
+  unused.
+- META migration 16 stores app-global audit rows because one run may span
+  profiles and the delivery intentionally contains no profile or page content.
+  Each event is a canonical 128-byte version-one record of opaque identities,
+  monotonic time, and closed progress codes. Delivery rows retain the exact
+  ordered range and count. Internal
+  manifest guards are never persisted because they are derived from scoped
+  origins/accounts. Strict tables constrain every BLOB width, version, batch
+  index, and foreign key; rows are immutable.
+- One SQLite transaction inserts the delivery and all 1–16 events. Replaying
+  the same manifest/supervisor/delivery identity verifies the proof and every
+  event byte before acknowledging the prior commit; a substituted identity or
+  payload is never settled. Insert failure is reported as refusal only after a
+  proven rollback. Commit failure re-reads exact durable truth and otherwise
+  remains unsettled.
+- Durable history has a 262,144-event/delivery denial-of-service ceiling backed
+  by constant-time state counters and triggers. Append never evicts an audit
+  event. Retention/deletion therefore requires a future explicit product
+  migration rather than becoming an implicit data-loss side effect.
 
 ## Implemented provider-neutral stream boundary
 
@@ -540,6 +576,11 @@ and authority joins, event/time replay, duplicate refusal, the 64-event and
 reconstruction, refused/cancelled retry, exact prefix commit, mismatch
 fail-stop retention, shutdown quiescence, the closed port contract, and
 redacted diagnostics.
+Six Store-adapter tests cover schema widths/version/immutability/counting,
+transactional append, exact idempotent replay across process reopen,
+substituted-delivery refusal without mutation, independent eight-batch actor
+admission, asynchronous settlement, callback-panic containment, and
+retained-ledger reconciliation.
 Thirty-six provider/request-boundary tests cover configuration/usage/retry ceilings,
 fragmented CR/LF/CRLF SSE framing, multiline data, comments, invalid UTF-8,
 line/event/event-count/aggregate-wire exhaustion, exact model/response joins,

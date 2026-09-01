@@ -165,18 +165,32 @@ fn validate_root(source: &str) -> Result<(), String> {
                 .to_owned(),
         );
     }
-    let required_fixture_gate = concat!("#[cfg(feature=\"probe-harness\")]", "modfixture_server;");
-    if !compact(source).contains(required_fixture_gate) {
-        return Err("fixture server must remain behind probe-harness".to_owned());
+    let source = compact(source);
+    for module in [
+        "contract",
+        "control",
+        "evidence",
+        "fixture_server",
+        "probe_recipes",
+        "protocol",
+    ] {
+        let required_gate = format!("#[cfg(feature=\"probe-harness\")]mod{module};");
+        if !source.contains(&required_gate) {
+            return Err(format!(
+                "agentic diagnostic module {module} must remain behind probe-harness"
+            ));
+        }
     }
     Ok(())
 }
 
 fn validate_shipping_sources(repository: &Path) -> Result<(), String> {
     let forbidden = [
-        "zephium-agentic",
-        "zephium_agentic",
         "probe-harness",
+        "native-agentic-input-probe",
+        "agentic_input_probe",
+        "macos-agentic-input-probe",
+        "windows-agentic-input-probe",
         "__zephiumNativeInputFixtureV1",
     ];
     let mut files = Vec::new();
@@ -221,6 +235,9 @@ fn validate_release_graph(metadata: &CargoMetadata) -> Result<(), String> {
     let agentic = package_names
         .get("zephium-agentic")
         .ok_or_else(|| "cargo metadata is missing zephium-agentic".to_owned())?;
+    let engine = package_names
+        .get("zephium-engine")
+        .ok_or_else(|| "cargo metadata is missing zephium-engine".to_owned())?;
     let resolve = metadata
         .resolve
         .as_ref()
@@ -228,7 +245,7 @@ fn validate_release_graph(metadata: &CargoMetadata) -> Result<(), String> {
     let graph = resolve
         .nodes
         .iter()
-        .map(|node| (node.id.as_str(), node.dependencies.as_slice()))
+        .map(|node| (node.id.as_str(), node))
         .collect::<BTreeMap<_, _>>();
     let mut pending = vec![*desktop];
     let mut visited = BTreeSet::new();
@@ -236,13 +253,30 @@ fn validate_release_graph(metadata: &CargoMetadata) -> Result<(), String> {
         if !visited.insert(package) {
             continue;
         }
-        if package == *agentic {
-            return Err(
-                "ordinary zephium-desktop release graph reaches zephium-agentic".to_owned(),
-            );
-        }
-        if let Some(dependencies) = graph.get(package) {
-            pending.extend(dependencies.iter().map(String::as_str));
+        if let Some(node) = graph.get(package) {
+            if package == *agentic
+                && node
+                    .features
+                    .iter()
+                    .any(|feature| feature == "probe-harness")
+            {
+                return Err(
+                    "ordinary zephium-desktop release graph activates agentic probe-harness"
+                        .to_owned(),
+                );
+            }
+            if package == *engine
+                && node
+                    .features
+                    .iter()
+                    .any(|feature| feature == "native-agentic-input-probe")
+            {
+                return Err(
+                    "ordinary zephium-desktop release graph activates native agentic input probe"
+                        .to_owned(),
+                );
+            }
+            pending.extend(node.dependencies.iter().map(String::as_str));
         }
     }
     Ok(())
@@ -319,6 +353,8 @@ struct CargoResolve {
 struct CargoNode {
     id: String,
     dependencies: Vec<String>,
+    #[serde(default)]
+    features: Vec<String>,
 }
 
 #[cfg(test)]
@@ -346,14 +382,17 @@ mod tests {
                     CargoNode {
                         id: "desktop".to_owned(),
                         dependencies: desktop_dependencies,
+                        features: Vec::new(),
                     },
                     CargoNode {
                         id: "engine".to_owned(),
                         dependencies: Vec::new(),
+                        features: Vec::new(),
                     },
                     CargoNode {
                         id: "agentic".to_owned(),
                         dependencies: Vec::new(),
+                        features: Vec::new(),
                     },
                 ],
             }),
@@ -361,13 +400,26 @@ mod tests {
     }
 
     #[test]
-    fn release_graph_accepts_absent_diagnostic_crate() {
+    fn release_graph_accepts_production_graph_without_diagnostic_features() {
         validate_release_graph(&metadata(vec!["engine".to_owned()])).expect("isolated graph");
+        validate_release_graph(&metadata(vec!["agentic".to_owned()]))
+            .expect("production agentic graph");
     }
 
     #[test]
-    fn release_graph_rejects_direct_or_transitive_diagnostic_crate() {
-        assert!(validate_release_graph(&metadata(vec!["agentic".to_owned()])).is_err());
+    fn release_graph_rejects_direct_or_transitive_diagnostic_features() {
+        let mut direct = metadata(vec!["agentic".to_owned()]);
+        direct
+            .resolve
+            .as_mut()
+            .expect("resolve")
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "agentic")
+            .expect("agentic")
+            .features
+            .push("probe-harness".to_owned());
+        assert!(validate_release_graph(&direct).is_err());
         let mut transitive = metadata(vec!["engine".to_owned()]);
         transitive
             .resolve
@@ -377,8 +429,8 @@ mod tests {
             .iter_mut()
             .find(|node| node.id == "engine")
             .expect("engine")
-            .dependencies
-            .push("agentic".to_owned());
+            .features
+            .push("native-agentic-input-probe".to_owned());
         assert!(validate_release_graph(&transitive).is_err());
     }
 
@@ -388,7 +440,17 @@ mod tests {
             #[cfg(all(feature = "probe-harness", not(debug_assertions)))]
             compile_error!("the agentic probe harness is forbidden in optimized builds");
             #[cfg(feature = "probe-harness")]
+            mod contract;
+            #[cfg(feature = "probe-harness")]
+            mod control;
+            #[cfg(feature = "probe-harness")]
+            mod evidence;
+            #[cfg(feature = "probe-harness")]
             mod fixture_server;
+            #[cfg(feature = "probe-harness")]
+            mod probe_recipes;
+            #[cfg(feature = "probe-harness")]
+            mod protocol;
         "#;
         validate_root(valid).expect("valid guard");
         assert!(validate_root("mod fixture_server;").is_err());

@@ -83,8 +83,9 @@ The complete machine-readable classifications and primary-source links are in
   512-request lifetime, one worker, one-second I/O deadlines, no request logs,
   no external fetches, and no native bridge;
 - compile-time optimized-build refusal for fixture/probe code plus a Cargo
-  resolved-graph gate proving ordinary `zephium-desktop` cannot reach the
-  crate.
+  resolved-graph gate proving ordinary `zephium-desktop` cannot activate
+  either diagnostic feature; probe-only modules remain feature-gated while
+  production agentic contracts may enter the shipping graph.
 
 ## Open evidence gates
 

@@ -19,6 +19,10 @@ const _: [(); 32] = [(); zephium_core::extensions::EXTENSION_NATIVE_OWNERSHIP_ID
 const _: [(); 128] = [(); zephium_core::extensions::MAX_EXTENSION_NATIVE_NAMESPACE_OBLIGATIONS];
 // Keep PROFILE v13's exact site-denial capacity trigger tied to Core.
 const _: [(); 128] = [(); zephium_core::extensions::MAX_EXTENSION_SITE_DENIALS_PER_PROFILE];
+// Keep META v16's fixed audit payload and append ceiling tied to the adapter.
+const _: [(); 128] = [(); zephium_agentic::AGENT_AUDIT_RECORD_V1_BYTES];
+const _: [(); 16] = [(); zephium_agentic::MAX_AGENT_AUDIT_DELIVERY_EVENTS];
+const _: [(); 262_144] = [(); crate::hub::MAX_DURABLE_AGENT_AUDIT_EVENTS];
 
 pub struct Migration {
     pub version: i64,
@@ -1219,6 +1223,147 @@ pub static META: &[Migration] = &[
                                 coalesce(sum(revision), 0) AS live_revision_sum
                          FROM extension_native_ownership_journal
                      );
+                 END;",
+            )
+        },
+    },
+    Migration {
+        version: 16,
+        up: |tx| {
+            tx.execute_batch(
+                // Agent audit is deliberately app-global: one run may span
+                // several profiles, while these records contain neither a
+                // profile identity nor page/provider content. The state row
+                // enforces a fail-closed durable ceiling without an O(n)
+                // count query on every append. Rows are immutable; retention
+                // requires a future explicit product migration, never silent
+                // eviction from the append path.
+                "CREATE TABLE agent_audit_state (
+                     id INTEGER PRIMARY KEY CHECK (id = 1),
+                     delivery_count INTEGER NOT NULL
+                         CHECK (delivery_count BETWEEN 0 AND 262144),
+                     event_count INTEGER NOT NULL
+                         CHECK (event_count BETWEEN 0 AND 262144)
+                 ) STRICT;
+                 INSERT INTO agent_audit_state(id, delivery_count, event_count)
+                 VALUES (1, 0, 0);
+
+                 CREATE TABLE agent_audit_deliveries (
+                     manifest_id BLOB NOT NULL
+                         CHECK (length(manifest_id) = 16),
+                     supervisor_id BLOB NOT NULL
+                         CHECK (length(supervisor_id) = 8
+                                AND supervisor_id != X'0000000000000000'),
+                     delivery_id BLOB NOT NULL
+                         CHECK (length(delivery_id) = 8
+                                AND delivery_id != X'0000000000000000'),
+                     first_event_id BLOB NOT NULL
+                         CHECK (length(first_event_id) = 8
+                                AND first_event_id != X'0000000000000000'),
+                     last_event_id BLOB NOT NULL
+                         CHECK (length(last_event_id) = 8
+                                AND last_event_id != X'0000000000000000'),
+                     event_count INTEGER NOT NULL
+                         CHECK (event_count BETWEEN 1 AND 16),
+                     CHECK (first_event_id <= last_event_id),
+                     PRIMARY KEY (manifest_id, supervisor_id, delivery_id)
+                 ) STRICT, WITHOUT ROWID;
+
+                 CREATE TABLE agent_audit_events (
+                     manifest_id BLOB NOT NULL
+                         CHECK (length(manifest_id) = 16),
+                     supervisor_id BLOB NOT NULL
+                         CHECK (length(supervisor_id) = 8
+                                AND supervisor_id != X'0000000000000000'),
+                     event_id BLOB NOT NULL
+                         CHECK (length(event_id) = 8
+                                AND event_id != X'0000000000000000'),
+                     delivery_id BLOB NOT NULL
+                         CHECK (length(delivery_id) = 8
+                                AND delivery_id != X'0000000000000000'),
+                     batch_index INTEGER NOT NULL
+                         CHECK (batch_index BETWEEN 0 AND 15),
+                     recorded_at BLOB NOT NULL
+                         CHECK (length(recorded_at) = 8),
+                     record_version INTEGER NOT NULL
+                         CHECK (record_version = 1),
+                     record BLOB NOT NULL
+                         CHECK (length(record) = 128
+                                AND substr(record, 1, 1) = X'01'),
+                     PRIMARY KEY (manifest_id, supervisor_id, event_id),
+                     UNIQUE (manifest_id, supervisor_id, delivery_id, batch_index),
+                     FOREIGN KEY (manifest_id, supervisor_id, delivery_id)
+                         REFERENCES agent_audit_deliveries(
+                             manifest_id, supervisor_id, delivery_id
+                         ) ON DELETE RESTRICT ON UPDATE RESTRICT
+                 ) STRICT, WITHOUT ROWID;
+
+                 CREATE TRIGGER agent_audit_delivery_capacity
+                 BEFORE INSERT ON agent_audit_deliveries
+                 WHEN (SELECT delivery_count FROM agent_audit_state WHERE id = 1)
+                      >= 262144
+                 BEGIN
+                     SELECT RAISE(ABORT, 'agent audit delivery capacity exceeded');
+                 END;
+                 CREATE TRIGGER agent_audit_event_capacity
+                 BEFORE INSERT ON agent_audit_events
+                 WHEN (SELECT event_count FROM agent_audit_state WHERE id = 1)
+                      >= 262144
+                 BEGIN
+                     SELECT RAISE(ABORT, 'agent audit event capacity exceeded');
+                 END;
+                 CREATE TRIGGER agent_audit_delivery_count
+                 AFTER INSERT ON agent_audit_deliveries
+                 BEGIN
+                     UPDATE agent_audit_state
+                     SET delivery_count = delivery_count + 1 WHERE id = 1;
+                     SELECT CASE WHEN changes() != 1 THEN RAISE(ABORT,
+                         'agent audit delivery count is unavailable') END;
+                 END;
+                 CREATE TRIGGER agent_audit_event_count
+                 AFTER INSERT ON agent_audit_events
+                 BEGIN
+                     UPDATE agent_audit_state
+                     SET event_count = event_count + 1 WHERE id = 1;
+                     SELECT CASE WHEN changes() != 1 THEN RAISE(ABORT,
+                         'agent audit event count is unavailable') END;
+                 END;
+                 CREATE TRIGGER agent_audit_state_update_exact
+                 BEFORE UPDATE ON agent_audit_state
+                 WHEN NOT (
+                     (NEW.delivery_count = OLD.delivery_count + 1
+                      AND NEW.event_count = OLD.event_count)
+                     OR
+                     (NEW.delivery_count = OLD.delivery_count
+                      AND NEW.event_count = OLD.event_count + 1)
+                 )
+                 BEGIN
+                     SELECT RAISE(ABORT, 'agent audit count transition is invalid');
+                 END;
+                 CREATE TRIGGER agent_audit_state_immutable
+                 BEFORE DELETE ON agent_audit_state
+                 BEGIN
+                     SELECT RAISE(ABORT, 'agent audit state is immutable');
+                 END;
+                 CREATE TRIGGER agent_audit_delivery_immutable
+                 BEFORE UPDATE ON agent_audit_deliveries
+                 BEGIN
+                     SELECT RAISE(ABORT, 'agent audit delivery is immutable');
+                 END;
+                 CREATE TRIGGER agent_audit_delivery_retained
+                 BEFORE DELETE ON agent_audit_deliveries
+                 BEGIN
+                     SELECT RAISE(ABORT, 'agent audit delivery retention is explicit');
+                 END;
+                 CREATE TRIGGER agent_audit_event_immutable
+                 BEFORE UPDATE ON agent_audit_events
+                 BEGIN
+                     SELECT RAISE(ABORT, 'agent audit event is immutable');
+                 END;
+                 CREATE TRIGGER agent_audit_event_retained
+                 BEFORE DELETE ON agent_audit_events
+                 BEGIN
+                     SELECT RAISE(ABORT, 'agent audit event retention is explicit');
                  END;",
             )
         },
@@ -2910,6 +3055,123 @@ mod tests {
             conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
             15
+        );
+    }
+
+    #[test]
+    fn meta_v16_agent_audit_schema_is_bounded_immutable_and_counted() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply(&mut conn, &META[..15]).unwrap();
+        apply(&mut conn, &META[..16]).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT delivery_count, event_count FROM agent_audit_state WHERE id = 1",
+                [],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .unwrap(),
+            (0, 0)
+        );
+
+        let manifest = vec![1_u8; 16];
+        let supervisor = 1_u64.to_be_bytes();
+        let delivery = 1_u64.to_be_bytes();
+        let event = 1_u64.to_be_bytes();
+        let recorded_at = 100_u64.to_be_bytes();
+        let mut record = vec![0_u8; zephium_agentic::AGENT_AUDIT_RECORD_V1_BYTES];
+        record[0] = 1;
+        conn.execute(
+            "INSERT INTO agent_audit_deliveries(
+                 manifest_id, supervisor_id, delivery_id,
+                 first_event_id, last_event_id, event_count
+             ) VALUES (?1, ?2, ?3, ?4, ?4, 1)",
+            rusqlite::params![&manifest, &supervisor, &delivery, &event,],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO agent_audit_events(
+                 manifest_id, supervisor_id, event_id, delivery_id,
+                 batch_index, recorded_at, record_version, record
+             ) VALUES (?1, ?2, ?3, ?4, 0, ?5, 1, ?6)",
+            rusqlite::params![
+                &manifest,
+                &supervisor,
+                &event,
+                &delivery,
+                &recorded_at,
+                &record,
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT delivery_count, event_count FROM agent_audit_state WHERE id = 1",
+                [],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .unwrap(),
+            (1, 1)
+        );
+        assert!(conn
+            .execute(
+                "UPDATE agent_audit_state SET event_count = event_count + 2",
+                [],
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "UPDATE agent_audit_events SET recorded_at = ?1",
+                [101_u64.to_be_bytes()],
+            )
+            .is_err());
+        assert!(conn.execute("DELETE FROM agent_audit_events", []).is_err());
+        assert!(conn
+            .execute("DELETE FROM agent_audit_deliveries", [])
+            .is_err());
+
+        let tx = conn.transaction().unwrap();
+        let second_delivery = 2_u64.to_be_bytes();
+        let second_event = 2_u64.to_be_bytes();
+        tx.execute(
+            "INSERT INTO agent_audit_deliveries(
+                 manifest_id, supervisor_id, delivery_id,
+                 first_event_id, last_event_id, event_count
+             ) VALUES (?1, ?2, ?3, ?4, ?4, 1)",
+            rusqlite::params![&manifest, &supervisor, &second_delivery, &second_event,],
+        )
+        .unwrap();
+        let mut invalid_record = record.clone();
+        invalid_record[0] = 2;
+        assert!(tx
+            .execute(
+                "INSERT INTO agent_audit_events(
+                     manifest_id, supervisor_id, event_id, delivery_id,
+                     batch_index, recorded_at, record_version, record
+                 ) VALUES (?1, ?2, ?3, ?4, 0, ?5, 1, ?6)",
+                rusqlite::params![
+                    &manifest,
+                    &supervisor,
+                    &second_event,
+                    &second_delivery,
+                    &recorded_at,
+                    &invalid_record,
+                ],
+            )
+            .is_err());
+        tx.rollback().unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT delivery_count, event_count FROM agent_audit_state WHERE id = 1",
+                [],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .unwrap(),
+            (1, 1)
+        );
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            16
         );
     }
 

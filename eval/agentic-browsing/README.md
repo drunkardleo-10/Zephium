@@ -40,8 +40,11 @@ call, or diagnostic feature. See `m2-context-identity.md`,
 boundaries.
 
 An optimized build with `probe-harness` is expected to fail at compile time.
-The ordinary `zephium-desktop` resolved graph is separately required not to
-reach `zephium-agentic`.
+The ordinary `zephium-desktop` resolved graph may reach the production
+functional core through Store, but is separately required not to activate
+`probe-harness` or `native-agentic-input-probe`. All probe-only contract,
+control, evidence, protocol, recipe, fixture, and native modules remain behind
+those features.
 
 macOS CI also executes the hidden 14-case fixed-DOM matrix:
 

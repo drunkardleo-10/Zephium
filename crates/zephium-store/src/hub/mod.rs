@@ -4,6 +4,7 @@
 //! file-level isolation boundary. The hub owns every connection; a single
 //! actor thread (`actor.rs`) serializes all access.
 
+mod agent_audit;
 mod blocker;
 mod compatibility;
 mod deletion;
@@ -38,6 +39,7 @@ use zephium_core::session::{
 
 use crate::{bounded_json, migrations};
 
+pub(crate) use agent_audit::{AgentAuditAppendOutcome, MAX_DURABLE_AGENT_AUDIT_EVENTS};
 use compatibility::remove_legacy_source;
 pub(crate) use compatibility::LEGACY_IMPORT_STATE_KEY;
 #[cfg(test)]
