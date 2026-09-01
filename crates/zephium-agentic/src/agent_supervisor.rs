@@ -1,0 +1,794 @@
+//! Canonical non-widening delegation topology for the bounded run supervisor.
+//!
+//! This immutable functional core pre-approves which manifest plan nodes may
+//! delegate to which children. It owns no model input, objective text, task,
+//! timer, queue, browser context, provider, or native resource.
+
+use std::fmt;
+
+use sha2::{Digest, Sha256};
+use thiserror::Error;
+
+use crate::{
+    AgentPlanNodeId, AgentPlanNodeScope, AgentRunManifest, AgentRunManifestId, ContextRunId,
+    MAX_AGENT_PLAN_NODES,
+};
+
+/// Initial maximum simultaneously live nodes in one supervisor tree.
+pub const MAX_AGENT_LIVE_SUPERVISOR_NODES: usize = 8;
+/// Initial maximum simultaneously executing nodes in one supervisor tree.
+pub const MAX_AGENT_EXECUTING_SUPERVISOR_NODES: usize = 4;
+/// Maximum root-to-child delegation edges.
+pub const MAX_AGENT_DELEGATION_DEPTH: u8 = 2;
+
+/// One shell-approved manifest node and its direct delegation parent.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct AgentDelegationSpec {
+    node: AgentPlanNodeId,
+    parent: Option<AgentPlanNodeId>,
+}
+
+impl AgentDelegationSpec {
+    /// Declares one root or direct parent relation without granting authority.
+    pub const fn new(node: AgentPlanNodeId, parent: Option<AgentPlanNodeId>) -> Self {
+        Self { node, parent }
+    }
+
+    /// Exact approved manifest plan node.
+    pub const fn node(&self) -> AgentPlanNodeId {
+        self.node
+    }
+
+    /// Direct parent, or `None` for the sole root.
+    pub const fn parent(&self) -> Option<AgentPlanNodeId> {
+        self.parent
+    }
+}
+
+impl fmt::Debug for AgentDelegationSpec {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentDelegationSpec")
+            .field("node", &self.node)
+            .field("parent", &self.parent)
+            .finish()
+    }
+}
+
+/// Canonical privacy-preserving node projection after inheritance validation.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct AgentDelegationNode {
+    node: AgentPlanNodeId,
+    parent: Option<AgentPlanNodeId>,
+    depth: u8,
+}
+
+impl AgentDelegationNode {
+    /// Exact approved manifest plan node.
+    pub const fn node(&self) -> AgentPlanNodeId {
+        self.node
+    }
+
+    /// Direct delegation parent, absent only for the sole root.
+    pub const fn parent(&self) -> Option<AgentPlanNodeId> {
+        self.parent
+    }
+
+    /// Exact root-relative delegation depth.
+    pub const fn depth(&self) -> u8 {
+        self.depth
+    }
+}
+
+impl fmt::Debug for AgentDelegationNode {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentDelegationNode")
+            .field("node", &self.node)
+            .field("parent", &self.parent)
+            .field("depth", &self.depth)
+            .finish()
+    }
+}
+
+/// Immutable exact delegation topology for one approved manifest revision.
+#[must_use]
+pub struct AgentDelegationTopology {
+    manifest: AgentRunManifestId,
+    manifest_guard: [u8; 32],
+    run: ContextRunId,
+    root: AgentPlanNodeId,
+    nodes: Vec<AgentDelegationNode>,
+    guard: [u8; 32],
+}
+
+impl AgentDelegationTopology {
+    /// Validates connectivity, depth, and parent-to-child non-widening.
+    pub fn try_new(
+        manifest: &AgentRunManifest,
+        specs: Vec<AgentDelegationSpec>,
+    ) -> Result<Self, AgentSupervisorContractError> {
+        if specs.is_empty() {
+            return Err(AgentSupervisorContractError::Empty);
+        }
+        if specs.len() > MAX_AGENT_PLAN_NODES {
+            return Err(AgentSupervisorContractError::TopologyLimit);
+        }
+        let mut specs = specs;
+        specs.sort_by_key(AgentDelegationSpec::node);
+        if specs
+            .windows(2)
+            .any(|pair| pair[0].node() == pair[1].node())
+        {
+            return Err(AgentSupervisorContractError::DuplicateNode);
+        }
+
+        let mut roots = specs.iter().filter(|spec| spec.parent().is_none());
+        let root = roots
+            .next()
+            .map(|spec| spec.node())
+            .ok_or(AgentSupervisorContractError::Root)?;
+        if roots.next().is_some() {
+            return Err(AgentSupervisorContractError::Root);
+        }
+        for spec in &specs {
+            if manifest.plan_node(spec.node()).is_none() {
+                return Err(AgentSupervisorContractError::ManifestNodeMissing);
+            }
+            if spec.parent() == Some(spec.node()) {
+                return Err(AgentSupervisorContractError::Cycle);
+            }
+            if spec.parent().is_some_and(|parent| {
+                specs
+                    .binary_search_by_key(&parent, AgentDelegationSpec::node)
+                    .is_err()
+            }) {
+                return Err(AgentSupervisorContractError::ParentMissing);
+            }
+        }
+
+        let mut nodes = Vec::with_capacity(specs.len());
+        for spec in &specs {
+            let depth = topology_depth(*spec, &specs)?;
+            if depth > MAX_AGENT_DELEGATION_DEPTH {
+                return Err(AgentSupervisorContractError::Depth);
+            }
+            if let Some(parent) = spec.parent() {
+                let parent_scope = manifest
+                    .plan_node(parent)
+                    .ok_or(AgentSupervisorContractError::ManifestNodeMissing)?;
+                let child_scope = manifest
+                    .plan_node(spec.node())
+                    .ok_or(AgentSupervisorContractError::ManifestNodeMissing)?;
+                if !scope_contains(parent_scope, child_scope) {
+                    return Err(AgentSupervisorContractError::Widening);
+                }
+            }
+            nodes.push(AgentDelegationNode {
+                node: spec.node(),
+                parent: spec.parent(),
+                depth,
+            });
+        }
+        if nodes
+            .iter()
+            .any(|node| node.node() != root && !reaches_root(*node, root, &nodes))
+        {
+            return Err(AgentSupervisorContractError::Cycle);
+        }
+
+        let guard = topology_guard(manifest.guard(), root, &nodes);
+        Ok(Self {
+            manifest: manifest.id(),
+            manifest_guard: manifest.guard(),
+            run: manifest.run(),
+            root,
+            nodes,
+            guard,
+        })
+    }
+
+    /// Exact immutable manifest revision identity.
+    pub const fn manifest(&self) -> AgentRunManifestId {
+        self.manifest
+    }
+
+    /// Exact owning run identity.
+    pub const fn run(&self) -> ContextRunId {
+        self.run
+    }
+
+    /// Sole root plan node.
+    pub const fn root(&self) -> AgentPlanNodeId {
+        self.root
+    }
+
+    /// Canonical node-id ordered topology.
+    pub fn nodes(&self) -> &[AgentDelegationNode] {
+        &self.nodes
+    }
+
+    /// Resolves one exact approved delegation node.
+    pub fn node(&self, id: AgentPlanNodeId) -> Option<AgentDelegationNode> {
+        let index = self
+            .nodes
+            .binary_search_by_key(&id, AgentDelegationNode::node)
+            .ok()?;
+        self.nodes.get(index).copied()
+    }
+
+    /// Whether this topology was proven against the exact manifest revision.
+    pub fn matches_manifest(&self, manifest: &AgentRunManifest) -> bool {
+        self.manifest == manifest.id() && self.manifest_guard == manifest.guard()
+    }
+
+    /// Whether two values represent the exact same canonical topology revision.
+    pub fn matches_revision(&self, other: &Self) -> bool {
+        self.manifest == other.manifest && self.guard == other.guard
+    }
+}
+
+impl fmt::Debug for AgentDelegationTopology {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentDelegationTopology")
+            .field("manifest", &self.manifest)
+            .field("run", &self.run)
+            .field("root", &self.root)
+            .field("nodes", &self.nodes.len())
+            .field("guard", &"[redacted]")
+            .finish()
+    }
+}
+
+/// Closed immutable-supervisor topology refusal.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum AgentSupervisorContractError {
+    /// A supervisor topology requires one root node.
+    #[error("agent supervisor topology is empty")]
+    Empty,
+    /// Approved topology exceeded the manifest node ceiling.
+    #[error("agent supervisor topology exceeds its node ceiling")]
+    TopologyLimit,
+    /// One plan node appeared more than once.
+    #[error("agent supervisor topology repeats a plan node")]
+    DuplicateNode,
+    /// The topology did not contain exactly one root.
+    #[error("agent supervisor topology requires exactly one root")]
+    Root,
+    /// A topology node was absent from the exact manifest revision.
+    #[error("agent supervisor node is absent from the manifest")]
+    ManifestNodeMissing,
+    /// A direct parent was absent from the approved topology.
+    #[error("agent supervisor parent is absent from the topology")]
+    ParentMissing,
+    /// Parent relationships contained a cycle.
+    #[error("agent supervisor topology contains a cycle")]
+    Cycle,
+    /// Root-relative delegation depth exceeded the hard ceiling.
+    #[error("agent supervisor delegation depth exceeds its ceiling")]
+    Depth,
+    /// A child widened at least one parent authority dimension.
+    #[error("agent supervisor child widens parent authority")]
+    Widening,
+}
+
+fn topology_depth(
+    spec: AgentDelegationSpec,
+    specs: &[AgentDelegationSpec],
+) -> Result<u8, AgentSupervisorContractError> {
+    let mut depth = 0_u8;
+    let mut current = spec;
+    while let Some(parent) = current.parent() {
+        depth = depth
+            .checked_add(1)
+            .ok_or(AgentSupervisorContractError::Depth)?;
+        if usize::from(depth) > specs.len() {
+            return Err(AgentSupervisorContractError::Cycle);
+        }
+        let index = specs
+            .binary_search_by_key(&parent, AgentDelegationSpec::node)
+            .map_err(|_| AgentSupervisorContractError::ParentMissing)?;
+        current = specs[index];
+    }
+    Ok(depth)
+}
+
+fn reaches_root(
+    node: AgentDelegationNode,
+    root: AgentPlanNodeId,
+    nodes: &[AgentDelegationNode],
+) -> bool {
+    let mut current = node;
+    for _ in 0..nodes.len() {
+        let Some(parent) = current.parent() else {
+            return current.node() == root;
+        };
+        let Ok(index) = nodes.binary_search_by_key(&parent, AgentDelegationNode::node) else {
+            return false;
+        };
+        current = nodes[index];
+    }
+    false
+}
+
+fn scope_contains(parent: &AgentPlanNodeScope, child: &AgentPlanNodeScope) -> bool {
+    ordered_subset(child.profiles(), parent.profiles())
+        && ordered_subset(child.accounts(), parent.accounts())
+        && ordered_subset(child.origins(), parent.origins())
+        && child.effects().is_subset_of(parent.effects())
+        && child.max_sensitivity() <= parent.max_sensitivity()
+        && parent.budget().contains(child.budget())
+        && child.expires_at() <= parent.expires_at()
+}
+
+fn ordered_subset<T: Ord>(child: &[T], parent: &[T]) -> bool {
+    child
+        .iter()
+        .all(|value| parent.binary_search(value).is_ok())
+}
+
+fn topology_guard(
+    manifest_guard: [u8; 32],
+    root: AgentPlanNodeId,
+    nodes: &[AgentDelegationNode],
+) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"ZEPHIUM-AGENT-DELEGATION-TOPOLOGY-1\0");
+    hasher.update(manifest_guard);
+    hasher.update(root.bytes());
+    hasher.update((nodes.len() as u64).to_be_bytes());
+    for node in nodes {
+        hasher.update(node.node().bytes());
+        match node.parent() {
+            Some(parent) => {
+                hasher.update([1]);
+                hasher.update(parent.bytes());
+            }
+            None => hasher.update([0]),
+        }
+        hasher.update([node.depth()]);
+    }
+    hasher.finalize().into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        AgentAccountScope, AgentEffectScope, AgentPlanNodeAuthority, AgentPolicyInstant,
+        AgentRunBudget, AgentRunScope, SemanticEffectClass, SemanticOrigin, SemanticSensitivity,
+    };
+    use zephium_core::ids::ProfileId;
+
+    fn profile(value: u128) -> ProfileId {
+        ProfileId::from(value)
+    }
+
+    fn origin(host: &str) -> SemanticOrigin {
+        SemanticOrigin::parse(&format!("https://{host}.example.test/private")).expect("origin")
+    }
+
+    fn effects(values: &[SemanticEffectClass]) -> AgentEffectScope {
+        AgentEffectScope::try_new(values).expect("effects")
+    }
+
+    fn budget(operations: u32) -> AgentRunBudget {
+        AgentRunBudget::try_new(operations, 1_000, 1_000, 1).expect("budget")
+    }
+
+    struct NodeInput {
+        id: u128,
+        origins: Vec<SemanticOrigin>,
+        effects: AgentEffectScope,
+        sensitivity: SemanticSensitivity,
+        operations: u32,
+        expiry: u64,
+    }
+
+    fn make_manifest(nodes: Vec<NodeInput>) -> AgentRunManifest {
+        let origins = vec![origin("a"), origin("b"), origin("c")];
+        let run_effects = effects(&[
+            SemanticEffectClass::Read,
+            SemanticEffectClass::LocalWrite,
+            SemanticEffectClass::ExternalWrite,
+        ]);
+        let scope = AgentRunScope::try_new(
+            vec![profile(1)],
+            vec![AgentAccountScope::Anonymous],
+            origins,
+            SemanticSensitivity::Sensitive,
+            run_effects,
+            Vec::new(),
+        )
+        .expect("scope");
+        let nodes = nodes
+            .into_iter()
+            .map(|node| {
+                AgentPlanNodeScope::new(
+                    AgentPlanNodeId::from_raw(node.id),
+                    AgentPlanNodeAuthority::try_new(
+                        vec![profile(1)],
+                        vec![AgentAccountScope::Anonymous],
+                        node.origins,
+                        node.sensitivity,
+                        node.effects,
+                    )
+                    .expect("authority"),
+                    budget(node.operations),
+                    AgentPolicyInstant::from_millis(node.expiry),
+                )
+            })
+            .collect();
+        AgentRunManifest::try_new(
+            AgentRunManifestId::from_raw(1),
+            ContextRunId::from_raw(2),
+            scope,
+            budget(100),
+            AgentPolicyInstant::from_millis(1_000),
+            AgentPolicyInstant::from_millis(10_000),
+            nodes,
+        )
+        .expect("manifest")
+    }
+
+    fn node(
+        id: u128,
+        origins: &[&str],
+        effects_values: &[SemanticEffectClass],
+        sensitivity: SemanticSensitivity,
+        operations: u32,
+        expiry: u64,
+    ) -> NodeInput {
+        NodeInput {
+            id,
+            origins: origins.iter().map(|value| origin(value)).collect(),
+            effects: effects(effects_values),
+            sensitivity,
+            operations,
+            expiry,
+        }
+    }
+
+    fn standard_manifest() -> AgentRunManifest {
+        make_manifest(vec![
+            node(
+                1,
+                &["a", "b"],
+                &[SemanticEffectClass::Read, SemanticEffectClass::LocalWrite],
+                SemanticSensitivity::Sensitive,
+                50,
+                9_000,
+            ),
+            node(
+                2,
+                &["a"],
+                &[SemanticEffectClass::Read, SemanticEffectClass::LocalWrite],
+                SemanticSensitivity::Sensitive,
+                25,
+                8_000,
+            ),
+            node(
+                3,
+                &["a"],
+                &[SemanticEffectClass::Read],
+                SemanticSensitivity::Public,
+                10,
+                7_000,
+            ),
+        ])
+    }
+
+    #[test]
+    fn canonical_topology_proves_exact_depth_and_manifest_revision() {
+        let manifest = standard_manifest();
+        let topology = AgentDelegationTopology::try_new(
+            &manifest,
+            vec![
+                AgentDelegationSpec::new(
+                    AgentPlanNodeId::from_raw(3),
+                    Some(AgentPlanNodeId::from_raw(2)),
+                ),
+                AgentDelegationSpec::new(AgentPlanNodeId::from_raw(1), None),
+                AgentDelegationSpec::new(
+                    AgentPlanNodeId::from_raw(2),
+                    Some(AgentPlanNodeId::from_raw(1)),
+                ),
+            ],
+        )
+        .expect("topology");
+        assert_eq!(topology.root(), AgentPlanNodeId::from_raw(1));
+        assert_eq!(topology.nodes().len(), 3);
+        assert_eq!(
+            topology
+                .node(AgentPlanNodeId::from_raw(3))
+                .expect("node")
+                .depth(),
+            MAX_AGENT_DELEGATION_DEPTH
+        );
+        assert!(topology.matches_manifest(&manifest));
+        let changed_revision = make_manifest(vec![node(
+            1,
+            &["a"],
+            &[SemanticEffectClass::Read],
+            SemanticSensitivity::Public,
+            1,
+            8_000,
+        )]);
+        assert!(!topology.matches_manifest(&changed_revision));
+
+        let same = AgentDelegationTopology::try_new(
+            &manifest,
+            vec![
+                AgentDelegationSpec::new(AgentPlanNodeId::from_raw(1), None),
+                AgentDelegationSpec::new(
+                    AgentPlanNodeId::from_raw(2),
+                    Some(AgentPlanNodeId::from_raw(1)),
+                ),
+                AgentDelegationSpec::new(
+                    AgentPlanNodeId::from_raw(3),
+                    Some(AgentPlanNodeId::from_raw(2)),
+                ),
+            ],
+        )
+        .expect("canonical topology");
+        assert!(topology.matches_revision(&same));
+        let debug = format!("{topology:?} {:?}", topology.nodes());
+        assert!(!debug.contains("a.example.test"));
+        assert!(!debug.contains("b.example.test"));
+        assert!(debug.contains("[redacted]"));
+    }
+
+    #[test]
+    fn topology_rejects_shape_cycles_depth_and_unknown_nodes() {
+        let approved = standard_manifest();
+        assert_eq!(
+            AgentDelegationTopology::try_new(&approved, Vec::new()).expect_err("empty"),
+            AgentSupervisorContractError::Empty
+        );
+        assert_eq!(
+            AgentDelegationTopology::try_new(
+                &approved,
+                vec![
+                    AgentDelegationSpec::new(AgentPlanNodeId::from_raw(1), None),
+                    AgentDelegationSpec::new(AgentPlanNodeId::from_raw(1), None),
+                ],
+            )
+            .expect_err("duplicate"),
+            AgentSupervisorContractError::DuplicateNode
+        );
+        assert_eq!(
+            AgentDelegationTopology::try_new(
+                &approved,
+                vec![
+                    AgentDelegationSpec::new(AgentPlanNodeId::from_raw(1), None),
+                    AgentDelegationSpec::new(AgentPlanNodeId::from_raw(2), None),
+                ],
+            )
+            .expect_err("two roots"),
+            AgentSupervisorContractError::Root
+        );
+        assert_eq!(
+            AgentDelegationTopology::try_new(
+                &approved,
+                vec![
+                    AgentDelegationSpec::new(AgentPlanNodeId::from_raw(1), None),
+                    AgentDelegationSpec::new(
+                        AgentPlanNodeId::from_raw(2),
+                        Some(AgentPlanNodeId::from_raw(99)),
+                    ),
+                ],
+            )
+            .expect_err("missing parent"),
+            AgentSupervisorContractError::ParentMissing
+        );
+        assert_eq!(
+            AgentDelegationTopology::try_new(
+                &approved,
+                vec![
+                    AgentDelegationSpec::new(AgentPlanNodeId::from_raw(1), None),
+                    AgentDelegationSpec::new(
+                        AgentPlanNodeId::from_raw(2),
+                        Some(AgentPlanNodeId::from_raw(3)),
+                    ),
+                    AgentDelegationSpec::new(
+                        AgentPlanNodeId::from_raw(3),
+                        Some(AgentPlanNodeId::from_raw(2)),
+                    ),
+                ],
+            )
+            .expect_err("cycle"),
+            AgentSupervisorContractError::Cycle
+        );
+
+        let deep_manifest = make_manifest(vec![
+            node(
+                1,
+                &["a"],
+                &[SemanticEffectClass::Read],
+                SemanticSensitivity::Public,
+                10,
+                9_000,
+            ),
+            node(
+                2,
+                &["a"],
+                &[SemanticEffectClass::Read],
+                SemanticSensitivity::Public,
+                9,
+                8_000,
+            ),
+            node(
+                3,
+                &["a"],
+                &[SemanticEffectClass::Read],
+                SemanticSensitivity::Public,
+                8,
+                7_000,
+            ),
+            node(
+                4,
+                &["a"],
+                &[SemanticEffectClass::Read],
+                SemanticSensitivity::Public,
+                7,
+                6_000,
+            ),
+        ]);
+        assert_eq!(
+            AgentDelegationTopology::try_new(
+                &deep_manifest,
+                vec![
+                    AgentDelegationSpec::new(AgentPlanNodeId::from_raw(1), None),
+                    AgentDelegationSpec::new(
+                        AgentPlanNodeId::from_raw(2),
+                        Some(AgentPlanNodeId::from_raw(1))
+                    ),
+                    AgentDelegationSpec::new(
+                        AgentPlanNodeId::from_raw(3),
+                        Some(AgentPlanNodeId::from_raw(2))
+                    ),
+                    AgentDelegationSpec::new(
+                        AgentPlanNodeId::from_raw(4),
+                        Some(AgentPlanNodeId::from_raw(3))
+                    ),
+                ],
+            )
+            .expect_err("depth"),
+            AgentSupervisorContractError::Depth
+        );
+        assert_eq!(
+            AgentDelegationTopology::try_new(
+                &approved,
+                vec![AgentDelegationSpec::new(
+                    AgentPlanNodeId::from_raw(99),
+                    None
+                )],
+            )
+            .expect_err("unknown"),
+            AgentSupervisorContractError::ManifestNodeMissing
+        );
+        assert_eq!(
+            AgentDelegationTopology::try_new(
+                &approved,
+                (1..=MAX_AGENT_PLAN_NODES + 1)
+                    .map(|id| AgentDelegationSpec::new(AgentPlanNodeId::from_raw(id as u128), None))
+                    .collect(),
+            )
+            .expect_err("topology limit"),
+            AgentSupervisorContractError::TopologyLimit
+        );
+    }
+
+    #[test]
+    fn child_cannot_widen_any_parent_authority_or_resource_dimension() {
+        let cases = [
+            make_manifest(vec![
+                node(
+                    1,
+                    &["a"],
+                    &[SemanticEffectClass::Read],
+                    SemanticSensitivity::Sensitive,
+                    50,
+                    8_000,
+                ),
+                node(
+                    2,
+                    &["a", "b"],
+                    &[SemanticEffectClass::Read],
+                    SemanticSensitivity::Sensitive,
+                    25,
+                    7_000,
+                ),
+            ]),
+            make_manifest(vec![
+                node(
+                    1,
+                    &["a"],
+                    &[SemanticEffectClass::Read],
+                    SemanticSensitivity::Sensitive,
+                    50,
+                    8_000,
+                ),
+                node(
+                    2,
+                    &["a"],
+                    &[SemanticEffectClass::Read, SemanticEffectClass::LocalWrite],
+                    SemanticSensitivity::Sensitive,
+                    25,
+                    7_000,
+                ),
+            ]),
+            make_manifest(vec![
+                node(
+                    1,
+                    &["a"],
+                    &[SemanticEffectClass::Read],
+                    SemanticSensitivity::Public,
+                    50,
+                    8_000,
+                ),
+                node(
+                    2,
+                    &["a"],
+                    &[SemanticEffectClass::Read],
+                    SemanticSensitivity::Sensitive,
+                    25,
+                    7_000,
+                ),
+            ]),
+            make_manifest(vec![
+                node(
+                    1,
+                    &["a"],
+                    &[SemanticEffectClass::Read],
+                    SemanticSensitivity::Sensitive,
+                    20,
+                    8_000,
+                ),
+                node(
+                    2,
+                    &["a"],
+                    &[SemanticEffectClass::Read],
+                    SemanticSensitivity::Sensitive,
+                    25,
+                    7_000,
+                ),
+            ]),
+            make_manifest(vec![
+                node(
+                    1,
+                    &["a"],
+                    &[SemanticEffectClass::Read],
+                    SemanticSensitivity::Sensitive,
+                    50,
+                    7_000,
+                ),
+                node(
+                    2,
+                    &["a"],
+                    &[SemanticEffectClass::Read],
+                    SemanticSensitivity::Sensitive,
+                    25,
+                    8_000,
+                ),
+            ]),
+        ];
+        for manifest in cases {
+            assert_eq!(
+                AgentDelegationTopology::try_new(
+                    &manifest,
+                    vec![
+                        AgentDelegationSpec::new(AgentPlanNodeId::from_raw(1), None),
+                        AgentDelegationSpec::new(
+                            AgentPlanNodeId::from_raw(2),
+                            Some(AgentPlanNodeId::from_raw(1)),
+                        ),
+                    ],
+                )
+                .expect_err("widening"),
+                AgentSupervisorContractError::Widening
+            );
+        }
+    }
+}

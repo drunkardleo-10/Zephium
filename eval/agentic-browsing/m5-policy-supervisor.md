@@ -1,9 +1,10 @@
 # M5 policy and supervisor
 
 Status: the immutable approved run-manifest contract, mutable plan-lease/model
-input accounting, and single-flight semantic effect policy are implemented.
-The bounded run tree/scheduler/cancellation tree, provider adapters, audit
-sink, and live qualification remain pending.
+input accounting, single-flight semantic effect policy, and immutable
+non-widening delegation topology are implemented. The mutable bounded run
+tree/scheduler/cancellation tree, provider adapters, audit sink, and live
+qualification remain pending.
 
 This evidence describes policy input facts only. A manifest cannot authorize a
 browser action, model call, tool call, data transfer, cost, or native resource.
@@ -143,6 +144,29 @@ browser action, model call, tool call, data transfer, cost, or native resource.
   worker, provider, page, native view, or native input. The only persistent
   additions are bounded policy rows and content-free provenance.
 
+## Implemented delegation topology
+
+- One canonical topology is bound by SHA-256 to the exact manifest revision,
+  run, sole root, every plan-node identity, direct parent, and computed depth.
+  Input ordering cannot change its revision. It retains no objectives, prompts,
+  model output, page content, origin text, tasks, queues, workers, timers, or
+  native resources.
+- Every topology node must already exist in the exact manifest. Duplicate
+  nodes, zero or multiple roots, missing parents, self-edges, indirect cycles,
+  and disconnected chains fail before mutable scheduling exists. The topology
+  itself remains bounded by the manifest's 64 approved plan nodes.
+- Delegation depth is proven from the complete parent chain and hard-capped at
+  two. The later mutable supervisor will separately enforce the initial eight
+  live/four executing defaults; pre-approving a plan node does not make it live
+  or allocate execution resources.
+- Every direct child must be a subset of its parent across profiles, account
+  states, canonical origins, effects, sensitivity, all four budget dimensions,
+  and expiry. This is stricter than the manifest's run-level inheritance and
+  prevents an otherwise run-valid child from widening delegated authority.
+- Public projections expose only redacted plan/run identities, parent links,
+  depth, counts, and a redacted guard. Exact manifest and topology revision
+  matching prevents a topology from being reused after approval changes.
+
 ## Current tests
 
 Default crate tests exercise canonical order independence, canonical ULID
@@ -162,3 +186,7 @@ sensitivity; guessed read references; absent/exact flow rules; pending model
 calls; capability `NeedsHuman`; stale dispatch state; action substitution;
 payload/receipt substitution; provider failure/overage; and redacted
 diagnostics. They allocate no native or provider resource and perform no I/O.
+Three delegation-topology tests additionally cover canonical order, exact
+manifest revision binding, the valid depth-two boundary, every malformed tree
+shape, the 64-node preflight ceiling, and parent widening through origin,
+effect, sensitivity, operation budget, or expiry.

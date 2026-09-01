@@ -16,6 +16,7 @@ compile_error!("the agentic probe harness is forbidden in optimized builds");
 
 mod agent_manifest;
 mod agent_policy;
+mod agent_supervisor;
 mod context;
 mod context_port;
 mod context_registry;
@@ -66,6 +67,11 @@ pub use agent_policy::{
     AgentRunPolicy, AgentTaintCohort, MAX_AGENT_ACCOUNT_ATTESTATION_AGE_MILLIS,
     MAX_AGENT_PENDING_EFFECTS, MAX_AGENT_PENDING_MODEL_CALLS, MAX_AGENT_TAINT_COHORTS,
     MAX_AGENT_TAINT_REFERENCES,
+};
+pub use agent_supervisor::{
+    AgentDelegationNode, AgentDelegationSpec, AgentDelegationTopology,
+    AgentSupervisorContractError, MAX_AGENT_DELEGATION_DEPTH, MAX_AGENT_EXECUTING_SUPERVISOR_NODES,
+    MAX_AGENT_LIVE_SUPERVISOR_NODES,
 };
 
 pub use context::{
