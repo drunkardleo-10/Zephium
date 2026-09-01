@@ -22,8 +22,9 @@ use anthropic::AnthropicMessagesStreamDecoder;
 use openai::OpenAiResponsesStreamDecoder;
 
 pub use continuation::{
-    AgentProviderBoundDiffContinuation, AgentProviderBoundScreenshotContinuation,
-    AgentProviderContinuation, AgentProviderContinuationError, AgentProviderContinuationSeed,
+    AgentProviderBoundDiffContinuation, AgentProviderBoundLocateContinuation,
+    AgentProviderBoundScreenshotContinuation, AgentProviderContinuation,
+    AgentProviderContinuationError, AgentProviderContinuationSeed,
     MAX_AGENT_PROVIDER_CONTINUATION_INITIAL_OBSERVATION_BYTES,
     MAX_AGENT_PROVIDER_CONTINUATION_TRANSCRIPT_BYTES, MAX_AGENT_PROVIDER_CONTINUATION_TURNS,
 };
@@ -42,15 +43,15 @@ use crate::{
 
 pub use request::{
     AgentCommittedProviderInput, AgentCommittedProviderRequest, AgentPreparedDiffRequest,
-    AgentPreparedObservationRequest, AgentPreparedReadRequest, AgentPreparedScreenshotRequest,
-    AgentProviderDiffRequestDraft, AgentProviderEndpoint, AgentProviderInputEvidence,
-    AgentProviderInputOutcome, AgentProviderLocalInputTokenCounter, AgentProviderObjective,
-    AgentProviderObjectiveError, AgentProviderRequest, AgentProviderRequestError,
-    AgentProviderRequestSettlement, AgentProviderScreenshotRequestDraft,
-    AgentProviderTransportInput, MAX_AGENT_BROWSER_NAVIGATION_URL_BYTES,
-    MAX_AGENT_PROVIDER_OBJECTIVE_BYTES, MAX_AGENT_PROVIDER_OBJECTIVE_TOKENS,
-    MAX_AGENT_PROVIDER_REQUEST_BYTES, MAX_AGENT_PROVIDER_SCREENSHOT_PNG_BYTES,
-    MAX_AGENT_PROVIDER_SCREENSHOT_TRANSCRIPT_BYTES,
+    AgentPreparedLocateRequest, AgentPreparedObservationRequest, AgentPreparedReadRequest,
+    AgentPreparedScreenshotRequest, AgentProviderDiffRequestDraft, AgentProviderEndpoint,
+    AgentProviderInputEvidence, AgentProviderInputOutcome, AgentProviderLocalInputTokenCounter,
+    AgentProviderLocateRequestDraft, AgentProviderObjective, AgentProviderObjectiveError,
+    AgentProviderRequest, AgentProviderRequestError, AgentProviderRequestSettlement,
+    AgentProviderScreenshotRequestDraft, AgentProviderTransportInput,
+    MAX_AGENT_BROWSER_NAVIGATION_URL_BYTES, MAX_AGENT_PROVIDER_OBJECTIVE_BYTES,
+    MAX_AGENT_PROVIDER_OBJECTIVE_TOKENS, MAX_AGENT_PROVIDER_REQUEST_BYTES,
+    MAX_AGENT_PROVIDER_SCREENSHOT_PNG_BYTES, MAX_AGENT_PROVIDER_SCREENSHOT_TRANSCRIPT_BYTES,
 };
 pub use tool::{
     AgentBrowserActProposal, AgentBrowserHumanReason, AgentBrowserScopeProposal,
@@ -490,6 +491,18 @@ impl AgentProviderCallConfig {
             return Err(AgentProviderContractError::AdmissionBudget);
         }
         Ok(())
+    }
+
+    pub(crate) fn validate_locate_request(
+        &self,
+        request: AgentModelCallRequest,
+        locate: &SemanticTokenMeasurement,
+        structured_input: &SemanticTokenMeasurement,
+    ) -> Result<(), AgentProviderContractError> {
+        if locate.quality() != crate::SemanticTokenCountQuality::ExactLocal {
+            return Err(AgentProviderContractError::InputTokenQuality);
+        }
+        self.validate_diff_request(request, locate, structured_input)
     }
 
     pub(crate) fn validate_screenshot_request(

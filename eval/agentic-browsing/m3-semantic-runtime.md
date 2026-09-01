@@ -97,6 +97,13 @@ or observed on either platform.
   normally). Ranking is deterministic across exact name/text/value/role,
   bounded phrase, and all-term semantic matches; output carries no matched
   strings, selector, DOM, script, regex, or native authority.
+- A deterministic `ZLOC1` result encoder now admits only the ranked opaque
+  references and closed role/match/sensitivity/trust/actionability labels. It
+  repeats neither query nor page text, has an 8 KiB / 2,048 exact-token ceiling,
+  binds its digest to locate identity, exact observation fingerprint, query,
+  scope, budget, counters, and ordered matches, and mints only a content-free
+  delivery receipt. Byte, token-quality, tokenizer-revision, result, and
+  receipt substitution tests fail closed.
 - Deterministic `ZSEM1` output uses one bounded writer and observation-global
   references, frame aliases, parent relationships, roles, state/operation
   inventories, trust/sensitivity/freshness labels, typed frame dispositions,

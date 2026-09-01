@@ -50,6 +50,7 @@ mod semantic_execute;
 mod semantic_execute_coordinator;
 mod semantic_extract;
 mod semantic_locate;
+mod semantic_locate_model;
 mod semantic_model;
 mod semantic_observation;
 #[cfg(feature = "probe-harness")]
@@ -104,25 +105,26 @@ pub use agent_provider::{
     AgentBrowserSemanticQuery, AgentBrowserToolCall, AgentBrowserToolCallId,
     AgentBrowserToolContractError, AgentBrowserToolKind, AgentBrowserToolProposal,
     AgentBrowserWaitCondition, AgentCommittedProviderInput, AgentCommittedProviderRequest,
-    AgentPreparedDiffRequest, AgentPreparedObservationRequest, AgentPreparedReadRequest,
-    AgentPreparedScreenshotRequest, AgentProviderBillingClass, AgentProviderBoundDiffContinuation,
+    AgentPreparedDiffRequest, AgentPreparedLocateRequest, AgentPreparedObservationRequest,
+    AgentPreparedReadRequest, AgentPreparedScreenshotRequest, AgentProviderBillingClass,
+    AgentProviderBoundDiffContinuation, AgentProviderBoundLocateContinuation,
     AgentProviderBoundScreenshotContinuation, AgentProviderCallConfig, AgentProviderCallIdentity,
     AgentProviderCompletion, AgentProviderContinuation, AgentProviderContinuationError,
     AgentProviderContinuationSeed, AgentProviderContractError, AgentProviderDiffRequestDraft,
     AgentProviderEndpoint, AgentProviderFailure, AgentProviderFailureClass,
     AgentProviderInputEvidence, AgentProviderInputOutcome, AgentProviderKind,
-    AgentProviderLocalInputTokenCounter, AgentProviderModelRevision, AgentProviderObjective,
-    AgentProviderObjectiveError, AgentProviderPricedUsage, AgentProviderPricingAttribution,
-    AgentProviderPricingContractError, AgentProviderPricingError, AgentProviderPricingProfile,
-    AgentProviderPricingRevision, AgentProviderPricingSchedule, AgentProviderProtocolError,
-    AgentProviderRequest, AgentProviderRequestError, AgentProviderRequestSettlement,
-    AgentProviderRetryAfter, AgentProviderRetryDisposition, AgentProviderScreenshotRequestDraft,
-    AgentProviderStopReason, AgentProviderStreamBatch, AgentProviderStreamBudget,
-    AgentProviderStreamConclusion, AgentProviderStreamDecoder, AgentProviderStreamEvent,
-    AgentProviderStreamStats, AgentProviderTerminalFailure, AgentProviderTextDelta,
-    AgentProviderTokenRates, AgentProviderToolCallCorrelation, AgentProviderTransportInput,
-    AgentProviderUsage, MAX_AGENT_BROWSER_NAVIGATION_URL_BYTES,
-    MAX_AGENT_BROWSER_SEMANTIC_QUERY_BYTES,
+    AgentProviderLocalInputTokenCounter, AgentProviderLocateRequestDraft,
+    AgentProviderModelRevision, AgentProviderObjective, AgentProviderObjectiveError,
+    AgentProviderPricedUsage, AgentProviderPricingAttribution, AgentProviderPricingContractError,
+    AgentProviderPricingError, AgentProviderPricingProfile, AgentProviderPricingRevision,
+    AgentProviderPricingSchedule, AgentProviderProtocolError, AgentProviderRequest,
+    AgentProviderRequestError, AgentProviderRequestSettlement, AgentProviderRetryAfter,
+    AgentProviderRetryDisposition, AgentProviderScreenshotRequestDraft, AgentProviderStopReason,
+    AgentProviderStreamBatch, AgentProviderStreamBudget, AgentProviderStreamConclusion,
+    AgentProviderStreamDecoder, AgentProviderStreamEvent, AgentProviderStreamStats,
+    AgentProviderTerminalFailure, AgentProviderTextDelta, AgentProviderTokenRates,
+    AgentProviderToolCallCorrelation, AgentProviderTransportInput, AgentProviderUsage,
+    MAX_AGENT_BROWSER_NAVIGATION_URL_BYTES, MAX_AGENT_BROWSER_SEMANTIC_QUERY_BYTES,
     MAX_AGENT_PROVIDER_CONTINUATION_INITIAL_OBSERVATION_BYTES,
     MAX_AGENT_PROVIDER_CONTINUATION_TRANSCRIPT_BYTES, MAX_AGENT_PROVIDER_CONTINUATION_TURNS,
     MAX_AGENT_PROVIDER_MODEL_REVISION_BYTES, MAX_AGENT_PROVIDER_OBJECTIVE_BYTES,
@@ -155,6 +157,10 @@ pub use semantic_locate::{
     SemanticLocateMatch, SemanticLocateMatchQuality, SemanticLocateQuery, SemanticLocateRequest,
     SemanticLocateResult, SemanticLocateScope, SemanticLocateStats, MAX_SEMANTIC_LOCATE_MATCHES,
     MAX_SEMANTIC_LOCATE_QUERY_BYTES, MAX_SEMANTIC_LOCATE_QUERY_TERMS,
+};
+pub use semantic_locate_model::{
+    encode_semantic_locate_result, SemanticEncodedLocateResult, SemanticLocateDeliveryReceipt,
+    SemanticLocateEncodingStats, SemanticLocateModelPayload, SEMANTIC_LOCATE_MODEL_SCHEMA_VERSION,
 };
 
 pub use context::{
@@ -312,7 +318,8 @@ pub use semantic_model::{
     SemanticTokenMeasurement, SemanticTokenMeasurementError, SemanticTokenizerRevision,
     SemanticTokenizerRevisionError, ACTION_SEMANTIC_DIFF_TOKEN_TARGET,
     INITIAL_SEMANTIC_MODEL_TOKEN_TARGET, MAX_SEMANTIC_MODEL_BYTES, MAX_SEMANTIC_MODEL_TOKENS,
-    MAX_SEMANTIC_TOKENIZER_REVISION_BYTES, SEMANTIC_MODEL_SCHEMA_VERSION,
+    MAX_SEMANTIC_TOKENIZER_REVISION_BYTES, SEMANTIC_LOCATE_RESULT_TOKEN_CEILING,
+    SEMANTIC_MODEL_SCHEMA_VERSION,
 };
 pub use semantic_observation::{
     SemanticExpansionKind, SemanticFrameBoundary, SemanticFrameBoundaryStatus,

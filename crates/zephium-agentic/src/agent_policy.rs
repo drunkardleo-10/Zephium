@@ -1,7 +1,7 @@
 //! Mutable bounded plan-lease accounting and committed model-input taint.
 //!
 //! This functional core reserves one model call before transport, records
-//! source taint only after exact committed observation/diff/read delivery, and
+//! source taint only after exact committed observation/diff/read/locate delivery, and
 //! settles provider usage without retries. Its child effect policy reserves
 //! one operation per bounded prepared action only after exact source-to-sink
 //! checks and still cannot execute an action. The core owns no transport,
@@ -25,16 +25,17 @@ pub use effect::{
 
 use crate::semantic_diff::SemanticObservationFingerprint;
 use crate::semantic_diff_model::SemanticDiffDeliveryAuthority;
+use crate::semantic_locate_model::SemanticLocateDeliveryAuthority;
 use crate::semantic_screenshot::SemanticScreenshotDeliveryAuthority;
 use crate::{
     AgentAccountScope, AgentContextAccountBinding, AgentPlanLeaseId, AgentPlanNodeId,
     AgentPolicyInstant, AgentProviderPricedUsage, AgentProviderPricingAttribution, AgentRunBudget,
     AgentRunManifest, AgentRunManifestId, ContextJoin, SemanticActionAttemptId, SemanticDiff,
     SemanticDiffDeliveryReceipt, SemanticDiffModelPayload, SemanticEffectClass,
-    SemanticModelPayload, SemanticObservation, SemanticObservationAcknowledgement,
-    SemanticObservationGeneration, SemanticObservationId, SemanticOrigin,
-    SemanticReadDeliveryReceipt, SemanticReadModelPayload, SemanticReadResult, SemanticReferenceId,
-    SemanticScreenshotDeliveryReceipt, SemanticSensitivity, SemanticTrust,
+    SemanticLocateDeliveryReceipt, SemanticLocateResult, SemanticModelPayload, SemanticObservation,
+    SemanticObservationAcknowledgement, SemanticObservationGeneration, SemanticObservationId,
+    SemanticOrigin, SemanticReadDeliveryReceipt, SemanticReadModelPayload, SemanticReadResult,
+    SemanticReferenceId, SemanticScreenshotDeliveryReceipt, SemanticSensitivity, SemanticTrust,
 };
 
 /// Maximum model calls reserved or active in one run policy.
@@ -375,6 +376,7 @@ enum ModelInputKind {
     Diff,
     Read,
     Screenshot,
+    Locate,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1053,6 +1055,47 @@ impl AgentRunPolicy {
         )
     }
 
+    /// Reserves one exact whole-provider-input measurement for a locate result.
+    ///
+    /// The locate result must be bound to an observation already committed to
+    /// this policy. Candidate taint is copied only from that exact baseline, so
+    /// the derived opaque-reference subset cannot widen origin, account,
+    /// sensitivity, trust, or browser authority.
+    pub(crate) fn prepare_provider_locate_input(
+        &mut self,
+        request: AgentModelCallRequest,
+        expected: AgentModelCallExpectation,
+        result: &SemanticLocateResult,
+        delivery: &SemanticLocateDeliveryAuthority,
+        structured_input_tokens: u64,
+    ) -> Result<AgentModelCallAdmission, AgentPolicyError> {
+        if request.id() != expected.call
+            || request.lease() != expected.lease
+            || self.manifest.id() != expected.manifest
+            || self
+                .lease_index(expected.lease)
+                .and_then(|index| self.leases.get(index))
+                .is_none_or(|lease| lease.binding.node() != expected.node)
+        {
+            return Err(AgentPolicyError::Authority);
+        }
+        if !delivery.matches_result(result) {
+            return Err(AgentPolicyError::PayloadMismatch);
+        }
+        let candidates = locate_taints(result, request.account(), &self.taints)?;
+        self.prepare_model_input(
+            request,
+            result.context(),
+            ModelInputKind::Locate,
+            result.guard(),
+            candidates,
+            ModelInputTokenReservation {
+                measured: structured_input_tokens,
+                additional: 0,
+            },
+        )
+    }
+
     /// Reserves exact bounded-read input before any model transport receives bytes.
     pub fn prepare_read_input(
         &mut self,
@@ -1144,6 +1187,15 @@ impl AgentRunPolicy {
         receipt: &SemanticDiffDeliveryReceipt,
     ) -> Result<AgentActiveModelCall, AgentPolicyError> {
         self.commit_model_input(admission, ModelInputKind::Diff, receipt.guard())
+    }
+
+    /// Commits one exact locate-result taint projection after transport delivery.
+    pub fn commit_locate_input(
+        &mut self,
+        admission: AgentModelCallAdmission,
+        receipt: &SemanticLocateDeliveryReceipt,
+    ) -> Result<AgentActiveModelCall, AgentPolicyError> {
+        self.commit_model_input(admission, ModelInputKind::Locate, receipt.guard())
     }
 
     /// Commits exact read taint after exact transport delivery receipt.
@@ -1608,6 +1660,9 @@ pub enum AgentPolicyError {
     /// The diff's exact prior source cohort was not committed to this policy.
     #[error("agent policy semantic diff baseline is not committed")]
     DiffBaselineMissing,
+    /// The locate result's exact observation or one returned reference was not committed.
+    #[error("agent policy semantic locate baseline is not committed")]
+    LocateBaselineMissing,
     /// Projected persistent model-context taint exceeded its hard ceiling.
     #[error("agent policy taint cohort ceiling reached")]
     TaintLimit,
@@ -1922,6 +1977,40 @@ fn insert_taint_reference(references: &mut Vec<SemanticReferenceId>, current: Se
     }
 }
 
+fn locate_taints(
+    result: &SemanticLocateResult,
+    account: AgentContextAccountBinding,
+    retained: &[AgentTaintCohort],
+) -> Result<Vec<AgentTaintCohort>, AgentPolicyError> {
+    if account.context() != result.context() {
+        return Err(AgentPolicyError::Authority);
+    }
+    let candidates = retained
+        .iter()
+        .filter(|cohort| {
+            cohort.context == result.context()
+                && cohort.observation == result.observation()
+                && cohort.observation_generation == result.observation_generation()
+                && cohort.source_guard == result.observation_guard()
+                && cohort.account == account.account()
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return Err(AgentPolicyError::LocateBaselineMissing);
+    }
+    for matched in result.matches() {
+        let source_count = candidates
+            .iter()
+            .filter(|cohort| cohort.contains_reference(matched.reference()))
+            .count();
+        if source_count != 1 {
+            return Err(AgentPolicyError::LocateBaselineMissing);
+        }
+    }
+    Ok(candidates)
+}
+
 fn read_taints(
     read: &SemanticReadResult<'_>,
     account: AgentContextAccountBinding,
@@ -2141,6 +2230,7 @@ fn admission_guard(facts: AdmissionGuardFacts<'_>) -> [u8; 32] {
         ModelInputKind::Diff => 2,
         ModelInputKind::Read => 3,
         ModelInputKind::Screenshot => 4,
+        ModelInputKind::Locate => 5,
     }]);
     hash_context(&mut hasher, facts.context);
     hasher.update(facts.source_guard);
@@ -2208,13 +2298,14 @@ mod tests {
     use crate::semantic_screenshot::admitted_test_screenshot;
     use crate::{
         compute_semantic_diff, decode_semantic_snapshot, encode_semantic_diff,
-        encode_semantic_observation, encode_semantic_read, read_semantic_observation,
-        verify_semantic_action, AgentAccountAttestationId, AgentAccountId, AgentDataFlowRule,
-        AgentEffectScope, AgentPlanNodeAuthority, AgentPlanNodeScope,
-        AgentPreparedObservationRequest, AgentPreparedReadRequest, AgentProviderCallConfig,
-        AgentProviderContractError, AgentProviderDiffRequestDraft, AgentProviderEndpoint,
-        AgentProviderInputEvidence, AgentProviderInputOutcome, AgentProviderKind,
-        AgentProviderLocalInputTokenCounter, AgentProviderModelRevision, AgentProviderObjective,
+        encode_semantic_locate_result, encode_semantic_observation, encode_semantic_read,
+        locate_semantic_observation, read_semantic_observation, verify_semantic_action,
+        AgentAccountAttestationId, AgentAccountId, AgentDataFlowRule, AgentEffectScope,
+        AgentPlanNodeAuthority, AgentPlanNodeScope, AgentPreparedObservationRequest,
+        AgentPreparedReadRequest, AgentProviderCallConfig, AgentProviderContractError,
+        AgentProviderDiffRequestDraft, AgentProviderEndpoint, AgentProviderInputEvidence,
+        AgentProviderInputOutcome, AgentProviderKind, AgentProviderLocalInputTokenCounter,
+        AgentProviderLocateRequestDraft, AgentProviderModelRevision, AgentProviderObjective,
         AgentProviderRequestSettlement, AgentProviderScreenshotRequestDraft,
         AgentProviderStreamBudget, AgentRunManifestId, AgentRunScope, ContextAutomationState,
         ContextCapabilities, ContextCapability, ContextId, ContextIdentity, ContextKind,
@@ -2222,7 +2313,8 @@ mod tests {
         FrameId, SemanticActionBatch, SemanticActionBatchId, SemanticActionFailure,
         SemanticActionIntent, SemanticActionProposal, SemanticCaptureInstant,
         SemanticDecodeContext, SemanticDiffBudget, SemanticDiffOutcome, SemanticEffectEvidence,
-        SemanticFrameJoin, SemanticFrameTrust, SemanticInvocationId,
+        SemanticFrameJoin, SemanticFrameTrust, SemanticInvocationId, SemanticLocateBudget,
+        SemanticLocateId, SemanticLocateQuery, SemanticLocateRequest, SemanticLocateScope,
         SemanticModelDeliverySettlement, SemanticModelEncodingBudget, SemanticObservationAssembler,
         SemanticObservationBudget, SemanticObservationId, SemanticObservationRequest,
         SemanticPreparedAction, SemanticReadAuthority, SemanticReadBudget,
@@ -3818,6 +3910,183 @@ mod tests {
         ));
         assert_eq!(fixture.policy.pending_model_calls(), 0);
         assert_eq!(fixture.policy.taints().len(), 2);
+    }
+
+    #[test]
+    fn locate_result_rejoins_committed_baseline_without_widening_taint() {
+        let source = origin("provider-locate-request");
+        let context = make_context(9_237, 9_238, 9_239);
+        let observation = actionable_observation(context, source.clone(), 1);
+        let selected = tokenizer();
+        let config = provider_config(selected.clone(), 10, 20);
+        let objective = AgentProviderObjective::try_admit(
+            "Find the save control".to_owned(),
+            &FixedCounter {
+                revision: selected.clone(),
+                tokens: 5,
+            },
+            &selected,
+        )
+        .expect("objective");
+        let mut fixture = policy_fixture(
+            9_237,
+            9_238,
+            source,
+            SemanticSensitivity::Sensitive,
+            &[SemanticEffectClass::Read],
+            run_budget(10, 5_000, 10_000),
+        );
+        let binding = account(context, NOW - 1);
+        let committed = AgentPreparedObservationRequest::try_openai(
+            &mut fixture.policy,
+            call_request(1, fixture.lease, binding, 15, 20, 100, NOW),
+            &observation,
+            observation_payload(&observation, 50),
+            &objective,
+            config.clone(),
+        )
+        .expect("initial request")
+        .into_transport_input()
+        .commit(&mut fixture.policy)
+        .expect("initial commit");
+        let (initial_request, input, continuation) = committed.into_parts();
+        let (active, evidence) = input.into_parts();
+        let baseline = evidence
+            .observation_acknowledgement()
+            .expect("observation baseline")
+            .clone();
+        fixture
+            .policy
+            .settle_model_call(active, AgentModelCallSettlement::Completed, 65, 4, 80)
+            .expect("initial settlement");
+        assert_eq!(fixture.policy.taints().len(), 1);
+        let initial_reference_count = fixture.policy.taints()[0].reference_count();
+
+        let arguments = r#"{"semantic_query":"save draft","scope":{"kind":"initial"}}"#;
+        let tool = crate::AgentBrowserToolCall::decode_openai(
+            initial_request.call(),
+            "fc_locate_request_1".to_owned(),
+            "call_locate_request_1".to_owned(),
+            "locate",
+            arguments.to_owned(),
+        )
+        .expect("locate tool");
+        let completion = crate::AgentProviderCompletion::new(
+            initial_request.call(),
+            crate::AgentProviderStopReason::ToolCalls,
+            crate::AgentProviderUsage::try_new(65, 4, 0, 0, 0).expect("usage"),
+            crate::AgentProviderStreamStats::new(
+                200,
+                8,
+                0,
+                1,
+                u32::try_from(arguments.len()).expect("argument bytes"),
+            ),
+            true,
+        );
+        let continuation = continuation
+            .expect("continuation seed")
+            .join_terminal_tool(completion, tool.into_continuation_parts().0)
+            .expect("locate terminal join");
+        let frames = observation
+            .frames()
+            .iter()
+            .map(|frame| frame.frame().clone())
+            .collect::<Vec<_>>();
+        let locate_request = SemanticLocateRequest::bind(
+            SemanticLocateId::new(1).expect("locate id"),
+            &observation,
+            &baseline,
+            &frames,
+            SemanticLocateQuery::try_new("save draft".to_owned()).expect("query"),
+            SemanticLocateScope::Initial,
+            SemanticLocateBudget::STANDARD,
+        )
+        .expect("locate bind");
+        let result = locate_semantic_observation(&observation, locate_request).expect("locate");
+        assert_eq!(result.matches().len(), 1);
+        let payload = encode_semantic_locate_result(
+            &result,
+            SemanticModelEncodingBudget::LOCATE_RESULT_EXACT,
+        )
+        .expect("encode locate")
+        .admit(
+            &FixedCounter {
+                revision: selected.clone(),
+                tokens: 30,
+            },
+            &selected,
+        )
+        .expect("admit locate");
+        let next_request = call_request(2, fixture.lease, binding, 500, 20, 100, NOW);
+        let provider_counted_result = SemanticTokenMeasurement::try_new(
+            selected.clone(),
+            30,
+            SemanticTokenCountQuality::ProviderExact,
+        )
+        .expect("provider locate measurement");
+        let local_structured = SemanticTokenMeasurement::try_new(
+            selected.clone(),
+            120,
+            SemanticTokenCountQuality::ExactLocal,
+        )
+        .expect("local structured measurement");
+        assert_eq!(
+            config
+                .validate_locate_request(next_request, &provider_counted_result, &local_structured,)
+                .expect_err("locate result itself must be counted locally"),
+            AgentProviderContractError::InputTokenQuality
+        );
+        let draft = AgentProviderLocateRequestDraft::try_new(
+            continuation
+                .bind_locate_request(next_request, &config, &result, payload)
+                .expect("bind locate result"),
+        )
+        .expect("fixed locate draft");
+        let prepared = draft
+            .try_prepare(
+                &mut fixture.policy,
+                next_request,
+                &result,
+                &FixedProviderInputCounter {
+                    revision: selected,
+                    tokens: 120,
+                    quality: SemanticTokenCountQuality::ExactLocal,
+                },
+            )
+            .expect("locate whole-input admission");
+        assert_eq!(prepared.structured_input_measurement().tokens(), 120);
+        assert_eq!(fixture.policy.accounting().reserved_model_tokens(), 140);
+        let transcript_bytes = prepared.continuation_transcript_bytes();
+        let committed = prepared
+            .into_transport_input()
+            .commit(&mut fixture.policy)
+            .expect("locate transport commit");
+        assert_eq!(
+            committed.continuation_transcript_bytes(),
+            Some(transcript_bytes)
+        );
+        assert!(committed
+            .input_evidence()
+            .locate_receipt()
+            .is_some_and(|receipt| receipt.matches_result(&result)));
+        assert!(committed
+            .input_evidence()
+            .observation_acknowledgement()
+            .is_some_and(|acknowledgement| acknowledgement.matches(&observation)));
+        assert_eq!(fixture.policy.taints().len(), 1);
+        assert_eq!(
+            fixture.policy.taints()[0].reference_count(),
+            initial_reference_count
+        );
+        let (_, input, continuation) = committed.into_parts();
+        assert!(continuation.is_some());
+        let (active, evidence) = input.into_parts();
+        assert!(matches!(evidence, AgentProviderInputEvidence::Locate(_)));
+        fixture
+            .policy
+            .settle_model_call(active, AgentModelCallSettlement::Completed, 120, 4, 80)
+            .expect("locate settlement");
     }
 
     #[test]

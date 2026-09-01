@@ -361,6 +361,20 @@ returns only opaque references, closed roles/match classes, sensitivity/trust,
 actionability, and truthful truncation counts. It exposes no selector, raw
 document surface, script, regex, native handle, or new action authority.
 
+The result is encoded as deterministic `ZLOC1` content without repeating the
+query or any matched page string. Encoding is capped at 8 KiB and 2,048 exact
+tokens. Only an exact prior tool-only `locate` stop may bind it to a strictly
+newer same-plan call. OpenAI and Anthropic receive their matching fixed
+function/tool result through the bounded stateless transcript; the complete
+immutable body must pass the pinned local whole-input counter before policy
+reservation. Policy rejoins the exact committed observation cohort and proves
+every returned reference was already disclosed. Committing delivery therefore
+adds no origin, account, sensitivity, trust, or reference taint; it returns a
+content-free receipt and retains the same observation acknowledgement for a
+later bounded turn. Refusal or pre-commit cancellation releases the reservation.
+The diff path mechanically rejects both locate and screenshot correlations, so
+neither result class can be substituted with a page delta.
+
 After an action, return a semantic diff against the last acknowledged snapshot:
 
 - added, removed, changed, and moved semantic nodes;

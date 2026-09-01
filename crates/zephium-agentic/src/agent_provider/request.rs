@@ -1,7 +1,7 @@
 //! Fixed, bounded provider requests and one-shot input commitment.
 //!
 //! Request construction accepts only a token-admitted objective and an
-//! existing semantic observation/read payload. The provider body is generated
+//! existing semantic observation/read or bound tool-result payload. The provider body is generated
 //! from an immutable instruction and the same closed tool vocabulary decoded
 //! locally. It has no arbitrary instructions, provider-native browser tools,
 //! selectors, JavaScript, DOM/HTML, prior-response state, metadata, or secret.
@@ -17,11 +17,13 @@ use thiserror::Error;
 
 use crate::agent_policy::AgentModelCallExpectation;
 use crate::semantic_diff_model::SemanticDiffDeliveryAuthority;
+use crate::semantic_locate_model::SemanticLocateDeliveryAuthority;
 use crate::semantic_wire::looks_like_secret_value;
 use crate::{
     AgentActiveModelCall, AgentModelCallAdmission, AgentModelCallRequest,
     AgentModelInputCancellation, AgentPolicyError, AgentRunPolicy, SemanticDiff,
     SemanticDiffDeliveryReceipt, SemanticDiffEncodingStats, SemanticEncodingStats,
+    SemanticLocateDeliveryReceipt, SemanticLocateEncodingStats, SemanticLocateResult,
     SemanticModelPayload, SemanticObservation, SemanticObservationAcknowledgement,
     SemanticReadDeliveryReceipt, SemanticReadEncodingStats, SemanticReadModelPayload,
     SemanticReadResult, SemanticScreenshotDeliveryReceipt, SemanticScreenshotStats,
@@ -34,11 +36,11 @@ use crate::{
 use super::continuation::AgentProviderTranscript;
 use super::tool::AgentBrowserToolKind;
 use super::{
-    AgentProviderBoundDiffContinuation, AgentProviderBoundScreenshotContinuation,
-    AgentProviderCallConfig, AgentProviderCallIdentity, AgentProviderContinuationSeed,
-    AgentProviderContractError, AgentProviderKind, AgentProviderModelRevision,
-    ANTHROPIC_GLOBAL_INFERENCE_GEO, ANTHROPIC_STANDARD_SERVICE_TIER_REQUEST,
-    OPENAI_STANDARD_SERVICE_TIER,
+    AgentProviderBoundDiffContinuation, AgentProviderBoundLocateContinuation,
+    AgentProviderBoundScreenshotContinuation, AgentProviderCallConfig, AgentProviderCallIdentity,
+    AgentProviderContinuationSeed, AgentProviderContractError, AgentProviderKind,
+    AgentProviderModelRevision, ANTHROPIC_GLOBAL_INFERENCE_GEO,
+    ANTHROPIC_STANDARD_SERVICE_TIER_REQUEST, OPENAI_STANDARD_SERVICE_TIER,
 };
 
 /// Maximum UTF-8 bytes in one approved browser objective.
@@ -290,15 +292,18 @@ pub enum AgentProviderRequestSettlement {
 
 /// Content-free proof of the exact semantic input committed with a provider call.
 ///
-/// A full observation or committed diff can supply the next exact diff
-/// baseline. A bounded-read receipt deliberately cannot. Cloning this proof neither clones
-/// active provider authority nor authorizes model input, policy, or browser work.
+/// A full observation, committed diff, or locate result can supply the next
+/// exact observation baseline. Bounded-read and screenshot receipts
+/// deliberately cannot. Cloning this proof neither clones active provider
+/// authority nor authorizes model input, policy, or browser work.
 #[derive(Clone, Eq, PartialEq)]
 pub enum AgentProviderInputEvidence {
     /// One exact full observation committed to disclosure.
     Observation(SemanticObservationAcknowledgement),
     /// One exact semantic diff committed to disclosure.
     Diff(SemanticDiffDeliveryReceipt),
+    /// One exact content-free semantic-locate result committed to disclosure.
+    Locate(SemanticLocateDeliveryReceipt),
     /// One exact bounded semantic read committed to disclosure.
     Read(SemanticReadDeliveryReceipt),
     /// One exact sensitive viewport screenshot committed to disclosure.
@@ -311,6 +316,7 @@ impl AgentProviderInputEvidence {
         match self {
             Self::Observation(acknowledgement) => Some(acknowledgement),
             Self::Diff(receipt) => Some(receipt.acknowledgement()),
+            Self::Locate(receipt) => Some(receipt.acknowledgement()),
             Self::Read(_) => None,
             Self::Screenshot(_) => None,
         }
@@ -320,7 +326,7 @@ impl AgentProviderInputEvidence {
     pub const fn diff_receipt(&self) -> Option<&SemanticDiffDeliveryReceipt> {
         match self {
             Self::Diff(receipt) => Some(receipt),
-            Self::Observation(_) | Self::Read(_) => None,
+            Self::Observation(_) | Self::Locate(_) | Self::Read(_) => None,
             Self::Screenshot(_) => None,
         }
     }
@@ -329,7 +335,15 @@ impl AgentProviderInputEvidence {
     pub const fn read_receipt(&self) -> Option<&SemanticReadDeliveryReceipt> {
         match self {
             Self::Read(receipt) => Some(receipt),
-            Self::Observation(_) | Self::Diff(_) | Self::Screenshot(_) => None,
+            Self::Observation(_) | Self::Diff(_) | Self::Locate(_) | Self::Screenshot(_) => None,
+        }
+    }
+
+    /// Exact semantic-locate proof when this call sent a locate tool result.
+    pub const fn locate_receipt(&self) -> Option<&SemanticLocateDeliveryReceipt> {
+        match self {
+            Self::Locate(receipt) => Some(receipt),
+            Self::Observation(_) | Self::Diff(_) | Self::Read(_) | Self::Screenshot(_) => None,
         }
     }
 
@@ -337,7 +351,7 @@ impl AgentProviderInputEvidence {
     pub const fn screenshot_receipt(&self) -> Option<&SemanticScreenshotDeliveryReceipt> {
         match self {
             Self::Screenshot(receipt) => Some(receipt),
-            Self::Observation(_) | Self::Diff(_) | Self::Read(_) => None,
+            Self::Observation(_) | Self::Diff(_) | Self::Locate(_) | Self::Read(_) => None,
         }
     }
 }
@@ -350,6 +364,7 @@ impl fmt::Debug for AgentProviderInputEvidence {
                 .field(acknowledgement)
                 .finish(),
             Self::Diff(receipt) => formatter.debug_tuple("Diff").field(receipt).finish(),
+            Self::Locate(receipt) => formatter.debug_tuple("Locate").field(receipt).finish(),
             Self::Read(receipt) => formatter.debug_tuple("Read").field(receipt).finish(),
             Self::Screenshot(receipt) => {
                 formatter.debug_tuple("Screenshot").field(receipt).finish()
@@ -428,6 +443,10 @@ enum AgentProviderInputCommitment {
         admission: AgentModelCallAdmission,
         delivery: SemanticDiffDeliveryAuthority,
     },
+    Locate {
+        admission: AgentModelCallAdmission,
+        delivery: SemanticLocateDeliveryAuthority,
+    },
     Read {
         admission: AgentModelCallAdmission,
         delivery: crate::semantic_read_model::SemanticReadDeliveryAuthority,
@@ -466,6 +485,17 @@ impl AgentProviderInputCommitment {
                     evidence: AgentProviderInputEvidence::Diff(receipt),
                 })
             }
+            Self::Locate {
+                admission,
+                delivery,
+            } => {
+                let receipt = delivery.commit();
+                let active = policy.commit_locate_input(admission, &receipt)?;
+                Ok(AgentCommittedProviderInput {
+                    active,
+                    evidence: AgentProviderInputEvidence::Locate(receipt),
+                })
+            }
             Self::Read {
                 admission,
                 delivery,
@@ -499,6 +529,7 @@ impl AgentProviderInputCommitment {
         let admission = match self {
             Self::Observation { admission, .. }
             | Self::Diff { admission, .. }
+            | Self::Locate { admission, .. }
             | Self::Read { admission, .. }
             | Self::Screenshot { admission, .. } => admission,
         };
@@ -654,8 +685,8 @@ impl AgentCommittedProviderRequest {
 
     /// Moves request, committed input, and optional one-shot continuation seed.
     ///
-    /// A committed full observation or diff can carry a seed. A bounded read
-    /// never creates diff-baseline continuation authority.
+    /// A committed full observation, diff, or locate result can carry a seed.
+    /// Bounded reads and screenshots never create continuation authority.
     pub fn into_parts(
         self,
     ) -> (
@@ -1143,6 +1174,209 @@ impl fmt::Debug for AgentPreparedDiffRequest {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("AgentPreparedDiffRequest")
+            .field("request", &self.request)
+            .field("admission", &self.admission)
+            .field("semantic_stats", &self.semantic_stats)
+            .field("structured_input", &self.structured_input)
+            .field(
+                "continuation_transcript_bytes",
+                &self.continuation_transcript.retained_bytes(),
+            )
+            .field("delivery", &self.delivery)
+            .field("content", &"[redacted]")
+            .finish()
+    }
+}
+
+/// Fixed stateless locate-result body awaiting whole-input token admission.
+///
+/// The result contains no page strings, but remains joined to its exact
+/// baseline, result guard, bounded transcript, and one-shot policy authority.
+#[must_use]
+pub struct AgentProviderLocateRequestDraft {
+    request: AgentProviderRequest,
+    delivery: SemanticLocateDeliveryAuthority,
+    semantic_stats: SemanticLocateEncodingStats,
+    continuation_transcript: AgentProviderTranscript,
+}
+
+impl AgentProviderLocateRequestDraft {
+    /// Encodes the exact fixed provider protocol selected by the bound turn.
+    pub fn try_new(
+        continuation: AgentProviderBoundLocateContinuation,
+    ) -> Result<Self, AgentProviderRequestError> {
+        let endpoint = match continuation.provider() {
+            AgentProviderKind::OpenAiResponses => AgentProviderEndpoint::OpenAiResponses,
+            AgentProviderKind::AnthropicMessages => AgentProviderEndpoint::AnthropicMessages,
+        };
+        let body = match continuation.provider() {
+            AgentProviderKind::OpenAiResponses => {
+                encode_openai_continuation_body(continuation.config(), continuation.transcript())?
+            }
+            AgentProviderKind::AnthropicMessages => encode_anthropic_continuation_body(
+                continuation.config(),
+                continuation.transcript(),
+            )?,
+        };
+        let (call, config, continuation_transcript, semantic_stats, delivery) =
+            continuation.into_request_parts();
+        Ok(Self {
+            request: AgentProviderRequest {
+                call,
+                config,
+                endpoint,
+                body,
+            },
+            delivery,
+            semantic_stats,
+            continuation_transcript,
+        })
+    }
+
+    /// Immutable provider body available only to a trusted full-input counter.
+    pub const fn request(&self) -> &AgentProviderRequest {
+        &self.request
+    }
+
+    /// Content-free metrics for the appended locate result.
+    pub const fn semantic_stats(&self) -> SemanticLocateEncodingStats {
+        self.semantic_stats
+    }
+
+    /// Private structured transcript bytes retained by this draft.
+    pub const fn continuation_transcript_bytes(&self) -> usize {
+        self.continuation_transcript.retained_bytes()
+    }
+
+    fn measure_structured_input(
+        &self,
+        counter: &dyn AgentProviderLocalInputTokenCounter,
+    ) -> Result<SemanticTokenMeasurement, SemanticTokenCounterError> {
+        let config = self.request.config();
+        match self.request.endpoint() {
+            AgentProviderEndpoint::OpenAiResponses => counter.count_openai_responses_input(
+                config.model(),
+                config.tokenizer(),
+                self.request.body(),
+            ),
+            AgentProviderEndpoint::AnthropicMessages => counter.count_anthropic_messages_input(
+                config.model(),
+                config.tokenizer(),
+                self.request.body(),
+            ),
+        }
+    }
+
+    /// Counts and atomically admits this exact whole structured locate result.
+    pub fn try_prepare(
+        self,
+        policy: &mut AgentRunPolicy,
+        call_request: AgentModelCallRequest,
+        result: &SemanticLocateResult,
+        counter: &dyn AgentProviderLocalInputTokenCounter,
+    ) -> Result<AgentPreparedLocateRequest, AgentProviderRequestError> {
+        let structured_input = self
+            .measure_structured_input(counter)
+            .map_err(AgentProviderRequestError::InputTokenCounter)?;
+        self.request.config().validate_locate_request(
+            call_request,
+            self.delivery.token_measurement(),
+            &structured_input,
+        )?;
+        let call = self.request.call();
+        let admission = policy.prepare_provider_locate_input(
+            call_request,
+            AgentModelCallExpectation::new(call.manifest(), call.call(), call.lease(), call.node()),
+            result,
+            &self.delivery,
+            u64::from(structured_input.tokens()),
+        )?;
+        debug_assert_eq!(call, AgentProviderCallIdentity::from_admission(&admission));
+        Ok(AgentPreparedLocateRequest {
+            request: self.request,
+            admission,
+            delivery: self.delivery,
+            semantic_stats: self.semantic_stats,
+            structured_input,
+            continuation_transcript: self.continuation_transcript,
+        })
+    }
+}
+
+impl fmt::Debug for AgentProviderLocateRequestDraft {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentProviderLocateRequestDraft")
+            .field("request", &self.request)
+            .field("semantic_stats", &self.semantic_stats)
+            .field(
+                "continuation_transcript_bytes",
+                &self.continuation_transcript.retained_bytes(),
+            )
+            .field("delivery", &self.delivery)
+            .field("content", &"[redacted]")
+            .finish()
+    }
+}
+
+/// Exact stateless locate-result request with whole-input policy admission.
+#[must_use]
+pub struct AgentPreparedLocateRequest {
+    request: AgentProviderRequest,
+    admission: AgentModelCallAdmission,
+    delivery: SemanticLocateDeliveryAuthority,
+    semantic_stats: SemanticLocateEncodingStats,
+    structured_input: SemanticTokenMeasurement,
+    continuation_transcript: AgentProviderTranscript,
+}
+
+impl AgentPreparedLocateRequest {
+    /// Exact immutable provider request admitted for transport.
+    pub const fn request(&self) -> &AgentProviderRequest {
+        &self.request
+    }
+
+    /// Content-free metrics for the appended locate result.
+    pub const fn semantic_stats(&self) -> SemanticLocateEncodingStats {
+        self.semantic_stats
+    }
+
+    /// Exact local count over the complete provider-structured replay.
+    pub const fn structured_input_measurement(&self) -> &SemanticTokenMeasurement {
+        &self.structured_input
+    }
+
+    /// Private structured transcript bytes retained for another eligible turn.
+    pub const fn continuation_transcript_bytes(&self) -> usize {
+        self.continuation_transcript.retained_bytes()
+    }
+
+    /// Joins the exact request, locate proof, and policy admission for transport.
+    pub fn into_transport_input(self) -> AgentProviderTransportInput {
+        AgentProviderTransportInput {
+            request: self.request,
+            commitment: AgentProviderInputCommitment::Locate {
+                admission: self.admission,
+                delivery: self.delivery,
+            },
+            continuation_transcript: Some(self.continuation_transcript),
+        }
+    }
+
+    /// Consumes request and admission together at the transport commit point.
+    pub fn settle(
+        self,
+        policy: &mut AgentRunPolicy,
+        settlement: AgentProviderRequestSettlement,
+    ) -> Result<AgentProviderInputOutcome, AgentProviderRequestError> {
+        self.into_transport_input().settle(policy, settlement)
+    }
+}
+
+impl fmt::Debug for AgentPreparedLocateRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentPreparedLocateRequest")
             .field("request", &self.request)
             .field("admission", &self.admission)
             .field("semantic_stats", &self.semantic_stats)

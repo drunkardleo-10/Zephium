@@ -1,4 +1,4 @@
-//! Exact one-shot provider continuation authority for semantic diffs.
+//! Exact one-shot provider continuation authority for semantic tool results.
 //!
 //! This module retains the minimum bounded, structured prior input required by
 //! stateless provider replay plus content-free committed baseline proof and the
@@ -12,9 +12,11 @@ use std::sync::Arc;
 use thiserror::Error;
 
 use crate::semantic_diff_model::SemanticDiffDeliveryAuthority;
+use crate::semantic_locate_model::SemanticLocateDeliveryAuthority;
 use crate::semantic_screenshot::SemanticScreenshotDeliveryAuthority;
 use crate::{
     AgentModelCallRequest, SemanticDiff, SemanticDiffEncodingStats, SemanticDiffModelPayload,
+    SemanticLocateEncodingStats, SemanticLocateModelPayload, SemanticLocateResult,
     SemanticObservationAcknowledgement, SemanticObservationGeneration, SemanticObservationId,
     SemanticScreenshot, SemanticScreenshotStats,
 };
@@ -189,6 +191,7 @@ impl AgentProviderContinuationSeed {
         let baseline = match input.evidence() {
             AgentProviderInputEvidence::Observation(baseline) => baseline.clone(),
             AgentProviderInputEvidence::Diff(receipt) => receipt.acknowledgement().clone(),
+            AgentProviderInputEvidence::Locate(receipt) => receipt.acknowledgement().clone(),
             AgentProviderInputEvidence::Read(_) | AgentProviderInputEvidence::Screenshot(_) => {
                 return None;
             }
@@ -254,7 +257,7 @@ impl fmt::Debug for AgentProviderContinuationSeed {
     }
 }
 
-/// Move-only exact prior-turn correlation for one semantic-diff tool result.
+/// Move-only exact prior-turn correlation for one semantic tool result.
 ///
 /// This type grants no browser action or model call. A provider adapter must
 /// consume it while preparing a newly admitted call whose config, run, plan
@@ -354,6 +357,69 @@ impl AgentProviderContinuation {
         })
     }
 
+    /// Binds one provisional same-plan request to an exact semantic-locate result.
+    ///
+    /// Only a prior `locate` tool call can enter this path. The result contains
+    /// no matched strings and appends one bounded reusable transcript turn.
+    pub fn bind_locate_request(
+        self,
+        request: AgentModelCallRequest,
+        next_config: &AgentProviderCallConfig,
+        result: &SemanticLocateResult,
+        payload: SemanticLocateModelPayload,
+    ) -> Result<AgentProviderBoundLocateContinuation, AgentProviderContinuationError> {
+        let next_call = AgentProviderCallIdentity {
+            manifest: self.prior_call.manifest(),
+            call: request.id(),
+            lease: request.lease(),
+            node: self.prior_call.node(),
+        };
+        self.bind_locate(next_call, next_config, result, payload)
+    }
+
+    /// Consumes the exact prior locate call into one fixed result continuation.
+    pub fn bind_locate(
+        self,
+        next_call: AgentProviderCallIdentity,
+        next_config: &AgentProviderCallConfig,
+        result: &SemanticLocateResult,
+        payload: SemanticLocateModelPayload,
+    ) -> Result<AgentProviderBoundLocateContinuation, AgentProviderContinuationError> {
+        if next_config != &self.config {
+            return Err(AgentProviderContinuationError::Config);
+        }
+        if next_call.manifest() != self.prior_call.manifest()
+            || next_call.lease() != self.prior_call.lease()
+            || next_call.node() != self.prior_call.node()
+            || next_call.call() <= self.prior_call.call()
+        {
+            return Err(AgentProviderContinuationError::Lineage);
+        }
+        if self.correlation.kind() != AgentBrowserToolKind::Locate {
+            return Err(AgentProviderContinuationError::ToolKind);
+        }
+        if !result.matches_acknowledgement(&self.baseline) {
+            return Err(AgentProviderContinuationError::Baseline);
+        }
+        if !payload.matches_result(result) {
+            return Err(AgentProviderContinuationError::Payload);
+        }
+        let (prior_call, config, baseline, correlation, transcript) = self.into_parts();
+        let (tool_result, semantic_stats, delivery) = payload.into_provider_parts();
+        let transcript = transcript.try_append(correlation, tool_result)?;
+        Ok(AgentProviderBoundLocateContinuation {
+            prior_call,
+            next_call,
+            config,
+            baseline,
+            transcript,
+            semantic_stats,
+            delivery,
+            observation: result.observation(),
+            observation_generation: result.observation_generation(),
+        })
+    }
+
     /// Binds one provisional same-plan request to the exact viewport image.
     ///
     /// Only a prior `screenshot` tool call can enter this path. The returned
@@ -412,6 +478,12 @@ impl AgentProviderContinuation {
         diff: &SemanticDiff,
         payload: &SemanticDiffModelPayload,
     ) -> Result<(), AgentProviderContinuationError> {
+        if matches!(
+            self.correlation.kind(),
+            AgentBrowserToolKind::Locate | AgentBrowserToolKind::Screenshot
+        ) {
+            return Err(AgentProviderContinuationError::ToolKind);
+        }
         if next_config != &self.config {
             return Err(AgentProviderContinuationError::Config);
         }
@@ -569,6 +641,122 @@ impl fmt::Debug for AgentProviderBoundDiffContinuation {
     }
 }
 
+/// Move-only provider continuation bound to one exact semantic-locate result.
+///
+/// Provider-specific request construction may consume this value, but it may
+/// not substitute a result, call, config, baseline, or tool correlation.
+#[must_use]
+pub struct AgentProviderBoundLocateContinuation {
+    prior_call: AgentProviderCallIdentity,
+    next_call: AgentProviderCallIdentity,
+    config: AgentProviderCallConfig,
+    baseline: SemanticObservationAcknowledgement,
+    transcript: AgentProviderTranscript,
+    semantic_stats: SemanticLocateEncodingStats,
+    delivery: SemanticLocateDeliveryAuthority,
+    observation: SemanticObservationId,
+    observation_generation: SemanticObservationGeneration,
+}
+
+impl AgentProviderBoundLocateContinuation {
+    /// Exact completed provider call awaiting the locate result.
+    pub const fn prior_call(&self) -> AgentProviderCallIdentity {
+        self.prior_call
+    }
+
+    /// Exact provisional model call that may carry the locate result.
+    pub const fn next_call(&self) -> AgentProviderCallIdentity {
+        self.next_call
+    }
+
+    /// Fixed provider protocol retained across the continuation.
+    pub const fn provider(&self) -> AgentProviderKind {
+        self.config.provider()
+    }
+
+    /// Exact source observation represented by the locate result.
+    pub const fn observation(&self) -> SemanticObservationId {
+        self.observation
+    }
+
+    /// Exact source progressive-observation generation.
+    pub const fn observation_generation(&self) -> SemanticObservationGeneration {
+        self.observation_generation
+    }
+
+    /// Exact pending provider tool-call identifier.
+    pub fn tool_call_id(&self) -> &AgentBrowserToolCallId {
+        self.latest_turn().correlation.id()
+    }
+
+    /// Private structured transcript bytes retained for resource accounting.
+    pub const fn retained_transcript_bytes(&self) -> usize {
+        self.transcript.retained_bytes()
+    }
+
+    /// Content-free metrics for the exact locate result now in the transcript.
+    pub const fn semantic_stats(&self) -> SemanticLocateEncodingStats {
+        self.semantic_stats
+    }
+
+    pub(super) const fn config(&self) -> &AgentProviderCallConfig {
+        &self.config
+    }
+
+    pub(super) const fn transcript(&self) -> &AgentProviderTranscript {
+        &self.transcript
+    }
+
+    fn latest_turn(&self) -> &AgentProviderTranscriptTurn {
+        self.transcript
+            .turns
+            .last()
+            .expect("bound locate continuation always appends one transcript turn")
+    }
+
+    pub(super) fn into_request_parts(
+        self,
+    ) -> (
+        AgentProviderCallIdentity,
+        AgentProviderCallConfig,
+        AgentProviderTranscript,
+        SemanticLocateEncodingStats,
+        SemanticLocateDeliveryAuthority,
+    ) {
+        (
+            self.next_call,
+            self.config,
+            self.transcript,
+            self.semantic_stats,
+            self.delivery,
+        )
+    }
+}
+
+impl fmt::Debug for AgentProviderBoundLocateContinuation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentProviderBoundLocateContinuation")
+            .field("prior_call", &self.prior_call)
+            .field("next_call", &self.next_call)
+            .field("provider", &self.config.provider())
+            .field("baseline", &self.baseline)
+            .field("observation", &self.observation)
+            .field("observation_generation", &self.observation_generation)
+            .field("semantic_stats", &self.semantic_stats)
+            .field("delivery", &self.delivery)
+            .field("tool_kind", &self.latest_turn().correlation.kind())
+            .field("tool_call_id", &"[redacted]")
+            .field(
+                "argument_bytes",
+                &self.latest_turn().correlation.argument_bytes(),
+            )
+            .field("transcript_bytes", &self.transcript.retained_bytes())
+            .field("content", &"[redacted]")
+            .finish()
+    }
+}
+
 /// Move-only provider continuation bound to one exact viewport screenshot.
 ///
 /// The canonical PNG is retained only until the fixed provider body is
@@ -699,17 +887,18 @@ mod tests {
     use crate::semantic_screenshot::admitted_test_screenshot;
     use crate::{
         compute_semantic_diff, decode_semantic_snapshot, encode_semantic_diff,
-        AgentAccountAttestationId, AgentAccountScope, AgentContextAccountBinding,
-        AgentModelCallBudget, AgentModelCallRequest, AgentPolicyInstant, ContextCapabilities,
-        ContextCapability, ContextId, ContextIdentity, ContextKind, ContextOperationId,
-        ContextRegistry, ContextRunId, ContextSettlement, FrameId, SemanticDecodeContext,
-        SemanticDiffBudget, SemanticDiffOutcome, SemanticFrameJoin, SemanticFrameTrust,
-        SemanticInvocationId, SemanticModelEncodingBudget, SemanticObservation,
-        SemanticObservationAssembler, SemanticObservationBudget, SemanticObservationId,
-        SemanticObservationRequest, SemanticOrigin, SemanticSnapshotGeneration,
-        SemanticTokenCountQuality, SemanticTokenCountRequirement, SemanticTokenCounter,
-        SemanticTokenCounterError, SemanticTokenMeasurement, SemanticTokenizerRevision,
-        SEMANTIC_WIRE_VERSION,
+        encode_semantic_locate_result, locate_semantic_observation, AgentAccountAttestationId,
+        AgentAccountScope, AgentContextAccountBinding, AgentModelCallBudget, AgentModelCallRequest,
+        AgentPolicyInstant, ContextCapabilities, ContextCapability, ContextId, ContextIdentity,
+        ContextKind, ContextOperationId, ContextRegistry, ContextRunId, ContextSettlement, FrameId,
+        SemanticDecodeContext, SemanticDiffBudget, SemanticDiffOutcome, SemanticFrameJoin,
+        SemanticFrameTrust, SemanticInvocationId, SemanticLocateBudget, SemanticLocateId,
+        SemanticLocateQuery, SemanticLocateRequest, SemanticLocateScope,
+        SemanticModelEncodingBudget, SemanticObservation, SemanticObservationAssembler,
+        SemanticObservationBudget, SemanticObservationId, SemanticObservationRequest,
+        SemanticOrigin, SemanticSnapshotGeneration, SemanticTokenCountQuality,
+        SemanticTokenCountRequirement, SemanticTokenCounter, SemanticTokenCounterError,
+        SemanticTokenMeasurement, SemanticTokenizerRevision, SEMANTIC_WIRE_VERSION,
     };
 
     struct FixedCounter {
@@ -837,6 +1026,29 @@ mod tests {
         .expect("assembler")
         .finish()
         .expect("finish")
+    }
+
+    fn locate_result(
+        observation: &SemanticObservation,
+        acknowledgement: &SemanticObservationAcknowledgement,
+        id: u64,
+    ) -> SemanticLocateResult {
+        let frames = observation
+            .frames()
+            .iter()
+            .map(|frame| frame.frame().clone())
+            .collect::<Vec<_>>();
+        let request = SemanticLocateRequest::bind(
+            SemanticLocateId::new(id).expect("locate"),
+            observation,
+            acknowledgement,
+            &frames,
+            SemanticLocateQuery::try_new("private old state".to_owned()).expect("query"),
+            SemanticLocateScope::Initial,
+            SemanticLocateBudget::STANDARD,
+        )
+        .expect("bind locate");
+        locate_semantic_observation(observation, request).expect("locate result")
     }
 
     fn call(value: u64) -> AgentProviderCallIdentity {
@@ -1061,19 +1273,61 @@ mod tests {
         .admit(&counter, config.tokenizer())
         .expect("admit");
         let prior = call(1);
+        let locate_arguments =
+            r#"{"semantic_query":"private old state","scope":{"kind":"initial"}}"#;
+        let locate_correlation = super::super::AgentBrowserToolCall::decode_openai(
+            prior,
+            "fc_wrong_diff_private_1".to_owned(),
+            "call_wrong_diff_private_1".to_owned(),
+            "locate",
+            locate_arguments.to_owned(),
+        )
+        .expect("locate tool")
+        .into_continuation_parts()
+        .0;
+        let locate_continuation = AgentProviderContinuationSeed {
+            call: prior,
+            config: config.clone(),
+            baseline: baseline.clone(),
+            transcript: transcript(),
+        }
+        .join_terminal_tool(
+            completion(
+                prior,
+                u32::try_from(locate_arguments.len()).expect("argument bytes"),
+            ),
+            locate_correlation,
+        )
+        .expect("locate terminal");
+        let locate_diff_payload = encode_semantic_diff(
+            &diff,
+            SemanticModelEncodingBudget::try_new(
+                16 * 1024,
+                16 * 1024,
+                SemanticTokenCountRequirement::Exact,
+            )
+            .expect("encoding budget"),
+        )
+        .expect("encode")
+        .admit(&counter, config.tokenizer())
+        .expect("admit");
+        assert!(matches!(
+            locate_continuation.bind_diff(call(2), &config, &diff, locate_diff_payload),
+            Err(AgentProviderContinuationError::ToolKind)
+        ));
+
         let seed = AgentProviderContinuationSeed {
             call: prior,
             config: config.clone(),
             baseline: baseline.clone(),
             transcript: transcript(),
         };
-        let arguments =
-            r#"{"semantic_query":"Save \"quoted\" \\ control","scope":{"kind":"initial"}}"#;
+        let arguments = "{}";
         let correlation = super::super::AgentBrowserToolCall::decode_openai(
             prior,
             "fc_continuation_private_1".to_owned(),
             "call_continuation_private_1".to_owned(),
-            "locate",
+            "back",
             arguments.to_owned(),
         )
         .expect("tool")
@@ -1089,7 +1343,7 @@ mod tests {
             )
             .expect("terminal join");
         assert_eq!(continuation.provider(), AgentProviderKind::OpenAiResponses);
-        assert_eq!(continuation.tool_kind(), AgentBrowserToolKind::Locate);
+        assert_eq!(continuation.tool_kind(), AgentBrowserToolKind::Back);
         assert_eq!(continuation.argument_bytes(), arguments.len());
         let debug = format!("{continuation:?}");
         assert!(!debug.contains("call_continuation_private_1"));
@@ -1140,7 +1394,7 @@ mod tests {
         assert_eq!(input[2]["type"], "function_call");
         assert_eq!(input[2]["id"], "fc_continuation_private_1");
         assert_eq!(input[2]["call_id"], "call_continuation_private_1");
-        assert_eq!(input[2]["name"], "locate");
+        assert_eq!(input[2]["name"], "back");
         assert_eq!(input[2]["arguments"], arguments);
         assert_eq!(input[2]["status"], "completed");
         assert_eq!(input[3]["type"], "function_call_output");
@@ -1164,6 +1418,146 @@ mod tests {
             assert!(!debug.contains(secret));
         }
         assert!(debug.contains("[redacted]"));
+    }
+
+    #[test]
+    fn locate_tool_binds_only_its_exact_content_free_result() {
+        let context = context();
+        let observed = observation(context, 1, 1, 1, "private old state");
+        let baseline = SemanticObservationAcknowledgement::from_fingerprint(
+            SemanticObservationFingerprint::from_observation(&observed),
+        );
+        let result = locate_result(&observed, &baseline, 41);
+        let config = config(AgentProviderKind::OpenAiResponses);
+        let counter = FixedCounter {
+            revision: config.tokenizer().clone(),
+        };
+        let payload = encode_semantic_locate_result(
+            &result,
+            SemanticModelEncodingBudget::LOCATE_RESULT_EXACT,
+        )
+        .expect("encode locate")
+        .admit(&counter, config.tokenizer())
+        .expect("admit locate");
+        let prior = call(1);
+        let arguments = r#"{"semantic_query":"private old state","scope":{"kind":"initial"}}"#;
+        let correlation = super::super::AgentBrowserToolCall::decode_openai(
+            prior,
+            "fc_locate_private_1".to_owned(),
+            "call_locate_private_1".to_owned(),
+            "locate",
+            arguments.to_owned(),
+        )
+        .expect("locate tool")
+        .into_continuation_parts()
+        .0;
+        let continuation = AgentProviderContinuationSeed {
+            call: prior,
+            config: config.clone(),
+            baseline,
+            transcript: transcript(),
+        }
+        .join_terminal_tool(
+            completion(
+                prior,
+                u32::try_from(arguments.len()).expect("argument bytes"),
+            ),
+            correlation,
+        )
+        .expect("locate terminal");
+        let prior_transcript_bytes = continuation.retained_transcript_bytes();
+        let bound = continuation
+            .bind_locate(call(2), &config, &result, payload)
+            .expect("bind locate result");
+        assert_eq!(bound.observation(), result.observation());
+        assert_eq!(bound.semantic_stats().matches(), 1);
+        assert!(bound.retained_transcript_bytes() > prior_transcript_bytes);
+        let draft = super::super::request::AgentProviderLocateRequestDraft::try_new(bound)
+            .expect("fixed locate draft");
+        let wire: serde_json::Value =
+            serde_json::from_slice(draft.request().body()).expect("OpenAI locate JSON");
+        let input = wire["input"].as_array().expect("input");
+        assert_eq!(input.len(), 4);
+        assert_eq!(input[2]["name"], "locate");
+        assert_eq!(input[2]["arguments"], arguments);
+        let output = input[3]["output"].as_str().expect("locate output");
+        assert!(output.starts_with("ZLOC1 content=untrusted"));
+        assert!(output.contains("ref=@a2"));
+        assert!(!output.contains("private old state"));
+        assert!(!format!("{draft:?}").contains("private old state"));
+    }
+
+    #[test]
+    fn anthropic_locate_result_is_adjacent_and_provider_shape_exact() {
+        let context = context();
+        let observed = observation(context, 1, 1, 1, "private old state");
+        let baseline = SemanticObservationAcknowledgement::from_fingerprint(
+            SemanticObservationFingerprint::from_observation(&observed),
+        );
+        let result = locate_result(&observed, &baseline, 42);
+        let config = config(AgentProviderKind::AnthropicMessages);
+        let payload = encode_semantic_locate_result(
+            &result,
+            SemanticModelEncodingBudget::LOCATE_RESULT_EXACT,
+        )
+        .expect("encode locate")
+        .admit(
+            &FixedCounter {
+                revision: config.tokenizer().clone(),
+            },
+            config.tokenizer(),
+        )
+        .expect("admit locate");
+        let prior = call(1);
+        let arguments = r#"{"semantic_query":"private old state","scope":{"kind":"initial"}}"#;
+        let correlation = super::super::AgentBrowserToolCall::decode(
+            prior,
+            "toolu_locate_private_1".to_owned(),
+            "locate",
+            arguments.to_owned(),
+        )
+        .expect("Anthropic locate tool")
+        .into_continuation_parts()
+        .0;
+        let continuation = AgentProviderContinuationSeed {
+            call: prior,
+            config: config.clone(),
+            baseline,
+            transcript: transcript(),
+        }
+        .join_terminal_tool(
+            completion(
+                prior,
+                u32::try_from(arguments.len()).expect("argument bytes"),
+            ),
+            correlation,
+        )
+        .expect("locate terminal");
+        let draft = super::super::request::AgentProviderLocateRequestDraft::try_new(
+            continuation
+                .bind_locate(call(2), &config, &result, payload)
+                .expect("bind locate result"),
+        )
+        .expect("fixed Anthropic locate draft");
+        let wire: serde_json::Value =
+            serde_json::from_slice(draft.request().body()).expect("Anthropic locate JSON");
+        let messages = wire["messages"].as_array().expect("messages");
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[1]["role"], "assistant");
+        assert_eq!(messages[1]["content"][0]["type"], "tool_use");
+        assert_eq!(messages[1]["content"][0]["name"], "locate");
+        assert_eq!(messages[1]["content"][0]["id"], "toolu_locate_private_1");
+        assert_eq!(messages[2]["role"], "user");
+        assert_eq!(messages[2]["content"][0]["type"], "tool_result");
+        assert_eq!(
+            messages[2]["content"][0]["tool_use_id"],
+            "toolu_locate_private_1"
+        );
+        let output = messages[2]["content"][0]["content"]
+            .as_str()
+            .expect("locate output");
+        assert!(output.starts_with("ZLOC1 content=untrusted"));
+        assert!(!output.contains("private old state"));
     }
 
     #[test]
@@ -1628,7 +2022,7 @@ impl fmt::Debug for AgentProviderContinuation {
     }
 }
 
-/// Closed refusal while binding one provider turn to a semantic-diff result.
+/// Closed refusal while binding one provider turn to a semantic result.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum AgentProviderContinuationError {
     /// Terminal provider correlation named another committed model call.

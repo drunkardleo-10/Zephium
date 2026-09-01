@@ -10,10 +10,11 @@
 use std::fmt;
 use std::num::NonZeroU64;
 
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::semantic_diff::SemanticObservationFingerprint;
-use crate::semantic_model::role_label;
+use crate::semantic_model::{role_label, sensitivity_label, source_label};
 use crate::semantic_wire::looks_like_secret_value;
 use crate::{
     ContextJoin, FrameId, SemanticFrameBoundaryStatus, SemanticFrameJoin, SemanticNode,
@@ -381,8 +382,10 @@ pub struct SemanticLocateResult {
     observation: SemanticObservationId,
     observation_generation: SemanticObservationGeneration,
     context: ContextJoin,
+    observation_fingerprint: SemanticObservationFingerprint,
     matches: Vec<SemanticLocateMatch>,
     stats: SemanticLocateStats,
+    guard: [u8; 32],
 }
 
 impl SemanticLocateResult {
@@ -414,6 +417,28 @@ impl SemanticLocateResult {
     /// Content-free lookup accounting.
     pub const fn stats(&self) -> SemanticLocateStats {
         self.stats
+    }
+
+    pub(crate) fn matches_acknowledgement(
+        &self,
+        acknowledgement: &SemanticObservationAcknowledgement,
+    ) -> bool {
+        acknowledgement.observation() == self.observation
+            && acknowledgement.generation() == self.observation_generation
+            && acknowledgement.context() == self.context
+            && acknowledgement.guard() == self.observation_fingerprint.digest()
+    }
+
+    pub(crate) fn acknowledgement(&self) -> SemanticObservationAcknowledgement {
+        SemanticObservationAcknowledgement::from_fingerprint(self.observation_fingerprint.clone())
+    }
+
+    pub(crate) const fn observation_guard(&self) -> [u8; 32] {
+        self.observation_fingerprint.digest()
+    }
+
+    pub(crate) const fn guard(&self) -> [u8; 32] {
+        self.guard
     }
 }
 
@@ -507,13 +532,16 @@ pub fn locate_semantic_observation(
         withheld_secret_nodes,
         truncated: usize::from(matched_nodes) > matches.len(),
     };
+    let guard = locate_result_guard(&request, &matches, stats);
     Ok(SemanticLocateResult {
         id: request.id,
         observation: request.observation,
         observation_generation: request.observation_generation,
         context: request.context,
+        observation_fingerprint: request.fingerprint,
         matches,
         stats,
+        guard,
     })
 }
 
@@ -842,6 +870,77 @@ fn ranking_key(candidate: RankedMatch) -> (SemanticLocateMatchQuality, bool, u16
         !candidate.value.actionable,
         candidate.ordinal,
     )
+}
+
+fn locate_result_guard(
+    request: &SemanticLocateRequest,
+    matches: &[SemanticLocateMatch],
+    stats: SemanticLocateStats,
+) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"ZEPHIUM-SEMANTIC-LOCATE-RESULT-1\0");
+    hasher.update(request.id.get().to_be_bytes());
+    hasher.update(request.fingerprint.digest());
+    hasher.update((request.query.source.len() as u64).to_be_bytes());
+    hasher.update(request.query.source.as_bytes());
+    hash_locate_scope(&mut hasher, request.scope);
+    hasher.update([request.budget.max_matches]);
+    hasher.update(stats.scanned_nodes.to_be_bytes());
+    hasher.update(stats.matched_nodes.to_be_bytes());
+    hasher.update([stats.returned_matches]);
+    hasher.update(stats.withheld_secret_nodes.to_be_bytes());
+    hasher.update([u8::from(stats.truncated)]);
+    hasher.update((matches.len() as u64).to_be_bytes());
+    for matched in matches {
+        hasher.update(matched.reference.get().to_be_bytes());
+        hash_guard_label(&mut hasher, role_label(matched.role));
+        hasher.update([match_quality_guard_tag(matched.quality)]);
+        hash_guard_label(&mut hasher, sensitivity_label(matched.sensitivity));
+        hash_guard_label(&mut hasher, source_label(matched.trust));
+        hasher.update([u8::from(matched.actionable)]);
+    }
+    hasher.finalize().into()
+}
+
+fn hash_locate_scope(hasher: &mut Sha256, scope: SemanticLocateScope) {
+    match scope {
+        SemanticLocateScope::Initial => hasher.update([0]),
+        SemanticLocateScope::Region(reference) => {
+            hasher.update([1]);
+            hasher.update(reference.get().to_be_bytes());
+        }
+        SemanticLocateScope::Subtree(reference) => {
+            hasher.update([2]);
+            hasher.update(reference.get().to_be_bytes());
+        }
+        SemanticLocateScope::Table(reference) => {
+            hasher.update([3]);
+            hasher.update(reference.get().to_be_bytes());
+        }
+        SemanticLocateScope::Frame(reference) => {
+            hasher.update([4]);
+            hasher.update(reference.get().to_be_bytes());
+        }
+    }
+}
+
+fn hash_guard_label(hasher: &mut Sha256, label: &str) {
+    hasher.update((label.len() as u64).to_be_bytes());
+    hasher.update(label.as_bytes());
+}
+
+const fn match_quality_guard_tag(quality: SemanticLocateMatchQuality) -> u8 {
+    match quality {
+        SemanticLocateMatchQuality::ExactName => 1,
+        SemanticLocateMatchQuality::ExactText => 2,
+        SemanticLocateMatchQuality::ExactValue => 3,
+        SemanticLocateMatchQuality::ExactRole => 4,
+        SemanticLocateMatchQuality::NamePhrase => 5,
+        SemanticLocateMatchQuality::TextPhrase => 6,
+        SemanticLocateMatchQuality::AllTermsInName => 7,
+        SemanticLocateMatchQuality::AllTermsInText => 8,
+        SemanticLocateMatchQuality::AllTermsAcrossSemantics => 9,
+    }
 }
 
 fn normalize_into(output: &mut String, input: &str) {
@@ -1286,10 +1385,36 @@ mod tests {
 
     #[test]
     fn exact_observation_content_is_bound_into_the_result() {
-        let first = observation(600, "Save changes");
-        let second = observation(600, "Save account");
-        let first = locate(&first, 1, "save changes", SemanticLocateScope::Initial, 8);
-        let second = locate(&second, 1, "save changes", SemanticLocateScope::Initial, 8);
+        let first_observation = observation(600, "Save changes");
+        let second_observation = observation(600, "Save account");
+        let first_acknowledgement = acknowledgement(&first_observation);
+        let first = locate(
+            &first_observation,
+            1,
+            "save changes",
+            SemanticLocateScope::Initial,
+            8,
+        );
+        let second = locate(
+            &second_observation,
+            1,
+            "save changes",
+            SemanticLocateScope::Initial,
+            8,
+        );
         assert_ne!(first.matches(), second.matches());
+        assert_ne!(first.guard(), second.guard());
+        assert!(first.matches_acknowledgement(&first_acknowledgement));
+        assert_eq!(first.acknowledgement(), first_acknowledgement);
+
+        let replay_identity = locate(
+            &first_observation,
+            2,
+            "save changes",
+            SemanticLocateScope::Initial,
+            8,
+        );
+        assert_eq!(first.matches(), replay_identity.matches());
+        assert_ne!(first.guard(), replay_identity.guard());
     }
 }

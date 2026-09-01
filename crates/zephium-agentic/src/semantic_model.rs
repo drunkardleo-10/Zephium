@@ -28,6 +28,8 @@ pub const MAX_SEMANTIC_MODEL_TOKENS: u32 = 128 * 1024;
 pub const INITIAL_SEMANTIC_MODEL_TOKEN_TARGET: u32 = 2_000;
 /// Normal action-diff token target from the product qualification contract.
 pub const ACTION_SEMANTIC_DIFF_TOKEN_TARGET: u32 = 200;
+/// Hard token ceiling for one content-free semantic-locate result.
+pub const SEMANTIC_LOCATE_RESULT_TOKEN_CEILING: u32 = 2_048;
 /// Maximum bounded provider/model/tokenizer revision label bytes.
 pub const MAX_SEMANTIC_TOKENIZER_REVISION_BYTES: usize = 96;
 
@@ -77,6 +79,13 @@ impl SemanticModelEncodingBudget {
         max_bytes: 16 * 1024,
         max_tokens: ACTION_SEMANTIC_DIFF_TOKEN_TARGET,
         token_requirement: SemanticTokenCountRequirement::ProviderEstimateAllowed,
+    };
+
+    /// Bounded semantic-locate result budget for an exact counting path.
+    pub const LOCATE_RESULT_EXACT: Self = Self {
+        max_bytes: 8 * 1024,
+        max_tokens: SEMANTIC_LOCATE_RESULT_TOKEN_CEILING,
+        token_requirement: SemanticTokenCountRequirement::Exact,
     };
 
     /// Validates nonzero byte and token limits under global hard ceilings.

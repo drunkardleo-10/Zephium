@@ -434,6 +434,17 @@ browser action, model call, tool call, data transfer, cost, or native resource.
   widened. The matcher independently rejoins committed observation and current
   frame authority and returns only ranked opaque references; this conversion
   still grants no model continuation, policy, or browser authority.
+- The locate result continuation is now distinct from page diffs. Only the
+  exact prior tool-only `locate` correlation can append one token-admitted
+  `ZLOC1` result to the bounded stateless transcript; OpenAI and Anthropic use
+  their fixed matching tool-result shapes. A pinned local counter measures the
+  complete immutable replay before policy admission. Policy rejoins the exact
+  previously committed observation/account/source guard and proves every
+  returned reference exists in exactly one retained source cohort. Commit
+  merges only those unchanged baseline cohorts, so locate cannot add taint or
+  authority, while its content-free receipt preserves the same acknowledgement
+  for the next bounded turn. Refusal/cancellation drops the move-only delivery
+  authority. Diff binding explicitly rejects locate and screenshot results.
 - `act` converts immediately into the existing click/fill/select/press/scroll,
   effect, wait, verification, and settle types. Existing secret/control-text
   refusal and outcome compatibility run during decode. The preflight also caps
