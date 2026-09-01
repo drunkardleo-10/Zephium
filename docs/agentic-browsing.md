@@ -529,6 +529,19 @@ stream, structured-output, tool-call, usage, cancellation, retry-after, and
 error contracts. Local and hosted transports attach later without changing the
 browser vocabulary.
 
+The BYOK HTTPS shell uses private exact provider endpoints, provider-bound
+zeroizing credentials, redirect refusal, identity-only response content
+encoding, bounded deadlines, and at most four simultaneous attempts. Admission
+acquires a transport slot before semantic input commits; after commit, send
+errors and cancellation are terminal outcomes rather than proof that no
+provider work occurred. The HTTP client disables even library-default
+protocol-NACK retries; any future retry requires a new call identity and policy
+admission. When a committed attempt has no trustworthy usage, policy charges
+its complete token and cost reservation and records that the charge is a
+conservative ceiling.
+This is intentionally stricter than assuming an errored `send` transmitted no
+bytes.
+
 The supervisor records concise semantic progress—responsibility, active
 resource, operation class, state, result, and blocker—not hidden model
 reasoning or raw tool chatter.
@@ -855,6 +868,12 @@ sources rather than copying another browser agent's architecture:
 - [OWASP LLM prompt-injection prevention](https://cheatsheetseries.owasp.org/cheatsheets/LLM_Prompt_Injection_Prevention_Cheat_Sheet.html)
   summarizes the threat class; Zephium's deterministic source-to-sink policy
   remains the actual product boundary.
+- [OpenAI Responses API](https://platform.openai.com/docs/api-reference/responses/create)
+  defines the first fixed request, bearer-authentication, streaming, and usage
+  surface; Zephium sets `store: false` and accepts only its own closed tools.
+- [Anthropic Messages API](https://docs.anthropic.com/en/api/messages)
+  defines the second fixed request, `x-api-key` and version headers, streaming,
+  and usage surface used by the provider-neutral adapter.
 
 Primary documentation does not substitute for device tests against the exact
 runtime Zephium ships.

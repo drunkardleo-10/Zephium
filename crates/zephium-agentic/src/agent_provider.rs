@@ -837,6 +837,14 @@ pub struct AgentProviderFailure {
 }
 
 impl AgentProviderFailure {
+    /// Constructs one failure without a provider-requested retry delay.
+    pub const fn new(class: AgentProviderFailureClass) -> Self {
+        Self {
+            class,
+            retry_after: None,
+        }
+    }
+
     /// Constructs one closed failure and validates retry-after compatibility.
     pub const fn try_new(
         class: AgentProviderFailureClass,

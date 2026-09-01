@@ -193,6 +193,18 @@ impl AgentProviderRequest {
     pub fn byte_len(&self) -> usize {
         self.body.len()
     }
+
+    /// Moves the exact request into the trusted transport without copying its body.
+    pub fn into_transport_parts(
+        self,
+    ) -> (
+        AgentProviderCallIdentity,
+        AgentProviderCallConfig,
+        AgentProviderEndpoint,
+        Vec<u8>,
+    ) {
+        (self.call, self.config, self.endpoint, self.body)
+    }
 }
 
 impl fmt::Debug for AgentProviderRequest {
