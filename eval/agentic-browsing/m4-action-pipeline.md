@@ -1,11 +1,11 @@
 # M4 action pipeline
 
 Status: bounded pre-policy action proposals, exact observation binding, typed
-settle/verification contracts, and fresh-snapshot structural revalidation are
-implemented. Policy permits, platform execution, visibility/occlusion checks,
-event observation, cancellable deadline driving, effect verification, diff
-settlement, navigation/dialog state machines, read/extract/screenshot, and
-live qualification remain pending.
+settle/verification contracts, fresh-snapshot structural revalidation, and the
+event-driven bounded settle core are implemented. Policy permits, platform
+execution, visibility/occlusion checks, native event adapters and timer driving,
+effect verification, diff settlement, read/extract/screenshot, and live
+qualification remain pending.
 
 This evidence describes a functional-core seam. It does not claim that an
 action can currently reach a native view or page, that model-declared effects
@@ -65,6 +65,34 @@ are trusted, or that M4 is complete.
   execute one fixed recipe, observe under cancellation and one absolute
   deadline, verify the declared effect independently, and compute an admitted
   bounded diff before reporting success or continuing a batch.
+- Settlement starts only after the imperative executor claims one backend
+  request terminally applied. One nonzero action-attempt identity, exact bound
+  frame/stable target, source snapshot generation, monotonic completion time,
+  and per-action budget derive one overflow-checked absolute deadline. An
+  `Immediate` condition becomes ready for verification without allocating or
+  consuming an event; it still does not become success.
+- The settle core consumes at most 128 coalesced facts/snapshots and retains
+  O(1) state. Facts can express only tick, exact next navigation, document
+  ready, URL/title change without content, dialog state, semantic change,
+  mutation, scroll-position change, exact cancellation, renderer loss, or
+  human takeover. Cross-attempt, clock-regressing, wrong-frame, stale-context,
+  skipped lifecycle-transition, and forged transition joins are rejected
+  without advancing state.
+- Navigation commits require the exact next document join. Cancellation,
+  renderer loss, and human takeover carry both their exact prior join and the
+  full-invalidation successor, so a race after one admitted navigation can be
+  checked without guessing skipped authority. Explicit human takeover and
+  cancellation terminally preempt settlement.
+- Target-state settlement looks up the private stable identity in a strictly
+  newer exact-frame snapshot. Mutation quiet restarts on every admitted
+  coalesced mutation and can complete only after its bounded quiet interval
+  and no later than the same absolute action deadline. Missing deadline wakes
+  therefore cannot create an indefinite wait; the shell must own one timer.
+- Ready settlement means only that independent verification may run. The core
+  has a closed failure taxonomy and non-authorizing recovery hints for abort,
+  fresh observation, explicit capability, or human control. There is no retry
+  counter, retry loop, or outcome path that treats a wait condition as effect
+  proof.
 
 The action core has zero idle overhead. It allocates only when an admitted
 proposal batch is constructed and creates no page/runtime/native work.
@@ -86,5 +114,11 @@ invalid option ancestry; diagnostic redaction; stable identity across harmless
 sibling insertion, focus, and geometry changes; structural/name/state change;
 missing targets; removed operations; disabled targets; regressed generations;
 credential escalation; and option drift.
+
+Settlement coverage includes immediate readiness, exact deadline derivation
+and overflow, mutation-quiet restart, strictly newer target-state snapshots,
+attempt and monotonic-clock correlation, exact navigation/cancellation/human
+takeover transitions, terminal idempotence, event exhaustion, typed recovery,
+and content-redacted diagnostics.
 
 No platform action backend or live page is exercised by these tests.

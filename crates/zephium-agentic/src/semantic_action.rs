@@ -677,6 +677,10 @@ pub struct SemanticBoundAction {
 }
 
 impl SemanticBoundAction {
+    pub(crate) const fn target_key(&self) -> SemanticNodeKey {
+        self.intent.target().node_key
+    }
+
     /// One-based position in the exact batch.
     pub const fn ordinal(&self) -> u8 {
         self.ordinal

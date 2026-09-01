@@ -34,6 +34,7 @@ mod semantic_diff_model;
 mod semantic_model;
 mod semantic_observation;
 mod semantic_runtime;
+mod semantic_settle;
 mod semantic_wire;
 mod sign_in_handoff;
 
@@ -160,6 +161,11 @@ pub use semantic_runtime::{
     MAX_SEMANTIC_RUNTIME_SOURCE_BYTES, MAX_SEMANTIC_RUNTIME_VISITED_NODES,
     MIN_SEMANTIC_RUNTIME_WIRE_BYTES, SEMANTIC_RUNTIME_GLOBAL_NAME, SEMANTIC_RUNTIME_PROGRAM,
     SEMANTIC_RUNTIME_PROTOCOL_VERSION,
+};
+pub use semantic_settle::{
+    SemanticActionAttemptId, SemanticActionFailure, SemanticActionRecoveryHint,
+    SemanticSettleError, SemanticSettleEvent, SemanticSettleFact, SemanticSettleInstant,
+    SemanticSettleStatus, SemanticSettleTracker, MAX_SEMANTIC_SETTLE_EVENTS,
 };
 pub use semantic_wire::{
     decode_semantic_snapshot, SemanticDecodeContext, SemanticDecodeError, MAX_SEMANTIC_WIRE_BYTES,
