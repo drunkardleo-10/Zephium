@@ -6,14 +6,22 @@
 //! execution context. This module owns the complete protocol vocabulary and
 //! parses every browser-controlled response under a pre-allocation native
 //! ceiling supplied by the platform adapter.
+//!
+//! Chromium's document-start `worldName` implementation grants universal
+//! access when it creates an inspector world. Production deliberately does not
+//! use that command. It first creates one root-frame world with
+//! `grantUniveralAccess: false`, joins its system-unique context identity, then
+//! lazily installs the immutable program through one fixed function call.
 
 use std::fmt;
 
 use serde_json::{json, Value};
+#[cfg(test)]
+use zephium_agentic::SEMANTIC_RUNTIME_GLOBAL_NAME;
 use zephium_agentic::{
     SemanticRuntimeInvocation, SemanticRuntimeResultError, SemanticSnapshot,
     MAX_SEMANTIC_RUNTIME_REQUEST_BYTES, MAX_SEMANTIC_RUNTIME_SOURCE_BYTES, MAX_SEMANTIC_WIRE_BYTES,
-    SEMANTIC_RUNTIME_GLOBAL_NAME, SEMANTIC_RUNTIME_PROGRAM,
+    SEMANTIC_RUNTIME_PROGRAM,
 };
 
 const WORLD_NAME_PREFIX: &str = "zephium-semantic-runtime-v1-";
@@ -26,6 +34,16 @@ pub(crate) const MAX_CONTEXT_EVENTS_PER_INVOCATION: u16 = 512;
 pub(crate) const MAX_CONTEXT_EVENT_BYTES_PER_INVOCATION: usize = 512 * 1_024;
 pub(crate) const MAX_INVOCATION_RESPONSE_BYTES: usize = 2 * MAX_SEMANTIC_WIRE_BYTES + 16 * 1_024;
 const MAX_INVOCATION_PARAMETERS_BYTES: usize = 8 * 1_024;
+const INSTALL_RESPONSE_MARKER: &str = "I1";
+const INSTALL_FUNCTION_PREFIX: &str = "function(){";
+const INSTALL_FUNCTION_SUFFIX: &str = concat!(
+    ";const descriptor=Object.getOwnPropertyDescriptor(globalThis,\"",
+    "__zephiumSemanticRuntimeV1",
+    "\");const api=descriptor&&descriptor.value;return descriptor&&",
+    "descriptor.writable===false&&descriptor.configurable===false&&",
+    "descriptor.enumerable===false&&Object.isFrozen(api)&&",
+    "typeof api.invoke===\"function\"&&Object.isFrozen(api.invoke)?\"I1\":\"F1\";}"
+);
 
 const INVOKE_FUNCTION: &str =
     "function(encoded){return globalThis.__zephiumSemanticRuntimeV1.invoke(encoded);}";
@@ -34,25 +52,21 @@ const INVOKE_FUNCTION: &str =
 /// crosses the adapter boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FixedSemanticCdpMethod {
-    AddScriptToEvaluateOnNewDocument,
     GetFrameTree,
     RuntimeEnable,
     CreateIsolatedWorld,
     RuntimeDisable,
     CallFunctionOn,
-    RemoveScriptToEvaluateOnNewDocument,
 }
 
 impl FixedSemanticCdpMethod {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
-            Self::AddScriptToEvaluateOnNewDocument => "Page.addScriptToEvaluateOnNewDocument",
             Self::GetFrameTree => "Page.getFrameTree",
             Self::RuntimeEnable => "Runtime.enable",
             Self::CreateIsolatedWorld => "Page.createIsolatedWorld",
             Self::RuntimeDisable => "Runtime.disable",
             Self::CallFunctionOn => "Runtime.callFunctionOn",
-            Self::RemoveScriptToEvaluateOnNewDocument => "Page.removeScriptToEvaluateOnNewDocument",
         }
     }
 }
@@ -96,11 +110,14 @@ impl fmt::Debug for FixedSemanticCdpCommand {
 pub(crate) struct SemanticWorldName(String);
 
 impl SemanticWorldName {
-    pub(crate) fn from_epoch(epoch: u64) -> Result<Self, SemanticCdpProtocolError> {
-        if epoch == 0 {
+    pub(crate) fn from_nonce(
+        epoch: u64,
+        unpredictable: u128,
+    ) -> Result<Self, SemanticCdpProtocolError> {
+        if epoch == 0 || unpredictable == 0 {
             return Err(SemanticCdpProtocolError::InvalidAuthority);
         }
-        let value = format!("{WORLD_NAME_PREFIX}{epoch:016x}");
+        let value = format!("{WORLD_NAME_PREFIX}{epoch:016x}-{unpredictable:032x}");
         if value.len() > MAX_WORLD_NAME_BYTES {
             return Err(SemanticCdpProtocolError::Limit);
         }
@@ -115,26 +132,6 @@ impl SemanticWorldName {
 impl fmt::Debug for SemanticWorldName {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("SemanticWorldName([redacted])")
-    }
-}
-
-#[derive(Clone, Eq, PartialEq)]
-pub(crate) struct SemanticScriptRegistrationId(String);
-
-impl SemanticScriptRegistrationId {
-    fn parse(value: &str) -> Result<Self, SemanticCdpProtocolError> {
-        validate_browser_identifier(value)?;
-        Ok(Self(value.to_owned()))
-    }
-
-    fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Debug for SemanticScriptRegistrationId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("SemanticScriptRegistrationId([redacted])")
     }
 }
 
@@ -340,35 +337,60 @@ pub(crate) enum SemanticCdpInvocationError {
     Result(SemanticRuntimeResultError),
 }
 
-pub(crate) fn install_runtime_command(
-    world: &SemanticWorldName,
+pub(crate) fn install_runtime_in_context_command(
+    context: &SemanticExecutionContext,
 ) -> Result<FixedSemanticCdpCommand, SemanticCdpProtocolError> {
     let source = SEMANTIC_RUNTIME_PROGRAM.source();
     if source.len() > MAX_SEMANTIC_RUNTIME_SOURCE_BYTES || !source.is_ascii() {
         return Err(SemanticCdpProtocolError::Limit);
     }
+    let capacity = INSTALL_FUNCTION_PREFIX
+        .len()
+        .checked_add(source.len())
+        .and_then(|length| length.checked_add(INSTALL_FUNCTION_SUFFIX.len()))
+        .ok_or(SemanticCdpProtocolError::Limit)?;
+    let mut declaration = String::new();
+    declaration
+        .try_reserve_exact(capacity)
+        .map_err(|_| SemanticCdpProtocolError::Limit)?;
+    declaration.push_str(INSTALL_FUNCTION_PREFIX);
+    declaration.push_str(source);
+    declaration.push_str(INSTALL_FUNCTION_SUFFIX);
+    if declaration.len() != capacity {
+        return Err(SemanticCdpProtocolError::Limit);
+    }
     command(
-        FixedSemanticCdpMethod::AddScriptToEvaluateOnNewDocument,
+        FixedSemanticCdpMethod::CallFunctionOn,
         json!({
-            "source": source,
-            "worldName": world.as_str(),
-            "includeCommandLineAPI": false,
-            "runImmediately": true,
+            "functionDeclaration": declaration,
+            "silent": true,
+            "returnByValue": true,
+            "generatePreview": false,
+            "userGesture": false,
+            "awaitPromise": false,
+            "uniqueContextId": context.unique_id(),
         }),
         MAX_CONTROL_PARAMETERS_BYTES,
         MAX_CONTROL_RESPONSE_BYTES,
     )
 }
 
-pub(crate) fn decode_install_response(
+pub(crate) fn decode_runtime_install_response(
     response: &str,
-) -> Result<SemanticScriptRegistrationId, SemanticCdpProtocolError> {
+) -> Result<(), SemanticCdpProtocolError> {
     let object = parse_success_object(response, MAX_CONTROL_RESPONSE_BYTES)?;
-    let identifier = object
-        .get("identifier")
-        .and_then(Value::as_str)
+    let result = object
+        .get("result")
+        .and_then(Value::as_object)
         .ok_or(SemanticCdpProtocolError::InvalidResponse)?;
-    SemanticScriptRegistrationId::parse(identifier)
+    if result.get("type").and_then(Value::as_str) == Some("string")
+        && result.get("value").and_then(Value::as_str) == Some(INSTALL_RESPONSE_MARKER)
+        && result.get("subtype").is_none()
+    {
+        Ok(())
+    } else {
+        Err(SemanticCdpProtocolError::InvalidResponse)
+    }
 }
 
 pub(crate) fn get_frame_tree_command() -> FixedSemanticCdpCommand {
@@ -500,17 +522,6 @@ pub(crate) fn decode_invocation_response(
         .map_err(SemanticCdpInvocationError::Result)
 }
 
-pub(crate) fn remove_runtime_command(
-    registration: &SemanticScriptRegistrationId,
-) -> Result<FixedSemanticCdpCommand, SemanticCdpProtocolError> {
-    command(
-        FixedSemanticCdpMethod::RemoveScriptToEvaluateOnNewDocument,
-        json!({ "identifier": registration.as_str() }),
-        MAX_CONTROL_PARAMETERS_BYTES,
-        MAX_CONTROL_RESPONSE_BYTES,
-    )
-}
-
 fn command(
     method: FixedSemanticCdpMethod,
     parameters: Value,
@@ -629,19 +640,32 @@ mod tests {
     }
 
     #[test]
-    fn fixed_vocabulary_installs_only_the_pinned_program_in_a_named_world() {
-        let world = SemanticWorldName::from_epoch(7).expect("world");
-        let command = install_runtime_command(&world).expect("command");
-        assert_eq!(
-            command.method(),
-            FixedSemanticCdpMethod::AddScriptToEvaluateOnNewDocument
-        );
+    fn fixed_vocabulary_installs_only_the_pinned_program_in_the_joined_world() {
+        let context = SemanticExecutionContext::new(19, "unique-context-19").expect("context");
+        let command = install_runtime_in_context_command(&context).expect("command");
+        assert_eq!(command.method(), FixedSemanticCdpMethod::CallFunctionOn);
         let parameters: Value = serde_json::from_str(command.parameters()).expect("parameters");
-        assert_eq!(parameters["source"], SEMANTIC_RUNTIME_PROGRAM.source());
-        assert_eq!(parameters["worldName"], world.as_str());
-        assert_eq!(parameters["includeCommandLineAPI"], false);
-        assert_eq!(parameters["runImmediately"], true);
-        assert_eq!(parameters.as_object().map(|object| object.len()), Some(4));
+        let declaration = parameters["functionDeclaration"]
+            .as_str()
+            .expect("fixed declaration");
+        assert!(declaration.starts_with(INSTALL_FUNCTION_PREFIX));
+        assert!(declaration.ends_with(INSTALL_FUNCTION_SUFFIX));
+        assert_eq!(
+            declaration
+                .matches(SEMANTIC_RUNTIME_PROGRAM.source())
+                .count(),
+            1
+        );
+        assert!(INSTALL_FUNCTION_SUFFIX.contains(SEMANTIC_RUNTIME_GLOBAL_NAME));
+        assert_eq!(parameters["uniqueContextId"], "unique-context-19");
+        assert_eq!(parameters["returnByValue"], true);
+        assert_eq!(parameters["generatePreview"], false);
+        assert_eq!(parameters["userGesture"], false);
+        assert_eq!(parameters["awaitPromise"], false);
+        assert_eq!(parameters["silent"], true);
+        assert!(parameters.get("arguments").is_none());
+        assert!(parameters.get("executionContextId").is_none());
+        assert_eq!(parameters.as_object().map(|object| object.len()), Some(7));
         assert!(format!("{command:?}").contains("[redacted]"));
         assert!(!format!("{command:?}").contains(SEMANTIC_RUNTIME_GLOBAL_NAME));
     }
@@ -670,7 +694,7 @@ mod tests {
 
     #[test]
     fn context_discovery_requires_matching_isolated_unique_context() {
-        let world = SemanticWorldName::from_epoch(12).expect("world");
+        let world = SemanticWorldName::from_nonce(12, 0x12).expect("world");
         let root = SemanticRootFrameId::parse("root-frame").expect("frame");
         let mut discovery = SemanticContextDiscovery::new(world.clone(), root);
         discovery
@@ -726,7 +750,7 @@ mod tests {
 
     #[test]
     fn context_discovery_rejects_default_spoof_and_identity_races() {
-        let world = SemanticWorldName::from_epoch(3).expect("world");
+        let world = SemanticWorldName::from_nonce(3, 0x34).expect("world");
         let root = SemanticRootFrameId::parse("root").expect("frame");
         let mut discovery = SemanticContextDiscovery::new(world.clone(), root.clone());
         let default_world = json!({
@@ -791,14 +815,12 @@ mod tests {
             "Runtime.disable"
         );
         assert_eq!(
-            decode_install_response(r#"{"identifier":"script-1"}"#),
-            Ok(SemanticScriptRegistrationId("script-1".to_owned()))
+            decode_runtime_install_response(r#"{"result":{"type":"string","value":"I1"}}"#),
+            Ok(())
         );
-        let removal = remove_runtime_command(&SemanticScriptRegistrationId("script-1".to_owned()))
-            .expect("removal");
         assert_eq!(
-            removal.method().as_str(),
-            "Page.removeScriptToEvaluateOnNewDocument"
+            decode_runtime_install_response(r#"{"result":{"type":"string","value":"F1"}}"#),
+            Err(SemanticCdpProtocolError::InvalidResponse)
         );
         assert_eq!(
             decode_root_frame(r#"{"frameTree":{"frame":{"id":"root"},"childFrames":[]}}"#),
@@ -818,7 +840,11 @@ mod tests {
             Err(SemanticCdpProtocolError::Limit)
         );
         assert_eq!(
-            SemanticWorldName::from_epoch(0),
+            SemanticWorldName::from_nonce(0, 1),
+            Err(SemanticCdpProtocolError::InvalidAuthority)
+        );
+        assert_eq!(
+            SemanticWorldName::from_nonce(1, 0),
             Err(SemanticCdpProtocolError::InvalidAuthority)
         );
     }
@@ -870,7 +896,7 @@ mod tests {
 
     #[test]
     fn event_volume_and_debug_output_fail_closed_without_content() {
-        let world = SemanticWorldName::from_epoch(99).expect("world");
+        let world = SemanticWorldName::from_nonce(99, 0x56).expect("world");
         let root = SemanticRootFrameId::parse("private-root-identifier").expect("frame");
         let mut discovery = SemanticContextDiscovery::new(world, root);
         let unrelated = r#"{"context":{"id":1,"uniqueId":"private-page-identifier","name":"","auxData":{"frameId":"private-root-identifier","isDefault":true,"type":"default"}}}"#;

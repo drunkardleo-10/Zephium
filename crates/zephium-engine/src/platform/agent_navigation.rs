@@ -38,7 +38,6 @@ impl AgentNavigationTerminal {
 }
 
 pub(crate) struct AgentNavigationObservation {
-    #[cfg(test)]
     document_committed: bool,
     terminal: Option<AgentNavigationTerminal>,
 }
@@ -46,7 +45,6 @@ pub(crate) struct AgentNavigationObservation {
 impl AgentNavigationObservation {
     const fn none() -> Self {
         Self {
-            #[cfg(test)]
             document_committed: false,
             terminal: None,
         }
@@ -54,7 +52,6 @@ impl AgentNavigationObservation {
 
     const fn document_committed() -> Self {
         Self {
-            #[cfg(test)]
             document_committed: true,
             terminal: None,
         }
@@ -62,13 +59,11 @@ impl AgentNavigationObservation {
 
     fn terminal(_document_committed: bool, terminal: AgentNavigationTerminal) -> Self {
         Self {
-            #[cfg(test)]
             document_committed: _document_committed,
             terminal: Some(terminal),
         }
     }
 
-    #[cfg(test)]
     pub(crate) const fn did_commit_document(&self) -> bool {
         self.document_committed
     }

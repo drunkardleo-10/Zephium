@@ -62,11 +62,12 @@ const SEMANTIC_RUNTIME_SOURCE_SHA256: [u8; 32] = [
 pub struct SemanticRuntimeProgram;
 
 impl SemanticRuntimeProgram {
-    /// Returns the reviewed program bytes for document-start isolated-world installation.
+    /// Returns the reviewed program bytes for isolated-world installation.
     ///
     /// The adapter must never log, dynamically modify, append to, or install this
-    /// source in page world. Invocation remains limited to the separately encoded
-    /// closed request grammar.
+    /// source in page world. An adapter may install it at document start or
+    /// lazily after proving the target world, but invocation remains limited to
+    /// the separately encoded closed request grammar.
     pub const fn source(self) -> &'static str {
         SEMANTIC_RUNTIME_SOURCE
     }
@@ -522,7 +523,7 @@ pub enum SemanticRuntimePortFailure {
     /// A bounded native or runtime single-flight permit was unavailable.
     #[error("semantic runtime resources are exhausted")]
     ResourceExhausted,
-    /// The exact document-start runtime has not reached a committed document.
+    /// The exact isolated runtime has not reached a committed document.
     #[error("semantic runtime is not ready")]
     NotReady,
     /// The per-document invocation ceiling was exhausted.

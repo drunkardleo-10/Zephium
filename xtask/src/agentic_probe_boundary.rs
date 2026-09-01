@@ -56,6 +56,8 @@ const ENGINE_WINDOWS_AGENT_TIMEOUT: &str = "crates/zephium-engine/src/platform/w
 const ENGINE_AGENT_NAVIGATION: &str = "crates/zephium-engine/src/platform/agent_navigation.rs";
 const ENGINE_WINDOWS_SEMANTIC_PROTOCOL: &str =
     "crates/zephium-engine/src/platform/agent_semantic_cdp_protocol.rs";
+const ENGINE_WINDOWS_SEMANTIC_RUNTIME: &str =
+    "crates/zephium-engine/src/platform/windows/semantic_runtime.rs";
 const ENGINE_WINDOWS_PROBE_MODULE: &str =
     "crates/zephium-engine/src/platform/windows/agentic_input_probe.rs";
 const ENGINE_MACOS_PROBE_BINARY: &str =
@@ -184,6 +186,10 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     validate_engine_windows_semantic_protocol(
         &read(repository.join(ENGINE_PLATFORM_MODULE))?,
         &read(repository.join(ENGINE_WINDOWS_SEMANTIC_PROTOCOL))?,
+    )?;
+    validate_engine_windows_semantic_runtime(
+        &windows_module,
+        &read(repository.join(ENGINE_WINDOWS_SEMANTIC_RUNTIME))?,
     )?;
     validate_owned_context_viewport_contract(
         &read(repository.join(AGENTIC_CONTEXT_PORT))?,
@@ -452,7 +458,6 @@ fn validate_engine_agent_context_boundary(
             ));
         }
     }
-
     for (label, source) in [
         ("port", port.as_str()),
         ("host", host.as_str()),
@@ -530,6 +535,7 @@ fn validate_engine_windows_agent_context_boundary(
     let module = compact(module);
     for required in [
         "#[cfg(feature=\"agentic-browser\")]modagent_context;",
+        "#[allow(dead_code)]modsemantic_runtime;",
         "#[cfg(feature=\"agentic-browser\")]modtimeout;",
         "build_owned_agent_view",
         "schedule_content_policy_timeout",
@@ -563,6 +569,12 @@ fn validate_engine_windows_agent_context_boundary(
         "controller.ParentWindow(&mutcontroller_parent)",
         "GetFocus()",
         "super::install_crash_handler",
+        "AgentSemanticRuntimePlan::prepare()",
+        "semantic_plan.bind(&view.webview(),semantic_invariant,semantic_panic)",
+        "semantic_navigation.document_committed()",
+        "semantic_renderer.renderer_lost()",
+        "semantic.controller().attest(&view.webview())",
+        "pub(crate)fnretire_semantic_runtime(&mutself)->bool",
         "pub(crate)fnclose(&mutself)->Result<(),wry::WebView2CleanupDebt>",
         "ContextConstructionProof::WindowsOwnedSelectedProfileEmptyInventory",
         "ContextConstructionProof::WindowsOwnedAutomationSubprofileEmptyInventory",
@@ -623,12 +635,35 @@ fn validate_engine_windows_agent_context_boundary(
         "OwnedWindowsCleanupDebt::new",
         "binding.retire(ContextPortFailure::Shutdown)",
         "fnclose_unpublished_windows_agent_view",
+        "binding.view.prepare_semantic_document_load()",
+        "letsemantic_clean=self.view.retire_semantic_runtime();",
+        "semantic_clean:bool",
+        "letsemantic_pending=self.view.semantic_pending_for_audit()?;",
     ] {
         if !host.contains(required) {
             return Err(format!(
                 "production Windows agent-context host lost required obligation {required}"
             ));
         }
+    }
+    let windows_host = host
+        .split_once("fnclose_unpublished_windows_agent_view")
+        .and_then(|(_, source)| source.split_once("fnstart_owned_agent_navigation"))
+        .map(|(_, source)| source)
+        .ok_or_else(|| "production Windows navigation owner is missing".to_owned())?;
+    let (windows_navigation, windows_host) = windows_host
+        .split_once("fnstart_owned_agent_recovery")
+        .ok_or_else(|| "production Windows recovery owner is missing".to_owned())?;
+    let windows_recovery = windows_host
+        .split_once("fnon_owned_agent_navigation_terminal")
+        .map(|(source, _)| source)
+        .ok_or_else(|| "production Windows recovery terminal boundary is missing".to_owned())?;
+    if !windows_navigation.contains("binding.view.prepare_semantic_document_load()")
+        || !windows_recovery.contains("binding.view.prepare_semantic_document_load()")
+    {
+        return Err(
+            "production Windows navigation and recovery must rotate semantic authority".to_owned(),
+        );
     }
 
     for (label, source) in [
@@ -661,7 +696,9 @@ fn validate_engine_windows_agent_context_boundary(
 fn validate_engine_windows_semantic_protocol(module: &str, source: &str) -> Result<(), String> {
     let module = compact(module);
     if !module.contains(
-        "#[cfg(all(feature=\"agentic-browser\",any(target_os=\"windows\",test)))]modagent_semantic_cdp_protocol;",
+        "#[cfg(all(feature=\"agentic-browser\",any(target_os=\"windows\",test)))]",
+    ) || !module.contains(
+        "#[cfg_attr(all(target_os=\"windows\",not(test)),allow(dead_code))]modagent_semantic_cdp_protocol;",
     ) {
         return Err(
             "production Windows semantic CDP protocol escaped its agentic-browser platform gate"
@@ -672,21 +709,22 @@ fn validate_engine_windows_semantic_protocol(module: &str, source: &str) -> Resu
     let source = compact(source);
     for required in [
         "enumFixedSemanticCdpMethod",
-        "Page.addScriptToEvaluateOnNewDocument",
         "Page.getFrameTree",
         "Runtime.enable",
         "Page.createIsolatedWorld",
         "Runtime.disable",
         "Runtime.callFunctionOn",
-        "Page.removeScriptToEvaluateOnNewDocument",
+        "install_runtime_in_context_command",
         "SEMANTIC_RUNTIME_PROGRAM.source()",
         "MAX_SEMANTIC_RUNTIME_SOURCE_BYTES",
         "MAX_SEMANTIC_RUNTIME_REQUEST_BYTES",
         "MAX_SEMANTIC_WIRE_BYTES",
+        "MAX_CONTROL_PARAMETERS_BYTES:usize=128*1_024",
         "MAX_CONTEXT_EVENTS_PER_INVOCATION:u16=512",
         "MAX_CONTEXT_EVENT_BYTES_PER_INVOCATION:usize=512*1_024",
-        "\"includeCommandLineAPI\":false",
-        "\"runImmediately\":true",
+        "SemanticWorldName::from_nonce",
+        "ifepoch==0||unpredictable==0",
+        "declaration.push_str(source)",
         "\"grantUniveralAccess\":false",
         "\"uniqueContextId\":context.unique_id()",
         "\"returnByValue\":true",
@@ -708,6 +746,8 @@ fn validate_engine_windows_semantic_protocol(module: &str, source: &str) -> Resu
         }
     }
     for forbidden in [
+        "Page.addScriptToEvaluateOnNewDocument",
+        "Page.removeScriptToEvaluateOnNewDocument",
         "Runtime.evaluate",
         "Page.bringToFront",
         "Page.captureScreenshot",
@@ -725,6 +765,76 @@ fn validate_engine_windows_semantic_protocol(module: &str, source: &str) -> Resu
         if source.contains(forbidden) {
             return Err(format!(
                 "production Windows semantic CDP protocol acquired forbidden surface {forbidden}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_engine_windows_semantic_runtime(module: &str, source: &str) -> Result<(), String> {
+    let module = compact(module);
+    if !module.contains("#[allow(dead_code)]modsemantic_runtime;") {
+        return Err(
+            "production Windows semantic runtime escaped its agentic-browser gate".to_owned(),
+        );
+    }
+
+    let source = compact(source);
+    for required in [
+        "windows_core::GUID::new()",
+        "SemanticWorldName::from_nonce(epoch,unpredictable)",
+        "letnext_world=next_world_name()?;",
+        "state.world=next_world;",
+        "ICoreWebView2CallDevToolsProtocolMethodCompletedHandler",
+        "GetDevToolsProtocolEventReceiver(&event_name)",
+        "Runtime.executionContextCreated",
+        "CallDevToolsProtocolMethod(&method,&parameters,&handler)",
+        "borrowed_pcwstr_bounded(response,self.response_limit,self.response_limit)",
+        "super::take_pwstr_bounded(raw,MAX_CONTEXT_EVENT_BYTES,MAX_CONTEXT_EVENT_BYTES)",
+        "MAX_CLEANUP_DISABLE_ATTEMPTS:u8=1",
+        "in_flight:Option<InFlightCommand>",
+        "state.context_events_enabled=true",
+        "CommandStage::CleanupRuntimeDisable",
+        "install_runtime_in_context_command(&context)",
+        "decode_runtime_install_response(&response)",
+        "invoke_runtime_command(context,&state.pending.as_ref()?.invocation)",
+        "state.installed_context=None",
+        "state.document_generation=state.document_generation.checked_add(1)",
+        "SemanticRuntimePortFailure::DocumentReplaced",
+        "SemanticRuntimePortFailure::RendererLost",
+        "SemanticRuntimePortFailure::TimedOut",
+        "remove_DevToolsProtocolEventReceived(self.token)",
+        "same_interface(&self.core,core)",
+        "formatter.write_str(\"AgentSemanticRuntimeController([native,redacted])\")",
+    ] {
+        if !source.contains(required) {
+            return Err(format!(
+                "production Windows semantic runtime lost required bounded mechanism {required}"
+            ));
+        }
+    }
+    for forbidden in [
+        "Page.addScriptToEvaluateOnNewDocument",
+        "Page.removeScriptToEvaluateOnNewDocument",
+        "Runtime.evaluate",
+        "ExecuteScript(",
+        "evaluate_script",
+        "querySelector",
+        "outerHTML",
+        "Input.dispatch",
+        "PostWebMessage",
+        "with_ipc_handler",
+        "with_initialization_script",
+        "AddHostObject",
+        "MsgWaitForMultipleObjectsEx",
+        "PeekMessageW",
+        "thread::spawn",
+        "channel(",
+        "method:&str",
+    ] {
+        if source.contains(forbidden) {
+            return Err(format!(
+                "production Windows semantic runtime acquired forbidden authority {forbidden}"
             ));
         }
     }
@@ -3469,6 +3579,25 @@ mod tests {
         assert!(validate_engine_windows_semantic_protocol(
             module,
             &source.replace("\"userGesture\": false", "\"userGesture\": true"),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn windows_production_semantic_runtime_is_serialized_and_non_universal() {
+        let module = include_str!("../../crates/zephium-engine/src/platform/windows/mod.rs");
+        let source =
+            include_str!("../../crates/zephium-engine/src/platform/windows/semantic_runtime.rs");
+        validate_engine_windows_semantic_runtime(module, source)
+            .expect("bounded Windows semantic runtime");
+        assert!(validate_engine_windows_semantic_runtime(
+            module,
+            &format!("{source}\nRuntime.evaluate();"),
+        )
+        .is_err());
+        assert!(validate_engine_windows_semantic_runtime(
+            module,
+            &source.replace("MAX_CLEANUP_DISABLE_ATTEMPTS: u8 = 1", "usize::MAX"),
         )
         .is_err());
     }

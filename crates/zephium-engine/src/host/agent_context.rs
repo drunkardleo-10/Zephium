@@ -353,13 +353,17 @@ struct AgentPendingRecovery {
 struct AgentContextRetirement {
     navigation_clean: bool,
     content_policy_clean: bool,
+    semantic_clean: bool,
     native_clean: bool,
 }
 
 #[cfg(target_os = "windows")]
 impl AgentContextRetirement {
     const fn is_clean(&self) -> bool {
-        self.navigation_clean && self.content_policy_clean && self.native_clean
+        self.navigation_clean
+            && self.content_policy_clean
+            && self.semantic_clean
+            && self.native_clean
     }
 }
 
@@ -467,10 +471,15 @@ impl AgentOwnedContext {
     }
 
     fn pending_operation_for_audit(&self) -> Option<bool> {
-        if self.pending_navigation.is_some() && self.pending_recovery.is_some() {
+        let lifecycle_pending =
+            self.pending_navigation.is_some() || self.pending_recovery.is_some();
+        let semantic_pending = self.view.semantic_pending_for_audit()?;
+        if (self.pending_navigation.is_some() && self.pending_recovery.is_some())
+            || (lifecycle_pending && semantic_pending)
+        {
             None
         } else {
-            Some(self.pending_navigation.is_some() || self.pending_recovery.is_some())
+            Some(lifecycle_pending || semantic_pending)
         }
     }
 
@@ -564,10 +573,12 @@ impl AgentOwnedContext {
             .content_policy_registration
             .take()
             .is_some_and(|registration| registration.retire().is_ok());
+        let semantic_clean = self.view.retire_semantic_runtime();
         let native_clean = self.close_native();
         AgentContextRetirement {
             navigation_clean,
             content_policy_clean,
+            semantic_clean,
             native_clean,
         }
     }
@@ -583,6 +594,11 @@ impl Drop for AgentOwnedContext {
         if policy_cleanup_failed {
             (self.native_terminal_failure)(
                 "Windows agent content-policy registration escaped explicit retirement",
+            );
+        }
+        if self.view.semantic_is_live() && !self.view.retire_semantic_runtime() {
+            (self.native_terminal_failure)(
+                "Windows agent semantic runtime escaped explicit retirement",
             );
         }
         let _ = self.close_native();
@@ -2173,7 +2189,13 @@ impl EngineHost {
         view: &mut crate::platform::imp::AgentOwnedView,
         native_resource: &mut Option<NativeResourceLease>,
     ) -> bool {
-        let clean = match view.close() {
+        let semantic_clean = view.retire_semantic_runtime();
+        if !semantic_clean {
+            self.fail_agent_context_invariant(
+                "unpublished Windows agent semantic runtime did not retire exactly",
+            );
+        }
+        let native_clean = match view.close() {
             Ok(()) => true,
             Err(debt) => {
                 let debt = super::OwnedWindowsCleanupDebt::new(debt, native_resource.take());
@@ -2185,7 +2207,7 @@ impl EngineHost {
             }
         };
         self.collect_pending_windows_cleanup_debts();
-        clean
+        semantic_clean && native_clean
     }
 
     fn start_owned_agent_navigation(
@@ -2226,6 +2248,13 @@ impl EngineHost {
             return;
         };
         binding.join = requested;
+        if binding.view.prepare_semantic_document_load().is_err() {
+            self.fail_agent_context_invariant(
+                "Windows agent navigation could not rotate its semantic document world",
+            );
+            task.refuse(ContextPortFailure::NativeRefused);
+            return;
+        }
         let terminal_claimed = Arc::new(AtomicBool::new(false));
         let timeout_claim = terminal_claimed.clone();
         let timeout_guard = task.callback_guard();
@@ -2332,6 +2361,13 @@ impl EngineHost {
         };
         binding.join = requested;
         binding.renderer_loss_rejoin_pending = false;
+        if binding.view.prepare_semantic_document_load().is_err() {
+            self.fail_agent_context_invariant(
+                "Windows agent recovery could not rotate its semantic document world",
+            );
+            task.refuse(ContextPortFailure::NativeRefused);
+            return;
+        }
         let expected = binding.committed_target.clone();
         let deadline = Instant::now()
             .checked_add(Duration::from_secs(5))
@@ -2734,6 +2770,10 @@ impl EngineHost {
     fn record_agent_context_retirement(&mut self, retirement: AgentContextRetirement) -> bool {
         if !retirement.content_policy_clean {
             self.fail_content_policy_retirement();
+        } else if !retirement.semantic_clean {
+            self.fail_agent_context_invariant(
+                "Windows agent semantic runtime did not retire exactly",
+            );
         } else if !retirement.navigation_clean {
             self.fail_agent_context_invariant(
                 "Windows agent teardown lost its exact native navigation gate",

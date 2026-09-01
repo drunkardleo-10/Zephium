@@ -224,10 +224,14 @@ sensitive. They are not printed, included in CI artifacts, or committed.
 
 ## 5. Page runtime and trust boundary
 
-Each page receives an immutable, versioned instrumentation program at document
-creation in an engine-supported isolated world. Rust owns the program bytes and
-the exact invocation vocabulary. The program does not accept arbitrary code,
-selectors, or property paths from the model or page.
+Each supported page receives an immutable, versioned instrumentation program
+in an engine-supported isolated world. Prefer document creation when the engine
+provides a world-specific registration that preserves the required isolation.
+If a document-start mechanism silently widens world authority, install lazily
+after commit into a freshly created, native-proven least-authority world before
+the first semantic operation. Rust owns the program bytes and the exact
+invocation vocabulary. The program does not accept arbitrary code, selectors,
+or property paths from the model or page.
 
 The runtime may:
 
@@ -260,8 +264,19 @@ world. The M1 fixture runtime uses one-way ready/result messages and no reply;
 the production fixed-recipe invocation mechanism remains evidence-driven and
 must not rely on private WebKit SPI. On Windows, isolated CDP worlds may be an
 internal adapter mechanism, but CDP remains absent from domain and model
-contracts. Every use is fixed, audited, generation-bound, and covered by
-hostile tests. The release-excluded M1 Windows fixture adapter uses only fixed
+contracts. Do not use a named
+`Page.addScriptToEvaluateOnNewDocument` world: current Blink creates that world
+with universal access even when the public protocol surface does not disclose
+the widening. Instead, create a new unpredictable world name for every
+authorized document load with `grantUniveralAccess: false`, join its exact
+root-frame isolated execution-context event and system-unique context id, and
+install the fixed runtime lazily through a fixed `Runtime.callFunctionOn`
+before its first invocation. Blink also caches inspector worlds by frame and
+name, so reusing a name across documents is forbidden. These requirements are
+grounded in the current primary
+[Blink inspector implementation](https://chromium.googlesource.com/chromium/src/third_party/+/34509812c5711b92703c48b0970f587c2fd442d3/blink/renderer/core/inspector/inspector_page_agent.cc#1041).
+Every use is fixed, audited, generation-bound, and covered by hostile tests.
+The release-excluded M1 Windows fixture adapter uses only fixed
 `Runtime.evaluate` expressions with `userGesture: false` for bounded fixture
 observation and fixed semantic recipes. It issues only one CDP request at a
 time and waits for its completion before the next because WebView2 explicitly

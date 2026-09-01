@@ -27,6 +27,7 @@ use wry::{
     WebViewExtWindows as _,
 };
 use zephium_agentic::{ContextConstructionProof, ContextOwnedViewport, ContextProfileStorageClass};
+use zephium_agentic::{SemanticRuntimeInvocation, SemanticRuntimePortFailure, SemanticSnapshot};
 use zephium_core::ids::ProfileId;
 
 use crate::platform::agent_navigation::AgentNavigationController;
@@ -114,6 +115,7 @@ impl<Navigation, RendererLost, BrowserLost, Invariant, Panic>
 /// Exact native page and its one-at-a-time navigation policy.
 pub(crate) struct AgentOwnedView {
     navigation: AgentNavigationController,
+    semantic: Option<super::semantic_runtime::AgentSemanticRuntimeRegistration>,
     profile: AgentOwnedProfile,
     storage_class: ContextProfileStorageClass,
     expected_user_data_folder: std::path::PathBuf,
@@ -133,6 +135,47 @@ impl AgentOwnedView {
         &self.navigation
     }
 
+    pub(crate) fn semantic(
+        &self,
+    ) -> Option<&super::semantic_runtime::AgentSemanticRuntimeController> {
+        self.semantic
+            .as_ref()
+            .map(super::semantic_runtime::AgentSemanticRuntimeRegistration::controller)
+    }
+
+    pub(crate) fn prepare_semantic_document_load(&mut self) -> Result<(), ()> {
+        self.semantic().ok_or(())?.begin_document_load()
+    }
+
+    pub(crate) fn retire_semantic_runtime(&mut self) -> bool {
+        self.semantic
+            .take()
+            .is_some_and(|registration| registration.retire().is_ok())
+    }
+
+    pub(crate) const fn semantic_is_live(&self) -> bool {
+        self.semantic.is_some()
+    }
+
+    // The host intentionally refuses this call until physical Windows
+    // isolated-world qualification promotes the platform support claim.
+    #[allow(dead_code)]
+    pub(crate) fn dispatch_semantic(
+        &self,
+        invocation: SemanticRuntimeInvocation,
+        completion: impl FnOnce(Result<SemanticSnapshot, SemanticRuntimePortFailure>) + 'static,
+    ) -> Result<(), SemanticRuntimePortFailure> {
+        let Some(semantic) = self.semantic() else {
+            completion(Err(SemanticRuntimePortFailure::Retired));
+            return Err(SemanticRuntimePortFailure::Retired);
+        };
+        semantic.dispatch(invocation, completion)
+    }
+
+    pub(crate) fn semantic_pending_for_audit(&self) -> Option<bool> {
+        self.semantic()?.pending_for_audit()
+    }
+
     pub(crate) fn attest(&self, deadline: Instant) -> Result<(), AgentOwnedViewConstructionError> {
         attest_profile_before_initialization(
             &self.profile,
@@ -142,10 +185,19 @@ impl AgentOwnedView {
             &self.expected_user_data_folder,
             deadline,
         )?;
+        if !self
+            .semantic()
+            .is_some_and(|semantic| semantic.attest(&self.view.webview()))
+        {
+            return Err(AgentOwnedViewConstructionError::ExtensionIsolation);
+        }
         attest_hidden_owner(&self.view, self.expected_parent, self.viewport)
     }
 
     pub(crate) fn close(&mut self) -> Result<(), wry::WebView2CleanupDebt> {
+        if self.semantic_is_live() {
+            let _ = self.retire_semantic_runtime();
+        }
         self.view.close()
     }
 }
@@ -326,10 +378,12 @@ const fn map_inventory_failure(
 
 /// Builds one initially hidden, extension-isolated selected-profile WebView2.
 ///
-/// The only initial document is `about:blank`. No script, IPC handler, popup
-/// callback, generic native bridge, selector, or model-facing program is
-/// installed. Network navigation remains denied until the host arms one exact
-/// operation and attaches its native content policy.
+/// The only initial document is `about:blank`. No page-world script, IPC
+/// handler, popup callback, generic native bridge, selector, or model-facing
+/// program is installed. The semantic program is installed lazily only in a
+/// native-proven non-universal isolated world. Network navigation remains
+/// denied until the host arms one exact operation and attaches its native
+/// content policy.
 pub(crate) fn build_owned_agent_view<Navigation, RendererLost, BrowserLost, Invariant, Panic>(
     parent: &impl HasWindowHandle,
     viewport: ContextOwnedViewport,
@@ -352,6 +406,8 @@ where
     }
     let expected_parent = expected_parent_hwnd(parent)?;
     let proof = profile.proof();
+    let semantic_plan = super::semantic_runtime::AgentSemanticRuntimePlan::prepare()
+        .map_err(|_| AgentOwnedViewConstructionError::Native)?;
     let AgentOwnedViewCallbacks {
         navigation: on_navigation,
         renderer_lost: on_renderer_lost,
@@ -370,9 +426,14 @@ where
     let panic_callback = Rc::new(on_callback_panic);
     let navigation_invariant = invariant_callback.clone();
     let renderer_invariant = invariant_callback.clone();
+    let semantic_invariant = invariant_callback.clone();
     let navigation_panic = panic_callback.clone();
     let renderer_panic = panic_callback.clone();
     let browser_panic = panic_callback.clone();
+    let semantic_panic = panic_callback.clone();
+    let semantic_navigation = semantic_plan.clone();
+    let semantic_renderer = semantic_plan.clone();
+    let semantic_browser = semantic_plan.clone();
 
     let mut builder = WebViewBuilder::new()
         .with_url("about:blank")
@@ -395,6 +456,12 @@ where
         .with_navigation_handler(move |target| navigation_policy.allows(&target))
         .with_navigation_event_handler(move |event| match navigation_events.observe(event) {
             Ok(observation) => {
+                if observation.did_commit_document()
+                    && semantic_navigation.document_committed().is_err()
+                {
+                    invoke_unit_callback(navigation_invariant.as_ref(), navigation_panic.as_ref());
+                    return;
+                }
                 if let Some(terminal) = observation.into_terminal() {
                     invoke_navigation_callback(
                         navigation_callback.as_ref(),
@@ -449,6 +516,12 @@ where
     let view = builder
         .build_as_child(parent)
         .map_err(|_| AgentOwnedViewConstructionError::Native)?;
+    let semantic = semantic_plan
+        .bind(&view.webview(), semantic_invariant, semantic_panic)
+        .map_err(|_| AgentOwnedViewConstructionError::Native)?;
+    if !semantic.controller().attest(&view.webview()) {
+        return Err(AgentOwnedViewConstructionError::ExtensionIsolation);
+    }
     let security_policy = super::configure(
         &view,
         0.0,
@@ -461,12 +534,14 @@ where
     let crash_observer = super::install_crash_handler(&view, move |failure| match failure {
         super::ProcessFailure::Renderer => match renderer_events.claim_renderer_loss() {
             Ok(true) => {
+                semantic_renderer.renderer_lost();
                 invoke_unit_callback(renderer_lost_callback.as_ref(), renderer_panic.as_ref())
             }
             Ok(false) => {}
             Err(()) => invoke_unit_callback(renderer_invariant.as_ref(), renderer_panic.as_ref()),
         },
         super::ProcessFailure::Browser => {
+            semantic_browser.renderer_lost();
             let _ = renderer_events.claim_renderer_loss();
             invoke_unit_callback(browser_lost_callback.as_ref(), browser_panic.as_ref());
         }
@@ -475,6 +550,7 @@ where
     Ok((
         AgentOwnedView {
             navigation,
+            semantic: Some(semantic),
             profile,
             storage_class,
             expected_user_data_folder: expected_user_data_folder.to_owned(),

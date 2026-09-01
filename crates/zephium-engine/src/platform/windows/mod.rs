@@ -15,6 +15,11 @@ mod cdp;
 mod content_filter;
 #[allow(dead_code)]
 mod extensions;
+#[cfg(feature = "agentic-browser")]
+// Compiled and lifecycle-bound while invocation remains closed until the
+// physical Windows isolated-world qualifier promotes the support claim.
+#[allow(dead_code)]
+mod semantic_runtime;
 mod stage;
 #[cfg(feature = "agentic-browser")]
 mod timeout;

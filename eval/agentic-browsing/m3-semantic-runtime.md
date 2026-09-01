@@ -11,12 +11,14 @@ through a fixed content-world reply handler and exposes its single-flight result
 through the bounded native context port. Fixed OpenAI and Anthropic stateless
 transcript encoders now produce move-only drafts with a synchronous exact-local
 whole-input counting port, exact policy reservation, and commit-only diff
-transport authority. Concrete reviewed local counters for pinned proof models
-remain absent, so production still falls back to fresh full observations. A
-mechanically release-excluded hidden/ephemeral/loopback-only semantic native
-qualifier passed on the authorized macOS/WebKit host and is retained in a
-closed aggregate manifest. Actual pinned provider token measurements remain
-pending.
+transport authority. The Windows owner now lifecycle-binds a bounded native
+WebView2 adapter over a five-method closed CDP grammar, while its host semantic
+port remains deliberately unsupported pending physical qualification. Concrete
+reviewed local counters for pinned proof models remain absent, so production
+still falls back to fresh full observations. A mechanically release-excluded
+hidden/ephemeral/loopback-only semantic native qualifier passed on the
+authorized macOS/WebKit host and is retained in a closed aggregate manifest.
+Actual pinned provider token measurements remain pending.
 
 This evidence records deterministic Rust contracts, static and synthetic DOM
 execution of the fixed program, and the narrow reviewed macOS native fixture
@@ -264,12 +266,14 @@ or observed on either platform.
   responses are seven fixed detail-free `E1` fault codes (invalid request,
   busy, missing anchor, identity exhaustion, unsupported scope, output limit,
   or internal invariant); unknown/page-supplied fault detail is rejected.
-- The production document-start asset is 51,219 ASCII bytes under a 64 KiB hard
+- The production isolated-world asset is 51,566 ASCII bytes under a 64 KiB hard
   source ceiling. Rust owns its exact bytes, sole private-world global name,
   and pinned SHA-256 digest
-  `f8adcdd636063dcac5e7cc9dcd6bbacc30df6d3dfbb1075b8ce6b1114951bb69`.
+  `76e8a40097c12f1fafc396e22346fc35833087aaf20f2f72c23d45bdb9b9b8ff`.
   The adapter receives an opaque program object whose diagnostics redact both
-  source and digest; there is no source concatenation or dynamic script input.
+  source and digest. No caller can supply or modify script; the Windows closed
+  protocol alone places the exact asset inside its fixed install-and-attest
+  function declaration.
 - The program installs one frozen, non-enumerable, non-writable,
   non-configurable object with one `invoke` method. When its exact native
   handler exists in the same isolated world, it retains one dormant Promise
@@ -320,8 +324,10 @@ or observed on either platform.
   descends open shadow roots but never obtains or guesses a closed root;
   cross-frame content remains a separate native-attested frame invocation and
   observation-assembly responsibility.
-- DOM methods and Web IDL getters used by traversal are captured at document
-  start rather than read from hostile element properties. The allowlist maps
+- DOM methods and Web IDL getters used by traversal are captured when the
+  immutable asset initializes in its isolated world—at document start on macOS
+  and before the first semantic operation on Windows—rather than read from
+  hostile element properties. The allowlist maps
   fixed HTML/ARIA roles, native/ARIA state, compatible operation classes,
   quantized geometry, labels, and safe primitive value summaries. Password and
   credential-labelled input values are never read into a returned payload;
@@ -396,47 +402,79 @@ an admitted observation and creates no timer, thread, page, queue, or worker.
 
 ## Windows isolated-world protocol boundary
 
-The first production Windows layer is now a platform-gated, pure closed CDP
-protocol core; it is not the extension/userscript CDP feasibility harness. The
-core accepts no method string, program string, function string, selector, or
-execution-context identifier from a caller. Its complete method inventory is
-`Page.addScriptToEvaluateOnNewDocument`, `Page.getFrameTree`, `Runtime.enable`,
-`Page.createIsolatedWorld`, `Runtime.disable`, `Runtime.callFunctionOn`, and
-`Page.removeScriptToEvaluateOnNewDocument`. The installed source is only
-`SEMANTIC_RUNTIME_PROGRAM`, in one process-unique named world, with command-line
-APIs disabled and immediate installation requested for the construction-only
-document. World creation explicitly denies universal access.
+The production Windows layer now includes both a platform-gated closed CDP
+protocol and the native WebView2 callback/lifecycle adapter; it is not the
+extension/userscript CDP feasibility harness. Callers can supply no method,
+program, function, selector, or execution-context identifier. The complete
+method inventory is only `Page.getFrameTree`, `Runtime.enable`,
+`Page.createIsolatedWorld`, `Runtime.disable`, and `Runtime.callFunctionOn`.
+The source gate forbids document-start registration, `Runtime.evaluate`,
+generic method strings, Web messages, host objects, DOM selectors, input CDP,
+and message-pump or worker escape hatches.
 
-One invocation discovers only the current root frame, temporarily enables
-runtime context reporting, asks WebView2 to create or resolve that exact named
-world, and requires the browser's numeric context identity to match an event
-whose name, root-frame id, `isDefault: false`, and `type: isolated` fields all
-agree. The eventual fixed function call uses the event's system-unique context
-id rather than the reusable numeric id, sets `userGesture: false`, does not
-await a Promise, returns by value, and carries only the existing 2 KiB closed
-invocation grammar. The fixed function can call only the frozen runtime's sole
-`invoke` member. Control replies, invocation replies, individual context
-events, cumulative event bytes, and event count are all independently bounded;
-browser errors, exception detail, duplicate/divergent matching contexts,
-default-world spoofing, context-id reuse, and oversized data fail closed.
-Diagnostics redact parameters and every browser identity.
+The original named `Page.addScriptToEvaluateOnNewDocument` design was rejected
+after reviewing current Blink implementation rather than trusting the protocol
+surface alone. Blink's `EvaluateScriptOnNewDocument` creates a named inspector
+world with `grant_universal_access` hard-coded true. Its world cache also
+returns an existing frame/name entry without reapplying the current document's
+security origin. The production adapter therefore never registers a CDP
+document-start script, and generates a checked process epoch plus a new OS GUID
+for every host-authorized document load. On the first invocation after commit,
+it lazily creates that root-frame world with universal access explicitly false,
+installs the exact fixed asset there, and verifies the frozen non-writable,
+non-configurable API before invocation. See the current primary
+[Blink inspector implementation](https://chromium.googlesource.com/chromium/src/third_party/+/34509812c5711b92703c48b0970f587c2fd442d3/blink/renderer/core/inspector/inspector_page_agent.cc#1041)
+for the cache/security-origin path and the hard-coded document-start grant.
+
+One first invocation discovers only the current root frame, temporarily enables
+runtime context reporting, and asks WebView2 to create that exact non-universal
+world. It joins the browser's numeric create response to one event whose
+unpredictable name, root-frame id, `isDefault: false`, `type: isolated`, and
+system-unique context id all agree, then disables context reporting before any
+program call. One fixed `Runtime.callFunctionOn` installs and attests the asset;
+a second fixed call uses only the system-unique context id, sets
+`userGesture: false`, does not await a Promise, returns by value, and carries
+only the existing 2 KiB closed invocation grammar. Later same-document calls
+reuse only that joined unique context and fixed invoke function.
+
+The native owner retains at most one pending invocation and one CDP command.
+Every dependent command waits for the prior COM completion because WebView2 may
+process concurrent CDP calls out of dispatch order. Individual control replies,
+invocation replies, context events, cumulative event bytes, event count,
+document invocations, and the one cleanup-disable attempt are independently
+bounded. COM strings are scanned under UTF-16 and UTF-8 ceilings before Rust
+allocation. Browser errors, exception detail, duplicate/divergent matching
+contexts, default-world spoofing, context-id reuse, oversized data, callback
+duplication, and registration mismatch fail closed. Diagnostics redact command
+parameters and every browser/world identity.
+
+The semantic plan is created before Wry installs its navigation callback, then
+bound to the exact constructed `ICoreWebView2` identity. Native commit,
+host-authorized document replacement, cancellation, timeout, renderer/browser
+loss, recovery, close, drop, and shutdown all rotate or revoke semantic
+authority and settle retained work with a closed failure. Retirement removes
+the exact context-event registration before native view cleanup. Resource
+audits reject simultaneous lifecycle and semantic work or contradictory native
+state. When no invocation is active, the runtime has no timer, poller, worker,
+enabled Runtime event stream, program-installed observer, or page bridge.
 
 This design follows WebView2's current Win32 contract: CDP calls are
 asynchronous and calls that depend on ordering must wait for the prior
 completion because protocol processing may otherwise be out of order
 ([Microsoft](https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2#calldevtoolsprotocolmethod)).
-The protocol's named document-start world and non-universal isolated-world
-creation contracts are documented by Chromium
+The non-universal isolated-world creation contract is documented by Chromium
 ([Page domain](https://chromedevtools.github.io/devtools-protocol/tot/Page/)),
 and `Runtime.callFunctionOn` documents the system-unique context id as the
 cross-process-navigation-safe alternative to a reusable numeric id
 ([Runtime domain](https://chromedevtools.github.io/devtools-protocol/tot/Runtime/#method-callFunctionOn)).
 
-This unit is deterministic protocol groundwork only. It does not yet register
-native WebView2 callbacks, enable the Windows host semantic port, or claim live
-isolation, timing, teardown, debugger coexistence, arbitrary-page behavior, or
-Windows product support. The existing production Windows owner continues to
-contain no CDP route, and the extension-owned CDP probe remains unchanged.
+This is compile-qualified production plumbing, not physical Windows evidence.
+The Windows host semantic task remains explicitly unsupported until the exact
+adapter passes the release-excluded fixed isolated-world fixture on supported
+physical Windows, including replacement, renderer loss, event pressure,
+teardown, and debugger coexistence. No live isolation, timing, arbitrary-page,
+or Windows product-support claim is made, and the extension-owned CDP probe
+remains unchanged.
 
 ## Reviewed macOS native evidence
 
@@ -567,8 +605,9 @@ rather than silently widening the hostile wire schema.
    checks. Open/closed shadow behavior and source exclusion currently have
    deterministic synthetic/static coverage but still require that engine
    evidence;
-4. complete the bounded native WebView2 callback/lifecycle adapter over the
-   closed Windows protocol, keep the host port unsupported until its fixed
-   isolated-world fixture passes on physical supported Windows, then add
-   hostile replacement, renderer-loss, event-flood, teardown, and debugger-
-   coexistence evidence. No main-world or numeric-context fallback is allowed.
+4. run the bounded native WebView2 callback/lifecycle adapter through its fixed
+   isolated-world fixture on physical supported Windows, including hostile
+   replacement, renderer-loss, event-flood, teardown, and debugger-coexistence
+   cases. Keep the host port unsupported until that evidence passes. No
+   document-start named-world, main-world, or numeric-context fallback is
+   allowed.
