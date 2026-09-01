@@ -223,6 +223,47 @@ pub enum AgentBrowserHumanReason {
     HumanChallenge,
 }
 
+/// Closed standalone wait condition proposed by the model.
+///
+/// Unlike an action-local `SemanticWaitCondition`, target-scoped variants
+/// carry the exact opaque reference they propose to observe. This value is
+/// still not observation or timer authority: the shell must bind the target
+/// against one exact acknowledged observation and derive one absolute
+/// deadline before waiting.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgentBrowserWaitCondition {
+    /// Observe immediately without an idle heuristic.
+    Immediate,
+    /// Wait for one exact native navigation commitment.
+    NavigationCommitted,
+    /// Wait for the current document to reach the adapter's fixed ready state.
+    DocumentReady,
+    /// Wait for one referenced target to gain or lose an allowlisted state.
+    TargetState {
+        /// Opaque prior-observation target proposal.
+        target: SemanticReferenceId,
+        /// Allowlisted state.
+        state: SemanticState,
+        /// Required presence.
+        present: bool,
+    },
+    /// Wait for the native-attested committed URL to change.
+    UrlChanged,
+    /// Wait for bounded semantic title state to change.
+    TitleChanged,
+    /// Wait for a browser/page dialog boundary.
+    Dialog(SemanticDialogState),
+    /// Wait for a semantic projection change.
+    SemanticChange,
+    /// Wait for bounded mutation quiet, never network idle.
+    MutationQuiet(SemanticMutationQuietPeriod),
+    /// Wait for independently sampled scroll movement of one referenced target.
+    ScrollPositionChanged {
+        /// Opaque prior-observation target proposal.
+        target: SemanticReferenceId,
+    },
+}
+
 /// Pre-observation bounded semantic action-batch proposal.
 #[must_use]
 #[derive(Eq, PartialEq)]
@@ -348,7 +389,7 @@ pub enum AgentBrowserToolProposal {
     /// Typed wait proposal under one relative ceiling.
     Wait {
         /// Closed condition.
-        condition: SemanticWaitCondition,
+        condition: AgentBrowserWaitCondition,
         /// Relative ceiling; the shell derives one absolute deadline.
         timeout: SemanticSettleBudget,
     },
@@ -663,7 +704,7 @@ fn decode_proposal(
         }
         AgentBrowserToolKind::Wait => {
             let value: WaitArgumentsWire = parse(arguments)?;
-            let condition = decode_wait(value.condition)?;
+            let condition = decode_standalone_wait(value.condition)?;
             let timeout = SemanticSettleBudget::try_new(value.timeout_millis)
                 .map_err(|_| AgentBrowserToolContractError::Wait)?;
             Ok(AgentBrowserToolProposal::Wait { condition, timeout })
@@ -819,6 +860,42 @@ fn decode_wait(value: WaitWire) -> Result<SemanticWaitCondition, AgentBrowserToo
                 .map_err(|_| AgentBrowserToolContractError::Wait)?,
         )),
         WaitWire::ScrollPositionChanged => Ok(SemanticWaitCondition::ScrollPositionChanged),
+    }
+}
+
+fn decode_standalone_wait(
+    value: StandaloneWaitWire,
+) -> Result<AgentBrowserWaitCondition, AgentBrowserToolContractError> {
+    match value {
+        StandaloneWaitWire::Immediate => Ok(AgentBrowserWaitCondition::Immediate),
+        StandaloneWaitWire::NavigationCommitted => {
+            Ok(AgentBrowserWaitCondition::NavigationCommitted)
+        }
+        StandaloneWaitWire::DocumentReady => Ok(AgentBrowserWaitCondition::DocumentReady),
+        StandaloneWaitWire::TargetState {
+            target,
+            state,
+            present,
+        } => Ok(AgentBrowserWaitCondition::TargetState {
+            target: reference(target)?,
+            state: state.into(),
+            present,
+        }),
+        StandaloneWaitWire::UrlChanged => Ok(AgentBrowserWaitCondition::UrlChanged),
+        StandaloneWaitWire::TitleChanged => Ok(AgentBrowserWaitCondition::TitleChanged),
+        StandaloneWaitWire::Dialog { state } => Ok(AgentBrowserWaitCondition::Dialog(state.into())),
+        StandaloneWaitWire::SemanticChange => Ok(AgentBrowserWaitCondition::SemanticChange),
+        StandaloneWaitWire::MutationQuiet { millis } => {
+            Ok(AgentBrowserWaitCondition::MutationQuiet(
+                SemanticMutationQuietPeriod::try_new(millis)
+                    .map_err(|_| AgentBrowserToolContractError::Wait)?,
+            ))
+        }
+        StandaloneWaitWire::ScrollPositionChanged { target } => {
+            Ok(AgentBrowserWaitCondition::ScrollPositionChanged {
+                target: reference(target)?,
+            })
+        }
     }
 }
 
@@ -1044,6 +1121,31 @@ enum WaitWire {
 
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum StandaloneWaitWire {
+    Immediate,
+    NavigationCommitted,
+    DocumentReady,
+    TargetState {
+        target: String,
+        state: StateWire,
+        present: bool,
+    },
+    UrlChanged,
+    TitleChanged,
+    Dialog {
+        state: DialogWire,
+    },
+    SemanticChange,
+    MutationQuiet {
+        millis: u32,
+    },
+    ScrollPositionChanged {
+        target: String,
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum VerificationWire {
     TargetState { state: StateWire, present: bool },
     TargetValueMatchesInput,
@@ -1180,7 +1282,7 @@ impl From<ScrollAmountWire> for SemanticScrollAmount {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WaitArgumentsWire {
-    condition: WaitWire,
+    condition: StandaloneWaitWire,
     timeout_millis: u32,
 }
 
@@ -1331,10 +1433,52 @@ mod tests {
         assert!(matches!(
             wait.proposal(),
             AgentBrowserToolProposal::Wait {
-                condition: SemanticWaitCondition::MutationQuiet(quiet),
+                condition: AgentBrowserWaitCondition::MutationQuiet(quiet),
                 timeout,
             } if quiet.millis() == 250 && timeout.millis() == 5_000
         ));
+
+        let target_wait = decode(
+            "wait",
+            r#"{"condition":{"kind":"target_state","target":"@a5","state":"expanded","present":true},"timeout_millis":1000}"#,
+        )
+        .expect("target wait");
+        assert!(matches!(
+            target_wait.proposal(),
+            AgentBrowserToolProposal::Wait {
+                condition: AgentBrowserWaitCondition::TargetState {
+                    target,
+                    state: SemanticState::Expanded,
+                    present: true,
+                },
+                timeout,
+            } if target.get() == 5 && timeout.millis() == 1_000
+        ));
+
+        let scroll_wait = decode(
+            "wait",
+            r#"{"condition":{"kind":"scroll_position_changed","target":"@a6"},"timeout_millis":1000}"#,
+        )
+        .expect("scroll wait");
+        assert!(matches!(
+            scroll_wait.proposal(),
+            AgentBrowserToolProposal::Wait {
+                condition: AgentBrowserWaitCondition::ScrollPositionChanged { target },
+                ..
+            } if target.get() == 6
+        ));
+
+        for arguments in [
+            r#"{"condition":{"kind":"target_state","state":"expanded","present":true},"timeout_millis":1000}"#,
+            r#"{"condition":{"kind":"scroll_position_changed"},"timeout_millis":1000}"#,
+            r#"{"condition":{"kind":"target_state","target":"@a01","state":"expanded","present":true},"timeout_millis":1000}"#,
+        ] {
+            assert!(matches!(
+                decode("wait", arguments),
+                Err(AgentBrowserToolContractError::Arguments)
+                    | Err(AgentBrowserToolContractError::Reference)
+            ));
+        }
     }
 
     #[test]

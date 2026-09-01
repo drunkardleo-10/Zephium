@@ -1723,7 +1723,7 @@ fn tool_parameters(kind: AgentBrowserToolKind) -> Value {
             }),
         )]),
         AgentBrowserToolKind::Wait => strict_object(vec![
-            ("condition", wait_schema()),
+            ("condition", standalone_wait_schema()),
             (
                 "timeout_millis",
                 json!({"type":"integer","minimum":1,"maximum":MAX_SEMANTIC_ACTION_SETTLE_MILLIS}),
@@ -1845,7 +1845,7 @@ fn action_variant(kind: &'static str, mut properties: Vec<(&'static str, Value)>
                 "capability_boundary",
             ]),
         ),
-        ("wait", wait_schema()),
+        ("wait", action_wait_schema()),
         ("verification", verification_schema()),
         (
             "settle_millis",
@@ -1855,7 +1855,7 @@ fn action_variant(kind: &'static str, mut properties: Vec<(&'static str, Value)>
     tagged_object(kind, properties)
 }
 
-fn wait_schema() -> Value {
+fn action_wait_schema() -> Value {
     any_of(vec![
         tagged_object("immediate", Vec::new()),
         tagged_object("navigation_committed", Vec::new()),
@@ -1879,6 +1879,37 @@ fn wait_schema() -> Value {
             )],
         ),
         tagged_object("scroll_position_changed", Vec::new()),
+    ])
+}
+
+fn standalone_wait_schema() -> Value {
+    any_of(vec![
+        tagged_object("immediate", Vec::new()),
+        tagged_object("navigation_committed", Vec::new()),
+        tagged_object("document_ready", Vec::new()),
+        tagged_object(
+            "target_state",
+            vec![
+                ("target", reference_schema()),
+                ("state", state_schema()),
+                ("present", json!({"type":"boolean"})),
+            ],
+        ),
+        tagged_object("url_changed", Vec::new()),
+        tagged_object("title_changed", Vec::new()),
+        tagged_object("dialog", vec![("state", dialog_schema())]),
+        tagged_object("semantic_change", Vec::new()),
+        tagged_object(
+            "mutation_quiet",
+            vec![(
+                "millis",
+                json!({"type":"integer","minimum":1,"maximum":MAX_SEMANTIC_MUTATION_QUIET_MILLIS}),
+            )],
+        ),
+        tagged_object(
+            "scroll_position_changed",
+            vec![("target", reference_schema())],
+        ),
     ])
 }
 
@@ -2113,6 +2144,15 @@ mod tests {
             )
             .expect("schema sample must decode");
         }
+
+        let wait = definitions
+            .iter()
+            .find(|definition| definition.kind == AgentBrowserToolKind::Wait)
+            .expect("wait schema");
+        let wait_schema = serde_json::to_string(&wait.parameters).expect("wait schema JSON");
+        assert!(wait_schema.contains(r#""target_state""#));
+        assert!(wait_schema.contains(r#""scroll_position_changed""#));
+        assert!(wait_schema.contains(r#""target""#));
     }
 
     #[test]

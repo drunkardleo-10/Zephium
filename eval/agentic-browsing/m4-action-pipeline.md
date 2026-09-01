@@ -29,6 +29,13 @@ are trusted, or that M4 is complete.
   direction/magnitude `scroll`. It contains opaque semantic references rather
   than selectors, DOM, JavaScript, native handles, key strings, pixel deltas,
   or generated HTML.
+- Standalone waits have a distinct model contract from action-local settlement.
+  Target-state and scroll-position waits must carry one canonical opaque
+  `@aN` reference; action-local waits continue to use their already-bound
+  primary action target. Missing, noncanonical, selector-like, or extra target
+  fields fail in the strict provider decoder before any observation or timer
+  authority exists. This prevents a future wait driver from guessing which
+  page node a target-scoped condition means.
 - A batch admits one through eight sequential proposals. Exact fill text is
   capped at 4 KiB per action and 16 KiB per batch. Each action carries a
   nonzero settle budget no longer than 30 seconds; aggregate batch settlement

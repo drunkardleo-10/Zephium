@@ -53,8 +53,8 @@ pub use tool::{
     AgentBrowserActProposal, AgentBrowserHumanReason, AgentBrowserScopeProposal,
     AgentBrowserSemanticQuery, AgentBrowserToolCall, AgentBrowserToolCallId,
     AgentBrowserToolContractError, AgentBrowserToolKind, AgentBrowserToolProposal,
-    AgentProviderToolCallCorrelation, MAX_AGENT_BROWSER_SEMANTIC_QUERY_BYTES,
-    MAX_AGENT_PROVIDER_TOOL_CALL_ID_BYTES,
+    AgentBrowserWaitCondition, AgentProviderToolCallCorrelation,
+    MAX_AGENT_BROWSER_SEMANTIC_QUERY_BYTES, MAX_AGENT_PROVIDER_TOOL_CALL_ID_BYTES,
 };
 
 /// Maximum bytes in one pinned provider model revision.
