@@ -11,6 +11,13 @@ use super::{
 };
 use crate::{AgentPlanNodeId, SemanticActionFailure};
 
+mod context_schedule;
+use context_schedule::SupervisorContextRow;
+pub use context_schedule::{
+    AgentSupervisorContextAssignment, AgentSupervisorContextCancellationTarget,
+    AgentSupervisorContextRelease, AgentSupervisorContextReleaseOutcome,
+};
+
 /// Process-local identity for one exact mutable supervisor incarnation.
 #[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct AgentSupervisorId(NonZeroU64);
@@ -66,6 +73,8 @@ impl fmt::Debug for AgentSupervisorAttemptId {
 pub enum AgentSupervisorWait {
     /// At least one activated descendant must finish first.
     Descendants,
+    /// One or more assigned browser contexts need proven disposition.
+    Contexts,
     /// The shell deliberately yielded a turn with no retained async work.
     Yielded,
 }
@@ -302,6 +311,7 @@ pub struct AgentSupervisorRuntimeStatus {
     cancelling: usize,
     terminal: usize,
     cancelled: usize,
+    contexts: usize,
     sealed: bool,
 }
 
@@ -344,6 +354,11 @@ impl AgentSupervisorRuntimeStatus {
     /// Terminally cancelled nodes.
     pub const fn cancelled(self) -> usize {
         self.cancelled
+    }
+
+    /// Browser contexts still assigned to supervisor nodes.
+    pub const fn contexts(self) -> usize {
+        self.contexts
     }
 
     /// Whether token/settlement ambiguity sealed further mutation.
@@ -481,6 +496,7 @@ pub struct AgentSupervisorCancellationBatch {
     affected: usize,
     terminal: usize,
     targets: Vec<AgentSupervisorCancellationTarget>,
+    contexts: Vec<AgentSupervisorContextCancellationTarget>,
 }
 
 impl AgentSupervisorCancellationBatch {
@@ -513,6 +529,13 @@ impl AgentSupervisorCancellationBatch {
     pub fn targets(&self) -> impl ExactSizeIterator<Item = AgentSupervisorCancellationTarget> + '_ {
         self.targets.iter().copied()
     }
+
+    /// Assigned contexts that must cancel, close, release, or retire.
+    pub fn contexts(
+        &self,
+    ) -> impl ExactSizeIterator<Item = AgentSupervisorContextCancellationTarget> + '_ {
+        self.contexts.iter().copied()
+    }
 }
 
 impl fmt::Debug for AgentSupervisorCancellationBatch {
@@ -525,6 +548,7 @@ impl fmt::Debug for AgentSupervisorCancellationBatch {
             .field("affected", &self.affected)
             .field("terminal", &self.terminal)
             .field("drain_targets", &self.targets.len())
+            .field("context_targets", &self.contexts.len())
             .field("content", &"[redacted]")
             .finish()
     }
@@ -536,6 +560,7 @@ pub struct AgentRunSupervisor {
     id: AgentSupervisorId,
     topology: AgentDelegationTopology,
     nodes: Vec<SupervisorNodeRow>,
+    contexts: Vec<SupervisorContextRow>,
     last_attempt: Option<AgentSupervisorAttemptId>,
     last_cancellation: Option<AgentSupervisorCancellationId>,
     sealed: bool,
@@ -552,6 +577,7 @@ impl AgentRunSupervisor {
                 node: root,
                 state: NodeState::Queued,
             }],
+            contexts: Vec::new(),
             last_attempt: None,
             last_cancellation: None,
             sealed: false,
@@ -579,6 +605,7 @@ impl AgentRunSupervisor {
             cancelling: 0,
             terminal: 0,
             cancelled: 0,
+            contexts: self.contexts.len(),
             sealed: self.sealed,
         };
         for row in &self.nodes {
@@ -753,6 +780,7 @@ impl AgentRunSupervisor {
             target.node() == root || topology_descends_from(&self.topology, target.node(), root)
         }));
         debug_assert!(targets.len() <= MAX_AGENT_EXECUTING_SUPERVISOR_NODES);
+        let contexts = self.context_cancellation_targets_for(root);
         let terminal = self.status().cancelled.saturating_sub(terminal_before);
         Ok(AgentSupervisorCancellationBatch {
             supervisor: self.id,
@@ -761,6 +789,7 @@ impl AgentRunSupervisor {
             affected,
             terminal,
             targets,
+            contexts,
         })
     }
 
@@ -782,6 +811,14 @@ impl AgentRunSupervisor {
         match self.nodes[index].state {
             NodeState::Queued | NodeState::Waiting(AgentSupervisorWait::Yielded) => {}
             NodeState::Waiting(AgentSupervisorWait::Descendants) => {
+                if self.has_live_descendant(node) {
+                    return Err(AgentSupervisorRuntimeError::DescendantsLive);
+                }
+            }
+            NodeState::Waiting(AgentSupervisorWait::Contexts) => {
+                if self.has_assigned_context(node) {
+                    return Err(AgentSupervisorRuntimeError::ContextsLive);
+                }
                 if self.has_live_descendant(node) {
                     return Err(AgentSupervisorRuntimeError::DescendantsLive);
                 }
@@ -825,7 +862,7 @@ impl AgentRunSupervisor {
         ))
     }
 
-    /// Settles one exact execution, or safely waits when descendants remain.
+    /// Settles one exact execution, or waits while descendants/contexts remain.
     pub fn complete(
         &mut self,
         execution: AgentNodeExecution,
@@ -834,6 +871,13 @@ impl AgentRunSupervisor {
         let (index, cancellation) = self.require_execution(&execution)?;
         if let Some(cancellation) = cancellation {
             return Ok(self.settle_cancelled_execution(index, execution, cancellation));
+        }
+        if self.has_assigned_context(execution.node()) {
+            self.nodes[index].state = NodeState::Waiting(AgentSupervisorWait::Contexts);
+            return Ok(execution_receipt(
+                execution,
+                AgentSupervisorExecutionOutcome::Waiting(AgentSupervisorWait::Contexts),
+            ));
         }
         if self.has_live_descendant(execution.node()) {
             self.nodes[index].state = NodeState::Waiting(AgentSupervisorWait::Descendants);
@@ -944,6 +988,7 @@ impl AgentRunSupervisor {
                     row.state,
                     NodeState::Cancelling(CancellingState { running: None, .. })
                 ) && !self.has_live_descendant(row.node)
+                    && !self.has_assigned_context(row.node)
             });
             let Some(index) = candidate else {
                 return;
@@ -1021,6 +1066,36 @@ pub enum AgentSupervisorRuntimeError {
     /// Parent cannot settle/resume while an activated descendant is live.
     #[error("agent supervisor descendant is still live")]
     DescendantsLive,
+    /// Node cannot settle/resume while an assigned context remains live.
+    #[error("agent supervisor browser context is still assigned")]
+    ContextsLive,
+    /// Supplied manifest was not the exact topology manifest revision.
+    #[error("agent supervisor manifest revision mismatched")]
+    ManifestMismatch,
+    /// Context run or profile was outside the exact node authority.
+    #[error("agent supervisor context authority mismatched")]
+    ContextAuthority,
+    /// Context identity was already assigned in this run supervisor.
+    #[error("agent supervisor context was already assigned")]
+    ContextDuplicate,
+    /// Run-global concurrent context budget was full.
+    #[error("agent supervisor run context budget exhausted")]
+    RunContextLimit,
+    /// Node-local concurrent context budget was full.
+    #[error("agent supervisor node context budget exhausted")]
+    NodeContextLimit,
+    /// Bounded context-assignment storage could not be reserved.
+    #[error("agent supervisor context assignment capacity unavailable")]
+    ContextCapacity,
+    /// Context was not assigned to this supervisor.
+    #[error("agent supervisor context is not assigned")]
+    ContextNotAssigned,
+    /// Registry cleanup proof did not match the retained assignment.
+    #[error("agent supervisor context cleanup identity mismatched")]
+    ContextIdentityMismatch,
+    /// Existing bounded context registry refused the exact operation.
+    #[error(transparent)]
+    ContextRegistry(#[from] crate::ContextRegistryError),
     /// Non-cloneable execution identity/state/guard did not exactly match.
     #[error("agent supervisor execution token mismatched")]
     ExecutionMismatch,

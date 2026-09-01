@@ -19,10 +19,12 @@ pub use runtime::{
     AgentNodeExecution, AgentRunSupervisor, AgentSupervisorAttemptId, AgentSupervisorCancellation,
     AgentSupervisorCancellationBatch, AgentSupervisorCancellationId,
     AgentSupervisorCancellationReason, AgentSupervisorCancellationTarget,
-    AgentSupervisorCompletion, AgentSupervisorExecutionOutcome, AgentSupervisorExecutionReceipt,
-    AgentSupervisorFailure, AgentSupervisorId, AgentSupervisorNodeCancellation,
-    AgentSupervisorNodeSnapshot, AgentSupervisorNodeStatus, AgentSupervisorRuntimeError,
-    AgentSupervisorRuntimeStatus, AgentSupervisorWait,
+    AgentSupervisorCompletion, AgentSupervisorContextAssignment,
+    AgentSupervisorContextCancellationTarget, AgentSupervisorContextRelease,
+    AgentSupervisorContextReleaseOutcome, AgentSupervisorExecutionOutcome,
+    AgentSupervisorExecutionReceipt, AgentSupervisorFailure, AgentSupervisorId,
+    AgentSupervisorNodeCancellation, AgentSupervisorNodeSnapshot, AgentSupervisorNodeStatus,
+    AgentSupervisorRuntimeError, AgentSupervisorRuntimeStatus, AgentSupervisorWait,
 };
 
 /// Initial maximum simultaneously live nodes in one supervisor tree.
@@ -372,8 +374,10 @@ mod tests {
     use super::*;
     use crate::{
         AgentAccountScope, AgentEffectScope, AgentPlanNodeAuthority, AgentPolicyInstant,
-        AgentRunBudget, AgentRunScope, SemanticActionFailure, SemanticEffectClass, SemanticOrigin,
-        SemanticSensitivity,
+        AgentRunBudget, AgentRunScope, ContextCapabilities, ContextCapability, ContextId,
+        ContextIdentity, ContextKind, ContextOperationId, ContextRegistry, ContextRegistryError,
+        ContextResourceDisposition, ContextSettlement, ContextTerminal, SemanticActionFailure,
+        SemanticEffectClass, SemanticOrigin, SemanticSensitivity,
     };
     use zephium_core::ids::ProfileId;
 
@@ -513,12 +517,81 @@ mod tests {
         .expect("topology")
     }
 
+    fn single_node_context_manifest(
+        manifest_id: u128,
+        run_contexts: u8,
+        node_contexts: u8,
+    ) -> AgentRunManifest {
+        let effect_scope = effects(&[SemanticEffectClass::Read]);
+        AgentRunManifest::try_new(
+            AgentRunManifestId::from_raw(manifest_id),
+            ContextRunId::from_raw(2),
+            AgentRunScope::try_new(
+                vec![profile(1)],
+                vec![AgentAccountScope::Anonymous],
+                vec![origin("a")],
+                SemanticSensitivity::Public,
+                effect_scope,
+                Vec::new(),
+            )
+            .expect("scope"),
+            AgentRunBudget::try_new(10, 100, 100, run_contexts).expect("run budget"),
+            AgentPolicyInstant::from_millis(1_000),
+            AgentPolicyInstant::from_millis(10_000),
+            vec![AgentPlanNodeScope::new(
+                AgentPlanNodeId::from_raw(1),
+                AgentPlanNodeAuthority::try_new(
+                    vec![profile(1)],
+                    vec![AgentAccountScope::Anonymous],
+                    vec![origin("a")],
+                    SemanticSensitivity::Public,
+                    effect_scope,
+                )
+                .expect("authority"),
+                AgentRunBudget::try_new(10, 100, 100, node_contexts).expect("node budget"),
+                AgentPolicyInstant::from_millis(9_000),
+            )],
+        )
+        .expect("context manifest")
+    }
+
     fn attempt(value: u64) -> AgentSupervisorAttemptId {
         AgentSupervisorAttemptId::new(value).expect("attempt")
     }
 
     fn cancellation(value: u64) -> AgentSupervisorCancellationId {
         AgentSupervisorCancellationId::new(value).expect("cancellation")
+    }
+
+    fn context(value: u128) -> ContextId {
+        ContextId::from_raw(value)
+    }
+
+    fn context_identity(value: u128, owner: u128, profile_value: u128) -> ContextIdentity {
+        ContextIdentity::new(
+            context(value),
+            ContextRunId::from_raw(owner),
+            profile(profile_value),
+            ContextKind::Owned,
+        )
+    }
+
+    fn context_capabilities() -> ContextCapabilities {
+        ContextCapabilities::try_new(
+            ContextKind::Owned,
+            &[
+                ContextCapability::Navigate,
+                ContextCapability::Observe,
+                ContextCapability::Act,
+                ContextCapability::Suspend,
+                ContextCapability::Recover,
+            ],
+        )
+        .expect("context capabilities")
+    }
+
+    fn context_operation(value: u64) -> ContextOperationId {
+        ContextOperationId::new(value).expect("context operation")
     }
 
     #[test]
@@ -1300,5 +1373,293 @@ mod tests {
         let debug = format!("{supervisor:?} {branch:?} {run:?}");
         assert!(!debug.contains("a.example.test"));
         assert!(debug.contains("[redacted]"));
+    }
+
+    #[test]
+    fn context_assignment_rejoins_manifest_authority_and_both_context_budgets() {
+        let manifest = standard_manifest();
+        let mut supervisor = AgentRunSupervisor::new(
+            AgentSupervisorId::new(30).expect("supervisor"),
+            standard_topology(&manifest),
+        );
+        let root_id = AgentPlanNodeId::from_raw(1);
+        let root = supervisor.start(root_id, attempt(1)).expect("start root");
+        let mut registry = ContextRegistry::new();
+        let capabilities = context_capabilities();
+
+        assert_eq!(
+            supervisor
+                .reserve_context(
+                    &root,
+                    &manifest,
+                    &mut registry,
+                    context_identity(1, 99, 1),
+                    capabilities,
+                )
+                .expect_err("wrong owner"),
+            AgentSupervisorRuntimeError::ContextAuthority
+        );
+        assert_eq!(
+            supervisor
+                .reserve_context(
+                    &root,
+                    &manifest,
+                    &mut registry,
+                    context_identity(1, 2, 99),
+                    capabilities,
+                )
+                .expect_err("wrong profile"),
+            AgentSupervisorRuntimeError::ContextAuthority
+        );
+        let other_manifest = make_manifest(vec![node(
+            1,
+            &["a"],
+            &[SemanticEffectClass::Read],
+            SemanticSensitivity::Public,
+            1,
+            2_000,
+        )]);
+        assert_eq!(
+            supervisor
+                .reserve_context(
+                    &root,
+                    &other_manifest,
+                    &mut registry,
+                    context_identity(1, 2, 1),
+                    capabilities,
+                )
+                .expect_err("different manifest revision"),
+            AgentSupervisorRuntimeError::ManifestMismatch
+        );
+
+        let preexisting = context_identity(9, 2, 1);
+        registry
+            .reserve(preexisting, capabilities)
+            .expect("preexisting registry row");
+        assert_eq!(
+            supervisor
+                .reserve_context(&root, &manifest, &mut registry, preexisting, capabilities,)
+                .expect_err("registry duplicate"),
+            AgentSupervisorRuntimeError::ContextRegistry(ContextRegistryError::Duplicate)
+        );
+        assert_eq!(supervisor.status().contexts(), 0);
+        registry
+            .cancel_queued(preexisting.id())
+            .expect("remove preexisting row");
+
+        let identity = context_identity(1, 2, 1);
+        let assignment = supervisor
+            .reserve_context(&root, &manifest, &mut registry, identity, capabilities)
+            .expect("reserve exact context");
+        assert_eq!(assignment.node(), root_id);
+        assert_eq!(assignment.identity(), identity);
+        assert_eq!(supervisor.status().contexts(), 1);
+        assert_eq!(registry.status().total(), 1);
+        assert_eq!(
+            supervisor
+                .reserve_context(&root, &manifest, &mut registry, identity, capabilities)
+                .expect_err("duplicate assignment"),
+            AgentSupervisorRuntimeError::ContextDuplicate
+        );
+        assert_eq!(
+            supervisor
+                .reserve_context(
+                    &root,
+                    &manifest,
+                    &mut registry,
+                    context_identity(2, 2, 1),
+                    capabilities,
+                )
+                .expect_err("run context budget"),
+            AgentSupervisorRuntimeError::RunContextLimit
+        );
+        assert_eq!(registry.status().total(), 1);
+        assert!(!supervisor.status().is_sealed());
+
+        let node_manifest = single_node_context_manifest(90, 2, 1);
+        let node_topology = AgentDelegationTopology::try_new(
+            &node_manifest,
+            vec![AgentDelegationSpec::new(root_id, None)],
+        )
+        .expect("single-node topology");
+        let mut node_supervisor = AgentRunSupervisor::new(
+            AgentSupervisorId::new(34).expect("supervisor"),
+            node_topology,
+        );
+        let node_execution = node_supervisor
+            .start(root_id, attempt(1))
+            .expect("start single node");
+        let mut node_registry = ContextRegistry::new();
+        node_supervisor
+            .reserve_context(
+                &node_execution,
+                &node_manifest,
+                &mut node_registry,
+                context_identity(3, 2, 1),
+                capabilities,
+            )
+            .expect("first node context");
+        assert_eq!(
+            node_supervisor
+                .reserve_context(
+                    &node_execution,
+                    &node_manifest,
+                    &mut node_registry,
+                    context_identity(4, 2, 1),
+                    capabilities,
+                )
+                .expect_err("node context budget"),
+            AgentSupervisorRuntimeError::NodeContextLimit
+        );
+        assert_eq!(node_registry.status().total(), 1);
+    }
+
+    #[test]
+    fn node_completion_waits_for_registry_proven_context_disposition() {
+        let manifest = standard_manifest();
+        let mut supervisor = AgentRunSupervisor::new(
+            AgentSupervisorId::new(31).expect("supervisor"),
+            standard_topology(&manifest),
+        );
+        let root_id = AgentPlanNodeId::from_raw(1);
+        let root = supervisor.start(root_id, attempt(1)).expect("start root");
+        let mut registry = ContextRegistry::new();
+        let identity = context_identity(10, 2, 1);
+        supervisor
+            .reserve_context(
+                &root,
+                &manifest,
+                &mut registry,
+                identity,
+                context_capabilities(),
+            )
+            .expect("assign context");
+        let waiting = supervisor
+            .complete(root, AgentSupervisorCompletion::Succeeded)
+            .expect("context wait");
+        assert_eq!(
+            waiting.outcome(),
+            AgentSupervisorExecutionOutcome::Waiting(AgentSupervisorWait::Contexts)
+        );
+        assert_eq!(supervisor.status().executing(), 0);
+        assert_eq!(
+            supervisor
+                .start(root_id, attempt(2))
+                .expect_err("assigned context blocks terminal retry"),
+            AgentSupervisorRuntimeError::ContextsLive
+        );
+        let release = supervisor
+            .cancel_queued_context(&mut registry, identity.id())
+            .expect("registry-proven queued cancellation");
+        assert_eq!(release.assignment().identity(), identity);
+        assert_eq!(
+            release.outcome(),
+            AgentSupervisorContextReleaseOutcome::QueuedCancelled
+        );
+        assert_eq!(supervisor.status().contexts(), 0);
+        assert_eq!(registry.status().total(), 0);
+        let root = supervisor
+            .start(root_id, attempt(2))
+            .expect("resume after disposition");
+        supervisor
+            .complete(root, AgentSupervisorCompletion::Succeeded)
+            .expect("terminal root");
+        assert_eq!(supervisor.status().terminal(), 1);
+    }
+
+    #[test]
+    fn cancellation_keeps_context_owner_live_until_cleanup_and_active_reap_is_exact() {
+        let manifest = standard_manifest();
+        let root_id = AgentPlanNodeId::from_raw(1);
+        let mut supervisor = AgentRunSupervisor::new(
+            AgentSupervisorId::new(32).expect("supervisor"),
+            standard_topology(&manifest),
+        );
+        let root = supervisor.start(root_id, attempt(1)).expect("start root");
+        let mut registry = ContextRegistry::new();
+        let identity = context_identity(20, 2, 1);
+        supervisor
+            .reserve_context(
+                &root,
+                &manifest,
+                &mut registry,
+                identity,
+                context_capabilities(),
+            )
+            .expect("assign context");
+        let batch = supervisor
+            .cancel_subtree(
+                root_id,
+                cancellation(1),
+                AgentSupervisorCancellationReason::Shutdown,
+            )
+            .expect("cancel run");
+        assert_eq!(batch.contexts().len(), 1);
+        let target = batch.contexts().next().expect("context target");
+        assert_eq!(target.assignment().identity(), identity);
+        assert_eq!(target.cancellation().id(), cancellation(1));
+        supervisor
+            .drain_cancelled(root, cancellation(1))
+            .expect("execution drained");
+        assert_eq!(supervisor.status().executing(), 0);
+        assert_eq!(supervisor.status().live(), 1);
+        assert_eq!(supervisor.status().contexts(), 1);
+        assert_eq!(supervisor.context_cancellation_targets().count(), 1);
+        supervisor
+            .cancel_queued_context(&mut registry, identity.id())
+            .expect("cleanup context");
+        assert_eq!(supervisor.status().live(), 0);
+        assert_eq!(supervisor.status().cancelled(), 1);
+
+        let manifest = standard_manifest();
+        let mut active_supervisor = AgentRunSupervisor::new(
+            AgentSupervisorId::new(33).expect("supervisor"),
+            standard_topology(&manifest),
+        );
+        let execution = active_supervisor
+            .start(root_id, attempt(1))
+            .expect("start root");
+        let mut active_registry = ContextRegistry::new();
+        let active_identity = context_identity(21, 2, 1);
+        active_supervisor
+            .reserve_context(
+                &execution,
+                &manifest,
+                &mut active_registry,
+                active_identity,
+                context_capabilities(),
+            )
+            .expect("assign active context");
+        let construction = active_registry
+            .begin_context(active_identity.id(), context_operation(1))
+            .expect("begin construction");
+        active_registry
+            .settle_construction(
+                active_identity.id(),
+                construction,
+                ContextSettlement::Applied,
+            )
+            .expect("settle construction");
+        let close = active_registry
+            .begin_close(active_identity.id(), context_operation(2))
+            .expect("begin close");
+        active_registry
+            .settle_close(active_identity.id(), close, ContextSettlement::Applied)
+            .expect("settle close");
+        let release = active_supervisor
+            .reap_terminal_context(&mut active_registry, active_identity.id())
+            .expect("reap exact terminal context");
+        assert_eq!(
+            release.outcome(),
+            AgentSupervisorContextReleaseOutcome::Retired {
+                terminal: ContextTerminal::Closed,
+                resource: ContextResourceDisposition::Destroyed,
+            }
+        );
+        active_supervisor
+            .complete(execution, AgentSupervisorCompletion::Succeeded)
+            .expect("complete after reap");
+        assert_eq!(active_supervisor.status().contexts(), 0);
+        assert_eq!(active_supervisor.status().terminal(), 1);
     }
 }

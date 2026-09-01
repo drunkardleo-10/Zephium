@@ -73,11 +73,13 @@ pub use agent_supervisor::{
     AgentRunSupervisor, AgentSupervisorAttemptId, AgentSupervisorCancellation,
     AgentSupervisorCancellationBatch, AgentSupervisorCancellationId,
     AgentSupervisorCancellationReason, AgentSupervisorCancellationTarget,
-    AgentSupervisorCompletion, AgentSupervisorContractError, AgentSupervisorExecutionOutcome,
-    AgentSupervisorExecutionReceipt, AgentSupervisorFailure, AgentSupervisorId,
-    AgentSupervisorNodeCancellation, AgentSupervisorNodeSnapshot, AgentSupervisorNodeStatus,
-    AgentSupervisorRuntimeError, AgentSupervisorRuntimeStatus, AgentSupervisorWait,
-    MAX_AGENT_DELEGATION_DEPTH, MAX_AGENT_EXECUTING_SUPERVISOR_NODES,
+    AgentSupervisorCompletion, AgentSupervisorContextAssignment,
+    AgentSupervisorContextCancellationTarget, AgentSupervisorContextRelease,
+    AgentSupervisorContextReleaseOutcome, AgentSupervisorContractError,
+    AgentSupervisorExecutionOutcome, AgentSupervisorExecutionReceipt, AgentSupervisorFailure,
+    AgentSupervisorId, AgentSupervisorNodeCancellation, AgentSupervisorNodeSnapshot,
+    AgentSupervisorNodeStatus, AgentSupervisorRuntimeError, AgentSupervisorRuntimeStatus,
+    AgentSupervisorWait, MAX_AGENT_DELEGATION_DEPTH, MAX_AGENT_EXECUTING_SUPERVISOR_NODES,
     MAX_AGENT_LIVE_SUPERVISOR_NODES,
 };
 

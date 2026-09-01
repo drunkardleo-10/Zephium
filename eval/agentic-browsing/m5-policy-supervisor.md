@@ -4,8 +4,9 @@ Status: the immutable approved run-manifest contract, mutable plan-lease/model
 input accounting, single-flight semantic effect policy, and immutable
 non-widening delegation topology are implemented. The first mutable bounded
 run-tree scheduler and its exact cancellation/drain tree are also implemented;
-context assignment, provider adapters, audit sink, and live qualification
-remain pending.
+manifest-bound context assignment is implemented over the existing bounded
+context registry. Per-origin write scheduling, semantic progress, provider
+adapters, audit sink, and live qualification remain pending.
 
 This evidence describes policy input facts only. A manifest cannot authorize a
 browser action, model call, tool call, data transfer, cost, or native resource.
@@ -213,6 +214,38 @@ browser action, model call, tool call, data transfer, cost, or native resource.
   from leaf to root. Root cancellation is therefore sticky across the whole
   activated run tree without retaining an idle task, timer, worker, or channel.
 
+## Implemented context scheduling join
+
+- A running node can reserve a context only by presenting its exact current
+  non-cloneable execution token, the exact manifest revision already bound to
+  the topology, and a complete `ContextIdentity`/capability request to the
+  existing `ContextRegistry`. The supervisor does not create a second native
+  owner, view ledger, lifecycle, execution permit, or construction path.
+- Admission requires the exact run owner and a profile in the node's canonical
+  manifest scope. Run-global and node-local concurrent context budgets are
+  checked before the registry mutates. The manifest hard ceiling remains four
+  contexts per run; the existing process registry independently retains its
+  eight logical/four executing ceilings and refuses without eviction.
+- Assignments are canonical by opaque `ContextId`, unique within the run, and
+  expose only redacted immutable identity and responsible plan node. A node
+  cannot become success/failure terminal while any exact assigned context
+  remains; it releases the agent execution slot into an explicit context wait
+  instead.
+- Context budget is released only through one of two existing registry-proven
+  dispositions: cancellation of a never-started queued row, or reaping an
+  active terminal row after its native resource was destroyed, transferred to
+  Browse, or its borrowed Browse tab was retained. Cleanup remains available
+  after supervisor fail-stop because it can only remove exact retained state.
+- Subtree cancellation returns at most four assigned context cleanup targets
+  in addition to running agent targets. Draining the agent execution alone does
+  not terminalize its node while a context remains. Current context targets can
+  be projected again after signal loss; exact registry cleanup then cascades
+  resource-free cancellation terminality from leaf to root.
+- The scheduling join stores no URL, origin, objective, prompt, provider data,
+  page content, profile path, account label, native handle, or extension
+  identity. When no run reserves a context it has zero task, worker, timer,
+  queue, model, page, or native overhead.
+
 ## Current tests
 
 Default crate tests exercise canonical order independence, canonical ULID
@@ -247,3 +280,8 @@ execution-slot retention, one-shot cancellation replay, revoked delegation,
 late-success suppression, nested branch/run cancellation identity, exact drain
 acknowledgement, mismatch sealing without early capacity release, and redacted
 content-free batches.
+Three context-scheduling tests cover exact manifest revision/run/profile joins,
+run and node context ceilings, duplicate refusal, atomic registry reservation,
+context-wait terminal ordering, queued cancellation, active owned-context
+construction/close/reap disposition, cancellation target reconciliation, and
+retention of node liveness after execution drain until exact context cleanup.
