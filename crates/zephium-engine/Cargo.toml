@@ -189,6 +189,7 @@ objc2-web-kit = { version = "0.3", default-features = false, features = [
     "WKFrameInfo",
     "WKScriptMessage",
     "WKScriptMessageHandlerWithReply",
+    "WKSnapshotConfiguration",
     "WKUserContentController",
     "WKUserScript",
     "WKWebExtension",

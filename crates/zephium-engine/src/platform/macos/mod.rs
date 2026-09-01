@@ -8,6 +8,8 @@ mod content_filter;
 mod credentials;
 #[cfg(feature = "agentic-browser")]
 mod semantic_runtime;
+#[cfg(feature = "agentic-browser")]
+mod semantic_screenshot;
 // Pure policy translation and the profile-scoped native extension lifecycle.
 mod extensions;
 mod native;

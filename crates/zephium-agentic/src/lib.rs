@@ -154,7 +154,7 @@ pub use context_port::{
     ContextNavigationSettlement, ContextNavigationTarget, ContextPortContractError,
     ContextPortFailure, ContextRendererLoss, ContextResourceAuditId,
     ContextResourceAuditSettlement, ContextTransitionRequest, ContextTransitionSettlement,
-    MAX_PENDING_NATIVE_CONTEXT_TASKS,
+    SemanticScreenshotNativeCompletion, MAX_PENDING_NATIVE_CONTEXT_TASKS,
 };
 pub use context_registry::{
     ContextRegistry, ContextRegistryEntry, ContextRegistryEntryState, ContextRegistryError,
@@ -315,14 +315,14 @@ pub use semantic_screenshot::{
     prepare_semantic_screenshot, SemanticScreenshot, SemanticScreenshotBudget,
     SemanticScreenshotBudgetError, SemanticScreenshotCoordinator,
     SemanticScreenshotCoordinatorError, SemanticScreenshotCoordinatorStatus,
-    SemanticScreenshotError, SemanticScreenshotNativeCapture, SemanticScreenshotNativeRequest,
-    SemanticScreenshotPaintEvidence, SemanticScreenshotPending, SemanticScreenshotPixelLayout,
-    SemanticScreenshotRequest, SemanticScreenshotRequestError, SemanticScreenshotRequestId,
-    SemanticScreenshotScope, SemanticScreenshotStats, SemanticScreenshotTrust,
-    MAX_PENDING_SEMANTIC_SCREENSHOTS, MAX_SEMANTIC_SCREENSHOT_CAPTURE_MILLIS,
-    MAX_SEMANTIC_SCREENSHOT_HEIGHT, MAX_SEMANTIC_SCREENSHOT_PIXELS,
-    MAX_SEMANTIC_SCREENSHOT_PNG_BYTES, MAX_SEMANTIC_SCREENSHOT_PNG_CHUNKS,
-    MAX_SEMANTIC_SCREENSHOT_WIDTH,
+    SemanticScreenshotError, SemanticScreenshotNativeCapture, SemanticScreenshotNativeFailure,
+    SemanticScreenshotNativeRequest, SemanticScreenshotPaintEvidence, SemanticScreenshotPending,
+    SemanticScreenshotPixelLayout, SemanticScreenshotRequest, SemanticScreenshotRequestError,
+    SemanticScreenshotRequestId, SemanticScreenshotScope, SemanticScreenshotStats,
+    SemanticScreenshotTrust, MAX_PENDING_SEMANTIC_SCREENSHOTS,
+    MAX_SEMANTIC_SCREENSHOT_CAPTURE_MILLIS, MAX_SEMANTIC_SCREENSHOT_HEIGHT,
+    MAX_SEMANTIC_SCREENSHOT_PIXELS, MAX_SEMANTIC_SCREENSHOT_PNG_BYTES,
+    MAX_SEMANTIC_SCREENSHOT_PNG_CHUNKS, MAX_SEMANTIC_SCREENSHOT_WIDTH,
 };
 pub use semantic_settle::{
     SemanticActionAttemptId, SemanticActionFailure, SemanticActionRecoveryHint,

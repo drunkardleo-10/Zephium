@@ -9,8 +9,11 @@ read/transport, closed structured extraction admission, and the one-shot
 viewport screenshot contract are implemented.
 Policy permits, platform execution,
 visibility/occlusion checks, native observation adapters and timer driving,
-native screenshot adapters, visual policy and
-model-provider wiring, and live qualification remain pending.
+the Windows screenshot adapter, visual policy and model-provider wiring, and
+live action/screenshot qualification remain pending. The production macOS
+owned-context viewport adapter is implemented and mechanically bounded, but it
+has not been executed in this evidence pass and therefore carries no live-pixel
+or platform qualification claim.
 
 This evidence describes a functional-core seam. It does not claim that an
 action can currently reach a native view or page, that model-declared effects
@@ -266,6 +269,11 @@ are trusted, or that M4 is complete.
   pre-request capture, clock regression, and post-deadline completion fail
   closed. Every terminal admission failure or exact cancellation releases its
   slot without retry authority; the sole deadline is at most five seconds.
+  Both halves now retain the trusted request clock anchor and exact main-frame
+  semantic snapshot generation. The macOS host compares that generation with
+  the current owned-view semantic runtime before dispatch, so a screenshot
+  cannot use a merely same-document but different observed snapshot as native
+  authority.
 - The standard image budget is 1280x800, 1,024,000 pixels, and 5 MiB native PNG;
   hard ceilings are 2048x2048, 2,097,152 pixels, and 9 MiB. The platform stream
   must enforce the selected byte ceiling while encoding, before returning a
@@ -278,9 +286,35 @@ are trusted, or that M4 is complete.
 - Admitted pixels remain explicitly browser-rendered hostile page content and
   conservatively `Sensitive`. PNG bytes and all page/native metadata are
   redacted from diagnostics; the core creates no file, persistence, timer,
-  worker, native view, or thread. It mints no policy/provider authority and the
-  current tree has no native capture adapter, so no live screenshot is taken by
-  these contracts or tests.
+  worker, native view, or thread. It mints no policy/provider authority.
+- The macOS port carries capture results through a dedicated move-only callback,
+  never the cloneable context event bus. It shares the existing bounded native
+  ingress and adds exactly two process-wide physical capture permits. Logical
+  timeout, cancellation, renderer loss, or context retirement can settle
+  immediately, while the non-cancellable WebKit operation retains its physical
+  permit until the native callback/block is actually destroyed. This prevents
+  timeout from reopening unbounded native work. Native resource audits expose
+  that physical debt separately from context-bound lifecycle operations, so a
+  timed-out capture cannot disappear from content-free accounting merely
+  because its logical context has already settled.
+- The macOS adapter uses `WKWebView`'s public asynchronous snapshot API with an
+  exact viewport rectangle, conservative budget-derived width, and
+  `afterScreenUpdates = true`. The result is rejected before encode when native
+  dimensions/pixels exceed the request. ImageIO then writes directly to a
+  Rust-owned `CGDataConsumer`; every write is checked against the selected PNG
+  ceiling before bounded growth, and allocation failure/overflow settles as a
+  closed resource refusal. No Foundation-backed mutable buffer, file, raw
+  bitmap copy, generic page bridge, JavaScript evaluation, selector, global
+  input, or focus operation is introduced. The existing core subsequently
+  verifies CRC/shape and removes admitted ancillary metadata in place.
+- The host uses the port-admission `Instant` as the native elapsed-time anchor,
+  maps start/completion into the request's trusted monotonic domain, includes
+  queue and encode time in the sole deadline, and suppresses encoding after a
+  logical cancellation. Exact context join, owned kind, `Observe` capability,
+  committed target, renderer health, no competing operation, dormant semantic
+  pull, and exact snapshot generation are all required before capture. This
+  path is compile/unit/static-gate evidence only: no native screenshot command
+  was run and no screenshot bytes or page content were recorded.
 
 The functional core has zero idle overhead. It allocates only when a bounded
 action, read, or extraction operation is invoked and creates no timer, worker,
@@ -294,6 +328,10 @@ cargo clippy --locked -p zephium-agentic --all-targets -- -D warnings
 cargo test --locked -p zephium-agentic --features probe-harness
 cargo clippy --locked -p zephium-agentic --all-targets \
   --features probe-harness -- -D warnings
+cargo test --locked -p zephium-engine --features agentic-browser
+cargo clippy --locked -p zephium-engine --features agentic-browser \
+  --all-targets -- -D warnings
+cargo xtask check-agentic-probe-boundary
 ```
 
 Coverage includes every fixed action shape; rolling second-action checkpoint

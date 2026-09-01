@@ -39,6 +39,8 @@ const ENGINE_MACOS_AGENT_CONTEXT: &str =
     "crates/zephium-engine/src/platform/macos/agent_context.rs";
 const ENGINE_MACOS_SEMANTIC_RUNTIME: &str =
     "crates/zephium-engine/src/platform/macos/semantic_runtime.rs";
+const ENGINE_MACOS_SEMANTIC_SCREENSHOT: &str =
+    "crates/zephium-engine/src/platform/macos/semantic_screenshot.rs";
 const ENGINE_MACOS_SEMANTIC_PROBE: &str =
     "crates/zephium-engine/src/platform/macos/agentic_semantic_probe.rs";
 const ENGINE_WINDOWS_MODULE: &str = "crates/zephium-engine/src/platform/windows/mod.rs";
@@ -134,6 +136,9 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     )?;
     validate_engine_semantic_runtime_boundary(&read(
         repository.join(ENGINE_MACOS_SEMANTIC_RUNTIME),
+    )?)?;
+    validate_engine_semantic_screenshot_boundary(&read(
+        repository.join(ENGINE_MACOS_SEMANTIC_SCREENSHOT),
     )?)?;
     let macos_module = read(repository.join(ENGINE_MACOS_MODULE))?;
     validate_engine_platform_module(&macos_module, "macOS")?;
@@ -325,6 +330,11 @@ fn validate_engine_agent_context_boundary(
     let port = compact(port);
     for required in [
         "MAX_PENDING_NATIVE_CONTEXT_TASKS",
+        "MAX_PENDING_SEMANTIC_SCREENSHOTS",
+        "structAgentScreenshotPhysicalPermit",
+        "physical_screenshots:usize",
+        "fnreserve_screenshot",
+        "fncapture_semantic_screenshot",
         "ContextOperationKind::Recover",
         "ContextOperationKind::Close",
         "constfnsupports_cookie_transfer()->bool{false}",
@@ -348,10 +358,15 @@ fn validate_engine_agent_context_boundary(
         "ContextConstructionProof::MacOsOwnedSelectedProfileExtensionFree",
         "pending_navigation:Option<AgentPendingNavigation>",
         "pending_recovery:Option<AgentPendingRecovery>",
+        "pending_screenshot:Option<AgentPendingScreenshot>",
+        "pending_captures,",
         "renderer_loss_rejoin_pending:bool",
         "binding.view.attest(",
         "binding.view.prepare_semantic_document_load()",
         "fnstart_owned_agent_semantic_invocation",
+        "fnstart_owned_agent_screenshot",
+        "binding.semantic_snapshot_generation!=Some(snapshot_generation)",
+        "binding.view.dispatch_screenshot(",
         "SemanticRuntimeSettlement::try_new",
         "double_full_successor(binding.join,requested)",
         "binding.view.view().reload()",
@@ -377,6 +392,7 @@ fn validate_engine_agent_context_boundary(
         "WKWebsiteDataStore::dataStoreForIdentifier(&identifier,mtm)",
         "Retained::as_ptr(&actual_store)==Retained::as_ptr(expected)",
         "semantic:Option<AgentSemanticRuntimeRegistration>",
+        "pub(crate)fndispatch_screenshot(",
         "structAgentNavigationController",
         "state.bootstrap_available=false",
         "native_id:Option<wry::NavigationId>",
@@ -413,6 +429,50 @@ fn validate_engine_agent_context_boundary(
                     "production agent-context {label} acquired forbidden surface {forbidden}"
                 ));
             }
+        }
+    }
+    Ok(())
+}
+
+fn validate_engine_semantic_screenshot_boundary(source: &str) -> Result<(), String> {
+    let source = compact(source);
+    for required in [
+        "takeSnapshotWithConfiguration_completionHandler",
+        "objc2::exception::catch",
+        "configuration.setAfterScreenUpdates(true)",
+        "configuration.setSnapshotWidth(Some(&width))",
+        "CGImageDestinationCreateWithDataConsumer",
+        "CGDataConsumerCallbacks",
+        "end>self.limit",
+        "try_reserve_exact",
+        "budget.max_png_bytes()",
+        "cancelled.load(Ordering::Acquire)",
+        "completed_at>request.deadline()",
+        "SemanticScreenshotPaintEvidence::ExactDocumentContentAvailable",
+        "CFRelease(self.0.as_ptr())",
+    ] {
+        if !source.contains(required) {
+            return Err(format!(
+                "production macOS semantic screenshot lost required bounded mechanism {required}"
+            ));
+        }
+    }
+    for forbidden in [
+        "NSMutableData",
+        "TIFFRepresentation",
+        "evaluateJavaScript",
+        "callAsyncJavaScript",
+        "evaluate_script",
+        "querySelector",
+        "CGEvent",
+        "NSEvent",
+        "write(",
+        "File::create",
+    ] {
+        if source.contains(forbidden) {
+            return Err(format!(
+                "production macOS semantic screenshot acquired forbidden surface {forbidden}"
+            ));
         }
     }
     Ok(())
@@ -2470,6 +2530,35 @@ mod tests {
     }
 
     #[test]
+    fn production_semantic_screenshot_requires_bounded_native_streaming() {
+        let screenshot = r#"
+            takeSnapshotWithConfiguration_completionHandler();
+            objc2::exception::catch();
+            configuration.setAfterScreenUpdates(true);
+            configuration.setSnapshotWidth(Some(&width));
+            CGImageDestinationCreateWithDataConsumer();
+            CGDataConsumerCallbacks;
+            if end > self.limit {}
+            bytes.try_reserve_exact(1);
+            budget.max_png_bytes();
+            cancelled.load(Ordering::Acquire);
+            if completed_at > request.deadline() {}
+            SemanticScreenshotPaintEvidence::ExactDocumentContentAvailable;
+            CFRelease(self.0.as_ptr());
+        "#;
+        validate_engine_semantic_screenshot_boundary(screenshot)
+            .expect("bounded semantic screenshot");
+        assert!(validate_engine_semantic_screenshot_boundary(&format!(
+            "{screenshot}\nNSMutableData::new();"
+        ))
+        .is_err());
+        assert!(validate_engine_semantic_screenshot_boundary(
+            &screenshot.replace("budget.max_png_bytes();", "")
+        )
+        .is_err());
+    }
+
+    #[test]
     fn production_agent_context_boundary_is_closed_and_probe_independent() {
         let engine = r#"
             #[cfg(feature = "agentic-browser")]
@@ -2484,6 +2573,11 @@ mod tests {
         "#;
         let port = r#"
             use x::MAX_PENDING_NATIVE_CONTEXT_TASKS;
+            use x::MAX_PENDING_SEMANTIC_SCREENSHOTS;
+            struct AgentScreenshotPhysicalPermit;
+            physical_screenshots: usize,
+            fn reserve_screenshot() {}
+            fn capture_semantic_screenshot() {}
             ContextOperationKind::Recover;
             ContextOperationKind::Close;
             const fn supports_cookie_transfer() -> bool { false }
@@ -2499,10 +2593,15 @@ mod tests {
             ContextConstructionProof::MacOsOwnedSelectedProfileExtensionFree;
             pending_navigation: Option<AgentPendingNavigation>,
             pending_recovery: Option<AgentPendingRecovery>,
+            pending_screenshot: Option<AgentPendingScreenshot>,
+            pending_captures,
             renderer_loss_rejoin_pending: bool,
             binding.view.attest();
             binding.view.prepare_semantic_document_load();
             fn start_owned_agent_semantic_invocation() {}
+            fn start_owned_agent_screenshot() {}
+            binding.semantic_snapshot_generation != Some(snapshot_generation);
+            binding.view.dispatch_screenshot();
             SemanticRuntimeSettlement::try_new();
             double_full_successor(binding.join, requested);
             binding.view.view().reload();
@@ -2519,6 +2618,7 @@ mod tests {
             WKWebsiteDataStore::dataStoreForIdentifier(&identifier, mtm);
             Retained::as_ptr(&actual_store) == Retained::as_ptr(expected);
             semantic: Option<AgentSemanticRuntimeRegistration>,
+            pub(crate) fn dispatch_screenshot() {}
             struct AgentNavigationController;
             state.bootstrap_available = false;
             native_id: Option<wry::NavigationId>;

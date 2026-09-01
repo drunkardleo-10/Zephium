@@ -3,6 +3,7 @@
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use raw_window_handle::HasWindowHandle;
 use wry::{
@@ -12,7 +13,8 @@ use wry::{
 use zephium_agentic::{
     ContextNavigationTarget, ContextOperationJoin, ContextOperationKind, ContextPortFailure,
     ContextProfileStorageClass, SemanticRuntimeInvocation, SemanticRuntimePortFailure,
-    SemanticSnapshot,
+    SemanticScreenshotNativeCapture, SemanticScreenshotNativeFailure,
+    SemanticScreenshotNativeRequest, SemanticSnapshot,
 };
 use zephium_core::ids::ProfileId;
 
@@ -499,6 +501,25 @@ impl AgentOwnedView {
                 completion(outcome.map_err(map_semantic_runtime_failure));
             })
             .map_err(map_semantic_dispatch_failure)
+    }
+
+    pub(crate) fn dispatch_screenshot(
+        &self,
+        request: SemanticScreenshotNativeRequest,
+        admitted_at: Instant,
+        cancelled: Arc<AtomicBool>,
+        completion: impl FnOnce(Result<SemanticScreenshotNativeCapture, SemanticScreenshotNativeFailure>)
+            + 'static,
+        callback_panicked: impl Fn() + 'static,
+    ) -> Result<(), SemanticScreenshotNativeFailure> {
+        super::semantic_screenshot::capture_viewport(
+            &self.view,
+            request,
+            admitted_at,
+            cancelled,
+            completion,
+            callback_panicked,
+        )
     }
 
     pub(crate) fn semantic_pending_for_audit(&self) -> Option<bool> {

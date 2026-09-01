@@ -14,7 +14,9 @@ use url::Url;
 use crate::{
     ContextCapabilities, ContextCookieTransferRequest, ContextCookieTransferSettlement,
     ContextJoin, ContextKind, ContextOperationJoin, ContextOperationKind, ContextProfileLease,
-    SemanticRuntimeInvocation, SemanticRuntimeSettlement, MAX_LIVE_CONTEXTS,
+    SemanticRuntimeInvocation, SemanticRuntimeSettlement, SemanticScreenshotNativeCapture,
+    SemanticScreenshotNativeFailure, SemanticScreenshotNativeRequest, MAX_LIVE_CONTEXTS,
+    MAX_PENDING_SEMANTIC_SCREENSHOTS,
 };
 
 /// Maximum number of lifecycle tasks one native adapter may retain.
@@ -625,8 +627,10 @@ pub struct ContextNativeResourceCounts {
     pub visible_surfaces: u8,
     /// Resident views in the platform's suspended state.
     pub suspended_views: u8,
-    /// Mutating native lifecycle operations awaiting settlement.
+    /// Context-bound logical operations awaiting settlement.
     pub pending_operations: u8,
+    /// Viewport captures reserved, executing, or awaiting physical settlement.
+    pub pending_captures: u8,
     /// Tasks retained by the native executor but not yet running.
     pub queued_tasks: u8,
 }
@@ -642,6 +646,8 @@ impl ContextNativeResourceSnapshot {
             u8::try_from(MAX_LIVE_CONTEXTS).map_err(|_| ContextPortContractError::ResourceLimit)?;
         let queue_limit = u8::try_from(MAX_PENDING_NATIVE_CONTEXT_TASKS)
             .map_err(|_| ContextPortContractError::ResourceLimit)?;
+        let capture_limit = u8::try_from(MAX_PENDING_SEMANTIC_SCREENSHOTS)
+            .map_err(|_| ContextPortContractError::ResourceLimit)?;
         if [
             counts.known_bindings,
             counts.resident_views,
@@ -654,6 +660,7 @@ impl ContextNativeResourceSnapshot {
         .into_iter()
         .any(|count| count > live_limit)
             || counts.queued_tasks > queue_limit
+            || counts.pending_captures > capture_limit
         {
             return Err(ContextPortContractError::ResourceLimit);
         }
@@ -728,6 +735,18 @@ pub enum ContextNativeEvent {
     SemanticRuntimeSettled(Box<SemanticRuntimeSettlement>),
 }
 
+/// Move-only terminal callback for one admitted native viewport capture.
+///
+/// A port returning [`ContextDispatch::Scheduled`] must invoke this exactly
+/// once. A synchronous `Rejected` or `Unsupported` result transfers no
+/// settlement obligation; callers terminally cancel their retained pending
+/// half from the dispatch result itself.
+pub type SemanticScreenshotNativeCompletion = Box<
+    dyn FnOnce(Result<SemanticScreenshotNativeCapture, SemanticScreenshotNativeFailure>)
+        + Send
+        + 'static,
+>;
+
 /// Trusted imperative boundary implemented by one bounded platform adapter.
 ///
 /// Implementations own native handles and private identity mappings. They must
@@ -745,6 +764,13 @@ pub trait AgentBrowserPort: Send + Sync {
 
     /// Attempts to admit one already-encoded fixed semantic-runtime invocation.
     fn invoke_semantic(&self, invocation: SemanticRuntimeInvocation) -> ContextDispatch;
+
+    /// Attempts one bounded viewport capture outside the cloneable event bus.
+    fn capture_semantic_screenshot(
+        &self,
+        request: SemanticScreenshotNativeRequest,
+        completion: SemanticScreenshotNativeCompletion,
+    ) -> ContextDispatch;
 }
 
 fn require_operation(
@@ -957,6 +983,7 @@ mod tests {
             visible_surfaces: 1,
             suspended_views: 1,
             pending_operations: 2,
+            pending_captures: 2,
             queued_tasks: 4,
         };
         assert_eq!(
@@ -964,6 +991,23 @@ mod tests {
                 .expect("snapshot")
                 .counts(),
             valid
+        );
+        let detached_capture = ContextNativeResourceCounts {
+            known_bindings: 0,
+            resident_views: 0,
+            owned_reservations: 0,
+            borrowed_leases: 0,
+            visible_surfaces: 0,
+            suspended_views: 0,
+            pending_operations: 0,
+            pending_captures: 2,
+            queued_tasks: 0,
+        };
+        assert_eq!(
+            ContextNativeResourceSnapshot::try_new(detached_capture)
+                .expect("physical capture debt outlives logical binding")
+                .counts(),
+            detached_capture
         );
         assert_eq!(
             ContextNativeResourceSnapshot::try_new(ContextNativeResourceCounts {
@@ -975,6 +1019,14 @@ mod tests {
         assert_eq!(
             ContextNativeResourceSnapshot::try_new(ContextNativeResourceCounts {
                 queued_tasks: u8::try_from(MAX_PENDING_NATIVE_CONTEXT_TASKS + 1)
+                    .expect("small ceiling"),
+                ..valid
+            }),
+            Err(ContextPortContractError::ResourceLimit)
+        );
+        assert_eq!(
+            ContextNativeResourceSnapshot::try_new(ContextNativeResourceCounts {
+                pending_captures: u8::try_from(MAX_PENDING_SEMANTIC_SCREENSHOTS + 1)
                     .expect("small ceiling"),
                 ..valid
             }),
@@ -1025,6 +1077,14 @@ mod tests {
             fn invoke_semantic(
                 &self,
                 _invocation: crate::SemanticRuntimeInvocation,
+            ) -> ContextDispatch {
+                ContextDispatch::Unsupported
+            }
+
+            fn capture_semantic_screenshot(
+                &self,
+                _request: crate::SemanticScreenshotNativeRequest,
+                _completion: SemanticScreenshotNativeCompletion,
             ) -> ContextDispatch {
                 ContextDispatch::Unsupported
             }

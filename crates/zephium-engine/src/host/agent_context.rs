@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(target_os = "macos")]
 use std::sync::Arc;
 #[cfg(target_os = "macos")]
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use zephium_agentic::{
     ContextNativeEvent, ContextNativeResourceCounts, ContextNativeResourceSnapshot,
@@ -27,7 +27,8 @@ use zephium_agentic::{
     ContextOperationKind, ContextProfileLease, ContextProfileLeasePurpose,
     ContextProfileStorageClass, ContextTransitionRequest, ContextTransitionSettlement, FrameId,
     SemanticFrameTrust, SemanticInvocationId, SemanticOrigin, SemanticRuntimePortFailure,
-    SemanticRuntimeSettlement, SemanticSnapshotGeneration, MAX_LIVE_CONTEXTS,
+    SemanticRuntimeSettlement, SemanticScreenshotNativeCapture, SemanticScreenshotNativeFailure,
+    SemanticScreenshotRequestId, SemanticSnapshotGeneration, MAX_LIVE_CONTEXTS,
 };
 #[cfg(target_os = "macos")]
 use zephium_core::ports::engine::Partition;
@@ -41,11 +42,45 @@ use super::profiles::{
 use super::resources::{NativeResourceClass, NativeResourceLease};
 use super::EngineHost;
 use crate::agent_context_port::AgentContextTask;
+#[cfg(target_os = "macos")]
+use crate::agent_context_port::AgentScreenshotTask;
 
 #[cfg(target_os = "macos")]
 const AGENT_PAGE_LOAD_COMMIT_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(target_os = "macos")]
 const AGENT_SEMANTIC_RUNTIME_TIMEOUT: Duration = Duration::from_secs(15);
+
+#[cfg(target_os = "macos")]
+struct AgentPendingScreenshot {
+    id: SemanticScreenshotRequestId,
+    context: ContextJoin,
+    snapshot_generation: SemanticSnapshotGeneration,
+    cancelled: Arc<AtomicBool>,
+    watchdog: crate::platform::imp::ContentPolicyTimeout,
+    task: AgentScreenshotTask,
+}
+
+#[cfg(target_os = "macos")]
+impl AgentPendingScreenshot {
+    fn complete(
+        self,
+        outcome: Result<SemanticScreenshotNativeCapture, SemanticScreenshotNativeFailure>,
+    ) {
+        if outcome.is_err() {
+            self.cancelled.store(true, Ordering::Release);
+        }
+        let Self {
+            id: _,
+            context: _,
+            snapshot_generation: _,
+            cancelled: _,
+            watchdog,
+            task,
+        } = self;
+        drop(watchdog);
+        task.complete(outcome);
+    }
+}
 
 #[cfg(target_os = "macos")]
 struct AgentPendingNavigation {
@@ -125,6 +160,7 @@ pub(super) struct AgentOwnedContext {
     committed_target: Option<ContextNavigationTarget>,
     pending_navigation: Option<AgentPendingNavigation>,
     pending_recovery: Option<AgentPendingRecovery>,
+    pending_screenshot: Option<AgentPendingScreenshot>,
     renderer_lost: bool,
     renderer_loss_rejoin_pending: bool,
     last_semantic_invocation: Option<SemanticInvocationId>,
@@ -152,6 +188,7 @@ impl AgentOwnedContext {
             committed_target: None,
             pending_navigation: None,
             pending_recovery: None,
+            pending_screenshot: None,
             renderer_lost: false,
             renderer_loss_rejoin_pending: false,
             last_semantic_invocation: None,
@@ -178,8 +215,9 @@ impl AgentOwnedContext {
     }
 
     fn pending_operation_for_audit(&self) -> Option<bool> {
-        let lifecycle_pending =
-            self.pending_navigation.is_some() || self.pending_recovery.is_some();
+        let lifecycle_pending = self.pending_navigation.is_some()
+            || self.pending_recovery.is_some()
+            || self.pending_screenshot.is_some();
         let semantic_pending = self.view.semantic_pending_for_audit()?;
         if lifecycle_pending && semantic_pending {
             None
@@ -206,6 +244,8 @@ impl AgentOwnedContext {
             && self.profile_lease.purpose() == ContextProfileLeasePurpose::Owned
             && (!self.renderer_loss_rejoin_pending || self.renderer_lost)
             && (self.pending_navigation.is_none() || self.pending_recovery.is_none())
+            && (self.pending_navigation.is_none() || self.pending_screenshot.is_none())
+            && (self.pending_recovery.is_none() || self.pending_screenshot.is_none())
             && self
                 .pending_navigation
                 .as_ref()
@@ -223,6 +263,11 @@ impl AgentOwnedContext {
             && self.pending_navigation.as_ref().is_none_or(|pending| {
                 pending.operation.context() == self.join
                     && pending.operation.kind() == ContextOperationKind::Navigate
+            })
+            && self.pending_screenshot.as_ref().is_none_or(|pending| {
+                pending.context == self.join
+                    && self.semantic_snapshot_generation == Some(pending.snapshot_generation)
+                    && !self.renderer_lost
             })
             && self.pending_operation_for_audit().is_some()
             && self.semantic_snapshot_generation.is_none_or(|_| {
@@ -257,6 +302,9 @@ impl AgentOwnedContext {
                 navigation_clean = false;
                 pending.complete(Err(ContextPortFailure::NativeRefused));
             }
+        }
+        if let Some(pending) = self.pending_screenshot.take() {
+            pending.complete(Err(map_context_failure_to_screenshot(pending_failure)));
         }
         let content_policy_clean = self
             .content_policy_registration
@@ -331,6 +379,11 @@ impl EngineHost {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    pub(crate) fn handle_agent_screenshot_task(&mut self, task: AgentScreenshotTask) {
+        self.start_owned_agent_screenshot(task);
+    }
+
     fn settle_agent_context_audit(
         &mut self,
         task: AgentContextTask,
@@ -364,12 +417,15 @@ impl EngineHost {
         #[cfg(not(target_os = "macos"))]
         let pending_operations = Some(0);
 
-        let queued_request_tasks = task
-            .pending_tasks()
+        let admission_counts = task.admission_counts();
+        let queued_request_tasks = admission_counts
+            .map(|(pending, _)| pending)
             .and_then(|pending| pending.checked_sub(1))
             .zip(pending_operations)
             .and_then(|(pending, operations)| pending.checked_sub(usize::from(operations)))
             .and_then(|pending| u8::try_from(pending).ok());
+        let pending_captures =
+            admission_counts.and_then(|(_, captures)| u8::try_from(captures).ok());
         let queued_tasks = queued_request_tasks
             .zip(crate::host::agent_context_terminal_depth_for_audit())
             .and_then(|(requests, terminals)| {
@@ -399,12 +455,14 @@ impl EngineHost {
             binding_count,
             resident_view_count,
             pending_operations,
+            pending_captures,
             queued_tasks,
         ) {
             (
                 Some(binding_count),
                 Some(resident_view_count),
                 Some(pending_operations),
+                Some(pending_captures),
                 Some(queued_tasks),
             ) if !self.native_resource_accounting_failed
                 && self.native_resources.is_healthy()
@@ -419,6 +477,7 @@ impl EngineHost {
                     visible_surfaces: 0,
                     suspended_views: 0,
                     pending_operations,
+                    pending_captures,
                     queued_tasks,
                 })
                 .map_err(|_| ContextPortFailure::NativeRefused)
@@ -609,7 +668,9 @@ impl EngineHost {
                 Some(SemanticRuntimePortFailure::RendererLost)
             }
             Some(binding)
-                if binding.pending_navigation.is_some() || binding.pending_recovery.is_some() =>
+                if binding.pending_navigation.is_some()
+                    || binding.pending_recovery.is_some()
+                    || binding.pending_screenshot.is_some() =>
             {
                 Some(SemanticRuntimePortFailure::NotReady)
             }
@@ -719,6 +780,173 @@ impl EngineHost {
     }
 
     #[cfg(target_os = "macos")]
+    fn start_owned_agent_screenshot(&mut self, mut task: AgentScreenshotTask) {
+        let Some(request) = task.request() else {
+            self.fail_agent_context_invariant(
+                "agent-context screenshot task lost its exact request",
+            );
+            task.refuse(SemanticScreenshotNativeFailure::Transport);
+            return;
+        };
+        let context = request.context();
+        let id = context.identity().id();
+        let request_id = request.id();
+        let snapshot_generation = request.snapshot_generation();
+        let admitted_at = task.admitted_at();
+        let Some(capture_window_millis) = request
+            .deadline()
+            .millis()
+            .checked_sub(request.requested_at().millis())
+        else {
+            task.refuse(SemanticScreenshotNativeFailure::TimedOut);
+            return;
+        };
+        let capture_window = Duration::from_millis(capture_window_millis);
+        let elapsed = Instant::now().saturating_duration_since(admitted_at);
+        if capture_window.is_zero() || elapsed >= capture_window {
+            task.refuse(SemanticScreenshotNativeFailure::TimedOut);
+            return;
+        }
+
+        let failure = match self.agent_contexts.get(&id) {
+            None => Some(SemanticScreenshotNativeFailure::Stale),
+            Some(binding) if binding.join != context => {
+                Some(SemanticScreenshotNativeFailure::Stale)
+            }
+            Some(binding) if binding.renderer_lost => {
+                Some(SemanticScreenshotNativeFailure::RendererLost)
+            }
+            Some(binding)
+                if binding.pending_navigation.is_some()
+                    || binding.pending_recovery.is_some()
+                    || binding.pending_screenshot.is_some() =>
+            {
+                Some(SemanticScreenshotNativeFailure::ResourceExhausted)
+            }
+            Some(binding)
+                if !binding
+                    .capabilities
+                    .contains(zephium_agentic::ContextCapability::Observe) =>
+            {
+                Some(SemanticScreenshotNativeFailure::Unsupported)
+            }
+            Some(binding)
+                if binding.committed_target.is_none()
+                    || binding.semantic_snapshot_generation != Some(snapshot_generation) =>
+            {
+                Some(SemanticScreenshotNativeFailure::Stale)
+            }
+            Some(binding) if binding.view.semantic_pending_for_audit() != Some(false) => {
+                Some(SemanticScreenshotNativeFailure::NotReady)
+            }
+            Some(_) => None,
+        };
+        if let Some(failure) = failure {
+            task.refuse(failure);
+            return;
+        }
+
+        let callback_guard = task.callback_guard();
+        let timeout_guard = callback_guard.clone();
+        let Some(watchdog) = crate::platform::imp::schedule_content_policy_timeout(
+            capture_window.saturating_sub(elapsed),
+            move || {
+                let rejected = timeout_guard.clone();
+                if !crate::host::try_with_agent_context_terminal(move |host| {
+                    host.finish_owned_agent_screenshot(
+                        id,
+                        request_id,
+                        Err(SemanticScreenshotNativeFailure::TimedOut),
+                    );
+                }) {
+                    rejected.callback_dispatch_rejected();
+                }
+            },
+        ) else {
+            task.refuse(SemanticScreenshotNativeFailure::Transport);
+            return;
+        };
+        let Some(request) = task.take_request() else {
+            drop(watchdog);
+            self.fail_agent_context_invariant(
+                "agent-context screenshot request changed during admission",
+            );
+            task.refuse(SemanticScreenshotNativeFailure::Transport);
+            return;
+        };
+        let Some(physical) = task.take_physical() else {
+            drop(watchdog);
+            self.fail_agent_context_invariant(
+                "agent-context screenshot lost its physical capacity permit",
+            );
+            task.refuse(SemanticScreenshotNativeFailure::Transport);
+            return;
+        };
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let pending = AgentPendingScreenshot {
+            id: request_id,
+            context,
+            snapshot_generation,
+            cancelled: cancelled.clone(),
+            watchdog,
+            task,
+        };
+        let Some(binding) = self.agent_contexts.get_mut(&id) else {
+            pending.complete(Err(SemanticScreenshotNativeFailure::Stale));
+            return;
+        };
+        if binding.pending_screenshot.is_some() {
+            pending.complete(Err(SemanticScreenshotNativeFailure::Transport));
+            self.fail_agent_context_invariant(
+                "agent-context screenshot admission observed an existing capture",
+            );
+            return;
+        }
+        binding.pending_screenshot = Some(pending);
+
+        let native_guard = callback_guard.clone();
+        let panic_guard = callback_guard.clone();
+        let dispatched = binding.view.dispatch_screenshot(
+            request,
+            admitted_at,
+            cancelled,
+            move |outcome| {
+                drop(physical);
+                let rejected = native_guard.clone();
+                if !crate::host::try_with_agent_context_terminal(move |host| {
+                    host.finish_owned_agent_screenshot(id, request_id, outcome);
+                }) {
+                    rejected.callback_dispatch_rejected();
+                }
+            },
+            move || panic_guard.callback_dispatch_rejected(),
+        );
+        if let Err(failure) = dispatched {
+            self.finish_owned_agent_screenshot(id, request_id, Err(failure));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn finish_owned_agent_screenshot(
+        &mut self,
+        id: ContextId,
+        request_id: SemanticScreenshotRequestId,
+        outcome: Result<SemanticScreenshotNativeCapture, SemanticScreenshotNativeFailure>,
+    ) {
+        let Some(pending) = self.agent_contexts.get_mut(&id).and_then(|binding| {
+            (binding
+                .pending_screenshot
+                .as_ref()
+                .is_some_and(|pending| pending.id == request_id))
+            .then(|| binding.pending_screenshot.take())
+            .flatten()
+        }) else {
+            return;
+        };
+        pending.complete(outcome);
+    }
+
+    #[cfg(target_os = "macos")]
     fn timeout_owned_agent_semantic_invocation(
         &mut self,
         id: ContextId,
@@ -750,7 +978,9 @@ impl EngineHost {
             None => Some(ContextPortFailure::Stale),
             Some(binding) if binding.renderer_lost => Some(ContextPortFailure::Stale),
             Some(binding)
-                if binding.pending_navigation.is_some() || binding.pending_recovery.is_some() =>
+                if binding.pending_navigation.is_some()
+                    || binding.pending_recovery.is_some()
+                    || binding.pending_screenshot.is_some() =>
             {
                 Some(ContextPortFailure::ResourceExhausted)
             }
@@ -868,7 +1098,9 @@ impl EngineHost {
         let failure = match self.agent_contexts.get(&id) {
             None => Some(ContextPortFailure::Stale),
             Some(binding)
-                if binding.pending_navigation.is_some() || binding.pending_recovery.is_some() =>
+                if binding.pending_navigation.is_some()
+                    || binding.pending_recovery.is_some()
+                    || binding.pending_screenshot.is_some() =>
             {
                 Some(ContextPortFailure::ResourceExhausted)
             }
@@ -1032,7 +1264,14 @@ impl EngineHost {
         view_origin: ContextJoin,
         emitter: crate::agent_context_port::AgentContextCallbackGuard,
     ) {
-        let (prior, pending_navigation, pending_recovery, navigation_clean, emit_loss) = {
+        let (
+            prior,
+            pending_navigation,
+            pending_recovery,
+            pending_screenshot,
+            navigation_clean,
+            emit_loss,
+        ) = {
             let Some(binding) = self.agent_contexts.get_mut(&id) else {
                 return;
             };
@@ -1044,6 +1283,7 @@ impl EngineHost {
             let prior = binding.join;
             let pending_navigation = binding.pending_navigation.take();
             let pending_recovery = binding.pending_recovery.take();
+            let pending_screenshot = binding.pending_screenshot.take();
             let pending_operation = pending_navigation
                 .as_ref()
                 .map(|pending| pending.operation)
@@ -1061,6 +1301,7 @@ impl EngineHost {
                 prior,
                 pending_navigation,
                 pending_recovery,
+                pending_screenshot,
                 navigation_clean,
                 emit_loss,
             )
@@ -1071,6 +1312,9 @@ impl EngineHost {
         }
         if let Some(pending) = pending_recovery {
             pending.complete(Err(ContextPortFailure::NativeRefused));
+        }
+        if let Some(pending) = pending_screenshot {
+            pending.complete(Err(SemanticScreenshotNativeFailure::RendererLost));
         }
         if !navigation_clean {
             self.fail_agent_context_invariant(
@@ -1241,7 +1485,7 @@ impl EngineHost {
         current: ContextJoin,
     ) -> Result<(), ContextPortFailure> {
         let id = current.identity().id();
-        let (pending_navigation, pending_recovery, disarmed) = {
+        let (pending_navigation, pending_recovery, pending_screenshot, disarmed) = {
             let binding = self
                 .agent_contexts
                 .get_mut(&id)
@@ -1266,7 +1510,10 @@ impl EngineHost {
             binding.renderer_loss_rejoin_pending = false;
             let pending_navigation = binding.pending_navigation.take();
             let pending_recovery = binding.pending_recovery.take();
-            let mutually_exclusive = pending_navigation.is_none() || pending_recovery.is_none();
+            let pending_screenshot = binding.pending_screenshot.take();
+            let mutually_exclusive = (pending_navigation.is_none() || pending_recovery.is_none())
+                && (pending_navigation.is_none() || pending_screenshot.is_none())
+                && (pending_recovery.is_none() || pending_screenshot.is_none());
             let navigation_disarmed = pending_navigation
                 .as_ref()
                 .is_none_or(|pending| binding.view.navigation().disarm(pending.operation));
@@ -1282,6 +1529,7 @@ impl EngineHost {
             (
                 pending_navigation,
                 pending_recovery,
+                pending_screenshot,
                 mutually_exclusive && navigation_disarmed && recovery_disarmed,
             )
         };
@@ -1304,6 +1552,9 @@ impl EngineHost {
                 );
                 pending.complete(Err(ContextPortFailure::NativeRefused));
             }
+        }
+        if let Some(pending) = pending_screenshot {
+            pending.complete(Err(SemanticScreenshotNativeFailure::Cancelled));
         }
         Ok(())
     }
@@ -1401,6 +1652,25 @@ fn map_owned_view_construction_failure(
         crate::platform::imp::AgentOwnedViewConstructionError::Native => {
             ContextPortFailure::NativeRefused
         }
+    }
+}
+
+#[cfg(target_os = "macos")]
+const fn map_context_failure_to_screenshot(
+    failure: ContextPortFailure,
+) -> SemanticScreenshotNativeFailure {
+    match failure {
+        ContextPortFailure::Unsupported => SemanticScreenshotNativeFailure::Unsupported,
+        ContextPortFailure::ResourceExhausted => SemanticScreenshotNativeFailure::ResourceExhausted,
+        ContextPortFailure::Cancelled => SemanticScreenshotNativeFailure::Cancelled,
+        ContextPortFailure::TimedOut => SemanticScreenshotNativeFailure::TimedOut,
+        ContextPortFailure::Stale => SemanticScreenshotNativeFailure::Stale,
+        ContextPortFailure::Shutdown => SemanticScreenshotNativeFailure::Shutdown,
+        ContextPortFailure::ProfileUnavailable
+        | ContextPortFailure::ProfileBusy
+        | ContextPortFailure::ExtensionIsolationUnproven
+        | ContextPortFailure::CookieTransferFailed
+        | ContextPortFailure::NativeRefused => SemanticScreenshotNativeFailure::Transport,
     }
 }
 

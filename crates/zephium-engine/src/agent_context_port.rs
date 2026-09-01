@@ -9,10 +9,13 @@ use zephium_agentic::{
     ContextCookieTransferSettlement, ContextDispatch, ContextNativeEvent, ContextNativeRequest,
     ContextPortFailure, ContextResourceAuditId, ContextResourceAuditSettlement,
     SemanticRuntimeCorrelation, SemanticRuntimeInvocation, SemanticRuntimePortFailure,
-    SemanticRuntimeSettlement, MAX_PENDING_NATIVE_CONTEXT_TASKS,
+    SemanticRuntimeSettlement, SemanticScreenshotNativeCompletion, SemanticScreenshotNativeRequest,
+    MAX_PENDING_NATIVE_CONTEXT_TASKS, MAX_PENDING_SEMANTIC_SCREENSHOTS,
 };
 #[cfg(target_os = "macos")]
 use zephium_agentic::{ContextJoin, ContextOperationKind, ContextRendererLoss};
+#[cfg(any(target_os = "macos", test))]
+use zephium_agentic::{SemanticScreenshotNativeCapture, SemanticScreenshotNativeFailure};
 
 use crate::MainThreadDispatch;
 
@@ -61,9 +64,36 @@ impl AgentContextCallbackGuard {
     }
 }
 
+#[cfg(target_os = "macos")]
+#[derive(Clone)]
+pub(crate) struct AgentScreenshotCallbackGuard {
+    admission: Arc<AgentPortAdmission>,
+}
+
+#[cfg(target_os = "macos")]
+impl AgentScreenshotCallbackGuard {
+    pub(crate) fn callback_dispatch_rejected(&self) {
+        let sealed = match self.admission.state.lock() {
+            Ok(state) => state.sealed,
+            Err(poisoned) => {
+                let mut state = poisoned.into_inner();
+                state.invariant_failed = true;
+                state.sealed = true;
+                drop(state);
+                self.admission.report_fatal_once();
+                return;
+            }
+        };
+        if !sealed {
+            self.admission.fail_invariant();
+        }
+    }
+}
+
 #[derive(Default)]
 struct AgentPortAdmissionState {
     pending: usize,
+    physical_screenshots: usize,
     sealed: bool,
     invariant_failed: bool,
 }
@@ -108,6 +138,43 @@ impl AgentPortAdmission {
         })
     }
 
+    #[cfg(any(target_os = "macos", test))]
+    fn reserve_screenshot(
+        self: &Arc<Self>,
+    ) -> Result<(AgentTaskPermit, AgentScreenshotPhysicalPermit), ContextPortFailure> {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => {
+                let mut state = poisoned.into_inner();
+                state.invariant_failed = true;
+                state.sealed = true;
+                drop(state);
+                self.report_fatal_once();
+                return Err(ContextPortFailure::Shutdown);
+            }
+        };
+        if state.sealed || state.invariant_failed {
+            return Err(ContextPortFailure::Shutdown);
+        }
+        if state.pending >= MAX_PENDING_NATIVE_CONTEXT_TASKS
+            || state.physical_screenshots >= MAX_PENDING_SEMANTIC_SCREENSHOTS
+        {
+            return Err(ContextPortFailure::ResourceExhausted);
+        }
+        state.pending += 1;
+        state.physical_screenshots += 1;
+        Ok((
+            AgentTaskPermit {
+                admission: Arc::clone(self),
+                released: false,
+            },
+            AgentScreenshotPhysicalPermit {
+                admission: Arc::clone(self),
+                released: false,
+            },
+        ))
+    }
+
     fn release(&self) {
         let mut state = match self.state.lock() {
             Ok(state) => state,
@@ -130,11 +197,35 @@ impl AgentPortAdmission {
         state.pending = pending;
     }
 
-    fn pending(&self) -> Option<usize> {
+    #[cfg(any(target_os = "macos", test))]
+    fn release_screenshot(&self) {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => {
+                let mut state = poisoned.into_inner();
+                state.invariant_failed = true;
+                state.sealed = true;
+                drop(state);
+                self.report_fatal_once();
+                return;
+            }
+        };
+        let Some(physical_screenshots) = state.physical_screenshots.checked_sub(1) else {
+            state.invariant_failed = true;
+            state.sealed = true;
+            drop(state);
+            self.fail_invariant();
+            return;
+        };
+        state.physical_screenshots = physical_screenshots;
+    }
+
+    fn counts(&self) -> Option<(usize, usize)> {
         match self.state.lock() {
             Ok(state) => (!state.invariant_failed
-                && state.pending <= MAX_PENDING_NATIVE_CONTEXT_TASKS)
-                .then_some(state.pending),
+                && state.pending <= MAX_PENDING_NATIVE_CONTEXT_TASKS
+                && state.physical_screenshots <= MAX_PENDING_SEMANTIC_SCREENSHOTS)
+                .then_some((state.pending, state.physical_screenshots)),
             Err(poisoned) => {
                 let mut state = poisoned.into_inner();
                 state.invariant_failed = true;
@@ -144,6 +235,11 @@ impl AgentPortAdmission {
                 None
             }
         }
+    }
+
+    #[cfg(any(target_os = "macos", test))]
+    fn pending(&self) -> Option<usize> {
+        self.counts().map(|(pending, _)| pending)
     }
 
     fn seal(&self) {
@@ -186,9 +282,25 @@ struct AgentTaskPermit {
     released: bool,
 }
 
+#[cfg(any(target_os = "macos", test))]
+pub(crate) struct AgentScreenshotPhysicalPermit {
+    admission: Arc<AgentPortAdmission>,
+    released: bool,
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl Drop for AgentScreenshotPhysicalPermit {
+    fn drop(&mut self) {
+        if !self.released {
+            self.released = true;
+            self.admission.release_screenshot();
+        }
+    }
+}
+
 impl AgentTaskPermit {
-    fn pending(&self) -> Option<usize> {
-        self.admission.pending()
+    fn counts(&self) -> Option<(usize, usize)> {
+        self.admission.counts()
     }
 
     fn release(&mut self) {
@@ -227,6 +339,102 @@ pub(crate) struct AgentContextTask {
     request: Option<AgentPendingRequest>,
     permit: AgentTaskPermit,
     sink: AgentContextEventSink,
+}
+
+/// Move-only native capture task sharing the context port's global admission.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) struct AgentScreenshotTask {
+    request: Option<SemanticScreenshotNativeRequest>,
+    completion: Option<SemanticScreenshotNativeCompletion>,
+    physical: Option<AgentScreenshotPhysicalPermit>,
+    admitted_at: std::time::Instant,
+    permit: AgentTaskPermit,
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl AgentScreenshotTask {
+    fn new(
+        request: SemanticScreenshotNativeRequest,
+        completion: SemanticScreenshotNativeCompletion,
+        physical: AgentScreenshotPhysicalPermit,
+        permit: AgentTaskPermit,
+    ) -> Self {
+        Self {
+            request: Some(request),
+            completion: Some(completion),
+            physical: Some(physical),
+            admitted_at: std::time::Instant::now(),
+            permit,
+        }
+    }
+
+    pub(crate) fn request(&self) -> Option<&SemanticScreenshotNativeRequest> {
+        self.request.as_ref()
+    }
+
+    pub(crate) fn take_request(&mut self) -> Option<SemanticScreenshotNativeRequest> {
+        self.request.take()
+    }
+
+    pub(crate) fn take_physical(&mut self) -> Option<AgentScreenshotPhysicalPermit> {
+        self.physical.take()
+    }
+
+    pub(crate) const fn admitted_at(&self) -> std::time::Instant {
+        self.admitted_at
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn callback_guard(&self) -> AgentScreenshotCallbackGuard {
+        AgentScreenshotCallbackGuard {
+            admission: self.permit.admission.clone(),
+        }
+    }
+
+    pub(crate) fn complete(
+        mut self,
+        outcome: Result<SemanticScreenshotNativeCapture, SemanticScreenshotNativeFailure>,
+    ) {
+        self.request = None;
+        self.physical = None;
+        self.permit.release();
+        self.invoke_completion(outcome);
+    }
+
+    pub(crate) fn refuse(self, failure: SemanticScreenshotNativeFailure) {
+        self.complete(Err(failure));
+    }
+
+    fn cancel_without_completion(mut self) {
+        self.request = None;
+        self.completion = None;
+        self.physical = None;
+        self.permit.release();
+    }
+
+    fn invoke_completion(
+        &mut self,
+        outcome: Result<SemanticScreenshotNativeCapture, SemanticScreenshotNativeFailure>,
+    ) {
+        let Some(completion) = self.completion.take() else {
+            self.permit.admission.fail_invariant();
+            return;
+        };
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| completion(outcome))).is_err() {
+            self.permit.admission.fail_invariant();
+        }
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl Drop for AgentScreenshotTask {
+    fn drop(&mut self) {
+        if self.request.take().is_none() && self.completion.is_none() {
+            return;
+        }
+        self.permit.release();
+        self.invoke_completion(Err(SemanticScreenshotNativeFailure::Transport));
+    }
 }
 
 impl AgentContextTask {
@@ -276,8 +484,8 @@ impl AgentContextTask {
         }
     }
 
-    pub(crate) fn pending_tasks(&self) -> Option<usize> {
-        self.permit.pending()
+    pub(crate) fn admission_counts(&self) -> Option<(usize, usize)> {
+        self.permit.counts()
     }
 
     #[cfg(target_os = "macos")]
@@ -568,6 +776,45 @@ impl EngineAgentBrowserPort {
             ContextDispatch::Rejected(ContextPortFailure::Shutdown)
         }
     }
+
+    #[cfg(target_os = "macos")]
+    fn schedule_screenshot(
+        &self,
+        request: SemanticScreenshotNativeRequest,
+        completion: SemanticScreenshotNativeCompletion,
+    ) -> ContextDispatch {
+        let (permit, physical) = match self.admission.reserve_screenshot() {
+            Ok(permits) => permits,
+            Err(failure) => return ContextDispatch::Rejected(failure),
+        };
+        let task = AgentScreenshotTask::new(request, completion, physical, permit);
+        let slot = Arc::new(Mutex::new(Some(task)));
+        let for_dispatch = slot.clone();
+        let executed = Arc::new(AtomicBool::new(false));
+        let executed_in_dispatch = executed.clone();
+        let accepted = (self.dispatch)(Box::new(move || {
+            executed_in_dispatch.store(true, Ordering::Release);
+            let task = for_dispatch
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            if let Some(task) = task {
+                dispatch_screenshot_to_host(task);
+            }
+        }));
+        if accepted || executed.load(Ordering::Acquire) {
+            ContextDispatch::Scheduled
+        } else {
+            if let Some(task) = slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            {
+                task.cancel_without_completion();
+            }
+            ContextDispatch::Rejected(ContextPortFailure::Shutdown)
+        }
+    }
 }
 
 impl AgentBrowserPort for EngineAgentBrowserPort {
@@ -599,6 +846,25 @@ impl AgentBrowserPort for EngineAgentBrowserPort {
             invocation: Some(invocation),
         }))
     }
+
+    fn capture_semantic_screenshot(
+        &self,
+        request: SemanticScreenshotNativeRequest,
+        completion: SemanticScreenshotNativeCompletion,
+    ) -> ContextDispatch {
+        #[cfg(target_os = "macos")]
+        {
+            if !supports_semantic_screenshot(&request) {
+                return ContextDispatch::Unsupported;
+            }
+            self.schedule_screenshot(request, completion)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (request, completion);
+            ContextDispatch::Unsupported
+        }
+    }
 }
 
 fn dispatch_to_host(task: AgentContextTask) {
@@ -619,6 +885,29 @@ fn dispatch_to_host(task: AgentContextTask) {
             .take()
         {
             task.refuse(ContextPortFailure::Shutdown);
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn dispatch_screenshot_to_host(task: AgentScreenshotTask) {
+    let slot = Arc::new(Mutex::new(Some(task)));
+    let for_host = slot.clone();
+    if !crate::host::try_with_agent_context(move |host| {
+        let task = for_host
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(task) = task {
+            host.handle_agent_screenshot_task(task);
+        }
+    }) {
+        if let Some(task) = slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            task.refuse(SemanticScreenshotNativeFailure::Shutdown);
         }
     }
 }
@@ -671,19 +960,31 @@ fn supports_semantic_invocation(invocation: &SemanticRuntimeInvocation) -> bool 
     }
 }
 
+#[cfg(target_os = "macos")]
+fn supports_semantic_screenshot(request: &SemanticScreenshotNativeRequest) -> bool {
+    request.context().identity().kind() == zephium_agentic::ContextKind::Owned
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
 
     use zephium_agentic::{
-        encode_semantic_runtime_invocation, ContextCapabilities, ContextCapability,
+        decode_semantic_snapshot, encode_semantic_observation, encode_semantic_runtime_invocation,
+        prepare_semantic_screenshot, ContextCapabilities, ContextCapability,
         ContextConstructionRequest, ContextConstructionSource, ContextId, ContextIdentity,
-        ContextOperationId, ContextProfileLeaseId, ContextProfileLeasePurpose,
+        ContextKind, ContextOperationId, ContextProfileLeaseId, ContextProfileLeasePurpose,
         ContextProfileLeaseRegistry, ContextProfileStorageClass, ContextRegistry, ContextRunId,
-        ContextSettlement, FrameId, SemanticFrameJoin, SemanticFrameTrust, SemanticInvocationId,
+        ContextSettlement, FrameId, SemanticCaptureInstant, SemanticDecodeContext,
+        SemanticFrameJoin, SemanticFrameTrust, SemanticInvocationId,
+        SemanticModelDeliverySettlement, SemanticModelEncodingBudget, SemanticObservationAssembler,
         SemanticObservationBudget, SemanticObservationId, SemanticObservationRequest,
-        SemanticOrigin, SemanticRuntimeBudget, SemanticSnapshotGeneration,
+        SemanticOrigin, SemanticRuntimeBudget, SemanticScreenshotBudget,
+        SemanticScreenshotCoordinator, SemanticScreenshotRequestId, SemanticSnapshotGeneration,
+        SemanticTokenCountQuality, SemanticTokenCountRequirement, SemanticTokenCounter,
+        SemanticTokenCounterError, SemanticTokenMeasurement, SemanticTokenizerRevision,
+        SEMANTIC_WIRE_VERSION,
     };
     use zephium_core::ids::ProfileId;
 
@@ -771,6 +1072,122 @@ mod tests {
             SemanticRuntimeBudget::INITIAL_FILTERED,
         )
         .expect("encode")
+    }
+
+    struct ScreenshotTokenCounter {
+        revision: SemanticTokenizerRevision,
+    }
+
+    impl SemanticTokenCounter for ScreenshotTokenCounter {
+        fn count_tokens(
+            &self,
+            input: &str,
+        ) -> Result<SemanticTokenMeasurement, SemanticTokenCounterError> {
+            if input.is_empty() {
+                return Err(SemanticTokenCounterError::InvalidResult);
+            }
+            SemanticTokenMeasurement::try_new(
+                self.revision.clone(),
+                32,
+                SemanticTokenCountQuality::ExactLocal,
+            )
+            .map_err(|_| SemanticTokenCounterError::InvalidResult)
+        }
+    }
+
+    fn screenshot_native_request(seed: u64) -> SemanticScreenshotNativeRequest {
+        let identity = ContextIdentity::new(
+            ContextId::generate(),
+            ContextRunId::generate(),
+            ProfileId::from(u128::from(seed + 2)),
+            ContextKind::Owned,
+        );
+        let capabilities =
+            ContextCapabilities::try_new(ContextKind::Owned, &[ContextCapability::Observe])
+                .expect("capabilities");
+        let mut registry = ContextRegistry::new();
+        registry.reserve(identity, capabilities).expect("reserve");
+        let construction = registry
+            .begin_context(
+                identity.id(),
+                ContextOperationId::new(1).expect("operation"),
+            )
+            .expect("construction");
+        registry
+            .settle_construction(identity.id(), construction, ContextSettlement::Applied)
+            .expect("settlement");
+        let context = registry.join(identity.id()).expect("context");
+        let frame = SemanticFrameJoin::try_new(
+            context,
+            FrameId::MAIN,
+            context.frame_generation(),
+            SemanticOrigin::parse("https://screenshot-port.example.test/private").expect("origin"),
+            SemanticFrameTrust::SameOrigin,
+        )
+        .expect("frame");
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "v": SEMANTIC_WIRE_VERSION,
+            "i": seed + 10,
+            "g": 1,
+            "c": "complete",
+            "n": [
+                {"k": 1, "r": "document", "o": 16},
+                {"k": 2, "p": 0, "r": "paragraph", "t": "sensitive", "q": "sensitive"}
+            ]
+        }))
+        .expect("wire");
+        let snapshot = decode_semantic_snapshot(
+            SemanticDecodeContext::new(
+                SemanticInvocationId::new(seed + 10).expect("invocation"),
+                frame,
+                SemanticSnapshotGeneration::INITIAL,
+            ),
+            &bytes,
+        )
+        .expect("snapshot");
+        let observation_request = SemanticObservationRequest::initial(
+            SemanticObservationId::new(seed + 20).expect("observation"),
+            context,
+            SemanticObservationBudget::INITIAL_FILTERED,
+        );
+        let observation = SemanticObservationAssembler::new(observation_request, snapshot)
+            .expect("assembler")
+            .finish()
+            .expect("observation");
+        let revision = SemanticTokenizerRevision::try_new("engine-screenshot-port-v1".to_owned())
+            .expect("revision");
+        let acknowledgement = encode_semantic_observation(
+            &observation,
+            SemanticModelEncodingBudget::try_new(
+                32 * 1024,
+                1_000,
+                SemanticTokenCountRequirement::Exact,
+            )
+            .expect("budget"),
+        )
+        .expect("encode")
+        .admit(
+            &ScreenshotTokenCounter {
+                revision: revision.clone(),
+            },
+            &revision,
+        )
+        .expect("admit")
+        .settle_delivery(SemanticModelDeliverySettlement::Committed)
+        .expect("delivery");
+        let request = prepare_semantic_screenshot(
+            SemanticScreenshotRequestId::new(seed + 30).expect("screenshot"),
+            &observation,
+            &acknowledgement,
+            SemanticCaptureInstant::from_millis(1_000),
+            SemanticCaptureInstant::from_millis(2_000),
+            SemanticScreenshotBudget::STANDARD,
+        )
+        .expect("screenshot request");
+        SemanticScreenshotCoordinator::new()
+            .begin(request)
+            .expect("begin screenshot")
+            .1
     }
 
     #[cfg(target_os = "macos")]
@@ -881,6 +1298,100 @@ mod tests {
             [ContextNativeEvent::ResourceAuditSettled(settlement)]
                 if settlement.outcome() == Err(ContextPortFailure::Shutdown)
         ));
+    }
+
+    #[test]
+    fn screenshot_dispatch_has_exactly_one_move_only_terminal_when_host_is_absent() {
+        crate::host::make_unavailable_for_test();
+        let outcomes = Arc::new(Mutex::new(Vec::new()));
+        let captured = outcomes.clone();
+        let slot = AgentContextPortSlot::new(
+            Arc::new(|task| {
+                task();
+                true
+            }),
+            Arc::new(|_| {}),
+        );
+        let port = slot.take(Arc::new(|_| {})).expect("port");
+        let dispatch = port.capture_semantic_screenshot(
+            screenshot_native_request(100),
+            Box::new(move |outcome| {
+                captured.lock().expect("outcomes").push(outcome.err());
+            }),
+        );
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(dispatch, ContextDispatch::Scheduled);
+            assert_eq!(
+                outcomes.lock().expect("outcomes").as_slice(),
+                [Some(SemanticScreenshotNativeFailure::Shutdown)]
+            );
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert_eq!(dispatch, ContextDispatch::Unsupported);
+            assert!(outcomes.lock().expect("outcomes").is_empty());
+        }
+        let state = slot.state.lock().expect("state");
+        let admission = state.admission.as_ref().expect("admission");
+        assert_eq!(admission.counts(), Some((0, 0)));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn rejected_screenshot_dispatch_releases_both_slots_without_callback() {
+        let callbacks = Arc::new(AtomicUsize::new(0));
+        let counted = callbacks.clone();
+        let slot = AgentContextPortSlot::new(Arc::new(|_| false), Arc::new(|_| {}));
+        let port = slot.take(Arc::new(|_| {})).expect("port");
+        assert_eq!(
+            port.capture_semantic_screenshot(
+                screenshot_native_request(200),
+                Box::new(move |_| {
+                    counted.fetch_add(1, Ordering::Relaxed);
+                }),
+            ),
+            ContextDispatch::Rejected(ContextPortFailure::Shutdown)
+        );
+        assert_eq!(callbacks.load(Ordering::Relaxed), 0);
+        let state = slot.state.lock().expect("state");
+        assert_eq!(
+            state
+                .admission
+                .as_ref()
+                .and_then(|admission| admission.counts()),
+            Some((0, 0))
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn panicking_screenshot_completion_is_fail_stopped_without_unwinding() {
+        crate::host::make_unavailable_for_test();
+        let fatals = Arc::new(AtomicUsize::new(0));
+        let counted = fatals.clone();
+        let slot = AgentContextPortSlot::new(
+            Arc::new(|task| {
+                task();
+                true
+            }),
+            Arc::new(move |_| {
+                counted.fetch_add(1, Ordering::Relaxed);
+            }),
+        );
+        let port = slot.take(Arc::new(|_| {})).expect("port");
+        assert_eq!(
+            port.capture_semantic_screenshot(
+                screenshot_native_request(300),
+                Box::new(|_| panic!("external screenshot completion panicked")),
+            ),
+            ContextDispatch::Scheduled
+        );
+        assert_eq!(fatals.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            port.audit_resources(ContextResourceAuditId::new(1).expect("audit")),
+            ContextDispatch::Rejected(ContextPortFailure::Shutdown)
+        );
     }
 
     #[test]
@@ -1015,6 +1526,36 @@ mod tests {
             ContextNativeEvent::ResourceAuditSettled(settlement)
                 if settlement.outcome() == Err(ContextPortFailure::NativeRefused)
         )));
+    }
+
+    #[test]
+    fn physical_screenshot_debt_remains_bounded_after_logical_settlement() {
+        let admission = Arc::new(AgentPortAdmission::new(Arc::new(|_| {})));
+        let (logical_one, physical_one) = admission.reserve_screenshot().expect("first capture");
+        let (logical_two, physical_two) = admission.reserve_screenshot().expect("second capture");
+        drop(logical_one);
+        drop(logical_two);
+
+        assert!(matches!(
+            admission.reserve_screenshot(),
+            Err(ContextPortFailure::ResourceExhausted)
+        ));
+        {
+            let state = admission.state.lock().expect("admission state");
+            assert_eq!(state.pending, 0);
+            assert_eq!(state.physical_screenshots, MAX_PENDING_SEMANTIC_SCREENSHOTS);
+        }
+
+        drop(physical_one);
+        let (logical_three, physical_three) = admission
+            .reserve_screenshot()
+            .expect("released physical slot");
+        drop(logical_three);
+        drop(physical_two);
+        drop(physical_three);
+        let state = admission.state.lock().expect("admission state");
+        assert_eq!(state.pending, 0);
+        assert_eq!(state.physical_screenshots, 0);
     }
 
     #[test]

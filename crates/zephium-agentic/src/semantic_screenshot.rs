@@ -21,7 +21,7 @@ use crate::{
     ContextJoin, FrameId, SemanticCaptureInstant, SemanticCompleteness,
     SemanticFrameBoundaryStatus, SemanticObservation, SemanticObservationAcknowledgement,
     SemanticObservationGeneration, SemanticObservationId, SemanticSensitivity,
-    SemanticValueSummary,
+    SemanticSnapshotGeneration, SemanticValueSummary,
 };
 
 /// Maximum physical pixel width accepted from a native viewport capture.
@@ -188,6 +188,7 @@ pub struct SemanticScreenshotRequest {
     scope: SemanticScreenshotScope,
     observation: SemanticObservationId,
     observation_generation: SemanticObservationGeneration,
+    snapshot_generation: SemanticSnapshotGeneration,
     context: ContextJoin,
     requested_at: SemanticCaptureInstant,
     deadline: SemanticCaptureInstant,
@@ -216,6 +217,11 @@ impl SemanticScreenshotRequest {
         self.observation_generation
     }
 
+    /// Exact main-frame semantic snapshot that authorized visual capture.
+    pub const fn snapshot_generation(&self) -> SemanticSnapshotGeneration {
+        self.snapshot_generation
+    }
+
     /// Exact context/document/cancellation authority.
     pub const fn context(&self) -> ContextJoin {
         self.context
@@ -242,6 +248,7 @@ impl SemanticScreenshotRequest {
             scope: self.scope,
             observation: self.observation,
             observation_generation: self.observation_generation,
+            snapshot_generation: self.snapshot_generation,
             context: self.context,
             requested_at: self.requested_at,
             deadline: self.deadline,
@@ -252,8 +259,10 @@ impl SemanticScreenshotRequest {
             id: self.id,
             scope: self.scope,
             context: self.context,
+            requested_at: self.requested_at,
             deadline: self.deadline,
             budget: self.budget,
+            snapshot_generation: self.snapshot_generation,
             guard: self.guard,
         };
         (pending, native)
@@ -268,6 +277,7 @@ impl fmt::Debug for SemanticScreenshotRequest {
             .field("scope", &self.scope)
             .field("observation", &self.observation)
             .field("observation_generation", &self.observation_generation)
+            .field("snapshot_generation", &self.snapshot_generation)
             .field("context", &self.context)
             .field("requested_at", &self.requested_at)
             .field("deadline", &self.deadline)
@@ -321,6 +331,11 @@ pub fn prepare_semantic_screenshot(
         return Err(SemanticScreenshotRequestError::Deadline);
     }
     let fingerprint = SemanticObservationFingerprint::from_observation(observation);
+    let snapshot_generation = observation
+        .frames()
+        .first()
+        .ok_or(SemanticScreenshotRequestError::IncompleteObservation)?
+        .generation();
     let scope = SemanticScreenshotScope::Viewport;
     let guard = screenshot_request_guard(
         id,
@@ -335,6 +350,7 @@ pub fn prepare_semantic_screenshot(
         scope,
         observation: observation.request().id(),
         observation_generation: observation.request().generation(),
+        snapshot_generation,
         context,
         requested_at,
         deadline,
@@ -374,6 +390,7 @@ pub struct SemanticScreenshotPending {
     scope: SemanticScreenshotScope,
     observation: SemanticObservationId,
     observation_generation: SemanticObservationGeneration,
+    snapshot_generation: SemanticSnapshotGeneration,
     context: ContextJoin,
     requested_at: SemanticCaptureInstant,
     deadline: SemanticCaptureInstant,
@@ -396,6 +413,7 @@ impl fmt::Debug for SemanticScreenshotPending {
             .field("scope", &self.scope)
             .field("observation", &self.observation)
             .field("observation_generation", &self.observation_generation)
+            .field("snapshot_generation", &self.snapshot_generation)
             .field("context", &self.context)
             .field("deadline", &self.deadline)
             .field("budget", &self.budget)
@@ -557,8 +575,10 @@ pub struct SemanticScreenshotNativeRequest {
     id: SemanticScreenshotRequestId,
     scope: SemanticScreenshotScope,
     context: ContextJoin,
+    requested_at: SemanticCaptureInstant,
     deadline: SemanticCaptureInstant,
     budget: SemanticScreenshotBudget,
+    snapshot_generation: SemanticSnapshotGeneration,
     guard: [u8; 32],
 }
 
@@ -578,6 +598,11 @@ impl SemanticScreenshotNativeRequest {
         self.context
     }
 
+    /// Trusted-shell clock anchor used to map native elapsed time.
+    pub const fn requested_at(&self) -> SemanticCaptureInstant {
+        self.requested_at
+    }
+
     /// Sole absolute native completion deadline.
     pub const fn deadline(&self) -> SemanticCaptureInstant {
         self.deadline
@@ -586,6 +611,11 @@ impl SemanticScreenshotNativeRequest {
     /// Native dimension, pixel, and bounded-stream ceilings.
     pub const fn budget(&self) -> SemanticScreenshotBudget {
         self.budget
+    }
+
+    /// Exact main-frame semantic snapshot to revalidate before native capture.
+    pub const fn snapshot_generation(&self) -> SemanticSnapshotGeneration {
+        self.snapshot_generation
     }
 
     /// Consumes the one-shot native job into a claimed completed capture.
@@ -606,8 +636,10 @@ impl SemanticScreenshotNativeRequest {
             id: self.id,
             scope: self.scope,
             context: self.context,
+            requested_at: self.requested_at,
             deadline: self.deadline,
             budget: self.budget,
+            snapshot_generation: self.snapshot_generation,
             guard: self.guard,
             paint,
             started_at,
@@ -626,8 +658,10 @@ impl fmt::Debug for SemanticScreenshotNativeRequest {
             .field("id", &self.id)
             .field("scope", &self.scope)
             .field("context", &self.context)
+            .field("requested_at", &self.requested_at)
             .field("deadline", &self.deadline)
             .field("budget", &self.budget)
+            .field("snapshot_generation", &self.snapshot_generation)
             .field("guard", &"[redacted]")
             .finish()
     }
@@ -640,14 +674,48 @@ pub enum SemanticScreenshotPaintEvidence {
     ExactDocumentContentAvailable,
 }
 
+/// Closed native screenshot refusal emitted after successful port admission.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum SemanticScreenshotNativeFailure {
+    /// The pinned platform cannot implement the required capture invariants.
+    #[error("native semantic screenshot is unsupported")]
+    Unsupported,
+    /// A bounded queue, encoder, image, or native capture slot is full.
+    #[error("native semantic screenshot resources are exhausted")]
+    ResourceExhausted,
+    /// Cancellation or context retirement terminated the exact attempt.
+    #[error("native semantic screenshot was cancelled")]
+    Cancelled,
+    /// The sole native capture deadline elapsed.
+    #[error("native semantic screenshot timed out")]
+    TimedOut,
+    /// Context, document, or semantic snapshot authority no longer matches.
+    #[error("native semantic screenshot authority is stale")]
+    Stale,
+    /// The exact document has not reached a capturable content edge.
+    #[error("native semantic screenshot document is not ready")]
+    NotReady,
+    /// The exact native renderer disappeared before settlement.
+    #[error("native semantic screenshot renderer was lost")]
+    RendererLost,
+    /// The platform capture or bounded encoder refused the operation.
+    #[error("native semantic screenshot transport failed")]
+    Transport,
+    /// Process teardown permanently sealed the native adapter.
+    #[error("native semantic screenshot adapter is shutting down")]
+    Shutdown,
+}
+
 /// Claimed native result awaiting functional-core admission.
 #[must_use]
 pub struct SemanticScreenshotNativeCapture {
     id: SemanticScreenshotRequestId,
     scope: SemanticScreenshotScope,
     context: ContextJoin,
+    requested_at: SemanticCaptureInstant,
     deadline: SemanticCaptureInstant,
     budget: SemanticScreenshotBudget,
+    snapshot_generation: SemanticSnapshotGeneration,
     guard: [u8; 32],
     paint: SemanticScreenshotPaintEvidence,
     started_at: SemanticCaptureInstant,
@@ -664,8 +732,10 @@ impl fmt::Debug for SemanticScreenshotNativeCapture {
             .field("id", &self.id)
             .field("scope", &self.scope)
             .field("context", &self.context)
+            .field("requested_at", &self.requested_at)
             .field("deadline", &self.deadline)
             .field("budget", &self.budget)
+            .field("snapshot_generation", &self.snapshot_generation)
             .field("paint", &self.paint)
             .field("started_at", &self.started_at)
             .field("completed_at", &self.completed_at)
@@ -898,8 +968,10 @@ fn admit_semantic_screenshot(
         || pending.id != capture.id
         || pending.scope != capture.scope
         || pending.context != capture.context
+        || pending.requested_at != capture.requested_at
         || pending.deadline != capture.deadline
         || pending.budget != capture.budget
+        || pending.snapshot_generation != capture.snapshot_generation
     {
         return Err(SemanticScreenshotError::RequestMismatch);
     }
@@ -1492,6 +1564,7 @@ mod tests {
         assert_eq!(prepared.scope(), SemanticScreenshotScope::Viewport);
         assert_eq!(prepared.observation(), observation.request().id());
         assert_eq!(prepared.observation_generation().get(), 1);
+        assert_eq!(prepared.snapshot_generation().get(), 1);
         assert_eq!(prepared.context(), context);
         assert_eq!(prepared.requested_at().millis(), 1_000);
         assert_eq!(prepared.deadline().millis(), 2_000);
@@ -1501,8 +1574,10 @@ mod tests {
         assert_eq!(native.id().get(), 1);
         assert_eq!(native.scope(), SemanticScreenshotScope::Viewport);
         assert_eq!(native.context(), context);
+        assert_eq!(native.requested_at().millis(), 1_000);
         assert_eq!(native.deadline().millis(), 2_000);
         assert_eq!(native.budget(), SemanticScreenshotBudget::STANDARD);
+        assert_eq!(native.snapshot_generation().get(), 1);
         let capture = native.complete(
             SemanticScreenshotPaintEvidence::ExactDocumentContentAvailable,
             SemanticCaptureInstant::from_millis(1_100),
