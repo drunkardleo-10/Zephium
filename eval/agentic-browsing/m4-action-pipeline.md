@@ -4,10 +4,11 @@ Status: bounded pre-policy action proposals, exact observation binding,
 one-action rolling checkpoints, typed settle/verification contracts,
 fresh-snapshot structural revalidation, event-driven bounded settlement,
 independent effect verification, and acknowledged action-result diff/fresh-state
-finalization, plus the bounded zero-copy semantic-read core are implemented.
+finalization, plus bounded semantic read/transport and closed structured
+extraction admission are implemented.
 Policy permits, platform execution,
 visibility/occlusion checks, native observation adapters and timer driving,
-multi-action result aggregation, extract, screenshot, and live
+multi-action result aggregation, screenshot, model-provider wiring, and live
 qualification remain pending.
 
 This evidence describes a functional-core seam. It does not claim that an
@@ -190,9 +191,37 @@ are trusted, or that M4 is complete.
   the payload without authority. The receipt is intentionally a distinct type,
   cannot authorize a semantic diff or progressive scope, and fails to match a
   different sensitivity projection, content cohort, or capture time.
+- Extraction accepts hostile model output only after that exact bounded read
+  has a committed delivery receipt. The caller supplies a nonzero trusted
+  schema identity and one through 64 unique schema-ordered ASCII fields. The
+  closed v1 schema permits only bounded text, Boolean, bounded unsigned integer,
+  and bounded text-list values; it cannot express nested objects, arbitrary
+  JSON Schema, executable data, selectors, DOM/native identity, or markup.
+- The fixed extraction output envelope is capped at 64 KiB before JSON decode,
+  rejects unknown or duplicate keys, requires the exact grammar version and
+  trusted schema identity, and admits at most 256 primitive values, 64 KiB
+  retained text, and 1,024 provenance edges. Individual text, list, item,
+  schema-name, field-name, and per-value source limits are independently
+  smaller. Optional fields may be omitted, but present fields must remain in
+  schema order and required fields cannot disappear.
+- Every scalar, list mapping, and list item cites one through four canonical,
+  strictly increasing `@rN` tokens. Rust resolves each token in the exact
+  delivered read and reapplies the requested public/sensitive ceiling; missing,
+  reordered, duplicated, noncanonical, secret, or over-policy citations fail
+  closed. Model-produced strings are separately bounded, screened for forbidden
+  invisible/control characters and secret-like forms, and redacted from
+  diagnostics.
+- An admitted result is explicitly `ModelMapped`, not browser-attested truth.
+  Values retain a flat bounded table of the exact borrowed read fragments. Each
+  opaque source span carries a full SHA-256 guard over the delivered read,
+  trusted schema identity, sensitivity allowance, and raw model output, so a
+  span from a different result cannot resolve against a coincidentally similar
+  table. Extraction creates no observation acknowledgement, action authority,
+  policy permit, or durable page identity.
 
-The action core has zero idle overhead. It allocates only when an admitted
-proposal batch is constructed and creates no page/runtime/native work.
+The functional core has zero idle overhead. It allocates only when a bounded
+action, read, or extraction operation is invoked and creates no timer, worker,
+queue, page/runtime task, native view, or thread.
 
 ## Deterministic evidence
 
@@ -244,5 +273,14 @@ frame/provenance aliases, non-actionable `@rN` identities, byte refusal,
 token quality/revision/count gates, content-redacted diagnostics, committed-only
 delivery receipts, projection/capture mismatch, and the mechanical distinction
 from full-observation acknowledgement authority.
+
+Extraction coverage includes trusted schema names, uniqueness, ordering, and
+all field bounds; exact read-delivery/capture/projection binding; all four value
+shapes; optional and required fields; malformed, unknown, duplicate, reordered,
+extra, and type-mismatched model output; input, text, list, unsigned, primitive,
+and aggregate provenance ceilings; secret/control-character refusal; canonical,
+resolved, unique, ordered, and sensitivity-admitted citations; content-free
+diagnostics; exact borrowed provenance; and cross-result source-span
+substitution refusal.
 
 No platform action backend or live page is exercised by these tests.

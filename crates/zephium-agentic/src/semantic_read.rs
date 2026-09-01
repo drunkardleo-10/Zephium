@@ -216,6 +216,19 @@ impl SemanticReadFragmentId {
         format!("@r{}", self.0.get())
     }
 
+    /// Parses only the canonical provenance spelling without leading zeros.
+    pub fn parse_model_token(value: &str) -> Option<Self> {
+        let digits = value.strip_prefix("@r")?;
+        if digits.is_empty()
+            || (digits.len() > 1 && digits.starts_with('0'))
+            || !digits.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return None;
+        }
+        let value = digits.parse::<u16>().ok()?;
+        Self::new(value)
+    }
+
     /// One-based result-local ordinal for trusted validation.
     pub const fn get(self) -> u16 {
         self.0.get()
@@ -520,6 +533,12 @@ impl<'a> SemanticReadResult<'a> {
     /// Deterministic frame/node/name-text-value ordered readable primitives.
     pub fn fragments(&self) -> &[SemanticReadFragment<'a>] {
         &self.fragments
+    }
+
+    /// Resolves one result-local provenance identity.
+    pub fn fragment(&self, id: SemanticReadFragmentId) -> Option<SemanticReadFragment<'a>> {
+        let fragment = self.fragments.get(usize::from(id.get() - 1)).copied()?;
+        (fragment.id() == id).then_some(fragment)
     }
 
     /// Complete omission set; empty means every available admitted value fit.

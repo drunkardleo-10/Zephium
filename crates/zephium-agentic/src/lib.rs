@@ -32,6 +32,7 @@ mod semantic_action;
 mod semantic_action_result;
 mod semantic_diff;
 mod semantic_diff_model;
+mod semantic_extract;
 mod semantic_model;
 mod semantic_observation;
 mod semantic_read;
@@ -141,6 +142,20 @@ pub use semantic_diff::{
 pub use semantic_diff_model::{
     encode_semantic_diff, SemanticDiffEncodingStats, SemanticDiffModelPayload, SemanticEncodedDiff,
     SEMANTIC_DIFF_MODEL_SCHEMA_VERSION,
+};
+pub use semantic_extract::{
+    extract_semantic_read, SemanticExtractedBoolean, SemanticExtractedField, SemanticExtractedText,
+    SemanticExtractedTextList, SemanticExtractedUnsigned, SemanticExtractedValue,
+    SemanticExtractionError, SemanticExtractionFieldSchema, SemanticExtractionResult,
+    SemanticExtractionSchema, SemanticExtractionSchemaError, SemanticExtractionSchemaId,
+    SemanticExtractionSource, SemanticExtractionSourceSpan, SemanticExtractionStats,
+    SemanticExtractionTrust, SemanticExtractionValueKind, MAX_SEMANTIC_EXTRACTION_FIELDS,
+    MAX_SEMANTIC_EXTRACTION_FIELD_NAME_BYTES, MAX_SEMANTIC_EXTRACTION_INPUT_BYTES,
+    MAX_SEMANTIC_EXTRACTION_LIST_ITEMS, MAX_SEMANTIC_EXTRACTION_LIST_ITEM_BYTES,
+    MAX_SEMANTIC_EXTRACTION_SCHEMA_NAME_BYTES, MAX_SEMANTIC_EXTRACTION_SOURCES_PER_VALUE,
+    MAX_SEMANTIC_EXTRACTION_SOURCE_EDGES, MAX_SEMANTIC_EXTRACTION_TEXT_BYTES,
+    MAX_SEMANTIC_EXTRACTION_TOTAL_TEXT_BYTES, MAX_SEMANTIC_EXTRACTION_VALUES,
+    SEMANTIC_EXTRACTION_SCHEMA_VERSION,
 };
 pub use semantic_model::{
     encode_semantic_observation, SemanticEncodedObservation, SemanticEncodingStats,
