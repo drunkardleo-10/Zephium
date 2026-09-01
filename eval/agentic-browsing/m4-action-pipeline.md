@@ -4,12 +4,12 @@ Status: bounded pre-policy action proposals, exact observation binding,
 one-action rolling checkpoints, typed settle/verification contracts,
 fresh-snapshot structural revalidation, event-driven bounded settlement,
 independent effect verification, and acknowledged action-result diff/fresh-state
-finalization, plus bounded semantic read/transport, closed structured
-extraction admission, and the one-shot viewport screenshot contract are
-implemented.
+finalization and exact bounded batch-terminal aggregation, plus bounded semantic
+read/transport, closed structured extraction admission, and the one-shot
+viewport screenshot contract are implemented.
 Policy permits, platform execution,
 visibility/occlusion checks, native observation adapters and timer driving,
-multi-action result aggregation, native screenshot adapters, visual policy and
+native screenshot adapters, visual policy and
 model-provider wiring, and live qualification remain pending.
 
 This evidence describes a functional-core seam. It does not claim that an
@@ -160,6 +160,30 @@ are trusted, or that M4 is complete.
   or invent a delta. An unacknowledged baseline is a lease failure, not a
   fresh-snapshot success. Diff and full-snapshot bytes still require the
   existing token-admission and committed-delivery boundary.
+- Batch aggregation begins only from an exact already-bound batch and retains
+  at most eight content-free expected action guards, eight content-free
+  completion summaries, and the latest full result. An exact per-position
+  SHA-256 guard prevents an action from another separately bound batch from
+  being admitted even if a shell violates its process-local uniqueness
+  obligation and reuses a batch ID. Previous full diffs/snapshots are dropped
+  as each later action succeeds, so aggregation remains O(one bounded current
+  state plus eight fixed summaries), not eight page-state payloads.
+- Each admitted success must be the exact next ordinal, match both the original
+  bound action and its rolling pre-execution checkpoint, use a previously unseen
+  attempt identity, and carry non-regressing independent-proof time. A complete
+  batch returns only after every action independently reached finalization.
+  Incomplete aggregation cannot be represented as success.
+- A verified navigation, dialog transition, or context/document/cancellation
+  change establishes a mandatory terminal stop before any remainder. Trusted
+  orchestration may also explicitly stop a nonempty successful prefix for
+  meaningful unpredicted state, but it cannot label an ordinary prefix as a
+  navigation/dialog stop without matching evidence. Complete and deliberately
+  stopped outcomes retain only the latest exact state update.
+- A failed next action returns its one-based position, the closed pipeline
+  failure, and the minimum non-authorizing recovery boundary. It discards the
+  prior full state because a failed attempt may have changed the page without
+  proving it. There is no retry count, automatic retry path, or way to continue
+  after an established stop boundary.
 - Read derives only borrowed primitives from the validated semantic observation
   vocabulary; it cannot introduce DOM, selectors, HTML, script, attributes,
   native handles, or arbitrary page objects. It retains at most 256 fields and
