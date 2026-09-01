@@ -157,6 +157,11 @@ have been instrumented or observed on either platform.
   and page content remain private and diagnostics-redacted. This is the
   production admission seam, not an actual provider/tokenizer measurement
   claim.
+- The admitted diff can now move its sole compact-content allocation into a
+  fixed provider request while retaining a separate move-only, content-free
+  delivery authority. That authority is diagnostics-redacted and can mint the
+  exact diff receipt only at transport commit; refusal and cancellation drop
+  it without acknowledging the current observation.
 - Committing a full-observation provider request now mints one move-only,
   memory-only continuation seed beside the immutable request and usage
   authority. Bounded reads do not. The transport destroys this seed for every

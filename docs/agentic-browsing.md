@@ -591,6 +591,12 @@ fixed tool result without enabling remote storage or generic payloads. Until
 those codecs are implemented and qualified, the provider adapter sends a fresh
 full observation.
 
+Diff disclosure authority is split from the compact content before a provider
+request can retain it. The fixed encoder may move the content into one request
+body while carrying only a redacted, content-free delivery authority to the
+transport commit point. Refusal or cancellation drops that authority; only an
+exact commit mints the diff receipt and next-baseline acknowledgement.
+
 This is intentionally stricter than assuming an errored `send` transmitted no
 bytes.
 

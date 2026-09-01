@@ -134,6 +134,37 @@ pub struct SemanticDiffModelPayload {
     diff_guard: [u8; 32],
 }
 
+/// Move-only proof retained beside one provider-bound diff request.
+///
+/// The provider adapter may move the compact content into its fixed request
+/// body while retaining this content-free authority until the transport
+/// commits. Refusal or cancellation drops it without acknowledging the diff.
+pub(crate) struct SemanticDiffDeliveryAuthority {
+    current_fingerprint: SemanticObservationFingerprint,
+    diff_guard: [u8; 32],
+}
+
+impl SemanticDiffDeliveryAuthority {
+    pub(crate) fn commit(self) -> SemanticDiffDeliveryReceipt {
+        SemanticDiffDeliveryReceipt {
+            acknowledgement: SemanticObservationAcknowledgement::from_fingerprint(
+                self.current_fingerprint,
+            ),
+            diff_guard: self.diff_guard,
+        }
+    }
+}
+
+impl fmt::Debug for SemanticDiffDeliveryAuthority {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SemanticDiffDeliveryAuthority")
+            .field("current_fingerprint", &"[redacted]")
+            .field("diff_guard", &"[redacted]")
+            .finish()
+    }
+}
+
 /// Opaque proof that one exact semantic diff reached committed model delivery.
 ///
 /// This binds both the acknowledged baseline and the exact current observation.
@@ -190,18 +221,33 @@ impl SemanticDiffModelPayload {
         self.diff_guard == diff.guard() && self.current_fingerprint == *diff.current_fingerprint()
     }
 
+    pub(crate) fn into_provider_parts(
+        self,
+    ) -> (
+        String,
+        SemanticDiffEncodingStats,
+        SemanticDiffDeliveryAuthority,
+    ) {
+        (
+            self.content,
+            self.stats,
+            SemanticDiffDeliveryAuthority {
+                current_fingerprint: self.current_fingerprint,
+                diff_guard: self.diff_guard,
+            },
+        )
+    }
+
     /// Settles delivery while retaining proof of the exact baseline/current diff.
     pub fn settle_delivery_receipt(
         self,
         settlement: SemanticModelDeliverySettlement,
     ) -> Result<SemanticDiffDeliveryReceipt, SemanticModelDeliveryError> {
         match settlement {
-            SemanticModelDeliverySettlement::Committed => Ok(SemanticDiffDeliveryReceipt {
-                acknowledgement: SemanticObservationAcknowledgement::from_fingerprint(
-                    self.current_fingerprint,
-                ),
-                diff_guard: self.diff_guard,
-            }),
+            SemanticModelDeliverySettlement::Committed => {
+                let (_, _, delivery) = self.into_provider_parts();
+                Ok(delivery.commit())
+            }
             SemanticModelDeliverySettlement::Refused => Err(SemanticModelDeliveryError::Refused),
             SemanticModelDeliverySettlement::Cancelled => {
                 Err(SemanticModelDeliveryError::Cancelled)
@@ -1006,9 +1052,16 @@ mod tests {
         .expect("admit alternate");
         assert!(!alternate_payload.matches_diff(&exact_diff));
 
-        let receipt = exact_payload
-            .settle_delivery_receipt(SemanticModelDeliverySettlement::Committed)
-            .expect("exact delivery");
+        let (content, stats, delivery) = exact_payload.into_provider_parts();
+        assert!(content.starts_with("ZDIFF1"));
+        assert_eq!(
+            usize::try_from(stats.bytes()).expect("bytes"),
+            content.len()
+        );
+        let delivery_debug = format!("{delivery:?}");
+        assert!(!delivery_debug.contains("Private current action"));
+        assert!(delivery_debug.contains("[redacted]"));
+        let receipt = delivery.commit();
         assert_eq!(receipt.guard(), exact_diff.guard());
         assert!(receipt.acknowledgement().matches(&current));
         let debug = format!("{exact_diff:?} {receipt:?}");
