@@ -540,9 +540,14 @@ acquires a transport slot before semantic input commits; after commit, send
 errors and cancellation are terminal outcomes rather than proof that no
 provider work occurred. The HTTP client disables even library-default
 protocol-NACK retries; any future retry requires a new call identity and policy
-admission. When a committed attempt has no trustworthy usage, policy charges
-its complete token and cost reservation and records that the charge is a
-conservative ceiling.
+admission. A committed attempt proven not to have polled the HTTP send future
+settles exact zero provider usage and cost while retaining its already-committed
+semantic taint. Once send may have been polled, a terminal result without
+trustworthy provider usage charges the complete token and cost reservation and
+records that charge as a conservative ceiling. Provider-reported usage retains
+the exact fixed provider, model, and tokenizer revision in a move-only pricing
+requirement; policy authority cannot be extracted or a completed call settled
+until the matching trusted pricing revision supplies cost.
 This is intentionally stricter than assuming an errored `send` transmitted no
 bytes.
 

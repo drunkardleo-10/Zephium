@@ -13,8 +13,10 @@ Responses and Anthropic Messages plain-text, tool-call, error, stop, and usage
 stream normalization are implemented behind one provider-neutral decoder.
 The closed browser-tool proposal decoder and fixed request/tool-schema encoding
 for both providers are implemented with atomic model-input commitment. The
-durable Store adapter is implemented; live provider qualification remains
-pending.
+durable Store adapter and fixed BYOK HTTPS transport are implemented. Terminal
+transport evidence now selects exact-zero, reservation-ceiling, or move-only
+pricing-required policy settlement without exposing active authority. Live
+provider and fixed pricing-catalog qualification remain pending.
 
 This evidence describes policy input facts only. A manifest cannot authorize a
 browser action, model call, tool call, data transfer, cost, or native resource.
@@ -464,6 +466,51 @@ browser action, model call, tool call, data transfer, cost, or native resource.
   observation/read taint and returns the active usage authority or releases the
   full reservation on pre-commit refusal/cancellation.
 
+## Implemented fixed HTTPS transport and policy-settlement join
+
+- The imperative shell accepts only an already-built move-only provider input,
+  one provider-matching zeroizing credential, exact cancellation, and the
+  existing run policy. Production endpoints are compile-time constants for
+  OpenAI Responses and Anthropic Messages; arbitrary URLs exist only in private
+  test construction restricted to loopback.
+- One shared rustls client uses the system proxy, refuses redirects, disables
+  automatic retries and referer propagation, requests identity encoding, and
+  applies bounded connect, idle-read, whole-request, and HTTP/2 header limits.
+  At most four admitted attempts exist. A slot is acquired before semantic
+  disclosure commits, is released on every terminal path, and seals the shared
+  transport if a committed attempt is abandoned.
+- Credentials are provider-bound, copied once into a sensitive header, and
+  zeroized on drop. Debug output exposes only provider and byte count. Request
+  bodies, authorization values, provider-authored error bodies, response text,
+  semantic content, and model values are absent from transport diagnostics.
+- Cancellation is sticky and checked before commitment, immediately before
+  the HTTP send future can be polled, during send, and before every body chunk.
+  A committed attempt proven not to have polled send carries
+  `ExactZeroBeforeDispatch`; once send may have been polled, any missing usage
+  carries `UnknownAfterDispatch`. Network errors, HTTP statuses, redirects,
+  response-header violations, decoder failures, consumer cancellation, and
+  body cancellation therefore cannot manufacture zero usage.
+- The transport retains the exact provider/model/tokenizer configuration and
+  joins it to the decoder conclusion and non-cloneable active policy authority.
+  Active authority has no public extraction path. Pre-dispatch failure settles
+  exact zero, preserving committed semantic taint while releasing unused token
+  and cost reservation. Ambiguous post-dispatch failure/cancellation settles
+  the complete reservation ceiling.
+- A decoder conclusion with provider usage becomes a move-only
+  pricing-required settlement. It exposes only the exact redacted configuration,
+  normalized counters, and content-free conclusion to the trusted pricing
+  adapter. Completed responses have no unpriced fallback: if the matching fixed
+  pricing revision is unavailable, the object retains authority for retry or
+  reconciliation rather than inventing cost or releasing the reservation.
+  Provider terminal failures with exact usage follow the same pricing path;
+  those without usage consume the reservation ceiling.
+- The transport issues at most one POST per admitted attempt and does not read
+  non-200 response bodies. It streams bounded chunks directly through the
+  existing provider-neutral decoder and exposes only normalized nonempty event
+  batches to its callback. No raw SSE, generic HTTP response, provider-native
+  browser tool, selector, JavaScript, DOM, HTML, CDP, retry authority, queue,
+  worker, timer, or idle task crosses the public boundary.
+
 ## Implemented OpenAI Responses stream slice
 
 - The incremental Responses decoder follows the official
@@ -596,3 +643,12 @@ observation/read one-shot commitment for both providers, provider-compatible
 schema projection, fixed body fields, fail-closed ordering, and redacted
 diagnostics. They use only deterministic in-memory values and wire fragments
 and no provider, network, credential, task, timer, or retry.
+Fourteen fixed-transport tests add synthetic ephemeral-loopback evidence for
+exact endpoint/header/body construction, credential and diagnostic redaction,
+single-POST/no-retry behavior, redirect refusal, closed status/retry mapping,
+connection failure, bounded request reading, concurrency/duplicate/shutdown
+accounting, lost-wakeup resistance, abandoned-attempt fail-stop, exact-zero
+pre-dispatch cancellation, reservation-ceiling post-dispatch cancellation,
+priced completed usage, priced terminal-failure usage, and conservative terminal
+failure without usage. They use synthetic credentials and content only, never
+an external endpoint, account, profile, provider key, or provider response.

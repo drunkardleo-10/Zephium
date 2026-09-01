@@ -24,11 +24,12 @@ use reqwest::{Client, StatusCode, Url};
 use thiserror::Error;
 use tokio::sync::Notify;
 use zephium_agentic::{
-    AgentActiveModelCall, AgentCommittedProviderRequest, AgentProviderCallIdentity,
-    AgentProviderEndpoint, AgentProviderFailure, AgentProviderFailureClass, AgentProviderKind,
-    AgentProviderRequestError, AgentProviderRetryAfter, AgentProviderStreamBatch,
-    AgentProviderStreamConclusion, AgentProviderStreamDecoder, AgentProviderTransportInput,
-    AgentRunPolicy,
+    AgentActiveModelCall, AgentCommittedProviderRequest, AgentModelCallReceipt,
+    AgentModelCallSettlement, AgentModelCallUnaccountedSettlement, AgentModelUsageAccounting,
+    AgentPolicyError, AgentProviderCallConfig, AgentProviderCallIdentity, AgentProviderEndpoint,
+    AgentProviderFailure, AgentProviderFailureClass, AgentProviderKind, AgentProviderRequestError,
+    AgentProviderRetryAfter, AgentProviderStreamBatch, AgentProviderStreamConclusion,
+    AgentProviderStreamDecoder, AgentProviderTransportInput, AgentProviderUsage, AgentRunPolicy,
 };
 use zeroize::Zeroizing;
 
@@ -750,11 +751,35 @@ pub enum AgentProviderTransportOutcome {
     Failed(AgentProviderFailure),
 }
 
-/// Terminal result joined to the exact active policy authority.
+/// Trustworthy provider-usage knowledge retained at the transport boundary.
+///
+/// This value separates a request proven not to have reached network dispatch
+/// from an ambiguous send or response. A provider-reported value is normalized
+/// by the fixed decoder; it still requires the exact trusted pricing revision
+/// before policy can settle cost.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgentProviderUsageKnowledge {
+    /// The HTTP send future was never polled, so provider usage and cost are zero.
+    ExactZeroBeforeDispatch,
+    /// The fixed provider decoder supplied internally consistent token counters.
+    ProviderReported(AgentProviderUsage),
+    /// Network dispatch may have occurred and no trustworthy usage was returned.
+    UnknownAfterDispatch,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AgentProviderDispatchEvidence {
+    NotDispatched,
+    MayHaveDispatched,
+}
+
+/// Terminal result joined to exact policy authority and pricing identity.
 #[must_use]
 pub struct AgentProviderTransportResult {
     active: AgentActiveModelCall,
+    config: AgentProviderCallConfig,
     outcome: AgentProviderTransportOutcome,
+    failure_dispatch: AgentProviderDispatchEvidence,
 }
 
 impl AgentProviderTransportResult {
@@ -768,14 +793,102 @@ impl AgentProviderTransportResult {
         &self.active
     }
 
+    /// Exact provider, model, tokenizer, and response bounds used for this call.
+    pub const fn config(&self) -> &AgentProviderCallConfig {
+        &self.config
+    }
+
     /// Closed content-free terminal transport outcome.
     pub const fn outcome(&self) -> AgentProviderTransportOutcome {
         self.outcome
     }
 
-    /// Moves terminal policy authority and transport outcome together.
-    pub fn into_parts(self) -> (AgentActiveModelCall, AgentProviderTransportOutcome) {
-        (self.active, self.outcome)
+    /// Exact usage evidence that determines the only safe settlement route.
+    pub const fn usage_knowledge(&self) -> AgentProviderUsageKnowledge {
+        match self.outcome {
+            AgentProviderTransportOutcome::Stream(AgentProviderStreamConclusion::Completed(
+                completion,
+            )) => AgentProviderUsageKnowledge::ProviderReported(completion.usage()),
+            AgentProviderTransportOutcome::Stream(AgentProviderStreamConclusion::Failed(
+                failure,
+            )) => match failure.usage() {
+                Some(usage) => AgentProviderUsageKnowledge::ProviderReported(usage),
+                None => AgentProviderUsageKnowledge::UnknownAfterDispatch,
+            },
+            AgentProviderTransportOutcome::Failed(_) => match self.failure_dispatch {
+                AgentProviderDispatchEvidence::NotDispatched => {
+                    AgentProviderUsageKnowledge::ExactZeroBeforeDispatch
+                }
+                AgentProviderDispatchEvidence::MayHaveDispatched => {
+                    AgentProviderUsageKnowledge::UnknownAfterDispatch
+                }
+            },
+        }
+    }
+
+    /// Converts transport evidence into the sole safe policy-settlement route.
+    ///
+    /// Provider-reported usage retains the exact fixed provider/model/tokenizer
+    /// configuration until trusted pricing supplies cost. Pre-dispatch failures
+    /// settle exact zero; ambiguous sends consume the complete reservation.
+    pub fn into_policy_settlement(self) -> AgentProviderPolicySettlement {
+        let Self {
+            active,
+            config,
+            outcome,
+            failure_dispatch,
+        } = self;
+        match outcome {
+            AgentProviderTransportOutcome::Stream(conclusion) => match conclusion {
+                AgentProviderStreamConclusion::Completed(completion) => {
+                    AgentProviderPolicySettlement::PricingRequired(AgentProviderPricingSettlement {
+                        active,
+                        config,
+                        conclusion,
+                        settlement: AgentModelCallSettlement::Completed,
+                        usage: completion.usage(),
+                    })
+                }
+                AgentProviderStreamConclusion::Failed(failure) => match failure.usage() {
+                    Some(usage) => AgentProviderPolicySettlement::PricingRequired(
+                        AgentProviderPricingSettlement {
+                            active,
+                            config,
+                            conclusion,
+                            settlement: settlement_for_failure(failure.failure()),
+                            usage,
+                        },
+                    ),
+                    None => {
+                        AgentProviderPolicySettlement::Immediate(AgentProviderImmediateSettlement {
+                            active,
+                            outcome: AgentProviderTransportOutcome::Stream(conclusion),
+                            accounting: AgentProviderImmediateAccounting::ReservationCeiling(
+                                unaccounted_settlement_for_failure(failure.failure()),
+                            ),
+                        })
+                    }
+                },
+            },
+            AgentProviderTransportOutcome::Failed(failure) => {
+                let settlement = settlement_for_failure(failure);
+                let accounting = match failure_dispatch {
+                    AgentProviderDispatchEvidence::NotDispatched => {
+                        AgentProviderImmediateAccounting::ExactZero(settlement)
+                    }
+                    AgentProviderDispatchEvidence::MayHaveDispatched => {
+                        AgentProviderImmediateAccounting::ReservationCeiling(
+                            unaccounted_settlement_for_failure(failure),
+                        )
+                    }
+                };
+                AgentProviderPolicySettlement::Immediate(AgentProviderImmediateSettlement {
+                    active,
+                    outcome: AgentProviderTransportOutcome::Failed(failure),
+                    accounting,
+                })
+            }
+        }
     }
 }
 
@@ -784,7 +897,190 @@ impl fmt::Debug for AgentProviderTransportResult {
         formatter
             .debug_struct("AgentProviderTransportResult")
             .field("active", &self.active)
+            .field("config", &self.config)
             .field("outcome", &self.outcome)
+            .field("usage", &self.usage_knowledge())
+            .finish()
+    }
+}
+
+/// Move-only safe settlement selected from terminal transport evidence.
+#[must_use]
+pub enum AgentProviderPolicySettlement {
+    /// No pricing lookup is needed: usage is exact zero or unknowable.
+    Immediate(AgentProviderImmediateSettlement),
+    /// Exact normalized tokens require the matching trusted pricing revision.
+    PricingRequired(AgentProviderPricingSettlement),
+}
+
+impl AgentProviderPolicySettlement {
+    /// Exact non-authorizing call correlation retained with policy authority.
+    pub fn call(&self) -> AgentProviderCallIdentity {
+        match self {
+            Self::Immediate(settlement) => settlement.call(),
+            Self::PricingRequired(settlement) => settlement.call(),
+        }
+    }
+}
+
+impl fmt::Debug for AgentProviderPolicySettlement {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Immediate(settlement) => formatter
+                .debug_tuple("Immediate")
+                .field(settlement)
+                .finish(),
+            Self::PricingRequired(settlement) => formatter
+                .debug_tuple("PricingRequired")
+                .field(settlement)
+                .finish(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AgentProviderImmediateAccounting {
+    ExactZero(AgentModelCallSettlement),
+    ReservationCeiling(AgentModelCallUnaccountedSettlement),
+}
+
+/// Move-only terminal authority that can settle without a pricing lookup.
+#[must_use]
+pub struct AgentProviderImmediateSettlement {
+    active: AgentActiveModelCall,
+    outcome: AgentProviderTransportOutcome,
+    accounting: AgentProviderImmediateAccounting,
+}
+
+impl AgentProviderImmediateSettlement {
+    /// Exact non-authorizing call correlation.
+    pub fn call(&self) -> AgentProviderCallIdentity {
+        AgentProviderCallIdentity::from_active(&self.active)
+    }
+
+    /// Content-free terminal transport outcome retained for supervision.
+    pub const fn outcome(&self) -> AgentProviderTransportOutcome {
+        self.outcome
+    }
+
+    /// Completed, provider-failed, or cancelled policy terminal class.
+    pub const fn settlement(&self) -> AgentModelCallSettlement {
+        match self.accounting {
+            AgentProviderImmediateAccounting::ExactZero(settlement) => settlement,
+            AgentProviderImmediateAccounting::ReservationCeiling(settlement) => match settlement {
+                AgentModelCallUnaccountedSettlement::ProviderFailed => {
+                    AgentModelCallSettlement::ProviderFailed
+                }
+                AgentModelCallUnaccountedSettlement::Cancelled => {
+                    AgentModelCallSettlement::Cancelled
+                }
+            },
+        }
+    }
+
+    /// Exact-zero or reservation-ceiling accounting selected by transport proof.
+    pub const fn usage_accounting(&self) -> AgentModelUsageAccounting {
+        match self.accounting {
+            AgentProviderImmediateAccounting::ExactZero(_) => AgentModelUsageAccounting::Exact,
+            AgentProviderImmediateAccounting::ReservationCeiling(_) => {
+                AgentModelUsageAccounting::ReservationCeiling
+            }
+        }
+    }
+
+    /// Consumes the exact active authority in the selected safe policy path.
+    pub fn settle(
+        self,
+        policy: &mut AgentRunPolicy,
+    ) -> Result<AgentModelCallReceipt, AgentPolicyError> {
+        match self.accounting {
+            AgentProviderImmediateAccounting::ExactZero(settlement) => {
+                policy.settle_model_call(self.active, settlement, 0, 0, 0)
+            }
+            AgentProviderImmediateAccounting::ReservationCeiling(settlement) => {
+                policy.settle_model_call_unaccounted(self.active, settlement)
+            }
+        }
+    }
+}
+
+impl fmt::Debug for AgentProviderImmediateSettlement {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentProviderImmediateSettlement")
+            .field("active", &self.active)
+            .field("outcome", &self.outcome)
+            .field("settlement", &self.settlement())
+            .field("usage_accounting", &self.usage_accounting())
+            .finish()
+    }
+}
+
+/// Move-only exact-usage authority awaiting one trusted pricing result.
+///
+/// A pricing adapter must match this exact provider, model, tokenizer, and
+/// normalized usage. The object retains active policy authority if lookup
+/// cannot produce a price, preventing an unpriced completion fallback.
+#[must_use]
+pub struct AgentProviderPricingSettlement {
+    active: AgentActiveModelCall,
+    config: AgentProviderCallConfig,
+    conclusion: AgentProviderStreamConclusion,
+    settlement: AgentModelCallSettlement,
+    usage: AgentProviderUsage,
+}
+
+impl AgentProviderPricingSettlement {
+    /// Exact non-authorizing call correlation.
+    pub fn call(&self) -> AgentProviderCallIdentity {
+        AgentProviderCallIdentity::from_active(&self.active)
+    }
+
+    /// Exact provider/model/tokenizer and response bounds used for pricing.
+    pub const fn config(&self) -> &AgentProviderCallConfig {
+        &self.config
+    }
+
+    /// Normalized content-free terminal conclusion retained for supervision.
+    pub const fn conclusion(&self) -> AgentProviderStreamConclusion {
+        self.conclusion
+    }
+
+    /// Completed, provider-failed, or cancelled policy terminal class.
+    pub const fn settlement(&self) -> AgentModelCallSettlement {
+        self.settlement
+    }
+
+    /// Exact normalized provider token counters to price and settle.
+    pub const fn usage(&self) -> AgentProviderUsage {
+        self.usage
+    }
+
+    /// Settles exact tokens with cost from the matching trusted price revision.
+    pub fn settle(
+        self,
+        policy: &mut AgentRunPolicy,
+        cost_micro_usd: u64,
+    ) -> Result<AgentModelCallReceipt, AgentPolicyError> {
+        policy.settle_model_call(
+            self.active,
+            self.settlement,
+            self.usage.input_tokens(),
+            self.usage.output_tokens(),
+            cost_micro_usd,
+        )
+    }
+}
+
+impl fmt::Debug for AgentProviderPricingSettlement {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentProviderPricingSettlement")
+            .field("active", &self.active)
+            .field("config", &self.config)
+            .field("conclusion", &self.conclusion)
+            .field("settlement", &self.settlement)
+            .field("usage", &self.usage)
             .finish()
     }
 }
@@ -810,12 +1106,19 @@ impl AgentProviderAttempt {
 
     /// Cancels after commitment without polling or transmitting the HTTP request.
     ///
-    /// Provider usage is unknowable at this boundary and the returned authority
-    /// must therefore use conservative unaccounted policy settlement.
+    /// Provider usage and cost are provably zero, while semantic disclosure
+    /// taint remains committed because admission already crossed that boundary.
     pub fn cancel_without_dispatch(mut self) -> AgentProviderTransportResult {
         let slot = self.slot.take();
-        let (_, active) = self.committed.into_parts();
-        finish_attempt(active, cancelled_failure(), slot)
+        let (request, active) = self.committed.into_parts();
+        let (_, config, _, _) = request.into_transport_parts();
+        finish_attempt(
+            active,
+            config,
+            cancelled_failure(),
+            AgentProviderDispatchEvidence::NotDispatched,
+            slot,
+        )
     }
 
     /// Transmits once, decodes bounded SSE, and returns terminal policy authority.
@@ -833,15 +1136,37 @@ impl AgentProviderAttempt {
         if !call.matches_active(&active)
             || !provider_endpoint_matches(self.provider, endpoint_class)
         {
-            return finish_attempt(active, protocol_failure(), slot);
+            return finish_attempt(
+                active,
+                config,
+                protocol_failure(),
+                AgentProviderDispatchEvidence::NotDispatched,
+                slot,
+            );
         }
         let mut decoder = match AgentProviderStreamDecoder::try_new(call, &config) {
             Ok(decoder) => decoder,
-            Err(_) => return finish_attempt(active, protocol_failure(), slot),
+            Err(_) => {
+                return finish_attempt(
+                    active,
+                    config,
+                    protocol_failure(),
+                    AgentProviderDispatchEvidence::NotDispatched,
+                    slot,
+                );
+            }
         };
         let credential = match self.credential.into_sensitive_header(self.provider) {
             Ok(credential) => credential,
-            Err(_) => return finish_attempt(active, protocol_failure(), slot),
+            Err(_) => {
+                return finish_attempt(
+                    active,
+                    config,
+                    protocol_failure(),
+                    AgentProviderDispatchEvidence::NotDispatched,
+                    slot,
+                );
+            }
         };
         let request = provider_request(
             &self.client,
@@ -850,13 +1175,34 @@ impl AgentProviderAttempt {
             credential,
             body,
         );
+        if self.cancellation.is_cancelled() || self.shutdown.is_cancelled() {
+            return finish_attempt(
+                active,
+                config,
+                cancelled_failure(),
+                AgentProviderDispatchEvidence::NotDispatched,
+                slot,
+            );
+        }
         let response = tokio::select! {
             biased;
             () = self.cancellation.cancelled() => {
-                return finish_attempt(active, cancelled_failure(), slot);
+                return finish_attempt(
+                    active,
+                    config,
+                    cancelled_failure(),
+                    AgentProviderDispatchEvidence::MayHaveDispatched,
+                    slot,
+                );
             }
             () = self.shutdown.cancelled() => {
-                return finish_attempt(active, cancelled_failure(), slot);
+                return finish_attempt(
+                    active,
+                    config,
+                    cancelled_failure(),
+                    AgentProviderDispatchEvidence::MayHaveDispatched,
+                    slot,
+                );
             }
             response = request.send() => response,
         };
@@ -864,20 +1210,44 @@ impl AgentProviderAttempt {
             Ok(response) => response,
             Err(error) => {
                 let outcome = network_failure(&error);
-                return finish_attempt(active, outcome, slot);
+                return finish_attempt(
+                    active,
+                    config,
+                    outcome,
+                    AgentProviderDispatchEvidence::MayHaveDispatched,
+                    slot,
+                );
             }
         };
         if response.url() != &self.endpoint {
-            return finish_attempt(active, protocol_failure(), slot);
+            return finish_attempt(
+                active,
+                config,
+                protocol_failure(),
+                AgentProviderDispatchEvidence::MayHaveDispatched,
+                slot,
+            );
         }
         if response.status() != StatusCode::OK {
             let failure = status_failure(response.status(), response.headers());
-            return finish_attempt(active, AgentProviderTransportOutcome::Failed(failure), slot);
+            return finish_attempt(
+                active,
+                config,
+                AgentProviderTransportOutcome::Failed(failure),
+                AgentProviderDispatchEvidence::MayHaveDispatched,
+                slot,
+            );
         }
         if !response_encoding_admitted(response.headers())
             || !response_content_type_admitted(response.headers())
         {
-            return finish_attempt(active, protocol_failure(), slot);
+            return finish_attempt(
+                active,
+                config,
+                protocol_failure(),
+                AgentProviderDispatchEvidence::MayHaveDispatched,
+                slot,
+            );
         }
 
         let mut stream = response.bytes_stream();
@@ -885,10 +1255,22 @@ impl AgentProviderAttempt {
             let next = tokio::select! {
                 biased;
                 () = self.cancellation.cancelled() => {
-                    return finish_attempt(active, cancelled_failure(), slot);
+                    return finish_attempt(
+                        active,
+                        config,
+                        cancelled_failure(),
+                        AgentProviderDispatchEvidence::MayHaveDispatched,
+                        slot,
+                    );
                 }
                 () = self.shutdown.cancelled() => {
-                    return finish_attempt(active, cancelled_failure(), slot);
+                    return finish_attempt(
+                        active,
+                        config,
+                        cancelled_failure(),
+                        AgentProviderDispatchEvidence::MayHaveDispatched,
+                        slot,
+                    );
                 }
                 next = stream.try_next() => next,
             };
@@ -897,23 +1279,49 @@ impl AgentProviderAttempt {
                 Ok(None) => break,
                 Err(error) => {
                     let outcome = network_failure(&error);
-                    return finish_attempt(active, outcome, slot);
+                    return finish_attempt(
+                        active,
+                        config,
+                        outcome,
+                        AgentProviderDispatchEvidence::MayHaveDispatched,
+                        slot,
+                    );
                 }
             };
             let batch = match decoder.push(&chunk) {
                 Ok(batch) => batch,
-                Err(_) => return finish_attempt(active, protocol_failure(), slot),
+                Err(_) => {
+                    return finish_attempt(
+                        active,
+                        config,
+                        protocol_failure(),
+                        AgentProviderDispatchEvidence::MayHaveDispatched,
+                        slot,
+                    );
+                }
             };
             if !batch.events().is_empty() && consume(batch) == AgentProviderBatchDisposition::Cancel
             {
-                return finish_attempt(active, cancelled_failure(), slot);
+                return finish_attempt(
+                    active,
+                    config,
+                    cancelled_failure(),
+                    AgentProviderDispatchEvidence::MayHaveDispatched,
+                    slot,
+                );
             }
         }
         let outcome = match decoder.finish() {
             Ok(conclusion) => AgentProviderTransportOutcome::Stream(conclusion),
             Err(_) => protocol_failure(),
         };
-        finish_attempt(active, outcome, slot)
+        finish_attempt(
+            active,
+            config,
+            outcome,
+            AgentProviderDispatchEvidence::MayHaveDispatched,
+            slot,
+        )
     }
 }
 
@@ -958,14 +1366,49 @@ fn provider_request(
 
 fn finish_attempt(
     active: AgentActiveModelCall,
-    outcome: AgentProviderTransportOutcome,
+    config: AgentProviderCallConfig,
+    mut outcome: AgentProviderTransportOutcome,
+    mut failure_dispatch: AgentProviderDispatchEvidence,
     mut slot: Option<AgentProviderSlot>,
 ) -> AgentProviderTransportResult {
+    if let AgentProviderTransportOutcome::Stream(conclusion) = outcome {
+        let call = match conclusion {
+            AgentProviderStreamConclusion::Completed(completion) => completion.call(),
+            AgentProviderStreamConclusion::Failed(failure) => failure.call(),
+        };
+        if !call.matches_active(&active) {
+            outcome = protocol_failure();
+            failure_dispatch = AgentProviderDispatchEvidence::MayHaveDispatched;
+        }
+    }
     if let Some(slot) = &mut slot {
         slot.mark_completed();
     }
     drop(slot);
-    AgentProviderTransportResult { active, outcome }
+    AgentProviderTransportResult {
+        active,
+        config,
+        outcome,
+        failure_dispatch,
+    }
+}
+
+const fn settlement_for_failure(failure: AgentProviderFailure) -> AgentModelCallSettlement {
+    if matches!(failure.class(), AgentProviderFailureClass::Cancelled) {
+        AgentModelCallSettlement::Cancelled
+    } else {
+        AgentModelCallSettlement::ProviderFailed
+    }
+}
+
+const fn unaccounted_settlement_for_failure(
+    failure: AgentProviderFailure,
+) -> AgentModelCallUnaccountedSettlement {
+    if matches!(failure.class(), AgentProviderFailureClass::Cancelled) {
+        AgentModelCallUnaccountedSettlement::Cancelled
+    } else {
+        AgentModelCallUnaccountedSettlement::ProviderFailed
+    }
 }
 
 fn cancelled_failure() -> AgentProviderTransportOutcome {
@@ -1074,7 +1517,7 @@ fn response_content_type_admitted(headers: &HeaderMap) -> bool {
 mod tests {
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
-    use std::sync::mpsc::{self, Receiver};
+    use std::sync::mpsc::{self, Receiver, SyncSender};
     use std::thread::{self, JoinHandle};
     use std::time::{Duration, Instant};
 
@@ -1082,9 +1525,8 @@ mod tests {
     use zephium_agentic::{
         decode_semantic_snapshot, encode_semantic_observation, AgentAccountAttestationId,
         AgentAccountScope, AgentContextAccountBinding, AgentEffectScope, AgentModelCallBudget,
-        AgentModelCallId, AgentModelCallRequest, AgentModelCallSettlement,
-        AgentModelCallUnaccountedSettlement, AgentPlanLeaseBinding, AgentPlanLeaseId,
-        AgentPlanNodeAuthority, AgentPlanNodeId, AgentPlanNodeScope,
+        AgentModelCallId, AgentModelCallRequest, AgentModelCallSettlement, AgentPlanLeaseBinding,
+        AgentPlanLeaseId, AgentPlanNodeAuthority, AgentPlanNodeId, AgentPlanNodeScope,
         AgentPreparedObservationRequest, AgentProviderCallConfig, AgentProviderModelRevision,
         AgentProviderObjective, AgentProviderStopReason, AgentProviderStreamBudget, AgentRunBudget,
         AgentRunManifest, AgentRunManifestId, AgentRunScope, ContextCapabilities,
@@ -1329,6 +1771,74 @@ mod tests {
         thread: Option<JoinHandle<()>>,
     }
 
+    struct StalledResponseServer {
+        openai: Url,
+        anthropic: Url,
+        ready: Receiver<()>,
+        release: SyncSender<()>,
+        request: Receiver<Result<CapturedRequest, &'static str>>,
+        thread: Option<JoinHandle<()>>,
+    }
+
+    impl StalledResponseServer {
+        fn spawn() -> Self {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind loopback");
+            let address = listener.local_addr().expect("loopback address");
+            let openai = Url::parse(&format!("http://{address}/v1/responses")).expect("openai URL");
+            let anthropic =
+                Url::parse(&format!("http://{address}/v1/messages")).expect("anthropic URL");
+            let (ready_sender, ready) = mpsc::sync_channel(1);
+            let (release, release_receiver) = mpsc::sync_channel(1);
+            let (request_sender, request) = mpsc::sync_channel(1);
+            let thread =
+                thread::spawn(move || {
+                    let result = listener.accept().map_err(|_| "accept failed").and_then(
+                        |(mut stream, _)| {
+                            stream
+                                .set_read_timeout(Some(Duration::from_secs(3)))
+                                .map_err(|_| "read deadline failed")?;
+                            let captured = read_request(&mut stream)?;
+                            ready_sender.send(()).map_err(|_| "ready failed")?;
+                            release_receiver
+                                .recv_timeout(Duration::from_secs(3))
+                                .map_err(|_| "release failed")?;
+                            Ok(captured)
+                        },
+                    );
+                    let _sent = request_sender.send(result);
+                });
+            Self {
+                openai,
+                anthropic,
+                ready,
+                release,
+                request,
+                thread: Some(thread),
+            }
+        }
+
+        fn wait_until_request(&self) {
+            self.ready
+                .recv_timeout(Duration::from_secs(3))
+                .expect("request dispatch");
+        }
+
+        fn finish(mut self) -> CapturedRequest {
+            self.release.send(()).expect("release server");
+            let request = self
+                .request
+                .recv_timeout(Duration::from_secs(3))
+                .expect("server result")
+                .expect("valid request");
+            self.thread
+                .take()
+                .expect("server thread")
+                .join()
+                .expect("server join");
+            request
+        }
+    }
+
     impl DropConnectionServer {
         fn spawn() -> Self {
             let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind loopback");
@@ -1522,6 +2032,21 @@ mod tests {
         .into_bytes()
     }
 
+    fn anthropic_failure_stream() -> Vec<u8> {
+        [
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-opus-5\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":7,\"cache_creation_input_tokens\":3,\"cache_read_input_tokens\":5,\"output_tokens\":1,\"output_tokens_details\":{\"thinking_tokens\":0}}}}\n\n",
+            "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"provider-authored-sensitive-detail\"}}\n\n",
+        ]
+        .concat()
+        .into_bytes()
+    }
+
+    fn anthropic_failure_without_usage_stream() -> Vec<u8> {
+        "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"provider-authored-sensitive-detail\"}}\n\n"
+            .as_bytes()
+            .to_vec()
+    }
+
     #[test]
     fn configuration_credentials_and_response_headers_are_strict_and_redacted() {
         assert_eq!(
@@ -1640,10 +2165,33 @@ mod tests {
         assert_eq!(text, "hello");
         assert_eq!(completion.stop(), AgentProviderStopReason::Completed);
         assert_eq!(completion.usage().total_tokens(), 20);
-        let (active, _) = result.into_parts();
-        policy
-            .settle_model_call(active, AgentModelCallSettlement::Completed, 17, 3, 80)
-            .expect("policy settlement");
+        assert_eq!(
+            result.usage_knowledge(),
+            AgentProviderUsageKnowledge::ProviderReported(completion.usage())
+        );
+        let AgentProviderPolicySettlement::PricingRequired(settlement) =
+            result.into_policy_settlement()
+        else {
+            panic!("trusted pricing must be required")
+        };
+        assert_eq!(
+            settlement.config().provider(),
+            AgentProviderKind::OpenAiResponses
+        );
+        assert_eq!(settlement.config().model().as_str(), "gpt-5.6-sol");
+        assert_eq!(settlement.usage(), completion.usage());
+        assert_eq!(settlement.settlement(), AgentModelCallSettlement::Completed);
+        let settlement_debug = format!("{settlement:?}");
+        assert!(!settlement_debug.contains("gpt-5.6-sol"));
+        assert!(!settlement_debug.contains("transport-test-v1"));
+        assert_eq!(policy.pending_model_calls(), 1);
+        let receipt = settlement
+            .settle(&mut policy, 80)
+            .expect("exact priced policy settlement");
+        assert_eq!(receipt.usage_accounting(), AgentModelUsageAccounting::Exact);
+        assert_eq!(receipt.input_tokens(), 17);
+        assert_eq!(receipt.output_tokens(), 3);
+        assert_eq!(receipt.cost_micro_usd(), 80);
         assert!(transport.snapshot().expect("snapshot").is_quiescent());
 
         let captured = server.finish();
@@ -1658,6 +2206,129 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&captured.body).expect("request body");
         assert_eq!(body["stream"], true);
         assert_eq!(body["store"], false);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn terminal_failure_with_usage_retains_pricing_and_exact_accounting() {
+        let server = OneShotServer::spawn(
+            "200 OK",
+            &[
+                ("Content-Type", "text/event-stream"),
+                ("Content-Encoding", "identity"),
+            ],
+            vec![anthropic_failure_stream()],
+        );
+        let transport = test_transport(&server);
+        let credential = AgentProviderCredential::try_new(
+            AgentProviderKind::AnthropicMessages,
+            "synthetic-anthropic-key".to_owned(),
+        )
+        .expect("credential");
+        let (mut policy, input) = provider_fixture(AgentProviderKind::AnthropicMessages);
+        let attempt = transport
+            .try_admit(
+                input,
+                &mut policy,
+                &credential,
+                AgentProviderCancellation::new(),
+            )
+            .expect("admission");
+        let result = attempt
+            .execute(|_| AgentProviderBatchDisposition::Continue)
+            .await;
+        let AgentProviderTransportOutcome::Stream(AgentProviderStreamConclusion::Failed(failure)) =
+            result.outcome()
+        else {
+            panic!("normalized terminal failure expected")
+        };
+        assert_eq!(
+            failure.failure().class(),
+            AgentProviderFailureClass::Overloaded
+        );
+        let usage = failure.usage().expect("provider usage");
+        assert_eq!(usage.input_tokens(), 15);
+        assert_eq!(usage.output_tokens(), 1);
+        assert_eq!(
+            result.usage_knowledge(),
+            AgentProviderUsageKnowledge::ProviderReported(usage)
+        );
+        assert!(!format!("{result:?}").contains("provider-authored-sensitive-detail"));
+
+        let AgentProviderPolicySettlement::PricingRequired(settlement) =
+            result.into_policy_settlement()
+        else {
+            panic!("reported failure usage must be priced")
+        };
+        assert_eq!(
+            settlement.config().provider(),
+            AgentProviderKind::AnthropicMessages
+        );
+        assert_eq!(
+            settlement.settlement(),
+            AgentModelCallSettlement::ProviderFailed
+        );
+        let receipt = settlement
+            .settle(&mut policy, 25)
+            .expect("exact failure settlement");
+        assert_eq!(receipt.usage_accounting(), AgentModelUsageAccounting::Exact);
+        assert_eq!(receipt.input_tokens(), 15);
+        assert_eq!(receipt.output_tokens(), 1);
+        assert_eq!(receipt.cost_micro_usd(), 25);
+        assert!(transport.snapshot().expect("snapshot").is_quiescent());
+        server.finish();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn terminal_failure_without_usage_consumes_the_reservation_ceiling() {
+        let server = OneShotServer::spawn(
+            "200 OK",
+            &[("Content-Type", "text/event-stream")],
+            vec![anthropic_failure_without_usage_stream()],
+        );
+        let transport = test_transport(&server);
+        let credential = AgentProviderCredential::try_new(
+            AgentProviderKind::AnthropicMessages,
+            "synthetic-anthropic-key".to_owned(),
+        )
+        .expect("credential");
+        let (mut policy, input) = provider_fixture(AgentProviderKind::AnthropicMessages);
+        let attempt = transport
+            .try_admit(
+                input,
+                &mut policy,
+                &credential,
+                AgentProviderCancellation::new(),
+            )
+            .expect("admission");
+        let result = attempt
+            .execute(|_| AgentProviderBatchDisposition::Continue)
+            .await;
+        assert!(matches!(
+            result.outcome(),
+            AgentProviderTransportOutcome::Stream(AgentProviderStreamConclusion::Failed(failure))
+                if failure.usage().is_none()
+                    && failure.failure().class() == AgentProviderFailureClass::Overloaded
+        ));
+        assert_eq!(
+            result.usage_knowledge(),
+            AgentProviderUsageKnowledge::UnknownAfterDispatch
+        );
+        let AgentProviderPolicySettlement::Immediate(settlement) = result.into_policy_settlement()
+        else {
+            panic!("missing terminal usage must settle conservatively")
+        };
+        let receipt = settlement
+            .settle(&mut policy)
+            .expect("reservation-ceiling settlement");
+        assert_eq!(
+            receipt.usage_accounting(),
+            AgentModelUsageAccounting::ReservationCeiling
+        );
+        assert_eq!(receipt.input_tokens(), 18);
+        assert_eq!(receipt.output_tokens(), 20);
+        assert_eq!(receipt.cost_micro_usd(), 100);
+        assert!(transport.snapshot().expect("snapshot").is_quiescent());
+        server.finish();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1695,13 +2366,28 @@ mod tests {
         );
         let rendered = format!("{result:?}");
         assert!(!rendered.contains("provider-authored-error"));
-        let (active, _) = result.into_parts();
-        policy
-            .settle_model_call_unaccounted(
-                active,
-                AgentModelCallUnaccountedSettlement::ProviderFailed,
-            )
+        assert_eq!(
+            result.usage_knowledge(),
+            AgentProviderUsageKnowledge::UnknownAfterDispatch
+        );
+        let AgentProviderPolicySettlement::Immediate(settlement) = result.into_policy_settlement()
+        else {
+            panic!("unknown usage must settle immediately")
+        };
+        assert_eq!(
+            settlement.usage_accounting(),
+            AgentModelUsageAccounting::ReservationCeiling
+        );
+        assert_eq!(
+            settlement.settlement(),
+            AgentModelCallSettlement::ProviderFailed
+        );
+        let receipt = settlement
+            .settle(&mut policy)
             .expect("conservative settlement");
+        assert_eq!(receipt.input_tokens(), 18);
+        assert_eq!(receipt.output_tokens(), 20);
+        assert_eq!(receipt.cost_micro_usd(), 100);
 
         let captured = server.finish();
         let head = std::str::from_utf8(&captured.head)
@@ -1748,13 +2434,21 @@ mod tests {
             panic!("transport failure expected")
         };
         assert_eq!(failure.class(), AgentProviderFailureClass::Transport);
-        let (active, _) = result.into_parts();
-        policy
-            .settle_model_call_unaccounted(
-                active,
-                AgentModelCallUnaccountedSettlement::ProviderFailed,
-            )
+        assert_eq!(
+            result.usage_knowledge(),
+            AgentProviderUsageKnowledge::UnknownAfterDispatch
+        );
+        let AgentProviderPolicySettlement::Immediate(settlement) = result.into_policy_settlement()
+        else {
+            panic!("unknown usage must settle immediately")
+        };
+        let receipt = settlement
+            .settle(&mut policy)
             .expect("conservative settlement");
+        assert_eq!(
+            receipt.usage_accounting(),
+            AgentModelUsageAccounting::ReservationCeiling
+        );
         assert_eq!(server.finish(), 1);
     }
 
@@ -1787,12 +2481,16 @@ mod tests {
             panic!("protocol failure expected")
         };
         assert_eq!(failure.class(), AgentProviderFailureClass::Protocol);
-        let (active, _) = result.into_parts();
-        policy
-            .settle_model_call_unaccounted(
-                active,
-                AgentModelCallUnaccountedSettlement::ProviderFailed,
-            )
+        assert_eq!(
+            result.usage_knowledge(),
+            AgentProviderUsageKnowledge::UnknownAfterDispatch
+        );
+        let AgentProviderPolicySettlement::Immediate(settlement) = result.into_policy_settlement()
+        else {
+            panic!("unknown usage must settle immediately")
+        };
+        settlement
+            .settle(&mut policy)
             .expect("conservative settlement");
         let captured = server.finish();
         let head = std::str::from_utf8(&captured.head).expect("request head");
@@ -1864,18 +2562,37 @@ mod tests {
         assert_eq!(excess_policy.pending_model_calls(), 0);
 
         for (attempt, mut policy) in admitted {
-            let (active, outcome) = attempt.cancel_without_dispatch().into_parts();
+            let result = attempt.cancel_without_dispatch();
+            assert_eq!(
+                result.usage_knowledge(),
+                AgentProviderUsageKnowledge::ExactZeroBeforeDispatch
+            );
             assert!(matches!(
-                outcome,
+                result.outcome(),
                 AgentProviderTransportOutcome::Failed(failure)
                     if failure.class() == AgentProviderFailureClass::Cancelled
             ));
-            policy
-                .settle_model_call_unaccounted(
-                    active,
-                    AgentModelCallUnaccountedSettlement::Cancelled,
-                )
-                .expect("cancel settlement");
+            let AgentProviderPolicySettlement::Immediate(settlement) =
+                result.into_policy_settlement()
+            else {
+                panic!("pre-dispatch cancellation must settle immediately")
+            };
+            assert_eq!(
+                settlement.usage_accounting(),
+                AgentModelUsageAccounting::Exact
+            );
+            assert_eq!(settlement.settlement(), AgentModelCallSettlement::Cancelled);
+            let receipt = settlement.settle(&mut policy).expect("cancel settlement");
+            assert_eq!(receipt.input_tokens(), 0);
+            assert_eq!(receipt.output_tokens(), 0);
+            assert_eq!(receipt.cost_micro_usd(), 0);
+            assert_eq!(policy.pending_model_calls(), 0);
+            assert_eq!(policy.taints().len(), 1);
+            let accounting = policy.accounting();
+            assert_eq!(accounting.consumed_operations(), 1);
+            assert_eq!(accounting.reserved_operations(), 0);
+            assert_eq!(accounting.consumed_model_tokens(), 0);
+            assert_eq!(accounting.consumed_cost_micro_usd(), 0);
         }
         assert!(transport.snapshot().expect("snapshot").is_quiescent());
 
@@ -1918,15 +2635,26 @@ mod tests {
         let result = attempt
             .execute(|_| AgentProviderBatchDisposition::Continue)
             .await;
-        let (active, outcome) = result.into_parts();
+        assert_eq!(
+            result.usage_knowledge(),
+            AgentProviderUsageKnowledge::ExactZeroBeforeDispatch
+        );
         assert!(matches!(
-            outcome,
+            result.outcome(),
             AgentProviderTransportOutcome::Failed(failure)
                 if failure.class() == AgentProviderFailureClass::Cancelled
         ));
-        policy
-            .settle_model_call_unaccounted(active, AgentModelCallUnaccountedSettlement::Cancelled)
+        let AgentProviderPolicySettlement::Immediate(settlement) = result.into_policy_settlement()
+        else {
+            panic!("sticky cancellation must settle immediately")
+        };
+        let receipt = settlement
+            .settle(&mut policy)
             .expect("run cancellation settlement");
+        assert_eq!(receipt.usage_accounting(), AgentModelUsageAccounting::Exact);
+        assert_eq!(receipt.input_tokens(), 0);
+        assert_eq!(receipt.output_tokens(), 0);
+        assert_eq!(receipt.cost_micro_usd(), 0);
 
         let (mut shutdown_policy, shutdown_input) =
             provider_fixture(AgentProviderKind::OpenAiResponses);
@@ -1942,18 +2670,89 @@ mod tests {
         let result = attempt
             .execute(|_| AgentProviderBatchDisposition::Continue)
             .await;
-        let (active, outcome) = result.into_parts();
+        assert_eq!(
+            result.usage_knowledge(),
+            AgentProviderUsageKnowledge::ExactZeroBeforeDispatch
+        );
         assert!(matches!(
-            outcome,
+            result.outcome(),
             AgentProviderTransportOutcome::Failed(failure)
                 if failure.class() == AgentProviderFailureClass::Cancelled
         ));
-        shutdown_policy
-            .settle_model_call_unaccounted(active, AgentModelCallUnaccountedSettlement::Cancelled)
+        let AgentProviderPolicySettlement::Immediate(settlement) = result.into_policy_settlement()
+        else {
+            panic!("sticky shutdown must settle immediately")
+        };
+        settlement
+            .settle(&mut shutdown_policy)
             .expect("shutdown cancellation settlement");
         let snapshot = transport.snapshot().expect("snapshot");
         assert!(snapshot.is_sealed());
         assert!(snapshot.is_quiescent());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn post_dispatch_cancellation_consumes_the_reservation_ceiling() {
+        let server = StalledResponseServer::spawn();
+        let transport = AgentProviderTransport::try_new_loopback(
+            AgentProviderTransportConfig::try_new(
+                Duration::from_secs(5),
+                Duration::from_secs(2),
+                Duration::from_secs(2),
+            )
+            .expect("config"),
+            server.openai.clone(),
+            server.anthropic.clone(),
+        )
+        .expect("transport");
+        let credential = AgentProviderCredential::try_new(
+            AgentProviderKind::OpenAiResponses,
+            "synthetic-openai-key".to_owned(),
+        )
+        .expect("credential");
+        let cancellation = AgentProviderCancellation::new();
+        let (mut policy, input) = provider_fixture(AgentProviderKind::OpenAiResponses);
+        let attempt = transport
+            .try_admit(input, &mut policy, &credential, cancellation.clone())
+            .expect("admission");
+        let task = tokio::spawn(async move {
+            attempt
+                .execute(|_| AgentProviderBatchDisposition::Continue)
+                .await
+        });
+
+        server.wait_until_request();
+        cancellation.cancel();
+        let result = task.await.expect("transport task");
+        assert_eq!(
+            result.usage_knowledge(),
+            AgentProviderUsageKnowledge::UnknownAfterDispatch
+        );
+        assert!(matches!(
+            result.outcome(),
+            AgentProviderTransportOutcome::Failed(failure)
+                if failure.class() == AgentProviderFailureClass::Cancelled
+        ));
+        let AgentProviderPolicySettlement::Immediate(settlement) = result.into_policy_settlement()
+        else {
+            panic!("ambiguous cancellation must settle immediately")
+        };
+        assert_eq!(
+            settlement.usage_accounting(),
+            AgentModelUsageAccounting::ReservationCeiling
+        );
+        assert_eq!(settlement.settlement(), AgentModelCallSettlement::Cancelled);
+        let receipt = settlement
+            .settle(&mut policy)
+            .expect("conservative cancellation settlement");
+        assert_eq!(receipt.input_tokens(), 18);
+        assert_eq!(receipt.output_tokens(), 20);
+        assert_eq!(receipt.cost_micro_usd(), 100);
+        assert!(transport.snapshot().expect("snapshot").is_quiescent());
+
+        let captured = server.finish();
+        let head = std::str::from_utf8(&captured.head).expect("request head");
+        assert!(head.starts_with("POST /v1/responses HTTP/1.1\r\n"));
     }
 
     #[test]
