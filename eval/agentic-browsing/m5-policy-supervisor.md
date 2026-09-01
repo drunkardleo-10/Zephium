@@ -3,7 +3,7 @@
 Status: the immutable approved run-manifest contract, mutable plan-lease/model
 input accounting, single-flight semantic effect policy, and immutable
 non-widening delegation topology are implemented. The first mutable bounded
-run-tree scheduler is also implemented; cancellation/drain propagation,
+run-tree scheduler and its exact cancellation/drain tree are also implemented;
 context assignment, provider adapters, audit sink, and live qualification
 remain pending.
 
@@ -193,9 +193,25 @@ browser action, model call, tool call, data transfer, cost, or native resource.
   objectives, prompts, model output, provider text, page content, or origins.
 - Cross-incarnation, stale, substituted, or duplicate execution tokens cannot
   change node state. Ambiguous same-supervisor settlement seals mutation and
-  retains the executing slot in accounting. Exact cancellation and drain
-  acknowledgement will extend these states next; the scheduler does not yet
-  claim that running external work has been cancelled.
+  retains the executing slot in accounting.
+- A strictly increasing one-shot cancellation update applies to an activated
+  subtree under one of seven closed content-free reasons. It revokes later
+  execution and delegation immediately. Queued leaves cancel synchronously;
+  non-running ancestors remain cancellation-pending until every activated
+  descendant is terminal.
+- Running nodes stay both live and executing after cancellation is requested.
+  The returned batch contains at most four content-free signal targets and
+  grants no execution, provider, action, page, or native authority. Capacity is
+  released only when the original non-cloneable execution token reports
+  terminal drain. A racing ordinary wait/completion callback is forced to the
+  pending cancellation outcome and cannot claim success. Current targets can
+  be projected again without mutation so a shell can reconcile a lost signal.
+- Nested ancestor cancellation does not overwrite an earlier child-branch
+  cancellation. A wrong cancellation identity, substituted execution token,
+  or ambiguous drain seals mutation and retains executing capacity. Once the
+  exact running drains settle, resource-free cancelling ancestors terminalize
+  from leaf to root. Root cancellation is therefore sticky across the whole
+  activated run tree without retaining an idle task, timer, worker, or channel.
 
 ## Current tests
 
@@ -225,3 +241,9 @@ wait/resume/terminal ordering, sequential live-slot reuse, the exact eight-live
 and four-executing boundaries without eviction, non-consumption of capacity
 refusals, admitted-attempt replay refusal, cross-incarnation token rejection,
 terminal failure projection, and redacted diagnostics.
+Three cancellation tests additionally cover complete depth-two propagation,
+queued immediate terminal state, resource-free ancestor draining, exact
+execution-slot retention, one-shot cancellation replay, revoked delegation,
+late-success suppression, nested branch/run cancellation identity, exact drain
+acknowledgement, mismatch sealing without early capacity release, and redacted
+content-free batches.

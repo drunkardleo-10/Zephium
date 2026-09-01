@@ -16,10 +16,13 @@ use crate::{
 
 mod runtime;
 pub use runtime::{
-    AgentNodeExecution, AgentRunSupervisor, AgentSupervisorAttemptId, AgentSupervisorCompletion,
-    AgentSupervisorExecutionOutcome, AgentSupervisorExecutionReceipt, AgentSupervisorFailure,
-    AgentSupervisorId, AgentSupervisorNodeSnapshot, AgentSupervisorNodeStatus,
-    AgentSupervisorRuntimeError, AgentSupervisorRuntimeStatus, AgentSupervisorWait,
+    AgentNodeExecution, AgentRunSupervisor, AgentSupervisorAttemptId, AgentSupervisorCancellation,
+    AgentSupervisorCancellationBatch, AgentSupervisorCancellationId,
+    AgentSupervisorCancellationReason, AgentSupervisorCancellationTarget,
+    AgentSupervisorCompletion, AgentSupervisorExecutionOutcome, AgentSupervisorExecutionReceipt,
+    AgentSupervisorFailure, AgentSupervisorId, AgentSupervisorNodeCancellation,
+    AgentSupervisorNodeSnapshot, AgentSupervisorNodeStatus, AgentSupervisorRuntimeError,
+    AgentSupervisorRuntimeStatus, AgentSupervisorWait,
 };
 
 /// Initial maximum simultaneously live nodes in one supervisor tree.
@@ -512,6 +515,10 @@ mod tests {
 
     fn attempt(value: u64) -> AgentSupervisorAttemptId {
         AgentSupervisorAttemptId::new(value).expect("attempt")
+    }
+
+    fn cancellation(value: u64) -> AgentSupervisorCancellationId {
+        AgentSupervisorCancellationId::new(value).expect("cancellation")
     }
 
     #[test]
@@ -1054,6 +1061,243 @@ mod tests {
             AgentSupervisorExecutionOutcome::Failed(failure)
         );
         let debug = format!("{replay:?} {receipt:?}");
+        assert!(!debug.contains("a.example.test"));
+        assert!(debug.contains("[redacted]"));
+    }
+
+    #[test]
+    fn cancellation_tree_retains_execution_capacity_until_exact_terminal_drain() {
+        let manifest = standard_manifest();
+        let mut supervisor = AgentRunSupervisor::new(
+            AgentSupervisorId::new(20).expect("supervisor"),
+            standard_topology(&manifest),
+        );
+        let root_id = AgentPlanNodeId::from_raw(1);
+        let child_id = AgentPlanNodeId::from_raw(2);
+        let grandchild_id = AgentPlanNodeId::from_raw(3);
+        let root = supervisor.start(root_id, attempt(1)).expect("start root");
+        supervisor
+            .delegate(&root, child_id)
+            .expect("delegate child");
+        supervisor
+            .wait(root, AgentSupervisorWait::Descendants)
+            .expect("wait root");
+        let child = supervisor.start(child_id, attempt(2)).expect("start child");
+        supervisor
+            .delegate(&child, grandchild_id)
+            .expect("delegate grandchild");
+        supervisor
+            .wait(child, AgentSupervisorWait::Descendants)
+            .expect("wait child");
+        let grandchild = supervisor
+            .start(grandchild_id, attempt(3))
+            .expect("start grandchild");
+
+        let batch = supervisor
+            .cancel_subtree(
+                root_id,
+                cancellation(1),
+                AgentSupervisorCancellationReason::UserRequested,
+            )
+            .expect("cancel complete tree");
+        assert_eq!(batch.root(), root_id);
+        assert_eq!(batch.affected(), 3);
+        assert_eq!(batch.terminal(), 0);
+        assert_eq!(batch.targets().len(), 1);
+        let target = batch.targets().next().expect("one drain target");
+        assert_eq!(target.node(), grandchild_id);
+        assert_eq!(target.attempt(), attempt(3));
+        assert_eq!(target.cancellation().id(), cancellation(1));
+        assert_eq!(supervisor.status().live(), 3);
+        assert_eq!(supervisor.status().executing(), 1);
+        assert_eq!(supervisor.status().cancelling(), 3);
+        assert_eq!(supervisor.status().cancelled(), 0);
+        assert_eq!(
+            supervisor
+                .start(root_id, attempt(4))
+                .expect_err("cancelling root cannot resume"),
+            AgentSupervisorRuntimeError::NotRunnable
+        );
+
+        let receipt = supervisor
+            .drain_cancelled(grandchild, cancellation(1))
+            .expect("exact drain");
+        let AgentSupervisorExecutionOutcome::Cancelled(cancelled) = receipt.outcome() else {
+            panic!("execution must be cancelled");
+        };
+        assert_eq!(cancelled.id(), cancellation(1));
+        assert_eq!(
+            cancelled.reason(),
+            AgentSupervisorCancellationReason::UserRequested
+        );
+        assert_eq!(supervisor.status().live(), 0);
+        assert_eq!(supervisor.status().executing(), 0);
+        assert_eq!(supervisor.status().cancelling(), 0);
+        assert_eq!(supervisor.status().terminal(), 3);
+        assert_eq!(supervisor.status().cancelled(), 3);
+        assert!(supervisor
+            .nodes()
+            .all(|node| matches!(node.status(), AgentSupervisorNodeStatus::Cancelled(_))));
+    }
+
+    #[test]
+    fn queued_cancellation_is_immediate_and_late_completion_cannot_claim_success() {
+        let manifest = standard_manifest();
+        let mut supervisor = AgentRunSupervisor::new(
+            AgentSupervisorId::new(21).expect("supervisor"),
+            standard_topology(&manifest),
+        );
+        let root_id = AgentPlanNodeId::from_raw(1);
+        let child_id = AgentPlanNodeId::from_raw(2);
+        let grandchild_id = AgentPlanNodeId::from_raw(3);
+        let root = supervisor.start(root_id, attempt(1)).expect("start root");
+        supervisor
+            .delegate(&root, child_id)
+            .expect("delegate child");
+
+        let child_cancel = supervisor
+            .cancel_subtree(
+                child_id,
+                cancellation(1),
+                AgentSupervisorCancellationReason::ParentTerminated,
+            )
+            .expect("cancel queued child");
+        assert_eq!(child_cancel.affected(), 1);
+        assert_eq!(child_cancel.terminal(), 1);
+        assert_eq!(child_cancel.targets().len(), 0);
+        assert_eq!(supervisor.status().live(), 1);
+        assert_eq!(supervisor.status().executing(), 1);
+        assert_eq!(supervisor.status().cancelled(), 1);
+        assert_eq!(
+            supervisor
+                .cancel_subtree(
+                    child_id,
+                    cancellation(1),
+                    AgentSupervisorCancellationReason::Shutdown,
+                )
+                .expect_err("cancellation identity cannot replay"),
+            AgentSupervisorRuntimeError::CancellationReplay
+        );
+        assert_eq!(
+            supervisor
+                .delegate(&root, grandchild_id)
+                .expect_err("grandchild requires its exact direct parent"),
+            AgentSupervisorRuntimeError::DelegationMismatch
+        );
+
+        let root_cancel = supervisor
+            .cancel_subtree(
+                root_id,
+                cancellation(2),
+                AgentSupervisorCancellationReason::Shutdown,
+            )
+            .expect("cancel running root");
+        assert_eq!(root_cancel.targets().len(), 1);
+        assert_eq!(supervisor.status().executing(), 1);
+        assert_eq!(
+            supervisor
+                .delegate(&root, child_id)
+                .expect_err("cancellation revokes delegation"),
+            AgentSupervisorRuntimeError::CancellationPending
+        );
+        let receipt = supervisor
+            .complete(root, AgentSupervisorCompletion::Succeeded)
+            .expect("late completion is a drain callback");
+        let AgentSupervisorExecutionOutcome::Cancelled(cancelled) = receipt.outcome() else {
+            panic!("late success must settle as cancelled");
+        };
+        assert_eq!(cancelled.id(), cancellation(2));
+        assert_eq!(
+            cancelled.reason(),
+            AgentSupervisorCancellationReason::Shutdown
+        );
+        assert_eq!(supervisor.status().live(), 0);
+        assert_eq!(supervisor.status().terminal(), 2);
+        assert_eq!(supervisor.status().cancelled(), 2);
+    }
+
+    #[test]
+    fn nested_cancellation_preserves_prior_branch_and_mismatch_fails_stopped() {
+        let manifest = standard_manifest();
+        let mut supervisor = AgentRunSupervisor::new(
+            AgentSupervisorId::new(22).expect("supervisor"),
+            standard_topology(&manifest),
+        );
+        let root_id = AgentPlanNodeId::from_raw(1);
+        let child_id = AgentPlanNodeId::from_raw(2);
+        let grandchild_id = AgentPlanNodeId::from_raw(3);
+        let root = supervisor.start(root_id, attempt(1)).expect("start root");
+        supervisor
+            .delegate(&root, child_id)
+            .expect("delegate child");
+        let child = supervisor.start(child_id, attempt(2)).expect("start child");
+        supervisor
+            .delegate(&child, grandchild_id)
+            .expect("delegate grandchild");
+        let grandchild = supervisor
+            .start(grandchild_id, attempt(3))
+            .expect("start grandchild");
+
+        let branch = supervisor
+            .cancel_subtree(
+                child_id,
+                cancellation(1),
+                AgentSupervisorCancellationReason::BudgetExhausted,
+            )
+            .expect("cancel child branch");
+        assert_eq!(branch.affected(), 2);
+        assert_eq!(branch.targets().len(), 2);
+        let run = supervisor
+            .cancel_subtree(
+                root_id,
+                cancellation(2),
+                AgentSupervisorCancellationReason::UserRequested,
+            )
+            .expect("cancel remaining run");
+        assert_eq!(run.affected(), 1);
+        assert_eq!(run.targets().len(), 3);
+        assert_eq!(supervisor.cancellation_targets().count(), 3);
+        assert_eq!(
+            run.targets()
+                .find(|target| target.node() == child_id)
+                .expect("existing branch target")
+                .cancellation()
+                .id(),
+            cancellation(1)
+        );
+        assert_eq!(supervisor.status().executing(), 3);
+        let AgentSupervisorNodeStatus::Cancelling(child_cancellation) = supervisor
+            .node_status(child_id)
+            .expect("child cancellation")
+        else {
+            panic!("child must remain cancellation-pending");
+        };
+        assert_eq!(child_cancellation.cancellation().id(), cancellation(1));
+        assert_eq!(
+            child_cancellation.cancellation().reason(),
+            AgentSupervisorCancellationReason::BudgetExhausted
+        );
+        assert_eq!(child_cancellation.draining_attempt(), Some(attempt(2)));
+
+        supervisor
+            .drain_cancelled(root, cancellation(2))
+            .expect("drain root");
+        supervisor
+            .drain_cancelled(grandchild, cancellation(1))
+            .expect("drain grandchild");
+        assert_eq!(supervisor.status().executing(), 1);
+        assert_eq!(supervisor.status().cancelling(), 2);
+        assert_eq!(supervisor.status().cancelled(), 1);
+        assert_eq!(
+            supervisor
+                .drain_cancelled(child, cancellation(2))
+                .expect_err("wrong branch cancellation"),
+            AgentSupervisorRuntimeError::CancellationMismatch
+        );
+        assert!(supervisor.status().is_sealed());
+        assert_eq!(supervisor.status().executing(), 1);
+        assert_eq!(supervisor.status().live(), 2);
+        let debug = format!("{supervisor:?} {branch:?} {run:?}");
         assert!(!debug.contains("a.example.test"));
         assert!(debug.contains("[redacted]"));
     }

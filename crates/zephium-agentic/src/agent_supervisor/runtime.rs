@@ -87,6 +87,88 @@ pub enum AgentSupervisorFailure {
     ResourceExhausted,
 }
 
+/// Strictly increasing identity for one admitted cancellation-tree update.
+#[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct AgentSupervisorCancellationId(NonZeroU64);
+
+impl AgentSupervisorCancellationId {
+    /// Constructs one nonzero shell-minted cancellation identity.
+    pub const fn new(value: u64) -> Option<Self> {
+        match NonZeroU64::new(value) {
+            Some(value) => Some(Self(value)),
+            None => None,
+        }
+    }
+
+    /// Numeric value for exact process-local correlation.
+    pub const fn get(self) -> u64 {
+        self.0.get()
+    }
+}
+
+impl fmt::Debug for AgentSupervisorCancellationId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("AgentSupervisorCancellationId([redacted])")
+    }
+}
+
+/// Closed reason for cancelling one activated run-tree branch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgentSupervisorCancellationReason {
+    /// The person explicitly stopped the run or branch.
+    UserRequested,
+    /// Human takeover revoked automation authority.
+    HumanTakeover,
+    /// An ancestor failed and no longer needs this branch.
+    ParentTerminated,
+    /// The branch reached its trusted monotonic deadline.
+    DeadlineExceeded,
+    /// A hard run or node budget was exhausted.
+    BudgetExhausted,
+    /// Deterministic policy revoked continuation authority.
+    PolicyRevoked,
+    /// Process shutdown requires bounded terminal cleanup.
+    Shutdown,
+}
+
+/// Content-free identity and reason for one cancellation-tree update.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AgentSupervisorCancellation {
+    id: AgentSupervisorCancellationId,
+    reason: AgentSupervisorCancellationReason,
+}
+
+impl AgentSupervisorCancellation {
+    /// Exact one-shot cancellation update.
+    pub const fn id(self) -> AgentSupervisorCancellationId {
+        self.id
+    }
+
+    /// Closed cancellation reason.
+    pub const fn reason(self) -> AgentSupervisorCancellationReason {
+        self.reason
+    }
+}
+
+/// Public cancellation state for one node, including retained execution work.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AgentSupervisorNodeCancellation {
+    cancellation: AgentSupervisorCancellation,
+    draining_attempt: Option<AgentSupervisorAttemptId>,
+}
+
+impl AgentSupervisorNodeCancellation {
+    /// Exact cancellation update affecting the node.
+    pub const fn cancellation(self) -> AgentSupervisorCancellation {
+        self.cancellation
+    }
+
+    /// Exact attempt retaining an execution slot until terminal drain.
+    pub const fn draining_attempt(self) -> Option<AgentSupervisorAttemptId> {
+        self.draining_attempt
+    }
+}
+
 /// Current content-free state of one activated supervisor node.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentSupervisorNodeStatus {
@@ -96,26 +178,41 @@ pub enum AgentSupervisorNodeStatus {
     Running(AgentSupervisorAttemptId),
     /// No task or execution slot is retained while the node waits.
     Waiting(AgentSupervisorWait),
+    /// Cancellation is sticky while execution or descendants still drain.
+    Cancelling(AgentSupervisorNodeCancellation),
     /// Node completed successfully.
     Succeeded,
     /// Node terminated under the closed failure taxonomy.
     Failed(AgentSupervisorFailure),
+    /// Node and every activated descendant terminally cancelled.
+    Cancelled(AgentSupervisorCancellation),
 }
 
 impl AgentSupervisorNodeStatus {
     /// Whether the node still counts against the live-node ceiling.
     pub const fn is_live(self) -> bool {
-        matches!(self, Self::Queued | Self::Running(_) | Self::Waiting(_))
+        matches!(
+            self,
+            Self::Queued | Self::Running(_) | Self::Waiting(_) | Self::Cancelling(_)
+        )
     }
 
     /// Whether the node owns one executing-agent slot.
     pub const fn is_executing(self) -> bool {
-        matches!(self, Self::Running(_))
+        match self {
+            Self::Running(_) => true,
+            Self::Cancelling(cancellation) => cancellation.draining_attempt().is_some(),
+            Self::Queued
+            | Self::Waiting(_)
+            | Self::Succeeded
+            | Self::Failed(_)
+            | Self::Cancelled(_) => false,
+        }
     }
 
     /// Whether no later execution may reopen this node.
     pub const fn is_terminal(self) -> bool {
-        matches!(self, Self::Succeeded | Self::Failed(_))
+        matches!(self, Self::Succeeded | Self::Failed(_) | Self::Cancelled(_))
     }
 }
 
@@ -126,12 +223,32 @@ struct RunningState {
 }
 
 #[derive(Clone, Copy)]
+struct CancellingState {
+    cancellation: AgentSupervisorCancellation,
+    running: Option<RunningState>,
+}
+
+impl CancellingState {
+    const fn public(self) -> AgentSupervisorNodeCancellation {
+        AgentSupervisorNodeCancellation {
+            cancellation: self.cancellation,
+            draining_attempt: match self.running {
+                Some(running) => Some(running.attempt),
+                None => None,
+            },
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
 enum NodeState {
     Queued,
     Running(RunningState),
     Waiting(AgentSupervisorWait),
+    Cancelling(CancellingState),
     Succeeded,
     Failed(AgentSupervisorFailure),
+    Cancelled(AgentSupervisorCancellation),
 }
 
 impl NodeState {
@@ -140,8 +257,12 @@ impl NodeState {
             Self::Queued => AgentSupervisorNodeStatus::Queued,
             Self::Running(running) => AgentSupervisorNodeStatus::Running(running.attempt),
             Self::Waiting(reason) => AgentSupervisorNodeStatus::Waiting(reason),
+            Self::Cancelling(cancellation) => {
+                AgentSupervisorNodeStatus::Cancelling(cancellation.public())
+            }
             Self::Succeeded => AgentSupervisorNodeStatus::Succeeded,
             Self::Failed(failure) => AgentSupervisorNodeStatus::Failed(failure),
+            Self::Cancelled(cancellation) => AgentSupervisorNodeStatus::Cancelled(cancellation),
         }
     }
 }
@@ -178,7 +299,9 @@ pub struct AgentSupervisorRuntimeStatus {
     executing: usize,
     queued: usize,
     waiting: usize,
+    cancelling: usize,
     terminal: usize,
+    cancelled: usize,
     sealed: bool,
 }
 
@@ -208,9 +331,19 @@ impl AgentSupervisorRuntimeStatus {
         self.waiting
     }
 
-    /// Successfully or unsuccessfully completed nodes.
+    /// Nodes awaiting an exact running drain or live descendants.
+    pub const fn cancelling(self) -> usize {
+        self.cancelling
+    }
+
+    /// Successfully, unsuccessfully, or cancelled terminal nodes.
     pub const fn terminal(self) -> usize {
         self.terminal
+    }
+
+    /// Terminally cancelled nodes.
+    pub const fn cancelled(self) -> usize {
+        self.cancelled
     }
 
     /// Whether token/settlement ambiguity sealed further mutation.
@@ -266,6 +399,8 @@ pub enum AgentSupervisorExecutionOutcome {
     Succeeded,
     /// Node failed after every activated descendant was terminal.
     Failed(AgentSupervisorFailure),
+    /// Cancellation won the race and the exact execution terminally drained.
+    Cancelled(AgentSupervisorCancellation),
 }
 
 /// Content-free receipt for one exact settled execution token.
@@ -308,6 +443,93 @@ pub enum AgentSupervisorCompletion {
     Failed(AgentSupervisorFailure),
 }
 
+/// One running node that must receive a best-effort cancellation signal.
+///
+/// This projection carries no execution, action, provider, page, or native
+/// authority. Only the original non-cloneable execution token can acknowledge
+/// terminal drain.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AgentSupervisorCancellationTarget {
+    node: AgentPlanNodeId,
+    attempt: AgentSupervisorAttemptId,
+    cancellation: AgentSupervisorCancellation,
+}
+
+impl AgentSupervisorCancellationTarget {
+    /// Exact activated plan node whose current work must stop.
+    pub const fn node(self) -> AgentPlanNodeId {
+        self.node
+    }
+
+    /// Exact executing attempt retaining the scheduler slot.
+    pub const fn attempt(self) -> AgentSupervisorAttemptId {
+        self.attempt
+    }
+
+    /// Exact cancellation update the attempt must drain under.
+    pub const fn cancellation(self) -> AgentSupervisorCancellation {
+        self.cancellation
+    }
+}
+
+/// Bounded content-free result of applying one cancellation-tree update.
+#[must_use]
+pub struct AgentSupervisorCancellationBatch {
+    supervisor: AgentSupervisorId,
+    root: AgentPlanNodeId,
+    cancellation: AgentSupervisorCancellation,
+    affected: usize,
+    terminal: usize,
+    targets: Vec<AgentSupervisorCancellationTarget>,
+}
+
+impl AgentSupervisorCancellationBatch {
+    /// Exact mutable supervisor incarnation.
+    pub const fn supervisor(&self) -> AgentSupervisorId {
+        self.supervisor
+    }
+
+    /// Root of the activated cancellation subtree.
+    pub const fn root(&self) -> AgentPlanNodeId {
+        self.root
+    }
+
+    /// Exact one-shot cancellation update.
+    pub const fn cancellation(&self) -> AgentSupervisorCancellation {
+        self.cancellation
+    }
+
+    /// Nodes newly made cancelling or cancelled by this update.
+    pub const fn affected(&self) -> usize {
+        self.affected
+    }
+
+    /// Affected nodes made terminal without a running drain callback.
+    pub const fn terminal(&self) -> usize {
+        self.terminal
+    }
+
+    /// Running attempts that retain execution capacity until terminal drain.
+    pub fn targets(&self) -> impl ExactSizeIterator<Item = AgentSupervisorCancellationTarget> + '_ {
+        self.targets.iter().copied()
+    }
+}
+
+impl fmt::Debug for AgentSupervisorCancellationBatch {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentSupervisorCancellationBatch")
+            .field("supervisor", &self.supervisor)
+            .field("root", &self.root)
+            .field("cancellation", &self.cancellation)
+            .field("affected", &self.affected)
+            .field("terminal", &self.terminal)
+            .field("drain_targets", &self.targets.len())
+            .field("content", &"[redacted]")
+            .finish()
+    }
+}
+
 /// Single-owner bounded scheduler for one exact delegation topology.
 #[must_use]
 pub struct AgentRunSupervisor {
@@ -315,6 +537,7 @@ pub struct AgentRunSupervisor {
     topology: AgentDelegationTopology,
     nodes: Vec<SupervisorNodeRow>,
     last_attempt: Option<AgentSupervisorAttemptId>,
+    last_cancellation: Option<AgentSupervisorCancellationId>,
     sealed: bool,
 }
 
@@ -330,6 +553,7 @@ impl AgentRunSupervisor {
                 state: NodeState::Queued,
             }],
             last_attempt: None,
+            last_cancellation: None,
             sealed: false,
         }
     }
@@ -352,7 +576,9 @@ impl AgentRunSupervisor {
             executing: 0,
             queued: 0,
             waiting: 0,
+            cancelling: 0,
             terminal: 0,
+            cancelled: 0,
             sealed: self.sealed,
         };
         for row in &self.nodes {
@@ -369,8 +595,19 @@ impl AgentRunSupervisor {
                     status.live += 1;
                     status.waiting += 1;
                 }
+                AgentSupervisorNodeStatus::Cancelling(cancellation) => {
+                    status.live += 1;
+                    status.cancelling += 1;
+                    if cancellation.draining_attempt().is_some() {
+                        status.executing += 1;
+                    }
+                }
                 AgentSupervisorNodeStatus::Succeeded | AgentSupervisorNodeStatus::Failed(_) => {
                     status.terminal += 1;
+                }
+                AgentSupervisorNodeStatus::Cancelled(_) => {
+                    status.terminal += 1;
+                    status.cancelled += 1;
                 }
             }
         }
@@ -391,13 +628,36 @@ impl AgentRunSupervisor {
         })
     }
 
+    /// All running cancellation targets for reconciliation after signal loss.
+    pub fn cancellation_targets(
+        &self,
+    ) -> impl Iterator<Item = AgentSupervisorCancellationTarget> + '_ {
+        self.nodes.iter().filter_map(|row| match row.state {
+            NodeState::Cancelling(CancellingState {
+                cancellation,
+                running: Some(running),
+            }) => Some(AgentSupervisorCancellationTarget {
+                node: row.node,
+                attempt: running.attempt,
+                cancellation,
+            }),
+            NodeState::Queued
+            | NodeState::Running(_)
+            | NodeState::Waiting(_)
+            | NodeState::Cancelling(_)
+            | NodeState::Succeeded
+            | NodeState::Failed(_)
+            | NodeState::Cancelled(_) => None,
+        })
+    }
+
     /// Activates one pre-approved direct child while its exact parent executes.
     pub fn delegate(
         &mut self,
         parent: &AgentNodeExecution,
         child: AgentPlanNodeId,
     ) -> Result<(), AgentSupervisorRuntimeError> {
-        self.require_execution(parent)?;
+        self.require_running_execution(parent)?;
         let topology_child = self
             .topology
             .node(child)
@@ -425,6 +685,85 @@ impl AgentRunSupervisor {
         Ok(())
     }
 
+    /// Applies one sticky cancellation update to an activated subtree.
+    ///
+    /// Queued and resource-free waiting nodes are synchronously cancelled once
+    /// their activated descendants are terminal. Running attempts remain live
+    /// and executing until their original non-cloneable token settles or
+    /// explicitly acknowledges terminal drain.
+    pub fn cancel_subtree(
+        &mut self,
+        root: AgentPlanNodeId,
+        id: AgentSupervisorCancellationId,
+        reason: AgentSupervisorCancellationReason,
+    ) -> Result<AgentSupervisorCancellationBatch, AgentSupervisorRuntimeError> {
+        if self.sealed {
+            return Err(AgentSupervisorRuntimeError::Sealed);
+        }
+        if self.last_cancellation.is_some_and(|last| id <= last) {
+            return Err(AgentSupervisorRuntimeError::CancellationReplay);
+        }
+        let root_index = self
+            .node_index(root)
+            .ok_or(AgentSupervisorRuntimeError::NodeMissing)?;
+        match self.nodes[root_index].state {
+            NodeState::Queued | NodeState::Running(_) | NodeState::Waiting(_) => {}
+            NodeState::Cancelling(_) => {
+                return Err(AgentSupervisorRuntimeError::CancellationPending);
+            }
+            NodeState::Succeeded | NodeState::Failed(_) | NodeState::Cancelled(_) => {
+                return Err(AgentSupervisorRuntimeError::NotLive);
+            }
+        }
+
+        let cancellation = AgentSupervisorCancellation { id, reason };
+        let terminal_before = self.status().cancelled;
+        let mut affected = 0;
+        for index in 0..self.nodes.len() {
+            let node = self.nodes[index].node;
+            if node != root && !topology_descends_from(&self.topology, node, root) {
+                continue;
+            }
+            match self.nodes[index].state {
+                NodeState::Queued | NodeState::Waiting(_) => {
+                    self.nodes[index].state = NodeState::Cancelling(CancellingState {
+                        cancellation,
+                        running: None,
+                    });
+                    affected += 1;
+                }
+                NodeState::Running(running) => {
+                    self.nodes[index].state = NodeState::Cancelling(CancellingState {
+                        cancellation,
+                        running: Some(running),
+                    });
+                    affected += 1;
+                }
+                NodeState::Cancelling(_)
+                | NodeState::Succeeded
+                | NodeState::Failed(_)
+                | NodeState::Cancelled(_) => {}
+            }
+        }
+        debug_assert!(affected > 0);
+        self.last_cancellation = Some(id);
+        self.finalize_drained_cancellations();
+        let mut targets = Vec::with_capacity(self.status().executing);
+        targets.extend(self.cancellation_targets().filter(|target| {
+            target.node() == root || topology_descends_from(&self.topology, target.node(), root)
+        }));
+        debug_assert!(targets.len() <= MAX_AGENT_EXECUTING_SUPERVISOR_NODES);
+        let terminal = self.status().cancelled.saturating_sub(terminal_before);
+        Ok(AgentSupervisorCancellationBatch {
+            supervisor: self.id,
+            root,
+            cancellation,
+            affected,
+            terminal,
+            targets,
+        })
+    }
+
     /// Admits one queued/yielded node into an executing-agent slot.
     pub fn start(
         &mut self,
@@ -447,7 +786,11 @@ impl AgentRunSupervisor {
                     return Err(AgentSupervisorRuntimeError::DescendantsLive);
                 }
             }
-            NodeState::Running(_) | NodeState::Succeeded | NodeState::Failed(_) => {
+            NodeState::Running(_)
+            | NodeState::Cancelling(_)
+            | NodeState::Succeeded
+            | NodeState::Failed(_)
+            | NodeState::Cancelled(_) => {
                 return Err(AgentSupervisorRuntimeError::NotRunnable);
             }
         }
@@ -471,7 +814,10 @@ impl AgentRunSupervisor {
         execution: AgentNodeExecution,
         reason: AgentSupervisorWait,
     ) -> Result<AgentSupervisorExecutionReceipt, AgentSupervisorRuntimeError> {
-        let index = self.require_execution(&execution)?;
+        let (index, cancellation) = self.require_execution(&execution)?;
+        if let Some(cancellation) = cancellation {
+            return Ok(self.settle_cancelled_execution(index, execution, cancellation));
+        }
         self.nodes[index].state = NodeState::Waiting(reason);
         Ok(execution_receipt(
             execution,
@@ -485,7 +831,10 @@ impl AgentRunSupervisor {
         execution: AgentNodeExecution,
         completion: AgentSupervisorCompletion,
     ) -> Result<AgentSupervisorExecutionReceipt, AgentSupervisorRuntimeError> {
-        let index = self.require_execution(&execution)?;
+        let (index, cancellation) = self.require_execution(&execution)?;
+        if let Some(cancellation) = cancellation {
+            return Ok(self.settle_cancelled_execution(index, execution, cancellation));
+        }
         if self.has_live_descendant(execution.node()) {
             self.nodes[index].state = NodeState::Waiting(AgentSupervisorWait::Descendants);
             return Ok(execution_receipt(
@@ -506,10 +855,31 @@ impl AgentRunSupervisor {
         Ok(execution_receipt(execution, outcome))
     }
 
+    /// Acknowledges that one cancellation target and all work it owned drained.
+    ///
+    /// A wrong cancellation identity is ambiguous: mutation seals and the
+    /// executing slot remains retained rather than risking oversubscription.
+    pub fn drain_cancelled(
+        &mut self,
+        execution: AgentNodeExecution,
+        cancellation: AgentSupervisorCancellationId,
+    ) -> Result<AgentSupervisorExecutionReceipt, AgentSupervisorRuntimeError> {
+        let (index, pending) = self.require_execution(&execution)?;
+        let Some(pending) = pending else {
+            self.sealed = true;
+            return Err(AgentSupervisorRuntimeError::CancellationMismatch);
+        };
+        if pending.id() != cancellation {
+            self.sealed = true;
+            return Err(AgentSupervisorRuntimeError::CancellationMismatch);
+        }
+        Ok(self.settle_cancelled_execution(index, execution, pending))
+    }
+
     fn require_execution(
         &mut self,
         execution: &AgentNodeExecution,
-    ) -> Result<usize, AgentSupervisorRuntimeError> {
+    ) -> Result<(usize, Option<AgentSupervisorCancellation>), AgentSupervisorRuntimeError> {
         if self.sealed {
             return Err(AgentSupervisorRuntimeError::Sealed);
         }
@@ -517,17 +887,72 @@ impl AgentRunSupervisor {
             self.sealed = true;
             return Err(AgentSupervisorRuntimeError::ExecutionMismatch);
         };
+        let (running, cancellation) = match self.nodes[index].state {
+            NodeState::Running(running) => (Some(running), None),
+            NodeState::Cancelling(cancelling) => {
+                (cancelling.running, Some(cancelling.cancellation))
+            }
+            NodeState::Queued
+            | NodeState::Waiting(_)
+            | NodeState::Succeeded
+            | NodeState::Failed(_)
+            | NodeState::Cancelled(_) => (None, None),
+        };
         let matches = execution.supervisor == self.id
-            && matches!(
-                self.nodes[index].state,
-                NodeState::Running(running)
-                    if running.attempt == execution.attempt && running.guard == execution.guard
-            );
+            && running.is_some_and(|running| {
+                running.attempt == execution.attempt && running.guard == execution.guard
+            });
         if !matches {
             self.sealed = true;
             return Err(AgentSupervisorRuntimeError::ExecutionMismatch);
         }
+        Ok((index, cancellation))
+    }
+
+    fn require_running_execution(
+        &mut self,
+        execution: &AgentNodeExecution,
+    ) -> Result<usize, AgentSupervisorRuntimeError> {
+        let (index, cancellation) = self.require_execution(execution)?;
+        if cancellation.is_some() {
+            return Err(AgentSupervisorRuntimeError::CancellationPending);
+        }
         Ok(index)
+    }
+
+    fn settle_cancelled_execution(
+        &mut self,
+        index: usize,
+        execution: AgentNodeExecution,
+        cancellation: AgentSupervisorCancellation,
+    ) -> AgentSupervisorExecutionReceipt {
+        self.nodes[index].state = NodeState::Cancelling(CancellingState {
+            cancellation,
+            running: None,
+        });
+        self.finalize_drained_cancellations();
+        execution_receipt(
+            execution,
+            AgentSupervisorExecutionOutcome::Cancelled(cancellation),
+        )
+    }
+
+    fn finalize_drained_cancellations(&mut self) {
+        loop {
+            let candidate = self.nodes.iter().position(|row| {
+                matches!(
+                    row.state,
+                    NodeState::Cancelling(CancellingState { running: None, .. })
+                ) && !self.has_live_descendant(row.node)
+            });
+            let Some(index) = candidate else {
+                return;
+            };
+            let NodeState::Cancelling(cancelling) = self.nodes[index].state else {
+                unreachable!("candidate was proven cancelling");
+            };
+            self.nodes[index].state = NodeState::Cancelled(cancelling.cancellation);
+        }
     }
 
     fn node_index(&self, node: AgentPlanNodeId) -> Option<usize> {
@@ -551,6 +976,7 @@ impl fmt::Debug for AgentRunSupervisor {
             .field("manifest", &self.topology.manifest())
             .field("status", &self.status())
             .field("last_attempt", &self.last_attempt)
+            .field("last_cancellation", &self.last_cancellation)
             .field("content", &"[redacted]")
             .finish()
     }
@@ -580,6 +1006,15 @@ pub enum AgentSupervisorRuntimeError {
     /// Execution attempt identity was reused or regressed.
     #[error("agent supervisor execution attempt replay")]
     AttemptReplay,
+    /// Cancellation identity was reused or regressed.
+    #[error("agent supervisor cancellation replay")]
+    CancellationReplay,
+    /// The requested cancellation root is already draining.
+    #[error("agent supervisor cancellation is already pending")]
+    CancellationPending,
+    /// The requested cancellation root is already terminal.
+    #[error("agent supervisor node is not live")]
+    NotLive,
     /// Node is running or terminal and cannot start another turn.
     #[error("agent supervisor node is not runnable")]
     NotRunnable,
@@ -589,6 +1024,9 @@ pub enum AgentSupervisorRuntimeError {
     /// Non-cloneable execution identity/state/guard did not exactly match.
     #[error("agent supervisor execution token mismatched")]
     ExecutionMismatch,
+    /// Drain acknowledgement did not name the exact pending cancellation.
+    #[error("agent supervisor cancellation drain mismatched")]
+    CancellationMismatch,
 }
 
 fn topology_descends_from(
