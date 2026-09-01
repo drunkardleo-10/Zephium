@@ -1,5 +1,7 @@
 #[cfg(all(feature = "agentic-browser", any(target_os = "windows", test)))]
 mod agent_navigation;
+#[cfg(all(feature = "agentic-browser", any(target_os = "windows", test)))]
+mod agent_semantic_cdp_protocol;
 
 #[cfg(target_os = "macos")]
 pub mod macos;

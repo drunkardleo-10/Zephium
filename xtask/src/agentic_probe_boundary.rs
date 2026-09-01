@@ -36,6 +36,7 @@ const PROVIDER_TRANSPORT_MANIFEST: &str = "crates/zephium-agent-provider-transpo
 const PROVIDER_TRANSPORT_ROOT: &str = "crates/zephium-agent-provider-transport/src/lib.rs";
 const ENGINE_MANIFEST: &str = "crates/zephium-engine/Cargo.toml";
 const ENGINE_ROOT: &str = "crates/zephium-engine/src/lib.rs";
+const ENGINE_PLATFORM_MODULE: &str = "crates/zephium-engine/src/platform/mod.rs";
 const ENGINE_HOST_ROOT: &str = "crates/zephium-engine/src/host/mod.rs";
 const ENGINE_AGENT_CONTEXT_PORT: &str = "crates/zephium-engine/src/agent_context_port.rs";
 const ENGINE_AGENT_CONTEXT_HOST: &str = "crates/zephium-engine/src/host/agent_context.rs";
@@ -53,6 +54,8 @@ const ENGINE_WINDOWS_AGENT_CONTEXT: &str =
     "crates/zephium-engine/src/platform/windows/agent_context.rs";
 const ENGINE_WINDOWS_AGENT_TIMEOUT: &str = "crates/zephium-engine/src/platform/windows/timeout.rs";
 const ENGINE_AGENT_NAVIGATION: &str = "crates/zephium-engine/src/platform/agent_navigation.rs";
+const ENGINE_WINDOWS_SEMANTIC_PROTOCOL: &str =
+    "crates/zephium-engine/src/platform/agent_semantic_cdp_protocol.rs";
 const ENGINE_WINDOWS_PROBE_MODULE: &str =
     "crates/zephium-engine/src/platform/windows/agentic_input_probe.rs";
 const ENGINE_MACOS_PROBE_BINARY: &str =
@@ -177,6 +180,10 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         &read(repository.join(ENGINE_WINDOWS_AGENT_TIMEOUT))?,
         &read(repository.join(ENGINE_AGENT_NAVIGATION))?,
         &read(repository.join(ENGINE_AGENT_CONTEXT_HOST))?,
+    )?;
+    validate_engine_windows_semantic_protocol(
+        &read(repository.join(ENGINE_PLATFORM_MODULE))?,
+        &read(repository.join(ENGINE_WINDOWS_SEMANTIC_PROTOCOL))?,
     )?;
     validate_owned_context_viewport_contract(
         &read(repository.join(AGENTIC_CONTEXT_PORT))?,
@@ -646,6 +653,79 @@ fn validate_engine_windows_agent_context_boundary(
                     "production Windows agent-context {label} acquired forbidden surface {forbidden}"
                 ));
             }
+        }
+    }
+    Ok(())
+}
+
+fn validate_engine_windows_semantic_protocol(module: &str, source: &str) -> Result<(), String> {
+    let module = compact(module);
+    if !module.contains(
+        "#[cfg(all(feature=\"agentic-browser\",any(target_os=\"windows\",test)))]modagent_semantic_cdp_protocol;",
+    ) {
+        return Err(
+            "production Windows semantic CDP protocol escaped its agentic-browser platform gate"
+                .to_owned(),
+        );
+    }
+
+    let source = compact(source);
+    for required in [
+        "enumFixedSemanticCdpMethod",
+        "Page.addScriptToEvaluateOnNewDocument",
+        "Page.getFrameTree",
+        "Runtime.enable",
+        "Page.createIsolatedWorld",
+        "Runtime.disable",
+        "Runtime.callFunctionOn",
+        "Page.removeScriptToEvaluateOnNewDocument",
+        "SEMANTIC_RUNTIME_PROGRAM.source()",
+        "MAX_SEMANTIC_RUNTIME_SOURCE_BYTES",
+        "MAX_SEMANTIC_RUNTIME_REQUEST_BYTES",
+        "MAX_SEMANTIC_WIRE_BYTES",
+        "MAX_CONTEXT_EVENTS_PER_INVOCATION:u16=512",
+        "MAX_CONTEXT_EVENT_BYTES_PER_INVOCATION:usize=512*1_024",
+        "\"includeCommandLineAPI\":false",
+        "\"runImmediately\":true",
+        "\"grantUniveralAccess\":false",
+        "\"uniqueContextId\":context.unique_id()",
+        "\"returnByValue\":true",
+        "\"generatePreview\":false",
+        "\"userGesture\":false",
+        "\"awaitPromise\":false",
+        "auxiliary.get(\"isDefault\").and_then(Value::as_bool)!=Some(false)",
+        "auxiliary.get(\"type\").and_then(Value::as_str)!=Some(\"isolated\")",
+        "created==observed.id",
+        "object.contains_key(\"error\")",
+        "object.contains_key(\"exceptionDetails\")",
+        "SemanticWorldName([redacted])",
+        "SemanticContextDiscovery",
+    ] {
+        if !source.contains(required) {
+            return Err(format!(
+                "production Windows semantic CDP protocol lost required closed mechanism {required}"
+            ));
+        }
+    }
+    for forbidden in [
+        "Runtime.evaluate",
+        "Page.bringToFront",
+        "Page.captureScreenshot",
+        "Input.dispatch",
+        "Runtime.addBinding",
+        "PostWebMessage",
+        "with_ipc_handler",
+        "querySelector",
+        "outerHTML",
+        "document.cookie",
+        "localStorage",
+        "sessionStorage",
+        "method:&str",
+    ] {
+        if source.contains(forbidden) {
+            return Err(format!(
+                "production Windows semantic CDP protocol acquired forbidden surface {forbidden}"
+            ));
         }
     }
     Ok(())
@@ -3370,6 +3450,25 @@ mod tests {
             &timeout.replace("MAX_PENDING_NATIVE_CONTEXT_TASKS", "usize::MAX"),
             navigation,
             host,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn windows_production_semantic_protocol_is_closed_and_bounded() {
+        let module = include_str!("../../crates/zephium-engine/src/platform/mod.rs");
+        let source =
+            include_str!("../../crates/zephium-engine/src/platform/agent_semantic_cdp_protocol.rs");
+        validate_engine_windows_semantic_protocol(module, source)
+            .expect("closed Windows semantic protocol");
+        assert!(validate_engine_windows_semantic_protocol(
+            module,
+            &format!("{source}\nRuntime.evaluate();"),
+        )
+        .is_err());
+        assert!(validate_engine_windows_semantic_protocol(
+            module,
+            &source.replace("\"userGesture\": false", "\"userGesture\": true"),
         )
         .is_err());
     }

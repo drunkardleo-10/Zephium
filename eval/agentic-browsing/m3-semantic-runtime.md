@@ -394,6 +394,50 @@ or observed on either platform.
 The crate remains a zero-idle-cost functional core: decoding happens only for
 an admitted observation and creates no timer, thread, page, queue, or worker.
 
+## Windows isolated-world protocol boundary
+
+The first production Windows layer is now a platform-gated, pure closed CDP
+protocol core; it is not the extension/userscript CDP feasibility harness. The
+core accepts no method string, program string, function string, selector, or
+execution-context identifier from a caller. Its complete method inventory is
+`Page.addScriptToEvaluateOnNewDocument`, `Page.getFrameTree`, `Runtime.enable`,
+`Page.createIsolatedWorld`, `Runtime.disable`, `Runtime.callFunctionOn`, and
+`Page.removeScriptToEvaluateOnNewDocument`. The installed source is only
+`SEMANTIC_RUNTIME_PROGRAM`, in one process-unique named world, with command-line
+APIs disabled and immediate installation requested for the construction-only
+document. World creation explicitly denies universal access.
+
+One invocation discovers only the current root frame, temporarily enables
+runtime context reporting, asks WebView2 to create or resolve that exact named
+world, and requires the browser's numeric context identity to match an event
+whose name, root-frame id, `isDefault: false`, and `type: isolated` fields all
+agree. The eventual fixed function call uses the event's system-unique context
+id rather than the reusable numeric id, sets `userGesture: false`, does not
+await a Promise, returns by value, and carries only the existing 2 KiB closed
+invocation grammar. The fixed function can call only the frozen runtime's sole
+`invoke` member. Control replies, invocation replies, individual context
+events, cumulative event bytes, and event count are all independently bounded;
+browser errors, exception detail, duplicate/divergent matching contexts,
+default-world spoofing, context-id reuse, and oversized data fail closed.
+Diagnostics redact parameters and every browser identity.
+
+This design follows WebView2's current Win32 contract: CDP calls are
+asynchronous and calls that depend on ordering must wait for the prior
+completion because protocol processing may otherwise be out of order
+([Microsoft](https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2#calldevtoolsprotocolmethod)).
+The protocol's named document-start world and non-universal isolated-world
+creation contracts are documented by Chromium
+([Page domain](https://chromedevtools.github.io/devtools-protocol/tot/Page/)),
+and `Runtime.callFunctionOn` documents the system-unique context id as the
+cross-process-navigation-safe alternative to a reusable numeric id
+([Runtime domain](https://chromedevtools.github.io/devtools-protocol/tot/Runtime/#method-callFunctionOn)).
+
+This unit is deterministic protocol groundwork only. It does not yet register
+native WebView2 callbacks, enable the Windows host semantic port, or claim live
+isolation, timing, teardown, debugger coexistence, arbitrary-page behavior, or
+Windows product support. The existing production Windows owner continues to
+contain no CDP route, and the extension-owned CDP probe remains unchanged.
+
 ## Reviewed macOS native evidence
 
 On 2026-09-01, the separately authorized production-path qualifier passed on
@@ -496,11 +540,12 @@ current content-free result is 7 initial
 nodes, 6 expanded nodes, 620/374 encoded bytes, and an 881-byte wire-truncated
 result under a 1,024-byte request ceiling.
 
-The synthetic smoke and macOS compile/static gates are not live-browser
-isolated-world evidence. They cannot prove pinned WebKit wrapper identity,
-content-world separation, script-message timing, frame installation,
-navigation replacement, style/layout equivalence, or teardown; those claims
-remain blocked on the coordinated hostile fixed-DOM engine qualification.
+The synthetic smoke and compile/static gates alone are not live-browser
+isolated-world evidence. The authorized fixed macOS qualifier now covers the
+narrow pinned-WebKit wrapper/world, replacement, redaction, fixed viewport, and
+teardown claims recorded above. It does not prove arbitrary-page behavior,
+broader hostile timing/mutation behavior, Windows WebView2 isolation, or
+cross-platform style/layout equivalence.
 Surrounding-text windows are admitted up to
 8 KiB by the domain contract, but one runtime node field remains capped at
 4 KiB, so a larger single-node context is returned with truthful `text_limit`
@@ -516,10 +561,14 @@ rather than silently widening the hostile wire schema.
    authorized provider fixture, then record action-diff token/latency
    distributions for the pinned proof models/tokenizers. A standalone diff and
    remote stored conversation remain forbidden;
-3. execute the fixed native qualifier with separate authorization, then extend
-   live-engine hostile coverage for stale nodes, mutation pressure, and timing
-   races beyond its current page-world bridge, prototype collision, frame
-   boundary, redaction, world replacement, and teardown checks. Open/closed
-   shadow behavior and source exclusion currently have deterministic
-   synthetic/static coverage but
-   still require that engine evidence.
+3. extend the authorized macOS live-engine coverage for stale nodes, mutation
+   pressure, and timing races beyond its current page-world bridge, prototype
+   collision, frame boundary, redaction, world replacement, and teardown
+   checks. Open/closed shadow behavior and source exclusion currently have
+   deterministic synthetic/static coverage but still require that engine
+   evidence;
+4. complete the bounded native WebView2 callback/lifecycle adapter over the
+   closed Windows protocol, keep the host port unsupported until its fixed
+   isolated-world fixture passes on physical supported Windows, then add
+   hostile replacement, renderer-loss, event-flood, teardown, and debugger-
+   coexistence evidence. No main-world or numeric-context fallback is allowed.
