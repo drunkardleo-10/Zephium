@@ -8,6 +8,7 @@
 
 mod anthropic;
 mod continuation;
+mod extraction;
 mod openai;
 mod pricing;
 mod request;
@@ -22,11 +23,16 @@ use anthropic::AnthropicMessagesStreamDecoder;
 use openai::OpenAiResponsesStreamDecoder;
 
 pub use continuation::{
-    AgentProviderBoundDiffContinuation, AgentProviderBoundLocateContinuation,
-    AgentProviderBoundReadContinuation, AgentProviderBoundScreenshotContinuation,
-    AgentProviderContinuation, AgentProviderContinuationError, AgentProviderContinuationSeed,
+    AgentProviderBoundDiffContinuation, AgentProviderBoundExtractionContinuation,
+    AgentProviderBoundLocateContinuation, AgentProviderBoundReadContinuation,
+    AgentProviderBoundScreenshotContinuation, AgentProviderContinuation,
+    AgentProviderContinuationError, AgentProviderContinuationSeed,
     MAX_AGENT_PROVIDER_CONTINUATION_INITIAL_OBSERVATION_BYTES,
     MAX_AGENT_PROVIDER_CONTINUATION_TRANSCRIPT_BYTES, MAX_AGENT_PROVIDER_CONTINUATION_TURNS,
+};
+pub use extraction::{
+    AgentProviderExtractionOutputBinding, AgentProviderExtractionOutputCollector,
+    AgentProviderExtractionOutputError,
 };
 pub use pricing::{
     AgentProviderPricedUsage, AgentProviderPricingAttribution, AgentProviderPricingContractError,
@@ -43,10 +49,10 @@ use crate::{
 
 pub use request::{
     AgentCommittedProviderInput, AgentCommittedProviderRequest, AgentPreparedDiffRequest,
-    AgentPreparedLocateRequest, AgentPreparedObservationRequest,
+    AgentPreparedExtractionRequest, AgentPreparedLocateRequest, AgentPreparedObservationRequest,
     AgentPreparedReadContinuationRequest, AgentPreparedReadRequest, AgentPreparedScreenshotRequest,
-    AgentProviderDiffRequestDraft, AgentProviderEndpoint, AgentProviderInputEvidence,
-    AgentProviderInputOutcome, AgentProviderLocalInputTokenCounter,
+    AgentProviderDiffRequestDraft, AgentProviderEndpoint, AgentProviderExtractionRequestDraft,
+    AgentProviderInputEvidence, AgentProviderInputOutcome, AgentProviderLocalInputTokenCounter,
     AgentProviderLocateRequestDraft, AgentProviderObjective, AgentProviderObjectiveError,
     AgentProviderReadContinuationRequestDraft, AgentProviderRequest, AgentProviderRequestError,
     AgentProviderRequestSettlement, AgentProviderScreenshotRequestDraft,
@@ -517,6 +523,18 @@ impl AgentProviderCallConfig {
             return Err(AgentProviderContractError::InputTokenQuality);
         }
         self.validate_diff_request(request, read, structured_input)
+    }
+
+    pub(crate) fn validate_extraction_request(
+        &self,
+        request: AgentModelCallRequest,
+        extraction: &SemanticTokenMeasurement,
+        structured_input: &SemanticTokenMeasurement,
+    ) -> Result<(), AgentProviderContractError> {
+        if extraction.quality() != crate::SemanticTokenCountQuality::ExactLocal {
+            return Err(AgentProviderContractError::InputTokenQuality);
+        }
+        self.validate_diff_request(request, extraction, structured_input)
     }
 
     pub(crate) fn validate_screenshot_request(

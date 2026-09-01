@@ -25,6 +25,7 @@ pub use effect::{
 
 use crate::semantic_diff::SemanticObservationFingerprint;
 use crate::semantic_diff_model::SemanticDiffDeliveryAuthority;
+use crate::semantic_extract_model::SemanticExtractionDeliveryAuthority;
 use crate::semantic_locate_model::SemanticLocateDeliveryAuthority;
 use crate::semantic_read_model::SemanticReadDeliveryAuthority;
 use crate::semantic_screenshot::SemanticScreenshotDeliveryAuthority;
@@ -33,7 +34,8 @@ use crate::{
     AgentPolicyInstant, AgentProviderPricedUsage, AgentProviderPricingAttribution, AgentRunBudget,
     AgentRunManifest, AgentRunManifestId, ContextJoin, SemanticActionAttemptId, SemanticDiff,
     SemanticDiffDeliveryReceipt, SemanticDiffModelPayload, SemanticEffectClass,
-    SemanticLocateDeliveryReceipt, SemanticLocateResult, SemanticModelPayload, SemanticObservation,
+    SemanticExtractionDeliveryReceipt, SemanticExtractionSchema, SemanticLocateDeliveryReceipt,
+    SemanticLocateResult, SemanticModelPayload, SemanticObservation,
     SemanticObservationAcknowledgement, SemanticObservationGeneration, SemanticObservationId,
     SemanticOrigin, SemanticReadDeliveryReceipt, SemanticReadModelPayload, SemanticReadResult,
     SemanticReferenceId, SemanticScreenshotDeliveryReceipt, SemanticSensitivity, SemanticTrust,
@@ -376,6 +378,7 @@ enum ModelInputKind {
     Observation,
     Diff,
     Read,
+    Extraction,
     Screenshot,
     Locate,
 }
@@ -454,6 +457,33 @@ impl AgentModelCallExpectation {
             call,
             lease,
             node,
+        }
+    }
+}
+
+/// Exact purpose-bound extraction evidence awaiting policy reservation.
+pub(crate) struct AgentProviderExtractionInput<'a, 'read> {
+    baseline: &'a SemanticObservationAcknowledgement,
+    schema: &'a SemanticExtractionSchema,
+    read: &'a SemanticReadResult<'read>,
+    delivery: &'a SemanticExtractionDeliveryAuthority,
+    structured_input_tokens: u64,
+}
+
+impl<'a, 'read> AgentProviderExtractionInput<'a, 'read> {
+    pub(crate) const fn new(
+        baseline: &'a SemanticObservationAcknowledgement,
+        schema: &'a SemanticExtractionSchema,
+        read: &'a SemanticReadResult<'read>,
+        delivery: &'a SemanticExtractionDeliveryAuthority,
+        structured_input_tokens: u64,
+    ) -> Self {
+        Self {
+            baseline,
+            schema,
+            read,
+            delivery,
+            structured_input_tokens,
         }
     }
 }
@@ -1140,6 +1170,47 @@ impl AgentRunPolicy {
         )
     }
 
+    /// Reserves one exact whole-provider-input measurement for extraction mapping.
+    ///
+    /// The schema and bounded read must match the exact move-only delivery
+    /// authority, and the read must still derive from the committed provider
+    /// baseline. Candidate taint remains the unchanged baseline projection.
+    pub(crate) fn prepare_provider_extraction_input(
+        &mut self,
+        request: AgentModelCallRequest,
+        expected: AgentModelCallExpectation,
+        input: AgentProviderExtractionInput<'_, '_>,
+    ) -> Result<AgentModelCallAdmission, AgentPolicyError> {
+        if request.id() != expected.call
+            || request.lease() != expected.lease
+            || self.manifest.id() != expected.manifest
+            || self
+                .lease_index(expected.lease)
+                .and_then(|index| self.leases.get(index))
+                .is_none_or(|lease| lease.binding.node() != expected.node)
+        {
+            return Err(AgentPolicyError::Authority);
+        }
+        if !input.delivery.matches(input.schema, input.read)
+            || !input.read.matches_acknowledgement(input.baseline)
+        {
+            return Err(AgentPolicyError::PayloadMismatch);
+        }
+        let candidates =
+            provider_read_taints(input.read, input.baseline, request.account(), &self.taints)?;
+        self.prepare_model_input(
+            request,
+            input.delivery.context(),
+            ModelInputKind::Extraction,
+            input.delivery.guard(),
+            candidates,
+            ModelInputTokenReservation {
+                measured: input.structured_input_tokens,
+                additional: 0,
+            },
+        )
+    }
+
     /// Reserves exact bounded-read input before any model transport receives bytes.
     pub fn prepare_read_input(
         &mut self,
@@ -1249,6 +1320,15 @@ impl AgentRunPolicy {
         receipt: &SemanticReadDeliveryReceipt,
     ) -> Result<AgentActiveModelCall, AgentPolicyError> {
         self.commit_model_input(admission, ModelInputKind::Read, receipt.guard())
+    }
+
+    /// Commits exact extraction-mapping taint after provider disclosure.
+    pub fn commit_extraction_input(
+        &mut self,
+        admission: AgentModelCallAdmission,
+        receipt: &SemanticExtractionDeliveryReceipt,
+    ) -> Result<AgentActiveModelCall, AgentPolicyError> {
+        self.commit_model_input(admission, ModelInputKind::Extraction, receipt.guard())
     }
 
     /// Commits exact sensitive visual taint after transport disclosure.
@@ -2316,6 +2396,7 @@ fn admission_guard(facts: AdmissionGuardFacts<'_>) -> [u8; 32] {
         ModelInputKind::Read => 3,
         ModelInputKind::Screenshot => 4,
         ModelInputKind::Locate => 5,
+        ModelInputKind::Extraction => 6,
     }]);
     hash_context(&mut hasher, facts.context);
     hasher.update(facts.source_guard);
@@ -2383,32 +2464,35 @@ mod tests {
     use crate::semantic_screenshot::admitted_test_screenshot;
     use crate::{
         compute_semantic_diff, decode_semantic_snapshot, encode_semantic_diff,
-        encode_semantic_locate_result, encode_semantic_observation, encode_semantic_read,
-        locate_semantic_observation, read_semantic_observation, verify_semantic_action,
-        AgentAccountAttestationId, AgentAccountId, AgentDataFlowRule, AgentEffectScope,
-        AgentPlanNodeAuthority, AgentPlanNodeScope, AgentPreparedObservationRequest,
-        AgentPreparedReadRequest, AgentProviderCallConfig, AgentProviderContractError,
-        AgentProviderDiffRequestDraft, AgentProviderEndpoint, AgentProviderInputEvidence,
+        encode_semantic_extraction_request, encode_semantic_locate_result,
+        encode_semantic_observation, encode_semantic_read, locate_semantic_observation,
+        read_semantic_observation, verify_semantic_action, AgentAccountAttestationId,
+        AgentAccountId, AgentDataFlowRule, AgentEffectScope, AgentPlanNodeAuthority,
+        AgentPlanNodeScope, AgentPreparedObservationRequest, AgentPreparedReadRequest,
+        AgentProviderCallConfig, AgentProviderContractError, AgentProviderDiffRequestDraft,
+        AgentProviderEndpoint, AgentProviderExtractionRequestDraft, AgentProviderInputEvidence,
         AgentProviderInputOutcome, AgentProviderKind, AgentProviderLocalInputTokenCounter,
         AgentProviderLocateRequestDraft, AgentProviderModelRevision, AgentProviderObjective,
         AgentProviderReadContinuationRequestDraft, AgentProviderRequestSettlement,
-        AgentProviderScreenshotRequestDraft, AgentProviderStreamBudget, AgentRunManifestId,
-        AgentRunScope, ContextAutomationState, ContextCapabilities, ContextCapability, ContextId,
-        ContextIdentity, ContextKind, ContextOperationId, ContextRegistry, ContextRunId,
-        ContextSettlement, FrameGeneration, FrameId, SemanticActionBatch, SemanticActionBatchId,
-        SemanticActionFailure, SemanticActionIntent, SemanticActionProposal,
-        SemanticCaptureInstant, SemanticDecodeContext, SemanticDiffBudget, SemanticDiffOutcome,
-        SemanticEffectEvidence, SemanticFrameJoin, SemanticFrameTrust, SemanticInvocationId,
-        SemanticLocateBudget, SemanticLocateId, SemanticLocateQuery, SemanticLocateRequest,
-        SemanticLocateScope, SemanticModelDeliverySettlement, SemanticModelEncodingBudget,
-        SemanticObservationAssembler, SemanticObservationBudget, SemanticObservationId,
-        SemanticObservationRequest, SemanticPreparedAction, SemanticReadAuthority,
-        SemanticReadBudget, SemanticReadSensitivityLimit, SemanticSettleBudget,
-        SemanticSettleInstant, SemanticSettleTracker, SemanticSnapshot, SemanticSnapshotGeneration,
-        SemanticState, SemanticTokenCountQuality, SemanticTokenCountRequirement,
-        SemanticTokenCounter, SemanticTokenCounterError, SemanticTokenMeasurement,
-        SemanticTokenizerRevision, SemanticVerification, SemanticWaitCondition,
-        SEMANTIC_WIRE_VERSION,
+        AgentProviderScreenshotRequestDraft, AgentProviderStreamBatch, AgentProviderStreamBudget,
+        AgentProviderStreamConclusion, AgentProviderStreamEvent, AgentProviderTextDelta,
+        AgentRunManifestId, AgentRunScope, ContextAutomationState, ContextCapabilities,
+        ContextCapability, ContextId, ContextIdentity, ContextKind, ContextOperationId,
+        ContextRegistry, ContextRunId, ContextSettlement, FrameGeneration, FrameId,
+        SemanticActionBatch, SemanticActionBatchId, SemanticActionFailure, SemanticActionIntent,
+        SemanticActionProposal, SemanticCaptureInstant, SemanticDecodeContext, SemanticDiffBudget,
+        SemanticDiffOutcome, SemanticEffectEvidence, SemanticExtractionFieldSchema,
+        SemanticExtractionSchema, SemanticExtractionSchemaId, SemanticFrameJoin,
+        SemanticFrameTrust, SemanticInvocationId, SemanticLocateBudget, SemanticLocateId,
+        SemanticLocateQuery, SemanticLocateRequest, SemanticLocateScope,
+        SemanticModelDeliverySettlement, SemanticModelEncodingBudget, SemanticObservationAssembler,
+        SemanticObservationBudget, SemanticObservationId, SemanticObservationRequest,
+        SemanticPreparedAction, SemanticReadAuthority, SemanticReadBudget,
+        SemanticReadSensitivityLimit, SemanticSettleBudget, SemanticSettleInstant,
+        SemanticSettleTracker, SemanticSnapshot, SemanticSnapshotGeneration, SemanticState,
+        SemanticTokenCountQuality, SemanticTokenCountRequirement, SemanticTokenCounter,
+        SemanticTokenCounterError, SemanticTokenMeasurement, SemanticTokenizerRevision,
+        SemanticVerification, SemanticWaitCondition, SEMANTIC_WIRE_VERSION,
     };
     use serde_json::{json, Value};
 
@@ -4374,6 +4458,211 @@ mod tests {
             .join_terminal_tool(completion, tool.into_continuation_parts().0)
             .expect("post-read terminal join");
         assert!(next_continuation.baseline().matches(&observation));
+    }
+
+    #[test]
+    fn extraction_mapping_commits_exact_input_and_admits_only_its_bound_output() {
+        let source = origin("provider-extraction-request");
+        let context = make_context(9_271, 9_272, 9_273);
+        let observation = actionable_observation(context, source.clone(), 1);
+        let selected = tokenizer();
+        let config = provider_config(selected.clone(), 10, 20);
+        let objective = AgentProviderObjective::try_admit(
+            "Extract the save-control label".to_owned(),
+            &FixedCounter {
+                revision: selected.clone(),
+                tokens: 5,
+            },
+            &selected,
+        )
+        .expect("objective");
+        let mut fixture = policy_fixture(
+            9_271,
+            9_272,
+            source,
+            SemanticSensitivity::Public,
+            &[SemanticEffectClass::Read],
+            run_budget(10, 5_000, 10_000),
+        );
+        let account_binding = account(context, NOW - 1);
+        let committed = AgentPreparedObservationRequest::try_openai(
+            &mut fixture.policy,
+            call_request(1, fixture.lease, account_binding, 15, 20, 100, NOW),
+            &observation,
+            observation_payload(&observation, 50),
+            &objective,
+            config.clone(),
+        )
+        .expect("initial request")
+        .into_transport_input()
+        .commit(&mut fixture.policy)
+        .expect("initial commit");
+        let (initial_request, input, continuation) = committed.into_parts();
+        let (active, evidence) = input.into_parts();
+        let baseline = evidence
+            .observation_acknowledgement()
+            .expect("observation baseline")
+            .clone();
+        fixture
+            .policy
+            .settle_model_call(active, AgentModelCallSettlement::Completed, 65, 4, 80)
+            .expect("initial settlement");
+        let initial_reference_count = fixture.policy.taints()[0].reference_count();
+
+        let arguments = r#"{"schema_id":71}"#;
+        let tool = crate::AgentBrowserToolCall::decode_openai(
+            initial_request.call(),
+            "fc_extract_request_1".to_owned(),
+            "call_extract_request_1".to_owned(),
+            "extract",
+            arguments.to_owned(),
+        )
+        .expect("extract tool");
+        let completion = crate::AgentProviderCompletion::new(
+            initial_request.call(),
+            crate::AgentProviderStopReason::ToolCalls,
+            crate::AgentProviderUsage::try_new(65, 4, 0, 0, 0).expect("usage"),
+            crate::AgentProviderStreamStats::new(
+                200,
+                8,
+                0,
+                1,
+                u32::try_from(arguments.len()).expect("argument bytes"),
+            ),
+            true,
+        );
+        let continuation = continuation
+            .expect("continuation seed")
+            .join_terminal_tool(completion, tool.into_continuation_parts().0)
+            .expect("extract terminal join");
+        let read = read_semantic_observation(
+            &observation,
+            SemanticReadAuthority::Initial,
+            SemanticCaptureInstant::from_millis(NOW - 2),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::STANDARD,
+        )
+        .expect("read result");
+        assert!(read.matches_acknowledgement(&baseline));
+        let schema = SemanticExtractionSchema::try_new(
+            SemanticExtractionSchemaId::new(71).expect("schema id"),
+            vec![
+                SemanticExtractionFieldSchema::try_text("title".to_owned(), true, 64)
+                    .expect("title field"),
+            ],
+        )
+        .expect("schema");
+        let payload = encode_semantic_extraction_request(
+            &schema,
+            &read,
+            SemanticModelEncodingBudget::try_new(
+                16 * 1024,
+                16 * 1024,
+                SemanticTokenCountRequirement::Exact,
+            )
+            .expect("extraction encoding budget"),
+        )
+        .expect("encode extraction request")
+        .admit(
+            &FixedCounter {
+                revision: selected.clone(),
+                tokens: 45,
+            },
+            &selected,
+        )
+        .expect("admit extraction request");
+        let extraction_request = call_request(2, fixture.lease, account_binding, 500, 20, 100, NOW);
+        let draft = AgentProviderExtractionRequestDraft::try_new(
+            continuation
+                .bind_extraction_request(extraction_request, &config, &schema, &read, payload)
+                .expect("bind extraction"),
+        )
+        .expect("fixed extraction draft");
+        let prepared = draft
+            .try_prepare(
+                &mut fixture.policy,
+                extraction_request,
+                &schema,
+                &read,
+                &FixedProviderInputCounter {
+                    revision: selected,
+                    tokens: 120,
+                    quality: SemanticTokenCountQuality::ExactLocal,
+                },
+            )
+            .expect("extraction whole-input admission");
+        assert_eq!(prepared.structured_input_measurement().tokens(), 120);
+        let (transport, output_binding) = prepared.into_transport_parts();
+        let committed = transport
+            .commit(&mut fixture.policy)
+            .expect("extraction transport commit");
+        assert!(committed.continuation_transcript_bytes().is_none());
+        assert!(committed
+            .input_evidence()
+            .extraction_receipt()
+            .is_some_and(|receipt| receipt.matches(&schema, &read)));
+        assert!(committed
+            .input_evidence()
+            .observation_acknowledgement()
+            .is_none());
+        assert_eq!(fixture.policy.taints().len(), 1);
+        assert_eq!(
+            fixture.policy.taints()[0].reference_count(),
+            initial_reference_count
+        );
+        let (request, input, continuation) = committed.into_parts();
+        assert!(continuation.is_none());
+        let (active, evidence) = input.into_parts();
+        let mut collector = output_binding
+            .start(&evidence)
+            .expect("committed extraction evidence");
+        let output = r#"{"v":1,"schema":71,"fields":[{"name":"title","value":{"k":"text","value":"Save draft","sources":["@r1"]}}]}"#;
+        let split = output.len() / 2;
+        collector
+            .push_batch(AgentProviderStreamBatch::new(
+                request.call(),
+                vec![AgentProviderStreamEvent::TextDelta(
+                    AgentProviderTextDelta::new(output[..split].to_owned()),
+                )],
+            ))
+            .expect("first extraction delta");
+        collector
+            .push_batch(AgentProviderStreamBatch::new(
+                request.call(),
+                vec![AgentProviderStreamEvent::TextDelta(
+                    AgentProviderTextDelta::new(output[split..].to_owned()),
+                )],
+            ))
+            .expect("second extraction delta");
+        assert_eq!(collector.retained_bytes(), output.len());
+        let completion = crate::AgentProviderCompletion::new(
+            request.call(),
+            crate::AgentProviderStopReason::Completed,
+            crate::AgentProviderUsage::try_new(120, 4, 0, 0, 0).expect("usage"),
+            crate::AgentProviderStreamStats::new(
+                240,
+                2,
+                u32::try_from(output.len()).expect("output bytes"),
+                0,
+                0,
+            ),
+            false,
+        );
+        let result = collector
+            .finish(
+                AgentProviderStreamConclusion::Completed(completion),
+                &schema,
+                &read,
+                SemanticReadSensitivityLimit::PublicOnly,
+            )
+            .expect("admit exact extraction output");
+        assert_eq!(result.schema(), schema.id());
+        assert_eq!(result.stats().fields(), 1);
+        assert_eq!(result.stats().source_edges(), 1);
+        fixture
+            .policy
+            .settle_model_call(active, AgentModelCallSettlement::Completed, 120, 4, 80)
+            .expect("extraction settlement");
     }
 
     #[test]

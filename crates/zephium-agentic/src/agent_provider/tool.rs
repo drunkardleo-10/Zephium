@@ -557,11 +557,16 @@ impl AgentBrowserToolCall {
     pub fn into_continuation_parts(
         self,
     ) -> (AgentProviderToolCallCorrelation, AgentBrowserToolProposal) {
+        let extraction_schema = match &self.proposal {
+            AgentBrowserToolProposal::Extract { schema, .. } => Some(*schema),
+            _ => None,
+        };
         (
             AgentProviderToolCallCorrelation {
                 source_call: self.source_call,
                 id: self.id,
                 kind: self.proposal.kind(),
+                extraction_schema,
                 provider_item_id: self.provider_item_id,
                 arguments: self.arguments,
             },
@@ -590,6 +595,7 @@ pub struct AgentProviderToolCallCorrelation {
     pub(super) source_call: AgentProviderCallIdentity,
     pub(super) id: AgentBrowserToolCallId,
     pub(super) kind: AgentBrowserToolKind,
+    pub(super) extraction_schema: Option<SemanticExtractionSchemaId>,
     pub(super) provider_item_id: Option<String>,
     pub(super) arguments: String,
 }
@@ -618,6 +624,7 @@ impl fmt::Debug for AgentProviderToolCallCorrelation {
             .field("source_call", &self.source_call)
             .field("id", &self.id)
             .field("kind", &self.kind)
+            .field("extraction_schema", &self.extraction_schema)
             .field(
                 "provider_item_id",
                 &self.provider_item_id.as_ref().map(|_| "[redacted]"),

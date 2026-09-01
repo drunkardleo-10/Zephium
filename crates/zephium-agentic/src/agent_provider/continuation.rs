@@ -12,11 +12,13 @@ use std::sync::Arc;
 use thiserror::Error;
 
 use crate::semantic_diff_model::SemanticDiffDeliveryAuthority;
+use crate::semantic_extract_model::SemanticExtractionDeliveryAuthority;
 use crate::semantic_locate_model::SemanticLocateDeliveryAuthority;
 use crate::semantic_read_model::SemanticReadDeliveryAuthority;
 use crate::semantic_screenshot::SemanticScreenshotDeliveryAuthority;
 use crate::{
     AgentModelCallRequest, SemanticDiff, SemanticDiffEncodingStats, SemanticDiffModelPayload,
+    SemanticExtractionEncodingStats, SemanticExtractionModelPayload, SemanticExtractionSchema,
     SemanticLocateEncodingStats, SemanticLocateModelPayload, SemanticLocateResult,
     SemanticObservationAcknowledgement, SemanticObservationGeneration, SemanticObservationId,
     SemanticReadEncodingStats, SemanticReadModelPayload, SemanticReadResult, SemanticScreenshot,
@@ -213,7 +215,10 @@ impl AgentProviderContinuationSeed {
                 }
                 baseline
             }
-            AgentProviderInputEvidence::Screenshot(_) => return None,
+            AgentProviderInputEvidence::Extraction(_)
+            | AgentProviderInputEvidence::Screenshot(_) => {
+                return None;
+            }
         };
         let transcript = transcript?;
         Some(Self {
@@ -503,6 +508,76 @@ impl AgentProviderContinuation {
         })
     }
 
+    /// Binds one provisional same-plan request to an exact extraction mapping input.
+    ///
+    /// Only a prior `extract` call selecting this exact trusted schema may
+    /// enter the path. The bounded read must derive from the already-committed
+    /// provider baseline; progressive replacements require their own delivered
+    /// observation first.
+    pub fn bind_extraction_request(
+        self,
+        request: AgentModelCallRequest,
+        next_config: &AgentProviderCallConfig,
+        schema: &SemanticExtractionSchema,
+        read: &SemanticReadResult<'_>,
+        payload: SemanticExtractionModelPayload,
+    ) -> Result<AgentProviderBoundExtractionContinuation, AgentProviderContinuationError> {
+        let next_call = AgentProviderCallIdentity {
+            manifest: self.prior_call.manifest(),
+            call: request.id(),
+            lease: request.lease(),
+            node: self.prior_call.node(),
+        };
+        self.bind_extraction(next_call, next_config, schema, read, payload)
+    }
+
+    /// Consumes the exact prior extraction call into one constrained-output turn.
+    pub fn bind_extraction(
+        self,
+        next_call: AgentProviderCallIdentity,
+        next_config: &AgentProviderCallConfig,
+        schema: &SemanticExtractionSchema,
+        read: &SemanticReadResult<'_>,
+        payload: SemanticExtractionModelPayload,
+    ) -> Result<AgentProviderBoundExtractionContinuation, AgentProviderContinuationError> {
+        if next_config != &self.config {
+            return Err(AgentProviderContinuationError::Config);
+        }
+        if next_call.manifest() != self.prior_call.manifest()
+            || next_call.lease() != self.prior_call.lease()
+            || next_call.node() != self.prior_call.node()
+            || next_call.call() <= self.prior_call.call()
+        {
+            return Err(AgentProviderContinuationError::Lineage);
+        }
+        if self.correlation.kind() != AgentBrowserToolKind::Extract
+            || self.correlation.extraction_schema != Some(schema.id())
+        {
+            return Err(AgentProviderContinuationError::ToolKind);
+        }
+        if !read.matches_acknowledgement(&self.baseline) {
+            return Err(AgentProviderContinuationError::Baseline);
+        }
+        if !payload.matches(schema, read) {
+            return Err(AgentProviderContinuationError::Payload);
+        }
+        let (prior_call, config, baseline, correlation, transcript) = self.into_parts();
+        let (tool_result, semantic_stats, delivery) = payload.into_provider_parts();
+        let transcript = transcript.try_append(correlation, tool_result)?;
+        Ok(AgentProviderBoundExtractionContinuation {
+            prior_call,
+            next_call,
+            config,
+            baseline,
+            transcript,
+            semantic_stats,
+            delivery,
+            schema: schema.id(),
+            observation: read.observation(),
+            observation_generation: read.observation_generation(),
+        })
+    }
+
     /// Binds one provisional same-plan request to the exact viewport image.
     ///
     /// Only a prior `screenshot` tool call can enter this path. The returned
@@ -565,6 +640,7 @@ impl AgentProviderContinuation {
             self.correlation.kind(),
             AgentBrowserToolKind::Locate
                 | AgentBrowserToolKind::Read
+                | AgentBrowserToolKind::Extract
                 | AgentBrowserToolKind::Screenshot
         ) {
             return Err(AgentProviderContinuationError::ToolKind);
@@ -961,6 +1037,113 @@ impl fmt::Debug for AgentProviderBoundReadContinuation {
     }
 }
 
+/// Move-only provider continuation bound to one extraction mapping request.
+///
+/// The result turn is constrained to the fixed extraction JSON envelope and
+/// cannot create another browser-tool continuation.
+#[must_use]
+pub struct AgentProviderBoundExtractionContinuation {
+    prior_call: AgentProviderCallIdentity,
+    next_call: AgentProviderCallIdentity,
+    config: AgentProviderCallConfig,
+    baseline: SemanticObservationAcknowledgement,
+    transcript: AgentProviderTranscript,
+    semantic_stats: SemanticExtractionEncodingStats,
+    delivery: SemanticExtractionDeliveryAuthority,
+    schema: crate::SemanticExtractionSchemaId,
+    observation: SemanticObservationId,
+    observation_generation: SemanticObservationGeneration,
+}
+
+impl AgentProviderBoundExtractionContinuation {
+    /// Exact completed provider call awaiting extraction evidence.
+    pub const fn prior_call(&self) -> AgentProviderCallIdentity {
+        self.prior_call
+    }
+
+    /// Exact provisional constrained-output call.
+    pub const fn next_call(&self) -> AgentProviderCallIdentity {
+        self.next_call
+    }
+
+    /// Fixed provider protocol retained across the mapping turn.
+    pub const fn provider(&self) -> AgentProviderKind {
+        self.config.provider()
+    }
+
+    /// Exact trusted extraction schema selected by the prior tool call.
+    pub const fn schema(&self) -> crate::SemanticExtractionSchemaId {
+        self.schema
+    }
+
+    /// Exact source observation represented by the bounded read.
+    pub const fn observation(&self) -> SemanticObservationId {
+        self.observation
+    }
+
+    /// Exact source progressive-observation generation.
+    pub const fn observation_generation(&self) -> SemanticObservationGeneration {
+        self.observation_generation
+    }
+
+    /// Private structured transcript bytes retained until request serialization.
+    pub const fn retained_transcript_bytes(&self) -> usize {
+        self.transcript.retained_bytes()
+    }
+
+    /// Content-free metrics for the schema/read mapping input.
+    pub const fn semantic_stats(&self) -> SemanticExtractionEncodingStats {
+        self.semantic_stats
+    }
+
+    pub(super) const fn config(&self) -> &AgentProviderCallConfig {
+        &self.config
+    }
+
+    pub(super) const fn transcript(&self) -> &AgentProviderTranscript {
+        &self.transcript
+    }
+
+    pub(super) fn into_request_parts(
+        self,
+    ) -> (
+        AgentProviderCallIdentity,
+        AgentProviderCallConfig,
+        SemanticObservationAcknowledgement,
+        AgentProviderTranscript,
+        SemanticExtractionEncodingStats,
+        SemanticExtractionDeliveryAuthority,
+    ) {
+        (
+            self.next_call,
+            self.config,
+            self.baseline,
+            self.transcript,
+            self.semantic_stats,
+            self.delivery,
+        )
+    }
+}
+
+impl fmt::Debug for AgentProviderBoundExtractionContinuation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentProviderBoundExtractionContinuation")
+            .field("prior_call", &self.prior_call)
+            .field("next_call", &self.next_call)
+            .field("provider", &self.config.provider())
+            .field("baseline", &self.baseline)
+            .field("schema", &self.schema)
+            .field("observation", &self.observation)
+            .field("observation_generation", &self.observation_generation)
+            .field("semantic_stats", &self.semantic_stats)
+            .field("delivery", &"[redacted]")
+            .field("transcript_bytes", &self.transcript.retained_bytes())
+            .field("content", &"[redacted]")
+            .finish()
+    }
+}
+
 /// Move-only provider continuation bound to one exact viewport screenshot.
 ///
 /// The canonical PNG is retained only until the fixed provider body is
@@ -1091,12 +1274,13 @@ mod tests {
     use crate::semantic_screenshot::admitted_test_screenshot;
     use crate::{
         compute_semantic_diff, decode_semantic_snapshot, encode_semantic_diff,
-        encode_semantic_locate_result, encode_semantic_read, locate_semantic_observation,
-        read_semantic_observation, AgentAccountAttestationId, AgentAccountScope,
-        AgentContextAccountBinding, AgentModelCallBudget, AgentModelCallRequest,
+        encode_semantic_extraction_request, encode_semantic_locate_result, encode_semantic_read,
+        locate_semantic_observation, read_semantic_observation, AgentAccountAttestationId,
+        AgentAccountScope, AgentContextAccountBinding, AgentModelCallBudget, AgentModelCallRequest,
         AgentPolicyInstant, ContextCapabilities, ContextCapability, ContextId, ContextIdentity,
         ContextKind, ContextOperationId, ContextRegistry, ContextRunId, ContextSettlement, FrameId,
         SemanticCaptureInstant, SemanticDecodeContext, SemanticDiffBudget, SemanticDiffOutcome,
+        SemanticExtractionFieldSchema, SemanticExtractionSchema, SemanticExtractionSchemaId,
         SemanticFrameJoin, SemanticFrameTrust, SemanticInvocationId, SemanticLocateBudget,
         SemanticLocateId, SemanticLocateQuery, SemanticLocateRequest, SemanticLocateScope,
         SemanticModelEncodingBudget, SemanticObservation, SemanticObservationAssembler,
@@ -1266,6 +1450,65 @@ mod tests {
             SemanticReadBudget::STANDARD,
         )
         .expect("read result")
+    }
+
+    fn extraction_schema(id: u64) -> SemanticExtractionSchema {
+        SemanticExtractionSchema::try_new(
+            SemanticExtractionSchemaId::new(id).expect("schema id"),
+            vec![
+                SemanticExtractionFieldSchema::try_text("title".to_owned(), true, 128)
+                    .expect("title"),
+                SemanticExtractionFieldSchema::try_boolean("active".to_owned(), false)
+                    .expect("active"),
+            ],
+        )
+        .expect("schema")
+    }
+
+    fn extraction_continuation(
+        provider: AgentProviderKind,
+        baseline: SemanticObservationAcknowledgement,
+        schema: SemanticExtractionSchemaId,
+    ) -> AgentProviderContinuation {
+        let prior = call(1);
+        let arguments = format!(
+            r#"{{"scope":{{"kind":"initial"}},"schema_id":{}}}"#,
+            schema.get()
+        );
+        let tool = match provider {
+            AgentProviderKind::OpenAiResponses => {
+                super::super::AgentBrowserToolCall::decode_openai(
+                    prior,
+                    "fc_extract_private_1".to_owned(),
+                    "call_extract_private_1".to_owned(),
+                    "extract",
+                    arguments.clone(),
+                )
+                .expect("OpenAI extract tool")
+            }
+            AgentProviderKind::AnthropicMessages => super::super::AgentBrowserToolCall::decode(
+                prior,
+                "toolu_extract_private_1".to_owned(),
+                "extract",
+                arguments.clone(),
+            )
+            .expect("Anthropic extract tool"),
+        };
+        let correlation = tool.into_continuation_parts().0;
+        AgentProviderContinuationSeed {
+            call: prior,
+            config: config(provider),
+            baseline,
+            transcript: transcript(),
+        }
+        .join_terminal_tool(
+            completion(
+                prior,
+                u32::try_from(arguments.len()).expect("argument bytes"),
+            ),
+            correlation,
+        )
+        .expect("extract terminal join")
     }
 
     fn call(value: u64) -> AgentProviderCallIdentity {
@@ -1971,6 +2214,166 @@ mod tests {
         assert!(output.starts_with("ZREAD1 content=untrusted"));
         assert!(output.contains("private readable state"));
         assert!(!format!("{draft:?}").contains("private readable state"));
+    }
+
+    #[test]
+    fn extraction_turn_is_schema_bound_tool_free_and_provider_constrained() {
+        for provider in [
+            AgentProviderKind::OpenAiResponses,
+            AgentProviderKind::AnthropicMessages,
+        ] {
+            let context = context();
+            let observed = observation(context, 1, 1, 1, "private extraction evidence");
+            let baseline = SemanticObservationAcknowledgement::from_fingerprint(
+                SemanticObservationFingerprint::from_observation(&observed),
+            );
+            let read = read_result(&observed);
+            let schema = extraction_schema(71);
+            let config = config(provider);
+            let payload = encode_semantic_extraction_request(
+                &schema,
+                &read,
+                SemanticModelEncodingBudget::try_new(
+                    32 * 1024,
+                    32 * 1024,
+                    SemanticTokenCountRequirement::Exact,
+                )
+                .expect("extraction budget"),
+            )
+            .expect("encode extraction request")
+            .admit(
+                &FixedCounter {
+                    revision: config.tokenizer().clone(),
+                },
+                config.tokenizer(),
+            )
+            .expect("admit extraction request");
+            let bound = extraction_continuation(provider, baseline, schema.id())
+                .bind_extraction(call(2), &config, &schema, &read, payload)
+                .expect("bind extraction");
+            assert_eq!(bound.schema(), schema.id());
+            assert_eq!(bound.observation(), read.observation());
+            assert_eq!(bound.semantic_stats().fields(), 2);
+            let draft = super::super::request::AgentProviderExtractionRequestDraft::try_new(bound)
+                .expect("fixed extraction draft");
+            let wire: serde_json::Value =
+                serde_json::from_slice(draft.request().body()).expect("extraction request JSON");
+            assert!(draft.request().byte_len() < super::super::MAX_AGENT_PROVIDER_REQUEST_BYTES);
+            assert!(wire.get("tools").is_none());
+            assert!(wire.get("tool_choice").is_none());
+            assert!(wire.get("previous_response_id").is_none());
+            let serialized = serde_json::to_string(&wire).expect("request JSON text");
+            assert!(serialized.contains("private extraction evidence"));
+            assert!(serialized.contains("ZEXTRACT1"));
+            assert!(serialized.contains(r#"S name=\"title\""#));
+            let debug = format!("{draft:?}");
+            assert!(!debug.contains("private extraction evidence"));
+            assert!(!debug.contains("title"));
+            assert!(!debug.contains("extract_private_1"));
+
+            match provider {
+                AgentProviderKind::OpenAiResponses => {
+                    assert_eq!(wire["store"], false);
+                    assert_eq!(wire["stream"], true);
+                    assert_eq!(wire["truncation"], "disabled");
+                    assert_eq!(wire["text"]["format"]["type"], "json_schema");
+                    assert_eq!(wire["text"]["format"]["strict"], true);
+                    assert_eq!(
+                        wire["text"]["format"]["name"],
+                        "zephium_semantic_extraction_v1"
+                    );
+                    assert_eq!(
+                        wire["text"]["format"]["schema"]["additionalProperties"],
+                        false
+                    );
+                    assert_eq!(wire["input"][2]["type"], "function_call");
+                    assert_eq!(wire["input"][2]["name"], "extract");
+                    assert_eq!(wire["input"][3]["type"], "function_call_output");
+                }
+                AgentProviderKind::AnthropicMessages => {
+                    assert_eq!(wire["stream"], true);
+                    assert_eq!(wire["service_tier"], "standard_only");
+                    assert_eq!(wire["inference_geo"], "global");
+                    assert_eq!(wire["output_config"]["format"]["type"], "json_schema");
+                    assert_eq!(
+                        wire["output_config"]["format"]["schema"]["additionalProperties"],
+                        false
+                    );
+                    assert_eq!(wire["messages"][1]["content"][0]["type"], "tool_use");
+                    assert_eq!(wire["messages"][1]["content"][0]["name"], "extract");
+                    assert_eq!(wire["messages"][2]["content"][0]["type"], "tool_result");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn extraction_binding_rejects_schema_and_generic_diff_substitution() {
+        let context = context();
+        let observed = observation(context, 1, 1, 1, "private extraction evidence");
+        let baseline = SemanticObservationAcknowledgement::from_fingerprint(
+            SemanticObservationFingerprint::from_observation(&observed),
+        );
+        let read = read_result(&observed);
+        let selected = extraction_schema(71);
+        let substituted = extraction_schema(72);
+        let config = config(AgentProviderKind::OpenAiResponses);
+        let payload = encode_semantic_extraction_request(
+            &substituted,
+            &read,
+            SemanticModelEncodingBudget::try_new(
+                32 * 1024,
+                32 * 1024,
+                SemanticTokenCountRequirement::Exact,
+            )
+            .expect("extraction budget"),
+        )
+        .expect("encode extraction request")
+        .admit(
+            &FixedCounter {
+                revision: config.tokenizer().clone(),
+            },
+            config.tokenizer(),
+        )
+        .expect("admit extraction request");
+        assert!(matches!(
+            extraction_continuation(
+                AgentProviderKind::OpenAiResponses,
+                baseline.clone(),
+                selected.id(),
+            )
+            .bind_extraction(call(2), &config, &substituted, &read, payload),
+            Err(AgentProviderContinuationError::ToolKind)
+        ));
+
+        let current = observation(context, 2, 2, 2, "updated extraction evidence");
+        let SemanticDiffOutcome::Diff(diff) =
+            compute_semantic_diff(&observed, &baseline, &current, SemanticDiffBudget::ACTION)
+        else {
+            panic!("diff")
+        };
+        let diff_payload = encode_semantic_diff(
+            &diff,
+            SemanticModelEncodingBudget::try_new(
+                16 * 1024,
+                16 * 1024,
+                SemanticTokenCountRequirement::Exact,
+            )
+            .expect("diff encoding budget"),
+        )
+        .expect("encode diff")
+        .admit(
+            &FixedCounter {
+                revision: config.tokenizer().clone(),
+            },
+            config.tokenizer(),
+        )
+        .expect("admit diff");
+        assert!(matches!(
+            extraction_continuation(AgentProviderKind::OpenAiResponses, baseline, selected.id(),)
+                .bind_diff(call(2), &config, &diff, diff_payload),
+            Err(AgentProviderContinuationError::ToolKind)
+        ));
     }
 
     #[test]
