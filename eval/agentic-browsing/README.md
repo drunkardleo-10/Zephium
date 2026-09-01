@@ -52,6 +52,15 @@ HTTPS endpoints, rustls/system-proxy feature graph, redirect/retry refusal,
 sensitive credentials, identity encoding, test-only loopback construction, and
 move-only usage-settlement route.
 
+That gate also decodes all three committed JSON manifests through closed
+schemas, rejects unknown fields, machine-local paths and high-confidence secret
+material, and cross-checks capability pins against the vendored manifests and
+provenance records. The current pending Browse and Windows states are exact:
+they cannot acquire measurements or advance to a qualified claim without a
+reviewed validator change. This deliberately makes evidence promotion a
+code-and-evidence review, rather than allowing an edited status string to turn
+missing device work into a pass.
+
 macOS CI also executes the hidden 14-case fixed-DOM matrix:
 
 ```sh

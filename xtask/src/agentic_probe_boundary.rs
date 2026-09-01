@@ -37,6 +37,7 @@ const ENGINE_RELEASE_REFUSAL: &str = concat!(
 );
 
 pub(crate) fn check(repository: &Path) -> Result<(), String> {
+    crate::agentic_evidence::check(repository)?;
     validate_manifest(&read(repository.join(AGENTIC_MANIFEST))?)?;
     validate_root(&read(repository.join(AGENTIC_ROOT))?)?;
     validate_provider_billing_contract(

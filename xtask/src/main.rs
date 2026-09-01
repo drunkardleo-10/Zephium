@@ -1,6 +1,7 @@
 //! Single deterministic entrypoint for the workspace gate: `cargo xtask ci`.
 
 mod adblock_provenance;
+mod agentic_evidence;
 mod agentic_probe_boundary;
 mod bitwarden_core;
 mod blocker_seed;
