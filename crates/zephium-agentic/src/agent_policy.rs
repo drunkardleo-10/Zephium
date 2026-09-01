@@ -19,8 +19,8 @@ use effect::AgentEffectRow;
 pub use effect::{
     AgentActiveEffect, AgentEffectAssessment, AgentEffectAuthorization, AgentEffectCancellation,
     AgentEffectDispatchRequest, AgentEffectId, AgentEffectPermit, AgentEffectReceipt,
-    AgentEffectRequest, AgentEffectSettlement, AgentNeedsHumanReason, AgentNeedsHumanTransition,
-    MAX_AGENT_PENDING_EFFECTS,
+    AgentEffectRequest, AgentEffectSettlement, AgentFailedSemanticEffect, AgentNeedsHumanReason,
+    AgentNeedsHumanTransition, AgentVerifiedSemanticEffect, MAX_AGENT_PENDING_EFFECTS,
 };
 
 use crate::semantic_diff::SemanticObservationFingerprint;
@@ -2466,13 +2466,13 @@ mod tests {
         compute_semantic_diff, decode_semantic_snapshot, encode_semantic_diff,
         encode_semantic_extraction_request, encode_semantic_locate_result,
         encode_semantic_observation, encode_semantic_read, locate_semantic_observation,
-        read_semantic_observation, verify_semantic_action, AgentAccountAttestationId,
-        AgentAccountId, AgentDataFlowRule, AgentEffectScope, AgentPlanNodeAuthority,
-        AgentPlanNodeScope, AgentPreparedObservationRequest, AgentPreparedReadRequest,
-        AgentProviderCallConfig, AgentProviderContractError, AgentProviderDiffRequestDraft,
-        AgentProviderEndpoint, AgentProviderExtractionRequestDraft, AgentProviderInputEvidence,
-        AgentProviderInputOutcome, AgentProviderKind, AgentProviderLocalInputTokenCounter,
-        AgentProviderLocateRequestDraft, AgentProviderModelRevision, AgentProviderObjective,
+        read_semantic_observation, AgentAccountAttestationId, AgentAccountId, AgentDataFlowRule,
+        AgentEffectScope, AgentPlanNodeAuthority, AgentPlanNodeScope,
+        AgentPreparedObservationRequest, AgentPreparedReadRequest, AgentProviderCallConfig,
+        AgentProviderContractError, AgentProviderDiffRequestDraft, AgentProviderEndpoint,
+        AgentProviderExtractionRequestDraft, AgentProviderInputEvidence, AgentProviderInputOutcome,
+        AgentProviderKind, AgentProviderLocalInputTokenCounter, AgentProviderLocateRequestDraft,
+        AgentProviderModelRevision, AgentProviderObjective,
         AgentProviderReadContinuationRequestDraft, AgentProviderRequestSettlement,
         AgentProviderScreenshotRequestDraft, AgentProviderStreamBatch, AgentProviderStreamBudget,
         AgentProviderStreamConclusion, AgentProviderStreamEvent, AgentProviderTextDelta,
@@ -2489,10 +2489,10 @@ mod tests {
         SemanticObservationBudget, SemanticObservationId, SemanticObservationRequest,
         SemanticPreparedAction, SemanticReadAuthority, SemanticReadBudget,
         SemanticReadSensitivityLimit, SemanticSettleBudget, SemanticSettleInstant,
-        SemanticSettleTracker, SemanticSnapshot, SemanticSnapshotGeneration, SemanticState,
-        SemanticTokenCountQuality, SemanticTokenCountRequirement, SemanticTokenCounter,
-        SemanticTokenCounterError, SemanticTokenMeasurement, SemanticTokenizerRevision,
-        SemanticVerification, SemanticWaitCondition, SEMANTIC_WIRE_VERSION,
+        SemanticSnapshot, SemanticSnapshotGeneration, SemanticState, SemanticTokenCountQuality,
+        SemanticTokenCountRequirement, SemanticTokenCounter, SemanticTokenCounterError,
+        SemanticTokenMeasurement, SemanticTokenizerRevision, SemanticVerification,
+        SemanticWaitCondition, SEMANTIC_WIRE_VERSION,
     };
     use serde_json::{json, Value};
 
@@ -5693,12 +5693,36 @@ mod tests {
                 effect_dispatch_request(1, binding, automation),
             )
             .expect("dispatch");
-        let tracker =
-            SemanticSettleTracker::begin(attempt, &action, SemanticSettleInstant::from_millis(NOW))
-                .expect("settle tracker");
+        let (pending, native) = crate::prepare_semantic_action_execution(
+            active,
+            &action,
+            crate::SemanticActionExecutionInstant::from_millis(NOW - 20),
+        )
+        .expect("native execution");
+        let actual_geometry = native.expected_geometry();
+        let outcome = pending.settle(
+            action.frame(),
+            native.complete(
+                crate::SemanticActionExecutionBackend::FixedSemanticRecipe,
+                crate::SemanticActionNativeReadiness::ExactVisibleUnoccludedTarget,
+                crate::SemanticActionNativeViewport::try_new(800, 600).expect("viewport"),
+                actual_geometry,
+                crate::SemanticActionExecutionInstant::from_millis(NOW - 10),
+                crate::SemanticActionExecutionInstant::from_millis(NOW),
+            ),
+        );
+        let start =
+            crate::begin_semantic_action_settlement(outcome, &action).expect("settlement start");
+        let mut settlement_coordinator = crate::SemanticActionSettlementCoordinator::new();
+        let crate::SemanticActionSettlementUpdate::Terminal(terminal) = settlement_coordinator
+            .begin(start)
+            .expect("immediate settlement")
+        else {
+            panic!("immediate settlement was pending");
+        };
         let snapshot = post_action_snapshot(&observation);
-        let verified = verify_semantic_action(
-            &tracker,
+        let verified_terminal = crate::verify_semantic_action_terminal(
+            *terminal,
             &action,
             SemanticEffectEvidence::snapshot(
                 attempt,
@@ -5707,16 +5731,26 @@ mod tests {
             ),
         )
         .expect("independent proof");
-        let receipt = fixture
+        let accounted = fixture
             .policy
-            .settle_verified_semantic_effect(active, &action, &verified)
+            .settle_verified_semantic_terminal(verified_terminal, &action)
             .expect("effect settlement");
+        let receipt = accounted.receipt();
         assert_eq!(receipt.id().get(), 1);
         assert_eq!(receipt.attempt(), attempt);
         assert_eq!(
             receipt.settlement(),
             AgentEffectSettlement::Verified(crate::SemanticEffectProofKind::TargetState)
         );
+        assert_eq!(accounted.verified().attempt(), attempt);
+        assert_eq!(accounted.settlement().attempt(), attempt);
+        assert_eq!(
+            accounted.execution().backend(),
+            crate::SemanticActionExecutionBackend::FixedSemanticRecipe
+        );
+        let debug = format!("{accounted:?}");
+        assert!(!debug.contains("Save draft"));
+        assert!(!debug.contains("effect.example.test"));
         assert_eq!(fixture.policy.pending_effects(), 0);
         assert_eq!(fixture.policy.accounting().consumed_operations(), 2);
         assert_eq!(fixture.policy.accounting().reserved_operations(), 0);
@@ -5766,15 +5800,64 @@ mod tests {
                 effect_dispatch_request(2, binding, automation),
             )
             .expect("failed dispatch");
+        let (pending, native) = crate::prepare_semantic_action_execution(
+            failed_active,
+            &action,
+            crate::SemanticActionExecutionInstant::from_millis(NOW - 20),
+        )
+        .expect("failed-path native execution");
+        let actual_geometry = native.expected_geometry();
+        let outcome = pending.settle(
+            action.frame(),
+            native.complete(
+                crate::SemanticActionExecutionBackend::FixedSemanticRecipe,
+                crate::SemanticActionNativeReadiness::ExactVisibleUnoccludedTarget,
+                crate::SemanticActionNativeViewport::try_new(800, 600).expect("viewport"),
+                actual_geometry,
+                crate::SemanticActionExecutionInstant::from_millis(NOW - 10),
+                crate::SemanticActionExecutionInstant::from_millis(NOW),
+            ),
+        );
+        let start = crate::begin_semantic_action_settlement(outcome, &action)
+            .expect("failed-path settlement start");
+        let crate::SemanticActionSettlementUpdate::Terminal(terminal) = settlement_coordinator
+            .begin(start)
+            .expect("failed-path immediate settlement")
+        else {
+            panic!("immediate settlement was pending");
+        };
+        let verification_refusal = crate::verify_semantic_action_terminal(
+            *terminal,
+            &action,
+            SemanticEffectEvidence::navigation(
+                failed_attempt,
+                SemanticSettleInstant::from_millis(NOW + 1),
+                action.frame().context(),
+                action.frame().context(),
+            ),
+        )
+        .expect_err("wrong evidence class");
+        assert_eq!(
+            verification_refusal.error(),
+            crate::SemanticVerificationError::EvidenceKindMismatch
+        );
         let failed = fixture
             .policy
-            .settle_failed_semantic_effect(failed_active, SemanticActionFailure::BackendRefused)
+            .settle_refused_semantic_terminal(verification_refusal)
             .expect("failed settlement");
         assert_eq!(
-            failed.settlement(),
-            AgentEffectSettlement::Failed(SemanticActionFailure::BackendRefused)
+            failed.receipt().settlement(),
+            AgentEffectSettlement::Failed(SemanticActionFailure::VerificationFailed)
         );
-        assert_eq!(failed.attempt(), failed_attempt);
+        assert_eq!(failed.receipt().attempt(), failed_attempt);
+        assert_eq!(
+            failed.verification_error(),
+            crate::SemanticVerificationError::EvidenceKindMismatch
+        );
+        assert_eq!(failed.settlement().attempt(), failed_attempt);
+        let debug = format!("{failed:?}");
+        assert!(!debug.contains("Save draft"));
+        assert!(!debug.contains("effect.example.test"));
         assert_eq!(fixture.policy.accounting().consumed_operations(), 3);
         assert!(!fixture.policy.is_sealed());
 

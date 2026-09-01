@@ -204,6 +204,7 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     validate_semantic_terminal_verification(
         &read(repository.join(AGENTIC_ROOT))?,
         &read(repository.join(AGENTIC_SEMANTIC_VERIFY))?,
+        &read(repository.join(AGENTIC_EFFECT_POLICY))?,
     )?;
     validate_provider_input_evidence_contract(
         &read(repository.join(AGENTIC_ROOT))?,
@@ -2981,12 +2982,18 @@ fn validate_semantic_settlement_coordinator(root: &str, coordinator: &str) -> Re
     Ok(())
 }
 
-fn validate_semantic_terminal_verification(root: &str, verification: &str) -> Result<(), String> {
+fn validate_semantic_terminal_verification(
+    root: &str,
+    verification: &str,
+    policy: &str,
+) -> Result<(), String> {
     let root = compact(root);
     for required in [
         "verify_semantic_action_terminal",
         "SemanticActionVerificationRefusal",
         "SemanticActionVerifiedTerminal",
+        "AgentFailedSemanticEffect",
+        "AgentVerifiedSemanticEffect",
         "#[cfg(test)]pub(crate)usesemantic_verify::verify_semantic_action;",
     ] {
         if !root.contains(required) {
@@ -3019,6 +3026,7 @@ fn validate_semantic_terminal_verification(root: &str, verification: &str) -> Re
     }
     for forbidden in [
         "pubfnverify_semantic_action(",
+        "pubfninto_parts(",
         "into_terminal(",
         "evaluateJavaScript",
         "callAsyncJavaScript",
@@ -3037,6 +3045,46 @@ fn validate_semantic_terminal_verification(root: &str, verification: &str) -> Re
         if verification.contains(forbidden) {
             return Err(format!(
                 "semantic terminal verification acquired forbidden escape/work surface {forbidden}"
+            ));
+        }
+    }
+
+    if verification.matches("pub(crate)fninto_parts(").count() < 2 {
+        return Err(
+            "verified and refused terminals must remain opaque until policy settlement".to_owned(),
+        );
+    }
+
+    let policy = compact(policy);
+    for required in [
+        "pubstructAgentVerifiedSemanticEffect{",
+        "pubstructAgentFailedSemanticEffect{",
+        "pubfnsettle_verified_semantic_terminal(",
+        "terminal:SemanticActionVerifiedTerminal",
+        "let(active,execution,settlement,verified)=terminal.into_parts();",
+        "self.settle_verified_semantic_effect(active,action,&verified)?",
+        "pubfnsettle_refused_semantic_terminal(",
+        "refusal:SemanticActionVerificationRefusal",
+        "verification_error.action_failure()",
+        "pub(crate)fnsettle_verified_semantic_effect(",
+    ] {
+        if !policy.contains(required) {
+            return Err(format!(
+                "effect policy lost consuming verification settlement {required}"
+            ));
+        }
+    }
+    for forbidden in [
+        "pubfnsettle_verified_semantic_effect(",
+        "std::thread",
+        "std::time",
+        "std::fs",
+        "tokio::",
+        "retry(",
+    ] {
+        if policy.contains(forbidden) {
+            return Err(format!(
+                "effect policy acquired forbidden raw-verification/work surface {forbidden}"
             ));
         }
     }
@@ -4290,6 +4338,8 @@ mod tests {
                 verify_semantic_action_terminal,
                 SemanticActionVerificationRefusal,
                 SemanticActionVerifiedTerminal,
+                AgentFailedSemanticEffect,
+                AgentVerifiedSemanticEffect,
             };
             #[cfg(test)]
             pub(crate) use semantic_verify::verify_semantic_action;
@@ -4301,8 +4351,14 @@ mod tests {
                 settlement: SemanticSettleTracker,
                 verified: SemanticVerifiedAction,
             }
+            impl SemanticActionVerifiedTerminal {
+                pub(crate) fn into_parts(self) {}
+            }
             pub struct SemanticActionVerificationRefusal {
                 terminal: Box<SemanticActionSettlementTerminal>,
+            }
+            impl SemanticActionVerificationRefusal {
+                pub(crate) fn into_parts(self) {}
             }
             pub fn verify_semantic_action_terminal(
                 terminal: SemanticActionSettlementTerminal,
@@ -4316,7 +4372,30 @@ mod tests {
                 settlement: &SemanticSettleTracker,
             ) {}
         "#;
-        validate_semantic_terminal_verification(root, verification)
+        let policy = r#"
+            pub struct AgentVerifiedSemanticEffect {
+                receipt: AgentEffectReceipt,
+            }
+            pub struct AgentFailedSemanticEffect {
+                receipt: AgentEffectReceipt,
+            }
+            pub fn settle_verified_semantic_terminal(
+                &mut self,
+                terminal: SemanticActionVerifiedTerminal,
+                action: &SemanticPreparedAction,
+            ) {
+                let (active, execution, settlement, verified) = terminal.into_parts();
+                self.settle_verified_semantic_effect(active, action, &verified)?;
+            }
+            pub fn settle_refused_semantic_terminal(
+                &mut self,
+                refusal: SemanticActionVerificationRefusal,
+            ) {
+                verification_error.action_failure();
+            }
+            pub(crate) fn settle_verified_semantic_effect() {}
+        "#;
+        validate_semantic_terminal_verification(root, verification, policy)
             .expect("consuming terminal verification");
         assert!(validate_semantic_terminal_verification(
             root,
@@ -4324,6 +4403,7 @@ mod tests {
                 "pub(crate) fn verify_semantic_action(",
                 "pub fn verify_semantic_action(",
             ),
+            policy,
         )
         .is_err());
         assert!(validate_semantic_terminal_verification(
@@ -4332,11 +4412,19 @@ mod tests {
                 "let (active, execution, settlement) = terminal.into_parts();",
                 ""
             ),
+            policy,
         )
         .is_err());
         assert!(validate_semantic_terminal_verification(
             root,
             &format!("{verification}\nfn into_terminal() {{}}"),
+            policy,
+        )
+        .is_err());
+        assert!(validate_semantic_terminal_verification(
+            root,
+            verification,
+            &policy.replace("verification_error.action_failure();", ""),
         )
         .is_err());
     }

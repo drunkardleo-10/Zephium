@@ -90,12 +90,13 @@ pub use agent_metrics::{
 pub use agent_policy::{
     AgentActiveEffect, AgentActiveModelCall, AgentEffectAssessment, AgentEffectAuthorization,
     AgentEffectCancellation, AgentEffectDispatchRequest, AgentEffectId, AgentEffectPermit,
-    AgentEffectReceipt, AgentEffectRequest, AgentEffectSettlement, AgentModelCallAdmission,
-    AgentModelCallBudget, AgentModelCallId, AgentModelCallReceipt, AgentModelCallRequest,
-    AgentModelCallSettlement, AgentModelCallUnaccountedSettlement, AgentModelInputCancellation,
-    AgentModelUsageAccounting, AgentNeedsHumanReason, AgentNeedsHumanTransition,
-    AgentPlanLeaseBinding, AgentPolicyAccounting, AgentPolicyError, AgentRunPolicy,
-    AgentTaintCohort, MAX_AGENT_ACCOUNT_ATTESTATION_AGE_MILLIS, MAX_AGENT_PENDING_EFFECTS,
+    AgentEffectReceipt, AgentEffectRequest, AgentEffectSettlement, AgentFailedSemanticEffect,
+    AgentModelCallAdmission, AgentModelCallBudget, AgentModelCallId, AgentModelCallReceipt,
+    AgentModelCallRequest, AgentModelCallSettlement, AgentModelCallUnaccountedSettlement,
+    AgentModelInputCancellation, AgentModelUsageAccounting, AgentNeedsHumanReason,
+    AgentNeedsHumanTransition, AgentPlanLeaseBinding, AgentPolicyAccounting, AgentPolicyError,
+    AgentRunPolicy, AgentTaintCohort, AgentVerifiedSemanticEffect,
+    MAX_AGENT_ACCOUNT_ATTESTATION_AGE_MILLIS, MAX_AGENT_PENDING_EFFECTS,
     MAX_AGENT_PENDING_MODEL_CALLS, MAX_AGENT_TAINT_COHORTS, MAX_AGENT_TAINT_REFERENCES,
 };
 pub use agent_progress_metrics::{

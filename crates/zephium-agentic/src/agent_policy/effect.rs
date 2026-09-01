@@ -13,8 +13,10 @@ use sha2::{Digest, Sha256};
 
 use super::*;
 use crate::{
-    AgentRunManifestId, ContextAutomationState, ContextControl, SemanticActionFailure,
-    SemanticEffectProofKind, SemanticPreparedAction, SemanticVerifiedAction,
+    AgentRunManifestId, ContextAutomationState, ContextControl, SemanticActionExecutionApplied,
+    SemanticActionFailure, SemanticActionVerificationRefusal, SemanticActionVerifiedTerminal,
+    SemanticEffectProofKind, SemanticPreparedAction, SemanticSettleTracker,
+    SemanticVerificationError, SemanticVerifiedAction,
 };
 
 /// Maximum prepared or dispatched semantic effects in one run policy.
@@ -664,6 +666,121 @@ impl fmt::Debug for AgentEffectReceipt {
     }
 }
 
+/// Policy-accounted verified effect retaining its exact downstream proof state.
+#[must_use]
+pub struct AgentVerifiedSemanticEffect {
+    receipt: AgentEffectReceipt,
+    execution: SemanticActionExecutionApplied,
+    settlement: SemanticSettleTracker,
+    verified: SemanticVerifiedAction,
+}
+
+impl AgentVerifiedSemanticEffect {
+    /// Exact charged policy receipt.
+    pub const fn receipt(&self) -> AgentEffectReceipt {
+        self.receipt
+    }
+
+    /// Content-free backend attribution and native execution timing.
+    pub const fn execution(&self) -> SemanticActionExecutionApplied {
+        self.execution
+    }
+
+    /// Exact terminal settlement state consumed by verification.
+    pub const fn settlement(&self) -> &SemanticSettleTracker {
+        &self.settlement
+    }
+
+    /// Opaque independently established proof for action-result finalization.
+    pub const fn verified(&self) -> &SemanticVerifiedAction {
+        &self.verified
+    }
+
+    /// Separates the charged receipt, metrics state, and downstream proof.
+    pub fn into_parts(
+        self,
+    ) -> (
+        AgentEffectReceipt,
+        SemanticActionExecutionApplied,
+        SemanticSettleTracker,
+        SemanticVerifiedAction,
+    ) {
+        (self.receipt, self.execution, self.settlement, self.verified)
+    }
+}
+
+impl fmt::Debug for AgentVerifiedSemanticEffect {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentVerifiedSemanticEffect")
+            .field("receipt", &self.receipt)
+            .field("execution", &self.execution)
+            .field("settlement", &self.settlement)
+            .field("verified", &self.verified)
+            .finish()
+    }
+}
+
+/// Policy-accounted verification refusal with content-free terminal metrics.
+#[must_use]
+pub struct AgentFailedSemanticEffect {
+    receipt: AgentEffectReceipt,
+    execution: SemanticActionExecutionApplied,
+    settlement: SemanticSettleTracker,
+    verification_error: SemanticVerificationError,
+}
+
+impl AgentFailedSemanticEffect {
+    /// Exact charged failed policy receipt.
+    pub const fn receipt(&self) -> AgentEffectReceipt {
+        self.receipt
+    }
+
+    /// Content-free backend attribution and native execution timing.
+    pub const fn execution(&self) -> SemanticActionExecutionApplied {
+        self.execution
+    }
+
+    /// Exact terminal settlement state consumed by verification.
+    pub const fn settlement(&self) -> &SemanticSettleTracker {
+        &self.settlement
+    }
+
+    /// Closed verification refusal mapped into the receipt's typed failure.
+    pub const fn verification_error(&self) -> SemanticVerificationError {
+        self.verification_error
+    }
+
+    /// Separates the charged receipt and content-free failure metrics.
+    pub fn into_parts(
+        self,
+    ) -> (
+        AgentEffectReceipt,
+        SemanticActionExecutionApplied,
+        SemanticSettleTracker,
+        SemanticVerificationError,
+    ) {
+        (
+            self.receipt,
+            self.execution,
+            self.settlement,
+            self.verification_error,
+        )
+    }
+}
+
+impl fmt::Debug for AgentFailedSemanticEffect {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentFailedSemanticEffect")
+            .field("receipt", &self.receipt)
+            .field("execution", &self.execution)
+            .field("settlement", &self.settlement)
+            .field("verification_error", &self.verification_error)
+            .finish()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum AgentEffectRowState {
     Authorized,
@@ -965,8 +1082,40 @@ impl AgentRunPolicy {
         })
     }
 
+    /// Consumes one exact verified pipeline terminal into a charged receipt.
+    pub fn settle_verified_semantic_terminal(
+        &mut self,
+        terminal: SemanticActionVerifiedTerminal,
+        action: &SemanticPreparedAction,
+    ) -> Result<AgentVerifiedSemanticEffect, AgentPolicyError> {
+        let (active, execution, settlement, verified) = terminal.into_parts();
+        let receipt = self.settle_verified_semantic_effect(active, action, &verified)?;
+        Ok(AgentVerifiedSemanticEffect {
+            receipt,
+            execution,
+            settlement,
+            verified,
+        })
+    }
+
+    /// Consumes one exact refused proof opportunity into a charged failure.
+    pub fn settle_refused_semantic_terminal(
+        &mut self,
+        refusal: SemanticActionVerificationRefusal,
+    ) -> Result<AgentFailedSemanticEffect, AgentPolicyError> {
+        let (active, execution, settlement, verification_error) = refusal.into_parts();
+        let receipt =
+            self.settle_failed_semantic_effect(active, verification_error.action_failure())?;
+        Ok(AgentFailedSemanticEffect {
+            receipt,
+            execution,
+            settlement,
+            verification_error,
+        })
+    }
+
     /// Settles a dispatched effect only with its exact independent proof.
-    pub fn settle_verified_semantic_effect(
+    pub(crate) fn settle_verified_semantic_effect(
         &mut self,
         active: AgentActiveEffect,
         action: &SemanticPreparedAction,

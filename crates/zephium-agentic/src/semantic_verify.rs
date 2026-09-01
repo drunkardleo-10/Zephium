@@ -426,8 +426,7 @@ impl SemanticActionVerifiedTerminal {
         &self.verified
     }
 
-    /// Separates exact policy authority, metrics, settlement, and proof.
-    pub fn into_parts(
+    pub(crate) fn into_parts(
         self,
     ) -> (
         AgentActiveEffect,
@@ -464,8 +463,7 @@ impl SemanticActionVerificationRefusal {
         self.error
     }
 
-    /// Recovers terminal policy authority for one typed failed settlement.
-    pub fn into_parts(
+    pub(crate) fn into_parts(
         self,
     ) -> (
         AgentActiveEffect,

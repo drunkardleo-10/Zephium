@@ -164,6 +164,15 @@ are trusted, or that M4 is complete.
   authority, execution/settlement metrics, and closed verification error for
   one typed failed policy settlement. Borrowed snapshot/text evidence is never
   retained, and neither path owns a timer, task, queue, callback, or retry.
+- Run policy consumes the joined verified or refused terminal directly. The
+  raw “active authority plus borrowed proof” settlement method is crate-private.
+  Verified charging returns an immutable effect receipt still joined to
+  content-free execution attribution, terminal settlement, and the opaque
+  proof required by result finalization. Refused charging maps the closed
+  verification error exactly once to its action failure and returns the failed
+  receipt with timing/error state. Pre-verification native and settlement
+  failures keep the separate public typed-failure path; no fabricated proof is
+  needed to charge them.
 - A zero-idle single-owner coordinator now retains the active policy half while
   native work is outstanding. Its empty `Vec` allocates only on first use; it
   admits at most four requests process-wide and one per logical context,
@@ -574,7 +583,10 @@ opaque proof/action binding. The terminal join additionally covers exact
 success authority/attempt preservation, one-shot refusal with authority
 recovery, action substitution, backend attribution, and content-redacted
 diagnostics; the static gate rejects a public borrow-only verifier or terminal
-recovery retry path.
+recovery retry path. Policy-join coverage runs the complete
+dispatch→native→settle→verify→charge success path and the refused-evidence
+failure path, asserting exact receipt/attempt/proof/failure/backend retention;
+the static gate rejects a public raw verified-effect settlement method.
 
 Action-result coverage includes exact committed-baseline/content binding,
 source observation and batch guard substitution, exact verification

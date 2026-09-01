@@ -563,6 +563,15 @@ the same authority plus a closed verification error for one failed policy
 settlement. Neither path retains borrowed evidence or creates a verification
 retry.
 
+Policy accounting then consumes the joined verified or refused terminal rather
+than accepting separately supplied authority and proof. A verified charge
+returns the immutable effect receipt still joined to execution attribution,
+terminal settlement, and the opaque proof needed by result finalization. A
+verification refusal maps exactly once to the closed action-failure taxonomy
+and returns the failed receipt with content-free timing/error state. The raw
+verified-effect settlement method is crate-private; pre-verification native or
+settlement failures retain their distinct typed failure path.
+
 ### 8.2 Input backends
 
 The runtime can choose among:
