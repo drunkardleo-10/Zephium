@@ -13,7 +13,9 @@ transcript encoders now produce move-only drafts with a synchronous exact-local
 whole-input counting port, exact policy reservation, and commit-only diff
 transport authority. The Windows owner now lifecycle-binds a bounded native
 WebView2 adapter over a five-method closed CDP grammar, while its host semantic
-port remains deliberately unsupported pending physical qualification. Concrete
+port remains deliberately unsupported pending physical qualification. A
+release-excluded physical-Windows qualifier and closed offline reviewer now
+exercise that exact production adapter without widening the host port. Concrete
 reviewed local counters for pinned proof models remain absent, so production
 still falls back to fresh full observations. A mechanically release-excluded
 hidden/ephemeral/loopback-only semantic native qualifier passed on the
@@ -468,13 +470,23 @@ and `Runtime.callFunctionOn` documents the system-unique context id as the
 cross-process-navigation-safe alternative to a reusable numeric id
 ([Runtime domain](https://chromedevtools.github.io/devtools-protocol/tot/Runtime/#method-callFunctionOn)).
 
-This is compile-qualified production plumbing, not physical Windows evidence.
-The Windows host semantic task remains explicitly unsupported until the exact
-adapter passes the release-excluded fixed isolated-world fixture on supported
-physical Windows, including replacement, renderer loss, event pressure,
-teardown, and debugger coexistence. No live isolation, timing, arbitrary-page,
-or Windows product-support claim is made, and the extension-owned CDP probe
-remains unchanged.
+The production plumbing and its release-excluded physical qualifier are
+compile-qualified, not physical Windows evidence. The qualifier constructs the
+same hidden owned view through the production profile-inventory, navigation,
+content-policy, semantic, crash-observer, browser-process, and cleanup seams.
+Its four exact modes cover two document epochs, bounded context-event pressure
+with recovery in a third epoch, fixed local renderer loss followed by typed
+refusal, and coexistence while a debugger remains attached. A canonical
+content-free JSONL contract, four fixed create-new filenames, and an offline
+reviewer require one identical runtime fingerprint and exact focus, pending,
+process, profile, fixture, and teardown facts. Diagnostic code is
+optimized-build refused and the static boundary permits only the fixed
+`Page.crash` fault; it rejects generic CDP, evaluation, selectors, page
+bridges, input injection, focus mutation, arbitrary output paths, and external
+URLs. The Windows host semantic task remains explicitly unsupported until all
+four records pass on supported physical Windows. No live isolation, timing,
+arbitrary-page, or Windows product-support claim is made, and the
+extension-owned CDP probe remains unchanged.
 
 ## Reviewed macOS native evidence
 
@@ -519,6 +531,9 @@ node eval/agentic-browsing/semantic-runtime-smoke-v1.js
 cargo check --locked -p zephium-engine \
   --features native-agentic-semantic-probe \
   --bin macos-agentic-semantic-probe
+cargo check --locked --target x86_64-pc-windows-msvc \
+  -p zephium-engine --features native-agentic-semantic-probe \
+  --bin windows-agentic-semantic-probe
 ```
 
 Tests cover canonical/redacted origins and page text, main/child-frame joins,
@@ -605,9 +620,11 @@ rather than silently widening the hostile wire schema.
    checks. Open/closed shadow behavior and source exclusion currently have
    deterministic synthetic/static coverage but still require that engine
    evidence;
-4. run the bounded native WebView2 callback/lifecycle adapter through its fixed
-   isolated-world fixture on physical supported Windows, including hostile
-   replacement, renderer-loss, event-flood, teardown, and debugger-coexistence
-   cases. Keep the host port unsupported until that evidence passes. No
-   document-start named-world, main-world, or numeric-context fallback is
-   allowed.
+4. run the four fixed, create-new semantic qualifier records documented in the
+   evidence README on physical supported Windows, then pass the offline review.
+   The source/cross-build path already covers replacement, renderer loss,
+   bounded event-pressure recovery, exact process/profile teardown, debugger
+   continuity, and focus sampling, but none is behavioral evidence until the
+   physical records pass. Keep the host port unsupported until then. No
+   document-start named-world, main-world, numeric-context, or generic-CDP
+   fallback is allowed.

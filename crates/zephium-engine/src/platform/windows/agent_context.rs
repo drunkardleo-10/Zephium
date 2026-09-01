@@ -176,6 +176,10 @@ impl AgentOwnedView {
         self.semantic()?.pending_for_audit()
     }
 
+    pub(crate) fn semantic_work_drained_for_audit(&self) -> Option<bool> {
+        self.semantic()?.work_drained_for_audit()
+    }
+
     pub(crate) fn attest(&self, deadline: Instant) -> Result<(), AgentOwnedViewConstructionError> {
         attest_profile_before_initialization(
             &self.profile,

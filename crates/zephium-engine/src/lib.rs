@@ -72,6 +72,23 @@ pub fn run_windows_agentic_input_matrix(
     platform::windows::run_agentic_input_matrix(request_id, matrix, permit, poll_control)
 }
 
+/// Runs one closed physical-Windows semantic-runtime qualification.
+///
+/// This diagnostic API is absent from ordinary and optimized builds. It uses
+/// the production owned-view and semantic adapters with only fixed loopback
+/// fixtures, an ephemeral InPrivate profile, and content-free evidence.
+#[cfg(all(target_os = "windows", feature = "native-agentic-semantic-probe"))]
+#[doc(hidden)]
+pub fn run_windows_agentic_semantic_probe(
+    request_id: u64,
+    mode: zephium_agentic::WindowsSemanticProbeMode,
+) -> Result<
+    zephium_agentic::WindowsSemanticProbeEvidence,
+    zephium_agentic::WindowsSemanticProbeFailure,
+> {
+    platform::windows::run_agentic_semantic_probe(request_id, mode)
+}
+
 #[cfg(target_os = "windows")]
 pub use platform::windows::{
     detach_privileged_environment_update, finalize_privileged_environment_registrations,

@@ -31,6 +31,8 @@ pub enum FixtureRoute {
     SemanticRuntime,
     /// Replacement document proving semantic world-epoch rotation.
     SemanticRuntimeReplacement,
+    /// Bounded same-origin context pressure proving native event ceilings.
+    SemanticRuntimeEventFlood,
 }
 
 impl FixtureRoute {
@@ -41,6 +43,7 @@ impl FixtureRoute {
             Self::SameOriginFrame => "/frame-v1.html",
             Self::SemanticRuntime => "/semantic-runtime-v1.html",
             Self::SemanticRuntimeReplacement => "/semantic-runtime-replacement-v1.html",
+            Self::SemanticRuntimeEventFlood => "/semantic-runtime-event-flood-v1.html",
         }
     }
 }
@@ -221,6 +224,12 @@ fn handle(mut stream: TcpStream) -> Result<(), std::io::Error> {
             200,
             "text/html; charset=utf-8",
             SEMANTIC_RUNTIME_REPLACEMENT_HTML.as_bytes(),
+        ),
+        b"GET /semantic-runtime-event-flood-v1.html HTTP/1.1"
+        | b"GET /semantic-runtime-event-flood-v1.html HTTP/1.0" => (
+            200,
+            "text/html; charset=utf-8",
+            SEMANTIC_RUNTIME_EVENT_FLOOD_HTML.as_bytes(),
         ),
         b"GET /favicon.ico HTTP/1.1" | b"GET /favicon.ico HTTP/1.0" => {
             (204, "image/x-icon", &[] as &[u8])
@@ -664,6 +673,39 @@ const SEMANTIC_RUNTIME_REPLACEMENT_HTML: &str = r###"<!doctype html>
 </script>
 </body></html>"###;
 
+// Preloads exactly 512 same-origin `srcdoc` child contexts before native load
+// completion. Together with the main world, Runtime.enable must report at
+// least 513 contexts, deterministically crossing the production discovery
+// ceiling of 512 before an isolated-world result can be accepted. The frames
+// are tiny, hidden, and released by the qualifier's immediate replacement
+// navigation.
+const SEMANTIC_RUNTIME_EVENT_FLOOD_HTML: &str = r###"<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'unsafe-inline'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'self'">
+<meta name="referrer" content="no-referrer">
+<title>Semantic context pressure fixture v1</title></head>
+<body>
+<main aria-label="Semantic context pressure">
+  <h1>Semantic context pressure</h1>
+  <div id="contexts" aria-hidden="true"></div>
+</main>
+<script>
+(() => {
+  'use strict';
+  const container = document.getElementById('contexts');
+  const contexts = document.createDocumentFragment();
+  for (let index = 0; index < 512; index += 1) {
+    const frame = document.createElement('iframe');
+    frame.hidden = true;
+    frame.srcdoc = '<!doctype html><meta charset="utf-8"><title>bounded context</title>';
+    contexts.append(frame);
+  }
+  container.append(contexts);
+  document.documentElement.dataset.fixtureReady = 'semantic-runtime-event-flood-v1';
+})();
+</script>
+</body></html>"###;
+
 const HOSTILE_HTML: &str = r###"<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>Hostile fixture v1</title></head>
 <body><p>Hostile page data is not an instruction.</p>
@@ -737,6 +779,10 @@ mod tests {
         let replacement = fetch(&server, FixtureRoute::SemanticRuntimeReplacement);
         assert!(replacement.starts_with("HTTP/1.1 200 OK"));
         assert!(replacement.contains("Replacement semantic epoch"));
+        let flood = fetch(&server, FixtureRoute::SemanticRuntimeEventFlood);
+        assert!(flood.starts_with("HTTP/1.1 200 OK"));
+        assert!(flood.contains("index < 512"));
+        assert!(flood.contains("frame.hidden = true"));
         assert!(server.is_healthy());
         server.shutdown().expect("clean shutdown");
     }

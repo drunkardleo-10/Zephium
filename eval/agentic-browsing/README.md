@@ -39,6 +39,9 @@ cargo check --locked --target x86_64-pc-windows-msvc \
   --bin windows-agentic-input-probe
 cargo check --locked --target x86_64-pc-windows-msvc \
   -p zephium-engine --features agentic-browser
+cargo check --locked --target x86_64-pc-windows-msvc \
+  -p zephium-engine --features native-agentic-semantic-probe \
+  --bin windows-agentic-semantic-probe
 cargo xtask check-agentic-probe-boundary
 ```
 
@@ -180,6 +183,67 @@ or failed fixture makes the review command nonzero. The exact
 `--write-summary` form instead writes those same validated UTF-8 aggregate
 bytes to the fixed create-new summary filename. The aggregate remains ignored
 until reviewed into the committed manifest.
+
+The production Windows semantic adapter has a separate four-process physical
+qualification. It is fully hidden and uses no OS-wide pointer or keyboard
+input, focus API, Accessibility permission, account, credential, external
+site, extension-owned native seam, screenshot, or page-world bridge. Each run
+creates a new ephemeral WebView2 user-data directory, an InPrivate automation
+subprofile whose extension inventory is proven empty, one fixed 1280-by-800
+logical owned view, and only loopback fixtures. The release-excluded renderer
+case issues the sole fixed `Page.crash` diagnostic command against that local
+view; no generic CDP method, expression, selector, or target is accepted.
+
+Run the three non-debugger modes as ordinary processes on an authorized
+physical Windows device:
+
+```powershell
+cargo run --locked -p zephium-engine `
+  --features native-agentic-semantic-probe `
+  --bin windows-agentic-semantic-probe -- --ci-hidden-fixed-documents `
+  --evidence-directory eval/agentic-browsing/local-results
+cargo run --locked -p zephium-engine `
+  --features native-agentic-semantic-probe `
+  --bin windows-agentic-semantic-probe -- --ci-hidden-event-flood `
+  --evidence-directory eval/agentic-browsing/local-results
+cargo run --locked -p zephium-engine `
+  --features native-agentic-semantic-probe `
+  --bin windows-agentic-semantic-probe -- --ci-hidden-renderer-loss `
+  --evidence-directory eval/agentic-browsing/local-results
+cargo build --locked -p zephium-engine `
+  --features native-agentic-semantic-probe `
+  --bin windows-agentic-semantic-probe
+```
+
+For the fourth mode, configure an authorized debugger to launch the exact
+freshly built executable
+`target\debug\windows-agentic-semantic-probe.exe` with these exact arguments,
+and keep it attached until process exit:
+
+```text
+--ci-hidden-debugger-coexistence --evidence-directory eval/agentic-browsing/local-results
+```
+
+The debugger mode fails before native construction if no debugger is attached;
+all other modes fail before construction if one is attached. Every mode also
+samples debugger state and foreground, active-window, and thread-focus state
+throughout native work. Review only the exact four create-new records:
+
+```powershell
+cargo run --locked -p zephium-agentic `
+  --features probe-harness `
+  --bin windows-agentic-semantic-evidence-review -- `
+  --directory eval/agentic-browsing/local-results `
+  --write-summary
+```
+
+The offline reviewer requires one identical Windows/WebView2/adapter
+fingerprint and exact mode-specific snapshot, document-epoch, pressure,
+recovery, renderer-loss, debugger, focus, pending-work, process-exit, profile,
+fixture, and native-view teardown facts. It reads no other filename and emits
+no page content, path, native error, world/context identity, or trace. The
+runner accepts no stdout form and neither runner nor reviewer overwrites an
+existing record. Archive the local directory before any retry.
 
 The authorized hidden fixed-DOM macOS safety result is recorded only as reviewed
 aggregate fields. Native AppKit/accessibility, visible/background behavior,

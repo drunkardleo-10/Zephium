@@ -263,6 +263,10 @@ impl AgentSemanticRuntimeController {
         self.native.pending_for_audit()
     }
 
+    pub(crate) fn work_drained_for_audit(&self) -> Option<bool> {
+        self.native.work_drained_for_audit()
+    }
+
     pub(crate) fn attest(&self, core: &ICoreWebView2) -> bool {
         self.native.attest(core)
     }
@@ -527,6 +531,20 @@ impl NativeRuntime {
                 DocumentPhase::RendererLost | DocumentPhase::Failed | DocumentPhase::Retired
             ) || (!pending && state.discovery.is_none()));
         valid.then_some(pending)
+    }
+
+    fn work_drained_for_audit(&self) -> Option<bool> {
+        let state = self.shared.state.try_borrow().ok()?;
+        let drained = state.pending.is_none()
+            && state.in_flight.is_none()
+            && state.discovery.is_none()
+            && !state.context_events_enabled
+            && !state.cleanup_disable_pending;
+        let valid = state.bound
+            && state.completed_invocations <= MAX_SEMANTIC_RUNTIME_DOCUMENT_INVOCATIONS
+            && state.cleanup_disable_attempts <= MAX_CLEANUP_DISABLE_ATTEMPTS
+            && state.phase != DocumentPhase::Retired;
+        valid.then_some(drained)
     }
 
     fn attest(self: &Rc<Self>, core: &ICoreWebView2) -> bool {

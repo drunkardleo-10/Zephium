@@ -58,6 +58,7 @@ native-agentic-input-probe = [
 # fixture and content-free pass/fail runner.
 native-agentic-semantic-probe = [
     "agentic-browser",
+    "dep:tempfile",
     "zephium-agentic/probe-harness",
 ]
 # Compiles the production, zero-idle agent-browser native port. The feature is
@@ -120,6 +121,11 @@ path = "src/bin/macos_agentic_semantic_probe.rs"
 required-features = ["native-agentic-semantic-probe"]
 
 [[bin]]
+name = "windows-agentic-semantic-probe"
+path = "src/bin/windows_agentic_semantic_probe.rs"
+required-features = ["native-agentic-semantic-probe"]
+
+[[bin]]
 name = "macos-representative-extension-probe"
 path = "src/bin/macos_representative_extension_probe.rs"
 required-features = ["native-web-extension-probes"]
@@ -146,6 +152,7 @@ windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
     "Win32_System_Com",
+    "Win32_System_Diagnostics_Debug",
     "Win32_System_LibraryLoader",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",

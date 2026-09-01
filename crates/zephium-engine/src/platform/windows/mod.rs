@@ -9,6 +9,8 @@
 mod agent_context;
 #[cfg(feature = "native-agentic-input-probe")]
 mod agentic_input_probe;
+#[cfg(feature = "native-agentic-semantic-probe")]
+mod agentic_semantic_probe;
 #[cfg(any(test, feature = "windows-cdp-spike"))]
 #[allow(dead_code)]
 mod cdp;
@@ -40,6 +42,8 @@ pub(crate) use agent_context::{
 };
 #[cfg(feature = "native-agentic-input-probe")]
 pub(crate) use agentic_input_probe::run as run_agentic_input_matrix;
+#[cfg(feature = "native-agentic-semantic-probe")]
+pub(crate) use agentic_semantic_probe::run as run_agentic_semantic_probe;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;

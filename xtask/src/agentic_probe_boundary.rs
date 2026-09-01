@@ -64,12 +64,16 @@ const ENGINE_WINDOWS_SEMANTIC_RUNTIME: &str =
     "crates/zephium-engine/src/platform/windows/semantic_runtime.rs";
 const ENGINE_WINDOWS_PROBE_MODULE: &str =
     "crates/zephium-engine/src/platform/windows/agentic_input_probe.rs";
+const ENGINE_WINDOWS_SEMANTIC_PROBE_MODULE: &str =
+    "crates/zephium-engine/src/platform/windows/agentic_semantic_probe.rs";
 const ENGINE_MACOS_PROBE_BINARY: &str =
     "crates/zephium-engine/src/bin/macos_agentic_input_probe.rs";
 const ENGINE_MACOS_SEMANTIC_PROBE_BINARY: &str =
     "crates/zephium-engine/src/bin/macos_agentic_semantic_probe.rs";
 const ENGINE_WINDOWS_PROBE_BINARY: &str =
     "crates/zephium-engine/src/bin/windows_agentic_input_probe.rs";
+const ENGINE_WINDOWS_SEMANTIC_PROBE_BINARY: &str =
+    "crates/zephium-engine/src/bin/windows_agentic_semantic_probe.rs";
 const AGENTIC_SOURCE_DIRECTORY: &str = "crates/zephium-agentic/src";
 const AGENTIC_DIAGNOSTIC_MODULES: [&str; 10] = [
     "contract.rs",
@@ -201,6 +205,12 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         &windows_module,
         &read(repository.join(ENGINE_WINDOWS_SEMANTIC_RUNTIME))?,
     )?;
+    validate_windows_semantic_probe(
+        &windows_module,
+        &read(repository.join(ENGINE_WINDOWS_SEMANTIC_PROBE_MODULE))?,
+        &read(repository.join(ENGINE_WINDOWS_SEMANTIC_PROBE_BINARY))?,
+        &read(repository.join(AGENTIC_FIXTURE_SERVER))?,
+    )?;
     validate_owned_context_viewport_contract(
         &read(repository.join(AGENTIC_CONTEXT_PORT))?,
         &read(repository.join(ENGINE_AGENT_CONTEXT_HOST))?,
@@ -257,11 +267,18 @@ fn validate_engine_manifest(source: &str) -> Result<(), String> {
         .and_then(|features| features.get("native-agentic-semantic-probe"))
         .and_then(toml::Value::as_array)
         .ok_or_else(|| "engine native-agentic-semantic-probe feature is missing".to_owned())?;
-    if semantic_probe_feature.as_slice()
-        != [
-            toml::Value::String("agentic-browser".to_owned()),
-            toml::Value::String("zephium-agentic/probe-harness".to_owned()),
-        ]
+    let semantic_actual = semantic_probe_feature
+        .iter()
+        .filter_map(toml::Value::as_str)
+        .collect::<BTreeSet<_>>();
+    let semantic_expected = [
+        "agentic-browser",
+        "dep:tempfile",
+        "zephium-agentic/probe-harness",
+    ]
+    .into_iter()
+    .collect::<BTreeSet<_>>();
+    if semantic_actual != semantic_expected || semantic_actual.len() != semantic_probe_feature.len()
     {
         return Err("engine native-agentic-semantic-probe feature graph drifted".to_owned());
     }
@@ -311,22 +328,35 @@ fn validate_engine_manifest(source: &str) -> Result<(), String> {
             ));
         }
     }
-    let semantic_binary = binaries
-        .iter()
-        .find(|binary| {
-            binary.get("name").and_then(toml::Value::as_str) == Some("macos-agentic-semantic-probe")
-        })
-        .ok_or_else(|| "engine macOS semantic probe binary is missing".to_owned())?;
-    if semantic_binary.get("path").and_then(toml::Value::as_str)
-        != Some("src/bin/macos_agentic_semantic_probe.rs")
-        || semantic_binary
-            .get("required-features")
-            .and_then(toml::Value::as_array)
-            .is_none_or(|features| {
-                features.as_slice() != [toml::Value::String("native-agentic-semantic-probe".into())]
-            })
-    {
-        return Err("engine macOS semantic probe binary gate drifted".to_owned());
+    for (name, path, platform) in [
+        (
+            "macos-agentic-semantic-probe",
+            "src/bin/macos_agentic_semantic_probe.rs",
+            "macOS",
+        ),
+        (
+            "windows-agentic-semantic-probe",
+            "src/bin/windows_agentic_semantic_probe.rs",
+            "Windows",
+        ),
+    ] {
+        let semantic_binary = binaries
+            .iter()
+            .find(|binary| binary.get("name").and_then(toml::Value::as_str) == Some(name))
+            .ok_or_else(|| format!("engine {platform} semantic probe binary is missing"))?;
+        if semantic_binary.get("path").and_then(toml::Value::as_str) != Some(path)
+            || semantic_binary
+                .get("required-features")
+                .and_then(toml::Value::as_array)
+                .is_none_or(|features| {
+                    features.as_slice()
+                        != [toml::Value::String("native-agentic-semantic-probe".into())]
+                })
+        {
+            return Err(format!(
+                "engine {platform} semantic probe binary gate drifted"
+            ));
+        }
     }
     Ok(())
 }
@@ -343,6 +373,11 @@ fn validate_engine_root(source: &str) -> Result<(), String> {
         "#[cfg(all(target_os=\"macos\",feature=\"native-agentic-semantic-probe\"))]",
         "pubfnrun_macos_agentic_semantic_probe()->Result<(),&'staticstr>",
         "platform::macos::run_agentic_semantic_probe()",
+        "#[cfg(all(target_os=\"windows\",feature=\"native-agentic-semantic-probe\"))]",
+        "pubfnrun_windows_agentic_semantic_probe(",
+        "mode:zephium_agentic::WindowsSemanticProbeMode",
+        "Result<zephium_agentic::WindowsSemanticProbeEvidence,zephium_agentic::WindowsSemanticProbeFailure,>",
+        "platform::windows::run_agentic_semantic_probe(request_id,mode)",
     ] {
         if !source.contains(required) {
             return Err(format!(
@@ -810,6 +845,8 @@ fn validate_engine_windows_semantic_runtime(module: &str, source: &str) -> Resul
         "invoke_runtime_command(context,&state.pending.as_ref()?.invocation)",
         "state.installed_context=None",
         "state.document_generation=state.document_generation.checked_add(1)",
+        "fnwork_drained_for_audit(&self)->Option<bool>",
+        "state.pending.is_none()&&state.in_flight.is_none()&&state.discovery.is_none()&&!state.context_events_enabled&&!state.cleanup_disable_pending",
         "SemanticRuntimePortFailure::DocumentReplaced",
         "SemanticRuntimePortFailure::RendererLost",
         "SemanticRuntimePortFailure::TimedOut",
@@ -1194,6 +1231,156 @@ fn validate_windows_probe_source(source: &str) -> Result<(), String> {
         if source.contains(forbidden) {
             return Err(format!(
                 "Windows native-input probe contains forbidden authority {forbidden}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_windows_semantic_probe(
+    module: &str,
+    source: &str,
+    binary: &str,
+    fixture: &str,
+) -> Result<(), String> {
+    let module = compact(module);
+    for required in [
+        "#[cfg(feature=\"native-agentic-semantic-probe\")]modagentic_semantic_probe;",
+        "#[cfg(feature=\"native-agentic-semantic-probe\")]pub(crate)useagentic_semantic_probe::runasrun_agentic_semantic_probe;",
+    ] {
+        if !module.contains(required) {
+            return Err(format!(
+                "Windows semantic probe escaped or drifted from required gate {required}"
+            ));
+        }
+    }
+
+    let source = compact(source);
+    for required in [
+        "FixtureRoute::SemanticRuntime",
+        "FixtureRoute::SemanticRuntimeReplacement",
+        "FixtureRoute::SemanticRuntimeEventFlood",
+        "FixtureServer::start()",
+        "tempfile::tempdir()",
+        "WebContext::new(Some(profile.path().to_path_buf()))",
+        ".with_incognito(true)",
+        ".with_visible(false)",
+        ".with_focused(false)",
+        ".with_browser_extensions_enabled(true)",
+        "ContextProfileStorageClass::Ephemeral",
+        "ContextOwnedViewport::STANDARD",
+        "AgentOwnedProfile::automation(profile_id)",
+        "build_owned_agent_view(",
+        "ContextConstructionProof::WindowsOwnedAutomationSubprofileEmptyInventory",
+        "NativeContentPolicy::AllowAll",
+        "view.prepare_semantic_document_load()",
+        "view.navigation().document_finished_for_audit(operation)",
+        "view.dispatch_semantic(",
+        "view.semantic_work_drained_for_audit()",
+        "SemanticRuntimePortFailure::Transport",
+        "SemanticRuntimePortFailure::RendererLost",
+        "SemanticRuntimeFault::DocumentLoading",
+        "MAX_DOCUMENT_LOADING_RETRIES:u16=512",
+        "HSTRING::from(\"Page.crash\")",
+        "IsDebuggerPresent()",
+        "GetForegroundWindow()",
+        "GetActiveWindow()",
+        "GetFocus()",
+        "MsgWaitForMultipleObjectsEx(",
+        "for_in0..256",
+        "browser_process_for_environment(&captured)",
+        "install_browser_process_exit_observer(&captured,browser.id(),|_|{})",
+        "observer.observed_expected_exit()&&process.has_exited()",
+        "profile.close().is_ok()",
+        "server.shutdown().is_ok()",
+    ] {
+        if !source.contains(required) {
+            return Err(format!(
+                "Windows semantic probe lost required production-path mechanism {required}"
+            ));
+        }
+    }
+    if source.matches("CallDevToolsProtocolMethod(").count() != 1 {
+        return Err(
+            "Windows semantic probe must expose exactly one fixed renderer-crash CDP call"
+                .to_owned(),
+        );
+    }
+    for forbidden in [
+        "Runtime.evaluate",
+        "Page.addScriptToEvaluateOnNewDocument",
+        "Page.removeScriptToEvaluateOnNewDocument",
+        "Page.bringToFront",
+        "Page.captureScreenshot",
+        "Input.dispatch",
+        "ExecuteScript(",
+        "evaluate_script",
+        "querySelector",
+        "outerHTML",
+        "innerHTML",
+        "document.cookie",
+        "PostWebMessage",
+        "with_ipc_handler",
+        "with_initialization_script",
+        "AddHostObject",
+        "SendInput(",
+        "SetCursorPos(",
+        "SetFocus(",
+        "SetForegroundWindow(",
+        "mouse_event(",
+        "keybd_event(",
+        "http://",
+        "https://",
+        "method:&str",
+        "serde_json::Value",
+    ] {
+        if source.contains(forbidden) {
+            return Err(format!(
+                "Windows semantic probe acquired forbidden authority {forbidden}"
+            ));
+        }
+    }
+
+    let binary = compact(binary);
+    for required in [
+        "WindowsSemanticProbeMode::from_argument",
+        "--evidence-directory",
+        "eval/agentic-browsing/local-results",
+        "mode.local_result_filename()",
+        "NamedTempFile::new_in(directory)",
+        "pending.file.as_file().sync_all()",
+        "persist_noclobber(pending.destination)",
+        "qualify_windows_semantic_probe_evidence(mode,&evidence)",
+        "encode_windows_semantic_probe_response(&response)",
+        "WindowsSemanticProbeReply::Completed(evidence)",
+    ] {
+        if !binary.contains(required) {
+            return Err(format!(
+                "Windows semantic qualification runner lost required closed gate {required}"
+            ));
+        }
+    }
+    for forbidden in ["stdout", ".display()"] {
+        if binary.contains(forbidden) {
+            return Err(format!(
+                "Windows semantic qualification runner exposes forbidden output {forbidden}"
+            ));
+        }
+    }
+
+    let fixture = compact(fixture);
+    for required in [
+        "Self::SemanticRuntimeEventFlood=>\"/semantic-runtime-event-flood-v1.html\"",
+        "index<512",
+        "frame.hidden=true",
+        "frame.srcdoc=",
+        "connect-src'none'",
+        "form-action'none'",
+        "frame-src'self'",
+    ] {
+        if !fixture.contains(required) {
+            return Err(format!(
+                "Windows semantic pressure fixture lost required bound {required}"
             ));
         }
     }
@@ -3358,6 +3545,7 @@ mod tests {
             agentic-browser = ["dep:zephium-agentic"]
             native-agentic-semantic-probe = [
               "agentic-browser",
+              "dep:tempfile",
               "zephium-agentic/probe-harness",
             ]
             [[bin]]
@@ -3371,6 +3559,10 @@ mod tests {
             [[bin]]
             name = "macos-agentic-semantic-probe"
             path = "src/bin/macos_agentic_semantic_probe.rs"
+            required-features = ["native-agentic-semantic-probe"]
+            [[bin]]
+            name = "windows-agentic-semantic-probe"
+            path = "src/bin/windows_agentic_semantic_probe.rs"
             required-features = ["native-agentic-semantic-probe"]
             [dependencies]
             zephium-agentic = { optional = true }
@@ -3401,6 +3593,16 @@ mod tests {
             #[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
             pub fn run_macos_agentic_semantic_probe() -> Result<(), &'static str> {
                 platform::macos::run_agentic_semantic_probe()
+            }
+            #[cfg(all(target_os = "windows", feature = "native-agentic-semantic-probe"))]
+            pub fn run_windows_agentic_semantic_probe(
+                request_id: u64,
+                mode: zephium_agentic::WindowsSemanticProbeMode,
+            ) -> Result<
+                zephium_agentic::WindowsSemanticProbeEvidence,
+                zephium_agentic::WindowsSemanticProbeFailure,
+            > {
+                platform::windows::run_agentic_semantic_probe(request_id, mode)
             }
         "#;
         validate_engine_root(root).expect("valid engine release refusal");
@@ -3692,6 +3894,33 @@ mod tests {
         assert!(validate_engine_windows_semantic_runtime(
             module,
             &source.replace("MAX_CLEANUP_DISABLE_ATTEMPTS: u8 = 1", "usize::MAX"),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn windows_semantic_probe_is_fixed_hidden_and_release_excluded() {
+        let module = include_str!("../../crates/zephium-engine/src/platform/windows/mod.rs");
+        let source = include_str!(
+            "../../crates/zephium-engine/src/platform/windows/agentic_semantic_probe.rs"
+        );
+        let binary =
+            include_str!("../../crates/zephium-engine/src/bin/windows_agentic_semantic_probe.rs");
+        let fixture = include_str!("../../crates/zephium-agentic/src/fixture_server.rs");
+        validate_windows_semantic_probe(module, source, binary, fixture)
+            .expect("closed Windows semantic qualifier");
+        assert!(validate_windows_semantic_probe(
+            module,
+            &format!("{source}\nSetForegroundWindow(host);"),
+            binary,
+            fixture,
+        )
+        .is_err());
+        assert!(validate_windows_semantic_probe(
+            module,
+            source,
+            &binary.replace("persist_noclobber", "persist"),
+            fixture,
         )
         .is_err());
     }
