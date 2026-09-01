@@ -568,7 +568,12 @@ require an explicit reviewed product catalog.
 
 The supervisor records concise semantic progress—responsibility, active
 resource, operation class, state, result, and blocker—not hidden model
-reasoning or raw tool chatter.
+reasoning or raw tool chatter. Active model calls, model receipts, effect
+permits, active effects, effect receipts, and human transitions retain a
+private canonical manifest-revision guard. Progress accepts them only when
+both the public manifest identity and that guard match the supervisor
+topology; reusing an identity for different scope, budget, or lifetime facts
+cannot contaminate the progress projection or its downstream semantic audit.
 
 ## 12. Probe and test harness
 

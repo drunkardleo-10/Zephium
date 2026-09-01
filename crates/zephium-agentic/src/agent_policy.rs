@@ -487,6 +487,7 @@ impl fmt::Debug for AgentModelCallAdmission {
 #[must_use]
 pub struct AgentActiveModelCall {
     manifest: AgentRunManifestId,
+    manifest_guard: [u8; 32],
     id: AgentModelCallId,
     lease: AgentPlanLeaseId,
     node: AgentPlanNodeId,
@@ -513,6 +514,32 @@ impl AgentActiveModelCall {
     pub const fn node(&self) -> AgentPlanNodeId {
         self.node
     }
+
+    /// Whether this call belongs to one exact canonical manifest revision.
+    pub(crate) fn matches_manifest_revision(
+        &self,
+        manifest: AgentRunManifestId,
+        manifest_guard: [u8; 32],
+    ) -> bool {
+        self.manifest == manifest && self.manifest_guard == manifest_guard
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn for_progress_test(
+        manifest: &AgentRunManifest,
+        id: AgentModelCallId,
+        lease: AgentPlanLeaseId,
+        node: AgentPlanNodeId,
+    ) -> Self {
+        Self {
+            manifest: manifest.id(),
+            manifest_guard: manifest.guard(),
+            id,
+            lease,
+            node,
+            guard: [0; 32],
+        }
+    }
 }
 
 impl fmt::Debug for AgentActiveModelCall {
@@ -520,6 +547,7 @@ impl fmt::Debug for AgentActiveModelCall {
         formatter
             .debug_struct("AgentActiveModelCall")
             .field("manifest", &self.manifest)
+            .field("manifest_guard", &"[redacted]")
             .field("id", &self.id)
             .field("lease", &self.lease)
             .field("node", &self.node)
@@ -592,9 +620,10 @@ struct TerminalModelUsage {
 }
 
 /// Content-free terminal model-call accounting receipt.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub struct AgentModelCallReceipt {
     manifest: AgentRunManifestId,
+    manifest_guard: [u8; 32],
     id: AgentModelCallId,
     lease: AgentPlanLeaseId,
     node: AgentPlanNodeId,
@@ -657,16 +686,26 @@ impl AgentModelCallReceipt {
         self.cost_micro_usd
     }
 
+    /// Whether this receipt belongs to one exact canonical manifest revision.
+    pub(crate) fn matches_manifest_revision(
+        self,
+        manifest: AgentRunManifestId,
+        manifest_guard: [u8; 32],
+    ) -> bool {
+        self.manifest == manifest && self.manifest_guard == manifest_guard
+    }
+
     #[cfg(test)]
     pub(crate) const fn for_progress_test(
-        manifest: AgentRunManifestId,
+        manifest: &AgentRunManifest,
         id: AgentModelCallId,
         lease: AgentPlanLeaseId,
         node: AgentPlanNodeId,
         settlement: AgentModelCallSettlement,
     ) -> Self {
         Self {
-            manifest,
+            manifest: manifest.id(),
+            manifest_guard: manifest.guard(),
             id,
             lease,
             node,
@@ -677,6 +716,25 @@ impl AgentModelCallReceipt {
             output_tokens: 0,
             cost_micro_usd: 0,
         }
+    }
+}
+
+impl fmt::Debug for AgentModelCallReceipt {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentModelCallReceipt")
+            .field("manifest", &self.manifest)
+            .field("manifest_guard", &"[redacted]")
+            .field("id", &self.id)
+            .field("lease", &self.lease)
+            .field("node", &self.node)
+            .field("settlement", &self.settlement)
+            .field("usage_accounting", &self.usage_accounting)
+            .field("pricing_attribution", &self.pricing_attribution)
+            .field("input_tokens", &self.input_tokens)
+            .field("output_tokens", &self.output_tokens)
+            .field("cost_micro_usd", &self.cost_micro_usd)
+            .finish()
     }
 }
 
@@ -969,7 +1027,7 @@ impl AgentRunPolicy {
         let index = self.call_index_or_seal(active.id)?;
         let call = &self.calls[index];
         if call.state != ModelCallState::Delivered
-            || active.manifest != self.manifest.id()
+            || !active.matches_manifest_revision(self.manifest.id(), self.manifest.guard())
             || call.lease != active.lease
             || call.node != active.node
             || call.admission_guard != active.guard
@@ -1035,6 +1093,7 @@ impl AgentRunPolicy {
         }
         Ok(AgentModelCallReceipt {
             manifest: self.manifest.id(),
+            manifest_guard: self.manifest.guard(),
             id: call.id,
             lease: call.lease,
             node: call.node,
@@ -1176,6 +1235,7 @@ impl AgentRunPolicy {
         self.calls[index].state = ModelCallState::Delivered;
         Ok(AgentActiveModelCall {
             manifest: admission.manifest,
+            manifest_guard: self.manifest.guard(),
             id: admission.id,
             lease: admission.lease,
             node: admission.node,

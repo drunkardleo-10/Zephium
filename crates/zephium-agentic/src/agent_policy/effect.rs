@@ -255,6 +255,7 @@ pub enum AgentNeedsHumanReason {
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub struct AgentNeedsHumanTransition {
     manifest: AgentRunManifestId,
+    manifest_guard: [u8; 32],
     node: AgentPlanNodeId,
     context: ContextJoin,
     effect: SemanticEffectClass,
@@ -287,16 +288,26 @@ impl AgentNeedsHumanTransition {
         self.reason
     }
 
+    /// Whether this transition belongs to one exact canonical manifest revision.
+    pub(crate) fn matches_manifest_revision(
+        self,
+        manifest: AgentRunManifestId,
+        manifest_guard: [u8; 32],
+    ) -> bool {
+        self.manifest == manifest && self.manifest_guard == manifest_guard
+    }
+
     #[cfg(test)]
     pub(crate) const fn for_progress_test(
-        manifest: AgentRunManifestId,
+        manifest: &AgentRunManifest,
         node: AgentPlanNodeId,
         context: ContextJoin,
         effect: SemanticEffectClass,
         reason: AgentNeedsHumanReason,
     ) -> Self {
         Self {
-            manifest,
+            manifest: manifest.id(),
+            manifest_guard: manifest.guard(),
             node,
             context,
             effect,
@@ -310,6 +321,7 @@ impl fmt::Debug for AgentNeedsHumanTransition {
         formatter
             .debug_struct("AgentNeedsHumanTransition")
             .field("manifest", &self.manifest)
+            .field("manifest_guard", &"[redacted]")
             .field("node", &self.node)
             .field("context", &"[redacted]")
             .field("effect", &self.effect)
@@ -332,6 +344,7 @@ pub enum AgentEffectAuthorization {
 #[must_use]
 pub struct AgentEffectPermit {
     manifest: AgentRunManifestId,
+    manifest_guard: [u8; 32],
     id: AgentEffectId,
     lease: AgentPlanLeaseId,
     node: AgentPlanNodeId,
@@ -370,6 +383,35 @@ impl AgentEffectPermit {
     pub fn matches_action(&self, action: &SemanticPreparedAction) -> bool {
         self.action_guard == action.verification_guard()
     }
+
+    /// Whether this permit belongs to one exact canonical manifest revision.
+    pub(crate) fn matches_manifest_revision(
+        &self,
+        manifest: AgentRunManifestId,
+        manifest_guard: [u8; 32],
+    ) -> bool {
+        self.manifest == manifest && self.manifest_guard == manifest_guard
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn for_progress_test(
+        manifest: &AgentRunManifest,
+        id: AgentEffectId,
+        lease: AgentPlanLeaseId,
+        node: AgentPlanNodeId,
+        effect: SemanticEffectClass,
+    ) -> Self {
+        Self {
+            manifest: manifest.id(),
+            manifest_guard: manifest.guard(),
+            id,
+            lease,
+            node,
+            effect,
+            action_guard: [0; 32],
+            guard: [0; 32],
+        }
+    }
 }
 
 impl fmt::Debug for AgentEffectPermit {
@@ -377,6 +419,7 @@ impl fmt::Debug for AgentEffectPermit {
         formatter
             .debug_struct("AgentEffectPermit")
             .field("manifest", &self.manifest)
+            .field("manifest_guard", &"[redacted]")
             .field("id", &self.id)
             .field("lease", &self.lease)
             .field("node", &self.node)
@@ -391,6 +434,7 @@ impl fmt::Debug for AgentEffectPermit {
 #[must_use]
 pub struct AgentActiveEffect {
     manifest: AgentRunManifestId,
+    manifest_guard: [u8; 32],
     id: AgentEffectId,
     lease: AgentPlanLeaseId,
     node: AgentPlanNodeId,
@@ -430,6 +474,37 @@ impl AgentActiveEffect {
     pub const fn attempt(&self) -> SemanticActionAttemptId {
         self.attempt
     }
+
+    /// Whether this effect belongs to one exact canonical manifest revision.
+    pub(crate) fn matches_manifest_revision(
+        &self,
+        manifest: AgentRunManifestId,
+        manifest_guard: [u8; 32],
+    ) -> bool {
+        self.manifest == manifest && self.manifest_guard == manifest_guard
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn for_progress_test(
+        manifest: &AgentRunManifest,
+        id: AgentEffectId,
+        lease: AgentPlanLeaseId,
+        node: AgentPlanNodeId,
+        effect: SemanticEffectClass,
+        attempt: SemanticActionAttemptId,
+    ) -> Self {
+        Self {
+            manifest: manifest.id(),
+            manifest_guard: manifest.guard(),
+            id,
+            lease,
+            node,
+            effect,
+            attempt,
+            action_guard: [0; 32],
+            guard: [0; 32],
+        }
+    }
 }
 
 impl fmt::Debug for AgentActiveEffect {
@@ -437,6 +512,7 @@ impl fmt::Debug for AgentActiveEffect {
         formatter
             .debug_struct("AgentActiveEffect")
             .field("manifest", &self.manifest)
+            .field("manifest_guard", &"[redacted]")
             .field("id", &self.id)
             .field("lease", &self.lease)
             .field("node", &self.node)
@@ -469,9 +545,10 @@ pub enum AgentEffectSettlement {
 }
 
 /// Content-free receipt after one dispatched effect consumes its operation.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub struct AgentEffectReceipt {
     manifest: AgentRunManifestId,
+    manifest_guard: [u8; 32],
     id: AgentEffectId,
     lease: AgentPlanLeaseId,
     node: AgentPlanNodeId,
@@ -516,9 +593,18 @@ impl AgentEffectReceipt {
         self.settlement
     }
 
+    /// Whether this receipt belongs to one exact canonical manifest revision.
+    pub(crate) fn matches_manifest_revision(
+        self,
+        manifest: AgentRunManifestId,
+        manifest_guard: [u8; 32],
+    ) -> bool {
+        self.manifest == manifest && self.manifest_guard == manifest_guard
+    }
+
     #[cfg(test)]
     pub(crate) const fn for_progress_test(
-        manifest: AgentRunManifestId,
+        manifest: &AgentRunManifest,
         id: AgentEffectId,
         lease: AgentPlanLeaseId,
         node: AgentPlanNodeId,
@@ -527,7 +613,8 @@ impl AgentEffectReceipt {
         settlement: AgentEffectSettlement,
     ) -> Self {
         Self {
-            manifest,
+            manifest: manifest.id(),
+            manifest_guard: manifest.guard(),
             id,
             lease,
             node,
@@ -535,6 +622,22 @@ impl AgentEffectReceipt {
             attempt,
             settlement,
         }
+    }
+}
+
+impl fmt::Debug for AgentEffectReceipt {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentEffectReceipt")
+            .field("manifest", &self.manifest)
+            .field("manifest_guard", &"[redacted]")
+            .field("id", &self.id)
+            .field("lease", &self.lease)
+            .field("node", &self.node)
+            .field("effect", &self.effect)
+            .field("attempt", &self.attempt)
+            .field("settlement", &self.settlement)
+            .finish()
     }
 }
 
@@ -731,6 +834,7 @@ impl AgentRunPolicy {
         });
         Ok(AgentEffectAuthorization::Permit(AgentEffectPermit {
             manifest: self.manifest.id(),
+            manifest_guard: self.manifest.guard(),
             id: request.id(),
             lease: request.lease(),
             node: node_id,
@@ -751,7 +855,7 @@ impl AgentRunPolicy {
             return Err(AgentPolicyError::EffectMissing);
         };
         let row = &self.effects[index];
-        if permit.manifest != self.manifest.id()
+        if !permit.matches_manifest_revision(self.manifest.id(), self.manifest.guard())
             || row.state != AgentEffectRowState::Authorized
             || !row.matches_permit(&permit)
         {
@@ -779,7 +883,7 @@ impl AgentRunPolicy {
         };
         let row = &self.effects[index];
         if row.state != AgentEffectRowState::Authorized
-            || permit.manifest != self.manifest.id()
+            || !permit.matches_manifest_revision(self.manifest.id(), self.manifest.guard())
             || !row.matches_permit(&permit)
             || permit.action_guard != action.verification_guard()
         {
@@ -827,6 +931,7 @@ impl AgentRunPolicy {
         self.effects[index].state = AgentEffectRowState::Dispatched(request.attempt());
         Ok(AgentActiveEffect {
             manifest: permit.manifest,
+            manifest_guard: permit.manifest_guard,
             id: permit.id,
             lease: permit.lease,
             node: permit.node,
@@ -873,7 +978,9 @@ impl AgentRunPolicy {
             return Err(AgentPolicyError::EffectMissing);
         };
         let row = &self.effects[effect_index];
-        if active.manifest != self.manifest.id() || !row.matches_active(&active) {
+        if !active.matches_manifest_revision(self.manifest.id(), self.manifest.guard())
+            || !row.matches_active(&active)
+        {
             self.sealed = true;
             return Err(AgentPolicyError::EffectSettlementMismatch);
         }
@@ -905,6 +1012,7 @@ impl AgentRunPolicy {
         let row = self.effects.remove(effect_index);
         Ok(AgentEffectReceipt {
             manifest: self.manifest.id(),
+            manifest_guard: active.manifest_guard,
             id: row.id,
             lease: row.lease,
             node: row.node,
@@ -923,6 +1031,7 @@ impl AgentRunPolicy {
     ) -> AgentEffectAuthorization {
         AgentEffectAuthorization::NeedsHuman(AgentNeedsHumanTransition {
             manifest: self.manifest.id(),
+            manifest_guard: self.manifest.guard(),
             node,
             context,
             effect,

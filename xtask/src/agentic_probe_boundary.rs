@@ -14,6 +14,10 @@ const AGENTIC_PROVIDER_OPENAI: &str = "crates/zephium-agentic/src/agent_provider
 const AGENTIC_PROVIDER_ANTHROPIC: &str = "crates/zephium-agentic/src/agent_provider/anthropic.rs";
 const AGENTIC_PROVIDER_PRICING: &str = "crates/zephium-agentic/src/agent_provider/pricing.rs";
 const AGENTIC_POLICY: &str = "crates/zephium-agentic/src/agent_policy.rs";
+const AGENTIC_EFFECT_POLICY: &str = "crates/zephium-agentic/src/agent_policy/effect.rs";
+const AGENTIC_SUPERVISOR: &str = "crates/zephium-agentic/src/agent_supervisor.rs";
+const AGENTIC_SUPERVISOR_PROGRESS: &str =
+    "crates/zephium-agentic/src/agent_supervisor/runtime/progress.rs";
 const PROVIDER_TRANSPORT_MANIFEST: &str = "crates/zephium-agent-provider-transport/Cargo.toml";
 const PROVIDER_TRANSPORT_ROOT: &str = "crates/zephium-agent-provider-transport/src/lib.rs";
 const ENGINE_MANIFEST: &str = "crates/zephium-engine/Cargo.toml";
@@ -59,6 +63,12 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         &read(repository.join(AGENTIC_PROVIDER_PRICING))?,
         &read(repository.join(AGENTIC_POLICY))?,
         &read(repository.join(PROVIDER_TRANSPORT_ROOT))?,
+    )?;
+    validate_progress_manifest_revision_contract(
+        &read(repository.join(AGENTIC_POLICY))?,
+        &read(repository.join(AGENTIC_EFFECT_POLICY))?,
+        &read(repository.join(AGENTIC_SUPERVISOR))?,
+        &read(repository.join(AGENTIC_SUPERVISOR_PROGRESS))?,
     )?;
     validate_provider_transport_manifest(&read(repository.join(PROVIDER_TRANSPORT_MANIFEST))?)?;
     validate_provider_transport_root(&read(repository.join(PROVIDER_TRANSPORT_ROOT))?)?;
@@ -527,6 +537,99 @@ fn validate_provider_transport_root(source: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_progress_manifest_revision_contract(
+    policy: &str,
+    effect_policy: &str,
+    supervisor: &str,
+    progress: &str,
+) -> Result<(), String> {
+    let policy = compact(policy);
+    for required in [
+        "pubstructAgentActiveModelCall{manifest:AgentRunManifestId,manifest_guard:[u8;32]",
+        "pubstructAgentModelCallReceipt{manifest:AgentRunManifestId,manifest_guard:[u8;32]",
+        "Ok(AgentActiveModelCall{manifest:admission.manifest,manifest_guard:self.manifest.guard()",
+        "Ok(AgentModelCallReceipt{manifest:self.manifest.id(),manifest_guard:self.manifest.guard()",
+        "!active.matches_manifest_revision(self.manifest.id(),self.manifest.guard())",
+    ] {
+        if !policy.contains(required) {
+            return Err(format!(
+                "agent model progress value lost exact manifest revision binding {required}"
+            ));
+        }
+    }
+    if policy
+        .matches("pub(crate)fnmatches_manifest_revision(")
+        .count()
+        != 2
+        || policy
+            .matches("self.manifest==manifest&&self.manifest_guard==manifest_guard")
+            .count()
+            != 2
+    {
+        return Err(
+            "agent model progress values lost canonical manifest revision matching".to_owned(),
+        );
+    }
+
+    let effect_policy = compact(effect_policy);
+    for required in [
+        "pubstructAgentNeedsHumanTransition{manifest:AgentRunManifestId,manifest_guard:[u8;32]",
+        "pubstructAgentEffectPermit{manifest:AgentRunManifestId,manifest_guard:[u8;32]",
+        "pubstructAgentActiveEffect{manifest:AgentRunManifestId,manifest_guard:[u8;32]",
+        "pubstructAgentEffectReceipt{manifest:AgentRunManifestId,manifest_guard:[u8;32]",
+        "AgentEffectAuthorization::Permit(AgentEffectPermit{manifest:self.manifest.id(),manifest_guard:self.manifest.guard()",
+        "Ok(AgentActiveEffect{manifest:permit.manifest,manifest_guard:permit.manifest_guard",
+        "Ok(AgentEffectReceipt{manifest:self.manifest.id(),manifest_guard:active.manifest_guard",
+        "AgentEffectAuthorization::NeedsHuman(AgentNeedsHumanTransition{manifest:self.manifest.id(),manifest_guard:self.manifest.guard()",
+    ] {
+        if !effect_policy.contains(required) {
+            return Err(format!(
+                "agent effect progress value lost exact manifest revision binding {required}"
+            ));
+        }
+    }
+    if effect_policy
+        .matches("pub(crate)fnmatches_manifest_revision(")
+        .count()
+        != 4
+        || effect_policy
+            .matches("self.manifest==manifest&&self.manifest_guard==manifest_guard")
+            .count()
+            != 4
+    {
+        return Err(
+            "agent effect progress values lost canonical manifest revision matching".to_owned(),
+        );
+    }
+    if effect_policy
+        .matches("matches_manifest_revision(self.manifest.id(),self.manifest.guard())")
+        .count()
+        != 3
+    {
+        return Err(
+            "agent effect lifecycle stopped rejoining the canonical manifest revision".to_owned(),
+        );
+    }
+
+    let supervisor = compact(supervisor);
+    if !supervisor.contains("pub(super)constfnmanifest_guard(&self)->[u8;32]{self.manifest_guard}")
+    {
+        return Err(
+            "agent supervisor stopped retaining its private manifest revision guard".to_owned(),
+        );
+    }
+
+    let progress = compact(progress);
+    let join = "matches_manifest_revision(self.topology.manifest(),self.topology.manifest_guard())";
+    if progress.matches(join).count() != 6 {
+        return Err(
+            "all six supervisor progress admissions must join the exact manifest revision"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
 fn validate_agentic_zero_idle_sources(repository: &Path) -> Result<(), String> {
     let source_directory = repository.join(AGENTIC_SOURCE_DIRECTORY);
     let mut files = Vec::new();
@@ -868,6 +971,113 @@ mod tests {
         "#;
         validate_root(valid).expect("valid guard");
         assert!(validate_root("mod fixture_server;").is_err());
+    }
+
+    #[test]
+    fn supervisor_progress_requires_exact_manifest_revision_provenance() {
+        let policy = r#"
+            pub struct AgentActiveModelCall {
+                manifest: AgentRunManifestId,
+                manifest_guard: [u8; 32],
+            }
+            pub struct AgentModelCallReceipt {
+                manifest: AgentRunManifestId,
+                manifest_guard: [u8; 32],
+            }
+            pub(crate) fn matches_manifest_revision() {
+                self.manifest == manifest && self.manifest_guard == manifest_guard
+            }
+            pub(crate) fn matches_manifest_revision() {
+                self.manifest == manifest && self.manifest_guard == manifest_guard
+            }
+            Ok(AgentActiveModelCall {
+                manifest: admission.manifest,
+                manifest_guard: self.manifest.guard(),
+            });
+            Ok(AgentModelCallReceipt {
+                manifest: self.manifest.id(),
+                manifest_guard: self.manifest.guard(),
+            });
+            !active.matches_manifest_revision(self.manifest.id(), self.manifest.guard());
+        "#;
+        let effect_policy = r#"
+            pub struct AgentNeedsHumanTransition {
+                manifest: AgentRunManifestId,
+                manifest_guard: [u8; 32],
+            }
+            pub struct AgentEffectPermit {
+                manifest: AgentRunManifestId,
+                manifest_guard: [u8; 32],
+            }
+            pub struct AgentActiveEffect {
+                manifest: AgentRunManifestId,
+                manifest_guard: [u8; 32],
+            }
+            pub struct AgentEffectReceipt {
+                manifest: AgentRunManifestId,
+                manifest_guard: [u8; 32],
+            }
+            pub(crate) fn matches_manifest_revision() {
+                self.manifest == manifest && self.manifest_guard == manifest_guard
+            }
+            pub(crate) fn matches_manifest_revision() {
+                self.manifest == manifest && self.manifest_guard == manifest_guard
+            }
+            pub(crate) fn matches_manifest_revision() {
+                self.manifest == manifest && self.manifest_guard == manifest_guard
+            }
+            pub(crate) fn matches_manifest_revision() {
+                self.manifest == manifest && self.manifest_guard == manifest_guard
+            }
+            AgentEffectAuthorization::Permit(AgentEffectPermit {
+                manifest: self.manifest.id(),
+                manifest_guard: self.manifest.guard(),
+            });
+            Ok(AgentActiveEffect {
+                manifest: permit.manifest,
+                manifest_guard: permit.manifest_guard,
+            });
+            Ok(AgentEffectReceipt {
+                manifest: self.manifest.id(),
+                manifest_guard: active.manifest_guard,
+            });
+            AgentEffectAuthorization::NeedsHuman(AgentNeedsHumanTransition {
+                manifest: self.manifest.id(),
+                manifest_guard: self.manifest.guard(),
+            });
+            permit.matches_manifest_revision(self.manifest.id(), self.manifest.guard());
+            permit.matches_manifest_revision(self.manifest.id(), self.manifest.guard());
+            active.matches_manifest_revision(self.manifest.id(), self.manifest.guard());
+        "#;
+        let supervisor = r#"
+            pub(super) const fn manifest_guard(&self) -> [u8; 32] {
+                self.manifest_guard
+            }
+        "#;
+        let join = r#"
+            value.matches_manifest_revision(
+                self.topology.manifest(),
+                self.topology.manifest_guard()
+            );
+        "#;
+        let progress = join.repeat(6);
+
+        validate_progress_manifest_revision_contract(policy, effect_policy, supervisor, &progress)
+            .expect("exact revision joins");
+        assert!(validate_progress_manifest_revision_contract(
+            &policy.replacen("manifest_guard: [u8; 32]", "", 1),
+            effect_policy,
+            supervisor,
+            &progress,
+        )
+        .is_err());
+        assert!(validate_progress_manifest_revision_contract(
+            policy,
+            effect_policy,
+            supervisor,
+            &join.repeat(5),
+        )
+        .is_err());
     }
 
     #[test]

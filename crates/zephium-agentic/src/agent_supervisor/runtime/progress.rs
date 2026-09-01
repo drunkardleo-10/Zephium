@@ -254,7 +254,9 @@ impl AgentRunSupervisor {
         execution: &AgentNodeExecution,
         call: &AgentActiveModelCall,
     ) -> Result<AgentSemanticProgress, AgentSupervisorRuntimeError> {
-        if call.manifest() != self.topology.manifest() || call.node() != execution.node() {
+        if !call.matches_manifest_revision(self.topology.manifest(), self.topology.manifest_guard())
+            || call.node() != execution.node()
+        {
             return Err(AgentSupervisorRuntimeError::ProgressAuthority);
         }
         let activity = AgentProgressActivity::try_new(
@@ -271,7 +273,10 @@ impl AgentRunSupervisor {
         receipt: AgentModelCallReceipt,
     ) -> Result<AgentSemanticProgress, AgentSupervisorRuntimeError> {
         let index = self.require_running_execution(execution)?;
-        if receipt.manifest() != self.topology.manifest() || receipt.node() != execution.node() {
+        if !receipt
+            .matches_manifest_revision(self.topology.manifest(), self.topology.manifest_guard())
+            || receipt.node() != execution.node()
+        {
             return Err(AgentSupervisorRuntimeError::ProgressAuthority);
         }
         let state = match receipt.settlement() {
@@ -304,7 +309,10 @@ impl AgentRunSupervisor {
         execution: &AgentNodeExecution,
         permit: &AgentEffectPermit,
     ) -> Result<AgentSemanticProgress, AgentSupervisorRuntimeError> {
-        if permit.manifest() != self.topology.manifest() || permit.node() != execution.node() {
+        if !permit
+            .matches_manifest_revision(self.topology.manifest(), self.topology.manifest_guard())
+            || permit.node() != execution.node()
+        {
             return Err(AgentSupervisorRuntimeError::ProgressAuthority);
         }
         let activity = AgentProgressActivity::try_new(
@@ -320,7 +328,10 @@ impl AgentRunSupervisor {
         execution: &AgentNodeExecution,
         active: &AgentActiveEffect,
     ) -> Result<AgentSemanticProgress, AgentSupervisorRuntimeError> {
-        if active.manifest() != self.topology.manifest() || active.node() != execution.node() {
+        if !active
+            .matches_manifest_revision(self.topology.manifest(), self.topology.manifest_guard())
+            || active.node() != execution.node()
+        {
             return Err(AgentSupervisorRuntimeError::ProgressAuthority);
         }
         let activity = AgentProgressActivity::try_new(
@@ -337,7 +348,10 @@ impl AgentRunSupervisor {
         receipt: AgentEffectReceipt,
     ) -> Result<AgentSemanticProgress, AgentSupervisorRuntimeError> {
         let index = self.require_running_execution(execution)?;
-        if receipt.manifest() != self.topology.manifest() || receipt.node() != execution.node() {
+        if !receipt
+            .matches_manifest_revision(self.topology.manifest(), self.topology.manifest_guard())
+            || receipt.node() != execution.node()
+        {
             return Err(AgentSupervisorRuntimeError::ProgressAuthority);
         }
         let (state, blocker) = match receipt.settlement() {
@@ -370,7 +384,8 @@ impl AgentRunSupervisor {
         transition: AgentNeedsHumanTransition,
     ) -> Result<AgentSupervisorExecutionReceipt, AgentSupervisorRuntimeError> {
         let index = self.require_running_execution(execution)?;
-        if transition.manifest() != self.topology.manifest()
+        if !transition
+            .matches_manifest_revision(self.topology.manifest(), self.topology.manifest_guard())
             || transition.node() != execution.node()
             || !self.owns_context_assignment(execution.node(), transition.context().identity())
         {

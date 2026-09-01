@@ -245,6 +245,10 @@ impl AgentDelegationTopology {
     pub(super) const fn guard(&self) -> [u8; 32] {
         self.guard
     }
+
+    pub(super) const fn manifest_guard(&self) -> [u8; 32] {
+        self.manifest_guard
+    }
 }
 
 impl fmt::Debug for AgentDelegationTopology {
@@ -375,14 +379,14 @@ fn topology_guard(
 mod tests {
     use super::*;
     use crate::{
-        AgentAccountScope, AgentEffectId, AgentEffectReceipt, AgentEffectScope,
-        AgentEffectSettlement, AgentModelCallId, AgentModelCallReceipt, AgentModelCallSettlement,
-        AgentNeedsHumanReason, AgentNeedsHumanTransition, AgentPlanLeaseId, AgentPlanNodeAuthority,
-        AgentPolicyInstant, AgentRunBudget, AgentRunScope, ContextCapabilities, ContextCapability,
-        ContextId, ContextIdentity, ContextKind, ContextOperationId, ContextRegistry,
-        ContextRegistryError, ContextResourceDisposition, ContextSettlement, ContextTerminal,
-        SemanticActionAttemptId, SemanticActionFailure, SemanticEffectClass, SemanticOrigin,
-        SemanticSensitivity,
+        AgentAccountScope, AgentActiveEffect, AgentActiveModelCall, AgentEffectId,
+        AgentEffectPermit, AgentEffectReceipt, AgentEffectScope, AgentEffectSettlement,
+        AgentModelCallId, AgentModelCallReceipt, AgentModelCallSettlement, AgentNeedsHumanReason,
+        AgentNeedsHumanTransition, AgentPlanLeaseId, AgentPlanNodeAuthority, AgentPolicyInstant,
+        AgentRunBudget, AgentRunScope, ContextCapabilities, ContextCapability, ContextId,
+        ContextIdentity, ContextKind, ContextOperationId, ContextRegistry, ContextRegistryError,
+        ContextResourceDisposition, ContextSettlement, ContextTerminal, SemanticActionAttemptId,
+        SemanticActionFailure, SemanticEffectClass, SemanticOrigin, SemanticSensitivity,
     };
     use zephium_core::ids::ProfileId;
 
@@ -1765,7 +1769,6 @@ mod tests {
     #[test]
     fn semantic_progress_accepts_only_exact_manifest_node_receipts() {
         let manifest = standard_manifest();
-        let manifest_id = manifest.id();
         let root_id = AgentPlanNodeId::from_raw(1);
         let lease = AgentPlanLeaseId::from_raw(501);
         let mut supervisor = AgentRunSupervisor::new(
@@ -1773,8 +1776,18 @@ mod tests {
             standard_topology(&manifest),
         );
         let execution = supervisor.start(root_id, attempt(1)).expect("start root");
+        let active_model = AgentActiveModelCall::for_progress_test(
+            &manifest,
+            AgentModelCallId::new(1).expect("model call"),
+            lease,
+            root_id,
+        );
+        let active_model_progress = supervisor
+            .record_active_model_call(&execution, &active_model)
+            .expect("active model progress");
+        assert_eq!(active_model_progress.state(), AgentProgressState::Active);
         let model = AgentModelCallReceipt::for_progress_test(
-            manifest_id,
+            &manifest,
             AgentModelCallId::new(1).expect("model call"),
             lease,
             root_id,
@@ -1791,8 +1804,29 @@ mod tests {
             ))
         );
 
+        let permit = AgentEffectPermit::for_progress_test(
+            &manifest,
+            AgentEffectId::new(1).expect("effect"),
+            lease,
+            root_id,
+            SemanticEffectClass::LocalWrite,
+        );
+        supervisor
+            .record_effect_permit(&execution, &permit)
+            .expect("effect permit progress");
+        let active_effect = AgentActiveEffect::for_progress_test(
+            &manifest,
+            AgentEffectId::new(1).expect("effect"),
+            lease,
+            root_id,
+            SemanticEffectClass::LocalWrite,
+            SemanticActionAttemptId::new(1).expect("action attempt"),
+        );
+        supervisor
+            .record_active_effect(&execution, &active_effect)
+            .expect("active effect progress");
         let effect = AgentEffectReceipt::for_progress_test(
-            manifest_id,
+            &manifest,
             AgentEffectId::new(1).expect("effect"),
             lease,
             root_id,
@@ -1810,9 +1844,37 @@ mod tests {
                 SemanticActionFailure::BackendRefused
             ))
         );
+        let guard_debug = format!("{:?}", manifest.guard());
+        let value_debug =
+            format!("{active_model:?} {model:?} {permit:?} {active_effect:?} {effect:?}");
+        assert!(value_debug.contains("[redacted]"));
+        assert!(!value_debug.contains(&guard_debug));
 
-        let foreign = AgentModelCallReceipt::for_progress_test(
-            AgentRunManifestId::from_raw(999),
+        let changed_revision = make_manifest(vec![node(
+            1,
+            &["a"],
+            &[SemanticEffectClass::Read],
+            SemanticSensitivity::Public,
+            1,
+            2_000,
+        )]);
+        assert_eq!(changed_revision.id(), manifest.id());
+        assert!(!changed_revision.matches_revision(&manifest));
+
+        let foreign_active_model = AgentActiveModelCall::for_progress_test(
+            &changed_revision,
+            AgentModelCallId::new(2).expect("model call"),
+            lease,
+            root_id,
+        );
+        assert_eq!(
+            supervisor
+                .record_active_model_call(&execution, &foreign_active_model)
+                .expect_err("same-id foreign manifest revision"),
+            AgentSupervisorRuntimeError::ProgressAuthority
+        );
+        let foreign_model = AgentModelCallReceipt::for_progress_test(
+            &changed_revision,
             AgentModelCallId::new(2).expect("model call"),
             lease,
             root_id,
@@ -1820,8 +1882,50 @@ mod tests {
         );
         assert_eq!(
             supervisor
-                .record_model_call_result(&execution, foreign)
-                .expect_err("foreign manifest"),
+                .record_model_call_result(&execution, foreign_model)
+                .expect_err("same-id foreign manifest revision"),
+            AgentSupervisorRuntimeError::ProgressAuthority
+        );
+        let foreign_permit = AgentEffectPermit::for_progress_test(
+            &changed_revision,
+            AgentEffectId::new(2).expect("effect"),
+            lease,
+            root_id,
+            SemanticEffectClass::Read,
+        );
+        assert_eq!(
+            supervisor
+                .record_effect_permit(&execution, &foreign_permit)
+                .expect_err("same-id foreign manifest revision"),
+            AgentSupervisorRuntimeError::ProgressAuthority
+        );
+        let foreign_active_effect = AgentActiveEffect::for_progress_test(
+            &changed_revision,
+            AgentEffectId::new(2).expect("effect"),
+            lease,
+            root_id,
+            SemanticEffectClass::Read,
+            SemanticActionAttemptId::new(2).expect("action attempt"),
+        );
+        assert_eq!(
+            supervisor
+                .record_active_effect(&execution, &foreign_active_effect)
+                .expect_err("same-id foreign manifest revision"),
+            AgentSupervisorRuntimeError::ProgressAuthority
+        );
+        let foreign_effect = AgentEffectReceipt::for_progress_test(
+            &changed_revision,
+            AgentEffectId::new(2).expect("effect"),
+            lease,
+            root_id,
+            SemanticEffectClass::Read,
+            SemanticActionAttemptId::new(2).expect("action attempt"),
+            AgentEffectSettlement::Failed(SemanticActionFailure::BackendRefused),
+        );
+        assert_eq!(
+            supervisor
+                .record_effect_result(&execution, foreign_effect)
+                .expect_err("same-id foreign manifest revision"),
             AgentSupervisorRuntimeError::ProgressAuthority
         );
         assert_eq!(supervisor.semantic_progress(root_id), Some(effect_progress));
@@ -1924,13 +2028,39 @@ mod tests {
             .settle_construction(identity.id(), construction, ContextSettlement::Applied)
             .expect("settle context");
         let join = registry.join(identity.id()).expect("context join");
-        let transition = AgentNeedsHumanTransition::for_progress_test(
-            manifest.id(),
+        let changed_revision = make_manifest(vec![node(
+            1,
+            &["a"],
+            &[SemanticEffectClass::Read],
+            SemanticSensitivity::Public,
+            1,
+            2_000,
+        )]);
+        assert_eq!(changed_revision.id(), manifest.id());
+        let foreign_transition = AgentNeedsHumanTransition::for_progress_test(
+            &changed_revision,
             root_id,
             join,
             SemanticEffectClass::LocalWrite,
             AgentNeedsHumanReason::HumanControl,
         );
+        assert_eq!(
+            supervisor
+                .wait_for_human(&execution, foreign_transition)
+                .expect_err("same-id foreign manifest revision"),
+            AgentSupervisorRuntimeError::ProgressAuthority
+        );
+        assert_eq!(supervisor.status().executing(), 1);
+        let transition = AgentNeedsHumanTransition::for_progress_test(
+            &manifest,
+            root_id,
+            join,
+            SemanticEffectClass::LocalWrite,
+            AgentNeedsHumanReason::HumanControl,
+        );
+        let transition_debug = format!("{transition:?}");
+        assert!(transition_debug.contains("[redacted]"));
+        assert!(!transition_debug.contains(&format!("{:?}", manifest.guard())));
 
         let receipt = supervisor
             .wait_for_human(&execution, transition)

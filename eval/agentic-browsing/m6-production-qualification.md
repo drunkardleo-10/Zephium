@@ -56,6 +56,12 @@ cargo clippy --locked -p xtask --all-targets -- -D warnings
   digest, provider/billing class, catalog revision, and normalized
   cache/cache-write/reasoning subsets for reproducible aggregate metrics. No
   production catalog entry or live provider result is implied.
+- Every policy-derived value admitted to supervisor progress now retains and
+  rejoins the private canonical manifest-revision guard. Regression coverage
+  rejects active operations, terminal receipts, permits, and human transitions
+  minted from a different scope revision that deliberately reuses the same
+  public manifest identity; the release boundary mechanically pins all six
+  joins.
 
 The authoritative aggregate records and exact remaining blockers are in
 `native-input-matrix-v1.json` and `browse-baseline-v1.json`.
