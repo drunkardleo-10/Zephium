@@ -1,3 +1,6 @@
+#[cfg(all(feature = "agentic-browser", any(target_os = "windows", test)))]
+mod agent_navigation;
+
 #[cfg(target_os = "macos")]
 pub mod macos;
 #[cfg(target_os = "macos")]

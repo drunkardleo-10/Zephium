@@ -567,7 +567,7 @@ impl WindowsNativeExtensionProfile {
         &self,
         deadline: Instant,
     ) -> Result<bool, WindowsNativeExtensionFailure> {
-        Ok(inventory(&self.profile, deadline)?.entries.is_empty())
+        profile_inventory_is_empty(&self.profile, deadline)
     }
 
     pub(crate) fn reconcile_recovery(
@@ -619,6 +619,20 @@ impl WindowsNativeExtensionProfile {
             Err(failure) => WindowsNativeExtensionProfileReconciliation::StillUncertain(failure),
         }
     }
+}
+
+/// Reads one extension-enabled profile's bounded native inventory.
+///
+/// This deliberately accepts the exact `Profile7` authority rather than a
+/// logical profile id. Callers must first bind that COM profile to their
+/// controller/environment. An empty result from an extension-disabled
+/// environment is not a valid proof and is excluded by the Wry startup gate
+/// that produces every production caller.
+pub(crate) fn profile_inventory_is_empty(
+    profile: &ICoreWebView2Profile7,
+    deadline: Instant,
+) -> Result<bool, WindowsNativeExtensionFailure> {
+    Ok(inventory(profile, deadline)?.entries.is_empty())
 }
 
 impl fmt::Debug for WindowsNativeExtensionProfile {

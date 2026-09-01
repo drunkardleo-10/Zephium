@@ -2,9 +2,11 @@
 //! positioning, SetWindowRgn rounding, divider drags and the drop indicator
 //! all mirror the macOS ContentStage.
 
-// Phase 0a feasibility probe. Unit/cross-target test builds keep it compiling,
-// and an explicit feature admits a future native harness. Product builds do
-// not contain it until native Windows QA ratifies the live isolation gate.
+// The native-input feasibility harness remains independently feature-gated and
+// optimized-build-refused. The production agent owner below contains no probe
+// route and is reachable only through the dormant `agentic-browser` port.
+#[cfg(feature = "agentic-browser")]
+mod agent_context;
 #[cfg(feature = "native-agentic-input-probe")]
 mod agentic_input_probe;
 #[cfg(any(test, feature = "windows-cdp-spike"))]
@@ -14,6 +16,8 @@ mod content_filter;
 #[allow(dead_code)]
 mod extensions;
 mod stage;
+#[cfg(feature = "agentic-browser")]
+mod timeout;
 
 pub(crate) use content_filter::{
     install_on_view as install_content_policy_on_view, prepare as prepare_content_policy,
@@ -21,7 +25,14 @@ pub(crate) use content_filter::{
 };
 pub(crate) use extensions::*;
 pub use stage::Stage;
+#[cfg(feature = "agentic-browser")]
+pub(crate) use timeout::{schedule_content_policy_timeout, ContentPolicyTimeout};
 
+#[cfg(feature = "agentic-browser")]
+pub(crate) use agent_context::{
+    build_owned_agent_view, AgentNavigationCommit, AgentNavigationTerminal, AgentOwnedProfile,
+    AgentOwnedView, AgentOwnedViewCallbacks, AgentOwnedViewConstructionError,
+};
 #[cfg(feature = "native-agentic-input-probe")]
 pub(crate) use agentic_input_probe::run as run_agentic_input_matrix;
 
