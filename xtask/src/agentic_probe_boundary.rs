@@ -18,6 +18,7 @@ const AGENTIC_WINDOWS_SEMANTIC_EVIDENCE: &str =
     "crates/zephium-agentic/src/semantic_probe_evidence.rs";
 const AGENTIC_PROBE_QUALIFICATION: &str = "crates/zephium-agentic/src/probe_qualification.rs";
 const AGENTIC_PROVIDER_REQUEST: &str = "crates/zephium-agentic/src/agent_provider/request.rs";
+const AGENTIC_PROVIDER_TOOL: &str = "crates/zephium-agentic/src/agent_provider/tool.rs";
 const AGENTIC_PROVIDER_OPENAI: &str = "crates/zephium-agentic/src/agent_provider/openai.rs";
 const AGENTIC_PROVIDER_ANTHROPIC: &str = "crates/zephium-agentic/src/agent_provider/anthropic.rs";
 const AGENTIC_PROVIDER_PRICING: &str = "crates/zephium-agentic/src/agent_provider/pricing.rs";
@@ -28,6 +29,7 @@ const AGENTIC_METRICS: &str = "crates/zephium-agentic/src/agent_metrics.rs";
 const AGENTIC_PROGRESS_METRICS: &str = "crates/zephium-agentic/src/agent_progress_metrics.rs";
 const AGENTIC_SEMANTIC_DIFF: &str = "crates/zephium-agentic/src/semantic_diff.rs";
 const AGENTIC_SEMANTIC_DIFF_MODEL: &str = "crates/zephium-agentic/src/semantic_diff_model.rs";
+const AGENTIC_SEMANTIC_LOCATE: &str = "crates/zephium-agentic/src/semantic_locate.rs";
 const AGENTIC_SEMANTIC_ACTION: &str = "crates/zephium-agentic/src/semantic_action.rs";
 const AGENTIC_SEMANTIC_EXECUTE: &str = "crates/zephium-agentic/src/semantic_execute.rs";
 const AGENTIC_SEMANTIC_EXECUTE_COORDINATOR: &str =
@@ -142,6 +144,11 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         &read(repository.join(AGENTIC_SEMANTIC_DIFF))?,
         &read(repository.join(AGENTIC_SEMANTIC_DIFF_MODEL))?,
         &read(repository.join(AGENTIC_POLICY))?,
+    )?;
+    validate_semantic_locate_contract(
+        &read(repository.join(AGENTIC_ROOT))?,
+        &read(repository.join(AGENTIC_SEMANTIC_LOCATE))?,
+        &read(repository.join(AGENTIC_PROVIDER_TOOL))?,
     )?;
     validate_semantic_execution_contract(
         &read(repository.join(AGENTIC_ROOT))?,
@@ -2123,6 +2130,94 @@ fn validate_semantic_diff_policy_contract(
     Ok(())
 }
 
+fn validate_semantic_locate_contract(
+    root: &str,
+    locate: &str,
+    provider_tool: &str,
+) -> Result<(), String> {
+    let root = compact(root);
+    for required in [
+        "modsemantic_locate;",
+        "locate_semantic_observation",
+        "MAX_SEMANTIC_LOCATE_MATCHES",
+        "MAX_SEMANTIC_LOCATE_QUERY_BYTES",
+        "MAX_SEMANTIC_LOCATE_QUERY_TERMS",
+    ] {
+        if !root.contains(required) {
+            return Err(format!(
+                "agentic root lost bounded semantic-locate contract {required}"
+            ));
+        }
+    }
+
+    let locate = compact(locate);
+    for required in [
+        "pubconstMAX_SEMANTIC_LOCATE_QUERY_BYTES:usize=1_024;",
+        "pubconstMAX_SEMANTIC_LOCATE_QUERY_TERMS:usize=16;",
+        "pubconstMAX_SEMANTIC_LOCATE_MATCHES:u8=32;",
+        "||looks_like_secret_value(&source)",
+        "if!acknowledgement.matches(observation)",
+        "validate_current_frames(observation,current_frames)?;",
+        "fingerprint:SemanticObservationFingerprint",
+        "ifrequest.fingerprint!=SemanticObservationFingerprint::from_observation(observation)",
+        "SemanticLocateScope::Frame(reference)",
+        "SemanticFrameBoundaryStatus::Observed{frame,..}=>Some(frame)",
+        "Vec::<RankedMatch>::with_capacity(usize::from(request.budget.max_matches))",
+        "ifnode.sensitivity()==SemanticSensitivity::Secret",
+        "letSome(quality)=match_node(node,&request.query,&mutscratch)",
+        "truncated:usize::from(matched_nodes)>matches.len()",
+    ] {
+        if !locate.contains(required) {
+            return Err(format!(
+                "semantic locate lost acknowledgement, scope, secret, or resource bound {required}"
+            ));
+        }
+    }
+    let secret_check = locate
+        .find("ifnode.sensitivity()==SemanticSensitivity::Secret")
+        .ok_or_else(|| "semantic locate secret exclusion is missing".to_owned())?;
+    let matching = locate
+        .find("letSome(quality)=match_node(node,&request.query,&mutscratch)")
+        .ok_or_else(|| "semantic locate matcher is missing".to_owned())?;
+    if secret_check >= matching {
+        return Err("semantic locate must exclude secret nodes before matching".to_owned());
+    }
+    for forbidden in [
+        "regex::",
+        "scraper::",
+        "fantoccini",
+        "query_selector(",
+        "querySelector(",
+        "evaluate_javascript(",
+        "execute_script(",
+        "Runtime.evaluate",
+        "std::net::",
+        "reqwest::",
+    ] {
+        if locate.contains(forbidden) {
+            return Err(format!(
+                "semantic locate acquired forbidden document/runtime surface {forbidden}"
+            ));
+        }
+    }
+
+    let provider_tool = compact(provider_tool);
+    for required in [
+        "pubconstMAX_AGENT_BROWSER_SEMANTIC_QUERY_BYTES:usize=MAX_SEMANTIC_LOCATE_QUERY_BYTES;",
+        "SemanticLocateQuery::try_new(value)",
+        "pubfninto_locate_query(self)->SemanticLocateQuery",
+        "pubfntry_into_locate_scope(self,)->Result<SemanticLocateScope,AgentBrowserToolContractError>",
+        "Self::SurroundingText{..}=>Err(AgentBrowserToolContractError::Scope)",
+    ] {
+        if !provider_tool.contains(required) {
+            return Err(format!(
+                "provider locate proposal drifted from bounded semantic core {required}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_semantic_execution_contract(
     root: &str,
     effect: &str,
@@ -2947,6 +3042,36 @@ mod tests {
         )
         .is_err());
         assert!(validate_semantic_diff_policy_contract(root, diff, "", policy).is_err());
+    }
+
+    #[test]
+    fn semantic_locate_requires_acknowledged_bounded_non_document_search() {
+        let root = include_str!("../../crates/zephium-agentic/src/lib.rs");
+        let locate = include_str!("../../crates/zephium-agentic/src/semantic_locate.rs");
+        let provider_tool = include_str!("../../crates/zephium-agentic/src/agent_provider/tool.rs");
+        validate_semantic_locate_contract(root, locate, provider_tool)
+            .expect("bounded semantic locate");
+        assert!(validate_semantic_locate_contract(
+            root,
+            &locate.replace("|| looks_like_secret_value(&source)", ""),
+            provider_tool,
+        )
+        .is_err());
+        assert!(validate_semantic_locate_contract(
+            root,
+            &format!("{locate}\nfn escape() {{ query_selector(\"*\"); }}"),
+            provider_tool,
+        )
+        .is_err());
+        assert!(validate_semantic_locate_contract(
+            root,
+            locate,
+            &provider_tool.replace(
+                "Self::SurroundingText { .. } => Err(AgentBrowserToolContractError::Scope)",
+                "Self::SurroundingText { target, .. } => Ok(SemanticLocateScope::Subtree(target))",
+            ),
+        )
+        .is_err());
     }
 
     #[test]

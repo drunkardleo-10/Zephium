@@ -14,11 +14,12 @@ use thiserror::Error;
 use crate::{
     ContextNavigationTarget, SemanticActionContractError, SemanticActionIntent,
     SemanticActionProposal, SemanticActionText, SemanticDialogState, SemanticEffectClass,
-    SemanticExtractionSchemaId, SemanticMutationQuietPeriod, SemanticPressKey, SemanticReferenceId,
-    SemanticScrollAmount, SemanticScrollDirection, SemanticSettleBudget, SemanticState,
-    SemanticTextWindow, SemanticVerification, SemanticWaitCondition,
-    MAX_AGENT_PROVIDER_TOOL_ARGUMENT_BYTES, MAX_SEMANTIC_ACTIONS_PER_BATCH,
-    MAX_SEMANTIC_ACTION_BATCH_SETTLE_MILLIS, MAX_SEMANTIC_ACTION_BATCH_TEXT_BYTES,
+    SemanticExtractionSchemaId, SemanticLocateQuery, SemanticLocateScope,
+    SemanticMutationQuietPeriod, SemanticPressKey, SemanticReferenceId, SemanticScrollAmount,
+    SemanticScrollDirection, SemanticSettleBudget, SemanticState, SemanticTextWindow,
+    SemanticVerification, SemanticWaitCondition, MAX_AGENT_PROVIDER_TOOL_ARGUMENT_BYTES,
+    MAX_SEMANTIC_ACTIONS_PER_BATCH, MAX_SEMANTIC_ACTION_BATCH_SETTLE_MILLIS,
+    MAX_SEMANTIC_ACTION_BATCH_TEXT_BYTES, MAX_SEMANTIC_LOCATE_QUERY_BYTES,
 };
 
 use super::request::MAX_AGENT_BROWSER_NAVIGATION_URL_BYTES;
@@ -27,7 +28,7 @@ use super::AgentProviderCallIdentity;
 /// Maximum bytes in one opaque provider tool-call identity.
 pub const MAX_AGENT_PROVIDER_TOOL_CALL_ID_BYTES: usize = 128;
 /// Maximum UTF-8 bytes in one semantic locate query.
-pub const MAX_AGENT_BROWSER_SEMANTIC_QUERY_BYTES: usize = 1_024;
+pub const MAX_AGENT_BROWSER_SEMANTIC_QUERY_BYTES: usize = MAX_SEMANTIC_LOCATE_QUERY_BYTES;
 const MAX_AGENT_BROWSER_TOOL_JSON_DEPTH: u8 = 16;
 
 /// Closed model-facing browser tool names.
@@ -148,24 +149,25 @@ impl fmt::Debug for AgentBrowserToolCallId {
 
 /// Bounded natural-language semantic query, never a DOM selector.
 #[derive(Eq, PartialEq)]
-pub struct AgentBrowserSemanticQuery(String);
+pub struct AgentBrowserSemanticQuery(SemanticLocateQuery);
 
 impl AgentBrowserSemanticQuery {
     fn try_new(value: String) -> Result<Self, AgentBrowserToolContractError> {
-        if value.is_empty() || value.len() > MAX_AGENT_BROWSER_SEMANTIC_QUERY_BYTES {
-            return Err(AgentBrowserToolContractError::Query);
-        }
-        if value.chars().any(invalid_model_text_character) {
-            return Err(AgentBrowserToolContractError::Query);
-        }
-        Ok(Self(value))
+        SemanticLocateQuery::try_new(value)
+            .map(Self)
+            .map_err(|_| AgentBrowserToolContractError::Query)
     }
 
     /// Exact untrusted semantic query for a fixed semantic matcher.
     ///
     /// A consumer must never pass this value to a CSS/XPath/JavaScript API.
     pub fn as_str(&self) -> &str {
-        &self.0
+        self.0.as_str()
+    }
+
+    /// Consumes the provider proposal into the bounded semantic matcher query.
+    pub fn into_locate_query(self) -> SemanticLocateQuery {
+        self.0
     }
 }
 
@@ -173,7 +175,8 @@ impl fmt::Debug for AgentBrowserSemanticQuery {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("AgentBrowserSemanticQuery")
-            .field("bytes", &self.0.len())
+            .field("bytes", &self.0.as_str().len())
+            .field("terms", &self.0.term_count())
             .field("content", &"[redacted]")
             .finish()
     }
@@ -202,6 +205,25 @@ pub enum AgentBrowserScopeProposal {
         /// Existing hard-bounded surrounding window.
         window: SemanticTextWindow,
     },
+}
+
+impl AgentBrowserScopeProposal {
+    /// Converts only scopes with exact lookup semantics into the core matcher vocabulary.
+    ///
+    /// `surrounding_text` is a read window rather than a tree-search boundary,
+    /// so it is deliberately refused instead of being widened to a subtree.
+    pub fn try_into_locate_scope(
+        self,
+    ) -> Result<SemanticLocateScope, AgentBrowserToolContractError> {
+        match self {
+            Self::Initial => Ok(SemanticLocateScope::Initial),
+            Self::Region(reference) => Ok(SemanticLocateScope::Region(reference)),
+            Self::Subtree(reference) => Ok(SemanticLocateScope::Subtree(reference)),
+            Self::Table(reference) => Ok(SemanticLocateScope::Table(reference)),
+            Self::Frame(reference) => Ok(SemanticLocateScope::Frame(reference)),
+            Self::SurroundingText { .. } => Err(AgentBrowserToolContractError::Scope),
+        }
+    }
 }
 
 /// Closed reason offered to the supervisor for a human-control pause.
@@ -962,24 +984,6 @@ fn validate_json_depth(arguments: &str) -> Result<(), AgentBrowserToolContractEr
     Ok(())
 }
 
-fn invalid_model_text_character(character: char) -> bool {
-    (character.is_control() && !matches!(character, '\t' | '\n' | '\r'))
-        || matches!(
-            character,
-            '\u{00ad}'
-                | '\u{061c}'
-                | '\u{180e}'
-                | '\u{200b}'..='\u{200f}'
-                | '\u{202a}'..='\u{202e}'
-                | '\u{2060}'..='\u{2064}'
-                | '\u{2066}'..='\u{206f}'
-                | '\u{feff}'
-                | '\u{fff9}'..='\u{fffb}'
-                | '\u{e0001}'
-                | '\u{e0020}'..='\u{e007f}'
-        )
-}
-
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EmptyWire {}
@@ -1411,6 +1415,31 @@ mod tests {
             matches!(scope, AgentBrowserScopeProposal::Region(reference) if reference.get() == 3)
         );
         assert!(!format!("{locate:?}").contains("Save changes button"));
+        let (_, locate) = decode(
+            "locate",
+            r#"{"semantic_query":"Save changes button","scope":{"kind":"region","target":"@a3"}}"#,
+        )
+        .expect("locate conversion")
+        .into_parts();
+        let AgentBrowserToolProposal::Locate { query, scope } = locate else {
+            panic!("locate conversion");
+        };
+        let query = query.into_locate_query();
+        assert_eq!(query.as_str(), "Save changes button");
+        assert_eq!(query.term_count(), 3);
+        assert!(matches!(
+            scope.try_into_locate_scope().expect("core scope"),
+            SemanticLocateScope::Region(reference) if reference.get() == 3
+        ));
+        assert_eq!(
+            AgentBrowserScopeProposal::SurroundingText {
+                target: SemanticReferenceId::new(1).expect("reference"),
+                window: SemanticTextWindow::try_new(8, 8).expect("window"),
+            }
+            .try_into_locate_scope()
+            .expect_err("read-only scope"),
+            AgentBrowserToolContractError::Scope
+        );
 
         let read = decode("read", r#"{"scope":{"kind":"table","target":"@a4"}}"#).expect("read");
         assert!(matches!(

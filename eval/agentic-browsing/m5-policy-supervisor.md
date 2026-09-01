@@ -427,6 +427,13 @@ browser action, model call, tool call, data transfer, cost, or native resource.
   bounded hostile natural-language text explicitly forbidden from selector
   APIs; progressive scopes are closed reference/window proposals that still
   require exact acknowledged-observation binding.
+- The provider locate proposal now moves directly into the shipping bounded
+  semantic-query type, so provider and matcher limits cannot drift. Closed
+  initial/region/subtree/table/frame scopes convert without copying the query;
+  `surrounding_text` is deliberately refused for locate rather than silently
+  widened. The matcher independently rejoins committed observation and current
+  frame authority and returns only ranked opaque references; this conversion
+  still grants no model continuation, policy, or browser authority.
 - `act` converts immediately into the existing click/fill/select/press/scroll,
   effect, wait, verification, and settle types. Existing secret/control-text
   refusal and outcome compatibility run during decode. The preflight also caps

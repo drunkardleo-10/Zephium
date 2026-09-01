@@ -349,6 +349,18 @@ text only on request. The first snapshot target is normally 500–2,000 model
 tokens rather than a 50–200k-token DOM or a multi-thousand-node raw
 accessibility tree.
 
+`locate` is a bounded deterministic search over one exact acknowledged
+semantic observation, not a page query. Its normalized hostile-text query is
+capped at 1,024 bytes and 16 distinct terms, rejects secret-like and invisible
+control text, and can search only the initial observation or an exact
+region/subtree/table/observed-frame reference. Binding rejoins the committed
+observation fingerprint and the complete current native frame cohort. The
+matcher examines at most the already-bounded observation, withholds secret
+nodes before matching, retains at most 32 ranked results (eight normally), and
+returns only opaque references, closed roles/match classes, sensitivity/trust,
+actionability, and truthful truncation counts. It exposes no selector, raw
+document surface, script, regex, native handle, or new action authority.
+
 After an action, return a semantic diff against the last acknowledged snapshot:
 
 - added, removed, changed, and moved semantic nodes;

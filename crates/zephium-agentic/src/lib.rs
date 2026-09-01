@@ -49,6 +49,7 @@ mod semantic_diff_model;
 mod semantic_execute;
 mod semantic_execute_coordinator;
 mod semantic_extract;
+mod semantic_locate;
 mod semantic_model;
 mod semantic_observation;
 #[cfg(feature = "probe-harness")]
@@ -147,6 +148,13 @@ pub use agent_supervisor::{
     AgentSupervisorNodeStatus, AgentSupervisorRuntimeError, AgentSupervisorRuntimeStatus,
     AgentSupervisorWait, MAX_AGENT_DELEGATION_DEPTH, MAX_AGENT_EXECUTING_SUPERVISOR_NODES,
     MAX_AGENT_LIVE_SUPERVISOR_NODES,
+};
+
+pub use semantic_locate::{
+    locate_semantic_observation, SemanticLocateBudget, SemanticLocateError, SemanticLocateId,
+    SemanticLocateMatch, SemanticLocateMatchQuality, SemanticLocateQuery, SemanticLocateRequest,
+    SemanticLocateResult, SemanticLocateScope, SemanticLocateStats, MAX_SEMANTIC_LOCATE_MATCHES,
+    MAX_SEMANTIC_LOCATE_QUERY_BYTES, MAX_SEMANTIC_LOCATE_QUERY_TERMS,
 };
 
 pub use context::{

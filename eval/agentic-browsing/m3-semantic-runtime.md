@@ -87,6 +87,16 @@ or observed on either platform.
   agrees with canonical parent/child origins. Every retained boundary must be
   explicitly observed, deferred for a typed budget/scope reason, or marked
   unsupported for a typed safe-runtime reason; omission is a failure.
+- The shipping semantic locator now binds a 1,024-byte/16-term normalized
+  hostile query to one exact committed observation acknowledgement and the
+  complete current native frame cohort. It accepts only initial,
+  region/subtree/table, or separately observed child-frame scope, refuses
+  stale/incompatible references and read-only surrounding-text widening,
+  withholds secret nodes before matching, scans no more than the existing
+  observation ceiling, and retains at most 32 ranked opaque references (eight
+  normally). Ranking is deterministic across exact name/text/value/role,
+  bounded phrase, and all-term semantic matches; output carries no matched
+  strings, selector, DOM, script, regex, or native authority.
 - Deterministic `ZSEM1` output uses one bounded writer and observation-global
   references, frame aliases, parent relationships, roles, state/operation
   inventories, trust/sensitivity/freshness labels, typed frame dispositions,
