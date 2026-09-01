@@ -15,6 +15,7 @@ const AGENTIC_PROVIDER_ANTHROPIC: &str = "crates/zephium-agentic/src/agent_provi
 const AGENTIC_PROVIDER_PRICING: &str = "crates/zephium-agentic/src/agent_provider/pricing.rs";
 const AGENTIC_POLICY: &str = "crates/zephium-agentic/src/agent_policy.rs";
 const AGENTIC_EFFECT_POLICY: &str = "crates/zephium-agentic/src/agent_policy/effect.rs";
+const AGENTIC_AUDIT: &str = "crates/zephium-agentic/src/agent_audit.rs";
 const AGENTIC_SUPERVISOR: &str = "crates/zephium-agentic/src/agent_supervisor.rs";
 const AGENTIC_SUPERVISOR_PROGRESS: &str =
     "crates/zephium-agentic/src/agent_supervisor/runtime/progress.rs";
@@ -69,6 +70,7 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         &read(repository.join(AGENTIC_EFFECT_POLICY))?,
         &read(repository.join(AGENTIC_SUPERVISOR))?,
         &read(repository.join(AGENTIC_SUPERVISOR_PROGRESS))?,
+        &read(repository.join(AGENTIC_AUDIT))?,
     )?;
     validate_provider_transport_manifest(&read(repository.join(PROVIDER_TRANSPORT_MANIFEST))?)?;
     validate_provider_transport_root(&read(repository.join(PROVIDER_TRANSPORT_ROOT))?)?;
@@ -542,6 +544,7 @@ fn validate_progress_manifest_revision_contract(
     effect_policy: &str,
     supervisor: &str,
     progress: &str,
+    audit: &str,
 ) -> Result<(), String> {
     let policy = compact(policy);
     for required in [
@@ -618,6 +621,13 @@ fn validate_progress_manifest_revision_contract(
             "agent supervisor stopped retaining its private manifest revision guard".to_owned(),
         );
     }
+    if !supervisor.contains(
+        "pub(super)fnmatches_manifest_revision(&self,manifest:AgentRunManifestId,manifest_guard:[u8;32],)->bool{self.manifest==manifest&&self.manifest_guard==manifest_guard}",
+    ) {
+        return Err(
+            "agent supervisor lost its exact private manifest revision comparison".to_owned(),
+        );
+    }
 
     let progress = compact(progress);
     let join = "matches_manifest_revision(self.topology.manifest(),self.topology.manifest_guard())";
@@ -625,6 +635,13 @@ fn validate_progress_manifest_revision_contract(
         return Err(
             "all six supervisor progress admissions must join the exact manifest revision"
                 .to_owned(),
+        );
+    }
+    if !compact(audit).contains(
+        "!supervisor.topology().matches_manifest_revision(self.manifest,self.manifest_guard)",
+    ) {
+        return Err(
+            "agent audit admission must rejoin the exact supervisor manifest revision".to_owned(),
         );
     }
     Ok(())
@@ -1053,6 +1070,13 @@ mod tests {
             pub(super) const fn manifest_guard(&self) -> [u8; 32] {
                 self.manifest_guard
             }
+            pub(super) fn matches_manifest_revision(
+                &self,
+                manifest: AgentRunManifestId,
+                manifest_guard: [u8; 32],
+            ) -> bool {
+                self.manifest == manifest && self.manifest_guard == manifest_guard
+            }
         "#;
         let join = r#"
             value.matches_manifest_revision(
@@ -1061,14 +1085,27 @@ mod tests {
             );
         "#;
         let progress = join.repeat(6);
+        let audit = r#"
+            if !supervisor
+                .topology()
+                .matches_manifest_revision(self.manifest, self.manifest_guard)
+            {}
+        "#;
 
-        validate_progress_manifest_revision_contract(policy, effect_policy, supervisor, &progress)
-            .expect("exact revision joins");
+        validate_progress_manifest_revision_contract(
+            policy,
+            effect_policy,
+            supervisor,
+            &progress,
+            audit,
+        )
+        .expect("exact revision joins");
         assert!(validate_progress_manifest_revision_contract(
             &policy.replacen("manifest_guard: [u8; 32]", "", 1),
             effect_policy,
             supervisor,
             &progress,
+            audit,
         )
         .is_err());
         assert!(validate_progress_manifest_revision_contract(
@@ -1076,6 +1113,15 @@ mod tests {
             effect_policy,
             supervisor,
             &join.repeat(5),
+            audit,
+        )
+        .is_err());
+        assert!(validate_progress_manifest_revision_contract(
+            policy,
+            effect_policy,
+            supervisor,
+            &progress,
+            "",
         )
         .is_err());
     }

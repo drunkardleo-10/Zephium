@@ -492,7 +492,11 @@ impl AgentAuditLedger {
         if self.shutdown_sealed {
             return Err(AgentAuditError::ShutdownSealed);
         }
-        if supervisor.id() != self.supervisor || supervisor.topology().manifest() != self.manifest {
+        if supervisor.id() != self.supervisor
+            || !supervisor
+                .topology()
+                .matches_manifest_revision(self.manifest, self.manifest_guard)
+        {
             return Err(AgentAuditError::Authority);
         }
         let progress = supervisor
@@ -1063,6 +1067,10 @@ mod tests {
     use zephium_core::ids::ProfileId;
 
     fn manifest(id: u128) -> AgentRunManifest {
+        manifest_with_operations(id, 100)
+    }
+
+    fn manifest_with_operations(id: u128, operations: u32) -> AgentRunManifest {
         let profile = ProfileId::from(1);
         let origin = SemanticOrigin::parse("https://audit.example.test/private?token=hidden")
             .expect("origin");
@@ -1080,7 +1088,7 @@ mod tests {
                 Vec::new(),
             )
             .expect("run scope"),
-            AgentRunBudget::try_new(100, 1_000, 1_000, 1).expect("run budget"),
+            AgentRunBudget::try_new(operations, 1_000, 1_000, 1).expect("run budget"),
             AgentPolicyInstant::from_millis(100),
             AgentPolicyInstant::from_millis(10_000),
             vec![AgentPlanNodeScope::new(
@@ -1093,7 +1101,7 @@ mod tests {
                     effects,
                 )
                 .expect("node authority"),
-                AgentRunBudget::try_new(100, 1_000, 1_000, 1).expect("node budget"),
+                AgentRunBudget::try_new(operations, 1_000, 1_000, 1).expect("node budget"),
                 AgentPolicyInstant::from_millis(9_000),
             )],
         )
@@ -1212,6 +1220,22 @@ mod tests {
                     AgentPolicyInstant::from_millis(102),
                 )
                 .expect_err("foreign supervisor"),
+            AgentAuditError::Authority
+        );
+        let changed_manifest = manifest_with_operations(1, 99);
+        assert_eq!(changed_manifest.id(), manifest.id());
+        assert!(!changed_manifest.matches_revision(&manifest));
+        let same_id_foreign_revision = make_supervisor(&changed_manifest, 1);
+        assert_eq!(same_id_foreign_revision.id(), supervisor.id());
+        assert_eq!(
+            ledger
+                .record_current(
+                    &same_id_foreign_revision,
+                    root,
+                    event(3),
+                    AgentPolicyInstant::from_millis(102),
+                )
+                .expect_err("same identities but foreign manifest revision"),
             AgentAuditError::Authority
         );
         assert_eq!(ledger.status().pending(), 2);

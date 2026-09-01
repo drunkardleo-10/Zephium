@@ -493,7 +493,10 @@ another tool remains untrusted content.
 
 The semantic audit stores plan/effect/approval transitions, resource identity,
 typed results, and provenance. It does not store hidden chain-of-thought, raw
-DOM, secret values, or indiscriminate page contents.
+DOM, secret values, or indiscriminate page contents. Each current-progress
+snapshot is accepted only from the exact supervisor incarnation and canonical
+manifest revision originally joined to the ledger; matching public identities
+cannot substitute a different scope revision.
 
 ### 10.1 Downloads, uploads, dialogs, and external schemes
 

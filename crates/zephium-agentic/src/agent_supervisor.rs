@@ -234,7 +234,7 @@ impl AgentDelegationTopology {
 
     /// Whether this topology was proven against the exact manifest revision.
     pub fn matches_manifest(&self, manifest: &AgentRunManifest) -> bool {
-        self.manifest == manifest.id() && self.manifest_guard == manifest.guard()
+        self.matches_manifest_revision(manifest.id(), manifest.guard())
     }
 
     /// Whether two values represent the exact same canonical topology revision.
@@ -248,6 +248,14 @@ impl AgentDelegationTopology {
 
     pub(super) const fn manifest_guard(&self) -> [u8; 32] {
         self.manifest_guard
+    }
+
+    pub(super) fn matches_manifest_revision(
+        &self,
+        manifest: AgentRunManifestId,
+        manifest_guard: [u8; 32],
+    ) -> bool {
+        self.manifest == manifest && self.manifest_guard == manifest_guard
     }
 }
 

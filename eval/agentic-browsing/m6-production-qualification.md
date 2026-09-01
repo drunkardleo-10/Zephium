@@ -60,8 +60,9 @@ cargo clippy --locked -p xtask --all-targets -- -D warnings
   rejoins the private canonical manifest-revision guard. Regression coverage
   rejects active operations, terminal receipts, permits, and human transitions
   minted from a different scope revision that deliberately reuses the same
-  public manifest identity; the release boundary mechanically pins all six
-  joins.
+  public manifest identity. The audit ledger independently rejoins that private
+  revision on every current-progress snapshot, and the release boundary
+  mechanically pins all six progress joins plus the audit admission.
 
 The authoritative aggregate records and exact remaining blockers are in
 `native-input-matrix-v1.json` and `browse-baseline-v1.json`.
