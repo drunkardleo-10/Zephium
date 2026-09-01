@@ -440,6 +440,37 @@ impl SemanticSettleTracker {
         self.deadline
     }
 
+    /// Earliest exact monotonic wake the shell must schedule, if still pending.
+    ///
+    /// Mutation-quiet settlement wakes at the current quiet boundary and all
+    /// other waits wake at their sole absolute deadline. The value advances
+    /// after every admitted mutation. This method creates no timer and retains
+    /// no timer handle; it lets the imperative shell keep one cancel/replace
+    /// wake instead of polling.
+    pub const fn next_wake(&self) -> Option<SemanticSettleInstant> {
+        if self.status.is_terminal() {
+            return None;
+        }
+        let candidate = match self.wait {
+            SemanticWaitCondition::MutationQuiet(quiet) => {
+                self.last_mutation_at.checked_add(quiet.millis())
+            }
+            SemanticWaitCondition::Immediate
+            | SemanticWaitCondition::NavigationCommitted
+            | SemanticWaitCondition::DocumentReady
+            | SemanticWaitCondition::TargetState { .. }
+            | SemanticWaitCondition::UrlChanged
+            | SemanticWaitCondition::TitleChanged
+            | SemanticWaitCondition::Dialog(_)
+            | SemanticWaitCondition::SemanticChange
+            | SemanticWaitCondition::ScrollPositionChanged => Some(self.deadline),
+        };
+        match candidate {
+            Some(candidate) if candidate.millis() < self.deadline.millis() => Some(candidate),
+            Some(_) | None => Some(self.deadline),
+        }
+    }
+
     /// Current settlement state.
     pub const fn status(&self) -> SemanticSettleStatus {
         self.status
@@ -872,6 +903,7 @@ mod tests {
         assert_eq!(tracker.event_count(), 0);
         assert_eq!(tracker.elapsed_millis(), Some(0));
         assert_eq!(tracker.deadline().millis(), 350);
+        assert_eq!(tracker.next_wake(), None);
     }
 
     #[test]
@@ -895,6 +927,10 @@ mod tests {
             SemanticSettleInstant::from_millis(1_000),
         )
         .expect("tracker");
+        assert_eq!(
+            tracker.next_wake().map(SemanticSettleInstant::millis),
+            Some(1_100)
+        );
         let frame = action.frame().clone();
         assert_eq!(
             tracker
@@ -903,10 +939,18 @@ mod tests {
             SemanticSettleStatus::Pending
         );
         assert_eq!(
+            tracker.next_wake().map(SemanticSettleInstant::millis),
+            Some(1_150)
+        );
+        assert_eq!(
             tracker
                 .observe(event(attempt, 1_149, SemanticSettleFact::Tick))
                 .expect("tick"),
             SemanticSettleStatus::Pending
+        );
+        assert_eq!(
+            tracker.next_wake().map(SemanticSettleInstant::millis),
+            Some(1_150)
         );
         assert_eq!(
             tracker
@@ -914,6 +958,7 @@ mod tests {
                 .expect("tick"),
             SemanticSettleStatus::ReadyForVerification
         );
+        assert_eq!(tracker.next_wake(), None);
         assert_eq!(tracker.elapsed_millis(), Some(150));
     }
 
@@ -1034,6 +1079,10 @@ mod tests {
             SemanticSettleTracker::begin(attempt, &action, SemanticSettleInstant::from_millis(500))
                 .expect("tracker");
         assert_eq!(
+            tracker.next_wake().map(SemanticSettleInstant::millis),
+            Some(600)
+        );
+        assert_eq!(
             tracker.observe(event(
                 SemanticActionAttemptId::new(6).expect("other"),
                 510,
@@ -1047,6 +1096,7 @@ mod tests {
                 .expect("deadline"),
             SemanticSettleStatus::Failed(SemanticActionFailure::Timeout)
         );
+        assert_eq!(tracker.next_wake(), None);
         assert_eq!(tracker.elapsed_millis(), Some(100));
         assert_eq!(
             tracker.observe(event(attempt, 601, SemanticSettleFact::Tick)),

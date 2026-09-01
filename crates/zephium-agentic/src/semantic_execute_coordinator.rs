@@ -25,12 +25,18 @@ pub const MAX_PENDING_SEMANTIC_ACTION_EXECUTIONS: usize = MAX_AGENT_PENDING_EFFE
 #[must_use]
 pub struct SemanticActionExecutionReservation {
     key: SemanticActionExecutionCoordinatorKey,
+    deadline: SemanticActionExecutionInstant,
 }
 
 impl SemanticActionExecutionReservation {
     /// Exact action-attempt identity retained without page content.
     pub const fn attempt(&self) -> crate::SemanticActionAttemptId {
         self.key.attempt()
+    }
+
+    /// Absolute native-execution wake retained after the request moves away.
+    pub const fn deadline(&self) -> SemanticActionExecutionInstant {
+        self.deadline
     }
 }
 
@@ -40,6 +46,7 @@ impl fmt::Debug for SemanticActionExecutionReservation {
             .debug_struct("SemanticActionExecutionReservation")
             .field("effect", &self.key.effect())
             .field("attempt", &self.key.attempt())
+            .field("deadline", &self.deadline)
             .field("guard", &"[redacted]")
             .finish()
     }
@@ -150,8 +157,9 @@ impl SemanticActionExecutionCoordinator {
                 )
             })?;
         let key = pending.coordinator_key();
+        let deadline = pending.deadline();
         self.pending.push(pending);
-        Ok((SemanticActionExecutionReservation { key }, native))
+        Ok((SemanticActionExecutionReservation { key, deadline }, native))
     }
 
     /// Admits one exact native terminal and releases only its reservation.
@@ -506,6 +514,8 @@ mod tests {
 
         let (reservation, native) = begin(&mut coordinator, &action, 11);
         assert_eq!(reservation.attempt().get(), 11);
+        assert_eq!(reservation.deadline().millis(), 1_250);
+        assert_eq!(reservation.deadline(), native.deadline());
         assert_eq!(coordinator.status().pending(), 1);
         assert_eq!(
             coordinator

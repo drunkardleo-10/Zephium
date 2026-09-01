@@ -10,7 +10,7 @@ structured extraction admission, exact tool-result/constrained-output
 extraction transport, and the one-shot viewport screenshot contract are
 implemented.
 Policy permits, platform execution,
-visibility/occlusion checks, native observation adapters and timer driving,
+visibility/occlusion checks, native observation adapters and physical timer installation,
 installed visual token counters, and live action/screenshot/provider
 qualification remain pending. Exact one-shot visual policy and fixed OpenAI /
 Anthropic tool-result wiring are implemented. Production macOS and Windows owned-context
@@ -137,7 +137,9 @@ are trusted, or that M4 is complete.
   port refusal, cancellation, or a shell-driven deadline releases one entry.
   Unknown, substituted, replayed, and premature-timeout terminals do not release
   retained debt. Shutdown seals new admission but keeps accepted entries until
-  their terminal drain.
+  their terminal drain. The move-only reservation retains the exact absolute
+  deadline after its content-bearing native request leaves the shell, so one
+  timer can be scheduled without keeping or copying that request.
 - `AgentBrowserPort` has a move-only semantic-action callback contract: a
   `Scheduled` native request owes exactly one settlement created by consuming
   that request, while synchronous `Rejected` or `Unsupported` results owe no
@@ -178,7 +180,11 @@ are trusted, or that M4 is complete.
   adjacent complete-frame snapshot. Mutation quiet restarts on every admitted
   coalesced mutation and can complete only after its bounded quiet interval
   and no later than the same absolute action deadline. Missing deadline wakes
-  therefore cannot create an indefinite wait; the shell must own one timer.
+  therefore cannot create an indefinite wait. While pending, the tracker
+  exposes exactly one next wake: the current quiet boundary capped by the
+  absolute deadline, or the deadline for every other condition. Terminal state
+  exposes no wake. This is a pure scheduling plan, not a timer or polling loop;
+  the future native shell must install, replace, and cancel the physical timer.
 - Ready settlement means only that independent verification may run. The core
   has a closed failure taxonomy and non-authorizing recovery hints for abort,
   fresh observation, explicit capability, or human control. There is no retry

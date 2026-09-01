@@ -530,7 +530,10 @@ target committed navigation, document readiness, element state, URL/title,
 dialog appearance/disappearance, semantic change, download decision, or a
 bounded mutation-quiet interval. Every wait has one absolute deadline and is
 cancellable. Continuous analytics traffic, animations, or an SPA socket cannot
-hold a run indefinitely.
+hold a run indefinitely. The functional core exposes the earliest exact wake:
+the current quiet boundary for mutation-quiet waits and the absolute deadline
+for every other wait. The shell owns one cancel-or-replace timer per admitted
+action; it does not poll.
 
 ### 8.2 Input backends
 

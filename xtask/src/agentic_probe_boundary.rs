@@ -42,6 +42,7 @@ const AGENTIC_SEMANTIC_ACTION: &str = "crates/zephium-agentic/src/semantic_actio
 const AGENTIC_SEMANTIC_EXECUTE: &str = "crates/zephium-agentic/src/semantic_execute.rs";
 const AGENTIC_SEMANTIC_EXECUTE_COORDINATOR: &str =
     "crates/zephium-agentic/src/semantic_execute_coordinator.rs";
+const AGENTIC_SEMANTIC_SETTLE: &str = "crates/zephium-agentic/src/semantic_settle.rs";
 const AGENTIC_CONTEXT_PORT: &str = "crates/zephium-agentic/src/context_port.rs";
 const AGENTIC_SUPERVISOR: &str = "crates/zephium-agentic/src/agent_supervisor.rs";
 const AGENTIC_SUPERVISOR_PROGRESS: &str =
@@ -192,6 +193,7 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         &read(repository.join(AGENTIC_CONTEXT_PORT))?,
         &read(repository.join(ENGINE_AGENT_CONTEXT_PORT))?,
     )?;
+    validate_semantic_settle_wake(&read(repository.join(AGENTIC_SEMANTIC_SETTLE))?)?;
     validate_provider_input_evidence_contract(
         &read(repository.join(AGENTIC_ROOT))?,
         &read(repository.join(AGENTIC_PROVIDER_REQUEST))?,
@@ -2773,6 +2775,8 @@ fn validate_semantic_execution_contract(
     for required in [
         "MAX_PENDING_SEMANTIC_ACTION_EXECUTIONS:usize=MAX_AGENT_PENDING_EFFECTS",
         "pending:Vec<SemanticActionExecutionPending>",
+        "deadline:SemanticActionExecutionInstant",
+        "letdeadline=pending.deadline()",
         "self.pending.len()>=MAX_PENDING_SEMANTIC_ACTION_EXECUTIONS",
         "entry.coordinator_key().context()==action.frame().context().identity()",
         "!self.pending[index].matches_native_settlement(&settlement)",
@@ -2847,6 +2851,31 @@ fn validate_semantic_execution_contract(
         if action_method.contains(forbidden) {
             return Err(format!(
                 "engine action port admitted an unqualified M1 backend {forbidden}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_semantic_settle_wake(settle: &str) -> Result<(), String> {
+    let settle = compact(settle);
+    for required in [
+        "pubconstfnnext_wake(&self)->Option<SemanticSettleInstant>",
+        "self.status.is_terminal()",
+        "self.last_mutation_at.checked_add(quiet.millis())",
+        "Some(candidate)ifcandidate.millis()<self.deadline.millis()=>Some(candidate)",
+        "Some(_)|None=>Some(self.deadline)",
+    ] {
+        if !settle.contains(required) {
+            return Err(format!(
+                "semantic settlement lost exact no-poll wake contract {required}"
+            ));
+        }
+    }
+    for forbidden in ["std::thread", "std::time::Instant", "sleep(", "interval("] {
+        if settle.contains(forbidden) {
+            return Err(format!(
+                "semantic settlement core acquired imperative timer surface {forbidden}"
             ));
         }
     }
@@ -3826,6 +3855,8 @@ mod tests {
         let coordinator = r#"
             const MAX_PENDING_SEMANTIC_ACTION_EXECUTIONS: usize = MAX_AGENT_PENDING_EFFECTS;
             pending: Vec<SemanticActionExecutionPending>,
+            deadline: SemanticActionExecutionInstant,
+            let deadline = pending.deadline();
             self.pending.len() >= MAX_PENDING_SEMANTIC_ACTION_EXECUTIONS;
             entry.coordinator_key().context() == action.frame().context().identity();
             !self.pending[index].matches_native_settlement(&settlement);
@@ -3839,6 +3870,16 @@ mod tests {
                 Some(SemanticActionFailure::ResourceExhausted)
             }
             SemanticActionExecutionCoordinatorError::PrematureTimeout;
+        "#;
+        let settle = r#"
+            pub const fn next_wake(&self) -> Option<SemanticSettleInstant> {
+                if self.status.is_terminal() {}
+                self.last_mutation_at.checked_add(quiet.millis());
+                match candidate {
+                    Some(candidate) if candidate.millis() < self.deadline.millis() => Some(candidate),
+                    Some(_) | None => Some(self.deadline),
+                }
+            }
         "#;
         let context_port = r#"
             pub type SemanticActionNativeCompletion =
@@ -3911,6 +3952,11 @@ mod tests {
             &coordinator.replace("self.sealed = true;", ""),
             context_port,
             engine_port,
+        )
+        .is_err());
+        validate_semantic_settle_wake(settle).expect("exact no-poll wake plan");
+        assert!(validate_semantic_settle_wake(
+            &settle.replace("self.last_mutation_at.checked_add(quiet.millis());", ""),
         )
         .is_err());
         assert!(validate_semantic_execution_contract(
