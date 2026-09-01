@@ -546,13 +546,25 @@ semantic taint. Once send may have been polled, a terminal result without
 trustworthy provider usage charges the complete token and cost reservation and
 records that charge as a conservative ceiling. Provider-reported usage retains
 the exact fixed provider, model, tokenizer revision, and billing class in a
-move-only pricing requirement. OpenAI requests require the default service
-tier; Anthropic requests require standard-only capacity and global inference.
-The stream decoder must attest those actual classes before provider usage can
-reach pricing. Policy authority cannot be extracted or a completed call settled
-until the matching trusted pricing revision supplies cost.
+move-only pricing requirement. The request also binds a nonzero trusted pricing
+revision and inclusive input-price range before disclosure. OpenAI requests
+require the default service tier; Anthropic requests require standard-only
+capacity and global inference. The stream decoder must attest those actual
+classes before provider usage can reach pricing. Policy authority cannot be
+extracted or a completed call settled until the matching trusted pricing
+schedule supplies cost.
 This is intentionally stricter than assuming an errored `send` transmitted no
 bytes.
+
+Trusted schedules price uncached input, cached-read input, cache-write input,
+and inclusive output as four disjoint categories in integer micro-USD per
+million tokens. They use checked arithmetic and one upward rounding after the
+sum. Reasoning stays inside inclusive output. A catalog identity, range, or
+arithmetic refusal returns the move-only settlement without invoking policy;
+there is no raw-cost settlement escape. Successful catalog pricing is recorded
+as a `PricedCeiling`, distinct from exact zero and from charging the complete
+reservation when all usage is unknowable. Production model/rate entries still
+require an explicit reviewed product catalog.
 
 The supervisor records concise semantic progress—responsibility, active
 resource, operation class, state, result, and blocker—not hidden model

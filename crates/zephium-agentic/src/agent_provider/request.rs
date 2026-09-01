@@ -172,7 +172,7 @@ impl AgentProviderRequest {
         self.call
     }
 
-    /// Exact provider/model/tokenizer and response ceilings used to build it.
+    /// Exact provider/model/tokenizer/pricing and response bounds used to build it.
     pub const fn config(&self) -> &AgentProviderCallConfig {
         &self.config
     }
@@ -1409,6 +1409,11 @@ mod tests {
             super::super::AgentProviderModelRevision::try_new("claude-opus-5".to_owned())
                 .expect("model"),
             revision("anthropic:claude-opus-5:v1"),
+            super::super::AgentProviderPricingProfile::try_new(
+                super::super::AgentProviderPricingRevision::new(1).expect("pricing revision"),
+                16_384,
+            )
+            .expect("pricing profile"),
             512,
             1_024,
             super::super::AgentProviderStreamBudget::STANDARD,

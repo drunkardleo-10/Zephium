@@ -8,6 +8,7 @@
 
 mod anthropic;
 mod openai;
+mod pricing;
 mod request;
 mod sse;
 mod tool;
@@ -18,6 +19,12 @@ use thiserror::Error;
 
 use anthropic::AnthropicMessagesStreamDecoder;
 use openai::OpenAiResponsesStreamDecoder;
+
+pub use pricing::{
+    AgentProviderPricedUsage, AgentProviderPricingContractError, AgentProviderPricingError,
+    AgentProviderPricingProfile, AgentProviderPricingRevision, AgentProviderPricingSchedule,
+    AgentProviderTokenRates, MAX_AGENT_PROVIDER_RATE_MICRO_USD_PER_MILLION_TOKENS,
+};
 
 use crate::{
     AgentActiveModelCall, AgentModelCallAdmission, AgentModelCallId, AgentModelCallRequest,
@@ -71,6 +78,16 @@ pub enum AgentProviderKind {
     OpenAiResponses,
     /// Anthropic Messages API.
     AnthropicMessages,
+}
+
+impl AgentProviderKind {
+    /// Fixed billing class encoded for this provider protocol.
+    pub const fn billing_class(self) -> AgentProviderBillingClass {
+        match self {
+            Self::OpenAiResponses => AgentProviderBillingClass::OpenAiDefault,
+            Self::AnthropicMessages => AgentProviderBillingClass::AnthropicStandardGlobal,
+        }
+    }
 }
 
 /// Fixed provider billing mode selected by the immutable request contract.
@@ -332,23 +349,25 @@ impl AgentProviderStreamBudget {
     }
 }
 
-/// Fixed provider selection and response bounds for one admitted call.
+/// Fixed provider, pricing identity, and response bounds for one admitted call.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentProviderCallConfig {
     provider: AgentProviderKind,
     model: AgentProviderModelRevision,
     tokenizer: SemanticTokenizerRevision,
+    pricing: AgentProviderPricingProfile,
     fixed_input_tokens: u32,
     max_output_tokens: u32,
     stream: AgentProviderStreamBudget,
 }
 
 impl AgentProviderCallConfig {
-    /// Binds one provider/model revision to explicit output and stream limits.
+    /// Binds provider/model/tokenizer/pricing identity to response limits.
     pub fn try_new(
         provider: AgentProviderKind,
         model: AgentProviderModelRevision,
         tokenizer: SemanticTokenizerRevision,
+        pricing: AgentProviderPricingProfile,
         fixed_input_tokens: u32,
         max_output_tokens: u32,
         stream: AgentProviderStreamBudget,
@@ -363,6 +382,7 @@ impl AgentProviderCallConfig {
             provider,
             model,
             tokenizer,
+            pricing,
             fixed_input_tokens,
             max_output_tokens,
             stream,
@@ -376,12 +396,7 @@ impl AgentProviderCallConfig {
 
     /// Exact billing mode encoded into and required from the provider call.
     pub const fn billing_class(&self) -> AgentProviderBillingClass {
-        match self.provider {
-            AgentProviderKind::OpenAiResponses => AgentProviderBillingClass::OpenAiDefault,
-            AgentProviderKind::AnthropicMessages => {
-                AgentProviderBillingClass::AnthropicStandardGlobal
-            }
-        }
+        self.provider.billing_class()
     }
 
     /// Exact selected provider model revision.
@@ -392,6 +407,11 @@ impl AgentProviderCallConfig {
     /// Exact tokenizer/counting revision used for input admission.
     pub const fn tokenizer(&self) -> &SemanticTokenizerRevision {
         &self.tokenizer
+    }
+
+    /// Exact trusted catalog revision and inclusive input pricing range.
+    pub const fn pricing_profile(&self) -> AgentProviderPricingProfile {
+        self.pricing
     }
 
     /// Exact pinned envelope/tool-schema token count reserved beyond payload.
@@ -421,11 +441,12 @@ impl AgentProviderCallConfig {
         let additional_input_tokens = u64::from(objective.tokens())
             .checked_add(u64::from(self.fixed_input_tokens))
             .ok_or(AgentProviderContractError::AdmissionBudget)?;
+        let total_input_tokens = u64::from(payload.tokens())
+            .checked_add(additional_input_tokens)
+            .ok_or(AgentProviderContractError::AdmissionBudget)?;
         if additional_input_tokens > u64::from(request.budget().additional_input_tokens())
             || u64::from(self.max_output_tokens) > u64::from(request.budget().output_tokens())
-            || u64::from(payload.tokens())
-                .checked_add(additional_input_tokens)
-                .is_none()
+            || total_input_tokens > self.pricing.max_input_tokens()
         {
             return Err(AgentProviderContractError::AdmissionBudget);
         }
@@ -988,6 +1009,11 @@ mod tests {
             AgentProviderKind::OpenAiResponses,
             model,
             tokenizer("openai:gpt-5.6-sol:v1"),
+            AgentProviderPricingProfile::try_new(
+                AgentProviderPricingRevision::new(1).expect("pricing revision"),
+                16_384,
+            )
+            .expect("pricing profile"),
             512,
             4_096,
             AgentProviderStreamBudget::STANDARD,
@@ -1000,6 +1026,8 @@ mod tests {
         assert_eq!(config.fixed_input_tokens(), 512);
         assert_eq!(config.max_output_tokens(), 4_096);
         assert_eq!(config.stream_budget().max_tool_calls(), 8);
+        assert_eq!(config.pricing_profile().revision().value(), 1);
+        assert_eq!(config.pricing_profile().max_input_tokens(), 16_384);
 
         for invalid in ["", "../model", "https://model", "model name", "model/alias"] {
             assert_eq!(
@@ -1017,6 +1045,11 @@ mod tests {
                 AgentProviderModelRevision::try_new("claude-opus-5".to_owned())
                     .expect("valid revision"),
                 tokenizer("anthropic:claude-opus-5:v1"),
+                AgentProviderPricingProfile::try_new(
+                    AgentProviderPricingRevision::new(1).expect("pricing revision"),
+                    16_384,
+                )
+                .expect("pricing profile"),
                 512,
                 0,
                 AgentProviderStreamBudget::STANDARD,

@@ -26,11 +26,12 @@ pub use effect::{
 use crate::semantic_diff::SemanticObservationFingerprint;
 use crate::{
     AgentAccountScope, AgentContextAccountBinding, AgentPlanLeaseId, AgentPlanNodeId,
-    AgentPolicyInstant, AgentRunBudget, AgentRunManifest, AgentRunManifestId, ContextJoin,
-    SemanticActionAttemptId, SemanticEffectClass, SemanticModelPayload, SemanticObservation,
-    SemanticObservationAcknowledgement, SemanticObservationGeneration, SemanticObservationId,
-    SemanticOrigin, SemanticReadDeliveryReceipt, SemanticReadModelPayload, SemanticReadResult,
-    SemanticReferenceId, SemanticSensitivity, SemanticTrust,
+    AgentPolicyInstant, AgentProviderPricedUsage, AgentRunBudget, AgentRunManifest,
+    AgentRunManifestId, ContextJoin, SemanticActionAttemptId, SemanticEffectClass,
+    SemanticModelPayload, SemanticObservation, SemanticObservationAcknowledgement,
+    SemanticObservationGeneration, SemanticObservationId, SemanticOrigin,
+    SemanticReadDeliveryReceipt, SemanticReadModelPayload, SemanticReadResult, SemanticReferenceId,
+    SemanticSensitivity, SemanticTrust,
 };
 
 /// Maximum model calls reserved or active in one run policy.
@@ -573,8 +574,10 @@ impl AgentModelCallUnaccountedSettlement {
 /// Source of the usage charged by a terminal model-call receipt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentModelUsageAccounting {
-    /// Exact provider-accounted token and cost values were available.
+    /// Exact trusted token and cost values were available, including proven zero.
     Exact,
+    /// Provider tokens are exact and cost is a checked trusted-catalog ceiling.
+    PricedCeiling,
     /// Usage was unknowable, so the complete admitted ceilings were charged.
     ReservationCeiling,
 }
@@ -619,7 +622,7 @@ impl AgentModelCallReceipt {
         self.settlement
     }
 
-    /// Whether charged usage is exact or the conservative reservation ceiling.
+    /// Whether charged usage is exact, catalog-priced, or reservation-ceiling.
     pub const fn usage_accounting(self) -> AgentModelUsageAccounting {
         self.usage_accounting
     }
@@ -881,6 +884,30 @@ impl AgentRunPolicy {
             input_tokens,
             output_tokens,
             cost_micro_usd,
+        )
+    }
+
+    /// Settles exact provider tokens with an opaque checked catalog-cost ceiling.
+    ///
+    /// The priced value can be constructed only by the provider pricing
+    /// contract after exact provider/model/tokenizer/billing/revision matching.
+    /// Pricing details remain joined to the move-only terminal authority until
+    /// this single policy transition.
+    pub fn settle_model_call_priced(
+        &mut self,
+        active: AgentActiveModelCall,
+        settlement: AgentModelCallSettlement,
+        priced: AgentProviderPricedUsage,
+    ) -> Result<AgentModelCallReceipt, AgentPolicyError> {
+        let index = self.validate_active_model_call(&active)?;
+        let (usage, cost_ceiling_micro_usd) = priced.into_policy_parts();
+        self.settle_validated_model_call(
+            index,
+            settlement,
+            AgentModelUsageAccounting::PricedCeiling,
+            usage.input_tokens(),
+            usage.output_tokens(),
+            cost_ceiling_micro_usd,
         )
     }
 
@@ -2019,10 +2046,24 @@ mod tests {
         fixed_input_tokens: u32,
         max_output_tokens: u32,
     ) -> AgentProviderCallConfig {
+        provider_config_with_pricing_range(tokenizer, fixed_input_tokens, max_output_tokens, 16_384)
+    }
+
+    fn provider_config_with_pricing_range(
+        tokenizer: SemanticTokenizerRevision,
+        fixed_input_tokens: u32,
+        max_output_tokens: u32,
+        max_priced_input_tokens: u64,
+    ) -> AgentProviderCallConfig {
         AgentProviderCallConfig::try_new(
             AgentProviderKind::OpenAiResponses,
             AgentProviderModelRevision::try_new("gpt-5.6-sol".to_owned()).expect("model"),
             tokenizer,
+            crate::AgentProviderPricingProfile::try_new(
+                crate::AgentProviderPricingRevision::new(1).expect("pricing revision"),
+                max_priced_input_tokens,
+            )
+            .expect("pricing profile"),
             fixed_input_tokens,
             max_output_tokens,
             AgentProviderStreamBudget::STANDARD,
@@ -2039,6 +2080,11 @@ mod tests {
             AgentProviderKind::AnthropicMessages,
             AgentProviderModelRevision::try_new("claude-opus-5".to_owned()).expect("model"),
             tokenizer,
+            crate::AgentProviderPricingProfile::try_new(
+                crate::AgentProviderPricingRevision::new(1).expect("pricing revision"),
+                16_384,
+            )
+            .expect("pricing profile"),
             fixed_input_tokens,
             max_output_tokens,
             AgentProviderStreamBudget::STANDARD,
@@ -2407,6 +2453,37 @@ mod tests {
             &selected,
         )
         .expect("objective");
+
+        let mut outside_pricing_range = policy_fixture(
+            9_007,
+            9_008,
+            source.clone(),
+            SemanticSensitivity::Sensitive,
+            &[SemanticEffectClass::Read],
+            run_budget(10, 1_000, 10_000),
+        );
+        assert!(matches!(
+            AgentPreparedObservationRequest::try_openai(
+                &mut outside_pricing_range.policy,
+                call_request(
+                    1,
+                    outside_pricing_range.lease,
+                    account(context, NOW),
+                    15,
+                    20,
+                    100,
+                    NOW,
+                ),
+                &observation,
+                observation_payload(&observation, 50),
+                &objective,
+                provider_config_with_pricing_range(selected.clone(), 10, 20, 64),
+            ),
+            Err(crate::AgentProviderRequestError::Contract(
+                AgentProviderContractError::AdmissionBudget
+            ))
+        ));
+        assert_eq!(outside_pricing_range.policy.pending_model_calls(), 0);
 
         let mut insufficient = policy_fixture(
             9_007,

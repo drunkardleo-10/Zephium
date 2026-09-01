@@ -27,9 +27,10 @@ use zephium_agentic::{
     AgentActiveModelCall, AgentCommittedProviderRequest, AgentModelCallReceipt,
     AgentModelCallSettlement, AgentModelCallUnaccountedSettlement, AgentModelUsageAccounting,
     AgentPolicyError, AgentProviderCallConfig, AgentProviderCallIdentity, AgentProviderEndpoint,
-    AgentProviderFailure, AgentProviderFailureClass, AgentProviderKind, AgentProviderRequestError,
-    AgentProviderRetryAfter, AgentProviderStreamBatch, AgentProviderStreamConclusion,
-    AgentProviderStreamDecoder, AgentProviderTransportInput, AgentProviderUsage, AgentRunPolicy,
+    AgentProviderFailure, AgentProviderFailureClass, AgentProviderKind, AgentProviderPricingError,
+    AgentProviderPricingSchedule, AgentProviderRequestError, AgentProviderRetryAfter,
+    AgentProviderStreamBatch, AgentProviderStreamConclusion, AgentProviderStreamDecoder,
+    AgentProviderTransportInput, AgentProviderUsage, AgentRunPolicy,
 };
 use zeroize::Zeroizing;
 
@@ -793,7 +794,7 @@ impl AgentProviderTransportResult {
         &self.active
     }
 
-    /// Exact provider, model, tokenizer, and response bounds used for this call.
+    /// Exact provider, model, tokenizer, pricing, and response bounds for the call.
     pub const fn config(&self) -> &AgentProviderCallConfig {
         &self.config
     }
@@ -1036,7 +1037,7 @@ impl AgentProviderPricingSettlement {
         AgentProviderCallIdentity::from_active(&self.active)
     }
 
-    /// Exact provider/model/tokenizer and response bounds used for pricing.
+    /// Exact provider/model/tokenizer/billing/pricing bounds used for pricing.
     pub const fn config(&self) -> &AgentProviderCallConfig {
         &self.config
     }
@@ -1056,19 +1057,28 @@ impl AgentProviderPricingSettlement {
         self.usage
     }
 
-    /// Settles exact tokens with cost from the matching trusted price revision.
+    /// Prices and settles through one exact immutable trusted schedule.
+    ///
+    /// Identity/range/arithmetic refusal returns this move-only settlement in
+    /// the error so the caller can retry a corrected catalog lookup without
+    /// losing active policy authority.
     pub fn settle(
         self,
         policy: &mut AgentRunPolicy,
-        cost_micro_usd: u64,
-    ) -> Result<AgentModelCallReceipt, AgentPolicyError> {
-        policy.settle_model_call(
-            self.active,
-            self.settlement,
-            self.usage.input_tokens(),
-            self.usage.output_tokens(),
-            cost_micro_usd,
-        )
+        schedule: &AgentProviderPricingSchedule,
+    ) -> Result<AgentModelCallReceipt, AgentProviderPricingSettlementError> {
+        let priced = match schedule.try_price(&self.config, self.usage) {
+            Ok(priced) => priced,
+            Err(error) => {
+                return Err(AgentProviderPricingSettlementError::Pricing {
+                    error,
+                    unsettled: Box::new(self),
+                });
+            }
+        };
+        policy
+            .settle_model_call_priced(self.active, self.settlement, priced)
+            .map_err(AgentProviderPricingSettlementError::Policy)
     }
 }
 
@@ -1082,6 +1092,40 @@ impl fmt::Debug for AgentProviderPricingSettlement {
             .field("settlement", &self.settlement)
             .field("usage", &self.usage)
             .finish()
+    }
+}
+
+/// Failure while joining trusted pricing to exact terminal policy authority.
+#[derive(Debug, Error)]
+pub enum AgentProviderPricingSettlementError {
+    /// Schedule identity, input range, or checked arithmetic refused pricing.
+    #[error("agent provider terminal usage could not be priced")]
+    Pricing {
+        /// Closed content-free pricing refusal class.
+        error: AgentProviderPricingError,
+        /// Exact move-only terminal authority retained for corrected lookup.
+        unsettled: Box<AgentProviderPricingSettlement>,
+    },
+    /// Policy consumed the terminal transition and failed stopped.
+    #[error("agent provider priced policy settlement failed")]
+    Policy(#[source] AgentPolicyError),
+}
+
+impl AgentProviderPricingSettlementError {
+    /// Content-free pricing refusal when policy was not invoked.
+    pub const fn pricing_error(&self) -> Option<AgentProviderPricingError> {
+        match self {
+            Self::Pricing { error, .. } => Some(*error),
+            Self::Policy(_) => None,
+        }
+    }
+
+    /// Recovers exact authority only when pricing refused before policy use.
+    pub fn into_unsettled(self) -> Option<AgentProviderPricingSettlement> {
+        match self {
+            Self::Pricing { unsettled, .. } => Some(*unsettled),
+            Self::Policy(_) => None,
+        }
     }
 }
 
@@ -1528,16 +1572,18 @@ mod tests {
         AgentModelCallId, AgentModelCallRequest, AgentModelCallSettlement, AgentPlanLeaseBinding,
         AgentPlanLeaseId, AgentPlanNodeAuthority, AgentPlanNodeId, AgentPlanNodeScope,
         AgentPreparedObservationRequest, AgentProviderCallConfig, AgentProviderModelRevision,
-        AgentProviderObjective, AgentProviderStopReason, AgentProviderStreamBudget, AgentRunBudget,
-        AgentRunManifest, AgentRunManifestId, AgentRunScope, ContextCapabilities,
-        ContextCapability, ContextId, ContextIdentity, ContextKind, ContextOperationId,
-        ContextRegistry, ContextRunId, ContextSettlement, FrameGeneration, FrameId,
-        SemanticDecodeContext, SemanticEffectClass, SemanticFrameJoin, SemanticFrameTrust,
-        SemanticInvocationId, SemanticModelEncodingBudget, SemanticObservationAssembler,
-        SemanticObservationBudget, SemanticObservationId, SemanticObservationRequest,
-        SemanticOrigin, SemanticSensitivity, SemanticSnapshotGeneration, SemanticTokenCountQuality,
-        SemanticTokenCountRequirement, SemanticTokenCounter, SemanticTokenCounterError,
-        SemanticTokenMeasurement, SemanticTokenizerRevision, SEMANTIC_WIRE_VERSION,
+        AgentProviderObjective, AgentProviderPricingError, AgentProviderPricingProfile,
+        AgentProviderPricingRevision, AgentProviderPricingSchedule, AgentProviderStopReason,
+        AgentProviderStreamBudget, AgentProviderTokenRates, AgentRunBudget, AgentRunManifest,
+        AgentRunManifestId, AgentRunScope, ContextCapabilities, ContextCapability, ContextId,
+        ContextIdentity, ContextKind, ContextOperationId, ContextRegistry, ContextRunId,
+        ContextSettlement, FrameGeneration, FrameId, SemanticDecodeContext, SemanticEffectClass,
+        SemanticFrameJoin, SemanticFrameTrust, SemanticInvocationId, SemanticModelEncodingBudget,
+        SemanticObservationAssembler, SemanticObservationBudget, SemanticObservationId,
+        SemanticObservationRequest, SemanticOrigin, SemanticSensitivity,
+        SemanticSnapshotGeneration, SemanticTokenCountQuality, SemanticTokenCountRequirement,
+        SemanticTokenCounter, SemanticTokenCounterError, SemanticTokenMeasurement,
+        SemanticTokenizerRevision, SEMANTIC_WIRE_VERSION,
     };
     use zephium_core::ids::ProfileId;
 
@@ -1725,6 +1771,11 @@ mod tests {
             )
             .expect("model"),
             tokenizer,
+            zephium_agentic::AgentProviderPricingProfile::try_new(
+                zephium_agentic::AgentProviderPricingRevision::new(1).expect("pricing revision"),
+                16_384,
+            )
+            .expect("pricing profile"),
             5,
             20,
             AgentProviderStreamBudget::STANDARD,
@@ -1750,6 +1801,26 @@ mod tests {
         }
         .expect("prepared request");
         (policy, prepared.into_transport_input())
+    }
+
+    fn pricing_schedule(config: &AgentProviderCallConfig) -> AgentProviderPricingSchedule {
+        let rates = match config.provider() {
+            AgentProviderKind::OpenAiResponses => {
+                AgentProviderTokenRates::try_new(1_000_000, 500_000, 1_250_000, 21_000_000)
+                    .expect("OpenAI synthetic rates")
+            }
+            AgentProviderKind::AnthropicMessages => {
+                AgentProviderTokenRates::try_new(1_000_000, 1_000_000, 1_000_000, 10_000_000)
+                    .expect("Anthropic synthetic rates")
+            }
+        };
+        AgentProviderPricingSchedule::new(
+            config.provider(),
+            config.model().clone(),
+            config.tokenizer().clone(),
+            config.pricing_profile(),
+            rates,
+        )
     }
 
     struct CapturedRequest {
@@ -2185,10 +2256,35 @@ mod tests {
         assert!(!settlement_debug.contains("gpt-5.6-sol"));
         assert!(!settlement_debug.contains("transport-test-v1"));
         assert_eq!(policy.pending_model_calls(), 1);
+        let wrong_profile = AgentProviderPricingProfile::try_new(
+            AgentProviderPricingRevision::new(2).expect("pricing revision"),
+            settlement.config().pricing_profile().max_input_tokens(),
+        )
+        .expect("wrong profile");
+        let wrong_schedule = AgentProviderPricingSchedule::new(
+            settlement.config().provider(),
+            settlement.config().model().clone(),
+            settlement.config().tokenizer().clone(),
+            wrong_profile,
+            AgentProviderTokenRates::try_new(1, 1, 1, 1).expect("rates"),
+        );
+        let error = settlement
+            .settle(&mut policy, &wrong_schedule)
+            .expect_err("mismatched catalog must retain authority");
+        assert_eq!(
+            error.pricing_error(),
+            Some(AgentProviderPricingError::Identity)
+        );
+        let settlement = error.into_unsettled().expect("retained settlement");
+        assert_eq!(policy.pending_model_calls(), 1);
+        let schedule = pricing_schedule(settlement.config());
         let receipt = settlement
-            .settle(&mut policy, 80)
-            .expect("exact priced policy settlement");
-        assert_eq!(receipt.usage_accounting(), AgentModelUsageAccounting::Exact);
+            .settle(&mut policy, &schedule)
+            .expect("catalog-priced policy settlement");
+        assert_eq!(
+            receipt.usage_accounting(),
+            AgentModelUsageAccounting::PricedCeiling
+        );
         assert_eq!(receipt.input_tokens(), 17);
         assert_eq!(receipt.output_tokens(), 3);
         assert_eq!(receipt.cost_micro_usd(), 80);
@@ -2210,7 +2306,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn terminal_failure_with_usage_retains_pricing_and_exact_accounting() {
+    async fn terminal_failure_with_usage_retains_catalog_ceiling_accounting() {
         let server = OneShotServer::spawn(
             "200 OK",
             &[
@@ -2268,10 +2364,14 @@ mod tests {
             settlement.settlement(),
             AgentModelCallSettlement::ProviderFailed
         );
+        let schedule = pricing_schedule(settlement.config());
         let receipt = settlement
-            .settle(&mut policy, 25)
-            .expect("exact failure settlement");
-        assert_eq!(receipt.usage_accounting(), AgentModelUsageAccounting::Exact);
+            .settle(&mut policy, &schedule)
+            .expect("priced failure settlement");
+        assert_eq!(
+            receipt.usage_accounting(),
+            AgentModelUsageAccounting::PricedCeiling
+        );
         assert_eq!(receipt.input_tokens(), 15);
         assert_eq!(receipt.output_tokens(), 1);
         assert_eq!(receipt.cost_micro_usd(), 25);

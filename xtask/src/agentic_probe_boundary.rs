@@ -12,6 +12,8 @@ const AGENTIC_PROVIDER_ROOT: &str = "crates/zephium-agentic/src/agent_provider.r
 const AGENTIC_PROVIDER_REQUEST: &str = "crates/zephium-agentic/src/agent_provider/request.rs";
 const AGENTIC_PROVIDER_OPENAI: &str = "crates/zephium-agentic/src/agent_provider/openai.rs";
 const AGENTIC_PROVIDER_ANTHROPIC: &str = "crates/zephium-agentic/src/agent_provider/anthropic.rs";
+const AGENTIC_PROVIDER_PRICING: &str = "crates/zephium-agentic/src/agent_provider/pricing.rs";
+const AGENTIC_POLICY: &str = "crates/zephium-agentic/src/agent_policy.rs";
 const PROVIDER_TRANSPORT_MANIFEST: &str = "crates/zephium-agent-provider-transport/Cargo.toml";
 const PROVIDER_TRANSPORT_ROOT: &str = "crates/zephium-agent-provider-transport/src/lib.rs";
 const ENGINE_MANIFEST: &str = "crates/zephium-engine/Cargo.toml";
@@ -42,6 +44,11 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         &read(repository.join(AGENTIC_PROVIDER_REQUEST))?,
         &read(repository.join(AGENTIC_PROVIDER_OPENAI))?,
         &read(repository.join(AGENTIC_PROVIDER_ANTHROPIC))?,
+    )?;
+    validate_provider_pricing_contract(
+        &read(repository.join(AGENTIC_PROVIDER_PRICING))?,
+        &read(repository.join(AGENTIC_POLICY))?,
+        &read(repository.join(PROVIDER_TRANSPORT_ROOT))?,
     )?;
     validate_provider_transport_manifest(&read(repository.join(PROVIDER_TRANSPORT_MANIFEST))?)?;
     validate_provider_transport_root(&read(repository.join(PROVIDER_TRANSPORT_ROOT))?)?;
@@ -321,6 +328,9 @@ fn validate_provider_billing_contract(
         "constANTHROPIC_GLOBAL_INFERENCE_GEO:&str=\"global\";",
         "pubenumAgentProviderBillingClass",
         "pubconstfnbilling_class(&self)->AgentProviderBillingClass",
+        "pricing:AgentProviderPricingProfile",
+        "pubconstfnpricing_profile(&self)->AgentProviderPricingProfile",
+        "total_input_tokens>self.pricing.max_input_tokens()",
     ] {
         if !root.contains(required) {
             return Err(format!(
@@ -362,6 +372,65 @@ fn validate_provider_billing_contract(
                 "Anthropic decoder lost terminal billing-class attestation {required}"
             ));
         }
+    }
+    Ok(())
+}
+
+fn validate_provider_pricing_contract(
+    pricing: &str,
+    policy: &str,
+    transport: &str,
+) -> Result<(), String> {
+    let pricing = compact(pricing);
+    for required in [
+        "pubstructAgentProviderPricingSchedule",
+        "config.provider()!=self.provider",
+        "config.billing_class()!=self.billing_class",
+        "config.model()!=&self.model",
+        "config.tokenizer()!=&self.tokenizer",
+        "config.pricing_profile()!=self.profile",
+        "usage.input_tokens()>self.profile.max_input_tokens",
+        ".checked_add(usage.cache_write_input_tokens())",
+        ".checked_sub(priced_input_subsets)",
+        "u64::try_from(rounded)",
+        "pubstructAgentProviderPricedUsage",
+        "pub(crate)fninto_policy_parts(self)->(AgentProviderUsage,u64)",
+    ] {
+        if !pricing.contains(required) {
+            return Err(format!(
+                "agent provider pricing lost required checked boundary {required}"
+            ));
+        }
+    }
+
+    let policy = compact(policy);
+    for required in [
+        "PricedCeiling",
+        "pubfnsettle_model_call_priced(",
+        "AgentModelUsageAccounting::PricedCeiling",
+    ] {
+        if !policy.contains(required) {
+            return Err(format!(
+                "agent policy lost priced-ceiling settlement boundary {required}"
+            ));
+        }
+    }
+
+    let transport = compact(transport);
+    for required in [
+        "schedule:&AgentProviderPricingSchedule",
+        ".settle_model_call_priced(self.active,self.settlement,priced)",
+        "unsettled:Box<AgentProviderPricingSettlement>",
+        "pubfninto_unsettled(self)->Option<AgentProviderPricingSettlement>",
+    ] {
+        if !transport.contains(required) {
+            return Err(format!(
+                "agent provider transport lost price-authority join {required}"
+            ));
+        }
+    }
+    if transport.contains("pubfnsettle(self,policy:&mutAgentRunPolicy,cost_micro_usd:u64)") {
+        return Err("agent provider settlement regained an unbound raw-cost handoff".to_owned());
     }
     Ok(())
 }
@@ -744,7 +813,10 @@ mod tests {
             const ANTHROPIC_STANDARD_SERVICE_TIER_RESPONSE: &str = "standard";
             const ANTHROPIC_GLOBAL_INFERENCE_GEO: &str = "global";
             pub enum AgentProviderBillingClass {}
+            struct Config { pricing: AgentProviderPricingProfile }
             pub const fn billing_class(&self) -> AgentProviderBillingClass {}
+            pub const fn pricing_profile(&self) -> AgentProviderPricingProfile {}
+            if total_input_tokens > self.pricing.max_input_tokens() {}
         "#;
         let request = r#"
             OpenAiRequestWire { service_tier: OPENAI_STANDARD_SERVICE_TIER };
@@ -778,6 +850,58 @@ mod tests {
         .is_err());
         assert!(validate_provider_billing_contract(root, request, "", anthropic,).is_err());
         assert!(validate_provider_billing_contract(root, request, openai, "").is_err());
+    }
+
+    #[test]
+    fn provider_pricing_requires_checked_identity_range_and_move_only_join() {
+        let pricing = r#"
+            pub struct AgentProviderPricingSchedule;
+            if config.provider() != self.provider
+                || config.billing_class() != self.billing_class
+                || config.model() != &self.model
+                || config.tokenizer() != &self.tokenizer
+                || config.pricing_profile() != self.profile {}
+            if usage.input_tokens() > self.profile.max_input_tokens {}
+            usage.cached_input_tokens().checked_add(usage.cache_write_input_tokens());
+            usage.input_tokens().checked_sub(priced_input_subsets);
+            u64::try_from(rounded);
+            pub struct AgentProviderPricedUsage;
+            pub(crate) fn into_policy_parts(self) -> (AgentProviderUsage, u64) {}
+        "#;
+        let policy = r#"
+            enum AgentModelUsageAccounting { PricedCeiling }
+            pub fn settle_model_call_priced() {
+                AgentModelUsageAccounting::PricedCeiling;
+            }
+        "#;
+        let transport = r#"
+            pub fn settle(
+                self,
+                policy: &mut AgentRunPolicy,
+                schedule: &AgentProviderPricingSchedule,
+            ) {
+                policy.settle_model_call_priced(self.active, self.settlement, priced);
+            }
+            struct Error { unsettled: Box<AgentProviderPricingSettlement> }
+            pub fn into_unsettled(self) -> Option<AgentProviderPricingSettlement> {}
+        "#;
+
+        validate_provider_pricing_contract(pricing, policy, transport)
+            .expect("valid checked pricing boundary");
+        assert!(validate_provider_pricing_contract(
+            &pricing.replace("config.tokenizer() != &self.tokenizer", "true"),
+            policy,
+            transport,
+        )
+        .is_err());
+        assert!(validate_provider_pricing_contract(
+            pricing,
+            policy,
+            &format!(
+                "{transport}\npub fn settle(self, policy: &mut AgentRunPolicy, cost_micro_usd: u64) {{}}"
+            ),
+        )
+        .is_err());
     }
 
     #[test]

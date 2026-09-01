@@ -16,8 +16,10 @@ for both providers are implemented with atomic model-input commitment and a
 fixed, provider-attested billing class. The durable Store adapter and fixed
 BYOK HTTPS transport are implemented. Terminal transport evidence now selects
 exact-zero, reservation-ceiling, or move-only pricing-required policy
-settlement without exposing active authority. Live provider and fixed
-pricing-catalog qualification remain pending.
+settlement without exposing active authority. Checked provider pricing and its
+distinct catalog-ceiling accounting are implemented without product rate
+entries. Live provider and production pricing-catalog qualification remain
+pending.
 
 This evidence describes policy input facts only. A manifest cannot authorize a
 browser action, model call, tool call, data transfer, cost, or native resource.
@@ -456,11 +458,13 @@ browser action, model call, tool call, data transfer, cost, or native resource.
   union parameters are checked against Anthropic's current 20/16 compiler
   ceilings before serialization. Local decoding and policy checks remain
   mandatory even when a provider claims strict conformance.
-- Provider/model/tokenizer choice, exact pinned fixed-envelope/schema token
+- Provider/model/tokenizer/billing choice, a nonzero trusted pricing revision,
+  the schedule's inclusive input range, exact pinned fixed-envelope/schema token
   count, objective tokens, semantic tokens, output ceiling, and request-body
-  bytes are checked before transport. Bodies are capped at 2 MiB and expose
-  only a fixed endpoint enum plus exact redacted call correlation to the trusted
-  HTTP shell.
+  bytes are checked before transport. A request outside its bound price range
+  fails before reservation or disclosure. Bodies are capped at 2 MiB and
+  expose only a fixed endpoint enum plus exact redacted call correlation to the
+  trusted HTTP shell.
 - Construction validates and serializes before asking policy to reserve, so a
   malformed provider profile or encoding failure cannot orphan an admission.
   After reservation, construction is infallible and drops the original
@@ -508,6 +512,15 @@ browser action, model call, tool call, data transfer, cost, or native resource.
   reconciliation rather than inventing cost or releasing the reservation.
   Provider terminal failures with exact usage follow the same pricing path;
   those without usage consume the reservation ceiling.
+- The pure pricing schedule requires exact provider, model, tokenizer, billing
+  class, pricing revision, and input-range identity. It prices uncached input,
+  cached reads, cache writes, and inclusive output as four disjoint categories
+  in micro-USD per million tokens, with checked integer arithmetic and one
+  upward rounding. Reasoning is already included in output. Success produces an
+  opaque `PricedCeiling` policy value rather than a raw caller-supplied cost.
+  Identity, range, and arithmetic refusal return the boxed move-only settlement
+  before policy is invoked, so corrected lookup or reconciliation cannot lose
+  authority. No production model/rate schedule is implied by this contract.
 - The transport issues at most one POST per admitted attempt and does not read
   non-200 response bodies. It streams bounded chunks directly through the
   existing provider-neutral decoder and exposes only normalized nonempty event
@@ -519,9 +532,11 @@ browser action, model call, tool call, data transfer, cost, or native resource.
   credential marking, identity encoding, pre-send cancellation proof, and
   move-only settlement route. It also pins both fixed billing classes, their
   request controls, their decoder attestations, and refusal of the beta-only
-  Anthropic speed field on the stable endpoint. It rejects public
-  loopback/custom-endpoint construction, TLS-verification bypass, or
-  active-authority decomposition.
+  Anthropic speed field on the stable endpoint. The gate additionally pins
+  price identity/range/category checks, the opaque `PricedCeiling` join,
+  authority recovery on pre-policy pricing refusal, and absence of the former
+  raw-cost terminal API. It rejects public loopback/custom-endpoint
+  construction, TLS-verification bypass, or active-authority decomposition.
 
 ## Implemented OpenAI Responses stream slice
 
@@ -645,12 +660,12 @@ transactional append, exact idempotent replay across process reopen,
 substituted-delivery refusal without mutation, independent eight-batch actor
 admission, asynchronous settlement, callback-panic containment, and
 retained-ledger reconciliation.
-Thirty-seven provider/request-boundary tests cover configuration/usage/retry ceilings,
+Forty provider/request-boundary tests cover configuration/usage/retry ceilings,
 fragmented CR/LF/CRLF SSE framing, multiline data, comments, invalid UTF-8,
 line/event/event-count/aggregate-wire exhaustion, exact model/response joins,
 text hashing, terminal usage and billing-class attestation, output limits,
-failed/incomplete responses,
-typed OpenAI function-call and Anthropic content-block lifecycles, cumulative
+failed/incomplete responses, typed OpenAI function-call and Anthropic
+content-block lifecycles, cumulative
 cache-aware Anthropic usage, unknown future events, typed stream errors,
 truncated/malformed/empty tool arguments, every closed browser tool and semantic
 action class, URL/reference/query/schema validation, secret and mixed-effect
@@ -659,14 +674,18 @@ unsupported built-in and reasoning output, objective secret/tokenizer/quality
 refusal, recursive strict-schema completeness, atomic preflight/reservation,
 observation/read one-shot commitment for both providers, provider-compatible
 schema projection, fixed body fields, fail-closed ordering, and redacted
-diagnostics. They use only deterministic in-memory values and wire fragments
-and no provider, network, credential, task, timer, or retry.
+diagnostics. Checked pricing tests additionally cover four disjoint token
+categories, single upward rounding, exact schedule identity, pre-disclosure and
+terminal input-range refusal, overflow, hard rate/profile ceilings, and
+redacted diagnostics. They use only deterministic in-memory values and wire
+fragments and no provider, network, credential, task, timer, or retry.
 Fourteen fixed-transport tests add synthetic ephemeral-loopback evidence for
 exact endpoint/header/body construction, credential and diagnostic redaction,
 single-POST/no-retry behavior, redirect refusal, closed status/retry mapping,
 connection failure, bounded request reading, concurrency/duplicate/shutdown
 accounting, lost-wakeup resistance, abandoned-attempt fail-stop, exact-zero
 pre-dispatch cancellation, reservation-ceiling post-dispatch cancellation,
-priced completed usage, priced terminal-failure usage, and conservative terminal
+catalog-priced completed usage, catalog-priced terminal-failure usage,
+mismatched-catalog authority retention, and conservative terminal
 failure without usage. They use synthetic credentials and content only, never
 an external endpoint, account, profile, provider key, or provider response.

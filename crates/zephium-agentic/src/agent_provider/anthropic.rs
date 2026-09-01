@@ -830,8 +830,8 @@ fn validate_message_id(value: &str) -> Result<(), AgentProviderProtocolError> {
 mod tests {
     use super::*;
     use crate::{
-        AgentModelCallId, AgentPlanLeaseId, AgentPlanNodeId, AgentRunManifestId,
-        SemanticTokenizerRevision,
+        AgentModelCallId, AgentPlanLeaseId, AgentPlanNodeId, AgentProviderPricingProfile,
+        AgentProviderPricingRevision, AgentRunManifestId, SemanticTokenizerRevision,
     };
 
     fn call() -> AgentProviderCallIdentity {
@@ -849,6 +849,11 @@ mod tests {
             AgentProviderModelRevision::try_new("claude-opus-5".to_owned()).expect("model"),
             SemanticTokenizerRevision::try_new("anthropic:claude-opus-5:v1".to_owned())
                 .expect("tokenizer"),
+            AgentProviderPricingProfile::try_new(
+                AgentProviderPricingRevision::new(1).expect("pricing revision"),
+                16_384,
+            )
+            .expect("pricing profile"),
             512,
             1_024,
             AgentProviderStreamBudget::try_new(64 * 1024, 64, max_text, 2, max_arguments)
