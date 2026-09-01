@@ -433,6 +433,32 @@ pub fn windows_input_plan(
     Some(steps)
 }
 
+/// Encodes one Win32 keyboard-message `lParam` from a validated scan mapping.
+///
+/// `MapVirtualKeyW(MAPVK_VK_TO_VSC_EX)` returns the scan code in the low byte
+/// and an optional `0xE0`/`0xE1` extended prefix in the high byte. Win32
+/// keyboard messages carry only the low scan byte in bits 16-23 and represent
+/// that prefix with the extended-key flag in bit 24. A zero or unexpected
+/// mapping is refused instead of dispatching an ambiguous message.
+pub fn windows_key_message_lparam(mapped_scan: u32, down: bool) -> Option<isize> {
+    if mapped_scan == 0 || mapped_scan > u32::from(u16::MAX) {
+        return None;
+    }
+    let scan = mapped_scan & 0xff;
+    let prefix = (mapped_scan >> 8) & 0xff;
+    if scan == 0 || !matches!(prefix, 0 | 0xe0 | 0xe1) {
+        return None;
+    }
+    let mut encoded = 1_u32 | (scan << 16);
+    if prefix != 0 {
+        encoded |= 1 << 24;
+    }
+    if !down {
+        encoded |= 1 << 30 | 1 << 31;
+    }
+    Some(encoded as isize)
+}
+
 impl FixedProbeScript {
     /// Returns the fixed source associated with this closed recipe.
     ///
@@ -662,5 +688,24 @@ mod tests {
             WindowsProbeGeometry::try_new(f64::NAN, 0.0, 10.0, 10.0, None, None, 1.0,).is_none()
         );
         assert!(WindowsProbeGeometry::try_new(0.0, 0.0, 10.0, 10.0, None, None, 16.0,).is_none());
+    }
+
+    #[test]
+    fn windows_key_message_encoding_preserves_extended_and_transition_flags() {
+        assert_eq!(
+            windows_key_message_lparam(0x002d, true),
+            Some(1 | (0x2d << 16))
+        );
+        assert_eq!(
+            windows_key_message_lparam(0xe050, true),
+            Some(1 | (0x50 << 16) | (1 << 24))
+        );
+        assert_eq!(
+            windows_key_message_lparam(0xe050, false),
+            Some(1 | (0x50 << 16) | (1 << 24) | (1 << 30) | (1_isize << 31))
+        );
+        assert_eq!(windows_key_message_lparam(0, true), None);
+        assert_eq!(windows_key_message_lparam(0x0101, true), None);
+        assert_eq!(windows_key_message_lparam(0x1_e050, true), None);
     }
 }

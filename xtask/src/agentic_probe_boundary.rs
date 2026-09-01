@@ -233,6 +233,8 @@ fn validate_windows_probe_source(source: &str) -> Result<(), String> {
         "GetWindow(self.container,GW_CHILD)",
         "GetParent(self.document)",
         "SendMessageTimeoutW(",
+        "MAPVK_VK_TO_VSC_EX",
+        "windows_key_message_lparam(mapped_scan,down)",
         "ICoreWebView2CallDevToolsProtocolMethodCompletedHandler",
         "borrowed_pcwstr_bounded(",
         "method:FixedCdpMethod",
@@ -1867,6 +1869,8 @@ mod tests {
             GetWindow(self.container, GW_CHILD);
             GetParent(self.document);
             SendMessageTimeoutW(hwnd);
+            MAPVK_VK_TO_VSC_EX;
+            windows_key_message_lparam(mapped_scan, down);
             ICoreWebView2CallDevToolsProtocolMethodCompletedHandler;
             borrowed_pcwstr_bounded(response);
             fn call(method: FixedCdpMethod) {}

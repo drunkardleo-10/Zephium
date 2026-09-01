@@ -26,7 +26,7 @@ use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::SystemInformation::OSVERSIONINFOW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetFocus, MapVirtualKeyW, SetFocus, MAPVK_VK_TO_VSC, VK_DOWN, VK_RETURN,
+    GetFocus, MapVirtualKeyW, SetFocus, MAPVK_VK_TO_VSC_EX, VK_DOWN, VK_RETURN,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
@@ -45,13 +45,13 @@ use wry::{
     WebViewBuilderExtWindows as _, WebViewExtWindows as _,
 };
 use zephium_agentic::{
-    windows_input_plan, ActivationEvidence, BackendAvailability, BackendCapability, CaseEvidence,
-    CaseOutcome, EvidenceLabel, FixedProbeScript, FixtureCase, FixtureServer, FixtureTarget,
-    FocusEvidence, FocusOwner, GateOutcome, InputBackend, InputEventEvidence, InputEventKind,
-    Platform, PresentationState, ProbeFailure, ProbeFailureCode, ProbeRunPermit, ProbeStage,
-    ResourceEvidence, RunEvidence, RunMatrixRequest, RuntimeFingerprint, TargetEvidence,
-    TeardownEvidence, WindowsInputStep, WindowsProbeGeometry, WindowsProbeKey, WindowsProbePoint,
-    MAX_EVENT_EVIDENCE, MAX_NATIVE_INPUT_RUNTIME_ROW,
+    windows_input_plan, windows_key_message_lparam, ActivationEvidence, BackendAvailability,
+    BackendCapability, CaseEvidence, CaseOutcome, EvidenceLabel, FixedProbeScript, FixtureCase,
+    FixtureServer, FixtureTarget, FocusEvidence, FocusOwner, GateOutcome, InputBackend,
+    InputEventEvidence, InputEventKind, Platform, PresentationState, ProbeFailure,
+    ProbeFailureCode, ProbeRunPermit, ProbeStage, ResourceEvidence, RunEvidence, RunMatrixRequest,
+    RuntimeFingerprint, TargetEvidence, TeardownEvidence, WindowsInputStep, WindowsProbeGeometry,
+    WindowsProbeKey, WindowsProbePoint, MAX_EVENT_EVIDENCE, MAX_NATIVE_INPUT_RUNTIME_ROW,
 };
 
 use super::{
@@ -1045,15 +1045,13 @@ fn send_key(
         WindowsProbeKey::ArrowDown => VK_DOWN.0,
         WindowsProbeKey::Enter => VK_RETURN.0,
     };
-    let scan = unsafe { MapVirtualKeyW(u32::from(virtual_key), MAPVK_VK_TO_VSC) } & 0xff;
-    let mut lparam = 1_u32 | (scan << 16);
-    if !down {
-        lparam |= 1 << 30 | 1 << 31;
-    }
+    let mapped_scan = unsafe { MapVirtualKeyW(u32::from(virtual_key), MAPVK_VK_TO_VSC_EX) };
+    let lparam =
+        windows_key_message_lparam(mapped_scan, down).ok_or(AdapterError::NativeConstruction)?;
     target.send(
         if down { WM_KEYDOWN } else { WM_KEYUP },
         WPARAM(usize::from(virtual_key)),
-        LPARAM(lparam as isize),
+        LPARAM(lparam),
     )
 }
 

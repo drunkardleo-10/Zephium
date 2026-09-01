@@ -953,6 +953,10 @@ sources rather than copying another browser agent's architecture:
   invokes the procedure of the exact target HWND. The M1 HWND candidate
   therefore resolves and validates the direct WebView document child that
   pinned Wry itself uses for focus instead of sending to Wry's container.
+- [Win32 keyboard-message flags](https://learn.microsoft.com/en-us/windows/win32/inputdev/wm-keydown)
+  and [`MapVirtualKeyExW`](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-mapvirtualkeyexw)
+  define the scan-code, extended-key, previous-state, and transition fields.
+  The M1 HWND encoder preserves those fields and refuses an unknown mapping.
 - [Chrome DevTools Protocol Input](https://chromedevtools.github.io/devtools-protocol/tot/Input/)
   defines the fixed diagnostic mouse and key command coordinates and fields.
 - [Chrome DevTools Protocol `Runtime.evaluate`](https://chromedevtools.github.io/devtools-protocol/tot/Runtime/#method-evaluate)

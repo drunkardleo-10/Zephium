@@ -46,7 +46,7 @@ than a string.
 | Route | Implemented behavior | Qualification state |
 | --- | --- | --- |
 | Fixed DOM recipe | One compiled fixture recipe evaluated with `userGesture: false` | Cross-compiled; hidden physical result pending |
-| Ordinary child HWND | Pinned Wry's public HWND is its `WRY_WEBVIEW` container, whose procedure forwards focus to the first direct child as the WebView document. The adapter scales fixed geometry to that direct child's client area, revalidates its container/first-child/parent identity before and after every message, then issues at most sixteen `SendMessageTimeoutW` mouse/key steps under a 250 ms per-message ceiling. | Cross-compiled; hidden/background physical result pending |
+| Ordinary child HWND | Pinned Wry's public HWND is its `WRY_WEBVIEW` container, whose procedure forwards focus to the first direct child as the WebView document. The adapter scales fixed geometry to that direct child's client area, revalidates its container/first-child/parent identity before and after every message, then issues at most sixteen `SendMessageTimeoutW` mouse/key steps under a 250 ms per-message ceiling. Keyboard messages use `MAPVK_VK_TO_VSC_EX`, reject missing/unrecognized mappings, and preserve the extended-key and up-transition flags. | Cross-compiled; hidden/background physical result pending |
 | Composition controller | No cast or call is made | `UnsupportedByIntegration`; pinned Wry creates an ordinary controller |
 | CDP input | One fixed `Input.dispatchMouseEvent` or `Input.dispatchKeyEvent` completes before the next | Diagnostics only; physical result pending |
 | Focused/human | No global input is generated | Human baseline remains explicit and visible |
