@@ -16,9 +16,10 @@ use raw_window_handle::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-use webview2_com::CallDevToolsProtocolMethodCompletedHandler;
 use webview2_com::Microsoft::Web::WebView2::Win32::{
-    ICoreWebView2, ICoreWebView2Environment, ICoreWebView2Environment8,
+    ICoreWebView2, ICoreWebView2CallDevToolsProtocolMethodCompletedHandler,
+    ICoreWebView2CallDevToolsProtocolMethodCompletedHandler_Impl, ICoreWebView2Environment,
+    ICoreWebView2Environment8,
 };
 use windows::Wdk::System::SystemServices::RtlGetVersion;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
@@ -29,14 +30,14 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
-    GetForegroundWindow, MsgWaitForMultipleObjectsEx, PeekMessageW, PostQuitMessage,
-    RegisterClassW, SendMessageTimeoutW, SetForegroundWindow, SetWindowPos, ShowWindow,
-    TranslateMessage, CW_USEDEFAULT, HWND_BOTTOM, MSG, MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT,
-    SMTO_ABORTIFHUNG, SMTO_BLOCK, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOW,
-    SW_SHOWNOACTIVATE, WM_CHAR, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-    WM_QUIT, WNDCLASSW, WS_EX_TOOLWINDOW, WS_OVERLAPPEDWINDOW,
+    GetForegroundWindow, GetParent, GetWindow, IsChild, MsgWaitForMultipleObjectsEx, PeekMessageW,
+    PostQuitMessage, RegisterClassW, SendMessageTimeoutW, SetForegroundWindow, SetWindowPos,
+    ShowWindow, TranslateMessage, CW_USEDEFAULT, GW_CHILD, HWND_BOTTOM, MSG, MWMO_INPUTAVAILABLE,
+    PM_REMOVE, QS_ALLINPUT, SMTO_ABORTIFHUNG, SMTO_BLOCK, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SW_HIDE, SW_SHOW, SW_SHOWNOACTIVATE, WM_CHAR, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_QUIT, WNDCLASSW, WS_EX_TOOLWINDOW, WS_OVERLAPPEDWINDOW,
 };
-use windows_core::{Interface, HSTRING, PCWSTR};
+use windows_core::{Interface, HRESULT, HSTRING, PCWSTR};
 use wry::dpi::{LogicalPosition, LogicalSize, Position, Size};
 use wry::{
     DownloadPolicy, NavigationEvent, NavigationEventPhase, NavigationId, NewWindowResponse,
@@ -67,6 +68,7 @@ const FIXTURE_SETTLE: Duration = Duration::from_millis(225);
 const PUMP_SLICE: Duration = Duration::from_millis(5);
 const SEND_TIMEOUT_MS: u32 = 250;
 const MAX_CDP_PARAMETERS_BYTES: usize = 8 * 1_024;
+const MAX_CDP_RESPONSE_UTF16_UNITS: usize = 128 * 1_024;
 const MAX_CDP_RESPONSE_BYTES: usize = 128 * 1_024;
 const MAX_EVALUATION_VALUE_BYTES: usize = 32 * 1_024;
 const PROBE_WIDTH: i32 = 800;
@@ -828,7 +830,8 @@ fn run_case(
                 && foreground_before != host.hwnd
                 && (foreground_during == host.hwnd
                     || foreground_after == host.hwnd
-                    || (thread_focus_before != view.hwnd() && thread_focus_after == view.hwnd())),
+                    || (!focus_is_owned_by_view(view, thread_focus_before)
+                        && focus_is_owned_by_view(view, thread_focus_after))),
             target_received_dom_focus: target_received_focus,
         },
         activation: ActivationEvidence {
@@ -913,9 +916,10 @@ fn dispatch_hwnd_plan(
     geometry: WindowsProbeGeometry,
     plan: &[WindowsInputStep],
 ) -> Result<(), AdapterError> {
-    let hwnd = view.hwnd();
+    let target = OwnedDocumentHwnd::resolve(view)?;
     let mut rect = RECT::default();
-    unsafe { GetClientRect(hwnd, &mut rect) }.map_err(|_| AdapterError::NativeConstruction)?;
+    unsafe { GetClientRect(target.document, &mut rect) }
+        .map_err(|_| AdapterError::NativeConstruction)?;
     let width = rect.right.saturating_sub(rect.left);
     let height = rect.bottom.saturating_sub(rect.top);
     if width <= 0 || height <= 0 || width > i32::from(i16::MAX) || height > i32::from(i16::MAX) {
@@ -928,8 +932,7 @@ fn dispatch_hwnd_plan(
                 primary_down,
             } => {
                 let point = physical_point(point, geometry.device_pixel_ratio(), width, height)?;
-                send_message(
-                    hwnd,
+                target.send(
                     WM_MOUSEMOVE,
                     WPARAM(usize::from(primary_down)),
                     point_lparam(point),
@@ -937,20 +940,72 @@ fn dispatch_hwnd_plan(
             }
             WindowsInputStep::PrimaryDown(point) => {
                 let point = physical_point(point, geometry.device_pixel_ratio(), width, height)?;
-                send_message(hwnd, WM_LBUTTONDOWN, WPARAM(1), point_lparam(point))?;
+                target.send(WM_LBUTTONDOWN, WPARAM(1), point_lparam(point))?;
             }
             WindowsInputStep::PrimaryUp(point) => {
                 let point = physical_point(point, geometry.device_pixel_ratio(), width, height)?;
-                send_message(hwnd, WM_LBUTTONUP, WPARAM(0), point_lparam(point))?;
+                target.send(WM_LBUTTONUP, WPARAM(0), point_lparam(point))?;
             }
-            WindowsInputStep::KeyDown(key) => send_key(hwnd, key, true)?,
+            WindowsInputStep::KeyDown(key) => send_key(target, key, true)?,
             WindowsInputStep::TextX => {
-                send_message(hwnd, WM_CHAR, WPARAM(usize::from(b'x')), LPARAM(1))?
+                target.send(WM_CHAR, WPARAM(usize::from(b'x')), LPARAM(1))?
             }
-            WindowsInputStep::KeyUp(key) => send_key(hwnd, key, false)?,
+            WindowsInputStep::KeyUp(key) => send_key(target, key, false)?,
         }
     }
     Ok(())
+}
+
+/// Resolves the only HWND that the pinned Wry integration itself treats as
+/// the WebView document. `WebViewExtWindows::hwnd()` is Wry's container; its
+/// fixed window procedure forwards `WM_SETFOCUS` to the first direct child.
+/// Sending mouse/key messages to the container would call only that container
+/// procedure and would not dispatch them to the document descendant.
+#[derive(Clone, Copy)]
+struct OwnedDocumentHwnd {
+    container: HWND,
+    document: HWND,
+}
+
+impl OwnedDocumentHwnd {
+    fn resolve(view: &WebView) -> Result<Self, AdapterError> {
+        let container = view.hwnd();
+        if container.0.is_null() {
+            return Err(AdapterError::NativeConstruction);
+        }
+        let document = unsafe { GetWindow(container, GW_CHILD) }
+            .map_err(|_| AdapterError::NativeConstruction)?;
+        let target = Self {
+            container,
+            document,
+        };
+        target
+            .is_current()
+            .then_some(target)
+            .ok_or(AdapterError::NativeConstruction)
+    }
+
+    fn is_current(self) -> bool {
+        !self.document.0.is_null()
+            && unsafe { GetWindow(self.container, GW_CHILD) }.ok() == Some(self.document)
+            && unsafe { GetParent(self.document) }.ok() == Some(self.container)
+            && unsafe { IsChild(self.container, self.document) }.as_bool()
+    }
+
+    fn send(self, message: u32, wparam: WPARAM, lparam: LPARAM) -> Result<(), AdapterError> {
+        if !self.is_current() {
+            return Err(AdapterError::NativeConstruction);
+        }
+        send_message(self.document, message, wparam, lparam)?;
+        self.is_current()
+            .then_some(())
+            .ok_or(AdapterError::NativeConstruction)
+    }
+}
+
+fn focus_is_owned_by_view(view: &WebView, focus: HWND) -> bool {
+    let container = view.hwnd();
+    !focus.0.is_null() && (focus == container || unsafe { IsChild(container, focus) }.as_bool())
 }
 
 fn physical_point(
@@ -980,7 +1035,11 @@ fn point_lparam((x, y): (i16, i16)) -> LPARAM {
     LPARAM(packed as isize)
 }
 
-fn send_key(hwnd: HWND, key: WindowsProbeKey, down: bool) -> Result<(), AdapterError> {
+fn send_key(
+    target: OwnedDocumentHwnd,
+    key: WindowsProbeKey,
+    down: bool,
+) -> Result<(), AdapterError> {
     let virtual_key = match key {
         WindowsProbeKey::X => 0x58_u16,
         WindowsProbeKey::ArrowDown => VK_DOWN.0,
@@ -991,8 +1050,7 @@ fn send_key(hwnd: HWND, key: WindowsProbeKey, down: bool) -> Result<(), AdapterE
     if !down {
         lparam |= 1 << 30 | 1 << 31;
     }
-    send_message(
-        hwnd,
+    target.send(
         if down { WM_KEYDOWN } else { WM_KEYUP },
         WPARAM(usize::from(virtual_key)),
         LPARAM(lparam as isize),
@@ -1033,7 +1091,7 @@ fn dispatch_cdp_plan(
                 point,
                 primary_down,
             } => (
-                "Input.dispatchMouseEvent",
+                FixedCdpMethod::InputDispatchMouseEvent,
                 json!({
                     "type": "mouseMoved",
                     "x": point.x(),
@@ -1044,26 +1102,28 @@ fn dispatch_cdp_plan(
                 }),
             ),
             WindowsInputStep::PrimaryDown(point) => (
-                "Input.dispatchMouseEvent",
+                FixedCdpMethod::InputDispatchMouseEvent,
                 json!({"type":"mousePressed","x":point.x(),"y":point.y(),
                     "button":"left","buttons":1,"clickCount":1,"pointerType":"mouse"}),
             ),
             WindowsInputStep::PrimaryUp(point) => (
-                "Input.dispatchMouseEvent",
+                FixedCdpMethod::InputDispatchMouseEvent,
                 json!({"type":"mouseReleased","x":point.x(),"y":point.y(),
                     "button":"left","buttons":0,"clickCount":1,"pointerType":"mouse"}),
             ),
-            WindowsInputStep::KeyDown(key) => {
-                ("Input.dispatchKeyEvent", cdp_key_parameters(key, true))
-            }
+            WindowsInputStep::KeyDown(key) => (
+                FixedCdpMethod::InputDispatchKeyEvent,
+                cdp_key_parameters(key, true),
+            ),
             WindowsInputStep::TextX => (
-                "Input.dispatchKeyEvent",
+                FixedCdpMethod::InputDispatchKeyEvent,
                 json!({"type":"char","text":"x","unmodifiedText":"x","key":"x",
                     "code":"KeyX","windowsVirtualKeyCode":88,"nativeVirtualKeyCode":88}),
             ),
-            WindowsInputStep::KeyUp(key) => {
-                ("Input.dispatchKeyEvent", cdp_key_parameters(key, false))
-            }
+            WindowsInputStep::KeyUp(key) => (
+                FixedCdpMethod::InputDispatchKeyEvent,
+                cdp_key_parameters(key, false),
+            ),
         };
         let response = call_cdp(
             core,
@@ -1076,6 +1136,23 @@ fn dispatch_cdp_plan(
         validate_cdp_response(&response)?;
     }
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum FixedCdpMethod {
+    InputDispatchMouseEvent,
+    InputDispatchKeyEvent,
+    RuntimeEvaluate,
+}
+
+impl FixedCdpMethod {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::InputDispatchMouseEvent => "Input.dispatchMouseEvent",
+            Self::InputDispatchKeyEvent => "Input.dispatchKeyEvent",
+            Self::RuntimeEvaluate => "Runtime.evaluate",
+        }
+    }
 }
 
 fn cdp_key_parameters(key: WindowsProbeKey, down: bool) -> Value {
@@ -1111,7 +1188,7 @@ fn evaluate_fixed(
     .to_string();
     let response = call_cdp(
         core,
-        "Runtime.evaluate",
+        FixedCdpMethod::RuntimeEvaluate,
         &parameters,
         permit,
         poll_control,
@@ -1131,7 +1208,7 @@ fn evaluate_fixed(
 
 fn call_cdp(
     core: &ICoreWebView2,
-    method: &'static str,
+    method: FixedCdpMethod,
     parameters: &str,
     permit: &ProbeRunPermit,
     poll_control: &mut impl FnMut(),
@@ -1141,23 +1218,13 @@ fn call_cdp(
         return Err(AdapterError::InvalidEvidence);
     }
     let completion: Rc<RefCell<Option<Result<String, AdapterError>>>> = Rc::new(RefCell::new(None));
-    let callback_completion = Rc::clone(&completion);
     let callback_failed = Rc::new(Cell::new(false));
-    let callback_failed_inner = Rc::clone(&callback_failed);
-    let handler =
-        CallDevToolsProtocolMethodCompletedHandler::create(Box::new(move |result, response| {
-            let value = if result.is_err() || response.len() > MAX_CDP_RESPONSE_BYTES {
-                Err(AdapterError::InvalidEvidence)
-            } else {
-                Ok(response)
-            };
-            match callback_completion.try_borrow_mut() {
-                Ok(mut slot) if slot.is_none() => *slot = Some(value),
-                Ok(_) | Err(_) => callback_failed_inner.set(true),
-            }
-            Ok(())
-        }));
-    let method = HSTRING::from(method);
+    let handler: ICoreWebView2CallDevToolsProtocolMethodCompletedHandler = BoundedCdpCompletion {
+        completion: Rc::clone(&completion),
+        failed: Rc::clone(&callback_failed),
+    }
+    .into();
+    let method = HSTRING::from(method.as_str());
     let parameters = HSTRING::from(parameters);
     unsafe { core.CallDevToolsProtocolMethod(&method, &parameters, &handler) }
         .map_err(|_| AdapterError::NativeConstruction)?;
@@ -1182,6 +1249,76 @@ fn call_cdp(
         }
         pump_once(deadline)?;
     }
+}
+
+/// Direct COM completion adapter used instead of webview2-com's convenience
+/// callback. The convenience layer converts the returned `PCWSTR` to an
+/// unbounded `String` before invoking user code, which would make a later byte
+/// check only a post-allocation limit. This implementation scans at most the
+/// policy ceiling plus one UTF-16 unit before reserving an exact bounded UTF-8
+/// allocation.
+#[windows_core::implement(ICoreWebView2CallDevToolsProtocolMethodCompletedHandler)]
+struct BoundedCdpCompletion {
+    completion: Rc<RefCell<Option<Result<String, AdapterError>>>>,
+    failed: Rc<Cell<bool>>,
+}
+
+impl ICoreWebView2CallDevToolsProtocolMethodCompletedHandler_Impl for BoundedCdpCompletion_Impl {
+    fn Invoke(&self, result: HRESULT, response: &PCWSTR) -> windows_core::Result<()> {
+        let value = if result.is_err() {
+            Err(AdapterError::InvalidEvidence)
+        } else {
+            borrowed_pcwstr_bounded(
+                response,
+                MAX_CDP_RESPONSE_UTF16_UNITS,
+                MAX_CDP_RESPONSE_BYTES,
+            )
+            .ok_or(AdapterError::InvalidEvidence)
+        };
+        match self.completion.try_borrow_mut() {
+            Ok(mut slot) if slot.is_none() => *slot = Some(value),
+            Ok(_) | Err(_) => self.failed.set(true),
+        }
+        Ok(())
+    }
+}
+
+fn borrowed_pcwstr_bounded(
+    source: &PCWSTR,
+    max_utf16_units: usize,
+    max_utf8_bytes: usize,
+) -> Option<String> {
+    let pointer = source.as_ptr();
+    if pointer.is_null() {
+        return Some(String::new());
+    }
+    let mut length = 0_usize;
+    while length <= max_utf16_units {
+        // SAFETY: WebView2's completion-result contract supplies a
+        // NUL-terminated string that remains valid for this callback. The
+        // scan stops after the policy ceiling plus the distinguishing unit.
+        if unsafe { pointer.add(length).read() } == 0 {
+            // SAFETY: the bounded scan established this initialized prefix,
+            // and the native string remains borrowed through conversion.
+            let units = unsafe { std::slice::from_raw_parts(pointer, length) };
+            let mut utf8_bytes = 0_usize;
+            for character in char::decode_utf16(units.iter().copied()) {
+                let character = character.unwrap_or(char::REPLACEMENT_CHARACTER);
+                utf8_bytes = utf8_bytes.checked_add(character.len_utf8())?;
+                if utf8_bytes > max_utf8_bytes {
+                    return None;
+                }
+            }
+            let mut value = String::new();
+            value.try_reserve_exact(utf8_bytes).ok()?;
+            for character in char::decode_utf16(units.iter().copied()) {
+                value.push(character.unwrap_or(char::REPLACEMENT_CHARACTER));
+            }
+            return Some(value);
+        }
+        length += 1;
+    }
+    None
 }
 
 fn validate_cdp_response(response: &Value) -> Result<(), AdapterError> {
@@ -1646,5 +1783,21 @@ mod tests {
             origin
         ));
         assert!(!fixed_loopback_target("https://example.test/", origin));
+    }
+
+    #[test]
+    fn borrowed_cdp_completion_text_is_bounded_before_allocation() {
+        let ascii = [b'{' as u16, b'}' as u16, 0];
+        let ascii = PCWSTR(ascii.as_ptr());
+        assert_eq!(borrowed_pcwstr_bounded(&ascii, 2, 2).as_deref(), Some("{}"));
+        assert!(borrowed_pcwstr_bounded(&ascii, 1, 2).is_none());
+
+        let expansion = [0x0800_u16, 0];
+        let expansion = PCWSTR(expansion.as_ptr());
+        assert!(borrowed_pcwstr_bounded(&expansion, 1, 2).is_none());
+        assert_eq!(
+            borrowed_pcwstr_bounded(&expansion, 1, 3).as_deref(),
+            Some("\u{0800}")
+        );
     }
 }

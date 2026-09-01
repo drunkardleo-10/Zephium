@@ -12,6 +12,8 @@ const ENGINE_MANIFEST: &str = "crates/zephium-engine/Cargo.toml";
 const ENGINE_ROOT: &str = "crates/zephium-engine/src/lib.rs";
 const ENGINE_MACOS_MODULE: &str = "crates/zephium-engine/src/platform/macos/mod.rs";
 const ENGINE_WINDOWS_MODULE: &str = "crates/zephium-engine/src/platform/windows/mod.rs";
+const ENGINE_WINDOWS_PROBE_MODULE: &str =
+    "crates/zephium-engine/src/platform/windows/agentic_input_probe.rs";
 const ENGINE_MACOS_PROBE_BINARY: &str =
     "crates/zephium-engine/src/bin/macos_agentic_input_probe.rs";
 const ENGINE_WINDOWS_PROBE_BINARY: &str =
@@ -34,7 +36,8 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     validate_engine_platform_module(&read(repository.join(ENGINE_MACOS_MODULE))?, "macOS")?;
     validate_engine_platform_module(&read(repository.join(ENGINE_WINDOWS_MODULE))?, "Windows")?;
     let _ = read(repository.join(ENGINE_MACOS_PROBE_BINARY))?;
-    let _ = read(repository.join(ENGINE_WINDOWS_PROBE_BINARY))?;
+    validate_windows_probe_binary(&read(repository.join(ENGINE_WINDOWS_PROBE_BINARY))?)?;
+    validate_windows_probe_source(&read(repository.join(ENGINE_WINDOWS_PROBE_MODULE))?)?;
     validate_shipping_sources(repository)?;
     let metadata = cargo_metadata(repository)?;
     validate_release_graph(&metadata)
@@ -128,6 +131,69 @@ fn validate_engine_platform_module(source: &str, platform: &str) -> Result<(), S
         if !source.contains(required) {
             return Err(format!(
                 "{platform} agentic probe module escaped or drifted from its feature gate"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_windows_probe_binary(source: &str) -> Result<(), String> {
+    let source = compact(source);
+    for required in [
+        "--ci-hidden-fixed-dom",
+        "--ci-hidden-hwnd",
+        "--ci-hidden-cdp",
+        "--visible-background-windows-all",
+        "--visible-focused-windows-all",
+        "--allow-visible-focused",
+        "encode_response_line(&response)",
+        "ProbeReply::RunCompleted(evidence)",
+    ] {
+        if !source.contains(required) {
+            return Err(format!(
+                "Windows physical qualification runner lost required closed gate {required}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_windows_probe_source(source: &str) -> Result<(), String> {
+    let source = compact(source);
+    for required in [
+        "GetWindow(container,GW_CHILD)",
+        "GetWindow(self.container,GW_CHILD)",
+        "GetParent(self.document)",
+        "SendMessageTimeoutW(",
+        "ICoreWebView2CallDevToolsProtocolMethodCompletedHandler",
+        "borrowed_pcwstr_bounded(",
+        "method:FixedCdpMethod",
+        "Self::InputDispatchMouseEvent=>\"Input.dispatchMouseEvent\"",
+        "Self::InputDispatchKeyEvent=>\"Input.dispatchKeyEvent\"",
+        "Self::RuntimeEvaluate=>\"Runtime.evaluate\"",
+        "\"userGesture\":false",
+    ] {
+        if !source.contains(required) {
+            return Err(format!(
+                "Windows native-input probe lost required bounded mechanism {required}"
+            ));
+        }
+    }
+    for forbidden in [
+        "SendInput(",
+        "SetCursorPos(",
+        "mouse_event(",
+        "keybd_event(",
+        "PostWebMessage",
+        "ExecuteScript(",
+        ".eval(",
+        "with_ipc_handler",
+        "with_initialization_script",
+        "AddHostObject",
+    ] {
+        if source.contains(forbidden) {
+            return Err(format!(
+                "Windows native-input probe contains forbidden authority {forbidden}"
             ));
         }
     }
@@ -505,5 +571,55 @@ mod tests {
         "#;
         validate_engine_platform_module(module, "test").expect("valid module gates");
         assert!(validate_engine_platform_module("mod agentic_input_probe;", "test").is_err());
+    }
+
+    #[test]
+    fn windows_probe_requires_closed_scoped_input_and_bounded_cdp() {
+        let valid = r#"
+            GetWindow(container, GW_CHILD);
+            GetWindow(self.container, GW_CHILD);
+            GetParent(self.document);
+            SendMessageTimeoutW(hwnd);
+            ICoreWebView2CallDevToolsProtocolMethodCompletedHandler;
+            borrowed_pcwstr_bounded(response);
+            fn call(method: FixedCdpMethod) {}
+            Self::InputDispatchMouseEvent => "Input.dispatchMouseEvent";
+            Self::InputDispatchKeyEvent => "Input.dispatchKeyEvent";
+            Self::RuntimeEvaluate => "Runtime.evaluate";
+            json!({ "userGesture": false });
+        "#;
+        validate_windows_probe_source(valid).expect("valid bounded Windows probe");
+        assert!(validate_windows_probe_source(
+            &valid.replace("SendMessageTimeoutW(hwnd);", "SendInput(payload);")
+        )
+        .is_err());
+        assert!(validate_windows_probe_source(&valid.replace(
+            "borrowed_pcwstr_bounded(response);",
+            "response.to_string();"
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn windows_physical_runner_retains_exact_modes_and_jsonl_evidence() {
+        let valid = r#"
+            "--ci-hidden-fixed-dom";
+            "--ci-hidden-hwnd";
+            "--ci-hidden-cdp";
+            "--visible-background-windows-all";
+            "--visible-focused-windows-all";
+            "--allow-visible-focused";
+            encode_response_line(&response);
+            ProbeReply::RunCompleted(evidence);
+        "#;
+        validate_windows_probe_binary(valid).expect("valid physical runner");
+        assert!(
+            validate_windows_probe_binary(&valid.replace("\"--allow-visible-focused\";", ""))
+                .is_err()
+        );
+        assert!(validate_windows_probe_binary(
+            &valid.replace("encode_response_line(&response);", "println!(\"passed\");")
+        )
+        .is_err());
     }
 }

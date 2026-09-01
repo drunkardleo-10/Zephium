@@ -250,9 +250,13 @@ hostile tests. The release-excluded M1 Windows fixture adapter uses only fixed
 `Runtime.evaluate` expressions with `userGesture: false` for bounded fixture
 observation and fixed semantic recipes. It issues only one CDP request at a
 time and waits for its completion before the next because WebView2 explicitly
-permits CDP methods to be processed out of dispatch order. This main-world
-fixture mechanism is not the production semantic-world implementation and is
-never available for arbitrary pages, selectors, or model input.
+permits CDP methods to be processed out of dispatch order. The dispatch
+boundary accepts a closed three-variant method enum, not a method string. Its
+raw COM completion scans a fixed UTF-16 and UTF-8 ceiling before allocating;
+the webview2-com helper's eager unbounded string conversion is not used. This
+main-world fixture mechanism is not the production semantic-world
+implementation and is never available for arbitrary pages, selectors, or
+model input.
 
 ## 6. Semantic observation
 
@@ -861,6 +865,10 @@ sources rather than copying another browser agent's architecture:
   ties `SendMouseInput` and `SendPointerInput` to a composition controller.
   Pinned Wry owns an ordinary controller, so the adapter reports composition
   input as unsupported instead of casting across controller kinds.
+- [Win32 `SendMessageTimeoutW`](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendmessagetimeoutw)
+  invokes the procedure of the exact target HWND. The M1 HWND candidate
+  therefore resolves and validates the direct WebView document child that
+  pinned Wry itself uses for focus instead of sending to Wry's container.
 - [Chrome DevTools Protocol Input](https://chromedevtools.github.io/devtools-protocol/tot/Input/)
   defines the fixed diagnostic mouse and key command coordinates and fields.
 - [Chrome DevTools Protocol `Runtime.evaluate`](https://chromedevtools.github.io/devtools-protocol/tot/Runtime/#method-evaluate)

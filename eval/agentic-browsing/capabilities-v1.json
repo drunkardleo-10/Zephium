@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "reviewed_on": "2026-08-31",
+  "reviewed_on": "2026-09-01",
   "repository_revision": "commit-containing-this-manifest",
   "pinned_components": {
     "wry": {
@@ -70,9 +70,10 @@
       "code_status": "implemented_in_release_excluded_m1_adapter_cross_compiled",
       "device_status": "pending_device_capture",
       "evidence": [
-        "vendor/wry/src/webview2/mod.rs"
+        "vendor/wry/src/webview2/mod.rs",
+        "https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendmessagetimeoutw"
       ],
-      "limitations": "The adapter converts only validated fixed-fixture geometry into bounded SendMessageTimeoutW mouse/key sequences for its ordinary child HWND. It verifies exact navigation identity, an ephemeral UDF plus InPrivate postcondition, and two-factor process exit before deletion. Cross-compilation does not prove hidden/background trusted input, effect coverage, or no focus theft."
+      "limitations": "Pinned Wry exposes its WRY_WEBVIEW container, whose window procedure identifies the first direct child as the WebView document for focus. The adapter revalidates that owned child's container/first-child/parent identity before and after every fixed bounded SendMessageTimeoutW mouse/key step. It verifies exact navigation identity, an ephemeral UDF plus InPrivate postcondition, and two-factor process exit before deletion. Cross-compilation does not prove hidden/background trusted input, effect coverage, or no focus theft."
     },
     {
       "platform": "windows",
@@ -94,7 +95,7 @@
         "https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2#calldevtoolsprotocolmethod",
         "https://chromedevtools.github.io/devtools-protocol/tot/Input/"
       ],
-      "limitations": "The adapter serializes one allowlisted Input.dispatchMouseEvent or Input.dispatchKeyEvent completion at a time. Fixed Runtime.evaluate observation sets userGesture false and accepts bounded by-value strings only. Physical Windows behavior remains unqualified; CDP cannot enter domain or model contracts."
+      "limitations": "The adapter accepts only a closed three-variant CDP method enum and serializes one Input.dispatchMouseEvent or Input.dispatchKeyEvent completion at a time. Fixed Runtime.evaluate observation sets userGesture false; a raw COM completion bounds UTF-16 and UTF-8 before allocation and accepts bounded by-value strings only. Physical Windows behavior remains unqualified; CDP cannot enter domain or model contracts."
     }
   ],
   "security_facts": {

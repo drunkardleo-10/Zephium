@@ -33,25 +33,35 @@ Milestone 1 on Windows.
 Fixture observation is diagnostic-only. The adapter invokes only compiled
 `FixedProbeScript` expressions through `Runtime.evaluate`, always with
 `userGesture: false`, `returnByValue: true`, no promise wait, a fixed 8 KiB
-request ceiling, and a 128 KiB response ceiling. Returned fixture values have a
-32 KiB ceiling and a deny-unknown-fields schema. There is never more than one
-CDP command in flight; the next command is issued only after successful
-completion because WebView2 permits CDP calls to be processed out of dispatch
-order.
+request ceiling, and a 128 KiB UTF-16/UTF-8 response ceiling. The adapter owns
+the raw completion interface and performs that bounded scan before allocating;
+webview2-com's convenience completion is intentionally not used because it
+would construct an unbounded `String` first. Returned fixture values have a 32
+KiB ceiling and a deny-unknown-fields schema. There is never more than one CDP
+command in flight; the next command is issued only after successful completion
+because WebView2 permits CDP calls to be processed out of dispatch order.
+The dispatch function accepts only a closed three-variant method enum rather
+than a string.
 
 | Route | Implemented behavior | Qualification state |
 | --- | --- | --- |
 | Fixed DOM recipe | One compiled fixture recipe evaluated with `userGesture: false` | Cross-compiled; hidden physical result pending |
-| Ordinary child HWND | Validated CSS geometry is scaled to the owned child client area, then a maximum sixteen `SendMessageTimeoutW` mouse/key steps are issued under a 250 ms per-message ceiling | Cross-compiled; hidden/background physical result pending |
+| Ordinary child HWND | Pinned Wry's public HWND is its `WRY_WEBVIEW` container, whose procedure forwards focus to the first direct child as the WebView document. The adapter scales fixed geometry to that direct child's client area, revalidates its container/first-child/parent identity before and after every message, then issues at most sixteen `SendMessageTimeoutW` mouse/key steps under a 250 ms per-message ceiling. | Cross-compiled; hidden/background physical result pending |
 | Composition controller | No cast or call is made | `UnsupportedByIntegration`; pinned Wry creates an ordinary controller |
 | CDP input | One fixed `Input.dispatchMouseEvent` or `Input.dispatchKeyEvent` completes before the next | Diagnostics only; physical result pending |
 | Focused/human | No global input is generated | Human baseline remains explicit and visible |
 
 The HWND route never calls `SendInput`, moves the system pointer, injects a
-global keyboard event, or targets another process. Hidden and
-visible-background presentation never call `SetForegroundWindow` or
-`SetFocus`. The visible-focused runner mode requires the separate literal
+global keyboard event, or targets an HWND outside its owned Wry subtree.
+Hidden and visible-background presentation never call `SetForegroundWindow`
+or `SetFocus`. The visible-focused runner mode requires the separate literal
 `--allow-visible-focused` process argument.
+
+Targeting Wry's container itself was rejected during pinned-code review:
+`SendMessageTimeoutW` invokes the named HWND's procedure and does not perform
+hit-testing or redispatch to a descendant. Wry's container handles only
+`WM_SETFOCUS` specially. This correction landed before physical evidence, so
+no result is attributed to the invalid container route.
 
 ## Bounds, cancellation, and teardown
 
@@ -71,6 +81,10 @@ visible-background presentation never call `SetForegroundWindow` or
 - Evidence contains only closed enums, Booleans, counters, durations, and
   validated runtime labels. Paths, handles, PIDs, URLs, profile data, page
   content, native errors, and CDP responses are not emitted.
+- Each physical mode writes one bounded versioned JSON response to stdout
+  before qualification. A failed behavioral gate therefore retains redacted
+  case evidence instead of collapsing to a generic process error; pass/fail
+  diagnostics remain on stderr and local JSONL paths are gitignored.
 
 ## Compile evidence and physical run path
 
@@ -87,8 +101,12 @@ to remain behind `native-agentic-input-probe`, requires the probe-only
 dependency set exactly, proves the ordinary desktop release graph cannot
 activate either diagnostic feature, requires every diagnostic-only agentic
 module to remain feature-gated, and retains independent optimized-build
-refusals in the engine and contract crates. The production functional core may
-now be reached through the durable Store adapter.
+refusals in the engine and contract crates. It also locks the Windows runner's
+closed process gates, JSONL evidence path, owned-document HWND resolution,
+bounded raw CDP completion, fixed method allowlist, and absence of global
+`SendInput`, cursor movement, page IPC, host objects, or generic script calls.
+The production functional core may now be reached through the durable Store
+adapter.
 
 Physical Windows qualification must run the exact closed commands in
 `eval/agentic-browsing/README.md` on an authorized named device. No code or

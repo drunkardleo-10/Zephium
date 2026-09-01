@@ -8,5 +8,6 @@ dist
 gen/schemas
 .DS_Store
 *.log
+/eval/agentic-browsing/local-results/
 __pycache__/
 *.py[cod]

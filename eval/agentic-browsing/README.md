@@ -63,21 +63,28 @@ non-sensitive fields rather than committed raw.
 
 The Windows adapter can be compile-qualified from another host, but only a
 physical Windows run is behavioral evidence. On an authorized named Windows
-device, run these exact closed modes in order:
+device, create the ignored local evidence directory and run these exact closed
+modes in order:
 
 ```powershell
+New-Item -ItemType Directory -Force `
+  eval/agentic-browsing/local-results | Out-Null
 cargo run --locked -p zephium-engine `
   --features native-agentic-input-probe `
-  --bin windows-agentic-input-probe -- --ci-hidden-fixed-dom
+  --bin windows-agentic-input-probe -- --ci-hidden-fixed-dom `
+  > eval/agentic-browsing/local-results/windows-hidden-fixed-dom.jsonl
 cargo run --locked -p zephium-engine `
   --features native-agentic-input-probe `
-  --bin windows-agentic-input-probe -- --ci-hidden-hwnd
+  --bin windows-agentic-input-probe -- --ci-hidden-hwnd `
+  > eval/agentic-browsing/local-results/windows-hidden-hwnd.jsonl
 cargo run --locked -p zephium-engine `
   --features native-agentic-input-probe `
-  --bin windows-agentic-input-probe -- --ci-hidden-cdp
+  --bin windows-agentic-input-probe -- --ci-hidden-cdp `
+  > eval/agentic-browsing/local-results/windows-hidden-cdp.jsonl
 cargo run --locked -p zephium-engine `
   --features native-agentic-input-probe `
-  --bin windows-agentic-input-probe -- --visible-background-windows-all
+  --bin windows-agentic-input-probe -- --visible-background-windows-all `
+  > eval/agentic-browsing/local-results/windows-visible-background-all.jsonl
 ```
 
 These modes use only an ephemeral user-data directory, InPrivate controller,
@@ -86,6 +93,14 @@ OS-wide input, accounts, credentials, external sites, or extension-owned
 native seams. The visible-focused mode is separately gated by the literal
 `--allow-visible-focused` argument and must not be run without explicit
 foreground authorization.
+
+Each runner process writes exactly one versioned, size-bounded `ProbeResponse`
+JSON record to stdout before applying its pass/fail qualification whenever the
+native matrix returns evidence or a typed rejection. Build progress and the
+aggregate pass/fail summary remain on stderr, so a nonzero exit may still leave
+the redacted evidence needed to diagnose a rejected backend. The ignored local
+records contain only the closed evidence schema; review must still reject any
+unexpected file before extracting aggregate fields into committed evidence.
 
 The authorized hidden fixed-DOM macOS safety result is recorded only as reviewed
 aggregate fields. Native AppKit/accessibility, visible/background behavior,
