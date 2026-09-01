@@ -143,7 +143,11 @@ loopback fixtures, one owned probe window, and fixed commands. They do not use
 OS-wide input, accounts, credentials, external sites, or extension-owned
 native seams. The visible-focused mode is separately gated by the literal
 `--allow-visible-focused` argument and must not be run without explicit
-foreground authorization.
+foreground authorization. Construction and each row re-attest the exact native
+host/container/controller/document ownership, visibility, and DPI-rounded
+viewport. Hidden/background qualification samples foreground, active-window,
+and thread-focus state before, during, and after dispatch so a transient focus
+transfer fails even if it reverses before fixture settlement.
 
 Each runner process writes exactly one versioned, size-bounded `ProbeResponse`
 JSON record to stdout before applying its pass/fail qualification whenever the

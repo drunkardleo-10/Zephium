@@ -25,17 +25,19 @@ use windows::Wdk::System::SystemServices::RtlGetVersion;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::SystemInformation::OSVERSIONINFOW;
+use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetActiveWindow, GetFocus, MapVirtualKeyW, SetFocus, MAPVK_VK_TO_VSC_EX, VK_DOWN, VK_RETURN,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
-    GetForegroundWindow, GetParent, GetWindow, IsChild, MsgWaitForMultipleObjectsEx, PeekMessageW,
-    PostQuitMessage, RegisterClassW, SendMessageTimeoutW, SetForegroundWindow, SetWindowPos,
-    ShowWindow, TranslateMessage, CW_USEDEFAULT, GW_CHILD, HWND_BOTTOM, MSG, MWMO_INPUTAVAILABLE,
-    PM_REMOVE, QS_ALLINPUT, SMTO_ABORTIFHUNG, SMTO_BLOCK, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SW_HIDE, SW_SHOW, SW_SHOWNOACTIVATE, WM_CHAR, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MOUSEMOVE, WM_QUIT, WNDCLASSW, WS_EX_TOOLWINDOW, WS_OVERLAPPEDWINDOW,
+    GetForegroundWindow, GetParent, GetWindow, IsChild, IsWindow, IsWindowVisible,
+    MsgWaitForMultipleObjectsEx, PeekMessageW, PostQuitMessage, RegisterClassW,
+    SendMessageTimeoutW, SetForegroundWindow, SetWindowPos, ShowWindow, TranslateMessage,
+    CW_USEDEFAULT, GW_CHILD, HWND_BOTTOM, MSG, MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT,
+    SMTO_ABORTIFHUNG, SMTO_BLOCK, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOW,
+    SW_SHOWNOACTIVATE, WM_CHAR, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    WM_QUIT, WNDCLASSW, WS_EX_TOOLWINDOW, WS_OVERLAPPEDWINDOW,
 };
 use windows_core::{Interface, HRESULT, HSTRING, PCWSTR};
 use wry::dpi::{LogicalPosition, LogicalSize, Position, Size};
@@ -566,6 +568,8 @@ pub(crate) fn run(
         )?);
         apply_presentation(&host, view, matrix.presentation)
             .map_err(|error| adapter_failure(error, ProbeStage::Construct, None, None))?;
+        attest_native_view(&host, view, matrix.presentation)
+            .map_err(|error| adapter_failure(error, ProbeStage::Construct, None, None))?;
         verify_nonactivating_presentation(&host, view, matrix.presentation)
             .map_err(|error| adapter_failure(error, ProbeStage::Construct, None, None))?;
         let runtime = runtime_fingerprint()
@@ -738,6 +742,8 @@ fn run_case(
     deadline: Instant,
 ) -> Result<CaseEvidence, ProbeFailure> {
     let started = Instant::now();
+    attest_native_view(host, view, presentation)
+        .map_err(|error| adapter_failure(error, ProbeStage::Observe, Some(case), Some(backend)))?;
     let ready = evaluate_fixed(
         core,
         FixedProbeScript::Ready,
@@ -775,8 +781,10 @@ fn run_case(
         .map_err(|error| adapter_failure(error, ProbeStage::Observe, Some(case), Some(backend)))?;
     let resources_before = live_resource_sample(environment);
     let foreground_before = unsafe { GetForegroundWindow() };
+    let active_before = unsafe { GetActiveWindow() };
     let thread_focus_before = unsafe { GetFocus() };
-    let focus_before = native_focus_owner(host, foreground_before, false);
+    let focus_before =
+        native_focus_owner(host, view, foreground_before, thread_focus_before, false);
     let outcome_hint = execute_backend(
         view,
         core,
@@ -790,7 +798,10 @@ fn run_case(
     )
     .map_err(|error| adapter_failure(error, ProbeStage::Execute, Some(case), Some(backend)))?;
     let foreground_during = unsafe { GetForegroundWindow() };
-    let focus_during = native_focus_owner(host, foreground_during, false);
+    let active_during = unsafe { GetActiveWindow() };
+    let thread_focus_during = unsafe { GetFocus() };
+    let focus_during =
+        native_focus_owner(host, view, foreground_during, thread_focus_during, false);
     pump_for(FIXTURE_SETTLE, permit, poll_control, deadline)
         .map_err(|error| adapter_failure(error, ProbeStage::Settle, Some(case), Some(backend)))?;
     let state_json = evaluate_fixed(core, FixedProbeScript::Read, permit, poll_control, deadline)
@@ -814,8 +825,17 @@ fn run_case(
         .iter()
         .any(|event| event.kind == InputEventKind::Focus && event.target == target);
     let foreground_after = unsafe { GetForegroundWindow() };
+    let active_after = unsafe { GetActiveWindow() };
     let thread_focus_after = unsafe { GetFocus() };
-    let focus_after = native_focus_owner(host, foreground_after, target_received_focus);
+    let focus_after = native_focus_owner(
+        host,
+        view,
+        foreground_after,
+        thread_focus_after,
+        target_received_focus,
+    );
+    attest_native_view(host, view, presentation)
+        .map_err(|error| adapter_failure(error, ProbeStage::Observe, Some(case), Some(backend)))?;
     let popup_requested = popup_requested.get();
     let outcome = outcome_hint.unwrap_or_else(|| classify_outcome(case, &state, popup_requested));
     Ok(CaseEvidence {
@@ -828,14 +848,18 @@ fn run_case(
             before: focus_before,
             during: focus_during,
             after: focus_after,
-            probe_host_became_key: foreground_before != host.hwnd
-                && (foreground_during == host.hwnd || foreground_after == host.hwnd),
+            probe_host_became_key: (foreground_before != host.hwnd
+                && (foreground_during == host.hwnd || foreground_after == host.hwnd))
+                || (active_before != host.hwnd
+                    && (active_during == host.hwnd || active_after == host.hwnd)),
             browse_focus_was_stolen: presentation != PresentationState::VisibleFocused
-                && foreground_before != host.hwnd
-                && (foreground_during == host.hwnd
-                    || foreground_after == host.hwnd
+                && ((foreground_before != host.hwnd
+                    && (foreground_during == host.hwnd || foreground_after == host.hwnd))
+                    || (active_before != host.hwnd
+                        && (active_during == host.hwnd || active_after == host.hwnd))
                     || (!focus_is_owned_by_view(view, thread_focus_before)
-                        && focus_is_owned_by_view(view, thread_focus_after))),
+                        && (focus_is_owned_by_view(view, thread_focus_during)
+                            || focus_is_owned_by_view(view, thread_focus_after)))),
             target_received_dom_focus: target_received_focus,
         },
         activation: ActivationEvidence {
@@ -1392,6 +1416,74 @@ fn apply_presentation(
     Ok(())
 }
 
+/// Rebinds every matrix row to the native objects and viewport created by this
+/// adapter. Construction success alone is not evidence that WebView2 retained
+/// the same parent, visibility, or controller bounds after navigation.
+fn attest_native_view(
+    host: &ProbeHostWindow,
+    view: &WebView,
+    presentation: PresentationState,
+) -> Result<(), AdapterError> {
+    let container = view.hwnd();
+    if !unsafe { IsWindow(Some(host.hwnd)) }.as_bool()
+        || !unsafe { IsWindow(Some(container)) }.as_bool()
+        || unsafe { GetParent(container) }.ok() != Some(host.hwnd)
+    {
+        return Err(AdapterError::NativeConstruction);
+    }
+
+    let document = OwnedDocumentHwnd::resolve(view)?;
+    if !unsafe { IsWindow(Some(document.document)) }.as_bool() {
+        return Err(AdapterError::NativeConstruction);
+    }
+
+    let controller = view.controller();
+    let mut controller_parent = HWND::default();
+    let mut controller_visible = windows_core::BOOL::default();
+    let mut container_bounds = RECT::default();
+    let mut controller_bounds = RECT::default();
+    let dpi = unsafe { GetDpiForWindow(container) };
+    let Some(expected_width) = expected_physical_extent(PROBE_WIDTH, dpi) else {
+        return Err(AdapterError::NativeConstruction);
+    };
+    let Some(expected_height) = expected_physical_extent(PROBE_HEIGHT, dpi) else {
+        return Err(AdapterError::NativeConstruction);
+    };
+    let expected_visible = presentation != PresentationState::Hidden;
+    if unsafe { controller.ParentWindow(&mut controller_parent) }.is_err()
+        || controller_parent != container
+        || unsafe { controller.IsVisible(&mut controller_visible) }.is_err()
+        || controller_visible.as_bool() != expected_visible
+        || unsafe { IsWindowVisible(host.hwnd) }.as_bool() != expected_visible
+        || unsafe { IsWindowVisible(container) }.as_bool() != expected_visible
+        || unsafe { GetClientRect(container, &mut container_bounds) }.is_err()
+        || unsafe { controller.Bounds(&mut controller_bounds) }.is_err()
+        || container_bounds.left != 0
+        || container_bounds.top != 0
+        || container_bounds.right != expected_width
+        || container_bounds.bottom != expected_height
+        || controller_bounds.left != 0
+        || controller_bounds.top != 0
+        || controller_bounds.right != expected_width
+        || controller_bounds.bottom != expected_height
+    {
+        return Err(AdapterError::NativeConstruction);
+    }
+    Ok(())
+}
+
+fn expected_physical_extent(logical: i32, dpi: u32) -> Option<i32> {
+    let logical = u32::try_from(logical).ok().filter(|value| *value > 0)?;
+    if dpi == 0 {
+        return None;
+    }
+    let scaled = u64::from(logical)
+        .checked_mul(u64::from(dpi))?
+        .checked_add(48)?
+        / 96;
+    i32::try_from(scaled).ok().filter(|extent| *extent > 0)
+}
+
 /// Fails before the first fixture row if constructing or presenting a
 /// supposedly hidden/background probe has already activated its native host
 /// or moved this thread's keyboard focus into the owned WebView subtree.
@@ -1592,12 +1684,17 @@ fn live_resource_sample(environment: &ICoreWebView2Environment) -> ResourceEvide
 
 fn native_focus_owner(
     host: &ProbeHostWindow,
+    view: &WebView,
     foreground: HWND,
+    thread_focus: HWND,
     target_focused: bool,
 ) -> FocusOwner {
     if target_focused {
         FocusOwner::FixtureTarget
-    } else if foreground == host.hwnd {
+    } else if foreground == host.hwnd
+        || thread_focus == host.hwnd
+        || focus_is_owned_by_view(view, thread_focus)
+    {
         FocusOwner::ProbeHost
     } else {
         FocusOwner::External
@@ -1786,5 +1883,14 @@ mod tests {
             borrowed_pcwstr_bounded(&expansion, 1, 3).as_deref(),
             Some("\u{0800}")
         );
+    }
+
+    #[test]
+    fn viewport_extent_matches_wry_positive_half_up_dpi_rounding() {
+        assert_eq!(expected_physical_extent(800, 96), Some(800));
+        assert_eq!(expected_physical_extent(700, 120), Some(875));
+        assert_eq!(expected_physical_extent(1, 144), Some(2));
+        assert_eq!(expected_physical_extent(800, 0), None);
+        assert_eq!(expected_physical_extent(0, 96), None);
     }
 }

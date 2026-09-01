@@ -939,6 +939,15 @@ fn validate_windows_probe_binary(source: &str, qualification: &str) -> Result<()
 fn validate_windows_probe_source(source: &str) -> Result<(), String> {
     let source = compact(source);
     for required in [
+        "attest_native_view(&host,view,matrix.presentation)",
+        "IsWindow(Some(host.hwnd))",
+        "GetParent(container)",
+        "controller.ParentWindow(&mutcontroller_parent)",
+        "controller.IsVisible(&mutcontroller_visible)",
+        "GetClientRect(container,&mutcontainer_bounds)",
+        "controller.Bounds(&mutcontroller_bounds)",
+        "GetDpiForWindow(container)",
+        "expected_physical_extent(PROBE_WIDTH,dpi)",
         "GetWindow(container,GW_CHILD)",
         "GetWindow(self.container,GW_CHILD)",
         "GetParent(self.document)",
@@ -947,6 +956,9 @@ fn validate_windows_probe_source(source: &str) -> Result<(), String> {
         "windows_key_message_lparam(mapped_scan,down)",
         "verify_nonactivating_presentation(&host,view,matrix.presentation)",
         "foreground==host.hwnd||active==host.hwnd||focus_is_owned_by_view(view,focus)",
+        "letthread_focus_during=unsafe{GetFocus()};",
+        "letactive_during=unsafe{GetActiveWindow()};",
+        "focus_is_owned_by_view(view,thread_focus_during)",
         "ICoreWebView2CallDevToolsProtocolMethodCompletedHandler",
         "borrowed_pcwstr_bounded(",
         "method:FixedCdpMethod",
@@ -3390,6 +3402,15 @@ mod tests {
     #[test]
     fn windows_probe_requires_closed_scoped_input_and_bounded_cdp() {
         let valid = r#"
+            attest_native_view(&host, view, matrix.presentation);
+            IsWindow(Some(host.hwnd));
+            GetParent(container);
+            controller.ParentWindow(&mut controller_parent);
+            controller.IsVisible(&mut controller_visible);
+            GetClientRect(container, &mut container_bounds);
+            controller.Bounds(&mut controller_bounds);
+            GetDpiForWindow(container);
+            expected_physical_extent(PROBE_WIDTH, dpi);
             GetWindow(container, GW_CHILD);
             GetWindow(self.container, GW_CHILD);
             GetParent(self.document);
@@ -3398,6 +3419,9 @@ mod tests {
             windows_key_message_lparam(mapped_scan, down);
             verify_nonactivating_presentation(&host, view, matrix.presentation);
             foreground == host.hwnd || active == host.hwnd || focus_is_owned_by_view(view, focus);
+            let thread_focus_during = unsafe { GetFocus() };
+            let active_during = unsafe { GetActiveWindow() };
+            focus_is_owned_by_view(view, thread_focus_during);
             ICoreWebView2CallDevToolsProtocolMethodCompletedHandler;
             borrowed_pcwstr_bounded(response);
             fn call(method: FixedCdpMethod) {}
@@ -3415,6 +3439,10 @@ mod tests {
             "borrowed_pcwstr_bounded(response);",
             "response.to_string();"
         ))
+        .is_err());
+        assert!(validate_windows_probe_source(
+            &valid.replace("focus_is_owned_by_view(view, thread_focus_during);", "")
+        )
         .is_err());
     }
 

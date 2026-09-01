@@ -13,6 +13,10 @@ Milestone 1 on Windows.
   controller. It creates a unique temporary user-data directory, requests
   InPrivate mode, and verifies the runtime profile reports InPrivate before
   navigation.
+- Construction and every matrix row re-attest the exact host, Wry container,
+  WebView2 controller-parent, first document child, visibility state, and
+  DPI-rounded 800-by-700 logical controller/container bounds. A navigation or
+  runtime mutation cannot silently substitute a different native target.
 - Browser extensions are explicitly disabled at environment construction. The
   unique UDF starts empty and no extension startup gate, package path, page IPC,
   host object, custom protocol, model input, selector, or caller JavaScript is
@@ -57,7 +61,11 @@ Hidden and visible-background presentation never call `SetForegroundWindow`
 or `SetFocus`. Before the first fixture row they also require that the probe
 host is neither foreground nor active and that this thread's keyboard focus is
 outside the owned WebView subtree; otherwise the run returns a typed focus-
-policy failure instead of treating the stolen state as its baseline. The
+policy failure instead of treating the stolen state as its baseline. Every
+row samples foreground window, active window, and thread keyboard focus before,
+during, and after dispatch; a transient transfer into the owned subtree is
+therefore a failing focus-theft fact even if focus returns before fixture
+settlement. The
 visible-focused runner mode requires the separate literal
 `--allow-visible-focused` process argument.
 
@@ -113,8 +121,10 @@ activate either diagnostic feature, requires every diagnostic-only agentic
 module to remain feature-gated, and retains independent optimized-build
 refusals in the engine and contract crates. It also locks the Windows runner's
 closed process gates, JSONL evidence path, owned-document HWND resolution,
-bounded raw CDP completion, fixed method allowlist, and absence of global
-`SendInput`, cursor movement, page IPC, host objects, or generic script calls.
+bounds/visibility/controller ownership attestation, during-dispatch active and
+thread-focus sampling, bounded raw CDP completion, fixed method allowlist, and
+absence of global `SendInput`, cursor movement, page IPC, host objects, or
+generic script calls.
 The production functional core may now be reached through the durable Store
 adapter.
 
