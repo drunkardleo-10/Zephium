@@ -17,6 +17,11 @@ name = "windows-agentic-input-evidence-review"
 path = "src/bin/windows_agentic_input_evidence_review.rs"
 required-features = ["probe-harness"]
 
+[[bin]]
+name = "windows-agentic-semantic-evidence-review"
+path = "src/bin/windows_agentic_semantic_evidence_review.rs"
+required-features = ["probe-harness"]
+
 [dependencies]
 crc32fast.workspace = true
 serde.workspace = true

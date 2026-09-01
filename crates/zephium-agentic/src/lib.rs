@@ -51,6 +51,8 @@ mod semantic_execute_coordinator;
 mod semantic_extract;
 mod semantic_model;
 mod semantic_observation;
+#[cfg(feature = "probe-harness")]
+mod semantic_probe_evidence;
 mod semantic_read;
 mod semantic_read_model;
 mod semantic_runtime;
@@ -309,6 +311,17 @@ pub use semantic_observation::{
     SemanticObservationRequest, SemanticScope, SemanticScopeAnchor, SemanticTextWindow,
     MAX_SEMANTIC_OBSERVATION_EXPANSIONS, MAX_SEMANTIC_OBSERVATION_NODES,
     MAX_SEMANTIC_OBSERVATION_TEXT_BYTES, MAX_SEMANTIC_SURROUNDING_TEXT_BYTES,
+};
+#[cfg(feature = "probe-harness")]
+pub use semantic_probe_evidence::{
+    decode_windows_semantic_probe_response, encode_windows_semantic_probe_response,
+    qualify_windows_semantic_probe_evidence, WindowsSemanticProbeAggregate,
+    WindowsSemanticProbeEvidence, WindowsSemanticProbeFailure, WindowsSemanticProbeFailureCode,
+    WindowsSemanticProbeMode, WindowsSemanticProbeProtocolError,
+    WindowsSemanticProbeQualificationError, WindowsSemanticProbeReply,
+    WindowsSemanticProbeResponse, WindowsSemanticProbeStage, WindowsSemanticProbeValidationError,
+    WindowsSemanticTeardownEvidence, MAX_WINDOWS_SEMANTIC_PROBE_OUTPUT_BYTES,
+    WINDOWS_SEMANTIC_PHYSICAL_REVIEW_MODES, WINDOWS_SEMANTIC_PROBE_PROTOCOL_VERSION,
 };
 pub use semantic_read::{
     read_semantic_observation, SemanticCaptureInstant, SemanticReadAuthority, SemanticReadBudget,

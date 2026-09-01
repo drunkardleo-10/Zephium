@@ -12,6 +12,10 @@ const AGENTIC_FIXTURE_SERVER: &str = "crates/zephium-agentic/src/fixture_server.
 const AGENTIC_PROVIDER_ROOT: &str = "crates/zephium-agentic/src/agent_provider.rs";
 const AGENTIC_WINDOWS_REVIEW_BINARY: &str =
     "crates/zephium-agentic/src/bin/windows_agentic_input_evidence_review.rs";
+const AGENTIC_WINDOWS_SEMANTIC_REVIEW_BINARY: &str =
+    "crates/zephium-agentic/src/bin/windows_agentic_semantic_evidence_review.rs";
+const AGENTIC_WINDOWS_SEMANTIC_EVIDENCE: &str =
+    "crates/zephium-agentic/src/semantic_probe_evidence.rs";
 const AGENTIC_PROBE_QUALIFICATION: &str = "crates/zephium-agentic/src/probe_qualification.rs";
 const AGENTIC_PROVIDER_REQUEST: &str = "crates/zephium-agentic/src/agent_provider/request.rs";
 const AGENTIC_PROVIDER_OPENAI: &str = "crates/zephium-agentic/src/agent_provider/openai.rs";
@@ -67,7 +71,7 @@ const ENGINE_MACOS_SEMANTIC_PROBE_BINARY: &str =
 const ENGINE_WINDOWS_PROBE_BINARY: &str =
     "crates/zephium-engine/src/bin/windows_agentic_input_probe.rs";
 const AGENTIC_SOURCE_DIRECTORY: &str = "crates/zephium-agentic/src";
-const AGENTIC_DIAGNOSTIC_MODULES: [&str; 8] = [
+const AGENTIC_DIAGNOSTIC_MODULES: [&str; 10] = [
     "contract.rs",
     "control.rs",
     "evidence.rs",
@@ -75,7 +79,9 @@ const AGENTIC_DIAGNOSTIC_MODULES: [&str; 8] = [
     "probe_recipes.rs",
     "probe_qualification.rs",
     "protocol.rs",
+    "semantic_probe_evidence.rs",
     "windows_agentic_input_evidence_review.rs",
+    "windows_agentic_semantic_evidence_review.rs",
 ];
 const SHIPPING_ROOTS: [&str; 2] = ["desktop", "crates/zephium-app"];
 const RELEASE_REFUSAL: &str = concat!(
@@ -97,6 +103,10 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     validate_windows_review_binary(
         &read(repository.join(AGENTIC_WINDOWS_REVIEW_BINARY))?,
         &read(repository.join(AGENTIC_PROBE_QUALIFICATION))?,
+    )?;
+    validate_windows_semantic_review_binary(
+        &read(repository.join(AGENTIC_WINDOWS_SEMANTIC_REVIEW_BINARY))?,
+        &read(repository.join(AGENTIC_WINDOWS_SEMANTIC_EVIDENCE))?,
     )?;
     validate_root(&read(repository.join(AGENTIC_ROOT))?)?;
     validate_agent_metrics_contract(
@@ -1266,6 +1276,29 @@ fn validate_manifest(source: &str) -> Result<(), String> {
     {
         return Err("Windows agentic evidence-review binary gate drifted".to_owned());
     }
+    let semantic_review_binary = manifest
+        .get("bin")
+        .and_then(toml::Value::as_array)
+        .and_then(|binaries| {
+            binaries.iter().find(|binary| {
+                binary.get("name").and_then(toml::Value::as_str)
+                    == Some("windows-agentic-semantic-evidence-review")
+            })
+        })
+        .ok_or_else(|| "Windows semantic evidence-review binary is missing".to_owned())?;
+    if semantic_review_binary
+        .get("path")
+        .and_then(toml::Value::as_str)
+        != Some("src/bin/windows_agentic_semantic_evidence_review.rs")
+        || semantic_review_binary
+            .get("required-features")
+            .and_then(toml::Value::as_array)
+            .is_none_or(|features| {
+                features.as_slice() != [toml::Value::String("probe-harness".into())]
+            })
+    {
+        return Err("Windows semantic evidence-review binary gate drifted".to_owned());
+    }
     Ok(())
 }
 
@@ -1285,6 +1318,7 @@ fn validate_root(source: &str) -> Result<(), String> {
         "probe_recipes",
         "probe_qualification",
         "protocol",
+        "semantic_probe_evidence",
     ] {
         let required_gate = format!("#[cfg(feature=\"probe-harness\")]mod{module};");
         if !source.contains(&required_gate) {
@@ -1342,6 +1376,59 @@ fn validate_windows_review_binary(source: &str, qualification: &str) -> Result<(
         if source.contains(forbidden) {
             return Err(format!(
                 "Windows physical evidence reviewer can expose unreviewed input {forbidden}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_windows_semantic_review_binary(source: &str, evidence: &str) -> Result<(), String> {
+    let source = compact(source);
+    for required in [
+        "WINDOWS_SEMANTIC_PHYSICAL_REVIEW_MODES",
+        "symlink_metadata(directory)",
+        "decode_windows_semantic_probe_response(&bytes)",
+        "qualify_windows_semantic_probe_evidence(mode,&evidence)",
+        "file.take((MAX_WINDOWS_SEMANTIC_PROBE_OUTPUT_BYTES+1)asu64)",
+        "output.len()>MAX_WINDOWS_SEMANTIC_PROBE_OUTPUT_BYTES",
+        "stdout.write_all(&output)",
+        "--write-summary",
+        "windows-semantic-review-summary-v1.json",
+        ".create_new(true)",
+        "write_new_record(&directory,REVIEW_SUMMARY_FILENAME,&output)",
+    ] {
+        if !source.contains(required) {
+            return Err(format!(
+                "Windows semantic evidence reviewer lost required boundary {required}"
+            ));
+        }
+    }
+    let evidence = compact(evidence);
+    for required in [
+        "windows-semantic-fixed-documents.jsonl",
+        "windows-semantic-event-flood.jsonl",
+        "windows-semantic-renderer-loss.jsonl",
+        "windows-semantic-debugger-coexistence.jsonl",
+        "pubfnqualify_windows_semantic_probe_evidence(",
+        "evidence.peak_pending_invocations!=1",
+        "evidence.teardown.retained_native_views!=0",
+    ] {
+        if !evidence.contains(required) {
+            return Err(format!(
+                "Windows semantic evidence qualification lost required boundary {required}"
+            ));
+        }
+    }
+    for forbidden in [
+        "read_to_string",
+        "String::from_utf8",
+        "stdout.write_all(&bytes)",
+        ".display()",
+        "serde_json::Value",
+    ] {
+        if source.contains(forbidden) {
+            return Err(format!(
+                "Windows semantic evidence reviewer can expose unreviewed input {forbidden}"
             ));
         }
     }
@@ -2201,6 +2288,7 @@ fn validate_shipping_sources(repository: &Path) -> Result<(), String> {
         "macos-agentic-input-probe",
         "macos-agentic-semantic-probe",
         "windows-agentic-input-probe",
+        "windows-agentic-semantic-probe",
         "__zephiumNativeInputFixtureV1",
     ];
     let mut files = Vec::new();
@@ -2504,6 +2592,8 @@ mod tests {
             mod probe_qualification;
             #[cfg(feature = "probe-harness")]
             mod protocol;
+            #[cfg(feature = "probe-harness")]
+            mod semantic_probe_evidence;
         "#;
         validate_root(valid).expect("valid guard");
         assert!(validate_root("mod fixture_server;").is_err());
@@ -3066,6 +3156,10 @@ mod tests {
             [[bin]]
             name = "windows-agentic-input-evidence-review"
             path = "src/bin/windows_agentic_input_evidence_review.rs"
+            required-features = ["probe-harness"]
+            [[bin]]
+            name = "windows-agentic-semantic-evidence-review"
+            path = "src/bin/windows_agentic_semantic_evidence_review.rs"
             required-features = ["probe-harness"]
             [dependencies]
             crc32fast = "1"
@@ -3751,6 +3845,43 @@ mod tests {
         assert!(validate_windows_review_binary(
             binary,
             &qualification.replace("windows-hidden-cdp.jsonl", "windows-any.jsonl"),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn windows_semantic_reviewer_is_closed_and_content_free() {
+        let binary = r#"
+            WINDOWS_SEMANTIC_PHYSICAL_REVIEW_MODES;
+            symlink_metadata(directory);
+            decode_windows_semantic_probe_response(&bytes);
+            qualify_windows_semantic_probe_evidence(mode, &evidence);
+            file.take((MAX_WINDOWS_SEMANTIC_PROBE_OUTPUT_BYTES + 1) as u64);
+            if output.len() > MAX_WINDOWS_SEMANTIC_PROBE_OUTPUT_BYTES {}
+            stdout.write_all(&output);
+            "--write-summary";
+            "windows-semantic-review-summary-v1.json";
+            OpenOptions::new().create_new(true);
+            write_new_record(&directory, REVIEW_SUMMARY_FILENAME, &output);
+        "#;
+        let evidence = r#"
+            "windows-semantic-fixed-documents.jsonl";
+            "windows-semantic-event-flood.jsonl";
+            "windows-semantic-renderer-loss.jsonl";
+            "windows-semantic-debugger-coexistence.jsonl";
+            pub fn qualify_windows_semantic_probe_evidence() {}
+            evidence.peak_pending_invocations != 1;
+            evidence.teardown.retained_native_views != 0;
+        "#;
+        validate_windows_semantic_review_binary(binary, evidence).expect("closed reviewer");
+        assert!(validate_windows_semantic_review_binary(
+            &format!("{binary}\nstdout.write_all(&bytes);"),
+            evidence,
+        )
+        .is_err());
+        assert!(validate_windows_semantic_review_binary(
+            binary,
+            &evidence.replace("windows-semantic-event-flood.jsonl", "windows-any.jsonl"),
         )
         .is_err());
     }

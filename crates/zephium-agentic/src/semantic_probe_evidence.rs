@@ -1,0 +1,609 @@
+//! Closed, content-free evidence for physical Windows semantic qualification.
+//!
+//! This diagnostic contract is available only with `probe-harness`. It carries
+//! engine/runtime identity and aggregate pass/fail facts, never a world name,
+//! context id, URL, profile path, snapshot, page string, native error, or trace.
+
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+use crate::{Platform, RuntimeFingerprint};
+
+/// Version of the Windows semantic-probe result grammar.
+pub const WINDOWS_SEMANTIC_PROBE_PROTOCOL_VERSION: u16 = 1;
+/// Maximum canonical JSONL bytes emitted by one semantic-probe process.
+pub const MAX_WINDOWS_SEMANTIC_PROBE_OUTPUT_BYTES: usize = 16 * 1024;
+const MAX_RUN_ELAPSED_MS: u64 = 2 * 60_000;
+const MAX_CLEANUP_MS: u32 = 10_000;
+
+/// Exact physical runs required before Windows semantic support can be reviewed.
+pub const WINDOWS_SEMANTIC_PHYSICAL_REVIEW_MODES: [WindowsSemanticProbeMode; 4] = [
+    WindowsSemanticProbeMode::HiddenFixedDocuments,
+    WindowsSemanticProbeMode::HiddenEventFlood,
+    WindowsSemanticProbeMode::HiddenRendererLoss,
+    WindowsSemanticProbeMode::HiddenDebuggerCoexistence,
+];
+
+/// Closed release-excluded Windows semantic qualifier mode.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowsSemanticProbeMode {
+    /// Two fixed documents prove isolation, redaction, replacement, and reuse.
+    HiddenFixedDocuments,
+    /// A bounded context-event flood must fail closed and recover on navigation.
+    HiddenEventFlood,
+    /// A fixed diagnostics-only renderer crash must revoke semantic authority.
+    HiddenRendererLoss,
+    /// The fixed-document case must pass while an attached debugger is present.
+    HiddenDebuggerCoexistence,
+}
+
+impl WindowsSemanticProbeMode {
+    /// Parses only one literal release-excluded executable argument.
+    pub fn from_argument(argument: &str) -> Option<Self> {
+        match argument {
+            "--ci-hidden-fixed-documents" => Some(Self::HiddenFixedDocuments),
+            "--ci-hidden-event-flood" => Some(Self::HiddenEventFlood),
+            "--ci-hidden-renderer-loss" => Some(Self::HiddenRendererLoss),
+            "--ci-hidden-debugger-coexistence" => Some(Self::HiddenDebuggerCoexistence),
+            _ => None,
+        }
+    }
+
+    /// Literal runner argument for this mode.
+    pub const fn argument(self) -> &'static str {
+        match self {
+            Self::HiddenFixedDocuments => "--ci-hidden-fixed-documents",
+            Self::HiddenEventFlood => "--ci-hidden-event-flood",
+            Self::HiddenRendererLoss => "--ci-hidden-renderer-loss",
+            Self::HiddenDebuggerCoexistence => "--ci-hidden-debugger-coexistence",
+        }
+    }
+
+    /// Fixed ignored local filename consumed by the offline reviewer.
+    pub const fn local_result_filename(self) -> &'static str {
+        match self {
+            Self::HiddenFixedDocuments => "windows-semantic-fixed-documents.jsonl",
+            Self::HiddenEventFlood => "windows-semantic-event-flood.jsonl",
+            Self::HiddenRendererLoss => "windows-semantic-renderer-loss.jsonl",
+            Self::HiddenDebuggerCoexistence => "windows-semantic-debugger-coexistence.jsonl",
+        }
+    }
+}
+
+/// Content-free teardown facts for one physical semantic run.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WindowsSemanticTeardownEvidence {
+    /// Production semantic registration retired exactly.
+    pub runtime_retired: bool,
+    /// Native WebView2 controller cleanup completed.
+    pub view_closed: bool,
+    /// Browser-process exit was observed for the exact environment.
+    pub browser_process_exited: bool,
+    /// Ephemeral user-data directory removal succeeded after process exit.
+    pub profile_removed: bool,
+    /// Fixed loopback fixture worker joined and closed.
+    pub fixture_drained: bool,
+    /// Native callback and command accounting reached quiescence.
+    pub work_drained: bool,
+    /// Native owned views retained after teardown.
+    pub retained_native_views: u8,
+    /// Bounded cleanup wall-clock duration.
+    pub cleanup_ms: u32,
+}
+
+/// One machine-readable, content-free physical Windows semantic result.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WindowsSemanticProbeEvidence {
+    /// Controller-minted nonzero one-shot identity.
+    pub run_id: u64,
+    /// Exact OS/WebView2/adapter fingerprint.
+    pub runtime: RuntimeFingerprint,
+    /// Closed executable mode.
+    pub mode: WindowsSemanticProbeMode,
+    /// The run used a newly created ephemeral user-data directory.
+    pub ephemeral_profile: bool,
+    /// The production controller profile was InPrivate.
+    pub in_private: bool,
+    /// Native extension inventory was proven empty at construction.
+    pub extensions_absent: bool,
+    /// Host, container, and controller remained hidden.
+    pub presentation_hidden: bool,
+    /// Domain-owned logical viewport width.
+    pub viewport_width: u16,
+    /// Domain-owned logical viewport height.
+    pub viewport_height: u16,
+    /// Every navigable fixture URL belonged to the exact loopback origin.
+    pub loopback_only: bool,
+    /// Number of successfully decoded snapshots; snapshot bytes are absent.
+    pub snapshots: u8,
+    /// Number of host-authorized fixture document epochs.
+    pub document_epochs: u8,
+    /// First fixed snapshot passed its closed semantic assertions.
+    pub first_snapshot_verified: bool,
+    /// Replacement snapshot passed its closed semantic assertions.
+    pub replacement_snapshot_verified: bool,
+    /// No first-document semantic value survived in the replacement result.
+    pub replacement_stale_state_absent: bool,
+    /// Page-world runtime forgery/bridge remained unable to answer the adapter.
+    pub page_world_bridge_absent: bool,
+    /// Password and token fixtures were absent or typed redacted.
+    pub secrets_redacted: bool,
+    /// Context-event pressure reached the fixed rejection boundary.
+    pub event_flood_refused: bool,
+    /// A fresh document recovered after the event-flood refusal.
+    pub recovered_after_event_flood: bool,
+    /// Production crash observation reported renderer loss.
+    pub renderer_loss_observed: bool,
+    /// A later semantic dispatch returned the typed renderer-lost refusal.
+    pub renderer_lost_refused: bool,
+    /// Windows reported a debugger attached for the complete mode.
+    pub debugger_attached: bool,
+    /// Probe host ever displaced foreground, active-window, or thread focus.
+    pub focus_theft_observed: bool,
+    /// Highest number of concurrently pending semantic invocations.
+    pub peak_pending_invocations: u8,
+    /// No semantic work remained immediately before teardown.
+    pub semantic_work_drained: bool,
+    /// Bounded whole-run wall-clock duration.
+    pub elapsed_ms: u64,
+    /// Exact teardown evidence.
+    pub teardown: WindowsSemanticTeardownEvidence,
+}
+
+impl WindowsSemanticProbeEvidence {
+    /// Validates structural ceilings independently of mode qualification.
+    pub fn validate(&self) -> Result<(), WindowsSemanticProbeValidationError> {
+        if self.run_id == 0 {
+            return Err(WindowsSemanticProbeValidationError::Identity);
+        }
+        if self.runtime.platform != Platform::Windows
+            || self.runtime.engine.as_str() != "WebView2"
+            || self.runtime.adapter_revision.as_str() != "semantic-runtime-m3"
+        {
+            return Err(WindowsSemanticProbeValidationError::Runtime);
+        }
+        if self.viewport_width == 0
+            || self.viewport_height == 0
+            || self.snapshots > 2
+            || self.document_epochs == 0
+            || self.document_epochs > 3
+            || self.peak_pending_invocations > 1
+            || self.elapsed_ms > MAX_RUN_ELAPSED_MS
+        {
+            return Err(WindowsSemanticProbeValidationError::Bounds);
+        }
+        if self.teardown.retained_native_views > 1 || self.teardown.cleanup_ms > MAX_CLEANUP_MS {
+            return Err(WindowsSemanticProbeValidationError::Bounds);
+        }
+        Ok(())
+    }
+}
+
+/// Closed semantic-probe failure code with no native or page-controlled detail.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowsSemanticProbeFailureCode {
+    /// Executable arguments or one-shot identity were invalid.
+    InvalidRequest,
+    /// Fixed environment, profile, view, policy, or fixture construction failed.
+    HarnessFailure,
+    /// A closed semantic or lifecycle assertion did not hold.
+    VerificationFailed,
+    /// One absolute deadline expired.
+    TimedOut,
+    /// The debugger-only mode lacked an attached debugger.
+    DebuggerRequired,
+    /// A non-debugger mode unexpectedly ran under a debugger.
+    DebuggerForbidden,
+    /// Native view, process, profile, callback, or fixture teardown was incomplete.
+    TeardownIncomplete,
+}
+
+/// Closed stage for a semantic-probe rejection.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowsSemanticProbeStage {
+    /// Literal argument and one-shot admission.
+    Admit,
+    /// Ephemeral environment and production view construction.
+    Construct,
+    /// Fixed loopback navigation.
+    Navigate,
+    /// Bounded semantic invocation.
+    Observe,
+    /// Fault injection or recovery.
+    Fault,
+    /// Closed fixture assertion.
+    Verify,
+    /// Exact resource retirement.
+    Teardown,
+}
+
+/// Serialized typed rejection from one physical semantic run.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WindowsSemanticProbeFailure {
+    /// Content-free failure class.
+    pub code: WindowsSemanticProbeFailureCode,
+    /// Pipeline stage that settled the run.
+    pub stage: WindowsSemanticProbeStage,
+    /// Whether a wholly new run may be attempted.
+    pub retryable: bool,
+}
+
+/// One exact terminal semantic-probe payload.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", content = "payload", rename_all = "snake_case")]
+pub enum WindowsSemanticProbeReply {
+    /// Run returned bounded evidence, independently qualified afterward.
+    Completed(WindowsSemanticProbeEvidence),
+    /// Run failed with a closed rejection.
+    Rejected(WindowsSemanticProbeFailure),
+}
+
+/// Versioned one-shot semantic-probe response.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WindowsSemanticProbeResponse {
+    /// Exact grammar version.
+    pub protocol_version: u16,
+    /// Exact one-shot request identity.
+    pub request_id: u64,
+    /// Terminal reply.
+    pub reply: WindowsSemanticProbeReply,
+}
+
+/// Encodes one canonical bounded JSONL semantic-probe response.
+pub fn encode_windows_semantic_probe_response(
+    response: &WindowsSemanticProbeResponse,
+) -> Result<Vec<u8>, WindowsSemanticProbeProtocolError> {
+    if response.protocol_version != WINDOWS_SEMANTIC_PROBE_PROTOCOL_VERSION
+        || response.request_id == 0
+    {
+        return Err(WindowsSemanticProbeProtocolError::Identity);
+    }
+    let mut bytes = serde_json::to_vec(response)
+        .map_err(|_| WindowsSemanticProbeProtocolError::InvalidResponse)?;
+    bytes.push(b'\n');
+    if bytes.len() > MAX_WINDOWS_SEMANTIC_PROBE_OUTPUT_BYTES {
+        return Err(WindowsSemanticProbeProtocolError::Limit);
+    }
+    Ok(bytes)
+}
+
+/// Decodes only the canonical bounded JSONL spelling produced above.
+pub fn decode_windows_semantic_probe_response(
+    bytes: &[u8],
+) -> Result<WindowsSemanticProbeResponse, WindowsSemanticProbeProtocolError> {
+    if bytes.is_empty()
+        || bytes.len() > MAX_WINDOWS_SEMANTIC_PROBE_OUTPUT_BYTES
+        || bytes.last() != Some(&b'\n')
+        || bytes[..bytes.len() - 1].contains(&b'\n')
+        || bytes.contains(&b'\r')
+    {
+        return Err(WindowsSemanticProbeProtocolError::Limit);
+    }
+    let response: WindowsSemanticProbeResponse = serde_json::from_slice(&bytes[..bytes.len() - 1])
+        .map_err(|_| WindowsSemanticProbeProtocolError::InvalidResponse)?;
+    if response.protocol_version != WINDOWS_SEMANTIC_PROBE_PROTOCOL_VERSION
+        || response.request_id == 0
+    {
+        return Err(WindowsSemanticProbeProtocolError::Identity);
+    }
+    if encode_windows_semantic_probe_response(&response)? != bytes {
+        return Err(WindowsSemanticProbeProtocolError::NonCanonical);
+    }
+    Ok(response)
+}
+
+/// Content-free aggregate for one exactly qualified physical mode.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WindowsSemanticProbeAggregate {
+    mode: WindowsSemanticProbeMode,
+    snapshots: u8,
+    document_epochs: u8,
+    elapsed_ms: u64,
+    cleanup_ms: u32,
+    status: WindowsSemanticProbeAggregateStatus,
+}
+
+/// Terminal state of a qualified semantic aggregate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum WindowsSemanticProbeAggregateStatus {
+    Qualified,
+}
+
+impl WindowsSemanticProbeAggregate {
+    /// Qualified closed mode.
+    pub const fn mode(&self) -> WindowsSemanticProbeMode {
+        self.mode
+    }
+}
+
+/// Structural semantic evidence failure.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum WindowsSemanticProbeValidationError {
+    /// Run identity was zero.
+    #[error("Windows semantic-probe identity is invalid")]
+    Identity,
+    /// Runtime fingerprint did not identify the production Windows adapter.
+    #[error("Windows semantic-probe runtime is invalid")]
+    Runtime,
+    /// A count or duration exceeded the closed evidence ceiling.
+    #[error("Windows semantic-probe evidence exceeds its bounds")]
+    Bounds,
+}
+
+/// Canonical response encoding failure.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum WindowsSemanticProbeProtocolError {
+    /// Version or request identity was invalid.
+    #[error("Windows semantic-probe response identity is invalid")]
+    Identity,
+    /// JSON did not decode through the closed response schema.
+    #[error("Windows semantic-probe response is invalid")]
+    InvalidResponse,
+    /// Record exceeded its byte/line bounds.
+    #[error("Windows semantic-probe response exceeds its limit")]
+    Limit,
+    /// Record was valid JSON but not the canonical producer spelling.
+    #[error("Windows semantic-probe response is noncanonical")]
+    NonCanonical,
+}
+
+/// Exact mode-qualification failure.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum WindowsSemanticProbeQualificationError {
+    /// Structural evidence validation failed.
+    #[error("Windows semantic-probe evidence is invalid")]
+    Evidence(#[from] WindowsSemanticProbeValidationError),
+    /// Common profile, isolation, viewport, focus, or teardown facts failed.
+    #[error("Windows semantic-probe common invariant failed")]
+    CommonInvariant,
+    /// Result mode or its exact expected observations differed.
+    #[error("Windows semantic-probe mode evidence is invalid")]
+    Mode,
+}
+
+/// Qualifies one exact physical mode and returns only a content-free aggregate.
+pub fn qualify_windows_semantic_probe_evidence(
+    expected_mode: WindowsSemanticProbeMode,
+    evidence: &WindowsSemanticProbeEvidence,
+) -> Result<WindowsSemanticProbeAggregate, WindowsSemanticProbeQualificationError> {
+    evidence.validate()?;
+    if evidence.mode != expected_mode
+        || !evidence.ephemeral_profile
+        || !evidence.in_private
+        || !evidence.extensions_absent
+        || !evidence.presentation_hidden
+        || evidence.viewport_width != 1_280
+        || evidence.viewport_height != 800
+        || !evidence.loopback_only
+        || !evidence.page_world_bridge_absent
+        || !evidence.secrets_redacted
+        || evidence.focus_theft_observed
+        || evidence.peak_pending_invocations != 1
+        || !evidence.semantic_work_drained
+        || !evidence.teardown.runtime_retired
+        || !evidence.teardown.view_closed
+        || !evidence.teardown.browser_process_exited
+        || !evidence.teardown.profile_removed
+        || !evidence.teardown.fixture_drained
+        || !evidence.teardown.work_drained
+        || evidence.teardown.retained_native_views != 0
+    {
+        return Err(WindowsSemanticProbeQualificationError::CommonInvariant);
+    }
+
+    let mode_valid = match expected_mode {
+        WindowsSemanticProbeMode::HiddenFixedDocuments => {
+            fixed_documents(evidence) && !evidence.debugger_attached
+        }
+        WindowsSemanticProbeMode::HiddenDebuggerCoexistence => {
+            fixed_documents(evidence) && evidence.debugger_attached
+        }
+        WindowsSemanticProbeMode::HiddenEventFlood => {
+            !evidence.debugger_attached
+                && evidence.snapshots == 2
+                && evidence.document_epochs == 3
+                && evidence.first_snapshot_verified
+                && evidence.replacement_snapshot_verified
+                && evidence.replacement_stale_state_absent
+                && evidence.event_flood_refused
+                && evidence.recovered_after_event_flood
+                && !evidence.renderer_loss_observed
+                && !evidence.renderer_lost_refused
+        }
+        WindowsSemanticProbeMode::HiddenRendererLoss => {
+            !evidence.debugger_attached
+                && evidence.snapshots == 1
+                && evidence.document_epochs == 1
+                && evidence.first_snapshot_verified
+                && !evidence.replacement_snapshot_verified
+                && !evidence.replacement_stale_state_absent
+                && !evidence.event_flood_refused
+                && !evidence.recovered_after_event_flood
+                && evidence.renderer_loss_observed
+                && evidence.renderer_lost_refused
+        }
+    };
+    if !mode_valid {
+        return Err(WindowsSemanticProbeQualificationError::Mode);
+    }
+
+    Ok(WindowsSemanticProbeAggregate {
+        mode: evidence.mode,
+        snapshots: evidence.snapshots,
+        document_epochs: evidence.document_epochs,
+        elapsed_ms: evidence.elapsed_ms,
+        cleanup_ms: evidence.teardown.cleanup_ms,
+        status: WindowsSemanticProbeAggregateStatus::Qualified,
+    })
+}
+
+fn fixed_documents(evidence: &WindowsSemanticProbeEvidence) -> bool {
+    evidence.snapshots == 2
+        && evidence.document_epochs == 2
+        && evidence.first_snapshot_verified
+        && evidence.replacement_snapshot_verified
+        && evidence.replacement_stale_state_absent
+        && !evidence.event_flood_refused
+        && !evidence.recovered_after_event_flood
+        && !evidence.renderer_loss_observed
+        && !evidence.renderer_lost_refused
+}
+
+#[cfg(test)]
+pub(crate) fn tests_fixture(mode: WindowsSemanticProbeMode) -> WindowsSemanticProbeEvidence {
+    use crate::EvidenceLabel;
+
+    let flood = mode == WindowsSemanticProbeMode::HiddenEventFlood;
+    let renderer = mode == WindowsSemanticProbeMode::HiddenRendererLoss;
+    WindowsSemanticProbeEvidence {
+        run_id: 1,
+        runtime: RuntimeFingerprint {
+            platform: Platform::Windows,
+            os_version: EvidenceLabel::new("10.0.26100").expect("OS label"),
+            engine: EvidenceLabel::new("WebView2").expect("engine label"),
+            engine_version: EvidenceLabel::new("140.0.0.0").expect("version label"),
+            adapter_revision: EvidenceLabel::new("semantic-runtime-m3").expect("adapter label"),
+        },
+        mode,
+        ephemeral_profile: true,
+        in_private: true,
+        extensions_absent: true,
+        presentation_hidden: true,
+        viewport_width: 1_280,
+        viewport_height: 800,
+        loopback_only: true,
+        snapshots: if renderer { 1 } else { 2 },
+        document_epochs: if flood {
+            3
+        } else if renderer {
+            1
+        } else {
+            2
+        },
+        first_snapshot_verified: true,
+        replacement_snapshot_verified: !renderer,
+        replacement_stale_state_absent: !renderer,
+        page_world_bridge_absent: true,
+        secrets_redacted: true,
+        event_flood_refused: flood,
+        recovered_after_event_flood: flood,
+        renderer_loss_observed: renderer,
+        renderer_lost_refused: renderer,
+        debugger_attached: mode == WindowsSemanticProbeMode::HiddenDebuggerCoexistence,
+        focus_theft_observed: false,
+        peak_pending_invocations: 1,
+        semantic_work_drained: true,
+        elapsed_ms: 800,
+        teardown: WindowsSemanticTeardownEvidence {
+            runtime_retired: true,
+            view_closed: true,
+            browser_process_exited: true,
+            profile_removed: true,
+            fixture_drained: true,
+            work_drained: true,
+            retained_native_views: 0,
+            cleanup_ms: 50,
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_required_mode_has_one_exact_qualification() {
+        for mode in WINDOWS_SEMANTIC_PHYSICAL_REVIEW_MODES {
+            let evidence = tests_fixture(mode);
+            assert_eq!(
+                qualify_windows_semantic_probe_evidence(mode, &evidence)
+                    .expect("qualified")
+                    .mode(),
+                mode
+            );
+            assert_eq!(
+                WindowsSemanticProbeMode::from_argument(mode.argument()),
+                Some(mode)
+            );
+        }
+    }
+
+    #[test]
+    fn response_round_trip_is_bounded_and_canonical() {
+        let response = WindowsSemanticProbeResponse {
+            protocol_version: WINDOWS_SEMANTIC_PROBE_PROTOCOL_VERSION,
+            request_id: 1,
+            reply: WindowsSemanticProbeReply::Completed(tests_fixture(
+                WindowsSemanticProbeMode::HiddenFixedDocuments,
+            )),
+        };
+        let encoded = encode_windows_semantic_probe_response(&response).expect("encode");
+        assert_eq!(
+            decode_windows_semantic_probe_response(&encoded).expect("decode"),
+            response
+        );
+        let mut noncanonical = encoded;
+        noncanonical.insert(0, b' ');
+        assert_eq!(
+            decode_windows_semantic_probe_response(&noncanonical),
+            Err(WindowsSemanticProbeProtocolError::NonCanonical)
+        );
+    }
+
+    #[test]
+    fn substitutions_focus_and_teardown_fail_closed() {
+        let mode = WindowsSemanticProbeMode::HiddenFixedDocuments;
+        let mut evidence = tests_fixture(mode);
+        evidence.mode = WindowsSemanticProbeMode::HiddenEventFlood;
+        assert_eq!(
+            qualify_windows_semantic_probe_evidence(mode, &evidence),
+            Err(WindowsSemanticProbeQualificationError::CommonInvariant)
+        );
+
+        let mut evidence = tests_fixture(mode);
+        evidence.focus_theft_observed = true;
+        assert_eq!(
+            qualify_windows_semantic_probe_evidence(mode, &evidence),
+            Err(WindowsSemanticProbeQualificationError::CommonInvariant)
+        );
+
+        let mut evidence = tests_fixture(mode);
+        evidence.teardown.profile_removed = false;
+        assert_eq!(
+            qualify_windows_semantic_probe_evidence(mode, &evidence),
+            Err(WindowsSemanticProbeQualificationError::CommonInvariant)
+        );
+    }
+
+    #[test]
+    fn debugger_and_fault_modes_cannot_cross() {
+        let mut debugger = tests_fixture(WindowsSemanticProbeMode::HiddenDebuggerCoexistence);
+        debugger.debugger_attached = false;
+        assert_eq!(
+            qualify_windows_semantic_probe_evidence(
+                WindowsSemanticProbeMode::HiddenDebuggerCoexistence,
+                &debugger,
+            ),
+            Err(WindowsSemanticProbeQualificationError::Mode)
+        );
+
+        let mut renderer = tests_fixture(WindowsSemanticProbeMode::HiddenRendererLoss);
+        renderer.renderer_lost_refused = false;
+        assert_eq!(
+            qualify_windows_semantic_probe_evidence(
+                WindowsSemanticProbeMode::HiddenRendererLoss,
+                &renderer,
+            ),
+            Err(WindowsSemanticProbeQualificationError::Mode)
+        );
+    }
+}
