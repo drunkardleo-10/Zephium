@@ -35,6 +35,9 @@ const AGENTIC_SEMANTIC_LOCATE: &str = "crates/zephium-agentic/src/semantic_locat
 const AGENTIC_SEMANTIC_LOCATE_MODEL: &str = "crates/zephium-agentic/src/semantic_locate_model.rs";
 const AGENTIC_SEMANTIC_READ: &str = "crates/zephium-agentic/src/semantic_read.rs";
 const AGENTIC_SEMANTIC_READ_MODEL: &str = "crates/zephium-agentic/src/semantic_read_model.rs";
+const AGENTIC_SEMANTIC_EXTRACT: &str = "crates/zephium-agentic/src/semantic_extract.rs";
+const AGENTIC_SEMANTIC_EXTRACT_MODEL: &str = "crates/zephium-agentic/src/semantic_extract_model.rs";
+const AGENTIC_PROVIDER_EXTRACTION: &str = "crates/zephium-agentic/src/agent_provider/extraction.rs";
 const AGENTIC_SEMANTIC_ACTION: &str = "crates/zephium-agentic/src/semantic_action.rs";
 const AGENTIC_SEMANTIC_EXECUTE: &str = "crates/zephium-agentic/src/semantic_execute.rs";
 const AGENTIC_SEMANTIC_EXECUTE_COORDINATOR: &str =
@@ -167,6 +170,17 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         &read(repository.join(AGENTIC_PROVIDER_ROOT))?,
         &read(repository.join(AGENTIC_PROVIDER_CONTINUATION))?,
         &read(repository.join(AGENTIC_PROVIDER_REQUEST))?,
+        &read(repository.join(AGENTIC_POLICY))?,
+    )?;
+    validate_semantic_extraction_provider_contract(
+        &read(repository.join(AGENTIC_ROOT))?,
+        &read(repository.join(AGENTIC_SEMANTIC_EXTRACT))?,
+        &read(repository.join(AGENTIC_SEMANTIC_EXTRACT_MODEL))?,
+        &read(repository.join(AGENTIC_PROVIDER_ROOT))?,
+        &read(repository.join(AGENTIC_PROVIDER_TOOL))?,
+        &read(repository.join(AGENTIC_PROVIDER_CONTINUATION))?,
+        &read(repository.join(AGENTIC_PROVIDER_REQUEST))?,
+        &read(repository.join(AGENTIC_PROVIDER_EXTRACTION))?,
         &read(repository.join(AGENTIC_POLICY))?,
     )?;
     validate_semantic_execution_contract(
@@ -2280,7 +2294,7 @@ fn validate_semantic_locate_contract(
         "if!result.matches_acknowledgement(&self.baseline)",
         "if!payload.matches_result(result)",
         "lettranscript=transcript.try_append(correlation,tool_result)?;",
-        "AgentBrowserToolKind::Locate|AgentBrowserToolKind::Read|AgentBrowserToolKind::Screenshot",
+        "AgentBrowserToolKind::Locate|AgentBrowserToolKind::Read|AgentBrowserToolKind::Extract|AgentBrowserToolKind::Screenshot",
         "pubstructAgentProviderBoundLocateContinuation",
     ] {
         if !continuation.contains(required) {
@@ -2401,7 +2415,7 @@ fn validate_semantic_read_continuation_contract(
         "if!payload.matches_read(read)",
         "pubstructAgentProviderBoundReadContinuation",
         "baseline.guard()!=receipt.observation_guard()",
-        "AgentBrowserToolKind::Locate|AgentBrowserToolKind::Read|AgentBrowserToolKind::Screenshot",
+        "AgentBrowserToolKind::Locate|AgentBrowserToolKind::Read|AgentBrowserToolKind::Extract|AgentBrowserToolKind::Screenshot",
     ] {
         if !continuation.contains(required) {
             return Err(format!(
@@ -2421,7 +2435,7 @@ fn validate_semantic_read_continuation_contract(
         "commitment:AgentProviderInputCommitment::Read",
         "continuation_transcript:Some(self.continuation_transcript)",
         "continuation_baseline:Some(self.baseline)",
-        "Self::Read(_)=>None",
+        "Self::Read(_)|Self::Extraction(_)=>None",
     ] {
         if !provider_request.contains(required) {
             return Err(format!(
@@ -2457,6 +2471,202 @@ fn validate_semantic_read_continuation_contract(
         if !policy.contains(required) {
             return Err(format!(
                 "semantic read policy lost baseline-only taint admission {required}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_semantic_extraction_provider_contract(
+    root: &str,
+    extract: &str,
+    extract_model: &str,
+    provider_root: &str,
+    provider_tool: &str,
+    continuation: &str,
+    provider_request: &str,
+    provider_extraction: &str,
+    policy: &str,
+) -> Result<(), String> {
+    let root = compact(root);
+    for required in [
+        "modsemantic_extract;",
+        "modsemantic_extract_model;",
+        "encode_semantic_extraction_request",
+        "AgentProviderExtractionRequestDraft",
+        "AgentProviderExtractionOutputBinding",
+    ] {
+        if !root.contains(required) {
+            return Err(format!(
+                "agentic root lost constrained extraction contract {required}"
+            ));
+        }
+    }
+
+    let extract = compact(extract);
+    for required in [
+        "pubconstMAX_SEMANTIC_EXTRACTION_INPUT_BYTES:usize=64*1024;",
+        "pubconstMAX_SEMANTIC_EXTRACTION_FIELDS:usize=64;",
+        "pubfnextract_delivered_semantic_read<'a>(",
+        "if!delivery.matches(schema,read)",
+        "extract_semantic_read_inner(schema,read,sensitivity_limit,model_output)",
+        "looks_like_secret_value",
+        "SemanticExtractionTrust::ModelMapped",
+    ] {
+        if !extract.contains(required) {
+            return Err(format!(
+                "semantic extraction lost bounded Rust admission {required}"
+            ));
+        }
+    }
+
+    let extract_model = compact(extract_model);
+    for required in [
+        "pubconstSEMANTIC_EXTRACTION_MODEL_SCHEMA_VERSION:u16=1;",
+        "ZEXTRACT{}schema_content=trustedevidence_content=untrustedschema={}fields={}",
+        "letread=encode_semantic_read(read,budget)?.into_extraction_parts();",
+        "fnextraction_schema_guard(schema:&SemanticExtractionSchema)->[u8;32]",
+        "field.max_text_bytes().unwrap_or_default()",
+        "field.maximum_unsigned().unwrap_or_default()",
+        "field.max_list_items().unwrap_or_default()",
+        "field.max_list_item_bytes().unwrap_or_default()",
+        "pubstructSemanticExtractionDeliveryReceipt",
+        "self.schema_guard==extraction_schema_guard(schema)",
+        "self.read_guard==read.guard()",
+        "self.request_guard==extraction_request_guard(",
+    ] {
+        if !extract_model.contains(required) {
+            return Err(format!(
+                "extraction model input lost exact schema/read guard {required}"
+            ));
+        }
+    }
+
+    let provider_tool = compact(provider_tool);
+    for required in [
+        "AgentBrowserToolProposal::Extract{schema,..}=>Some(*schema)",
+        "extraction_schema:Option<SemanticExtractionSchemaId>",
+        "extraction_schema,provider_item_id:self.provider_item_id",
+    ] {
+        if !provider_tool.contains(required) {
+            return Err(format!(
+                "provider extraction tool lost exact schema correlation {required}"
+            ));
+        }
+    }
+
+    let continuation = compact(continuation);
+    for required in [
+        "pubfnbind_extraction_request(",
+        "self.correlation.kind()!=AgentBrowserToolKind::Extract||self.correlation.extraction_schema!=Some(schema.id())",
+        "if!read.matches_acknowledgement(&self.baseline)",
+        "if!payload.matches(schema,read)",
+        "pubstructAgentProviderBoundExtractionContinuation",
+        "AgentBrowserToolKind::Locate|AgentBrowserToolKind::Read|AgentBrowserToolKind::Extract|AgentBrowserToolKind::Screenshot",
+        "AgentProviderInputEvidence::Extraction(_)|AgentProviderInputEvidence::Screenshot(_)=>{returnNone;}",
+    ] {
+        if !continuation.contains(required) {
+            return Err(format!(
+                "provider extraction continuation lost terminal schema/read join {required}"
+            ));
+        }
+    }
+
+    let provider_request = compact(provider_request);
+    for required in [
+        "constAGENT_EXTRACTION_INSTRUCTIONS_V1:&str=concat!(",
+        "pubstructAgentProviderExtractionRequestDraft",
+        "encode_openai_extraction_body(",
+        "encode_anthropic_extraction_body(",
+        "text:OpenAiExtractionTextWire",
+        "output_config:AnthropicExtractionOutputConfigWire",
+        "policy.prepare_provider_extraction_input(",
+        "commitment:AgentProviderInputCommitment::Extraction",
+        "continuation_transcript:None",
+        "staticEXTRACTION_OUTPUT_SCHEMA:LazyLock<Value>",
+        "project_anthropic_schema(extraction_output_schema())",
+        "AgentProviderInputEvidence::Extraction(receipt)",
+    ] {
+        if !provider_request.contains(required) {
+            return Err(format!(
+                "provider extraction request lost constrained atomic path {required}"
+            ));
+        }
+    }
+    for (start, end, label) in [
+        (
+            "structOpenAiExtractionRequestWire<'a>{",
+            "structOpenAiExtractionTextWire<'a>{",
+            "OpenAI",
+        ),
+        (
+            "structAnthropicExtractionRequestWire<'a>{",
+            "structAnthropicExtractionOutputConfigWire<'a>{",
+            "Anthropic",
+        ),
+    ] {
+        let start = provider_request
+            .find(start)
+            .ok_or_else(|| format!("missing {label} extraction request wire"))?;
+        let end = provider_request[start..]
+            .find(end)
+            .map(|offset| start + offset)
+            .ok_or_else(|| format!("unterminated {label} extraction request wire"))?;
+        let wire = &provider_request[start..end];
+        if wire.contains("tools:") || wire.contains("tool_choice:") {
+            return Err(format!(
+                "{label} extraction mapping reacquired browser tools"
+            ));
+        }
+    }
+
+    let provider_extraction = compact(provider_extraction);
+    for required in [
+        "try_reserve_exact(MAX_SEMANTIC_EXTRACTION_INPUT_BYTES)",
+        "ifself.failed||batch.call()!=self.call",
+        "AgentProviderStreamEvent::ToolCall(_)",
+        ".checked_add(delta.len()).filter(|bytes|*bytes<=MAX_SEMANTIC_EXTRACTION_INPUT_BYTES)",
+        "completion.stop()!=AgentProviderStopReason::Completed",
+        "completion.stats().tool_calls()!=0",
+        "completion.stats().tool_argument_bytes()!=0",
+        "Some(self.output.len())",
+        "extract_delivered_semantic_read(",
+        "self.output.clear();",
+    ] {
+        if !provider_extraction.contains(required) {
+            return Err(format!(
+                "provider extraction collector lost bounded exact terminal join {required}"
+            ));
+        }
+    }
+
+    let provider_root = compact(provider_root);
+    for required in [
+        "fnvalidate_extraction_request(",
+        "ifextraction.quality()!=crate::SemanticTokenCountQuality::ExactLocal",
+        "self.validate_diff_request(request,extraction,structured_input)",
+    ] {
+        if !provider_root.contains(required) {
+            return Err(format!(
+                "provider extraction lost exact local count bound {required}"
+            ));
+        }
+    }
+
+    let policy = compact(policy);
+    for required in [
+        "pub(crate)structAgentProviderExtractionInput<'a,'read>",
+        "pub(crate)fnprepare_provider_extraction_input(",
+        "!input.delivery.matches(input.schema,input.read)",
+        "!input.read.matches_acknowledgement(input.baseline)",
+        "provider_read_taints(input.read,input.baseline,request.account(),&self.taints)?",
+        "ModelInputKind::Extraction",
+        "pubfncommit_extraction_input(",
+    ] {
+        if !policy.contains(required) {
+            return Err(format!(
+                "extraction policy lost baseline-only atomic admission {required}"
             ));
         }
     }
@@ -3482,6 +3692,89 @@ mod tests {
             continuation,
             provider_request,
             &policy.replace("cohort.contains_reference(provenance.reference())", "true",),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn semantic_extraction_requires_tool_free_schema_read_and_terminal_binding() {
+        let root = include_str!("../../crates/zephium-agentic/src/lib.rs");
+        let extract = include_str!("../../crates/zephium-agentic/src/semantic_extract.rs");
+        let extract_model =
+            include_str!("../../crates/zephium-agentic/src/semantic_extract_model.rs");
+        let provider_root = include_str!("../../crates/zephium-agentic/src/agent_provider.rs");
+        let provider_tool = include_str!("../../crates/zephium-agentic/src/agent_provider/tool.rs");
+        let continuation =
+            include_str!("../../crates/zephium-agentic/src/agent_provider/continuation.rs");
+        let provider_request =
+            include_str!("../../crates/zephium-agentic/src/agent_provider/request.rs");
+        let provider_extraction =
+            include_str!("../../crates/zephium-agentic/src/agent_provider/extraction.rs");
+        let policy = include_str!("../../crates/zephium-agentic/src/agent_policy.rs");
+        validate_semantic_extraction_provider_contract(
+            root,
+            extract,
+            extract_model,
+            provider_root,
+            provider_tool,
+            continuation,
+            provider_request,
+            provider_extraction,
+            policy,
+        )
+        .expect("bounded terminal semantic extraction");
+        assert!(validate_semantic_extraction_provider_contract(
+            root,
+            extract,
+            extract_model,
+            provider_root,
+            provider_tool,
+            &continuation.replace(
+                "|| self.correlation.extraction_schema != Some(schema.id())",
+                "",
+            ),
+            provider_request,
+            provider_extraction,
+            policy,
+        )
+        .is_err());
+        assert!(validate_semantic_extraction_provider_contract(
+            root,
+            extract,
+            extract_model,
+            provider_root,
+            provider_tool,
+            continuation,
+            &provider_request.replace(
+                "struct OpenAiExtractionRequestWire<'a> {",
+                "struct OpenAiExtractionRequestWire<'a> { tools: Vec<()>,",
+            ),
+            provider_extraction,
+            policy,
+        )
+        .is_err());
+        assert!(validate_semantic_extraction_provider_contract(
+            root,
+            extract,
+            extract_model,
+            provider_root,
+            provider_tool,
+            continuation,
+            provider_request,
+            &provider_extraction.replace("self.output.clear();", ""),
+            policy,
+        )
+        .is_err());
+        assert!(validate_semantic_extraction_provider_contract(
+            root,
+            extract,
+            extract_model,
+            provider_root,
+            provider_tool,
+            continuation,
+            provider_request,
+            provider_extraction,
+            &policy.replace("|| !input.read.matches_acknowledgement(input.baseline)", "",),
         )
         .is_err());
     }

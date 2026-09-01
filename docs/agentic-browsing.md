@@ -392,8 +392,42 @@ observation; a progressive expansion must first establish a new delivered
 observation rather than silently rebasing through a read result. Refusal and
 cancellation release the reservation.
 
-The diff path mechanically rejects locate, read, and screenshot correlations,
-so none of those result classes can be substituted with a page delta.
+`extract` now consumes that bounded read through a distinct, terminal mapping
+turn. Only the exact prior tool-only `extract` correlation selecting the same
+trusted schema ID may bind a strictly newer same-plan call. Deterministic
+`ZEXTRACT1` input carries trusted, closed schema field declarations followed by
+the exact hostile `ZREAD1` evidence; one guard binds the full schema definition,
+read, observation fingerprint, context, generation, and capture time. The
+complete immutable replay must receive an `ExactLocal` provider/model/tokenizer
+count before policy reserves it, then policy rejoins the unchanged committed
+baseline taint without adding origins, references, authority, or a new
+observation acknowledgement.
+
+The mapping call exposes no browser tools. OpenAI uses strict Responses
+`text.format` JSON Schema and Anthropic uses stable Messages
+`output_config.format`, following their current
+[structured-output](https://developers.openai.com/api/docs/guides/structured-outputs)
+[contracts](https://platform.claude.com/docs/en/build-with-claude/structured-outputs).
+Both receive one fixed universal envelope; product schema field names, page
+content, and values remain only in bounded request message content. This avoids
+turning Anthropic's documented 24-hour compiled-schema cache into a page- or
+workspace-schema store. The Anthropic projection removes its unsupported
+numeric, length, and cardinality constraints, while the original Rust schema
+remains authoritative as its guidance requires.
+
+A purpose-bound collector retains at most 64 KiB from the exact provider call,
+poisons and clears itself on a wrong-call or tool event, and admits output only
+after an exact `Completed` terminal with matching text-byte accounting and no
+tool output. Rust then reapplies schema identity and definition, ordered field
+semantics, value/aggregate bounds, secret screening, sensitivity, and exact
+`@rN` provenance. Refusal, incomplete output, cancellation, byte mismatch, or
+schema/read substitution fails closed. Extraction proof is content-free and
+terminal: it cannot seed a diff, another browser-tool turn, or browser
+authority. No live provider request was made for this implementation evidence.
+
+The diff path mechanically rejects locate, read, extract, and screenshot
+correlations, so none of those result classes can be substituted with a page
+delta.
 
 After an action, return a semantic diff against the last acknowledged snapshot:
 
@@ -648,6 +682,15 @@ retain only the exact earlier acknowledgement already present in its
 move-only transcript; the receipt itself still cannot mint or expose one. If
 the shell loses this optional proof it must request a fresh snapshot; it cannot
 recover by retaining or reconstructing semantic strings or request bytes.
+
+Extraction is not sent through either ordinary observation/read request or the
+generic diff continuation. Its exact `extract` tool result is replayed into a
+separate tool-free constrained-output request using the fixed universal
+extraction envelope above. The response binding is returned beside the
+move-only transport input, starts retention only after exact input commitment,
+and is destroyed on refusal/cancellation. A committed extraction receipt can
+validate only that exact schema/read mapping output and is never eligible for a
+continuation seed.
 
 A compact diff is never sent as a standalone stateless provider turn because
 the model would not have the acknowledged baseline it modifies. Provider diff
