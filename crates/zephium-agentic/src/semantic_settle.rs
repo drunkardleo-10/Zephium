@@ -397,10 +397,10 @@ pub struct SemanticSettleTracker {
 impl SemanticSettleTracker {
     /// Starts settlement after a backend has terminally applied one fixed action.
     ///
-    /// Calling this function is not proof that policy authorization or backend
-    /// execution occurred. The imperative executor must establish those stages
-    /// before constructing the tracker.
-    pub fn begin(
+    /// This constructor remains crate-private so production callers must use
+    /// the consuming execution-outcome bridge. Internal verification tests use
+    /// it directly to exercise the settlement core in isolation.
+    pub(crate) fn begin(
         attempt: SemanticActionAttemptId,
         action: &SemanticPreparedAction,
         completed_at: SemanticSettleInstant,

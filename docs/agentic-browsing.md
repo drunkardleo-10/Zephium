@@ -535,6 +535,13 @@ the current quiet boundary for mutation-quiet waits and the absolute deadline
 for every other wait. The shell owns one cancel-or-replace timer per admitted
 action; it does not poll.
 
+The native-to-settle transition consumes the complete non-cloneable execution
+outcome and rechecks it against the exact prepared action. Only an `Applied`
+terminal can mint a settlement tracker, using the trusted native completion
+time as the settle start. A typed execution failure, contract violation, action
+substitution, or deadline overflow returns the retained policy authority and
+creates no tracker, timer, worker, or retry path.
+
 ### 8.2 Input backends
 
 The runtime can choose among:

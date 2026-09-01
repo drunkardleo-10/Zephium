@@ -16,8 +16,8 @@ use crate::{
     AgentActiveEffect, AgentEffectId, ContextIdentity, SemanticActionAttemptId,
     SemanticActionFailure, SemanticActionKind, SemanticActionText, SemanticFrameJoin,
     SemanticInvocationId, SemanticPreparedAction, SemanticPressKey, SemanticRect, SemanticRole,
-    SemanticScrollAmount, SemanticScrollDirection, SemanticSettleInstant,
-    SemanticSnapshotGeneration,
+    SemanticScrollAmount, SemanticScrollDirection, SemanticSettleError, SemanticSettleInstant,
+    SemanticSettleTracker, SemanticSnapshotGeneration,
 };
 
 /// Maximum time between final policy dispatch and one native backend terminal.
@@ -643,6 +643,152 @@ impl fmt::Debug for SemanticActionExecutionOutcome {
     }
 }
 
+/// Exact post-execution authority and settlement state for one applied action.
+///
+/// This owner can be minted only by consuming a complete native execution
+/// outcome. It prevents an applied timestamp/backend fact copied from another
+/// attempt from starting settlement under unrelated policy authority.
+#[must_use]
+pub struct SemanticActionSettlementStart {
+    active: AgentActiveEffect,
+    execution: SemanticActionExecutionApplied,
+    tracker: SemanticSettleTracker,
+}
+
+impl SemanticActionSettlementStart {
+    /// Exact dispatched policy authority retained through settlement.
+    pub const fn active(&self) -> &AgentActiveEffect {
+        &self.active
+    }
+
+    /// Content-free fixed-backend attribution and execution timing.
+    pub const fn execution(&self) -> SemanticActionExecutionApplied {
+        self.execution
+    }
+
+    /// Exact bounded settlement tracker.
+    pub const fn tracker(&self) -> &SemanticSettleTracker {
+        &self.tracker
+    }
+
+    /// Mutable settlement state for trusted-shell facts and snapshots.
+    pub const fn tracker_mut(&mut self) -> &mut SemanticSettleTracker {
+        &mut self.tracker
+    }
+
+    /// Separates policy authority from settlement state for later verification.
+    pub fn into_parts(
+        self,
+    ) -> (
+        AgentActiveEffect,
+        SemanticActionExecutionApplied,
+        SemanticSettleTracker,
+    ) {
+        (self.active, self.execution, self.tracker)
+    }
+}
+
+impl fmt::Debug for SemanticActionSettlementStart {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SemanticActionSettlementStart")
+            .field("active", &"[redacted]")
+            .field("execution", &self.execution)
+            .field("tracker", &self.tracker)
+            .finish()
+    }
+}
+
+/// Failed native-to-settlement transition that returns policy authority.
+#[must_use]
+pub struct SemanticActionSettlementRefusal {
+    active: Box<AgentActiveEffect>,
+    error: SemanticActionSettlementStartError,
+}
+
+impl SemanticActionSettlementRefusal {
+    /// Closed reason settlement did not begin.
+    pub const fn error(&self) -> SemanticActionSettlementStartError {
+        self.error
+    }
+
+    /// Recovers policy authority for one terminal charged settlement.
+    pub fn into_parts(self) -> (AgentActiveEffect, SemanticActionSettlementStartError) {
+        (*self.active, self.error)
+    }
+}
+
+impl fmt::Debug for SemanticActionSettlementRefusal {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SemanticActionSettlementRefusal")
+            .field("active", &"[redacted]")
+            .field("error", &self.error)
+            .finish()
+    }
+}
+
+/// Closed refusal before bounded post-action settlement begins.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum SemanticActionSettlementStartError {
+    /// Supplied prepared action did not match retained policy authority.
+    #[error("semantic action settlement authority mismatched")]
+    AuthorityMismatch,
+    /// Native execution ended with an expected typed action failure.
+    #[error("semantic action execution failed before settlement: {0}")]
+    ExecutionFailed(SemanticActionFailure),
+    /// Native execution evidence violated its exact one-shot contract.
+    #[error("semantic action execution contract failed before settlement: {0}")]
+    ExecutionContract(SemanticActionExecutionContractError),
+    /// The settlement tracker refused its clock/deadline contract.
+    #[error("semantic action settlement could not start: {0}")]
+    Settlement(SemanticSettleError),
+}
+
+/// Consumes one exact native execution outcome into bounded settlement state.
+///
+/// Failed or malformed execution never creates a tracker and always returns
+/// the still-dispatched policy authority. This function allocates no worker,
+/// timer, queue, native object, or content buffer.
+pub fn begin_semantic_action_settlement(
+    outcome: SemanticActionExecutionOutcome,
+    action: &SemanticPreparedAction,
+) -> Result<SemanticActionSettlementStart, SemanticActionSettlementRefusal> {
+    let (active, disposition) = outcome.into_parts();
+    let error = if !active.matches_action(action) {
+        SemanticActionSettlementStartError::AuthorityMismatch
+    } else {
+        match disposition {
+            SemanticActionExecutionDisposition::Applied(applied) => {
+                match SemanticSettleTracker::begin(
+                    active.attempt(),
+                    action,
+                    applied.settle_started_at(),
+                ) {
+                    Ok(tracker) => {
+                        return Ok(SemanticActionSettlementStart {
+                            active,
+                            execution: applied,
+                            tracker,
+                        });
+                    }
+                    Err(error) => SemanticActionSettlementStartError::Settlement(error),
+                }
+            }
+            SemanticActionExecutionDisposition::Failed(failure) => {
+                SemanticActionSettlementStartError::ExecutionFailed(failure)
+            }
+            SemanticActionExecutionDisposition::ContractViolation(error) => {
+                SemanticActionSettlementStartError::ExecutionContract(error)
+            }
+        }
+    };
+    Err(SemanticActionSettlementRefusal {
+        active: Box::new(active),
+        error,
+    })
+}
+
 /// Preparation failure that returns the still-dispatched policy authority.
 #[must_use]
 pub struct SemanticActionExecutionRefusal {
@@ -965,8 +1111,7 @@ mod tests {
         SemanticActionIntent, SemanticActionProposal, SemanticEffectClass, SemanticFrameTrust,
         SemanticObservation, SemanticObservationAssembler, SemanticObservationBudget,
         SemanticObservationId, SemanticOrigin, SemanticReferenceId, SemanticSettleBudget,
-        SemanticSettleTracker, SemanticState, SemanticVerification, SemanticWaitCondition,
-        SEMANTIC_WIRE_VERSION,
+        SemanticState, SemanticVerification, SemanticWaitCondition, SEMANTIC_WIRE_VERSION,
     };
     use serde_json::json;
     use zephium_core::ids::ProfileId;
@@ -1143,21 +1288,148 @@ mod tests {
             SemanticActionExecutionInstant::from_millis(1_020),
         );
         let outcome = pending.settle(action.frame(), settlement);
-        let (active, disposition) = outcome.into_parts();
-        assert_eq!(active.attempt(), attempt);
-        let SemanticActionExecutionDisposition::Applied(applied) = disposition else {
-            panic!("exact native completion was not applied");
-        };
+        let start = begin_semantic_action_settlement(outcome, &action).expect("settlement start");
+        assert_eq!(start.active().attempt(), attempt);
+        let applied = start.execution();
         assert_eq!(
             applied.backend(),
             SemanticActionExecutionBackend::FixedSemanticRecipe
         );
         assert_eq!(applied.completed_at().millis(), 1_020);
         assert_eq!(applied.settle_started_at().millis(), 1_020);
-        let tracker =
-            SemanticSettleTracker::begin(active.attempt(), &action, applied.settle_started_at())
-                .expect("settle tracker");
-        assert_eq!(tracker.deadline().millis(), 1_270);
+        assert_eq!(start.tracker().deadline().millis(), 1_270);
+        assert_eq!(
+            start.tracker().status(),
+            crate::SemanticSettleStatus::ReadyForVerification
+        );
+    }
+
+    #[test]
+    fn settlement_start_rejects_action_substitution_and_returns_policy_authority() {
+        let observation = button_observation(15, true);
+        let original = click_action(&observation, 15);
+        let substituted = click_action(&observation, 16);
+        let (pending, native) = prepare_semantic_action_execution(
+            active(&original, 16),
+            &original,
+            SemanticActionExecutionInstant::from_millis(1_000),
+        )
+        .expect("execution");
+        let outcome = pending.settle(
+            original.frame(),
+            native.complete(
+                SemanticActionExecutionBackend::FixedSemanticRecipe,
+                SemanticActionNativeReadiness::ExactVisibleUnoccludedTarget,
+                viewport(),
+                rect(10, 20, 100, 30),
+                SemanticActionExecutionInstant::from_millis(1_010),
+                SemanticActionExecutionInstant::from_millis(1_020),
+            ),
+        );
+        let refusal = begin_semantic_action_settlement(outcome, &substituted)
+            .expect_err("substituted action");
+        let (returned, error) = refusal.into_parts();
+        assert_eq!(returned.attempt().get(), 16);
+        assert_eq!(error, SemanticActionSettlementStartError::AuthorityMismatch);
+    }
+
+    #[test]
+    fn failed_or_overflowing_execution_never_starts_settlement() {
+        let observation = button_observation(17, true);
+        let action = click_action(&observation, 17);
+        let (pending, native) = prepare_semantic_action_execution(
+            active(&action, 17),
+            &action,
+            SemanticActionExecutionInstant::from_millis(1_000),
+        )
+        .expect("execution");
+        let outcome = pending.settle(
+            action.frame(),
+            native.fail(
+                SemanticActionNativeFailure::TargetOccluded,
+                SemanticActionExecutionInstant::from_millis(1_010),
+            ),
+        );
+        let refusal =
+            begin_semantic_action_settlement(outcome, &action).expect_err("failed execution");
+        let (returned, error) = refusal.into_parts();
+        assert_eq!(returned.attempt().get(), 17);
+        assert_eq!(
+            error,
+            SemanticActionSettlementStartError::ExecutionFailed(
+                SemanticActionFailure::TargetOccluded,
+            )
+        );
+
+        let requested_at = SemanticActionExecutionInstant::from_millis(u64::MAX - 250);
+        let (pending, native) =
+            prepare_semantic_action_execution(active(&action, 18), &action, requested_at)
+                .expect("late execution");
+        let completed_at = SemanticActionExecutionInstant::from_millis(u64::MAX);
+        let outcome = pending.settle(
+            action.frame(),
+            native.complete(
+                SemanticActionExecutionBackend::FixedSemanticRecipe,
+                SemanticActionNativeReadiness::ExactVisibleUnoccludedTarget,
+                viewport(),
+                rect(10, 20, 100, 30),
+                requested_at,
+                completed_at,
+            ),
+        );
+        let refusal = begin_semantic_action_settlement(outcome, &action)
+            .expect_err("settlement deadline overflow");
+        let (returned, error) = refusal.into_parts();
+        assert_eq!(returned.attempt().get(), 18);
+        assert_eq!(
+            error,
+            SemanticActionSettlementStartError::Settlement(SemanticSettleError::DeadlineOverflow)
+        );
+    }
+
+    #[test]
+    fn execution_contract_violation_returns_authority_without_a_tracker() {
+        let observation = button_observation(19, true);
+        let action = click_action(&observation, 19);
+        let (first_pending, first_native) = prepare_semantic_action_execution(
+            active(&action, 19),
+            &action,
+            SemanticActionExecutionInstant::from_millis(1_000),
+        )
+        .expect("first execution");
+        let (second_pending, second_native) = prepare_semantic_action_execution(
+            active(&action, 20),
+            &action,
+            SemanticActionExecutionInstant::from_millis(1_000),
+        )
+        .expect("second execution");
+        drop(first_native);
+
+        let outcome = first_pending.settle(
+            action.frame(),
+            second_native.fail(
+                SemanticActionNativeFailure::Transport,
+                SemanticActionExecutionInstant::from_millis(1_010),
+            ),
+        );
+        let refusal =
+            begin_semantic_action_settlement(outcome, &action).expect_err("cross-request terminal");
+        let (returned, error) = refusal.into_parts();
+        assert_eq!(returned.attempt().get(), 19);
+        assert_eq!(
+            error,
+            SemanticActionSettlementStartError::ExecutionContract(
+                SemanticActionExecutionContractError::RequestMismatch
+            )
+        );
+        assert_eq!(
+            second_pending
+                .refuse(SemanticActionFailure::Cancelled)
+                .active()
+                .attempt()
+                .get(),
+            20
+        );
     }
 
     #[test]

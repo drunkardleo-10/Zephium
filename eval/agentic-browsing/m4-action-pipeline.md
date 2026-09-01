@@ -5,7 +5,8 @@ one-action rolling checkpoints, typed settle/verification contracts,
 fresh-snapshot structural revalidation, event-driven bounded settlement,
 independent effect verification, and acknowledged action-result diff/fresh-state
 finalization and exact bounded batch-terminal aggregation, plus a one-shot
-policy-to-native execution handoff, bounded semantic read/transport, closed
+policy-to-native execution handoff and exact consuming native-to-settlement
+transition, bounded semantic read/transport, closed
 structured extraction admission, exact tool-result/constrained-output
 extraction transport, and the one-shot viewport screenshot contract are
 implemented.
@@ -129,6 +130,15 @@ are trusted, or that M4 is complete.
   settle/independent-verification core. Typed backend failures and contract
   violations likewise return that authority for one charged terminal policy
   settlement, with no blind retry path.
+- The native-to-settle join consumes the complete non-cloneable execution
+  outcome, rechecks the returned policy authority against the exact prepared
+  action, and mints a tracker only for an `Applied` disposition. The tracker
+  begins at the trusted native completion instant, while its start owner keeps
+  content-free backend/readiness/timing attribution for metrics. Typed native
+  failure, execution-contract failure, action substitution, or settlement
+  deadline overflow returns policy authority without creating a tracker. The
+  transition owns no task, timer, queue, retry, native object, or content
+  buffer.
 - A zero-idle single-owner coordinator now retains the active policy half while
   native work is outstanding. Its empty `Vec` allocates only on first use; it
   admits at most four requests process-wide and one per logical context,

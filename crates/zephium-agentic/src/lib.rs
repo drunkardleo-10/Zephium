@@ -286,15 +286,16 @@ pub use semantic_diff_model::{
     SemanticDiffModelPayload, SemanticEncodedDiff, SEMANTIC_DIFF_MODEL_SCHEMA_VERSION,
 };
 pub use semantic_execute::{
-    prepare_semantic_action_execution, SemanticActionExecutionApplied,
-    SemanticActionExecutionBackend, SemanticActionExecutionContractError,
-    SemanticActionExecutionDisposition, SemanticActionExecutionInstant,
-    SemanticActionExecutionOutcome, SemanticActionExecutionPending,
+    begin_semantic_action_settlement, prepare_semantic_action_execution,
+    SemanticActionExecutionApplied, SemanticActionExecutionBackend,
+    SemanticActionExecutionContractError, SemanticActionExecutionDisposition,
+    SemanticActionExecutionInstant, SemanticActionExecutionOutcome, SemanticActionExecutionPending,
     SemanticActionExecutionPreparationError, SemanticActionExecutionRefusal,
     SemanticActionNativeFailure, SemanticActionNativeReadiness, SemanticActionNativeRequest,
     SemanticActionNativeSettlement, SemanticActionNativeTargetId, SemanticActionNativeViewport,
-    SemanticActionNativeViewportError, MAX_SEMANTIC_ACTION_NATIVE_EXECUTION_MILLIS,
-    MAX_SEMANTIC_ACTION_VIEWPORT_DIMENSION,
+    SemanticActionNativeViewportError, SemanticActionSettlementRefusal,
+    SemanticActionSettlementStart, SemanticActionSettlementStartError,
+    MAX_SEMANTIC_ACTION_NATIVE_EXECUTION_MILLIS, MAX_SEMANTIC_ACTION_VIEWPORT_DIMENSION,
 };
 pub use semantic_execute_coordinator::{
     semantic_action_dispatch_failure, SemanticActionExecutionCoordinator,

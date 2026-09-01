@@ -2702,7 +2702,9 @@ fn validate_semantic_execution_contract(
     for required in [
         "modsemantic_execute;",
         "modsemantic_execute_coordinator;",
+        "begin_semantic_action_settlement",
         "prepare_semantic_action_execution",
+        "SemanticActionSettlementStart",
         "SemanticActionExecutionCoordinator",
     ] {
         if !root.contains(required) {
@@ -2745,6 +2747,18 @@ fn validate_semantic_execution_contract(
         "applied.completed_at>deadline",
         "SemanticActionFailure::BackendRefused",
         "SemanticSettleInstant::from_millis",
+        "pubstructSemanticActionSettlementStart{",
+        "execution:SemanticActionExecutionApplied",
+        "pubstructSemanticActionSettlementRefusal{",
+        "active:Box<AgentActiveEffect>",
+        "pubfnbegin_semantic_action_settlement(",
+        "let(active,disposition)=outcome.into_parts();",
+        "if!active.matches_action(action)",
+        "SemanticSettleTracker::begin(",
+        "applied.settle_started_at()",
+        "SemanticActionSettlementStartError::ExecutionFailed",
+        "SemanticActionSettlementStartError::ExecutionContract",
+        "SemanticActionSettlementStartError::Settlement",
     ] {
         if !execution.contains(required) {
             return Err(format!(
@@ -2860,6 +2874,7 @@ fn validate_semantic_execution_contract(
 fn validate_semantic_settle_wake(settle: &str) -> Result<(), String> {
     let settle = compact(settle);
     for required in [
+        "pub(crate)fnbegin(",
         "pubconstfnnext_wake(&self)->Option<SemanticSettleInstant>",
         "self.status.is_terminal()",
         "self.last_mutation_at.checked_add(quiet.millis())",
@@ -3827,7 +3842,11 @@ mod tests {
         let root = r#"
             mod semantic_execute;
             mod semantic_execute_coordinator;
-            pub use semantic_execute::prepare_semantic_action_execution;
+            pub use semantic_execute::{
+                begin_semantic_action_settlement,
+                prepare_semantic_action_execution,
+                SemanticActionSettlementStart,
+            };
             pub use semantic_execute_coordinator::SemanticActionExecutionCoordinator;
         "#;
         let effect = r#"
@@ -3851,6 +3870,27 @@ mod tests {
             if applied.completed_at > deadline {}
             SemanticActionFailure::BackendRefused;
             SemanticSettleInstant::from_millis(1);
+            pub struct SemanticActionSettlementStart {
+                execution: SemanticActionExecutionApplied,
+            }
+            pub struct SemanticActionSettlementRefusal {
+                active: Box<AgentActiveEffect>,
+            }
+            pub fn begin_semantic_action_settlement(
+                outcome: SemanticActionExecutionOutcome,
+                action: &SemanticPreparedAction,
+            ) {
+                let (active, disposition) = outcome.into_parts();
+                if !active.matches_action(action) {}
+                SemanticSettleTracker::begin(
+                    active.attempt(),
+                    action,
+                    applied.settle_started_at(),
+                );
+                SemanticActionSettlementStartError::ExecutionFailed(failure);
+                SemanticActionSettlementStartError::ExecutionContract(error);
+                SemanticActionSettlementStartError::Settlement(error);
+            }
         "#;
         let coordinator = r#"
             const MAX_PENDING_SEMANTIC_ACTION_EXECUTIONS: usize = MAX_AGENT_PENDING_EFFECTS;
@@ -3872,6 +3912,7 @@ mod tests {
             SemanticActionExecutionCoordinatorError::PrematureTimeout;
         "#;
         let settle = r#"
+            pub(crate) fn begin() {}
             pub const fn next_wake(&self) -> Option<SemanticSettleInstant> {
                 if self.status.is_terminal() {}
                 self.last_mutation_at.checked_add(quiet.millis());
@@ -3916,6 +3957,36 @@ mod tests {
             effect,
             action,
             &format!("{execution}\nquerySelector(target);"),
+            coordinator,
+            context_port,
+            engine_port,
+        )
+        .is_err());
+        assert!(validate_semantic_execution_contract(
+            &root.replace("begin_semantic_action_settlement,", ""),
+            effect,
+            action,
+            execution,
+            coordinator,
+            context_port,
+            engine_port,
+        )
+        .is_err());
+        assert!(validate_semantic_execution_contract(
+            root,
+            effect,
+            action,
+            &execution.replace("let (active, disposition) = outcome.into_parts();", ""),
+            coordinator,
+            context_port,
+            engine_port,
+        )
+        .is_err());
+        assert!(validate_semantic_execution_contract(
+            root,
+            effect,
+            action,
+            &execution.replace("if !active.matches_action(action) {}", ""),
             coordinator,
             context_port,
             engine_port,
