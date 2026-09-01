@@ -198,6 +198,11 @@ the context.
 Every probe or production context names a profile explicitly. Test tooling
 never falls back to the default profile.
 
+The exact profile lease also binds whether the selected profile is durable or
+ephemeral. A native adapter may verify that class against the authoritative
+profile registry, but it may not infer a persistence class from `ProfileId` or
+substitute another storage partition.
+
 Controlled raw-profile experiments acquire an exclusive lease and require the
 normal Zephium process to be closed. Production-concurrency tests do not bypass
 this rule by opening the raw profile twice; they exercise the adapter through a

@@ -202,7 +202,7 @@ pub use probe_recipes::{
 pub use profile_lease::{
     ContextProfileLease, ContextProfileLeaseError, ContextProfileLeaseId,
     ContextProfileLeasePurpose, ContextProfileLeaseRegistry, ContextProfileLeaseStatus,
-    MAX_CONTEXT_PROFILE_TOMBSTONES,
+    ContextProfileStorageClass, MAX_CONTEXT_PROFILE_TOMBSTONES,
 };
 #[cfg(feature = "probe-harness")]
 pub use protocol::{

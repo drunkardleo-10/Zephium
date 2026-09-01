@@ -64,11 +64,25 @@ impl ContextProfileLeasePurpose {
     }
 }
 
+/// Native storage class selected by the authoritative profile registry.
+///
+/// The class is part of the exact lease because a `ProfileId` alone cannot
+/// distinguish an in-memory private profile from durable selected-profile
+/// storage. Native adapters must not infer or substitute this choice.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ContextProfileStorageClass {
+    /// Durable selected-profile storage.
+    Durable,
+    /// Process-lifetime, non-persistent selected-profile storage.
+    Ephemeral,
+}
+
 /// Copyable authority proving one context retained one explicit profile.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub struct ContextProfileLease {
     id: ContextProfileLeaseId,
     identity: ContextIdentity,
+    storage_class: ContextProfileStorageClass,
     purpose: ContextProfileLeasePurpose,
 }
 
@@ -83,6 +97,11 @@ impl ContextProfileLease {
         self.identity
     }
 
+    /// Exact selected-profile native storage class.
+    pub const fn storage_class(self) -> ContextProfileStorageClass {
+        self.storage_class
+    }
+
     /// Exact profile-retention purpose.
     pub const fn purpose(self) -> ContextProfileLeasePurpose {
         self.purpose
@@ -95,6 +114,7 @@ impl fmt::Debug for ContextProfileLease {
             .debug_struct("ContextProfileLease")
             .field("id", &self.id)
             .field("identity", &self.identity)
+            .field("storage_class", &self.storage_class)
             .field("purpose", &self.purpose)
             .finish()
     }
@@ -186,6 +206,7 @@ impl ContextProfileLeaseRegistry {
         &mut self,
         id: ContextProfileLeaseId,
         identity: ContextIdentity,
+        storage_class: ContextProfileStorageClass,
         purpose: ContextProfileLeasePurpose,
     ) -> Result<ContextProfileLease, ContextProfileLeaseError> {
         self.validate()?;
@@ -210,6 +231,7 @@ impl ContextProfileLeaseRegistry {
         let lease = ContextProfileLease {
             id,
             identity,
+            storage_class,
             purpose,
         };
         self.leases.insert(identity.id(), lease);
@@ -336,6 +358,8 @@ mod tests {
     use super::*;
     use crate::{ContextId, ContextRunId};
 
+    const DURABLE: ContextProfileStorageClass = ContextProfileStorageClass::Durable;
+
     fn identity(context: u128, profile: u128, kind: ContextKind) -> ContextIdentity {
         ContextIdentity::new(
             ContextId::from_raw(context),
@@ -354,13 +378,24 @@ mod tests {
         let mut registry = ContextProfileLeaseRegistry::new();
         let owned = identity(1, 100, ContextKind::Owned);
         assert_eq!(
-            registry.acquire(lease_id(1), owned, ContextProfileLeasePurpose::BorrowedTab,),
+            registry.acquire(
+                lease_id(1),
+                owned,
+                DURABLE,
+                ContextProfileLeasePurpose::BorrowedTab,
+            ),
             Err(ContextProfileLeaseError::PurposeMismatch)
         );
         let lease = registry
-            .acquire(lease_id(1), owned, ContextProfileLeasePurpose::Owned)
+            .acquire(
+                lease_id(1),
+                owned,
+                ContextProfileStorageClass::Ephemeral,
+                ContextProfileLeasePurpose::Owned,
+            )
             .expect("lease");
         assert_eq!(lease.identity(), owned);
+        assert_eq!(lease.storage_class(), ContextProfileStorageClass::Ephemeral);
         let debug = format!("{lease:?}");
         assert!(debug.contains("[redacted]"));
         assert!(!debug.contains("100"));
@@ -373,6 +408,7 @@ mod tests {
             .acquire(
                 lease_id(1),
                 identity(1, 100, ContextKind::Owned),
+                DURABLE,
                 ContextProfileLeasePurpose::Owned,
             )
             .expect("first");
@@ -380,6 +416,7 @@ mod tests {
             registry.acquire(
                 lease_id(2),
                 identity(1, 100, ContextKind::Owned),
+                DURABLE,
                 ContextProfileLeasePurpose::Owned,
             ),
             Err(ContextProfileLeaseError::DuplicateContext)
@@ -388,6 +425,7 @@ mod tests {
             registry.acquire(
                 lease_id(1),
                 identity(2, 100, ContextKind::Owned),
+                DURABLE,
                 ContextProfileLeasePurpose::Owned,
             ),
             Err(ContextProfileLeaseError::DuplicateLease)
@@ -402,6 +440,7 @@ mod tests {
             .acquire(
                 lease_id(1),
                 identity(1, 100, ContextKind::Owned),
+                DURABLE,
                 ContextProfileLeasePurpose::Owned,
             )
             .expect("first");
@@ -409,6 +448,7 @@ mod tests {
             .acquire(
                 lease_id(2),
                 identity(2, 200, ContextKind::BorrowedTab),
+                DURABLE,
                 ContextProfileLeasePurpose::BorrowedTab,
             )
             .expect("second");
@@ -422,6 +462,7 @@ mod tests {
             registry.acquire(
                 lease_id(3),
                 identity(3, 100, ContextKind::Owned),
+                DURABLE,
                 ContextProfileLeasePurpose::Owned,
             ),
             Err(ContextProfileLeaseError::ProfileRetired)
@@ -438,6 +479,7 @@ mod tests {
             .acquire(
                 lease_id(1),
                 identity(1, 100, ContextKind::Owned),
+                DURABLE,
                 ContextProfileLeasePurpose::Owned,
             )
             .expect("lease");
@@ -447,6 +489,14 @@ mod tests {
         };
         assert_eq!(
             registry.release(stale),
+            Err(ContextProfileLeaseError::StaleLease)
+        );
+        let substituted_storage = ContextProfileLease {
+            storage_class: ContextProfileStorageClass::Ephemeral,
+            ..retained
+        };
+        assert_eq!(
+            registry.release(substituted_storage),
             Err(ContextProfileLeaseError::StaleLease)
         );
         assert_eq!(registry.lease(retained.identity().id()), Some(retained));
@@ -460,6 +510,7 @@ mod tests {
                 .acquire(
                     lease_id(u64::try_from(value).expect("small value")),
                     identity(value as u128, 100, ContextKind::Owned),
+                    DURABLE,
                     ContextProfileLeasePurpose::Owned,
                 )
                 .expect("within limit");
@@ -468,6 +519,7 @@ mod tests {
             registry.acquire(
                 lease_id(99),
                 identity(99, 100, ContextKind::Owned),
+                DURABLE,
                 ContextProfileLeasePurpose::Owned,
             ),
             Err(ContextProfileLeaseError::LeaseLimit)
@@ -482,6 +534,7 @@ mod tests {
             .acquire(
                 lease_id(1),
                 identity(1, 100, ContextKind::HumanSignInHandoff),
+                DURABLE,
                 ContextProfileLeasePurpose::HumanSignInHandoff,
             )
             .expect("lease");
@@ -491,6 +544,7 @@ mod tests {
             registry.acquire(
                 lease_id(2),
                 identity(2, 100, ContextKind::Owned),
+                DURABLE,
                 ContextProfileLeasePurpose::Owned,
             ),
             Err(ContextProfileLeaseError::ShutdownSealed)

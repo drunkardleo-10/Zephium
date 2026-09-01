@@ -773,7 +773,8 @@ mod tests {
     use super::*;
     use crate::{
         ContextCapability, ContextId, ContextIdentity, ContextOperationId, ContextProfileLeaseId,
-        ContextProfileLeasePurpose, ContextProfileLeaseRegistry, ContextRegistry, ContextRunId,
+        ContextProfileLeasePurpose, ContextProfileLeaseRegistry, ContextProfileStorageClass,
+        ContextRegistry, ContextRunId,
     };
     use zephium_core::ids::ProfileId;
 
@@ -815,6 +816,7 @@ mod tests {
             .acquire(
                 ContextProfileLeaseId::new(value).expect("profile lease id"),
                 identity,
+                ContextProfileStorageClass::Durable,
                 purpose,
             )
             .expect("profile lease")

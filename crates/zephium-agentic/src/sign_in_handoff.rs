@@ -734,7 +734,7 @@ mod tests {
         ContextCookieTransferCounts, ContextCookieTransferFailure, ContextCookieTransferId,
         ContextCookieTransferStats, ContextIdentity, ContextNavigationTarget, ContextOperationId,
         ContextProfileLeaseId, ContextProfileLeasePurpose, ContextProfileLeaseRegistry,
-        ContextRegistry, ContextRunId, ContextSettlement,
+        ContextProfileStorageClass, ContextRegistry, ContextRunId, ContextSettlement,
     };
     use zephium_core::ids::ProfileId;
 
@@ -784,6 +784,7 @@ mod tests {
             .acquire(
                 ContextProfileLeaseId::new(value).expect("lease"),
                 identity,
+                ContextProfileStorageClass::Durable,
                 purpose,
             )
             .expect("profile lease")

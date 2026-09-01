@@ -81,13 +81,16 @@ not run policy authorization.
 
 Every native construction request now carries an exact `ContextProfileLease`;
 an otherwise valid context join cannot be dispatched with a lease for another
-context, owner, profile, or kind. The single-owner lease registry retains at
-most eight active leases, never substitutes a default profile, rejects lease
-and context identity reuse, and exposes only redacted identities and bounded
-counts. Profile deletion first installs a permanent profile tombstone, then
-returns the stable exact cleanup cohort; active leases remain until their
-native resources settle. The shutdown seal follows the same retain-until-exact-
-release rule and reports quiescence only at zero leases.
+context, owner, profile, or kind. The lease also carries the authoritative
+durable-or-ephemeral storage class, so a native adapter cannot infer a default
+partition from `ProfileId` or substitute persistent storage for a private
+profile. The single-owner lease registry retains at most eight active leases,
+never substitutes a default profile, rejects lease and context identity reuse,
+and exposes only redacted identities and bounded counts. Profile deletion first
+installs a permanent profile tombstone, then returns the stable exact cleanup
+cohort; active leases remain until their native resources settle. The shutdown
+seal follows the same retain-until-exact-release rule and reports quiescence
+only at zero leases.
 
 Visibility and input ownership now settle against exact native callbacks.
 Refused show/hide operations leave presentation unchanged. Human takeover
@@ -164,8 +167,8 @@ pressure, terminal resource disposition, shutdown quiescence, closed native
 request classes, construction-proof compatibility, unsafe URL rejection,
 redacted debug output, and bounded/consistent native resource snapshots.
 Profile-lease tests cover exact selection, kind compatibility, duplicate and
-capacity refusal without eviction, stale-release rejection, deletion races,
-and shutdown quiescence.
+capacity refusal without eviction, durable/ephemeral storage retention, stale-
+release rejection, deletion races, and shutdown quiescence.
 Cookie-transfer tests cover canonical/deduplicated origins, Windows clean-
 subprofile proof, handoff owner/profile joins, required capabilities, payload
 and HttpOnly count invariants, explicit partial application, destination
