@@ -287,12 +287,19 @@ are trusted, or that M4 is complete.
   existing token-admission and committed-delivery boundary.
 - Batch aggregation begins only from an exact already-bound batch and retains
   at most eight content-free expected action guards, eight content-free
-  completion summaries, and the latest full result. An exact per-position
-  SHA-256 guard prevents an action from another separately bound batch from
-  being admitted even if a shell violates its process-local uniqueness
-  obligation and reuses a batch ID. Previous full diffs/snapshots are dropped
-  as each later action succeeds, so aggregation remains O(one bounded current
-  state plus eight fixed summaries), not eight page-state payloads.
+  completion summaries, and the latest full result. Shipping admission consumes
+  the policy-accounted result; it has no loose-result overload. Before
+  consumption it rejoins receipt effect/attempt/proof, fixed-backend timing,
+  terminal settlement, exact action guard, and batch order. A refusal leaves
+  aggregation unchanged and returns the complete accounted owner. Successful
+  summaries retain the immutable receipt, native attribution, and settlement
+  counters/timing without page content, under a compile-time 512-byte ceiling
+  per summary (4 KiB for all eight). An exact per-position SHA-256 guard
+  prevents an action from another separately bound batch from being admitted
+  even if a shell violates its process-local uniqueness obligation and reuses a
+  batch ID. Previous full diffs/snapshots are dropped as each later action
+  succeeds, so aggregation remains O(one bounded current state plus eight fixed
+  summaries), not eight page-state payloads.
 - Each admitted success must be the exact next ordinal, match both the original
   bound action and its rolling pre-execution checkpoint, use a previously unseen
   attempt identity, and carry non-regressing independent-proof time. A complete
@@ -596,11 +603,14 @@ recovery retry path. Policy-join coverage runs the complete
 dispatch→native→settle→verify→charge success path and the refused-evidence
 failure path, asserting exact receipt/attempt/proof/failure/backend retention;
 the static gate rejects a public raw verified-effect settlement method.
-Accounted-result coverage additionally refuses an altered baseline acknowledgement,
-recovers the same charged owner and current observation, then succeeds with the
-exact acknowledgement while retaining receipt/attempt/settlement/proof and
-redacted diagnostics. The static gate rejects a shipping loose finalizer or a
-refusal that drops current state.
+Accounted-result coverage additionally refuses an altered baseline
+acknowledgement, recovers the same charged owner and current observation, then
+succeeds with the exact acknowledgement while retaining
+receipt/attempt/settlement/proof and redacted diagnostics. Accounted-batch
+coverage runs the full policy-to-result owner into aggregation, retains exact
+receipt/backend/settlement metrics, and recovers then readmits an exact result
+after a wrong-batch refusal. The static gate rejects a shipping loose finalizer,
+loose batch admission, or a refusal that drops current state.
 
 Action-result coverage includes exact committed-baseline/content binding,
 source observation and batch guard substitution, exact verification

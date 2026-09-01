@@ -2772,11 +2772,11 @@ mod tests {
         )
     }
 
-    fn prepared_click(
+    fn click_batch(
         observation: &SemanticObservation,
         target: u16,
         effect: SemanticEffectClass,
-    ) -> SemanticPreparedAction {
+    ) -> SemanticActionBatch {
         let frames = observation
             .frames()
             .iter()
@@ -2795,13 +2795,21 @@ mod tests {
             SemanticSettleBudget::try_new(250).expect("settle budget"),
         )
         .expect("proposal");
-        let batch = SemanticActionBatch::bind(
+        SemanticActionBatch::bind(
             SemanticActionBatchId::new(1).expect("batch"),
             observation,
             &frames,
             vec![proposal],
         )
-        .expect("batch");
+        .expect("batch")
+    }
+
+    fn prepared_click(
+        observation: &SemanticObservation,
+        target: u16,
+        effect: SemanticEffectClass,
+    ) -> SemanticPreparedAction {
+        let batch = click_batch(observation, target, effect);
         batch.actions()[0]
             .prepare(&observation.frames()[0])
             .expect("prepared action")
@@ -5653,7 +5661,10 @@ mod tests {
             run_budget(10, 1_000, 10_000),
         );
         commit_observation_to_model(&mut fixture.policy, fixture.lease, 1, binding, &observation);
-        let action = prepared_click(&observation, 2, SemanticEffectClass::LocalWrite);
+        let batch = click_batch(&observation, 2, SemanticEffectClass::LocalWrite);
+        let action = batch.actions()[0]
+            .prepare(&observation.frames()[0])
+            .expect("prepared action");
         let assessment =
             AgentEffectAssessment::new(&action, source.clone(), SemanticEffectClass::LocalWrite);
         let request = effect_request(1, fixture.lease, binding, automation);
@@ -5799,6 +5810,23 @@ mod tests {
         assert_eq!(finalized.settlement().attempt(), attempt);
         assert_eq!(finalized.result().verified().attempt(), attempt);
         assert!(!format!("{finalized:?}").contains("Save draft"));
+        let mut batch_execution =
+            crate::SemanticActionBatchExecution::new(&batch).expect("batch execution");
+        assert_eq!(
+            batch_execution
+                .record_success(&action, finalized)
+                .expect("accounted batch success"),
+            crate::SemanticActionBatchContinuation::Complete
+        );
+        let batch_result = batch_execution.finish().expect("complete batch");
+        assert_eq!(batch_result.completions().len(), 1);
+        assert_eq!(batch_result.completions()[0].receipt(), receipt);
+        assert_eq!(batch_result.completions()[0].attempt(), attempt);
+        assert_eq!(
+            batch_result.completions()[0].execution().backend(),
+            crate::SemanticActionExecutionBackend::FixedSemanticRecipe
+        );
+        assert!(!format!("{batch_result:?}").contains("Save draft"));
         assert_eq!(fixture.policy.pending_effects(), 0);
         assert_eq!(fixture.policy.accounting().consumed_operations(), 2);
         assert_eq!(fixture.policy.accounting().reserved_operations(), 0);

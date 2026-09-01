@@ -696,6 +696,38 @@ impl AgentVerifiedSemanticEffect {
         &self.verified
     }
 
+    #[cfg(test)]
+    pub(crate) fn for_pipeline_test(
+        terminal: SemanticActionVerifiedTerminal,
+        action: &SemanticPreparedAction,
+    ) -> Self {
+        let (active, execution, settlement, verified) = terminal.into_parts();
+        assert!(active.matches_action(action));
+        assert_eq!(active.attempt, verified.attempt());
+        assert_eq!(settlement.attempt(), verified.attempt());
+        assert_eq!(
+            settlement.status(),
+            crate::SemanticSettleStatus::ReadyForVerification
+        );
+        assert!(settlement.matches_action(action));
+        let receipt = AgentEffectReceipt {
+            manifest: active.manifest,
+            manifest_guard: active.manifest_guard,
+            id: active.id,
+            lease: active.lease,
+            node: active.node,
+            effect: active.effect,
+            attempt: active.attempt,
+            settlement: AgentEffectSettlement::Verified(verified.proof()),
+        };
+        Self {
+            receipt,
+            execution,
+            settlement,
+            verified,
+        }
+    }
+
     pub(crate) fn into_parts(
         self,
     ) -> (

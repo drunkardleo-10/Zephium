@@ -39,6 +39,8 @@ const AGENTIC_SEMANTIC_EXTRACT: &str = "crates/zephium-agentic/src/semantic_extr
 const AGENTIC_SEMANTIC_EXTRACT_MODEL: &str = "crates/zephium-agentic/src/semantic_extract_model.rs";
 const AGENTIC_PROVIDER_EXTRACTION: &str = "crates/zephium-agentic/src/agent_provider/extraction.rs";
 const AGENTIC_SEMANTIC_ACTION: &str = "crates/zephium-agentic/src/semantic_action.rs";
+const AGENTIC_SEMANTIC_ACTION_BATCH_RESULT: &str =
+    "crates/zephium-agentic/src/semantic_action_batch_result.rs";
 const AGENTIC_SEMANTIC_ACTION_RESULT: &str = "crates/zephium-agentic/src/semantic_action_result.rs";
 const AGENTIC_SEMANTIC_EXECUTE: &str = "crates/zephium-agentic/src/semantic_execute.rs";
 const AGENTIC_SEMANTIC_EXECUTE_COORDINATOR: &str =
@@ -211,6 +213,7 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         &read(repository.join(AGENTIC_ROOT))?,
         &read(repository.join(AGENTIC_EFFECT_POLICY))?,
         &read(repository.join(AGENTIC_SEMANTIC_ACTION_RESULT))?,
+        &read(repository.join(AGENTIC_SEMANTIC_ACTION_BATCH_RESULT))?,
     )?;
     validate_provider_input_evidence_contract(
         &read(repository.join(AGENTIC_ROOT))?,
@@ -3097,13 +3100,19 @@ fn validate_semantic_terminal_verification(
     Ok(())
 }
 
-fn validate_accounted_action_result(root: &str, policy: &str, result: &str) -> Result<(), String> {
+fn validate_accounted_action_result(
+    root: &str,
+    policy: &str,
+    result: &str,
+    batch: &str,
+) -> Result<(), String> {
     let root = compact(root);
     for required in [
         "finalize_accounted_semantic_action_result",
         "AgentAccountedSemanticActionResult",
         "AgentAccountedSemanticActionResultRefusal",
-        "#[cfg(test)]pub(crate)usesemantic_action_result::finalize_semantic_action_result;",
+        "SemanticActionBatchAdmissionRefusal",
+        "MAX_SEMANTIC_ACTION_BATCH_COMPLETION_BYTES",
     ] {
         if !root.contains(required) {
             return Err(format!(
@@ -3137,6 +3146,7 @@ fn validate_accounted_action_result(root: &str, policy: &str, result: &str) -> R
         "ifletErr(error)=validate_semantic_action_result(",
         "let(receipt,execution,settlement,verified)=accounted.into_parts();",
         "letresult=finish_semantic_action_result(",
+        "pub(crate)fninto_parts(",
         "#[cfg(test)]pub(crate)fnfinalize_semantic_action_result(",
         "current:&SemanticPostActionObservation",
     ] {
@@ -3159,6 +3169,59 @@ fn validate_accounted_action_result(root: &str, policy: &str, result: &str) -> R
         if result.contains(forbidden) {
             return Err(format!(
                 "accounted action result acquired forbidden loose/work surface {forbidden}"
+            ));
+        }
+    }
+
+    let batch = compact(batch);
+    for required in [
+        "pubstructSemanticActionBatchAdmissionRefusal{",
+        "accounted:Box<AgentAccountedSemanticActionResult>",
+        "pubfnrecord_success(",
+        "accounted:AgentAccountedSemanticActionResult",
+        "ifletErr(error)=self.validate_success(action,accounted.result())",
+        "receipt:AgentEffectReceipt",
+        "execution:SemanticActionExecutionApplied",
+        "settlement_event_count:u16",
+        "settlement_elapsed_millis:u64",
+        "settlement_terminal_at:SemanticSettleInstant",
+        "pubconstMAX_SEMANTIC_ACTION_BATCH_COMPLETION_BYTES:usize=512;",
+        "size_of::<SemanticActionBatchCompletion>()<=MAX_SEMANTIC_ACTION_BATCH_COMPLETION_BYTES",
+        "AgentEffectSettlement::Verified(verified_proof)",
+        "SemanticSettleStatus::ReadyForVerification",
+        "let(_,_,_,result)=accounted.into_parts();",
+        "AccountingMismatch",
+        "pubfninto_parts(",
+        "AgentAccountedSemanticActionResult,SemanticActionBatchExecutionError",
+    ] {
+        if !batch.contains(required) {
+            return Err(format!(
+                "accounted batch aggregation lost exact receipt/state join {required}"
+            ));
+        }
+    }
+    let validate = batch
+        .find("ifletErr(error)=self.validate_success(action,accounted.result())")
+        .ok_or_else(|| "accounted batch aggregation lost validation".to_owned())?;
+    let consume = batch
+        .find("let(_,_,_,result)=accounted.into_parts();")
+        .ok_or_else(|| "accounted batch aggregation lost consuming transition".to_owned())?;
+    if validate >= consume {
+        return Err("accounted batch aggregation consumed state before validation".to_owned());
+    }
+    for forbidden in [
+        "result:SemanticActionResult)->Result<SemanticActionBatchContinuation",
+        "std::thread",
+        "std::time",
+        "std::fs",
+        "tokio::",
+        "Mutex<",
+        "Arc<",
+        "retry(",
+    ] {
+        if batch.contains(forbidden) {
+            return Err(format!(
+                "accounted batch aggregation acquired forbidden loose/work surface {forbidden}"
             ));
         }
     }
@@ -4511,8 +4574,8 @@ mod tests {
                 AgentAccountedSemanticActionResult,
                 AgentAccountedSemanticActionResultRefusal,
             };
-            #[cfg(test)]
-            pub(crate) use semantic_action_result::finalize_semantic_action_result;
+            pub use semantic_action_batch_result::SemanticActionBatchAdmissionRefusal;
+            pub use semantic_action_batch_result::MAX_SEMANTIC_ACTION_BATCH_COMPLETION_BYTES;
         "#;
         let policy = r#"
             pub struct AgentVerifiedSemanticEffect {
@@ -4526,6 +4589,9 @@ mod tests {
             pub struct AgentAccountedSemanticActionResult {
                 receipt: AgentEffectReceipt,
                 result: SemanticActionResult,
+            }
+            impl AgentAccountedSemanticActionResult {
+                pub(crate) fn into_parts(self) {}
             }
             pub struct AgentAccountedSemanticActionResultRefusal {
                 accounted: Box<AgentVerifiedSemanticEffect>,
@@ -4556,11 +4622,47 @@ mod tests {
             #[cfg(test)]
             pub(crate) fn finalize_semantic_action_result() {}
         "#;
-        validate_accounted_action_result(root, policy, result).expect("accounted action result");
+        let batch = r#"
+            pub const MAX_SEMANTIC_ACTION_BATCH_COMPLETION_BYTES: usize = 512;
+            pub struct SemanticActionBatchCompletion {
+                receipt: AgentEffectReceipt,
+                execution: SemanticActionExecutionApplied,
+                settlement_event_count: u16,
+                settlement_elapsed_millis: u64,
+                settlement_terminal_at: SemanticSettleInstant,
+            }
+            const _: () = assert!(
+                std::mem::size_of::<SemanticActionBatchCompletion>()
+                    <= MAX_SEMANTIC_ACTION_BATCH_COMPLETION_BYTES
+            );
+            pub struct SemanticActionBatchAdmissionRefusal {
+                accounted: Box<AgentAccountedSemanticActionResult>,
+            }
+            impl SemanticActionBatchAdmissionRefusal {
+                pub fn into_parts(self) -> (
+                    AgentAccountedSemanticActionResult,
+                    SemanticActionBatchExecutionError,
+                ) {}
+            }
+            pub fn record_success(
+                &mut self,
+                action: &SemanticPreparedAction,
+                accounted: AgentAccountedSemanticActionResult,
+            ) {
+                if let Err(error) = self.validate_success(action, accounted.result()) {}
+                receipt.settlement() != AgentEffectSettlement::Verified(verified_proof);
+                settlement.status() != SemanticSettleStatus::ReadyForVerification;
+                let (_, _, _, result) = accounted.into_parts();
+                AccountingMismatch;
+            }
+        "#;
+        validate_accounted_action_result(root, policy, result, batch)
+            .expect("accounted action result");
         assert!(validate_accounted_action_result(
             root,
             policy,
             &result.replace("current: Box<SemanticPostActionObservation>,", ""),
+            batch,
         )
         .is_err());
         assert!(validate_accounted_action_result(
@@ -4570,6 +4672,7 @@ mod tests {
                 "#[cfg(test)]\n            pub(crate) fn finalize_semantic_action_result() {}",
                 "pub fn finalize_semantic_action_result() {}",
             ),
+            batch,
         )
         .is_err());
         assert!(validate_accounted_action_result(
@@ -4579,6 +4682,24 @@ mod tests {
                 "if let Err(error) = validate_semantic_action_result(",
                 "if false && ("
             ),
+            batch,
+        )
+        .is_err());
+        assert!(validate_accounted_action_result(
+            root,
+            policy,
+            result,
+            &batch.replace(
+                "accounted: AgentAccountedSemanticActionResult,",
+                "result: SemanticActionResult,"
+            ),
+        )
+        .is_err());
+        assert!(validate_accounted_action_result(
+            root,
+            policy,
+            result,
+            &batch.replace("accounted: Box<AgentAccountedSemanticActionResult>,", ""),
         )
         .is_err());
     }

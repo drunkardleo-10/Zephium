@@ -581,6 +581,17 @@ both the charged proof owner and the complete current observation, so an
 authority mistake cannot discard post-action state. The loose finalizer exists
 only under `cfg(test)`.
 
+Sequential batch aggregation consumes that accounted result directly; a loose
+`SemanticActionResult` is not a shipping admission surface. Before consuming
+the owner it rechecks exact batch order, action guard, receipt effect, attempt,
+proof, terminal settlement, and the execution-to-settlement clock join. Every
+refusal returns the complete accounted result without mutating the batch.
+Successful admission retains only the latest bounded state plus at most eight
+content-free summaries containing the immutable receipt, native attribution,
+and settlement counters/timing. Each summary has a compile-time 512-byte
+ceiling, so the entire fixed completion inventory is at most 4 KiB. This adds
+no idle work and no unbounded state.
+
 ### 8.2 Input backends
 
 The runtime can choose among:

@@ -166,8 +166,7 @@ impl AgentAccountedSemanticActionResult {
         &self.result
     }
 
-    /// Separates the receipt, metrics, and bounded downstream result.
-    pub fn into_parts(
+    pub(crate) fn into_parts(
         self,
     ) -> (
         AgentEffectReceipt,

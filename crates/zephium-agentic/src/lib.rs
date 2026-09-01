@@ -268,12 +268,11 @@ pub use semantic_action::{
     MAX_SEMANTIC_ACTION_TEXT_BYTES, MAX_SEMANTIC_MUTATION_QUIET_MILLIS,
 };
 pub use semantic_action_batch_result::{
-    SemanticActionBatchCompletion, SemanticActionBatchContinuation, SemanticActionBatchExecution,
+    SemanticActionBatchAdmissionRefusal, SemanticActionBatchCompletion,
+    SemanticActionBatchContinuation, SemanticActionBatchExecution,
     SemanticActionBatchExecutionError, SemanticActionBatchOutcome, SemanticActionBatchResult,
-    SemanticActionBatchStopReason,
+    SemanticActionBatchStopReason, MAX_SEMANTIC_ACTION_BATCH_COMPLETION_BYTES,
 };
-#[cfg(test)]
-pub(crate) use semantic_action_result::finalize_semantic_action_result;
 pub use semantic_action_result::{
     finalize_accounted_semantic_action_result, AgentAccountedSemanticActionResult,
     AgentAccountedSemanticActionResultRefusal, SemanticActionNextState, SemanticActionResult,
