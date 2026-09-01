@@ -475,6 +475,11 @@ impl AgentActiveEffect {
         self.attempt
     }
 
+    /// Whether this dispatched policy authority belongs to one exact action checkpoint.
+    pub fn matches_action(&self, action: &SemanticPreparedAction) -> bool {
+        self.effect == action.effect() && self.action_guard == action.verification_guard()
+    }
+
     /// Whether this effect belongs to one exact canonical manifest revision.
     pub(crate) fn matches_manifest_revision(
         &self,
@@ -503,6 +508,24 @@ impl AgentActiveEffect {
             attempt,
             action_guard: [0; 32],
             guard: [0; 32],
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_execution_test(
+        action: &SemanticPreparedAction,
+        attempt: SemanticActionAttemptId,
+    ) -> Self {
+        Self {
+            manifest: AgentRunManifestId::from_raw(801),
+            manifest_guard: [0x81; 32],
+            id: AgentEffectId::new(802).expect("test effect identity"),
+            lease: AgentPlanLeaseId::from_raw(803),
+            node: AgentPlanNodeId::from_raw(804),
+            effect: action.effect(),
+            attempt,
+            action_guard: action.verification_guard(),
+            guard: [0x82; 32],
         }
     }
 }

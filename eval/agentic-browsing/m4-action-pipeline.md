@@ -4,9 +4,10 @@ Status: bounded pre-policy action proposals, exact observation binding,
 one-action rolling checkpoints, typed settle/verification contracts,
 fresh-snapshot structural revalidation, event-driven bounded settlement,
 independent effect verification, and acknowledged action-result diff/fresh-state
-finalization and exact bounded batch-terminal aggregation, plus bounded semantic
-read/transport, closed structured extraction admission, and the one-shot
-viewport screenshot contract are implemented.
+finalization and exact bounded batch-terminal aggregation, plus a one-shot
+policy-to-native execution handoff, bounded semantic read/transport, closed
+structured extraction admission, and the one-shot viewport screenshot contract
+are implemented.
 Policy permits, platform execution,
 visibility/occlusion checks, native observation adapters and timer driving,
 the Windows screenshot adapter, visual policy and model-provider wiring, and
@@ -86,6 +87,37 @@ are trusted, or that M4 is complete.
   privately checkpoints the native invocation, generation, target value/state,
   option state, and a diagnostics-redacted contract guard. Only the current
   action needs a prepared value, so rolling batch state remains O(1).
+- Final policy dispatch can now split one exact non-cloneable active effect into
+  a retained policy-authority half and one closed native request. The join binds
+  effect and action-attempt identities, the complete private action guard,
+  exact frame/document authority, semantic invocation and snapshot generation,
+  private stable target identity, fresh pre-execution geometry, and trusted
+  monotonic request/deadline coordinates. Missing/empty geometry, action/permit
+  substitution, and deadline overflow return the still-dispatched authority so
+  the policy ledger can settle it terminally instead of leaking a reservation.
+- The native request exposes only the fixed action class and its already-bounded
+  recipe: at most one 4 KiB fill copy, one observed option stable identity, one
+  of fourteen keys, or a closed scroll direction/magnitude. It contains no
+  selector, raw DOM, JavaScript, property path, native handle, URL, model
+  output, generated HTML, backend order, timer, worker, or retry surface.
+  Private stable identities and fill content are redacted from diagnostics.
+- Native execution has a separately bounded absolute window of at most five
+  seconds, including port queue and backend work. A claimed application must
+  rejoin the exact request, retain exact current frame/document authority, use
+  non-regressing times, and carry fresh nonempty geometry plus either an exact
+  visible/unoccluded hit-target proof or an exact connected scroll-target
+  proof. Visible claims must intersect a nonzero viewport capped at 32768 per
+  dimension. Late terminals become typed timeouts; premature timeout claims,
+  cross-request results, clock regression, incompatible readiness, and
+  contradictory geometry are distinct fail-stop contract violations.
+- Backend class is content-free diagnostic attribution only: fixed semantic
+  recipe, engine-native input, or in-process accessibility. The enum grants no
+  selection authority and no production backend has been selected or wired.
+  An applied terminal is explicitly not effect proof; it only returns the exact
+  active policy authority and a same-clock start instant for the existing
+  settle/independent-verification core. Typed backend failures and contract
+  violations likewise return that authority for one charged terminal policy
+  settlement, with no blind retry path.
 - Revalidation is deliberately not an execution proof. The future native
   adapter must still re-resolve connectedness and current geometry, prove
   visibility/occlusion and backend compatibility, hold an exact policy permit,
@@ -342,6 +374,16 @@ invalid option ancestry; diagnostic redaction; stable identity across harmless
 sibling insertion, focus, and geometry changes; structural/name/state change;
 missing targets; removed operations; disabled targets; regressed generations;
 credential escalation; and option drift.
+
+Native-execution handoff coverage includes all five closed recipe projections,
+fresh-geometry retention, action/active-effect substitution, missing geometry,
+deadline overflow, cross-request completion, current-context mismatch,
+clock regression, late and premature timeout, viewport intersection,
+readiness/action compatibility, typed native failures, policy-authority return
+on every terminal, settle-clock handoff, and fill/page-content diagnostic
+redaction. The static release boundary also rejects generic script/evaluation,
+selector, OS-event, WebKit/WebView2, filesystem, and thread surfaces in this
+functional core.
 
 Settlement coverage includes immediate readiness, exact deadline derivation
 and overflow, mutation-quiet restart, exact adjacent target-state snapshots,

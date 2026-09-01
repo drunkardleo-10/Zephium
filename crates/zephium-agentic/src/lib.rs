@@ -46,6 +46,7 @@ mod semantic_action_batch_result;
 mod semantic_action_result;
 mod semantic_diff;
 mod semantic_diff_model;
+mod semantic_execute;
 mod semantic_extract;
 mod semantic_model;
 mod semantic_observation;
@@ -252,6 +253,17 @@ pub use semantic_diff::{
 pub use semantic_diff_model::{
     encode_semantic_diff, SemanticDiffDeliveryReceipt, SemanticDiffEncodingStats,
     SemanticDiffModelPayload, SemanticEncodedDiff, SEMANTIC_DIFF_MODEL_SCHEMA_VERSION,
+};
+pub use semantic_execute::{
+    prepare_semantic_action_execution, SemanticActionExecutionApplied,
+    SemanticActionExecutionBackend, SemanticActionExecutionContractError,
+    SemanticActionExecutionDisposition, SemanticActionExecutionInstant,
+    SemanticActionExecutionOutcome, SemanticActionExecutionPending,
+    SemanticActionExecutionPreparationError, SemanticActionExecutionRefusal,
+    SemanticActionNativeFailure, SemanticActionNativeReadiness, SemanticActionNativeRequest,
+    SemanticActionNativeSettlement, SemanticActionNativeTargetId, SemanticActionNativeViewport,
+    SemanticActionNativeViewportError, MAX_SEMANTIC_ACTION_NATIVE_EXECUTION_MILLIS,
+    MAX_SEMANTIC_ACTION_VIEWPORT_DIMENSION,
 };
 pub use semantic_extract::{
     extract_semantic_read, SemanticExtractedBoolean, SemanticExtractedField, SemanticExtractedText,

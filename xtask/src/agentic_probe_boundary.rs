@@ -24,6 +24,8 @@ const AGENTIC_METRICS: &str = "crates/zephium-agentic/src/agent_metrics.rs";
 const AGENTIC_PROGRESS_METRICS: &str = "crates/zephium-agentic/src/agent_progress_metrics.rs";
 const AGENTIC_SEMANTIC_DIFF: &str = "crates/zephium-agentic/src/semantic_diff.rs";
 const AGENTIC_SEMANTIC_DIFF_MODEL: &str = "crates/zephium-agentic/src/semantic_diff_model.rs";
+const AGENTIC_SEMANTIC_ACTION: &str = "crates/zephium-agentic/src/semantic_action.rs";
+const AGENTIC_SEMANTIC_EXECUTE: &str = "crates/zephium-agentic/src/semantic_execute.rs";
 const AGENTIC_SUPERVISOR: &str = "crates/zephium-agentic/src/agent_supervisor.rs";
 const AGENTIC_SUPERVISOR_PROGRESS: &str =
     "crates/zephium-agentic/src/agent_supervisor/runtime/progress.rs";
@@ -110,6 +112,12 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         &read(repository.join(AGENTIC_SEMANTIC_DIFF))?,
         &read(repository.join(AGENTIC_SEMANTIC_DIFF_MODEL))?,
         &read(repository.join(AGENTIC_POLICY))?,
+    )?;
+    validate_semantic_execution_contract(
+        &read(repository.join(AGENTIC_ROOT))?,
+        &read(repository.join(AGENTIC_EFFECT_POLICY))?,
+        &read(repository.join(AGENTIC_SEMANTIC_ACTION))?,
+        &read(repository.join(AGENTIC_SEMANTIC_EXECUTE))?,
     )?;
     validate_provider_input_evidence_contract(
         &read(repository.join(AGENTIC_ROOT))?,
@@ -1281,6 +1289,82 @@ fn validate_semantic_diff_policy_contract(
     Ok(())
 }
 
+fn validate_semantic_execution_contract(
+    root: &str,
+    effect: &str,
+    action: &str,
+    execution: &str,
+) -> Result<(), String> {
+    let root = compact(root);
+    for required in ["modsemantic_execute;", "prepare_semantic_action_execution"] {
+        if !root.contains(required) {
+            return Err(format!(
+                "agentic root lost semantic execution handoff {required}"
+            ));
+        }
+    }
+
+    let effect = compact(effect);
+    for required in [
+        "pubfnmatches_action(&self,action:&SemanticPreparedAction)->bool",
+        "self.effect==action.effect()&&self.action_guard==action.verification_guard()",
+    ] {
+        if !effect.contains(required) {
+            return Err(format!(
+                "agent effect policy lost exact native action join {required}"
+            ));
+        }
+    }
+
+    if !compact(action).contains("target_geometry:Option<SemanticRect>") {
+        return Err(
+            "prepared semantic action stopped retaining fresh pre-execution geometry".to_owned(),
+        );
+    }
+
+    let execution = compact(execution);
+    for required in [
+        "MAX_SEMANTIC_ACTION_NATIVE_EXECUTION_MILLIS",
+        "active:AgentActiveEffect",
+        "active.matches_action(action)",
+        "action.target_geometry().filter",
+        "action.verification_guard()",
+        "NativeRecipe::Fill(value)",
+        "ExactVisibleUnoccludedTarget",
+        "ExactConnectedScrollTarget",
+        "SemanticActionExecutionDisposition::ContractViolation",
+        "current_frame!=&self.correlation.frame",
+        "applied.completed_at>deadline",
+        "SemanticActionFailure::BackendRefused",
+        "SemanticSettleInstant::from_millis",
+    ] {
+        if !execution.contains(required) {
+            return Err(format!(
+                "semantic execution seam lost required one-shot bound {required}"
+            ));
+        }
+    }
+    for forbidden in [
+        "evaluateJavaScript",
+        "callAsyncJavaScript",
+        "querySelector",
+        "CGEvent",
+        "NSEvent",
+        "Input.dispatch",
+        "WKWebView",
+        "WebView2",
+        "std::thread",
+        "std::fs",
+    ] {
+        if execution.contains(forbidden) {
+            return Err(format!(
+                "semantic execution core acquired forbidden native/program surface {forbidden}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_provider_input_evidence_contract(
     root: &str,
     request: &str,
@@ -1877,6 +1961,52 @@ mod tests {
         )
         .is_err());
         assert!(validate_semantic_diff_policy_contract(root, diff, "", policy).is_err());
+    }
+
+    #[test]
+    fn semantic_execution_requires_one_shot_policy_and_native_rejoin() {
+        let root = r#"
+            mod semantic_execute;
+            pub use semantic_execute::prepare_semantic_action_execution;
+        "#;
+        let effect = r#"
+            pub fn matches_action(&self, action: &SemanticPreparedAction) -> bool {
+                self.effect == action.effect()
+                    && self.action_guard == action.verification_guard()
+            }
+        "#;
+        let action = "target_geometry: Option<SemanticRect>";
+        let execution = r#"
+            const MAX_SEMANTIC_ACTION_NATIVE_EXECUTION_MILLIS: u32 = 5_000;
+            active: AgentActiveEffect,
+            active.matches_action(action);
+            action.target_geometry().filter(|rect| true);
+            action.verification_guard();
+            NativeRecipe::Fill(value);
+            ExactVisibleUnoccludedTarget;
+            ExactConnectedScrollTarget;
+            SemanticActionExecutionDisposition::ContractViolation(error);
+            if current_frame != &self.correlation.frame {}
+            if applied.completed_at > deadline {}
+            SemanticActionFailure::BackendRefused;
+            SemanticSettleInstant::from_millis(1);
+        "#;
+        validate_semantic_execution_contract(root, effect, action, execution)
+            .expect("closed semantic execution handoff");
+        assert!(validate_semantic_execution_contract(
+            root,
+            effect,
+            action,
+            &format!("{execution}\nquerySelector(target);")
+        )
+        .is_err());
+        assert!(validate_semantic_execution_contract(
+            root,
+            effect,
+            action,
+            &execution.replace("if applied.completed_at > deadline {}", "")
+        )
+        .is_err());
     }
 
     #[test]

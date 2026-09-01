@@ -870,6 +870,7 @@ impl SemanticBoundAction {
 
         let target_value = target.value().cloned();
         let target_states = target.states();
+        let target_geometry = target.geometry();
         let checkpoint_invocation = current.invocation();
         let checkpoint_snapshot = current.generation();
         let guard = prepared_guard(
@@ -886,6 +887,7 @@ impl SemanticBoundAction {
             checkpoint_snapshot,
             target_value,
             target_states,
+            target_geometry,
             option_states,
             guard,
         })
@@ -944,6 +946,7 @@ pub struct SemanticPreparedAction {
     checkpoint_snapshot: SemanticSnapshotGeneration,
     target_value: Option<SemanticValueSummary>,
     target_states: SemanticStates,
+    target_geometry: Option<SemanticRect>,
     option_states: Option<SemanticStates>,
     guard: [u8; 32],
 }
@@ -1029,6 +1032,11 @@ impl SemanticPreparedAction {
         self.action.settle_budget()
     }
 
+    /// Fresh geometry sampled by the exact pre-execution snapshot.
+    pub const fn target_geometry(&self) -> Option<SemanticRect> {
+        self.target_geometry
+    }
+
     /// Bounded exact fill text, when this is a fill action.
     pub const fn fill_text(&self) -> Option<&SemanticActionText> {
         self.action.fill_text()
@@ -1041,6 +1049,13 @@ impl SemanticPreparedAction {
 
     pub(crate) const fn target_key(&self) -> SemanticNodeKey {
         self.action.target_key()
+    }
+
+    pub(crate) const fn option_key(&self) -> Option<SemanticNodeKey> {
+        match &self.action.intent {
+            BoundActionIntent::Select { option, .. } => Some(option.node_key),
+            _ => None,
+        }
     }
 
     pub(crate) const fn target_value(&self) -> Option<&SemanticValueSummary> {
@@ -1094,6 +1109,7 @@ impl fmt::Debug for SemanticPreparedAction {
             .field("checkpoint_snapshot", &self.checkpoint_snapshot)
             .field("has_target_value", &self.target_value.is_some())
             .field("target_states", &self.target_states)
+            .field("has_target_geometry", &self.target_geometry.is_some())
             .field("has_option_states", &self.option_states.is_some())
             .field("guard", &"[redacted]")
             .finish()
