@@ -1,3 +1,5 @@
+#[cfg(feature = "agentic-browser")]
+mod agent_context;
 mod construction;
 mod content_rules;
 mod discard;
@@ -26,6 +28,8 @@ mod stages;
 pub(crate) use dispatch::make_unavailable_for_test;
 #[cfg(target_os = "macos")]
 pub(crate) use dispatch::try_dispatch_macos_extension_command;
+#[cfg(feature = "agentic-browser")]
+pub(crate) use dispatch::try_with_agent_context;
 #[cfg(target_os = "macos")]
 pub(crate) use dispatch::with_extension_action_popup_terminal;
 #[cfg(target_os = "macos")]
@@ -636,6 +640,11 @@ pub(crate) struct EngineHost {
     #[cfg(target_os = "windows")]
     private_runtime: zephium_core::webview2::RuntimeGeneration,
     views: HashMap<ItemId, ObservedView>,
+    // Run-owned agent pages are intentionally absent from ordinary tab,
+    // session, stage, navigation-snapshot, and extension-principal maps. The
+    // feature-gated private owner is the only native identity projection.
+    #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+    agent_contexts: HashMap<zephium_agentic::ContextId, agent_context::AgentOwnedContext>,
     native_resources: NativeResourceLedger,
     extension_runtime_registry: extension_runtime::ExtensionRuntimeRegistry,
     extension_document_authority: ExtensionDocumentAuthority,

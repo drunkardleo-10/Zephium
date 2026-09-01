@@ -53,6 +53,9 @@ native-agentic-input-probe = [
     "dep:zephium-agentic",
     "zephium-agentic/probe-harness",
 ]
+# Compiles the production, zero-idle agent-browser native port. The feature is
+# intentionally separate from the release-excluded probe vocabulary.
+agentic-browser = ["dep:zephium-agentic"]
 
 [[bin]]
 name = "macos-principal-isolation-probe"

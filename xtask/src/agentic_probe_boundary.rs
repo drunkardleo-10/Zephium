@@ -30,7 +30,12 @@ const PROVIDER_TRANSPORT_MANIFEST: &str = "crates/zephium-agent-provider-transpo
 const PROVIDER_TRANSPORT_ROOT: &str = "crates/zephium-agent-provider-transport/src/lib.rs";
 const ENGINE_MANIFEST: &str = "crates/zephium-engine/Cargo.toml";
 const ENGINE_ROOT: &str = "crates/zephium-engine/src/lib.rs";
+const ENGINE_HOST_ROOT: &str = "crates/zephium-engine/src/host/mod.rs";
+const ENGINE_AGENT_CONTEXT_PORT: &str = "crates/zephium-engine/src/agent_context_port.rs";
+const ENGINE_AGENT_CONTEXT_HOST: &str = "crates/zephium-engine/src/host/agent_context.rs";
 const ENGINE_MACOS_MODULE: &str = "crates/zephium-engine/src/platform/macos/mod.rs";
+const ENGINE_MACOS_AGENT_CONTEXT: &str =
+    "crates/zephium-engine/src/platform/macos/agent_context.rs";
 const ENGINE_WINDOWS_MODULE: &str = "crates/zephium-engine/src/platform/windows/mod.rs";
 const ENGINE_WINDOWS_PROBE_MODULE: &str =
     "crates/zephium-engine/src/platform/windows/agentic_input_probe.rs";
@@ -109,6 +114,13 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     validate_provider_transport_root(&read(repository.join(PROVIDER_TRANSPORT_ROOT))?)?;
     validate_engine_manifest(&read(repository.join(ENGINE_MANIFEST))?)?;
     validate_engine_root(&read(repository.join(ENGINE_ROOT))?)?;
+    validate_engine_agent_context_boundary(
+        &read(repository.join(ENGINE_ROOT))?,
+        &read(repository.join(ENGINE_HOST_ROOT))?,
+        &read(repository.join(ENGINE_AGENT_CONTEXT_PORT))?,
+        &read(repository.join(ENGINE_AGENT_CONTEXT_HOST))?,
+        &read(repository.join(ENGINE_MACOS_AGENT_CONTEXT))?,
+    )?;
     validate_engine_platform_module(&read(repository.join(ENGINE_MACOS_MODULE))?, "macOS")?;
     validate_engine_platform_module(&read(repository.join(ENGINE_WINDOWS_MODULE))?, "Windows")?;
     let _ = read(repository.join(ENGINE_MACOS_PROBE_BINARY))?;
@@ -145,6 +157,16 @@ fn validate_engine_manifest(source: &str) -> Result<(), String> {
     .collect::<BTreeSet<_>>();
     if actual != expected || actual.len() != feature.len() {
         return Err("engine native-agentic-input-probe feature graph drifted".to_owned());
+    }
+    let production_feature = manifest
+        .get("features")
+        .and_then(|features| features.get("agentic-browser"))
+        .and_then(toml::Value::as_array)
+        .ok_or_else(|| "engine agentic-browser feature is missing".to_owned())?;
+    if production_feature.as_slice() != [toml::Value::String("dep:zephium-agentic".to_owned())] {
+        return Err(
+            "engine production agentic-browser feature must remain probe-independent".to_owned(),
+        );
     }
     let agentic_dependency = manifest
         .get("dependencies")
@@ -198,6 +220,107 @@ fn validate_engine_manifest(source: &str) -> Result<(), String> {
 fn validate_engine_root(source: &str) -> Result<(), String> {
     if !compact(source).contains(ENGINE_RELEASE_REFUSAL) {
         return Err("engine must retain its optimized agentic-probe compile refusal".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_engine_agent_context_boundary(
+    engine_root: &str,
+    host_root: &str,
+    port: &str,
+    host: &str,
+    macos: &str,
+) -> Result<(), String> {
+    let engine_root = compact(engine_root);
+    for required in [
+        "#[cfg(feature=\"agentic-browser\")]modagent_context_port;",
+        "pubfntake_agent_browser_port(",
+        "self.agent_context_port.seal();",
+    ] {
+        if !engine_root.contains(required) {
+            return Err(format!(
+                "production agent-context engine boundary lost required gate {required}"
+            ));
+        }
+    }
+
+    let host_root = compact(host_root);
+    for required in [
+        "#[cfg(feature=\"agentic-browser\")]modagent_context;",
+        "agent_contexts:HashMap<zephium_agentic::ContextId,agent_context::AgentOwnedContext>",
+    ] {
+        if !host_root.contains(required) {
+            return Err(format!(
+                "production agent-context identity island lost required gate {required}"
+            ));
+        }
+    }
+
+    let port = compact(port);
+    for required in [
+        "MAX_PENDING_NATIVE_CONTEXT_TASKS",
+        "ContextOperationKind::Close",
+        "constfnsupports_cookie_transfer()->bool{false}",
+        "pub(crate)structAgentContextPortSlot",
+        "ContextDispatch::Unsupported",
+    ] {
+        if !port.contains(required) {
+            return Err(format!(
+                "production agent-context port lost required closed mechanism {required}"
+            ));
+        }
+    }
+
+    let host = compact(host);
+    for required in [
+        "profile_lease:ContextProfileLease",
+        "install_content_policy_on_view(&view,&content_policy)",
+        "NativeResourceClass::AgentContext",
+        "ContextConstructionProof::MacOsOwnedSelectedProfileExtensionFree",
+        "force_shutdown_agent_contexts",
+    ] {
+        if !host.contains(required) {
+            return Err(format!(
+                "production agent-context owner lost required obligation {required}"
+            ));
+        }
+    }
+
+    let macos = compact(macos);
+    for required in [
+        "with_visible(false)",
+        "with_focused(false)",
+        "configuration.webExtensionController()",
+        "controller.userScripts()",
+        "with_data_store_identifier(profile.bytes())",
+        "Retained::as_ptr(&actual_store)==Retained::as_ptr(expected)",
+    ] {
+        if !macos.contains(required) {
+            return Err(format!(
+                "production macOS agent-context attestation lost required check {required}"
+            ));
+        }
+    }
+
+    for (label, source) in [
+        ("port", port.as_str()),
+        ("host", host.as_str()),
+        ("macOS adapter", macos.as_str()),
+    ] {
+        for forbidden in [
+            "with_ipc_handler",
+            "with_initialization_script",
+            "evaluate_script",
+            "querySelector",
+            "CallDevToolsProtocolMethod",
+            "native-agentic-input-probe",
+        ] {
+            if source.contains(forbidden) {
+                return Err(format!(
+                    "production agent-context {label} acquired forbidden surface {forbidden}"
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -1168,6 +1291,17 @@ fn validate_release_graph(metadata: &CargoMetadata) -> Result<(), String> {
                         .to_owned(),
                 );
             }
+            if package == *engine
+                && node
+                    .features
+                    .iter()
+                    .any(|feature| feature == "agentic-browser")
+            {
+                return Err(
+                    "ordinary zephium-desktop release graph activates the unwired native agent-context adapter"
+                        .to_owned(),
+                );
+            }
             pending.extend(node.dependencies.iter().map(String::as_str));
         }
     }
@@ -1922,6 +2056,7 @@ mod tests {
               "dep:zephium-agentic",
               "zephium-agentic/probe-harness",
             ]
+            agentic-browser = ["dep:zephium-agentic"]
             [[bin]]
             name = "macos-agentic-input-probe"
             path = "src/bin/macos_agentic_input_probe.rs"
@@ -1942,6 +2077,11 @@ mod tests {
             &valid.replace("zephium-agentic/probe-harness", "shipping-probe")
         )
         .is_err());
+        assert!(validate_engine_manifest(&valid.replace(
+            "agentic-browser = [\"dep:zephium-agentic\"]",
+            "agentic-browser = [\"zephium-agentic/probe-harness\"]",
+        ))
+        .is_err());
     }
 
     #[test]
@@ -1961,6 +2101,60 @@ mod tests {
         "#;
         validate_engine_platform_module(module, "test").expect("valid module gates");
         assert!(validate_engine_platform_module("mod agentic_input_probe;", "test").is_err());
+    }
+
+    #[test]
+    fn production_agent_context_boundary_is_closed_and_probe_independent() {
+        let engine = r#"
+            #[cfg(feature = "agentic-browser")]
+            mod agent_context_port;
+            pub fn take_agent_browser_port(&self) {}
+            fn shutdown(&self) { self.agent_context_port.seal(); }
+        "#;
+        let host_root = r#"
+            #[cfg(feature = "agentic-browser")]
+            mod agent_context;
+            agent_contexts: HashMap<zephium_agentic::ContextId, agent_context::AgentOwnedContext>,
+        "#;
+        let port = r#"
+            use x::MAX_PENDING_NATIVE_CONTEXT_TASKS;
+            ContextOperationKind::Close;
+            const fn supports_cookie_transfer() -> bool { false }
+            pub(crate) struct AgentContextPortSlot;
+            fn closed() { ContextDispatch::Unsupported; }
+        "#;
+        let host = r#"
+            profile_lease: ContextProfileLease,
+            install_content_policy_on_view(&view, &content_policy);
+            NativeResourceClass::AgentContext;
+            ContextConstructionProof::MacOsOwnedSelectedProfileExtensionFree;
+            fn force_shutdown_agent_contexts() {}
+        "#;
+        let macos = r#"
+            with_visible(false).with_focused(false);
+            configuration.webExtensionController();
+            controller.userScripts();
+            with_data_store_identifier(profile.bytes());
+            Retained::as_ptr(&actual_store) == Retained::as_ptr(expected);
+        "#;
+        validate_engine_agent_context_boundary(engine, host_root, port, host, macos)
+            .expect("closed production adapter");
+        assert!(validate_engine_agent_context_boundary(
+            engine,
+            host_root,
+            &format!("{port}\nevaluate_script();"),
+            host,
+            macos,
+        )
+        .is_err());
+        assert!(validate_engine_agent_context_boundary(
+            engine,
+            host_root,
+            port,
+            host,
+            &macos.replace("controller.userScripts();", ""),
+        )
+        .is_err());
     }
 
     #[test]

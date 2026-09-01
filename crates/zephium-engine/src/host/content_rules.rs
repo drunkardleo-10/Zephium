@@ -990,6 +990,51 @@ impl EngineHost {
                 return;
             }
         };
+        #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+        let agent_registrations = {
+            let mut context_ids: Vec<_> = self
+                .agent_contexts
+                .iter()
+                .filter_map(|(id, context)| (context.profile() == profile).then_some(*id))
+                .collect();
+            context_ids.sort();
+            let mut agent_registrations = Vec::with_capacity(context_ids.len());
+            let mut agent_failure = None;
+            for id in context_ids {
+                let Some(context) = self.agent_contexts.get(&id) else {
+                    agent_failure = Some(ContentRuleApplyFailure::NativeInstallation);
+                    break;
+                };
+                match crate::platform::imp::install_content_policy_on_view(context.view(), &native)
+                {
+                    Ok(registration) => agent_registrations.push((id, registration)),
+                    Err(failure) => {
+                        agent_failure = Some(failure);
+                        break;
+                    }
+                }
+            }
+            if let Some(failure) = agent_failure {
+                let agent_clean = self.rollback_agent_content_policy_cohort(agent_registrations);
+                let ordinary_clean =
+                    self.rollback_content_policy_cohort(registrations, spare_registration);
+                if !agent_clean || !ordinary_clean {
+                    return;
+                }
+                if failure == ContentRuleApplyFailure::NativeCleanup {
+                    self.fail_content_policy_retirement();
+                    return;
+                }
+                self.emit_content_policy_settlement(
+                    profile,
+                    generation,
+                    failed_settlement(applied, failure),
+                );
+                self.start_queued_content_policy(profile);
+                return;
+            }
+            agent_registrations
+        };
 
         // Construct the complete replacement cohort before swapping any
         // registration. A fallible view therefore leaves every prior exact
@@ -1011,6 +1056,21 @@ impl EngineHost {
         if let (Some(spare), Some(registration)) = (&mut self.spare, spare_registration) {
             let Some(replaced) = spare.view.content_policy_registration.replace(registration)
             else {
+                self.fail_content_policy_retirement();
+                return;
+            };
+            if replaced.retire().is_err() {
+                self.fail_content_policy_retirement();
+                return;
+            }
+        }
+        #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+        for (id, registration) in agent_registrations {
+            let replaced = self
+                .agent_contexts
+                .get_mut(&id)
+                .and_then(|context| context.replace_content_policy_registration(registration));
+            let Some(replaced) = replaced else {
                 self.fail_content_policy_retirement();
                 return;
             };
@@ -1059,6 +1119,25 @@ impl EngineHost {
         if let Some(registration) = spare {
             clean &= registration.retire().is_ok();
         }
+        if !clean {
+            self.fail_content_policy_retirement();
+        }
+        clean
+    }
+
+    #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+    fn rollback_agent_content_policy_cohort(
+        &mut self,
+        registrations: Vec<(
+            zephium_agentic::ContextId,
+            crate::platform::imp::ContentPolicyRegistration,
+        )>,
+    ) -> bool {
+        let clean = registrations
+            .into_iter()
+            .fold(true, |clean, (_, registration)| {
+                registration.retire().is_ok() && clean
+            });
         if !clean {
             self.fail_content_policy_retirement();
         }

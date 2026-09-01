@@ -1,11 +1,14 @@
 # M2 context identity and lifecycle core
 
-Status: pure domain contract, bounded registry, and closed shell/native port
-implemented; platform adapters pending.
+Status: pure domain contract, bounded registry, closed shell/native port, and
+the initial feature-gated macOS owned-context construction/close adapter are
+implemented. Navigation, presentation, suspension, renderer recovery, Windows
+native ownership/cookies, borrowed/handoff adapters, and named-device
+qualification remain pending.
 
 This evidence records code properties only. It does not claim that an owned
-native context, extension inventory proof, Windows cookie bridge, borrowed-tab
-lease, or sign-in handoff has shipped.
+native context has passed a live host/device qualification, or that a Windows
+cookie bridge, borrowed-tab native lease, or native sign-in handoff has shipped.
 
 ## Implemented boundary
 
@@ -151,11 +154,70 @@ requires it to close. Cancellation clears workflow-level pending authority but
 reports completion only from exact `RetiredContext` proofs: owned destroyed as
 closed and handoff destroyed as released.
 
+## Initial macOS native adapter
+
+`zephium-engine` now exposes the production adapter only through the separate
+`agentic-browser` feature. That feature depends on the shipping functional core
+but cannot activate `probe-harness` or `native-agentic-input-probe`; the
+ordinary desktop graph does not enable it yet. If no caller takes the unique
+port, no queue state, worker, timer, page, or native context is created.
+
+Taking the port creates one bounded admission state and is exact-once. At most
+16 requests can be retained across the outer main-loop dispatcher and the
+engine's dedicated, non-coalescing 16-task host band. Rejection releases its
+permit without manufacturing an asynchronous result; every accepted task
+either rejoins the main-thread host and emits one request-correlated terminal
+event or emits one closed native-refusal result when its retained owner is
+dropped. Poisoned admission is sticky, closes the port, and invokes the
+mandatory fatal callback once rather than deadlocking.
+
+The first macOS adapter accepts only owned construction, exact close,
+post-revocation cancellation, and privacy-preserving resource audit. Navigation
+and cookie transfer remain synchronously unsupported. Owned construction:
+
+- binds the exact context identity, complete capability inventory, profile
+  lease, and authoritative durable/ephemeral storage class;
+- reuses the engine's process-lifetime private `WKWebsiteDataStore` per
+  ephemeral profile, proves distinct private profiles do not alias, and uses
+  the exact profile data-store identifier for durable storage;
+- creates only a hidden, unfocused `about:blank` child with permissions,
+  downloads, popups/page-close, media surfaces, autofill, link previews, and
+  inspection denied;
+- asserts the actual `WKWebViewConfiguration` has no extension controller and
+  zero user scripts, then installs the current native content blocker before
+  any network navigation can be represented;
+- retains the content-policy registration, page, and native resource lease in
+  teardown order under a private `ContextId` map that is absent from ordinary
+  tab, session, stage, navigation-snapshot, and extension-principal maps.
+
+With `agentic-browser` enabled, the native resource ledger owns an independent
+eight-context class equal to the functional core's live-context ceiling. Its
+accounting reserve changes that feature graph's declared hard ceiling from 48
+to 56 without allocating a native object or changing any existing class
+ceiling; the ordinary feature-disabled ledger remains the original seven-class,
+48-slot layout. Audits cross-check the private map against the physical agent
+class and expose only bounded counts. Content-policy replacement includes every
+same-profile owned context in the preconstructed native replacement cohort.
+
+Profile erasure rejects an active private context after installing its sticky
+tombstone, preserving the exact storage obligation for orderly close and
+retry. Shutdown seals the port before host teardown, physically destroys any
+remaining context, and refuses a clean result if the shell failed to settle
+every exact Close first. This is static/unit evidence only; no new GUI run,
+external site, account, credential, global input, or Accessibility authority
+was used.
+
 ## Deterministic evidence
 
 ```sh
 cargo test --locked -p zephium-agentic
 cargo clippy --locked -p zephium-agentic --all-targets -- -D warnings
+cargo test --locked -p zephium-engine --features agentic-browser --lib
+cargo clippy --locked -p zephium-engine --features agentic-browser \
+  --all-targets -- -D warnings
+cargo check --locked --target x86_64-pc-windows-msvc \
+  -p zephium-engine --features agentic-browser
+cargo xtask check-agentic-probe-boundary
 ```
 
 The tests cover canonical/redacted identity, kind-scoped capability sets,
@@ -181,13 +243,12 @@ redaction, and exact cancellation resource dispositions.
 
 ## Remaining M2 work
 
-1. bind registry execution/native reservations to the engine's authoritative
-   resource leases through platform adapters;
-2. implement extension-free owned construction and inventory assertions on
-   both platform adapters without weakening current extension principals;
-3. implement explicit profile leasing, the bounded Windows cookie bridge, and
-   the sign-in-handoff transaction skeleton;
-4. connect existing native suspension, renderer-loss, teardown, and resource
-   ledgers while proving no tab/session/extension projection;
-5. run named-device lifecycle, idle-resource, cancellation, recovery, and
-   shutdown qualification.
+1. add Windows owned construction with a truthful enabled-inventory proof,
+   stable selected-profile/subprofile binding, and cleanup-debt ownership;
+2. connect native navigation, presentation, suspension, renderer loss and
+   recovery while preserving exact context/world/frame generations;
+3. implement the bounded Windows cookie adapter and native borrowed/handoff
+   transactions without changing ordinary extension principals;
+4. qualify macOS construction/storage/inventory/close and both-platform
+   lifecycle, idle-resource, cancellation, recovery, and shutdown behavior on
+   explicitly authorized named devices.

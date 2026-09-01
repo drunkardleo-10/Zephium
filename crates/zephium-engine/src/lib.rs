@@ -1,3 +1,5 @@
+#[cfg(feature = "agentic-browser")]
+mod agent_context_port;
 mod diagnostics;
 mod erasure;
 mod host;
@@ -1051,6 +1053,8 @@ pub struct WebviewEngine {
     layout_updates: Arc<layout_queue::LatestLayouts<PendingLayout>>,
     user_content_dispatch: Arc<UserContentDispatchGate>,
     extension_runtime_host: host::extension_runtime::ExtensionRuntimeHostFactorySlot,
+    #[cfg(feature = "agentic-browser")]
+    agent_context_port: agent_context_port::AgentContextPortSlot,
 }
 
 const MAX_IN_FLIGHT_USER_CONTENT_REQUESTS: usize = 4;
@@ -1225,6 +1229,11 @@ pub fn install(
     };
     let extension_runtime_host =
         host::extension_runtime::ExtensionRuntimeHostFactorySlot::new(dispatch.clone());
+    #[cfg(feature = "agentic-browser")]
+    let agent_context_port = agent_context_port::AgentContextPortSlot::new(
+        dispatch.clone(),
+        fatal_security_failure.clone(),
+    );
     host::install(
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         parent,
@@ -1245,6 +1254,8 @@ pub fn install(
         layout_updates: Arc::new(layout_queue::LatestLayouts::new(MAX_PENDING_LAYOUT_WINDOWS)),
         user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
         extension_runtime_host,
+        #[cfg(feature = "agentic-browser")]
+        agent_context_port,
     })
 }
 
@@ -1263,6 +1274,20 @@ pub fn enforce_runtime_security_floor() -> Result<RuntimeSecurityAdvisories, Str
 }
 
 impl WebviewEngine {
+    /// Takes the process-unique production agent-browser native port.
+    ///
+    /// Taking the port allocates only its fixed admission state. If this
+    /// method is never called, no agent queue, timer, worker, page, or native
+    /// object exists.
+    #[cfg(feature = "agentic-browser")]
+    #[must_use]
+    pub fn take_agent_browser_port(
+        &self,
+        sink: impl Fn(zephium_agentic::ContextNativeEvent) + Send + Sync + 'static,
+    ) -> Option<Arc<dyn zephium_agentic::AgentBrowserPort>> {
+        self.agent_context_port.take(Arc::new(sink))
+    }
+
     /// Takes the process-unique native extension-runtime host factory.
     ///
     /// The factory is deliberately move-only and serialized. Exactly one
@@ -2218,6 +2243,8 @@ impl Engine for WebviewEngine {
         // teardown barrier. A racing service bind can therefore never appear
         // behind shutdown even when the event-loop dispatch is delayed.
         self.extension_runtime_host.seal();
+        #[cfg(feature = "agentic-browser")]
+        self.agent_context_port.seal();
         let completion = Arc::new(std::sync::Mutex::new(Some(done)));
         let dispatched_completion = completion.clone();
         if !self.run(move || {
@@ -2263,6 +2290,8 @@ mod tests {
             extension_runtime_host: host::extension_runtime::ExtensionRuntimeHostFactorySlot::new(
                 Arc::new(|_| false),
             ),
+            #[cfg(feature = "agentic-browser")]
+            agent_context_port: agent_context_port::AgentContextPortSlot::disabled_for_test(),
         }
     }
 
@@ -2403,6 +2432,8 @@ mod tests {
             user_content_dispatch: gate.clone(),
             extension_runtime_host:
                 host::extension_runtime::ExtensionRuntimeHostFactorySlot::disabled_for_test(),
+            #[cfg(feature = "agentic-browser")]
+            agent_context_port: agent_context_port::AgentContextPortSlot::disabled_for_test(),
         };
         let profile = ProfileId::from(1);
 
@@ -2448,6 +2479,8 @@ mod tests {
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
             extension_runtime_host:
                 host::extension_runtime::ExtensionRuntimeHostFactorySlot::disabled_for_test(),
+            #[cfg(feature = "agentic-browser")]
+            agent_context_port: agent_context_port::AgentContextPortSlot::disabled_for_test(),
         };
 
         for scale in [f64::NAN, f64::NEG_INFINITY, f64::INFINITY, 0.29, 3.01] {
@@ -2531,6 +2564,8 @@ mod tests {
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
             extension_runtime_host:
                 host::extension_runtime::ExtensionRuntimeHostFactorySlot::disabled_for_test(),
+            #[cfg(feature = "agentic-browser")]
+            agent_context_port: agent_context_port::AgentContextPortSlot::disabled_for_test(),
         };
         let profile = ProfileId::from(88);
         let (tx, rx) = mpsc::channel();
@@ -2570,6 +2605,8 @@ mod tests {
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
             extension_runtime_host:
                 host::extension_runtime::ExtensionRuntimeHostFactorySlot::disabled_for_test(),
+            #[cfg(feature = "agentic-browser")]
+            agent_context_port: agent_context_port::AgentContextPortSlot::disabled_for_test(),
         };
 
         engine.erase_profile_data(
@@ -2655,6 +2692,8 @@ mod tests {
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
             extension_runtime_host:
                 host::extension_runtime::ExtensionRuntimeHostFactorySlot::disabled_for_test(),
+            #[cfg(feature = "agentic-browser")]
+            agent_context_port: agent_context_port::AgentContextPortSlot::disabled_for_test(),
         };
         let profile = ProfileId::from(91);
         let id = ItemId::from(1);
@@ -3024,6 +3063,8 @@ mod tests {
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
             extension_runtime_host:
                 host::extension_runtime::ExtensionRuntimeHostFactorySlot::disabled_for_test(),
+            #[cfg(feature = "agentic-browser")]
+            agent_context_port: agent_context_port::AgentContextPortSlot::disabled_for_test(),
         };
         let (tx, rx) = mpsc::channel();
         engine.erase_profile_data(
@@ -3344,6 +3385,8 @@ mod tests {
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
             extension_runtime_host:
                 host::extension_runtime::ExtensionRuntimeHostFactorySlot::disabled_for_test(),
+            #[cfg(feature = "agentic-browser")]
+            agent_context_port: agent_context_port::AgentContextPortSlot::disabled_for_test(),
         };
 
         assert_eq!(engine.close(id), NativeDispatch::Rejected);
@@ -3377,6 +3420,8 @@ mod tests {
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
             extension_runtime_host:
                 host::extension_runtime::ExtensionRuntimeHostFactorySlot::disabled_for_test(),
+            #[cfg(feature = "agentic-browser")]
+            agent_context_port: agent_context_port::AgentContextPortSlot::disabled_for_test(),
         };
 
         assert_eq!(
@@ -3445,6 +3490,8 @@ mod tests {
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
             extension_runtime_host:
                 host::extension_runtime::ExtensionRuntimeHostFactorySlot::disabled_for_test(),
+            #[cfg(feature = "agentic-browser")]
+            agent_context_port: agent_context_port::AgentContextPortSlot::disabled_for_test(),
         };
 
         assert_eq!(
@@ -3494,6 +3541,8 @@ mod tests {
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
             extension_runtime_host:
                 host::extension_runtime::ExtensionRuntimeHostFactorySlot::disabled_for_test(),
+            #[cfg(feature = "agentic-browser")]
+            agent_context_port: agent_context_port::AgentContextPortSlot::disabled_for_test(),
         };
 
         for window in 0..MAX_PENDING_LAYOUT_WINDOWS as u64 {
@@ -3558,6 +3607,8 @@ mod tests {
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
             extension_runtime_host:
                 host::extension_runtime::ExtensionRuntimeHostFactorySlot::disabled_for_test(),
+            #[cfg(feature = "agentic-browser")]
+            agent_context_port: agent_context_port::AgentContextPortSlot::disabled_for_test(),
         };
 
         assert_eq!(engine.reload(id), NativeDispatch::Scheduled);

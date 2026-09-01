@@ -27,6 +27,10 @@ cargo test --locked -p zephium-engine \
 cargo clippy --locked -p zephium-engine \
   --features native-agentic-input-probe \
   --bin macos-agentic-input-probe --lib -- -D warnings
+cargo test --locked -p zephium-engine \
+  --features agentic-browser --lib
+cargo clippy --locked -p zephium-engine \
+  --features agentic-browser --all-targets -- -D warnings
 cargo check --locked --target x86_64-pc-windows-msvc \
   -p zephium-engine --features native-agentic-input-probe \
   --bin windows-agentic-input-probe

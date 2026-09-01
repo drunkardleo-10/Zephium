@@ -17,8 +17,15 @@ use zephium_extension_runtime_api::MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES;
 /// The current product still admits at most 32 tab views and one warm spare.
 /// The remaining slots are reserved now, before extension runtimes can exist,
 /// so future features cannot silently consume tab or teardown capacity.
+#[cfg(feature = "agentic-browser")]
+pub(super) const MAX_NATIVE_VIEW_RESOURCES: usize = 56;
+#[cfg(not(feature = "agentic-browser"))]
 pub(super) const MAX_NATIVE_VIEW_RESOURCES: usize = 48;
 pub(super) const MAX_NATIVE_TEARDOWN_DEBTS: usize = 8;
+#[cfg(feature = "agentic-browser")]
+pub(super) const MAX_AGENT_CONTEXT_RESOURCES: usize = 8;
+#[cfg(feature = "agentic-browser")]
+const _: () = assert!(MAX_AGENT_CONTEXT_RESOURCES == zephium_agentic::MAX_LIVE_CONTEXTS);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum NativeResourceClass {
@@ -28,11 +35,28 @@ pub(super) enum NativeResourceClass {
     ExtensionBackground,
     ExtensionPopup,
     ReconciliationController,
+    #[cfg(feature = "agentic-browser")]
+    AgentContext,
     TransientConstruction,
 }
 
 impl NativeResourceClass {
+    #[cfg(feature = "agentic-browser")]
+    const COUNT: usize = 8;
+    #[cfg(not(feature = "agentic-browser"))]
     const COUNT: usize = 7;
+    #[cfg(feature = "agentic-browser")]
+    const ALL: [Self; Self::COUNT] = [
+        Self::Tab,
+        Self::WarmSpare,
+        Self::TeardownDebt,
+        Self::ExtensionBackground,
+        Self::ExtensionPopup,
+        Self::ReconciliationController,
+        Self::AgentContext,
+        Self::TransientConstruction,
+    ];
+    #[cfg(not(feature = "agentic-browser"))]
     const ALL: [Self; Self::COUNT] = [
         Self::Tab,
         Self::WarmSpare,
@@ -51,7 +75,18 @@ impl NativeResourceClass {
             Self::ExtensionBackground => 3,
             Self::ExtensionPopup => 4,
             Self::ReconciliationController => 5,
-            Self::TransientConstruction => 6,
+            #[cfg(feature = "agentic-browser")]
+            Self::AgentContext => 6,
+            Self::TransientConstruction => {
+                #[cfg(feature = "agentic-browser")]
+                {
+                    7
+                }
+                #[cfg(not(feature = "agentic-browser"))]
+                {
+                    6
+                }
+            }
         }
     }
 
@@ -63,6 +98,8 @@ impl NativeResourceClass {
             Self::ExtensionBackground => MAX_CONCURRENT_EXTENSION_BACKGROUND_RUNTIMES,
             Self::ExtensionPopup => 1,
             Self::ReconciliationController => 1,
+            #[cfg(feature = "agentic-browser")]
+            Self::AgentContext => MAX_AGENT_CONTEXT_RESOURCES,
             Self::TransientConstruction => 2,
         }
     }
@@ -195,13 +232,15 @@ impl NativeResourceLedger {
         self.is_healthy() && self.is_empty()
     }
 
-    #[cfg(test)]
-    fn count(&self, class: NativeResourceClass) -> Option<usize> {
-        self.shared
-            .state
-            .try_borrow()
-            .ok()
-            .map(|state| state.counts[class.index()])
+    #[cfg(any(test, all(feature = "agentic-browser", target_os = "macos")))]
+    pub(super) fn count_for_audit(&self, class: NativeResourceClass) -> Option<usize> {
+        match self.shared.state.try_borrow() {
+            Ok(state) => Some(state.counts[class.index()]),
+            Err(_) => {
+                self.shared.fail();
+                None
+            }
+        }
     }
 
     #[cfg(test)]
@@ -311,6 +350,11 @@ mod tests {
         );
         assert_eq!(NativeResourceClass::ExtensionPopup.limit(), 1);
         assert_eq!(NativeResourceClass::ReconciliationController.limit(), 1);
+        #[cfg(feature = "agentic-browser")]
+        assert_eq!(
+            NativeResourceClass::AgentContext.limit(),
+            MAX_AGENT_CONTEXT_RESOURCES
+        );
         assert_eq!(NativeResourceClass::TransientConstruction.limit(), 2);
         assert_eq!(
             NativeResourceClass::ALL
@@ -332,7 +376,7 @@ mod tests {
                 ledger.try_acquire(class),
                 Err(NativeResourceAdmissionError::ClassExhausted(actual)) if actual == class
             ));
-            assert_eq!(ledger.count(class), Some(class.limit()));
+            assert_eq!(ledger.count_for_audit(class), Some(class.limit()));
             drop(leases);
             assert!(ledger.is_empty());
         }
@@ -364,7 +408,10 @@ mod tests {
             .expect("one warm spare");
         assert!(ledger.try_acquire(NativeResourceClass::WarmSpare).is_err());
         assert_eq!(ledger.total(), Some(1));
-        assert_eq!(ledger.count(NativeResourceClass::WarmSpare), Some(1));
+        assert_eq!(
+            ledger.count_for_audit(NativeResourceClass::WarmSpare),
+            Some(1)
+        );
         drop(spare);
         assert!(ledger.is_empty());
     }
@@ -388,9 +435,12 @@ mod tests {
             transient.class(),
             Some(NativeResourceClass::TransientConstruction)
         );
-        assert_eq!(ledger.count(NativeResourceClass::WarmSpare), Some(1));
         assert_eq!(
-            ledger.count(NativeResourceClass::TransientConstruction),
+            ledger.count_for_audit(NativeResourceClass::WarmSpare),
+            Some(1)
+        );
+        assert_eq!(
+            ledger.count_for_audit(NativeResourceClass::TransientConstruction),
             Some(1)
         );
     }
@@ -408,8 +458,11 @@ mod tests {
             .reclassify(NativeResourceClass::TeardownDebt)
             .expect("failed close debt");
         assert_eq!(ledger.total(), Some(1));
-        assert_eq!(ledger.count(NativeResourceClass::Tab), Some(0));
-        assert_eq!(ledger.count(NativeResourceClass::TeardownDebt), Some(1));
+        assert_eq!(ledger.count_for_audit(NativeResourceClass::Tab), Some(0));
+        assert_eq!(
+            ledger.count_for_audit(NativeResourceClass::TeardownDebt),
+            Some(1)
+        );
         drop(lease);
         assert!(ledger.is_empty());
     }
@@ -449,14 +502,17 @@ mod tests {
         );
         assert_eq!(spare.class(), Some(NativeResourceClass::WarmSpare));
         assert_eq!(
-            ledger.count(NativeResourceClass::Tab),
+            ledger.count_for_audit(NativeResourceClass::Tab),
             Some(NativeResourceClass::Tab.limit())
         );
         assert_eq!(
-            ledger.count(NativeResourceClass::TransientConstruction),
+            ledger.count_for_audit(NativeResourceClass::TransientConstruction),
             Some(1)
         );
-        assert_eq!(ledger.count(NativeResourceClass::WarmSpare), Some(1));
+        assert_eq!(
+            ledger.count_for_audit(NativeResourceClass::WarmSpare),
+            Some(1)
+        );
         assert!(ledger.is_healthy());
 
         drop(transient);
@@ -485,9 +541,9 @@ mod tests {
                 ))
             );
             assert_eq!(view.class(), Some(source));
-            assert_eq!(ledger.count(source), Some(1));
+            assert_eq!(ledger.count_for_audit(source), Some(1));
             assert_eq!(
-                ledger.count(NativeResourceClass::TeardownDebt),
+                ledger.count_for_audit(NativeResourceClass::TeardownDebt),
                 Some(NativeResourceClass::TeardownDebt.limit())
             );
             assert_eq!(ledger.total(), Some(debts.len() + 1));

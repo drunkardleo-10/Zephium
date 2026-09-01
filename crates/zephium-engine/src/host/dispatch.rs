@@ -255,6 +255,10 @@ enum HostTaskPriority {
     // Exact extension-owner lifecycle and terminal debts are never keyed,
     // coalesced, replaced, or admitted from an ordinary task's capacity.
     ExtensionRuntime,
+    #[cfg(feature = "agentic-browser")]
+    // Exact agent-context lifecycle and audit tasks own an independent fixed
+    // band and are never coalesced or replaced.
+    AgentContext,
     ProfileErasure,
     Shutdown,
 }
@@ -302,6 +306,15 @@ const PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY: usize =
     zephium_core::session::MAX_SESSION_PROFILES;
 const NON_PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY: usize =
     NON_SHUTDOWN_PENDING_HOST_TASK_CAPACITY - PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY;
+#[cfg(feature = "agentic-browser")]
+const AGENT_CONTEXT_PENDING_HOST_TASK_CAPACITY: usize =
+    zephium_agentic::MAX_PENDING_NATIVE_CONTEXT_TASKS;
+#[cfg(feature = "agentic-browser")]
+const NON_AGENT_CONTEXT_PENDING_HOST_TASK_CAPACITY: usize =
+    NON_PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY - AGENT_CONTEXT_PENDING_HOST_TASK_CAPACITY;
+#[cfg(not(feature = "agentic-browser"))]
+const NON_AGENT_CONTEXT_PENDING_HOST_TASK_CAPACITY: usize =
+    NON_PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY;
 // A lifecycle call and its independently held publication proxy can each
 // contribute one accepted task for every bounded logical owner reservation.
 // Reserve and independently hard-cap that complete cohort before navigation
@@ -309,7 +322,7 @@ const NON_PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY: usize =
 const EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY: usize =
     2 * super::extension_runtime::MAX_EXTENSION_RUNTIME_LOGICAL_RESERVATIONS;
 const NON_EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY: usize =
-    NON_PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY - EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY;
+    NON_AGENT_CONTEXT_PENDING_HOST_TASK_CAPACITY - EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY;
 // The unique runtime factory admits at most one physical profile-fence
 // callback across the platform dispatcher and this reentrant host queue. Keep
 // its slot below the exact owner band so a timed-out read cannot crowd out a
@@ -430,6 +443,8 @@ pub(crate) fn install(
             #[cfg(target_os = "windows")]
             private_runtime,
             views: HashMap::new(),
+            #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+            agent_contexts: HashMap::new(),
             native_resources: NativeResourceLedger::default(),
             extension_runtime_registry:
                 super::extension_runtime::ExtensionRuntimeRegistry::new(extension_runtime_gate),
@@ -695,6 +710,18 @@ where
     F: FnOnce(&mut EngineHost) + 'static,
 {
     with_priority(HostTaskPriority::ExtensionRuntime, None, f)
+}
+
+/// Admit one exact production agent-context lifecycle or resource-audit task.
+///
+/// Its fixed noncoalescing band is independently capped by the public native
+/// port ceiling. Profile erasure and shutdown retain higher-priority space.
+#[cfg(feature = "agentic-browser")]
+pub(crate) fn try_with_agent_context<F>(f: F) -> bool
+where
+    F: FnOnce(&mut EngineHost) + 'static,
+{
+    with_priority(HostTaskPriority::AgentContext, None, f)
 }
 
 /// Admits one exact native extension terminal independently of ordinary
@@ -1616,6 +1643,16 @@ fn enqueue_pending(pending: &mut VecDeque<QueuedHostTask>, queued: QueuedHostTas
         // is never borrowed by retries while the UI thread is stalled.
         return false;
     }
+    #[cfg(feature = "agentic-browser")]
+    if queued.priority == HostTaskPriority::AgentContext
+        && pending
+            .iter()
+            .filter(|task| task.priority == HostTaskPriority::AgentContext)
+            .count()
+            >= AGENT_CONTEXT_PENDING_HOST_TASK_CAPACITY
+    {
+        return false;
+    }
     if queued.priority == HostTaskPriority::ExtensionRuntimeProfileFence
         && pending
             .iter()
@@ -1626,6 +1663,10 @@ fn enqueue_pending(pending: &mut VecDeque<QueuedHostTask>, queued: QueuedHostTas
         // A stale timed-out callback remains a physical queue occupant until
         // the UI borrow unwinds. Never borrow another band for a duplicate.
         return false;
+    }
+    #[cfg(feature = "agentic-browser")]
+    if queued.priority == HostTaskPriority::AgentContext {
+        return enqueue_bounded_pending(pending, queued);
     }
     if queued.priority != HostTaskPriority::ExtensionRuntime {
         let Some(key) = queued.key else {
@@ -1665,7 +1706,9 @@ fn enqueue_bounded_pending(pending: &mut VecDeque<QueuedHostTask>, queued: Queue
     let capacity = match queued.priority {
         HostTaskPriority::Shutdown => PENDING_HOST_TASK_CAPACITY,
         HostTaskPriority::ProfileErasure => NON_SHUTDOWN_PENDING_HOST_TASK_CAPACITY,
-        HostTaskPriority::ExtensionRuntime => NON_PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY,
+        #[cfg(feature = "agentic-browser")]
+        HostTaskPriority::AgentContext => NON_PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY,
+        HostTaskPriority::ExtensionRuntime => NON_AGENT_CONTEXT_PENDING_HOST_TASK_CAPACITY,
         HostTaskPriority::ExtensionRuntimeProfileFence => {
             NON_EXTENSION_RUNTIME_PENDING_HOST_TASK_CAPACITY
         }
@@ -1709,6 +1752,8 @@ fn enqueue_bounded_pending(pending: &mut VecDeque<QueuedHostTask>, queued: Queue
         // Accepted owner operations are exact authority debts. Replacing one
         // would leak or fabricate native ownership settlement.
         HostTaskPriority::ExtensionRuntime => None,
+        #[cfg(feature = "agentic-browser")]
+        HostTaskPriority::AgentContext => None,
         HostTaskPriority::ExtensionRuntimeProfileFence => None,
         // Its dedicated band guarantees the bounded first cohort. Past that
         // point rejecting this attempt is safer than dropping an already
@@ -2230,6 +2275,33 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "agentic-browser")]
+    #[test]
+    fn agent_context_band_is_fixed_noncoalescing_and_recovers_exact_capacity() {
+        let mut pending = VecDeque::new();
+        for _ in 0..AGENT_CONTEXT_PENDING_HOST_TASK_CAPACITY {
+            assert!(enqueue_pending(
+                &mut pending,
+                queued(HostTaskPriority::AgentContext)
+            ));
+        }
+        assert!(!enqueue_pending(
+            &mut pending,
+            queued(HostTaskPriority::AgentContext)
+        ));
+        assert_eq!(pending.len(), AGENT_CONTEXT_PENDING_HOST_TASK_CAPACITY);
+        assert!(pending
+            .iter()
+            .all(|task| task.priority == HostTaskPriority::AgentContext));
+
+        pending.pop_front();
+        assert!(enqueue_pending(
+            &mut pending,
+            queued(HostTaskPriority::AgentContext)
+        ));
+        assert_eq!(pending.len(), AGENT_CONTEXT_PENDING_HOST_TASK_CAPACITY);
+    }
+
     #[test]
     fn extension_runtime_band_recovers_only_after_an_exact_task_leaves() {
         let mut pending = VecDeque::new();
@@ -2369,6 +2441,14 @@ mod tests {
                 queued(HostTaskPriority::ExtensionRuntime)
             ));
         }
+        assert_eq!(pending.len(), NON_AGENT_CONTEXT_PENDING_HOST_TASK_CAPACITY);
+        #[cfg(feature = "agentic-browser")]
+        for _ in 0..AGENT_CONTEXT_PENDING_HOST_TASK_CAPACITY {
+            assert!(enqueue_pending(
+                &mut pending,
+                queued(HostTaskPriority::AgentContext)
+            ));
+        }
         assert_eq!(
             pending.len(),
             NON_PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY
@@ -2443,14 +2523,22 @@ mod tests {
                 queued(HostTaskPriority::ExtensionRuntime)
             ));
         }
-        assert_eq!(
-            pending.len(),
-            NON_PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY
-        );
+        assert_eq!(pending.len(), NON_AGENT_CONTEXT_PENDING_HOST_TASK_CAPACITY);
         assert!(!enqueue_pending(
             &mut pending,
             queued(HostTaskPriority::ExtensionRuntime)
         ));
+        #[cfg(feature = "agentic-browser")]
+        for _ in 0..AGENT_CONTEXT_PENDING_HOST_TASK_CAPACITY {
+            assert!(enqueue_pending(
+                &mut pending,
+                queued(HostTaskPriority::AgentContext)
+            ));
+        }
+        assert_eq!(
+            pending.len(),
+            NON_PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY
+        );
 
         for _ in 0..PROFILE_ERASURE_PENDING_HOST_TASK_CAPACITY {
             assert!(enqueue_pending(

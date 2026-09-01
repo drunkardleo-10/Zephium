@@ -618,6 +618,15 @@ impl EngineHost {
         ) {
             return;
         }
+        #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+        if self.has_agent_context_for_profile(profile) {
+            // The shell-side profile lease is the primary deletion fence. A
+            // native caller bypassing it still cannot clear storage out from
+            // under an owned context. Preserve the process-lifetime tombstone
+            // and every exact native obligation for an orderly close + retry.
+            completion.finish(zephium_core::ports::engine::ProfileDataErasureOutcome::Failed);
+            return;
+        }
         // Durable erasure tombstones the profile and synchronously retires
         // every transient runtime/document authority before native cleanup.
         self.extension_document_authority.revoke_profile(profile);

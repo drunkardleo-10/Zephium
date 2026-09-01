@@ -1,3 +1,5 @@
+#[cfg(feature = "agentic-browser")]
+mod agent_context;
 #[cfg(feature = "native-agentic-input-probe")]
 mod agentic_input_probe;
 mod content_filter;
@@ -41,6 +43,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::{cell::Cell, cell::RefCell, rc::Rc};
 
+#[cfg(feature = "agentic-browser")]
+pub(crate) use agent_context::{build_owned_agent_view, AgentOwnedViewConstructionError};
 #[cfg(feature = "native-agentic-input-probe")]
 pub(crate) use agentic_input_probe::run as run_agentic_input_matrix;
 

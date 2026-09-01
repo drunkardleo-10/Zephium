@@ -205,6 +205,12 @@ impl EngineHost {
         // currently have no tab-scoped grant rows.
         self.extension_runtime_registry.seal();
         self.extension_document_authority.revoke_all();
+        #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+        if !self.force_shutdown_agent_contexts() {
+            // Physical teardown still completes, but clean shutdown requires
+            // the shell to have settled every exact Close before this barrier.
+            self.native_resource_accounting_failed = true;
+        }
         let ids: Vec<ItemId> = self.views.keys().copied().collect();
         for id in ids {
             self.close(id);
