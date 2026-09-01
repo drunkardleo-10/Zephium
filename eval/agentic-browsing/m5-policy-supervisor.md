@@ -7,8 +7,12 @@ run-tree scheduler and its exact cancellation/drain tree are also implemented;
 manifest-bound context assignment is implemented over the existing bounded
 context registry, and content-free semantic progress is projected directly by
 the supervisor. A bounded semantic-audit ledger and typed persistence port are
-implemented. Provider adapters, the durable store adapter, and live
-qualification remain pending.
+implemented. The provider-neutral identity, usage, failure, retry-after,
+stream-budget, and bounded SSE framing contracts are implemented. OpenAI and
+Responses plain-text/refusal lifecycle and terminal-usage stream normalization
+is implemented. Fixed request/tool encoding, typed browser-tool decoding, the
+Anthropic codec, the durable store adapter, and live qualification remain
+pending.
 
 This evidence describes policy input facts only. A manifest cannot authorize a
 browser action, model call, tool call, data transfer, cost, or native resource.
@@ -324,6 +328,62 @@ browser action, model call, tool call, data transfer, cost, or native resource.
   output, raw tool chatter, page content, origins, selectors, JavaScript,
   secrets, paths, native handles, and arbitrary errors are unrepresentable.
 
+## Implemented provider-neutral stream boundary
+
+- The shared contract names only the OpenAI Responses and Anthropic Messages
+  protocols, one bounded pinned model revision, exact output-token and stream
+  ceilings, and content-free correlation copied from an existing policy
+  admission or active call. Correlation omits the one-shot policy guard and
+  cannot commit input, spend budget, settle a call, or authorize a retry.
+- Every response caps accepted SSE events, plain-text bytes, client tool calls,
+  aggregate wire bytes, and aggregate incomplete/complete tool arguments.
+  Process maxima are 2 MiB of response body, 4,096 events, 64 KiB of plain
+  text, eight tool calls, and 32 KiB of tool arguments; the normal per-call
+  budget is lower where possible. No provider task, socket, credential, timer,
+  queue, or worker exists while the feature is unused.
+- The common incremental SSE framer accepts arbitrary transport chunk
+  boundaries, CR/LF/CRLF, comments, multiple data lines, and unknown SSE
+  fields. It validates UTF-8 and independently caps a line, assembled event,
+  and total event count. Invalid UTF-8, an unterminated final event, or any
+  ceiling breach fails closed without returning provider-authored text.
+- Normalized terminal usage preserves authoritative input/output totals plus
+  cached/cache-write/reasoning subsets without double counting. Real provider
+  overage is not hidden by the adapter; policy remains responsible for
+  accounting and sealing an exceeded reservation.
+- Failures use a closed content-free taxonomy. Retry-after is nonzero, capped
+  at one day, accepted only for rate-limit/overload/timeout/transport classes,
+  and never grants retry authority. Any retry still requires a new supervisor
+  decision, monotonic call identity, policy reservation, and cancellation
+  check. Vendor codecs remain responsible for typed event sequencing and for
+  preventing raw tool arguments from crossing the public boundary.
+
+## Implemented OpenAI Responses stream slice
+
+- The incremental Responses decoder follows the official
+  [Responses create/stream contract](https://developers.openai.com/api/reference/typescript/resources/beta/subresources/responses/methods/create).
+  It requires the selected exact model revision, one bounded response identity,
+  `created` before output, one unambiguous terminal event, complete SSE framing,
+  and consistent terminal status. A mismatched response, model, event name,
+  status, terminal, or event order fail-stops the decoder.
+- Plain-text and refusal deltas are capped cumulatively and returned only as an
+  explicitly untrusted plain-text type with redacted diagnostics. The decoder
+  incrementally hashes deltas and requires the provider's corresponding `done`
+  value to match before a successful terminal result. Terminal output classes
+  must agree with the streamed class, so missing or substituted streamed text
+  cannot be silently accepted.
+- Completed/incomplete responses normalize exact input, output, cached,
+  cache-write, and reasoning-token counters. `total_tokens` must equal checked
+  input plus output; detail counters must remain subsets. Output-limit,
+  content-filter, and refusal stops are distinct from provider/cancellation
+  failure. A failed stream may truthfully carry no usage so the later policy
+  integration can apply a documented conservative settlement instead of
+  inventing zero usage.
+- Function-call arguments, provider built-in tools, hidden reasoning output,
+  unknown output classes, invalid JSON/UTF-8, and premature `[DONE]` fail
+  closed. Raw tool JSON is intentionally not exposed as an interim API. The
+  next provider slice must install the closed browser-tool decoder before
+  function calling is enabled.
+
 ## Current tests
 
 Default crate tests exercise canonical order independence, canonical ULID
@@ -375,3 +435,10 @@ and authority joins, event/time replay, duplicate refusal, the 64-event and
 reconstruction, refused/cancelled retry, exact prefix commit, mismatch
 fail-stop retention, shutdown quiescence, the closed port contract, and
 redacted diagnostics.
+Fourteen provider-boundary tests cover configuration/usage/retry ceilings,
+fragmented CR/LF/CRLF SSE framing, multiline data, comments, invalid UTF-8,
+line/event/event-count/aggregate-wire exhaustion, exact model/response joins,
+text hashing, terminal usage, output limits, failed/incomplete responses,
+unsupported tool and reasoning output, fail-closed ordering, and redacted
+diagnostics. They use only deterministic in-memory wire fragments and no
+provider, network, credential, task, timer, or retry.

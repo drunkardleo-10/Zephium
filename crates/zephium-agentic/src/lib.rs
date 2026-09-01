@@ -17,6 +17,7 @@ compile_error!("the agentic probe harness is forbidden in optimized builds");
 mod agent_audit;
 mod agent_manifest;
 mod agent_policy;
+mod agent_provider;
 mod agent_supervisor;
 mod context;
 mod context_port;
@@ -74,6 +75,19 @@ pub use agent_policy::{
     AgentRunPolicy, AgentTaintCohort, MAX_AGENT_ACCOUNT_ATTESTATION_AGE_MILLIS,
     MAX_AGENT_PENDING_EFFECTS, MAX_AGENT_PENDING_MODEL_CALLS, MAX_AGENT_TAINT_COHORTS,
     MAX_AGENT_TAINT_REFERENCES,
+};
+pub use agent_provider::{
+    AgentProviderCallConfig, AgentProviderCallIdentity, AgentProviderCompletion,
+    AgentProviderContractError, AgentProviderFailure, AgentProviderFailureClass, AgentProviderKind,
+    AgentProviderModelRevision, AgentProviderProtocolError, AgentProviderRetryAfter,
+    AgentProviderRetryDisposition, AgentProviderStopReason, AgentProviderStreamBatch,
+    AgentProviderStreamBudget, AgentProviderStreamConclusion, AgentProviderStreamEvent,
+    AgentProviderStreamStats, AgentProviderTerminalFailure, AgentProviderTextDelta,
+    AgentProviderUsage, OpenAiResponsesStreamDecoder, MAX_AGENT_PROVIDER_MODEL_REVISION_BYTES,
+    MAX_AGENT_PROVIDER_OUTPUT_TEXT_BYTES, MAX_AGENT_PROVIDER_RETRY_AFTER_MILLIS,
+    MAX_AGENT_PROVIDER_SSE_EVENT_BYTES, MAX_AGENT_PROVIDER_SSE_LINE_BYTES,
+    MAX_AGENT_PROVIDER_STREAM_EVENTS, MAX_AGENT_PROVIDER_STREAM_WIRE_BYTES,
+    MAX_AGENT_PROVIDER_TOOL_ARGUMENT_BYTES, MAX_AGENT_PROVIDER_TOOL_CALLS,
 };
 pub use agent_supervisor::{
     AgentDelegationNode, AgentDelegationSpec, AgentDelegationTopology, AgentNodeExecution,
