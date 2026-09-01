@@ -1637,23 +1637,25 @@ mod tests {
 
     use serde_json::json;
     use zephium_agentic::{
-        decode_semantic_snapshot, encode_semantic_observation, AgentAccountAttestationId,
-        AgentAccountScope, AgentContextAccountBinding, AgentEffectScope, AgentModelCallBudget,
-        AgentModelCallId, AgentModelCallRequest, AgentModelCallSettlement, AgentPlanLeaseBinding,
-        AgentPlanLeaseId, AgentPlanNodeAuthority, AgentPlanNodeId, AgentPlanNodeScope,
-        AgentPreparedObservationRequest, AgentProviderCallConfig, AgentProviderModelRevision,
-        AgentProviderObjective, AgentProviderPricingError, AgentProviderPricingProfile,
-        AgentProviderPricingRevision, AgentProviderPricingSchedule, AgentProviderStopReason,
-        AgentProviderStreamBudget, AgentProviderTokenRates, AgentRunBudget, AgentRunManifest,
-        AgentRunManifestId, AgentRunScope, ContextCapabilities, ContextCapability, ContextId,
-        ContextIdentity, ContextKind, ContextOperationId, ContextRegistry, ContextRunId,
-        ContextSettlement, FrameGeneration, FrameId, SemanticDecodeContext, SemanticEffectClass,
-        SemanticFrameJoin, SemanticFrameTrust, SemanticInvocationId, SemanticModelEncodingBudget,
-        SemanticObservationAssembler, SemanticObservationBudget, SemanticObservationId,
-        SemanticObservationRequest, SemanticOrigin, SemanticSensitivity,
-        SemanticSnapshotGeneration, SemanticTokenCountQuality, SemanticTokenCountRequirement,
-        SemanticTokenCounter, SemanticTokenCounterError, SemanticTokenMeasurement,
-        SemanticTokenizerRevision, SEMANTIC_WIRE_VERSION,
+        compute_semantic_diff, decode_semantic_snapshot, encode_semantic_diff,
+        encode_semantic_observation, AgentAccountAttestationId, AgentAccountScope,
+        AgentContextAccountBinding, AgentEffectScope, AgentModelCallBudget, AgentModelCallId,
+        AgentModelCallRequest, AgentModelCallSettlement, AgentPlanLeaseBinding, AgentPlanLeaseId,
+        AgentPlanNodeAuthority, AgentPlanNodeId, AgentPlanNodeScope,
+        AgentPreparedObservationRequest, AgentProviderCallConfig, AgentProviderDiffRequestDraft,
+        AgentProviderLocalInputTokenCounter, AgentProviderModelRevision, AgentProviderObjective,
+        AgentProviderPricingError, AgentProviderPricingProfile, AgentProviderPricingRevision,
+        AgentProviderPricingSchedule, AgentProviderStopReason, AgentProviderStreamBudget,
+        AgentProviderTokenRates, AgentRunBudget, AgentRunManifest, AgentRunManifestId,
+        AgentRunScope, ContextCapabilities, ContextCapability, ContextId, ContextIdentity,
+        ContextKind, ContextOperationId, ContextRegistry, ContextRunId, ContextSettlement,
+        FrameGeneration, FrameId, SemanticDecodeContext, SemanticDiffBudget, SemanticDiffOutcome,
+        SemanticEffectClass, SemanticFrameJoin, SemanticFrameTrust, SemanticInvocationId,
+        SemanticModelEncodingBudget, SemanticObservation, SemanticObservationAssembler,
+        SemanticObservationBudget, SemanticObservationId, SemanticObservationRequest,
+        SemanticOrigin, SemanticSensitivity, SemanticSnapshotGeneration, SemanticTokenCountQuality,
+        SemanticTokenCountRequirement, SemanticTokenCounter, SemanticTokenCounterError,
+        SemanticTokenMeasurement, SemanticTokenizerRevision, SEMANTIC_WIRE_VERSION,
     };
     use zephium_core::ids::ProfileId;
 
@@ -1684,9 +1686,72 @@ mod tests {
         }
     }
 
+    struct FixedStructuredCounter {
+        revision: SemanticTokenizerRevision,
+        tokens: u32,
+    }
+
+    impl FixedStructuredCounter {
+        fn count(
+            &self,
+            tokenizer: &SemanticTokenizerRevision,
+            request_body: &[u8],
+        ) -> Result<SemanticTokenMeasurement, SemanticTokenCounterError> {
+            if tokenizer != &self.revision || request_body.is_empty() {
+                return Err(SemanticTokenCounterError::InvalidResult);
+            }
+            SemanticTokenMeasurement::try_new(
+                self.revision.clone(),
+                self.tokens,
+                SemanticTokenCountQuality::ExactLocal,
+            )
+            .map_err(|_| SemanticTokenCounterError::InvalidResult)
+        }
+    }
+
+    impl AgentProviderLocalInputTokenCounter for FixedStructuredCounter {
+        fn count_openai_responses_input(
+            &self,
+            model: &AgentProviderModelRevision,
+            tokenizer: &SemanticTokenizerRevision,
+            request_body: &[u8],
+        ) -> Result<SemanticTokenMeasurement, SemanticTokenCounterError> {
+            if model.as_str() != "gpt-5.6-sol" {
+                return Err(SemanticTokenCounterError::Unavailable);
+            }
+            self.count(tokenizer, request_body)
+        }
+
+        fn count_anthropic_messages_input(
+            &self,
+            model: &AgentProviderModelRevision,
+            tokenizer: &SemanticTokenizerRevision,
+            request_body: &[u8],
+        ) -> Result<SemanticTokenMeasurement, SemanticTokenCounterError> {
+            if model.as_str() != "claude-opus-5" {
+                return Err(SemanticTokenCounterError::Unavailable);
+            }
+            self.count(tokenizer, request_body)
+        }
+    }
+
+    struct StatefulProviderFixture {
+        policy: AgentRunPolicy,
+        input: AgentProviderTransportInput,
+        observation: SemanticObservation,
+        account: AgentContextAccountBinding,
+        lease: AgentPlanLeaseId,
+        config: AgentProviderCallConfig,
+    }
+
     fn provider_fixture(
         provider: AgentProviderKind,
     ) -> (AgentRunPolicy, AgentProviderTransportInput) {
+        let fixture = stateful_provider_fixture(provider);
+        (fixture.policy, fixture.input)
+    }
+
+    fn stateful_provider_fixture(provider: AgentProviderKind) -> StatefulProviderFixture {
         let run = ContextRunId::generate();
         let profile = ProfileId::generate();
         let identity =
@@ -1858,7 +1923,7 @@ mod tests {
                 &observation,
                 payload,
                 &objective,
-                config,
+                config.clone(),
             ),
             AgentProviderKind::AnthropicMessages => AgentPreparedObservationRequest::try_anthropic(
                 &mut policy,
@@ -1866,11 +1931,54 @@ mod tests {
                 &observation,
                 payload,
                 &objective,
-                config,
+                config.clone(),
             ),
         }
         .expect("prepared request");
-        (policy, prepared.into_transport_input())
+        StatefulProviderFixture {
+            policy,
+            input: prepared.into_transport_input(),
+            observation,
+            account,
+            lease,
+            config,
+        }
+    }
+
+    fn successor_observation(previous: &SemanticObservation) -> SemanticObservation {
+        let invocation = SemanticInvocationId::new(12).expect("successor invocation");
+        let wire = serde_json::to_vec(&json!({
+            "v": SEMANTIC_WIRE_VERSION,
+            "i": invocation.get(),
+            "g": 12,
+            "c": "complete",
+            "n": [
+                {"k": 1, "r": "document", "o": 16},
+                {"k": 2, "p": 0, "r": "paragraph", "t": "updated synthetic marker"}
+            ]
+        }))
+        .expect("successor wire");
+        let snapshot = decode_semantic_snapshot(
+            SemanticDecodeContext::new(
+                invocation,
+                previous.frames()[0].frame().clone(),
+                SemanticSnapshotGeneration::new(12).expect("successor snapshot generation"),
+            ),
+            &wire,
+        )
+        .expect("successor snapshot");
+        SemanticObservationAssembler::new(
+            SemanticObservationRequest::initial(
+                SemanticObservationId::new(2).expect("successor observation"),
+                previous.request().context(),
+                SemanticObservationBudget::try_new(8, 4_096, 1)
+                    .expect("successor observation budget"),
+            ),
+            snapshot,
+        )
+        .expect("successor observation assembler")
+        .finish()
+        .expect("successor observation")
     }
 
     fn pricing_schedule(config: &AgentProviderCallConfig) -> AgentProviderPricingSchedule {
@@ -2185,6 +2293,25 @@ mod tests {
         ]
         .concat()
         .into_bytes()
+    }
+
+    fn anthropic_tool_stream() -> Vec<u8> {
+        [
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_tool_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-opus-5\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":7,\"cache_creation_input_tokens\":3,\"cache_read_input_tokens\":5,\"output_tokens\":1,\"output_tokens_details\":{\"thinking_tokens\":0},\"service_tier\":\"standard\",\"inference_geo\":\"global\"}}}\n\n",
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_back_1\",\"name\":\"back\",\"input\":{}}}\n\n",
+            "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":4}}\n\n",
+            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        ]
+        .concat()
+        .into_bytes()
+    }
+
+    fn provider_tool_stream(provider: AgentProviderKind) -> Vec<u8> {
+        match provider {
+            AgentProviderKind::OpenAiResponses => openai_tool_stream(),
+            AgentProviderKind::AnthropicMessages => anthropic_tool_stream(),
+        }
     }
 
     fn openai_mixed_tool_stream() -> Vec<u8> {
@@ -2515,6 +2642,284 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&captured.body).expect("request body");
         assert_eq!(body["store"], false);
         assert!(body.get("previous_response_id").is_none());
+    }
+
+    async fn qualify_admitted_diff_transport(provider: AgentProviderKind) {
+        let initial_server = OneShotServer::spawn(
+            "200 OK",
+            &[
+                ("Content-Type", "text/event-stream; charset=utf-8"),
+                ("Content-Encoding", "identity"),
+            ],
+            vec![provider_tool_stream(provider)],
+        );
+        let initial_transport = test_transport(&initial_server);
+        let credential = AgentProviderCredential::try_new(
+            provider,
+            match provider {
+                AgentProviderKind::OpenAiResponses => "synthetic-openai-key",
+                AgentProviderKind::AnthropicMessages => "synthetic-anthropic-key",
+            }
+            .to_owned(),
+        )
+        .expect("credential");
+        let mut fixture = stateful_provider_fixture(provider);
+        let mut initial_correlation = None;
+        let initial_result = initial_transport
+            .try_admit(
+                fixture.input,
+                &mut fixture.policy,
+                &credential,
+                AgentProviderCancellation::new(),
+            )
+            .expect("initial admission")
+            .execute(|batch| {
+                for event in batch.into_events() {
+                    if let zephium_agentic::AgentProviderStreamEvent::ToolCall(tool) = event {
+                        assert!(
+                            initial_correlation.is_none(),
+                            "initial fixture emitted multiple tools"
+                        );
+                        initial_correlation = Some(tool.into_continuation_parts().0);
+                    }
+                }
+                AgentProviderBatchDisposition::Continue
+            })
+            .await;
+        let AgentProviderTransportOutcome::Stream(AgentProviderStreamConclusion::Completed(
+            initial_completion,
+        )) = initial_result.outcome()
+        else {
+            panic!("initial tool completion expected")
+        };
+        assert_eq!(
+            initial_completion.stop(),
+            AgentProviderStopReason::ToolCalls
+        );
+        let (initial_settlement, initial_seed) =
+            initial_result.into_policy_settlement_with_continuation();
+        let continuation = initial_seed
+            .expect("initial continuation seed")
+            .join_terminal_tool(
+                initial_completion,
+                initial_correlation.expect("initial tool correlation"),
+            )
+            .expect("initial exact terminal join");
+        let AgentProviderPolicySettlement::PricingRequired(initial_settlement) = initial_settlement
+        else {
+            panic!("initial reported usage must be priced")
+        };
+        let initial_schedule = pricing_schedule(initial_settlement.config());
+        initial_settlement
+            .settle(&mut fixture.policy, &initial_schedule)
+            .expect("initial catalog-priced settlement");
+        assert_eq!(fixture.policy.pending_model_calls(), 0);
+        assert!(initial_transport
+            .snapshot()
+            .expect("initial snapshot")
+            .is_quiescent());
+        initial_server.finish();
+
+        let current = successor_observation(&fixture.observation);
+        let diff = match compute_semantic_diff(
+            &fixture.observation,
+            continuation.baseline(),
+            &current,
+            SemanticDiffBudget::ACTION,
+        ) {
+            SemanticDiffOutcome::Diff(diff) => diff,
+            SemanticDiffOutcome::FreshSnapshot(reason) => {
+                panic!("unexpected fresh snapshot: {reason:?}")
+            }
+        };
+        let diff_payload =
+            encode_semantic_diff(&diff, SemanticModelEncodingBudget::ACTION_DIFF_EXACT)
+                .expect("encode diff")
+                .admit(
+                    &FixedCounter {
+                        revision: fixture.config.tokenizer().clone(),
+                        tokens: 10,
+                    },
+                    fixture.config.tokenizer(),
+                )
+                .expect("admit diff");
+        let request = AgentModelCallRequest::new(
+            AgentModelCallId::new(2).expect("diff call"),
+            fixture.lease,
+            fixture.account,
+            AgentModelCallBudget::try_new(20, 20, 100).expect("diff call budget"),
+            zephium_agentic::AgentPolicyInstant::from_millis(NOW),
+        );
+        let draft = AgentProviderDiffRequestDraft::try_new(
+            continuation
+                .bind_diff_request(request, &fixture.config, &diff, diff_payload)
+                .expect("bind diff request"),
+        )
+        .expect("encode stateless diff request");
+        let structured_input_tokens = match provider {
+            AgentProviderKind::OpenAiResponses => 17,
+            AgentProviderKind::AnthropicMessages => 15,
+        };
+        let prepared = draft
+            .try_prepare(
+                &mut fixture.policy,
+                request,
+                &diff,
+                &FixedStructuredCounter {
+                    revision: fixture.config.tokenizer().clone(),
+                    tokens: structured_input_tokens,
+                },
+            )
+            .expect("admit exact whole diff request");
+        assert_eq!(
+            prepared.structured_input_measurement().tokens(),
+            structured_input_tokens
+        );
+        assert_eq!(
+            fixture.policy.accounting().reserved_model_tokens(),
+            u64::from(structured_input_tokens) + 20
+        );
+
+        let diff_server = OneShotServer::spawn(
+            "200 OK",
+            &[
+                ("Content-Type", "text/event-stream; charset=utf-8"),
+                ("Content-Encoding", "identity"),
+            ],
+            vec![provider_tool_stream(provider)],
+        );
+        let diff_transport = test_transport(&diff_server);
+        let diff_attempt = diff_transport
+            .try_admit(
+                prepared.into_transport_input(),
+                &mut fixture.policy,
+                &credential,
+                AgentProviderCancellation::new(),
+            )
+            .expect("diff transport admission");
+        let committed_acknowledgement = diff_attempt
+            .input_evidence()
+            .diff_receipt()
+            .expect("committed diff receipt")
+            .acknowledgement()
+            .clone();
+        assert_eq!(
+            committed_acknowledgement.observation(),
+            current.request().id()
+        );
+        assert_eq!(
+            committed_acknowledgement.generation(),
+            current.request().generation()
+        );
+        assert_eq!(
+            committed_acknowledgement.context(),
+            current.request().context()
+        );
+        assert_eq!(
+            diff_attempt
+                .input_evidence()
+                .observation_acknowledgement()
+                .expect("diff acknowledgement"),
+            &committed_acknowledgement
+        );
+        assert_eq!(
+            fixture.policy.accounting().reserved_model_tokens(),
+            u64::from(structured_input_tokens) + 20
+        );
+
+        let mut diff_correlation = None;
+        let diff_result = diff_attempt
+            .execute(|batch| {
+                for event in batch.into_events() {
+                    if let zephium_agentic::AgentProviderStreamEvent::ToolCall(tool) = event {
+                        assert!(
+                            diff_correlation.is_none(),
+                            "diff fixture emitted multiple tools"
+                        );
+                        diff_correlation = Some(tool.into_continuation_parts().0);
+                    }
+                }
+                AgentProviderBatchDisposition::Continue
+            })
+            .await;
+        let AgentProviderTransportOutcome::Stream(AgentProviderStreamConclusion::Completed(
+            diff_completion,
+        )) = diff_result.outcome()
+        else {
+            panic!("diff tool completion expected")
+        };
+        assert_eq!(diff_completion.stop(), AgentProviderStopReason::ToolCalls);
+        assert!(diff_result.has_continuation_seed());
+        assert!(!format!("{diff_result:?}").contains("updated synthetic marker"));
+        let (diff_settlement, diff_seed) = diff_result.into_policy_settlement_with_continuation();
+        let next_continuation = diff_seed
+            .expect("diff continuation seed")
+            .join_terminal_tool(
+                diff_completion,
+                diff_correlation.expect("diff tool correlation"),
+            )
+            .expect("diff exact terminal join");
+        assert_eq!(next_continuation.baseline(), &committed_acknowledgement);
+        let AgentProviderPolicySettlement::PricingRequired(diff_settlement) = diff_settlement
+        else {
+            panic!("diff reported usage must be priced")
+        };
+        let diff_schedule = pricing_schedule(diff_settlement.config());
+        let receipt = diff_settlement
+            .settle(&mut fixture.policy, &diff_schedule)
+            .expect("diff catalog-priced settlement");
+        assert_eq!(receipt.input_tokens(), u64::from(structured_input_tokens));
+        assert_eq!(
+            receipt.output_tokens(),
+            match provider {
+                AgentProviderKind::OpenAiResponses => 3,
+                AgentProviderKind::AnthropicMessages => 4,
+            }
+        );
+        assert_eq!(fixture.policy.pending_model_calls(), 0);
+        assert!(diff_transport
+            .snapshot()
+            .expect("diff snapshot")
+            .is_quiescent());
+
+        let captured = diff_server.finish();
+        let body: serde_json::Value =
+            serde_json::from_slice(&captured.body).expect("diff request body");
+        match provider {
+            AgentProviderKind::OpenAiResponses => {
+                assert_eq!(body["store"], false);
+                assert!(body.get("previous_response_id").is_none());
+                let input = body["input"].as_array().expect("fixed OpenAI input");
+                assert_eq!(input.len(), 4);
+                assert_eq!(input[2]["type"], "function_call");
+                assert_eq!(input[3]["type"], "function_call_output");
+                assert_eq!(input[2]["call_id"], input[3]["call_id"]);
+            }
+            AgentProviderKind::AnthropicMessages => {
+                let messages = body["messages"]
+                    .as_array()
+                    .expect("fixed Anthropic messages");
+                assert_eq!(messages.len(), 3);
+                assert_eq!(messages[1]["role"], "assistant");
+                assert_eq!(messages[1]["content"][0]["type"], "tool_use");
+                assert_eq!(messages[2]["role"], "user");
+                assert_eq!(messages[2]["content"][0]["type"], "tool_result");
+                assert_eq!(
+                    messages[1]["content"][0]["id"],
+                    messages[2]["content"][0]["tool_use_id"]
+                );
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn openai_diff_is_single_post_and_retains_the_next_exact_seed() {
+        qualify_admitted_diff_transport(AgentProviderKind::OpenAiResponses).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn anthropic_diff_is_single_post_and_retains_the_next_exact_seed() {
+        qualify_admitted_diff_transport(AgentProviderKind::AnthropicMessages).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

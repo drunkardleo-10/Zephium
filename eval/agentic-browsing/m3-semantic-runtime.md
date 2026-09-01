@@ -230,6 +230,21 @@ have been instrumented or observed on either platform.
   eligible tool-only turn. Refusal or cancellation releases the reservation
   without advancing either. Concrete reviewed counters are not yet installed,
   so production continues to require a fresh full observation.
+- Fixed loopback transport integrations now exercise the complete admitted
+  OpenAI and Anthropic paths from full-observation commit and exact tool-only
+  terminal through diff computation, fixed stateless replay, synthetic
+  exact-local whole-input count, exact policy reservation, one POST, stream
+  decoding, trusted pricing settlement, and next continuation seed. OpenAI
+  proves a four-item replay with adjacent matching `function_call` /
+  `function_call_output`, no `previous_response_id`, and a synthetic 17-token
+  whole-input count. Anthropic proves the original user message followed by an
+  adjacent assistant `tool_use` and matching user `tool_result`, with a
+  synthetic 15-token whole-input count. Both reserve the exact synthetic count
+  plus the fixed 20-token output ceiling, retain the exact committed diff
+  acknowledgement, and reach full quiescence after both turns. They use only
+  ephemeral loopback listeners, fixed synthetic page text, and synthetic
+  credentials; they are not provider token-count or real-provider
+  qualification claims.
 - The native-to-isolated-world request is a separate 2 KiB maximum closed JSON
   grammar containing only protocol/invocation/snapshot generations, one fixed
   initial/region/subtree/table/frame/surrounding-text scope, an internal stable
@@ -382,6 +397,7 @@ an admitted observation and creates no timer, thread, page, queue, or worker.
 ```sh
 cargo test --locked -p zephium-agentic
 cargo test --locked -p zephium-agentic --features probe-harness
+cargo test --locked -p zephium-agent-provider-transport
 cargo clippy --locked -p zephium-agentic --all-targets -- -D warnings
 cargo clippy --locked -p zephium-agentic --all-targets --features probe-harness -- -D warnings
 cargo xtask check-agentic-probe-boundary
@@ -427,7 +443,9 @@ id fields, preserved provider/service/output/tool bounds, request/transcript
 byte accounting, exact-local quality and whole-input authorization refusal
 before policy mutation, exact measured-token reservation, commit-only diff
 receipt/taint/continuation advancement, cancellation/refusal release, bounded
-multi-turn transcript carry-forward, and content-free diagnostics.
+multi-turn transcript carry-forward, one-post loopback transports with fixed
+OpenAI and Anthropic replay shapes, exact diff acknowledgement and next-seed
+retention, and content-free diagnostics.
 Runtime-invocation tests
 cover the sole compact initial shape, absence of URLs/selectors/scripts,
 stable-anchor diagnostic redaction,
