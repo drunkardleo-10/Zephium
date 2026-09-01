@@ -26,6 +26,15 @@ const ENGINE_MACOS_PROBE_BINARY: &str =
     "crates/zephium-engine/src/bin/macos_agentic_input_probe.rs";
 const ENGINE_WINDOWS_PROBE_BINARY: &str =
     "crates/zephium-engine/src/bin/windows_agentic_input_probe.rs";
+const AGENTIC_SOURCE_DIRECTORY: &str = "crates/zephium-agentic/src";
+const AGENTIC_DIAGNOSTIC_MODULES: [&str; 6] = [
+    "contract.rs",
+    "control.rs",
+    "evidence.rs",
+    "fixture_server.rs",
+    "probe_recipes.rs",
+    "protocol.rs",
+];
 const SHIPPING_ROOTS: [&str; 2] = ["desktop", "crates/zephium-app"];
 const RELEASE_REFUSAL: &str = concat!(
     "#[cfg(all(feature=\"probe-harness\",not(debug_assertions)))]",
@@ -60,6 +69,7 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     let _ = read(repository.join(ENGINE_MACOS_PROBE_BINARY))?;
     validate_windows_probe_binary(&read(repository.join(ENGINE_WINDOWS_PROBE_BINARY))?)?;
     validate_windows_probe_source(&read(repository.join(ENGINE_WINDOWS_PROBE_MODULE))?)?;
+    validate_agentic_zero_idle_sources(repository)?;
     validate_shipping_sources(repository)?;
     let metadata = cargo_metadata(repository)?;
     validate_release_graph(&metadata)
@@ -241,6 +251,40 @@ fn validate_manifest(source: &str) -> Result<(), String> {
     if !harness.is_empty() {
         return Err(
             "probe-harness must not activate an implicit dependency or shipping feature".to_owned(),
+        );
+    }
+    let default = manifest
+        .get("features")
+        .and_then(|features| features.get("default"))
+        .and_then(toml::Value::as_array)
+        .ok_or_else(|| "zephium-agentic default feature is missing".to_owned())?;
+    if !default.is_empty() {
+        return Err("zephium-agentic default feature set must remain empty".to_owned());
+    }
+    let dependencies = manifest
+        .get("dependencies")
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| "zephium-agentic dependency table is missing".to_owned())?;
+    let actual = dependencies
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let expected = [
+        "crc32fast",
+        "serde",
+        "serde_json",
+        "sha2",
+        "thiserror",
+        "ulid",
+        "url",
+        "zephium-core",
+    ]
+    .into_iter()
+    .collect::<BTreeSet<_>>();
+    if actual != expected || manifest.get("target").is_some() {
+        return Err(
+            "zephium-agentic default dependency graph acquired unreviewed runtime authority"
+                .to_owned(),
         );
     }
     Ok(())
@@ -479,6 +523,58 @@ fn validate_provider_transport_root(source: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_agentic_zero_idle_sources(repository: &Path) -> Result<(), String> {
+    let source_directory = repository.join(AGENTIC_SOURCE_DIRECTORY);
+    let mut files = Vec::new();
+    collect_files(&source_directory, &mut files)?;
+    for path in files {
+        if path.extension().and_then(|extension| extension.to_str()) != Some("rs")
+            || path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| AGENTIC_DIAGNOSTIC_MODULES.contains(&name))
+        {
+            continue;
+        }
+        let source = read(&path)?;
+        validate_agentic_zero_idle_source(
+            &path
+                .strip_prefix(repository)
+                .unwrap_or(&path)
+                .display()
+                .to_string(),
+            &source,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_agentic_zero_idle_source(label: &str, source: &str) -> Result<(), String> {
+    for forbidden in [
+        "std::net::",
+        "std::thread::",
+        "std::process::",
+        "std::fs::",
+        "tokio::",
+        "async_std::",
+        "reqwest::",
+        "hyper::",
+        "TcpListener",
+        "UdpSocket",
+        "Command::new(",
+        "OpenOptions::",
+        "File::open(",
+        "thread::spawn(",
+    ] {
+        if source.contains(forbidden) {
+            return Err(format!(
+                "zero-idle agentic functional core {label} acquired forbidden authority {forbidden}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_shipping_sources(repository: &Path) -> Result<(), String> {
     let forbidden = [
         "probe-harness",
@@ -533,6 +629,9 @@ fn validate_release_graph(metadata: &CargoMetadata) -> Result<(), String> {
     let engine = package_names
         .get("zephium-engine")
         .ok_or_else(|| "cargo metadata is missing zephium-engine".to_owned())?;
+    let provider_transport = package_names
+        .get("zephium-agent-provider-transport")
+        .ok_or_else(|| "cargo metadata is missing zephium-agent-provider-transport".to_owned())?;
     let resolve = metadata
         .resolve
         .as_ref()
@@ -547,6 +646,12 @@ fn validate_release_graph(metadata: &CargoMetadata) -> Result<(), String> {
     while let Some(package) = pending.pop() {
         if !visited.insert(package) {
             continue;
+        }
+        if package == *provider_transport {
+            return Err(
+                "ordinary zephium-desktop release graph links the dormant agent provider transport"
+                    .to_owned(),
+            );
         }
         if let Some(node) = graph.get(package) {
             if package == *agentic
@@ -671,12 +776,21 @@ mod tests {
                     id: "agentic".to_owned(),
                     name: "zephium-agentic".to_owned(),
                 },
+                CargoPackage {
+                    id: "transport".to_owned(),
+                    name: "zephium-agent-provider-transport".to_owned(),
+                },
             ],
             resolve: Some(CargoResolve {
                 nodes: vec![
                     CargoNode {
                         id: "desktop".to_owned(),
                         dependencies: desktop_dependencies,
+                        features: Vec::new(),
+                    },
+                    CargoNode {
+                        id: "transport".to_owned(),
+                        dependencies: vec!["agentic".to_owned()],
                         features: Vec::new(),
                     },
                     CargoNode {
@@ -727,6 +841,7 @@ mod tests {
             .features
             .push("native-agentic-input-probe".to_owned());
         assert!(validate_release_graph(&transitive).is_err());
+        assert!(validate_release_graph(&metadata(vec!["transport".to_owned()])).is_err());
     }
 
     #[test]
@@ -749,6 +864,39 @@ mod tests {
         "#;
         validate_root(valid).expect("valid guard");
         assert!(validate_root("mod fixture_server;").is_err());
+    }
+
+    #[test]
+    fn default_agentic_core_retains_closed_dependency_and_authority_sets() {
+        let manifest = r#"
+            [package]
+            publish = false
+            [features]
+            default = []
+            probe-harness = []
+            [dependencies]
+            crc32fast = "1"
+            serde = "1"
+            serde_json = "1"
+            sha2 = "1"
+            thiserror = "2"
+            ulid = "1"
+            url = "2"
+            zephium-core = "1"
+        "#;
+        validate_manifest(manifest).expect("closed functional-core manifest");
+        assert!(validate_manifest(&format!("{manifest}\ntokio = \"1\"")).is_err());
+        assert!(
+            validate_manifest(&manifest.replace("default = []", "default = [\"runtime\"]"))
+                .is_err()
+        );
+
+        validate_agentic_zero_idle_source("core.rs", "use std::collections::BTreeMap;")
+            .expect("allocation-only core");
+        assert!(
+            validate_agentic_zero_idle_source("core.rs", "use std::net::TcpListener;").is_err()
+        );
+        assert!(validate_agentic_zero_idle_source("core.rs", "tokio::spawn(work);").is_err());
     }
 
     #[test]

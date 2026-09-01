@@ -25,8 +25,14 @@ responses, machine-local paths, or native traces.
   device-qualified without a reviewed gate change;
 - cross-checks the Wry, Tauri, and `tauri-runtime-wry` capability versions and
   revisions against their vendored manifests and provenance files; and
-- continues to prove that diagnostic features are absent from the ordinary
-  desktop release graph.
+- continues to prove that diagnostic features and the dormant provider HTTPS
+  transport are absent from the ordinary desktop release graph.
+
+The same check pins the default functional core to an empty feature set and a
+closed allocation/data dependency inventory. Its non-diagnostic source is
+rejected if it acquires thread, process, file, socket, async-runtime, or HTTP
+client authority. This is a structural zero-idle-authority proof: it does not
+replace the pending named-device CPU, memory, wakeup, or energy measurement.
 
 Run the gate and its focused tests with:
 
