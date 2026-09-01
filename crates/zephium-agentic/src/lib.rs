@@ -38,6 +38,7 @@ mod semantic_observation;
 mod semantic_read;
 mod semantic_read_model;
 mod semantic_runtime;
+mod semantic_screenshot;
 mod semantic_settle;
 mod semantic_verify;
 mod semantic_wire;
@@ -195,6 +196,19 @@ pub use semantic_runtime::{
     MAX_SEMANTIC_RUNTIME_SOURCE_BYTES, MAX_SEMANTIC_RUNTIME_VISITED_NODES,
     MIN_SEMANTIC_RUNTIME_WIRE_BYTES, SEMANTIC_RUNTIME_GLOBAL_NAME, SEMANTIC_RUNTIME_PROGRAM,
     SEMANTIC_RUNTIME_PROTOCOL_VERSION,
+};
+pub use semantic_screenshot::{
+    prepare_semantic_screenshot, SemanticScreenshot, SemanticScreenshotBudget,
+    SemanticScreenshotBudgetError, SemanticScreenshotCoordinator,
+    SemanticScreenshotCoordinatorError, SemanticScreenshotCoordinatorStatus,
+    SemanticScreenshotError, SemanticScreenshotNativeCapture, SemanticScreenshotNativeRequest,
+    SemanticScreenshotPaintEvidence, SemanticScreenshotPending, SemanticScreenshotPixelLayout,
+    SemanticScreenshotRequest, SemanticScreenshotRequestError, SemanticScreenshotRequestId,
+    SemanticScreenshotScope, SemanticScreenshotStats, SemanticScreenshotTrust,
+    MAX_PENDING_SEMANTIC_SCREENSHOTS, MAX_SEMANTIC_SCREENSHOT_CAPTURE_MILLIS,
+    MAX_SEMANTIC_SCREENSHOT_HEIGHT, MAX_SEMANTIC_SCREENSHOT_PIXELS,
+    MAX_SEMANTIC_SCREENSHOT_PNG_BYTES, MAX_SEMANTIC_SCREENSHOT_PNG_CHUNKS,
+    MAX_SEMANTIC_SCREENSHOT_WIDTH,
 };
 pub use semantic_settle::{
     SemanticActionAttemptId, SemanticActionFailure, SemanticActionRecoveryHint,

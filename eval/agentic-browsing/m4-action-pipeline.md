@@ -4,12 +4,13 @@ Status: bounded pre-policy action proposals, exact observation binding,
 one-action rolling checkpoints, typed settle/verification contracts,
 fresh-snapshot structural revalidation, event-driven bounded settlement,
 independent effect verification, and acknowledged action-result diff/fresh-state
-finalization, plus bounded semantic read/transport and closed structured
-extraction admission are implemented.
+finalization, plus bounded semantic read/transport, closed structured
+extraction admission, and the one-shot viewport screenshot contract are
+implemented.
 Policy permits, platform execution,
 visibility/occlusion checks, native observation adapters and timer driving,
-multi-action result aggregation, screenshot, model-provider wiring, and live
-qualification remain pending.
+multi-action result aggregation, native screenshot adapters, visual policy and
+model-provider wiring, and live qualification remain pending.
 
 This evidence describes a functional-core seam. It does not claim that an
 action can currently reach a native view or page, that model-declared effects
@@ -218,6 +219,44 @@ are trusted, or that M4 is complete.
   span from a different result cannot resolve against a coincidentally similar
   table. Extraction creates no observation acknowledgement, action authority,
   policy permit, or durable page identity.
+- Screenshot v1 is deliberately viewport-only. Apple WebKit can natively select
+  a rectangle and width, but WebView2 `CapturePreview` supplies encoded PNG/JPEG
+  for what the WebView is displaying and documents that a call before the new
+  document's `ContentLoading` can capture the page being left. A raw-RGBA or
+  semantic-region common seam would therefore add a Windows full-frame decode,
+  crop, second image allocation, and decoder surface before evidence shows that
+  cost is needed. The native request instead requires an explicit exact-document
+  content-available attestation. See the primary
+  [WebKit snapshot configuration](https://developer.apple.com/documentation/webkit/wksnapshotconfiguration)
+  and [WebView2 capture contract](https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2#capturepreview).
+- A screenshot can be prepared only from an exact content-digest-bound
+  observation acknowledgement. Every observed frame must be complete, every
+  retained frame boundary observed, and no node may be secret or explicitly
+  redacted. This is the default no-known-secret path, not proof that arbitrary
+  image/canvas pixels are public; a future visual override requires a separate
+  exact policy capability rather than another value in this contract.
+- Preparation produces one content-bound request which a zero-idle coordinator
+  splits into non-cloneable pending/native halves. At most two captures may be
+  pending globally and one per exact context. Duplicate identities, cross-result
+  halves, wrong-context cancellation, stale context/document/cancellation joins,
+  pre-request capture, clock regression, and post-deadline completion fail
+  closed. Every terminal admission failure or exact cancellation releases its
+  slot without retry authority; the sole deadline is at most five seconds.
+- The standard image budget is 1280x800, 1,024,000 pixels, and 5 MiB native PNG;
+  hard ceilings are 2048x2048, 2,097,152 pixels, and 9 MiB. The platform stream
+  must enforce the selected byte ceiling while encoding, before returning a
+  buffer. Admission scans at most 1,024 chunks, requires matching nonzero
+  dimensions, fixed non-interlaced 8-bit RGB/RGBA, exact IHDR/contiguous
+  IDAT/IEND order, and valid CRCs. Unknown critical chunks fail; ancillary
+  rendering/ICC extensions also fail, bounded color declarations are retained,
+  and only a fixed non-rendering metadata vocabulary is CRC-checked and removed
+  in place without a pixel decode or second full image allocation.
+- Admitted pixels remain explicitly browser-rendered hostile page content and
+  conservatively `Sensitive`. PNG bytes and all page/native metadata are
+  redacted from diagnostics; the core creates no file, persistence, timer,
+  worker, native view, or thread. It mints no policy/provider authority and the
+  current tree has no native capture adapter, so no live screenshot is taken by
+  these contracts or tests.
 
 The functional core has zero idle overhead. It allocates only when a bounded
 action, read, or extraction operation is invoked and creates no timer, worker,
@@ -282,5 +321,15 @@ and aggregate provenance ceilings; secret/control-character refusal; canonical,
 resolved, unique, ordered, and sensitivity-admitted citations; content-free
 diagnostics; exact borrowed provenance; and cross-result source-span
 substitution refusal.
+
+Screenshot coverage includes exact acknowledged-observation binding;
+incomplete/unsupported/known-secret refusal; request deadline and image-budget
+validation; duplicate/global/per-context coordinator capacity; exact
+cancellation and terminal cleanup; cross-request pending/native substitution;
+stale context and capture-clock refusal; RGB/RGBA dimensions and classification;
+PNG signature, chunk framing/order/count, CRC, terminal-IEND, fixed-format, and
+critical-chunk rejection; consecutive IDAT retention; ancillary metadata
+removal before and after image data; content-redacted diagnostics; and
+move-only canonical PNG delivery.
 
 No platform action backend or live page is exercised by these tests.

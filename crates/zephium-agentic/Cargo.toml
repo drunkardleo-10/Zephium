@@ -13,6 +13,7 @@ default = []
 probe-harness = []
 
 [dependencies]
+crc32fast.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "=0.10.9"
