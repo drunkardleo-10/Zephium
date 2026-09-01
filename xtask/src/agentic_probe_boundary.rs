@@ -45,6 +45,7 @@ const AGENTIC_SEMANTIC_EXECUTE_COORDINATOR: &str =
 const AGENTIC_SEMANTIC_SETTLE_COORDINATOR: &str =
     "crates/zephium-agentic/src/semantic_settle_coordinator.rs";
 const AGENTIC_SEMANTIC_SETTLE: &str = "crates/zephium-agentic/src/semantic_settle.rs";
+const AGENTIC_SEMANTIC_VERIFY: &str = "crates/zephium-agentic/src/semantic_verify.rs";
 const AGENTIC_CONTEXT_PORT: &str = "crates/zephium-agentic/src/context_port.rs";
 const AGENTIC_SUPERVISOR: &str = "crates/zephium-agentic/src/agent_supervisor.rs";
 const AGENTIC_SUPERVISOR_PROGRESS: &str =
@@ -199,6 +200,10 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     validate_semantic_settlement_coordinator(
         &read(repository.join(AGENTIC_ROOT))?,
         &read(repository.join(AGENTIC_SEMANTIC_SETTLE_COORDINATOR))?,
+    )?;
+    validate_semantic_terminal_verification(
+        &read(repository.join(AGENTIC_ROOT))?,
+        &read(repository.join(AGENTIC_SEMANTIC_VERIFY))?,
     )?;
     validate_provider_input_evidence_contract(
         &read(repository.join(AGENTIC_ROOT))?,
@@ -2976,6 +2981,68 @@ fn validate_semantic_settlement_coordinator(root: &str, coordinator: &str) -> Re
     Ok(())
 }
 
+fn validate_semantic_terminal_verification(root: &str, verification: &str) -> Result<(), String> {
+    let root = compact(root);
+    for required in [
+        "verify_semantic_action_terminal",
+        "SemanticActionVerificationRefusal",
+        "SemanticActionVerifiedTerminal",
+        "#[cfg(test)]pub(crate)usesemantic_verify::verify_semantic_action;",
+    ] {
+        if !root.contains(required) {
+            return Err(format!(
+                "agentic root lost consuming terminal verification {required}"
+            ));
+        }
+    }
+
+    let verification = compact(verification);
+    for required in [
+        "pubstructSemanticActionVerifiedTerminal{",
+        "active:AgentActiveEffect",
+        "execution:SemanticActionExecutionApplied",
+        "settlement:SemanticSettleTracker",
+        "verified:SemanticVerifiedAction",
+        "pubstructSemanticActionVerificationRefusal{",
+        "terminal:Box<SemanticActionSettlementTerminal>",
+        "pubfnverify_semantic_action_terminal(",
+        "terminal:SemanticActionSettlementTerminal",
+        "letverified=matchverify_semantic_action(terminal.tracker(),action,evidence)",
+        "let(active,execution,settlement)=terminal.into_parts();",
+        "pub(crate)fnverify_semantic_action(",
+    ] {
+        if !verification.contains(required) {
+            return Err(format!(
+                "semantic verification lost exact terminal join {required}"
+            ));
+        }
+    }
+    for forbidden in [
+        "pubfnverify_semantic_action(",
+        "into_terminal(",
+        "evaluateJavaScript",
+        "callAsyncJavaScript",
+        "querySelector",
+        "CGEvent",
+        "NSEvent",
+        "Input.dispatch",
+        "std::thread",
+        "std::time",
+        "std::fs",
+        "tokio::",
+        "Mutex<",
+        "Arc<",
+        "retry(",
+    ] {
+        if verification.contains(forbidden) {
+            return Err(format!(
+                "semantic terminal verification acquired forbidden escape/work surface {forbidden}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_provider_input_evidence_contract(
     root: &str,
     request: &str,
@@ -4212,6 +4279,64 @@ mod tests {
         assert!(validate_semantic_settlement_coordinator(
             root,
             &format!("{coordinator}\nstd::thread::spawn(run);"),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn semantic_verification_consumes_only_coordinator_terminals() {
+        let root = r#"
+            pub use semantic_verify::{
+                verify_semantic_action_terminal,
+                SemanticActionVerificationRefusal,
+                SemanticActionVerifiedTerminal,
+            };
+            #[cfg(test)]
+            pub(crate) use semantic_verify::verify_semantic_action;
+        "#;
+        let verification = r#"
+            pub struct SemanticActionVerifiedTerminal {
+                active: AgentActiveEffect,
+                execution: SemanticActionExecutionApplied,
+                settlement: SemanticSettleTracker,
+                verified: SemanticVerifiedAction,
+            }
+            pub struct SemanticActionVerificationRefusal {
+                terminal: Box<SemanticActionSettlementTerminal>,
+            }
+            pub fn verify_semantic_action_terminal(
+                terminal: SemanticActionSettlementTerminal,
+                action: &SemanticPreparedAction,
+                evidence: SemanticEffectEvidence<'_>,
+            ) {
+                let verified = match verify_semantic_action(terminal.tracker(), action, evidence) {};
+                let (active, execution, settlement) = terminal.into_parts();
+            }
+            pub(crate) fn verify_semantic_action(
+                settlement: &SemanticSettleTracker,
+            ) {}
+        "#;
+        validate_semantic_terminal_verification(root, verification)
+            .expect("consuming terminal verification");
+        assert!(validate_semantic_terminal_verification(
+            root,
+            &verification.replace(
+                "pub(crate) fn verify_semantic_action(",
+                "pub fn verify_semantic_action(",
+            ),
+        )
+        .is_err());
+        assert!(validate_semantic_terminal_verification(
+            root,
+            &verification.replace(
+                "let (active, execution, settlement) = terminal.into_parts();",
+                ""
+            ),
+        )
+        .is_err());
+        assert!(validate_semantic_terminal_verification(
+            root,
+            &format!("{verification}\nfn into_terminal() {{}}"),
         )
         .is_err());
     }

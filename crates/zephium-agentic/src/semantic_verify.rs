@@ -11,7 +11,8 @@ use thiserror::Error;
 
 use crate::semantic_settle::exact_document_successor;
 use crate::{
-    ContextJoin, SemanticActionAttemptId, SemanticActionFailure, SemanticActionRevalidationError,
+    AgentActiveEffect, ContextJoin, SemanticActionAttemptId, SemanticActionExecutionApplied,
+    SemanticActionFailure, SemanticActionRevalidationError, SemanticActionSettlementTerminal,
     SemanticCompleteness, SemanticDialogState, SemanticInvocationId, SemanticPreparedAction,
     SemanticScrollAmount, SemanticScrollDirection, SemanticSettleInstant, SemanticSettleStatus,
     SemanticSettleTracker, SemanticSnapshot, SemanticSnapshotGeneration, SemanticState,
@@ -395,12 +396,132 @@ impl SemanticVerificationError {
     }
 }
 
+/// Exact policy, execution, settlement, and independent verification success.
+#[must_use]
+pub struct SemanticActionVerifiedTerminal {
+    active: AgentActiveEffect,
+    execution: SemanticActionExecutionApplied,
+    settlement: SemanticSettleTracker,
+    verified: SemanticVerifiedAction,
+}
+
+impl SemanticActionVerifiedTerminal {
+    /// Exact dispatched policy authority retained through verification.
+    pub const fn active(&self) -> &AgentActiveEffect {
+        &self.active
+    }
+
+    /// Content-free backend attribution and native execution timing.
+    pub const fn execution(&self) -> SemanticActionExecutionApplied {
+        self.execution
+    }
+
+    /// Exact terminal settlement state consumed by verification.
+    pub const fn settlement(&self) -> &SemanticSettleTracker {
+        &self.settlement
+    }
+
+    /// Opaque independently established action proof.
+    pub const fn verified(&self) -> &SemanticVerifiedAction {
+        &self.verified
+    }
+
+    /// Separates exact policy authority, metrics, settlement, and proof.
+    pub fn into_parts(
+        self,
+    ) -> (
+        AgentActiveEffect,
+        SemanticActionExecutionApplied,
+        SemanticSettleTracker,
+        SemanticVerifiedAction,
+    ) {
+        (self.active, self.execution, self.settlement, self.verified)
+    }
+}
+
+impl fmt::Debug for SemanticActionVerifiedTerminal {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SemanticActionVerifiedTerminal")
+            .field("active", &"[redacted]")
+            .field("execution", &self.execution)
+            .field("settlement", &self.settlement)
+            .field("verified", &self.verified)
+            .finish()
+    }
+}
+
+/// One-shot verification refusal that returns terminal policy authority.
+#[must_use]
+pub struct SemanticActionVerificationRefusal {
+    terminal: Box<SemanticActionSettlementTerminal>,
+    error: SemanticVerificationError,
+}
+
+impl SemanticActionVerificationRefusal {
+    /// Closed independent-verification failure.
+    pub const fn error(&self) -> SemanticVerificationError {
+        self.error
+    }
+
+    /// Recovers terminal policy authority for one typed failed settlement.
+    pub fn into_parts(
+        self,
+    ) -> (
+        AgentActiveEffect,
+        SemanticActionExecutionApplied,
+        SemanticSettleTracker,
+        SemanticVerificationError,
+    ) {
+        let (active, execution, settlement) = self.terminal.into_parts();
+        (active, execution, settlement, self.error)
+    }
+}
+
+impl fmt::Debug for SemanticActionVerificationRefusal {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SemanticActionVerificationRefusal")
+            .field("terminal", &"[redacted]")
+            .field("error", &self.error)
+            .finish()
+    }
+}
+
+/// Consumes one exact terminal settlement into one independent proof attempt.
+///
+/// Refusal consumes the proof opportunity and returns policy authority for a
+/// typed failed settlement. It creates no retry, timer, queue, snapshot copy,
+/// page callback, or content buffer.
+pub fn verify_semantic_action_terminal(
+    terminal: SemanticActionSettlementTerminal,
+    action: &SemanticPreparedAction,
+    evidence: SemanticEffectEvidence<'_>,
+) -> Result<SemanticActionVerifiedTerminal, SemanticActionVerificationRefusal> {
+    let verified = match verify_semantic_action(terminal.tracker(), action, evidence) {
+        Ok(verified) => verified,
+        Err(error) => {
+            return Err(SemanticActionVerificationRefusal {
+                terminal: Box::new(terminal),
+                error,
+            });
+        }
+    };
+    let (active, execution, settlement) = terminal.into_parts();
+    Ok(SemanticActionVerifiedTerminal {
+        active,
+        execution,
+        settlement,
+        verified,
+    })
+}
+
 /// Independently proves one exact settled action postcondition.
 ///
 /// No settle fact is accepted as effect evidence. Snapshot proofs require the
 /// exact adjacent snapshot; navigation/dialog/scroll facts must come from the
 /// separately sampled closed evidence vocabulary.
-pub fn verify_semantic_action(
+pub(crate) fn verify_semantic_action(
     settlement: &SemanticSettleTracker,
     action: &SemanticPreparedAction,
     evidence: SemanticEffectEvidence<'_>,
@@ -693,7 +814,8 @@ mod tests {
                 {"k": 1, "r": "document", "o": 16},
                 {"k": 2, "p": 0, "r": "button", "n": "Private submit", "o": 1},
                 {"k": 3, "p": 0, "r": "textbox", "n": "Private title",
-                 "v": {"k": "text", "value": "old"}, "o": 10},
+                 "v": {"k": "text", "value": "old"}, "o": 10,
+                 "b": {"x": 10, "y": 20, "w": 200, "h": 30}},
                 {"k": 4, "p": 0, "r": "checkbox", "n": "Private toggle", "o": 1},
                 {"k": 5, "p": 0, "r": "combobox", "n": "Private priority",
                  "v": {"k": "ordinal", "value": 0}, "o": 12},
@@ -777,6 +899,154 @@ mod tests {
             SemanticSettleInstant::from_millis(100),
         )
         .expect("tracker")
+    }
+
+    fn execution_terminal(
+        action: &SemanticPreparedAction,
+        attempt: u64,
+    ) -> SemanticActionSettlementTerminal {
+        let active = AgentActiveEffect::for_execution_test(
+            action,
+            SemanticActionAttemptId::new(attempt).expect("attempt"),
+        );
+        let (pending, native) = crate::prepare_semantic_action_execution(
+            active,
+            action,
+            crate::SemanticActionExecutionInstant::from_millis(80),
+        )
+        .expect("execution");
+        let actual_geometry = native.expected_geometry();
+        let outcome = pending.settle(
+            action.frame(),
+            native.complete(
+                crate::SemanticActionExecutionBackend::FixedSemanticRecipe,
+                crate::SemanticActionNativeReadiness::ExactVisibleUnoccludedTarget,
+                crate::SemanticActionNativeViewport::try_new(800, 600).expect("viewport"),
+                actual_geometry,
+                crate::SemanticActionExecutionInstant::from_millis(90),
+                crate::SemanticActionExecutionInstant::from_millis(100),
+            ),
+        );
+        let start = crate::begin_semantic_action_settlement(outcome, action).expect("settlement");
+        let mut coordinator = crate::SemanticActionSettlementCoordinator::new();
+        let crate::SemanticActionSettlementUpdate::Terminal(terminal) =
+            coordinator.begin(start).expect("terminal")
+        else {
+            panic!("immediate settlement was pending");
+        };
+        *terminal
+    }
+
+    #[test]
+    fn terminal_verification_consumes_one_exact_proof_opportunity() {
+        let (observation, _) = observation();
+        let batch = bind(
+            &observation,
+            SemanticActionIntent::Fill {
+                target: SemanticReferenceId::new(3).expect("target"),
+                value: SemanticActionText::try_new("new private title".to_owned()).expect("text"),
+            },
+            SemanticWaitCondition::Immediate,
+            SemanticVerification::TargetValueMatchesInput,
+        )
+        .expect("batch");
+        let action = batch.actions()[0]
+            .prepare(&observation.frames()[0])
+            .expect("prepare");
+        let snapshot = current(
+            &observation,
+            json!([
+                {"k": 1, "r": "document", "o": 16},
+                {"k": 3, "p": 0, "r": "textbox", "n": "Private title",
+                 "v": {"k": "text", "value": "new private title"}, "o": 10}
+            ]),
+        );
+
+        let success = verify_semantic_action_terminal(
+            execution_terminal(&action, 21),
+            &action,
+            SemanticEffectEvidence::exact_target_value(
+                SemanticActionAttemptId::new(21).expect("attempt"),
+                SemanticSettleInstant::from_millis(101),
+                &snapshot,
+                "old",
+                "new private title",
+            ),
+        )
+        .expect("verification");
+        assert_eq!(success.active().attempt().get(), 21);
+        assert_eq!(
+            success.execution().backend(),
+            crate::SemanticActionExecutionBackend::FixedSemanticRecipe
+        );
+        assert_eq!(
+            success.settlement().status(),
+            SemanticSettleStatus::ReadyForVerification
+        );
+        assert_eq!(
+            success.verified().proof(),
+            SemanticEffectProofKind::ExactTargetValue
+        );
+        let debug = format!("{success:?}");
+        assert!(!debug.contains("new private title"));
+        let (active, _execution, settlement, verified) = success.into_parts();
+        assert_eq!(active.attempt().get(), 21);
+        assert_eq!(settlement.attempt().get(), 21);
+        assert_eq!(verified.attempt().get(), 21);
+
+        let refusal = verify_semantic_action_terminal(
+            execution_terminal(&action, 22),
+            &action,
+            SemanticEffectEvidence::exact_target_value(
+                SemanticActionAttemptId::new(22).expect("attempt"),
+                SemanticSettleInstant::from_millis(101),
+                &snapshot,
+                "old",
+                "wrong private title",
+            ),
+        )
+        .expect_err("unproven outcome");
+        assert_eq!(
+            refusal.error(),
+            SemanticVerificationError::OutcomeNotObserved
+        );
+        assert!(!format!("{refusal:?}").contains("wrong private title"));
+        let (active, _execution, settlement, error) = refusal.into_parts();
+        assert_eq!(active.attempt().get(), 22);
+        assert_eq!(settlement.attempt().get(), 22);
+        assert_eq!(
+            error.action_failure(),
+            SemanticActionFailure::VerificationFailed
+        );
+
+        let substituted_batch = bind(
+            &observation,
+            SemanticActionIntent::Fill {
+                target: SemanticReferenceId::new(3).expect("target"),
+                value: SemanticActionText::try_new("different private title".to_owned())
+                    .expect("text"),
+            },
+            SemanticWaitCondition::Immediate,
+            SemanticVerification::TargetValueMatchesInput,
+        )
+        .expect("batch");
+        let substituted = substituted_batch.actions()[0]
+            .prepare(&observation.frames()[0])
+            .expect("prepare");
+        let refusal = verify_semantic_action_terminal(
+            execution_terminal(&action, 23),
+            &substituted,
+            SemanticEffectEvidence::exact_target_value(
+                SemanticActionAttemptId::new(23).expect("attempt"),
+                SemanticSettleInstant::from_millis(101),
+                &snapshot,
+                "old",
+                "new private title",
+            ),
+        )
+        .expect_err("substituted action");
+        assert_eq!(refusal.error(), SemanticVerificationError::ActionMismatch);
+        assert_eq!(refusal.into_parts().0.attempt().get(), 23);
     }
 
     #[test]

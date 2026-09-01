@@ -406,8 +406,11 @@ pub use semantic_settle_coordinator::{
     SemanticActionSettlementTerminal, SemanticActionSettlementUpdate,
     MAX_PENDING_SEMANTIC_ACTION_SETTLEMENTS,
 };
+#[cfg(test)]
+pub(crate) use semantic_verify::verify_semantic_action;
 pub use semantic_verify::{
-    verify_semantic_action, SemanticEffectEvidence, SemanticEffectProofKind,
+    verify_semantic_action_terminal, SemanticActionVerificationRefusal,
+    SemanticActionVerifiedTerminal, SemanticEffectEvidence, SemanticEffectProofKind,
     SemanticScrollPosition, SemanticScrollPositionError, SemanticVerificationError,
     SemanticVerifiedAction, MAX_SEMANTIC_SCROLL_COORDINATE,
 };

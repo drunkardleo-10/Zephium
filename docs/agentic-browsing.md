@@ -555,6 +555,14 @@ copy, or retry loop. Pending state exposes neither mutable tracker access nor a
 public destructuring path; only the coordinator-minted terminal owner releases
 the tracker and policy authority for independent verification or typed failure.
 
+Independent verification consumes that terminal owner and one borrowed
+evidence value exactly once. The raw tracker verifier is crate-private. Success
+keeps the exact policy authority, execution attribution, terminal settlement,
+and opaque proof together; refusal destroys the proof opportunity and returns
+the same authority plus a closed verification error for one failed policy
+settlement. Neither path retains borrowed evidence or creates a verification
+retry.
+
 ### 8.2 Input backends
 
 The runtime can choose among:

@@ -6,8 +6,8 @@ fresh-snapshot structural revalidation, event-driven bounded settlement,
 independent effect verification, and acknowledged action-result diff/fresh-state
 finalization and exact bounded batch-terminal aggregation, plus a one-shot
 policy-to-native execution handoff and exact consuming native-to-settlement
-transition with a move-only bounded settlement owner, bounded semantic
-read/transport, closed
+transition with a move-only bounded settlement owner and one-shot consuming
+terminal verification, bounded semantic read/transport, closed
 structured extraction admission, exact tool-result/constrained-output
 extraction transport, and the one-shot viewport screenshot contract are
 implemented.
@@ -155,6 +155,15 @@ are trusted, or that M4 is complete.
   Pending start state has no public mutable-tracker or destructuring escape;
   only the coordinator-minted terminal owner releases tracker and policy
   authority for verification or typed failure.
+- Independent verification consumes that terminal owner and exactly one
+  borrowed evidence value. The borrow-only tracker verifier is crate-private,
+  so production code cannot mint a proof from a copied tracker or retry a
+  refused proof opportunity. Success retains policy authority, content-free
+  execution attribution, terminal settlement, and the opaque proof in one
+  non-cloneable owner. Refusal consumes the terminal and returns the same
+  authority, execution/settlement metrics, and closed verification error for
+  one typed failed policy settlement. Borrowed snapshot/text evidence is never
+  retained, and neither path owns a timer, task, queue, callback, or retry.
 - A zero-idle single-owner coordinator now retains the active policy half while
   native work is outstanding. Its empty `Vec` allocates only on first use; it
   admits at most four requests process-wide and one per logical context,
@@ -561,7 +570,11 @@ adjacent target-state proof and skipped-generation refusal, exact option
 selection, fixed-key value change, independently correlated navigation/dialog
 transitions, directional/visibility-aware scroll proof, coordinate ceilings,
 pending/wrong-attempt/wrong-action/deadline refusal, typed failure mapping, and
-opaque proof/action binding.
+opaque proof/action binding. The terminal join additionally covers exact
+success authority/attempt preservation, one-shot refusal with authority
+recovery, action substitution, backend attribution, and content-redacted
+diagnostics; the static gate rejects a public borrow-only verifier or terminal
+recovery retry path.
 
 Action-result coverage includes exact committed-baseline/content binding,
 source observation and batch guard substitution, exact verification
