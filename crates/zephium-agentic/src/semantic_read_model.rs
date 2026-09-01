@@ -137,6 +137,26 @@ pub struct SemanticReadModelPayload {
     read_guard: [u8; 32],
 }
 
+pub(crate) struct SemanticReadDeliveryAuthority {
+    observation: SemanticObservationId,
+    observation_generation: SemanticObservationGeneration,
+    captured_at: SemanticCaptureInstant,
+    items: u16,
+    read_guard: [u8; 32],
+}
+
+impl SemanticReadDeliveryAuthority {
+    pub(crate) fn commit(self) -> SemanticReadDeliveryReceipt {
+        SemanticReadDeliveryReceipt {
+            observation: self.observation,
+            observation_generation: self.observation_generation,
+            captured_at: self.captured_at,
+            items: self.items,
+            read_guard: self.read_guard,
+        }
+    }
+}
+
 impl SemanticReadModelPayload {
     /// Returns exact compact read input to the already-selected model transport.
     pub fn as_str(&self) -> &str {
@@ -159,6 +179,26 @@ impl SemanticReadModelPayload {
             && self.captured_at == read.captured_at()
             && self.stats.items == read.stats().items()
             && self.read_guard == read.guard()
+    }
+
+    pub(crate) fn into_provider_parts(
+        self,
+    ) -> (
+        String,
+        SemanticReadEncodingStats,
+        SemanticReadDeliveryAuthority,
+    ) {
+        (
+            self.content,
+            self.stats,
+            SemanticReadDeliveryAuthority {
+                observation: self.observation,
+                observation_generation: self.observation_generation,
+                captured_at: self.captured_at,
+                items: self.stats.items,
+                read_guard: self.read_guard,
+            },
+        )
     }
 
     /// Settles transport of this exact token-admitted read.

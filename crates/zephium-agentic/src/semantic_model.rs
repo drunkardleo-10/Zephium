@@ -391,6 +391,16 @@ pub struct SemanticModelPayload {
     fingerprint: SemanticObservationFingerprint,
 }
 
+pub(crate) struct SemanticObservationDeliveryAuthority {
+    fingerprint: SemanticObservationFingerprint,
+}
+
+impl SemanticObservationDeliveryAuthority {
+    pub(crate) fn commit(self) -> SemanticObservationAcknowledgement {
+        SemanticObservationAcknowledgement::from_fingerprint(self.fingerprint)
+    }
+}
+
 impl SemanticModelPayload {
     /// Returns compact semantic input to the already-selected model transport.
     pub fn as_str(&self) -> &str {
@@ -409,6 +419,22 @@ impl SemanticModelPayload {
 
     pub(crate) fn matches_observation(&self, observation: &SemanticObservation) -> bool {
         self.fingerprint == SemanticObservationFingerprint::from_observation(observation)
+    }
+
+    pub(crate) fn into_provider_parts(
+        self,
+    ) -> (
+        String,
+        SemanticEncodingStats,
+        SemanticObservationDeliveryAuthority,
+    ) {
+        (
+            self.content,
+            self.stats,
+            SemanticObservationDeliveryAuthority {
+                fingerprint: self.fingerprint,
+            },
+        )
     }
 
     /// Settles transport of this exact token-admitted payload.

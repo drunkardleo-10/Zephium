@@ -1573,22 +1573,24 @@ mod tests {
         decode_semantic_snapshot, encode_semantic_observation, encode_semantic_read,
         read_semantic_observation, verify_semantic_action, AgentAccountAttestationId,
         AgentAccountId, AgentDataFlowRule, AgentEffectScope, AgentPlanNodeAuthority,
-        AgentPlanNodeScope, AgentProviderCallConfig, AgentProviderContractError, AgentProviderKind,
-        AgentProviderModelRevision, AgentProviderStreamBudget, AgentRunManifestId, AgentRunScope,
-        ContextAutomationState, ContextCapabilities, ContextCapability, ContextId, ContextIdentity,
-        ContextKind, ContextOperationId, ContextRegistry, ContextRunId, ContextSettlement,
-        FrameGeneration, FrameId, SemanticActionBatch, SemanticActionBatchId,
-        SemanticActionFailure, SemanticActionIntent, SemanticActionProposal,
-        SemanticCaptureInstant, SemanticDecodeContext, SemanticEffectEvidence, SemanticFrameJoin,
-        SemanticFrameTrust, SemanticInvocationId, SemanticModelDeliverySettlement,
-        SemanticModelEncodingBudget, SemanticObservationAssembler, SemanticObservationBudget,
-        SemanticObservationId, SemanticObservationRequest, SemanticPreparedAction,
-        SemanticReadAuthority, SemanticReadBudget, SemanticReadSensitivityLimit,
-        SemanticSettleBudget, SemanticSettleInstant, SemanticSettleTracker, SemanticSnapshot,
-        SemanticSnapshotGeneration, SemanticState, SemanticTokenCountQuality,
-        SemanticTokenCountRequirement, SemanticTokenCounter, SemanticTokenCounterError,
-        SemanticTokenMeasurement, SemanticTokenizerRevision, SemanticVerification,
-        SemanticWaitCondition, SEMANTIC_WIRE_VERSION,
+        AgentPlanNodeScope, AgentPreparedObservationRequest, AgentPreparedReadRequest,
+        AgentProviderCallConfig, AgentProviderContractError, AgentProviderEndpoint,
+        AgentProviderInputOutcome, AgentProviderKind, AgentProviderModelRevision,
+        AgentProviderObjective, AgentProviderRequestSettlement, AgentProviderStreamBudget,
+        AgentRunManifestId, AgentRunScope, ContextAutomationState, ContextCapabilities,
+        ContextCapability, ContextId, ContextIdentity, ContextKind, ContextOperationId,
+        ContextRegistry, ContextRunId, ContextSettlement, FrameGeneration, FrameId,
+        SemanticActionBatch, SemanticActionBatchId, SemanticActionFailure, SemanticActionIntent,
+        SemanticActionProposal, SemanticCaptureInstant, SemanticDecodeContext,
+        SemanticEffectEvidence, SemanticFrameJoin, SemanticFrameTrust, SemanticInvocationId,
+        SemanticModelDeliverySettlement, SemanticModelEncodingBudget, SemanticObservationAssembler,
+        SemanticObservationBudget, SemanticObservationId, SemanticObservationRequest,
+        SemanticPreparedAction, SemanticReadAuthority, SemanticReadBudget,
+        SemanticReadSensitivityLimit, SemanticSettleBudget, SemanticSettleInstant,
+        SemanticSettleTracker, SemanticSnapshot, SemanticSnapshotGeneration, SemanticState,
+        SemanticTokenCountQuality, SemanticTokenCountRequirement, SemanticTokenCounter,
+        SemanticTokenCounterError, SemanticTokenMeasurement, SemanticTokenizerRevision,
+        SemanticVerification, SemanticWaitCondition, SEMANTIC_WIRE_VERSION,
     };
     use serde_json::{json, Value};
 
@@ -1918,6 +1920,22 @@ mod tests {
         AgentEffectScope::try_new(values).expect("effects")
     }
 
+    fn provider_config(
+        tokenizer: SemanticTokenizerRevision,
+        fixed_input_tokens: u32,
+        max_output_tokens: u32,
+    ) -> AgentProviderCallConfig {
+        AgentProviderCallConfig::try_new(
+            AgentProviderKind::OpenAiResponses,
+            AgentProviderModelRevision::try_new("gpt-5.6-sol".to_owned()).expect("model"),
+            tokenizer,
+            fixed_input_tokens,
+            max_output_tokens,
+            AgentProviderStreamBudget::STANDARD,
+        )
+        .expect("provider config")
+    }
+
     fn run_budget(operations: u32, tokens: u64, cost: u64) -> AgentRunBudget {
         AgentRunBudget::try_new(operations, tokens, cost, 1).expect("budget")
     }
@@ -2133,44 +2151,6 @@ mod tests {
         assert_eq!(admission.input_token_limit(), 60);
         assert_eq!(admission.output_token_limit(), 20);
         assert_eq!(admission.cost_limit_micro_usd(), 100);
-        let provider = AgentProviderCallConfig::try_new(
-            AgentProviderKind::OpenAiResponses,
-            AgentProviderModelRevision::try_new("gpt-5.6-sol".to_owned()).expect("model"),
-            tokenizer(),
-            10,
-            20,
-            AgentProviderStreamBudget::STANDARD,
-        )
-        .expect("provider");
-        provider
-            .validate_admission(&admission, payload.token_measurement())
-            .expect("provider fits reservation");
-        let oversized_provider = AgentProviderCallConfig::try_new(
-            AgentProviderKind::OpenAiResponses,
-            AgentProviderModelRevision::try_new("gpt-5.6-sol".to_owned()).expect("model"),
-            tokenizer(),
-            11,
-            20,
-            AgentProviderStreamBudget::STANDARD,
-        )
-        .expect("provider");
-        assert_eq!(
-            oversized_provider.validate_admission(&admission, payload.token_measurement()),
-            Err(AgentProviderContractError::AdmissionBudget)
-        );
-        let wrong_tokenizer = AgentProviderCallConfig::try_new(
-            AgentProviderKind::OpenAiResponses,
-            AgentProviderModelRevision::try_new("gpt-5.6-sol".to_owned()).expect("model"),
-            SemanticTokenizerRevision::try_new("wrong:v1".to_owned()).expect("tokenizer"),
-            10,
-            20,
-            AgentProviderStreamBudget::STANDARD,
-        )
-        .expect("provider");
-        assert_eq!(
-            wrong_tokenizer.validate_admission(&admission, payload.token_measurement()),
-            Err(AgentProviderContractError::TokenizerRevision)
-        );
         let admission_debug = format!("{admission:?}");
 
         assert_eq!(fixture.policy.pending_model_calls(), 1);
@@ -2242,6 +2222,142 @@ mod tests {
     }
 
     #[test]
+    fn fixed_provider_request_is_atomic_bounded_and_one_shot() {
+        let source = origin("provider-request");
+        let context = make_context(9_007, 9_008, 9_009);
+        let observation = mixed_observation(context, source.clone(), 1);
+        let selected = tokenizer();
+        let objective = AgentProviderObjective::try_admit(
+            "Submit the reviewed form".to_owned(),
+            &FixedCounter {
+                revision: selected.clone(),
+                tokens: 5,
+            },
+            &selected,
+        )
+        .expect("objective");
+
+        let mut insufficient = policy_fixture(
+            9_007,
+            9_008,
+            source.clone(),
+            SemanticSensitivity::Sensitive,
+            &[SemanticEffectClass::Read],
+            run_budget(10, 1_000, 10_000),
+        );
+        let insufficient_payload = observation_payload(&observation, 50);
+        assert!(matches!(
+            AgentPreparedObservationRequest::try_openai(
+                &mut insufficient.policy,
+                call_request(
+                    1,
+                    insufficient.lease,
+                    account(context, NOW),
+                    15,
+                    20,
+                    100,
+                    NOW,
+                ),
+                &observation,
+                insufficient_payload,
+                &objective,
+                provider_config(selected.clone(), 11, 20),
+            ),
+            Err(crate::AgentProviderRequestError::Contract(
+                AgentProviderContractError::AdmissionBudget
+            ))
+        ));
+        assert_eq!(insufficient.policy.pending_model_calls(), 0);
+        assert_eq!(insufficient.policy.accounting().reserved_operations(), 0);
+
+        let mut fixture = policy_fixture(
+            9_007,
+            9_008,
+            source.clone(),
+            SemanticSensitivity::Sensitive,
+            &[SemanticEffectClass::Read],
+            run_budget(10, 1_000, 10_000),
+        );
+        let prepared = AgentPreparedObservationRequest::try_openai(
+            &mut fixture.policy,
+            call_request(1, fixture.lease, account(context, NOW), 15, 20, 100, NOW),
+            &observation,
+            observation_payload(&observation, 50),
+            &objective,
+            provider_config(selected.clone(), 10, 20),
+        )
+        .expect("prepared request");
+        assert_eq!(fixture.policy.pending_model_calls(), 1);
+        assert_eq!(fixture.policy.accounting().reserved_model_tokens(), 85);
+        assert_eq!(
+            prepared.request().endpoint(),
+            AgentProviderEndpoint::OpenAiResponses
+        );
+        assert!(prepared.request().byte_len() < crate::MAX_AGENT_PROVIDER_REQUEST_BYTES);
+        let wire: Value = serde_json::from_slice(prepared.request().body()).expect("request JSON");
+        assert_eq!(wire["model"], "gpt-5.6-sol");
+        assert_eq!(wire["store"], false);
+        assert_eq!(wire["stream"], true);
+        assert_eq!(wire["parallel_tool_calls"], false);
+        assert_eq!(wire["truncation"], "disabled");
+        assert_eq!(wire.as_object().expect("request object").len(), 10);
+        assert!(wire.get("previous_response_id").is_none());
+        assert!(wire.get("metadata").is_none());
+        assert!(wire.get("include").is_none());
+        assert_eq!(wire["input"].as_array().expect("input").len(), 2);
+        assert_eq!(wire["tools"].as_array().expect("tools").len(), 13);
+        assert!(wire["tools"]
+            .as_array()
+            .expect("tools")
+            .iter()
+            .all(|tool| tool["type"] == "function" && tool["strict"] == true));
+        let debug = format!("{prepared:?}");
+        assert!(!debug.contains("Submit the reviewed form"));
+        assert!(!debug.contains("private marker"));
+
+        let AgentProviderInputOutcome::Committed(active) = prepared
+            .settle(
+                &mut fixture.policy,
+                AgentProviderRequestSettlement::Committed,
+            )
+            .expect("commit")
+        else {
+            panic!("committed input");
+        };
+        assert_eq!(fixture.policy.taints().len(), 1);
+        fixture
+            .policy
+            .settle_model_call(active, AgentModelCallSettlement::Completed, 65, 5, 80)
+            .expect("provider settlement");
+
+        let mut refused = policy_fixture(
+            9_007,
+            9_008,
+            source,
+            SemanticSensitivity::Sensitive,
+            &[SemanticEffectClass::Read],
+            run_budget(10, 1_000, 10_000),
+        );
+        let prepared = AgentPreparedObservationRequest::try_openai(
+            &mut refused.policy,
+            call_request(1, refused.lease, account(context, NOW), 15, 20, 100, NOW),
+            &observation,
+            observation_payload(&observation, 50),
+            &objective,
+            provider_config(selected, 10, 20),
+        )
+        .expect("prepared request");
+        assert!(matches!(
+            prepared
+                .settle(&mut refused.policy, AgentProviderRequestSettlement::Refused)
+                .expect("refusal"),
+            AgentProviderInputOutcome::Refused
+        ));
+        assert_eq!(refused.policy.pending_model_calls(), 0);
+        assert!(refused.policy.taints().is_empty());
+    }
+
+    #[test]
     fn committed_read_merges_exact_source_taint_and_provider_failure_does_not_erase_it() {
         let source = origin("read");
         let context = make_context(17, 18, 19);
@@ -2255,6 +2371,16 @@ mod tests {
         )
         .expect("read");
         let payload = read_payload(&read, 40);
+        let selected = tokenizer();
+        let objective = AgentProviderObjective::try_admit(
+            "Read the selected fields".to_owned(),
+            &FixedCounter {
+                revision: selected.clone(),
+                tokens: 2,
+            },
+            &selected,
+        )
+        .expect("objective");
         let mut fixture = policy_fixture(
             17,
             18,
@@ -2264,21 +2390,25 @@ mod tests {
             run_budget(10, 1_000, 10_000),
         );
         let binding = account(context, NOW - 1);
-        let admission = fixture
-            .policy
-            .prepare_read_input(
-                call_request(1, fixture.lease, binding, 5, 15, 90, NOW),
-                &read,
-                &payload,
+        let prepared = AgentPreparedReadRequest::try_openai(
+            &mut fixture.policy,
+            call_request(1, fixture.lease, binding, 5, 15, 90, NOW),
+            &read,
+            payload,
+            &objective,
+            provider_config(selected, 3, 15),
+        )
+        .expect("prepared request");
+        assert_eq!(prepared.semantic_stats().items(), read.stats().items());
+        let AgentProviderInputOutcome::Committed(active) = prepared
+            .settle(
+                &mut fixture.policy,
+                AgentProviderRequestSettlement::Committed,
             )
-            .expect("admission");
-        let receipt = payload
-            .settle_delivery(SemanticModelDeliverySettlement::Committed)
-            .expect("delivery");
-        let active = fixture
-            .policy
-            .commit_read_input(admission, &receipt)
-            .expect("commit");
+            .expect("commit")
+        else {
+            panic!("committed input");
+        };
         assert_eq!(fixture.policy.taints().len(), 1);
         assert_eq!(
             fixture.policy.taints()[0].sensitivity(),

@@ -21,6 +21,8 @@ use crate::{
     MAX_SEMANTIC_ACTION_BATCH_SETTLE_MILLIS, MAX_SEMANTIC_ACTION_BATCH_TEXT_BYTES,
 };
 
+use super::request::MAX_AGENT_BROWSER_NAVIGATION_URL_BYTES;
+
 /// Maximum bytes in one opaque provider tool-call identity.
 pub const MAX_AGENT_PROVIDER_TOOL_CALL_ID_BYTES: usize = 128;
 /// Maximum UTF-8 bytes in one semantic locate query.
@@ -59,6 +61,22 @@ pub enum AgentBrowserToolKind {
 }
 
 impl AgentBrowserToolKind {
+    pub(crate) const ALL: [Self; 13] = [
+        Self::Navigate,
+        Self::Back,
+        Self::Forward,
+        Self::Reload,
+        Self::Snapshot,
+        Self::Locate,
+        Self::Act,
+        Self::Wait,
+        Self::Read,
+        Self::Extract,
+        Self::Screenshot,
+        Self::ShowForHuman,
+        Self::ResumeAfterHuman,
+    ];
+
     pub(crate) fn parse(value: &str) -> Option<Self> {
         match value {
             "navigate" => Some(Self::Navigate),
@@ -493,6 +511,9 @@ fn decode_proposal(
     match kind {
         AgentBrowserToolKind::Navigate => {
             let value: NavigateWire = parse(arguments)?;
+            if value.url.len() > MAX_AGENT_BROWSER_NAVIGATION_URL_BYTES {
+                return Err(AgentBrowserToolContractError::Navigation);
+            }
             let target = ContextNavigationTarget::parse(&value.url)
                 .map_err(|_| AgentBrowserToolContractError::Navigation)?;
             Ok(AgentBrowserToolProposal::Navigate(target))
@@ -1259,6 +1280,14 @@ mod tests {
                 Err(AgentBrowserToolContractError::Navigation)
             );
         }
+        let oversized_url = format!(
+            "https://example.test/{}",
+            "x".repeat(MAX_AGENT_BROWSER_NAVIGATION_URL_BYTES)
+        );
+        assert_eq!(
+            decode("navigate", &format!(r#"{{"url":"{oversized_url}"}}"#)).map(|_| ()),
+            Err(AgentBrowserToolContractError::Navigation)
+        );
         assert_eq!(
             decode("locate", r#"{"semantic_query":""}"#).map(|_| ()),
             Err(AgentBrowserToolContractError::Query)

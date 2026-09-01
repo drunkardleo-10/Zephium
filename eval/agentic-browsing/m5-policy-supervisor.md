@@ -11,9 +11,9 @@ implemented. The provider-neutral identity, usage, failure, retry-after,
 stream-budget, and bounded SSE framing contracts are implemented. OpenAI and
 Responses plain-text/refusal lifecycle and terminal-usage stream normalization
 is implemented. The closed browser-tool proposal decoder and OpenAI streamed
-function-call normalization are implemented. Fixed request/tool-schema
-encoding, the Anthropic codec, the durable store adapter, and live
-qualification remain pending.
+function-call normalization are implemented. Fixed OpenAI request/tool-schema
+encoding and atomic model-input commitment are implemented. The Anthropic
+codec, the durable store adapter, and live qualification remain pending.
 
 This evidence describes policy input facts only. A manifest cannot authorize a
 browser action, model call, tool call, data transfer, cost, or native resource.
@@ -368,11 +368,11 @@ browser action, model call, tool call, data transfer, cost, or native resource.
   requests have no representable variant.
 - Arguments are capped before parsing and preflighted at a maximum JSON depth
   of 16. Provider tool-call identities are bounded opaque ASCII correlation.
-  Navigation reuses the shipping HTTP(S) target validator; semantic references
-  must use canonical `@aN`; locate input is bounded hostile natural-language
-  text explicitly forbidden from selector APIs; progressive scopes are closed
-  reference/window proposals that still require exact acknowledged-observation
-  binding.
+  Navigation is capped at 8 KiB and reuses the shipping HTTP(S) target
+  validator; semantic references must use canonical `@aN`; locate input is
+  bounded hostile natural-language text explicitly forbidden from selector
+  APIs; progressive scopes are closed reference/window proposals that still
+  require exact acknowledged-observation binding.
 - `act` converts immediately into the existing click/fill/select/press/scroll,
   effect, wait, verification, and settle types. Existing secret/control-text
   refusal and outcome compatibility run during decode. The preflight also caps
@@ -389,6 +389,36 @@ browser action, model call, tool call, data transfer, cost, or native resource.
   reach a valid terminal `ToolCalls` conclusion; the supervisor must then bind
   current context/observation state and policy must independently classify and
   authorize any effect before a native adapter can run.
+
+## Implemented fixed provider request and commit seam
+
+- An approved objective is capped at 8 KiB/4,096 exact tokens, rejects unsafe
+  controls and recognized credential/authorization forms, and binds the same
+  tokenizer revision as the semantic payload and provider model profile. Its
+  content is absent from diagnostics and reused by reference across turns.
+- The OpenAI body is generated only from one immutable instruction, the
+  approved objective, one existing token-admitted `ZSEM1`/`ZREAD1` payload,
+  and the 13 closed browser tools. It explicitly sets streaming, `store:false`,
+  disabled truncation, and `parallel_tool_calls:false`; it has no arbitrary
+  system prompt, previous response, metadata, provider-native browser tool,
+  selector, JavaScript, DOM/HTML, CDP, native handle, or secret field.
+- Every function uses strict structured output. All object fields are required,
+  every object recursively has `additionalProperties:false`, tagged unions use
+  the supported nested `anyOf` subset, and schema ranges mirror the Rust-side
+  count/text/reference/wait/action ceilings. Local decoding and policy checks
+  remain mandatory even when a provider claims strict conformance.
+- Provider/model/tokenizer choice, exact pinned fixed-envelope/schema token
+  count, objective tokens, semantic tokens, output ceiling, and request-body
+  bytes are checked before transport. Bodies are capped at 2 MiB and expose
+  only a fixed endpoint enum plus exact redacted call correlation to the trusted
+  HTTP shell.
+- Construction validates and serializes before asking policy to reserve, so a
+  malformed provider profile or encoding failure cannot orphan an admission.
+  After reservation, construction is infallible and drops the original
+  semantic string, retaining only the one body copy, content-free metrics, and
+  private delivery authority. A one-shot settlement either commits exact
+  observation/read taint and returns the active usage authority or releases the
+  full reservation on pre-commit refusal/cancellation.
 
 ## Implemented OpenAI Responses stream slice
 
@@ -470,13 +500,15 @@ and authority joins, event/time replay, duplicate refusal, the 64-event and
 reconstruction, refused/cancelled retry, exact prefix commit, mismatch
 fail-stop retention, shutdown quiescence, the closed port contract, and
 redacted diagnostics.
-Twenty-three provider-boundary tests cover configuration/usage/retry ceilings,
+Twenty-six provider/request-boundary tests cover configuration/usage/retry ceilings,
 fragmented CR/LF/CRLF SSE framing, multiline data, comments, invalid UTF-8,
 line/event/event-count/aggregate-wire exhaustion, exact model/response joins,
 text hashing, terminal usage, output limits, failed/incomplete responses,
 typed OpenAI function-call lifecycle, every closed browser tool and semantic
 action class, URL/reference/query/schema validation, secret and mixed-effect
 refusal, unknown/generic bridge field refusal, argument depth/size exhaustion,
-unsupported built-in and reasoning output, fail-closed ordering, and redacted
-diagnostics. They use only deterministic in-memory wire fragments and no
-provider, network, credential, task, timer, or retry.
+unsupported built-in and reasoning output, objective secret/tokenizer/quality
+refusal, recursive strict-schema completeness, atomic preflight/reservation,
+observation/read one-shot commitment, fixed body fields, fail-closed ordering,
+and redacted diagnostics. They use only deterministic in-memory values and wire
+fragments and no provider, network, credential, task, timer, or retry.

@@ -7,6 +7,7 @@
 //! codecs and can cross the public boundary only as closed typed values.
 
 mod openai;
+mod request;
 mod sse;
 mod tool;
 
@@ -15,12 +16,19 @@ use std::fmt;
 use thiserror::Error;
 
 use crate::{
-    AgentActiveModelCall, AgentModelCallAdmission, AgentModelCallId, AgentPlanLeaseId,
-    AgentPlanNodeId, AgentRunManifestId, SemanticTokenMeasurement, SemanticTokenizerRevision,
-    MAX_AGENT_RUN_MODEL_TOKENS,
+    AgentActiveModelCall, AgentModelCallAdmission, AgentModelCallId, AgentModelCallRequest,
+    AgentPlanLeaseId, AgentPlanNodeId, AgentRunManifestId, SemanticTokenMeasurement,
+    SemanticTokenizerRevision, MAX_AGENT_RUN_MODEL_TOKENS,
 };
 
 pub use openai::OpenAiResponsesStreamDecoder;
+pub use request::{
+    AgentPreparedObservationRequest, AgentPreparedReadRequest, AgentProviderEndpoint,
+    AgentProviderInputOutcome, AgentProviderObjective, AgentProviderObjectiveError,
+    AgentProviderRequest, AgentProviderRequestError, AgentProviderRequestSettlement,
+    MAX_AGENT_BROWSER_NAVIGATION_URL_BYTES, MAX_AGENT_PROVIDER_OBJECTIVE_BYTES,
+    MAX_AGENT_PROVIDER_OBJECTIVE_TOKENS, MAX_AGENT_PROVIDER_REQUEST_BYTES,
+};
 pub use tool::{
     AgentBrowserActProposal, AgentBrowserHumanReason, AgentBrowserScopeProposal,
     AgentBrowserSemanticQuery, AgentBrowserToolCall, AgentBrowserToolCallId,
@@ -306,20 +314,23 @@ impl AgentProviderCallConfig {
         self.stream
     }
 
-    /// Proves this provider call fits one exact policy reservation.
-    pub fn validate_admission(
+    pub(crate) fn validate_request(
         &self,
-        admission: &AgentModelCallAdmission,
+        request: AgentModelCallRequest,
         payload: &SemanticTokenMeasurement,
+        objective: &SemanticTokenMeasurement,
     ) -> Result<(), AgentProviderContractError> {
-        if payload.revision() != &self.tokenizer {
+        if payload.revision() != &self.tokenizer || objective.revision() != &self.tokenizer {
             return Err(AgentProviderContractError::TokenizerRevision);
         }
-        let input_tokens = u64::from(payload.tokens())
+        let additional_input_tokens = u64::from(objective.tokens())
             .checked_add(u64::from(self.fixed_input_tokens))
             .ok_or(AgentProviderContractError::AdmissionBudget)?;
-        if input_tokens > admission.input_token_limit()
-            || u64::from(self.max_output_tokens) > admission.output_token_limit()
+        if additional_input_tokens > u64::from(request.budget().additional_input_tokens())
+            || u64::from(self.max_output_tokens) > u64::from(request.budget().output_tokens())
+            || u64::from(payload.tokens())
+                .checked_add(additional_input_tokens)
+                .is_none()
         {
             return Err(AgentProviderContractError::AdmissionBudget);
         }
@@ -793,6 +804,9 @@ impl AgentProviderFailure {
 /// Refusal to construct or decode a provider-neutral contract.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum AgentProviderContractError {
+    /// Configuration selected a different provider protocol than the adapter.
+    #[error("agent provider kind does not match the selected adapter")]
+    ProviderKind,
     /// Model revision was empty, oversized, URL/path-like, or unsafe ASCII.
     #[error("agent provider model revision is invalid")]
     ModelRevision,
