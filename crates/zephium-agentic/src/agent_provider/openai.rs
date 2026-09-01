@@ -1050,7 +1050,10 @@ impl TerminalOutputKind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AgentModelCallId, AgentPlanLeaseId, AgentPlanNodeId, AgentRunManifestId};
+    use crate::{
+        AgentModelCallId, AgentPlanLeaseId, AgentPlanNodeId, AgentRunManifestId,
+        SemanticTokenizerRevision,
+    };
 
     fn call() -> AgentProviderCallIdentity {
         AgentProviderCallIdentity {
@@ -1065,6 +1068,9 @@ mod tests {
         AgentProviderCallConfig::try_new(
             AgentProviderKind::OpenAiResponses,
             AgentProviderModelRevision::try_new("gpt-5.6-sol".to_owned()).expect("model"),
+            SemanticTokenizerRevision::try_new("openai:gpt-5.6-sol:v1".to_owned())
+                .expect("tokenizer"),
+            512,
             1_024,
             AgentProviderStreamBudget::try_new(64 * 1024, 64, max_text, 2, 1_024).expect("budget"),
         )

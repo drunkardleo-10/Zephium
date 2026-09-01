@@ -422,6 +422,9 @@ pub struct AgentModelCallAdmission {
     lease: AgentPlanLeaseId,
     node: AgentPlanNodeId,
     kind: ModelInputKind,
+    input_token_limit: u64,
+    output_token_limit: u64,
+    cost_limit_micro_usd: u64,
     guard: [u8; 32],
 }
 
@@ -445,6 +448,21 @@ impl AgentModelCallAdmission {
     pub const fn node(&self) -> AgentPlanNodeId {
         self.node
     }
+
+    /// Complete provider-accounted input-token reservation for this call.
+    pub const fn input_token_limit(&self) -> u64 {
+        self.input_token_limit
+    }
+
+    /// Provider-accounted output-token reservation for this call.
+    pub const fn output_token_limit(&self) -> u64 {
+        self.output_token_limit
+    }
+
+    /// Provider-cost reservation in millionths of a US dollar.
+    pub const fn cost_limit_micro_usd(&self) -> u64 {
+        self.cost_limit_micro_usd
+    }
 }
 
 impl fmt::Debug for AgentModelCallAdmission {
@@ -456,6 +474,9 @@ impl fmt::Debug for AgentModelCallAdmission {
             .field("lease", &self.lease)
             .field("node", &self.node)
             .field("kind", &self.kind)
+            .field("input_token_limit", &self.input_token_limit)
+            .field("output_token_limit", &self.output_token_limit)
+            .field("cost_limit_micro_usd", &self.cost_limit_micro_usd)
             .field("guard", &"[redacted]")
             .finish()
     }
@@ -975,6 +996,9 @@ impl AgentRunPolicy {
             lease,
             node: node_id,
             kind,
+            input_token_limit,
+            output_token_limit,
+            cost_limit_micro_usd: budget.cost_micro_usd(),
             guard: admission_guard,
         })
     }
@@ -1466,6 +1490,9 @@ fn admission_matches(admission: &AgentModelCallAdmission, call: &ModelCallRow) -
         && admission.lease == call.lease
         && admission.node == call.node
         && admission.kind == call.kind
+        && admission.input_token_limit == call.input_token_limit
+        && admission.output_token_limit == call.output_token_limit
+        && admission.cost_limit_micro_usd == call.cost_limit
         && admission.guard == call.admission_guard
 }
 
@@ -1546,21 +1573,22 @@ mod tests {
         decode_semantic_snapshot, encode_semantic_observation, encode_semantic_read,
         read_semantic_observation, verify_semantic_action, AgentAccountAttestationId,
         AgentAccountId, AgentDataFlowRule, AgentEffectScope, AgentPlanNodeAuthority,
-        AgentPlanNodeScope, AgentRunManifestId, AgentRunScope, ContextAutomationState,
-        ContextCapabilities, ContextCapability, ContextId, ContextIdentity, ContextKind,
-        ContextOperationId, ContextRegistry, ContextRunId, ContextSettlement, FrameGeneration,
-        FrameId, SemanticActionBatch, SemanticActionBatchId, SemanticActionFailure,
-        SemanticActionIntent, SemanticActionProposal, SemanticCaptureInstant,
-        SemanticDecodeContext, SemanticEffectEvidence, SemanticFrameJoin, SemanticFrameTrust,
-        SemanticInvocationId, SemanticModelDeliverySettlement, SemanticModelEncodingBudget,
-        SemanticObservationAssembler, SemanticObservationBudget, SemanticObservationId,
-        SemanticObservationRequest, SemanticPreparedAction, SemanticReadAuthority,
-        SemanticReadBudget, SemanticReadSensitivityLimit, SemanticSettleBudget,
-        SemanticSettleInstant, SemanticSettleTracker, SemanticSnapshot, SemanticSnapshotGeneration,
-        SemanticState, SemanticTokenCountQuality, SemanticTokenCountRequirement,
-        SemanticTokenCounter, SemanticTokenCounterError, SemanticTokenMeasurement,
-        SemanticTokenizerRevision, SemanticVerification, SemanticWaitCondition,
-        SEMANTIC_WIRE_VERSION,
+        AgentPlanNodeScope, AgentProviderCallConfig, AgentProviderContractError, AgentProviderKind,
+        AgentProviderModelRevision, AgentProviderStreamBudget, AgentRunManifestId, AgentRunScope,
+        ContextAutomationState, ContextCapabilities, ContextCapability, ContextId, ContextIdentity,
+        ContextKind, ContextOperationId, ContextRegistry, ContextRunId, ContextSettlement,
+        FrameGeneration, FrameId, SemanticActionBatch, SemanticActionBatchId,
+        SemanticActionFailure, SemanticActionIntent, SemanticActionProposal,
+        SemanticCaptureInstant, SemanticDecodeContext, SemanticEffectEvidence, SemanticFrameJoin,
+        SemanticFrameTrust, SemanticInvocationId, SemanticModelDeliverySettlement,
+        SemanticModelEncodingBudget, SemanticObservationAssembler, SemanticObservationBudget,
+        SemanticObservationId, SemanticObservationRequest, SemanticPreparedAction,
+        SemanticReadAuthority, SemanticReadBudget, SemanticReadSensitivityLimit,
+        SemanticSettleBudget, SemanticSettleInstant, SemanticSettleTracker, SemanticSnapshot,
+        SemanticSnapshotGeneration, SemanticState, SemanticTokenCountQuality,
+        SemanticTokenCountRequirement, SemanticTokenCounter, SemanticTokenCounterError,
+        SemanticTokenMeasurement, SemanticTokenizerRevision, SemanticVerification,
+        SemanticWaitCondition, SEMANTIC_WIRE_VERSION,
     };
     use serde_json::{json, Value};
 
@@ -2102,6 +2130,47 @@ mod tests {
                 &payload,
             )
             .expect("admission");
+        assert_eq!(admission.input_token_limit(), 60);
+        assert_eq!(admission.output_token_limit(), 20);
+        assert_eq!(admission.cost_limit_micro_usd(), 100);
+        let provider = AgentProviderCallConfig::try_new(
+            AgentProviderKind::OpenAiResponses,
+            AgentProviderModelRevision::try_new("gpt-5.6-sol".to_owned()).expect("model"),
+            tokenizer(),
+            10,
+            20,
+            AgentProviderStreamBudget::STANDARD,
+        )
+        .expect("provider");
+        provider
+            .validate_admission(&admission, payload.token_measurement())
+            .expect("provider fits reservation");
+        let oversized_provider = AgentProviderCallConfig::try_new(
+            AgentProviderKind::OpenAiResponses,
+            AgentProviderModelRevision::try_new("gpt-5.6-sol".to_owned()).expect("model"),
+            tokenizer(),
+            11,
+            20,
+            AgentProviderStreamBudget::STANDARD,
+        )
+        .expect("provider");
+        assert_eq!(
+            oversized_provider.validate_admission(&admission, payload.token_measurement()),
+            Err(AgentProviderContractError::AdmissionBudget)
+        );
+        let wrong_tokenizer = AgentProviderCallConfig::try_new(
+            AgentProviderKind::OpenAiResponses,
+            AgentProviderModelRevision::try_new("gpt-5.6-sol".to_owned()).expect("model"),
+            SemanticTokenizerRevision::try_new("wrong:v1".to_owned()).expect("tokenizer"),
+            10,
+            20,
+            AgentProviderStreamBudget::STANDARD,
+        )
+        .expect("provider");
+        assert_eq!(
+            wrong_tokenizer.validate_admission(&admission, payload.token_measurement()),
+            Err(AgentProviderContractError::TokenizerRevision)
+        );
         let admission_debug = format!("{admission:?}");
 
         assert_eq!(fixture.policy.pending_model_calls(), 1);
@@ -2708,6 +2777,9 @@ mod tests {
             lease: fixture.lease,
             node: AgentPlanNodeId::from_raw(1),
             kind: ModelInputKind::Observation,
+            input_token_limit: 0,
+            output_token_limit: 0,
+            cost_limit_micro_usd: 0,
             guard: [0; 32],
         };
         assert_eq!(

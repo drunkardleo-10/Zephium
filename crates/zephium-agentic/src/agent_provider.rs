@@ -16,7 +16,8 @@ use thiserror::Error;
 
 use crate::{
     AgentActiveModelCall, AgentModelCallAdmission, AgentModelCallId, AgentPlanLeaseId,
-    AgentPlanNodeId, AgentRunManifestId, MAX_AGENT_RUN_MODEL_TOKENS,
+    AgentPlanNodeId, AgentRunManifestId, SemanticTokenMeasurement, SemanticTokenizerRevision,
+    MAX_AGENT_RUN_MODEL_TOKENS,
 };
 
 pub use openai::OpenAiResponsesStreamDecoder;
@@ -243,6 +244,8 @@ impl AgentProviderStreamBudget {
 pub struct AgentProviderCallConfig {
     provider: AgentProviderKind,
     model: AgentProviderModelRevision,
+    tokenizer: SemanticTokenizerRevision,
+    fixed_input_tokens: u32,
     max_output_tokens: u32,
     stream: AgentProviderStreamBudget,
 }
@@ -252,15 +255,22 @@ impl AgentProviderCallConfig {
     pub fn try_new(
         provider: AgentProviderKind,
         model: AgentProviderModelRevision,
+        tokenizer: SemanticTokenizerRevision,
+        fixed_input_tokens: u32,
         max_output_tokens: u32,
         stream: AgentProviderStreamBudget,
     ) -> Result<Self, AgentProviderContractError> {
-        if max_output_tokens == 0 || max_output_tokens as u64 > MAX_AGENT_RUN_MODEL_TOKENS {
+        if fixed_input_tokens == 0 || u64::from(fixed_input_tokens) > MAX_AGENT_RUN_MODEL_TOKENS {
+            return Err(AgentProviderContractError::InputTokens);
+        }
+        if max_output_tokens == 0 || u64::from(max_output_tokens) > MAX_AGENT_RUN_MODEL_TOKENS {
             return Err(AgentProviderContractError::OutputTokens);
         }
         Ok(Self {
             provider,
             model,
+            tokenizer,
+            fixed_input_tokens,
             max_output_tokens,
             stream,
         })
@@ -276,6 +286,16 @@ impl AgentProviderCallConfig {
         &self.model
     }
 
+    /// Exact tokenizer/counting revision used for input admission.
+    pub const fn tokenizer(&self) -> &SemanticTokenizerRevision {
+        &self.tokenizer
+    }
+
+    /// Exact pinned envelope/tool-schema token count reserved beyond payload.
+    pub const fn fixed_input_tokens(&self) -> u32 {
+        self.fixed_input_tokens
+    }
+
     /// Hard requested provider output-token ceiling.
     pub const fn max_output_tokens(&self) -> u32 {
         self.max_output_tokens
@@ -284,6 +304,26 @@ impl AgentProviderCallConfig {
     /// Hard per-call stream ceilings.
     pub const fn stream_budget(&self) -> AgentProviderStreamBudget {
         self.stream
+    }
+
+    /// Proves this provider call fits one exact policy reservation.
+    pub fn validate_admission(
+        &self,
+        admission: &AgentModelCallAdmission,
+        payload: &SemanticTokenMeasurement,
+    ) -> Result<(), AgentProviderContractError> {
+        if payload.revision() != &self.tokenizer {
+            return Err(AgentProviderContractError::TokenizerRevision);
+        }
+        let input_tokens = u64::from(payload.tokens())
+            .checked_add(u64::from(self.fixed_input_tokens))
+            .ok_or(AgentProviderContractError::AdmissionBudget)?;
+        if input_tokens > admission.input_token_limit()
+            || u64::from(self.max_output_tokens) > admission.output_token_limit()
+        {
+            return Err(AgentProviderContractError::AdmissionBudget);
+        }
+        Ok(())
     }
 }
 
@@ -756,9 +796,18 @@ pub enum AgentProviderContractError {
     /// Model revision was empty, oversized, URL/path-like, or unsafe ASCII.
     #[error("agent provider model revision is invalid")]
     ModelRevision,
+    /// Fixed request-envelope input tokens were zero or exceeded the hard limit.
+    #[error("agent provider fixed input-token count is invalid")]
+    InputTokens,
     /// Requested output-token ceiling was zero or exceeded the hard limit.
     #[error("agent provider output-token ceiling is invalid")]
     OutputTokens,
+    /// Provider/tokenizer selection or request ceilings exceed exact admission.
+    #[error("agent provider call does not fit its policy admission")]
+    AdmissionBudget,
+    /// Semantic payload was measured with a different tokenizer revision.
+    #[error("agent provider tokenizer revision does not match semantic payload")]
+    TokenizerRevision,
     /// One or more stream ceilings were zero or exceeded hard limits.
     #[error("agent provider stream budget is invalid")]
     StreamBudget,
@@ -803,6 +852,10 @@ pub enum AgentProviderProtocolError {
 mod tests {
     use super::*;
 
+    fn tokenizer(value: &str) -> SemanticTokenizerRevision {
+        SemanticTokenizerRevision::try_new(value.to_owned()).expect("valid tokenizer")
+    }
+
     #[test]
     fn provider_configuration_and_diagnostics_are_bounded() {
         let model =
@@ -812,10 +865,13 @@ mod tests {
         let config = AgentProviderCallConfig::try_new(
             AgentProviderKind::OpenAiResponses,
             model,
+            tokenizer("openai:gpt-5.6-sol:v1"),
+            512,
             4_096,
             AgentProviderStreamBudget::STANDARD,
         )
         .expect("valid config");
+        assert_eq!(config.fixed_input_tokens(), 512);
         assert_eq!(config.max_output_tokens(), 4_096);
         assert_eq!(config.stream_budget().max_tool_calls(), 8);
 
@@ -834,6 +890,8 @@ mod tests {
                 AgentProviderKind::AnthropicMessages,
                 AgentProviderModelRevision::try_new("claude-opus-5".to_owned())
                     .expect("valid revision"),
+                tokenizer("anthropic:claude-opus-5:v1"),
+                512,
                 0,
                 AgentProviderStreamBudget::STANDARD,
             ),
