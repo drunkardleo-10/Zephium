@@ -1,16 +1,17 @@
 # M2 context identity and lifecycle core
 
 Status: pure domain contract, bounded registry, closed shell/native port, and
-the initial feature-gated macOS owned-context construction/close adapter are
-implemented, including exact shell-requested navigation on that first adapter.
-One-shot native renderer-loss detection, exact same-view recovery, and
-resource accounting are also implemented. Redirect and page-driven
-navigation, presentation, suspension, Windows native ownership/cookies,
+the initial feature-gated macOS and Windows owned-context lifecycle adapters
+are implemented. Both retain exact shell-requested navigation, one-shot
+renderer-loss detection, same-view recovery, explicit close, and resource
+accounting. The Windows implementation is cross-compiled only. Redirect and
+page-driven navigation, presentation, suspension, native Windows cookies,
 borrowed/handoff adapters, and named-device qualification remain pending.
 
-This evidence records code properties only. It does not claim that an owned
-native context has passed a live host/device qualification, or that a Windows
-cookie bridge, borrowed-tab native lease, or native sign-in handoff has shipped.
+This evidence records code properties only. It does not claim that either
+owned native adapter has passed a live production-context qualification, or
+that a Windows cookie bridge, borrowed-tab native lease, or native sign-in
+handoff has shipped.
 
 ## Implemented boundary
 
@@ -266,6 +267,72 @@ every exact Close first. This is static/unit evidence only; no new GUI run,
 external site, account, credential, global input, or Accessibility authority
 was used.
 
+## Initial Windows native adapter
+
+The same dormant production `agentic-browser` port now admits owned Windows
+contexts. This is source, unit, and MSVC cross-compile evidence only: no
+WebView2 controller was constructed and no behavioral claim is inferred from
+the target build.
+
+Construction first binds the exact logical profile to its durable profile root
+or process-lifetime private runtime root. It then establishes or rejoins the
+engine's extension-enabled WebView2 environment at that exact UDF. An existing
+extension-disabled environment is a typed restart/profile-busy refusal; it is
+never reinterpreted as empty-inventory proof. This preserves WebView2's
+immutable environment option contract: Microsoft documents that changing
+`AreBrowserExtensionsEnabled` while a matching environment is already running
+fails with `ERROR_INVALID_STATE`
+([EnvironmentOptions6](https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2environmentoptions6)).
+
+For a durable selected profile whose bounded native inventory is empty, the
+owned controller reuses that exact profile. If the selected inventory is not
+empty, or the context is ephemeral, construction selects the deterministic
+`agent-<ProfileId>` automation subprofile within the same environment/UDF and
+requires that exact controller profile to have an empty inventory. Multiple
+WebView2 profiles in one UDF isolate cookies and storage while sharing the
+environment/process group; this avoids one extra UDF and browser process per
+agent context
+([WebView2 multi-profile support](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/multi-profile-support)).
+An empty inventory is accepted only through `ICoreWebView2Profile7` on the
+extension-enabled environment; Microsoft explicitly documents that extension
+enumeration otherwise returns no extensions when extension support is disabled
+([Profile7](https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2profile7)).
+
+The pinned Wry startup gate runs after creating the exact controller/profile
+but before WebView initialization, script installation, or initial navigation.
+It reattests the environment UDF, controller/environment identity, exact
+profile name, InPrivate bit, and bounded empty extension inventory. The adapter
+supplies no initialization script, IPC handler, host object, custom protocol,
+new-window callback, selector, CDP method, or native-input route. It constructs
+one 1-by-1 hidden and unfocused `about:blank` child with devtools, clipboard,
+permissions, downloads, popups, page-close, autofill, context menus,
+accelerators, autoplay, fullscreen, and picture-in-picture denied. Before
+publication it rechecks the parent/container/controller HWND lineage, hidden
+controller and window state, absence of focus, exact browser-process
+provenance, and installation of the ordinary native content policy.
+
+The controller then enters only the private `ContextId` map; ordinary tab,
+session, stage, suspension, navigation-snapshot, and extension-principal maps
+remain untouched. Navigation uses the same exact one-at-a-time state machine
+as the macOS adapter: one construction bootstrap, canonical target match,
+native Wry `NavigationId`, commit-or-timeout atomic claim, redirect denial,
+renderer-loss seal, and recovery-only rearm. Windows deadlines use at most 16
+fixed UI-thread `SetTimer` slots, allocate no worker, channel, or map, and have
+zero timer activity while idle. Native callbacks use the independently bounded
+terminal host band and cannot replace an accepted request debt.
+
+Close, cancellation, profile erasure, and shutdown stop loading and settle any
+retained navigation before retiring content policy and calling WebView2 close.
+A failed close transfers the exact native-resource lease to the existing
+bounded, profile-attributed cleanup-debt owner; capacity is not reissued while
+the controller/HWND teardown is unproven. An accounted debt makes the close
+settlement unclean and quarantines that profile, but is not mislabeled as an
+accounting invariant failure. Unaccounted or overflowed debt remains a sticky
+host failure. Browser-process loss preserves the exact fail-closed context
+identity; the current same-controller recovery may refuse after a complete
+browser-process death, after which the shell must close and reconstruct rather
+than silently substituting a new native owner.
+
 ## Deterministic evidence
 
 ```sh
@@ -300,10 +367,21 @@ temporary-context release, scoped refresh, fresh observation, incompatible
 proof, out-of-scope commit, partial-transfer contamination, stale operation,
 redaction, and exact cancellation resource dispositions.
 
+The engine suite also exercises the platform-neutral exact navigation gate and
+statically proves Windows construction orders environment/profile proof,
+transient-resource acquisition, native construction cleanup import, process
+readback, content policy, resource reclassification, and private-map
+publication. Rejected unpublished views must close and transfer any failed
+teardown with their exact lease before quarantine or return. The release
+boundary independently rejects Windows production source that acquires a page
+script/IPC/CDP/selector/native-input surface, an unbounded timer authority, or
+loses its hidden/profile/inventory/process/policy/cleanup checks.
+
 ## Remaining M2 work
 
-1. add Windows owned construction with a truthful enabled-inventory proof,
-   stable selected-profile/subprofile binding, and cleanup-debt ownership;
+1. physically qualify Windows owned construction, selected/subprofile
+   inventory, hidden/focus state, navigation, loss, close, debt, and shutdown
+   on an explicitly authorized named Windows device/runtime;
 2. add bounded redirect/page-replacement observation, presentation, and
    suspension while preserving exact context/world/frame generations;
 3. implement the bounded Windows cookie adapter and native borrowed/handoff

@@ -37,6 +37,8 @@ cargo check --locked -p zephium-engine \
 cargo check --locked --target x86_64-pc-windows-msvc \
   -p zephium-engine --features native-agentic-input-probe \
   --bin windows-agentic-input-probe
+cargo check --locked --target x86_64-pc-windows-msvc \
+  -p zephium-engine --features agentic-browser
 cargo xtask check-agentic-probe-boundary
 ```
 
@@ -109,6 +111,8 @@ modes in order:
 ```powershell
 New-Item -ItemType Directory -Force `
   eval/agentic-browsing/local-results | Out-Null
+cargo check --locked --target x86_64-pc-windows-msvc `
+  -p zephium-engine --features agentic-browser
 cargo run --locked -p zephium-engine `
   --features native-agentic-input-probe `
   --bin windows-agentic-input-probe -- --ci-hidden-fixed-dom `

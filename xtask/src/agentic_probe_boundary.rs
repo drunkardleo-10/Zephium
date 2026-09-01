@@ -49,6 +49,10 @@ const ENGINE_MACOS_SEMANTIC_SCREENSHOT: &str =
 const ENGINE_MACOS_SEMANTIC_PROBE: &str =
     "crates/zephium-engine/src/platform/macos/agentic_semantic_probe.rs";
 const ENGINE_WINDOWS_MODULE: &str = "crates/zephium-engine/src/platform/windows/mod.rs";
+const ENGINE_WINDOWS_AGENT_CONTEXT: &str =
+    "crates/zephium-engine/src/platform/windows/agent_context.rs";
+const ENGINE_WINDOWS_AGENT_TIMEOUT: &str = "crates/zephium-engine/src/platform/windows/timeout.rs";
+const ENGINE_AGENT_NAVIGATION: &str = "crates/zephium-engine/src/platform/agent_navigation.rs";
 const ENGINE_WINDOWS_PROBE_MODULE: &str =
     "crates/zephium-engine/src/platform/windows/agentic_input_probe.rs";
 const ENGINE_MACOS_PROBE_BINARY: &str =
@@ -162,7 +166,15 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         &read(repository.join(ENGINE_MACOS_SEMANTIC_PROBE_BINARY))?,
         &read(repository.join(AGENTIC_FIXTURE_SERVER))?,
     )?;
-    validate_engine_platform_module(&read(repository.join(ENGINE_WINDOWS_MODULE))?, "Windows")?;
+    let windows_module = read(repository.join(ENGINE_WINDOWS_MODULE))?;
+    validate_engine_platform_module(&windows_module, "Windows")?;
+    validate_engine_windows_agent_context_boundary(
+        &windows_module,
+        &read(repository.join(ENGINE_WINDOWS_AGENT_CONTEXT))?,
+        &read(repository.join(ENGINE_WINDOWS_AGENT_TIMEOUT))?,
+        &read(repository.join(ENGINE_AGENT_NAVIGATION))?,
+        &read(repository.join(ENGINE_AGENT_CONTEXT_HOST))?,
+    )?;
     let _ = read(repository.join(ENGINE_MACOS_PROBE_BINARY))?;
     validate_windows_probe_binary(
         &read(repository.join(ENGINE_WINDOWS_PROBE_BINARY))?,
@@ -487,6 +499,144 @@ fn validate_engine_semantic_screenshot_boundary(source: &str) -> Result<(), Stri
             return Err(format!(
                 "production macOS semantic screenshot acquired forbidden surface {forbidden}"
             ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_engine_windows_agent_context_boundary(
+    module: &str,
+    adapter: &str,
+    timeout: &str,
+    navigation: &str,
+    host: &str,
+) -> Result<(), String> {
+    let module = compact(module);
+    for required in [
+        "#[cfg(feature=\"agentic-browser\")]modagent_context;",
+        "#[cfg(feature=\"agentic-browser\")]modtimeout;",
+        "build_owned_agent_view",
+        "schedule_content_policy_timeout",
+    ] {
+        if !module.contains(required) {
+            return Err(format!(
+                "production Windows agent-context module lost required gate {required}"
+            ));
+        }
+    }
+
+    let adapter = compact(adapter);
+    for required in [
+        "with_url(\"about:blank\")",
+        "with_visible(false)",
+        "with_focused(false)",
+        "with_devtools(false)",
+        "with_clipboard(false)",
+        "with_permission_handler(|_|wry::PermissionResponse::Deny)",
+        "with_download_policy(DownloadPolicy::DenyWithoutMetadata)",
+        "with_environment(environment.clone())",
+        "with_browser_extension_startup_gate(gate)",
+        "builder.with_profile_name(name)",
+        "builder.with_incognito(true)",
+        "profile_inventory_is_empty(&profile,deadline)",
+        "super::attest_environment(environment,expected_user_data_folder)",
+        "controller_environment_matches(environment,core)",
+        "profile_is_private(&profile)",
+        "IsWindowVisible(container)",
+        "GetParent(container)",
+        "controller.ParentWindow(&mutcontroller_parent)",
+        "GetFocus()",
+        "super::install_crash_handler",
+        "pub(crate)fnclose(&mutself)->Result<(),wry::WebView2CleanupDebt>",
+        "ContextConstructionProof::WindowsOwnedSelectedProfileEmptyInventory",
+        "ContextConstructionProof::WindowsOwnedAutomationSubprofileEmptyInventory",
+    ] {
+        if !adapter.contains(required) {
+            return Err(format!(
+                "production Windows agent-context adapter lost required check {required}"
+            ));
+        }
+    }
+
+    let timeout = compact(timeout);
+    for required in [
+        "MAX_PENDING_NATIVE_CONTEXT_TASKS",
+        "[Option<(usize,TimerCallback)>;MAX_AGENT_UI_TIMERS]",
+        "SetTimer(None,0,interval,Some(timer_proc))",
+        "KillTimer(None,self.timer)",
+        "catch_unwind",
+    ] {
+        if !timeout.contains(required) {
+            return Err(format!(
+                "production Windows agent-context timeout lost required bound {required}"
+            ));
+        }
+    }
+    for forbidden in ["HashMap", "thread::spawn", "thread::sleep", "channel("] {
+        if timeout.contains(forbidden) {
+            return Err(format!(
+                "production Windows agent-context timeout acquired forbidden authority {forbidden}"
+            ));
+        }
+    }
+
+    let navigation = compact(navigation);
+    for required in [
+        "native_id:Option<wry::NavigationId>",
+        "armed.native_id!=Some(event.id)",
+        "terminal_claimed.compare_exchange",
+        "state.bootstrap_available=false",
+        "fnclaim_renderer_loss",
+        "fnarm_recovery",
+        "fnsettle_recovery",
+        "NavigationEventPhase::Redirected",
+    ] {
+        if !navigation.contains(required) {
+            return Err(format!(
+                "production Windows agent navigation gate lost required mechanism {required}"
+            ));
+        }
+    }
+
+    let host = compact(host);
+    for required in [
+        "ensure_windows_extension_profile_at_path",
+        "browser_process(view.view())",
+        "install_content_policy_on_view(view.view(),&content_policy)",
+        "resource.reclassify(NativeResourceClass::AgentContext)",
+        "OwnedWindowsCleanupDebt::new",
+        "binding.retire(ContextPortFailure::Shutdown)",
+        "fnclose_unpublished_windows_agent_view",
+    ] {
+        if !host.contains(required) {
+            return Err(format!(
+                "production Windows agent-context host lost required obligation {required}"
+            ));
+        }
+    }
+
+    for (label, source) in [
+        ("adapter", adapter.as_str()),
+        ("navigation gate", navigation.as_str()),
+        ("host", host.as_str()),
+    ] {
+        for forbidden in [
+            "with_ipc_handler",
+            "with_initialization_script",
+            "evaluate_script",
+            "querySelector",
+            "CallDevToolsProtocolMethod",
+            "SendInput",
+            "mouse_event",
+            "keybd_event",
+            "CGEvent",
+            "native-agentic-input-probe",
+        ] {
+            if source.contains(forbidden) {
+                return Err(format!(
+                    "production Windows agent-context {label} acquired forbidden surface {forbidden}"
+                ));
+            }
         }
     }
     Ok(())
@@ -2958,6 +3108,35 @@ mod tests {
             port,
             host,
             &macos.replace("semantic.attest_configuration(&configuration);", ""),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn windows_production_agent_context_boundary_is_closed_and_bounded() {
+        let module = include_str!("../../crates/zephium-engine/src/platform/windows/mod.rs");
+        let adapter =
+            include_str!("../../crates/zephium-engine/src/platform/windows/agent_context.rs");
+        let timeout = include_str!("../../crates/zephium-engine/src/platform/windows/timeout.rs");
+        let navigation =
+            include_str!("../../crates/zephium-engine/src/platform/agent_navigation.rs");
+        let host = include_str!("../../crates/zephium-engine/src/host/agent_context.rs");
+        validate_engine_windows_agent_context_boundary(module, adapter, timeout, navigation, host)
+            .expect("closed Windows production owner");
+        assert!(validate_engine_windows_agent_context_boundary(
+            module,
+            &format!("{adapter}\nevaluate_script();"),
+            timeout,
+            navigation,
+            host,
+        )
+        .is_err());
+        assert!(validate_engine_windows_agent_context_boundary(
+            module,
+            adapter,
+            &timeout.replace("MAX_PENDING_NATIVE_CONTEXT_TASKS", "usize::MAX"),
+            navigation,
+            host,
         )
         .is_err());
     }
