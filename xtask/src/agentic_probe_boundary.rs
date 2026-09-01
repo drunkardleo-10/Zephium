@@ -58,10 +58,14 @@ const ENGINE_WINDOWS_AGENT_CONTEXT: &str =
     "crates/zephium-engine/src/platform/windows/agent_context.rs";
 const ENGINE_WINDOWS_AGENT_TIMEOUT: &str = "crates/zephium-engine/src/platform/windows/timeout.rs";
 const ENGINE_AGENT_NAVIGATION: &str = "crates/zephium-engine/src/platform/agent_navigation.rs";
+const ENGINE_AGENT_SCREENSHOT_BUFFER: &str =
+    "crates/zephium-engine/src/platform/agent_screenshot_buffer.rs";
 const ENGINE_WINDOWS_SEMANTIC_PROTOCOL: &str =
     "crates/zephium-engine/src/platform/agent_semantic_cdp_protocol.rs";
 const ENGINE_WINDOWS_SEMANTIC_RUNTIME: &str =
     "crates/zephium-engine/src/platform/windows/semantic_runtime.rs";
+const ENGINE_WINDOWS_SEMANTIC_SCREENSHOT: &str =
+    "crates/zephium-engine/src/platform/windows/semantic_screenshot.rs";
 const ENGINE_WINDOWS_PROBE_MODULE: &str =
     "crates/zephium-engine/src/platform/windows/agentic_input_probe.rs";
 const ENGINE_WINDOWS_SEMANTIC_PROBE_MODULE: &str =
@@ -204,6 +208,12 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     validate_engine_windows_semantic_runtime(
         &windows_module,
         &read(repository.join(ENGINE_WINDOWS_SEMANTIC_RUNTIME))?,
+    )?;
+    validate_engine_windows_semantic_screenshot(
+        &windows_module,
+        &read(repository.join(ENGINE_WINDOWS_AGENT_CONTEXT))?,
+        &read(repository.join(ENGINE_AGENT_SCREENSHOT_BUFFER))?,
+        &read(repository.join(ENGINE_WINDOWS_SEMANTIC_SCREENSHOT))?,
     )?;
     validate_windows_semantic_probe(
         &windows_module,
@@ -564,6 +574,95 @@ fn validate_engine_semantic_screenshot_boundary(source: &str) -> Result<(), Stri
         if source.contains(forbidden) {
             return Err(format!(
                 "production macOS semantic screenshot acquired forbidden surface {forbidden}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_engine_windows_semantic_screenshot(
+    module: &str,
+    agent_context: &str,
+    buffer: &str,
+    adapter: &str,
+) -> Result<(), String> {
+    let module = compact(module);
+    let agent_context = compact(agent_context);
+    let buffer = compact(buffer);
+    let adapter = compact(adapter);
+    for required in [
+        "#[cfg(feature=\"agentic-browser\")]#[allow(dead_code)]modsemantic_screenshot;",
+        "pub(crate)fndispatch_screenshot(",
+        "semantic.document_content_available_for_audit()==Some(true)",
+        "attest_hidden_owner(&self.view,self.expected_parent,self.viewport)",
+    ] {
+        let source = if required.starts_with("#[cfg") {
+            &module
+        } else {
+            &agent_context
+        };
+        if !source.contains(required) {
+            return Err(format!(
+                "production Windows semantic screenshot lost gated ownership seam {required}"
+            ));
+        }
+    }
+    for required in [
+        "structBoundedScreenshotBuffer",
+        "checked_add(source.len())",
+        "end>self.limit",
+        "try_reserve_exact",
+        "fnbounded_png_dimensions(",
+        "budget.max_png_bytes()",
+        "header.get(12..16)!=Some(b\"IHDR\".as_slice())",
+        "pixels>budget.max_pixels()",
+    ] {
+        if !buffer.contains(required) {
+            return Err(format!(
+                "production Windows semantic screenshot lost bounded buffer rule {required}"
+            ));
+        }
+    }
+    for required in [
+        "#[windows_core::implement(IStream)]",
+        "implISequentialStream_ImplforBoundedCaptureStream_Impl",
+        "implIStream_ImplforBoundedCaptureStream_Impl",
+        "buffer.write(source)",
+        "COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG",
+        ".CapturePreview(",
+        "request.budget().max_png_bytes()",
+        "cancelled.load(Ordering::Acquire)",
+        "completed_at>request.deadline()",
+        "bounded_png_dimensions(&png,request.budget())",
+        "SemanticScreenshotPaintEvidence::ExactDocumentContentAvailable",
+    ] {
+        if !adapter.contains(required) {
+            return Err(format!(
+                "production Windows semantic screenshot lost bounded native mechanism {required}"
+            ));
+        }
+    }
+    for forbidden in [
+        "SHCreateStreamOnFile",
+        "CreateStreamOnHGlobal",
+        "HGLOBAL",
+        "File::create",
+        "OpenOptions",
+        "std::fs",
+        "COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_JPEG",
+        "ExecuteScript",
+        "evaluate_script",
+        "querySelector",
+        "CallDevToolsProtocolMethod",
+        "Input.dispatch",
+        "SendInput",
+        "SetFocus",
+        "SetForegroundWindow",
+        "println!",
+    ] {
+        if buffer.contains(forbidden) || adapter.contains(forbidden) {
+            return Err(format!(
+                "production Windows semantic screenshot acquired forbidden surface {forbidden}"
             ));
         }
     }
@@ -3735,6 +3834,60 @@ mod tests {
         .is_err());
         assert!(validate_engine_semantic_screenshot_boundary(
             &screenshot.replace("budget.max_png_bytes();", "")
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn production_windows_screenshot_requires_a_capped_com_stream() {
+        let module = r#"
+            #[cfg(feature = "agentic-browser")]
+            #[allow(dead_code)]
+            mod semantic_screenshot;
+        "#;
+        let context = r#"
+            pub(crate) fn dispatch_screenshot() {
+                semantic.document_content_available_for_audit() == Some(true);
+                attest_hidden_owner(&self.view, self.expected_parent, self.viewport);
+            }
+        "#;
+        let buffer = r#"
+            struct BoundedScreenshotBuffer;
+            checked_add(source.len());
+            if end > self.limit {}
+            try_reserve_exact();
+            fn bounded_png_dimensions() {}
+            budget.max_png_bytes();
+            if header.get(12..16) != Some(b"IHDR".as_slice()) {}
+            if pixels > budget.max_pixels() {}
+        "#;
+        let adapter = r#"
+            #[windows_core::implement(IStream)]
+            impl ISequentialStream_Impl for BoundedCaptureStream_Impl {}
+            impl IStream_Impl for BoundedCaptureStream_Impl {}
+            buffer.write(source);
+            COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG;
+            core.CapturePreview();
+            request.budget().max_png_bytes();
+            cancelled.load(Ordering::Acquire);
+            if completed_at > request.deadline() {}
+            bounded_png_dimensions(&png, request.budget());
+            SemanticScreenshotPaintEvidence::ExactDocumentContentAvailable;
+        "#;
+        validate_engine_windows_semantic_screenshot(module, context, buffer, adapter)
+            .expect("bounded Windows semantic screenshot");
+        assert!(validate_engine_windows_semantic_screenshot(
+            module,
+            context,
+            buffer,
+            &format!("{adapter}\nCreateStreamOnHGlobal();")
+        )
+        .is_err());
+        assert!(validate_engine_windows_semantic_screenshot(
+            module,
+            context,
+            &buffer.replace("try_reserve_exact();", ""),
+            adapter,
         )
         .is_err());
     }

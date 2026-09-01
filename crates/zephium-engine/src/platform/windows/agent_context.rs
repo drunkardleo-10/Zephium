@@ -7,6 +7,8 @@
 
 use std::path::Path;
 use std::rc::Rc;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use std::time::Instant;
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -27,7 +29,10 @@ use wry::{
     WebViewExtWindows as _,
 };
 use zephium_agentic::{ContextConstructionProof, ContextOwnedViewport, ContextProfileStorageClass};
-use zephium_agentic::{SemanticRuntimeInvocation, SemanticRuntimePortFailure, SemanticSnapshot};
+use zephium_agentic::{
+    SemanticRuntimeInvocation, SemanticRuntimePortFailure, SemanticScreenshotNativeCapture,
+    SemanticScreenshotNativeFailure, SemanticScreenshotNativeRequest, SemanticSnapshot,
+};
 use zephium_core::ids::ProfileId;
 
 use crate::platform::agent_navigation::AgentNavigationController;
@@ -170,6 +175,36 @@ impl AgentOwnedView {
             return Err(SemanticRuntimePortFailure::Retired);
         };
         semantic.dispatch(invocation, completion)
+    }
+
+    // The physical adapter is compiled and statically gated now, but the host
+    // intentionally cannot reach it until Windows semantic qualification also
+    // unlocks exact snapshot-generation tracking on that platform.
+    #[allow(dead_code)]
+    pub(crate) fn dispatch_screenshot(
+        &self,
+        request: SemanticScreenshotNativeRequest,
+        admitted_at: Instant,
+        cancelled: Arc<AtomicBool>,
+        completion: impl FnOnce(Result<SemanticScreenshotNativeCapture, SemanticScreenshotNativeFailure>)
+            + 'static,
+        callback_panicked: impl Fn() + 'static,
+    ) -> Result<(), SemanticScreenshotNativeFailure> {
+        if !self
+            .semantic()
+            .is_some_and(|semantic| semantic.document_content_available_for_audit() == Some(true))
+            || attest_hidden_owner(&self.view, self.expected_parent, self.viewport).is_err()
+        {
+            return Err(SemanticScreenshotNativeFailure::NotReady);
+        }
+        super::semantic_screenshot::capture_viewport(
+            &self.view,
+            request,
+            admitted_at,
+            cancelled,
+            completion,
+            callback_panicked,
+        )
     }
 
     pub(crate) fn semantic_pending_for_audit(&self) -> Option<bool> {

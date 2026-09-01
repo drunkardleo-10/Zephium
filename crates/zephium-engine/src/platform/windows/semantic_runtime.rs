@@ -267,6 +267,14 @@ impl AgentSemanticRuntimeController {
         self.native.work_drained_for_audit()
     }
 
+    /// Reports the native lifecycle edge that WebView2 maps from this exact
+    /// main-frame `ContentLoading` event. It is content-free and grants no
+    /// semantic invocation or screenshot authority by itself.
+    pub(crate) fn document_content_available_for_audit(&self) -> Option<bool> {
+        let state = self.native.shared.state.try_borrow().ok()?;
+        Some(state.bound && state.phase == DocumentPhase::Ready)
+    }
+
     pub(crate) fn attest(&self, core: &ICoreWebView2) -> bool {
         self.native.attest(core)
     }

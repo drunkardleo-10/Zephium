@@ -10,11 +10,13 @@ structured extraction admission, and the one-shot viewport screenshot contract
 are implemented.
 Policy permits, platform execution,
 visibility/occlusion checks, native observation adapters and timer driving,
-the Windows screenshot adapter, visual policy and model-provider wiring, and
-live action/screenshot qualification remain pending. The production macOS
-owned-context viewport adapter is implemented and mechanically bounded, but it
-has not been executed in this evidence pass and therefore carries no live-pixel
-or platform qualification claim.
+visual policy and model-provider wiring, and live action/screenshot
+qualification remain pending. Production macOS and Windows owned-context
+viewport adapters are implemented and mechanically bounded, but neither was
+executed in this evidence pass and therefore neither carries a live-pixel or
+platform qualification claim. The Windows host keeps screenshot dispatch
+unsupported until its physical semantic-runtime qualifier promotes exact
+snapshot-generation lifecycle support.
 
 This evidence describes a functional-core seam. It does not claim that an
 action can currently reach a native view or page, that model-declared effects
@@ -362,6 +364,27 @@ are trusted, or that M4 is complete.
   bitmap copy, generic page bridge, JavaScript evaluation, selector, global
   input, or focus operation is introduced. The existing core subsequently
   verifies CRC/shape and removes admitted ancillary metadata in place.
+- The Windows adapter uses WebView2's public asynchronous `CapturePreview` API
+  with its fixed PNG format and a custom Rust-owned `IStream`. `Write`, `Seek`,
+  and `SetSize` all enforce the caller-selected byte ceiling before growth;
+  allocation failure and writes or seeks beyond that ceiling become a typed
+  resource refusal. The stream uses no file, generic system-memory stream,
+  unbounded callback buffer, decoder, second full-frame copy, JavaScript,
+  selector, CDP method, input, or focus operation. Before handing the move-only
+  PNG to the core, it reads only the fixed first IHDR dimensions and rejects
+  zero, overflowing, or over-budget pixels; the core still performs complete
+  chunk/CRC/format admission and in-place metadata removal. Unsupported stream
+  operations and COM reentrancy fail closed, stream/callback unwinds are
+  contained, and a synchronous dispatch/callback race cannot settle twice.
+- Windows capture remains deliberately unreachable from the production port:
+  the host does not yet retain the exact semantic invocation/snapshot
+  generation needed to authorize an image of the current document. The
+  private ownership seam already requires the exact runtime's content-free
+  WebView2 `ContentLoading` lifecycle fact and re-attests the hidden parent and
+  fixed viewport; those facts are necessary but do not substitute for the
+  missing snapshot-generation join. The adapter is compile- and static-gate
+  evidence only: no `CapturePreview` call ran, no native screenshot bytes were
+  produced, and no platform support claim is promoted by this change.
 - The host uses the port-admission `Instant` as the native elapsed-time anchor,
   maps start/completion into the request's trusted monotonic domain, includes
   queue and encode time in the sole deadline, and suppresses encoding after a
@@ -386,6 +409,10 @@ cargo clippy --locked -p zephium-agentic --all-targets \
 cargo test --locked -p zephium-engine --features agentic-browser
 cargo clippy --locked -p zephium-engine --features agentic-browser \
   --all-targets -- -D warnings
+cargo check --locked --release --target x86_64-pc-windows-msvc \
+  -p zephium-engine --features agentic-browser
+cargo check --locked --target x86_64-pc-windows-msvc \
+  -p zephium-engine --features agentic-browser --tests
 cargo xtask check-agentic-probe-boundary
 ```
 
@@ -466,5 +493,11 @@ PNG signature, chunk framing/order/count, CRC, terminal-IEND, fixed-format, and
 critical-chunk rejection; consecutive IDAT retention; ancillary metadata
 removal before and after image data; content-redacted diagnostics; and
 move-only canonical PNG delivery.
+Platform adapter coverage additionally includes bounded seek/overwrite/sparse
+extension, pre-growth write/seek/size refusal, fixed-IHDR dimension admission,
+and mechanical exclusion of Windows file/system-memory streams, decoding,
+generic script/CDP calls, OS input, and focus changes. The Windows adapter is
+cross-compiled only; no native capture or live page is exercised by these
+tests.
 
 No platform action backend or live page is exercised by these tests.

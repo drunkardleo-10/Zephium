@@ -22,6 +22,11 @@ mod extensions;
 // physical Windows isolated-world qualifier promotes the support claim.
 #[allow(dead_code)]
 mod semantic_runtime;
+// The bounded native capture adapter is compiled now, but the Windows host
+// keeps screenshot dispatch closed with semantic support until qualification.
+#[cfg(feature = "agentic-browser")]
+#[allow(dead_code)]
+mod semantic_screenshot;
 mod stage;
 #[cfg(feature = "agentic-browser")]
 mod timeout;
