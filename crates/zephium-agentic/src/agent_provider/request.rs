@@ -240,7 +240,7 @@ impl fmt::Debug for AgentProviderInputOutcome {
     }
 }
 
-/// Prepared OpenAI request carrying exact observation-delivery authority.
+/// Prepared provider request carrying exact observation-delivery authority.
 #[must_use]
 pub struct AgentPreparedObservationRequest {
     request: AgentProviderRequest,
@@ -276,6 +276,42 @@ impl AgentPreparedObservationRequest {
             call,
             config,
             endpoint: AgentProviderEndpoint::OpenAiResponses,
+            body,
+        };
+        Ok(Self {
+            request,
+            admission,
+            delivery,
+            semantic_stats,
+        })
+    }
+
+    /// Atomically admits and builds one fixed Anthropic observation request.
+    ///
+    /// Every fallible provider validation/serialization step runs before policy
+    /// reservation. Once admission succeeds, construction is infallible and
+    /// retains no second semantic-content copy.
+    pub fn try_anthropic(
+        policy: &mut AgentRunPolicy,
+        call_request: AgentModelCallRequest,
+        observation: &SemanticObservation,
+        payload: SemanticModelPayload,
+        objective: &AgentProviderObjective,
+        config: AgentProviderCallConfig,
+    ) -> Result<Self, AgentProviderRequestError> {
+        config.validate_request(
+            call_request,
+            payload.token_measurement(),
+            objective.token_measurement(),
+        )?;
+        let body = encode_anthropic_body(&config, objective.as_str(), payload.as_str())?;
+        let admission = policy.prepare_observation_input(call_request, observation, &payload)?;
+        let call = AgentProviderCallIdentity::from_admission(&admission);
+        let (_, semantic_stats, delivery) = payload.into_provider_parts();
+        let request = AgentProviderRequest {
+            call,
+            config,
+            endpoint: AgentProviderEndpoint::AnthropicMessages,
             body,
         };
         Ok(Self {
@@ -336,7 +372,7 @@ impl fmt::Debug for AgentPreparedObservationRequest {
     }
 }
 
-/// Prepared OpenAI request carrying exact bounded-read delivery authority.
+/// Prepared provider request carrying exact bounded-read delivery authority.
 #[must_use]
 pub struct AgentPreparedReadRequest {
     request: AgentProviderRequest,
@@ -372,6 +408,42 @@ impl AgentPreparedReadRequest {
             call,
             config,
             endpoint: AgentProviderEndpoint::OpenAiResponses,
+            body,
+        };
+        Ok(Self {
+            request,
+            admission,
+            delivery,
+            semantic_stats,
+        })
+    }
+
+    /// Atomically admits and builds one fixed Anthropic bounded-read request.
+    ///
+    /// Every fallible provider validation/serialization step runs before policy
+    /// reservation. Once admission succeeds, construction is infallible and
+    /// retains no second semantic-content copy.
+    pub fn try_anthropic(
+        policy: &mut AgentRunPolicy,
+        call_request: AgentModelCallRequest,
+        read: &SemanticReadResult<'_>,
+        payload: SemanticReadModelPayload,
+        objective: &AgentProviderObjective,
+        config: AgentProviderCallConfig,
+    ) -> Result<Self, AgentProviderRequestError> {
+        config.validate_request(
+            call_request,
+            payload.token_measurement(),
+            objective.token_measurement(),
+        )?;
+        let body = encode_anthropic_body(&config, objective.as_str(), payload.as_str())?;
+        let admission = policy.prepare_read_input(call_request, read, &payload)?;
+        let call = AgentProviderCallIdentity::from_admission(&admission);
+        let (_, semantic_stats, delivery) = payload.into_provider_parts();
+        let request = AgentProviderRequest {
+            call,
+            config,
+            endpoint: AgentProviderEndpoint::AnthropicMessages,
             body,
         };
         Ok(Self {
@@ -481,6 +553,43 @@ struct OpenAiToolWire<'a> {
     strict: bool,
 }
 
+#[derive(Serialize)]
+struct AnthropicRequestWire<'a> {
+    model: &'a str,
+    max_tokens: u32,
+    system: &'static str,
+    messages: [AnthropicMessageWire<'a>; 1],
+    tools: Vec<AnthropicToolWire<'static>>,
+    tool_choice: AnthropicToolChoiceWire,
+    stream: bool,
+}
+
+#[derive(Serialize)]
+struct AnthropicMessageWire<'a> {
+    role: &'static str,
+    content: [AnthropicTextWire<'a>; 2],
+}
+
+#[derive(Serialize)]
+struct AnthropicTextWire<'a> {
+    r#type: &'static str,
+    text: &'a str,
+}
+
+#[derive(Serialize)]
+struct AnthropicToolWire<'a> {
+    name: &'static str,
+    description: &'static str,
+    input_schema: &'a Value,
+    strict: bool,
+}
+
+#[derive(Serialize)]
+struct AnthropicToolChoiceWire {
+    r#type: &'static str,
+    disable_parallel_tool_use: bool,
+}
+
 fn encode_openai_body(
     config: &AgentProviderCallConfig,
     objective: &str,
@@ -533,17 +642,141 @@ fn encode_openai_body(
     Ok(body)
 }
 
+const MAX_ANTHROPIC_STRICT_TOOLS: usize = 20;
+const MAX_ANTHROPIC_SCHEMA_UNIONS: usize = 16;
+
+fn encode_anthropic_body(
+    config: &AgentProviderCallConfig,
+    objective: &str,
+    semantic: &str,
+) -> Result<Vec<u8>, AgentProviderRequestError> {
+    if config.provider() != AgentProviderKind::AnthropicMessages {
+        return Err(AgentProviderContractError::ProviderKind.into());
+    }
+    let definitions = anthropic_browser_tool_definitions();
+    let union_parameters = definitions.iter().try_fold(0_usize, |total, tool| {
+        total.checked_add(count_schema_unions(&tool.input_schema))
+    });
+    if definitions.len() > MAX_ANTHROPIC_STRICT_TOOLS
+        || union_parameters.is_none_or(|count| count > MAX_ANTHROPIC_SCHEMA_UNIONS)
+    {
+        return Err(AgentProviderRequestError::Encoding);
+    }
+    let tools = definitions
+        .iter()
+        .map(|tool| AnthropicToolWire {
+            name: tool.kind.as_str(),
+            description: tool.description,
+            input_schema: &tool.input_schema,
+            strict: true,
+        })
+        .collect();
+    let wire = AnthropicRequestWire {
+        model: config.model().as_str(),
+        max_tokens: config.max_output_tokens(),
+        system: AGENT_BROWSER_INSTRUCTIONS_V1,
+        messages: [AnthropicMessageWire {
+            role: "user",
+            content: [
+                AnthropicTextWire {
+                    r#type: "text",
+                    text: objective,
+                },
+                AnthropicTextWire {
+                    r#type: "text",
+                    text: semantic,
+                },
+            ],
+        }],
+        tools,
+        tool_choice: AnthropicToolChoiceWire {
+            r#type: "auto",
+            disable_parallel_tool_use: true,
+        },
+        stream: true,
+    };
+    let body = serde_json::to_vec(&wire).map_err(|_| AgentProviderRequestError::Encoding)?;
+    if body.len() > MAX_AGENT_PROVIDER_REQUEST_BYTES {
+        return Err(AgentProviderRequestError::Encoding);
+    }
+    Ok(body)
+}
+
 pub(super) struct BrowserToolDefinition {
     pub(super) kind: AgentBrowserToolKind,
     pub(super) description: &'static str,
     pub(super) parameters: Value,
 }
 
+struct AnthropicBrowserToolDefinition {
+    kind: AgentBrowserToolKind,
+    description: &'static str,
+    input_schema: Value,
+}
+
 static BROWSER_TOOL_DEFINITIONS: LazyLock<Vec<BrowserToolDefinition>> =
     LazyLock::new(build_browser_tool_definitions);
 
+static ANTHROPIC_BROWSER_TOOL_DEFINITIONS: LazyLock<Vec<AnthropicBrowserToolDefinition>> =
+    LazyLock::new(|| {
+        browser_tool_definitions()
+            .iter()
+            .map(|tool| AnthropicBrowserToolDefinition {
+                kind: tool.kind,
+                description: tool.description,
+                input_schema: project_anthropic_schema(&tool.parameters),
+            })
+            .collect()
+    });
+
 pub(super) fn browser_tool_definitions() -> &'static [BrowserToolDefinition] {
     &BROWSER_TOOL_DEFINITIONS
+}
+
+fn anthropic_browser_tool_definitions() -> &'static [AnthropicBrowserToolDefinition] {
+    &ANTHROPIC_BROWSER_TOOL_DEFINITIONS
+}
+
+fn project_anthropic_schema(schema: &Value) -> Value {
+    match schema {
+        Value::Array(values) => Value::Array(values.iter().map(project_anthropic_schema).collect()),
+        Value::Object(object) => {
+            let projected = object
+                .iter()
+                .filter(|(key, _)| {
+                    !matches!(
+                        key.as_str(),
+                        "minimum"
+                            | "maximum"
+                            | "exclusiveMinimum"
+                            | "exclusiveMaximum"
+                            | "multipleOf"
+                            | "minLength"
+                            | "maxLength"
+                            | "minItems"
+                            | "maxItems"
+                            | "uniqueItems"
+                            | "minProperties"
+                            | "maxProperties"
+                    )
+                })
+                .map(|(key, value)| (key.clone(), project_anthropic_schema(value)))
+                .collect();
+            Value::Object(projected)
+        }
+        _ => schema.clone(),
+    }
+}
+
+fn count_schema_unions(schema: &Value) -> usize {
+    match schema {
+        Value::Array(values) => values.iter().map(count_schema_unions).sum(),
+        Value::Object(object) => {
+            usize::from(object.contains_key("anyOf"))
+                + object.values().map(count_schema_unions).sum::<usize>()
+        }
+        _ => 0,
+    }
 }
 
 fn build_browser_tool_definitions() -> Vec<BrowserToolDefinition> {
@@ -989,6 +1222,68 @@ mod tests {
                 sample_arguments(definition.kind),
             )
             .expect("schema sample must decode");
+        }
+    }
+
+    #[test]
+    fn anthropic_request_is_stateless_strict_bounded_and_provider_compatible() {
+        let config = AgentProviderCallConfig::try_new(
+            AgentProviderKind::AnthropicMessages,
+            super::super::AgentProviderModelRevision::try_new("claude-opus-5".to_owned())
+                .expect("model"),
+            revision("anthropic:claude-opus-5:v1"),
+            512,
+            1_024,
+            super::super::AgentProviderStreamBudget::STANDARD,
+        )
+        .expect("config");
+        let body = encode_anthropic_body(
+            &config,
+            "Submit the reviewed form",
+            "ZSEM1\ncontent=untrusted",
+        )
+        .expect("request body");
+        assert!(body.len() < MAX_AGENT_PROVIDER_REQUEST_BYTES);
+        let wire: Value = serde_json::from_slice(&body).expect("request JSON");
+        assert_eq!(wire.as_object().expect("request object").len(), 7);
+        assert_eq!(wire["model"], "claude-opus-5");
+        assert_eq!(wire["max_tokens"], 1_024);
+        assert_eq!(wire["stream"], true);
+        assert_eq!(wire["tool_choice"]["type"], "auto");
+        assert_eq!(wire["tool_choice"]["disable_parallel_tool_use"], true);
+        assert!(wire.get("metadata").is_none());
+        assert!(wire.get("thinking").is_none());
+        assert!(wire.get("stop_sequences").is_none());
+        let messages = wire["messages"].as_array().expect("messages");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"], "user");
+        let content = messages[0]["content"].as_array().expect("content");
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["text"], "Submit the reviewed form");
+        assert_eq!(content[1]["text"], "ZSEM1\ncontent=untrusted");
+        let tools = wire["tools"].as_array().expect("tools");
+        assert_eq!(tools.len(), AgentBrowserToolKind::ALL.len());
+        assert!(tools.iter().all(|tool| tool["strict"] == true));
+        assert_eq!(
+            tools
+                .iter()
+                .map(|tool| count_schema_unions(&tool["input_schema"]))
+                .sum::<usize>(),
+            MAX_ANTHROPIC_SCHEMA_UNIONS
+        );
+        let schemas = serde_json::to_string(tools).expect("schema JSON");
+        for unsupported in [
+            "minimum",
+            "maximum",
+            "minLength",
+            "maxLength",
+            "minItems",
+            "maxItems",
+        ] {
+            assert!(!schemas.contains(&format!("\"{unsupported}\"")));
+        }
+        for tool in tools {
+            validate_strict_schema(&tool["input_schema"]);
         }
     }
 

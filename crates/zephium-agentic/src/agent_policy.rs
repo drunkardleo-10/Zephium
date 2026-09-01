@@ -1936,6 +1936,22 @@ mod tests {
         .expect("provider config")
     }
 
+    fn anthropic_provider_config(
+        tokenizer: SemanticTokenizerRevision,
+        fixed_input_tokens: u32,
+        max_output_tokens: u32,
+    ) -> AgentProviderCallConfig {
+        AgentProviderCallConfig::try_new(
+            AgentProviderKind::AnthropicMessages,
+            AgentProviderModelRevision::try_new("claude-opus-5".to_owned()).expect("model"),
+            tokenizer,
+            fixed_input_tokens,
+            max_output_tokens,
+            AgentProviderStreamBudget::STANDARD,
+        )
+        .expect("provider config")
+    }
+
     fn run_budget(operations: u32, tokens: u64, cost: u64) -> AgentRunBudget {
         AgentRunBudget::try_new(operations, tokens, cost, 1).expect("budget")
     }
@@ -2355,6 +2371,68 @@ mod tests {
         ));
         assert_eq!(refused.policy.pending_model_calls(), 0);
         assert!(refused.policy.taints().is_empty());
+    }
+
+    #[test]
+    fn anthropic_request_uses_the_same_atomic_input_authority() {
+        let source = origin("anthropic-request");
+        let context = make_context(9_107, 9_108, 9_109);
+        let observation = mixed_observation(context, source.clone(), 1);
+        let selected = tokenizer();
+        let objective = AgentProviderObjective::try_admit(
+            "Read the reviewed result".to_owned(),
+            &FixedCounter {
+                revision: selected.clone(),
+                tokens: 5,
+            },
+            &selected,
+        )
+        .expect("objective");
+        let mut fixture = policy_fixture(
+            9_107,
+            9_108,
+            source,
+            SemanticSensitivity::Sensitive,
+            &[SemanticEffectClass::Read],
+            run_budget(10, 1_000, 10_000),
+        );
+        let prepared = AgentPreparedObservationRequest::try_anthropic(
+            &mut fixture.policy,
+            call_request(1, fixture.lease, account(context, NOW), 15, 20, 100, NOW),
+            &observation,
+            observation_payload(&observation, 50),
+            &objective,
+            anthropic_provider_config(selected, 10, 20),
+        )
+        .expect("prepared request");
+        assert_eq!(fixture.policy.pending_model_calls(), 1);
+        assert_eq!(
+            prepared.request().endpoint(),
+            AgentProviderEndpoint::AnthropicMessages
+        );
+        let wire: Value = serde_json::from_slice(prepared.request().body()).expect("request JSON");
+        assert_eq!(wire["model"], "claude-opus-5");
+        assert_eq!(wire["tool_choice"]["disable_parallel_tool_use"], true);
+        assert_eq!(wire["messages"].as_array().expect("messages").len(), 1);
+        assert_eq!(
+            wire["messages"][0]["content"]
+                .as_array()
+                .expect("content blocks")
+                .len(),
+            2
+        );
+        assert!(matches!(
+            prepared
+                .settle(
+                    &mut fixture.policy,
+                    AgentProviderRequestSettlement::Cancelled,
+                )
+                .expect("cancel"),
+            AgentProviderInputOutcome::Cancelled
+        ));
+        assert_eq!(fixture.policy.pending_model_calls(), 0);
+        assert_eq!(fixture.policy.accounting().reserved_operations(), 0);
+        assert!(fixture.policy.taints().is_empty());
     }
 
     #[test]

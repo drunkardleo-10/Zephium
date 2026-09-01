@@ -6,6 +6,7 @@
 //! the first provider codecs. Vendor wire data remains private to those
 //! codecs and can cross the public boundary only as closed typed values.
 
+mod anthropic;
 mod openai;
 mod request;
 mod sse;
@@ -15,13 +16,15 @@ use std::fmt;
 
 use thiserror::Error;
 
+use anthropic::AnthropicMessagesStreamDecoder;
+use openai::OpenAiResponsesStreamDecoder;
+
 use crate::{
     AgentActiveModelCall, AgentModelCallAdmission, AgentModelCallId, AgentModelCallRequest,
     AgentPlanLeaseId, AgentPlanNodeId, AgentRunManifestId, SemanticTokenMeasurement,
     SemanticTokenizerRevision, MAX_AGENT_RUN_MODEL_TOKENS,
 };
 
-pub use openai::OpenAiResponsesStreamDecoder;
 pub use request::{
     AgentPreparedObservationRequest, AgentPreparedReadRequest, AgentProviderEndpoint,
     AgentProviderInputOutcome, AgentProviderObjective, AgentProviderObjectiveError,
@@ -62,6 +65,70 @@ pub enum AgentProviderKind {
     OpenAiResponses,
     /// Anthropic Messages API.
     AnthropicMessages,
+}
+
+/// Provider-neutral single-owner decoder for one exact streamed model call.
+///
+/// The selected provider is fixed by `AgentProviderCallConfig`; callers do not
+/// branch on vendor wire events and receive only the shared bounded contract.
+#[must_use]
+pub struct AgentProviderStreamDecoder {
+    inner: AgentProviderStreamDecoderInner,
+}
+
+enum AgentProviderStreamDecoderInner {
+    OpenAi(OpenAiResponsesStreamDecoder),
+    Anthropic(AnthropicMessagesStreamDecoder),
+}
+
+impl AgentProviderStreamDecoder {
+    /// Constructs the exact decoder selected by one admitted call config.
+    pub fn try_new(
+        call: AgentProviderCallIdentity,
+        config: &AgentProviderCallConfig,
+    ) -> Result<Self, AgentProviderProtocolError> {
+        let inner = match config.provider() {
+            AgentProviderKind::OpenAiResponses => AgentProviderStreamDecoderInner::OpenAi(
+                OpenAiResponsesStreamDecoder::try_new(call, config)?,
+            ),
+            AgentProviderKind::AnthropicMessages => AgentProviderStreamDecoderInner::Anthropic(
+                AnthropicMessagesStreamDecoder::try_new(call, config)?,
+            ),
+        };
+        Ok(Self { inner })
+    }
+
+    /// Decodes one arbitrary transport chunk through the selected adapter.
+    pub fn push(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<AgentProviderStreamBatch, AgentProviderProtocolError> {
+        match &mut self.inner {
+            AgentProviderStreamDecoderInner::OpenAi(decoder) => decoder.push(bytes),
+            AgentProviderStreamDecoderInner::Anthropic(decoder) => decoder.push(bytes),
+        }
+    }
+
+    /// Requires complete framing and one unambiguous terminal provider event.
+    pub fn finish(self) -> Result<AgentProviderStreamConclusion, AgentProviderProtocolError> {
+        match self.inner {
+            AgentProviderStreamDecoderInner::OpenAi(decoder) => decoder.finish(),
+            AgentProviderStreamDecoderInner::Anthropic(decoder) => decoder.finish(),
+        }
+    }
+}
+
+impl fmt::Debug for AgentProviderStreamDecoder {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.inner {
+            AgentProviderStreamDecoderInner::OpenAi(decoder) => {
+                formatter.debug_tuple("OpenAi").field(decoder).finish()
+            }
+            AgentProviderStreamDecoderInner::Anthropic(decoder) => {
+                formatter.debug_tuple("Anthropic").field(decoder).finish()
+            }
+        }
+    }
 }
 
 /// Bounded exact provider model revision selected before request admission.

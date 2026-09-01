@@ -8,12 +8,12 @@ manifest-bound context assignment is implemented over the existing bounded
 context registry, and content-free semantic progress is projected directly by
 the supervisor. A bounded semantic-audit ledger and typed persistence port are
 implemented. The provider-neutral identity, usage, failure, retry-after,
-stream-budget, and bounded SSE framing contracts are implemented. OpenAI and
-Responses plain-text/refusal lifecycle and terminal-usage stream normalization
-is implemented. The closed browser-tool proposal decoder and OpenAI streamed
-function-call normalization are implemented. Fixed OpenAI request/tool-schema
-encoding and atomic model-input commitment are implemented. The Anthropic
-codec, the durable store adapter, and live qualification remain pending.
+stream-budget, and bounded SSE framing contracts are implemented. OpenAI
+Responses and Anthropic Messages plain-text, tool-call, error, stop, and usage
+stream normalization are implemented behind one provider-neutral decoder.
+The closed browser-tool proposal decoder and fixed request/tool-schema encoding
+for both providers are implemented with atomic model-input commitment. The
+durable store adapter and live provider qualification remain pending.
 
 This evidence describes policy input facts only. A manifest cannot authorize a
 browser action, model call, tool call, data transfer, cost, or native resource.
@@ -396,17 +396,25 @@ browser action, model call, tool call, data transfer, cost, or native resource.
   controls and recognized credential/authorization forms, and binds the same
   tokenizer revision as the semantic payload and provider model profile. Its
   content is absent from diagnostics and reused by reference across turns.
-- The OpenAI body is generated only from one immutable instruction, the
-  approved objective, one existing token-admitted `ZSEM1`/`ZREAD1` payload,
-  and the 13 closed browser tools. It explicitly sets streaming, `store:false`,
-  disabled truncation, and `parallel_tool_calls:false`; it has no arbitrary
-  system prompt, previous response, metadata, provider-native browser tool,
-  selector, JavaScript, DOM/HTML, CDP, native handle, or secret field.
-- Every function uses strict structured output. All object fields are required,
-  every object recursively has `additionalProperties:false`, tagged unions use
-  the supported nested `anyOf` subset, and schema ranges mirror the Rust-side
-  count/text/reference/wait/action ceilings. Local decoding and policy checks
-  remain mandatory even when a provider claims strict conformance.
+- OpenAI and Anthropic bodies are generated only from one immutable
+  instruction, the approved objective, one existing token-admitted
+  `ZSEM1`/`ZREAD1` payload, and the same 13 closed browser tools. OpenAI sets
+  streaming, `store:false`, disabled truncation, and
+  `parallel_tool_calls:false`. Anthropic uses one user turn with two ordered
+  text blocks because its API combines consecutive same-role turns, and sets
+  `tool_choice:auto` plus `disable_parallel_tool_use:true`. Neither body has an
+  arbitrary system prompt, conversation state, metadata, provider-native
+  browser tool, selector, JavaScript, DOM/HTML, CDP, native handle, or secret
+  field.
+- Every function uses strict structured output. All object fields are required
+  and every object recursively has `additionalProperties:false`. OpenAI
+  receives the complete schema ranges. Anthropic receives a deterministic
+  projection without unsupported range/length/cardinality keywords while the
+  full Rust decoder remains the authoritative bounds check, matching the
+  provider's documented schema-transform guidance. The 13 strict tools and 16
+  union parameters are checked against Anthropic's current 20/16 compiler
+  ceilings before serialization. Local decoding and policy checks remain
+  mandatory even when a provider claims strict conformance.
 - Provider/model/tokenizer choice, exact pinned fixed-envelope/schema token
   count, objective tokens, semantic tokens, output ceiling, and request-body
   bytes are checked before transport. Bodies are capped at 2 MiB and expose
@@ -448,6 +456,38 @@ browser action, model call, tool call, data transfer, cost, or native resource.
   partial lifecycle, invalid proposal JSON, provider built-in tools, hidden
   reasoning output, unknown output classes, invalid JSON/UTF-8, and premature
   `[DONE]` fail-stop the stream.
+
+## Implemented Anthropic Messages stream slice
+
+- The incremental Messages decoder follows Anthropic's official
+  [stream lifecycle](https://platform.claude.com/docs/en/build-with-claude/streaming),
+  including exact matching SSE/data event types, `message_start`, sequential
+  indexed content blocks, one or more cumulative `message_delta` updates,
+  `message_stop`, pings, mid-stream errors, and graceful ignoring of unknown
+  future top-level event types. The selected model, assistant role, empty
+  initial content, bounded message identity, null initial stop, complete block
+  closure, and one terminal outcome are exact.
+- Text streams directly as bounded untrusted plain text without retaining a
+  second aggregate copy. Tool JSON remains private and bounded until block
+  closure, but no proposal is emitted until the terminal stop reason is
+  `tool_use`. An incomplete tool at `max_tokens` therefore returns a typed
+  output-limit result and zero tool proposals; a complete tool is decoded once
+  through the same closed Rust browser-tool contract.
+- `input_tokens`, cache-read, and cache-creation counters are normalized using
+  Anthropic's documented additive input total. Cumulative usage cannot regress;
+  output-reasoning detail remains a subset. Natural completion, client tool
+  use, output/context limits, refusal, custom stop, and paused turns map to the
+  shared stop vocabulary.
+- Thinking/signature blocks, server tools/results, citations deltas, fallback
+  blocks, unknown tool names, a second tool block despite disabled parallel
+  use, malformed arguments, index/interleaving errors, model mismatch, usage
+  regression, `[DONE]`, and ceilings fail closed. Known stream errors map to
+  the shared content-free failure taxonomy; provider error messages are never
+  retained or exposed.
+- One public provider-neutral decoder selects OpenAI or Anthropic only from the
+  already fixed call configuration. The shell therefore receives identical
+  bounded batches and terminal contracts without branching on vendor wire
+  data.
 
 ## Current tests
 
@@ -500,15 +540,18 @@ and authority joins, event/time replay, duplicate refusal, the 64-event and
 reconstruction, refused/cancelled retry, exact prefix commit, mismatch
 fail-stop retention, shutdown quiescence, the closed port contract, and
 redacted diagnostics.
-Twenty-six provider/request-boundary tests cover configuration/usage/retry ceilings,
+Thirty-six provider/request-boundary tests cover configuration/usage/retry ceilings,
 fragmented CR/LF/CRLF SSE framing, multiline data, comments, invalid UTF-8,
 line/event/event-count/aggregate-wire exhaustion, exact model/response joins,
 text hashing, terminal usage, output limits, failed/incomplete responses,
-typed OpenAI function-call lifecycle, every closed browser tool and semantic
+typed OpenAI function-call and Anthropic content-block lifecycles, cumulative
+cache-aware Anthropic usage, unknown future events, typed stream errors,
+truncated/malformed/empty tool arguments, every closed browser tool and semantic
 action class, URL/reference/query/schema validation, secret and mixed-effect
 refusal, unknown/generic bridge field refusal, argument depth/size exhaustion,
 unsupported built-in and reasoning output, objective secret/tokenizer/quality
 refusal, recursive strict-schema completeness, atomic preflight/reservation,
-observation/read one-shot commitment, fixed body fields, fail-closed ordering,
-and redacted diagnostics. They use only deterministic in-memory values and wire
-fragments and no provider, network, credential, task, timer, or retry.
+observation/read one-shot commitment for both providers, provider-compatible
+schema projection, fixed body fields, fail-closed ordering, and redacted
+diagnostics. They use only deterministic in-memory values and wire fragments
+and no provider, network, credential, task, timer, or retry.
