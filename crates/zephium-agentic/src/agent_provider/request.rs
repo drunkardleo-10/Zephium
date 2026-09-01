@@ -37,10 +37,11 @@ use super::continuation::AgentProviderTranscript;
 use super::tool::AgentBrowserToolKind;
 use super::{
     AgentProviderBoundDiffContinuation, AgentProviderBoundLocateContinuation,
-    AgentProviderBoundScreenshotContinuation, AgentProviderCallConfig, AgentProviderCallIdentity,
-    AgentProviderContinuationSeed, AgentProviderContractError, AgentProviderKind,
-    AgentProviderModelRevision, ANTHROPIC_GLOBAL_INFERENCE_GEO,
-    ANTHROPIC_STANDARD_SERVICE_TIER_REQUEST, OPENAI_STANDARD_SERVICE_TIER,
+    AgentProviderBoundReadContinuation, AgentProviderBoundScreenshotContinuation,
+    AgentProviderCallConfig, AgentProviderCallIdentity, AgentProviderContinuationSeed,
+    AgentProviderContractError, AgentProviderKind, AgentProviderModelRevision,
+    ANTHROPIC_GLOBAL_INFERENCE_GEO, ANTHROPIC_STANDARD_SERVICE_TIER_REQUEST,
+    OPENAI_STANDARD_SERVICE_TIER,
 };
 
 /// Maximum UTF-8 bytes in one approved browser objective.
@@ -568,6 +569,7 @@ pub struct AgentProviderTransportInput {
     request: AgentProviderRequest,
     commitment: AgentProviderInputCommitment,
     continuation_transcript: Option<AgentProviderTranscript>,
+    continuation_baseline: Option<SemanticObservationAcknowledgement>,
 }
 
 impl AgentProviderTransportInput {
@@ -592,6 +594,7 @@ impl AgentProviderTransportInput {
             request,
             commitment,
             continuation_transcript,
+            continuation_baseline,
         } = self;
         let input = commitment.commit(policy)?;
         let continuation = AgentProviderContinuationSeed::from_committed(
@@ -599,6 +602,7 @@ impl AgentProviderTransportInput {
             request.config(),
             &input,
             continuation_transcript,
+            continuation_baseline,
         );
         Ok(AgentCommittedProviderRequest {
             request,
@@ -644,6 +648,10 @@ impl fmt::Debug for AgentProviderTransportInput {
             .field(
                 "continuation_transcript",
                 &self.continuation_transcript.is_some(),
+            )
+            .field(
+                "continuation_baseline",
+                &self.continuation_baseline.is_some(),
             )
             .finish()
     }
@@ -823,6 +831,7 @@ impl AgentPreparedObservationRequest {
                 delivery: self.delivery,
             },
             continuation_transcript: self.continuation_transcript,
+            continuation_baseline: None,
         }
     }
 
@@ -953,6 +962,7 @@ impl AgentPreparedReadRequest {
                 delivery: self.delivery,
             },
             continuation_transcript: None,
+            continuation_baseline: None,
         }
     }
 
@@ -1157,6 +1167,7 @@ impl AgentPreparedDiffRequest {
                 delivery: self.delivery,
             },
             continuation_transcript: Some(self.continuation_transcript),
+            continuation_baseline: None,
         }
     }
 
@@ -1183,6 +1194,219 @@ impl fmt::Debug for AgentPreparedDiffRequest {
                 &self.continuation_transcript.retained_bytes(),
             )
             .field("delivery", &self.delivery)
+            .field("content", &"[redacted]")
+            .finish()
+    }
+}
+
+/// Fixed stateless read-result body awaiting whole-input token admission.
+///
+/// The read bytes and prior observation acknowledgement remain joined to the
+/// bounded structured transcript. This draft grants neither policy nor
+/// transport authority and cannot promote a direct read receipt into an
+/// observation acknowledgement.
+#[must_use]
+pub struct AgentProviderReadContinuationRequestDraft {
+    request: AgentProviderRequest,
+    baseline: SemanticObservationAcknowledgement,
+    delivery: crate::semantic_read_model::SemanticReadDeliveryAuthority,
+    semantic_stats: SemanticReadEncodingStats,
+    continuation_transcript: AgentProviderTranscript,
+}
+
+impl AgentProviderReadContinuationRequestDraft {
+    /// Encodes the exact fixed provider protocol selected by the bound turn.
+    pub fn try_new(
+        continuation: AgentProviderBoundReadContinuation,
+    ) -> Result<Self, AgentProviderRequestError> {
+        let endpoint = match continuation.provider() {
+            AgentProviderKind::OpenAiResponses => AgentProviderEndpoint::OpenAiResponses,
+            AgentProviderKind::AnthropicMessages => AgentProviderEndpoint::AnthropicMessages,
+        };
+        let body = match continuation.provider() {
+            AgentProviderKind::OpenAiResponses => {
+                encode_openai_continuation_body(continuation.config(), continuation.transcript())?
+            }
+            AgentProviderKind::AnthropicMessages => encode_anthropic_continuation_body(
+                continuation.config(),
+                continuation.transcript(),
+            )?,
+        };
+        let (call, config, baseline, continuation_transcript, semantic_stats, delivery) =
+            continuation.into_request_parts();
+        Ok(Self {
+            request: AgentProviderRequest {
+                call,
+                config,
+                endpoint,
+                body,
+            },
+            baseline,
+            delivery,
+            semantic_stats,
+            continuation_transcript,
+        })
+    }
+
+    /// Immutable provider body available only to a trusted full-input counter.
+    pub const fn request(&self) -> &AgentProviderRequest {
+        &self.request
+    }
+
+    /// Content-free metrics for the appended bounded read.
+    pub const fn semantic_stats(&self) -> SemanticReadEncodingStats {
+        self.semantic_stats
+    }
+
+    /// Private structured transcript bytes retained by this draft.
+    pub const fn continuation_transcript_bytes(&self) -> usize {
+        self.continuation_transcript.retained_bytes()
+    }
+
+    fn measure_structured_input(
+        &self,
+        counter: &dyn AgentProviderLocalInputTokenCounter,
+    ) -> Result<SemanticTokenMeasurement, SemanticTokenCounterError> {
+        let config = self.request.config();
+        match self.request.endpoint() {
+            AgentProviderEndpoint::OpenAiResponses => counter.count_openai_responses_input(
+                config.model(),
+                config.tokenizer(),
+                self.request.body(),
+            ),
+            AgentProviderEndpoint::AnthropicMessages => counter.count_anthropic_messages_input(
+                config.model(),
+                config.tokenizer(),
+                self.request.body(),
+            ),
+        }
+    }
+
+    /// Counts and atomically admits this exact whole structured read result.
+    pub fn try_prepare(
+        self,
+        policy: &mut AgentRunPolicy,
+        call_request: AgentModelCallRequest,
+        read: &SemanticReadResult<'_>,
+        counter: &dyn AgentProviderLocalInputTokenCounter,
+    ) -> Result<AgentPreparedReadContinuationRequest, AgentProviderRequestError> {
+        let structured_input = self
+            .measure_structured_input(counter)
+            .map_err(AgentProviderRequestError::InputTokenCounter)?;
+        self.request.config().validate_read_continuation_request(
+            call_request,
+            self.delivery.token_measurement(),
+            &structured_input,
+        )?;
+        let call = self.request.call();
+        let admission = policy.prepare_provider_read_input(
+            call_request,
+            AgentModelCallExpectation::new(call.manifest(), call.call(), call.lease(), call.node()),
+            &self.baseline,
+            read,
+            &self.delivery,
+            u64::from(structured_input.tokens()),
+        )?;
+        debug_assert_eq!(call, AgentProviderCallIdentity::from_admission(&admission));
+        Ok(AgentPreparedReadContinuationRequest {
+            request: self.request,
+            admission,
+            baseline: self.baseline,
+            delivery: self.delivery,
+            semantic_stats: self.semantic_stats,
+            structured_input,
+            continuation_transcript: self.continuation_transcript,
+        })
+    }
+}
+
+impl fmt::Debug for AgentProviderReadContinuationRequestDraft {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentProviderReadContinuationRequestDraft")
+            .field("request", &self.request)
+            .field("baseline", &self.baseline)
+            .field("semantic_stats", &self.semantic_stats)
+            .field(
+                "continuation_transcript_bytes",
+                &self.continuation_transcript.retained_bytes(),
+            )
+            .field("delivery", &"[redacted]")
+            .field("content", &"[redacted]")
+            .finish()
+    }
+}
+
+/// Exact stateless read-result request with whole-input policy admission.
+#[must_use]
+pub struct AgentPreparedReadContinuationRequest {
+    request: AgentProviderRequest,
+    admission: AgentModelCallAdmission,
+    baseline: SemanticObservationAcknowledgement,
+    delivery: crate::semantic_read_model::SemanticReadDeliveryAuthority,
+    semantic_stats: SemanticReadEncodingStats,
+    structured_input: SemanticTokenMeasurement,
+    continuation_transcript: AgentProviderTranscript,
+}
+
+impl AgentPreparedReadContinuationRequest {
+    /// Exact immutable provider request admitted for transport.
+    pub const fn request(&self) -> &AgentProviderRequest {
+        &self.request
+    }
+
+    /// Content-free metrics for the appended bounded read.
+    pub const fn semantic_stats(&self) -> SemanticReadEncodingStats {
+        self.semantic_stats
+    }
+
+    /// Exact local count over the complete provider-structured replay.
+    pub const fn structured_input_measurement(&self) -> &SemanticTokenMeasurement {
+        &self.structured_input
+    }
+
+    /// Private structured transcript bytes retained for another eligible turn.
+    pub const fn continuation_transcript_bytes(&self) -> usize {
+        self.continuation_transcript.retained_bytes()
+    }
+
+    /// Joins the exact request, read proof, baseline, and policy admission.
+    pub fn into_transport_input(self) -> AgentProviderTransportInput {
+        AgentProviderTransportInput {
+            request: self.request,
+            commitment: AgentProviderInputCommitment::Read {
+                admission: self.admission,
+                delivery: self.delivery,
+            },
+            continuation_transcript: Some(self.continuation_transcript),
+            continuation_baseline: Some(self.baseline),
+        }
+    }
+
+    /// Consumes request and admission together at the transport commit point.
+    pub fn settle(
+        self,
+        policy: &mut AgentRunPolicy,
+        settlement: AgentProviderRequestSettlement,
+    ) -> Result<AgentProviderInputOutcome, AgentProviderRequestError> {
+        self.into_transport_input().settle(policy, settlement)
+    }
+}
+
+impl fmt::Debug for AgentPreparedReadContinuationRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentPreparedReadContinuationRequest")
+            .field("request", &self.request)
+            .field("admission", &self.admission)
+            .field("baseline", &self.baseline)
+            .field("semantic_stats", &self.semantic_stats)
+            .field("structured_input", &self.structured_input)
+            .field(
+                "continuation_transcript_bytes",
+                &self.continuation_transcript.retained_bytes(),
+            )
+            .field("delivery", &"[redacted]")
             .field("content", &"[redacted]")
             .finish()
     }
@@ -1360,6 +1584,7 @@ impl AgentPreparedLocateRequest {
                 delivery: self.delivery,
             },
             continuation_transcript: Some(self.continuation_transcript),
+            continuation_baseline: None,
         }
     }
 
@@ -1567,6 +1792,7 @@ impl AgentPreparedScreenshotRequest {
             },
             // Visual bytes are deliberately one-shot and never replayed.
             continuation_transcript: None,
+            continuation_baseline: None,
         }
     }
 

@@ -13,12 +13,14 @@ use thiserror::Error;
 
 use crate::semantic_diff_model::SemanticDiffDeliveryAuthority;
 use crate::semantic_locate_model::SemanticLocateDeliveryAuthority;
+use crate::semantic_read_model::SemanticReadDeliveryAuthority;
 use crate::semantic_screenshot::SemanticScreenshotDeliveryAuthority;
 use crate::{
     AgentModelCallRequest, SemanticDiff, SemanticDiffEncodingStats, SemanticDiffModelPayload,
     SemanticLocateEncodingStats, SemanticLocateModelPayload, SemanticLocateResult,
     SemanticObservationAcknowledgement, SemanticObservationGeneration, SemanticObservationId,
-    SemanticScreenshot, SemanticScreenshotStats,
+    SemanticReadEncodingStats, SemanticReadModelPayload, SemanticReadResult, SemanticScreenshot,
+    SemanticScreenshotStats,
 };
 
 use super::{
@@ -167,7 +169,8 @@ impl fmt::Debug for AgentProviderTranscriptTurn {
     }
 }
 
-/// Exact committed observation or diff turn eligible for one terminal tool call.
+/// Exact committed observation, diff, locate, or bound-read turn eligible for
+/// one terminal tool call.
 ///
 /// Construction is private to a committed provider request, so cloneable input
 /// evidence alone cannot create this move-only join. A failed, cancelled,
@@ -187,14 +190,30 @@ impl AgentProviderContinuationSeed {
         config: &AgentProviderCallConfig,
         input: &AgentCommittedProviderInput,
         transcript: Option<AgentProviderTranscript>,
+        continuation_baseline: Option<SemanticObservationAcknowledgement>,
     ) -> Option<Self> {
         let baseline = match input.evidence() {
-            AgentProviderInputEvidence::Observation(baseline) => baseline.clone(),
-            AgentProviderInputEvidence::Diff(receipt) => receipt.acknowledgement().clone(),
-            AgentProviderInputEvidence::Locate(receipt) => receipt.acknowledgement().clone(),
-            AgentProviderInputEvidence::Read(_) | AgentProviderInputEvidence::Screenshot(_) => {
-                return None;
+            AgentProviderInputEvidence::Observation(baseline) => {
+                continuation_baseline.is_none().then(|| baseline.clone())?
             }
+            AgentProviderInputEvidence::Diff(receipt) => continuation_baseline
+                .is_none()
+                .then(|| receipt.acknowledgement().clone())?,
+            AgentProviderInputEvidence::Locate(receipt) => continuation_baseline
+                .is_none()
+                .then(|| receipt.acknowledgement().clone())?,
+            AgentProviderInputEvidence::Read(receipt) => {
+                let baseline = continuation_baseline?;
+                if baseline.observation() != receipt.observation()
+                    || baseline.generation() != receipt.observation_generation()
+                    || baseline.context() != receipt.context()
+                    || baseline.guard() != receipt.observation_guard()
+                {
+                    return None;
+                }
+                baseline
+            }
+            AgentProviderInputEvidence::Screenshot(_) => return None,
         };
         let transcript = transcript?;
         Some(Self {
@@ -420,6 +439,70 @@ impl AgentProviderContinuation {
         })
     }
 
+    /// Binds one provisional same-plan request to an exact bounded read result.
+    ///
+    /// This path accepts only a prior `read` tool call and a result derived
+    /// from the exact already-acknowledged observation. It does not promote the
+    /// read receipt into a new full-observation acknowledgement.
+    pub fn bind_read_request(
+        self,
+        request: AgentModelCallRequest,
+        next_config: &AgentProviderCallConfig,
+        read: &SemanticReadResult<'_>,
+        payload: SemanticReadModelPayload,
+    ) -> Result<AgentProviderBoundReadContinuation, AgentProviderContinuationError> {
+        let next_call = AgentProviderCallIdentity {
+            manifest: self.prior_call.manifest(),
+            call: request.id(),
+            lease: request.lease(),
+            node: self.prior_call.node(),
+        };
+        self.bind_read(next_call, next_config, read, payload)
+    }
+
+    /// Consumes the exact prior read call into one fixed result continuation.
+    pub fn bind_read(
+        self,
+        next_call: AgentProviderCallIdentity,
+        next_config: &AgentProviderCallConfig,
+        read: &SemanticReadResult<'_>,
+        payload: SemanticReadModelPayload,
+    ) -> Result<AgentProviderBoundReadContinuation, AgentProviderContinuationError> {
+        if next_config != &self.config {
+            return Err(AgentProviderContinuationError::Config);
+        }
+        if next_call.manifest() != self.prior_call.manifest()
+            || next_call.lease() != self.prior_call.lease()
+            || next_call.node() != self.prior_call.node()
+            || next_call.call() <= self.prior_call.call()
+        {
+            return Err(AgentProviderContinuationError::Lineage);
+        }
+        if self.correlation.kind() != AgentBrowserToolKind::Read {
+            return Err(AgentProviderContinuationError::ToolKind);
+        }
+        if !read.matches_acknowledgement(&self.baseline) {
+            return Err(AgentProviderContinuationError::Baseline);
+        }
+        if !payload.matches_read(read) {
+            return Err(AgentProviderContinuationError::Payload);
+        }
+        let (prior_call, config, baseline, correlation, transcript) = self.into_parts();
+        let (tool_result, semantic_stats, delivery) = payload.into_provider_parts();
+        let transcript = transcript.try_append(correlation, tool_result)?;
+        Ok(AgentProviderBoundReadContinuation {
+            prior_call,
+            next_call,
+            config,
+            baseline,
+            transcript,
+            semantic_stats,
+            delivery,
+            observation: read.observation(),
+            observation_generation: read.observation_generation(),
+        })
+    }
+
     /// Binds one provisional same-plan request to the exact viewport image.
     ///
     /// Only a prior `screenshot` tool call can enter this path. The returned
@@ -480,7 +563,9 @@ impl AgentProviderContinuation {
     ) -> Result<(), AgentProviderContinuationError> {
         if matches!(
             self.correlation.kind(),
-            AgentBrowserToolKind::Locate | AgentBrowserToolKind::Screenshot
+            AgentBrowserToolKind::Locate
+                | AgentBrowserToolKind::Read
+                | AgentBrowserToolKind::Screenshot
         ) {
             return Err(AgentProviderContinuationError::ToolKind);
         }
@@ -757,6 +842,125 @@ impl fmt::Debug for AgentProviderBoundLocateContinuation {
     }
 }
 
+/// Move-only provider continuation bound to one exact bounded read result.
+///
+/// The retained baseline is the already-committed observation from the prior
+/// provider context. It is carried separately from the read receipt so direct
+/// reads cannot manufacture full-observation acknowledgement.
+#[must_use]
+pub struct AgentProviderBoundReadContinuation {
+    prior_call: AgentProviderCallIdentity,
+    next_call: AgentProviderCallIdentity,
+    config: AgentProviderCallConfig,
+    baseline: SemanticObservationAcknowledgement,
+    transcript: AgentProviderTranscript,
+    semantic_stats: SemanticReadEncodingStats,
+    delivery: SemanticReadDeliveryAuthority,
+    observation: SemanticObservationId,
+    observation_generation: SemanticObservationGeneration,
+}
+
+impl AgentProviderBoundReadContinuation {
+    /// Exact completed provider call awaiting the read result.
+    pub const fn prior_call(&self) -> AgentProviderCallIdentity {
+        self.prior_call
+    }
+
+    /// Exact provisional model call that may carry the read result.
+    pub const fn next_call(&self) -> AgentProviderCallIdentity {
+        self.next_call
+    }
+
+    /// Fixed provider protocol retained across the continuation.
+    pub const fn provider(&self) -> AgentProviderKind {
+        self.config.provider()
+    }
+
+    /// Exact source observation represented by the read projection.
+    pub const fn observation(&self) -> SemanticObservationId {
+        self.observation
+    }
+
+    /// Exact source progressive-observation generation.
+    pub const fn observation_generation(&self) -> SemanticObservationGeneration {
+        self.observation_generation
+    }
+
+    /// Exact pending provider tool-call identifier.
+    pub fn tool_call_id(&self) -> &AgentBrowserToolCallId {
+        self.latest_turn().correlation.id()
+    }
+
+    /// Private structured transcript bytes retained for resource accounting.
+    pub const fn retained_transcript_bytes(&self) -> usize {
+        self.transcript.retained_bytes()
+    }
+
+    /// Content-free metrics for the read result now in the transcript.
+    pub const fn semantic_stats(&self) -> SemanticReadEncodingStats {
+        self.semantic_stats
+    }
+
+    pub(super) const fn config(&self) -> &AgentProviderCallConfig {
+        &self.config
+    }
+
+    pub(super) const fn transcript(&self) -> &AgentProviderTranscript {
+        &self.transcript
+    }
+
+    fn latest_turn(&self) -> &AgentProviderTranscriptTurn {
+        self.transcript
+            .turns
+            .last()
+            .expect("bound read continuation always appends one transcript turn")
+    }
+
+    pub(super) fn into_request_parts(
+        self,
+    ) -> (
+        AgentProviderCallIdentity,
+        AgentProviderCallConfig,
+        SemanticObservationAcknowledgement,
+        AgentProviderTranscript,
+        SemanticReadEncodingStats,
+        SemanticReadDeliveryAuthority,
+    ) {
+        (
+            self.next_call,
+            self.config,
+            self.baseline,
+            self.transcript,
+            self.semantic_stats,
+            self.delivery,
+        )
+    }
+}
+
+impl fmt::Debug for AgentProviderBoundReadContinuation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentProviderBoundReadContinuation")
+            .field("prior_call", &self.prior_call)
+            .field("next_call", &self.next_call)
+            .field("provider", &self.config.provider())
+            .field("baseline", &self.baseline)
+            .field("observation", &self.observation)
+            .field("observation_generation", &self.observation_generation)
+            .field("semantic_stats", &self.semantic_stats)
+            .field("delivery", &"[redacted]")
+            .field("tool_kind", &self.latest_turn().correlation.kind())
+            .field("tool_call_id", &"[redacted]")
+            .field(
+                "argument_bytes",
+                &self.latest_turn().correlation.argument_bytes(),
+            )
+            .field("transcript_bytes", &self.transcript.retained_bytes())
+            .field("content", &"[redacted]")
+            .finish()
+    }
+}
+
 /// Move-only provider continuation bound to one exact viewport screenshot.
 ///
 /// The canonical PNG is retained only until the fixed provider body is
@@ -887,16 +1091,18 @@ mod tests {
     use crate::semantic_screenshot::admitted_test_screenshot;
     use crate::{
         compute_semantic_diff, decode_semantic_snapshot, encode_semantic_diff,
-        encode_semantic_locate_result, locate_semantic_observation, AgentAccountAttestationId,
-        AgentAccountScope, AgentContextAccountBinding, AgentModelCallBudget, AgentModelCallRequest,
+        encode_semantic_locate_result, encode_semantic_read, locate_semantic_observation,
+        read_semantic_observation, AgentAccountAttestationId, AgentAccountScope,
+        AgentContextAccountBinding, AgentModelCallBudget, AgentModelCallRequest,
         AgentPolicyInstant, ContextCapabilities, ContextCapability, ContextId, ContextIdentity,
         ContextKind, ContextOperationId, ContextRegistry, ContextRunId, ContextSettlement, FrameId,
-        SemanticDecodeContext, SemanticDiffBudget, SemanticDiffOutcome, SemanticFrameJoin,
-        SemanticFrameTrust, SemanticInvocationId, SemanticLocateBudget, SemanticLocateId,
-        SemanticLocateQuery, SemanticLocateRequest, SemanticLocateScope,
+        SemanticCaptureInstant, SemanticDecodeContext, SemanticDiffBudget, SemanticDiffOutcome,
+        SemanticFrameJoin, SemanticFrameTrust, SemanticInvocationId, SemanticLocateBudget,
+        SemanticLocateId, SemanticLocateQuery, SemanticLocateRequest, SemanticLocateScope,
         SemanticModelEncodingBudget, SemanticObservation, SemanticObservationAssembler,
         SemanticObservationBudget, SemanticObservationId, SemanticObservationRequest,
-        SemanticOrigin, SemanticSnapshotGeneration, SemanticTokenCountQuality,
+        SemanticOrigin, SemanticReadAuthority, SemanticReadBudget, SemanticReadResult,
+        SemanticReadSensitivityLimit, SemanticSnapshotGeneration, SemanticTokenCountQuality,
         SemanticTokenCountRequirement, SemanticTokenCounter, SemanticTokenCounterError,
         SemanticTokenMeasurement, SemanticTokenizerRevision, SEMANTIC_WIRE_VERSION,
     };
@@ -1049,6 +1255,17 @@ mod tests {
         )
         .expect("bind locate");
         locate_semantic_observation(observation, request).expect("locate result")
+    }
+
+    fn read_result(observation: &SemanticObservation) -> SemanticReadResult<'_> {
+        read_semantic_observation(
+            observation,
+            SemanticReadAuthority::Initial,
+            SemanticCaptureInstant::from_millis(1_550),
+            SemanticReadSensitivityLimit::Sensitive,
+            SemanticReadBudget::STANDARD,
+        )
+        .expect("read result")
     }
 
     fn call(value: u64) -> AgentProviderCallIdentity {
@@ -1558,6 +1775,202 @@ mod tests {
             .expect("locate output");
         assert!(output.starts_with("ZLOC1 content=untrusted"));
         assert!(!output.contains("private old state"));
+    }
+
+    #[test]
+    fn read_tool_binds_only_the_exact_acknowledged_read_result() {
+        let context = context();
+        let observed = observation(context, 1, 1, 1, "private readable state");
+        let baseline = SemanticObservationAcknowledgement::from_fingerprint(
+            SemanticObservationFingerprint::from_observation(&observed),
+        );
+        let read = read_result(&observed);
+        let config = config(AgentProviderKind::OpenAiResponses);
+        let counter = FixedCounter {
+            revision: config.tokenizer().clone(),
+        };
+        let payload = encode_semantic_read(
+            &read,
+            SemanticModelEncodingBudget::try_new(
+                16 * 1024,
+                16 * 1024,
+                SemanticTokenCountRequirement::Exact,
+            )
+            .expect("read budget"),
+        )
+        .expect("encode read")
+        .admit(&counter, config.tokenizer())
+        .expect("admit read");
+        let prior = call(1);
+        let arguments = r#"{"scope":{"kind":"initial"}}"#;
+        let correlation = super::super::AgentBrowserToolCall::decode_openai(
+            prior,
+            "fc_read_private_1".to_owned(),
+            "call_read_private_1".to_owned(),
+            "read",
+            arguments.to_owned(),
+        )
+        .expect("read tool")
+        .into_continuation_parts()
+        .0;
+        let continuation = AgentProviderContinuationSeed {
+            call: prior,
+            config: config.clone(),
+            baseline: baseline.clone(),
+            transcript: transcript(),
+        }
+        .join_terminal_tool(
+            completion(
+                prior,
+                u32::try_from(arguments.len()).expect("argument bytes"),
+            ),
+            correlation,
+        )
+        .expect("read terminal");
+        let prior_transcript_bytes = continuation.retained_transcript_bytes();
+        let bound = continuation
+            .bind_read(call(2), &config, &read, payload)
+            .expect("bind read result");
+        assert_eq!(bound.observation(), read.observation());
+        assert_eq!(bound.semantic_stats().items(), read.stats().items());
+        assert!(bound.retained_transcript_bytes() > prior_transcript_bytes);
+        let draft =
+            super::super::request::AgentProviderReadContinuationRequestDraft::try_new(bound)
+                .expect("fixed read draft");
+        let wire: serde_json::Value =
+            serde_json::from_slice(draft.request().body()).expect("OpenAI read JSON");
+        let input = wire["input"].as_array().expect("input");
+        assert_eq!(input.len(), 4);
+        assert_eq!(input[2]["name"], "read");
+        assert_eq!(input[2]["arguments"], arguments);
+        let output = input[3]["output"].as_str().expect("read output");
+        assert!(output.starts_with("ZREAD1 content=untrusted"));
+        assert!(output.contains("private readable state"));
+        let debug = format!("{draft:?}");
+        assert!(!debug.contains("private readable state"));
+        assert!(!debug.contains("call_read_private_1"));
+
+        let substituted = observation(context, 1, 1, 1, "substituted readable state");
+        let substituted_read = read_result(&substituted);
+        let substituted_payload = encode_semantic_read(
+            &substituted_read,
+            SemanticModelEncodingBudget::try_new(
+                16 * 1024,
+                16 * 1024,
+                SemanticTokenCountRequirement::Exact,
+            )
+            .expect("read budget"),
+        )
+        .expect("encode substituted read")
+        .admit(&counter, config.tokenizer())
+        .expect("admit substituted read");
+        let wrong_correlation = super::super::AgentBrowserToolCall::decode_openai(
+            prior,
+            "fc_read_private_2".to_owned(),
+            "call_read_private_2".to_owned(),
+            "read",
+            arguments.to_owned(),
+        )
+        .expect("read tool")
+        .into_continuation_parts()
+        .0;
+        let wrong_continuation = AgentProviderContinuationSeed {
+            call: prior,
+            config: config.clone(),
+            baseline,
+            transcript: transcript(),
+        }
+        .join_terminal_tool(
+            completion(
+                prior,
+                u32::try_from(arguments.len()).expect("argument bytes"),
+            ),
+            wrong_correlation,
+        )
+        .expect("read terminal");
+        assert!(matches!(
+            wrong_continuation.bind_read(call(2), &config, &substituted_read, substituted_payload,),
+            Err(AgentProviderContinuationError::Baseline)
+        ));
+    }
+
+    #[test]
+    fn anthropic_read_result_is_adjacent_and_provider_shape_exact() {
+        let context = context();
+        let observed = observation(context, 1, 1, 1, "private readable state");
+        let baseline = SemanticObservationAcknowledgement::from_fingerprint(
+            SemanticObservationFingerprint::from_observation(&observed),
+        );
+        let read = read_result(&observed);
+        let config = config(AgentProviderKind::AnthropicMessages);
+        let payload = encode_semantic_read(
+            &read,
+            SemanticModelEncodingBudget::try_new(
+                16 * 1024,
+                16 * 1024,
+                SemanticTokenCountRequirement::Exact,
+            )
+            .expect("read budget"),
+        )
+        .expect("encode read")
+        .admit(
+            &FixedCounter {
+                revision: config.tokenizer().clone(),
+            },
+            config.tokenizer(),
+        )
+        .expect("admit read");
+        let prior = call(1);
+        let arguments = r#"{"scope":{"kind":"initial"}}"#;
+        let correlation = super::super::AgentBrowserToolCall::decode(
+            prior,
+            "toolu_read_private_1".to_owned(),
+            "read",
+            arguments.to_owned(),
+        )
+        .expect("Anthropic read tool")
+        .into_continuation_parts()
+        .0;
+        let continuation = AgentProviderContinuationSeed {
+            call: prior,
+            config: config.clone(),
+            baseline,
+            transcript: transcript(),
+        }
+        .join_terminal_tool(
+            completion(
+                prior,
+                u32::try_from(arguments.len()).expect("argument bytes"),
+            ),
+            correlation,
+        )
+        .expect("read terminal");
+        let draft = super::super::request::AgentProviderReadContinuationRequestDraft::try_new(
+            continuation
+                .bind_read(call(2), &config, &read, payload)
+                .expect("bind read result"),
+        )
+        .expect("fixed Anthropic read draft");
+        let wire: serde_json::Value =
+            serde_json::from_slice(draft.request().body()).expect("Anthropic read JSON");
+        let messages = wire["messages"].as_array().expect("messages");
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[1]["role"], "assistant");
+        assert_eq!(messages[1]["content"][0]["type"], "tool_use");
+        assert_eq!(messages[1]["content"][0]["name"], "read");
+        assert_eq!(messages[1]["content"][0]["id"], "toolu_read_private_1");
+        assert_eq!(messages[2]["role"], "user");
+        assert_eq!(messages[2]["content"][0]["type"], "tool_result");
+        assert_eq!(
+            messages[2]["content"][0]["tool_use_id"],
+            "toolu_read_private_1"
+        );
+        let output = messages[2]["content"][0]["content"]
+            .as_str()
+            .expect("read output");
+        assert!(output.starts_with("ZREAD1 content=untrusted"));
+        assert!(output.contains("private readable state"));
+        assert!(!format!("{draft:?}").contains("private readable state"));
     }
 
     #[test]

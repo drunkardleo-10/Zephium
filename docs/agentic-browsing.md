@@ -372,8 +372,28 @@ every returned reference was already disclosed. Committing delivery therefore
 adds no origin, account, sensitivity, trust, or reference taint; it returns a
 content-free receipt and retains the same observation acknowledgement for a
 later bounded turn. Refusal or pre-commit cancellation releases the reservation.
-The diff path mechanically rejects both locate and screenshot correlations, so
-neither result class can be substituted with a page delta.
+`read` result continuation follows the same one-shot correlation rule but may
+carry bounded page strings. A read result records the exact full-observation
+fingerprint in addition to its context, generation, capture time, provenance,
+omissions, and content guard. Only the matching prior tool-only `read` stop may
+bind its token-admitted `ZREAD1` bytes to a newer same-plan call. The full
+OpenAI or Anthropic replay must receive an `ExactLocal` latest-result count and
+whole-input count before policy mutation; provider-backed counting is rejected
+because it would itself disclose the result. Policy proves the exact committed
+baseline cohort and every returned reference/origin, then reuses that cohort
+unchanged. This admits truthful empty reads, preserves the conservative prior
+sensitivity and trust, and adds no origin, account, reference, or taint-cohort
+growth. Its delivery receipt remains deliberately weaker than an observation
+acknowledgement; the move-only bound request carries the prior acknowledgement
+separately so a successful read result can retain stateless continuation
+without allowing a standalone read to manufacture diff or expansion authority.
+The current seam accepts only a read projected from that already-acknowledged
+observation; a progressive expansion must first establish a new delivered
+observation rather than silently rebasing through a read result. Refusal and
+cancellation release the reservation.
+
+The diff path mechanically rejects locate, read, and screenshot correlations,
+so none of those result classes can be substituted with a page delta.
 
 After an action, return a semantic diff against the last acknowledged snapshot:
 
@@ -623,9 +643,11 @@ schedule supplies cost.
 The fixed OpenAI and Anthropic builders accept token-admitted full-observation
 or bounded-read types. Committed admission retains a cloneable content-free
 proof beside move-only usage authority: a full observation can seed later diff
-computation, while a read receipt cannot. If the shell loses this optional proof
-it must request a fresh snapshot; it cannot recover by retaining or
-reconstructing semantic strings or request bytes.
+computation, while a standalone read receipt cannot. A bound `read` result may
+retain only the exact earlier acknowledgement already present in its
+move-only transcript; the receipt itself still cannot mint or expose one. If
+the shell loses this optional proof it must request a fresh snapshot; it cannot
+recover by retaining or reconstructing semantic strings or request bytes.
 
 A compact diff is never sent as a standalone stateless provider turn because
 the model would not have the acknowledged baseline it modifies. Provider diff

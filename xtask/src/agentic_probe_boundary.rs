@@ -33,6 +33,8 @@ const AGENTIC_SEMANTIC_DIFF: &str = "crates/zephium-agentic/src/semantic_diff.rs
 const AGENTIC_SEMANTIC_DIFF_MODEL: &str = "crates/zephium-agentic/src/semantic_diff_model.rs";
 const AGENTIC_SEMANTIC_LOCATE: &str = "crates/zephium-agentic/src/semantic_locate.rs";
 const AGENTIC_SEMANTIC_LOCATE_MODEL: &str = "crates/zephium-agentic/src/semantic_locate_model.rs";
+const AGENTIC_SEMANTIC_READ: &str = "crates/zephium-agentic/src/semantic_read.rs";
+const AGENTIC_SEMANTIC_READ_MODEL: &str = "crates/zephium-agentic/src/semantic_read_model.rs";
 const AGENTIC_SEMANTIC_ACTION: &str = "crates/zephium-agentic/src/semantic_action.rs";
 const AGENTIC_SEMANTIC_EXECUTE: &str = "crates/zephium-agentic/src/semantic_execute.rs";
 const AGENTIC_SEMANTIC_EXECUTE_COORDINATOR: &str =
@@ -154,6 +156,15 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         &read(repository.join(AGENTIC_SEMANTIC_LOCATE_MODEL))?,
         &read(repository.join(AGENTIC_PROVIDER_ROOT))?,
         &read(repository.join(AGENTIC_PROVIDER_TOOL))?,
+        &read(repository.join(AGENTIC_PROVIDER_CONTINUATION))?,
+        &read(repository.join(AGENTIC_PROVIDER_REQUEST))?,
+        &read(repository.join(AGENTIC_POLICY))?,
+    )?;
+    validate_semantic_read_continuation_contract(
+        &read(repository.join(AGENTIC_ROOT))?,
+        &read(repository.join(AGENTIC_SEMANTIC_READ))?,
+        &read(repository.join(AGENTIC_SEMANTIC_READ_MODEL))?,
+        &read(repository.join(AGENTIC_PROVIDER_ROOT))?,
         &read(repository.join(AGENTIC_PROVIDER_CONTINUATION))?,
         &read(repository.join(AGENTIC_PROVIDER_REQUEST))?,
         &read(repository.join(AGENTIC_POLICY))?,
@@ -2138,6 +2149,7 @@ fn validate_semantic_diff_policy_contract(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_semantic_locate_contract(
     root: &str,
     locate: &str,
@@ -2268,7 +2280,7 @@ fn validate_semantic_locate_contract(
         "if!result.matches_acknowledgement(&self.baseline)",
         "if!payload.matches_result(result)",
         "lettranscript=transcript.try_append(correlation,tool_result)?;",
-        "AgentBrowserToolKind::Locate|AgentBrowserToolKind::Screenshot",
+        "AgentBrowserToolKind::Locate|AgentBrowserToolKind::Read|AgentBrowserToolKind::Screenshot",
         "pubstructAgentProviderBoundLocateContinuation",
     ] {
         if !continuation.contains(required) {
@@ -2321,6 +2333,130 @@ fn validate_semantic_locate_contract(
         if !policy.contains(required) {
             return Err(format!(
                 "semantic locate policy lost baseline-only taint admission {required}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_semantic_read_continuation_contract(
+    root: &str,
+    read: &str,
+    read_model: &str,
+    provider_root: &str,
+    continuation: &str,
+    provider_request: &str,
+    policy: &str,
+) -> Result<(), String> {
+    let root = compact(root);
+    for required in [
+        "AgentProviderBoundReadContinuation",
+        "AgentProviderReadContinuationRequestDraft",
+        "AgentPreparedReadContinuationRequest",
+    ] {
+        if !root.contains(required) {
+            return Err(format!(
+                "agentic root lost semantic read continuation export {required}"
+            ));
+        }
+    }
+
+    let read = compact(read);
+    for required in [
+        "observation_fingerprint:SemanticObservationFingerprint",
+        "pub(crate)constfnobservation_guard(&self)->[u8;32]",
+        "pub(crate)fnmatches_acknowledgement(",
+        "acknowledgement.guard()==self.observation_fingerprint.digest()",
+        "node.sensitivity()==SemanticSensitivity::Secret",
+        "pubconstMAX_SEMANTIC_READ_ITEMS:u16=256",
+        "pubconstMAX_SEMANTIC_READ_BYTES:u32=64*1024",
+    ] {
+        if !read.contains(required) {
+            return Err(format!(
+                "semantic read lost exact observation, secret, or resource binding {required}"
+            ));
+        }
+    }
+
+    let read_model = compact(read_model);
+    for required in [
+        "measurement:SemanticTokenMeasurement",
+        "observation_guard:[u8;32]",
+        "self.observation_guard==read.observation_guard()",
+        "observation_guard:read.observation_guard()",
+        "pubfnmatches_read(&self,read:&SemanticReadResult<'_>)->bool",
+    ] {
+        if !read_model.contains(required) {
+            return Err(format!(
+                "semantic read delivery lost exact source and token binding {required}"
+            ));
+        }
+    }
+
+    let continuation = compact(continuation);
+    for required in [
+        "pubfnbind_read_request(",
+        "self.correlation.kind()!=AgentBrowserToolKind::Read",
+        "if!read.matches_acknowledgement(&self.baseline)",
+        "if!payload.matches_read(read)",
+        "pubstructAgentProviderBoundReadContinuation",
+        "baseline.guard()!=receipt.observation_guard()",
+        "AgentBrowserToolKind::Locate|AgentBrowserToolKind::Read|AgentBrowserToolKind::Screenshot",
+    ] {
+        if !continuation.contains(required) {
+            return Err(format!(
+                "provider read continuation lost exact tool/baseline join {required}"
+            ));
+        }
+    }
+
+    let provider_request = compact(provider_request);
+    for required in [
+        "pubstructAgentProviderReadContinuationRequestDraft",
+        "counter.count_openai_responses_input(",
+        "counter.count_anthropic_messages_input(",
+        "config().validate_read_continuation_request(",
+        "policy.prepare_provider_read_input(",
+        "pubstructAgentPreparedReadContinuationRequest",
+        "commitment:AgentProviderInputCommitment::Read",
+        "continuation_transcript:Some(self.continuation_transcript)",
+        "continuation_baseline:Some(self.baseline)",
+        "Self::Read(_)=>None",
+    ] {
+        if !provider_request.contains(required) {
+            return Err(format!(
+                "provider read result lost local counting, non-promotion, or atomic disclosure {required}"
+            ));
+        }
+    }
+
+    let provider_root = compact(provider_root);
+    for required in [
+        "fnvalidate_read_continuation_request(",
+        "ifread.quality()!=crate::SemanticTokenCountQuality::ExactLocal",
+        "self.validate_diff_request(request,read,structured_input)",
+    ] {
+        if !provider_root.contains(required) {
+            return Err(format!(
+                "provider read result lost exact local count bound {required}"
+            ));
+        }
+    }
+
+    let policy = compact(policy);
+    for required in [
+        "pub(crate)fnprepare_provider_read_input(",
+        "!delivery.matches_read(read)||!read.matches_acknowledgement(baseline)",
+        "provider_read_taints(read,baseline,request.account(),&self.taints)?",
+        "ModelInputKind::Read",
+        "cohort.source_guard==baseline.guard()",
+        "cohort.contains_reference(provenance.reference())",
+        "ifcandidates.is_empty()",
+        "pubfncommit_read_input(",
+    ] {
+        if !policy.contains(required) {
+            return Err(format!(
+                "semantic read policy lost baseline-only taint admission {required}"
             ));
         }
     }
@@ -3261,6 +3397,91 @@ mod tests {
             continuation,
             provider_request,
             &policy.replace("cohort.contains_reference(matched.reference())", "true",),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn semantic_read_continuation_requires_exact_baseline_and_local_counting() {
+        let root = include_str!("../../crates/zephium-agentic/src/lib.rs");
+        let read = include_str!("../../crates/zephium-agentic/src/semantic_read.rs");
+        let read_model = include_str!("../../crates/zephium-agentic/src/semantic_read_model.rs");
+        let provider_root = include_str!("../../crates/zephium-agentic/src/agent_provider.rs");
+        let continuation =
+            include_str!("../../crates/zephium-agentic/src/agent_provider/continuation.rs");
+        let provider_request =
+            include_str!("../../crates/zephium-agentic/src/agent_provider/request.rs");
+        let policy = include_str!("../../crates/zephium-agentic/src/agent_policy.rs");
+        validate_semantic_read_continuation_contract(
+            root,
+            read,
+            read_model,
+            provider_root,
+            continuation,
+            provider_request,
+            policy,
+        )
+        .expect("bounded semantic read continuation");
+        assert!(validate_semantic_read_continuation_contract(
+            root,
+            &read.replace(
+                "&& acknowledgement.guard() == self.observation_fingerprint.digest()",
+                "",
+            ),
+            read_model,
+            provider_root,
+            continuation,
+            provider_request,
+            policy,
+        )
+        .is_err());
+        assert!(validate_semantic_read_continuation_contract(
+            root,
+            read,
+            read_model,
+            &provider_root.replace(
+                "if read.quality() != crate::SemanticTokenCountQuality::ExactLocal",
+                "if false",
+            ),
+            continuation,
+            provider_request,
+            policy,
+        )
+        .is_err());
+        assert!(validate_semantic_read_continuation_contract(
+            root,
+            read,
+            read_model,
+            provider_root,
+            &continuation.replace(
+                "if !read.matches_acknowledgement(&self.baseline)",
+                "if false",
+            ),
+            provider_request,
+            policy,
+        )
+        .is_err());
+        assert!(validate_semantic_read_continuation_contract(
+            root,
+            read,
+            read_model,
+            provider_root,
+            continuation,
+            &provider_request.replace(
+                "continuation_baseline: Some(self.baseline)",
+                "continuation_baseline: None",
+            ),
+            policy,
+        )
+        .is_err());
+        assert!(validate_semantic_read_continuation_contract(
+            root,
+            read,
+            read_model,
+            provider_root,
+            continuation,
+            provider_request,
+            &policy.replace("cohort.contains_reference(provenance.reference())", "true",),
         )
         .is_err());
     }

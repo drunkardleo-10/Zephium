@@ -104,6 +104,13 @@ or observed on either platform.
   scope, budget, counters, and ordered matches, and mints only a content-free
   delivery receipt. Byte, token-quality, tokenizer-revision, result, and
   receipt substitution tests fail closed.
+- Every bounded read result now retains the exact source-observation
+  fingerprint alongside its public observation/generation/context coordinates.
+  `ZREAD1` payload, delivery authority, and receipt propagate that private
+  digest and rejoin it when matching a read. Same-coordinate altered source
+  content therefore cannot be substituted into a later result continuation,
+  while the public receipt remains distinct from full-observation
+  acknowledgement authority.
 - Deterministic `ZSEM1` output uses one bounded writer and observation-global
   references, frame aliases, parent relationships, roles, state/operation
   inventories, trust/sensitivity/freshness labels, typed frame dispositions,
@@ -591,6 +598,11 @@ receipt/taint/continuation advancement, cancellation/refusal release, bounded
 multi-turn transcript carry-forward, one-post loopback transports with fixed
 OpenAI and Anthropic replay shapes, exact diff acknowledgement and next-seed
 retention, and content-free diagnostics.
+Read-result continuation coverage additionally proves exact source-fingerprint
+binding, OpenAI and Anthropic tool-result adjacency/correlation, `ZREAD1`
+content carriage with redacted diagnostics, same-coordinate content
+substitution refusal, latest-result and whole-replay local counting, and
+non-promotion of its receipt to observation acknowledgement.
 Runtime-invocation tests
 cover the sole compact initial shape, absence of URLs/selectors/scripts,
 stable-anchor diagnostic redaction,

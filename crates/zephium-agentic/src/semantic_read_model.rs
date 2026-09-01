@@ -12,7 +12,7 @@ use crate::semantic_model::{
     validate_semantic_token_measurement, write_quoted, BoundedModelBuffer,
 };
 use crate::{
-    SemanticCaptureInstant, SemanticFrameJoin, SemanticModelDeliveryError,
+    ContextJoin, SemanticCaptureInstant, SemanticFrameJoin, SemanticModelDeliveryError,
     SemanticModelDeliverySettlement, SemanticModelEncodingBudget, SemanticModelEncodingError,
     SemanticObservationGeneration, SemanticObservationId, SemanticReadContent, SemanticReadField,
     SemanticReadOmission, SemanticReadResult, SemanticSensitivity, SemanticTokenCounter,
@@ -72,6 +72,8 @@ pub struct SemanticEncodedRead {
     stats: SemanticReadEncodingStats,
     observation: SemanticObservationId,
     observation_generation: SemanticObservationGeneration,
+    context: ContextJoin,
+    observation_guard: [u8; 32],
     captured_at: SemanticCaptureInstant,
     read_guard: [u8; 32],
 }
@@ -108,6 +110,8 @@ impl SemanticEncodedRead {
             measurement,
             observation: self.observation,
             observation_generation: self.observation_generation,
+            context: self.context,
+            observation_guard: self.observation_guard,
             captured_at: self.captured_at,
             read_guard: self.read_guard,
         })
@@ -133,23 +137,44 @@ pub struct SemanticReadModelPayload {
     measurement: SemanticTokenMeasurement,
     observation: SemanticObservationId,
     observation_generation: SemanticObservationGeneration,
+    context: ContextJoin,
+    observation_guard: [u8; 32],
     captured_at: SemanticCaptureInstant,
     read_guard: [u8; 32],
 }
 
 pub(crate) struct SemanticReadDeliveryAuthority {
+    measurement: SemanticTokenMeasurement,
     observation: SemanticObservationId,
     observation_generation: SemanticObservationGeneration,
+    context: ContextJoin,
+    observation_guard: [u8; 32],
     captured_at: SemanticCaptureInstant,
     items: u16,
     read_guard: [u8; 32],
 }
 
 impl SemanticReadDeliveryAuthority {
+    pub(crate) const fn token_measurement(&self) -> &SemanticTokenMeasurement {
+        &self.measurement
+    }
+
+    pub(crate) fn matches_read(&self, read: &SemanticReadResult<'_>) -> bool {
+        self.observation == read.observation()
+            && self.observation_generation == read.observation_generation()
+            && self.context == read.context()
+            && self.observation_guard == read.observation_guard()
+            && self.captured_at == read.captured_at()
+            && self.items == read.stats().items()
+            && self.read_guard == read.guard()
+    }
+
     pub(crate) fn commit(self) -> SemanticReadDeliveryReceipt {
         SemanticReadDeliveryReceipt {
             observation: self.observation,
             observation_generation: self.observation_generation,
+            context: self.context,
+            observation_guard: self.observation_guard,
             captured_at: self.captured_at,
             items: self.items,
             read_guard: self.read_guard,
@@ -176,6 +201,8 @@ impl SemanticReadModelPayload {
     pub(crate) fn matches_read(&self, read: &SemanticReadResult<'_>) -> bool {
         self.observation == read.observation()
             && self.observation_generation == read.observation_generation()
+            && self.context == read.context()
+            && self.observation_guard == read.observation_guard()
             && self.captured_at == read.captured_at()
             && self.stats.items == read.stats().items()
             && self.read_guard == read.guard()
@@ -192,8 +219,11 @@ impl SemanticReadModelPayload {
             self.content,
             self.stats,
             SemanticReadDeliveryAuthority {
+                measurement: self.measurement,
                 observation: self.observation,
                 observation_generation: self.observation_generation,
+                context: self.context,
+                observation_guard: self.observation_guard,
                 captured_at: self.captured_at,
                 items: self.stats.items,
                 read_guard: self.read_guard,
@@ -215,6 +245,8 @@ impl SemanticReadModelPayload {
             SemanticModelDeliverySettlement::Committed => Ok(SemanticReadDeliveryReceipt {
                 observation: self.observation,
                 observation_generation: self.observation_generation,
+                context: self.context,
+                observation_guard: self.observation_guard,
                 captured_at: self.captured_at,
                 items: self.stats.items,
                 read_guard: self.read_guard,
@@ -246,6 +278,8 @@ impl fmt::Debug for SemanticReadModelPayload {
 pub struct SemanticReadDeliveryReceipt {
     observation: SemanticObservationId,
     observation_generation: SemanticObservationGeneration,
+    context: ContextJoin,
+    observation_guard: [u8; 32],
     captured_at: SemanticCaptureInstant,
     items: u16,
     read_guard: [u8; 32],
@@ -262,6 +296,15 @@ impl SemanticReadDeliveryReceipt {
         self.observation_generation
     }
 
+    /// Exact source context/document/cancellation authority.
+    pub const fn context(&self) -> ContextJoin {
+        self.context
+    }
+
+    pub(crate) const fn observation_guard(&self) -> [u8; 32] {
+        self.observation_guard
+    }
+
     /// Trusted-shell capture time represented by the delivered read.
     pub const fn captured_at(&self) -> SemanticCaptureInstant {
         self.captured_at
@@ -276,6 +319,8 @@ impl SemanticReadDeliveryReceipt {
     pub fn matches_read(&self, read: &SemanticReadResult<'_>) -> bool {
         self.observation == read.observation()
             && self.observation_generation == read.observation_generation()
+            && self.context == read.context()
+            && self.observation_guard == read.observation_guard()
             && self.captured_at == read.captured_at()
             && self.items == read.stats().items()
             && self.read_guard == read.guard()
@@ -292,6 +337,7 @@ impl fmt::Debug for SemanticReadDeliveryReceipt {
             .debug_struct("SemanticReadDeliveryReceipt")
             .field("observation", &self.observation)
             .field("observation_generation", &self.observation_generation)
+            .field("context", &self.context)
             .field("captured_at", &self.captured_at)
             .field("items", &self.items)
             .field("read_guard", &"[redacted]")
@@ -391,6 +437,8 @@ pub fn encode_semantic_read(
         stats,
         observation: read.observation(),
         observation_generation: read.observation_generation(),
+        context: read.context(),
+        observation_guard: read.observation_guard(),
         captured_at: read.captured_at(),
         read_guard: read.guard(),
     })

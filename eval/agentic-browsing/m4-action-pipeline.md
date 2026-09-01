@@ -277,10 +277,12 @@ are trusted, or that M4 is complete.
   secret fragments before exposing bytes.
 - Encoded read bytes stay private until the selected tokenizer port admits the
   exact revision, quality, byte, and token ceilings. Committed transport mints
-  a content-bound read-delivery receipt; refused/cancelled transport consumes
-  the payload without authority. The receipt is intentionally a distinct type,
+  a content-bound read-delivery receipt which also privately binds the exact
+  full source-observation fingerprint; refused/cancelled transport consumes the
+  payload without authority. The receipt is intentionally a distinct type,
   cannot authorize a semantic diff or progressive scope, and fails to match a
-  different sensitivity projection, content cohort, or capture time.
+  same-coordinate altered observation, different sensitivity projection,
+  content cohort, or capture time.
 - Extraction accepts hostile model output only after that exact bounded read
   has a committed delivery receipt. The caller supplies a nonzero trusted
   schema identity and one through 64 unique schema-ordered ASCII fields. The
@@ -512,7 +514,9 @@ content-free diagnostics. Encoding coverage includes deterministic escaping,
 frame/provenance aliases, non-actionable `@rN` identities, byte refusal,
 token quality/revision/count gates, content-redacted diagnostics, committed-only
 delivery receipts, projection/capture mismatch, and the mechanical distinction
-from full-observation acknowledgement authority.
+from full-observation acknowledgement authority. Provider-result coverage also
+binds the read to its exact prior observation fingerprint and refuses
+same-coordinate result substitution.
 
 Extraction coverage includes trusted schema names, uniqueness, ordering, and
 all field bounds; exact read-delivery/capture/projection binding; all four value

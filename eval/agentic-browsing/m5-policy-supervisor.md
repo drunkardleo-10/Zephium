@@ -444,7 +444,21 @@ browser action, model call, tool call, data transfer, cost, or native resource.
   merges only those unchanged baseline cohorts, so locate cannot add taint or
   authority, while its content-free receipt preserves the same acknowledgement
   for the next bounded turn. Refusal/cancellation drops the move-only delivery
-  authority. Diff binding explicitly rejects locate and screenshot results.
+  authority.
+- Read result continuation is independently typed from both locate and diff.
+  Only an exact prior tool-only `read` correlation can append its token-admitted
+  `ZREAD1` bytes. The read must match the complete already-acknowledged source
+  fingerprint, not only observation/generation/context coordinates. Both fixed
+  provider replays require an `ExactLocal` latest-result count and whole-body
+  count before policy admission. Policy rejoins every exact committed baseline
+  cohort, proves each returned reference belongs to exactly one matching
+  origin, and merges those cohorts unchanged; empty results remain admissible
+  without adding taint or references. The read receipt itself still exposes no
+  observation acknowledgement. A successful bound request carries the prior
+  acknowledgement separately and move-only so a later tool turn remains
+  possible, while standalone reads cannot manufacture diff or progressive-
+  scope authority. Diff binding explicitly rejects locate, read, and screenshot
+  results.
 - `act` converts immediately into the existing click/fill/select/press/scroll,
   effect, wait, verification, and settle types. Existing secret/control-text
   refusal and outcome compatibility run during decode. The preflight also caps
@@ -552,13 +566,15 @@ browser action, model call, tool call, data transfer, cost, or native resource.
   At most four admitted attempts exist. A slot is acquired before semantic
   disclosure commits, is released on every terminal path, and seals the shared
   transport if a committed attempt is abandoned.
-- A committed attempt exposes only the content-free observation/read/screenshot proof
-  retained by request admission. A shell may clone the observation proof before
-  consuming the attempt so a future bounded continuation can compute an exact
-  diff. Screenshot proof is audit correlation only and cannot seed another
-  continuation. Losing an eligible observation proof cannot widen authority and
-  requires a fresh snapshot; request bytes, semantic strings, and image bytes
-  are never duplicated for continuation.
+- A committed attempt exposes only the content-free observation/read/screenshot
+  proof retained by request admission. A shell may clone the observation proof
+  before consuming the attempt so a future bounded continuation can compute an
+  exact diff. A read receipt cannot expose an acknowledgement; only the fixed
+  bound-read transport may carry forward the exact acknowledgement already in
+  its private transcript. Screenshot proof is audit correlation only and
+  cannot seed another continuation. Losing an eligible observation proof
+  cannot widen authority and requires a fresh snapshot; request bytes,
+  semantic strings, and image bytes are never duplicated for continuation.
 - The codec is not a provider privacy qualification. OpenAI documents that
   image inputs are scanned and that a flagged image may be retained for manual
   review even under Zero Data Retention or Modified Abuse Monitoring; see
@@ -756,6 +772,10 @@ unsupported built-in and reasoning output, objective secret/tokenizer/quality
 refusal, recursive strict-schema completeness, atomic preflight/reservation,
 observation/read one-shot commitment for both providers, exact input-proof
 retention through transport admission, contextless-diff exclusion,
+exact-fingerprint read-result binding, OpenAI and Anthropic `ZREAD1`
+tool-result shapes, latest-result and whole-replay local counting,
+same-coordinate substitution refusal, empty-result baseline rejoin, unchanged
+taint/reference inventory, read-receipt non-promotion, and next-seed retention,
 byte-exact screenshot guards, OpenAI and Anthropic visual tool-result shapes,
 silent-resize refusal, every-frame sensitive zero-reference taint, exact local
 whole-body counting, visual byte/transcript ceilings, receipt substitution,

@@ -507,6 +507,8 @@ impl SemanticReadStats {
 pub struct SemanticReadResult<'a> {
     observation: SemanticObservationId,
     observation_generation: SemanticObservationGeneration,
+    context: ContextJoin,
+    observation_fingerprint: SemanticObservationFingerprint,
     captured_at: SemanticCaptureInstant,
     fragments: Vec<SemanticReadFragment<'a>>,
     omissions: SemanticReadOmissions,
@@ -523,6 +525,11 @@ impl<'a> SemanticReadResult<'a> {
     /// Progressive observation generation projected by this result.
     pub const fn observation_generation(&self) -> SemanticObservationGeneration {
         self.observation_generation
+    }
+
+    /// Exact context/document/cancellation authority projected by this result.
+    pub const fn context(&self) -> ContextJoin {
+        self.context
     }
 
     /// Trusted-shell capture time shared by every fragment.
@@ -554,6 +561,20 @@ impl<'a> SemanticReadResult<'a> {
     pub(crate) const fn guard(&self) -> [u8; 32] {
         self.guard
     }
+
+    pub(crate) const fn observation_guard(&self) -> [u8; 32] {
+        self.observation_fingerprint.digest()
+    }
+
+    pub(crate) fn matches_acknowledgement(
+        &self,
+        acknowledgement: &SemanticObservationAcknowledgement,
+    ) -> bool {
+        acknowledgement.observation() == self.observation
+            && acknowledgement.generation() == self.observation_generation
+            && acknowledgement.context() == self.context
+            && acknowledgement.guard() == self.observation_fingerprint.digest()
+    }
 }
 
 impl fmt::Debug for SemanticReadResult<'_> {
@@ -562,6 +583,7 @@ impl fmt::Debug for SemanticReadResult<'_> {
             .debug_struct("SemanticReadResult")
             .field("observation", &self.observation)
             .field("observation_generation", &self.observation_generation)
+            .field("context", &self.context)
             .field("captured_at", &self.captured_at)
             .field("omissions", &self.omissions)
             .field("stats", &self.stats)
@@ -832,6 +854,8 @@ impl<'a> SemanticReadBuilder<'a> {
         SemanticReadResult {
             observation: self.observation.request().id(),
             observation_generation: self.observation.request().generation(),
+            context: self.observation.request().context(),
+            observation_fingerprint: fingerprint,
             captured_at: self.captured_at,
             fragments: self.fragments,
             omissions: self.omissions,
@@ -1031,6 +1055,10 @@ mod tests {
     }
 
     fn initial_observation(completeness: &str) -> SemanticObservation {
+        initial_observation_with_heading(completeness, "Public heading")
+    }
+
+    fn initial_observation_with_heading(completeness: &str, heading: &str) -> SemanticObservation {
         let context = context();
         let frame = SemanticFrameJoin::try_new(
             context,
@@ -1048,7 +1076,7 @@ mod tests {
             json!([
                 {"k": 1, "r": "document", "o": 16},
                 {"k": 2, "p": 0, "r": "heading", "l": 2,
-                 "n": "Public heading", "t": "Public introduction"},
+                 "n": heading, "t": "Public introduction"},
                 {"k": 3, "p": 0, "r": "paragraph", "t": "Public paragraph"},
                 {"k": 4, "p": 0, "r": "paragraph", "t": "Private customer note",
                  "q": "sensitive"},
@@ -1123,6 +1151,12 @@ mod tests {
             observation.frames()[0].frame().origin()
         );
         assert_eq!(captured_at.millis(), 42);
+        assert!(result.matches_acknowledgement(&acknowledgement(&observation)));
+        let substituted = initial_observation_with_heading("complete", "Substituted heading");
+        assert!(
+            !result.matches_acknowledgement(&acknowledgement(&substituted)),
+            "matching observation coordinates must not permit content substitution"
+        );
 
         let debug = format!("{result:?} {:?} {first:?}", result.fragments());
         for content in [

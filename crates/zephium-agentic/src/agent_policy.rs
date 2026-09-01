@@ -26,6 +26,7 @@ pub use effect::{
 use crate::semantic_diff::SemanticObservationFingerprint;
 use crate::semantic_diff_model::SemanticDiffDeliveryAuthority;
 use crate::semantic_locate_model::SemanticLocateDeliveryAuthority;
+use crate::semantic_read_model::SemanticReadDeliveryAuthority;
 use crate::semantic_screenshot::SemanticScreenshotDeliveryAuthority;
 use crate::{
     AgentAccountScope, AgentContextAccountBinding, AgentPlanLeaseId, AgentPlanNodeId,
@@ -1096,6 +1097,49 @@ impl AgentRunPolicy {
         )
     }
 
+    /// Reserves one exact whole-provider-input measurement for a read result.
+    ///
+    /// The result must come from the exact observation already present in the
+    /// retained provider transcript. Rejoining that committed baseline keeps
+    /// the prior origin/account/sensitivity/reference taint unchanged: a read
+    /// can disclose more value text, but it cannot create browser authority or
+    /// lower the sensitivity of the model context that already contained it.
+    pub(crate) fn prepare_provider_read_input(
+        &mut self,
+        request: AgentModelCallRequest,
+        expected: AgentModelCallExpectation,
+        baseline: &SemanticObservationAcknowledgement,
+        read: &SemanticReadResult<'_>,
+        delivery: &SemanticReadDeliveryAuthority,
+        structured_input_tokens: u64,
+    ) -> Result<AgentModelCallAdmission, AgentPolicyError> {
+        if request.id() != expected.call
+            || request.lease() != expected.lease
+            || self.manifest.id() != expected.manifest
+            || self
+                .lease_index(expected.lease)
+                .and_then(|index| self.leases.get(index))
+                .is_none_or(|lease| lease.binding.node() != expected.node)
+        {
+            return Err(AgentPolicyError::Authority);
+        }
+        if !delivery.matches_read(read) || !read.matches_acknowledgement(baseline) {
+            return Err(AgentPolicyError::PayloadMismatch);
+        }
+        let candidates = provider_read_taints(read, baseline, request.account(), &self.taints)?;
+        self.prepare_model_input(
+            request,
+            read.context(),
+            ModelInputKind::Read,
+            read.guard(),
+            candidates,
+            ModelInputTokenReservation {
+                measured: structured_input_tokens,
+                additional: 0,
+            },
+        )
+    }
+
     /// Reserves exact bounded-read input before any model transport receives bytes.
     pub fn prepare_read_input(
         &mut self,
@@ -1654,6 +1698,9 @@ pub enum AgentPolicyError {
     /// Empty read could not prove source context authority.
     #[error("agent policy empty read has no source authority")]
     EmptyRead,
+    /// The read result's exact observation or one source reference was not committed.
+    #[error("agent policy semantic read baseline is not committed")]
+    ReadBaselineMissing,
     /// A semantic diff had no frame from which to prove context authority.
     #[error("agent policy empty diff has no source authority")]
     EmptyDiff,
@@ -2011,6 +2058,44 @@ fn locate_taints(
     Ok(candidates)
 }
 
+fn provider_read_taints(
+    read: &SemanticReadResult<'_>,
+    baseline: &SemanticObservationAcknowledgement,
+    account: AgentContextAccountBinding,
+    retained: &[AgentTaintCohort],
+) -> Result<Vec<AgentTaintCohort>, AgentPolicyError> {
+    if account.context() != read.context() || !read.matches_acknowledgement(baseline) {
+        return Err(AgentPolicyError::Authority);
+    }
+    let candidates = retained
+        .iter()
+        .filter(|cohort| {
+            cohort.context == baseline.context()
+                && cohort.observation == baseline.observation()
+                && cohort.observation_generation == baseline.generation()
+                && cohort.source_guard == baseline.guard()
+                && cohort.account == account.account()
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return Err(AgentPolicyError::ReadBaselineMissing);
+    }
+    for fragment in read.fragments() {
+        let provenance = fragment.provenance();
+        let mut sources = candidates
+            .iter()
+            .filter(|cohort| cohort.contains_reference(provenance.reference()));
+        let Some(source) = sources.next() else {
+            return Err(AgentPolicyError::ReadBaselineMissing);
+        };
+        if sources.next().is_some() || source.origin() != provenance.origin() {
+            return Err(AgentPolicyError::ReadBaselineMissing);
+        }
+    }
+    Ok(candidates)
+}
+
 fn read_taints(
     read: &SemanticReadResult<'_>,
     account: AgentContextAccountBinding,
@@ -2306,23 +2391,24 @@ mod tests {
         AgentProviderDiffRequestDraft, AgentProviderEndpoint, AgentProviderInputEvidence,
         AgentProviderInputOutcome, AgentProviderKind, AgentProviderLocalInputTokenCounter,
         AgentProviderLocateRequestDraft, AgentProviderModelRevision, AgentProviderObjective,
-        AgentProviderRequestSettlement, AgentProviderScreenshotRequestDraft,
-        AgentProviderStreamBudget, AgentRunManifestId, AgentRunScope, ContextAutomationState,
-        ContextCapabilities, ContextCapability, ContextId, ContextIdentity, ContextKind,
-        ContextOperationId, ContextRegistry, ContextRunId, ContextSettlement, FrameGeneration,
-        FrameId, SemanticActionBatch, SemanticActionBatchId, SemanticActionFailure,
-        SemanticActionIntent, SemanticActionProposal, SemanticCaptureInstant,
-        SemanticDecodeContext, SemanticDiffBudget, SemanticDiffOutcome, SemanticEffectEvidence,
-        SemanticFrameJoin, SemanticFrameTrust, SemanticInvocationId, SemanticLocateBudget,
-        SemanticLocateId, SemanticLocateQuery, SemanticLocateRequest, SemanticLocateScope,
-        SemanticModelDeliverySettlement, SemanticModelEncodingBudget, SemanticObservationAssembler,
-        SemanticObservationBudget, SemanticObservationId, SemanticObservationRequest,
-        SemanticPreparedAction, SemanticReadAuthority, SemanticReadBudget,
-        SemanticReadSensitivityLimit, SemanticSettleBudget, SemanticSettleInstant,
-        SemanticSettleTracker, SemanticSnapshot, SemanticSnapshotGeneration, SemanticState,
-        SemanticTokenCountQuality, SemanticTokenCountRequirement, SemanticTokenCounter,
-        SemanticTokenCounterError, SemanticTokenMeasurement, SemanticTokenizerRevision,
-        SemanticVerification, SemanticWaitCondition, SEMANTIC_WIRE_VERSION,
+        AgentProviderReadContinuationRequestDraft, AgentProviderRequestSettlement,
+        AgentProviderScreenshotRequestDraft, AgentProviderStreamBudget, AgentRunManifestId,
+        AgentRunScope, ContextAutomationState, ContextCapabilities, ContextCapability, ContextId,
+        ContextIdentity, ContextKind, ContextOperationId, ContextRegistry, ContextRunId,
+        ContextSettlement, FrameGeneration, FrameId, SemanticActionBatch, SemanticActionBatchId,
+        SemanticActionFailure, SemanticActionIntent, SemanticActionProposal,
+        SemanticCaptureInstant, SemanticDecodeContext, SemanticDiffBudget, SemanticDiffOutcome,
+        SemanticEffectEvidence, SemanticFrameJoin, SemanticFrameTrust, SemanticInvocationId,
+        SemanticLocateBudget, SemanticLocateId, SemanticLocateQuery, SemanticLocateRequest,
+        SemanticLocateScope, SemanticModelDeliverySettlement, SemanticModelEncodingBudget,
+        SemanticObservationAssembler, SemanticObservationBudget, SemanticObservationId,
+        SemanticObservationRequest, SemanticPreparedAction, SemanticReadAuthority,
+        SemanticReadBudget, SemanticReadSensitivityLimit, SemanticSettleBudget,
+        SemanticSettleInstant, SemanticSettleTracker, SemanticSnapshot, SemanticSnapshotGeneration,
+        SemanticState, SemanticTokenCountQuality, SemanticTokenCountRequirement,
+        SemanticTokenCounter, SemanticTokenCounterError, SemanticTokenMeasurement,
+        SemanticTokenizerRevision, SemanticVerification, SemanticWaitCondition,
+        SEMANTIC_WIRE_VERSION,
     };
     use serde_json::{json, Value};
 
@@ -4087,6 +4173,239 @@ mod tests {
             .policy
             .settle_model_call(active, AgentModelCallSettlement::Completed, 120, 4, 80)
             .expect("locate settlement");
+    }
+
+    #[test]
+    fn read_result_rejoins_exact_baseline_and_retains_continuation_without_taint_growth() {
+        let source = origin("provider-read-request");
+        let context = make_context(9_247, 9_248, 9_249);
+        let observation = actionable_observation(context, source.clone(), 1);
+        let selected = tokenizer();
+        let config = provider_config(selected.clone(), 10, 20);
+        let objective = AgentProviderObjective::try_admit(
+            "Read the save control".to_owned(),
+            &FixedCounter {
+                revision: selected.clone(),
+                tokens: 5,
+            },
+            &selected,
+        )
+        .expect("objective");
+        let mut fixture = policy_fixture(
+            9_247,
+            9_248,
+            source,
+            SemanticSensitivity::Sensitive,
+            &[SemanticEffectClass::Read],
+            run_budget(10, 5_000, 10_000),
+        );
+        let binding = account(context, NOW - 1);
+        let committed = AgentPreparedObservationRequest::try_openai(
+            &mut fixture.policy,
+            call_request(1, fixture.lease, binding, 15, 20, 100, NOW),
+            &observation,
+            observation_payload(&observation, 50),
+            &objective,
+            config.clone(),
+        )
+        .expect("initial request")
+        .into_transport_input()
+        .commit(&mut fixture.policy)
+        .expect("initial commit");
+        let (initial_request, input, continuation) = committed.into_parts();
+        let (active, evidence) = input.into_parts();
+        let baseline = evidence
+            .observation_acknowledgement()
+            .expect("observation baseline")
+            .clone();
+        fixture
+            .policy
+            .settle_model_call(active, AgentModelCallSettlement::Completed, 65, 4, 80)
+            .expect("initial settlement");
+        assert_eq!(fixture.policy.taints().len(), 1);
+        let initial_reference_count = fixture.policy.taints()[0].reference_count();
+
+        let arguments = r#"{"scope":{"kind":"initial"}}"#;
+        let tool = crate::AgentBrowserToolCall::decode_openai(
+            initial_request.call(),
+            "fc_read_request_1".to_owned(),
+            "call_read_request_1".to_owned(),
+            "read",
+            arguments.to_owned(),
+        )
+        .expect("read tool");
+        let completion = crate::AgentProviderCompletion::new(
+            initial_request.call(),
+            crate::AgentProviderStopReason::ToolCalls,
+            crate::AgentProviderUsage::try_new(65, 4, 0, 0, 0).expect("usage"),
+            crate::AgentProviderStreamStats::new(
+                200,
+                8,
+                0,
+                1,
+                u32::try_from(arguments.len()).expect("argument bytes"),
+            ),
+            true,
+        );
+        let continuation = continuation
+            .expect("continuation seed")
+            .join_terminal_tool(completion, tool.into_continuation_parts().0)
+            .expect("read terminal join");
+        let read = read_semantic_observation(
+            &observation,
+            SemanticReadAuthority::Initial,
+            SemanticCaptureInstant::from_millis(NOW - 2),
+            SemanticReadSensitivityLimit::Sensitive,
+            SemanticReadBudget::STANDARD,
+        )
+        .expect("read result");
+        assert!(read.matches_acknowledgement(&baseline));
+        let payload = encode_semantic_read(
+            &read,
+            SemanticModelEncodingBudget::try_new(
+                16 * 1024,
+                16 * 1024,
+                SemanticTokenCountRequirement::Exact,
+            )
+            .expect("read encoding budget"),
+        )
+        .expect("encode read")
+        .admit(
+            &FixedCounter {
+                revision: selected.clone(),
+                tokens: 30,
+            },
+            &selected,
+        )
+        .expect("admit read");
+        let next_request = call_request(2, fixture.lease, binding, 500, 20, 100, NOW);
+        let provider_counted_result = SemanticTokenMeasurement::try_new(
+            selected.clone(),
+            30,
+            SemanticTokenCountQuality::ProviderExact,
+        )
+        .expect("provider read measurement");
+        let local_structured = SemanticTokenMeasurement::try_new(
+            selected.clone(),
+            120,
+            SemanticTokenCountQuality::ExactLocal,
+        )
+        .expect("local structured measurement");
+        assert_eq!(
+            config
+                .validate_read_continuation_request(
+                    next_request,
+                    &provider_counted_result,
+                    &local_structured,
+                )
+                .expect_err("read result itself must be counted locally"),
+            AgentProviderContractError::InputTokenQuality
+        );
+        let draft = AgentProviderReadContinuationRequestDraft::try_new(
+            continuation
+                .bind_read_request(next_request, &config, &read, payload)
+                .expect("bind read result"),
+        )
+        .expect("fixed read draft");
+        let prepared = draft
+            .try_prepare(
+                &mut fixture.policy,
+                next_request,
+                &read,
+                &FixedProviderInputCounter {
+                    revision: selected,
+                    tokens: 120,
+                    quality: SemanticTokenCountQuality::ExactLocal,
+                },
+            )
+            .expect("read whole-input admission");
+        assert_eq!(prepared.structured_input_measurement().tokens(), 120);
+        assert_eq!(fixture.policy.accounting().reserved_model_tokens(), 140);
+        let transcript_bytes = prepared.continuation_transcript_bytes();
+        let committed = prepared
+            .into_transport_input()
+            .commit(&mut fixture.policy)
+            .expect("read transport commit");
+        assert_eq!(
+            committed.continuation_transcript_bytes(),
+            Some(transcript_bytes)
+        );
+        assert!(committed
+            .input_evidence()
+            .read_receipt()
+            .is_some_and(|receipt| receipt.matches_read(&read)));
+        assert!(
+            committed
+                .input_evidence()
+                .observation_acknowledgement()
+                .is_none(),
+            "read evidence must not mint full-observation authority"
+        );
+        assert_eq!(fixture.policy.taints().len(), 1);
+        assert_eq!(
+            fixture.policy.taints()[0].reference_count(),
+            initial_reference_count
+        );
+        let (read_request, input, continuation) = committed.into_parts();
+        let (active, evidence) = input.into_parts();
+        assert!(matches!(evidence, AgentProviderInputEvidence::Read(_)));
+        fixture
+            .policy
+            .settle_model_call(active, AgentModelCallSettlement::Completed, 120, 4, 80)
+            .expect("read settlement");
+
+        let tool = crate::AgentBrowserToolCall::decode_openai(
+            read_request.call(),
+            "fc_after_read_1".to_owned(),
+            "call_after_read_1".to_owned(),
+            "back",
+            "{}".to_owned(),
+        )
+        .expect("post-read tool");
+        let completion = crate::AgentProviderCompletion::new(
+            read_request.call(),
+            crate::AgentProviderStopReason::ToolCalls,
+            crate::AgentProviderUsage::try_new(120, 4, 0, 0, 0).expect("usage"),
+            crate::AgentProviderStreamStats::new(200, 8, 0, 1, 2),
+            true,
+        );
+        let next_continuation = continuation
+            .expect("read retains baseline for continuation")
+            .join_terminal_tool(completion, tool.into_continuation_parts().0)
+            .expect("post-read terminal join");
+        assert!(next_continuation.baseline().matches(&observation));
+    }
+
+    #[test]
+    fn empty_read_rejoins_committed_baseline_without_new_reference_authority() {
+        let source = origin("empty-provider-read");
+        let context = make_context(9_251, 9_252, 9_253);
+        let observation = document_only_observation(context, source, 1);
+        let baseline = observation_payload(&observation, 10)
+            .settle_delivery(SemanticModelDeliverySettlement::Committed)
+            .expect("baseline acknowledgement");
+        let binding = account(context, NOW - 1);
+        let retained = observation_taints(&observation, binding).expect("observation taint");
+        let read = read_semantic_observation(
+            &observation,
+            SemanticReadAuthority::Initial,
+            SemanticCaptureInstant::from_millis(NOW - 2),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::STANDARD,
+        )
+        .expect("empty read");
+        assert!(read.fragments().is_empty());
+        let candidates = provider_read_taints(&read, &baseline, binding, &retained)
+            .expect("empty read baseline rejoin");
+        assert_eq!(candidates, retained);
+        assert!(candidates
+            .iter()
+            .all(|cohort| cohort.reference_count() == 1));
+        assert_eq!(
+            provider_read_taints(&read, &baseline, binding, &[])
+                .expect_err("missing retained baseline"),
+            AgentPolicyError::ReadBaselineMissing
+        );
     }
 
     #[test]
