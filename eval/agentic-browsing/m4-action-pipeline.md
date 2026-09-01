@@ -2,10 +2,10 @@
 
 Status: bounded pre-policy action proposals, exact observation binding, typed
 settle/verification contracts, fresh-snapshot structural revalidation, and the
-event-driven bounded settle core are implemented. Policy permits, platform
-execution, visibility/occlusion checks, native event adapters and timer driving,
-effect verification, diff settlement, read/extract/screenshot, and live
-qualification remain pending.
+event-driven bounded settle and independent effect-verification cores are
+implemented. Policy permits, platform execution, visibility/occlusion checks,
+native observation adapters and timer driving, diff settlement,
+read/extract/screenshot, and live qualification remain pending.
 
 This evidence describes a functional-core seam. It does not claim that an
 action can currently reach a native view or page, that model-declared effects
@@ -33,6 +33,12 @@ are trusted, or that M4 is complete.
   compatibility table rejects action/wait/verification combinations that
   cannot prove the claimed outcome. An immediate observation is allowed only
   with a separate verification requirement; it is not blind success.
+- Generic mutation or semantic-change signals are settle triggers, never effect
+  proof. Fill requires an exact match to the requested bounded input, select
+  requires the exact bound option, state proof requires the target to transition
+  from the opposite baseline, and a no-op postcondition is refused at binding.
+  Fixed key recipes may prove a target value/selection change; click proof is
+  limited to an exact target state, navigation, or dialog transition.
 - One batch must use a homogeneous declared effect class. External write,
   communication, purchase, destructive, and capability-boundary declarations
   permit exactly one action so an eventual policy/executor cannot amortize a
@@ -83,8 +89,8 @@ are trusted, or that M4 is complete.
   full-invalidation successor, so a race after one admitted navigation can be
   checked without guessing skipped authority. Explicit human takeover and
   cancellation terminally preempt settlement.
-- Target-state settlement looks up the private stable identity in a strictly
-  newer exact-frame snapshot. Mutation quiet restarts on every admitted
+- Target-state settlement looks up the private stable identity in the exact
+  adjacent complete-frame snapshot. Mutation quiet restarts on every admitted
   coalesced mutation and can complete only after its bounded quiet interval
   and no later than the same absolute action deadline. Missing deadline wakes
   therefore cannot create an indefinite wait; the shell must own one timer.
@@ -93,6 +99,29 @@ are trusted, or that M4 is complete.
   fresh observation, explicit capability, or human control. There is no retry
   counter, retry loop, or outcome path that treats a wait condition as effect
   proof.
+- Verification admits only a separately sampled, exact attempt-correlated
+  evidence class at or after settle completion and no later than the same
+  absolute deadline. Semantic proofs require the exact adjacent complete
+  snapshot, private stable target identity, unchanged role/trust/sensitivity,
+  and non-credential semantics. Missing, skipped, incomplete, cross-frame, or
+  secret-upgraded targets fail closed.
+- Exact fill evidence is a transient borrowed string capped at 4 KiB and
+  compared byte-for-byte with the already bounded requested input; ordinary
+  snapshot values are not reused because their safe projection is normalized
+  and capped at 1 KiB. Evidence diagnostics retain neither requested nor
+  observed text. Selection proof resolves the private bound option again and
+  requires its selected state and current target ancestry.
+- Navigation proof requires a second exact-next-document authority sample;
+  dialog proof requires an opposite-to-expected transition in the same exact
+  context; scroll proof requires bounded before/after samples moving in the
+  declared direction, plus post-action visibility for `IntoView`.
+- Successful verification mints a content-free opaque token joined to the
+  attempt, action ordinal, declared postcondition, adjacent snapshot when used,
+  and a diagnostics-redacted SHA-256 action-contract guard. The token is not a
+  policy permit and cannot execute or retry. The future native shell remains
+  responsible for sourcing evidence from an observation adapter independent of
+  the backend completion response; the pure constructors do not claim to attest
+  that imperative separation.
 
 The action core has zero idle overhead. It allocates only when an admitted
 proposal batch is constructed and creates no page/runtime/native work.
@@ -116,9 +145,16 @@ missing targets; removed operations; disabled targets; regressed generations;
 credential escalation; and option drift.
 
 Settlement coverage includes immediate readiness, exact deadline derivation
-and overflow, mutation-quiet restart, strictly newer target-state snapshots,
+and overflow, mutation-quiet restart, exact adjacent target-state snapshots,
 attempt and monotonic-clock correlation, exact navigation/cancellation/human
 takeover transitions, terminal idempotence, event exhaustion, typed recovery,
 and content-redacted diagnostics.
+
+Verification coverage includes exact fill match and redaction, no-op refusal,
+adjacent target-state proof and skipped-generation refusal, exact option
+selection, fixed-key value change, independently correlated navigation/dialog
+transitions, directional/visibility-aware scroll proof, coordinate ceilings,
+pending/wrong-attempt/wrong-action/deadline refusal, typed failure mapping, and
+opaque proof/action binding.
 
 No platform action backend or live page is exercised by these tests.

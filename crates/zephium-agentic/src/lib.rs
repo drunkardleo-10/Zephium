@@ -35,6 +35,7 @@ mod semantic_model;
 mod semantic_observation;
 mod semantic_runtime;
 mod semantic_settle;
+mod semantic_verify;
 mod semantic_wire;
 mod sign_in_handoff;
 
@@ -166,6 +167,11 @@ pub use semantic_settle::{
     SemanticActionAttemptId, SemanticActionFailure, SemanticActionRecoveryHint,
     SemanticSettleError, SemanticSettleEvent, SemanticSettleFact, SemanticSettleInstant,
     SemanticSettleStatus, SemanticSettleTracker, MAX_SEMANTIC_SETTLE_EVENTS,
+};
+pub use semantic_verify::{
+    verify_semantic_action, SemanticEffectEvidence, SemanticEffectProofKind,
+    SemanticScrollPosition, SemanticScrollPositionError, SemanticVerificationError,
+    SemanticVerifiedAction, MAX_SEMANTIC_SCROLL_COORDINATE,
 };
 pub use semantic_wire::{
     decode_semantic_snapshot, SemanticDecodeContext, SemanticDecodeError, MAX_SEMANTIC_WIRE_BYTES,

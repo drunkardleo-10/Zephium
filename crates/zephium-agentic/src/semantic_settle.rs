@@ -13,8 +13,8 @@ use thiserror::Error;
 use crate::semantic::SemanticNodeKey;
 use crate::{
     ContextJoin, FrameId, SemanticActionRevalidationError, SemanticBoundAction,
-    SemanticDialogState, SemanticFrameJoin, SemanticSnapshot, SemanticSnapshotGeneration,
-    SemanticWaitCondition,
+    SemanticCompleteness, SemanticDialogState, SemanticFrameJoin, SemanticSnapshot,
+    SemanticSnapshotGeneration, SemanticWaitCondition,
 };
 
 /// Maximum exact facts or snapshots one action settlement may consume.
@@ -372,6 +372,9 @@ pub enum SemanticSettleError {
     /// Settlement was already terminal.
     #[error("semantic settle state is already terminal")]
     AlreadyTerminal,
+    /// Target-state settlement requires one complete adjacent snapshot.
+    #[error("semantic settle snapshot is incomplete")]
+    IncompleteSnapshot,
 }
 
 /// O(1)-memory settlement core for one already-dispatched action attempt.
@@ -379,6 +382,7 @@ pub struct SemanticSettleTracker {
     attempt: SemanticActionAttemptId,
     frame: SemanticFrameJoin,
     target: SemanticNodeKey,
+    action_guard: [u8; 32],
     source_snapshot: SemanticSnapshotGeneration,
     wait: SemanticWaitCondition,
     started_at: SemanticSettleInstant,
@@ -413,6 +417,7 @@ impl SemanticSettleTracker {
             attempt,
             frame: action.frame().clone(),
             target: action.target_key(),
+            action_guard: action.verification_guard(),
             source_snapshot: action.snapshot_generation(),
             wait: action.wait(),
             started_at: completed_at,
@@ -451,6 +456,18 @@ impl SemanticSettleTracker {
             Some(terminal) => terminal.elapsed_since(self.started_at),
             None => None,
         }
+    }
+
+    /// Monotonic terminal instant, once settlement is ready or failed.
+    pub const fn terminal_at(&self) -> Option<SemanticSettleInstant> {
+        self.terminal_at
+    }
+
+    pub(crate) fn matches_action(&self, action: &SemanticBoundAction) -> bool {
+        self.frame == *action.frame()
+            && self.target == action.target_key()
+            && self.source_snapshot == action.snapshot_generation()
+            && self.action_guard == action.verification_guard()
     }
 
     /// Consumes one exact coalesced native/shell fact.
@@ -511,13 +528,16 @@ impl SemanticSettleTracker {
         if snapshot.frame() != &self.frame {
             return Err(SemanticSettleError::AuthorityMismatch);
         }
+        if snapshot.completeness() != SemanticCompleteness::Complete {
+            return Err(SemanticSettleError::IncompleteSnapshot);
+        }
         if observed_at > self.deadline {
             return Ok(self.fail(SemanticActionFailure::Timeout, self.deadline));
         }
         if !self.admit_event(observed_at) {
             return Ok(self.status);
         }
-        if snapshot.generation() <= self.source_snapshot {
+        if self.source_snapshot.next() != Some(snapshot.generation()) {
             return Ok(self.fail(SemanticActionFailure::StaleReference, observed_at));
         }
         let Some(target) = snapshot
@@ -649,6 +669,7 @@ impl fmt::Debug for SemanticSettleTracker {
             .field("attempt", &self.attempt)
             .field("frame", &self.frame)
             .field("target", &"[redacted]")
+            .field("action_guard", &"[redacted]")
             .field("source_snapshot", &self.source_snapshot)
             .field("wait", &self.wait)
             .field("deadline", &self.deadline)
@@ -662,7 +683,7 @@ fn same_or_document_successor(previous: ContextJoin, current: ContextJoin) -> bo
     previous == current || exact_document_successor(previous, current)
 }
 
-fn exact_document_successor(previous: ContextJoin, current: ContextJoin) -> bool {
+pub(crate) fn exact_document_successor(previous: ContextJoin, current: ContextJoin) -> bool {
     current.identity() == previous.identity()
         && current.context_generation() == previous.context_generation()
         && current.cancellation_generation() == previous.cancellation_generation()
@@ -804,12 +825,13 @@ mod tests {
         observation: &SemanticObservation,
         generation: u64,
         button_states: u8,
+        completeness: &str,
     ) -> SemanticSnapshot {
         let bytes = serde_json::to_vec(&json!({
             "v": SEMANTIC_WIRE_VERSION,
             "i": generation + 10,
             "g": generation,
-            "c": "complete",
+            "c": completeness,
             "n": [
                 {"k": 1, "r": "document", "o": 16},
                 {"k": 2, "p": 0, "r": "button", "n": "Sensitive button label", "s": button_states, "o": 9}
@@ -833,7 +855,10 @@ mod tests {
         let action = action(
             &observation,
             SemanticWaitCondition::Immediate,
-            SemanticVerification::SemanticChange,
+            SemanticVerification::TargetState {
+                state: SemanticState::Focused,
+                present: true,
+            },
             250,
         );
         let tracker = SemanticSettleTracker::begin(
@@ -856,7 +881,10 @@ mod tests {
             SemanticWaitCondition::MutationQuiet(
                 SemanticMutationQuietPeriod::try_new(100).expect("quiet"),
             ),
-            SemanticVerification::SemanticChange,
+            SemanticVerification::TargetState {
+                state: SemanticState::Focused,
+                present: true,
+            },
             500,
         );
         let attempt = SemanticActionAttemptId::new(2).expect("attempt");
@@ -921,10 +949,23 @@ mod tests {
                 .expect("snapshot"),
             SemanticSettleStatus::Failed(SemanticActionFailure::StaleReference)
         );
+        let mut incomplete_tracker =
+            SemanticSettleTracker::begin(attempt, &action, SemanticSettleInstant::from_millis(50))
+                .expect("tracker");
+        let incomplete = snapshot(&observation, 2, 4, "node_limit");
+        assert_eq!(
+            incomplete_tracker.observe_snapshot(
+                attempt,
+                SemanticSettleInstant::from_millis(70),
+                &incomplete,
+            ),
+            Err(SemanticSettleError::IncompleteSnapshot)
+        );
+        assert_eq!(incomplete_tracker.event_count(), 0);
         let mut tracker =
             SemanticSettleTracker::begin(attempt, &action, SemanticSettleInstant::from_millis(50))
                 .expect("tracker");
-        let current = snapshot(&observation, 2, 4);
+        let current = snapshot(&observation, 2, 4, "complete");
         assert_eq!(
             tracker
                 .observe_snapshot(attempt, SemanticSettleInstant::from_millis(75), &current,)
@@ -981,7 +1022,10 @@ mod tests {
         let action = action(
             &observation,
             SemanticWaitCondition::SemanticChange,
-            SemanticVerification::SemanticChange,
+            SemanticVerification::TargetState {
+                state: SemanticState::Focused,
+                present: true,
+            },
             100,
         );
         let attempt = SemanticActionAttemptId::new(5).expect("attempt");
@@ -1015,7 +1059,10 @@ mod tests {
         let action = action(
             &observation,
             SemanticWaitCondition::SemanticChange,
-            SemanticVerification::SemanticChange,
+            SemanticVerification::TargetState {
+                state: SemanticState::Focused,
+                present: true,
+            },
             250,
         );
         let attempt = SemanticActionAttemptId::new(6).expect("attempt");
@@ -1061,7 +1108,10 @@ mod tests {
         let action = action(
             &observation,
             SemanticWaitCondition::SemanticChange,
-            SemanticVerification::SemanticChange,
+            SemanticVerification::TargetState {
+                state: SemanticState::Focused,
+                present: true,
+            },
             250,
         );
         let attempt = SemanticActionAttemptId::new(9).expect("attempt");
@@ -1099,7 +1149,10 @@ mod tests {
         let action = action(
             &observation,
             SemanticWaitCondition::SemanticChange,
-            SemanticVerification::SemanticChange,
+            SemanticVerification::TargetState {
+                state: SemanticState::Focused,
+                present: true,
+            },
             30_000,
         );
         let attempt = SemanticActionAttemptId::new(7).expect("attempt");
@@ -1150,7 +1203,10 @@ mod tests {
         let action = action(
             &observation,
             SemanticWaitCondition::SemanticChange,
-            SemanticVerification::SemanticChange,
+            SemanticVerification::TargetState {
+                state: SemanticState::Focused,
+                present: true,
+            },
             250,
         );
         assert!(matches!(

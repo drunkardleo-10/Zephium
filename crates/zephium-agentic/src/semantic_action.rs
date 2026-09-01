@@ -421,14 +421,14 @@ pub enum SemanticVerification {
         /// Required presence.
         present: bool,
     },
-    /// Safe target value changed from its pre-action value.
+    /// Safe target value exactly matches the bounded fill input.
+    TargetValueMatchesInput,
+    /// Safe target value changed from its pre-action value after a fixed key recipe.
     TargetValueChanged,
-    /// Target selection changed to the exact bound option.
+    /// Target selection exactly matches the bound option.
+    TargetSelectionMatchesOption,
+    /// Target selection changed after a fixed key recipe.
     TargetSelectionChanged,
-    /// Focus moved in the expected action frame.
-    FocusChanged,
-    /// A bounded semantic change occurred.
-    SemanticChange,
     /// One exact navigation committed under the current context authority.
     NavigationCommitted,
     /// Dialog state matches the declared state.
@@ -515,27 +515,23 @@ impl SemanticActionProposal {
 
 fn verification_matches(kind: SemanticActionKind, verification: SemanticVerification) -> bool {
     match kind {
-        SemanticActionKind::Click => !matches!(
+        SemanticActionKind::Click => matches!(
             verification,
-            SemanticVerification::TargetValueChanged
+            SemanticVerification::TargetState { .. }
+                | SemanticVerification::NavigationCommitted
+                | SemanticVerification::Dialog(_)
+        ),
+        SemanticActionKind::Fill => verification == SemanticVerification::TargetValueMatchesInput,
+        SemanticActionKind::Select => {
+            verification == SemanticVerification::TargetSelectionMatchesOption
+        }
+        SemanticActionKind::Press => matches!(
+            verification,
+            SemanticVerification::TargetState { .. }
+                | SemanticVerification::TargetValueChanged
                 | SemanticVerification::TargetSelectionChanged
-                | SemanticVerification::ScrollPositionChanged
-        ),
-        SemanticActionKind::Fill => matches!(
-            verification,
-            SemanticVerification::TargetValueChanged
-                | SemanticVerification::TargetState { .. }
-                | SemanticVerification::SemanticChange
-        ),
-        SemanticActionKind::Select => matches!(
-            verification,
-            SemanticVerification::TargetSelectionChanged
-                | SemanticVerification::TargetState { .. }
-                | SemanticVerification::SemanticChange
-        ),
-        SemanticActionKind::Press => !matches!(
-            verification,
-            SemanticVerification::TargetValueChanged | SemanticVerification::ScrollPositionChanged
+                | SemanticVerification::NavigationCommitted
+                | SemanticVerification::Dialog(_)
         ),
         SemanticActionKind::Scroll => verification == SemanticVerification::ScrollPositionChanged,
     }
@@ -553,17 +549,19 @@ fn wait_matches(wait: SemanticWaitCondition, verification: SemanticVerification)
         SemanticVerification::TargetState { state, present } => {
             matches!(
                 wait,
-                SemanticWaitCondition::Immediate | SemanticWaitCondition::SemanticChange
+                SemanticWaitCondition::Immediate
+                    | SemanticWaitCondition::SemanticChange
+                    | SemanticWaitCondition::MutationQuiet(_)
             ) || wait == SemanticWaitCondition::TargetState { state, present }
         }
         SemanticVerification::ScrollPositionChanged => matches!(
             wait,
             SemanticWaitCondition::Immediate | SemanticWaitCondition::ScrollPositionChanged
         ),
-        SemanticVerification::TargetValueChanged
+        SemanticVerification::TargetValueMatchesInput
+        | SemanticVerification::TargetValueChanged
         | SemanticVerification::TargetSelectionChanged
-        | SemanticVerification::FocusChanged
-        | SemanticVerification::SemanticChange => matches!(
+        | SemanticVerification::TargetSelectionMatchesOption => matches!(
             wait,
             SemanticWaitCondition::Immediate
                 | SemanticWaitCondition::SemanticChange
@@ -594,9 +592,11 @@ struct BoundNode {
     frame: SemanticFrameJoin,
     snapshot: SemanticSnapshotGeneration,
     role: SemanticRole,
+    value: Option<crate::SemanticValueSummary>,
     states: SemanticStates,
     operations: SemanticOperations,
     sensitivity: SemanticSensitivity,
+    trust: SemanticTrust,
     geometry: Option<SemanticRect>,
     structural_digest: [u8; 32],
 }
@@ -610,9 +610,11 @@ impl fmt::Debug for BoundNode {
             .field("frame", &self.frame)
             .field("snapshot", &self.snapshot)
             .field("role", &self.role)
+            .field("has_value", &self.value.is_some())
             .field("states", &self.states)
             .field("operations", &self.operations)
             .field("sensitivity", &self.sensitivity)
+            .field("trust", &self.trust)
             .field("geometry", &self.geometry)
             .field("structural_digest", &"[redacted]")
             .finish()
@@ -679,6 +681,10 @@ pub struct SemanticBoundAction {
 impl SemanticBoundAction {
     pub(crate) const fn target_key(&self) -> SemanticNodeKey {
         self.intent.target().node_key
+    }
+
+    pub(crate) const fn target_value(&self) -> Option<&crate::SemanticValueSummary> {
+        self.intent.target().value.as_ref()
     }
 
     /// One-based position in the exact batch.
@@ -800,6 +806,68 @@ impl SemanticBoundAction {
         }
         Ok(())
     }
+
+    pub(crate) fn verification_target<'a>(
+        &self,
+        current: &'a SemanticSnapshot,
+    ) -> Result<(usize, &'a crate::SemanticNode), SemanticActionRevalidationError> {
+        verification_node(self.intent.target(), current)
+    }
+
+    pub(crate) fn verification_option<'a>(
+        &self,
+        current: &'a SemanticSnapshot,
+        target_index: usize,
+    ) -> Result<(usize, &'a crate::SemanticNode), SemanticActionRevalidationError> {
+        let BoundActionIntent::Select { option, .. } = &self.intent else {
+            return Err(SemanticActionRevalidationError::SelectionTarget);
+        };
+        let (option_index, option_node) = verification_node(option, current)?;
+        if option_node.role() != SemanticRole::Option
+            || !is_descendant(current, option_index, target_index)
+        {
+            return Err(SemanticActionRevalidationError::SelectionTarget);
+        }
+        Ok((option_index, option_node))
+    }
+
+    pub(crate) fn verification_guard(&self) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(b"ZEPHIUM-SEMANTIC-VERIFICATION-GUARD-1\0");
+        hash_frame(&mut hasher, self.frame());
+        hasher.update([self.ordinal]);
+        hasher.update(self.target_key().get().to_be_bytes());
+        hasher.update(self.snapshot_generation().get().to_be_bytes());
+        hash_effect(&mut hasher, self.effect);
+        hash_wait(&mut hasher, self.wait);
+        hash_verification(&mut hasher, self.verification);
+        hasher.update(self.settle_budget.millis().to_be_bytes());
+        match &self.intent {
+            BoundActionIntent::Click { .. } => hasher.update([1]),
+            BoundActionIntent::Fill { value, .. } => {
+                hasher.update([2]);
+                hasher.update((value.len() as u64).to_be_bytes());
+                hasher.update(value.as_str().as_bytes());
+            }
+            BoundActionIntent::Select { option, .. } => {
+                hasher.update([3]);
+                hasher.update(option.node_key.get().to_be_bytes());
+            }
+            BoundActionIntent::Press { key, .. } => {
+                hasher.update([4, press_key_code(*key)]);
+            }
+            BoundActionIntent::Scroll {
+                direction, amount, ..
+            } => {
+                hasher.update([
+                    5,
+                    scroll_direction_code(*direction),
+                    scroll_amount_code(*amount),
+                ]);
+            }
+        }
+        hasher.finalize().into()
+    }
 }
 
 impl fmt::Debug for SemanticBoundAction {
@@ -877,6 +945,8 @@ impl SemanticActionBatch {
                 proposal.intent,
                 &mut text_bytes,
             )?;
+            validate_bound_verification(&intent, proposal.verification)?;
+            validate_verification_baseline(&intent, proposal.verification)?;
             actions.push(SemanticBoundAction {
                 ordinal,
                 intent,
@@ -937,6 +1007,89 @@ impl SemanticActionBatch {
     /// Aggregate exact fill-text bytes.
     pub const fn text_bytes(&self) -> usize {
         self.text_bytes
+    }
+}
+
+fn validate_bound_verification(
+    intent: &BoundActionIntent,
+    verification: SemanticVerification,
+) -> Result<(), SemanticActionBindingError> {
+    let compatible = match (intent, verification) {
+        (BoundActionIntent::Press { target, .. }, SemanticVerification::TargetValueChanged) => {
+            matches!(
+                target.role,
+                SemanticRole::Textbox
+                    | SemanticRole::Searchbox
+                    | SemanticRole::Spinbutton
+                    | SemanticRole::Slider
+            )
+        }
+        (BoundActionIntent::Press { target, .. }, SemanticVerification::TargetSelectionChanged) => {
+            matches!(
+                target.role,
+                SemanticRole::Combobox
+                    | SemanticRole::Listbox
+                    | SemanticRole::Option
+                    | SemanticRole::Radio
+                    | SemanticRole::Tab
+                    | SemanticRole::MenuItem
+            )
+        }
+        (BoundActionIntent::Press { target, key }, SemanticVerification::NavigationCommitted) => {
+            matches!(target.role, SemanticRole::Link | SemanticRole::Button)
+                && matches!(key, SemanticPressKey::Enter | SemanticPressKey::Space)
+        }
+        (BoundActionIntent::Press { key, .. }, SemanticVerification::Dialog(_)) => matches!(
+            key,
+            SemanticPressKey::Enter | SemanticPressKey::Escape | SemanticPressKey::Space
+        ),
+        _ => true,
+    };
+    if compatible {
+        Ok(())
+    } else {
+        Err(SemanticActionBindingError::OutcomeContract)
+    }
+}
+
+fn validate_verification_baseline(
+    intent: &BoundActionIntent,
+    verification: SemanticVerification,
+) -> Result<(), SemanticActionBindingError> {
+    let already_satisfied = match verification {
+        SemanticVerification::TargetState { state, present } => {
+            intent.target().states.contains(state) == present
+        }
+        SemanticVerification::TargetValueMatchesInput => match intent {
+            BoundActionIntent::Fill { target, value } => match target.value.as_ref() {
+                Some(crate::SemanticValueSummary::Text(current)) => {
+                    current.as_str() == value.as_str()
+                }
+                None => value.is_empty(),
+                Some(
+                    crate::SemanticValueSummary::Redacted
+                    | crate::SemanticValueSummary::Boolean(_)
+                    | crate::SemanticValueSummary::Ordinal(_),
+                ) => false,
+            },
+            _ => false,
+        },
+        SemanticVerification::TargetSelectionMatchesOption => match intent {
+            BoundActionIntent::Select { option, .. } => {
+                option.states.contains(SemanticState::Selected)
+            }
+            _ => false,
+        },
+        SemanticVerification::TargetValueChanged
+        | SemanticVerification::TargetSelectionChanged
+        | SemanticVerification::NavigationCommitted
+        | SemanticVerification::Dialog(_)
+        | SemanticVerification::ScrollPositionChanged => false,
+    };
+    if already_satisfied {
+        Err(SemanticActionBindingError::OutcomeAlreadySatisfied)
+    } else {
+        Ok(())
     }
 }
 
@@ -1147,12 +1300,41 @@ fn bind_node(snapshot: &SemanticSnapshot, node: &crate::SemanticNode) -> BoundNo
         frame: snapshot.frame().clone(),
         snapshot: snapshot.generation(),
         role: node.role(),
+        value: node.value().cloned(),
         states: node.states(),
         operations: node.operations(),
         sensitivity: node.sensitivity(),
+        trust: node.trust(),
         geometry: node.geometry(),
         structural_digest: structural_digest(node, parent_key.map(|key| key.get())),
     }
+}
+
+fn verification_node<'a>(
+    bound: &BoundNode,
+    current: &'a SemanticSnapshot,
+) -> Result<(usize, &'a crate::SemanticNode), SemanticActionRevalidationError> {
+    if current.frame() != &bound.frame || bound.snapshot.next() != Some(current.generation()) {
+        return Err(SemanticActionRevalidationError::StaleAuthority);
+    }
+    let Some((index, node)) = current
+        .nodes()
+        .iter()
+        .enumerate()
+        .find(|(_, node)| node.key() == bound.node_key)
+    else {
+        return Err(SemanticActionRevalidationError::TargetMissing);
+    };
+    if node.role() != bound.role || node.trust() != bound.trust {
+        return Err(SemanticActionRevalidationError::TargetChanged);
+    }
+    if node.role() == SemanticRole::Password
+        || node.sensitivity() == SemanticSensitivity::Secret
+        || node.sensitivity() != bound.sensitivity
+    {
+        return Err(SemanticActionRevalidationError::CredentialBoundary);
+    }
+    Ok((index, node))
 }
 
 fn structural_digest(node: &crate::SemanticNode, parent_key: Option<u64>) -> [u8; 32] {
@@ -1173,6 +1355,139 @@ fn structural_digest(node: &crate::SemanticNode, parent_key: Option<u64>) -> [u8
         None => hasher.update([0]),
     }
     hasher.finalize().into()
+}
+
+fn hash_frame(hasher: &mut Sha256, frame: &SemanticFrameJoin) {
+    let context = frame.context();
+    let identity = context.identity();
+    hasher.update(identity.id().bytes());
+    hasher.update(identity.owner().bytes());
+    hasher.update(identity.profile().bytes());
+    hasher.update([match identity.kind() {
+        crate::ContextKind::Owned => 1,
+        crate::ContextKind::BorrowedTab => 2,
+        crate::ContextKind::HumanSignInHandoff => 3,
+    }]);
+    hasher.update(context.context_generation().get().to_be_bytes());
+    hasher.update(context.navigation_epoch().get().to_be_bytes());
+    hasher.update(context.frame().get().to_be_bytes());
+    hasher.update(context.frame_generation().get().to_be_bytes());
+    hasher.update(context.cancellation_generation().get().to_be_bytes());
+    hasher.update(frame.frame().get().to_be_bytes());
+    hasher.update(frame.frame_generation().get().to_be_bytes());
+    hasher.update(frame.origin().as_url().as_str().as_bytes());
+    hasher.update([match frame.trust() {
+        crate::SemanticFrameTrust::SameOrigin => 1,
+        crate::SemanticFrameTrust::CrossOriginIsolated => 2,
+        crate::SemanticFrameTrust::Unsupported => 3,
+    }]);
+}
+
+fn hash_effect(hasher: &mut Sha256, effect: SemanticEffectClass) {
+    hasher.update([match effect {
+        SemanticEffectClass::Read => 1,
+        SemanticEffectClass::LocalWrite => 2,
+        SemanticEffectClass::ExternalWrite => 3,
+        SemanticEffectClass::Communication => 4,
+        SemanticEffectClass::Purchase => 5,
+        SemanticEffectClass::Destructive => 6,
+        SemanticEffectClass::CapabilityBoundary => 7,
+    }]);
+}
+
+fn hash_wait(hasher: &mut Sha256, wait: SemanticWaitCondition) {
+    match wait {
+        SemanticWaitCondition::Immediate => hasher.update([1]),
+        SemanticWaitCondition::NavigationCommitted => hasher.update([2]),
+        SemanticWaitCondition::DocumentReady => hasher.update([3]),
+        SemanticWaitCondition::TargetState { state, present } => {
+            hasher.update([4, state_code(state), u8::from(present)]);
+        }
+        SemanticWaitCondition::UrlChanged => hasher.update([5]),
+        SemanticWaitCondition::TitleChanged => hasher.update([6]),
+        SemanticWaitCondition::Dialog(state) => {
+            hasher.update([7, dialog_state_code(state)]);
+        }
+        SemanticWaitCondition::SemanticChange => hasher.update([8]),
+        SemanticWaitCondition::MutationQuiet(quiet) => {
+            hasher.update([9]);
+            hasher.update(quiet.millis().to_be_bytes());
+        }
+        SemanticWaitCondition::ScrollPositionChanged => hasher.update([10]),
+    }
+}
+
+fn hash_verification(hasher: &mut Sha256, verification: SemanticVerification) {
+    match verification {
+        SemanticVerification::TargetState { state, present } => {
+            hasher.update([1, state_code(state), u8::from(present)]);
+        }
+        SemanticVerification::TargetValueMatchesInput => hasher.update([2]),
+        SemanticVerification::TargetValueChanged => hasher.update([3]),
+        SemanticVerification::TargetSelectionMatchesOption => hasher.update([4]),
+        SemanticVerification::TargetSelectionChanged => hasher.update([5]),
+        SemanticVerification::NavigationCommitted => hasher.update([6]),
+        SemanticVerification::Dialog(state) => {
+            hasher.update([7, dialog_state_code(state)]);
+        }
+        SemanticVerification::ScrollPositionChanged => hasher.update([8]),
+    }
+}
+
+const fn state_code(state: SemanticState) -> u8 {
+    match state {
+        SemanticState::Checked => 1,
+        SemanticState::Selected => 2,
+        SemanticState::Expanded => 3,
+        SemanticState::Disabled => 4,
+        SemanticState::Required => 5,
+        SemanticState::Invalid => 6,
+        SemanticState::Focused => 7,
+    }
+}
+
+const fn dialog_state_code(state: SemanticDialogState) -> u8 {
+    match state {
+        SemanticDialogState::Present => 1,
+        SemanticDialogState::Absent => 2,
+    }
+}
+
+const fn press_key_code(key: SemanticPressKey) -> u8 {
+    match key {
+        SemanticPressKey::Enter => 1,
+        SemanticPressKey::Escape => 2,
+        SemanticPressKey::Space => 3,
+        SemanticPressKey::Tab => 4,
+        SemanticPressKey::ArrowUp => 5,
+        SemanticPressKey::ArrowDown => 6,
+        SemanticPressKey::ArrowLeft => 7,
+        SemanticPressKey::ArrowRight => 8,
+        SemanticPressKey::Home => 9,
+        SemanticPressKey::End => 10,
+        SemanticPressKey::PageUp => 11,
+        SemanticPressKey::PageDown => 12,
+        SemanticPressKey::Backspace => 13,
+        SemanticPressKey::Delete => 14,
+    }
+}
+
+const fn scroll_direction_code(direction: SemanticScrollDirection) -> u8 {
+    match direction {
+        SemanticScrollDirection::Up => 1,
+        SemanticScrollDirection::Down => 2,
+        SemanticScrollDirection::Left => 3,
+        SemanticScrollDirection::Right => 4,
+    }
+}
+
+const fn scroll_amount_code(amount: SemanticScrollAmount) -> u8 {
+    match amount {
+        SemanticScrollAmount::Line => 1,
+        SemanticScrollAmount::HalfPage => 2,
+        SemanticScrollAmount::Page => 3,
+        SemanticScrollAmount::IntoView => 4,
+    }
 }
 
 fn revalidate_node<'a>(
@@ -1304,6 +1619,12 @@ pub enum SemanticActionBindingError {
     /// Select target/option role, frame, snapshot, or ancestry was incompatible.
     #[error("semantic selection target is invalid")]
     SelectionTarget,
+    /// The exact declared postcondition already held before any effect.
+    #[error("semantic action outcome is already satisfied")]
+    OutcomeAlreadySatisfied,
+    /// Bound target role or fixed key cannot establish the declared postcondition.
+    #[error("semantic action bound outcome contract is incompatible")]
+    OutcomeContract,
     /// Aggregate replacement text exceeded the fixed batch ceiling.
     #[error("semantic action batch exceeds its text ceiling")]
     TextLimit,
@@ -1489,7 +1810,10 @@ mod tests {
                     target: SemanticReferenceId::new(2).expect("reference"),
                 },
                 SemanticEffectClass::Read,
-                SemanticVerification::SemanticChange,
+                SemanticVerification::TargetState {
+                    state: SemanticState::Focused,
+                    present: true,
+                },
             )],
         )
         .expect("click");
@@ -1509,7 +1833,7 @@ mod tests {
                             .expect("text"),
                     },
                     SemanticEffectClass::LocalWrite,
-                    SemanticVerification::TargetValueChanged,
+                    SemanticVerification::TargetValueMatchesInput,
                 ),
                 proposal(
                     SemanticActionIntent::Press {
@@ -1517,7 +1841,10 @@ mod tests {
                         key: SemanticPressKey::Enter,
                     },
                     SemanticEffectClass::LocalWrite,
-                    SemanticVerification::SemanticChange,
+                    SemanticVerification::TargetState {
+                        state: SemanticState::Focused,
+                        present: true,
+                    },
                 ),
             ],
         )
@@ -1537,7 +1864,7 @@ mod tests {
                     option: SemanticReferenceId::new(6).expect("option"),
                 },
                 SemanticEffectClass::LocalWrite,
-                SemanticVerification::TargetSelectionChanged,
+                SemanticVerification::TargetSelectionMatchesOption,
             )],
         )
         .expect("select");
@@ -1594,7 +1921,7 @@ mod tests {
                         .expect("text"),
                 },
                 SemanticEffectClass::LocalWrite,
-                SemanticVerification::TargetValueChanged,
+                SemanticVerification::TargetValueMatchesInput,
             )],
         )
         .expect("batch");
@@ -1622,7 +1949,7 @@ mod tests {
                             .expect("text"),
                     },
                     SemanticEffectClass::LocalWrite,
-                    SemanticVerification::TargetValueChanged,
+                    SemanticVerification::TargetValueMatchesInput,
                 )],
             ),
             Err(SemanticActionBindingError::CredentialBoundary)
@@ -1638,7 +1965,7 @@ mod tests {
                         value: SemanticActionText::try_new("x".to_owned()).expect("text"),
                     },
                     SemanticEffectClass::LocalWrite,
-                    SemanticVerification::TargetValueChanged,
+                    SemanticVerification::TargetValueMatchesInput,
                 )],
             ),
             Err(SemanticActionBindingError::Reference(
@@ -1656,7 +1983,7 @@ mod tests {
                         option: SemanticReferenceId::new(7).expect("option"),
                     },
                     SemanticEffectClass::LocalWrite,
-                    SemanticVerification::TargetSelectionChanged,
+                    SemanticVerification::TargetSelectionMatchesOption,
                 )],
             ),
             Err(SemanticActionBindingError::SelectionTarget)
@@ -1673,7 +2000,10 @@ mod tests {
                     target: SemanticReferenceId::new(2).expect("button"),
                 },
                 SemanticEffectClass::Read,
-                SemanticVerification::SemanticChange,
+                SemanticVerification::TargetState {
+                    state: SemanticState::Focused,
+                    present: true,
+                },
             )
         };
         assert_eq!(
@@ -1717,7 +2047,10 @@ mod tests {
                             target: SemanticReferenceId::new(2).expect("button"),
                         },
                         SemanticEffectClass::LocalWrite,
-                        SemanticVerification::SemanticChange,
+                        SemanticVerification::TargetState {
+                            state: SemanticState::Focused,
+                            present: true
+                        },
                     ),
                 ],
             ),
@@ -1732,7 +2065,7 @@ mod tests {
                         .expect("text"),
                 },
                 SemanticEffectClass::LocalWrite,
-                SemanticVerification::TargetValueChanged,
+                SemanticVerification::TargetValueMatchesInput,
             )
         };
         assert_eq!(
@@ -1749,7 +2082,10 @@ mod tests {
             proposal(
                 SemanticActionIntent::Click { target: id },
                 SemanticEffectClass::ExternalWrite,
-                SemanticVerification::SemanticChange,
+                SemanticVerification::TargetState {
+                    state: SemanticState::Focused,
+                    present: true,
+                },
             )
         };
         assert_eq!(
@@ -1772,7 +2108,10 @@ mod tests {
                 },
                 SemanticEffectClass::Read,
                 SemanticWaitCondition::Immediate,
-                SemanticVerification::SemanticChange,
+                SemanticVerification::TargetState {
+                    state: SemanticState::Focused,
+                    present: true,
+                },
                 SemanticSettleBudget::try_new(10_000).expect("budget"),
             )
             .expect("proposal")
@@ -1807,10 +2146,30 @@ mod tests {
                 },
                 SemanticEffectClass::Read,
                 SemanticWaitCondition::SemanticChange,
-                SemanticVerification::SemanticChange,
+                SemanticVerification::TargetState {
+                    state: SemanticState::Focused,
+                    present: true
+                },
                 SemanticSettleBudget::try_new(100).expect("budget"),
             ),
             Err(SemanticActionContractError::OutcomeContract)
+        );
+        let observation = observation();
+        assert_eq!(
+            SemanticActionBatch::bind(
+                SemanticActionBatchId::new(29).expect("batch"),
+                &observation,
+                &frames(&observation),
+                vec![proposal(
+                    SemanticActionIntent::Press {
+                        target: SemanticReferenceId::new(3).expect("textbox"),
+                        key: SemanticPressKey::ArrowDown,
+                    },
+                    SemanticEffectClass::LocalWrite,
+                    SemanticVerification::TargetSelectionChanged,
+                )],
+            ),
+            Err(SemanticActionBindingError::OutcomeContract)
         );
         assert_eq!(
             SemanticActionProposal::try_new(
@@ -1838,7 +2197,10 @@ mod tests {
                     target: SemanticReferenceId::new(2).expect("button"),
                 },
                 SemanticEffectClass::Read,
-                SemanticVerification::SemanticChange,
+                SemanticVerification::TargetState {
+                    state: SemanticState::Focused,
+                    present: true,
+                },
             )],
         )
         .expect("batch");
@@ -1952,7 +2314,7 @@ mod tests {
                     value: SemanticActionText::try_new("ordinary-value".to_owned()).expect("text"),
                 },
                 SemanticEffectClass::LocalWrite,
-                SemanticVerification::TargetValueChanged,
+                SemanticVerification::TargetValueMatchesInput,
             )],
         )
         .expect("fill");
@@ -1981,7 +2343,7 @@ mod tests {
                     option: SemanticReferenceId::new(6).expect("option"),
                 },
                 SemanticEffectClass::LocalWrite,
-                SemanticVerification::TargetSelectionChanged,
+                SemanticVerification::TargetSelectionMatchesOption,
             )],
         )
         .expect("select");
