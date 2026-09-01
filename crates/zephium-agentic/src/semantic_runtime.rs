@@ -231,6 +231,15 @@ impl SemanticRuntimeInvocation {
         self.budget
     }
 
+    /// Content-free identity retained by the native port after moving this invocation.
+    pub fn correlation(&self) -> SemanticRuntimeCorrelation {
+        SemanticRuntimeCorrelation {
+            invocation: self.invocation,
+            frame: self.frame.clone(),
+            snapshot_generation: self.snapshot_generation,
+        }
+    }
+
     /// Returns the fixed-schema request only to the trusted native runtime adapter.
     ///
     /// The string may contain a private stable-key anchor. It must never be
@@ -465,6 +474,137 @@ pub enum SemanticRuntimeResultError {
     Decode(SemanticDecodeError),
 }
 
+/// Exact content-free identity of one native semantic-runtime invocation.
+#[derive(Clone, Eq, PartialEq)]
+pub struct SemanticRuntimeCorrelation {
+    invocation: SemanticInvocationId,
+    frame: SemanticFrameJoin,
+    snapshot_generation: SemanticSnapshotGeneration,
+}
+
+impl SemanticRuntimeCorrelation {
+    /// Native invocation identity.
+    pub const fn invocation(&self) -> SemanticInvocationId {
+        self.invocation
+    }
+
+    /// Exact context/document/frame authority.
+    pub const fn frame(&self) -> &SemanticFrameJoin {
+        &self.frame
+    }
+
+    /// Expected snapshot generation.
+    pub const fn snapshot_generation(&self) -> SemanticSnapshotGeneration {
+        self.snapshot_generation
+    }
+}
+
+impl fmt::Debug for SemanticRuntimeCorrelation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SemanticRuntimeCorrelation")
+            .field("invocation", &self.invocation)
+            .field("frame", &self.frame)
+            .field("snapshot_generation", &self.snapshot_generation)
+            .finish()
+    }
+}
+
+/// Closed native semantic-runtime refusal with no page-controlled detail.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum SemanticRuntimePortFailure {
+    /// The platform or current frame cannot support the isolated runtime.
+    #[error("semantic runtime invocation is unsupported")]
+    Unsupported,
+    /// A bounded native or runtime single-flight permit was unavailable.
+    #[error("semantic runtime resources are exhausted")]
+    ResourceExhausted,
+    /// The exact document-start runtime has not reached a committed document.
+    #[error("semantic runtime is not ready")]
+    NotReady,
+    /// The per-document invocation ceiling was exhausted.
+    #[error("semantic runtime document budget is exhausted")]
+    InvocationLimit,
+    /// Native context/document/frame authority no longer matches.
+    #[error("semantic runtime invocation is stale")]
+    Stale,
+    /// Run cancellation terminated the invocation.
+    #[error("semantic runtime invocation was cancelled")]
+    Cancelled,
+    /// A newly committed document replaced the invocation.
+    #[error("semantic runtime document was replaced")]
+    DocumentReplaced,
+    /// The exact web-content renderer disappeared.
+    #[error("semantic runtime renderer was lost")]
+    RendererLost,
+    /// Native runtime registration was explicitly retired.
+    #[error("semantic runtime registration was retired")]
+    Retired,
+    /// The fixed reply channel violated its closed transport contract.
+    #[error("semantic runtime transport failed")]
+    Transport,
+    /// The fixed runtime or hostile wire decoder returned a typed refusal.
+    #[error("semantic runtime result was refused")]
+    Result(SemanticRuntimeResultError),
+    /// The native adapter deadline elapsed.
+    #[error("semantic runtime invocation timed out")]
+    TimedOut,
+    /// Process shutdown permanently sealed the adapter.
+    #[error("semantic runtime adapter is shutting down")]
+    Shutdown,
+}
+
+/// Exact asynchronous result for one native semantic-runtime invocation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SemanticRuntimeSettlement {
+    correlation: SemanticRuntimeCorrelation,
+    outcome: Result<SemanticSnapshot, SemanticRuntimePortFailure>,
+}
+
+impl SemanticRuntimeSettlement {
+    /// Validates a successful hostile result against its out-of-band identity.
+    pub fn try_new(
+        correlation: SemanticRuntimeCorrelation,
+        outcome: Result<SemanticSnapshot, SemanticRuntimePortFailure>,
+    ) -> Result<Self, SemanticRuntimeSettlementError> {
+        if let Ok(snapshot) = &outcome {
+            if snapshot.invocation() != correlation.invocation
+                || snapshot.frame() != &correlation.frame
+                || snapshot.generation() != correlation.snapshot_generation
+            {
+                return Err(SemanticRuntimeSettlementError::Correlation);
+            }
+        }
+        Ok(Self {
+            correlation,
+            outcome,
+        })
+    }
+
+    /// Content-free request identity.
+    pub const fn correlation(&self) -> &SemanticRuntimeCorrelation {
+        &self.correlation
+    }
+
+    /// Successful bounded snapshot or closed refusal.
+    pub fn outcome(&self) -> &Result<SemanticSnapshot, SemanticRuntimePortFailure> {
+        &self.outcome
+    }
+
+    /// Consumes the settlement and returns its result.
+    pub fn into_outcome(self) -> Result<SemanticSnapshot, SemanticRuntimePortFailure> {
+        self.outcome
+    }
+}
+
+/// Refusal to combine a result with a different native invocation identity.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum SemanticRuntimeSettlementError {
+    /// Snapshot invocation, frame authority, or generation mismatched.
+    #[error("semantic runtime settlement correlation does not match")]
+    Correlation,
+}
+
 #[derive(Serialize)]
 struct RuntimeInvocationWire {
     #[serde(rename = "v")]
@@ -613,6 +753,50 @@ mod tests {
             .expect("assembler")
             .finish()
             .expect("observation")
+    }
+
+    #[test]
+    fn native_settlement_rejoins_only_its_exact_invocation_frame_and_generation() {
+        let context = context(44);
+        let request = SemanticObservationRequest::initial(
+            SemanticObservationId::new(4).expect("observation"),
+            context,
+            SemanticObservationBudget::try_new(128, 16 * 1024, 1).expect("budget"),
+        );
+        let invocation = encode_semantic_runtime_invocation(
+            &request,
+            frame(context),
+            SemanticInvocationId::new(11).expect("invocation"),
+            SemanticSnapshotGeneration::new(21).expect("generation"),
+            SemanticRuntimeBudget::INITIAL_FILTERED,
+        )
+        .expect("runtime invocation");
+        let correlation = invocation.correlation();
+        let snapshot = observation(context).frames()[0].clone();
+        let settlement =
+            SemanticRuntimeSettlement::try_new(correlation.clone(), Ok(snapshot.clone()))
+                .expect("settlement");
+        assert_eq!(settlement.correlation(), &correlation);
+        assert_eq!(settlement.outcome(), &Ok(snapshot));
+
+        let wrong = encode_semantic_runtime_invocation(
+            &request,
+            frame(context),
+            SemanticInvocationId::new(12).expect("invocation"),
+            SemanticSnapshotGeneration::new(21).expect("generation"),
+            SemanticRuntimeBudget::INITIAL_FILTERED,
+        )
+        .expect("wrong invocation")
+        .correlation();
+        assert_eq!(
+            SemanticRuntimeSettlement::try_new(wrong, Ok(observation(context).frames()[0].clone())),
+            Err(SemanticRuntimeSettlementError::Correlation)
+        );
+        assert!(SemanticRuntimeSettlement::try_new(
+            correlation,
+            Err(SemanticRuntimePortFailure::Cancelled)
+        )
+        .is_ok());
     }
 
     #[test]

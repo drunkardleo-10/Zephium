@@ -187,8 +187,10 @@ synchronously unsupported. Owned construction:
   downloads, popups/page-close, media surfaces, autofill, link previews, and
   inspection denied;
 - asserts the actual `WKWebViewConfiguration` has no extension controller and
-  zero user scripts, then installs the current native content blocker before
-  any network navigation can be represented;
+  exactly one pointer-identified document-start script: the pinned private
+  semantic runtime in its dedicated `WKContentWorld`; no ordinary Zephium or
+  extension script principal is present. It then installs the current native
+  content blocker before any network navigation can be represented;
 - retains the content-policy registration, page, and native resource lease in
   teardown order under a private `ContextId` map that is absent from ordinary
   tab, session, stage, navigation-snapshot, and extension-principal maps.

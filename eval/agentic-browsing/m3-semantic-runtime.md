@@ -5,8 +5,11 @@ decoder, progressive scopes, deterministic multi-frame assembly, compact model
 encoding/token-admission ports, acknowledged stable-id diffs, compact diff
 token admission with exact baseline/current delivery proof, and the immutable
 bounded page-projection program with its fixed reply-channel pull protocol
-implemented; native isolated-world installation, live-engine hostile
-qualification, and actual pinned provider token measurements pending.
+implemented. The macOS owned-context adapter now installs and lifecycle-binds
+that program through a fixed content-world reply handler and exposes its
+single-flight result through the bounded native context port; live-engine
+hostile qualification and actual pinned provider token measurements remain
+pending.
 
 This evidence records deterministic Rust contracts plus static and synthetic
 DOM execution of the fixed program. It does not claim that arbitrary pages
@@ -240,6 +243,52 @@ have been instrumented or observed on either platform.
   reverse-index alternative follows from the deliberately narrow current-turn
   liveness guarantee in
   [ECMAScript WeakRef](https://tc39.es/ecma262/2023/multipage/managing-memory.html#sec-weak-ref-objects).
+- The macOS adapter creates the selected durable or ephemeral data-store
+  configuration before `WKWebView` construction, registers exactly one
+  `WKScriptMessageHandlerWithReply` in one private world, and installs the
+  pinned program at document start for the main frame only. Before every
+  authorized native load it removes the prior handler and script, retires that
+  world epoch, and installs the same immutable bytes in a fresh uniquely named
+  world. Only the active world, handler, and script are retained by Zephium.
+  Every inbound message rechecks that active-world pointer plus the exact
+  controller, handler name, web view, frame web view, main-frame bit,
+  Objective-C string type, UTF-16 ceiling, and UTF-8 ceiling before allocating
+  Rust text. It never calls `evaluateJavaScript`, `callAsyncJavaScript`, a
+  page-world function, or a generic bridge.
+- World rotation is a correctness boundary, not namespace decoration.
+  WebKit internally attaches a document identifier to script-message frame
+  data but public `WKFrameInfo` explicitly is transient and does not uniquely
+  identify a frame across callbacks. WebKit also retains the posting JavaScript
+  context until an asynchronous reply returns. Therefore a payload challenge
+  in one fixed world cannot exclude a callback from the replaced document.
+  Rotating the public content world before load makes an already-delivered old
+  callback pointer-distinct and fail-closed without dynamic JavaScript or SPI.
+  The process-local world-name counter is checked and nonwrapping; Apple states
+  that a named world is reused only while that world instance remains alive,
+  and the adapter retains only its current epoch.
+  This follows the current WebKit
+  [`frameInfoWithDocumentID` and async-reply implementation](https://github.com/WebKit/WebKit/blob/main/Source/WebKit/WebProcess/UserContent/WebUserContentController.cpp#L2184-L2245)
+  and Apple's
+  [`WKFrameInfo` contract](https://developer.apple.com/documentation/webkit/wkframeinfo).
+- The handler retains at most one dormant pull, one invocation, one completion,
+  and two reply actions. Loading, ready, renderer-lost, exhaustion-notice,
+  exhausted, failed, and retired phases are explicit. Navigation stops prior
+  authority before native load, holds the new document's early pull until the
+  exact Wry commit, and never restores semantic authority after provisional
+  failure. Renderer loss,
+  cancellation, document replacement, close, and shutdown each settle the
+  retained task with a closed content-free failure.
+- Every admitted macOS invocation retains one cancel-on-drop 15-second main
+  queue watchdog. The timeout matches the exact invocation identity, settles
+  its task once, and permanently fails that document channel so a late result
+  cannot become authority for later work.
+- The shared 16-task native ingress now accepts the already-encoded move-only
+  invocation without adding another queue or worker. The host revalidates the
+  exact context join, Observe capability, committed main-frame origin/trust,
+  monotonically increasing invocation identity, consecutive snapshot
+  generation, and absence of lifecycle work before dispatch. Resource audits
+  count the single-flight invocation as an operation and fail closed if native
+  channel state is internally contradictory.
 
 The crate remains a zero-idle-cost functional core: decoding happens only for
 an admitted observation and creates no timer, thread, page, queue, or worker.
@@ -297,11 +346,12 @@ current content-free result is 7 initial
 nodes, 6 expanded nodes, 620/374 encoded bytes, and an 881-byte wire-truncated
 result under a 1,024-byte request ceiling.
 
-The synthetic smoke is not live-browser or isolated-world evidence. It cannot
-prove WebKit/WebView2 wrapper identity, content-world separation, frame
-installation, navigation replacement, style/layout equivalence, or teardown;
-those claims remain blocked on the coordinated native adapter and hostile
-fixed-DOM engine qualification. Surrounding-text windows are admitted up to
+The synthetic smoke and macOS compile/static gates are not live-browser
+isolated-world evidence. They cannot prove pinned WebKit wrapper identity,
+content-world separation, script-message timing, frame installation,
+navigation replacement, style/layout equivalence, or teardown; those claims
+remain blocked on the coordinated hostile fixed-DOM engine qualification.
+Surrounding-text windows are admitted up to
 8 KiB by the domain contract, but one runtime node field remains capped at
 4 KiB, so a larger single-node context is returned with truthful `text_limit`
 rather than silently widening the hostile wire schema.
@@ -314,10 +364,7 @@ rather than silently widening the hostile wire schema.
    proof models/tokenizers and bind exact diffs to a bounded provider
    continuation/tool-result contract. A stateless standalone diff is forbidden
    because it omits the model's acknowledged baseline;
-3. install the frozen program and its already-closed invocation vocabulary
-   after the native M2 adapter provides exact world, frame, navigation,
-   cancellation, and teardown joins;
-4. add live-engine hostile tests for page-world bridge access, wrapper identity,
+3. add live-engine hostile tests for page-world bridge access, wrapper identity,
    spoofing, frame replacement, stale nodes, collisions, mutation pressure,
    redaction, and teardown/release behavior. Open/closed shadow behavior and
    source exclusion currently have deterministic synthetic/static coverage but

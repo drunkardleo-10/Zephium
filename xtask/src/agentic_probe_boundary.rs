@@ -36,6 +36,8 @@ const ENGINE_AGENT_CONTEXT_HOST: &str = "crates/zephium-engine/src/host/agent_co
 const ENGINE_MACOS_MODULE: &str = "crates/zephium-engine/src/platform/macos/mod.rs";
 const ENGINE_MACOS_AGENT_CONTEXT: &str =
     "crates/zephium-engine/src/platform/macos/agent_context.rs";
+const ENGINE_MACOS_SEMANTIC_RUNTIME: &str =
+    "crates/zephium-engine/src/platform/macos/semantic_runtime.rs";
 const ENGINE_WINDOWS_MODULE: &str = "crates/zephium-engine/src/platform/windows/mod.rs";
 const ENGINE_WINDOWS_PROBE_MODULE: &str =
     "crates/zephium-engine/src/platform/windows/agentic_input_probe.rs";
@@ -121,6 +123,9 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         &read(repository.join(ENGINE_AGENT_CONTEXT_HOST))?,
         &read(repository.join(ENGINE_MACOS_AGENT_CONTEXT))?,
     )?;
+    validate_engine_semantic_runtime_boundary(&read(
+        repository.join(ENGINE_MACOS_SEMANTIC_RUNTIME),
+    )?)?;
     validate_engine_platform_module(&read(repository.join(ENGINE_MACOS_MODULE))?, "macOS")?;
     validate_engine_platform_module(&read(repository.join(ENGINE_WINDOWS_MODULE))?, "Windows")?;
     let _ = read(repository.join(ENGINE_MACOS_PROBE_BINARY))?;
@@ -283,7 +288,10 @@ fn validate_engine_agent_context_boundary(
         "pending_navigation:Option<AgentPendingNavigation>",
         "pending_recovery:Option<AgentPendingRecovery>",
         "renderer_loss_rejoin_pending:bool",
-        "attest_owned_agent_view(",
+        "binding.view.attest(",
+        "binding.view.prepare_semantic_document_load()",
+        "fnstart_owned_agent_semantic_invocation",
+        "SemanticRuntimeSettlement::try_new",
         "double_full_successor(binding.join,requested)",
         "binding.view.view().reload()",
         "binding.view.view().load_url(\"about:blank\")",
@@ -304,9 +312,10 @@ fn validate_engine_agent_context_boundary(
         "with_visible(false)",
         "with_focused(false)",
         "configuration.webExtensionController()",
-        "controller.userScripts()",
-        "with_data_store_identifier(profile.bytes())",
+        "semantic.attest_configuration(&configuration)",
+        "WKWebsiteDataStore::dataStoreForIdentifier(&identifier,mtm)",
         "Retained::as_ptr(&actual_store)==Retained::as_ptr(expected)",
+        "semantic:Option<AgentSemanticRuntimeRegistration>",
         "structAgentNavigationController",
         "state.bootstrap_available=false",
         "native_id:Option<wry::NavigationId>",
@@ -343,6 +352,57 @@ fn validate_engine_agent_context_boundary(
                     "production agent-context {label} acquired forbidden surface {forbidden}"
                 ));
             }
+        }
+    }
+    Ok(())
+}
+
+fn validate_engine_semantic_runtime_boundary(source: &str) -> Result<(), String> {
+    let source = compact(source);
+    for required in [
+        "addScriptMessageHandlerWithReply_contentWorld_name",
+        "WKUserScript::initWithSource_injectionTime_forMainFrameOnly_inContentWorld",
+        "WKUserScriptInjectionTime::AtDocumentStart,true,&world",
+        "message.world()",
+        "message.name()",
+        "message.webView()",
+        "message.frameInfo()",
+        "frame.isMainFrame()",
+        "NEXT_SEMANTIC_RUNTIME_WORLD.fetch_update",
+        "SEMANTIC_RUNTIME_WORLD_NAME_PREFIX",
+        "channel.world_matches(&world)",
+        "body.lengthOfBytesUsingEncoding(NSUTF8StringEncoding)",
+        "MAX_SEMANTIC_RUNTIME_CHANNEL_RESULT_BYTES",
+        "MAX_SEMANTIC_RUNTIME_DOCUMENT_INVOCATIONS",
+        "SEMANTIC_RUNTIME_PROGRAM.source()",
+        "removeScriptMessageHandlerForName_contentWorld",
+        "controller.removeAllScriptMessageHandlers()",
+        "controller.removeAllUserScripts()",
+        "fnbegin_document_load",
+        "fnprepare_document_load",
+        "fndocument_committed",
+        "fnrenderer_lost",
+        "fncancel",
+        "fnretire",
+    ] {
+        if !source.contains(required) {
+            return Err(format!(
+                "production macOS semantic runtime lost required closed mechanism {required}"
+            ));
+        }
+    }
+    for forbidden in [
+        "evaluateJavaScript",
+        "callAsyncJavaScript",
+        "evaluate_script",
+        "with_ipc_handler",
+        "WKContentWorld::pageWorld",
+        "native-agentic-input-probe",
+    ] {
+        if source.contains(forbidden) {
+            return Err(format!(
+                "production macOS semantic runtime acquired forbidden surface {forbidden}"
+            ));
         }
     }
     Ok(())
@@ -2127,6 +2187,45 @@ mod tests {
     }
 
     #[test]
+    fn production_semantic_runtime_requires_the_exact_public_webkit_boundary() {
+        let runtime = r#"
+            addScriptMessageHandlerWithReply_contentWorld_name();
+            WKUserScript::initWithSource_injectionTime_forMainFrameOnly_inContentWorld();
+            WKUserScriptInjectionTime::AtDocumentStart, true, &world;
+            message.world();
+            message.name();
+            message.webView();
+            message.frameInfo();
+            frame.isMainFrame();
+            NEXT_SEMANTIC_RUNTIME_WORLD.fetch_update();
+            SEMANTIC_RUNTIME_WORLD_NAME_PREFIX;
+            channel.world_matches(&world);
+            body.lengthOfBytesUsingEncoding(NSUTF8StringEncoding);
+            MAX_SEMANTIC_RUNTIME_CHANNEL_RESULT_BYTES;
+            MAX_SEMANTIC_RUNTIME_DOCUMENT_INVOCATIONS;
+            SEMANTIC_RUNTIME_PROGRAM.source();
+            removeScriptMessageHandlerForName_contentWorld();
+            controller.removeAllScriptMessageHandlers();
+            controller.removeAllUserScripts();
+            fn begin_document_load() {}
+            fn prepare_document_load() {}
+            fn document_committed() {}
+            fn renderer_lost() {}
+            fn cancel() {}
+            fn retire() {}
+        "#;
+        validate_engine_semantic_runtime_boundary(runtime).expect("closed semantic runtime");
+        assert!(validate_engine_semantic_runtime_boundary(&format!(
+            "{runtime}\nevaluateJavaScript();"
+        ))
+        .is_err());
+        assert!(validate_engine_semantic_runtime_boundary(
+            &runtime.replace("message.frameInfo();", "")
+        )
+        .is_err());
+    }
+
+    #[test]
     fn production_agent_context_boundary_is_closed_and_probe_independent() {
         let engine = r#"
             #[cfg(feature = "agentic-browser")]
@@ -2157,7 +2256,10 @@ mod tests {
             pending_navigation: Option<AgentPendingNavigation>,
             pending_recovery: Option<AgentPendingRecovery>,
             renderer_loss_rejoin_pending: bool,
-            attest_owned_agent_view();
+            binding.view.attest();
+            binding.view.prepare_semantic_document_load();
+            fn start_owned_agent_semantic_invocation() {}
+            SemanticRuntimeSettlement::try_new();
             double_full_successor(binding.join, requested);
             binding.view.view().reload();
             binding.view.view().load_url("about:blank");
@@ -2169,9 +2271,10 @@ mod tests {
         let macos = r#"
             with_visible(false).with_focused(false);
             configuration.webExtensionController();
-            controller.userScripts();
-            with_data_store_identifier(profile.bytes());
+            semantic.attest_configuration(&configuration);
+            WKWebsiteDataStore::dataStoreForIdentifier(&identifier, mtm);
             Retained::as_ptr(&actual_store) == Retained::as_ptr(expected);
+            semantic: Option<AgentSemanticRuntimeRegistration>,
             struct AgentNavigationController;
             state.bootstrap_available = false;
             native_id: Option<wry::NavigationId>;
@@ -2198,7 +2301,7 @@ mod tests {
             host_root,
             port,
             host,
-            &macos.replace("controller.userScripts();", ""),
+            &macos.replace("semantic.attest_configuration(&configuration);", ""),
         )
         .is_err());
     }

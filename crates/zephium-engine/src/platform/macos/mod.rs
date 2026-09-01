@@ -4,6 +4,8 @@ mod agent_context;
 mod agentic_input_probe;
 mod content_filter;
 mod credentials;
+#[cfg(feature = "agentic-browser")]
+mod semantic_runtime;
 // Pure policy translation and the profile-scoped native extension lifecycle.
 mod extensions;
 mod native;
@@ -45,9 +47,8 @@ use std::{cell::Cell, cell::RefCell, rc::Rc};
 
 #[cfg(feature = "agentic-browser")]
 pub(crate) use agent_context::{
-    attest_owned_agent_view, build_owned_agent_view, AgentNavigationCommit,
-    AgentNavigationTerminal, AgentOwnedView, AgentOwnedViewCallbacks,
-    AgentOwnedViewConstructionError,
+    build_owned_agent_view, AgentNavigationCommit, AgentNavigationTerminal, AgentOwnedView,
+    AgentOwnedViewCallbacks, AgentOwnedViewConstructionError,
 };
 #[cfg(feature = "native-agentic-input-probe")]
 pub(crate) use agentic_input_probe::run as run_agentic_input_matrix;

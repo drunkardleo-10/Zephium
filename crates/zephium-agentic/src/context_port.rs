@@ -14,7 +14,7 @@ use url::Url;
 use crate::{
     ContextCapabilities, ContextCookieTransferRequest, ContextCookieTransferSettlement,
     ContextJoin, ContextKind, ContextOperationJoin, ContextOperationKind, ContextProfileLease,
-    MAX_LIVE_CONTEXTS,
+    SemanticRuntimeInvocation, SemanticRuntimeSettlement, MAX_LIVE_CONTEXTS,
 };
 
 /// Maximum number of lifecycle tasks one native adapter may retain.
@@ -338,7 +338,8 @@ pub enum ContextNativePlatform {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ContextConstructionProof {
     /// Selected macOS profile data store, no extension controller, extension,
-    /// userscript, or ordinary Zephium script principal attached.
+    /// or ordinary Zephium script principal attached; the sole user script is
+    /// the exact private semantic-runtime program in its dedicated world.
     MacOsOwnedSelectedProfileExtensionFree,
     /// Selected Windows profile used only after its extension inventory was
     /// proven empty for this construction.
@@ -723,6 +724,8 @@ pub enum ContextNativeEvent {
     CookieTransferSettled(Box<ContextCookieTransferSettlement>),
     /// One bounded native resource audit settled.
     ResourceAuditSettled(ContextResourceAuditSettlement),
+    /// One fixed isolated-world semantic invocation reached a terminal result.
+    SemanticRuntimeSettled(Box<SemanticRuntimeSettlement>),
 }
 
 /// Trusted imperative boundary implemented by one bounded platform adapter.
@@ -739,6 +742,9 @@ pub trait AgentBrowserPort: Send + Sync {
 
     /// Attempts to admit one privacy-preserving native resource audit.
     fn audit_resources(&self, audit: ContextResourceAuditId) -> ContextDispatch;
+
+    /// Attempts to admit one already-encoded fixed semantic-runtime invocation.
+    fn invoke_semantic(&self, invocation: SemanticRuntimeInvocation) -> ContextDispatch;
 }
 
 fn require_operation(
@@ -1014,6 +1020,13 @@ mod tests {
 
             fn audit_resources(&self, _audit: ContextResourceAuditId) -> ContextDispatch {
                 ContextDispatch::Scheduled
+            }
+
+            fn invoke_semantic(
+                &self,
+                _invocation: crate::SemanticRuntimeInvocation,
+            ) -> ContextDispatch {
+                ContextDispatch::Unsupported
             }
         }
 

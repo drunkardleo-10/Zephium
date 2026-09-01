@@ -11,10 +11,15 @@ use wry::{
 };
 use zephium_agentic::{
     ContextNavigationTarget, ContextOperationJoin, ContextOperationKind, ContextPortFailure,
-    ContextProfileStorageClass,
+    ContextProfileStorageClass, SemanticRuntimeInvocation, SemanticRuntimePortFailure,
+    SemanticSnapshot,
 };
 use zephium_core::ids::ProfileId;
 
+use super::semantic_runtime::{
+    AgentSemanticRuntimeController, AgentSemanticRuntimeDispatchError, AgentSemanticRuntimeFailure,
+    AgentSemanticRuntimeRegistration,
+};
 use super::WebsiteDataStore;
 
 /// Closed construction failure mapped to the public native-port taxonomy.
@@ -22,7 +27,7 @@ use super::WebsiteDataStore;
 pub(crate) enum AgentOwnedViewConstructionError {
     /// The exact selected-profile storage class or identity was not retained.
     Storage,
-    /// Extension or user-script absence could not be proven.
+    /// Extension absence or exact private semantic-script inventory could not be proven.
     ExtensionIsolation,
     /// Wry/WebKit refused hidden child-view construction or hardening.
     Native,
@@ -50,6 +55,57 @@ impl AgentNavigationTerminal {
 
     pub(crate) fn into_outcome(self) -> Result<AgentNavigationCommit, ContextPortFailure> {
         self.outcome
+    }
+}
+
+struct AgentNavigationObservation {
+    document_committed: bool,
+    terminal: Option<AgentNavigationTerminal>,
+}
+
+impl AgentNavigationObservation {
+    const fn none() -> Self {
+        Self {
+            document_committed: false,
+            terminal: None,
+        }
+    }
+
+    const fn document_committed() -> Self {
+        Self {
+            document_committed: true,
+            terminal: None,
+        }
+    }
+
+    fn terminal(document_committed: bool, terminal: AgentNavigationTerminal) -> Self {
+        Self {
+            document_committed,
+            terminal: Some(terminal),
+        }
+    }
+
+    const fn did_commit_document(&self) -> bool {
+        self.document_committed
+    }
+
+    fn into_terminal(self) -> Option<AgentNavigationTerminal> {
+        self.terminal
+    }
+
+    #[cfg(test)]
+    fn is_none(&self) -> bool {
+        self.terminal.is_none()
+    }
+
+    #[cfg(test)]
+    fn is_some(&self) -> bool {
+        self.terminal.is_some()
+    }
+
+    #[cfg(test)]
+    fn expect(self, message: &str) -> AgentNavigationTerminal {
+        self.terminal.expect(message)
     }
 }
 
@@ -91,6 +147,8 @@ struct AgentNavigationArm {
 
 struct AgentNavigationState {
     bootstrap_available: bool,
+    bootstrap_pending: bool,
+    bootstrap_native_id: Option<wry::NavigationId>,
     renderer_lost: bool,
     armed: Option<AgentNavigationArm>,
 }
@@ -99,6 +157,8 @@ impl Default for AgentNavigationState {
     fn default() -> Self {
         Self {
             bootstrap_available: true,
+            bootstrap_pending: false,
+            bootstrap_native_id: None,
             renderer_lost: false,
             armed: None,
         }
@@ -167,6 +227,8 @@ impl AgentNavigationController {
             return Err(());
         }
         state.bootstrap_available = false;
+        state.bootstrap_pending = false;
+        state.bootstrap_native_id = None;
         state.renderer_lost = false;
         state.armed = Some(AgentNavigationArm {
             operation,
@@ -231,39 +293,67 @@ impl AgentNavigationController {
         }
         if state.bootstrap_available && candidate == "about:blank" {
             state.bootstrap_available = false;
+            state.bootstrap_pending = true;
             return true;
         }
         false
     }
 
-    fn observe(&self, event: NavigationEvent) -> Result<Option<AgentNavigationTerminal>, ()> {
+    fn observe(&self, event: NavigationEvent) -> Result<AgentNavigationObservation, ()> {
         let mut state = self.state.lock().map_err(|_| ())?;
         if state.renderer_lost {
-            return Ok(None);
+            return Ok(AgentNavigationObservation::none());
         }
         let Some(armed) = state.armed.as_mut() else {
-            return Ok(None);
+            if !state.bootstrap_pending {
+                return Ok(AgentNavigationObservation::none());
+            }
+            if event.phase == NavigationEventPhase::Started {
+                if event.url == "about:blank" && state.bootstrap_native_id.is_none() {
+                    state.bootstrap_native_id = Some(event.id);
+                }
+                return Ok(AgentNavigationObservation::none());
+            }
+            if !matches!(
+                event.phase,
+                NavigationEventPhase::Committed | NavigationEventPhase::Failed
+            ) || state.bootstrap_native_id != Some(event.id)
+            {
+                return Ok(AgentNavigationObservation::none());
+            }
+            state.bootstrap_pending = false;
+            state.bootstrap_native_id = None;
+            return match event.phase {
+                NavigationEventPhase::Committed if event.url == "about:blank" => {
+                    Ok(AgentNavigationObservation::document_committed())
+                }
+                NavigationEventPhase::Failed => Ok(AgentNavigationObservation::none()),
+                NavigationEventPhase::Committed => Err(()),
+                NavigationEventPhase::Started
+                | NavigationEventPhase::Redirected
+                | NavigationEventPhase::Finished => Ok(AgentNavigationObservation::none()),
+            };
         };
         if event.phase == NavigationEventPhase::Started {
             let matches_target = armed.expected.matches(&event.url);
             if matches_target && armed.native_id.is_none() {
                 armed.native_id = Some(event.id);
             }
-            return Ok(None);
+            return Ok(AgentNavigationObservation::none());
         }
         if !matches!(
             event.phase,
             NavigationEventPhase::Committed | NavigationEventPhase::Failed
         ) || armed.native_id != Some(event.id)
         {
-            return Ok(None);
+            return Ok(AgentNavigationObservation::none());
         }
         if armed
             .terminal_claimed
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
         {
-            return Ok(None);
+            return Ok(AgentNavigationObservation::none());
         }
         let operation = armed.operation;
         let expected = armed.expected.clone();
@@ -272,9 +362,13 @@ impl AgentNavigationController {
             NavigationEventPhase::Failed => Err(ContextPortFailure::NativeRefused),
             NavigationEventPhase::Started
             | NavigationEventPhase::Redirected
-            | NavigationEventPhase::Finished => return Ok(None),
+            | NavigationEventPhase::Finished => return Ok(AgentNavigationObservation::none()),
         };
-        Ok(Some(AgentNavigationTerminal { operation, outcome }))
+        let document_committed = outcome.is_ok();
+        Ok(AgentNavigationObservation::terminal(
+            document_committed,
+            AgentNavigationTerminal { operation, outcome },
+        ))
     }
 
     fn claim_renderer_loss(&self) -> Result<bool, ()> {
@@ -317,9 +411,52 @@ fn invoke_owned_unit_callback(callback: &dyn Fn(), callback_panicked: &dyn Fn())
     }
 }
 
+fn new_owned_agent_configuration(
+    profile: ProfileId,
+    storage_class: ContextProfileStorageClass,
+    ephemeral_store: Option<&WebsiteDataStore>,
+) -> Result<
+    objc2::rc::Retained<objc2_web_kit::WKWebViewConfiguration>,
+    AgentOwnedViewConstructionError,
+> {
+    use objc2::rc::Retained;
+    use objc2_foundation::{MainThreadMarker, NSUUID};
+    use objc2_web_kit::{WKWebViewConfiguration, WKWebsiteDataStore};
+
+    match (storage_class, ephemeral_store) {
+        (ContextProfileStorageClass::Ephemeral, Some(store)) => {
+            super::new_configuration_with_data_store(store)
+                .map_err(|_| AgentOwnedViewConstructionError::Storage)
+        }
+        (ContextProfileStorageClass::Durable, None) => {
+            let mtm = MainThreadMarker::new().ok_or(AgentOwnedViewConstructionError::Native)?;
+            let identifier = NSUUID::from_bytes(profile.bytes());
+            let store = unsafe { WKWebsiteDataStore::dataStoreForIdentifier(&identifier, mtm) };
+            if !unsafe { store.isPersistent() }
+                || unsafe { store.identifier() }.map(|value| value.as_bytes())
+                    != Some(profile.bytes())
+            {
+                return Err(AgentOwnedViewConstructionError::Storage);
+            }
+            let configuration = unsafe { WKWebViewConfiguration::new(mtm) };
+            unsafe { configuration.setWebsiteDataStore(&store) };
+            let actual_store = unsafe { configuration.websiteDataStore() };
+            if Retained::as_ptr(&actual_store) != Retained::as_ptr(&store) {
+                return Err(AgentOwnedViewConstructionError::Storage);
+            }
+            Ok(configuration)
+        }
+        (ContextProfileStorageClass::Durable, Some(_))
+        | (ContextProfileStorageClass::Ephemeral, None) => {
+            Err(AgentOwnedViewConstructionError::Storage)
+        }
+    }
+}
+
 /// Exact native page and its closed navigation policy handle.
 pub(crate) struct AgentOwnedView {
     navigation: AgentNavigationController,
+    semantic: Option<AgentSemanticRuntimeRegistration>,
     view: WebView,
 }
 
@@ -330,6 +467,89 @@ impl AgentOwnedView {
 
     pub(crate) const fn navigation(&self) -> &AgentNavigationController {
         &self.navigation
+    }
+
+    pub(crate) fn semantic(&self) -> Option<&AgentSemanticRuntimeController> {
+        self.semantic
+            .as_ref()
+            .map(AgentSemanticRuntimeRegistration::controller)
+    }
+
+    pub(crate) fn prepare_semantic_document_load(&mut self) -> Result<(), ()> {
+        self.semantic.as_mut().ok_or(())?.prepare_document_load()
+    }
+
+    pub(crate) fn retire_semantic_runtime(&mut self) -> bool {
+        self.semantic
+            .take()
+            .is_some_and(|registration| registration.retire().is_ok())
+    }
+
+    pub(crate) fn dispatch_semantic(
+        &self,
+        invocation: SemanticRuntimeInvocation,
+        completion: impl FnOnce(Result<SemanticSnapshot, SemanticRuntimePortFailure>) + 'static,
+    ) -> Result<(), SemanticRuntimePortFailure> {
+        let Some(semantic) = self.semantic() else {
+            completion(Err(SemanticRuntimePortFailure::Retired));
+            return Err(SemanticRuntimePortFailure::Retired);
+        };
+        semantic
+            .dispatch(invocation, move |outcome| {
+                completion(outcome.map_err(map_semantic_runtime_failure));
+            })
+            .map_err(map_semantic_dispatch_failure)
+    }
+
+    pub(crate) fn semantic_pending_for_audit(&self) -> Option<bool> {
+        self.semantic()?.pending_for_audit()
+    }
+
+    pub(crate) fn attest(
+        &self,
+        profile: ProfileId,
+        storage_class: ContextProfileStorageClass,
+        ephemeral_store: Option<&WebsiteDataStore>,
+    ) -> Result<(), AgentOwnedViewConstructionError> {
+        let semantic = self
+            .semantic
+            .as_ref()
+            .ok_or(AgentOwnedViewConstructionError::ExtensionIsolation)?;
+        attest_owned_agent_view(
+            &self.view,
+            semantic,
+            profile,
+            storage_class,
+            ephemeral_store,
+        )
+    }
+}
+
+const fn map_semantic_dispatch_failure(
+    failure: AgentSemanticRuntimeDispatchError,
+) -> SemanticRuntimePortFailure {
+    match failure {
+        AgentSemanticRuntimeDispatchError::NotReady => SemanticRuntimePortFailure::NotReady,
+        AgentSemanticRuntimeDispatchError::Busy => SemanticRuntimePortFailure::ResourceExhausted,
+        AgentSemanticRuntimeDispatchError::Exhausted => SemanticRuntimePortFailure::InvocationLimit,
+        AgentSemanticRuntimeDispatchError::Retired => SemanticRuntimePortFailure::Retired,
+    }
+}
+
+const fn map_semantic_runtime_failure(
+    failure: AgentSemanticRuntimeFailure,
+) -> SemanticRuntimePortFailure {
+    match failure {
+        AgentSemanticRuntimeFailure::Dispatch(failure) => map_semantic_dispatch_failure(failure),
+        AgentSemanticRuntimeFailure::Cancelled => SemanticRuntimePortFailure::Cancelled,
+        AgentSemanticRuntimeFailure::DocumentReplaced => {
+            SemanticRuntimePortFailure::DocumentReplaced
+        }
+        AgentSemanticRuntimeFailure::RendererLost => SemanticRuntimePortFailure::RendererLost,
+        AgentSemanticRuntimeFailure::TimedOut => SemanticRuntimePortFailure::TimedOut,
+        AgentSemanticRuntimeFailure::Retired => SemanticRuntimePortFailure::Retired,
+        AgentSemanticRuntimeFailure::Transport => SemanticRuntimePortFailure::Transport,
+        AgentSemanticRuntimeFailure::Result(failure) => SemanticRuntimePortFailure::Result(failure),
     }
 }
 
@@ -395,6 +615,15 @@ where
     let on_callback_panic = Rc::new(on_callback_panic);
     let navigation_callback_panicked = on_callback_panic.clone();
     let renderer_callback_panicked = on_callback_panic.clone();
+    let configuration = new_owned_agent_configuration(profile, storage_class, ephemeral_store)?;
+    let semantic = AgentSemanticRuntimeRegistration::install(
+        &configuration,
+        invariant_failure_callback,
+        on_callback_panic,
+    )
+    .map_err(|_| AgentOwnedViewConstructionError::ExtensionIsolation)?;
+    let navigation_semantic = semantic.controller().clone();
+    let renderer_semantic = semantic.controller().clone();
     let builder = WebViewBuilder::new()
         .with_url("about:blank")
         .with_visible(false)
@@ -406,12 +635,18 @@ where
         .with_general_autofill_enabled(false)
         .with_navigation_handler(move |target| navigation_policy.allows(&target))
         .with_navigation_event_handler(move |event| match navigation_events.observe(event) {
-            Ok(Some(terminal)) => invoke_owned_navigation_callback(
-                navigation_callback.as_ref(),
-                navigation_callback_panicked.as_ref(),
-                terminal,
-            ),
-            Ok(None) => {}
+            Ok(observation) => {
+                if observation.did_commit_document() {
+                    navigation_semantic.document_committed();
+                }
+                if let Some(terminal) = observation.into_terminal() {
+                    invoke_owned_navigation_callback(
+                        navigation_callback.as_ref(),
+                        navigation_callback_panicked.as_ref(),
+                        terminal,
+                    );
+                }
+            }
             Err(()) => invoke_owned_unit_callback(
                 navigation_invariant_failure.as_ref(),
                 navigation_callback_panicked.as_ref(),
@@ -419,10 +654,13 @@ where
         })
         .with_on_web_content_process_terminate_handler(move || {
             match renderer_events.claim_renderer_loss() {
-                Ok(true) => invoke_owned_unit_callback(
-                    renderer_lost_callback.as_ref(),
-                    renderer_callback_panicked.as_ref(),
-                ),
+                Ok(true) => {
+                    renderer_semantic.renderer_lost();
+                    invoke_owned_unit_callback(
+                        renderer_lost_callback.as_ref(),
+                        renderer_callback_panicked.as_ref(),
+                    );
+                }
                 Ok(false) => {}
                 Err(()) => invoke_owned_unit_callback(
                     renderer_invariant_failure.as_ref(),
@@ -433,34 +671,32 @@ where
         .with_permission_handler(|_| wry::PermissionResponse::Deny)
         .with_download_policy(DownloadPolicy::DenyWithoutMetadata)
         .with_page_close_policy(PageClosePolicy::Ignore)
-        .with_allow_link_preview(false);
+        .with_allow_link_preview(false)
+        .with_webview_configuration(configuration);
 
-    let builder = match (storage_class, ephemeral_store) {
-        (ContextProfileStorageClass::Ephemeral, Some(store)) => {
-            let configuration = super::new_configuration_with_data_store(store)
-                .map_err(|_| AgentOwnedViewConstructionError::Storage)?;
-            builder
-                .with_incognito(true)
-                .with_webview_configuration(configuration)
-        }
-        (ContextProfileStorageClass::Durable, None) => {
-            builder.with_data_store_identifier(profile.bytes())
-        }
-        (ContextProfileStorageClass::Durable, Some(_))
-        | (ContextProfileStorageClass::Ephemeral, None) => {
-            return Err(AgentOwnedViewConstructionError::Storage);
-        }
+    let builder = if storage_class == ContextProfileStorageClass::Ephemeral {
+        builder.with_incognito(true)
+    } else {
+        builder
     };
 
     let view = builder
         .build_as_child(parent)
         .map_err(|_| AgentOwnedViewConstructionError::Native)?;
-    attest_owned_agent_view(&view, profile, storage_class, ephemeral_store)?;
-    Ok(AgentOwnedView { navigation, view })
+    semantic
+        .bind_view(&super::native_webview(&view))
+        .map_err(|_| AgentOwnedViewConstructionError::Native)?;
+    attest_owned_agent_view(&view, &semantic, profile, storage_class, ephemeral_store)?;
+    Ok(AgentOwnedView {
+        navigation,
+        semantic: Some(semantic),
+        view,
+    })
 }
 
 pub(crate) fn attest_owned_agent_view(
     view: &WebView,
+    semantic: &AgentSemanticRuntimeRegistration,
     profile: ProfileId,
     storage_class: ContextProfileStorageClass,
     ephemeral_store: Option<&WebsiteDataStore>,
@@ -473,8 +709,7 @@ pub(crate) fn attest_owned_agent_view(
     if unsafe { configuration.webExtensionController() }.is_some() {
         return Err(AgentOwnedViewConstructionError::ExtensionIsolation);
     }
-    let controller = unsafe { configuration.userContentController() };
-    if unsafe { controller.userScripts() }.count() != 0 {
+    if semantic.attest_configuration(&configuration).is_err() {
         return Err(AgentOwnedViewConstructionError::ExtensionIsolation);
     }
 
@@ -617,6 +852,39 @@ mod tests {
         assert!(gate.allows("about:blank"));
         assert!(!gate.allows("about:blank"));
         assert!(!gate.allows("https://example.test/"));
+    }
+
+    #[test]
+    fn construction_bootstrap_commit_releases_semantic_readiness_without_a_shell_terminal() {
+        let gate = super::AgentNavigationController::default();
+        assert!(gate.allows("about:blank"));
+        let started = gate
+            .observe(wry::NavigationEvent {
+                id: wry::NavigationId::from_raw(70),
+                phase: wry::NavigationEventPhase::Started,
+                url: "about:blank".to_owned(),
+            })
+            .expect("started");
+        assert!(!started.did_commit_document());
+        assert!(started.is_none());
+
+        let committed = gate
+            .observe(wry::NavigationEvent {
+                id: wry::NavigationId::from_raw(70),
+                phase: wry::NavigationEventPhase::Committed,
+                url: "about:blank".to_owned(),
+            })
+            .expect("committed");
+        assert!(committed.did_commit_document());
+        assert!(committed.is_none());
+        assert!(gate
+            .observe(wry::NavigationEvent {
+                id: wry::NavigationId::from_raw(70),
+                phase: wry::NavigationEventPhase::Committed,
+                url: "about:blank".to_owned(),
+            })
+            .expect("duplicate")
+            .is_none());
     }
 
     #[test]

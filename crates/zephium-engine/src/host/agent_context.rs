@@ -25,8 +25,9 @@ use zephium_agentic::{
     ContextId, ContextJoin, ContextNativeRequest, ContextNavigationRequest,
     ContextNavigationSettlement, ContextNavigationTarget, ContextOperationJoin,
     ContextOperationKind, ContextProfileLease, ContextProfileLeasePurpose,
-    ContextProfileStorageClass, ContextTransitionRequest, ContextTransitionSettlement,
-    MAX_LIVE_CONTEXTS,
+    ContextProfileStorageClass, ContextTransitionRequest, ContextTransitionSettlement, FrameId,
+    SemanticFrameTrust, SemanticInvocationId, SemanticOrigin, SemanticRuntimePortFailure,
+    SemanticRuntimeSettlement, SemanticSnapshotGeneration, MAX_LIVE_CONTEXTS,
 };
 #[cfg(target_os = "macos")]
 use zephium_core::ports::engine::Partition;
@@ -43,6 +44,8 @@ use crate::agent_context_port::AgentContextTask;
 
 #[cfg(target_os = "macos")]
 const AGENT_PAGE_LOAD_COMMIT_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(target_os = "macos")]
+const AGENT_SEMANTIC_RUNTIME_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[cfg(target_os = "macos")]
 struct AgentPendingNavigation {
@@ -64,12 +67,13 @@ struct AgentPendingRecovery {
 struct AgentContextRetirement {
     navigation_clean: bool,
     content_policy_clean: bool,
+    semantic_clean: bool,
 }
 
 #[cfg(target_os = "macos")]
 impl AgentContextRetirement {
     const fn is_clean(&self) -> bool {
-        self.navigation_clean && self.content_policy_clean
+        self.navigation_clean && self.content_policy_clean && self.semantic_clean
     }
 }
 
@@ -123,6 +127,8 @@ pub(super) struct AgentOwnedContext {
     pending_recovery: Option<AgentPendingRecovery>,
     renderer_lost: bool,
     renderer_loss_rejoin_pending: bool,
+    last_semantic_invocation: Option<SemanticInvocationId>,
+    semantic_snapshot_generation: Option<SemanticSnapshotGeneration>,
     content_policy_registration: Option<crate::platform::imp::ContentPolicyRegistration>,
     view: crate::platform::imp::AgentOwnedView,
     native_resource: Option<NativeResourceLease>,
@@ -148,6 +154,8 @@ impl AgentOwnedContext {
             pending_recovery: None,
             renderer_lost: false,
             renderer_loss_rejoin_pending: false,
+            last_semantic_invocation: None,
+            semantic_snapshot_generation: None,
             content_policy_registration: Some(content_policy_registration),
             view,
             native_resource: Some(native_resource),
@@ -167,6 +175,17 @@ impl AgentOwnedContext {
         registration: crate::platform::imp::ContentPolicyRegistration,
     ) -> Option<crate::platform::imp::ContentPolicyRegistration> {
         self.content_policy_registration.replace(registration)
+    }
+
+    fn pending_operation_for_audit(&self) -> Option<bool> {
+        let lifecycle_pending =
+            self.pending_navigation.is_some() || self.pending_recovery.is_some();
+        let semantic_pending = self.view.semantic_pending_for_audit()?;
+        if lifecycle_pending && semantic_pending {
+            None
+        } else {
+            Some(lifecycle_pending || semantic_pending)
+        }
     }
 
     fn is_consistent_with_key(&self, id: ContextId) -> bool {
@@ -205,6 +224,12 @@ impl AgentOwnedContext {
                 pending.operation.context() == self.join
                     && pending.operation.kind() == ContextOperationKind::Navigate
             })
+            && self.pending_operation_for_audit().is_some()
+            && self.semantic_snapshot_generation.is_none_or(|_| {
+                self.committed_target.is_some()
+                    && self.last_semantic_invocation.is_some()
+                    && !self.renderer_lost
+            })
             && self.native_resource.is_some()
             && self.content_policy_registration.is_some()
     }
@@ -237,10 +262,12 @@ impl AgentOwnedContext {
             .content_policy_registration
             .take()
             .is_some_and(|registration| registration.retire().is_ok());
+        let semantic_clean = self.view.retire_semantic_runtime();
         drop(self);
         AgentContextRetirement {
             navigation_clean,
             content_policy_clean,
+            semantic_clean,
         }
     }
 }
@@ -249,6 +276,16 @@ impl EngineHost {
     pub(crate) fn handle_agent_context_task(&mut self, task: AgentContextTask) {
         if let Some(audit) = task.audit() {
             self.settle_agent_context_audit(task, audit);
+            return;
+        }
+        #[cfg(target_os = "macos")]
+        if task.is_semantic() {
+            self.start_owned_agent_semantic_invocation(task);
+            return;
+        }
+        #[cfg(not(target_os = "macos"))]
+        if task.is_semantic() {
+            task.refuse(ContextPortFailure::Unsupported);
             return;
         }
 
@@ -316,15 +353,14 @@ impl EngineHost {
         let resident_view_count = Some(0);
 
         #[cfg(target_os = "macos")]
-        let pending_operations = u8::try_from(
-            self.agent_contexts
-                .values()
-                .filter(|binding| {
-                    binding.pending_navigation.is_some() || binding.pending_recovery.is_some()
-                })
-                .count(),
-        )
-        .ok();
+        let pending_operations = self
+            .agent_contexts
+            .values()
+            .try_fold(0usize, |count, binding| {
+                let pending = binding.pending_operation_for_audit()?;
+                count.checked_add(usize::from(pending))
+            })
+            .and_then(|count| u8::try_from(count).ok());
         #[cfg(not(target_os = "macos"))]
         let pending_operations = Some(0);
 
@@ -547,6 +583,160 @@ impl EngineHost {
     }
 
     #[cfg(target_os = "macos")]
+    fn start_owned_agent_semantic_invocation(&mut self, mut task: AgentContextTask) {
+        let Some(invocation) = task.take_semantic_invocation() else {
+            self.fail_agent_context_invariant(
+                "agent-context semantic task lost its exact invocation",
+            );
+            task.refuse(ContextPortFailure::NativeRefused);
+            return;
+        };
+        let correlation = invocation.correlation();
+        if task.semantic_correlation() != Some(&correlation) {
+            self.fail_agent_context_invariant(
+                "agent-context semantic task correlation changed during admission",
+            );
+            task.refuse(ContextPortFailure::NativeRefused);
+            return;
+        }
+
+        let context = invocation.frame().context();
+        let id = context.identity().id();
+        let failure = match self.agent_contexts.get(&id) {
+            None => Some(SemanticRuntimePortFailure::Stale),
+            Some(binding) if binding.join != context => Some(SemanticRuntimePortFailure::Stale),
+            Some(binding) if binding.renderer_lost => {
+                Some(SemanticRuntimePortFailure::RendererLost)
+            }
+            Some(binding)
+                if binding.pending_navigation.is_some() || binding.pending_recovery.is_some() =>
+            {
+                Some(SemanticRuntimePortFailure::NotReady)
+            }
+            Some(binding)
+                if !binding
+                    .capabilities
+                    .contains(zephium_agentic::ContextCapability::Observe) =>
+            {
+                Some(SemanticRuntimePortFailure::Unsupported)
+            }
+            Some(_)
+                if invocation.frame().frame() != FrameId::MAIN
+                    || invocation.frame().trust() != SemanticFrameTrust::SameOrigin =>
+            {
+                Some(SemanticRuntimePortFailure::Unsupported)
+            }
+            Some(binding) => {
+                let expected_origin = binding
+                    .committed_target
+                    .as_ref()
+                    .and_then(|target| SemanticOrigin::parse(target.as_url().as_str()).ok());
+                let expected_generation = binding
+                    .semantic_snapshot_generation
+                    .map_or(Some(SemanticSnapshotGeneration::INITIAL), |generation| {
+                        generation.next()
+                    });
+                if expected_origin.as_ref() != Some(invocation.frame().origin())
+                    || expected_generation != Some(invocation.snapshot_generation())
+                    || binding
+                        .last_semantic_invocation
+                        .is_some_and(|last| invocation.invocation().get() <= last.get())
+                {
+                    Some(SemanticRuntimePortFailure::Stale)
+                } else {
+                    None
+                }
+            }
+        };
+        if let Some(failure) = failure {
+            let settlement = SemanticRuntimeSettlement::try_new(correlation, Err(failure));
+            match settlement {
+                Ok(settlement) => task.complete(ContextNativeEvent::SemanticRuntimeSettled(
+                    Box::new(settlement),
+                )),
+                Err(_) => {
+                    self.fail_agent_context_invariant(
+                        "agent-context semantic refusal violated correlation",
+                    );
+                    task.refuse(ContextPortFailure::NativeRefused);
+                }
+            }
+            return;
+        }
+
+        let invocation_id = invocation.invocation();
+        let snapshot_generation = invocation.snapshot_generation();
+        let timeout_guard = task.callback_guard();
+        let Some(watchdog) = crate::platform::imp::schedule_content_policy_timeout(
+            AGENT_SEMANTIC_RUNTIME_TIMEOUT,
+            move || {
+                let rejected = timeout_guard.clone();
+                if !crate::host::try_with_agent_context_terminal(move |host| {
+                    host.timeout_owned_agent_semantic_invocation(id, invocation_id);
+                }) {
+                    rejected.callback_dispatch_rejected();
+                }
+            },
+        ) else {
+            match SemanticRuntimeSettlement::try_new(
+                correlation,
+                Err(SemanticRuntimePortFailure::Transport),
+            ) {
+                Ok(settlement) => task.complete(ContextNativeEvent::SemanticRuntimeSettled(
+                    Box::new(settlement),
+                )),
+                Err(_) => {
+                    self.fail_agent_context_invariant(
+                        "agent-context semantic timeout lost exact correlation",
+                    );
+                    task.refuse(ContextPortFailure::NativeRefused);
+                }
+            }
+            return;
+        };
+        let callback_guard = task.callback_guard();
+        let callback_correlation = correlation.clone();
+        let Some(binding) = self.agent_contexts.get_mut(&id) else {
+            task.refuse(ContextPortFailure::Stale);
+            return;
+        };
+        let dispatched = binding.view.dispatch_semantic(invocation, move |outcome| {
+            drop(watchdog);
+            match SemanticRuntimeSettlement::try_new(callback_correlation, outcome) {
+                Ok(settlement) => task.complete(ContextNativeEvent::SemanticRuntimeSettled(
+                    Box::new(settlement),
+                )),
+                Err(_) => {
+                    callback_guard.callback_dispatch_rejected();
+                    task.refuse(ContextPortFailure::NativeRefused);
+                }
+            }
+        });
+        if dispatched.is_ok() {
+            binding.last_semantic_invocation = Some(invocation_id);
+            binding.semantic_snapshot_generation = Some(snapshot_generation);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn timeout_owned_agent_semantic_invocation(
+        &mut self,
+        id: ContextId,
+        invocation: SemanticInvocationId,
+    ) {
+        let Some(binding) = self.agent_contexts.get(&id) else {
+            return;
+        };
+        let Some(semantic) = binding.view.semantic() else {
+            self.fail_agent_context_invariant(
+                "agent-context semantic timeout lost its runtime registration",
+            );
+            return;
+        };
+        let _ = semantic.timeout(invocation);
+    }
+
+    #[cfg(target_os = "macos")]
     fn start_owned_agent_navigation(
         &mut self,
         task: AgentContextTask,
@@ -590,6 +780,14 @@ impl EngineHost {
             return;
         };
         binding.join = requested;
+        binding.semantic_snapshot_generation = None;
+        if binding.view.prepare_semantic_document_load().is_err() {
+            self.fail_agent_context_invariant(
+                "agent-context navigation could not rotate its semantic document world",
+            );
+            task.refuse(ContextPortFailure::NativeRefused);
+            return;
+        }
 
         let terminal_claimed = Arc::new(AtomicBool::new(false));
         let timeout_claim = terminal_claimed.clone();
@@ -698,20 +896,23 @@ impl EngineHost {
         // Renderer loss and begin-recovery each advance the complete core
         // join. Retain that exact successor before any fallible native work so
         // later cancellation/close cannot rejoin the dead document.
-        let Some((profile, storage_class, expected)) =
-            self.agent_contexts.get_mut(&id).map(|binding| {
-                binding.join = requested;
-                binding.renderer_loss_rejoin_pending = false;
-                (
-                    binding.profile(),
-                    binding.profile_lease.storage_class(),
-                    binding.committed_target.clone(),
-                )
-            })
-        else {
+        let Some(binding) = self.agent_contexts.get_mut(&id) else {
             task.refuse(ContextPortFailure::Stale);
             return;
         };
+        binding.join = requested;
+        binding.renderer_loss_rejoin_pending = false;
+        binding.semantic_snapshot_generation = None;
+        if binding.view.prepare_semantic_document_load().is_err() {
+            self.fail_agent_context_invariant(
+                "agent-context recovery could not rotate its semantic document world",
+            );
+            task.refuse(ContextPortFailure::NativeRefused);
+            return;
+        }
+        let profile = binding.profile();
+        let storage_class = binding.profile_lease.storage_class();
+        let expected = binding.committed_target.clone();
         let ephemeral_store = match storage_class {
             ContextProfileStorageClass::Durable => None,
             ContextProfileStorageClass::Ephemeral => {
@@ -725,12 +926,9 @@ impl EngineHost {
         let attestation = self.agent_contexts.get(&id).map_or(
             Err(crate::platform::imp::AgentOwnedViewConstructionError::Native),
             |binding| {
-                crate::platform::imp::attest_owned_agent_view(
-                    binding.view.view(),
-                    profile,
-                    storage_class,
-                    ephemeral_store.as_ref(),
-                )
+                binding
+                    .view
+                    .attest(profile, storage_class, ephemeral_store.as_ref())
             },
         );
         if let Err(failure) = attestation {
@@ -1058,7 +1256,13 @@ impl EngineHost {
                 return Err(ContextPortFailure::Stale);
             }
             crate::platform::imp::stop_loading(binding.view.view());
+            binding
+                .view
+                .semantic()
+                .ok_or(ContextPortFailure::NativeRefused)?
+                .cancel();
             binding.join = current;
+            binding.semantic_snapshot_generation = None;
             binding.renderer_loss_rejoin_pending = false;
             let pending_navigation = binding.pending_navigation.take();
             let pending_recovery = binding.pending_recovery.take();
@@ -1143,6 +1347,10 @@ impl EngineHost {
     fn record_agent_context_retirement(&mut self, retirement: AgentContextRetirement) -> bool {
         if !retirement.content_policy_clean {
             self.fail_content_policy_retirement();
+        } else if !retirement.semantic_clean {
+            self.fail_agent_context_invariant(
+                "agent-context teardown did not retire its semantic runtime",
+            );
         } else if !retirement.navigation_clean {
             self.fail_agent_context_invariant(
                 "agent-context teardown lost its exact native navigation gate",
@@ -1452,11 +1660,37 @@ mod tests {
             .expect("recovery owner end")
             .0;
         let rejoin = recovery.find("binding.join = requested").expect("rejoin");
-        let reattest = recovery.find("attest_owned_agent_view(").expect("reattest");
+        let rotate = recovery
+            .find("binding.view.prepare_semantic_document_load()")
+            .expect("semantic epoch rotation");
+        let reattest = recovery.find(".attest(profile").expect("reattest");
         let watchdog = recovery
             .find("schedule_content_policy_timeout(")
             .expect("watchdog");
-        assert!(rejoin < reattest && reattest < watchdog);
+        assert!(rejoin < rotate && rotate < reattest && reattest < watchdog);
         assert!(!recovery.contains("build_owned_agent_view("));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn navigation_revokes_old_semantic_authority_before_other_fallible_native_work() {
+        let navigation = include_str!("agent_context.rs")
+            .split_once("fn start_owned_agent_navigation(")
+            .expect("navigation owner")
+            .1
+            .split_once("fn start_owned_agent_recovery(")
+            .expect("navigation owner end")
+            .0;
+        let rejoin = navigation.find("binding.join = requested").expect("rejoin");
+        let rotate = navigation
+            .find("binding.view.prepare_semantic_document_load()")
+            .expect("semantic epoch rotation");
+        let watchdog = navigation
+            .find("schedule_content_policy_timeout(")
+            .expect("watchdog");
+        let native_gate = navigation
+            .find(".navigation()\n            .arm(")
+            .expect("native gate");
+        assert!(rejoin < rotate && rotate < watchdog && watchdog < native_gate);
     }
 }

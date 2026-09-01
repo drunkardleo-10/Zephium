@@ -8,7 +8,8 @@ use zephium_agentic::{
     ContextCookieTransferFailure, ContextCookieTransferOutcome, ContextCookieTransferRequest,
     ContextCookieTransferSettlement, ContextDispatch, ContextNativeEvent, ContextNativeRequest,
     ContextPortFailure, ContextResourceAuditId, ContextResourceAuditSettlement,
-    MAX_PENDING_NATIVE_CONTEXT_TASKS,
+    SemanticRuntimeCorrelation, SemanticRuntimeInvocation, SemanticRuntimePortFailure,
+    SemanticRuntimeSettlement, MAX_PENDING_NATIVE_CONTEXT_TASKS,
 };
 #[cfg(target_os = "macos")]
 use zephium_agentic::{ContextJoin, ContextOperationKind, ContextRendererLoss};
@@ -213,6 +214,13 @@ enum AgentPendingRequest {
     Native(ContextNativeRequest),
     Cookie(ContextCookieTransferRequest),
     Audit(ContextResourceAuditId),
+    Semantic(AgentPendingSemantic),
+}
+
+struct AgentPendingSemantic {
+    correlation: SemanticRuntimeCorrelation,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    invocation: Option<SemanticRuntimeInvocation>,
 }
 
 pub(crate) struct AgentContextTask {
@@ -244,6 +252,26 @@ impl AgentContextTask {
     pub(crate) fn audit(&self) -> Option<ContextResourceAuditId> {
         match self.request.as_ref() {
             Some(AgentPendingRequest::Audit(audit)) => Some(*audit),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn is_semantic(&self) -> bool {
+        matches!(self.request, Some(AgentPendingRequest::Semantic(_)))
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn take_semantic_invocation(&mut self) -> Option<SemanticRuntimeInvocation> {
+        match self.request.as_mut() {
+            Some(AgentPendingRequest::Semantic(request)) => request.invocation.take(),
+            _ => None,
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn semantic_correlation(&self) -> Option<&SemanticRuntimeCorrelation> {
+        match self.request.as_ref() {
+            Some(AgentPendingRequest::Semantic(request)) => Some(&request.correlation),
             _ => None,
         }
     }
@@ -315,6 +343,10 @@ impl AgentContextTask {
                 Some(AgentPendingRequest::Audit(audit)),
                 ContextNativeEvent::ResourceAuditSettled(settlement),
             ) => *audit == settlement.audit(),
+            (
+                Some(AgentPendingRequest::Semantic(request)),
+                ContextNativeEvent::SemanticRuntimeSettled(settlement),
+            ) => &request.correlation == settlement.correlation(),
             _ => false,
         }
     }
@@ -394,6 +426,31 @@ fn refusal_event(
         AgentPendingRequest::Audit(audit) => Some(ContextNativeEvent::ResourceAuditSettled(
             ContextResourceAuditSettlement::new(audit, Err(failure)),
         )),
+        AgentPendingRequest::Semantic(request) => SemanticRuntimeSettlement::try_new(
+            request.correlation,
+            Err(map_context_failure_to_semantic(failure)),
+        )
+        .ok()
+        .map(Box::new)
+        .map(ContextNativeEvent::SemanticRuntimeSettled),
+    }
+}
+
+const fn map_context_failure_to_semantic(
+    failure: ContextPortFailure,
+) -> SemanticRuntimePortFailure {
+    match failure {
+        ContextPortFailure::Unsupported => SemanticRuntimePortFailure::Unsupported,
+        ContextPortFailure::ResourceExhausted => SemanticRuntimePortFailure::ResourceExhausted,
+        ContextPortFailure::Cancelled => SemanticRuntimePortFailure::Cancelled,
+        ContextPortFailure::TimedOut => SemanticRuntimePortFailure::TimedOut,
+        ContextPortFailure::Stale => SemanticRuntimePortFailure::Stale,
+        ContextPortFailure::Shutdown => SemanticRuntimePortFailure::Shutdown,
+        ContextPortFailure::ProfileUnavailable
+        | ContextPortFailure::ProfileBusy
+        | ContextPortFailure::ExtensionIsolationUnproven
+        | ContextPortFailure::CookieTransferFailed
+        | ContextPortFailure::NativeRefused => SemanticRuntimePortFailure::Transport,
     }
 }
 
@@ -531,6 +588,17 @@ impl AgentBrowserPort for EngineAgentBrowserPort {
     fn audit_resources(&self, audit: ContextResourceAuditId) -> ContextDispatch {
         self.schedule(AgentPendingRequest::Audit(audit))
     }
+
+    fn invoke_semantic(&self, invocation: SemanticRuntimeInvocation) -> ContextDispatch {
+        if !supports_semantic_invocation(&invocation) {
+            return ContextDispatch::Unsupported;
+        }
+        let correlation = invocation.correlation();
+        self.schedule(AgentPendingRequest::Semantic(AgentPendingSemantic {
+            correlation,
+            invocation: Some(invocation),
+        }))
+    }
 }
 
 fn dispatch_to_host(task: AgentContextTask) {
@@ -590,16 +658,32 @@ const fn supports_cookie_transfer() -> bool {
     false
 }
 
+fn supports_semantic_invocation(invocation: &SemanticRuntimeInvocation) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        invocation.frame().context().identity().kind() == zephium_agentic::ContextKind::Owned
+            && invocation.frame().frame() == zephium_agentic::FrameId::MAIN
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = invocation;
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
 
     use zephium_agentic::{
-        ContextCapabilities, ContextCapability, ContextConstructionRequest,
-        ContextConstructionSource, ContextId, ContextIdentity, ContextOperationId,
-        ContextProfileLeaseId, ContextProfileLeasePurpose, ContextProfileLeaseRegistry,
-        ContextProfileStorageClass, ContextRegistry, ContextRunId,
+        encode_semantic_runtime_invocation, ContextCapabilities, ContextCapability,
+        ContextConstructionRequest, ContextConstructionSource, ContextId, ContextIdentity,
+        ContextOperationId, ContextProfileLeaseId, ContextProfileLeasePurpose,
+        ContextProfileLeaseRegistry, ContextProfileStorageClass, ContextRegistry, ContextRunId,
+        ContextSettlement, FrameId, SemanticFrameJoin, SemanticFrameTrust, SemanticInvocationId,
+        SemanticObservationBudget, SemanticObservationId, SemanticObservationRequest,
+        SemanticOrigin, SemanticRuntimeBudget, SemanticSnapshotGeneration,
     };
     use zephium_core::ids::ProfileId;
 
@@ -640,6 +724,53 @@ mod tests {
             )
             .expect("request"),
         )
+    }
+
+    fn semantic_invocation(frame_id: FrameId) -> SemanticRuntimeInvocation {
+        let identity = ContextIdentity::new(
+            ContextId::generate(),
+            ContextRunId::generate(),
+            ProfileId::generate(),
+            zephium_agentic::ContextKind::Owned,
+        );
+        let capabilities = ContextCapabilities::try_new(
+            zephium_agentic::ContextKind::Owned,
+            &[ContextCapability::Observe],
+        )
+        .expect("capabilities");
+        let mut registry = ContextRegistry::new();
+        registry.reserve(identity, capabilities).expect("reserve");
+        let construction = registry
+            .begin_context(
+                identity.id(),
+                ContextOperationId::new(1).expect("operation"),
+            )
+            .expect("construction");
+        registry
+            .settle_construction(identity.id(), construction, ContextSettlement::Applied)
+            .expect("settlement");
+        let context = registry.join(identity.id()).expect("join");
+        let request = SemanticObservationRequest::initial(
+            SemanticObservationId::new(1).expect("observation"),
+            context,
+            SemanticObservationBudget::INITIAL_FILTERED,
+        );
+        let frame = SemanticFrameJoin::try_new(
+            context,
+            frame_id,
+            context.frame_generation(),
+            SemanticOrigin::parse("https://port.example.test/path").expect("origin"),
+            SemanticFrameTrust::SameOrigin,
+        )
+        .expect("frame");
+        encode_semantic_runtime_invocation(
+            &request,
+            frame,
+            SemanticInvocationId::new(1).expect("invocation"),
+            SemanticSnapshotGeneration::INITIAL,
+            SemanticRuntimeBudget::INITIAL_FILTERED,
+        )
+        .expect("encode")
     }
 
     #[cfg(target_os = "macos")]
@@ -750,6 +881,65 @@ mod tests {
             [ContextNativeEvent::ResourceAuditSettled(settlement)]
                 if settlement.outcome() == Err(ContextPortFailure::Shutdown)
         ));
+    }
+
+    #[test]
+    fn semantic_invocation_uses_the_same_bounded_queue_and_exact_terminal_identity() {
+        crate::host::make_unavailable_for_test();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = events.clone();
+        let slot = AgentContextPortSlot::new(
+            Arc::new(|task| {
+                task();
+                true
+            }),
+            Arc::new(|_| {}),
+        );
+        let port = slot
+            .take(Arc::new(move |event| {
+                captured.lock().expect("events").push(event);
+            }))
+            .expect("port");
+        let invocation = semantic_invocation(FrameId::MAIN);
+        let correlation = invocation.correlation();
+        let dispatch = port.invoke_semantic(invocation);
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(dispatch, ContextDispatch::Scheduled);
+            let events = events.lock().expect("events");
+            assert!(matches!(
+                events.as_slice(),
+                [ContextNativeEvent::SemanticRuntimeSettled(settlement)]
+                    if settlement.correlation() == &correlation
+                        && settlement.outcome()
+                            == &Err(SemanticRuntimePortFailure::Shutdown)
+            ));
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert_eq!(dispatch, ContextDispatch::Unsupported);
+            assert!(events.lock().expect("events").is_empty());
+        }
+    }
+
+    #[test]
+    fn semantic_port_refuses_non_main_frames_before_native_admission() {
+        let dispatches = Arc::new(AtomicUsize::new(0));
+        let counted = dispatches.clone();
+        let slot = AgentContextPortSlot::new(
+            Arc::new(move |_| {
+                counted.fetch_add(1, Ordering::Relaxed);
+                true
+            }),
+            Arc::new(|_| {}),
+        );
+        let port = slot.take(Arc::new(|_| {})).expect("port");
+        let child = FrameId::new(2).expect("child frame");
+        assert_eq!(
+            port.invoke_semantic(semantic_invocation(child)),
+            ContextDispatch::Unsupported
+        );
+        assert_eq!(dispatches.load(Ordering::Relaxed), 0);
     }
 
     #[test]
