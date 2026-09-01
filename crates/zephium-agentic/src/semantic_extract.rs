@@ -16,10 +16,10 @@ use thiserror::Error;
 
 use crate::semantic_wire::looks_like_secret_value;
 use crate::{
-    SemanticCaptureInstant, SemanticContractError, SemanticObservationGeneration,
-    SemanticObservationId, SemanticReadDeliveryReceipt, SemanticReadFragment,
-    SemanticReadFragmentId, SemanticReadResult, SemanticReadSensitivityLimit, SemanticSensitivity,
-    SemanticText,
+    SemanticCaptureInstant, SemanticContractError, SemanticExtractionDeliveryReceipt,
+    SemanticObservationGeneration, SemanticObservationId, SemanticReadDeliveryReceipt,
+    SemanticReadFragment, SemanticReadFragmentId, SemanticReadResult, SemanticReadSensitivityLimit,
+    SemanticSensitivity, SemanticText,
 };
 
 /// Exact version of the model-output extraction grammar.
@@ -787,6 +787,29 @@ pub fn extract_semantic_read<'a>(
     if !delivery.matches_read(read) {
         return Err(SemanticExtractionError::ReadNotDelivered);
     }
+    extract_semantic_read_inner(schema, read, sensitivity_limit, model_output)
+}
+
+/// Validates model output from one exact purpose-bound extraction request.
+pub fn extract_delivered_semantic_read<'a>(
+    schema: &SemanticExtractionSchema,
+    read: &SemanticReadResult<'a>,
+    delivery: &SemanticExtractionDeliveryReceipt,
+    sensitivity_limit: SemanticReadSensitivityLimit,
+    model_output: &[u8],
+) -> Result<SemanticExtractionResult<'a>, SemanticExtractionError> {
+    if !delivery.matches(schema, read) {
+        return Err(SemanticExtractionError::ReadNotDelivered);
+    }
+    extract_semantic_read_inner(schema, read, sensitivity_limit, model_output)
+}
+
+fn extract_semantic_read_inner<'a>(
+    schema: &SemanticExtractionSchema,
+    read: &SemanticReadResult<'a>,
+    sensitivity_limit: SemanticReadSensitivityLimit,
+    model_output: &[u8],
+) -> Result<SemanticExtractionResult<'a>, SemanticExtractionError> {
     if model_output.len() > MAX_SEMANTIC_EXTRACTION_INPUT_BYTES {
         return Err(SemanticExtractionError::InputLimit);
     }

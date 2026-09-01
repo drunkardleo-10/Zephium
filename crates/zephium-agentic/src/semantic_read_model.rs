@@ -78,6 +78,18 @@ pub struct SemanticEncodedRead {
     read_guard: [u8; 32],
 }
 
+pub(crate) struct SemanticEncodedReadParts {
+    pub(crate) content: String,
+    pub(crate) budget: SemanticModelEncodingBudget,
+    pub(crate) stats: SemanticReadEncodingStats,
+    pub(crate) observation: SemanticObservationId,
+    pub(crate) observation_generation: SemanticObservationGeneration,
+    pub(crate) context: ContextJoin,
+    pub(crate) observation_guard: [u8; 32],
+    pub(crate) captured_at: SemanticCaptureInstant,
+    pub(crate) read_guard: [u8; 32],
+}
+
 impl SemanticEncodedRead {
     /// Content-free encoding statistics.
     pub const fn stats(&self) -> SemanticReadEncodingStats {
@@ -115,6 +127,20 @@ impl SemanticEncodedRead {
             captured_at: self.captured_at,
             read_guard: self.read_guard,
         })
+    }
+
+    pub(crate) fn into_extraction_parts(self) -> SemanticEncodedReadParts {
+        SemanticEncodedReadParts {
+            content: self.content,
+            budget: self.budget,
+            stats: self.stats,
+            observation: self.observation,
+            observation_generation: self.observation_generation,
+            context: self.context,
+            observation_guard: self.observation_guard,
+            captured_at: self.captured_at,
+            read_guard: self.read_guard,
+        }
     }
 }
 
