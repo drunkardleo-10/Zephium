@@ -6,7 +6,8 @@ non-widening delegation topology are implemented. The first mutable bounded
 run-tree scheduler and its exact cancellation/drain tree are also implemented;
 manifest-bound context assignment is implemented over the existing bounded
 context registry, and content-free semantic progress is projected directly by
-the supervisor. Provider adapters, the durable audit sink, and live
+the supervisor. A bounded semantic-audit ledger and typed persistence port are
+implemented. Provider adapters, the durable store adapter, and live
 qualification remain pending.
 
 This evidence describes policy input facts only. A manifest cannot authorize a
@@ -283,7 +284,45 @@ browser action, model call, tool call, data transfer, cost, or native resource.
 - Public node snapshots include the current projection. Diagnostics expose
   only redacted identities and closed enums. Transition history and durable
   delivery are intentionally not simulated by this projection; the bounded
-  audit sink remains a separate pending persistence boundary.
+  audit ledger is a separate persistence boundary.
+
+## Implemented bounded semantic-audit port
+
+- A ledger can be created only against the exact queued-root supervisor before
+  execution or context allocation begins. It records only the exact current
+  supervisor-owned progress projection; callers cannot supply a different
+  state. Strictly increasing event identities, non-regressing trusted
+  monotonic time within the manifest lifetime, exact manifest/supervisor/node
+  joins, and unchanged-projection refusal make accidental stale or duplicate
+  append explicit.
+- At most 64 undelivered events and one 16-event delivery prefix are retained.
+  The queue never evicts or silently drops an event. Full capacity backpressures
+  before consuming the candidate event identity. Empty/oversized delivery,
+  concurrent delivery, and reused/regressed delivery identity fail before the
+  retained prefix changes.
+- Versioned SHA-256 event and delivery guards bind the manifest revision,
+  supervisor, event/delivery identities, monotonic recording time, responsible
+  node, closed operation/resource/state/result/blocker vocabulary, and exact
+  ordered batch. A lost local handoff can reconstruct the same in-flight batch
+  and proof without changing the queue.
+- Only an exact durable `Committed` settlement removes the corresponding
+  prefix. Proven pre-commit refusal and cancellation clear the attempt but
+  retain every event for a later explicitly identified retry. A missing or
+  substituted settlement fail-stops mutation and retains the complete
+  ambiguous prefix; a later exact acknowledgement may still drain it.
+- The Store adapter contract is transactional and idempotent by exact delivery
+  identity plus proof. Reconciliation may replay only that same pair. Refusal
+  or cancellation must prove that no event committed; uncertain or partial
+  durable outcomes remain unsettled instead of being misreported as safe
+  retry authority.
+- Shutdown sealing rejects new events while preserving delivery and drain.
+  Quiescence requires the seal, an empty queue, and no in-flight delivery. The
+  ledger and port own no storage, I/O, task, timer, thread, channel, provider,
+  page, or native resource; the durable Store adapter remains pending.
+- Events contain only opaque identities, trusted monotonic time, and the closed
+  semantic progress fields. Objective text, prompts, hidden reasoning, model
+  output, raw tool chatter, page content, origins, selectors, JavaScript,
+  secrets, paths, native handles, and arbitrary errors are unrepresentable.
 
 ## Current tests
 
@@ -330,3 +369,9 @@ Four semantic-progress tests cover queue/active/wait/failure projection,
 operation/resource pairing, exact manifest/node typed receipts, model/effect
 results, context ownership and cancellation, policy-derived human waits,
 execution-slot release, and redacted diagnostics.
+Five audit-ledger tests cover exact queued-root construction, current-projection
+and authority joins, event/time replay, duplicate refusal, the 64-event and
+16-event ceilings, non-consuming backpressure, single-flight delivery,
+reconstruction, refused/cancelled retry, exact prefix commit, mismatch
+fail-stop retention, shutdown quiescence, the closed port contract, and
+redacted diagnostics.

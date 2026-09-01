@@ -14,6 +14,7 @@
 #[cfg(all(feature = "probe-harness", not(debug_assertions)))]
 compile_error!("the agentic probe harness is forbidden in optimized builds");
 
+mod agent_audit;
 mod agent_manifest;
 mod agent_policy;
 mod agent_supervisor;
@@ -48,6 +49,12 @@ mod semantic_verify;
 mod semantic_wire;
 mod sign_in_handoff;
 
+pub use agent_audit::{
+    AgentAuditDelivery, AgentAuditDeliveryId, AgentAuditDeliveryOutcome, AgentAuditDeliveryProof,
+    AgentAuditDeliverySettlement, AgentAuditDispatch, AgentAuditError, AgentAuditEvent,
+    AgentAuditEventId, AgentAuditLedger, AgentAuditLedgerStatus, AgentAuditPort,
+    AgentAuditSinkFailure, MAX_AGENT_AUDIT_DELIVERY_EVENTS, MAX_PENDING_AGENT_AUDIT_EVENTS,
+};
 pub use agent_manifest::{
     AgentAccountAttestationId, AgentAccountId, AgentAccountScope, AgentContextAccountBinding,
     AgentDataFlowRule, AgentEffectScope, AgentManifestContractError, AgentPlanLeaseId,
