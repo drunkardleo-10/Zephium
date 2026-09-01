@@ -217,6 +217,7 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         &read(repository.join(ENGINE_AGENT_CONTEXT_PORT))?,
         &read(repository.join(ENGINE_AGENT_CONTEXT_HOST))?,
         &read(repository.join(ENGINE_MACOS_AGENT_CONTEXT))?,
+        &read(repository.join(ENGINE_AGENT_NAVIGATION))?,
     )?;
     validate_engine_semantic_runtime_boundary(&read(
         repository.join(ENGINE_MACOS_SEMANTIC_RUNTIME),
@@ -444,6 +445,7 @@ fn validate_engine_agent_context_boundary(
     port: &str,
     host: &str,
     macos: &str,
+    navigation: &str,
 ) -> Result<(), String> {
     let engine_root = compact(engine_root);
     for required in [
@@ -536,15 +538,8 @@ fn validate_engine_agent_context_boundary(
         "Retained::as_ptr(&actual_store)==Retained::as_ptr(expected)",
         "semantic:Option<AgentSemanticRuntimeRegistration>",
         "pub(crate)fndispatch_screenshot(",
-        "structAgentNavigationController",
-        "state.bootstrap_available=false",
-        "native_id:Option<wry::NavigationId>",
-        "armed.native_id!=Some(event.id)",
-        "terminal_claimed.compare_exchange",
+        "usecrate::platform::agent_navigation::AgentNavigationController",
         "with_on_web_content_process_terminate_handler",
-        "fnclaim_renderer_loss",
-        "fnarm_recovery",
-        "fnsettle_recovery",
         "renderer_lost_callback",
     ] {
         if !macos.contains(required) {
@@ -553,10 +548,29 @@ fn validate_engine_agent_context_boundary(
             ));
         }
     }
+    let navigation = compact(navigation);
+    for required in [
+        "structAgentNavigationController",
+        "state.bootstrap_available=false",
+        "native_id:Option<wry::NavigationId>",
+        "armed.native_id!=Some(event.id)",
+        "terminal_claimed.compare_exchange",
+        "fndocument_finished_for_audit",
+        "fnclaim_renderer_loss",
+        "fnarm_recovery",
+        "fnsettle_recovery",
+    ] {
+        if !navigation.contains(required) {
+            return Err(format!(
+                "shared production agent-context navigation lost required check {required}"
+            ));
+        }
+    }
     for (label, source) in [
         ("port", port.as_str()),
         ("host", host.as_str()),
         ("macOS adapter", macos.as_str()),
+        ("shared navigation", navigation.as_str()),
     ] {
         for forbidden in [
             "with_ipc_handler",
@@ -4785,18 +4799,22 @@ mod tests {
             Retained::as_ptr(&actual_store) == Retained::as_ptr(expected);
             semantic: Option<AgentSemanticRuntimeRegistration>,
             pub(crate) fn dispatch_screenshot() {}
+            use crate::platform::agent_navigation::AgentNavigationController;
+            with_on_web_content_process_terminate_handler();
+            renderer_lost_callback();
+        "#;
+        let navigation = r#"
             struct AgentNavigationController;
             state.bootstrap_available = false;
             native_id: Option<wry::NavigationId>;
             armed.native_id != Some(event.id);
             terminal_claimed.compare_exchange();
-            with_on_web_content_process_terminate_handler();
+            fn document_finished_for_audit() {}
             fn claim_renderer_loss() {}
             fn arm_recovery() {}
             fn settle_recovery() {}
-            renderer_lost_callback();
         "#;
-        validate_engine_agent_context_boundary(engine, host_root, port, host, macos)
+        validate_engine_agent_context_boundary(engine, host_root, port, host, macos, navigation)
             .expect("closed production adapter");
         assert!(validate_engine_agent_context_boundary(
             engine,
@@ -4804,6 +4822,7 @@ mod tests {
             &format!("{port}\nevaluate_script();"),
             host,
             macos,
+            navigation,
         )
         .is_err());
         assert!(validate_engine_agent_context_boundary(
@@ -4812,6 +4831,7 @@ mod tests {
             port,
             host,
             &macos.replace("semantic.attest_configuration(&configuration);", ""),
+            navigation,
         )
         .is_err());
     }

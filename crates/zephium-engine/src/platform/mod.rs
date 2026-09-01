@@ -1,4 +1,7 @@
-#[cfg(all(feature = "agentic-browser", any(target_os = "windows", test)))]
+#[cfg(all(
+    feature = "agentic-browser",
+    any(target_os = "macos", target_os = "windows", test)
+))]
 mod agent_navigation;
 #[cfg(all(feature = "agentic-browser", any(target_os = "windows", test)))]
 mod agent_screenshot_buffer;

@@ -198,11 +198,16 @@ synchronously unsupported. Owned construction:
 
 Navigation advances only the exact functional-core navigation/frame successor
 and retains its accepted port task until a native commit or closed refusal.
-The WebKit gate admits the canonical requested URL only: its construction-only
+macOS and Windows now use one shared navigation state machine rather than
+platform copies. The gate admits the canonical requested URL only: its construction-only
 `about:blank` permit is one-shot, and unarmed page navigation plus redirects
 remain denied until their policy contract is implemented. Commit and a
 30-second watchdog share one atomic terminal claim, so exactly one can enqueue
-the settlement. One navigation-or-recovery page-load terminal and one
+the settlement. A committed native `NavigationId` retains one content-free
+`Finished` fact even after logical settlement; duplicate or post-failure
+completion is an invariant failure. This provides the same exact readiness
+evidence to both platform adapters without retaining a URL, page value, timer,
+or additional queue entry. One navigation-or-recovery page-load terminal and one
 renderer loss can each contribute at most one callback per live context, so
 native callbacks own an independent fixed 16-entry host band; they cannot
 compete with the 16-entry request band.
@@ -316,10 +321,11 @@ provenance, and installation of the ordinary native content policy.
 
 The controller then enters only the private `ContextId` map; ordinary tab,
 session, stage, suspension, navigation-snapshot, and extension-principal maps
-remain untouched. Navigation uses the same exact one-at-a-time state machine
-as the macOS adapter: one construction bootstrap, canonical target match,
+remain untouched. Navigation uses the shared exact one-at-a-time state machine:
+one construction bootstrap, canonical target match,
 native Wry `NavigationId`, commit-or-timeout atomic claim, redirect denial,
-renderer-loss seal, and recovery-only rearm. Windows deadlines use at most 16
+one post-settlement `Finished` fact, renderer-loss seal, and recovery-only rearm.
+Windows deadlines use at most 16
 fixed UI-thread `SetTimer` slots, allocate no worker, channel, or map, and have
 zero timer activity while idle. Native callbacks use the independently bounded
 terminal host band and cannot replace an accepted request debt.

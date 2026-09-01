@@ -68,7 +68,6 @@ impl AgentNavigationObservation {
         self.document_committed
     }
 
-    #[cfg(target_os = "windows")]
     pub(crate) fn into_terminal(self) -> Option<AgentNavigationTerminal> {
         self.terminal
     }
@@ -76,6 +75,11 @@ impl AgentNavigationObservation {
     #[cfg(test)]
     pub(crate) fn is_none(&self) -> bool {
         self.terminal.is_none()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_some(&self) -> bool {
+        self.terminal.is_some()
     }
 
     #[cfg(test)]
