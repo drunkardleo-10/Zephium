@@ -136,15 +136,25 @@ pub struct SemanticDiffModelPayload {
 
 /// Move-only proof retained beside one provider-bound diff request.
 ///
-/// The provider adapter may move the compact content into its fixed request
-/// body while retaining this content-free authority until the transport
-/// commits. Refusal or cancellation drops it without acknowledging the diff.
+/// The provider adapter may retain compact content in its bounded transcript
+/// and fixed request body while this content-free authority waits for exact
+/// whole-input admission and transport commit. Refusal or cancellation drops
+/// it without acknowledging the diff.
 pub(crate) struct SemanticDiffDeliveryAuthority {
+    measurement: SemanticTokenMeasurement,
     current_fingerprint: SemanticObservationFingerprint,
     diff_guard: [u8; 32],
 }
 
 impl SemanticDiffDeliveryAuthority {
+    pub(crate) const fn token_measurement(&self) -> &SemanticTokenMeasurement {
+        &self.measurement
+    }
+
+    pub(crate) fn matches_diff(&self, diff: &SemanticDiff) -> bool {
+        self.diff_guard == diff.guard() && self.current_fingerprint == *diff.current_fingerprint()
+    }
+
     pub(crate) fn commit(self) -> SemanticDiffDeliveryReceipt {
         SemanticDiffDeliveryReceipt {
             acknowledgement: SemanticObservationAcknowledgement::from_fingerprint(
@@ -159,6 +169,7 @@ impl fmt::Debug for SemanticDiffDeliveryAuthority {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("SemanticDiffDeliveryAuthority")
+            .field("measurement", &self.measurement)
             .field("current_fingerprint", &"[redacted]")
             .field("diff_guard", &"[redacted]")
             .finish()
@@ -232,6 +243,7 @@ impl SemanticDiffModelPayload {
             self.content,
             self.stats,
             SemanticDiffDeliveryAuthority {
+                measurement: self.measurement,
                 current_fingerprint: self.current_fingerprint,
                 diff_guard: self.diff_guard,
             },

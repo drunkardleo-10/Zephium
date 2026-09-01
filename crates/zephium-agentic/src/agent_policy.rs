@@ -24,6 +24,7 @@ pub use effect::{
 };
 
 use crate::semantic_diff::SemanticObservationFingerprint;
+use crate::semantic_diff_model::SemanticDiffDeliveryAuthority;
 use crate::{
     AgentAccountScope, AgentContextAccountBinding, AgentPlanLeaseId, AgentPlanNodeId,
     AgentPolicyInstant, AgentProviderPricedUsage, AgentProviderPricingAttribution, AgentRunBudget,
@@ -418,6 +419,38 @@ struct AdmissionGuardFacts<'a> {
     output_token_limit: u64,
     cost_limit: u64,
     candidates: &'a [AgentTaintCohort],
+}
+
+#[derive(Clone, Copy)]
+struct ModelInputTokenReservation {
+    measured: u64,
+    additional: u64,
+}
+
+/// Expected content-free coordinates for one provisional provider call.
+#[derive(Clone, Copy)]
+pub(crate) struct AgentModelCallExpectation {
+    manifest: AgentRunManifestId,
+    call: AgentModelCallId,
+    lease: AgentPlanLeaseId,
+    node: AgentPlanNodeId,
+}
+
+impl AgentModelCallExpectation {
+    /// Captures the exact provisional coordinates checked before policy mutation.
+    pub(crate) const fn new(
+        manifest: AgentRunManifestId,
+        call: AgentModelCallId,
+        lease: AgentPlanLeaseId,
+        node: AgentPlanNodeId,
+    ) -> Self {
+        Self {
+            manifest,
+            call,
+            lease,
+            node,
+        }
+    }
 }
 
 /// Non-cloneable pre-transport reservation for one exact model input.
@@ -924,13 +957,17 @@ impl AgentRunPolicy {
         let context = observation.request().context();
         let candidates = observation_taints(observation, request.account())?;
         let source_guard = SemanticObservationFingerprint::from_observation(observation).digest();
+        let additional_input_tokens = u64::from(request.budget().additional_input_tokens());
         self.prepare_model_input(
             request,
             context,
             ModelInputKind::Observation,
             source_guard,
             candidates,
-            u64::from(payload.token_measurement().tokens()),
+            ModelInputTokenReservation {
+                measured: u64::from(payload.token_measurement().tokens()),
+                additional: additional_input_tokens,
+            },
         )
     }
 
@@ -954,13 +991,63 @@ impl AgentRunPolicy {
             .map(|frame| frame.frame().context())
             .ok_or(AgentPolicyError::EmptyDiff)?;
         let candidates = diff_taints(diff, request.account(), &self.taints)?;
+        let additional_input_tokens = u64::from(request.budget().additional_input_tokens());
         self.prepare_model_input(
             request,
             context,
             ModelInputKind::Diff,
             diff.guard(),
             candidates,
-            u64::from(payload.token_measurement().tokens()),
+            ModelInputTokenReservation {
+                measured: u64::from(payload.token_measurement().tokens()),
+                additional: additional_input_tokens,
+            },
+        )
+    }
+
+    /// Reserves one exact whole-provider-input measurement for a bound diff draft.
+    ///
+    /// This crate-private path is used only after the fixed provider codec and
+    /// an exact local structured-input counter have both succeeded. Expected
+    /// call coordinates prevent a provisional continuation identity from being
+    /// rebound to a different policy, lease, or plan node.
+    pub(crate) fn prepare_provider_diff_input(
+        &mut self,
+        request: AgentModelCallRequest,
+        expected: AgentModelCallExpectation,
+        diff: &SemanticDiff,
+        delivery: &SemanticDiffDeliveryAuthority,
+        structured_input_tokens: u64,
+    ) -> Result<AgentModelCallAdmission, AgentPolicyError> {
+        if request.id() != expected.call
+            || request.lease() != expected.lease
+            || self.manifest.id() != expected.manifest
+            || self
+                .lease_index(expected.lease)
+                .and_then(|index| self.leases.get(index))
+                .is_none_or(|lease| lease.binding.node() != expected.node)
+        {
+            return Err(AgentPolicyError::Authority);
+        }
+        if !delivery.matches_diff(diff) {
+            return Err(AgentPolicyError::PayloadMismatch);
+        }
+        let context = diff
+            .frames()
+            .first()
+            .map(|frame| frame.frame().context())
+            .ok_or(AgentPolicyError::EmptyDiff)?;
+        let candidates = diff_taints(diff, request.account(), &self.taints)?;
+        self.prepare_model_input(
+            request,
+            context,
+            ModelInputKind::Diff,
+            diff.guard(),
+            candidates,
+            ModelInputTokenReservation {
+                measured: structured_input_tokens,
+                additional: 0,
+            },
         )
     }
 
@@ -979,13 +1066,17 @@ impl AgentRunPolicy {
         };
         let context = first.provenance().context();
         let candidates = read_taints(read, request.account())?;
+        let additional_input_tokens = u64::from(request.budget().additional_input_tokens());
         self.prepare_model_input(
             request,
             context,
             ModelInputKind::Read,
             read.guard(),
             candidates,
-            u64::from(payload.token_measurement().tokens()),
+            ModelInputTokenReservation {
+                measured: u64::from(payload.token_measurement().tokens()),
+                additional: additional_input_tokens,
+            },
         )
     }
 
@@ -1210,7 +1301,7 @@ impl AgentRunPolicy {
         kind: ModelInputKind,
         source_guard: [u8; 32],
         candidates: Vec<AgentTaintCohort>,
-        measured_input_tokens: u64,
+        token_reservation: ModelInputTokenReservation,
     ) -> Result<AgentModelCallAdmission, AgentPolicyError> {
         let id = request.id();
         let lease = request.lease();
@@ -1237,8 +1328,9 @@ impl AgentRunPolicy {
         validate_time(&self.manifest, node.expires_at(), account, request.now())?;
         validate_context_scope(&self.manifest, node, context, account, &candidates)?;
 
-        let input_token_limit = measured_input_tokens
-            .checked_add(u64::from(budget.additional_input_tokens()))
+        let input_token_limit = token_reservation
+            .measured
+            .checked_add(token_reservation.additional)
             .ok_or(AgentPolicyError::Budget)?;
         let output_token_limit = u64::from(budget.output_tokens());
         let reserved_tokens = input_token_limit
@@ -2027,24 +2119,24 @@ mod tests {
         verify_semantic_action, AgentAccountAttestationId, AgentAccountId, AgentDataFlowRule,
         AgentEffectScope, AgentPlanNodeAuthority, AgentPlanNodeScope,
         AgentPreparedObservationRequest, AgentPreparedReadRequest, AgentProviderCallConfig,
-        AgentProviderContractError, AgentProviderEndpoint, AgentProviderInputEvidence,
-        AgentProviderInputOutcome, AgentProviderKind, AgentProviderModelRevision,
-        AgentProviderObjective, AgentProviderRequestSettlement, AgentProviderStreamBudget,
-        AgentRunManifestId, AgentRunScope, ContextAutomationState, ContextCapabilities,
-        ContextCapability, ContextId, ContextIdentity, ContextKind, ContextOperationId,
-        ContextRegistry, ContextRunId, ContextSettlement, FrameGeneration, FrameId,
-        SemanticActionBatch, SemanticActionBatchId, SemanticActionFailure, SemanticActionIntent,
-        SemanticActionProposal, SemanticCaptureInstant, SemanticDecodeContext, SemanticDiffBudget,
-        SemanticDiffOutcome, SemanticEffectEvidence, SemanticFrameJoin, SemanticFrameTrust,
-        SemanticInvocationId, SemanticModelDeliverySettlement, SemanticModelEncodingBudget,
-        SemanticObservationAssembler, SemanticObservationBudget, SemanticObservationId,
-        SemanticObservationRequest, SemanticPreparedAction, SemanticReadAuthority,
-        SemanticReadBudget, SemanticReadSensitivityLimit, SemanticSettleBudget,
-        SemanticSettleInstant, SemanticSettleTracker, SemanticSnapshot, SemanticSnapshotGeneration,
-        SemanticState, SemanticTokenCountQuality, SemanticTokenCountRequirement,
-        SemanticTokenCounter, SemanticTokenCounterError, SemanticTokenMeasurement,
-        SemanticTokenizerRevision, SemanticVerification, SemanticWaitCondition,
-        SEMANTIC_WIRE_VERSION,
+        AgentProviderContractError, AgentProviderDiffRequestDraft, AgentProviderEndpoint,
+        AgentProviderInputEvidence, AgentProviderInputOutcome, AgentProviderKind,
+        AgentProviderLocalInputTokenCounter, AgentProviderModelRevision, AgentProviderObjective,
+        AgentProviderRequestSettlement, AgentProviderStreamBudget, AgentRunManifestId,
+        AgentRunScope, ContextAutomationState, ContextCapabilities, ContextCapability, ContextId,
+        ContextIdentity, ContextKind, ContextOperationId, ContextRegistry, ContextRunId,
+        ContextSettlement, FrameGeneration, FrameId, SemanticActionBatch, SemanticActionBatchId,
+        SemanticActionFailure, SemanticActionIntent, SemanticActionProposal,
+        SemanticCaptureInstant, SemanticDecodeContext, SemanticDiffBudget, SemanticDiffOutcome,
+        SemanticEffectEvidence, SemanticFrameJoin, SemanticFrameTrust, SemanticInvocationId,
+        SemanticModelDeliverySettlement, SemanticModelEncodingBudget, SemanticObservationAssembler,
+        SemanticObservationBudget, SemanticObservationId, SemanticObservationRequest,
+        SemanticPreparedAction, SemanticReadAuthority, SemanticReadBudget,
+        SemanticReadSensitivityLimit, SemanticSettleBudget, SemanticSettleInstant,
+        SemanticSettleTracker, SemanticSnapshot, SemanticSnapshotGeneration, SemanticState,
+        SemanticTokenCountQuality, SemanticTokenCountRequirement, SemanticTokenCounter,
+        SemanticTokenCounterError, SemanticTokenMeasurement, SemanticTokenizerRevision,
+        SemanticVerification, SemanticWaitCondition, SEMANTIC_WIRE_VERSION,
     };
     use serde_json::{json, Value};
 
@@ -2319,6 +2411,49 @@ mod tests {
                 SemanticTokenCountQuality::ExactLocal,
             )
             .map_err(|_| SemanticTokenCounterError::InvalidResult)
+        }
+    }
+
+    struct FixedProviderInputCounter {
+        revision: SemanticTokenizerRevision,
+        tokens: u32,
+        quality: SemanticTokenCountQuality,
+    }
+
+    impl FixedProviderInputCounter {
+        fn measurement(
+            &self,
+            tokenizer: &SemanticTokenizerRevision,
+            request_body: &[u8],
+        ) -> Result<SemanticTokenMeasurement, SemanticTokenCounterError> {
+            if tokenizer != &self.revision || request_body.is_empty() {
+                return Err(SemanticTokenCounterError::InvalidResult);
+            }
+            SemanticTokenMeasurement::try_new(self.revision.clone(), self.tokens, self.quality)
+                .map_err(|_| SemanticTokenCounterError::InvalidResult)
+        }
+    }
+
+    impl AgentProviderLocalInputTokenCounter for FixedProviderInputCounter {
+        fn count_openai_responses_input(
+            &self,
+            model: &AgentProviderModelRevision,
+            tokenizer: &SemanticTokenizerRevision,
+            request_body: &[u8],
+        ) -> Result<SemanticTokenMeasurement, SemanticTokenCounterError> {
+            if model.as_str() != "gpt-5.6-sol" {
+                return Err(SemanticTokenCounterError::Unavailable);
+            }
+            self.measurement(tokenizer, request_body)
+        }
+
+        fn count_anthropic_messages_input(
+            &self,
+            _model: &AgentProviderModelRevision,
+            _tokenizer: &SemanticTokenizerRevision,
+            _request_body: &[u8],
+        ) -> Result<SemanticTokenMeasurement, SemanticTokenCounterError> {
+            Err(SemanticTokenCounterError::Unavailable)
         }
     }
 
@@ -3191,6 +3326,245 @@ mod tests {
         ));
         assert_eq!(refused.policy.pending_model_calls(), 0);
         assert!(refused.policy.taints().is_empty());
+    }
+
+    #[test]
+    fn stateless_diff_counts_whole_input_before_exact_policy_and_transport_commit() {
+        let source = origin("provider-diff-request");
+        let context = make_context(9_207, 9_208, 9_209);
+        let previous = actionable_observation(context, source.clone(), 1);
+        let current = observation(
+            context,
+            source.clone(),
+            2,
+            vec![
+                json!({"k": 1, "r": "document", "o": 16}),
+                json!({"k": 3, "p": 0, "r": "paragraph", "t": "new private marker"}),
+                json!({"k": 2, "p": 0, "r": "button", "n": "Save draft", "o": 9,
+                       "b": {"x": 10, "y": 10, "w": 100, "h": 30}}),
+            ],
+        );
+        let diff = diff_between(&previous, &current);
+        let selected = tokenizer();
+        let config = provider_config(selected.clone(), 10, 20);
+        let objective = AgentProviderObjective::try_admit(
+            "Review the private marker".to_owned(),
+            &FixedCounter {
+                revision: selected.clone(),
+                tokens: 5,
+            },
+            &selected,
+        )
+        .expect("objective");
+        let mut fixture = policy_fixture(
+            9_207,
+            9_208,
+            source,
+            SemanticSensitivity::Sensitive,
+            &[SemanticEffectClass::Read],
+            run_budget(10, 5_000, 10_000),
+        );
+        let binding = account(context, NOW - 1);
+        let prepared = AgentPreparedObservationRequest::try_openai(
+            &mut fixture.policy,
+            call_request(1, fixture.lease, binding, 15, 20, 100, NOW),
+            &previous,
+            observation_payload(&previous, 50),
+            &objective,
+            config.clone(),
+        )
+        .expect("initial request");
+        let committed = prepared
+            .into_transport_input()
+            .commit(&mut fixture.policy)
+            .expect("initial commit");
+        let (initial_request, input, continuation) = committed.into_parts();
+        let (active, evidence) = input.into_parts();
+        assert!(evidence
+            .observation_acknowledgement()
+            .is_some_and(|acknowledgement| acknowledgement.matches(&previous)));
+        fixture
+            .policy
+            .settle_model_call(active, AgentModelCallSettlement::Completed, 65, 4, 80)
+            .expect("initial settlement");
+        let tool = crate::AgentBrowserToolCall::decode_openai(
+            initial_request.call(),
+            "fc_diff_request_1".to_owned(),
+            "call_diff_request_1".to_owned(),
+            "back",
+            "{}".to_owned(),
+        )
+        .expect("tool call");
+        let correlation = tool.into_continuation_parts().0;
+        let completion = crate::AgentProviderCompletion::new(
+            initial_request.call(),
+            crate::AgentProviderStopReason::ToolCalls,
+            crate::AgentProviderUsage::try_new(65, 4, 0, 0, 0).expect("usage"),
+            crate::AgentProviderStreamStats::new(200, 8, 0, 1, 2),
+            true,
+        );
+        let continuation = continuation
+            .expect("continuation seed")
+            .join_terminal_tool(completion, correlation)
+            .expect("terminal tool join");
+
+        let diff_request = call_request(2, fixture.lease, binding, 500, 20, 100, NOW);
+        let diff_measurement = SemanticTokenMeasurement::try_new(
+            selected.clone(),
+            30,
+            SemanticTokenCountQuality::ExactLocal,
+        )
+        .expect("diff measurement");
+        let provider_preflight = SemanticTokenMeasurement::try_new(
+            selected.clone(),
+            120,
+            SemanticTokenCountQuality::ProviderExact,
+        )
+        .expect("provider preflight");
+        assert_eq!(
+            config
+                .validate_diff_request(diff_request, &diff_measurement, &provider_preflight)
+                .expect_err("provider-backed count must need separate disclosure authority"),
+            AgentProviderContractError::InputTokenQuality
+        );
+        let oversized = SemanticTokenMeasurement::try_new(
+            selected.clone(),
+            531,
+            SemanticTokenCountQuality::ExactLocal,
+        )
+        .expect("oversized measurement");
+        assert_eq!(
+            config
+                .validate_diff_request(diff_request, &diff_measurement, &oversized)
+                .expect_err("whole input exceeds authorized replay ceiling"),
+            AgentProviderContractError::AdmissionBudget
+        );
+        assert_eq!(fixture.policy.pending_model_calls(), 0);
+        let bound = continuation
+            .bind_diff_request(diff_request, &config, &diff, diff_payload(&diff, 30))
+            .expect("bound diff request");
+        let draft = AgentProviderDiffRequestDraft::try_new(bound).expect("fixed diff draft");
+        assert_eq!(fixture.policy.pending_model_calls(), 0);
+        let prepared = draft
+            .try_prepare(
+                &mut fixture.policy,
+                diff_request,
+                &diff,
+                &FixedProviderInputCounter {
+                    revision: selected,
+                    tokens: 120,
+                    quality: SemanticTokenCountQuality::ExactLocal,
+                },
+            )
+            .expect("whole-input admission");
+        assert_eq!(prepared.structured_input_measurement().tokens(), 120);
+        assert_eq!(
+            prepared.structured_input_measurement().quality(),
+            SemanticTokenCountQuality::ExactLocal
+        );
+        assert_eq!(fixture.policy.pending_model_calls(), 1);
+        assert_eq!(fixture.policy.accounting().reserved_model_tokens(), 140);
+        let transcript_bytes = prepared.continuation_transcript_bytes();
+        let debug = format!("{prepared:?}");
+        assert!(!debug.contains("private marker"));
+        assert!(!debug.contains("call_diff_request_1"));
+
+        let committed = prepared
+            .into_transport_input()
+            .commit(&mut fixture.policy)
+            .expect("diff transport commit");
+        assert_eq!(
+            committed.continuation_transcript_bytes(),
+            Some(transcript_bytes)
+        );
+        assert!(committed
+            .input_evidence()
+            .diff_receipt()
+            .is_some_and(|receipt| receipt.acknowledgement().matches(&current)));
+        assert!(committed
+            .input_evidence()
+            .observation_acknowledgement()
+            .is_some_and(|acknowledgement| acknowledgement.matches(&current)));
+        assert!(committed.input_evidence().read_receipt().is_none());
+        let (request, input, continuation) = committed.into_parts();
+        assert_eq!(request.endpoint(), AgentProviderEndpoint::OpenAiResponses);
+        let second_call = request.call();
+        let continuation = continuation.expect("diff continuation seed");
+        let (active, evidence) = input.into_parts();
+        assert!(matches!(evidence, AgentProviderInputEvidence::Diff(_)));
+        assert_eq!(fixture.policy.taints().len(), 2);
+        fixture
+            .policy
+            .settle_model_call(active, AgentModelCallSettlement::Completed, 120, 4, 80)
+            .expect("diff settlement");
+        assert_eq!(fixture.policy.pending_model_calls(), 0);
+
+        let next = observation(
+            context,
+            origin("provider-diff-request"),
+            3,
+            vec![
+                json!({"k": 1, "r": "document", "o": 16}),
+                json!({"k": 3, "p": 0, "r": "paragraph", "t": "latest private marker"}),
+                json!({"k": 2, "p": 0, "r": "button", "n": "Save draft", "o": 9,
+                       "b": {"x": 10, "y": 10, "w": 100, "h": 30}}),
+            ],
+        );
+        let next_diff = diff_between(&current, &next);
+        let tool = crate::AgentBrowserToolCall::decode_openai(
+            second_call,
+            "fc_diff_request_2".to_owned(),
+            "call_diff_request_2".to_owned(),
+            "reload",
+            "{}".to_owned(),
+        )
+        .expect("second tool call");
+        let completion = crate::AgentProviderCompletion::new(
+            second_call,
+            crate::AgentProviderStopReason::ToolCalls,
+            crate::AgentProviderUsage::try_new(120, 4, 0, 0, 0).expect("usage"),
+            crate::AgentProviderStreamStats::new(200, 8, 0, 1, 2),
+            true,
+        );
+        let continuation = continuation
+            .join_terminal_tool(completion, tool.into_continuation_parts().0)
+            .expect("second terminal tool join");
+        let third_request = call_request(3, fixture.lease, binding, 500, 20, 100, NOW);
+        let draft = AgentProviderDiffRequestDraft::try_new(
+            continuation
+                .bind_diff_request(
+                    third_request,
+                    &config,
+                    &next_diff,
+                    diff_payload(&next_diff, 30),
+                )
+                .expect("second bound diff"),
+        )
+        .expect("second fixed draft");
+        let wire: Value =
+            serde_json::from_slice(draft.request().body()).expect("second draft JSON");
+        assert_eq!(wire["input"].as_array().expect("replay inputs").len(), 6);
+        let prepared = draft
+            .try_prepare(
+                &mut fixture.policy,
+                third_request,
+                &next_diff,
+                &FixedProviderInputCounter {
+                    revision: tokenizer(),
+                    tokens: 160,
+                    quality: SemanticTokenCountQuality::ExactLocal,
+                },
+            )
+            .expect("second whole-input admission");
+        assert_eq!(fixture.policy.accounting().reserved_model_tokens(), 180);
+        assert!(matches!(
+            prepared
+                .settle(&mut fixture.policy, AgentProviderRequestSettlement::Refused)
+                .expect("diff refusal"),
+            AgentProviderInputOutcome::Refused
+        ));
+        assert_eq!(fixture.policy.pending_model_calls(), 0);
+        assert_eq!(fixture.policy.taints().len(), 2);
     }
 
     #[test]

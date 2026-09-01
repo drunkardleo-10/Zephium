@@ -40,13 +40,14 @@ use crate::{
 };
 
 pub use request::{
-    AgentCommittedProviderInput, AgentCommittedProviderRequest, AgentPreparedObservationRequest,
-    AgentPreparedReadRequest, AgentProviderDiffRequestDraft, AgentProviderEndpoint,
-    AgentProviderInputEvidence, AgentProviderInputOutcome, AgentProviderObjective,
-    AgentProviderObjectiveError, AgentProviderRequest, AgentProviderRequestError,
-    AgentProviderRequestSettlement, AgentProviderTransportInput,
-    MAX_AGENT_BROWSER_NAVIGATION_URL_BYTES, MAX_AGENT_PROVIDER_OBJECTIVE_BYTES,
-    MAX_AGENT_PROVIDER_OBJECTIVE_TOKENS, MAX_AGENT_PROVIDER_REQUEST_BYTES,
+    AgentCommittedProviderInput, AgentCommittedProviderRequest, AgentPreparedDiffRequest,
+    AgentPreparedObservationRequest, AgentPreparedReadRequest, AgentProviderDiffRequestDraft,
+    AgentProviderEndpoint, AgentProviderInputEvidence, AgentProviderInputOutcome,
+    AgentProviderLocalInputTokenCounter, AgentProviderObjective, AgentProviderObjectiveError,
+    AgentProviderRequest, AgentProviderRequestError, AgentProviderRequestSettlement,
+    AgentProviderTransportInput, MAX_AGENT_BROWSER_NAVIGATION_URL_BYTES,
+    MAX_AGENT_PROVIDER_OBJECTIVE_BYTES, MAX_AGENT_PROVIDER_OBJECTIVE_TOKENS,
+    MAX_AGENT_PROVIDER_REQUEST_BYTES,
 };
 pub use tool::{
     AgentBrowserActProposal, AgentBrowserHumanReason, AgentBrowserScopeProposal,
@@ -456,6 +457,32 @@ impl AgentProviderCallConfig {
         if additional_input_tokens > u64::from(request.budget().additional_input_tokens())
             || u64::from(self.max_output_tokens) > u64::from(request.budget().output_tokens())
             || total_input_tokens > self.pricing.max_input_tokens()
+        {
+            return Err(AgentProviderContractError::AdmissionBudget);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_diff_request(
+        &self,
+        request: AgentModelCallRequest,
+        diff: &SemanticTokenMeasurement,
+        structured_input: &SemanticTokenMeasurement,
+    ) -> Result<(), AgentProviderContractError> {
+        if diff.revision() != &self.tokenizer || structured_input.revision() != &self.tokenizer {
+            return Err(AgentProviderContractError::TokenizerRevision);
+        }
+        if structured_input.quality() != crate::SemanticTokenCountQuality::ExactLocal {
+            return Err(AgentProviderContractError::InputTokenQuality);
+        }
+        let allowed_input_tokens = u64::from(diff.tokens())
+            .checked_add(u64::from(request.budget().additional_input_tokens()))
+            .ok_or(AgentProviderContractError::AdmissionBudget)?;
+        if u64::from(self.fixed_input_tokens)
+            > u64::from(request.budget().additional_input_tokens())
+            || u64::from(structured_input.tokens()) > allowed_input_tokens
+            || u64::from(self.max_output_tokens) > u64::from(request.budget().output_tokens())
+            || u64::from(structured_input.tokens()) > self.pricing.max_input_tokens()
         {
             return Err(AgentProviderContractError::AdmissionBudget);
         }
@@ -972,6 +999,9 @@ pub enum AgentProviderContractError {
     /// Semantic payload was measured with a different tokenizer revision.
     #[error("agent provider tokenizer revision does not match semantic payload")]
     TokenizerRevision,
+    /// Whole structured input did not receive an exact pinned local count.
+    #[error("agent provider structured input token quality is not exact local")]
+    InputTokenQuality,
     /// One or more stream ceilings were zero or exceeded hard limits.
     #[error("agent provider stream budget is invalid")]
     StreamBudget,

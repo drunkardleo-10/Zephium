@@ -9,11 +9,13 @@ page-projection program with its fixed reply-channel pull protocol implemented.
 The macOS owned-context adapter now installs and lifecycle-binds that program
 through a fixed content-world reply handler and exposes its single-flight result
 through the bounded native context port. Fixed OpenAI and Anthropic stateless
-transcript encoders now produce move-only unsendable drafts; whole-structured-
-input token admission and transport commitment remain disabled. A mechanically
-release-excluded hidden/ephemeral/loopback-only semantic native qualifier is
-implemented but has not been executed; its named-device result and actual
-pinned provider token measurements remain pending.
+transcript encoders now produce move-only drafts with a synchronous exact-local
+whole-input counting port, exact policy reservation, and commit-only diff
+transport authority. Concrete reviewed local counters for pinned proof models
+remain absent, so production still falls back to fresh full observations. A
+mechanically release-excluded hidden/ephemeral/loopback-only semantic native
+qualifier is implemented but has not been executed; its named-device result and
+actual pinned provider token measurements remain pending.
 
 This evidence records deterministic Rust contracts plus static and synthetic
 DOM execution of the fixed program. It does not claim that arbitrary pages
@@ -193,7 +195,7 @@ have been instrumented or observed on either platform.
   browser-operation nor provider-call authority and exposes no generic JSON,
   DOM, selector, script, or transport payload.
 - Fixed provider-specific transcript encoders now consume the bound value into
-  an unsendable draft. OpenAI stateless `store: false` replay contains the two
+  a move-only draft. OpenAI stateless `store: false` replay contains the two
   original user inputs, every exact prior tool-only `function_call` output item
   (including provider item id, call id, fixed name, original validated argument
   string, and completed status), and the adjacent matching
@@ -212,11 +214,22 @@ have been instrumented or observed on either platform.
   class, enforce the 2 MiB body ceiling, and expose content-free transcript/body
   byte accounting with redacted diagnostics. Neither accepts a generic payload,
   remote conversation id, metadata, selector, DOM, script, raw request, or raw
-  response. The draft retains exact diff-delivery authority but has no method to
-  obtain policy admission, transport input, or a delivery receipt. Zephium
-  continues to require a fresh full observation until a trusted counter admits
-  the entire structured replay—not only the newest 200-token diff—under the
-  pinned model/tokenizer and same call reservation.
+  response. The draft retains exact diff-delivery authority and exposes the
+  immutable body only to a synchronous provider-specific local counter that
+  must use the pinned model/tokenizer, perform no I/O or retention, and return
+  `ExactLocal`; counting serialized JSON bytes is explicitly outside the port
+  contract. Provider-backed measurements are rejected at this seam because
+  they require a separate page-data disclosure admission, and Anthropic's
+  preflight result is only an estimate. The complete structured replay—not only
+  the newest 200-token diff—must fit the latest-diff-plus-additional-input
+  authorization ceiling, fixed output ceiling, and pricing range before policy
+  mutation. Policy then revalidates the exact diff/delivery pair, account,
+  context, manifest, call, lease, and node and reserves the exact measured
+  whole-input tokens. Transport commit alone mints the diff receipt, advances
+  taint, and retains the current baseline plus bounded transcript for one later
+  eligible tool-only turn. Refusal or cancellation releases the reservation
+  without advancing either. Concrete reviewed counters are not yet installed,
+  so production continues to require a fresh full observation.
 - The native-to-isolated-world request is a separate 2 KiB maximum closed JSON
   grammar containing only protocol/invocation/snapshot generations, one fixed
   initial/region/subtree/table/frame/surrounding-text scope, an internal stable
@@ -410,8 +423,11 @@ lineage/baseline/payload binding, bounded identity refusal, single-copy
 argument ownership, fixed OpenAI output-item/function-result ordering and
 correlation, fixed Anthropic adjacent tool-use/tool-result ordering and
 correlation, hostile JSON escaping without concatenation, stateless/no-remote-
-id fields, preserved provider/service/output/tool bounds, unsendable draft
-authority, request/transcript byte accounting, and content-free diagnostics.
+id fields, preserved provider/service/output/tool bounds, request/transcript
+byte accounting, exact-local quality and whole-input authorization refusal
+before policy mutation, exact measured-token reservation, commit-only diff
+receipt/taint/continuation advancement, cancellation/refusal release, bounded
+multi-turn transcript carry-forward, and content-free diagnostics.
 Runtime-invocation tests
 cover the sole compact initial shape, absence of URLs/selectors/scripts,
 stable-anchor diagnostic redaction,
@@ -444,12 +460,13 @@ rather than silently widening the hostile wire schema.
 ## Remaining M3 work
 
 1. pin the first OpenAI and Anthropic proof model/tokenizer revisions, implement
-   their trusted counters, and record actual fixture token/latency measurements;
-2. implement trusted whole-structured-input token admission and exact
-   diff-delivery transport commitment for the fixed OpenAI and Anthropic replay
-   drafts, then record actual fixture action-diff token/latency distributions
-   for the pinned proof models/tokenizers. A standalone diff and remote stored
-   conversation remain forbidden;
+   reviewed concrete exact-local counters, and record actual fixture
+   token/latency measurements. Provider-backed counting requires a separate
+   typed disclosure/transport admission and cannot substitute for this port;
+2. qualify the fixed replay through the actual admitted transport with an
+   authorized provider fixture, then record action-diff token/latency
+   distributions for the pinned proof models/tokenizers. A standalone diff and
+   remote stored conversation remain forbidden;
 3. execute the fixed native qualifier with separate authorization, then extend
    live-engine hostile coverage for stale nodes, mutation pressure, and timing
    races beyond its current page-world bridge, prototype collision, frame

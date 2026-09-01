@@ -13,7 +13,7 @@ use thiserror::Error;
 
 use crate::semantic_diff_model::SemanticDiffDeliveryAuthority;
 use crate::{
-    SemanticDiff, SemanticDiffEncodingStats, SemanticDiffModelPayload,
+    AgentModelCallRequest, SemanticDiff, SemanticDiffEncodingStats, SemanticDiffModelPayload,
     SemanticObservationAcknowledgement, SemanticObservationGeneration, SemanticObservationId,
 };
 
@@ -163,7 +163,7 @@ impl fmt::Debug for AgentProviderTranscriptTurn {
     }
 }
 
-/// Exact committed observation turn eligible to receive one terminal tool call.
+/// Exact committed observation or diff turn eligible for one terminal tool call.
 ///
 /// Construction is private to a committed provider request, so cloneable input
 /// evidence alone cannot create this move-only join. A failed, cancelled,
@@ -184,14 +184,16 @@ impl AgentProviderContinuationSeed {
         input: &AgentCommittedProviderInput,
         transcript: Option<AgentProviderTranscript>,
     ) -> Option<Self> {
-        let AgentProviderInputEvidence::Observation(baseline) = input.evidence() else {
-            return None;
+        let baseline = match input.evidence() {
+            AgentProviderInputEvidence::Observation(baseline) => baseline.clone(),
+            AgentProviderInputEvidence::Diff(receipt) => receipt.acknowledgement().clone(),
+            AgentProviderInputEvidence::Read(_) => return None,
         };
         let transcript = transcript?;
         Some(Self {
             call,
             config: config.clone(),
-            baseline: baseline.clone(),
+            baseline,
             transcript,
         })
     }
@@ -298,6 +300,27 @@ impl AgentProviderContinuation {
         self.transcript.retained_bytes()
     }
 
+    /// Binds one provisional same-plan request to the exact admitted diff.
+    ///
+    /// This derives only content-free correlation; it does not reserve policy
+    /// budget or grant provider transport. The fixed draft must still receive
+    /// exact whole-input token admission from the matching run policy.
+    pub fn bind_diff_request(
+        self,
+        request: AgentModelCallRequest,
+        next_config: &AgentProviderCallConfig,
+        diff: &SemanticDiff,
+        payload: SemanticDiffModelPayload,
+    ) -> Result<AgentProviderBoundDiffContinuation, AgentProviderContinuationError> {
+        let next_call = AgentProviderCallIdentity {
+            manifest: self.prior_call.manifest(),
+            call: request.id(),
+            lease: request.lease(),
+            node: self.prior_call.node(),
+        };
+        self.bind_diff(next_call, next_config, diff, payload)
+    }
+
     /// Consumes this prior turn and binds it to one exact admitted diff turn.
     ///
     /// The returned value is still not provider-call authority. It is the only
@@ -398,7 +421,7 @@ impl AgentProviderBoundDiffContinuation {
         self.prior_call
     }
 
-    /// Exact newly admitted model call that may carry the tool result.
+    /// Exact provisional model call that may carry the tool result after admission.
     pub const fn next_call(&self) -> AgentProviderCallIdentity {
         self.next_call
     }
@@ -523,6 +546,41 @@ mod tests {
             SemanticTokenMeasurement::try_new(
                 self.revision.clone(),
                 u32::try_from(input.len()).map_err(|_| SemanticTokenCounterError::InvalidResult)?,
+                SemanticTokenCountQuality::ExactLocal,
+            )
+            .map_err(|_| SemanticTokenCounterError::InvalidResult)
+        }
+    }
+
+    struct AnthropicStructuredCounter {
+        revision: SemanticTokenizerRevision,
+    }
+
+    impl super::super::AgentProviderLocalInputTokenCounter for AnthropicStructuredCounter {
+        fn count_openai_responses_input(
+            &self,
+            _model: &super::super::AgentProviderModelRevision,
+            _tokenizer: &SemanticTokenizerRevision,
+            _request_body: &[u8],
+        ) -> Result<SemanticTokenMeasurement, SemanticTokenCounterError> {
+            Err(SemanticTokenCounterError::Unavailable)
+        }
+
+        fn count_anthropic_messages_input(
+            &self,
+            model: &super::super::AgentProviderModelRevision,
+            tokenizer: &SemanticTokenizerRevision,
+            request_body: &[u8],
+        ) -> Result<SemanticTokenMeasurement, SemanticTokenCounterError> {
+            if model.as_str() != "claude-test-v1"
+                || tokenizer != &self.revision
+                || request_body.is_empty()
+            {
+                return Err(SemanticTokenCounterError::InvalidResult);
+            }
+            SemanticTokenMeasurement::try_new(
+                self.revision.clone(),
+                88,
                 SemanticTokenCountQuality::ExactLocal,
             )
             .map_err(|_| SemanticTokenCounterError::InvalidResult)
@@ -1016,6 +1074,13 @@ mod tests {
         );
         assert_eq!(draft.request().call(), call(2));
         assert_eq!(draft.semantic_stats().bytes() as usize, diff_bytes);
+        let measurement = draft
+            .measure_structured_input(&AnthropicStructuredCounter {
+                revision: config.tokenizer().clone(),
+            })
+            .expect("Anthropic local whole-input count");
+        assert_eq!(measurement.tokens(), 88);
+        assert_eq!(measurement.quality(), SemanticTokenCountQuality::ExactLocal);
         let wire: serde_json::Value =
             serde_json::from_slice(draft.request().body()).expect("Anthropic draft JSON");
         assert_eq!(wire["stream"], true);

@@ -591,7 +591,7 @@ configuration, model-call lineage, and terminal tool correlation. Failures,
 cancellation, non-tool stops, mixed text/reasoning output, and multi-tool stops
 destroy it. It can bind only a strictly newer same-plan call and the exact
 token-admitted diff extending that baseline. Fixed provider-specific stateless
-codecs now turn that bound value into an unsendable draft: OpenAI replays the
+codecs turn that bound value into a move-only draft: OpenAI replays the
 two original user inputs, each exact tool-only `function_call` output item, and
 its matching `function_call_output` under `store: false`; Anthropic replays the
 original user message followed by adjacent assistant `tool_use` and user
@@ -600,18 +600,29 @@ instructions, closed tools, disabled parallel calls, model/output bounds,
 service class, and streaming mode. They accept no generic payload, remote
 conversation id, metadata, reasoning/thinking block, selector, DOM, or script.
 The draft retains the bounded structured transcript, exact diff-delivery
-authority, and serialized-body byte accounting but deliberately has no policy
-or transport-commit authority. Production continues to send a fresh full
-observation until a trusted whole-structured-input token counter admits the
-entire replay—not merely its latest diff—under the same model/tokenizer and
-call reservation.
+authority, and serialized-body byte accounting without initially holding policy
+or transport-commit authority. A synchronous provider-specific local counter
+may inspect only that exact fixed body and must return an `ExactLocal`
+measurement for the pinned model/tokenizer. JSON-byte tokenization is not a
+valid implementation. Provider-backed counting is intentionally rejected here:
+even OpenAI's exact counting endpoint would disclose page data and therefore
+needs its own future typed transport admission, while Anthropic documents its
+preflight count as an estimate. Once the exact local count fits the latest-diff
+plus additional-input authorization ceiling, fixed output bound, and pricing
+range, policy validates the exact diff, baseline taint, account/context, call,
+manifest, lease, and node before reserving the exact whole-input count rather
+than the larger authorization ceiling. The resulting prepared diff uses the
+same bounded transport as full observations and reads.
 
 Diff disclosure authority is split from the compact content before a provider
 request can retain it. The stateless draft keeps the redacted, content-free
-authority inseparable from the exact bounded transcript and body, but cannot
-cross the transport boundary yet. The eventual admitted commit must consume
-that same authority; refusal or cancellation must drop it, and only an exact
-commit may mint the diff receipt and next-baseline acknowledgement.
+authority inseparable from the exact bounded transcript and body. Exact local
+counting grants no disclosure authority; successful policy admission joins the
+same authority to transport. Refusal or cancellation drops it, and only an
+exact transport commit mints the diff receipt, advances policy taint, and makes
+the current acknowledgement plus bounded transcript eligible for one later
+tool-only continuation. Until reviewed pinned local counters are installed for
+the proof models, production still falls back to a fresh full observation.
 
 This is intentionally stricter than assuming an errored `send` transmitted no
 bytes.

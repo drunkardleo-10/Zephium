@@ -13,18 +13,19 @@ use serde::Serialize;
 use serde_json::{json, Map, Value};
 use thiserror::Error;
 
+use crate::agent_policy::AgentModelCallExpectation;
 use crate::semantic_diff_model::SemanticDiffDeliveryAuthority;
 use crate::semantic_wire::looks_like_secret_value;
 use crate::{
     AgentActiveModelCall, AgentModelCallAdmission, AgentModelCallRequest,
-    AgentModelInputCancellation, AgentPolicyError, AgentRunPolicy, SemanticDiffEncodingStats,
-    SemanticEncodingStats, SemanticModelPayload, SemanticObservation,
-    SemanticObservationAcknowledgement, SemanticReadDeliveryReceipt, SemanticReadEncodingStats,
-    SemanticReadModelPayload, SemanticReadResult, SemanticTokenCountQuality, SemanticTokenCounter,
-    SemanticTokenCounterError, SemanticTokenMeasurement, SemanticTokenizerRevision,
-    MAX_SEMANTIC_ACTIONS_PER_BATCH, MAX_SEMANTIC_ACTION_SETTLE_MILLIS,
-    MAX_SEMANTIC_ACTION_TEXT_BYTES, MAX_SEMANTIC_MUTATION_QUIET_MILLIS,
-    MAX_SEMANTIC_SURROUNDING_TEXT_BYTES,
+    AgentModelInputCancellation, AgentPolicyError, AgentRunPolicy, SemanticDiff,
+    SemanticDiffDeliveryReceipt, SemanticDiffEncodingStats, SemanticEncodingStats,
+    SemanticModelPayload, SemanticObservation, SemanticObservationAcknowledgement,
+    SemanticReadDeliveryReceipt, SemanticReadEncodingStats, SemanticReadModelPayload,
+    SemanticReadResult, SemanticTokenCountQuality, SemanticTokenCounter, SemanticTokenCounterError,
+    SemanticTokenMeasurement, SemanticTokenizerRevision, MAX_SEMANTIC_ACTIONS_PER_BATCH,
+    MAX_SEMANTIC_ACTION_SETTLE_MILLIS, MAX_SEMANTIC_ACTION_TEXT_BYTES,
+    MAX_SEMANTIC_MUTATION_QUIET_MILLIS, MAX_SEMANTIC_SURROUNDING_TEXT_BYTES,
 };
 
 use super::continuation::AgentProviderTranscript;
@@ -32,8 +33,8 @@ use super::tool::AgentBrowserToolKind;
 use super::{
     AgentProviderBoundDiffContinuation, AgentProviderCallConfig, AgentProviderCallIdentity,
     AgentProviderContinuationSeed, AgentProviderContractError, AgentProviderKind,
-    ANTHROPIC_GLOBAL_INFERENCE_GEO, ANTHROPIC_STANDARD_SERVICE_TIER_REQUEST,
-    OPENAI_STANDARD_SERVICE_TIER,
+    AgentProviderModelRevision, ANTHROPIC_GLOBAL_INFERENCE_GEO,
+    ANTHROPIC_STANDARD_SERVICE_TIER_REQUEST, OPENAI_STANDARD_SERVICE_TIER,
 };
 
 /// Maximum UTF-8 bytes in one approved browser objective.
@@ -166,6 +167,31 @@ pub enum AgentProviderEndpoint {
     AnthropicMessages,
 }
 
+/// Exact synchronous local counter for one fixed provider-structured input.
+///
+/// Implementations must use the pinned provider/model/tokenizer semantics and
+/// must not perform network I/O, log, persist, or retain the supplied body.
+/// Provider token-count endpoints require separate disclosure authority and do
+/// not implement this port. Counting JSON bytes or tokenizing its wire spelling
+/// is not equivalent to provider structured-input accounting.
+pub trait AgentProviderLocalInputTokenCounter {
+    /// Counts one fixed OpenAI Responses creation body.
+    fn count_openai_responses_input(
+        &self,
+        model: &AgentProviderModelRevision,
+        tokenizer: &SemanticTokenizerRevision,
+        request_body: &[u8],
+    ) -> Result<SemanticTokenMeasurement, SemanticTokenCounterError>;
+
+    /// Counts one fixed Anthropic Messages creation body.
+    fn count_anthropic_messages_input(
+        &self,
+        model: &AgentProviderModelRevision,
+        tokenizer: &SemanticTokenizerRevision,
+        request_body: &[u8],
+    ) -> Result<SemanticTokenMeasurement, SemanticTokenCounterError>;
+}
+
 /// Exact immutable JSON request handed only to the trusted HTTP shell.
 #[must_use]
 pub struct AgentProviderRequest {
@@ -243,13 +269,15 @@ pub enum AgentProviderRequestSettlement {
 
 /// Content-free proof of the exact semantic input committed with a provider call.
 ///
-/// An observation can supply the next exact diff baseline. A bounded-read
-/// receipt deliberately cannot. Cloning this proof neither clones
+/// A full observation or committed diff can supply the next exact diff
+/// baseline. A bounded-read receipt deliberately cannot. Cloning this proof neither clones
 /// active provider authority nor authorizes model input, policy, or browser work.
 #[derive(Clone, Eq, PartialEq)]
 pub enum AgentProviderInputEvidence {
     /// One exact full observation committed to disclosure.
     Observation(SemanticObservationAcknowledgement),
+    /// One exact semantic diff committed to disclosure.
+    Diff(SemanticDiffDeliveryReceipt),
     /// One exact bounded semantic read committed to disclosure.
     Read(SemanticReadDeliveryReceipt),
 }
@@ -259,7 +287,16 @@ impl AgentProviderInputEvidence {
     pub const fn observation_acknowledgement(&self) -> Option<&SemanticObservationAcknowledgement> {
         match self {
             Self::Observation(acknowledgement) => Some(acknowledgement),
+            Self::Diff(receipt) => Some(receipt.acknowledgement()),
             Self::Read(_) => None,
+        }
+    }
+
+    /// Exact semantic-diff proof when this call sent a continuation result.
+    pub const fn diff_receipt(&self) -> Option<&SemanticDiffDeliveryReceipt> {
+        match self {
+            Self::Diff(receipt) => Some(receipt),
+            Self::Observation(_) | Self::Read(_) => None,
         }
     }
 
@@ -267,7 +304,7 @@ impl AgentProviderInputEvidence {
     pub const fn read_receipt(&self) -> Option<&SemanticReadDeliveryReceipt> {
         match self {
             Self::Read(receipt) => Some(receipt),
-            Self::Observation(_) => None,
+            Self::Observation(_) | Self::Diff(_) => None,
         }
     }
 }
@@ -279,6 +316,7 @@ impl fmt::Debug for AgentProviderInputEvidence {
                 .debug_tuple("Observation")
                 .field(acknowledgement)
                 .finish(),
+            Self::Diff(receipt) => formatter.debug_tuple("Diff").field(receipt).finish(),
             Self::Read(receipt) => formatter.debug_tuple("Read").field(receipt).finish(),
         }
     }
@@ -350,6 +388,10 @@ enum AgentProviderInputCommitment {
         admission: AgentModelCallAdmission,
         delivery: crate::semantic_model::SemanticObservationDeliveryAuthority,
     },
+    Diff {
+        admission: AgentModelCallAdmission,
+        delivery: SemanticDiffDeliveryAuthority,
+    },
     Read {
         admission: AgentModelCallAdmission,
         delivery: crate::semantic_read_model::SemanticReadDeliveryAuthority,
@@ -373,6 +415,17 @@ impl AgentProviderInputCommitment {
                     evidence: AgentProviderInputEvidence::Observation(acknowledgement),
                 })
             }
+            Self::Diff {
+                admission,
+                delivery,
+            } => {
+                let receipt = delivery.commit();
+                let active = policy.commit_diff_input(admission, &receipt)?;
+                Ok(AgentCommittedProviderInput {
+                    active,
+                    evidence: AgentProviderInputEvidence::Diff(receipt),
+                })
+            }
             Self::Read {
                 admission,
                 delivery,
@@ -393,7 +446,9 @@ impl AgentProviderInputCommitment {
         cancellation: AgentModelInputCancellation,
     ) -> Result<(), AgentProviderRequestError> {
         let admission = match self {
-            Self::Observation { admission, .. } | Self::Read { admission, .. } => admission,
+            Self::Observation { admission, .. }
+            | Self::Diff { admission, .. }
+            | Self::Read { admission, .. } => admission,
         };
         Ok(policy.cancel_prepared_input(admission, cancellation)?)
     }
@@ -547,8 +602,8 @@ impl AgentCommittedProviderRequest {
 
     /// Moves request, committed input, and optional one-shot continuation seed.
     ///
-    /// Only a committed full observation carries a seed. A bounded read never
-    /// creates diff-baseline continuation authority.
+    /// A committed full observation or diff can carry a seed. A bounded read
+    /// never creates diff-baseline continuation authority.
     pub fn into_parts(
         self,
     ) -> (
@@ -901,6 +956,65 @@ impl AgentProviderDiffRequestDraft {
     pub const fn continuation_transcript_bytes(&self) -> usize {
         self.continuation_transcript.retained_bytes()
     }
+
+    pub(super) fn measure_structured_input(
+        &self,
+        counter: &dyn AgentProviderLocalInputTokenCounter,
+    ) -> Result<SemanticTokenMeasurement, SemanticTokenCounterError> {
+        let config = self.request.config();
+        match self.request.endpoint() {
+            AgentProviderEndpoint::OpenAiResponses => counter.count_openai_responses_input(
+                config.model(),
+                config.tokenizer(),
+                self.request.body(),
+            ),
+            AgentProviderEndpoint::AnthropicMessages => counter.count_anthropic_messages_input(
+                config.model(),
+                config.tokenizer(),
+                self.request.body(),
+            ),
+        }
+    }
+
+    /// Counts and atomically admits this exact whole structured diff request.
+    ///
+    /// Encoding and local counting complete before policy mutation. Successful
+    /// policy admission reserves the exact whole-input count, rather than the
+    /// larger latest-diff-plus-envelope authorization ceiling.
+    pub fn try_prepare(
+        self,
+        policy: &mut AgentRunPolicy,
+        call_request: AgentModelCallRequest,
+        diff: &SemanticDiff,
+        counter: &dyn AgentProviderLocalInputTokenCounter,
+    ) -> Result<AgentPreparedDiffRequest, AgentProviderRequestError> {
+        let structured_input = self
+            .measure_structured_input(counter)
+            .map_err(AgentProviderRequestError::InputTokenCounter)?;
+        let config = self.request.config();
+        config.validate_diff_request(
+            call_request,
+            self.delivery.token_measurement(),
+            &structured_input,
+        )?;
+        let call = self.request.call();
+        let admission = policy.prepare_provider_diff_input(
+            call_request,
+            AgentModelCallExpectation::new(call.manifest(), call.call(), call.lease(), call.node()),
+            diff,
+            &self.delivery,
+            u64::from(structured_input.tokens()),
+        )?;
+        debug_assert_eq!(call, AgentProviderCallIdentity::from_admission(&admission));
+        Ok(AgentPreparedDiffRequest {
+            request: self.request,
+            admission,
+            delivery: self.delivery,
+            semantic_stats: self.semantic_stats,
+            structured_input,
+            continuation_transcript: self.continuation_transcript,
+        })
+    }
 }
 
 impl fmt::Debug for AgentProviderDiffRequestDraft {
@@ -919,12 +1033,87 @@ impl fmt::Debug for AgentProviderDiffRequestDraft {
     }
 }
 
+/// Exact stateless diff request with whole-input policy admission.
+#[must_use]
+pub struct AgentPreparedDiffRequest {
+    request: AgentProviderRequest,
+    admission: AgentModelCallAdmission,
+    delivery: SemanticDiffDeliveryAuthority,
+    semantic_stats: SemanticDiffEncodingStats,
+    structured_input: SemanticTokenMeasurement,
+    continuation_transcript: AgentProviderTranscript,
+}
+
+impl AgentPreparedDiffRequest {
+    /// Exact immutable provider request admitted for transport.
+    pub const fn request(&self) -> &AgentProviderRequest {
+        &self.request
+    }
+
+    /// Content-free metrics for the newest compact diff.
+    pub const fn semantic_stats(&self) -> SemanticDiffEncodingStats {
+        self.semantic_stats
+    }
+
+    /// Exact local count over the complete provider-structured replay.
+    pub const fn structured_input_measurement(&self) -> &SemanticTokenMeasurement {
+        &self.structured_input
+    }
+
+    /// Private structured transcript bytes retained for another eligible turn.
+    pub const fn continuation_transcript_bytes(&self) -> usize {
+        self.continuation_transcript.retained_bytes()
+    }
+
+    /// Joins the exact request, diff proof, and policy admission for transport.
+    pub fn into_transport_input(self) -> AgentProviderTransportInput {
+        AgentProviderTransportInput {
+            request: self.request,
+            commitment: AgentProviderInputCommitment::Diff {
+                admission: self.admission,
+                delivery: self.delivery,
+            },
+            continuation_transcript: Some(self.continuation_transcript),
+        }
+    }
+
+    /// Consumes request and admission together at the transport commit point.
+    pub fn settle(
+        self,
+        policy: &mut AgentRunPolicy,
+        settlement: AgentProviderRequestSettlement,
+    ) -> Result<AgentProviderInputOutcome, AgentProviderRequestError> {
+        self.into_transport_input().settle(policy, settlement)
+    }
+}
+
+impl fmt::Debug for AgentPreparedDiffRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentPreparedDiffRequest")
+            .field("request", &self.request)
+            .field("admission", &self.admission)
+            .field("semantic_stats", &self.semantic_stats)
+            .field("structured_input", &self.structured_input)
+            .field(
+                "continuation_transcript_bytes",
+                &self.continuation_transcript.retained_bytes(),
+            )
+            .field("delivery", &self.delivery)
+            .field("content", &"[redacted]")
+            .finish()
+    }
+}
+
 /// Closed failure while constructing or settling a fixed provider request.
 #[derive(Debug, Error)]
 pub enum AgentProviderRequestError {
     /// Provider configuration did not fit exact policy/tokenizer authority.
     #[error("agent provider request configuration is invalid")]
     Contract(#[from] AgentProviderContractError),
+    /// Exact local whole-input counter refused or failed.
+    #[error("agent provider structured input token counter failed")]
+    InputTokenCounter(#[source] SemanticTokenCounterError),
     /// Fixed request serialization failed or exceeded its hard byte ceiling.
     #[error("agent provider request encoding failed")]
     Encoding,

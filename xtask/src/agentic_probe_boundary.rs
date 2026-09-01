@@ -132,6 +132,9 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     validate_provider_input_evidence_contract(
         &read(repository.join(AGENTIC_ROOT))?,
         &read(repository.join(AGENTIC_PROVIDER_REQUEST))?,
+        &read(repository.join(AGENTIC_PROVIDER_ROOT))?,
+        &read(repository.join(AGENTIC_POLICY))?,
+        &read(repository.join(AGENTIC_SEMANTIC_DIFF_MODEL))?,
         &read(repository.join(PROVIDER_TRANSPORT_ROOT))?,
     )?;
     validate_progress_manifest_revision_contract(
@@ -1614,10 +1617,18 @@ fn validate_semantic_execution_contract(
 fn validate_provider_input_evidence_contract(
     root: &str,
     request: &str,
+    provider: &str,
+    policy: &str,
+    diff_model: &str,
     transport: &str,
 ) -> Result<(), String> {
     let root = compact(root);
-    for required in ["AgentCommittedProviderInput", "AgentProviderInputEvidence"] {
+    for required in [
+        "AgentCommittedProviderInput",
+        "AgentPreparedDiffRequest",
+        "AgentProviderInputEvidence",
+        "AgentProviderLocalInputTokenCounter",
+    ] {
         if !root.contains(required) {
             return Err(format!(
                 "agentic root lost provider input continuation export {required}"
@@ -1629,27 +1640,78 @@ fn validate_provider_input_evidence_contract(
     for required in [
         "pubenumAgentProviderInputEvidence",
         "Observation(SemanticObservationAcknowledgement)",
+        "Diff(SemanticDiffDeliveryReceipt)",
         "Read(SemanticReadDeliveryReceipt)",
         "pubstructAgentCommittedProviderInput",
         "evidence:AgentProviderInputEvidence::Observation(acknowledgement)",
+        "evidence:AgentProviderInputEvidence::Diff(receipt)",
         "evidence:AgentProviderInputEvidence::Read(receipt)",
         "Committed(Box<AgentCommittedProviderInput>)",
         "pubconstfninput_evidence(&self)->&AgentProviderInputEvidence",
+        "pubtraitAgentProviderLocalInputTokenCounter",
+        "fncount_openai_responses_input(",
+        "fncount_anthropic_messages_input(",
+        "pubstructAgentProviderDiffRequestDraft",
+        "counter:&dynAgentProviderLocalInputTokenCounter",
+        "config.validate_diff_request(",
+        "policy.prepare_provider_diff_input(",
+        "pubstructAgentPreparedDiffRequest",
+        "commitment:AgentProviderInputCommitment::Diff",
+        "continuation_transcript:Some(self.continuation_transcript)",
     ] {
         if !request.contains(required) {
             return Err(format!(
-                "provider request lost exact input continuation seam {required}"
+                "provider request lost exact admitted input continuation seam {required}"
             ));
         }
     }
-    for forbidden in [
-        "AgentPreparedDiffRequest",
-        "AgentProviderInputCommitment::Diff",
-        "ZDIFF1",
-    ] {
+    for forbidden in ["ZDIFF1"] {
         if request.contains(forbidden) {
             return Err(format!(
-                "stateless provider request regained contextless diff input {forbidden}"
+                "provider diff request regained standalone or remote-count authority {forbidden}"
+            ));
+        }
+    }
+
+    let provider = compact(provider);
+    for required in [
+        "fnvalidate_diff_request(",
+        "structured_input.quality()!=crate::SemanticTokenCountQuality::ExactLocal",
+        "u64::from(structured_input.tokens())>allowed_input_tokens",
+        "u64::from(structured_input.tokens())>self.pricing.max_input_tokens()",
+    ] {
+        if !provider.contains(required) {
+            return Err(format!(
+                "provider diff request lost exact local whole-input bound {required}"
+            ));
+        }
+    }
+
+    let policy = compact(policy);
+    for required in [
+        "fnprepare_provider_diff_input(",
+        "request.id()!=expected.call",
+        "request.lease()!=expected.lease",
+        "self.manifest.id()!=expected.manifest",
+        "delivery.matches_diff(diff)",
+        "measured:structured_input_tokens,additional:0",
+    ] {
+        if !policy.contains(required) {
+            return Err(format!(
+                "provider diff policy lost exact authority or reservation join {required}"
+            ));
+        }
+    }
+
+    let diff_model = compact(diff_model);
+    for required in [
+        "structSemanticDiffDeliveryAuthority{measurement:SemanticTokenMeasurement",
+        "fnmatches_diff(&self,diff:&SemanticDiff)->bool",
+        "measurement:self.measurement",
+    ] {
+        if !diff_model.contains(required) {
+            return Err(format!(
+                "semantic diff delivery lost its exact payload/count binding {required}"
             ));
         }
     }
@@ -2342,42 +2404,100 @@ mod tests {
     }
 
     #[test]
-    fn provider_input_evidence_forbids_contextless_stateless_diffs() {
+    fn provider_input_evidence_requires_authority_joined_stateless_diffs() {
         let root = r#"
             pub use request::{
                 AgentCommittedProviderInput,
+                AgentPreparedDiffRequest,
                 AgentProviderInputEvidence,
+                AgentProviderLocalInputTokenCounter,
             };
         "#;
         let request = r#"
             pub enum AgentProviderInputEvidence {
                 Observation(SemanticObservationAcknowledgement),
+                Diff(SemanticDiffDeliveryReceipt),
                 Read(SemanticReadDeliveryReceipt),
             }
             pub struct AgentCommittedProviderInput;
             evidence: AgentProviderInputEvidence::Observation(acknowledgement),
+            evidence: AgentProviderInputEvidence::Diff(receipt),
             evidence: AgentProviderInputEvidence::Read(receipt),
             Committed(Box<AgentCommittedProviderInput>),
             pub const fn input_evidence(&self) -> &AgentProviderInputEvidence {}
+            pub trait AgentProviderLocalInputTokenCounter {
+                fn count_openai_responses_input();
+                fn count_anthropic_messages_input();
+            }
+            pub struct AgentProviderDiffRequestDraft;
+            counter: &dyn AgentProviderLocalInputTokenCounter;
+            config.validate_diff_request();
+            policy.prepare_provider_diff_input();
+            pub struct AgentPreparedDiffRequest;
+            commitment: AgentProviderInputCommitment::Diff;
+            continuation_transcript: Some(self.continuation_transcript);
+        "#;
+        let provider = r#"
+            fn validate_diff_request() {
+                structured_input.quality() != crate::SemanticTokenCountQuality::ExactLocal;
+                u64::from(structured_input.tokens()) > allowed_input_tokens;
+                u64::from(structured_input.tokens()) > self.pricing.max_input_tokens();
+            }
+        "#;
+        let policy = r#"
+            fn prepare_provider_diff_input() {
+                request.id() != expected.call;
+                request.lease() != expected.lease;
+                self.manifest.id() != expected.manifest;
+                delivery.matches_diff(diff);
+                measured: structured_input_tokens, additional: 0;
+            }
+        "#;
+        let diff_model = r#"
+            struct SemanticDiffDeliveryAuthority {
+                measurement: SemanticTokenMeasurement,
+            }
+            fn matches_diff(&self, diff: &SemanticDiff) -> bool {}
+            measurement: self.measurement;
         "#;
         let transport = r#"
             pub const fn input_evidence(&self) -> &AgentProviderInputEvidence {
                 self.committed.input_evidence()
             }
         "#;
-        validate_provider_input_evidence_contract(root, request, transport)
-            .expect("exact provider input evidence");
+        validate_provider_input_evidence_contract(
+            root, request, provider, policy, diff_model, transport,
+        )
+        .expect("exact provider input evidence");
         assert!(validate_provider_input_evidence_contract(
             root,
             &request.replace("Read(SemanticReadDeliveryReceipt),", ""),
+            provider,
+            policy,
+            diff_model,
             transport,
         )
         .is_err());
-        assert!(validate_provider_input_evidence_contract(root, request, "").is_err());
         assert!(validate_provider_input_evidence_contract(
             root,
-            &format!("{request}\npub struct AgentPreparedDiffRequest;"),
+            request,
+            provider,
+            &policy.replace("delivery.matches_diff(diff);", ""),
+            diff_model,
             transport,
+        )
+        .is_err());
+        assert!(validate_provider_input_evidence_contract(
+            root,
+            request,
+            &provider.replace("SemanticTokenCountQuality::ExactLocal", "ProviderExact"),
+            policy,
+            diff_model,
+            transport,
+        )
+        .is_err());
+        assert!(validate_provider_input_evidence_contract(
+            root, request, provider, policy, diff_model, "",
         )
         .is_err());
     }
