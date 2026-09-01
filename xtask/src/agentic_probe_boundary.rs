@@ -8,6 +8,8 @@ use serde::Deserialize;
 
 const AGENTIC_MANIFEST: &str = "crates/zephium-agentic/Cargo.toml";
 const AGENTIC_ROOT: &str = "crates/zephium-agentic/src/lib.rs";
+const PROVIDER_TRANSPORT_MANIFEST: &str = "crates/zephium-agent-provider-transport/Cargo.toml";
+const PROVIDER_TRANSPORT_ROOT: &str = "crates/zephium-agent-provider-transport/src/lib.rs";
 const ENGINE_MANIFEST: &str = "crates/zephium-engine/Cargo.toml";
 const ENGINE_ROOT: &str = "crates/zephium-engine/src/lib.rs";
 const ENGINE_MACOS_MODULE: &str = "crates/zephium-engine/src/platform/macos/mod.rs";
@@ -31,6 +33,8 @@ const ENGINE_RELEASE_REFUSAL: &str = concat!(
 pub(crate) fn check(repository: &Path) -> Result<(), String> {
     validate_manifest(&read(repository.join(AGENTIC_MANIFEST))?)?;
     validate_root(&read(repository.join(AGENTIC_ROOT))?)?;
+    validate_provider_transport_manifest(&read(repository.join(PROVIDER_TRANSPORT_MANIFEST))?)?;
+    validate_provider_transport_root(&read(repository.join(PROVIDER_TRANSPORT_ROOT))?)?;
     validate_engine_manifest(&read(repository.join(ENGINE_MANIFEST))?)?;
     validate_engine_root(&read(repository.join(ENGINE_ROOT))?)?;
     validate_engine_platform_module(&read(repository.join(ENGINE_MACOS_MODULE))?, "macOS")?;
@@ -244,6 +248,92 @@ fn validate_root(source: &str) -> Result<(), String> {
         if !source.contains(&required_gate) {
             return Err(format!(
                 "agentic diagnostic module {module} must remain behind probe-harness"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_provider_transport_manifest(source: &str) -> Result<(), String> {
+    let manifest: toml::Value = toml::from_str(source)
+        .map_err(|error| format!("cannot parse {PROVIDER_TRANSPORT_MANIFEST}: {error}"))?;
+    if manifest
+        .get("package")
+        .and_then(|package| package.get("publish"))
+        .and_then(toml::Value::as_bool)
+        != Some(false)
+    {
+        return Err(
+            "agent provider transport must remain an unpublished internal crate".to_owned(),
+        );
+    }
+    let reqwest = manifest
+        .get("dependencies")
+        .and_then(|dependencies| dependencies.get("reqwest"))
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| "agent provider transport reqwest dependency is missing".to_owned())?;
+    if reqwest.get("version").and_then(toml::Value::as_str) != Some("=0.13.4")
+        || reqwest
+            .get("default-features")
+            .and_then(toml::Value::as_bool)
+            != Some(false)
+    {
+        return Err("agent provider transport reqwest pin or default features drifted".to_owned());
+    }
+    let features = reqwest
+        .get("features")
+        .and_then(toml::Value::as_array)
+        .ok_or_else(|| "agent provider transport reqwest features are missing".to_owned())?;
+    let actual = features
+        .iter()
+        .filter_map(toml::Value::as_str)
+        .collect::<BTreeSet<_>>();
+    let expected = ["http2", "rustls", "stream", "system-proxy"]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    if actual != expected || actual.len() != features.len() {
+        return Err("agent provider transport reqwest feature graph drifted".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_provider_transport_root(source: &str) -> Result<(), String> {
+    let source = compact(source);
+    for required in [
+        "constOPENAI_RESPONSES_URL:&str=\"https://api.openai.com/v1/responses\";",
+        "constANTHROPIC_MESSAGES_URL:&str=\"https://api.anthropic.com/v1/messages\";",
+        "fnexact_production_url(url:&Url,host:&str,path:&str)->bool",
+        "#[cfg(test)]fnexact_loopback_url(url:&Url)->bool",
+        "#[cfg(test)]fntry_new_loopback(",
+        ".https_only(endpoints.https_only)",
+        ".redirect(Policy::none())",
+        ".referer(false)",
+        ".retry(reqwest::retry::never())",
+        ".pool_max_idle_per_host(0)",
+        ".header(ACCEPT_ENCODING,HeaderValue::from_static(\"identity\"))",
+        "value.set_sensitive(true)",
+        "pubenumAgentProviderUsageKnowledge",
+        "ExactZeroBeforeDispatch",
+        "UnknownAfterDispatch",
+        "pubfninto_policy_settlement(self)->AgentProviderPolicySettlement",
+        "ifself.cancellation.is_cancelled()||self.shutdown.is_cancelled()",
+    ] {
+        if !source.contains(required) {
+            return Err(format!(
+                "agent provider transport lost required fixed boundary {required}"
+            ));
+        }
+    }
+    for forbidden in [
+        "danger_accept_invalid_certs",
+        "danger_accept_invalid_hostnames",
+        "pubfntry_new_with_endpoints",
+        "pubfntry_new_loopback",
+        "pubfninto_parts",
+    ] {
+        if source.contains(forbidden) {
+            return Err(format!(
+                "agent provider transport exposes forbidden authority {forbidden}"
             ));
         }
     }
@@ -520,6 +610,61 @@ mod tests {
         "#;
         validate_root(valid).expect("valid guard");
         assert!(validate_root("mod fixture_server;").is_err());
+    }
+
+    #[test]
+    fn provider_transport_requires_fixed_https_and_move_only_settlement() {
+        let manifest = r#"
+            [package]
+            publish = false
+            [dependencies]
+            reqwest = { version = "=0.13.4", default-features = false, features = ["http2", "rustls", "stream", "system-proxy"] }
+        "#;
+        validate_provider_transport_manifest(manifest).expect("valid transport manifest");
+        assert!(
+            validate_provider_transport_manifest(&manifest.replace("=0.13.4", "=0.13.5")).is_err()
+        );
+        assert!(
+            validate_provider_transport_manifest(&manifest.replace(", \"system-proxy\"", ""))
+                .is_err()
+        );
+
+        let root = r#"
+            const OPENAI_RESPONSES_URL: &str = "https://api.openai.com/v1/responses";
+            const ANTHROPIC_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
+            fn exact_production_url(url: &Url, host: &str, path: &str) -> bool {}
+            #[cfg(test)]
+            fn exact_loopback_url(url: &Url) -> bool {}
+            #[cfg(test)]
+            fn try_new_loopback() {}
+            builder
+                .https_only(endpoints.https_only)
+                .redirect(Policy::none())
+                .referer(false)
+                .retry(reqwest::retry::never())
+                .pool_max_idle_per_host(0);
+            request.header(ACCEPT_ENCODING, HeaderValue::from_static("identity"));
+            value.set_sensitive(true);
+            pub enum AgentProviderUsageKnowledge {
+                ExactZeroBeforeDispatch,
+                UnknownAfterDispatch,
+            }
+            pub fn into_policy_settlement(self) -> AgentProviderPolicySettlement {}
+            if self.cancellation.is_cancelled() || self.shutdown.is_cancelled() {}
+        "#;
+        validate_provider_transport_root(root).expect("valid transport boundary");
+        assert!(validate_provider_transport_root(&root.replace(
+            "#[cfg(test)]\n            fn try_new_loopback",
+            "pub fn try_new_loopback"
+        ))
+        .is_err());
+        assert!(validate_provider_transport_root(&format!(
+            "{root}\nbuilder.danger_accept_invalid_certs(true);"
+        ))
+        .is_err());
+        assert!(
+            validate_provider_transport_root(&format!("{root}\npub fn into_parts() {{}}")).is_err()
+        );
     }
 
     #[test]

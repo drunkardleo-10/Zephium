@@ -510,6 +510,11 @@ browser action, model call, tool call, data transfer, cost, or native resource.
   batches to its callback. No raw SSE, generic HTTP response, provider-native
   browser tool, selector, JavaScript, DOM, HTML, CDP, retry authority, queue,
   worker, timer, or idle task crosses the public boundary.
+- The repository boundary gate mechanically pins the two production endpoints,
+  rustls/system-proxy dependency feature set, redirect/retry refusal, sensitive
+  credential marking, identity encoding, pre-send cancellation proof, and
+  move-only settlement route. It rejects public loopback/custom-endpoint
+  construction, TLS-verification bypass, or active-authority decomposition.
 
 ## Implemented OpenAI Responses stream slice
 

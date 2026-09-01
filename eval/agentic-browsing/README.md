@@ -16,6 +16,9 @@ Deterministic contract and fixture checks:
 cargo test --locked -p zephium-agentic --features probe-harness
 cargo clippy --locked -p zephium-agentic --all-targets \
   --features probe-harness -- -D warnings
+cargo test --locked -p zephium-agent-provider-transport
+cargo clippy --locked -p zephium-agent-provider-transport \
+  --all-targets -- -D warnings
 cargo test --locked -p zephium-engine \
   --features native-agentic-input-probe --lib
 cargo test --locked -p zephium-engine \
@@ -44,7 +47,10 @@ The ordinary `zephium-desktop` resolved graph may reach the production
 functional core through Store, but is separately required not to activate
 `probe-harness` or `native-agentic-input-probe`. All probe-only contract,
 control, evidence, protocol, recipe, fixture, and native modules remain behind
-those features.
+those features. The same source gate pins the provider transport's two exact
+HTTPS endpoints, rustls/system-proxy feature graph, redirect/retry refusal,
+sensitive credentials, identity encoding, test-only loopback construction, and
+move-only usage-settlement route.
 
 macOS CI also executes the hidden 14-case fixed-DOM matrix:
 
