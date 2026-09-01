@@ -53,8 +53,8 @@ pub const MAX_SEMANTIC_RUNTIME_CHANNEL_RESULT_BYTES: usize =
 
 const SEMANTIC_RUNTIME_SOURCE: &str = include_str!("../assets/semantic-runtime-v1.js");
 const SEMANTIC_RUNTIME_SOURCE_SHA256: [u8; 32] = [
-    0xf8, 0xad, 0xcd, 0xd6, 0x36, 0x06, 0x3d, 0xca, 0xc5, 0xe7, 0xcc, 0x9d, 0xcd, 0x6b, 0xba, 0xcc,
-    0x30, 0xdf, 0x6d, 0x3d, 0xfb, 0xb1, 0x07, 0x5b, 0x8c, 0xe6, 0xb1, 0x11, 0x49, 0x51, 0xbb, 0x69,
+    0x76, 0xe8, 0xa4, 0x00, 0x97, 0xc1, 0x2f, 0x1f, 0xaf, 0xc3, 0x96, 0xe2, 0x23, 0x46, 0xfc, 0x35,
+    0x83, 0x30, 0x87, 0xaa, 0xf2, 0x0f, 0x2f, 0x72, 0xc2, 0x3d, 0x45, 0xbd, 0xb9, 0xb9, 0xb8, 0xff,
 ];
 
 /// Immutable production program passed only to a trusted isolated-world adapter.
@@ -428,6 +428,8 @@ pub enum SemanticRuntimeInvocationError {
 pub enum SemanticRuntimeFault {
     /// Fixed request grammar was invalid.
     InvalidRequest,
+    /// The exact committed document is still parsing and cannot be complete.
+    DocumentLoading,
     /// Another invocation already held the frame-local single-flight permit.
     Busy,
     /// Stable-key scope anchor no longer resolved in the exact document.
@@ -446,6 +448,7 @@ impl SemanticRuntimeFault {
     fn parse(value: &str) -> Option<Self> {
         match value {
             "invalid_request" => Some(Self::InvalidRequest),
+            "document_loading" => Some(Self::DocumentLoading),
             "busy" => Some(Self::Busy),
             "anchor_missing" => Some(Self::AnchorMissing),
             "identity_exhausted" => Some(Self::IdentityExhausted),
@@ -1100,6 +1103,12 @@ mod tests {
             invocation.decode_result(b"E1:anchor_missing"),
             Err(SemanticRuntimeResultError::Runtime(
                 SemanticRuntimeFault::AnchorMissing
+            ))
+        );
+        assert_eq!(
+            invocation.decode_result(b"E1:document_loading"),
+            Err(SemanticRuntimeResultError::Runtime(
+                SemanticRuntimeFault::DocumentLoading
             ))
         );
         assert_eq!(

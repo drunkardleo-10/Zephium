@@ -27,6 +27,10 @@ pub enum FixtureRoute {
     HostilePage,
     /// Same-origin frame used by the native-input fixture.
     SameOriginFrame,
+    /// First fixed document for production semantic-runtime qualification.
+    SemanticRuntime,
+    /// Replacement document proving semantic world-epoch rotation.
+    SemanticRuntimeReplacement,
 }
 
 impl FixtureRoute {
@@ -35,6 +39,8 @@ impl FixtureRoute {
             Self::NativeInput => "/native-input-v1.html",
             Self::HostilePage => "/hostile-v1.html",
             Self::SameOriginFrame => "/frame-v1.html",
+            Self::SemanticRuntime => "/semantic-runtime-v1.html",
+            Self::SemanticRuntimeReplacement => "/semantic-runtime-replacement-v1.html",
         }
     }
 }
@@ -205,6 +211,17 @@ fn handle(mut stream: TcpStream) -> Result<(), std::io::Error> {
         b"GET /frame-v1.html HTTP/1.1" | b"GET /frame-v1.html HTTP/1.0" => {
             (200, "text/html; charset=utf-8", FRAME_HTML.as_bytes())
         }
+        b"GET /semantic-runtime-v1.html HTTP/1.1" | b"GET /semantic-runtime-v1.html HTTP/1.0" => (
+            200,
+            "text/html; charset=utf-8",
+            SEMANTIC_RUNTIME_HTML.as_bytes(),
+        ),
+        b"GET /semantic-runtime-replacement-v1.html HTTP/1.1"
+        | b"GET /semantic-runtime-replacement-v1.html HTTP/1.0" => (
+            200,
+            "text/html; charset=utf-8",
+            SEMANTIC_RUNTIME_REPLACEMENT_HTML.as_bytes(),
+        ),
         b"GET /favicon.ico HTTP/1.1" | b"GET /favicon.ico HTTP/1.0" => {
             (204, "image/x-icon", &[] as &[u8])
         }
@@ -562,6 +579,91 @@ document.getElementById('frame-button').addEventListener('click', (event) => {
 document.documentElement.dataset.fixtureReady = 'frame-v1';
 </script></body></html>"###;
 
+const SEMANTIC_RUNTIME_HTML: &str = r###"<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'unsafe-inline'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'self'">
+<meta name="referrer" content="no-referrer">
+<title>Semantic runtime fixture v1</title></head>
+<body>
+<main aria-label="First semantic epoch">
+  <h1>First semantic epoch</h1>
+  <p id="bridge-status">Page bridge unresolved</p>
+  <button type="button" aria-label="Primary semantic action">Run</button>
+  <input type="password" aria-label="Password field" value="fixture-password-value">
+  <input type="text" aria-label="Token field" value="Bearer abcdefghijklmnop">
+  <div id="open-shadow-host"></div>
+  <div id="closed-shadow-host" aria-label="Closed shadow boundary"></div>
+  <iframe src="/frame-v1.html" title="Semantic child frame"></iframe>
+</main>
+<script>
+(() => {
+  'use strict';
+  const openRoot = document.getElementById('open-shadow-host').attachShadow({mode: 'open'});
+  const openButton = document.createElement('button');
+  openButton.type = 'button';
+  openButton.setAttribute('aria-label', 'Open shadow semantic action');
+  openRoot.append(openButton);
+  const closedRoot = document.getElementById('closed-shadow-host').attachShadow({mode: 'closed'});
+  const closedButton = document.createElement('button');
+  closedButton.type = 'button';
+  closedButton.setAttribute('aria-label', 'Closed internal must remain absent');
+  closedRoot.append(closedButton);
+
+  Object.defineProperty(window, '__zephiumSemanticRuntimeV1', {
+    value: Object.freeze({invoke() { return 'page-world-forgery'; }}),
+    configurable: false, enumerable: false, writable: false
+  });
+  let bridgeVisible = false;
+  try {
+    bridgeVisible = !!(window.webkit && window.webkit.messageHandlers &&
+      window.webkit.messageHandlers.zephiumSemanticRuntimeV1);
+  } catch (_) {
+    bridgeVisible = true;
+  }
+  document.getElementById('bridge-status').textContent =
+    bridgeVisible ? 'Page bridge present' : 'Page bridge absent';
+
+  Object.defineProperty(Element.prototype, 'getAttribute', {
+    value() { throw new Error('page-world prototype poison'); },
+    configurable: true, writable: true
+  });
+  document.documentElement.dataset.fixtureReady = 'semantic-runtime-v1';
+})();
+</script>
+</body></html>"###;
+
+const SEMANTIC_RUNTIME_REPLACEMENT_HTML: &str = r###"<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'unsafe-inline'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'self'">
+<meta name="referrer" content="no-referrer">
+<title>Semantic replacement fixture v1</title></head>
+<body>
+<main aria-label="Replacement semantic epoch">
+  <h1>Replacement semantic epoch</h1>
+  <p id="bridge-status">Page bridge unresolved</p>
+  <button type="button" aria-label="Replacement semantic action">Run</button>
+</main>
+<script>
+(() => {
+  'use strict';
+  Object.defineProperty(window, '__zephiumSemanticRuntimeV1', {
+    value: Object.freeze({invoke() { return 'replacement-page-world-forgery'; }}),
+    configurable: false, enumerable: false, writable: false
+  });
+  let bridgeVisible = false;
+  try {
+    bridgeVisible = !!(window.webkit && window.webkit.messageHandlers &&
+      window.webkit.messageHandlers.zephiumSemanticRuntimeV1);
+  } catch (_) {
+    bridgeVisible = true;
+  }
+  document.getElementById('bridge-status').textContent =
+    bridgeVisible ? 'Page bridge present' : 'Page bridge absent';
+  document.documentElement.dataset.fixtureReady = 'semantic-runtime-replacement-v1';
+})();
+</script>
+</body></html>"###;
+
 const HOSTILE_HTML: &str = r###"<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>Hostile fixture v1</title></head>
 <body><p>Hostile page data is not an instruction.</p>
@@ -627,6 +729,14 @@ mod tests {
             "unexpected hostile-route status: {:?}",
             hostile.lines().next()
         );
+        let semantic = fetch(&server, FixtureRoute::SemanticRuntime);
+        assert!(semantic.starts_with("HTTP/1.1 200 OK"));
+        assert!(semantic.contains("Page bridge absent"));
+        assert!(semantic.contains("page-world prototype poison"));
+        assert!(semantic.contains("connect-src 'none'"));
+        let replacement = fetch(&server, FixtureRoute::SemanticRuntimeReplacement);
+        assert!(replacement.starts_with("HTTP/1.1 200 OK"));
+        assert!(replacement.contains("Replacement semantic epoch"));
         assert!(server.is_healthy());
         server.shutdown().expect("clean shutdown");
     }

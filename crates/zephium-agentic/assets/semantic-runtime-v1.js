@@ -66,6 +66,7 @@
   const elementShadowGetter = getter(Element.prototype, "shadowRoot");
   const documentElementGetter = getter(Document.prototype, "documentElement");
   const documentActiveGetter = getter(Document.prototype, "activeElement");
+  const documentReadyStateGetter = getter(Document.prototype, "readyState");
   const shadowActiveGetter =
     typeof ShadowRoot === "function" ? getter(ShadowRoot.prototype, "activeElement") : null;
   const nodeListLengthGetter = getter(NodeList.prototype, "length");
@@ -1352,6 +1353,15 @@
   }
 
   function run(request) {
+    let readyState;
+    try {
+      readyState = read(documentReadyStateGetter, document);
+    } catch (_) {
+      return fault("document_loading");
+    }
+    if (readyState !== "interactive" && readyState !== "complete") {
+      return fault("document_loading");
+    }
     sweepIdentities(request.g);
     const state = {
       request,

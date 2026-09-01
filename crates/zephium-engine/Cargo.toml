@@ -53,6 +53,13 @@ native-agentic-input-probe = [
     "dep:zephium-agentic",
     "zephium-agentic/probe-harness",
 ]
+# Builds the non-shipping macOS production semantic-runtime qualification.
+# It reuses the production agent-context adapter but adds only a fixed loopback
+# fixture and content-free pass/fail runner.
+native-agentic-semantic-probe = [
+    "agentic-browser",
+    "zephium-agentic/probe-harness",
+]
 # Compiles the production, zero-idle agent-browser native port. The feature is
 # intentionally separate from the release-excluded probe vocabulary.
 agentic-browser = ["dep:zephium-agentic"]
@@ -106,6 +113,11 @@ required-features = ["native-agentic-input-probe"]
 name = "windows-agentic-input-probe"
 path = "src/bin/windows_agentic_input_probe.rs"
 required-features = ["native-agentic-input-probe"]
+
+[[bin]]
+name = "macos-agentic-semantic-probe"
+path = "src/bin/macos_agentic_semantic_probe.rs"
+required-features = ["native-agentic-semantic-probe"]
 
 [[bin]]
 name = "macos-representative-extension-probe"

@@ -11,6 +11,9 @@ mod platform;
 #[cfg(all(feature = "native-agentic-input-probe", not(debug_assertions)))]
 compile_error!("the native agentic input probe is forbidden in optimized builds");
 
+#[cfg(all(feature = "native-agentic-semantic-probe", not(debug_assertions)))]
+compile_error!("the native agentic semantic probe is forbidden in optimized builds");
+
 #[cfg(target_os = "macos")]
 pub use platform::macos::{
     passkey_authorization_state as macos_passkey_authorization_state,
@@ -40,6 +43,17 @@ pub fn run_macos_agentic_input_matrix(
     poll_control: impl FnMut(),
 ) -> Result<zephium_agentic::RunEvidence, zephium_agentic::ProbeFailure> {
     platform::macos::run_agentic_input_matrix(request_id, matrix, permit, poll_control)
+}
+
+/// Runs the fixed loopback production semantic-runtime qualification.
+///
+/// This diagnostic API is absent from ordinary and optimized builds. It uses
+/// one hidden owned view and ephemeral profile, performs no OS-wide input, and
+/// returns no page content or native trace.
+#[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+#[doc(hidden)]
+pub fn run_macos_agentic_semantic_probe() -> Result<(), &'static str> {
+    platform::macos::run_agentic_semantic_probe()
 }
 
 /// Runs one bounded Windows native-input matrix on the owning STA thread.

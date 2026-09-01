@@ -98,9 +98,11 @@ class Document extends Node {
     super(9);
     this._root = null;
     this._active = null;
+    this._ready = "complete";
   }
   get documentElement() { return this._root; }
   get activeElement() { return this._active; }
+  get readyState() { return this._ready; }
   getElementById(id) {
     const stack = this._root === null ? [] : [this._root];
     while (stack.length !== 0) {
@@ -255,6 +257,9 @@ assert(Buffer.byteLength(wireLimited) <= 1024, "wire ceiling exceeded");
 assert(JSON.parse(wireLimited).c === "wire_limit", "wire limit not truthful");
 
 assert(runtime.invoke("{}") === "E1:invalid_request", "invalid request accepted");
+document._ready = "loading";
+assert(invoke(12, 6, { k: "initial" }) === "E1:document_loading", "loading document accepted");
+document._ready = "complete";
 assert(
   runtime.invoke('{"v":1,"i":1,"g":1,"s":{"k":"initial"},"b":{"n":1,"t":1,"w":1024,"x":1,"geo":false},"selector":"*"}') ===
     "E1:invalid_request",
@@ -262,9 +267,9 @@ assert(
 );
 
 main._owner = null;
-assert(invoke(12, 6, { k: "region", a: mainNode.k }) === "E1:anchor_missing", "detached anchor accepted");
+assert(invoke(13, 7, { k: "region", a: mainNode.k }) === "E1:anchor_missing", "detached anchor accepted");
 setOwner(main, document);
-const reattached = JSON.parse(invoke(13, 7, { k: "initial" }));
+const reattached = JSON.parse(invoke(14, 8, { k: "initial" }));
 assert(
   reattached.n.some((node) => node.r === "landmark" && node.k === mainNode.k),
   "reattached stable identity changed"

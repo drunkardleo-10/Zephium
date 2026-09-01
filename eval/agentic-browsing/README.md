@@ -31,6 +31,9 @@ cargo test --locked -p zephium-engine \
   --features agentic-browser --lib
 cargo clippy --locked -p zephium-engine \
   --features agentic-browser --all-targets -- -D warnings
+cargo check --locked -p zephium-engine \
+  --features native-agentic-semantic-probe \
+  --bin macos-agentic-semantic-probe
 cargo check --locked --target x86_64-pc-windows-msvc \
   -p zephium-engine --features native-agentic-input-probe \
   --bin windows-agentic-input-probe
@@ -49,7 +52,8 @@ boundaries.
 An optimized build with `probe-harness` is expected to fail at compile time.
 The ordinary `zephium-desktop` resolved graph may reach the production
 functional core through Store, but is separately required not to activate
-`probe-harness` or `native-agentic-input-probe`. All probe-only contract,
+`probe-harness`, `native-agentic-input-probe`, or
+`native-agentic-semantic-probe`. All probe-only contract,
 control, evidence, protocol, recipe, fixture, and native modules remain behind
 those features. The same source gate pins the provider transport's two exact
 HTTPS endpoints, rustls/system-proxy feature graph, redirect/retry refusal,
@@ -79,6 +83,23 @@ accessibility, focused OS input, a real site, or a production backend order.
 Other matrices must run only on an explicitly authorized named device. Their
 JSONL result remains in a local ignored location and is reviewed into aggregate
 non-sensitive fields rather than committed raw.
+
+The macOS production semantic adapter has a separate one-shot qualifier:
+
+```sh
+cargo run --locked -p zephium-engine \
+  --features native-agentic-semantic-probe \
+  --bin macos-agentic-semantic-probe -- --ci-hidden-fixed-dom
+```
+
+This command is a pending named-device run and must not be executed merely
+because it compiles. With separate explicit authorization it uses one hidden
+owned view, one ephemeral `WKWebsiteDataStore`, two fixed loopback-only
+documents, the ordinary content-policy installation seam, and the production
+semantic registration. It performs no OS-wide input, requests no Accessibility
+permission, opens no account or external site, and emits only a content-free
+aggregate. The source gate mechanically excludes its fixture, runner, and
+feature from optimized and ordinary desktop builds.
 
 The Windows adapter can be compile-qualified from another host, but only a
 physical Windows run is behavioral evidence. On an authorized named Windows

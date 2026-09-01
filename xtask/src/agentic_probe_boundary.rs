@@ -8,6 +8,7 @@ use serde::Deserialize;
 
 const AGENTIC_MANIFEST: &str = "crates/zephium-agentic/Cargo.toml";
 const AGENTIC_ROOT: &str = "crates/zephium-agentic/src/lib.rs";
+const AGENTIC_FIXTURE_SERVER: &str = "crates/zephium-agentic/src/fixture_server.rs";
 const AGENTIC_PROVIDER_ROOT: &str = "crates/zephium-agentic/src/agent_provider.rs";
 const AGENTIC_WINDOWS_REVIEW_BINARY: &str =
     "crates/zephium-agentic/src/bin/windows_agentic_input_evidence_review.rs";
@@ -38,11 +39,15 @@ const ENGINE_MACOS_AGENT_CONTEXT: &str =
     "crates/zephium-engine/src/platform/macos/agent_context.rs";
 const ENGINE_MACOS_SEMANTIC_RUNTIME: &str =
     "crates/zephium-engine/src/platform/macos/semantic_runtime.rs";
+const ENGINE_MACOS_SEMANTIC_PROBE: &str =
+    "crates/zephium-engine/src/platform/macos/agentic_semantic_probe.rs";
 const ENGINE_WINDOWS_MODULE: &str = "crates/zephium-engine/src/platform/windows/mod.rs";
 const ENGINE_WINDOWS_PROBE_MODULE: &str =
     "crates/zephium-engine/src/platform/windows/agentic_input_probe.rs";
 const ENGINE_MACOS_PROBE_BINARY: &str =
     "crates/zephium-engine/src/bin/macos_agentic_input_probe.rs";
+const ENGINE_MACOS_SEMANTIC_PROBE_BINARY: &str =
+    "crates/zephium-engine/src/bin/macos_agentic_semantic_probe.rs";
 const ENGINE_WINDOWS_PROBE_BINARY: &str =
     "crates/zephium-engine/src/bin/windows_agentic_input_probe.rs";
 const AGENTIC_SOURCE_DIRECTORY: &str = "crates/zephium-agentic/src";
@@ -64,6 +69,10 @@ const RELEASE_REFUSAL: &str = concat!(
 const ENGINE_RELEASE_REFUSAL: &str = concat!(
     "#[cfg(all(feature=\"native-agentic-input-probe\",not(debug_assertions)))]",
     "compile_error!(\"thenativeagenticinputprobeisforbiddeninoptimizedbuilds\");"
+);
+const ENGINE_SEMANTIC_PROBE_RELEASE_REFUSAL: &str = concat!(
+    "#[cfg(all(feature=\"native-agentic-semantic-probe\",not(debug_assertions)))]",
+    "compile_error!(\"thenativeagenticsemanticprobeisforbiddeninoptimizedbuilds\");"
 );
 
 pub(crate) fn check(repository: &Path) -> Result<(), String> {
@@ -126,7 +135,14 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     validate_engine_semantic_runtime_boundary(&read(
         repository.join(ENGINE_MACOS_SEMANTIC_RUNTIME),
     )?)?;
-    validate_engine_platform_module(&read(repository.join(ENGINE_MACOS_MODULE))?, "macOS")?;
+    let macos_module = read(repository.join(ENGINE_MACOS_MODULE))?;
+    validate_engine_platform_module(&macos_module, "macOS")?;
+    validate_macos_semantic_probe(
+        &macos_module,
+        &read(repository.join(ENGINE_MACOS_SEMANTIC_PROBE))?,
+        &read(repository.join(ENGINE_MACOS_SEMANTIC_PROBE_BINARY))?,
+        &read(repository.join(AGENTIC_FIXTURE_SERVER))?,
+    )?;
     validate_engine_platform_module(&read(repository.join(ENGINE_WINDOWS_MODULE))?, "Windows")?;
     let _ = read(repository.join(ENGINE_MACOS_PROBE_BINARY))?;
     validate_windows_probe_binary(
@@ -172,6 +188,19 @@ fn validate_engine_manifest(source: &str) -> Result<(), String> {
         return Err(
             "engine production agentic-browser feature must remain probe-independent".to_owned(),
         );
+    }
+    let semantic_probe_feature = manifest
+        .get("features")
+        .and_then(|features| features.get("native-agentic-semantic-probe"))
+        .and_then(toml::Value::as_array)
+        .ok_or_else(|| "engine native-agentic-semantic-probe feature is missing".to_owned())?;
+    if semantic_probe_feature.as_slice()
+        != [
+            toml::Value::String("agentic-browser".to_owned()),
+            toml::Value::String("zephium-agentic/probe-harness".to_owned()),
+        ]
+    {
+        return Err("engine native-agentic-semantic-probe feature graph drifted".to_owned());
     }
     let agentic_dependency = manifest
         .get("dependencies")
@@ -219,12 +248,44 @@ fn validate_engine_manifest(source: &str) -> Result<(), String> {
             ));
         }
     }
+    let semantic_binary = binaries
+        .iter()
+        .find(|binary| {
+            binary.get("name").and_then(toml::Value::as_str) == Some("macos-agentic-semantic-probe")
+        })
+        .ok_or_else(|| "engine macOS semantic probe binary is missing".to_owned())?;
+    if semantic_binary.get("path").and_then(toml::Value::as_str)
+        != Some("src/bin/macos_agentic_semantic_probe.rs")
+        || semantic_binary
+            .get("required-features")
+            .and_then(toml::Value::as_array)
+            .is_none_or(|features| {
+                features.as_slice() != [toml::Value::String("native-agentic-semantic-probe".into())]
+            })
+    {
+        return Err("engine macOS semantic probe binary gate drifted".to_owned());
+    }
     Ok(())
 }
 
 fn validate_engine_root(source: &str) -> Result<(), String> {
-    if !compact(source).contains(ENGINE_RELEASE_REFUSAL) {
+    let source = compact(source);
+    if !source.contains(ENGINE_RELEASE_REFUSAL) {
         return Err("engine must retain its optimized agentic-probe compile refusal".to_owned());
+    }
+    if !source.contains(ENGINE_SEMANTIC_PROBE_RELEASE_REFUSAL) {
+        return Err("engine must retain its optimized semantic-probe compile refusal".to_owned());
+    }
+    for required in [
+        "#[cfg(all(target_os=\"macos\",feature=\"native-agentic-semantic-probe\"))]",
+        "pubfnrun_macos_agentic_semantic_probe()->Result<(),&'staticstr>",
+        "platform::macos::run_agentic_semantic_probe()",
+    ] {
+        if !source.contains(required) {
+            return Err(format!(
+                "engine semantic-probe public boundary lost required gate {required}"
+            ));
+        }
     }
     Ok(())
 }
@@ -398,6 +459,7 @@ fn validate_engine_semantic_runtime_boundary(source: &str) -> Result<(), String>
         "with_ipc_handler",
         "WKContentWorld::pageWorld",
         "native-agentic-input-probe",
+        "native-agentic-semantic-probe",
     ] {
         if source.contains(forbidden) {
             return Err(format!(
@@ -417,6 +479,109 @@ fn validate_engine_platform_module(source: &str, platform: &str) -> Result<(), S
         if !source.contains(required) {
             return Err(format!(
                 "{platform} agentic probe module escaped or drifted from its feature gate"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_macos_semantic_probe(
+    module: &str,
+    source: &str,
+    binary: &str,
+    fixture: &str,
+) -> Result<(), String> {
+    let module = compact(module);
+    for required in [
+        "#[cfg(feature=\"native-agentic-semantic-probe\")]modagentic_semantic_probe;",
+        "#[cfg(feature=\"native-agentic-semantic-probe\")]pub(crate)useagentic_semantic_probe::runasrun_agentic_semantic_probe;",
+    ] {
+        if !module.contains(required) {
+            return Err(format!(
+                "macOS semantic probe escaped or drifted from required gate {required}"
+            ));
+        }
+    }
+
+    let source = compact(source);
+    for required in [
+        "FixtureRoute::SemanticRuntime",
+        "FixtureRoute::SemanticRuntimeReplacement",
+        "FixtureServer::start()",
+        "new_ephemeral_data_store()",
+        "ContextProfileStorageClass::Ephemeral",
+        "build_owned_agent_view(",
+        "NativeContentPolicy::AllowAll",
+        "NSApplicationActivationPolicy::Accessory",
+        "NSWindowStyleMask::Borderless",
+        "window.orderOut(None)",
+        "!page.isHidden()",
+        "view.prepare_semantic_document_load()",
+        "view.dispatch_semantic(",
+        "SemanticRuntimeFault::DocumentLoading",
+        "MAX_DOCUMENT_LOADING_RETRIES",
+        "view.retire_semantic_runtime()",
+        "Weak::from_retained(&page)",
+        "pending.server.shutdown()",
+    ] {
+        if !source.contains(required) {
+            return Err(format!(
+                "macOS semantic probe lost required production-path mechanism {required}"
+            ));
+        }
+    }
+    for forbidden in [
+        "evaluateJavaScript",
+        "callAsyncJavaScript",
+        "evaluate_script",
+        "with_ipc_handler",
+        "CGEvent",
+        "AXUIElement",
+        "accessibilityPerformPress",
+        "NSEvent::",
+        "orderFront",
+        "makeKeyAndOrderFront",
+        "activateIgnoringOtherApps",
+        "activateWithOptions",
+    ] {
+        if source.contains(forbidden) {
+            return Err(format!(
+                "macOS semantic probe acquired forbidden authority {forbidden}"
+            ));
+        }
+    }
+
+    let binary = compact(binary);
+    for required in [
+        "arguments.as_slice()!=[\"--ci-hidden-fixed-dom\"]",
+        "run_macos_agentic_semantic_probe()",
+        "profile=ephemeral",
+        "fixture=loopback-only",
+        "page_world_bridge=absent",
+        "focus_theft=0",
+        "retained_views=0",
+    ] {
+        if !binary.contains(required) {
+            return Err(format!(
+                "macOS semantic probe binary lost required closed output {required}"
+            ));
+        }
+    }
+
+    let fixture = compact(fixture);
+    for required in [
+        "TcpListener::bind((Ipv4Addr::LOCALHOST,0))",
+        "if!address.ip().is_loopback()",
+        "format!(\"http://127.0.0.1:{}{}\"",
+        "Self::SemanticRuntime=>\"/semantic-runtime-v1.html\"",
+        "Self::SemanticRuntimeReplacement=>\"/semantic-runtime-replacement-v1.html\"",
+        "connect-src'none'",
+        "form-action'none'",
+        "frame-src'self'",
+    ] {
+        if !fixture.contains(required) {
+            return Err(format!(
+                "macOS semantic probe fixture lost loopback confinement {required}"
             ));
         }
     }
@@ -1277,8 +1442,11 @@ fn validate_shipping_sources(repository: &Path) -> Result<(), String> {
     let forbidden = [
         "probe-harness",
         "native-agentic-input-probe",
+        "native-agentic-semantic-probe",
         "agentic_input_probe",
+        "agentic_semantic_probe",
         "macos-agentic-input-probe",
+        "macos-agentic-semantic-probe",
         "windows-agentic-input-probe",
         "__zephiumNativeInputFixtureV1",
     ];
@@ -1371,6 +1539,17 @@ fn validate_release_graph(metadata: &CargoMetadata) -> Result<(), String> {
             {
                 return Err(
                     "ordinary zephium-desktop release graph activates native agentic input probe"
+                        .to_owned(),
+                );
+            }
+            if package == *engine
+                && node
+                    .features
+                    .iter()
+                    .any(|feature| feature == "native-agentic-semantic-probe")
+            {
+                return Err(
+                    "ordinary zephium-desktop release graph activates native agentic semantic probe"
                         .to_owned(),
                 );
             }
@@ -2140,6 +2319,10 @@ mod tests {
               "zephium-agentic/probe-harness",
             ]
             agentic-browser = ["dep:zephium-agentic"]
+            native-agentic-semantic-probe = [
+              "agentic-browser",
+              "zephium-agentic/probe-harness",
+            ]
             [[bin]]
             name = "macos-agentic-input-probe"
             path = "src/bin/macos_agentic_input_probe.rs"
@@ -2148,6 +2331,10 @@ mod tests {
             name = "windows-agentic-input-probe"
             path = "src/bin/windows_agentic_input_probe.rs"
             required-features = ["native-agentic-input-probe"]
+            [[bin]]
+            name = "macos-agentic-semantic-probe"
+            path = "src/bin/macos_agentic_semantic_probe.rs"
+            required-features = ["native-agentic-semantic-probe"]
             [dependencies]
             zephium-agentic = { optional = true }
         "#;
@@ -2172,6 +2359,12 @@ mod tests {
         let root = r#"
             #[cfg(all(feature = "native-agentic-input-probe", not(debug_assertions)))]
             compile_error!("the native agentic input probe is forbidden in optimized builds");
+            #[cfg(all(feature = "native-agentic-semantic-probe", not(debug_assertions)))]
+            compile_error!("the native agentic semantic probe is forbidden in optimized builds");
+            #[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+            pub fn run_macos_agentic_semantic_probe() -> Result<(), &'static str> {
+                platform::macos::run_agentic_semantic_probe()
+            }
         "#;
         validate_engine_root(root).expect("valid engine release refusal");
         assert!(validate_engine_root("pub fn shipping() {}").is_err());
@@ -2184,6 +2377,57 @@ mod tests {
         "#;
         validate_engine_platform_module(module, "test").expect("valid module gates");
         assert!(validate_engine_platform_module("mod agentic_input_probe;", "test").is_err());
+
+        let semantic_module = format!(
+            "{module}\n#[cfg(feature = \"native-agentic-semantic-probe\")]\nmod agentic_semantic_probe;\n#[cfg(feature = \"native-agentic-semantic-probe\")]\npub(crate) use agentic_semantic_probe::run as run_agentic_semantic_probe;"
+        );
+        let semantic_source = r#"
+            FixtureRoute::SemanticRuntime;
+            FixtureRoute::SemanticRuntimeReplacement;
+            FixtureServer::start();
+            new_ephemeral_data_store();
+            ContextProfileStorageClass::Ephemeral;
+            build_owned_agent_view();
+            NativeContentPolicy::AllowAll;
+            NSApplicationActivationPolicy::Accessory;
+            NSWindowStyleMask::Borderless;
+            window.orderOut(None);
+            !page.isHidden();
+            view.prepare_semantic_document_load();
+            view.dispatch_semantic();
+            SemanticRuntimeFault::DocumentLoading;
+            MAX_DOCUMENT_LOADING_RETRIES;
+            view.retire_semantic_runtime();
+            Weak::from_retained(&page);
+            pending.server.shutdown();
+        "#;
+        let semantic_binary = r#"
+            if arguments.as_slice() != ["--ci-hidden-fixed-dom"] {}
+            run_macos_agentic_semantic_probe();
+            "profile=ephemeral fixture=loopback-only page_world_bridge=absent focus_theft=0 retained_views=0";
+        "#;
+        let semantic_fixture = r#"
+            TcpListener::bind((Ipv4Addr::LOCALHOST, 0));
+            if !address.ip().is_loopback() {}
+            format!("http://127.0.0.1:{}{}", port, path);
+            Self::SemanticRuntime => "/semantic-runtime-v1.html";
+            Self::SemanticRuntimeReplacement => "/semantic-runtime-replacement-v1.html";
+            "connect-src 'none'; form-action 'none'; frame-src 'self'";
+        "#;
+        validate_macos_semantic_probe(
+            &semantic_module,
+            semantic_source,
+            semantic_binary,
+            semantic_fixture,
+        )
+        .expect("valid semantic probe gate");
+        assert!(validate_macos_semantic_probe(
+            &semantic_module,
+            &format!("{semantic_source}\nevaluate_script();"),
+            semantic_binary,
+            semantic_fixture,
+        )
+        .is_err());
     }
 
     #[test]

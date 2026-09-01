@@ -26,7 +26,9 @@ responses, machine-local paths, or native traces.
 - cross-checks the Wry, Tauri, and `tauri-runtime-wry` capability versions and
   revisions against their vendored manifests and provenance files; and
 - continues to prove that diagnostic features and the dormant provider HTTPS
-  transport are absent from the ordinary desktop release graph.
+  transport are absent from the ordinary desktop release graph; and
+- independently compile-refuses the fixed macOS semantic qualifier in
+  optimized builds and proves it absent from that graph.
 
 The same check pins the default functional core to an empty feature set and a
 closed allocation/data dependency inventory. Its non-diagnostic source is
@@ -100,6 +102,7 @@ The authoritative aggregate records and exact remaining blockers are in
 - retained action/run timing samples and reviewed per-site latency
   distributions from the qualification harness (the local reducer exposes
   only exact observed count/sum/maximum aggregates);
+- the pending hidden ephemeral loopback semantic-runtime qualifier;
 - deterministic semantic/action/policy suite closure, the six-site matrix,
   concurrent production configuration, endurance, and fault-injection evidence;
 - hot-path and zero-unused-agent-overhead measurements; and

@@ -7,9 +7,10 @@ token admission with exact baseline/current delivery proof, and the immutable
 bounded page-projection program with its fixed reply-channel pull protocol
 implemented. The macOS owned-context adapter now installs and lifecycle-binds
 that program through a fixed content-world reply handler and exposes its
-single-flight result through the bounded native context port; live-engine
-hostile qualification and actual pinned provider token measurements remain
-pending.
+single-flight result through the bounded native context port. A mechanically
+release-excluded hidden/ephemeral/loopback-only native qualifier is implemented
+but has not been executed; its named-device result and actual pinned provider
+token measurements remain pending.
 
 This evidence records deterministic Rust contracts plus static and synthetic
 DOM execution of the fixed program. It does not claim that arbitrary pages
@@ -278,6 +279,14 @@ have been instrumented or observed on either platform.
   failure. Renderer loss,
   cancellation, document replacement, close, and shutdown each settle the
   retained task with a closed content-free failure.
+- The immutable program refuses every invocation while the browser-derived
+  `Document.readyState` is still `loading`. Only `interactive` or `complete`
+  can produce a snapshot labelled complete/truncated; an early committed
+  navigation therefore returns the fixed content-free `document_loading`
+  fault instead of misrepresenting a partially parsed tree. The getter is
+  captured at document start in the isolated world, and the bounded native
+  channel treats this typed runtime refusal as recoverable without weakening
+  transport or generation checks.
 - Every admitted macOS invocation retains one cancel-on-drop 15-second main
   queue watchdog. The timeout matches the exact invocation identity, settles
   its task once, and permanently fails that document channel so a late result
@@ -303,6 +312,9 @@ cargo clippy --locked -p zephium-agentic --all-targets --features probe-harness 
 cargo xtask check-agentic-probe-boundary
 node --check crates/zephium-agentic/assets/semantic-runtime-v1.js
 node eval/agentic-browsing/semantic-runtime-smoke-v1.js
+cargo check --locked -p zephium-engine \
+  --features native-agentic-semantic-probe \
+  --bin macos-agentic-semantic-probe
 ```
 
 Tests cover canonical/redacted origins and page text, main/child-frame joins,
@@ -364,8 +376,10 @@ rather than silently widening the hostile wire schema.
    proof models/tokenizers and bind exact diffs to a bounded provider
    continuation/tool-result contract. A stateless standalone diff is forbidden
    because it omits the model's acknowledged baseline;
-3. add live-engine hostile tests for page-world bridge access, wrapper identity,
-   spoofing, frame replacement, stale nodes, collisions, mutation pressure,
-   redaction, and teardown/release behavior. Open/closed shadow behavior and
-   source exclusion currently have deterministic synthetic/static coverage but
+3. execute the fixed native qualifier with separate authorization, then extend
+   live-engine hostile coverage for stale nodes, mutation pressure, and timing
+   races beyond its current page-world bridge, prototype collision, frame
+   boundary, redaction, world replacement, and teardown checks. Open/closed
+   shadow behavior and source exclusion currently have deterministic
+   synthetic/static coverage but
    still require that engine evidence.
