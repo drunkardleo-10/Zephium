@@ -26,7 +26,7 @@ use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::SystemInformation::OSVERSIONINFOW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetFocus, MapVirtualKeyW, SetFocus, MAPVK_VK_TO_VSC_EX, VK_DOWN, VK_RETURN,
+    GetActiveWindow, GetFocus, MapVirtualKeyW, SetFocus, MAPVK_VK_TO_VSC_EX, VK_DOWN, VK_RETURN,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
@@ -45,13 +45,13 @@ use wry::{
     WebViewBuilderExtWindows as _, WebViewExtWindows as _,
 };
 use zephium_agentic::{
-    windows_input_plan, windows_key_message_lparam, ActivationEvidence, BackendAvailability,
-    BackendCapability, CaseEvidence, CaseOutcome, EvidenceLabel, FixedProbeScript, FixtureCase,
-    FixtureServer, FixtureTarget, FocusEvidence, FocusOwner, GateOutcome, InputBackend,
-    InputEventEvidence, InputEventKind, Platform, PresentationState, ProbeFailure,
-    ProbeFailureCode, ProbeRunPermit, ProbeStage, ResourceEvidence, RunEvidence, RunMatrixRequest,
-    RuntimeFingerprint, TargetEvidence, TeardownEvidence, WindowsInputStep, WindowsProbeGeometry,
-    WindowsProbeKey, WindowsProbePoint, MAX_EVENT_EVIDENCE, MAX_NATIVE_INPUT_RUNTIME_ROW,
+    windows_input_plan, windows_key_message_lparam, ActivationEvidence, CaseEvidence, CaseOutcome,
+    EvidenceLabel, FixedProbeScript, FixtureCase, FixtureServer, FixtureTarget, FocusEvidence,
+    FocusOwner, GateOutcome, InputBackend, InputEventEvidence, InputEventKind, Platform,
+    PresentationState, ProbeFailure, ProbeFailureCode, ProbeRunPermit, ProbeStage,
+    ResourceEvidence, RunEvidence, RunMatrixRequest, RuntimeFingerprint, TargetEvidence,
+    TeardownEvidence, WindowsInputStep, WindowsProbeGeometry, WindowsProbeKey, WindowsProbePoint,
+    MAX_EVENT_EVIDENCE, MAX_NATIVE_INPUT_RUNTIME_ROW, WINDOWS_PROBE_CAPABILITIES,
 };
 
 use super::{
@@ -84,6 +84,7 @@ enum AdapterError {
     NativeTeardown,
     ProfileTeardown,
     FixtureTeardown,
+    FocusPolicy,
 }
 
 impl AdapterError {
@@ -96,6 +97,7 @@ impl AdapterError {
             Self::NativeTeardown => ProbeFailureCode::NativeTeardownIncomplete,
             Self::ProfileTeardown => ProbeFailureCode::ProfileTeardownIncomplete,
             Self::FixtureTeardown => ProbeFailureCode::FixtureTeardownIncomplete,
+            Self::FocusPolicy => ProbeFailureCode::FocusPolicyViolation,
         }
     }
 
@@ -564,9 +566,11 @@ pub(crate) fn run(
         )?);
         apply_presentation(&host, view, matrix.presentation)
             .map_err(|error| adapter_failure(error, ProbeStage::Construct, None, None))?;
+        verify_nonactivating_presentation(&host, view, matrix.presentation)
+            .map_err(|error| adapter_failure(error, ProbeStage::Construct, None, None))?;
         let runtime = runtime_fingerprint()
             .map_err(|error| adapter_failure(error, ProbeStage::Construct, None, None))?;
-        let capabilities = windows_capabilities();
+        let capabilities = WINDOWS_PROBE_CAPABILITIES.to_vec();
         let core = view.webview();
         let mut cases = Vec::with_capacity(matrix.cases.len() * matrix.backends.len());
         let mut row = 0_u16;
@@ -1388,6 +1392,28 @@ fn apply_presentation(
     Ok(())
 }
 
+/// Fails before the first fixture row if constructing or presenting a
+/// supposedly hidden/background probe has already activated its native host
+/// or moved this thread's keyboard focus into the owned WebView subtree.
+/// Per-case sampling cannot discover this retrospectively because it would
+/// incorrectly treat the stolen state as the row's baseline.
+fn verify_nonactivating_presentation(
+    host: &ProbeHostWindow,
+    view: &WebView,
+    presentation: PresentationState,
+) -> Result<(), AdapterError> {
+    if presentation == PresentationState::VisibleFocused {
+        return Ok(());
+    }
+    let foreground = unsafe { GetForegroundWindow() };
+    let active = unsafe { GetActiveWindow() };
+    let focus = unsafe { GetFocus() };
+    if foreground == host.hwnd || active == host.hwnd || focus_is_owned_by_view(view, focus) {
+        return Err(AdapterError::FocusPolicy);
+    }
+    Ok(())
+}
+
 fn fixed_loopback_target(target: &str, expected_origin: &str) -> bool {
     if target == "about:blank" {
         return true;
@@ -1601,43 +1627,6 @@ fn runtime_fingerprint() -> Result<RuntimeFingerprint, AdapterError> {
         adapter_revision: EvidenceLabel::new("native-input-m1")
             .map_err(|_| AdapterError::InvalidEvidence)?,
     })
-}
-
-fn windows_capabilities() -> Vec<BackendCapability> {
-    vec![
-        BackendCapability {
-            backend: InputBackend::FixedDomRecipe,
-            availability: BackendAvailability::DiagnosticsOnly,
-        },
-        BackendCapability {
-            backend: InputBackend::WindowsHwndInput,
-            availability: BackendAvailability::Available,
-        },
-        BackendCapability {
-            backend: InputBackend::WindowsCompositionInput,
-            availability: BackendAvailability::UnsupportedByIntegration,
-        },
-        BackendCapability {
-            backend: InputBackend::WindowsCdpInput,
-            availability: BackendAvailability::DiagnosticsOnly,
-        },
-        BackendCapability {
-            backend: InputBackend::HumanBaseline,
-            availability: BackendAvailability::RequiresVisibleFocus,
-        },
-        BackendCapability {
-            backend: InputBackend::MacosAppKitEvent,
-            availability: BackendAvailability::UnsupportedByIntegration,
-        },
-        BackendCapability {
-            backend: InputBackend::MacosAccessibility,
-            availability: BackendAvailability::UnsupportedByIntegration,
-        },
-        BackendCapability {
-            backend: InputBackend::MacosFocusedOsInput,
-            availability: BackendAvailability::UnsupportedByIntegration,
-        },
-    ]
 }
 
 fn cancelled_case(

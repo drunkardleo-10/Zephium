@@ -54,7 +54,11 @@ than a string.
 The HWND route never calls `SendInput`, moves the system pointer, injects a
 global keyboard event, or targets an HWND outside its owned Wry subtree.
 Hidden and visible-background presentation never call `SetForegroundWindow`
-or `SetFocus`. The visible-focused runner mode requires the separate literal
+or `SetFocus`. Before the first fixture row they also require that the probe
+host is neither foreground nor active and that this thread's keyboard focus is
+outside the owned WebView subtree; otherwise the run returns a typed focus-
+policy failure instead of treating the stolen state as its baseline. The
+visible-focused runner mode requires the separate literal
 `--allow-visible-focused` process argument.
 
 Targeting Wry's container itself was rejected during pinned-code review:
@@ -85,6 +89,12 @@ no result is attributed to the invalid container route.
   before qualification. A failed behavioral gate therefore retains redacted
   case evidence instead of collapsing to a generic process error; pass/fail
   diagnostics remain on stderr and local JSONL paths are gitignored.
+- The offline review binary decodes those records through the same closed
+  protocol and qualification core used by the runner. It accepts only the four
+  fixed ignored filenames, real non-symlink files, exact response/run identity,
+  exact matrix order and capability inventory, and one identical runtime
+  fingerprint. It emits one content-free aggregate and never echoes raw records
+  or paths.
 
 ## Compile evidence and physical run path
 

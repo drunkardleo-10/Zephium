@@ -9,6 +9,9 @@ use serde::Deserialize;
 const AGENTIC_MANIFEST: &str = "crates/zephium-agentic/Cargo.toml";
 const AGENTIC_ROOT: &str = "crates/zephium-agentic/src/lib.rs";
 const AGENTIC_PROVIDER_ROOT: &str = "crates/zephium-agentic/src/agent_provider.rs";
+const AGENTIC_WINDOWS_REVIEW_BINARY: &str =
+    "crates/zephium-agentic/src/bin/windows_agentic_input_evidence_review.rs";
+const AGENTIC_PROBE_QUALIFICATION: &str = "crates/zephium-agentic/src/probe_qualification.rs";
 const AGENTIC_PROVIDER_REQUEST: &str = "crates/zephium-agentic/src/agent_provider/request.rs";
 const AGENTIC_PROVIDER_OPENAI: &str = "crates/zephium-agentic/src/agent_provider/openai.rs";
 const AGENTIC_PROVIDER_ANTHROPIC: &str = "crates/zephium-agentic/src/agent_provider/anthropic.rs";
@@ -36,13 +39,15 @@ const ENGINE_MACOS_PROBE_BINARY: &str =
 const ENGINE_WINDOWS_PROBE_BINARY: &str =
     "crates/zephium-engine/src/bin/windows_agentic_input_probe.rs";
 const AGENTIC_SOURCE_DIRECTORY: &str = "crates/zephium-agentic/src";
-const AGENTIC_DIAGNOSTIC_MODULES: [&str; 6] = [
+const AGENTIC_DIAGNOSTIC_MODULES: [&str; 8] = [
     "contract.rs",
     "control.rs",
     "evidence.rs",
     "fixture_server.rs",
     "probe_recipes.rs",
+    "probe_qualification.rs",
     "protocol.rs",
+    "windows_agentic_input_evidence_review.rs",
 ];
 const SHIPPING_ROOTS: [&str; 2] = ["desktop", "crates/zephium-app"];
 const RELEASE_REFUSAL: &str = concat!(
@@ -57,6 +62,10 @@ const ENGINE_RELEASE_REFUSAL: &str = concat!(
 pub(crate) fn check(repository: &Path) -> Result<(), String> {
     crate::agentic_evidence::check(repository)?;
     validate_manifest(&read(repository.join(AGENTIC_MANIFEST))?)?;
+    validate_windows_review_binary(
+        &read(repository.join(AGENTIC_WINDOWS_REVIEW_BINARY))?,
+        &read(repository.join(AGENTIC_PROBE_QUALIFICATION))?,
+    )?;
     validate_root(&read(repository.join(AGENTIC_ROOT))?)?;
     validate_agent_metrics_contract(
         &read(repository.join(AGENTIC_ROOT))?,
@@ -103,7 +112,10 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     validate_engine_platform_module(&read(repository.join(ENGINE_MACOS_MODULE))?, "macOS")?;
     validate_engine_platform_module(&read(repository.join(ENGINE_WINDOWS_MODULE))?, "Windows")?;
     let _ = read(repository.join(ENGINE_MACOS_PROBE_BINARY))?;
-    validate_windows_probe_binary(&read(repository.join(ENGINE_WINDOWS_PROBE_BINARY))?)?;
+    validate_windows_probe_binary(
+        &read(repository.join(ENGINE_WINDOWS_PROBE_BINARY))?,
+        &read(repository.join(AGENTIC_PROBE_QUALIFICATION))?,
+    )?;
     validate_windows_probe_source(&read(repository.join(ENGINE_WINDOWS_PROBE_MODULE))?)?;
     validate_agentic_zero_idle_sources(repository)?;
     validate_shipping_sources(repository)?;
@@ -205,21 +217,32 @@ fn validate_engine_platform_module(source: &str, platform: &str) -> Result<(), S
     Ok(())
 }
 
-fn validate_windows_probe_binary(source: &str) -> Result<(), String> {
+fn validate_windows_probe_binary(source: &str, qualification: &str) -> Result<(), String> {
     let source = compact(source);
     for required in [
-        "--ci-hidden-fixed-dom",
-        "--ci-hidden-hwnd",
-        "--ci-hidden-cdp",
-        "--visible-background-windows-all",
-        "--visible-focused-windows-all",
         "--allow-visible-focused",
+        "WindowsProbeMode::from_argument",
+        "qualify_windows_probe_evidence(mode,&evidence)",
         "encode_response_line(&response)",
         "ProbeReply::RunCompleted(evidence)",
     ] {
         if !source.contains(required) {
             return Err(format!(
                 "Windows physical qualification runner lost required closed gate {required}"
+            ));
+        }
+    }
+    let qualification = compact(qualification);
+    for required in [
+        "--ci-hidden-fixed-dom",
+        "--ci-hidden-hwnd",
+        "--ci-hidden-cdp",
+        "--visible-background-windows-all",
+        "--visible-focused-windows-all",
+    ] {
+        if !qualification.contains(required) {
+            return Err(format!(
+                "Windows physical qualification modes lost required closed gate {required}"
             ));
         }
     }
@@ -235,6 +258,8 @@ fn validate_windows_probe_source(source: &str) -> Result<(), String> {
         "SendMessageTimeoutW(",
         "MAPVK_VK_TO_VSC_EX",
         "windows_key_message_lparam(mapped_scan,down)",
+        "verify_nonactivating_presentation(&host,view,matrix.presentation)",
+        "foreground==host.hwnd||active==host.hwnd||focus_is_owned_by_view(view,focus)",
         "ICoreWebView2CallDevToolsProtocolMethodCompletedHandler",
         "borrowed_pcwstr_bounded(",
         "method:FixedCdpMethod",
@@ -325,6 +350,27 @@ fn validate_manifest(source: &str) -> Result<(), String> {
                 .to_owned(),
         );
     }
+    let review_binary = manifest
+        .get("bin")
+        .and_then(toml::Value::as_array)
+        .and_then(|binaries| {
+            binaries.iter().find(|binary| {
+                binary.get("name").and_then(toml::Value::as_str)
+                    == Some("windows-agentic-input-evidence-review")
+            })
+        })
+        .ok_or_else(|| "Windows agentic evidence-review binary is missing".to_owned())?;
+    if review_binary.get("path").and_then(toml::Value::as_str)
+        != Some("src/bin/windows_agentic_input_evidence_review.rs")
+        || review_binary
+            .get("required-features")
+            .and_then(toml::Value::as_array)
+            .is_none_or(|features| {
+                features.as_slice() != [toml::Value::String("probe-harness".into())]
+            })
+    {
+        return Err("Windows agentic evidence-review binary gate drifted".to_owned());
+    }
     Ok(())
 }
 
@@ -342,12 +388,61 @@ fn validate_root(source: &str) -> Result<(), String> {
         "evidence",
         "fixture_server",
         "probe_recipes",
+        "probe_qualification",
         "protocol",
     ] {
         let required_gate = format!("#[cfg(feature=\"probe-harness\")]mod{module};");
         if !source.contains(&required_gate) {
             return Err(format!(
                 "agentic diagnostic module {module} must remain behind probe-harness"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_windows_review_binary(source: &str, qualification: &str) -> Result<(), String> {
+    let source = compact(source);
+    for required in [
+        "WINDOWS_PHYSICAL_REVIEW_MODES",
+        "symlink_metadata(&directory)",
+        "decode_response_line(&bytes)",
+        "qualify_windows_probe_evidence(mode,&evidence)",
+        "file.take((MAX_PROTOCOL_OUTPUT_BYTES+1)asu64)",
+        "output.len()>MAX_PROTOCOL_OUTPUT_BYTES",
+        "stdout.write_all(&output)",
+    ] {
+        if !source.contains(required) {
+            return Err(format!(
+                "Windows physical evidence reviewer lost required boundary {required}"
+            ));
+        }
+    }
+    let qualification = compact(qualification);
+    for required in [
+        "windows-hidden-fixed-dom.jsonl",
+        "windows-hidden-hwnd.jsonl",
+        "windows-hidden-cdp.jsonl",
+        "windows-visible-background-all.jsonl",
+        "pubfnqualify_windows_probe_evidence(",
+        "evidence.capabilities.as_slice()!=WINDOWS_PROBE_CAPABILITIES",
+    ] {
+        if !qualification.contains(required) {
+            return Err(format!(
+                "Windows physical evidence qualification lost required boundary {required}"
+            ));
+        }
+    }
+    for forbidden in [
+        "read_to_string",
+        "String::from_utf8",
+        "stdout.write_all(&bytes)",
+        ".display()",
+        "serde_json::Value",
+    ] {
+        if source.contains(forbidden) {
+            return Err(format!(
+                "Windows physical evidence reviewer can expose unreviewed input {forbidden}"
             ));
         }
     }
@@ -1257,6 +1352,8 @@ mod tests {
             #[cfg(feature = "probe-harness")]
             mod probe_recipes;
             #[cfg(feature = "probe-harness")]
+            mod probe_qualification;
+            #[cfg(feature = "probe-harness")]
             mod protocol;
         "#;
         validate_root(valid).expect("valid guard");
@@ -1627,6 +1724,10 @@ mod tests {
             [features]
             default = []
             probe-harness = []
+            [[bin]]
+            name = "windows-agentic-input-evidence-review"
+            path = "src/bin/windows_agentic_input_evidence_review.rs"
+            required-features = ["probe-harness"]
             [dependencies]
             crc32fast = "1"
             serde = "1"
@@ -1871,6 +1972,8 @@ mod tests {
             SendMessageTimeoutW(hwnd);
             MAPVK_VK_TO_VSC_EX;
             windows_key_message_lparam(mapped_scan, down);
+            verify_nonactivating_presentation(&host, view, matrix.presentation);
+            foreground == host.hwnd || active == host.hwnd || focus_is_owned_by_view(view, focus);
             ICoreWebView2CallDevToolsProtocolMethodCompletedHandler;
             borrowed_pcwstr_bounded(response);
             fn call(method: FixedCdpMethod) {}
@@ -1893,23 +1996,61 @@ mod tests {
 
     #[test]
     fn windows_physical_runner_retains_exact_modes_and_jsonl_evidence() {
-        let valid = r#"
+        let binary = r#"
+            WindowsProbeMode::from_argument;
+            qualify_windows_probe_evidence(mode, &evidence);
+            "--allow-visible-focused";
+            encode_response_line(&response);
+            ProbeReply::RunCompleted(evidence);
+        "#;
+        let qualification = r#"
             "--ci-hidden-fixed-dom";
             "--ci-hidden-hwnd";
             "--ci-hidden-cdp";
             "--visible-background-windows-all";
             "--visible-focused-windows-all";
-            "--allow-visible-focused";
-            encode_response_line(&response);
-            ProbeReply::RunCompleted(evidence);
         "#;
-        validate_windows_probe_binary(valid).expect("valid physical runner");
-        assert!(
-            validate_windows_probe_binary(&valid.replace("\"--allow-visible-focused\";", ""))
-                .is_err()
-        );
+        validate_windows_probe_binary(binary, qualification).expect("valid physical runner");
         assert!(validate_windows_probe_binary(
-            &valid.replace("encode_response_line(&response);", "println!(\"passed\");")
+            &binary.replace("\"--allow-visible-focused\";", ""),
+            qualification,
+        )
+        .is_err());
+        assert!(validate_windows_probe_binary(
+            &binary.replace("encode_response_line(&response);", "println!(\"passed\");"),
+            qualification,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn windows_physical_reviewer_is_closed_and_content_free() {
+        let binary = r#"
+            WINDOWS_PHYSICAL_REVIEW_MODES;
+            symlink_metadata(&directory);
+            decode_response_line(&bytes);
+            qualify_windows_probe_evidence(mode, &evidence);
+            file.take((MAX_PROTOCOL_OUTPUT_BYTES + 1) as u64);
+            if output.len() > MAX_PROTOCOL_OUTPUT_BYTES {}
+            stdout.write_all(&output);
+        "#;
+        let qualification = r#"
+            "windows-hidden-fixed-dom.jsonl";
+            "windows-hidden-hwnd.jsonl";
+            "windows-hidden-cdp.jsonl";
+            "windows-visible-background-all.jsonl";
+            pub fn qualify_windows_probe_evidence() {}
+            evidence.capabilities.as_slice() != WINDOWS_PROBE_CAPABILITIES;
+        "#;
+        validate_windows_review_binary(binary, qualification).expect("closed reviewer");
+        assert!(validate_windows_review_binary(
+            &format!("{binary}\nstdout.write_all(&bytes);"),
+            qualification,
+        )
+        .is_err());
+        assert!(validate_windows_review_binary(
+            binary,
+            &qualification.replace("windows-hidden-cdp.jsonl", "windows-any.jsonl"),
         )
         .is_err());
     }

@@ -791,7 +791,7 @@ earlier gate.
 - record the exact pinned Wry/WebKit/WebView2 capabilities and gaps from code
   and primary documentation;
 - define versioned probe protocol, fixture server, result schema, redaction,
-  and eval manifest;
+  offline physical-result qualification, and eval manifest;
 - capture Browse startup/idle/concurrent-use baselines;
 - add build guards proving probe-only facilities cannot ship.
 
@@ -957,6 +957,10 @@ sources rather than copying another browser agent's architecture:
   and [`MapVirtualKeyExW`](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-mapvirtualkeyexw)
   define the scan-code, extended-key, previous-state, and transition fields.
   The M1 HWND encoder preserves those fields and refuses an unknown mapping.
+- [Win32 `ShowWindow`](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-showwindow)
+  defines `SW_SHOWNOACTIVATE`; the M1 adapter additionally verifies host
+  foreground/activation and owned-subtree keyboard focus before accepting a
+  hidden or background baseline.
 - [Chrome DevTools Protocol Input](https://chromedevtools.github.io/devtools-protocol/tot/Input/)
   defines the fixed diagnostic mouse and key command coordinates and fields.
 - [Chrome DevTools Protocol `Runtime.evaluate`](https://chromedevtools.github.io/devtools-protocol/tot/Runtime/#method-evaluate)

@@ -34,6 +34,8 @@ mod evidence;
 #[cfg(feature = "probe-harness")]
 mod fixture_server;
 #[cfg(feature = "probe-harness")]
+mod probe_qualification;
+#[cfg(feature = "probe-harness")]
 mod probe_recipes;
 mod profile_lease;
 #[cfg(feature = "probe-harness")]
@@ -185,6 +187,12 @@ pub use evidence::{
 #[cfg(feature = "probe-harness")]
 pub use fixture_server::{FixtureRoute, FixtureServer, FixtureServerError};
 #[cfg(feature = "probe-harness")]
+pub use probe_qualification::{
+    qualify_windows_probe_evidence, WindowsProbeAggregate, WindowsProbeMode,
+    WindowsProbeQualificationError, WINDOWS_PHYSICAL_REVIEW_MODES, WINDOWS_PROBE_CAPABILITIES,
+    WINDOWS_PROBE_CASES,
+};
+#[cfg(feature = "probe-harness")]
 pub use probe_recipes::{
     windows_input_plan, windows_key_message_lparam, FixedProbeScript, ProbeScriptWorld,
     WindowsInputStep, WindowsProbeGeometry, WindowsProbeKey, WindowsProbePoint,
@@ -198,9 +206,9 @@ pub use profile_lease::{
 };
 #[cfg(feature = "probe-harness")]
 pub use protocol::{
-    decode_request_line, encode_response_line, CancelRequest, CancelledReply, HelloReply,
-    HelloRequest, ProbeCommand, ProbeProtocolError, ProbeReply, ProbeRequest, ProbeResponse,
-    RunMatrixRequest, ShutdownReply, ShutdownRequest, MAX_BACKENDS_PER_REQUEST,
+    decode_request_line, decode_response_line, encode_response_line, CancelRequest, CancelledReply,
+    HelloReply, HelloRequest, ProbeCommand, ProbeProtocolError, ProbeReply, ProbeRequest,
+    ProbeResponse, RunMatrixRequest, ShutdownReply, ShutdownRequest, MAX_BACKENDS_PER_REQUEST,
     MAX_CASES_PER_REQUEST, MAX_PROTOCOL_INPUT_BYTES, MAX_PROTOCOL_OUTPUT_BYTES,
     PROBE_PROTOCOL_VERSION,
 };

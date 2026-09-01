@@ -100,6 +100,11 @@ cargo run --locked -p zephium-engine `
   --features native-agentic-input-probe `
   --bin windows-agentic-input-probe -- --visible-background-windows-all `
   > eval/agentic-browsing/local-results/windows-visible-background-all.jsonl
+cargo run --locked -p zephium-agentic `
+  --features probe-harness `
+  --bin windows-agentic-input-evidence-review -- `
+  --directory eval/agentic-browsing/local-results `
+  > eval/agentic-browsing/local-results/windows-review-summary-v1.json
 ```
 
 These modes use only an ephemeral user-data directory, InPrivate controller,
@@ -116,6 +121,19 @@ aggregate pass/fail summary remain on stderr, so a nonzero exit may still leave
 the redacted evidence needed to diagnose a rejected backend. The ignored local
 records contain only the closed evidence schema; review must still reject any
 unexpected file before extracting aggregate fields into committed evidence.
+
+The final review command is offline and can run on the same Windows device or
+another trusted checkout. It opens only the four fixed filenames as real,
+non-symlink files under one real directory; decodes exactly one bounded JSONL
+response from each; requires the response/run identity, Windows/WebView2
+runtime, adapter revision, capability inventory, case/backend order,
+presentation, focus, resource, outcome, trust, activation, and teardown joins;
+and requires one identical runtime fingerprint across all four processes. It
+never emits the captured records or file paths. Its sole stdout record is a
+bounded content-free aggregate suitable for human review; a typed rejection,
+partial matrix, runtime substitution, focus theft, or failed fixture makes the
+review command nonzero. The aggregate remains ignored until reviewed into the
+committed manifest.
 
 The authorized hidden fixed-DOM macOS safety result is recorded only as reviewed
 aggregate fields. Native AppKit/accessibility, visible/background behavior,

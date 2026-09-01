@@ -148,6 +148,9 @@ impl ProbeResponse {
             return Err(ProbeProtocolError::ZeroRequestId);
         }
         if let ProbeReply::RunCompleted(evidence) = &self.reply {
+            if evidence.run_id != self.request_id {
+                return Err(ProbeProtocolError::ResponseIdentity);
+            }
             evidence
                 .validate()
                 .map_err(ProbeProtocolError::InvalidEvidence)?;
@@ -255,6 +258,34 @@ pub fn encode_response_line(response: &ProbeResponse) -> Result<Vec<u8>, ProbePr
     Ok(output)
 }
 
+/// Decodes and revalidates one bounded JSONL response record.
+///
+/// This is used by the offline physical-evidence reviewer. It accepts neither
+/// multiple records nor a response whose completed run identity differs from
+/// its top-level request correlation.
+pub fn decode_response_line(input: &[u8]) -> Result<ProbeResponse, ProbeProtocolError> {
+    if input.is_empty() || input.len() > MAX_PROTOCOL_OUTPUT_BYTES {
+        return Err(ProbeProtocolError::OutputSize);
+    }
+    if input.contains(&0) {
+        return Err(ProbeProtocolError::InvalidFraming);
+    }
+    let payload = if let Some(without_newline) = input.strip_suffix(b"\n") {
+        without_newline
+            .strip_suffix(b"\r")
+            .unwrap_or(without_newline)
+    } else {
+        input
+    };
+    if payload.is_empty() || payload.contains(&b'\n') || payload.contains(&b'\r') {
+        return Err(ProbeProtocolError::InvalidFraming);
+    }
+    let response: ProbeResponse =
+        serde_json::from_slice(payload).map_err(|_| ProbeProtocolError::InvalidJson)?;
+    response.validate()?;
+    Ok(response)
+}
+
 /// Protocol validation failure. JSON responses use [`ProbeFailure`] instead of
 /// serializing parser or native error strings.
 #[derive(Debug, Error)]
@@ -277,6 +308,9 @@ pub enum ProbeProtocolError {
     /// Cancellation target is absent, zero, or aliases its own request.
     #[error("probe cancellation target is invalid")]
     InvalidCancellation,
+    /// A completed run did not match the response envelope correlation.
+    #[error("probe response identity does not match completed run")]
+    ResponseIdentity,
     /// Fixture-case list is empty or exceeds its ceiling.
     #[error("probe fixture case limit violated")]
     CaseLimit,
@@ -402,5 +436,28 @@ mod tests {
         for forbidden in ["url", "selector", "javascript", "html", "cookie", "token"] {
             assert!(!text.contains(forbidden));
         }
+        let decoded = decode_response_line(text.as_bytes()).expect("decode response");
+        assert_eq!(decoded, response);
+    }
+
+    #[test]
+    fn response_decoder_rejects_multiple_records_and_substituted_run_identity() {
+        let multiple = b"{\"protocol_version\":2}\n{\"protocol_version\":2}\n";
+        assert!(matches!(
+            decode_response_line(multiple),
+            Err(ProbeProtocolError::InvalidFraming)
+        ));
+
+        let response = ProbeResponse {
+            protocol_version: PROBE_PROTOCOL_VERSION,
+            request_id: 2,
+            reply: ProbeReply::RunCompleted(
+                crate::probe_qualification::tests_fixture_for_protocol(),
+            ),
+        };
+        assert!(matches!(
+            encode_response_line(&response),
+            Err(ProbeProtocolError::ResponseIdentity)
+        ));
     }
 }
