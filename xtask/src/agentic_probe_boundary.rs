@@ -3112,7 +3112,10 @@ fn validate_accounted_action_result(
         "AgentAccountedSemanticActionResult",
         "AgentAccountedSemanticActionResultRefusal",
         "SemanticActionBatchAdmissionRefusal",
+        "SemanticActionBatchFailureAdmissionRefusal",
+        "SemanticActionBatchFailureStage",
         "MAX_SEMANTIC_ACTION_BATCH_COMPLETION_BYTES",
+        "MAX_SEMANTIC_ACTION_BATCH_FAILURE_BYTES",
     ] {
         if !root.contains(required) {
             return Err(format!(
@@ -3123,7 +3126,15 @@ fn validate_accounted_action_result(
 
     let policy = compact(policy);
     for required in [
+        "pubstructAgentEffectReceipt{",
+        "action_guard:[u8;32]",
         "pubstructAgentVerifiedSemanticEffect{",
+        "pubstructAgentFailedSemanticEffect{",
+        "evidence:Option<Box<AgentFailedSemanticEffectEvidence>>",
+        "pubfnsettle_failed_semantic_effect(",
+        "action:&SemanticPreparedAction",
+        "Result<AgentFailedSemanticEffect,AgentPolicyError>",
+        "if!active.matches_action(action)",
         "pub(crate)fninto_parts(",
     ] {
         if !policy.contains(required) {
@@ -3187,9 +3198,19 @@ fn validate_accounted_action_result(
         "settlement_terminal_at:SemanticSettleInstant",
         "pubconstMAX_SEMANTIC_ACTION_BATCH_COMPLETION_BYTES:usize=512;",
         "size_of::<SemanticActionBatchCompletion>()<=MAX_SEMANTIC_ACTION_BATCH_COMPLETION_BYTES",
+        "pubconstMAX_SEMANTIC_ACTION_BATCH_FAILURE_BYTES:usize=512;",
+        "pubstructSemanticActionBatchFailure{",
+        "failure:Option<SemanticActionBatchFailure>",
+        "size_of::<SemanticActionBatchFailure>()<=MAX_SEMANTIC_ACTION_BATCH_FAILURE_BYTES",
         "AgentEffectSettlement::Verified(verified_proof)",
         "SemanticSettleStatus::ReadyForVerification",
         "let(_,_,_,result)=accounted.into_parts();",
+        "pubstructSemanticActionBatchFailureAdmissionRefusal{",
+        "execution:Box<SemanticActionBatchExecution>",
+        "failed:Box<AgentFailedSemanticEffect>",
+        "pubfnfail(self,action:&SemanticPreparedAction,failed:AgentFailedSemanticEffect,)",
+        "ifletErr(error)=self.validate_failure(action,&failed)",
+        "let(receipt,failure,evidence)=failed.into_parts();",
         "AccountingMismatch",
         "pubfninto_parts(",
         "AgentAccountedSemanticActionResult,SemanticActionBatchExecutionError",
@@ -3209,8 +3230,18 @@ fn validate_accounted_action_result(
     if validate >= consume {
         return Err("accounted batch aggregation consumed state before validation".to_owned());
     }
+    let failure_validate = batch
+        .find("ifletErr(error)=self.validate_failure(action,&failed)")
+        .ok_or_else(|| "accounted batch failure lost validation".to_owned())?;
+    let failure_consume = batch
+        .find("let(receipt,failure,evidence)=failed.into_parts();")
+        .ok_or_else(|| "accounted batch failure lost consuming transition".to_owned())?;
+    if failure_validate >= failure_consume {
+        return Err("accounted batch failure consumed evidence before validation".to_owned());
+    }
     for forbidden in [
         "result:SemanticActionResult)->Result<SemanticActionBatchContinuation",
+        "pubfnfail(self,failure:SemanticActionFailure)",
         "std::thread",
         "std::time",
         "std::fs",
@@ -4574,15 +4605,36 @@ mod tests {
                 AgentAccountedSemanticActionResult,
                 AgentAccountedSemanticActionResultRefusal,
             };
-            pub use semantic_action_batch_result::SemanticActionBatchAdmissionRefusal;
-            pub use semantic_action_batch_result::MAX_SEMANTIC_ACTION_BATCH_COMPLETION_BYTES;
+            pub use semantic_action_batch_result::{
+                SemanticActionBatchAdmissionRefusal,
+                SemanticActionBatchFailureAdmissionRefusal,
+                SemanticActionBatchFailureStage,
+                MAX_SEMANTIC_ACTION_BATCH_COMPLETION_BYTES,
+                MAX_SEMANTIC_ACTION_BATCH_FAILURE_BYTES,
+            };
         "#;
         let policy = r#"
+            pub struct AgentEffectReceipt {
+                action_guard: [u8; 32],
+            }
             pub struct AgentVerifiedSemanticEffect {
                 receipt: AgentEffectReceipt,
             }
             impl AgentVerifiedSemanticEffect {
                 pub(crate) fn into_parts(self) {}
+            }
+            enum AgentFailedSemanticEffectEvidence {}
+            pub struct AgentFailedSemanticEffect {
+                evidence: Option<Box<AgentFailedSemanticEffectEvidence>>,
+            }
+            impl AgentFailedSemanticEffect {
+                pub(crate) fn into_parts(self) {}
+            }
+            pub fn settle_failed_semantic_effect(
+                active: AgentActiveEffect,
+                action: &SemanticPreparedAction,
+            ) -> Result<AgentFailedSemanticEffect, AgentPolicyError> {
+                if !active.matches_action(action) {}
             }
         "#;
         let result = r#"
@@ -4624,6 +4676,7 @@ mod tests {
         "#;
         let batch = r#"
             pub const MAX_SEMANTIC_ACTION_BATCH_COMPLETION_BYTES: usize = 512;
+            pub const MAX_SEMANTIC_ACTION_BATCH_FAILURE_BYTES: usize = 512;
             pub struct SemanticActionBatchCompletion {
                 receipt: AgentEffectReceipt,
                 execution: SemanticActionExecutionApplied,
@@ -4635,6 +4688,14 @@ mod tests {
                 std::mem::size_of::<SemanticActionBatchCompletion>()
                     <= MAX_SEMANTIC_ACTION_BATCH_COMPLETION_BYTES
             );
+            pub struct SemanticActionBatchFailure {}
+            const _: () = assert!(
+                std::mem::size_of::<SemanticActionBatchFailure>()
+                    <= MAX_SEMANTIC_ACTION_BATCH_FAILURE_BYTES
+            );
+            pub struct SemanticActionBatchResult {
+                failure: Option<SemanticActionBatchFailure>,
+            }
             pub struct SemanticActionBatchAdmissionRefusal {
                 accounted: Box<AgentAccountedSemanticActionResult>,
             }
@@ -4643,6 +4704,10 @@ mod tests {
                     AgentAccountedSemanticActionResult,
                     SemanticActionBatchExecutionError,
                 ) {}
+            }
+            pub struct SemanticActionBatchFailureAdmissionRefusal {
+                execution: Box<SemanticActionBatchExecution>,
+                failed: Box<AgentFailedSemanticEffect>,
             }
             pub fn record_success(
                 &mut self,
@@ -4654,6 +4719,14 @@ mod tests {
                 settlement.status() != SemanticSettleStatus::ReadyForVerification;
                 let (_, _, _, result) = accounted.into_parts();
                 AccountingMismatch;
+            }
+            pub fn fail(
+                self,
+                action: &SemanticPreparedAction,
+                failed: AgentFailedSemanticEffect,
+            ) {
+                if let Err(error) = self.validate_failure(action, &failed) {}
+                let (receipt, failure, evidence) = failed.into_parts();
             }
         "#;
         validate_accounted_action_result(root, policy, result, batch)
@@ -4700,6 +4773,23 @@ mod tests {
             policy,
             result,
             &batch.replace("accounted: Box<AgentAccountedSemanticActionResult>,", ""),
+        )
+        .is_err());
+        assert!(validate_accounted_action_result(
+            root,
+            policy,
+            result,
+            &batch.replace("failed: Box<AgentFailedSemanticEffect>,", ""),
+        )
+        .is_err());
+        assert!(validate_accounted_action_result(
+            root,
+            policy,
+            result,
+            &batch.replace(
+                "failed: AgentFailedSemanticEffect,",
+                "failure: SemanticActionFailure,"
+            ),
         )
         .is_err());
     }

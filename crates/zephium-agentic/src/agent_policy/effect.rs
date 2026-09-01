@@ -580,6 +580,7 @@ pub struct AgentEffectReceipt {
     effect: SemanticEffectClass,
     attempt: SemanticActionAttemptId,
     settlement: AgentEffectSettlement,
+    action_guard: [u8; 32],
 }
 
 impl AgentEffectReceipt {
@@ -618,6 +619,10 @@ impl AgentEffectReceipt {
         self.settlement
     }
 
+    pub(crate) fn matches_action(self, action: &SemanticPreparedAction) -> bool {
+        self.effect == action.effect() && self.action_guard == action.verification_guard()
+    }
+
     /// Whether this receipt belongs to one exact canonical manifest revision.
     pub(crate) fn matches_manifest_revision(
         self,
@@ -646,6 +651,7 @@ impl AgentEffectReceipt {
             effect,
             attempt,
             settlement,
+            action_guard: [0; 32],
         }
     }
 }
@@ -662,6 +668,7 @@ impl fmt::Debug for AgentEffectReceipt {
             .field("effect", &self.effect)
             .field("attempt", &self.attempt)
             .field("settlement", &self.settlement)
+            .field("action_guard", &"[redacted]")
             .finish()
     }
 }
@@ -719,6 +726,7 @@ impl AgentVerifiedSemanticEffect {
             effect: active.effect,
             attempt: active.attempt,
             settlement: AgentEffectSettlement::Verified(verified.proof()),
+            action_guard: active.action_guard,
         };
         Self {
             receipt,
@@ -752,13 +760,24 @@ impl fmt::Debug for AgentVerifiedSemanticEffect {
     }
 }
 
-/// Policy-accounted verification refusal with content-free terminal metrics.
+enum AgentFailedSemanticEffectEvidence {
+    AfterExecution {
+        execution: SemanticActionExecutionApplied,
+        settlement: SemanticSettleTracker,
+        verification_error: SemanticVerificationError,
+    },
+}
+
+/// Policy-accounted semantic action failure with optional terminal metrics.
+///
+/// Failures before applied native execution allocate no evidence box. A
+/// verification refusal retains one bounded execution/settlement record until
+/// batch terminalization consumes it.
 #[must_use]
 pub struct AgentFailedSemanticEffect {
     receipt: AgentEffectReceipt,
-    execution: SemanticActionExecutionApplied,
-    settlement: SemanticSettleTracker,
-    verification_error: SemanticVerificationError,
+    failure: SemanticActionFailure,
+    evidence: Option<Box<AgentFailedSemanticEffectEvidence>>,
 }
 
 impl AgentFailedSemanticEffect {
@@ -767,36 +786,81 @@ impl AgentFailedSemanticEffect {
         self.receipt
     }
 
-    /// Content-free backend attribution and native execution timing.
-    pub const fn execution(&self) -> SemanticActionExecutionApplied {
-        self.execution
+    /// Exact charged closed failure.
+    pub const fn failure(&self) -> SemanticActionFailure {
+        self.failure
     }
 
-    /// Exact terminal settlement state consumed by verification.
-    pub const fn settlement(&self) -> &SemanticSettleTracker {
-        &self.settlement
+    /// Content-free backend attribution when native execution applied.
+    pub fn execution(&self) -> Option<SemanticActionExecutionApplied> {
+        self.evidence.as_deref().map(|evidence| match evidence {
+            AgentFailedSemanticEffectEvidence::AfterExecution { execution, .. } => *execution,
+        })
     }
 
-    /// Closed verification refusal mapped into the receipt's typed failure.
-    pub const fn verification_error(&self) -> SemanticVerificationError {
-        self.verification_error
+    /// Exact terminal settlement retained for a verification refusal.
+    pub fn settlement(&self) -> Option<&SemanticSettleTracker> {
+        self.evidence.as_deref().map(|evidence| match evidence {
+            AgentFailedSemanticEffectEvidence::AfterExecution { settlement, .. } => settlement,
+        })
     }
 
-    /// Separates the charged receipt and content-free failure metrics.
-    pub fn into_parts(
+    /// Closed verifier refusal when independent verification was reached.
+    pub fn verification_error(&self) -> Option<SemanticVerificationError> {
+        self.evidence.as_deref().map(|evidence| match evidence {
+            AgentFailedSemanticEffectEvidence::AfterExecution {
+                verification_error, ..
+            } => *verification_error,
+        })
+    }
+
+    pub(crate) fn matches_action(&self, action: &SemanticPreparedAction) -> bool {
+        self.receipt.matches_action(action)
+    }
+
+    pub(crate) fn into_parts(
         self,
     ) -> (
         AgentEffectReceipt,
-        SemanticActionExecutionApplied,
-        SemanticSettleTracker,
-        SemanticVerificationError,
+        SemanticActionFailure,
+        Option<(
+            SemanticActionExecutionApplied,
+            SemanticSettleTracker,
+            SemanticVerificationError,
+        )>,
     ) {
-        (
-            self.receipt,
-            self.execution,
-            self.settlement,
-            self.verification_error,
-        )
+        let evidence = self.evidence.map(|evidence| match *evidence {
+            AgentFailedSemanticEffectEvidence::AfterExecution {
+                execution,
+                settlement,
+                verification_error,
+            } => (execution, settlement, verification_error),
+        });
+        (self.receipt, self.failure, evidence)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_batch_test(
+        action: &SemanticPreparedAction,
+        attempt: SemanticActionAttemptId,
+        failure: SemanticActionFailure,
+    ) -> Self {
+        let active = AgentActiveEffect::for_execution_test(action, attempt);
+        Self {
+            receipt: AgentEffectReceipt {
+                manifest: active.manifest,
+                manifest_guard: active.manifest_guard,
+                id: active.id,
+                lease: active.lease,
+                node: active.node,
+                effect: active.effect,
+                attempt: active.attempt,
+                settlement: AgentEffectSettlement::Failed(failure),
+                action_guard: active.action_guard,
+            },
+            failure,
+            evidence: None,
+        }
     }
 }
 
@@ -805,9 +869,8 @@ impl fmt::Debug for AgentFailedSemanticEffect {
         formatter
             .debug_struct("AgentFailedSemanticEffect")
             .field("receipt", &self.receipt)
-            .field("execution", &self.execution)
-            .field("settlement", &self.settlement)
-            .field("verification_error", &self.verification_error)
+            .field("failure", &self.failure)
+            .field("has_execution_evidence", &self.evidence.is_some())
             .finish()
     }
 }
@@ -1135,13 +1198,19 @@ impl AgentRunPolicy {
         refusal: SemanticActionVerificationRefusal,
     ) -> Result<AgentFailedSemanticEffect, AgentPolicyError> {
         let (active, execution, settlement, verification_error) = refusal.into_parts();
+        let failure = verification_error.action_failure();
         let receipt =
-            self.settle_failed_semantic_effect(active, verification_error.action_failure())?;
+            self.settle_semantic_effect(active, AgentEffectSettlement::Failed(failure))?;
         Ok(AgentFailedSemanticEffect {
             receipt,
-            execution,
-            settlement,
-            verification_error,
+            failure,
+            evidence: Some(Box::new(
+                AgentFailedSemanticEffectEvidence::AfterExecution {
+                    execution,
+                    settlement,
+                    verification_error,
+                },
+            )),
         })
     }
 
@@ -1166,9 +1235,20 @@ impl AgentRunPolicy {
     pub fn settle_failed_semantic_effect(
         &mut self,
         active: AgentActiveEffect,
+        action: &SemanticPreparedAction,
         failure: SemanticActionFailure,
-    ) -> Result<AgentEffectReceipt, AgentPolicyError> {
-        self.settle_semantic_effect(active, AgentEffectSettlement::Failed(failure))
+    ) -> Result<AgentFailedSemanticEffect, AgentPolicyError> {
+        if !active.matches_action(action) {
+            self.sealed = true;
+            return Err(AgentPolicyError::EffectSettlementMismatch);
+        }
+        let receipt =
+            self.settle_semantic_effect(active, AgentEffectSettlement::Failed(failure))?;
+        Ok(AgentFailedSemanticEffect {
+            receipt,
+            failure,
+            evidence: None,
+        })
     }
 
     fn settle_semantic_effect(
@@ -1222,6 +1302,7 @@ impl AgentRunPolicy {
             effect: row.effect,
             attempt: active.attempt,
             settlement,
+            action_guard: active.action_guard,
         })
     }
 

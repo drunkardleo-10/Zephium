@@ -592,6 +592,20 @@ and settlement counters/timing. Each summary has a compile-time 512-byte
 ceiling, so the entire fixed completion inventory is at most 4 KiB. This adds
 no idle work and no unbounded state.
 
+A failed batch terminal likewise consumes a non-cloneable policy-accounted
+failure bound to the exact prepared next action; callers cannot terminate a
+shipping batch from a loose failure enum. The immutable effect receipt carries
+the private action guard, and admission rejoins it with batch order, effect,
+attempt uniqueness, and the exact failed settlement before consuming the
+owner. A pre-verification failure allocates no evidence box. A verification
+refusal retains one bounded box only until terminalization, where its native
+attribution, terminal settlement counters/timing, and closed verification
+error become one content-free summary under a compile-time 512-byte ceiling.
+Any refusal returns the unchanged batch execution and the exact failed owner,
+so an authority mismatch cannot discard either. The terminal discards prior
+page state because an unverified attempt may have changed the page, adds no
+retry surface, and adds no idle work.
+
 ### 8.2 Input backends
 
 The runtime can choose among:

@@ -5928,12 +5928,38 @@ mod tests {
         assert_eq!(failed.receipt().attempt(), failed_attempt);
         assert_eq!(
             failed.verification_error(),
-            crate::SemanticVerificationError::EvidenceKindMismatch
+            Some(crate::SemanticVerificationError::EvidenceKindMismatch)
         );
-        assert_eq!(failed.settlement().attempt(), failed_attempt);
+        assert_eq!(
+            failed.settlement().expect("failed settlement").attempt(),
+            failed_attempt
+        );
         let debug = format!("{failed:?}");
         assert!(!debug.contains("Save draft"));
         assert!(!debug.contains("effect.example.test"));
+        let failed_batch = crate::SemanticActionBatchExecution::new(&batch)
+            .expect("failed batch execution")
+            .fail(&action, failed)
+            .expect("accounted batch failure");
+        assert_eq!(
+            failed_batch.outcome(),
+            crate::SemanticActionBatchOutcome::Failed {
+                ordinal: 1,
+                failure: SemanticActionFailure::VerificationFailed,
+                recovery: crate::SemanticActionRecoveryHint::FreshObservationRequired,
+            }
+        );
+        let failed_summary = failed_batch.failure().expect("failed summary");
+        assert_eq!(failed_summary.receipt().attempt(), failed_attempt);
+        assert_eq!(
+            failed_summary.stage(),
+            crate::SemanticActionBatchFailureStage::AfterExecution
+        );
+        assert_eq!(
+            failed_summary.verification_error(),
+            Some(crate::SemanticVerificationError::EvidenceKindMismatch)
+        );
+        assert!(!format!("{failed_batch:?}").contains("Save draft"));
         assert_eq!(fixture.policy.accounting().consumed_operations(), 3);
         assert!(!fixture.policy.is_sealed());
 
@@ -5964,7 +5990,7 @@ mod tests {
         assert_eq!(fixture.policy.accounting().consumed_operations(), 3);
         assert_eq!(fixture.policy.accounting().reserved_operations(), 0);
         assert!(!fixture.policy.is_sealed());
-        let debug = format!("{:?} {receipt:?} {failed:?}", fixture.policy);
+        let debug = format!("{:?} {receipt:?} {failed_batch:?}", fixture.policy);
         assert!(!debug.contains("effect.example.test"));
         assert!(!debug.contains("Save draft"));
     }
@@ -6322,14 +6348,22 @@ mod tests {
             .expect("dispatch a");
         let receipt_a = fixture
             .policy
-            .settle_failed_semantic_effect(active_a, SemanticActionFailure::BackendRefused)
+            .settle_failed_semantic_effect(
+                active_a,
+                &action_a,
+                SemanticActionFailure::BackendRefused,
+            )
             .expect("settle a first");
         let receipt_b = fixture
             .policy
-            .settle_failed_semantic_effect(active_b, SemanticActionFailure::BackendRefused)
+            .settle_failed_semantic_effect(
+                active_b,
+                &action_b,
+                SemanticActionFailure::BackendRefused,
+            )
             .expect("settle b second");
-        assert_eq!(receipt_a.id().get(), 1);
-        assert_eq!(receipt_b.id().get(), 2);
+        assert_eq!(receipt_a.receipt().id().get(), 1);
+        assert_eq!(receipt_b.receipt().id().get(), 2);
         assert_eq!(fixture.policy.pending_effects(), 0);
         assert_eq!(fixture.policy.accounting().reserved_operations(), 0);
         assert_eq!(fixture.policy.accounting().consumed_operations(), 4);

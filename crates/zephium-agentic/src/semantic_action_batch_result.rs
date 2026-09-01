@@ -12,17 +12,20 @@ use std::fmt;
 use thiserror::Error;
 
 use crate::{
-    AgentAccountedSemanticActionResult, AgentEffectReceipt, AgentEffectSettlement, ContextJoin,
-    SemanticActionAttemptId, SemanticActionBatch, SemanticActionBatchId,
-    SemanticActionExecutionApplied, SemanticActionFailure, SemanticActionKind,
-    SemanticActionNextState, SemanticActionRecoveryHint, SemanticActionResult, SemanticEffectClass,
-    SemanticEffectProofKind, SemanticFreshSnapshotReason, SemanticObservationGeneration,
-    SemanticObservationId, SemanticPreparedAction, SemanticSettleInstant, SemanticSettleStatus,
+    AgentAccountedSemanticActionResult, AgentEffectReceipt, AgentEffectSettlement,
+    AgentFailedSemanticEffect, ContextJoin, SemanticActionAttemptId, SemanticActionBatch,
+    SemanticActionBatchId, SemanticActionExecutionApplied, SemanticActionFailure,
+    SemanticActionKind, SemanticActionNextState, SemanticActionRecoveryHint, SemanticActionResult,
+    SemanticEffectClass, SemanticEffectProofKind, SemanticFreshSnapshotReason,
+    SemanticObservationGeneration, SemanticObservationId, SemanticPreparedAction,
+    SemanticSettleInstant, SemanticSettleStatus, SemanticVerificationError,
     MAX_SEMANTIC_ACTIONS_PER_BATCH,
 };
 
 /// Maximum in-memory size of one content-free batch completion summary.
 pub const MAX_SEMANTIC_ACTION_BATCH_COMPLETION_BYTES: usize = 512;
+/// Maximum in-memory size of one content-free batch failure summary.
+pub const MAX_SEMANTIC_ACTION_BATCH_FAILURE_BYTES: usize = 512;
 
 /// Why a successfully verified prefix must not execute the remaining actions.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -144,6 +147,68 @@ impl SemanticActionBatchCompletion {
     }
 }
 
+/// Closed pipeline stage that supplied an accounted failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SemanticActionBatchFailureStage {
+    /// Preparation/native execution failed before applied execution evidence existed.
+    BeforeVerification,
+    /// Applied execution reached settlement and independent verification refused.
+    AfterExecution,
+}
+
+/// Content-free policy receipt and optional post-execution failure metrics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SemanticActionBatchFailure {
+    receipt: AgentEffectReceipt,
+    stage: SemanticActionBatchFailureStage,
+    execution: Option<SemanticActionExecutionApplied>,
+    settlement_event_count: Option<u16>,
+    settlement_elapsed_millis: Option<u64>,
+    settlement_terminal_at: Option<SemanticSettleInstant>,
+    verification_error: Option<SemanticVerificationError>,
+}
+
+impl SemanticActionBatchFailure {
+    /// Exact immutable failed policy receipt.
+    pub const fn receipt(self) -> AgentEffectReceipt {
+        self.receipt
+    }
+
+    /// Failure stage without page or native error text.
+    pub const fn stage(self) -> SemanticActionBatchFailureStage {
+        self.stage
+    }
+
+    /// Fixed-backend attribution when execution applied before refusal.
+    pub const fn execution(self) -> Option<SemanticActionExecutionApplied> {
+        self.execution
+    }
+
+    /// Coalesced settlement facts consumed, when settlement existed.
+    pub const fn settlement_event_count(self) -> Option<u16> {
+        self.settlement_event_count
+    }
+
+    /// Terminal settlement duration, when settlement existed.
+    pub const fn settlement_elapsed_millis(self) -> Option<u64> {
+        self.settlement_elapsed_millis
+    }
+
+    /// Exact content-free terminal settlement instant, when settlement existed.
+    pub const fn settlement_terminal_at(self) -> Option<SemanticSettleInstant> {
+        self.settlement_terminal_at
+    }
+
+    /// Closed verification refusal, when independent verification was reached.
+    pub const fn verification_error(self) -> Option<SemanticVerificationError> {
+        self.verification_error
+    }
+}
+
+const _: () = assert!(
+    std::mem::size_of::<SemanticActionBatchFailure>() <= MAX_SEMANTIC_ACTION_BATCH_FAILURE_BYTES
+);
+
 /// Terminal batch outcome; none of these variants authorizes a retry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SemanticActionBatchOutcome {
@@ -180,6 +245,7 @@ pub struct SemanticActionBatchResult {
     completions: Vec<SemanticActionBatchCompletion>,
     outcome: SemanticActionBatchOutcome,
     final_state: Option<SemanticActionResult>,
+    failure: Option<SemanticActionBatchFailure>,
 }
 
 impl SemanticActionBatchResult {
@@ -213,6 +279,11 @@ impl SemanticActionBatchResult {
         self.final_state.as_ref()
     }
 
+    /// Exact accounted failure evidence only for a failed outcome.
+    pub const fn failure(&self) -> Option<SemanticActionBatchFailure> {
+        self.failure
+    }
+
     /// Moves the latest state update into model encoding, when safe.
     pub fn into_final_state(self) -> Option<SemanticActionResult> {
         self.final_state
@@ -235,6 +306,7 @@ impl fmt::Debug for SemanticActionBatchResult {
                     .as_ref()
                     .map(SemanticActionResult::next_state),
             )
+            .field("failure", &self.failure)
             .field("content", &"[redacted]")
             .finish()
     }
@@ -376,26 +448,10 @@ impl SemanticActionBatchExecution {
         action: &SemanticPreparedAction,
         result: &SemanticActionResult,
     ) -> Result<(), SemanticActionBatchExecutionError> {
-        if self.completions.len() == usize::from(self.total) {
-            return Err(SemanticActionBatchExecutionError::AlreadyComplete);
-        }
-        if self.required_stop.is_some() {
-            return Err(SemanticActionBatchExecutionError::StopRequired);
-        }
+        self.validate_next_action(action)?;
         let expected = self.completed().saturating_add(1);
-        if action.batch() != self.batch
-            || action.source_observation() != self.source_observation
-            || action.source_observation_generation() != self.source_observation_generation
-            || action.bound_action().effect() != self.effect
-        {
-            return Err(SemanticActionBatchExecutionError::BatchMismatch);
-        }
-        if action.ordinal() != expected || result.verified().ordinal() != expected {
+        if result.verified().ordinal() != expected {
             return Err(SemanticActionBatchExecutionError::OrdinalMismatch);
-        }
-        let action_index = usize::from(expected - 1);
-        if self.action_guards[action_index] != action.bound_action().verification_guard() {
-            return Err(SemanticActionBatchExecutionError::ActionMismatch);
         }
         if !result.verified().matches_action(action) {
             return Err(SemanticActionBatchExecutionError::ActionResultMismatch);
@@ -423,6 +479,34 @@ impl SemanticActionBatchExecution {
             return Err(SemanticActionBatchExecutionError::ActionResultMismatch);
         }
 
+        Ok(())
+    }
+
+    fn validate_next_action(
+        &self,
+        action: &SemanticPreparedAction,
+    ) -> Result<(), SemanticActionBatchExecutionError> {
+        if self.completions.len() == usize::from(self.total) {
+            return Err(SemanticActionBatchExecutionError::AlreadyComplete);
+        }
+        if self.required_stop.is_some() {
+            return Err(SemanticActionBatchExecutionError::StopRequired);
+        }
+        let expected = self.completed().saturating_add(1);
+        if action.batch() != self.batch
+            || action.source_observation() != self.source_observation
+            || action.source_observation_generation() != self.source_observation_generation
+            || action.bound_action().effect() != self.effect
+        {
+            return Err(SemanticActionBatchExecutionError::BatchMismatch);
+        }
+        if action.ordinal() != expected {
+            return Err(SemanticActionBatchExecutionError::OrdinalMismatch);
+        }
+        let action_index = usize::from(expected - 1);
+        if self.action_guards[action_index] != action.bound_action().verification_guard() {
+            return Err(SemanticActionBatchExecutionError::ActionMismatch);
+        }
         Ok(())
     }
 
@@ -511,22 +595,47 @@ impl SemanticActionBatchExecution {
             completions: self.completions,
             outcome,
             final_state: Some(final_state),
+            failure: None,
         })
     }
 
-    /// Terminally fails the next action and discards any now-stale prior state.
+    /// Terminally consumes one policy-accounted failure for the exact next action.
+    ///
+    /// Validation refusal returns both the complete batch execution and failed
+    /// owner. A successful failure terminal discards any now-stale prior state.
     pub fn fail(
         self,
-        failure: SemanticActionFailure,
-    ) -> Result<SemanticActionBatchResult, SemanticActionBatchExecutionError> {
-        if self.completions.len() == usize::from(self.total) {
-            return Err(SemanticActionBatchExecutionError::AlreadyComplete);
+        action: &SemanticPreparedAction,
+        failed: AgentFailedSemanticEffect,
+    ) -> Result<SemanticActionBatchResult, SemanticActionBatchFailureAdmissionRefusal> {
+        if let Err(error) = self.validate_failure(action, &failed) {
+            return Err(SemanticActionBatchFailureAdmissionRefusal::new(
+                self, failed, error,
+            ));
         }
-        if self.required_stop.is_some() {
-            return Err(SemanticActionBatchExecutionError::StopRequired);
-        }
-        let ordinal = u8::try_from(self.completions.len() + 1)
-            .map_err(|_| SemanticActionBatchExecutionError::Invariant)?;
+
+        let ordinal = action.ordinal();
+        let (receipt, failure, evidence) = failed.into_parts();
+        let failure_summary = match evidence {
+            Some((execution, settlement, verification_error)) => SemanticActionBatchFailure {
+                receipt,
+                stage: SemanticActionBatchFailureStage::AfterExecution,
+                execution: Some(execution),
+                settlement_event_count: Some(settlement.event_count()),
+                settlement_elapsed_millis: settlement.elapsed_millis(),
+                settlement_terminal_at: settlement.terminal_at(),
+                verification_error: Some(verification_error),
+            },
+            None => SemanticActionBatchFailure {
+                receipt,
+                stage: SemanticActionBatchFailureStage::BeforeVerification,
+                execution: None,
+                settlement_event_count: None,
+                settlement_elapsed_millis: None,
+                settlement_terminal_at: None,
+                verification_error: None,
+            },
+        };
         Ok(SemanticActionBatchResult {
             batch: self.batch,
             effect: self.effect,
@@ -538,7 +647,55 @@ impl SemanticActionBatchExecution {
                 recovery: failure.recovery_hint(),
             },
             final_state: None,
+            failure: Some(failure_summary),
         })
+    }
+
+    fn validate_failure(
+        &self,
+        action: &SemanticPreparedAction,
+        failed: &AgentFailedSemanticEffect,
+    ) -> Result<(), SemanticActionBatchExecutionError> {
+        self.validate_next_action(action)?;
+        let receipt = failed.receipt();
+        let failure = failed.failure();
+        if !failed.matches_action(action)
+            || receipt.effect() != self.effect
+            || receipt.settlement() != AgentEffectSettlement::Failed(failure)
+            || self
+                .completions
+                .iter()
+                .any(|completion| completion.attempt == receipt.attempt())
+        {
+            return Err(SemanticActionBatchExecutionError::AccountingMismatch);
+        }
+
+        match (
+            failed.execution(),
+            failed.settlement(),
+            failed.verification_error(),
+        ) {
+            (None, None, None) => Ok(()),
+            (Some(execution), Some(settlement), Some(verification_error)) => {
+                let Some(terminal_at) = settlement.terminal_at() else {
+                    return Err(SemanticActionBatchExecutionError::AccountingMismatch);
+                };
+                let Some(elapsed_millis) = settlement.elapsed_millis() else {
+                    return Err(SemanticActionBatchExecutionError::AccountingMismatch);
+                };
+                if settlement.attempt() != receipt.attempt()
+                    || !settlement.matches_action(action)
+                    || !settlement.status().is_terminal()
+                    || verification_error.action_failure() != failure
+                    || terminal_at.millis().checked_sub(elapsed_millis)
+                        != Some(execution.settle_started_at().millis())
+                {
+                    return Err(SemanticActionBatchExecutionError::AccountingMismatch);
+                }
+                Ok(())
+            }
+            _ => Err(SemanticActionBatchExecutionError::AccountingMismatch),
+        }
     }
 }
 
@@ -599,6 +756,55 @@ impl fmt::Debug for SemanticActionBatchAdmissionRefusal {
         formatter
             .debug_struct("SemanticActionBatchAdmissionRefusal")
             .field("accounted", &"[redacted]")
+            .field("error", &self.error)
+            .finish()
+    }
+}
+
+/// Failed-terminal refusal preserving both batch state and accounted evidence.
+#[must_use]
+pub struct SemanticActionBatchFailureAdmissionRefusal {
+    execution: Box<SemanticActionBatchExecution>,
+    failed: Box<AgentFailedSemanticEffect>,
+    error: SemanticActionBatchExecutionError,
+}
+
+impl SemanticActionBatchFailureAdmissionRefusal {
+    fn new(
+        execution: SemanticActionBatchExecution,
+        failed: AgentFailedSemanticEffect,
+        error: SemanticActionBatchExecutionError,
+    ) -> Self {
+        Self {
+            execution: Box::new(execution),
+            failed: Box::new(failed),
+            error,
+        }
+    }
+
+    /// Closed batch or accounting mismatch.
+    pub const fn error(&self) -> SemanticActionBatchExecutionError {
+        self.error
+    }
+
+    /// Recovers unchanged batch state and the exact failed policy owner.
+    pub fn into_parts(
+        self,
+    ) -> (
+        SemanticActionBatchExecution,
+        AgentFailedSemanticEffect,
+        SemanticActionBatchExecutionError,
+    ) {
+        (*self.execution, *self.failed, self.error)
+    }
+}
+
+impl fmt::Debug for SemanticActionBatchFailureAdmissionRefusal {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SemanticActionBatchFailureAdmissionRefusal")
+            .field("execution", &"[redacted]")
+            .field("failed", &"[redacted]")
             .field("error", &self.error)
             .finish()
     }
@@ -1156,21 +1362,21 @@ mod tests {
         let first = batch.actions()[0]
             .prepare(&baseline.frames()[0])
             .expect("first");
-        let first_result = snapshot_result(
-            &first,
-            &baseline,
-            observation(context, 2, 2, 2, true, false, "Private changed"),
-            1,
-            100,
-            101,
-        );
+        let after_first = observation(context, 2, 2, 2, true, false, "Private changed");
+        let second = batch.actions()[1]
+            .prepare(&after_first.frames()[0])
+            .expect("second rolling checkpoint");
+        let first_result = snapshot_result(&first, &baseline, after_first, 1, 100, 101);
         let mut execution = SemanticActionBatchExecution::new(&batch).expect("execution");
         execution
             .record_success(&first, first_result)
             .expect("first success");
-        let result = execution
-            .fail(SemanticActionFailure::TargetOccluded)
-            .expect("failed batch");
+        let failed = AgentFailedSemanticEffect::for_batch_test(
+            &second,
+            SemanticActionAttemptId::new(2).expect("failed attempt"),
+            SemanticActionFailure::TargetOccluded,
+        );
+        let result = execution.fail(&second, failed).expect("failed batch");
         assert_eq!(
             result.outcome(),
             SemanticActionBatchOutcome::Failed {
@@ -1181,11 +1387,37 @@ mod tests {
         );
         assert_eq!(result.completions().len(), 1);
         assert!(result.final_state().is_none());
+        let failed = result.failure().expect("failed evidence");
+        assert_eq!(
+            failed.stage(),
+            SemanticActionBatchFailureStage::BeforeVerification
+        );
+        assert_eq!(failed.receipt().attempt().get(), 2);
+        assert!(failed.execution().is_none());
         assert!(result.into_final_state().is_none());
 
+        let cancelled_failure = AgentFailedSemanticEffect::for_batch_test(
+            &first,
+            SemanticActionAttemptId::new(3).expect("cancelled attempt"),
+            SemanticActionFailure::Cancelled,
+        );
+        let wrong_batch = standard_batch(&baseline, 99);
+        let wrong_first = wrong_batch.actions()[0]
+            .prepare(&baseline.frames()[0])
+            .expect("wrong first");
+        let refusal = SemanticActionBatchExecution::new(&wrong_batch)
+            .expect("wrong execution")
+            .fail(&wrong_first, cancelled_failure)
+            .expect_err("failure owner belongs to another batch");
+        assert_eq!(
+            refusal.error(),
+            SemanticActionBatchExecutionError::AccountingMismatch
+        );
+        assert!(!format!("{refusal:?}").contains("Private baseline"));
+        let (_wrong_execution, cancelled_failure, _) = refusal.into_parts();
         let cancelled = SemanticActionBatchExecution::new(&batch)
             .expect("execution")
-            .fail(SemanticActionFailure::Cancelled)
+            .fail(&first, cancelled_failure)
             .expect("cancelled batch");
         assert_eq!(
             cancelled.outcome(),

@@ -171,9 +171,10 @@ are trusted, or that M4 is complete.
   content-free execution attribution, terminal settlement, and the opaque
   proof required by result finalization. Refused charging maps the closed
   verification error exactly once to its action failure and returns the failed
-  receipt with timing/error state. Pre-verification native and settlement
-  failures keep the separate public typed-failure path; no fabricated proof is
-  needed to charge them.
+  owner with timing/error state. Pre-verification native and settlement
+  failures use the same non-cloneable failed-owner type without fabricating a
+  proof or allocating its optional post-execution evidence box. Every effect
+  receipt retains the private action guard needed for later exact admission.
 - Result finalization consumes that policy-accounted verified owner rather than
   accepting a loose proof. It validates the exact action, committed baseline,
   proof observation coordinates, current context, and capture clock while the
@@ -305,6 +306,15 @@ are trusted, or that M4 is complete.
   attempt identity, and carry non-regressing independent-proof time. A complete
   batch returns only after every action independently reached finalization.
   Incomplete aggregation cannot be represented as success.
+- Failed batch admission consumes only the non-cloneable policy-accounted
+  failed owner for the exact prepared next action. It rejoins the receipt's
+  private action guard, effect, failed settlement, unique attempt, batch order,
+  and—when execution applied—the terminal tracker, closed verification error,
+  and exact execution-to-settlement clock. A refusal returns both the unchanged
+  batch execution and exact failed owner. Pre-verification failures allocate no
+  evidence box; post-execution verification refusals retain one bounded box
+  until terminalization. The terminal retains one content-free failure summary
+  under a compile-time 512-byte ceiling and exposes no loose-failure overload.
 - A verified navigation, dialog transition, or context/document/cancellation
   change establishes a mandatory terminal stop before any remainder. Trusted
   orchestration may also explicitly stop a nonempty successful prefix for
@@ -609,8 +619,11 @@ succeeds with the exact acknowledgement while retaining
 receipt/attempt/settlement/proof and redacted diagnostics. Accounted-batch
 coverage runs the full policy-to-result owner into aggregation, retains exact
 receipt/backend/settlement metrics, and recovers then readmits an exact result
-after a wrong-batch refusal. The static gate rejects a shipping loose finalizer,
-loose batch admission, or a refusal that drops current state.
+after a wrong-batch refusal. Failure aggregation coverage consumes both
+pre-verification and post-execution failed owners, retains exact stage and
+content-free evidence, and recovers then readmits an exact owner after a
+wrong-batch refusal. The static gate rejects a shipping loose finalizer, loose
+success or failure admission, or a refusal that drops owned state.
 
 Action-result coverage includes exact committed-baseline/content binding,
 source observation and batch guard substitution, exact verification

@@ -270,8 +270,10 @@ pub use semantic_action::{
 pub use semantic_action_batch_result::{
     SemanticActionBatchAdmissionRefusal, SemanticActionBatchCompletion,
     SemanticActionBatchContinuation, SemanticActionBatchExecution,
-    SemanticActionBatchExecutionError, SemanticActionBatchOutcome, SemanticActionBatchResult,
-    SemanticActionBatchStopReason, MAX_SEMANTIC_ACTION_BATCH_COMPLETION_BYTES,
+    SemanticActionBatchExecutionError, SemanticActionBatchFailure,
+    SemanticActionBatchFailureAdmissionRefusal, SemanticActionBatchFailureStage,
+    SemanticActionBatchOutcome, SemanticActionBatchResult, SemanticActionBatchStopReason,
+    MAX_SEMANTIC_ACTION_BATCH_COMPLETION_BYTES, MAX_SEMANTIC_ACTION_BATCH_FAILURE_BYTES,
 };
 pub use semantic_action_result::{
     finalize_accounted_semantic_action_result, AgentAccountedSemanticActionResult,
