@@ -112,6 +112,10 @@ impl SemanticRetiredReferenceId {
     pub fn model_token(self) -> String {
         format!("old:{}", self.0.model_token())
     }
+
+    pub(crate) const fn reference(self) -> SemanticReferenceId {
+        self.0
+    }
 }
 
 /// Required old-to-current reference mapping for an otherwise unchanged node.
@@ -460,7 +464,9 @@ pub struct SemanticDiff {
     entries: Vec<SemanticDiffEntry>,
     reference_rebases: Vec<SemanticReferenceRebase>,
     stats: SemanticDiffStats,
+    baseline_guard: [u8; 32],
     current_fingerprint: SemanticObservationFingerprint,
+    guard: [u8; 32],
 }
 
 impl SemanticDiff {
@@ -507,6 +513,18 @@ impl SemanticDiff {
     pub(crate) const fn current_fingerprint(&self) -> &SemanticObservationFingerprint {
         &self.current_fingerprint
     }
+
+    pub(crate) const fn baseline_guard(&self) -> [u8; 32] {
+        self.baseline_guard
+    }
+
+    pub(crate) const fn current_guard(&self) -> [u8; 32] {
+        self.current_fingerprint.digest()
+    }
+
+    pub(crate) const fn guard(&self) -> [u8; 32] {
+        self.guard
+    }
 }
 
 impl fmt::Debug for SemanticDiff {
@@ -518,6 +536,8 @@ impl fmt::Debug for SemanticDiff {
             .field("current_observation", &self.current_observation)
             .field("current_generation", &self.current_generation)
             .field("stats", &self.stats)
+            .field("baseline_guard", &"[redacted]")
+            .field("guard", &"[redacted]")
             .finish()
     }
 }
@@ -801,6 +821,8 @@ pub fn compute_semantic_diff(
         .collect();
     let stats = diff_stats(&entries, &reference_rebases);
     let current_fingerprint = SemanticObservationFingerprint::from_observation(current);
+    let baseline_guard = acknowledgement.guard();
+    let guard = semantic_diff_guard(baseline_guard, current_fingerprint.digest());
     SemanticDiffOutcome::Diff(Box::new(SemanticDiff {
         previous_observation: previous.request().id(),
         previous_generation: previous.request().generation(),
@@ -810,8 +832,18 @@ pub fn compute_semantic_diff(
         entries,
         reference_rebases,
         stats,
+        baseline_guard,
         current_fingerprint,
+        guard,
     }))
+}
+
+fn semantic_diff_guard(baseline_guard: [u8; 32], current_guard: [u8; 32]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"ZEPHIUM-SEMANTIC-DIFF-1\0");
+    hasher.update(baseline_guard);
+    hasher.update(current_guard);
+    hasher.finalize().into()
 }
 
 fn scopes_match(previous: &SemanticScope, current: &SemanticScope) -> bool {

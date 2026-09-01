@@ -1,7 +1,7 @@
 //! Mutable bounded plan-lease accounting and committed model-input taint.
 //!
 //! This functional core reserves one model call before transport, records
-//! source taint only after exact committed observation/read delivery, and
+//! source taint only after exact committed observation/diff/read delivery, and
 //! settles provider usage without retries. Its child effect policy reserves
 //! one operation per bounded prepared action only after exact source-to-sink
 //! checks and still cannot execute an action. The core owns no transport,
@@ -27,11 +27,12 @@ use crate::semantic_diff::SemanticObservationFingerprint;
 use crate::{
     AgentAccountScope, AgentContextAccountBinding, AgentPlanLeaseId, AgentPlanNodeId,
     AgentPolicyInstant, AgentProviderPricedUsage, AgentProviderPricingAttribution, AgentRunBudget,
-    AgentRunManifest, AgentRunManifestId, ContextJoin, SemanticActionAttemptId,
-    SemanticEffectClass, SemanticModelPayload, SemanticObservation,
-    SemanticObservationAcknowledgement, SemanticObservationGeneration, SemanticObservationId,
-    SemanticOrigin, SemanticReadDeliveryReceipt, SemanticReadModelPayload, SemanticReadResult,
-    SemanticReferenceId, SemanticSensitivity, SemanticTrust,
+    AgentRunManifest, AgentRunManifestId, ContextJoin, SemanticActionAttemptId, SemanticDiff,
+    SemanticDiffDeliveryReceipt, SemanticDiffModelPayload, SemanticEffectClass,
+    SemanticModelPayload, SemanticObservation, SemanticObservationAcknowledgement,
+    SemanticObservationGeneration, SemanticObservationId, SemanticOrigin,
+    SemanticReadDeliveryReceipt, SemanticReadModelPayload, SemanticReadResult, SemanticReferenceId,
+    SemanticSensitivity, SemanticTrust,
 };
 
 /// Maximum model calls reserved or active in one run policy.
@@ -223,6 +224,7 @@ pub struct AgentTaintCohort {
     context: ContextJoin,
     observation: SemanticObservationId,
     observation_generation: SemanticObservationGeneration,
+    source_guard: [u8; 32],
     account: AgentAccountScope,
     origin: SemanticOrigin,
     sensitivity: SemanticSensitivity,
@@ -290,6 +292,7 @@ impl AgentTaintCohort {
         self.context == other.context
             && self.observation == other.observation
             && self.observation_generation == other.observation_generation
+            && self.source_guard == other.source_guard
             && self.account == other.account
             && self.origin == other.origin
     }
@@ -310,6 +313,7 @@ impl fmt::Debug for AgentTaintCohort {
         formatter
             .debug_struct("AgentTaintCohort")
             .field("context", &"[redacted]")
+            .field("source_guard", &"[redacted]")
             .field("account", &"[redacted]")
             .field("origin", &"[redacted]")
             .field("sensitivity", &self.sensitivity)
@@ -366,6 +370,7 @@ impl AgentPolicyAccounting {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ModelInputKind {
     Observation,
+    Diff,
     Read,
 }
 
@@ -929,6 +934,36 @@ impl AgentRunPolicy {
         )
     }
 
+    /// Reserves exact semantic-diff input before any model transport receives bytes.
+    ///
+    /// The diff must extend an exact baseline already committed to this policy.
+    /// Current references, including unchanged rebases, are conservatively
+    /// joined to that baseline before the new reservation can exist.
+    pub fn prepare_diff_input(
+        &mut self,
+        request: AgentModelCallRequest,
+        diff: &SemanticDiff,
+        payload: &SemanticDiffModelPayload,
+    ) -> Result<AgentModelCallAdmission, AgentPolicyError> {
+        if !payload.matches_diff(diff) {
+            return Err(AgentPolicyError::PayloadMismatch);
+        }
+        let context = diff
+            .frames()
+            .first()
+            .map(|frame| frame.frame().context())
+            .ok_or(AgentPolicyError::EmptyDiff)?;
+        let candidates = diff_taints(diff, request.account(), &self.taints)?;
+        self.prepare_model_input(
+            request,
+            context,
+            ModelInputKind::Diff,
+            diff.guard(),
+            candidates,
+            u64::from(payload.token_measurement().tokens()),
+        )
+    }
+
     /// Reserves exact bounded-read input before any model transport receives bytes.
     pub fn prepare_read_input(
         &mut self,
@@ -965,6 +1000,15 @@ impl AgentRunPolicy {
             ModelInputKind::Observation,
             acknowledgement.guard(),
         )
+    }
+
+    /// Commits exact diff taint after exact transport delivery proof.
+    pub fn commit_diff_input(
+        &mut self,
+        admission: AgentModelCallAdmission,
+        receipt: &SemanticDiffDeliveryReceipt,
+    ) -> Result<AgentActiveModelCall, AgentPolicyError> {
+        self.commit_model_input(admission, ModelInputKind::Diff, receipt.guard())
     }
 
     /// Commits exact read taint after exact transport delivery receipt.
@@ -1413,6 +1457,12 @@ pub enum AgentPolicyError {
     /// Empty read could not prove source context authority.
     #[error("agent policy empty read has no source authority")]
     EmptyRead,
+    /// A semantic diff had no frame from which to prove context authority.
+    #[error("agent policy empty diff has no source authority")]
+    EmptyDiff,
+    /// The diff's exact prior source cohort was not committed to this policy.
+    #[error("agent policy semantic diff baseline is not committed")]
+    DiffBaselineMissing,
     /// Projected persistent model-context taint exceeded its hard ceiling.
     #[error("agent policy taint cohort ceiling reached")]
     TaintLimit,
@@ -1514,6 +1564,7 @@ fn observation_taints(
     let context = observation.request().context();
     let observation_id = observation.request().id();
     let observation_generation = observation.request().generation();
+    let source_guard = SemanticObservationFingerprint::from_observation(observation).digest();
     if account.context() != context {
         return Err(AgentPolicyError::Authority);
     }
@@ -1539,6 +1590,7 @@ fn observation_taints(
                 context,
                 observation: observation_id,
                 observation_generation,
+                source_guard,
                 account: account.account(),
                 origin: frame.frame().origin().clone(),
                 sensitivity,
@@ -1551,6 +1603,140 @@ fn observation_taints(
         );
     }
     Ok(cohorts)
+}
+
+fn diff_taints(
+    diff: &SemanticDiff,
+    account: AgentContextAccountBinding,
+    retained: &[AgentTaintCohort],
+) -> Result<Vec<AgentTaintCohort>, AgentPolicyError> {
+    let context = diff
+        .frames()
+        .first()
+        .map(|frame| frame.frame().context())
+        .ok_or(AgentPolicyError::EmptyDiff)?;
+    if account.context() != context
+        || diff
+            .frames()
+            .iter()
+            .any(|frame| frame.frame().context() != context)
+    {
+        return Err(AgentPolicyError::Authority);
+    }
+
+    let mut origins = Vec::with_capacity(diff.frames().len());
+    for frame in diff.frames() {
+        if !origins.contains(frame.frame().origin()) {
+            origins.push(frame.frame().origin().clone());
+        }
+    }
+
+    let mut candidates = Vec::with_capacity(origins.len());
+    for origin in origins {
+        let baseline_matches = |cohort: &AgentTaintCohort| {
+            cohort.context == context
+                && cohort.observation == diff.previous_observation()
+                && cohort.observation_generation == diff.previous_generation()
+                && cohort.source_guard == diff.baseline_guard()
+                && cohort.account == account.account()
+                && cohort.origin == origin
+        };
+        if !retained.iter().any(baseline_matches) {
+            return Err(AgentPolicyError::DiffBaselineMissing);
+        }
+
+        let mut sensitivity = retained
+            .iter()
+            .filter(|cohort| baseline_matches(cohort))
+            .map(|cohort| cohort.sensitivity)
+            .max()
+            .unwrap_or(SemanticSensitivity::Public);
+        let attested_at = retained
+            .iter()
+            .filter(|cohort| baseline_matches(cohort))
+            .map(|cohort| cohort.attested_at)
+            .min()
+            .unwrap_or(account.observed_at())
+            .min(account.observed_at());
+        let mut references = canonical_references(
+            retained
+                .iter()
+                .filter(|cohort| baseline_matches(cohort))
+                .flat_map(|cohort| cohort.references.iter().copied())
+                .collect(),
+        );
+        for entry in diff
+            .entries()
+            .iter()
+            .filter(|entry| entry.frame().origin() == &origin)
+        {
+            if let Some(previous) = entry.previous_reference() {
+                retire_taint_reference(&mut references, previous.reference())?;
+            }
+        }
+        for rebase in diff
+            .reference_rebases()
+            .iter()
+            .filter(|rebase| rebase.frame().origin() == &origin)
+        {
+            retire_taint_reference(&mut references, rebase.previous_reference().reference())?;
+        }
+        for entry in diff
+            .entries()
+            .iter()
+            .filter(|entry| entry.frame().origin() == &origin)
+        {
+            if let Some(node) = entry.current_node() {
+                sensitivity = sensitivity.max(match node.sensitivity() {
+                    SemanticSensitivity::Secret => SemanticSensitivity::Sensitive,
+                    other => other,
+                });
+            }
+            if let Some(reference) = entry.current_reference() {
+                insert_taint_reference(&mut references, reference);
+            }
+        }
+        for rebase in diff
+            .reference_rebases()
+            .iter()
+            .filter(|rebase| rebase.frame().origin() == &origin)
+        {
+            insert_taint_reference(&mut references, rebase.current_reference());
+        }
+        merge_taint(
+            &mut candidates,
+            AgentTaintCohort {
+                context,
+                observation: diff.current_observation(),
+                observation_generation: diff.current_generation(),
+                source_guard: diff.current_guard(),
+                account: account.account(),
+                origin,
+                sensitivity,
+                trust: SemanticTrust::UntrustedPage,
+                attested_at,
+                references: canonical_references(references),
+            },
+        );
+    }
+    Ok(candidates)
+}
+
+fn retire_taint_reference(
+    references: &mut Vec<SemanticReferenceId>,
+    retired: SemanticReferenceId,
+) -> Result<(), AgentPolicyError> {
+    let index = references
+        .binary_search(&retired)
+        .map_err(|_| AgentPolicyError::DiffBaselineMissing)?;
+    references.remove(index);
+    Ok(())
+}
+
+fn insert_taint_reference(references: &mut Vec<SemanticReferenceId>, current: SemanticReferenceId) {
+    if let Err(index) = references.binary_search(&current) {
+        references.insert(index, current);
+    }
 }
 
 fn read_taints(
@@ -1571,6 +1757,7 @@ fn read_taints(
                 context: provenance.context(),
                 observation: provenance.observation(),
                 observation_generation: provenance.observation_generation(),
+                source_guard: read.guard(),
                 account: account.account(),
                 origin: provenance.origin().clone(),
                 sensitivity: provenance.sensitivity(),
@@ -1768,7 +1955,8 @@ fn admission_guard(facts: AdmissionGuardFacts<'_>) -> [u8; 32] {
     hasher.update(facts.node.bytes());
     hasher.update([match facts.kind {
         ModelInputKind::Observation => 1,
-        ModelInputKind::Read => 2,
+        ModelInputKind::Diff => 2,
+        ModelInputKind::Read => 3,
     }]);
     hash_context(&mut hasher, facts.context);
     hasher.update(facts.source_guard);
@@ -1780,6 +1968,7 @@ fn admission_guard(facts: AdmissionGuardFacts<'_>) -> [u8; 32] {
         hash_context(&mut hasher, candidate.context);
         hasher.update(candidate.observation.get().to_be_bytes());
         hasher.update(candidate.observation_generation.get().to_be_bytes());
+        hasher.update(candidate.source_guard);
         hash_account(&mut hasher, candidate.account);
         let origin = candidate.origin.as_url().as_str().as_bytes();
         hasher.update((origin.len() as u64).to_be_bytes());
@@ -1833,18 +2022,19 @@ fn hash_context(hasher: &mut Sha256, context: ContextJoin) {
 mod tests {
     use super::*;
     use crate::{
-        decode_semantic_snapshot, encode_semantic_observation, encode_semantic_read,
-        read_semantic_observation, verify_semantic_action, AgentAccountAttestationId,
-        AgentAccountId, AgentDataFlowRule, AgentEffectScope, AgentPlanNodeAuthority,
-        AgentPlanNodeScope, AgentPreparedObservationRequest, AgentPreparedReadRequest,
-        AgentProviderCallConfig, AgentProviderContractError, AgentProviderEndpoint,
-        AgentProviderInputOutcome, AgentProviderKind, AgentProviderModelRevision,
-        AgentProviderObjective, AgentProviderRequestSettlement, AgentProviderStreamBudget,
-        AgentRunManifestId, AgentRunScope, ContextAutomationState, ContextCapabilities,
-        ContextCapability, ContextId, ContextIdentity, ContextKind, ContextOperationId,
-        ContextRegistry, ContextRunId, ContextSettlement, FrameGeneration, FrameId,
-        SemanticActionBatch, SemanticActionBatchId, SemanticActionFailure, SemanticActionIntent,
-        SemanticActionProposal, SemanticCaptureInstant, SemanticDecodeContext,
+        compute_semantic_diff, decode_semantic_snapshot, encode_semantic_diff,
+        encode_semantic_observation, encode_semantic_read, read_semantic_observation,
+        verify_semantic_action, AgentAccountAttestationId, AgentAccountId, AgentDataFlowRule,
+        AgentEffectScope, AgentPlanNodeAuthority, AgentPlanNodeScope,
+        AgentPreparedObservationRequest, AgentPreparedReadRequest, AgentProviderCallConfig,
+        AgentProviderContractError, AgentProviderEndpoint, AgentProviderInputOutcome,
+        AgentProviderKind, AgentProviderModelRevision, AgentProviderObjective,
+        AgentProviderRequestSettlement, AgentProviderStreamBudget, AgentRunManifestId,
+        AgentRunScope, ContextAutomationState, ContextCapabilities, ContextCapability, ContextId,
+        ContextIdentity, ContextKind, ContextOperationId, ContextRegistry, ContextRunId,
+        ContextSettlement, FrameGeneration, FrameId, SemanticActionBatch, SemanticActionBatchId,
+        SemanticActionFailure, SemanticActionIntent, SemanticActionProposal,
+        SemanticCaptureInstant, SemanticDecodeContext, SemanticDiffBudget, SemanticDiffOutcome,
         SemanticEffectEvidence, SemanticFrameJoin, SemanticFrameTrust, SemanticInvocationId,
         SemanticModelDeliverySettlement, SemanticModelEncodingBudget, SemanticObservationAssembler,
         SemanticObservationBudget, SemanticObservationId, SemanticObservationRequest,
@@ -2177,6 +2367,40 @@ mod tests {
             &revision,
         )
         .expect("payload")
+    }
+
+    fn diff_between(
+        previous: &SemanticObservation,
+        current: &SemanticObservation,
+    ) -> Box<SemanticDiff> {
+        let acknowledgement = observation_payload(previous, 10)
+            .settle_delivery(SemanticModelDeliverySettlement::Committed)
+            .expect("baseline delivery");
+        match compute_semantic_diff(
+            previous,
+            &acknowledgement,
+            current,
+            SemanticDiffBudget::ACTION,
+        ) {
+            SemanticDiffOutcome::Diff(diff) => diff,
+            SemanticDiffOutcome::FreshSnapshot(reason) => {
+                panic!("unexpected fresh snapshot: {reason:?}")
+            }
+        }
+    }
+
+    fn diff_payload(diff: &SemanticDiff, tokens: u32) -> SemanticDiffModelPayload {
+        let revision = tokenizer();
+        encode_semantic_diff(diff, SemanticModelEncodingBudget::ACTION_DIFF_EXACT)
+            .expect("encode diff")
+            .admit(
+                &FixedCounter {
+                    revision: revision.clone(),
+                    tokens,
+                },
+                &revision,
+            )
+            .expect("diff payload")
     }
 
     fn effects(values: &[SemanticEffectClass]) -> AgentEffectScope {
@@ -2522,6 +2746,194 @@ mod tests {
         assert!(!debug.contains("private marker"));
         assert!(!debug.contains("must-never-escape"));
         assert!(debug.contains("[redacted]"));
+    }
+
+    #[test]
+    fn semantic_diff_delivery_transforms_exact_current_reference_authority() {
+        let source = origin("diff-chain");
+        let context = make_context(7_101, 7_102, 7_103);
+        let previous = actionable_observation(context, source.clone(), 1);
+        let current = observation(
+            context,
+            source.clone(),
+            2,
+            vec![
+                json!({"k": 1, "r": "document", "o": 16}),
+                json!({"k": 3, "p": 0, "r": "paragraph", "t": "new public marker"}),
+                json!({"k": 2, "p": 0, "r": "button", "n": "Save draft", "o": 9,
+                       "b": {"x": 10, "y": 10, "w": 100, "h": 30}}),
+            ],
+        );
+        let diff = diff_between(&previous, &current);
+        assert_eq!(diff.stats().added(), 1);
+        assert_eq!(diff.reference_rebases().len(), 1);
+        let mut fixture = policy_fixture(
+            7_101,
+            7_102,
+            source,
+            SemanticSensitivity::Sensitive,
+            &[SemanticEffectClass::Read],
+            run_budget(10, 1_000, 10_000),
+        );
+        let binding = account(context, NOW - 1);
+        commit_observation_to_model(&mut fixture.policy, fixture.lease, 1, binding, &previous);
+
+        let payload = diff_payload(&diff, 30);
+        let admission = fixture
+            .policy
+            .prepare_diff_input(
+                call_request(2, fixture.lease, binding, 5, 10, 80, NOW),
+                &diff,
+                &payload,
+            )
+            .expect("diff admission");
+        assert_eq!(admission.input_token_limit(), 35);
+        assert_eq!(fixture.policy.taints().len(), 1);
+        let receipt = payload
+            .settle_delivery_receipt(SemanticModelDeliverySettlement::Committed)
+            .expect("diff delivery");
+        assert!(receipt.acknowledgement().matches(&current));
+        let active = fixture
+            .policy
+            .commit_diff_input(admission, &receipt)
+            .expect("diff commit");
+
+        assert_eq!(fixture.policy.taints().len(), 2);
+        let current_taint = fixture
+            .policy
+            .taints()
+            .iter()
+            .find(|taint| taint.observation() == current.request().id())
+            .expect("current taint");
+        assert_eq!(current_taint.reference_count(), 3);
+        for reference in 1..=3 {
+            assert!(current_taint.contains_reference(
+                SemanticReferenceId::new(reference).expect("current reference")
+            ));
+        }
+        assert_eq!(
+            current_taint.attested_at(),
+            AgentPolicyInstant::from_millis(NOW - 1)
+        );
+        fixture
+            .policy
+            .settle_model_call(active, AgentModelCallSettlement::Completed, 31, 4, 70)
+            .expect("diff settlement");
+        assert_eq!(fixture.policy.pending_model_calls(), 0);
+        assert_eq!(fixture.policy.accounting().consumed_operations(), 2);
+        assert_eq!(fixture.policy.accounting().consumed_model_tokens(), 45);
+    }
+
+    #[test]
+    fn semantic_diff_requires_the_exact_committed_baseline_and_payload_pair() {
+        let source = origin("diff-baseline");
+        let context = make_context(7_201, 7_202, 7_203);
+        let previous = actionable_observation(context, source.clone(), 1);
+        let alternate_previous = document_only_observation(context, source.clone(), 1);
+        let current = actionable_observation(context, source.clone(), 2);
+        let exact_diff = diff_between(&previous, &current);
+        let alternate_diff = diff_between(&alternate_previous, &current);
+        assert_ne!(exact_diff.guard(), alternate_diff.guard());
+        let binding = account(context, NOW - 1);
+        let mut fixture = policy_fixture(
+            7_201,
+            7_202,
+            source,
+            SemanticSensitivity::Sensitive,
+            &[SemanticEffectClass::Read],
+            run_budget(10, 1_000, 10_000),
+        );
+
+        let payload = diff_payload(&exact_diff, 20);
+        assert_eq!(
+            fixture
+                .policy
+                .prepare_diff_input(
+                    call_request(1, fixture.lease, binding, 0, 0, 0, NOW),
+                    &exact_diff,
+                    &payload,
+                )
+                .expect_err("missing baseline"),
+            AgentPolicyError::DiffBaselineMissing
+        );
+        assert_eq!(fixture.policy.pending_model_calls(), 0);
+
+        commit_observation_to_model(
+            &mut fixture.policy,
+            fixture.lease,
+            1,
+            binding,
+            &alternate_previous,
+        );
+        let payload = diff_payload(&exact_diff, 20);
+        assert_eq!(
+            fixture
+                .policy
+                .prepare_diff_input(
+                    call_request(2, fixture.lease, binding, 0, 0, 0, NOW),
+                    &exact_diff,
+                    &payload,
+                )
+                .expect_err("wrong exact baseline"),
+            AgentPolicyError::DiffBaselineMissing
+        );
+        let alternate_payload = diff_payload(&alternate_diff, 20);
+        assert_eq!(
+            fixture
+                .policy
+                .prepare_diff_input(
+                    call_request(2, fixture.lease, binding, 0, 0, 0, NOW),
+                    &exact_diff,
+                    &alternate_payload,
+                )
+                .expect_err("payload substitution"),
+            AgentPolicyError::PayloadMismatch
+        );
+        assert_eq!(fixture.policy.pending_model_calls(), 0);
+        assert!(!fixture.policy.is_sealed());
+    }
+
+    #[test]
+    fn semantic_diff_delivery_receipt_substitution_seals_ambiguity() {
+        let source = origin("diff-receipt");
+        let context = make_context(7_301, 7_302, 7_303);
+        let previous = actionable_observation(context, source.clone(), 1);
+        let alternate_previous = document_only_observation(context, source.clone(), 1);
+        let current = actionable_observation(context, source.clone(), 2);
+        let exact_diff = diff_between(&previous, &current);
+        let alternate_diff = diff_between(&alternate_previous, &current);
+        let binding = account(context, NOW - 1);
+        let mut fixture = policy_fixture(
+            7_301,
+            7_302,
+            source,
+            SemanticSensitivity::Sensitive,
+            &[SemanticEffectClass::Read],
+            run_budget(10, 1_000, 10_000),
+        );
+        commit_observation_to_model(&mut fixture.policy, fixture.lease, 1, binding, &previous);
+        let payload = diff_payload(&exact_diff, 20);
+        let admission = fixture
+            .policy
+            .prepare_diff_input(
+                call_request(2, fixture.lease, binding, 0, 0, 0, NOW),
+                &exact_diff,
+                &payload,
+            )
+            .expect("diff admission");
+        let wrong_receipt = diff_payload(&alternate_diff, 20)
+            .settle_delivery_receipt(SemanticModelDeliverySettlement::Committed)
+            .expect("alternate receipt");
+        assert_eq!(
+            fixture
+                .policy
+                .commit_diff_input(admission, &wrong_receipt)
+                .expect_err("receipt substitution"),
+            AgentPolicyError::AdmissionMismatch
+        );
+        assert!(fixture.policy.is_sealed());
+        assert_eq!(fixture.policy.pending_model_calls(), 1);
+        assert_eq!(fixture.policy.accounting().reserved_operations(), 1);
     }
 
     #[test]
@@ -4389,6 +4801,7 @@ mod tests {
                 context: make_context(147, 148, 1_000 + index),
                 observation: SemanticObservationId::new(1).expect("observation"),
                 observation_generation: SemanticObservationGeneration::INITIAL,
+                source_guard: [index as u8; 32],
                 account: AgentAccountScope::Anonymous,
                 origin: source.clone(),
                 sensitivity: SemanticSensitivity::Public,
@@ -4432,6 +4845,7 @@ mod tests {
                 context: make_context(97, 98, id),
                 observation: SemanticObservationId::new(id as u64).expect("observation"),
                 observation_generation: SemanticObservationGeneration::INITIAL,
+                source_guard: [id as u8; 32],
                 account: AgentAccountScope::Anonymous,
                 origin: source.clone(),
                 sensitivity: SemanticSensitivity::Public,
@@ -4444,6 +4858,7 @@ mod tests {
             context: make_context(97, 98, 10_000),
             observation: SemanticObservationId::new(10_000).expect("observation"),
             observation_generation: SemanticObservationGeneration::INITIAL,
+            source_guard: [0xff; 32],
             account: AgentAccountScope::Anonymous,
             origin: source.clone(),
             sensitivity: SemanticSensitivity::Public,
@@ -4465,6 +4880,7 @@ mod tests {
             context: exact_context,
             observation: committed[0].observation(),
             observation_generation: committed[0].observation_generation(),
+            source_guard: committed[0].source_guard,
             account: AgentAccountScope::Anonymous,
             origin: source.clone(),
             sensitivity: SemanticSensitivity::Public,
@@ -4478,6 +4894,7 @@ mod tests {
                 context: exact_context,
                 observation: committed[0].observation(),
                 observation_generation: committed[0].observation_generation(),
+                source_guard: committed[0].source_guard,
                 account: AgentAccountScope::Anonymous,
                 origin: source,
                 sensitivity: SemanticSensitivity::Sensitive,

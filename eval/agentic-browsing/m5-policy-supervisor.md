@@ -84,22 +84,30 @@ browser action, model call, tool call, data transfer, cost, or native resource.
   scope in addition to exact run, context/document/cancellation generation,
   profile, account, canonical source origin, non-secret sensitivity, current
   account attestation, manifest/node lifetime, and mutable budget.
-- The semantic observation or bounded-read payload must have been encoded from
-  the exact supplied source. Its measured semantic input tokens plus bounded
-  envelope input, output, cost, and one operation are reserved before any
-  provider transport receives bytes. Consumed plus every pending reservation
-  is checked jointly against run and node budgets.
+- The semantic observation, exact diff, or bounded-read payload must have been
+  encoded from the exact supplied source. A diff additionally requires that
+  its exact baseline fingerprint is already committed in this policy; reused
+  observation/generation coordinates cannot stand in for a different
+  baseline. Its measured semantic input tokens plus bounded envelope input,
+  output, cost, and one operation are reserved before any provider transport
+  receives bytes. Consumed plus every pending reservation is checked jointly
+  against run and node budgets.
 - At most four prepared or delivered calls exist per run policy. Refusal or
   pre-delivery cancellation releases the complete reservation but never
   reopens its monotonic call ID. No provider, task, timer, queue, or worker is
   created by this functional core.
-- Taint is committed only when the exact opaque delivery acknowledgement or
-  read receipt matches the source guard retained at admission. Callers do not
-  resupply model-facing bytes, selectors, page JavaScript, DOM, or source facts
-  at this boundary, preventing post-transport source substitution.
+- Taint is committed only when the exact opaque observation acknowledgement,
+  baseline/current diff receipt, or read receipt matches the source guard
+  retained at admission. Callers do not resupply model-facing bytes, selectors,
+  page JavaScript, DOM, or source facts at this boundary, preventing
+  post-transport source substitution.
 - The content-free run-global taint ledger is keyed by exact source
   context/document/cancellation authority, observation identity/generation,
-  account, and canonical origin. It retains the oldest trusted
+  private source fingerprint, account, and canonical origin. Exact diff
+  admission transforms each committed per-origin reference union: retired
+  references are removed before current/add/rebase references are installed,
+  unchanged references persist, and same-origin subframes cannot reintroduce a
+  retired token. It retains the oldest trusted
   account-attestation time plus maximum sensitivity, worst trust, and the
   canonical union of opaque references actually committed to the model.
   Secret values remain mechanically absent; visible metadata of a redacted
@@ -612,7 +620,7 @@ browser action, model call, tool call, data transfer, cost, or native resource.
 Default crate tests exercise canonical order independence, canonical ULID
 round trips, redacted diagnostics, every collection/budget/lifetime ceiling,
 secret/read/same-endpoint/out-of-scope/widening/duplicate flow refusal, and
-plan-node identity/scope/budget/expiry inheritance. Ten additional policy tests
+plan-node identity/scope/budget/expiry inheritance. Policy tests
 execute real semantic observation/read encode, exact token admission, mutable
 reservation, committed delivery receipt, taint, cancellation, and provider
 settlement paths. Ten further policy tests execute real action bind/prepare,
@@ -626,8 +634,10 @@ sensitivity; guessed read references; absent/exact flow rules; pending model
 calls; four-effect and per-origin-write ceilings; duplicate action guards;
 distinct-origin concurrency and out-of-order settlement; capability
 `NeedsHuman`; stale dispatch state; action substitution;
-payload/receipt substitution; provider failure/overage; and redacted
-diagnostics. They allocate no native or provider resource and perform no I/O.
+payload/receipt substitution; exact diff-baseline absence/substitution;
+add/rebase/current-reference transformation; provider failure/overage; and
+redacted diagnostics. They allocate no native or provider resource and perform
+no I/O.
 Three delegation-topology tests additionally cover canonical order, exact
 manifest revision binding, the valid depth-two boundary, every malformed tree
 shape, the 64-node preflight ceiling, and parent widening through origin,

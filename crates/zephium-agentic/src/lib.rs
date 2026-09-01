@@ -241,8 +241,8 @@ pub use semantic_diff::{
     SemanticRetiredReferenceId, MAX_SEMANTIC_DIFF_ENTRIES,
 };
 pub use semantic_diff_model::{
-    encode_semantic_diff, SemanticDiffEncodingStats, SemanticDiffModelPayload, SemanticEncodedDiff,
-    SEMANTIC_DIFF_MODEL_SCHEMA_VERSION,
+    encode_semantic_diff, SemanticDiffDeliveryReceipt, SemanticDiffEncodingStats,
+    SemanticDiffModelPayload, SemanticEncodedDiff, SEMANTIC_DIFF_MODEL_SCHEMA_VERSION,
 };
 pub use semantic_extract::{
     extract_semantic_read, SemanticExtractedBoolean, SemanticExtractedField, SemanticExtractedText,

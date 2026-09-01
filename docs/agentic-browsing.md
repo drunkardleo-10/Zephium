@@ -326,6 +326,13 @@ After an action, return a semantic diff against the last acknowledged snapshot:
 - the evidence used to verify the intended effect;
 - a bounded amount of surrounding context.
 
+Diff admission is valid only when that exact baseline was already committed to
+model delivery. The model payload and terminal delivery proof bind the exact
+baseline/current fingerprint pair, not merely their public observation and
+generation coordinates. The policy derives current opaque-reference authority
+by retiring old references and installing add/rebase references over the exact
+committed baseline; it never accepts a caller-supplied replacement inventory.
+
 Internal stable IDs support diff computation but never become durable DOM
 identity. If a confident diff cannot be formed, return a fresh snapshot rather
 than an invented delta.

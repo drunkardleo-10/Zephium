@@ -18,6 +18,8 @@ const AGENTIC_EFFECT_POLICY: &str = "crates/zephium-agentic/src/agent_policy/eff
 const AGENTIC_AUDIT: &str = "crates/zephium-agentic/src/agent_audit.rs";
 const AGENTIC_METRICS: &str = "crates/zephium-agentic/src/agent_metrics.rs";
 const AGENTIC_PROGRESS_METRICS: &str = "crates/zephium-agentic/src/agent_progress_metrics.rs";
+const AGENTIC_SEMANTIC_DIFF: &str = "crates/zephium-agentic/src/semantic_diff.rs";
+const AGENTIC_SEMANTIC_DIFF_MODEL: &str = "crates/zephium-agentic/src/semantic_diff_model.rs";
 const AGENTIC_SUPERVISOR: &str = "crates/zephium-agentic/src/agent_supervisor.rs";
 const AGENTIC_SUPERVISOR_PROGRESS: &str =
     "crates/zephium-agentic/src/agent_supervisor/runtime/progress.rs";
@@ -75,6 +77,12 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         &read(repository.join(AGENTIC_PROVIDER_PRICING))?,
         &read(repository.join(AGENTIC_POLICY))?,
         &read(repository.join(PROVIDER_TRANSPORT_ROOT))?,
+    )?;
+    validate_semantic_diff_policy_contract(
+        &read(repository.join(AGENTIC_ROOT))?,
+        &read(repository.join(AGENTIC_SEMANTIC_DIFF))?,
+        &read(repository.join(AGENTIC_SEMANTIC_DIFF_MODEL))?,
+        &read(repository.join(AGENTIC_POLICY))?,
     )?;
     validate_progress_manifest_revision_contract(
         &read(repository.join(AGENTIC_POLICY))?,
@@ -673,6 +681,73 @@ fn validate_provider_transport_root(source: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_semantic_diff_policy_contract(
+    root: &str,
+    diff: &str,
+    model: &str,
+    policy: &str,
+) -> Result<(), String> {
+    if !compact(root).contains("SemanticDiffDeliveryReceipt") {
+        return Err("agentic root stopped exporting exact semantic-diff delivery proof".to_owned());
+    }
+
+    let diff = compact(diff);
+    for required in [
+        "baseline_guard:[u8;32]",
+        "current_fingerprint:SemanticObservationFingerprint",
+        "guard:[u8;32]",
+        "letbaseline_guard=acknowledgement.guard()",
+        "letguard=semantic_diff_guard(baseline_guard,current_fingerprint.digest())",
+        "fnsemantic_diff_guard(baseline_guard:[u8;32],current_guard:[u8;32])->[u8;32]",
+        "hasher.update(b\"ZEPHIUM-SEMANTIC-DIFF-1\\0\")",
+    ] {
+        if !diff.contains(required) {
+            return Err(format!(
+                "semantic diff lost exact baseline/current binding {required}"
+            ));
+        }
+    }
+
+    let model = compact(model);
+    for required in [
+        "pubstructSemanticDiffDeliveryReceipt",
+        "diff_guard:[u8;32]",
+        "pub(crate)fnmatches_diff(&self,diff:&SemanticDiff)->bool",
+        "self.diff_guard==diff.guard()&&self.current_fingerprint==*diff.current_fingerprint()",
+        "pubfnsettle_delivery_receipt(",
+        "diff_guard:self.diff_guard",
+    ] {
+        if !model.contains(required) {
+            return Err(format!(
+                "semantic diff model seam lost exact delivery proof {required}"
+            ));
+        }
+    }
+
+    let policy = compact(policy);
+    for required in [
+        "source_guard:[u8;32]",
+        "ModelInputKind::Diff",
+        "pubfnprepare_diff_input(",
+        "if!payload.matches_diff(diff)",
+        "cohort.source_guard==diff.baseline_guard()",
+        "source_guard:diff.current_guard()",
+        "fnretire_taint_reference(",
+        "fninsert_taint_reference(",
+        "source_guard:read.guard()",
+        "pubfncommit_diff_input(",
+        "self.commit_model_input(admission,ModelInputKind::Diff,receipt.guard())",
+        "hasher.update(candidate.source_guard)",
+    ] {
+        if !policy.contains(required) {
+            return Err(format!(
+                "agent policy lost exact semantic-diff authority {required}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_progress_manifest_revision_contract(
     policy: &str,
     effect_policy: &str,
@@ -1122,6 +1197,69 @@ mod tests {
         "#;
         validate_root(valid).expect("valid guard");
         assert!(validate_root("mod fixture_server;").is_err());
+    }
+
+    #[test]
+    fn semantic_diff_policy_requires_exact_baseline_and_delivery_proof() {
+        let root = "pub use semantic_diff_model::SemanticDiffDeliveryReceipt;";
+        let diff = r#"
+            struct SemanticDiff {
+                baseline_guard: [u8; 32],
+                current_fingerprint: SemanticObservationFingerprint,
+                guard: [u8; 32],
+            }
+            let baseline_guard = acknowledgement.guard();
+            let guard = semantic_diff_guard(baseline_guard, current_fingerprint.digest());
+            fn semantic_diff_guard(
+                baseline_guard: [u8; 32],
+                current_guard: [u8; 32]
+            ) -> [u8; 32] {
+                hasher.update(b"ZEPHIUM-SEMANTIC-DIFF-1\0");
+            }
+        "#;
+        let model = r#"
+            pub struct SemanticDiffDeliveryReceipt { diff_guard: [u8; 32] }
+            pub(crate) fn matches_diff(&self, diff: &SemanticDiff) -> bool {
+                self.diff_guard == diff.guard()
+                    && self.current_fingerprint == *diff.current_fingerprint()
+            }
+            pub fn settle_delivery_receipt() {
+                diff_guard: self.diff_guard,
+            }
+        "#;
+        let policy = r#"
+            struct AgentTaintCohort { source_guard: [u8; 32] }
+            ModelInputKind::Diff;
+            pub fn prepare_diff_input() {
+                if !payload.matches_diff(diff) {}
+                cohort.source_guard == diff.baseline_guard();
+                source_guard: diff.current_guard();
+                source_guard: read.guard();
+                hasher.update(candidate.source_guard);
+            }
+            fn retire_taint_reference() {}
+            fn insert_taint_reference() {}
+            pub fn commit_diff_input() {
+                self.commit_model_input(admission, ModelInputKind::Diff, receipt.guard())
+            }
+        "#;
+        validate_semantic_diff_policy_contract(root, diff, model, policy)
+            .expect("exact semantic-diff policy");
+        assert!(validate_semantic_diff_policy_contract(
+            root,
+            &diff.replace("baseline_guard: [u8; 32],", ""),
+            model,
+            policy,
+        )
+        .is_err());
+        assert!(validate_semantic_diff_policy_contract(
+            root,
+            diff,
+            model,
+            &policy.replace("cohort.source_guard == diff.baseline_guard();", ""),
+        )
+        .is_err());
+        assert!(validate_semantic_diff_policy_contract(root, diff, "", policy).is_err());
     }
 
     #[test]

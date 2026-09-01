@@ -3,7 +3,8 @@
 Status: bounded semantic identity, snapshot, opaque-reference, hostile wire
 decoder, progressive scopes, deterministic multi-frame assembly, compact model
 encoding/token-admission ports, acknowledged stable-id diffs, compact diff
-token admission, and the immutable bounded page-projection program implemented;
+token admission with exact baseline/current delivery proof, and the immutable
+bounded page-projection program implemented;
 native isolated-world installation, live-engine hostile qualification, and
 actual pinned provider token measurements pending.
 
@@ -141,10 +142,15 @@ have been instrumented or observed on either platform.
 - Diff bytes remain private until the selected tokenizer revision admits them
   under the same exact/provider-estimate quality rules as full observations.
   Normal exact and provider-estimate action budgets cap encoded bytes at 16 KiB
-  and measured tokens at 200. Committed diff delivery acknowledges the exact
-  current observation for the next baseline; refusal or cancellation cannot.
-  This is the production admission seam, not yet an actual provider/tokenizer
-  measurement claim.
+  and measured tokens at 200. Each admitted payload and committed-delivery
+  receipt is bound to a domain-separated digest of both the exact acknowledged
+  baseline fingerprint and exact current fingerprint; a different baseline
+  with reused public observation/generation coordinates cannot substitute its
+  payload or receipt. Committed delivery acknowledges the exact current
+  observation for the next baseline; refusal or cancellation cannot. Digests
+  and page content remain private and diagnostics-redacted. This is the
+  production admission seam, not yet an actual provider/tokenizer measurement
+  claim.
 - The native-to-isolated-world request is a separate 2 KiB maximum closed JSON
   grammar containing only protocol/invocation/snapshot generations, one fixed
   initial/region/subtree/table/frame/surrounding-text scope, an internal stable
@@ -254,8 +260,10 @@ generation changes, truncation, stable-key role reuse/loss, entry ceilings,
 unchanged-reference shifts and fan-out limits, compact diff determinism and
 escaping, current frame freshness, byte refusal without partial output,
 exact/estimated quality and revision admission, the 200-token target gate,
-commit-only next-baseline acknowledgement, and fresh-snapshot fallback without
-leaked page content. Runtime-invocation tests cover the sole compact initial
+commit-only next-baseline acknowledgement, exact baseline/current payload and
+receipt substitution refusal even when public coordinates match, and
+fresh-snapshot fallback without leaked page content. Runtime-invocation tests
+cover the sole compact initial
 shape, absence of URLs/selectors/scripts, stable-anchor diagnostic redaction,
 aggregate/per-frame budgets, exact anchor frame and generation joins, hostile
 invocation substitution, fixed faults, unknown-fault rejection, and response

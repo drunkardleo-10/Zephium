@@ -74,6 +74,7 @@ pub struct SemanticEncodedDiff {
     budget: SemanticModelEncodingBudget,
     stats: SemanticDiffEncodingStats,
     current_fingerprint: SemanticObservationFingerprint,
+    diff_guard: [u8; 32],
 }
 
 impl SemanticEncodedDiff {
@@ -107,6 +108,7 @@ impl SemanticEncodedDiff {
             stats: self.stats,
             measurement,
             current_fingerprint: self.current_fingerprint,
+            diff_guard: self.diff_guard,
         })
     }
 }
@@ -129,6 +131,43 @@ pub struct SemanticDiffModelPayload {
     stats: SemanticDiffEncodingStats,
     measurement: SemanticTokenMeasurement,
     current_fingerprint: SemanticObservationFingerprint,
+    diff_guard: [u8; 32],
+}
+
+/// Opaque proof that one exact semantic diff reached committed model delivery.
+///
+/// This binds both the acknowledged baseline and the exact current observation.
+/// It contains no page content and cannot authorize a model call by itself.
+#[derive(Clone, Eq, PartialEq)]
+pub struct SemanticDiffDeliveryReceipt {
+    acknowledgement: SemanticObservationAcknowledgement,
+    diff_guard: [u8; 32],
+}
+
+impl SemanticDiffDeliveryReceipt {
+    /// Exact current observation acknowledgement for the next diff baseline.
+    pub const fn acknowledgement(&self) -> &SemanticObservationAcknowledgement {
+        &self.acknowledgement
+    }
+
+    /// Consumes the diff proof and returns its current observation baseline.
+    pub fn into_acknowledgement(self) -> SemanticObservationAcknowledgement {
+        self.acknowledgement
+    }
+
+    pub(crate) const fn guard(&self) -> [u8; 32] {
+        self.diff_guard
+    }
+}
+
+impl fmt::Debug for SemanticDiffDeliveryReceipt {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SemanticDiffDeliveryReceipt")
+            .field("acknowledgement", &self.acknowledgement)
+            .field("diff_guard", &"[redacted]")
+            .finish()
+    }
 }
 
 impl SemanticDiffModelPayload {
@@ -145,6 +184,29 @@ impl SemanticDiffModelPayload {
     /// Admitted bounded token measurement and tokenizer revision.
     pub const fn token_measurement(&self) -> &SemanticTokenMeasurement {
         &self.measurement
+    }
+
+    pub(crate) fn matches_diff(&self, diff: &SemanticDiff) -> bool {
+        self.diff_guard == diff.guard() && self.current_fingerprint == *diff.current_fingerprint()
+    }
+
+    /// Settles delivery while retaining proof of the exact baseline/current diff.
+    pub fn settle_delivery_receipt(
+        self,
+        settlement: SemanticModelDeliverySettlement,
+    ) -> Result<SemanticDiffDeliveryReceipt, SemanticModelDeliveryError> {
+        match settlement {
+            SemanticModelDeliverySettlement::Committed => Ok(SemanticDiffDeliveryReceipt {
+                acknowledgement: SemanticObservationAcknowledgement::from_fingerprint(
+                    self.current_fingerprint,
+                ),
+                diff_guard: self.diff_guard,
+            }),
+            SemanticModelDeliverySettlement::Refused => Err(SemanticModelDeliveryError::Refused),
+            SemanticModelDeliverySettlement::Cancelled => {
+                Err(SemanticModelDeliveryError::Cancelled)
+            }
+        }
     }
 
     /// Settles transport of this exact token-admitted diff.
@@ -259,6 +321,7 @@ pub fn encode_semantic_diff(
         budget,
         stats,
         current_fingerprint: diff.current_fingerprint().clone(),
+        diff_guard: diff.guard(),
     })
 }
 
@@ -877,6 +940,81 @@ mod tests {
         assert!(encoded.content.contains("R f=f1 old=old:@a2 ref=@a3\n"));
         assert!(encoded.content.contains("R f=f1 old=old:@a3 ref=@a4\n"));
         assert_eq!(encoded.stats().reference_rebases(), 2);
+    }
+
+    #[test]
+    fn delivery_proof_binds_the_exact_baseline_and_current_pair() {
+        let context = context();
+        let actual_previous = observation(
+            context,
+            50,
+            61,
+            71,
+            json!([
+                {"k": 3001, "r": "document"},
+                {"k": 3002, "p": 0, "r": "button", "n": "Private current action", "o": 1}
+            ]),
+        );
+        let alternate_previous =
+            observation(context, 50, 61, 71, json!([{"k": 3001, "r": "document"}]));
+        let current = observation(
+            context,
+            51,
+            62,
+            72,
+            json!([
+                {"k": 3001, "r": "document"},
+                {"k": 3002, "p": 0, "r": "button", "n": "Private current action", "o": 1}
+            ]),
+        );
+        let exact_diff = match compute_semantic_diff(
+            &actual_previous,
+            &acknowledge(&actual_previous),
+            &current,
+            SemanticDiffBudget::ACTION,
+        ) {
+            SemanticDiffOutcome::Diff(diff) => diff,
+            SemanticDiffOutcome::FreshSnapshot(reason) => {
+                panic!("unexpected exact fresh snapshot: {reason:?}")
+            }
+        };
+        let alternate_diff = match compute_semantic_diff(
+            &alternate_previous,
+            &acknowledge(&alternate_previous),
+            &current,
+            SemanticDiffBudget::ACTION,
+        ) {
+            SemanticDiffOutcome::Diff(diff) => diff,
+            SemanticDiffOutcome::FreshSnapshot(reason) => {
+                panic!("unexpected alternate fresh snapshot: {reason:?}")
+            }
+        };
+        assert_ne!(exact_diff.guard(), alternate_diff.guard());
+
+        let exact_payload =
+            encode_semantic_diff(&exact_diff, SemanticModelEncodingBudget::ACTION_DIFF_EXACT)
+                .expect("encode exact")
+                .admit(&exact_counter(40), &revision())
+                .expect("admit exact");
+        assert!(exact_payload.matches_diff(&exact_diff));
+        let alternate_payload = encode_semantic_diff(
+            &alternate_diff,
+            SemanticModelEncodingBudget::ACTION_DIFF_EXACT,
+        )
+        .expect("encode alternate")
+        .admit(&exact_counter(40), &revision())
+        .expect("admit alternate");
+        assert!(!alternate_payload.matches_diff(&exact_diff));
+
+        let receipt = exact_payload
+            .settle_delivery_receipt(SemanticModelDeliverySettlement::Committed)
+            .expect("exact delivery");
+        assert_eq!(receipt.guard(), exact_diff.guard());
+        assert!(receipt.acknowledgement().matches(&current));
+        let debug = format!("{exact_diff:?} {receipt:?}");
+        assert!(!debug.contains("Private current action"));
+        assert!(!debug.contains("encoded-private"));
+        assert!(debug.contains("[redacted]"));
     }
 
     #[test]
