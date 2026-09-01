@@ -25,6 +25,7 @@ pub use effect::{
 
 use crate::semantic_diff::SemanticObservationFingerprint;
 use crate::semantic_diff_model::SemanticDiffDeliveryAuthority;
+use crate::semantic_screenshot::SemanticScreenshotDeliveryAuthority;
 use crate::{
     AgentAccountScope, AgentContextAccountBinding, AgentPlanLeaseId, AgentPlanNodeId,
     AgentPolicyInstant, AgentProviderPricedUsage, AgentProviderPricingAttribution, AgentRunBudget,
@@ -33,7 +34,7 @@ use crate::{
     SemanticModelPayload, SemanticObservation, SemanticObservationAcknowledgement,
     SemanticObservationGeneration, SemanticObservationId, SemanticOrigin,
     SemanticReadDeliveryReceipt, SemanticReadModelPayload, SemanticReadResult, SemanticReferenceId,
-    SemanticSensitivity, SemanticTrust,
+    SemanticScreenshotDeliveryReceipt, SemanticSensitivity, SemanticTrust,
 };
 
 /// Maximum model calls reserved or active in one run policy.
@@ -373,6 +374,7 @@ enum ModelInputKind {
     Observation,
     Diff,
     Read,
+    Screenshot,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1080,6 +1082,48 @@ impl AgentRunPolicy {
         )
     }
 
+    /// Reserves one exact whole-provider-input measurement for a visual result.
+    ///
+    /// This crate-private path accepts only a fixed provider draft holding the
+    /// exact move-only screenshot delivery authority. The original semantic
+    /// observation is rejoined so visual pixels cannot be rebound to another
+    /// context, generation, origin inventory, or policy call.
+    pub(crate) fn prepare_provider_screenshot_input(
+        &mut self,
+        request: AgentModelCallRequest,
+        expected: AgentModelCallExpectation,
+        observation: &SemanticObservation,
+        delivery: &SemanticScreenshotDeliveryAuthority,
+        structured_input_tokens: u64,
+    ) -> Result<AgentModelCallAdmission, AgentPolicyError> {
+        if request.id() != expected.call
+            || request.lease() != expected.lease
+            || self.manifest.id() != expected.manifest
+            || self
+                .lease_index(expected.lease)
+                .and_then(|index| self.leases.get(index))
+                .is_none_or(|lease| lease.binding.node() != expected.node)
+        {
+            return Err(AgentPolicyError::Authority);
+        }
+        if !delivery.matches_observation(observation) {
+            return Err(AgentPolicyError::PayloadMismatch);
+        }
+        let context = delivery.context();
+        let candidates = screenshot_taints(observation, request.account(), delivery.guard())?;
+        self.prepare_model_input(
+            request,
+            context,
+            ModelInputKind::Screenshot,
+            delivery.guard(),
+            candidates,
+            ModelInputTokenReservation {
+                measured: structured_input_tokens,
+                additional: 0,
+            },
+        )
+    }
+
     /// Commits exact observation taint after exact transport acknowledgement.
     pub fn commit_observation_input(
         &mut self,
@@ -1109,6 +1153,15 @@ impl AgentRunPolicy {
         receipt: &SemanticReadDeliveryReceipt,
     ) -> Result<AgentActiveModelCall, AgentPolicyError> {
         self.commit_model_input(admission, ModelInputKind::Read, receipt.guard())
+    }
+
+    /// Commits exact sensitive visual taint after transport disclosure.
+    pub fn commit_screenshot_input(
+        &mut self,
+        admission: AgentModelCallAdmission,
+        receipt: &SemanticScreenshotDeliveryReceipt,
+    ) -> Result<AgentActiveModelCall, AgentPolicyError> {
+        self.commit_model_input(admission, ModelInputKind::Screenshot, receipt.guard())
     }
 
     /// Releases a pre-delivery reservation after refusal or exact cancellation.
@@ -1697,6 +1750,44 @@ fn observation_taints(
     Ok(cohorts)
 }
 
+fn screenshot_taints(
+    observation: &SemanticObservation,
+    account: AgentContextAccountBinding,
+    source_guard: [u8; 32],
+) -> Result<Vec<AgentTaintCohort>, AgentPolicyError> {
+    let context = observation.request().context();
+    if account.context() != context || observation.frames().is_empty() {
+        return Err(AgentPolicyError::Authority);
+    }
+    let mut cohorts = Vec::with_capacity(observation.frames().len());
+    for frame in observation.frames() {
+        if frame.frame().context() != context {
+            return Err(AgentPolicyError::Authority);
+        }
+        merge_taint(
+            &mut cohorts,
+            AgentTaintCohort {
+                context,
+                observation: observation.request().id(),
+                observation_generation: observation.request().generation(),
+                source_guard,
+                account: account.account(),
+                origin: frame.frame().origin().clone(),
+                // Pixels can disclose canvas, image, video, and cross-frame
+                // information absent from the semantic projection. Known
+                // secrets were rejected before capture, but public taint can
+                // never be inferred from that negative check.
+                sensitivity: SemanticSensitivity::Sensitive,
+                trust: SemanticTrust::UntrustedPage,
+                attested_at: account.observed_at(),
+                // A screenshot is evidence, never opaque node authority.
+                references: Vec::new(),
+            },
+        );
+    }
+    Ok(cohorts)
+}
+
 fn diff_taints(
     diff: &SemanticDiff,
     account: AgentContextAccountBinding,
@@ -2049,6 +2140,7 @@ fn admission_guard(facts: AdmissionGuardFacts<'_>) -> [u8; 32] {
         ModelInputKind::Observation => 1,
         ModelInputKind::Diff => 2,
         ModelInputKind::Read => 3,
+        ModelInputKind::Screenshot => 4,
     }]);
     hash_context(&mut hasher, facts.context);
     hasher.update(facts.source_guard);
@@ -2113,6 +2205,7 @@ fn hash_context(hasher: &mut Sha256, context: ContextJoin) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::semantic_screenshot::admitted_test_screenshot;
     use crate::{
         compute_semantic_diff, decode_semantic_snapshot, encode_semantic_diff,
         encode_semantic_observation, encode_semantic_read, read_semantic_observation,
@@ -2122,13 +2215,14 @@ mod tests {
         AgentProviderContractError, AgentProviderDiffRequestDraft, AgentProviderEndpoint,
         AgentProviderInputEvidence, AgentProviderInputOutcome, AgentProviderKind,
         AgentProviderLocalInputTokenCounter, AgentProviderModelRevision, AgentProviderObjective,
-        AgentProviderRequestSettlement, AgentProviderStreamBudget, AgentRunManifestId,
-        AgentRunScope, ContextAutomationState, ContextCapabilities, ContextCapability, ContextId,
-        ContextIdentity, ContextKind, ContextOperationId, ContextRegistry, ContextRunId,
-        ContextSettlement, FrameGeneration, FrameId, SemanticActionBatch, SemanticActionBatchId,
-        SemanticActionFailure, SemanticActionIntent, SemanticActionProposal,
-        SemanticCaptureInstant, SemanticDecodeContext, SemanticDiffBudget, SemanticDiffOutcome,
-        SemanticEffectEvidence, SemanticFrameJoin, SemanticFrameTrust, SemanticInvocationId,
+        AgentProviderRequestSettlement, AgentProviderScreenshotRequestDraft,
+        AgentProviderStreamBudget, AgentRunManifestId, AgentRunScope, ContextAutomationState,
+        ContextCapabilities, ContextCapability, ContextId, ContextIdentity, ContextKind,
+        ContextOperationId, ContextRegistry, ContextRunId, ContextSettlement, FrameGeneration,
+        FrameId, SemanticActionBatch, SemanticActionBatchId, SemanticActionFailure,
+        SemanticActionIntent, SemanticActionProposal, SemanticCaptureInstant,
+        SemanticDecodeContext, SemanticDiffBudget, SemanticDiffOutcome, SemanticEffectEvidence,
+        SemanticFrameJoin, SemanticFrameTrust, SemanticInvocationId,
         SemanticModelDeliverySettlement, SemanticModelEncodingBudget, SemanticObservationAssembler,
         SemanticObservationBudget, SemanticObservationId, SemanticObservationRequest,
         SemanticPreparedAction, SemanticReadAuthority, SemanticReadBudget,
@@ -2290,6 +2384,92 @@ mod tests {
                        "b": {"x": 10, "y": 10, "w": 100, "h": 30}}),
             ],
         )
+    }
+
+    fn multi_origin_observation(context: ContextJoin, observation_id: u64) -> SemanticObservation {
+        fn frame_snapshot(
+            context: ContextJoin,
+            frame: FrameId,
+            origin: SemanticOrigin,
+            trust: SemanticFrameTrust,
+            invocation: u64,
+            nodes: Value,
+        ) -> SemanticSnapshot {
+            let frame_generation = if frame == FrameId::MAIN {
+                context.frame_generation()
+            } else {
+                FrameGeneration::new(frame.get()).expect("frame generation")
+            };
+            let join = SemanticFrameJoin::try_new(context, frame, frame_generation, origin, trust)
+                .expect("frame");
+            let bytes = serde_json::to_vec(&json!({
+                "v": SEMANTIC_WIRE_VERSION,
+                "i": invocation,
+                "g": invocation,
+                "c": "complete",
+                "n": nodes,
+            }))
+            .expect("wire");
+            decode_semantic_snapshot(
+                SemanticDecodeContext::new(
+                    SemanticInvocationId::new(invocation).expect("invocation"),
+                    join,
+                    SemanticSnapshotGeneration::new(invocation).expect("snapshot"),
+                ),
+                &bytes,
+            )
+            .expect("snapshot")
+        }
+
+        let main = frame_snapshot(
+            context,
+            FrameId::MAIN,
+            origin("visual-main"),
+            SemanticFrameTrust::SameOrigin,
+            observation_id + 10,
+            json!([
+                {"k": 1, "r": "document", "o": 16},
+                {"k": 2, "p": 0, "r": "frame_boundary"},
+                {"k": 3, "p": 0, "r": "frame_boundary"}
+            ]),
+        );
+        let first_boundary = main.nodes()[1].reference();
+        let second_boundary = main.nodes()[2].reference();
+        let request = SemanticObservationRequest::initial(
+            SemanticObservationId::new(observation_id).expect("observation"),
+            context,
+            SemanticObservationBudget::try_new(16, 8_192, 3).expect("budget"),
+        );
+        let mut assembler = SemanticObservationAssembler::new(request, main).expect("assembler");
+        assembler
+            .attach_frame(
+                FrameId::MAIN,
+                first_boundary,
+                frame_snapshot(
+                    context,
+                    FrameId::new(2).expect("child frame"),
+                    origin("visual-child-a"),
+                    SemanticFrameTrust::CrossOriginIsolated,
+                    observation_id + 20,
+                    json!([{"k": 1, "r": "paragraph", "t": "child a"}]),
+                ),
+            )
+            .expect("first child");
+        assembler
+            .attach_frame(
+                FrameId::MAIN,
+                second_boundary,
+                frame_snapshot(
+                    context,
+                    FrameId::new(3).expect("child frame"),
+                    origin("visual-child-b"),
+                    SemanticFrameTrust::CrossOriginIsolated,
+                    observation_id + 30,
+                    json!([{"k": 1, "r": "paragraph", "t": "child b"}]),
+                ),
+            )
+            .expect("second child");
+        assembler.finish().expect("multi-origin observation")
     }
 
     fn multi_actionable_observation(
@@ -2753,6 +2933,79 @@ mod tests {
         policy
             .settle_model_call(active, AgentModelCallSettlement::Completed, 10, 0, 0)
             .expect("model settlement");
+    }
+
+    fn prepare_openai_screenshot_result(
+        fixture: &mut PolicyFixture,
+        binding: AgentContextAccountBinding,
+        observation: &SemanticObservation,
+        objective: &AgentProviderObjective,
+        config: &AgentProviderCallConfig,
+        visual: (u64, u8, u32),
+    ) -> crate::AgentPreparedScreenshotRequest {
+        let (screenshot_id, pixel, structured_tokens) = visual;
+        let initial = AgentPreparedObservationRequest::try_openai(
+            &mut fixture.policy,
+            call_request(1, fixture.lease, binding, 15, 20, 100, NOW),
+            observation,
+            observation_payload(observation, 50),
+            objective,
+            config.clone(),
+        )
+        .expect("initial visual request");
+        let committed = initial
+            .into_transport_input()
+            .commit(&mut fixture.policy)
+            .expect("initial visual commit");
+        let (initial_request, input, continuation) = committed.into_parts();
+        let (active, evidence) = input.into_parts();
+        let acknowledgement = evidence
+            .observation_acknowledgement()
+            .expect("visual baseline")
+            .clone();
+        fixture
+            .policy
+            .settle_model_call(active, AgentModelCallSettlement::Completed, 65, 4, 80)
+            .expect("initial visual settlement");
+
+        let tool = crate::AgentBrowserToolCall::decode_openai(
+            initial_request.call(),
+            "fc_policy_screenshot_1".to_owned(),
+            "call_policy_screenshot_1".to_owned(),
+            "screenshot",
+            "{}".to_owned(),
+        )
+        .expect("screenshot tool");
+        let completion = crate::AgentProviderCompletion::new(
+            initial_request.call(),
+            crate::AgentProviderStopReason::ToolCalls,
+            crate::AgentProviderUsage::try_new(65, 4, 0, 0, 0).expect("usage"),
+            crate::AgentProviderStreamStats::new(200, 8, 0, 1, 2),
+            true,
+        );
+        let continuation = continuation
+            .expect("visual continuation seed")
+            .join_terminal_tool(completion, tool.into_continuation_parts().0)
+            .expect("visual terminal join");
+        let screenshot =
+            admitted_test_screenshot(observation, &acknowledgement, screenshot_id, pixel);
+        let visual_request = call_request(2, fixture.lease, binding, 500, 20, 100, NOW);
+        let bound = continuation
+            .bind_screenshot_request(visual_request, config, screenshot)
+            .expect("bound screenshot result");
+        AgentProviderScreenshotRequestDraft::try_new(bound)
+            .expect("fixed screenshot draft")
+            .try_prepare(
+                &mut fixture.policy,
+                visual_request,
+                observation,
+                &FixedProviderInputCounter {
+                    revision: config.tokenizer().clone(),
+                    tokens: structured_tokens,
+                    quality: SemanticTokenCountQuality::ExactLocal,
+                },
+            )
+            .expect("prepared screenshot result")
     }
 
     fn effect_request(
@@ -3565,6 +3818,247 @@ mod tests {
         ));
         assert_eq!(fixture.policy.pending_model_calls(), 0);
         assert_eq!(fixture.policy.taints().len(), 2);
+    }
+
+    #[test]
+    fn screenshot_taint_covers_every_observed_frame_without_reference_authority() {
+        let context = make_context(9_257, 9_258, 9_259);
+        let observation = multi_origin_observation(context, 1);
+        let cohorts = screenshot_taints(&observation, account(context, NOW - 1), [0xa5; 32])
+            .expect("screenshot taints");
+        assert_eq!(cohorts.len(), 3);
+        assert_eq!(
+            cohorts
+                .iter()
+                .map(|cohort| cohort.origin().clone())
+                .collect::<Vec<_>>(),
+            vec![
+                origin("visual-main"),
+                origin("visual-child-a"),
+                origin("visual-child-b"),
+            ]
+        );
+        assert!(cohorts.iter().all(|cohort| {
+            cohort.context() == context
+                && cohort.observation() == observation.request().id()
+                && cohort.sensitivity() == SemanticSensitivity::Sensitive
+                && cohort.trust() == SemanticTrust::UntrustedPage
+                && cohort.reference_count() == 0
+        }));
+    }
+
+    #[test]
+    fn screenshot_commit_seals_on_exact_pixel_receipt_substitution() {
+        let source = origin("screenshot-receipt");
+        let context = make_context(9_277, 9_278, 9_279);
+        let observation = actionable_observation(context, source.clone(), 1);
+        let acknowledgement = observation_payload(&observation, 10)
+            .settle_delivery(SemanticModelDeliverySettlement::Committed)
+            .expect("acknowledgement");
+        let first = admitted_test_screenshot(&observation, &acknowledgement, 81, 0x11);
+        let second = admitted_test_screenshot(&observation, &acknowledgement, 82, 0x22);
+        let (_, _, first_delivery) = first.into_provider_parts();
+        let (_, _, second_delivery) = second.into_provider_parts();
+        let mut fixture = policy_fixture(
+            9_277,
+            9_278,
+            source,
+            SemanticSensitivity::Sensitive,
+            &[SemanticEffectClass::Read],
+            run_budget(10, 1_000, 10_000),
+        );
+        let request = call_request(1, fixture.lease, account(context, NOW - 1), 10, 0, 0, NOW);
+        let manifest = fixture.policy.manifest().id();
+        let admission = fixture
+            .policy
+            .prepare_provider_screenshot_input(
+                request,
+                AgentModelCallExpectation::new(
+                    manifest,
+                    request.id(),
+                    fixture.lease,
+                    AgentPlanNodeId::from_raw(1),
+                ),
+                &observation,
+                &first_delivery,
+                10,
+            )
+            .expect("screenshot admission");
+        let substituted = second_delivery.commit();
+        assert!(matches!(
+            fixture
+                .policy
+                .commit_screenshot_input(admission, &substituted),
+            Err(AgentPolicyError::AdmissionMismatch)
+        ));
+        assert!(fixture.policy.is_sealed());
+        assert!(fixture.policy.taints().is_empty());
+    }
+
+    #[test]
+    fn screenshot_result_counts_whole_body_commits_sensitive_zero_reference_taint_once() {
+        let source = origin("provider-screenshot-request");
+        let context = make_context(9_307, 9_308, 9_309);
+        let observation = actionable_observation(context, source.clone(), 1);
+        let selected = tokenizer();
+        let config = provider_config(selected.clone(), 10, 20);
+        let objective = AgentProviderObjective::try_admit(
+            "Inspect the visible page state".to_owned(),
+            &FixedCounter {
+                revision: selected.clone(),
+                tokens: 5,
+            },
+            &selected,
+        )
+        .expect("objective");
+        let binding = account(context, NOW - 1);
+        let visual_request =
+            call_request(2, AgentPlanLeaseId::from_raw(1), binding, 500, 20, 100, NOW);
+        let provider_count = SemanticTokenMeasurement::try_new(
+            selected.clone(),
+            120,
+            SemanticTokenCountQuality::ProviderExact,
+        )
+        .expect("provider count");
+        assert_eq!(
+            config
+                .validate_screenshot_request(visual_request, &provider_count)
+                .expect_err("visual request requires local whole-body counting"),
+            AgentProviderContractError::InputTokenQuality
+        );
+        let oversized = SemanticTokenMeasurement::try_new(
+            selected.clone(),
+            501,
+            SemanticTokenCountQuality::ExactLocal,
+        )
+        .expect("oversized local count");
+        assert_eq!(
+            config
+                .validate_screenshot_request(visual_request, &oversized)
+                .expect_err("whole visual body exceeds its exact authorization"),
+            AgentProviderContractError::AdmissionBudget
+        );
+
+        let mut fixture = policy_fixture(
+            9_307,
+            9_308,
+            source.clone(),
+            SemanticSensitivity::Sensitive,
+            &[SemanticEffectClass::Read],
+            run_budget(10, 5_000, 10_000),
+        );
+        let prepared = prepare_openai_screenshot_result(
+            &mut fixture,
+            binding,
+            &observation,
+            &objective,
+            &config,
+            (71, 0x33, 120),
+        );
+        assert_eq!(prepared.structured_input_measurement().tokens(), 120);
+        assert_eq!(
+            prepared.structured_input_measurement().quality(),
+            SemanticTokenCountQuality::ExactLocal
+        );
+        assert!(prepared.continuation_transcript_bytes() > 0);
+        assert!(
+            prepared.continuation_transcript_bytes()
+                <= crate::MAX_AGENT_PROVIDER_SCREENSHOT_TRANSCRIPT_BYTES
+        );
+        assert_eq!(fixture.policy.pending_model_calls(), 1);
+        assert_eq!(fixture.policy.taints().len(), 1);
+        assert_eq!(fixture.policy.accounting().reserved_model_tokens(), 140);
+        let prepared_debug = format!("{prepared:?}");
+        assert!(!prepared_debug.contains("provider-screenshot-request"));
+        assert!(!prepared_debug.contains("call_policy_screenshot_1"));
+        assert!(prepared_debug.contains("[redacted]"));
+
+        let committed = prepared
+            .into_transport_input()
+            .commit(&mut fixture.policy)
+            .expect("screenshot transport commit");
+        assert_eq!(committed.continuation_transcript_bytes(), None);
+        let receipt = committed
+            .input_evidence()
+            .screenshot_receipt()
+            .expect("screenshot evidence");
+        assert_eq!(receipt.id().get(), 71);
+        assert_eq!(receipt.observation(), observation.request().id());
+        assert_eq!(
+            receipt.observation_generation(),
+            observation.request().generation()
+        );
+        assert_eq!(receipt.context(), context);
+        assert_eq!(receipt.captured_at().millis(), 1_200);
+        assert!(committed
+            .input_evidence()
+            .observation_acknowledgement()
+            .is_none());
+        assert!(committed.input_evidence().diff_receipt().is_none());
+        assert!(committed.input_evidence().read_receipt().is_none());
+        assert_eq!(fixture.policy.taints().len(), 2);
+        let visual_taint = fixture
+            .policy
+            .taints()
+            .iter()
+            .find(|taint| taint.reference_count() == 0)
+            .expect("zero-reference screenshot taint");
+        assert_eq!(visual_taint.context(), context);
+        assert_eq!(visual_taint.origin(), &source);
+        assert_eq!(visual_taint.sensitivity(), SemanticSensitivity::Sensitive);
+        assert_eq!(visual_taint.trust(), SemanticTrust::UntrustedPage);
+        assert_eq!(visual_taint.account(), AgentAccountScope::Anonymous);
+        let (_, input, continuation) = committed.into_parts();
+        assert!(
+            continuation.is_none(),
+            "visual pixels must never enter replay"
+        );
+        let (active, evidence) = input.into_parts();
+        assert!(matches!(
+            evidence,
+            AgentProviderInputEvidence::Screenshot(_)
+        ));
+        fixture
+            .policy
+            .settle_model_call(active, AgentModelCallSettlement::Completed, 120, 4, 80)
+            .expect("screenshot provider settlement");
+        assert_eq!(fixture.policy.pending_model_calls(), 0);
+
+        let cancelled_source = origin("provider-screenshot-cancelled");
+        let cancelled_context = make_context(9_407, 9_408, 9_409);
+        let cancelled_observation =
+            actionable_observation(cancelled_context, cancelled_source.clone(), 1);
+        let cancelled_binding = account(cancelled_context, NOW - 1);
+        let mut cancelled = policy_fixture(
+            9_407,
+            9_408,
+            cancelled_source,
+            SemanticSensitivity::Sensitive,
+            &[SemanticEffectClass::Read],
+            run_budget(10, 5_000, 10_000),
+        );
+        let prepared = prepare_openai_screenshot_result(
+            &mut cancelled,
+            cancelled_binding,
+            &cancelled_observation,
+            &objective,
+            &config,
+            (72, 0x44, 120),
+        );
+        assert_eq!(cancelled.policy.pending_model_calls(), 1);
+        assert_eq!(cancelled.policy.taints().len(), 1);
+        assert!(matches!(
+            prepared
+                .settle(
+                    &mut cancelled.policy,
+                    AgentProviderRequestSettlement::Cancelled
+                )
+                .expect("visual cancellation"),
+            AgentProviderInputOutcome::Cancelled
+        ));
+        assert_eq!(cancelled.policy.pending_model_calls(), 0);
+        assert_eq!(cancelled.policy.taints().len(), 1);
+        assert_eq!(cancelled.policy.accounting().reserved_model_tokens(), 0);
     }
 
     #[test]

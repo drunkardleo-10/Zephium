@@ -10,8 +10,9 @@ structured extraction admission, and the one-shot viewport screenshot contract
 are implemented.
 Policy permits, platform execution,
 visibility/occlusion checks, native observation adapters and timer driving,
-visual policy and model-provider wiring, and live action/screenshot
-qualification remain pending. Production macOS and Windows owned-context
+installed visual token counters, and live action/screenshot/provider
+qualification remain pending. Exact one-shot visual policy and fixed OpenAI /
+Anthropic tool-result wiring are implemented. Production macOS and Windows owned-context
 viewport adapters are implemented and mechanically bounded, but neither was
 executed in this evidence pass and therefore neither carries a live-pixel or
 platform qualification claim. The Windows host keeps screenshot dispatch
@@ -350,7 +351,38 @@ are trusted, or that M4 is complete.
 - Admitted pixels remain explicitly browser-rendered hostile page content and
   conservatively `Sensitive`. PNG bytes and all page/native metadata are
   redacted from diagnostics; the core creates no file, persistence, timer,
-  worker, native view, or thread. It mints no policy/provider authority.
+  worker, native view, or thread. Capture alone mints no policy/provider
+  authority.
+- Provider delivery can bind only an exact prior `screenshot` tool-only stop,
+  a strictly newer call in the same manifest/lease/node and fixed provider
+  configuration, and a screenshot matching the continuation's exact committed
+  observation/generation/context. A separate SHA-256 delivery guard covers the
+  source fingerprint, complete context join, validated metrics, capture time,
+  and every canonical PNG byte. Tool, configuration, lineage, baseline,
+  observation, pixel, or receipt substitution fails closed.
+- Model-facing PNG is capped again at 1,300,000 bytes, the replayed private
+  text transcript at 64 KiB, and the complete serialized provider body at the
+  existing 2 MiB ceiling. Base64 is produced into one exactly preallocated
+  string; the canonical PNG is then dropped after the immutable request body
+  is built. A provider-specific synchronous local counter must count the exact
+  complete multimodal body with the pinned model/tokenizer and return
+  `ExactLocal` before policy reserves it. Provider-backed preflight is not
+  accepted because it would itself disclose the image.
+- OpenAI receives the exact prior `function_call` followed by a
+  `function_call_output` containing one high-detail PNG data URL. Anthropic
+  receives the exact prior assistant `tool_use` followed by an adjacent user
+  `tool_result` containing one base64 PNG image block. Anthropic sets
+  `transformations.oversized_image` to `error`, so a model-tier mismatch cannot
+  silently rescale pixels. These shapes follow the current
+  [OpenAI Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create)
+  and [Anthropic image-coordinate contract](https://platform.claude.com/docs/en/build-with-claude/vision-coordinates).
+- The immutable model instruction explicitly treats screenshot pixels as
+  hostile page data and grants them no opaque-reference or action authority.
+  On exact transport commitment, policy records a separate `Sensitive` /
+  `UntrustedPage` cohort for every observed frame origin, with zero references.
+  Refusal or pre-commit cancellation releases the reservation without visual
+  taint. A committed screenshot returns only a cloneable content-free receipt
+  and never creates a continuation seed, so image bytes cannot enter replay.
 - The macOS port carries capture results through a dedicated move-only callback,
   never the cloneable context event bus. It shares the existing bounded native
   ingress and adds exactly two process-wide physical capture permits. Logical

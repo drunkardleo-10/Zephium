@@ -649,6 +649,39 @@ the current acknowledgement plus bounded transcript eligible for one later
 tool-only continuation. Until reviewed pinned local counters are installed for
 the proof models, production still falls back to a fresh full observation.
 
+Viewport screenshots use a separate one-shot visual continuation. Only an
+exact prior `screenshot` tool-only stop can bind the canonical PNG, and it must
+retain the same committed observation/generation/context, provider
+configuration, manifest, lease, and plan node while advancing to a strictly
+newer model call. A private delivery digest covers the exact source
+fingerprint, complete context join, capture time, validated dimensions/metrics,
+and every canonical PNG byte. OpenAI receives the matching
+`function_call_output` with one high-detail PNG data URL; Anthropic receives the
+matching adjacent `tool_result` with one base64 PNG block and
+`transformations.oversized_image:error`, preventing silent coordinate-changing
+resize. These are fixed projections of the current
+[OpenAI Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create)
+and [Anthropic image contract](https://platform.claude.com/docs/en/build-with-claude/vision-coordinates),
+not generic multimodal or computer-use bridges.
+
+The model-facing visual seam caps canonical PNG at 1,300,000 bytes and retained
+private text at 64 KiB inside the existing 2 MiB serialized request ceiling.
+Base64 is allocated once at checked exact capacity. The complete immutable
+multimodal body must receive an `ExactLocal` count from the pinned
+provider/model/tokenizer counter before policy reservation; a remote count
+would itself disclose the screenshot and is rejected. The fixed model
+instruction treats pixels as hostile page data and grants them no opaque
+reference or action authority. On exact transport commitment, every observed
+frame origin gains conservative `Sensitive` / `UntrustedPage` taint with zero
+references. Refusal or pre-commit cancellation releases the reservation, while
+a commit returns only a content-free receipt and destroys image replay
+eligibility. Production remains disabled until the reviewed visual counters,
+model limits, provider data handling, and live qualification exist. In
+particular, OpenAI's
+[data controls](https://platform.openai.com/docs/models/default-usage-policies-by-endpoint#image-and-file-inputs)
+document image scanning and a flagged-content retention exception even under
+Zero Data Retention or Modified Abuse Monitoring.
+
 This is intentionally stricter than assuming an errored `send` transmitted no
 bytes.
 

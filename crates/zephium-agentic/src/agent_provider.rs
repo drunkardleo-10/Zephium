@@ -22,8 +22,9 @@ use anthropic::AnthropicMessagesStreamDecoder;
 use openai::OpenAiResponsesStreamDecoder;
 
 pub use continuation::{
-    AgentProviderBoundDiffContinuation, AgentProviderContinuation, AgentProviderContinuationError,
-    AgentProviderContinuationSeed, MAX_AGENT_PROVIDER_CONTINUATION_INITIAL_OBSERVATION_BYTES,
+    AgentProviderBoundDiffContinuation, AgentProviderBoundScreenshotContinuation,
+    AgentProviderContinuation, AgentProviderContinuationError, AgentProviderContinuationSeed,
+    MAX_AGENT_PROVIDER_CONTINUATION_INITIAL_OBSERVATION_BYTES,
     MAX_AGENT_PROVIDER_CONTINUATION_TRANSCRIPT_BYTES, MAX_AGENT_PROVIDER_CONTINUATION_TURNS,
 };
 pub use pricing::{
@@ -41,13 +42,15 @@ use crate::{
 
 pub use request::{
     AgentCommittedProviderInput, AgentCommittedProviderRequest, AgentPreparedDiffRequest,
-    AgentPreparedObservationRequest, AgentPreparedReadRequest, AgentProviderDiffRequestDraft,
-    AgentProviderEndpoint, AgentProviderInputEvidence, AgentProviderInputOutcome,
-    AgentProviderLocalInputTokenCounter, AgentProviderObjective, AgentProviderObjectiveError,
-    AgentProviderRequest, AgentProviderRequestError, AgentProviderRequestSettlement,
+    AgentPreparedObservationRequest, AgentPreparedReadRequest, AgentPreparedScreenshotRequest,
+    AgentProviderDiffRequestDraft, AgentProviderEndpoint, AgentProviderInputEvidence,
+    AgentProviderInputOutcome, AgentProviderLocalInputTokenCounter, AgentProviderObjective,
+    AgentProviderObjectiveError, AgentProviderRequest, AgentProviderRequestError,
+    AgentProviderRequestSettlement, AgentProviderScreenshotRequestDraft,
     AgentProviderTransportInput, MAX_AGENT_BROWSER_NAVIGATION_URL_BYTES,
     MAX_AGENT_PROVIDER_OBJECTIVE_BYTES, MAX_AGENT_PROVIDER_OBJECTIVE_TOKENS,
-    MAX_AGENT_PROVIDER_REQUEST_BYTES,
+    MAX_AGENT_PROVIDER_REQUEST_BYTES, MAX_AGENT_PROVIDER_SCREENSHOT_PNG_BYTES,
+    MAX_AGENT_PROVIDER_SCREENSHOT_TRANSCRIPT_BYTES,
 };
 pub use tool::{
     AgentBrowserActProposal, AgentBrowserHumanReason, AgentBrowserScopeProposal,
@@ -481,6 +484,28 @@ impl AgentProviderCallConfig {
         if u64::from(self.fixed_input_tokens)
             > u64::from(request.budget().additional_input_tokens())
             || u64::from(structured_input.tokens()) > allowed_input_tokens
+            || u64::from(self.max_output_tokens) > u64::from(request.budget().output_tokens())
+            || u64::from(structured_input.tokens()) > self.pricing.max_input_tokens()
+        {
+            return Err(AgentProviderContractError::AdmissionBudget);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_screenshot_request(
+        &self,
+        request: AgentModelCallRequest,
+        structured_input: &SemanticTokenMeasurement,
+    ) -> Result<(), AgentProviderContractError> {
+        if structured_input.revision() != &self.tokenizer {
+            return Err(AgentProviderContractError::TokenizerRevision);
+        }
+        if structured_input.quality() != crate::SemanticTokenCountQuality::ExactLocal {
+            return Err(AgentProviderContractError::InputTokenQuality);
+        }
+        let authorized_input_tokens = u64::from(request.budget().additional_input_tokens());
+        if u64::from(self.fixed_input_tokens) > authorized_input_tokens
+            || u64::from(structured_input.tokens()) > authorized_input_tokens
             || u64::from(self.max_output_tokens) > u64::from(request.budget().output_tokens())
             || u64::from(structured_input.tokens()) > self.pricing.max_input_tokens()
         {

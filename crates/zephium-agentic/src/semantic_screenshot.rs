@@ -193,6 +193,7 @@ pub struct SemanticScreenshotRequest {
     requested_at: SemanticCaptureInstant,
     deadline: SemanticCaptureInstant,
     budget: SemanticScreenshotBudget,
+    source_guard: [u8; 32],
     guard: [u8; 32],
 }
 
@@ -253,6 +254,7 @@ impl SemanticScreenshotRequest {
             requested_at: self.requested_at,
             deadline: self.deadline,
             budget: self.budget,
+            source_guard: self.source_guard,
             guard: self.guard,
         };
         let native = SemanticScreenshotNativeRequest {
@@ -282,6 +284,7 @@ impl fmt::Debug for SemanticScreenshotRequest {
             .field("requested_at", &self.requested_at)
             .field("deadline", &self.deadline)
             .field("budget", &self.budget)
+            .field("source_guard", &"[redacted]")
             .field("guard", &"[redacted]")
             .finish()
     }
@@ -355,6 +358,7 @@ pub fn prepare_semantic_screenshot(
         requested_at,
         deadline,
         budget,
+        source_guard: fingerprint.digest(),
         guard,
     })
 }
@@ -395,6 +399,7 @@ pub struct SemanticScreenshotPending {
     requested_at: SemanticCaptureInstant,
     deadline: SemanticCaptureInstant,
     budget: SemanticScreenshotBudget,
+    source_guard: [u8; 32],
     guard: [u8; 32],
 }
 
@@ -417,6 +422,7 @@ impl fmt::Debug for SemanticScreenshotPending {
             .field("context", &self.context)
             .field("deadline", &self.deadline)
             .field("budget", &self.budget)
+            .field("source_guard", &"[redacted]")
             .field("guard", &"[redacted]")
             .finish()
     }
@@ -845,6 +851,7 @@ pub struct SemanticScreenshot {
     context: ContextJoin,
     captured_at: SemanticCaptureInstant,
     stats: SemanticScreenshotStats,
+    source_guard: [u8; 32],
     png: Vec<u8>,
 }
 
@@ -903,6 +910,27 @@ impl SemanticScreenshot {
     pub fn into_png(self) -> Vec<u8> {
         self.png
     }
+
+    pub(crate) fn into_provider_parts(
+        self,
+    ) -> (
+        Vec<u8>,
+        SemanticScreenshotStats,
+        SemanticScreenshotDeliveryAuthority,
+    ) {
+        let guard = screenshot_delivery_guard(&self);
+        let authority = SemanticScreenshotDeliveryAuthority {
+            id: self.id,
+            scope: self.scope,
+            observation: self.observation,
+            observation_generation: self.observation_generation,
+            context: self.context,
+            captured_at: self.captured_at,
+            source_guard: self.source_guard,
+            guard,
+        };
+        (self.png, self.stats, authority)
+    }
 }
 
 impl fmt::Debug for SemanticScreenshot {
@@ -918,9 +946,252 @@ impl fmt::Debug for SemanticScreenshot {
             .field("sensitivity", &SemanticSensitivity::Sensitive)
             .field("trust", &SemanticScreenshotTrust::BrowserRenderedPage)
             .field("stats", &self.stats)
+            .field("source_guard", &"[redacted]")
             .field("png", &"[redacted]")
             .finish()
     }
+}
+
+/// Content-free exact screenshot proof retained until provider commitment.
+///
+/// The authority is crate-private because only the fixed provider codec may
+/// hold image disclosure authority before transport commitment.
+#[must_use]
+pub(crate) struct SemanticScreenshotDeliveryAuthority {
+    id: SemanticScreenshotRequestId,
+    scope: SemanticScreenshotScope,
+    observation: SemanticObservationId,
+    observation_generation: SemanticObservationGeneration,
+    context: ContextJoin,
+    captured_at: SemanticCaptureInstant,
+    source_guard: [u8; 32],
+    guard: [u8; 32],
+}
+
+impl SemanticScreenshotDeliveryAuthority {
+    pub(crate) fn matches_observation(&self, observation: &SemanticObservation) -> bool {
+        self.observation == observation.request().id()
+            && self.observation_generation == observation.request().generation()
+            && self.context == observation.request().context()
+            && self.source_guard
+                == SemanticObservationFingerprint::from_observation(observation).digest()
+    }
+
+    pub(crate) const fn context(&self) -> ContextJoin {
+        self.context
+    }
+
+    pub(crate) const fn guard(&self) -> [u8; 32] {
+        self.guard
+    }
+
+    pub(crate) fn commit(self) -> SemanticScreenshotDeliveryReceipt {
+        SemanticScreenshotDeliveryReceipt {
+            id: self.id,
+            scope: self.scope,
+            observation: self.observation,
+            observation_generation: self.observation_generation,
+            context: self.context,
+            captured_at: self.captured_at,
+            guard: self.guard,
+        }
+    }
+}
+
+impl fmt::Debug for SemanticScreenshotDeliveryAuthority {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SemanticScreenshotDeliveryAuthority")
+            .field("id", &self.id)
+            .field("scope", &self.scope)
+            .field("observation", &self.observation)
+            .field("observation_generation", &self.observation_generation)
+            .field("context", &self.context)
+            .field("captured_at", &self.captured_at)
+            .field("source_guard", &"[redacted]")
+            .field("guard", &"[redacted]")
+            .finish()
+    }
+}
+
+/// Content-free proof that one exact canonical screenshot reached a provider.
+///
+/// This receipt cannot recreate image bytes, grant browser authority, or seed
+/// semantic references. It exists only for exact policy taint commitment and
+/// later audit correlation.
+#[derive(Clone, Eq, PartialEq)]
+pub struct SemanticScreenshotDeliveryReceipt {
+    id: SemanticScreenshotRequestId,
+    scope: SemanticScreenshotScope,
+    observation: SemanticObservationId,
+    observation_generation: SemanticObservationGeneration,
+    context: ContextJoin,
+    captured_at: SemanticCaptureInstant,
+    guard: [u8; 32],
+}
+
+impl SemanticScreenshotDeliveryReceipt {
+    /// Exact screenshot request delivered.
+    pub const fn id(&self) -> SemanticScreenshotRequestId {
+        self.id
+    }
+
+    /// Fixed admitted visual scope.
+    pub const fn scope(&self) -> SemanticScreenshotScope {
+        self.scope
+    }
+
+    /// Exact semantic observation that authorized capture.
+    pub const fn observation(&self) -> SemanticObservationId {
+        self.observation
+    }
+
+    /// Exact progressive source generation.
+    pub const fn observation_generation(&self) -> SemanticObservationGeneration {
+        self.observation_generation
+    }
+
+    /// Exact context/document/cancellation authority at capture.
+    pub const fn context(&self) -> ContextJoin {
+        self.context
+    }
+
+    /// Trusted-shell capture completion time.
+    pub const fn captured_at(&self) -> SemanticCaptureInstant {
+        self.captured_at
+    }
+
+    pub(crate) const fn guard(&self) -> [u8; 32] {
+        self.guard
+    }
+}
+
+impl fmt::Debug for SemanticScreenshotDeliveryReceipt {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SemanticScreenshotDeliveryReceipt")
+            .field("id", &self.id)
+            .field("scope", &self.scope)
+            .field("observation", &self.observation)
+            .field("observation_generation", &self.observation_generation)
+            .field("context", &self.context)
+            .field("captured_at", &self.captured_at)
+            .field("guard", &"[redacted]")
+            .finish()
+    }
+}
+
+fn screenshot_delivery_guard(screenshot: &SemanticScreenshot) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"zephium.semantic-screenshot-delivery.v1\0");
+    hasher.update(screenshot.id.get().to_be_bytes());
+    hasher.update([match screenshot.scope {
+        SemanticScreenshotScope::Viewport => 0,
+    }]);
+    hasher.update(screenshot.observation.get().to_be_bytes());
+    hasher.update(screenshot.observation_generation.get().to_be_bytes());
+    hash_context(&mut hasher, screenshot.context);
+    hasher.update(screenshot.captured_at.millis().to_be_bytes());
+    hasher.update(screenshot.source_guard);
+    let stats = screenshot.stats;
+    hasher.update(stats.width().to_be_bytes());
+    hasher.update(stats.height().to_be_bytes());
+    hasher.update(stats.pixels().to_be_bytes());
+    hasher.update(stats.canonical_png_bytes().to_be_bytes());
+    hasher.update(&screenshot.png);
+    hasher.finalize().into()
+}
+
+fn hash_context(hasher: &mut Sha256, context: ContextJoin) {
+    let identity = context.identity();
+    hasher.update(identity.id().bytes());
+    hasher.update(identity.owner().bytes());
+    hasher.update(identity.profile().bytes());
+    hasher.update([match identity.kind() {
+        crate::ContextKind::Owned => 1,
+        crate::ContextKind::BorrowedTab => 2,
+        crate::ContextKind::HumanSignInHandoff => 3,
+    }]);
+    hasher.update(context.context_generation().get().to_be_bytes());
+    hasher.update(context.navigation_epoch().get().to_be_bytes());
+    hasher.update(context.frame().get().to_be_bytes());
+    hasher.update(context.frame_generation().get().to_be_bytes());
+    hasher.update(context.cancellation_generation().get().to_be_bytes());
+}
+
+#[cfg(test)]
+pub(crate) fn admitted_test_screenshot(
+    observation: &SemanticObservation,
+    acknowledgement: &SemanticObservationAcknowledgement,
+    id: u64,
+    pixel: u8,
+) -> SemanticScreenshot {
+    let request = prepare_semantic_screenshot(
+        SemanticScreenshotRequestId::new(id).expect("test screenshot id"),
+        observation,
+        acknowledgement,
+        SemanticCaptureInstant::from_millis(1_000),
+        SemanticCaptureInstant::from_millis(2_000),
+        SemanticScreenshotBudget::STANDARD,
+    )
+    .expect("test screenshot request");
+    let context = request.context();
+    let mut coordinator = SemanticScreenshotCoordinator::new();
+    let (pending, native) = coordinator.begin(request).expect("test screenshot begin");
+    let capture = native.complete(
+        SemanticScreenshotPaintEvidence::ExactDocumentContentAvailable,
+        SemanticCaptureInstant::from_millis(1_100),
+        SemanticCaptureInstant::from_millis(1_200),
+        1,
+        1,
+        test_rgba_png(pixel),
+    );
+    coordinator
+        .admit(pending, context, capture)
+        .expect("test screenshot admission")
+}
+
+#[cfg(test)]
+fn test_rgba_png(pixel: u8) -> Vec<u8> {
+    fn append_chunk(png: &mut Vec<u8>, kind: [u8; 4], data: &[u8]) {
+        png.extend_from_slice(
+            &u32::try_from(data.len())
+                .expect("test PNG chunk length")
+                .to_be_bytes(),
+        );
+        png.extend_from_slice(&kind);
+        png.extend_from_slice(data);
+        let mut crc = Crc32::new();
+        crc.update(&kind);
+        crc.update(data);
+        png.extend_from_slice(&crc.finalize().to_be_bytes());
+    }
+
+    let mut png = PNG_SIGNATURE.to_vec();
+    let mut header = Vec::with_capacity(13);
+    header.extend_from_slice(&1_u32.to_be_bytes());
+    header.extend_from_slice(&1_u32.to_be_bytes());
+    header.extend_from_slice(&[8, 6, 0, 0, 0]);
+    append_chunk(&mut png, PNG_IHDR, &header);
+
+    // One final RFC 1951 stored block containing one RGBA scanline, wrapped
+    // in zlib with the matching Adler-32 checksum.
+    let scanline = [0, pixel, pixel, pixel, 0xff];
+    let length = u16::try_from(scanline.len()).expect("test scanline length");
+    let mut image = vec![0x78, 0x01, 0x01];
+    image.extend_from_slice(&length.to_le_bytes());
+    image.extend_from_slice(&(!length).to_le_bytes());
+    image.extend_from_slice(&scanline);
+    let mut a = 1_u32;
+    let mut b = 0_u32;
+    for byte in scanline {
+        a = (a + u32::from(byte)) % 65_521;
+        b = (b + a) % 65_521;
+    }
+    image.extend_from_slice(&((b << 16) | a).to_be_bytes());
+    append_chunk(&mut png, PNG_IDAT, &image);
+    append_chunk(&mut png, PNG_IEND, &[]);
+    png
 }
 
 /// Closed refusal from native screenshot result admission.
@@ -996,6 +1267,7 @@ fn admit_semantic_screenshot(
         context: pending.context,
         captured_at: capture.completed_at,
         stats,
+        source_guard: pending.source_guard,
         png,
     })
 }
@@ -1633,6 +1905,43 @@ mod tests {
         assert!(!debug.contains("private-metadata"));
         assert!(!debug.contains("Private page pixels"));
         assert!(screenshot.into_png().starts_with(PNG_SIGNATURE));
+    }
+
+    #[test]
+    fn provider_delivery_authority_binds_exact_pixels_source_and_redacted_receipt() {
+        let source = observation(300);
+        let acknowledgement = acknowledgement(&source);
+        let first = admitted_test_screenshot(&source, &acknowledgement, 7, 0x11);
+        let second = admitted_test_screenshot(&source, &acknowledgement, 7, 0x22);
+        let (_, first_stats, first_delivery) = first.into_provider_parts();
+        let (_, second_stats, second_delivery) = second.into_provider_parts();
+
+        assert_eq!(first_stats, second_stats);
+        assert!(first_delivery.matches_observation(&source));
+        assert!(second_delivery.matches_observation(&source));
+        assert_ne!(
+            first_delivery.guard(),
+            second_delivery.guard(),
+            "the exact canonical PNG bytes must affect disclosure authority"
+        );
+        assert!(!first_delivery.matches_observation(&observation(400)));
+        let authority_debug = format!("{first_delivery:?}");
+        assert!(authority_debug.contains("[redacted]"));
+        assert!(!authority_debug.contains("Private page pixels"));
+
+        let receipt = first_delivery.commit();
+        assert_eq!(receipt.id().get(), 7);
+        assert_eq!(receipt.scope(), SemanticScreenshotScope::Viewport);
+        assert_eq!(receipt.observation(), source.request().id());
+        assert_eq!(
+            receipt.observation_generation(),
+            source.request().generation()
+        );
+        assert_eq!(receipt.context(), source.request().context());
+        assert_eq!(receipt.captured_at().millis(), 1_200);
+        let receipt_debug = format!("{receipt:?}");
+        assert!(receipt_debug.contains("[redacted]"));
+        assert!(!receipt_debug.contains("Private page pixels"));
     }
 
     #[test]

@@ -6176,6 +6176,7 @@ dependencies = [
 name = "zephium-agentic"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "crc32fast",
  "proptest",
  "serde",

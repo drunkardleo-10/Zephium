@@ -23,6 +23,7 @@ path = "src/bin/windows_agentic_semantic_evidence_review.rs"
 required-features = ["probe-harness"]
 
 [dependencies]
+base64.workspace = true
 crc32fast.workspace = true
 serde.workspace = true
 serde_json.workspace = true

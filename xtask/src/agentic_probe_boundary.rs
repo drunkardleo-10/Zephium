@@ -1524,6 +1524,7 @@ fn validate_manifest(source: &str) -> Result<(), String> {
         .map(String::as_str)
         .collect::<BTreeSet<_>>();
     let expected = [
+        "base64",
         "crc32fast",
         "serde",
         "serde_json",
@@ -3448,6 +3449,7 @@ mod tests {
             path = "src/bin/windows_agentic_semantic_evidence_review.rs"
             required-features = ["probe-harness"]
             [dependencies]
+            base64 = "0.22"
             crc32fast = "1"
             serde = "1"
             serde_json = "1"

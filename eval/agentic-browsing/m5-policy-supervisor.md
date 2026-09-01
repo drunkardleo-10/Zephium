@@ -13,7 +13,9 @@ Responses and Anthropic Messages plain-text, tool-call, error, stop, and usage
 stream normalization are implemented behind one provider-neutral decoder.
 The closed browser-tool proposal decoder and fixed request/tool-schema encoding
 for both providers are implemented with atomic model-input commitment and a
-fixed, provider-attested billing class. The durable Store adapter and fixed
+fixed, provider-attested billing class. Exact one-shot screenshot tool-result
+encoding, whole-multimodal-input admission, sensitive visual taint, and
+content-free delivery receipts are implemented for both providers. The durable Store adapter and fixed
 BYOK HTTPS transport are implemented. Terminal transport evidence now selects
 exact-zero, reservation-ceiling, or move-only pricing-required policy
 settlement without exposing active authority. Checked provider pricing and its
@@ -487,6 +489,28 @@ browser action, model call, tool call, data transfer, cost, or native resource.
   acknowledgement needed to compute a later diff; a read proof cannot become
   diff authority. The stateless builders mechanically exclude `ZDIFF1`: a
   standalone diff would omit the acknowledged model context it modifies.
+- A screenshot result is a distinct one-shot continuation rather than a generic
+  body or standalone image turn. It requires an exact prior `screenshot`
+  tool-only stop, fixed provider configuration, strictly newer same-plan call,
+  and the exact committed observation/generation/context that authorized the
+  viewport capture. The retained delivery guard covers every canonical PNG
+  byte and validated content-free metric. OpenAI encodes the image as the sole
+  high-detail `input_image` in the matching `function_call_output`; Anthropic
+  encodes it as the sole image in the matching adjacent `tool_result`, with
+  `oversized_image:error` to reject coordinate-changing server resize.
+- Visual drafts cap canonical PNG at 1,300,000 bytes and private replay text at
+  64 KiB inside the unchanged 2 MiB whole-body ceiling. Base64 is allocated
+  once with checked exact capacity. Only a synchronous pinned provider-specific
+  local counter over the exact complete multimodal body can admit the request;
+  provider-backed counts and non-exact quality fail. Policy then revalidates
+  manifest/call/lease/node, account/context, the exact source observation and
+  every observed frame origin before reserving the measured tokens.
+- Transport refusal or pre-commit cancellation drops screenshot authority and
+  releases the reservation. Exact commitment mints a content-free visual
+  receipt and adds `Sensitive` / `UntrustedPage` taint for every observed frame
+  origin with zero opaque references. The receipt cannot recreate pixels or
+  seed a diff/tool continuation, and the private transcript is deliberately
+  dropped at commit. Pixel/receipt substitution seals policy.
 - This exclusion follows the current primary contracts. OpenAI's
   [latest-model guidance](https://developers.openai.com/api/docs/guides/latest-model)
   requires stateless/`store:false` callers to replay the relevant returned
@@ -510,11 +534,20 @@ browser action, model call, tool call, data transfer, cost, or native resource.
   At most four admitted attempts exist. A slot is acquired before semantic
   disclosure commits, is released on every terminal path, and seals the shared
   transport if a committed attempt is abandoned.
-- A committed attempt exposes only the content-free observation/read proof
+- A committed attempt exposes only the content-free observation/read/screenshot proof
   retained by request admission. A shell may clone the observation proof before
   consuming the attempt so a future bounded continuation can compute an exact
-  diff. Losing it cannot widen authority and requires a fresh snapshot; request
-  bytes and semantic strings are never duplicated for continuation.
+  diff. Screenshot proof is audit correlation only and cannot seed another
+  continuation. Losing an eligible observation proof cannot widen authority and
+  requires a fresh snapshot; request bytes, semantic strings, and image bytes
+  are never duplicated for continuation.
+- The codec is not a provider privacy qualification. OpenAI documents that
+  image inputs are scanned and that a flagged image may be retained for manual
+  review even under Zero Data Retention or Modified Abuse Monitoring; see
+  [OpenAI data controls](https://platform.openai.com/docs/models/default-usage-policies-by-endpoint#image-and-file-inputs).
+  Production visual enablement therefore still requires an explicit reviewed
+  provider/model/data-handling catalog and installed local visual counter. No
+  provider request or image disclosure was made for this evidence.
 - Credentials are provider-bound, copied once into a sensitive header, and
   zeroized on drop. Debug output exposes only provider and byte count. Request
   bodies, authorization values, provider-authored error bodies, response text,
@@ -704,9 +737,13 @@ refusal, unknown/generic bridge field refusal, argument depth/size exhaustion,
 unsupported built-in and reasoning output, objective secret/tokenizer/quality
 refusal, recursive strict-schema completeness, atomic preflight/reservation,
 observation/read one-shot commitment for both providers, exact input-proof
-retention through transport admission, contextless-diff exclusion, provider-compatible
-schema projection, fixed body fields, fail-closed ordering, and redacted
-diagnostics. Checked pricing tests additionally cover four disjoint token
+retention through transport admission, contextless-diff exclusion,
+byte-exact screenshot guards, OpenAI and Anthropic visual tool-result shapes,
+silent-resize refusal, every-frame sensitive zero-reference taint, exact local
+whole-body counting, visual byte/transcript ceilings, receipt substitution,
+commit/cancel cleanup, no image continuation, provider-compatible schema
+projection, fixed body fields, fail-closed ordering, and redacted diagnostics.
+Checked pricing tests additionally cover four disjoint token
 categories, single upward rounding, exact schedule identity, pre-disclosure and
 terminal input-range refusal, overflow, hard rate/profile ceilings, and
 redacted diagnostics. They use only deterministic in-memory values and wire

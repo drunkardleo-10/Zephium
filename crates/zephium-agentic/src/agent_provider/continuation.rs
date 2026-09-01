@@ -12,9 +12,11 @@ use std::sync::Arc;
 use thiserror::Error;
 
 use crate::semantic_diff_model::SemanticDiffDeliveryAuthority;
+use crate::semantic_screenshot::SemanticScreenshotDeliveryAuthority;
 use crate::{
     AgentModelCallRequest, SemanticDiff, SemanticDiffEncodingStats, SemanticDiffModelPayload,
     SemanticObservationAcknowledgement, SemanticObservationGeneration, SemanticObservationId,
+    SemanticScreenshot, SemanticScreenshotStats,
 };
 
 use super::{
@@ -187,7 +189,9 @@ impl AgentProviderContinuationSeed {
         let baseline = match input.evidence() {
             AgentProviderInputEvidence::Observation(baseline) => baseline.clone(),
             AgentProviderInputEvidence::Diff(receipt) => receipt.acknowledgement().clone(),
-            AgentProviderInputEvidence::Read(_) => return None,
+            AgentProviderInputEvidence::Read(_) | AgentProviderInputEvidence::Screenshot(_) => {
+                return None;
+            }
         };
         let transcript = transcript?;
         Some(Self {
@@ -347,6 +351,57 @@ impl AgentProviderContinuation {
             delivery,
             current_observation: diff.current_observation(),
             current_generation: diff.current_generation(),
+        })
+    }
+
+    /// Binds one provisional same-plan request to the exact viewport image.
+    ///
+    /// Only a prior `screenshot` tool call can enter this path. The returned
+    /// value retains the image for one fixed provider-specific result body but
+    /// never appends it to the reusable transcript.
+    pub fn bind_screenshot_request(
+        self,
+        request: AgentModelCallRequest,
+        next_config: &AgentProviderCallConfig,
+        screenshot: SemanticScreenshot,
+    ) -> Result<AgentProviderBoundScreenshotContinuation, AgentProviderContinuationError> {
+        let next_call = AgentProviderCallIdentity {
+            manifest: self.prior_call.manifest(),
+            call: request.id(),
+            lease: request.lease(),
+            node: self.prior_call.node(),
+        };
+        if next_config != &self.config {
+            return Err(AgentProviderContinuationError::Config);
+        }
+        if next_call.manifest() != self.prior_call.manifest()
+            || next_call.lease() != self.prior_call.lease()
+            || next_call.node() != self.prior_call.node()
+            || next_call.call() <= self.prior_call.call()
+        {
+            return Err(AgentProviderContinuationError::Lineage);
+        }
+        if self.correlation.kind() != AgentBrowserToolKind::Screenshot {
+            return Err(AgentProviderContinuationError::ToolKind);
+        }
+        if self.baseline.observation() != screenshot.observation()
+            || self.baseline.generation() != screenshot.observation_generation()
+            || self.baseline.context() != screenshot.context()
+        {
+            return Err(AgentProviderContinuationError::Baseline);
+        }
+        let (prior_call, config, baseline, correlation, transcript) = self.into_parts();
+        let (png, screenshot_stats, delivery) = screenshot.into_provider_parts();
+        Ok(AgentProviderBoundScreenshotContinuation {
+            prior_call,
+            next_call,
+            config,
+            baseline,
+            correlation,
+            transcript,
+            png,
+            screenshot_stats,
+            delivery,
         })
     }
 
@@ -514,15 +569,138 @@ impl fmt::Debug for AgentProviderBoundDiffContinuation {
     }
 }
 
+/// Move-only provider continuation bound to one exact viewport screenshot.
+///
+/// The canonical PNG is retained only until the fixed provider body is
+/// serialized. This type cannot create another continuation or introduce
+/// opaque semantic references from pixels.
+#[must_use]
+pub struct AgentProviderBoundScreenshotContinuation {
+    prior_call: AgentProviderCallIdentity,
+    next_call: AgentProviderCallIdentity,
+    config: AgentProviderCallConfig,
+    baseline: SemanticObservationAcknowledgement,
+    correlation: AgentProviderToolCallCorrelation,
+    transcript: AgentProviderTranscript,
+    png: Vec<u8>,
+    screenshot_stats: SemanticScreenshotStats,
+    delivery: SemanticScreenshotDeliveryAuthority,
+}
+
+impl AgentProviderBoundScreenshotContinuation {
+    /// Exact completed call whose screenshot result is pending.
+    pub const fn prior_call(&self) -> AgentProviderCallIdentity {
+        self.prior_call
+    }
+
+    /// Provisional same-plan call selected for visual delivery.
+    pub const fn next_call(&self) -> AgentProviderCallIdentity {
+        self.next_call
+    }
+
+    /// Fixed provider protocol retained across the result turn.
+    pub const fn provider(&self) -> AgentProviderKind {
+        self.config.provider()
+    }
+
+    /// Exact prior observation that authorized screenshot capture.
+    pub const fn baseline(&self) -> &SemanticObservationAcknowledgement {
+        &self.baseline
+    }
+
+    /// Exact prior screenshot tool call awaiting its result.
+    pub const fn tool_call_id(&self) -> &AgentBrowserToolCallId {
+        self.correlation.id()
+    }
+
+    /// Canonical PNG byte count retained before request encoding.
+    pub fn png_bytes(&self) -> usize {
+        self.png.len()
+    }
+
+    /// Content-free validated image metrics.
+    pub const fn screenshot_stats(&self) -> SemanticScreenshotStats {
+        self.screenshot_stats
+    }
+
+    /// Private text transcript bytes retained beside the one-shot image.
+    pub const fn retained_transcript_bytes(&self) -> usize {
+        self.transcript.retained_bytes()
+    }
+
+    pub(super) const fn config(&self) -> &AgentProviderCallConfig {
+        &self.config
+    }
+
+    pub(super) const fn transcript(&self) -> &AgentProviderTranscript {
+        &self.transcript
+    }
+
+    pub(super) const fn correlation(&self) -> &AgentProviderToolCallCorrelation {
+        &self.correlation
+    }
+
+    pub(super) fn png(&self) -> &[u8] {
+        &self.png
+    }
+
+    pub(super) fn into_request_parts(
+        self,
+    ) -> (
+        AgentProviderCallIdentity,
+        AgentProviderCallConfig,
+        AgentProviderTranscript,
+        AgentProviderToolCallCorrelation,
+        Vec<u8>,
+        SemanticScreenshotStats,
+        SemanticScreenshotDeliveryAuthority,
+    ) {
+        (
+            self.next_call,
+            self.config,
+            self.transcript,
+            self.correlation,
+            self.png,
+            self.screenshot_stats,
+            self.delivery,
+        )
+    }
+}
+
+impl fmt::Debug for AgentProviderBoundScreenshotContinuation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentProviderBoundScreenshotContinuation")
+            .field("prior_call", &self.prior_call)
+            .field("next_call", &self.next_call)
+            .field("provider", &self.config.provider())
+            .field("baseline", &self.baseline)
+            .field("tool_kind", &self.correlation.kind())
+            .field("tool_call_id", &"[redacted]")
+            .field("argument_bytes", &self.correlation.argument_bytes())
+            .field("transcript_bytes", &self.transcript.retained_bytes())
+            .field("png_bytes", &self.png.len())
+            .field("screenshot_stats", &self.screenshot_stats)
+            .field("delivery", &self.delivery)
+            .field("content", &"[redacted]")
+            .finish()
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine as _;
     use serde_json::json;
     use zephium_core::ids::ProfileId;
 
     use super::*;
     use crate::semantic_diff::SemanticObservationFingerprint;
+    use crate::semantic_screenshot::admitted_test_screenshot;
     use crate::{
-        compute_semantic_diff, decode_semantic_snapshot, encode_semantic_diff, ContextCapabilities,
+        compute_semantic_diff, decode_semantic_snapshot, encode_semantic_diff,
+        AgentAccountAttestationId, AgentAccountScope, AgentContextAccountBinding,
+        AgentModelCallBudget, AgentModelCallRequest, AgentPolicyInstant, ContextCapabilities,
         ContextCapability, ContextId, ContextIdentity, ContextKind, ContextOperationId,
         ContextRegistry, ContextRunId, ContextSettlement, FrameId, SemanticDecodeContext,
         SemanticDiffBudget, SemanticDiffOutcome, SemanticFrameJoin, SemanticFrameTrust,
@@ -726,6 +904,58 @@ mod tests {
             "private initial observation".to_owned(),
         )
         .expect("bounded transcript")
+    }
+
+    fn model_request(context: crate::ContextJoin, value: u64) -> AgentModelCallRequest {
+        AgentModelCallRequest::new(
+            crate::AgentModelCallId::new(value).expect("model call"),
+            crate::AgentPlanLeaseId::from_raw(22),
+            AgentContextAccountBinding::new(
+                AgentAccountAttestationId::from_raw(31),
+                context,
+                AgentAccountScope::Anonymous,
+                AgentPolicyInstant::from_millis(1_500),
+            ),
+            AgentModelCallBudget::try_new(4_096, 512, 10_000).expect("call budget"),
+            AgentPolicyInstant::from_millis(1_600),
+        )
+    }
+
+    fn screenshot_continuation(
+        provider: AgentProviderKind,
+        baseline: SemanticObservationAcknowledgement,
+        kind: AgentBrowserToolKind,
+    ) -> AgentProviderContinuation {
+        let prior = call(1);
+        let correlation = match provider {
+            AgentProviderKind::OpenAiResponses => {
+                super::super::AgentBrowserToolCall::decode_openai(
+                    prior,
+                    "fc_screenshot_private_1".to_owned(),
+                    "call_screenshot_private_1".to_owned(),
+                    kind.as_str(),
+                    "{}".to_owned(),
+                )
+                .expect("OpenAI screenshot tool")
+            }
+            AgentProviderKind::AnthropicMessages => super::super::AgentBrowserToolCall::decode(
+                prior,
+                "toolu_screenshot_private_1".to_owned(),
+                kind.as_str(),
+                "{}".to_owned(),
+            )
+            .expect("Anthropic screenshot tool"),
+        }
+        .into_continuation_parts()
+        .0;
+        AgentProviderContinuationSeed {
+            call: prior,
+            config: config(provider),
+            baseline,
+            transcript: transcript(),
+        }
+        .join_terminal_tool(completion(prior, 2), correlation)
+        .expect("screenshot terminal join")
     }
 
     #[test]
@@ -1127,6 +1357,259 @@ mod tests {
             assert!(!debug.contains(secret));
         }
     }
+
+    #[test]
+    fn openai_screenshot_result_is_one_shot_exact_image_content() {
+        let context = context();
+        let observation = observation(context, 1, 1, 1, "private visual state");
+        let baseline = SemanticObservationAcknowledgement::from_fingerprint(
+            SemanticObservationFingerprint::from_observation(&observation),
+        );
+        let screenshot = admitted_test_screenshot(&observation, &baseline, 41, 0x5a);
+        let expected_png = screenshot.as_png().to_vec();
+        let config = config(AgentProviderKind::OpenAiResponses);
+        let bound = screenshot_continuation(
+            AgentProviderKind::OpenAiResponses,
+            baseline,
+            AgentBrowserToolKind::Screenshot,
+        )
+        .bind_screenshot_request(model_request(context, 2), &config, screenshot)
+        .expect("OpenAI screenshot bind");
+        assert_eq!(bound.prior_call(), call(1));
+        assert_eq!(bound.next_call(), call(2));
+        assert_eq!(bound.png_bytes(), expected_png.len());
+        assert_eq!(
+            usize::try_from(bound.screenshot_stats().canonical_png_bytes()).expect("PNG bytes"),
+            expected_png.len()
+        );
+        let bound_debug = format!("{bound:?}");
+        assert!(!bound_debug.contains("private visual state"));
+        assert!(!bound_debug.contains("call_screenshot_private_1"));
+
+        let draft = super::super::request::AgentProviderScreenshotRequestDraft::try_new(bound)
+            .expect("fixed OpenAI screenshot draft");
+        assert_eq!(
+            draft.request().endpoint(),
+            super::super::request::AgentProviderEndpoint::OpenAiResponses
+        );
+        assert_eq!(draft.request().call(), call(2));
+        assert!(draft.request().byte_len() < super::super::MAX_AGENT_PROVIDER_REQUEST_BYTES);
+        let wire: serde_json::Value =
+            serde_json::from_slice(draft.request().body()).expect("OpenAI screenshot JSON");
+        assert!(wire["instructions"]
+            .as_str()
+            .expect("instructions")
+            .contains("screenshot pixel"));
+        assert_eq!(wire["store"], false);
+        assert_eq!(wire["stream"], true);
+        assert_eq!(wire["parallel_tool_calls"], false);
+        assert_eq!(wire["truncation"], "disabled");
+        assert_eq!(wire["service_tier"], "default");
+        assert!(wire.get("previous_response_id").is_none());
+        let input = wire["input"].as_array().expect("OpenAI input");
+        assert_eq!(input.len(), 4);
+        assert_eq!(input[2]["type"], "function_call");
+        assert_eq!(input[2]["id"], "fc_screenshot_private_1");
+        assert_eq!(input[2]["call_id"], "call_screenshot_private_1");
+        assert_eq!(input[2]["name"], "screenshot");
+        assert_eq!(input[2]["arguments"], "{}");
+        assert_eq!(input[3]["type"], "function_call_output");
+        assert_eq!(input[3]["call_id"], "call_screenshot_private_1");
+        let output = input[3]["output"].as_array().expect("image output");
+        assert_eq!(output.len(), 1);
+        assert_eq!(output[0]["type"], "input_image");
+        assert_eq!(output[0]["detail"], "high");
+        let image_url = output[0]["image_url"].as_str().expect("data URL");
+        let encoded = image_url
+            .strip_prefix("data:image/png;base64,")
+            .expect("PNG data URL");
+        assert_eq!(STANDARD.decode(encoded).expect("base64 PNG"), expected_png);
+        let draft_debug = format!("{draft:?}");
+        assert!(!draft_debug.contains(encoded));
+        assert!(!draft_debug.contains("private objective"));
+        assert!(draft_debug.contains("[redacted]"));
+    }
+
+    #[test]
+    fn anthropic_screenshot_result_refuses_silent_image_resize() {
+        let context = context();
+        let observation = observation(context, 1, 1, 1, "private visual state");
+        let baseline = SemanticObservationAcknowledgement::from_fingerprint(
+            SemanticObservationFingerprint::from_observation(&observation),
+        );
+        let screenshot = admitted_test_screenshot(&observation, &baseline, 42, 0xa5);
+        let expected_png = screenshot.as_png().to_vec();
+        let config = config(AgentProviderKind::AnthropicMessages);
+        let bound = screenshot_continuation(
+            AgentProviderKind::AnthropicMessages,
+            baseline,
+            AgentBrowserToolKind::Screenshot,
+        )
+        .bind_screenshot_request(model_request(context, 2), &config, screenshot)
+        .expect("Anthropic screenshot bind");
+        let draft = super::super::request::AgentProviderScreenshotRequestDraft::try_new(bound)
+            .expect("fixed Anthropic screenshot draft");
+        assert_eq!(
+            draft.request().endpoint(),
+            super::super::request::AgentProviderEndpoint::AnthropicMessages
+        );
+        assert!(draft.request().byte_len() < super::super::MAX_AGENT_PROVIDER_REQUEST_BYTES);
+        let wire: serde_json::Value =
+            serde_json::from_slice(draft.request().body()).expect("Anthropic screenshot JSON");
+        assert!(wire["system"]
+            .as_str()
+            .expect("system")
+            .contains("screenshot pixel"));
+        assert_eq!(wire["stream"], true);
+        assert_eq!(wire["service_tier"], "standard_only");
+        assert_eq!(wire["inference_geo"], "global");
+        assert_eq!(wire["tool_choice"]["type"], "auto");
+        assert_eq!(wire["tool_choice"]["disable_parallel_tool_use"], true);
+        assert!(wire.get("metadata").is_none());
+        assert!(wire.get("thinking").is_none());
+        let messages = wire["messages"].as_array().expect("Anthropic messages");
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[1]["role"], "assistant");
+        assert_eq!(messages[1]["content"][0]["type"], "tool_use");
+        assert_eq!(
+            messages[1]["content"][0]["id"],
+            "toolu_screenshot_private_1"
+        );
+        assert_eq!(messages[1]["content"][0]["name"], "screenshot");
+        assert_eq!(messages[1]["content"][0]["input"], json!({}));
+        assert_eq!(messages[2]["role"], "user");
+        let result = &messages[2]["content"][0];
+        assert_eq!(result["type"], "tool_result");
+        assert_eq!(result["tool_use_id"], "toolu_screenshot_private_1");
+        let image = &result["content"][0];
+        assert_eq!(image["type"], "image");
+        assert_eq!(image["source"]["type"], "base64");
+        assert_eq!(image["source"]["media_type"], "image/png");
+        assert_eq!(image["transformations"]["oversized_image"], "error");
+        assert_eq!(
+            STANDARD
+                .decode(image["source"]["data"].as_str().expect("base64"))
+                .expect("PNG"),
+            expected_png
+        );
+    }
+
+    #[test]
+    fn screenshot_continuation_rejects_tool_config_lineage_and_baseline_substitution() {
+        let context = context();
+        let first = observation(context, 1, 1, 1, "first visual state");
+        let second = observation(context, 2, 2, 2, "second visual state");
+        let first_baseline = SemanticObservationAcknowledgement::from_fingerprint(
+            SemanticObservationFingerprint::from_observation(&first),
+        );
+        let second_baseline = SemanticObservationAcknowledgement::from_fingerprint(
+            SemanticObservationFingerprint::from_observation(&second),
+        );
+        let openai = config(AgentProviderKind::OpenAiResponses);
+
+        assert!(matches!(
+            screenshot_continuation(
+                AgentProviderKind::OpenAiResponses,
+                first_baseline.clone(),
+                AgentBrowserToolKind::Back,
+            )
+            .bind_screenshot_request(
+                model_request(context, 2),
+                &openai,
+                admitted_test_screenshot(&first, &first_baseline, 51, 1),
+            ),
+            Err(AgentProviderContinuationError::ToolKind)
+        ));
+        assert!(matches!(
+            screenshot_continuation(
+                AgentProviderKind::OpenAiResponses,
+                first_baseline.clone(),
+                AgentBrowserToolKind::Screenshot,
+            )
+            .bind_screenshot_request(
+                model_request(context, 2),
+                &config(AgentProviderKind::AnthropicMessages),
+                admitted_test_screenshot(&first, &first_baseline, 52, 2),
+            ),
+            Err(AgentProviderContinuationError::Config)
+        ));
+        assert!(matches!(
+            screenshot_continuation(
+                AgentProviderKind::OpenAiResponses,
+                first_baseline.clone(),
+                AgentBrowserToolKind::Screenshot,
+            )
+            .bind_screenshot_request(
+                model_request(context, 1),
+                &openai,
+                admitted_test_screenshot(&first, &first_baseline, 53, 3),
+            ),
+            Err(AgentProviderContinuationError::Lineage)
+        ));
+        assert!(matches!(
+            screenshot_continuation(
+                AgentProviderKind::OpenAiResponses,
+                first_baseline,
+                AgentBrowserToolKind::Screenshot,
+            )
+            .bind_screenshot_request(
+                model_request(context, 2),
+                &openai,
+                admitted_test_screenshot(&second, &second_baseline, 54, 4),
+            ),
+            Err(AgentProviderContinuationError::Baseline)
+        ));
+    }
+
+    #[test]
+    fn screenshot_result_refuses_replay_transcript_above_visual_ceiling() {
+        let context = context();
+        let observation = observation(context, 1, 1, 1, "private visual state");
+        let baseline = SemanticObservationAcknowledgement::from_fingerprint(
+            SemanticObservationFingerprint::from_observation(&observation),
+        );
+        let oversized_transcript = transcript()
+            .try_append(
+                openai_correlation("{}"),
+                "x".repeat(super::super::MAX_AGENT_PROVIDER_SCREENSHOT_TRANSCRIPT_BYTES),
+            )
+            .expect("valid general continuation transcript");
+        assert!(
+            oversized_transcript.retained_bytes()
+                > super::super::MAX_AGENT_PROVIDER_SCREENSHOT_TRANSCRIPT_BYTES
+        );
+        let prior = call(1);
+        let correlation = super::super::AgentBrowserToolCall::decode_openai(
+            prior,
+            "fc_screenshot_private_2".to_owned(),
+            "call_screenshot_private_2".to_owned(),
+            "screenshot",
+            "{}".to_owned(),
+        )
+        .expect("screenshot tool")
+        .into_continuation_parts()
+        .0;
+        let config = config(AgentProviderKind::OpenAiResponses);
+        let continuation = AgentProviderContinuationSeed {
+            call: prior,
+            config: config.clone(),
+            baseline: baseline.clone(),
+            transcript: oversized_transcript,
+        }
+        .join_terminal_tool(completion(prior, 2), correlation)
+        .expect("terminal join");
+        let bound = continuation
+            .bind_screenshot_request(
+                model_request(context, 2),
+                &config,
+                admitted_test_screenshot(&observation, &baseline, 61, 0x55),
+            )
+            .expect("screenshot bind");
+        assert!(matches!(
+            super::super::request::AgentProviderScreenshotRequestDraft::try_new(bound),
+            Err(super::super::request::AgentProviderRequestError::Encoding)
+        ));
+    }
 }
 
 impl fmt::Debug for AgentProviderContinuation {
@@ -1157,6 +1640,9 @@ pub enum AgentProviderContinuationError {
     /// Provider-specific tool correlation was absent or unexpectedly present.
     #[error("agent provider continuation wire shape mismatched provider")]
     ProviderShape,
+    /// Pending tool result was not the expected closed browser tool class.
+    #[error("agent provider continuation tool kind is incompatible")]
+    ToolKind,
     /// Next request changed the fixed provider/model/tokenizer/pricing contract.
     #[error("agent provider continuation configuration changed")]
     Config,
