@@ -11,10 +11,11 @@ use std::fmt;
 use thiserror::Error;
 
 use crate::{
-    compute_semantic_diff, SemanticActionFailure, SemanticDiff, SemanticDiffBudget,
+    compute_semantic_diff, AgentEffectReceipt, AgentVerifiedSemanticEffect,
+    SemanticActionExecutionApplied, SemanticActionFailure, SemanticDiff, SemanticDiffBudget,
     SemanticDiffOutcome, SemanticFreshSnapshotReason, SemanticObservation,
     SemanticObservationAcknowledgement, SemanticPreparedAction, SemanticSettleInstant,
-    SemanticVerifiedAction,
+    SemanticSettleTracker, SemanticVerifiedAction,
 };
 
 /// One complete current observation joined to its trusted-shell capture time.
@@ -135,6 +136,98 @@ impl fmt::Debug for SemanticActionResult {
     }
 }
 
+/// Policy-accounted verified action plus its bounded next browser state.
+#[must_use]
+pub struct AgentAccountedSemanticActionResult {
+    receipt: AgentEffectReceipt,
+    execution: SemanticActionExecutionApplied,
+    settlement: SemanticSettleTracker,
+    result: SemanticActionResult,
+}
+
+impl AgentAccountedSemanticActionResult {
+    /// Exact policy receipt charged before result finalization.
+    pub const fn receipt(&self) -> AgentEffectReceipt {
+        self.receipt
+    }
+
+    /// Content-free backend attribution and native execution timing.
+    pub const fn execution(&self) -> SemanticActionExecutionApplied {
+        self.execution
+    }
+
+    /// Exact terminal settlement state used by independent verification.
+    pub const fn settlement(&self) -> &SemanticSettleTracker {
+        &self.settlement
+    }
+
+    /// Complete bounded action result for model-input admission.
+    pub const fn result(&self) -> &SemanticActionResult {
+        &self.result
+    }
+
+    /// Separates the receipt, metrics, and bounded downstream result.
+    pub fn into_parts(
+        self,
+    ) -> (
+        AgentEffectReceipt,
+        SemanticActionExecutionApplied,
+        SemanticSettleTracker,
+        SemanticActionResult,
+    ) {
+        (self.receipt, self.execution, self.settlement, self.result)
+    }
+}
+
+impl fmt::Debug for AgentAccountedSemanticActionResult {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentAccountedSemanticActionResult")
+            .field("receipt", &self.receipt)
+            .field("execution", &self.execution)
+            .field("settlement", &self.settlement)
+            .field("result", &self.result)
+            .finish()
+    }
+}
+
+/// Result-finalization refusal that preserves charged proof and current state.
+#[must_use]
+pub struct AgentAccountedSemanticActionResultRefusal {
+    accounted: Box<AgentVerifiedSemanticEffect>,
+    current: Box<SemanticPostActionObservation>,
+    error: SemanticActionResultError,
+}
+
+impl AgentAccountedSemanticActionResultRefusal {
+    /// Closed authority or observation mismatch.
+    pub const fn error(&self) -> SemanticActionResultError {
+        self.error
+    }
+
+    /// Recovers the charged proof owner and exact current observation.
+    pub fn into_parts(
+        self,
+    ) -> (
+        AgentVerifiedSemanticEffect,
+        SemanticPostActionObservation,
+        SemanticActionResultError,
+    ) {
+        (*self.accounted, *self.current, self.error)
+    }
+}
+
+impl fmt::Debug for AgentAccountedSemanticActionResultRefusal {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentAccountedSemanticActionResultRefusal")
+            .field("accounted", &"[redacted]")
+            .field("current", &self.current)
+            .field("error", &self.error)
+            .finish()
+    }
+}
+
 /// Refusal before a verified action may be represented as successful.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum SemanticActionResultError {
@@ -176,13 +269,46 @@ impl SemanticActionResultError {
     }
 }
 
-/// Finalizes one verified action with a complete diff or exact fresh snapshot.
+/// Finalizes one policy-accounted action with a bounded next-state update.
 ///
-/// `baseline` must be the exact observation delivered to the model before it
-/// proposed the action. `current` is consumed so a diff fallback cannot lose
-/// the full post-action observation. A fresh-snapshot outcome is safe success;
-/// an unacknowledged baseline or mismatched proof is an error instead.
-pub fn finalize_semantic_action_result(
+/// Authority refusal returns both the already-charged proof owner and the exact
+/// current observation. The current observation is consumed only after every
+/// join validates, so callers cannot lose post-action state on a bad baseline,
+/// proof, or clock coordinate.
+pub fn finalize_accounted_semantic_action_result(
+    action: &SemanticPreparedAction,
+    accounted: AgentVerifiedSemanticEffect,
+    baseline: &SemanticObservation,
+    acknowledgement: &SemanticObservationAcknowledgement,
+    current: SemanticPostActionObservation,
+    budget: SemanticDiffBudget,
+) -> Result<AgentAccountedSemanticActionResult, AgentAccountedSemanticActionResultRefusal> {
+    if let Err(error) = validate_semantic_action_result(
+        action,
+        accounted.verified(),
+        baseline,
+        acknowledgement,
+        &current,
+    ) {
+        return Err(AgentAccountedSemanticActionResultRefusal {
+            accounted: Box::new(accounted),
+            current: Box::new(current),
+            error,
+        });
+    }
+    let (receipt, execution, settlement, verified) = accounted.into_parts();
+    let result =
+        finish_semantic_action_result(verified, baseline, acknowledgement, current, budget);
+    Ok(AgentAccountedSemanticActionResult {
+        receipt,
+        execution,
+        settlement,
+        result,
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn finalize_semantic_action_result(
     action: &SemanticPreparedAction,
     verified: SemanticVerifiedAction,
     baseline: &SemanticObservation,
@@ -190,6 +316,23 @@ pub fn finalize_semantic_action_result(
     current: SemanticPostActionObservation,
     budget: SemanticDiffBudget,
 ) -> Result<SemanticActionResult, SemanticActionResultError> {
+    validate_semantic_action_result(action, &verified, baseline, acknowledgement, &current)?;
+    Ok(finish_semantic_action_result(
+        verified,
+        baseline,
+        acknowledgement,
+        current,
+        budget,
+    ))
+}
+
+fn validate_semantic_action_result(
+    action: &SemanticPreparedAction,
+    verified: &SemanticVerifiedAction,
+    baseline: &SemanticObservation,
+    acknowledgement: &SemanticObservationAcknowledgement,
+    current: &SemanticPostActionObservation,
+) -> Result<(), SemanticActionResultError> {
     if !verified.matches_action(action) {
         return Err(SemanticActionResultError::ActionMismatch);
     }
@@ -208,14 +351,13 @@ pub fn finalize_semantic_action_result(
     if current.observed_at() > verified.deadline() {
         return Err(SemanticActionResultError::ObservationAfterDeadline);
     }
-    let current = current.observation;
-    if current.request().context() != verified.current_context() {
+    if current.observation().request().context() != verified.current_context() {
         return Err(SemanticActionResultError::CurrentContextMismatch);
     }
     match (verified.current_invocation(), verified.current_snapshot()) {
         (Some(invocation), Some(generation)) => {
             if verified.current_context() != action.frame().context()
-                || !current.frames().iter().any(|snapshot| {
+                || !current.observation().frames().iter().any(|snapshot| {
                     snapshot.frame() == action.frame()
                         && snapshot.invocation() == invocation
                         && snapshot.generation() == generation
@@ -227,7 +369,17 @@ pub fn finalize_semantic_action_result(
         (None, None) => {}
         _ => return Err(SemanticActionResultError::VerificationObservationMismatch),
     }
+    Ok(())
+}
 
+fn finish_semantic_action_result(
+    verified: SemanticVerifiedAction,
+    baseline: &SemanticObservation,
+    acknowledgement: &SemanticObservationAcknowledgement,
+    current: SemanticPostActionObservation,
+    budget: SemanticDiffBudget,
+) -> SemanticActionResult {
+    let current = current.observation;
     let update = match compute_semantic_diff(baseline, acknowledgement, &current, budget) {
         SemanticDiffOutcome::Diff(diff) => SemanticActionStateUpdate::Diff(diff),
         SemanticDiffOutcome::FreshSnapshot(reason) => {
@@ -238,7 +390,7 @@ pub fn finalize_semantic_action_result(
             }
         }
     };
-    Ok(SemanticActionResult { verified, update })
+    SemanticActionResult { verified, update }
 }
 
 #[cfg(test)]

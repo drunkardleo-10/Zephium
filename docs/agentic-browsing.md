@@ -572,6 +572,15 @@ and returns the failed receipt with content-free timing/error state. The raw
 verified-effect settlement method is crate-private; pre-verification native or
 settlement failures retain their distinct typed failure path.
 
+Action-result finalization consumes the policy-accounted verified owner, not a
+loose proof. It validates the action, acknowledged baseline, proof observation,
+current context, and monotonic capture bounds while the exact current
+observation is still borrowed. Only after every join passes does it consume the
+owner and compute a bounded diff or fresh-snapshot fallback. Refusal returns
+both the charged proof owner and the complete current observation, so an
+authority mistake cannot discard post-action state. The loose finalizer exists
+only under `cfg(test)`.
+
 ### 8.2 Input backends
 
 The runtime can choose among:

@@ -5751,6 +5751,54 @@ mod tests {
         let debug = format!("{accounted:?}");
         assert!(!debug.contains("Save draft"));
         assert!(!debug.contains("effect.example.test"));
+        let current_request = SemanticObservationRequest::initial(
+            SemanticObservationId::new(99).expect("current observation"),
+            observation.request().context(),
+            SemanticObservationBudget::INITIAL_FILTERED,
+        );
+        let current_observation = SemanticObservationAssembler::new(current_request, snapshot)
+            .expect("current assembler")
+            .finish()
+            .expect("current observation");
+        let acknowledgement = SemanticObservationAcknowledgement::from_fingerprint(
+            crate::semantic_diff::SemanticObservationFingerprint::from_observation(&observation),
+        );
+        let wrong_acknowledgement = SemanticObservationAcknowledgement::from_fingerprint(
+            crate::semantic_diff::SemanticObservationFingerprint::from_observation(
+                &current_observation,
+            ),
+        );
+        let refusal = crate::finalize_accounted_semantic_action_result(
+            &action,
+            accounted,
+            &observation,
+            &wrong_acknowledgement,
+            crate::SemanticPostActionObservation::new(
+                SemanticSettleInstant::from_millis(NOW + 1),
+                current_observation,
+            ),
+            SemanticDiffBudget::ACTION,
+        )
+        .expect_err("wrong baseline acknowledgement");
+        assert_eq!(
+            refusal.error(),
+            crate::SemanticActionResultError::BaselineNotAcknowledged
+        );
+        assert!(!format!("{refusal:?}").contains("Save draft"));
+        let (accounted, current, _) = refusal.into_parts();
+        let finalized = crate::finalize_accounted_semantic_action_result(
+            &action,
+            accounted,
+            &observation,
+            &acknowledgement,
+            current,
+            SemanticDiffBudget::ACTION,
+        )
+        .expect("accounted action result");
+        assert_eq!(finalized.receipt(), receipt);
+        assert_eq!(finalized.settlement().attempt(), attempt);
+        assert_eq!(finalized.result().verified().attempt(), attempt);
+        assert!(!format!("{finalized:?}").contains("Save draft"));
         assert_eq!(fixture.policy.pending_effects(), 0);
         assert_eq!(fixture.policy.accounting().consumed_operations(), 2);
         assert_eq!(fixture.policy.accounting().reserved_operations(), 0);

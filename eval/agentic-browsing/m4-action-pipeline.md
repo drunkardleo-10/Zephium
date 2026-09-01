@@ -7,7 +7,8 @@ independent effect verification, and acknowledged action-result diff/fresh-state
 finalization and exact bounded batch-terminal aggregation, plus a one-shot
 policy-to-native execution handoff and exact consuming native-to-settlement
 transition with a move-only bounded settlement owner and one-shot consuming
-terminal verification, bounded semantic read/transport, closed
+terminal verification through exact policy accounting and result finalization,
+bounded semantic read/transport, closed
 structured extraction admission, exact tool-result/constrained-output
 extraction transport, and the one-shot viewport screenshot contract are
 implemented.
@@ -173,6 +174,14 @@ are trusted, or that M4 is complete.
   receipt with timing/error state. Pre-verification native and settlement
   failures keep the separate public typed-failure path; no fabricated proof is
   needed to charge them.
+- Result finalization consumes that policy-accounted verified owner rather than
+  accepting a loose proof. It validates the exact action, committed baseline,
+  proof observation coordinates, current context, and capture clock while the
+  complete current observation is still borrowed. Only a valid join
+  destructures the charged owner and computes the bounded diff/fresh-snapshot
+  outcome. Refusal returns both the charged proof owner and exact current
+  observation, preventing an authority mistake from discarding post-action
+  state. The loose finalizer is compiled only for crate tests.
 - A zero-idle single-owner coordinator now retains the active policy half while
   native work is outstanding. Its empty `Vec` allocates only on first use; it
   admits at most four requests process-wide and one per logical context,
@@ -587,6 +596,11 @@ recovery retry path. Policy-join coverage runs the complete
 dispatch→native→settle→verify→charge success path and the refused-evidence
 failure path, asserting exact receipt/attempt/proof/failure/backend retention;
 the static gate rejects a public raw verified-effect settlement method.
+Accounted-result coverage additionally refuses an altered baseline acknowledgement,
+recovers the same charged owner and current observation, then succeeds with the
+exact acknowledgement while retaining receipt/attempt/settlement/proof and
+redacted diagnostics. The static gate rejects a shipping loose finalizer or a
+refusal that drops current state.
 
 Action-result coverage includes exact committed-baseline/content binding,
 source observation and batch guard substitution, exact verification

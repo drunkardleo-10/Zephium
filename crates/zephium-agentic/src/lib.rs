@@ -272,8 +272,11 @@ pub use semantic_action_batch_result::{
     SemanticActionBatchExecutionError, SemanticActionBatchOutcome, SemanticActionBatchResult,
     SemanticActionBatchStopReason,
 };
+#[cfg(test)]
+pub(crate) use semantic_action_result::finalize_semantic_action_result;
 pub use semantic_action_result::{
-    finalize_semantic_action_result, SemanticActionNextState, SemanticActionResult,
+    finalize_accounted_semantic_action_result, AgentAccountedSemanticActionResult,
+    AgentAccountedSemanticActionResultRefusal, SemanticActionNextState, SemanticActionResult,
     SemanticActionResultError, SemanticPostActionObservation,
 };
 pub use semantic_diff::{

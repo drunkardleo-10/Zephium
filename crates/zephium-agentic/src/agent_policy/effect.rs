@@ -696,8 +696,7 @@ impl AgentVerifiedSemanticEffect {
         &self.verified
     }
 
-    /// Separates the charged receipt, metrics state, and downstream proof.
-    pub fn into_parts(
+    pub(crate) fn into_parts(
         self,
     ) -> (
         AgentEffectReceipt,

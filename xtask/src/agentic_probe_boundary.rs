@@ -39,6 +39,7 @@ const AGENTIC_SEMANTIC_EXTRACT: &str = "crates/zephium-agentic/src/semantic_extr
 const AGENTIC_SEMANTIC_EXTRACT_MODEL: &str = "crates/zephium-agentic/src/semantic_extract_model.rs";
 const AGENTIC_PROVIDER_EXTRACTION: &str = "crates/zephium-agentic/src/agent_provider/extraction.rs";
 const AGENTIC_SEMANTIC_ACTION: &str = "crates/zephium-agentic/src/semantic_action.rs";
+const AGENTIC_SEMANTIC_ACTION_RESULT: &str = "crates/zephium-agentic/src/semantic_action_result.rs";
 const AGENTIC_SEMANTIC_EXECUTE: &str = "crates/zephium-agentic/src/semantic_execute.rs";
 const AGENTIC_SEMANTIC_EXECUTE_COORDINATOR: &str =
     "crates/zephium-agentic/src/semantic_execute_coordinator.rs";
@@ -205,6 +206,11 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         &read(repository.join(AGENTIC_ROOT))?,
         &read(repository.join(AGENTIC_SEMANTIC_VERIFY))?,
         &read(repository.join(AGENTIC_EFFECT_POLICY))?,
+    )?;
+    validate_accounted_action_result(
+        &read(repository.join(AGENTIC_ROOT))?,
+        &read(repository.join(AGENTIC_EFFECT_POLICY))?,
+        &read(repository.join(AGENTIC_SEMANTIC_ACTION_RESULT))?,
     )?;
     validate_provider_input_evidence_contract(
         &read(repository.join(AGENTIC_ROOT))?,
@@ -3091,6 +3097,74 @@ fn validate_semantic_terminal_verification(
     Ok(())
 }
 
+fn validate_accounted_action_result(root: &str, policy: &str, result: &str) -> Result<(), String> {
+    let root = compact(root);
+    for required in [
+        "finalize_accounted_semantic_action_result",
+        "AgentAccountedSemanticActionResult",
+        "AgentAccountedSemanticActionResultRefusal",
+        "#[cfg(test)]pub(crate)usesemantic_action_result::finalize_semantic_action_result;",
+    ] {
+        if !root.contains(required) {
+            return Err(format!(
+                "agentic root lost accounted action-result finalization {required}"
+            ));
+        }
+    }
+
+    let policy = compact(policy);
+    for required in [
+        "pubstructAgentVerifiedSemanticEffect{",
+        "pub(crate)fninto_parts(",
+    ] {
+        if !policy.contains(required) {
+            return Err(format!(
+                "verified effect escaped exact result finalization {required}"
+            ));
+        }
+    }
+
+    let result = compact(result);
+    for required in [
+        "pubstructAgentAccountedSemanticActionResult{",
+        "receipt:AgentEffectReceipt",
+        "result:SemanticActionResult",
+        "pubstructAgentAccountedSemanticActionResultRefusal{",
+        "accounted:Box<AgentVerifiedSemanticEffect>",
+        "current:Box<SemanticPostActionObservation>",
+        "pubfnfinalize_accounted_semantic_action_result(",
+        "accounted:AgentVerifiedSemanticEffect",
+        "ifletErr(error)=validate_semantic_action_result(",
+        "let(receipt,execution,settlement,verified)=accounted.into_parts();",
+        "letresult=finish_semantic_action_result(",
+        "#[cfg(test)]pub(crate)fnfinalize_semantic_action_result(",
+        "current:&SemanticPostActionObservation",
+    ] {
+        if !result.contains(required) {
+            return Err(format!(
+                "accounted action result lost exact proof/current-state join {required}"
+            ));
+        }
+    }
+    for forbidden in [
+        "pubfnfinalize_semantic_action_result(",
+        "std::thread",
+        "std::time",
+        "std::fs",
+        "tokio::",
+        "Mutex<",
+        "Arc<",
+        "retry(",
+    ] {
+        if result.contains(forbidden) {
+            return Err(format!(
+                "accounted action result acquired forbidden loose/work surface {forbidden}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_provider_input_evidence_contract(
     root: &str,
     request: &str,
@@ -4425,6 +4499,86 @@ mod tests {
             root,
             verification,
             &policy.replace("verification_error.action_failure();", ""),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn action_result_consumes_accounted_proof_without_losing_current_state() {
+        let root = r#"
+            pub use semantic_action_result::{
+                finalize_accounted_semantic_action_result,
+                AgentAccountedSemanticActionResult,
+                AgentAccountedSemanticActionResultRefusal,
+            };
+            #[cfg(test)]
+            pub(crate) use semantic_action_result::finalize_semantic_action_result;
+        "#;
+        let policy = r#"
+            pub struct AgentVerifiedSemanticEffect {
+                receipt: AgentEffectReceipt,
+            }
+            impl AgentVerifiedSemanticEffect {
+                pub(crate) fn into_parts(self) {}
+            }
+        "#;
+        let result = r#"
+            pub struct AgentAccountedSemanticActionResult {
+                receipt: AgentEffectReceipt,
+                result: SemanticActionResult,
+            }
+            pub struct AgentAccountedSemanticActionResultRefusal {
+                accounted: Box<AgentVerifiedSemanticEffect>,
+                current: Box<SemanticPostActionObservation>,
+            }
+            pub fn finalize_accounted_semantic_action_result(
+                accounted: AgentVerifiedSemanticEffect,
+            ) {
+                if let Err(error) = validate_semantic_action_result(
+                    action,
+                    accounted.verified(),
+                    baseline,
+                    acknowledgement,
+                    &current,
+                ) {}
+                let (receipt, execution, settlement, verified) = accounted.into_parts();
+                let result = finish_semantic_action_result(
+                    verified,
+                    baseline,
+                    acknowledgement,
+                    current,
+                    budget,
+                );
+            }
+            fn validate_semantic_action_result(
+                current: &SemanticPostActionObservation,
+            ) {}
+            #[cfg(test)]
+            pub(crate) fn finalize_semantic_action_result() {}
+        "#;
+        validate_accounted_action_result(root, policy, result).expect("accounted action result");
+        assert!(validate_accounted_action_result(
+            root,
+            policy,
+            &result.replace("current: Box<SemanticPostActionObservation>,", ""),
+        )
+        .is_err());
+        assert!(validate_accounted_action_result(
+            root,
+            policy,
+            &result.replace(
+                "#[cfg(test)]\n            pub(crate) fn finalize_semantic_action_result() {}",
+                "pub fn finalize_semantic_action_result() {}",
+            ),
+        )
+        .is_err());
+        assert!(validate_accounted_action_result(
+            root,
+            policy,
+            &result.replace(
+                "if let Err(error) = validate_semantic_action_result(",
+                "if false && ("
+            ),
         )
         .is_err());
     }
