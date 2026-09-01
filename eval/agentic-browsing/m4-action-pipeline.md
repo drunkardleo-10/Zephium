@@ -6,8 +6,9 @@ fresh-snapshot structural revalidation, event-driven bounded settlement,
 independent effect verification, and acknowledged action-result diff/fresh-state
 finalization and exact bounded batch-terminal aggregation, plus a one-shot
 policy-to-native execution handoff, bounded semantic read/transport, closed
-structured extraction admission, and the one-shot viewport screenshot contract
-are implemented.
+structured extraction admission, exact tool-result/constrained-output
+extraction transport, and the one-shot viewport screenshot contract are
+implemented.
 Policy permits, platform execution,
 visibility/occlusion checks, native observation adapters and timer driving,
 installed visual token counters, and live action/screenshot/provider
@@ -310,6 +311,33 @@ are trusted, or that M4 is complete.
   span from a different result cannot resolve against a coincidentally similar
   table. Extraction creates no observation acknowledgement, action authority,
   policy permit, or durable page identity.
+- The provider mapping path is separate from ordinary read and diff
+  continuation. Only an exact prior tool-only `extract` call selecting the same
+  trusted schema ID can append deterministic `ZEXTRACT1` input: trusted closed
+  field declarations followed by the exact hostile `ZREAD1` evidence. Its
+  private delivery guard binds every field kind and bound plus the read,
+  observation fingerprint, context, generation, and capture time. Generic diff
+  binding now explicitly rejects extract correlations.
+- OpenAI receives a tool-free strict `text.format` JSON-schema response turn;
+  Anthropic receives a tool-free stable `output_config.format` response turn.
+  Both use one fixed universal output envelope rather than a dynamic schema, so
+  shell-registered field names and page values do not enter Anthropic's
+  documented 24-hour compiled-schema cache. The Anthropic projection removes
+  unsupported numeric/length/cardinality constraints and Rust revalidates the
+  original closed schema after streaming, consistent with the current
+  [OpenAI structured-output](https://developers.openai.com/api/docs/guides/structured-outputs)
+  and [Anthropic structured-output](https://platform.claude.com/docs/en/build-with-claude/structured-outputs)
+  contracts.
+- The full immutable mapping request requires an `ExactLocal` count from the
+  pinned provider/model/tokenizer before policy mutation. Exact commitment
+  rejoins the unchanged observation baseline taint and returns only a
+  content-free extraction receipt; it creates no acknowledgement or reference
+  growth. The response collector retains at most the existing 64 KiB hostile
+  extraction ceiling, clears and permanently poisons itself on wrong-call or
+  tool output, and admits only an exact completed, tool-free terminal whose
+  reported text bytes equal the retained bytes. Schema/read substitution,
+  refusal, incomplete output, cancellation, and terminal mismatch fail closed.
+  Extraction is terminal and cannot seed another provider/browser turn.
 - Screenshot v1 is deliberately viewport-only. Apple WebKit can natively select
   a rectangle and width, but WebView2 `CapturePreview` supplies encoded PNG/JPEG
   for what the WebView is displaying and documents that a call before the new

@@ -15,8 +15,11 @@ The closed browser-tool proposal decoder and fixed request/tool-schema encoding
 for both providers are implemented with atomic model-input commitment and a
 fixed, provider-attested billing class. Exact one-shot screenshot tool-result
 encoding, whole-multimodal-input admission, sensitive visual taint, and
-content-free delivery receipts are implemented for both providers. The durable Store adapter and fixed
-BYOK HTTPS transport are implemented. Terminal transport evidence now selects
+content-free delivery receipts are implemented for both providers. Exact
+schema/read-bound extraction tool-result replay, tool-free constrained-output
+requests, bounded response collection, and Rust output admission are also
+implemented for both providers. The durable Store adapter and fixed BYOK HTTPS
+transport are implemented. Terminal transport evidence now selects
 exact-zero, reservation-ceiling, or move-only pricing-required policy
 settlement without exposing active authority. Checked provider pricing and its
 distinct catalog-ceiling accounting are implemented without product rate
@@ -457,8 +460,16 @@ browser action, model call, tool call, data transfer, cost, or native resource.
   observation acknowledgement. A successful bound request carries the prior
   acknowledgement separately and move-only so a later tool turn remains
   possible, while standalone reads cannot manufacture diff or progressive-
-  scope authority. Diff binding explicitly rejects locate, read, and screenshot
-  results.
+  scope authority. Diff binding explicitly rejects locate, read, extract, and
+  screenshot results.
+- Extraction result continuation is terminal and independently typed from
+  read, locate, diff, and screenshot. The exact decoded `extract` correlation
+  retains its shell-registered schema ID. Only that schema, the exact committed
+  baseline, a bounded read derived from it, a strictly newer same-plan call,
+  and a token-admitted combined `ZEXTRACT1` schema/read payload can construct
+  the mapping draft. Schema definitions with the same ID but changed fields or
+  bounds, read/fingerprint substitution, and generic diff substitution fail
+  before policy mutation.
 - `act` converts immediately into the existing click/fill/select/press/scroll,
   effect, wait, verification, and settle types. Existing secret/control-text
   refusal and outcome compatibility run during decode. The preflight also caps
@@ -503,6 +514,18 @@ browser action, model call, tool call, data transfer, cost, or native resource.
   union parameters are checked against Anthropic's current 20/16 compiler
   ceilings before serialization. Local decoding and policy checks remain
   mandatory even when a provider claims strict conformance.
+- Extraction switches from browser tool calling to a separate tool-free
+  constrained-output turn. OpenAI uses strict Responses `text.format` JSON
+  Schema; Anthropic uses stable Messages `output_config.format`. Both serialize
+  one fixed universal envelope with four tagged value variants and canonical
+  `@rN` source arrays, never the caller's dynamic field schema. Product schema
+  names and page values remain in bounded message content rather than
+  Anthropic's documented 24-hour compiled-schema cache. Anthropic receives the
+  deterministic unsupported-constraint projection, while Rust still enforces
+  the original schema and all aggregate/value/provenance/sensitivity limits.
+  This follows the current
+  [OpenAI structured-output contract](https://developers.openai.com/api/docs/guides/structured-outputs)
+  and [Anthropic structured-output/cache contract](https://platform.claude.com/docs/en/build-with-claude/structured-outputs).
 - Provider/model/tokenizer/billing choice, a nonzero trusted pricing revision,
   the schedule's inclusive input range, exact pinned fixed-envelope/schema token
   count, objective tokens, semantic tokens, output ceiling, and request-body
@@ -521,6 +544,21 @@ browser action, model call, tool call, data transfer, cost, or native resource.
   acknowledgement needed to compute a later diff; a read proof cannot become
   diff authority. The stateless builders mechanically exclude `ZDIFF1`: a
   standalone diff would omit the acknowledged model context it modifies.
+- A constrained extraction draft holds its schema/read delivery authority and
+  fixed replay until a synchronous pinned local counter measures the exact
+  complete body. Policy independently checks manifest/call/lease/node,
+  account/context, exact schema/read guard, committed observation baseline, and
+  unchanged taint before reserving that measured count. Refusal/cancellation
+  drops the authority; commit returns a content-free receipt and a one-shot
+  output binding, deliberately retaining no continuation transcript.
+- The extraction collector begins only from the matching committed receipt,
+  retains no more than 64 KiB, clears and poisons on wrong-call, tool, capacity,
+  or byte-limit failure, and admits only an exact `Completed`, tool-free
+  terminal with matching text-byte statistics. The existing Rust extraction
+  decoder then validates strict JSON, exact schema definition and order,
+  source provenance, sensitivity, secrets, and all limits. The admitted result
+  remains `ModelMapped` and creates no browser or provider continuation
+  authority. No provider request was issued for this evidence.
 - A screenshot result is a distinct one-shot continuation rather than a generic
   body or standalone image turn. It requires an exact prior `screenshot`
   tool-only stop, fixed provider configuration, strictly newer same-plan call,
@@ -566,13 +604,16 @@ browser action, model call, tool call, data transfer, cost, or native resource.
   At most four admitted attempts exist. A slot is acquired before semantic
   disclosure commits, is released on every terminal path, and seals the shared
   transport if a committed attempt is abandoned.
-- A committed attempt exposes only the content-free observation/read/screenshot
-  proof retained by request admission. A shell may clone the observation proof
+- A committed attempt exposes only the content-free
+  observation/read/extraction/screenshot proof retained by request admission.
+  A shell may clone the observation proof
   before consuming the attempt so a future bounded continuation can compute an
   exact diff. A read receipt cannot expose an acknowledgement; only the fixed
   bound-read transport may carry forward the exact acknowledgement already in
   its private transcript. Screenshot proof is audit correlation only and
-  cannot seed another continuation. Losing an eligible observation proof
+  cannot seed another continuation. Extraction proof is usable only by its
+  purpose-bound terminal output collector and likewise cannot seed a
+  continuation. Losing an eligible observation proof
   cannot widen authority and requires a fresh snapshot; request bytes,
   semantic strings, and image bytes are never duplicated for continuation.
 - The codec is not a provider privacy qualification. OpenAI documents that
@@ -776,6 +817,11 @@ exact-fingerprint read-result binding, OpenAI and Anthropic `ZREAD1`
 tool-result shapes, latest-result and whole-replay local counting,
 same-coordinate substitution refusal, empty-result baseline rejoin, unchanged
 taint/reference inventory, read-receipt non-promotion, and next-seed retention,
+exact-schema `extract` correlation, combined `ZEXTRACT1` schema/read guards,
+fixed OpenAI and Anthropic constrained-output request shapes, dynamic-schema
+cache exclusion, exact whole-request local counting, unchanged baseline taint,
+terminal extraction proof, bounded streamed-output retention, wrong-call
+poisoning, exact terminal-byte joins, and schema/read substitution refusal,
 byte-exact screenshot guards, OpenAI and Anthropic visual tool-result shapes,
 silent-resize refusal, every-frame sensitive zero-reference taint, exact local
 whole-body counting, visual byte/transcript ceilings, receipt substitution,
@@ -786,13 +832,14 @@ categories, single upward rounding, exact schedule identity, pre-disclosure and
 terminal input-range refusal, overflow, hard rate/profile ceilings, and
 redacted diagnostics. They use only deterministic in-memory values and wire
 fragments and no provider, network, credential, task, timer, or retry.
-Fourteen fixed-transport tests add synthetic ephemeral-loopback evidence for
+Sixteen fixed-transport tests add synthetic ephemeral-loopback evidence for
 exact endpoint/header/body construction, credential and diagnostic redaction,
 single-POST/no-retry behavior, redirect refusal, closed status/retry mapping,
 connection failure, bounded request reading, concurrency/duplicate/shutdown
 accounting, lost-wakeup resistance, abandoned-attempt fail-stop, exact-zero
 pre-dispatch cancellation, reservation-ceiling post-dispatch cancellation,
 catalog-priced completed usage, catalog-priced terminal-failure usage,
-mismatched-catalog authority retention, and conservative terminal
-failure without usage. They use synthetic credentials and content only, never
-an external endpoint, account, profile, provider key, or provider response.
+mismatched-catalog authority retention, conservative terminal failure without
+usage, and terminal OpenAI/Anthropic constrained extraction. They use synthetic
+credentials and content only, never an external endpoint, account, profile,
+provider key, or provider response.

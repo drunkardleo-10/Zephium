@@ -1638,24 +1638,28 @@ mod tests {
     use serde_json::json;
     use zephium_agentic::{
         compute_semantic_diff, decode_semantic_snapshot, encode_semantic_diff,
-        encode_semantic_observation, AgentAccountAttestationId, AgentAccountScope,
-        AgentContextAccountBinding, AgentEffectScope, AgentModelCallBudget, AgentModelCallId,
-        AgentModelCallRequest, AgentModelCallSettlement, AgentPlanLeaseBinding, AgentPlanLeaseId,
-        AgentPlanNodeAuthority, AgentPlanNodeId, AgentPlanNodeScope,
-        AgentPreparedObservationRequest, AgentProviderCallConfig, AgentProviderDiffRequestDraft,
+        encode_semantic_extraction_request, encode_semantic_observation, read_semantic_observation,
+        AgentAccountAttestationId, AgentAccountScope, AgentContextAccountBinding, AgentEffectScope,
+        AgentModelCallBudget, AgentModelCallId, AgentModelCallRequest, AgentModelCallSettlement,
+        AgentPlanLeaseBinding, AgentPlanLeaseId, AgentPlanNodeAuthority, AgentPlanNodeId,
+        AgentPlanNodeScope, AgentPreparedObservationRequest, AgentProviderCallConfig,
+        AgentProviderDiffRequestDraft, AgentProviderExtractionRequestDraft,
         AgentProviderLocalInputTokenCounter, AgentProviderModelRevision, AgentProviderObjective,
         AgentProviderPricingError, AgentProviderPricingProfile, AgentProviderPricingRevision,
         AgentProviderPricingSchedule, AgentProviderStopReason, AgentProviderStreamBudget,
         AgentProviderTokenRates, AgentRunBudget, AgentRunManifest, AgentRunManifestId,
         AgentRunScope, ContextCapabilities, ContextCapability, ContextId, ContextIdentity,
         ContextKind, ContextOperationId, ContextRegistry, ContextRunId, ContextSettlement,
-        FrameGeneration, FrameId, SemanticDecodeContext, SemanticDiffBudget, SemanticDiffOutcome,
-        SemanticEffectClass, SemanticFrameJoin, SemanticFrameTrust, SemanticInvocationId,
-        SemanticModelEncodingBudget, SemanticObservation, SemanticObservationAssembler,
-        SemanticObservationBudget, SemanticObservationId, SemanticObservationRequest,
-        SemanticOrigin, SemanticSensitivity, SemanticSnapshotGeneration, SemanticTokenCountQuality,
-        SemanticTokenCountRequirement, SemanticTokenCounter, SemanticTokenCounterError,
-        SemanticTokenMeasurement, SemanticTokenizerRevision, SEMANTIC_WIRE_VERSION,
+        FrameGeneration, FrameId, SemanticCaptureInstant, SemanticDecodeContext,
+        SemanticDiffBudget, SemanticDiffOutcome, SemanticEffectClass,
+        SemanticExtractionFieldSchema, SemanticExtractionSchema, SemanticExtractionSchemaId,
+        SemanticFrameJoin, SemanticFrameTrust, SemanticInvocationId, SemanticModelEncodingBudget,
+        SemanticObservation, SemanticObservationAssembler, SemanticObservationBudget,
+        SemanticObservationId, SemanticObservationRequest, SemanticOrigin, SemanticReadAuthority,
+        SemanticReadBudget, SemanticReadSensitivityLimit, SemanticSensitivity,
+        SemanticSnapshotGeneration, SemanticTokenCountQuality, SemanticTokenCountRequirement,
+        SemanticTokenCounter, SemanticTokenCounterError, SemanticTokenMeasurement,
+        SemanticTokenizerRevision, SEMANTIC_WIRE_VERSION,
     };
     use zephium_core::ids::ProfileId;
 
@@ -2314,6 +2318,205 @@ mod tests {
         }
     }
 
+    fn sse_json(event: &str, payload: serde_json::Value) -> String {
+        format!(
+            "event: {event}\ndata: {}\n\n",
+            serde_json::to_string(&payload).expect("SSE fixture JSON")
+        )
+    }
+
+    fn openai_extract_tool_stream() -> Vec<u8> {
+        let arguments = r#"{"schema_id":71}"#;
+        [
+            sse_json(
+                "response.created",
+                json!({"type":"response.created","response":{
+                    "id":"resp_extract_tool_1","status":"in_progress",
+                    "model":"gpt-5.6-sol","service_tier":"default"
+                }}),
+            ),
+            sse_json(
+                "response.output_item.added",
+                json!({"type":"response.output_item.added","item":{
+                    "type":"function_call","id":"fc_extract_tool_1",
+                    "call_id":"call_extract_tool_1","name":"extract",
+                    "arguments":"","status":"in_progress"
+                }}),
+            ),
+            sse_json(
+                "response.function_call_arguments.delta",
+                json!({"type":"response.function_call_arguments.delta",
+                    "item_id":"fc_extract_tool_1","delta":arguments}),
+            ),
+            sse_json(
+                "response.function_call_arguments.done",
+                json!({"type":"response.function_call_arguments.done",
+                    "item_id":"fc_extract_tool_1","name":"extract",
+                    "arguments":arguments}),
+            ),
+            sse_json(
+                "response.output_item.done",
+                json!({"type":"response.output_item.done","item":{
+                    "type":"function_call","id":"fc_extract_tool_1",
+                    "call_id":"call_extract_tool_1","name":"extract",
+                    "arguments":arguments,"status":"completed"
+                }}),
+            ),
+            sse_json(
+                "response.completed",
+                json!({"type":"response.completed","response":{
+                    "id":"resp_extract_tool_1","status":"completed",
+                    "model":"gpt-5.6-sol","service_tier":"default",
+                    "output":[{"type":"function_call","id":"fc_extract_tool_1",
+                        "call_id":"call_extract_tool_1","name":"extract",
+                        "arguments":arguments,"status":"completed"}],
+                    "usage":{"input_tokens":17,"output_tokens":3,"total_tokens":20,
+                        "input_tokens_details":{"cached_tokens":0},
+                        "output_tokens_details":{"reasoning_tokens":0}}
+                }}),
+            ),
+            "data: [DONE]\n\n".to_owned(),
+        ]
+        .concat()
+        .into_bytes()
+    }
+
+    fn anthropic_extract_tool_stream() -> Vec<u8> {
+        [
+            sse_json(
+                "message_start",
+                json!({"type":"message_start","message":{
+                    "id":"msg_extract_tool_1","type":"message","role":"assistant",
+                    "content":[],"model":"claude-opus-5","stop_reason":null,
+                    "stop_sequence":null,"usage":{"input_tokens":7,
+                        "cache_creation_input_tokens":3,"cache_read_input_tokens":5,
+                        "output_tokens":1,"output_tokens_details":{"thinking_tokens":0},
+                        "service_tier":"standard","inference_geo":"global"}
+                }}),
+            ),
+            sse_json(
+                "content_block_start",
+                json!({"type":"content_block_start","index":0,"content_block":{
+                    "type":"tool_use","id":"toolu_extract_1","name":"extract",
+                    "input":{}
+                }}),
+            ),
+            sse_json(
+                "content_block_delta",
+                json!({"type":"content_block_delta","index":0,"delta":{
+                    "type":"input_json_delta","partial_json":"{\"schema_id\":71}"
+                }}),
+            ),
+            sse_json(
+                "content_block_stop",
+                json!({"type":"content_block_stop","index":0}),
+            ),
+            sse_json(
+                "message_delta",
+                json!({"type":"message_delta","delta":{"stop_reason":"tool_use",
+                    "stop_sequence":null},"usage":{"output_tokens":4}}),
+            ),
+            sse_json("message_stop", json!({"type":"message_stop"})),
+        ]
+        .concat()
+        .into_bytes()
+    }
+
+    fn provider_extract_tool_stream(provider: AgentProviderKind) -> Vec<u8> {
+        match provider {
+            AgentProviderKind::OpenAiResponses => openai_extract_tool_stream(),
+            AgentProviderKind::AnthropicMessages => anthropic_extract_tool_stream(),
+        }
+    }
+
+    fn openai_extraction_output_stream(output: &str, input_tokens: u32) -> Vec<u8> {
+        [
+            sse_json(
+                "response.created",
+                json!({"type":"response.created","response":{
+                    "id":"resp_extract_output_1","status":"in_progress",
+                    "model":"gpt-5.6-sol","service_tier":"default"
+                }}),
+            ),
+            sse_json(
+                "response.output_text.delta",
+                json!({"type":"response.output_text.delta","delta":output}),
+            ),
+            sse_json(
+                "response.output_text.done",
+                json!({"type":"response.output_text.done","text":output}),
+            ),
+            sse_json(
+                "response.completed",
+                json!({"type":"response.completed","response":{
+                    "id":"resp_extract_output_1","status":"completed",
+                    "model":"gpt-5.6-sol","service_tier":"default",
+                    "output":[{"type":"message","content":[{"type":"output_text"}]}],
+                    "usage":{"input_tokens":input_tokens,"output_tokens":3,
+                        "total_tokens":input_tokens + 3,
+                        "input_tokens_details":{"cached_tokens":0},
+                        "output_tokens_details":{"reasoning_tokens":0}}
+                }}),
+            ),
+            "data: [DONE]\n\n".to_owned(),
+        ]
+        .concat()
+        .into_bytes()
+    }
+
+    fn anthropic_extraction_output_stream(output: &str, input_tokens: u32) -> Vec<u8> {
+        [
+            sse_json(
+                "message_start",
+                json!({"type":"message_start","message":{
+                    "id":"msg_extract_output_1","type":"message","role":"assistant",
+                    "content":[],"model":"claude-opus-5","stop_reason":null,
+                    "stop_sequence":null,"usage":{"input_tokens":input_tokens,
+                        "cache_creation_input_tokens":0,"cache_read_input_tokens":0,
+                        "output_tokens":1,"output_tokens_details":{"thinking_tokens":0},
+                        "service_tier":"standard","inference_geo":"global"}
+                }}),
+            ),
+            sse_json(
+                "content_block_start",
+                json!({"type":"content_block_start","index":0,
+                    "content_block":{"type":"text","text":""}}),
+            ),
+            sse_json(
+                "content_block_delta",
+                json!({"type":"content_block_delta","index":0,
+                    "delta":{"type":"text_delta","text":output}}),
+            ),
+            sse_json(
+                "content_block_stop",
+                json!({"type":"content_block_stop","index":0}),
+            ),
+            sse_json(
+                "message_delta",
+                json!({"type":"message_delta","delta":{"stop_reason":"end_turn",
+                    "stop_sequence":null},"usage":{"output_tokens":4}}),
+            ),
+            sse_json("message_stop", json!({"type":"message_stop"})),
+        ]
+        .concat()
+        .into_bytes()
+    }
+
+    fn provider_extraction_output_stream(
+        provider: AgentProviderKind,
+        output: &str,
+        input_tokens: u32,
+    ) -> Vec<u8> {
+        match provider {
+            AgentProviderKind::OpenAiResponses => {
+                openai_extraction_output_stream(output, input_tokens)
+            }
+            AgentProviderKind::AnthropicMessages => {
+                anthropic_extraction_output_stream(output, input_tokens)
+            }
+        }
+    }
+
     fn openai_mixed_tool_stream() -> Vec<u8> {
         [
             "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_mixed_1\",\"status\":\"in_progress\",\"model\":\"gpt-5.6-sol\",\"service_tier\":\"default\"}}\n\n",
@@ -2920,6 +3123,249 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn anthropic_diff_is_single_post_and_retains_the_next_exact_seed() {
         qualify_admitted_diff_transport(AgentProviderKind::AnthropicMessages).await;
+    }
+
+    async fn qualify_admitted_extraction_transport(provider: AgentProviderKind) {
+        let initial_server = OneShotServer::spawn(
+            "200 OK",
+            &[
+                ("Content-Type", "text/event-stream; charset=utf-8"),
+                ("Content-Encoding", "identity"),
+            ],
+            vec![provider_extract_tool_stream(provider)],
+        );
+        let initial_transport = test_transport(&initial_server);
+        let credential = AgentProviderCredential::try_new(
+            provider,
+            match provider {
+                AgentProviderKind::OpenAiResponses => "synthetic-openai-key",
+                AgentProviderKind::AnthropicMessages => "synthetic-anthropic-key",
+            }
+            .to_owned(),
+        )
+        .expect("credential");
+        let mut fixture = stateful_provider_fixture(provider);
+        let mut correlation = None;
+        let initial_result = initial_transport
+            .try_admit(
+                fixture.input,
+                &mut fixture.policy,
+                &credential,
+                AgentProviderCancellation::new(),
+            )
+            .expect("initial extraction admission")
+            .execute(|batch| {
+                for event in batch.into_events() {
+                    if let zephium_agentic::AgentProviderStreamEvent::ToolCall(tool) = event {
+                        assert!(correlation.is_none(), "multiple extraction proposals");
+                        correlation = Some(tool.into_continuation_parts().0);
+                    }
+                }
+                AgentProviderBatchDisposition::Continue
+            })
+            .await;
+        let AgentProviderTransportOutcome::Stream(AgentProviderStreamConclusion::Completed(
+            initial_completion,
+        )) = initial_result.outcome()
+        else {
+            panic!("initial extraction tool completion expected: {initial_result:?}")
+        };
+        assert_eq!(
+            initial_completion.stop(),
+            AgentProviderStopReason::ToolCalls
+        );
+        let (initial_settlement, seed) = initial_result.into_policy_settlement_with_continuation();
+        let continuation = seed
+            .expect("extraction continuation seed")
+            .join_terminal_tool(
+                initial_completion,
+                correlation.expect("extraction correlation"),
+            )
+            .expect("exact extraction terminal join");
+        let AgentProviderPolicySettlement::PricingRequired(initial_settlement) = initial_settlement
+        else {
+            panic!("initial extraction usage must be priced")
+        };
+        let initial_schedule = pricing_schedule(initial_settlement.config());
+        initial_settlement
+            .settle(&mut fixture.policy, &initial_schedule)
+            .expect("initial extraction settlement");
+        initial_server.finish();
+
+        let read = read_semantic_observation(
+            &fixture.observation,
+            SemanticReadAuthority::Initial,
+            SemanticCaptureInstant::from_millis(NOW - 2),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::STANDARD,
+        )
+        .expect("extraction read");
+        let schema = SemanticExtractionSchema::try_new(
+            SemanticExtractionSchemaId::new(71).expect("schema id"),
+            vec![
+                SemanticExtractionFieldSchema::try_text("title".to_owned(), true, 64)
+                    .expect("title field"),
+            ],
+        )
+        .expect("extraction schema");
+        let payload = encode_semantic_extraction_request(
+            &schema,
+            &read,
+            SemanticModelEncodingBudget::try_new(
+                32 * 1024,
+                32 * 1024,
+                SemanticTokenCountRequirement::Exact,
+            )
+            .expect("extraction budget"),
+        )
+        .expect("encode extraction input")
+        .admit(
+            &FixedCounter {
+                revision: fixture.config.tokenizer().clone(),
+                tokens: 10,
+            },
+            fixture.config.tokenizer(),
+        )
+        .expect("admit extraction input");
+        let request = AgentModelCallRequest::new(
+            AgentModelCallId::new(2).expect("extraction call"),
+            fixture.lease,
+            fixture.account,
+            AgentModelCallBudget::try_new(30, 20, 100).expect("extraction call budget"),
+            zephium_agentic::AgentPolicyInstant::from_millis(NOW),
+        );
+        let draft = AgentProviderExtractionRequestDraft::try_new(
+            continuation
+                .bind_extraction_request(request, &fixture.config, &schema, &read, payload)
+                .expect("bind extraction request"),
+        )
+        .expect("encode extraction request");
+        let structured_input_tokens = match provider {
+            AgentProviderKind::OpenAiResponses => 17,
+            AgentProviderKind::AnthropicMessages => 15,
+        };
+        let prepared = draft
+            .try_prepare(
+                &mut fixture.policy,
+                request,
+                &schema,
+                &read,
+                &FixedStructuredCounter {
+                    revision: fixture.config.tokenizer().clone(),
+                    tokens: structured_input_tokens,
+                },
+            )
+            .expect("admit exact extraction request");
+        let (input, output_binding) = prepared.into_transport_parts();
+        let output = r#"{"v":1,"schema":71,"fields":[{"name":"title","value":{"k":"text","value":"synthetic fixture marker","sources":["@r1"]}}]}"#;
+        let output_server = OneShotServer::spawn(
+            "200 OK",
+            &[
+                ("Content-Type", "text/event-stream; charset=utf-8"),
+                ("Content-Encoding", "identity"),
+            ],
+            vec![provider_extraction_output_stream(
+                provider,
+                output,
+                structured_input_tokens,
+            )],
+        );
+        let output_transport = test_transport(&output_server);
+        let attempt = output_transport
+            .try_admit(
+                input,
+                &mut fixture.policy,
+                &credential,
+                AgentProviderCancellation::new(),
+            )
+            .expect("extraction transport admission");
+        assert!(attempt
+            .input_evidence()
+            .extraction_receipt()
+            .is_some_and(|receipt| receipt.matches(&schema, &read)));
+        let mut collector = output_binding
+            .start(attempt.input_evidence())
+            .expect("bind committed extraction input");
+        let output_result = attempt
+            .execute(|batch| {
+                collector
+                    .push_batch(batch)
+                    .expect("collect extraction stream batch");
+                AgentProviderBatchDisposition::Continue
+            })
+            .await;
+        let AgentProviderTransportOutcome::Stream(AgentProviderStreamConclusion::Completed(
+            output_completion,
+        )) = output_result.outcome()
+        else {
+            panic!("completed extraction output expected")
+        };
+        assert_eq!(output_completion.stop(), AgentProviderStopReason::Completed);
+        assert!(!output_result.has_continuation_seed());
+        assert_eq!(collector.retained_bytes(), output.len());
+        let extracted = collector
+            .finish(
+                AgentProviderStreamConclusion::Completed(output_completion),
+                &schema,
+                &read,
+                SemanticReadSensitivityLimit::PublicOnly,
+            )
+            .expect("admit extracted output");
+        assert_eq!(extracted.schema(), schema.id());
+        assert_eq!(extracted.stats().fields(), 1);
+        assert_eq!(extracted.stats().source_edges(), 1);
+        let (settlement, seed) = output_result.into_policy_settlement_with_continuation();
+        assert!(seed.is_none());
+        let AgentProviderPolicySettlement::PricingRequired(settlement) = settlement else {
+            panic!("extraction usage must be priced")
+        };
+        let schedule = pricing_schedule(settlement.config());
+        let receipt = settlement
+            .settle(&mut fixture.policy, &schedule)
+            .expect("extraction pricing settlement");
+        assert_eq!(receipt.input_tokens(), u64::from(structured_input_tokens));
+        assert_eq!(fixture.policy.taints().len(), 1);
+        assert_eq!(fixture.policy.pending_model_calls(), 0);
+        assert!(output_transport
+            .snapshot()
+            .expect("extraction snapshot")
+            .is_quiescent());
+
+        let captured = output_server.finish();
+        let body: serde_json::Value =
+            serde_json::from_slice(&captured.body).expect("extraction request body");
+        assert!(body.get("tools").is_none());
+        assert!(body.get("tool_choice").is_none());
+        let format_schema = match provider {
+            AgentProviderKind::OpenAiResponses => {
+                assert_eq!(body["text"]["format"]["type"], "json_schema");
+                assert_eq!(body["text"]["format"]["strict"], true);
+                assert_eq!(body["input"][2]["type"], "function_call");
+                assert_eq!(body["input"][2]["name"], "extract");
+                assert_eq!(body["input"][3]["type"], "function_call_output");
+                &body["text"]["format"]["schema"]
+            }
+            AgentProviderKind::AnthropicMessages => {
+                assert_eq!(body["output_config"]["format"]["type"], "json_schema");
+                assert_eq!(body["messages"][1]["content"][0]["type"], "tool_use");
+                assert_eq!(body["messages"][1]["content"][0]["name"], "extract");
+                assert_eq!(body["messages"][2]["content"][0]["type"], "tool_result");
+                &body["output_config"]["format"]["schema"]
+            }
+        };
+        assert!(!serde_json::to_string(format_schema)
+            .expect("fixed output schema")
+            .contains("title"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn openai_extraction_is_constrained_single_post_and_terminal() {
+        qualify_admitted_extraction_transport(AgentProviderKind::OpenAiResponses).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn anthropic_extraction_is_constrained_single_post_and_terminal() {
+        qualify_admitted_extraction_transport(AgentProviderKind::AnthropicMessages).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
