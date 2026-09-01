@@ -69,8 +69,12 @@ pub use agent_policy::{
     MAX_AGENT_TAINT_REFERENCES,
 };
 pub use agent_supervisor::{
-    AgentDelegationNode, AgentDelegationSpec, AgentDelegationTopology,
-    AgentSupervisorContractError, MAX_AGENT_DELEGATION_DEPTH, MAX_AGENT_EXECUTING_SUPERVISOR_NODES,
+    AgentDelegationNode, AgentDelegationSpec, AgentDelegationTopology, AgentNodeExecution,
+    AgentRunSupervisor, AgentSupervisorAttemptId, AgentSupervisorCompletion,
+    AgentSupervisorContractError, AgentSupervisorExecutionOutcome, AgentSupervisorExecutionReceipt,
+    AgentSupervisorFailure, AgentSupervisorId, AgentSupervisorNodeSnapshot,
+    AgentSupervisorNodeStatus, AgentSupervisorRuntimeError, AgentSupervisorRuntimeStatus,
+    AgentSupervisorWait, MAX_AGENT_DELEGATION_DEPTH, MAX_AGENT_EXECUTING_SUPERVISOR_NODES,
     MAX_AGENT_LIVE_SUPERVISOR_NODES,
 };
 

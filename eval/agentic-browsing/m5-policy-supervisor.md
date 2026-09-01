@@ -2,9 +2,10 @@
 
 Status: the immutable approved run-manifest contract, mutable plan-lease/model
 input accounting, single-flight semantic effect policy, and immutable
-non-widening delegation topology are implemented. The mutable bounded run
-tree/scheduler/cancellation tree, provider adapters, audit sink, and live
-qualification remain pending.
+non-widening delegation topology are implemented. The first mutable bounded
+run-tree scheduler is also implemented; cancellation/drain propagation,
+context assignment, provider adapters, audit sink, and live qualification
+remain pending.
 
 This evidence describes policy input facts only. A manifest cannot authorize a
 browser action, model call, tool call, data transfer, cost, or native resource.
@@ -167,6 +168,35 @@ browser action, model call, tool call, data transfer, cost, or native resource.
   depth, counts, and a redacted guard. Exact manifest and topology revision
   matching prevents a topology from being reused after approval changes.
 
+## Implemented bounded run-tree scheduler
+
+- One process-local supervisor incarnation owns one validated topology and
+  initially activates only its root as queued. It creates no model stream,
+  future, task, worker, timer, channel, provider, context, page, or native
+  resource. Pre-approved topology nodes consume nothing until their exact
+  executing parent activates them.
+- A child can activate only once, only through its pre-approved direct parent,
+  and only while a non-cloneable exact parent execution token is current. Up to
+  eight nonterminal nodes may be live. Terminal history stays bounded by the
+  topology's 64-node ceiling, frees live capacity, and can never reopen.
+- Up to four nodes may execute concurrently. A successful admission mints a
+  non-cloneable token bound to the supervisor incarnation, topology revision,
+  plan node, and strictly increasing attempt identity. A capacity refusal does
+  not consume the attempt; an admitted attempt can never replay.
+- Waiting is an explicit content-free state that retains no execution slot or
+  asynchronous work. A node waiting for descendants cannot resume while any
+  activated descendant remains live. A terminal request made too early safely
+  becomes this descendant wait instead of losing execution authority.
+- Success and the closed supervisor failure taxonomy are terminal only after
+  all activated descendants settle. Status and zero-allocation node iteration
+  report activated/live/executing/queued/waiting/terminal counts without
+  objectives, prompts, model output, provider text, page content, or origins.
+- Cross-incarnation, stale, substituted, or duplicate execution tokens cannot
+  change node state. Ambiguous same-supervisor settlement seals mutation and
+  retains the executing slot in accounting. Exact cancellation and drain
+  acknowledgement will extend these states next; the scheduler does not yet
+  claim that running external work has been cancelled.
+
 ## Current tests
 
 Default crate tests exercise canonical order independence, canonical ULID
@@ -190,3 +220,8 @@ Three delegation-topology tests additionally cover canonical order, exact
 manifest revision binding, the valid depth-two boundary, every malformed tree
 shape, the 64-node preflight ceiling, and parent widening through origin,
 effect, sensitivity, operation budget, or expiry.
+Three mutable-scheduler tests execute a complete depth-two tree, descendant
+wait/resume/terminal ordering, sequential live-slot reuse, the exact eight-live
+and four-executing boundaries without eviction, non-consumption of capacity
+refusals, admitted-attempt replay refusal, cross-incarnation token rejection,
+terminal failure projection, and redacted diagnostics.

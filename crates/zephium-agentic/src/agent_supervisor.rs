@@ -14,6 +14,14 @@ use crate::{
     MAX_AGENT_PLAN_NODES,
 };
 
+mod runtime;
+pub use runtime::{
+    AgentNodeExecution, AgentRunSupervisor, AgentSupervisorAttemptId, AgentSupervisorCompletion,
+    AgentSupervisorExecutionOutcome, AgentSupervisorExecutionReceipt, AgentSupervisorFailure,
+    AgentSupervisorId, AgentSupervisorNodeSnapshot, AgentSupervisorNodeStatus,
+    AgentSupervisorRuntimeError, AgentSupervisorRuntimeStatus, AgentSupervisorWait,
+};
+
 /// Initial maximum simultaneously live nodes in one supervisor tree.
 pub const MAX_AGENT_LIVE_SUPERVISOR_NODES: usize = 8;
 /// Initial maximum simultaneously executing nodes in one supervisor tree.
@@ -226,6 +234,10 @@ impl AgentDelegationTopology {
     pub fn matches_revision(&self, other: &Self) -> bool {
         self.manifest == other.manifest && self.guard == other.guard
     }
+
+    pub(super) const fn guard(&self) -> [u8; 32] {
+        self.guard
+    }
 }
 
 impl fmt::Debug for AgentDelegationTopology {
@@ -357,7 +369,8 @@ mod tests {
     use super::*;
     use crate::{
         AgentAccountScope, AgentEffectScope, AgentPlanNodeAuthority, AgentPolicyInstant,
-        AgentRunBudget, AgentRunScope, SemanticEffectClass, SemanticOrigin, SemanticSensitivity,
+        AgentRunBudget, AgentRunScope, SemanticActionFailure, SemanticEffectClass, SemanticOrigin,
+        SemanticSensitivity,
     };
     use zephium_core::ids::ProfileId;
 
@@ -477,6 +490,28 @@ mod tests {
                 7_000,
             ),
         ])
+    }
+
+    fn standard_topology(manifest: &AgentRunManifest) -> AgentDelegationTopology {
+        AgentDelegationTopology::try_new(
+            manifest,
+            vec![
+                AgentDelegationSpec::new(AgentPlanNodeId::from_raw(1), None),
+                AgentDelegationSpec::new(
+                    AgentPlanNodeId::from_raw(2),
+                    Some(AgentPlanNodeId::from_raw(1)),
+                ),
+                AgentDelegationSpec::new(
+                    AgentPlanNodeId::from_raw(3),
+                    Some(AgentPlanNodeId::from_raw(2)),
+                ),
+            ],
+        )
+        .expect("topology")
+    }
+
+    fn attempt(value: u64) -> AgentSupervisorAttemptId {
+        AgentSupervisorAttemptId::new(value).expect("attempt")
     }
 
     #[test]
@@ -790,5 +825,236 @@ mod tests {
                 AgentSupervisorContractError::Widening
             );
         }
+    }
+
+    #[test]
+    fn mutable_scheduler_executes_a_depth_two_tree_without_retained_wait_work() {
+        let manifest = standard_manifest();
+        let topology = standard_topology(&manifest);
+        let mut supervisor =
+            AgentRunSupervisor::new(AgentSupervisorId::new(1).expect("supervisor"), topology);
+        let initial = supervisor.status();
+        assert_eq!(initial.activated(), 1);
+        assert_eq!(initial.live(), 1);
+        assert_eq!(initial.executing(), 0);
+        assert_eq!(initial.queued(), 1);
+        assert_eq!(initial.waiting(), 0);
+        assert_eq!(initial.terminal(), 0);
+        assert!(!initial.is_sealed());
+
+        let root = supervisor
+            .start(AgentPlanNodeId::from_raw(1), attempt(1))
+            .expect("start root");
+        supervisor
+            .delegate(&root, AgentPlanNodeId::from_raw(2))
+            .expect("delegate child");
+        let root_wait = supervisor
+            .complete(root, AgentSupervisorCompletion::Succeeded)
+            .expect("parent waits");
+        assert_eq!(
+            root_wait.outcome(),
+            AgentSupervisorExecutionOutcome::Waiting(AgentSupervisorWait::Descendants)
+        );
+        assert_eq!(supervisor.status().executing(), 0);
+        assert_eq!(supervisor.status().waiting(), 1);
+
+        let child = supervisor
+            .start(AgentPlanNodeId::from_raw(2), attempt(2))
+            .expect("start child");
+        supervisor
+            .delegate(&child, AgentPlanNodeId::from_raw(3))
+            .expect("delegate grandchild");
+        let child_wait = supervisor
+            .wait(child, AgentSupervisorWait::Descendants)
+            .expect("wait child");
+        assert_eq!(
+            child_wait.outcome(),
+            AgentSupervisorExecutionOutcome::Waiting(AgentSupervisorWait::Descendants)
+        );
+
+        let grandchild = supervisor
+            .start(AgentPlanNodeId::from_raw(3), attempt(3))
+            .expect("start grandchild");
+        let grandchild_receipt = supervisor
+            .complete(grandchild, AgentSupervisorCompletion::Succeeded)
+            .expect("complete grandchild");
+        assert_eq!(
+            grandchild_receipt.outcome(),
+            AgentSupervisorExecutionOutcome::Succeeded
+        );
+        let child = supervisor
+            .start(AgentPlanNodeId::from_raw(2), attempt(4))
+            .expect("resume child");
+        supervisor
+            .complete(child, AgentSupervisorCompletion::Succeeded)
+            .expect("complete child");
+        let root = supervisor
+            .start(AgentPlanNodeId::from_raw(1), attempt(5))
+            .expect("resume root");
+        supervisor
+            .complete(root, AgentSupervisorCompletion::Succeeded)
+            .expect("complete root");
+
+        assert_eq!(supervisor.status().live(), 0);
+        assert_eq!(supervisor.status().executing(), 0);
+        assert_eq!(supervisor.status().terminal(), 3);
+        assert!(supervisor.nodes().all(|node| node.status().is_terminal()));
+        assert_eq!(
+            supervisor
+                .start(AgentPlanNodeId::from_raw(1), attempt(6))
+                .expect_err("terminal node cannot reopen"),
+            AgentSupervisorRuntimeError::NotRunnable
+        );
+        assert!(!supervisor.status().is_sealed());
+    }
+
+    #[test]
+    fn mutable_scheduler_enforces_live_and_execution_limits_without_eviction() {
+        let mut inputs = vec![node(
+            1,
+            &["a"],
+            &[SemanticEffectClass::Read],
+            SemanticSensitivity::Public,
+            50,
+            9_000,
+        )];
+        for id in 2..=9_u128 {
+            inputs.push(node(
+                id,
+                &["a"],
+                &[SemanticEffectClass::Read],
+                SemanticSensitivity::Public,
+                10,
+                8_000,
+            ));
+        }
+        let manifest = make_manifest(inputs);
+        let mut specs = vec![AgentDelegationSpec::new(AgentPlanNodeId::from_raw(1), None)];
+        for id in 2..=9_u128 {
+            specs.push(AgentDelegationSpec::new(
+                AgentPlanNodeId::from_raw(id),
+                Some(AgentPlanNodeId::from_raw(1)),
+            ));
+        }
+        let topology = AgentDelegationTopology::try_new(&manifest, specs).expect("wide topology");
+        let mut supervisor =
+            AgentRunSupervisor::new(AgentSupervisorId::new(2).expect("supervisor"), topology);
+        let root = supervisor
+            .start(AgentPlanNodeId::from_raw(1), attempt(1))
+            .expect("start root");
+        for id in 2..=8_u128 {
+            supervisor
+                .delegate(&root, AgentPlanNodeId::from_raw(id))
+                .expect("delegate within live ceiling");
+        }
+        assert_eq!(supervisor.status().live(), MAX_AGENT_LIVE_SUPERVISOR_NODES);
+        assert_eq!(
+            supervisor
+                .delegate(&root, AgentPlanNodeId::from_raw(9))
+                .expect_err("live ceiling"),
+            AgentSupervisorRuntimeError::LiveLimit
+        );
+        assert_eq!(supervisor.node_status(AgentPlanNodeId::from_raw(9)), None);
+
+        let child_two = supervisor
+            .start(AgentPlanNodeId::from_raw(2), attempt(2))
+            .expect("start child two");
+        supervisor
+            .complete(child_two, AgentSupervisorCompletion::Succeeded)
+            .expect("complete child two");
+        supervisor
+            .delegate(&root, AgentPlanNodeId::from_raw(9))
+            .expect("terminal child released live slot");
+        assert_eq!(supervisor.status().activated(), 9);
+        assert_eq!(supervisor.status().live(), MAX_AGENT_LIVE_SUPERVISOR_NODES);
+
+        let child_three = supervisor
+            .start(AgentPlanNodeId::from_raw(3), attempt(3))
+            .expect("start child three");
+        let _child_four = supervisor
+            .start(AgentPlanNodeId::from_raw(4), attempt(4))
+            .expect("start child four");
+        let _child_five = supervisor
+            .start(AgentPlanNodeId::from_raw(5), attempt(5))
+            .expect("start child five");
+        assert_eq!(
+            supervisor.status().executing(),
+            MAX_AGENT_EXECUTING_SUPERVISOR_NODES
+        );
+        assert_eq!(
+            supervisor
+                .start(AgentPlanNodeId::from_raw(6), attempt(6))
+                .expect_err("execution ceiling"),
+            AgentSupervisorRuntimeError::ExecutionLimit
+        );
+        supervisor
+            .complete(child_three, AgentSupervisorCompletion::Succeeded)
+            .expect("release execution slot");
+        let _child_six = supervisor
+            .start(AgentPlanNodeId::from_raw(6), attempt(6))
+            .expect("failed admission did not consume attempt");
+        assert_eq!(supervisor.status().executing(), 4);
+        assert!(!supervisor.status().is_sealed());
+    }
+
+    #[test]
+    fn mutable_scheduler_rejects_attempt_replay_and_cross_instance_tokens() {
+        let manifest = standard_manifest();
+        let topology_one = standard_topology(&manifest);
+        let topology_two = standard_topology(&manifest);
+        let mut first = AgentRunSupervisor::new(
+            AgentSupervisorId::new(10).expect("supervisor"),
+            topology_one,
+        );
+        let mut second = AgentRunSupervisor::new(
+            AgentSupervisorId::new(11).expect("supervisor"),
+            topology_two,
+        );
+        let first_execution = first
+            .start(AgentPlanNodeId::from_raw(1), attempt(1))
+            .expect("first execution");
+        let _second_execution = second
+            .start(AgentPlanNodeId::from_raw(1), attempt(1))
+            .expect("second execution");
+        assert_eq!(
+            second
+                .wait(first_execution, AgentSupervisorWait::Yielded)
+                .expect_err("cross-instance token"),
+            AgentSupervisorRuntimeError::ExecutionMismatch
+        );
+        assert!(second.status().is_sealed());
+        assert_eq!(second.status().executing(), 1);
+
+        let manifest = standard_manifest();
+        let mut replay = AgentRunSupervisor::new(
+            AgentSupervisorId::new(12).expect("supervisor"),
+            standard_topology(&manifest),
+        );
+        let execution = replay
+            .start(AgentPlanNodeId::from_raw(1), attempt(1))
+            .expect("execution");
+        replay
+            .wait(execution, AgentSupervisorWait::Yielded)
+            .expect("yield");
+        assert_eq!(
+            replay
+                .start(AgentPlanNodeId::from_raw(1), attempt(1))
+                .expect_err("attempt replay"),
+            AgentSupervisorRuntimeError::AttemptReplay
+        );
+        let execution = replay
+            .start(AgentPlanNodeId::from_raw(1), attempt(2))
+            .expect("next attempt");
+        let failure = AgentSupervisorFailure::Action(SemanticActionFailure::BackendRefused);
+        let receipt = replay
+            .complete(execution, AgentSupervisorCompletion::Failed(failure))
+            .expect("terminal failure");
+        assert_eq!(
+            receipt.outcome(),
+            AgentSupervisorExecutionOutcome::Failed(failure)
+        );
+        let debug = format!("{replay:?} {receipt:?}");
+        assert!(!debug.contains("a.example.test"));
+        assert!(debug.contains("[redacted]"));
     }
 }
