@@ -569,7 +569,7 @@ impl SemanticObservationAcknowledgement {
         Self { fingerprint }
     }
 
-    fn matches(&self, observation: &SemanticObservation) -> bool {
+    pub(crate) fn matches(&self, observation: &SemanticObservation) -> bool {
         self.fingerprint == SemanticObservationFingerprint::from_observation(observation)
     }
 }

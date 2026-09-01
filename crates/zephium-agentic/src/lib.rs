@@ -29,6 +29,7 @@ mod profile_lease;
 mod protocol;
 mod semantic;
 mod semantic_action;
+mod semantic_action_result;
 mod semantic_diff;
 mod semantic_diff_model;
 mod semantic_model;
@@ -123,6 +124,10 @@ pub use semantic_action::{
     SemanticWaitCondition, MAX_SEMANTIC_ACTIONS_PER_BATCH, MAX_SEMANTIC_ACTION_BATCH_SETTLE_MILLIS,
     MAX_SEMANTIC_ACTION_BATCH_TEXT_BYTES, MAX_SEMANTIC_ACTION_SETTLE_MILLIS,
     MAX_SEMANTIC_ACTION_TEXT_BYTES, MAX_SEMANTIC_MUTATION_QUIET_MILLIS,
+};
+pub use semantic_action_result::{
+    finalize_semantic_action_result, SemanticActionNextState, SemanticActionResult,
+    SemanticActionResultError, SemanticPostActionObservation,
 };
 pub use semantic_diff::{
     compute_semantic_diff, SemanticDiff, SemanticDiffBudget, SemanticDiffBudgetError,

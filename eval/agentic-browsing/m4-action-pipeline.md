@@ -2,11 +2,12 @@
 
 Status: bounded pre-policy action proposals, exact observation binding,
 one-action rolling checkpoints, typed settle/verification contracts,
-fresh-snapshot structural revalidation, and the event-driven bounded settle
-and independent effect-verification cores are implemented. Policy permits,
-platform execution, visibility/occlusion checks, native observation adapters
-and timer driving, diff settlement,
-read/extract/screenshot, and live qualification remain pending.
+fresh-snapshot structural revalidation, event-driven bounded settlement,
+independent effect verification, and acknowledged action-result diff/fresh-state
+finalization are implemented. Policy permits, platform execution,
+visibility/occlusion checks, native observation adapters and timer driving,
+multi-action result aggregation, read/extract/screenshot, and live
+qualification remain pending.
 
 This evidence describes a functional-core seam. It does not claim that an
 action can currently reach a native view or page, that model-declared effects
@@ -62,6 +63,10 @@ are trusted, or that M4 is complete.
   sensitivity, trust, parent stable identity, and bounded accessible name.
   Stable checked/selected/expanded/required/invalid state is guarded
   separately. The digest and private identity never enter the model contract.
+- Every bound action also retains the exact batch and source observation
+  identity/generation. Those coordinates enter its private verification guard,
+  preventing an otherwise identical action proof from being substituted across
+  a batch or model-visible baseline.
 - Fresh-snapshot revalidation requires the exact frame/document authority, a
   non-regressing snapshot generation, the same stable node, an enabled target,
   the required operation, unchanged stable semantics/state, and unchanged
@@ -128,12 +133,30 @@ are trusted, or that M4 is complete.
   context; scroll proof requires bounded before/after samples moving in the
   declared direction, plus post-action visibility for `IntoView`.
 - Successful verification mints a content-free opaque token joined to the
-  attempt, action ordinal, declared postcondition, adjacent snapshot when used,
-  and a diagnostics-redacted SHA-256 action-contract guard. The token is not a
+  attempt, action ordinal, declared postcondition, exact current context,
+  evidence time, sole absolute deadline, native invocation and adjacent
+  snapshot when semantic evidence was used, and a diagnostics-redacted SHA-256
+  action-contract guard. The token is not a
   policy permit and cannot execute or retry. The future native shell remains
   responsible for sourcing evidence from an observation adapter independent of
   the backend completion response; the pure constructors do not claim to attest
   that imperative separation.
+- Finalization consumes that non-cloneable proof and the complete current
+  observation. It requires the action's exact source observation and a
+  content-digest-bound acknowledgement minted only by committed model delivery.
+  Semantic proof must name an invocation/generation actually present in the
+  assembled current observation. The current observation carries its trusted
+  monotonic capture time and must be no earlier than the independent proof and
+  no later than the same absolute deadline. Cross-batch, altered-baseline,
+  current-context, clock, invocation, or generation substitution fails closed
+  before success.
+- The existing conservative diff core then returns either the complete bounded
+  action diff or a typed fallback that owns the exact current observation for
+  full-snapshot encoding. A diff-limit, context change, generation gap, or
+  another ordinary diff premise failure therefore cannot discard current state
+  or invent a delta. An unacknowledged baseline is a lease failure, not a
+  fresh-snapshot success. Diff and full-snapshot bytes still require the
+  existing token-admission and committed-delivery boundary.
 
 The action core has zero idle overhead. It allocates only when an admitted
 proposal batch is constructed and creates no page/runtime/native work.
@@ -170,5 +193,12 @@ selection, fixed-key value change, independently correlated navigation/dialog
 transitions, directional/visibility-aware scroll proof, coordinate ceilings,
 pending/wrong-attempt/wrong-action/deadline refusal, typed failure mapping, and
 opaque proof/action binding.
+
+Action-result coverage includes exact committed-baseline/content binding,
+source observation and batch guard substitution, exact verification
+invocation/generation membership in the assembled observation, post-proof and
+pre-deadline observation ordering, complete diff success, navigation successor
+fresh-state fallback, diff-budget fallback without losing the current
+observation, typed failure mapping, and content-redacted diagnostics.
 
 No platform action backend or live page is exercised by these tests.

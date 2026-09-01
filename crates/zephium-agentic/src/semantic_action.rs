@@ -671,6 +671,9 @@ impl BoundActionIntent {
 /// One observation-bound action. It still carries no policy execution permit.
 #[derive(Clone, Eq, PartialEq)]
 pub struct SemanticBoundAction {
+    batch: SemanticActionBatchId,
+    source_observation: SemanticObservationId,
+    source_observation_generation: SemanticObservationGeneration,
     ordinal: u8,
     intent: BoundActionIntent,
     effect: SemanticEffectClass,
@@ -682,6 +685,21 @@ pub struct SemanticBoundAction {
 impl SemanticBoundAction {
     pub(crate) const fn target_key(&self) -> SemanticNodeKey {
         self.intent.target().node_key
+    }
+
+    /// Exact model-proposed batch that owns this action.
+    pub const fn batch(&self) -> SemanticActionBatchId {
+        self.batch
+    }
+
+    /// Observation whose opaque references were consumed at binding.
+    pub const fn source_observation(&self) -> SemanticObservationId {
+        self.source_observation
+    }
+
+    /// Progressive observation generation consumed at binding.
+    pub const fn source_observation_generation(&self) -> SemanticObservationGeneration {
+        self.source_observation_generation
     }
 
     /// One-based position in the exact batch.
@@ -866,6 +884,9 @@ impl SemanticBoundAction {
     pub(crate) fn verification_guard(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(b"ZEPHIUM-SEMANTIC-VERIFICATION-GUARD-1\0");
+        hasher.update(self.batch.get().to_be_bytes());
+        hasher.update(self.source_observation.get().to_be_bytes());
+        hasher.update(self.source_observation_generation.get().to_be_bytes());
         hash_frame(&mut hasher, self.frame());
         hasher.update([self.ordinal]);
         hasher.update(self.target_key().get().to_be_bytes());
@@ -921,6 +942,21 @@ impl SemanticPreparedAction {
     /// Original observation-bound action contract.
     pub const fn bound_action(&self) -> &SemanticBoundAction {
         &self.action
+    }
+
+    /// Exact model-proposed batch that owns this action.
+    pub const fn batch(&self) -> SemanticActionBatchId {
+        self.action.batch()
+    }
+
+    /// Observation whose opaque references were consumed at binding.
+    pub const fn source_observation(&self) -> SemanticObservationId {
+        self.action.source_observation()
+    }
+
+    /// Progressive observation generation consumed at binding.
+    pub const fn source_observation_generation(&self) -> SemanticObservationGeneration {
+        self.action.source_observation_generation()
     }
 
     /// One-based position in the exact batch.
@@ -1038,6 +1074,12 @@ impl fmt::Debug for SemanticBoundAction {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("SemanticBoundAction")
+            .field("batch", &self.batch)
+            .field("source_observation", &self.source_observation)
+            .field(
+                "source_observation_generation",
+                &self.source_observation_generation,
+            )
             .field("ordinal", &self.ordinal)
             .field("kind", &self.kind())
             .field("target", self.intent.target())
@@ -1112,6 +1154,9 @@ impl SemanticActionBatch {
             validate_bound_verification(&intent, proposal.verification)?;
             validate_verification_baseline(&intent, proposal.verification)?;
             actions.push(SemanticBoundAction {
+                batch: id,
+                source_observation: observation.request().id(),
+                source_observation_generation: observation.request().generation(),
                 ordinal,
                 intent,
                 effect: proposal.effect,

@@ -12,10 +12,10 @@ use thiserror::Error;
 use crate::semantic_settle::exact_document_successor;
 use crate::{
     ContextJoin, SemanticActionAttemptId, SemanticActionFailure, SemanticActionRevalidationError,
-    SemanticCompleteness, SemanticDialogState, SemanticPreparedAction, SemanticScrollAmount,
-    SemanticScrollDirection, SemanticSettleInstant, SemanticSettleStatus, SemanticSettleTracker,
-    SemanticSnapshot, SemanticSnapshotGeneration, SemanticState, SemanticVerification,
-    MAX_SEMANTIC_ACTION_TEXT_BYTES,
+    SemanticCompleteness, SemanticDialogState, SemanticInvocationId, SemanticPreparedAction,
+    SemanticScrollAmount, SemanticScrollDirection, SemanticSettleInstant, SemanticSettleStatus,
+    SemanticSettleTracker, SemanticSnapshot, SemanticSnapshotGeneration, SemanticState,
+    SemanticVerification, MAX_SEMANTIC_ACTION_TEXT_BYTES,
 };
 
 /// Largest absolute independently sampled scroll coordinate.
@@ -250,6 +250,10 @@ pub struct SemanticVerifiedAction {
     ordinal: u8,
     verification: SemanticVerification,
     proof: SemanticEffectProofKind,
+    observed_at: SemanticSettleInstant,
+    deadline: SemanticSettleInstant,
+    current_context: ContextJoin,
+    current_invocation: Option<SemanticInvocationId>,
     current_snapshot: Option<SemanticSnapshotGeneration>,
     action_guard: [u8; 32],
 }
@@ -275,6 +279,26 @@ impl SemanticVerifiedAction {
         self.proof
     }
 
+    /// Monotonic instant at which the independent effect evidence was sampled.
+    pub const fn observed_at(&self) -> SemanticSettleInstant {
+        self.observed_at
+    }
+
+    /// Sole absolute action deadline that also bounds post-action observation.
+    pub const fn deadline(&self) -> SemanticSettleInstant {
+        self.deadline
+    }
+
+    /// Exact current context authority represented by the independent proof.
+    pub const fn current_context(&self) -> ContextJoin {
+        self.current_context
+    }
+
+    /// Native invocation carrying semantic evidence, when a snapshot proved the effect.
+    pub const fn current_invocation(&self) -> Option<SemanticInvocationId> {
+        self.current_invocation
+    }
+
     /// Adjacent post-action snapshot generation, when semantic proof was used.
     pub const fn current_snapshot(&self) -> Option<SemanticSnapshotGeneration> {
         self.current_snapshot
@@ -294,6 +318,10 @@ impl fmt::Debug for SemanticVerifiedAction {
             .field("ordinal", &self.ordinal)
             .field("verification", &self.verification)
             .field("proof", &self.proof)
+            .field("observed_at", &self.observed_at)
+            .field("deadline", &self.deadline)
+            .field("current_context", &self.current_context)
+            .field("current_invocation", &self.current_invocation)
             .field("current_snapshot", &self.current_snapshot)
             .field("action_guard", &"[redacted]")
             .finish()
@@ -400,142 +428,162 @@ pub fn verify_semantic_action(
         return Err(SemanticVerificationError::EvidenceAfterDeadline);
     }
 
-    let (proof, current_snapshot) = match (action.verification(), evidence.kind) {
-        (
-            SemanticVerification::TargetState { state, present },
-            SemanticEffectEvidenceKind::Snapshot(snapshot),
-        ) => {
-            let (_, target) = verification_target(action, snapshot)?;
-            if target.states().contains(state) != present {
-                return Err(SemanticVerificationError::OutcomeNotObserved);
+    let (proof, current_context, current_invocation, current_snapshot) =
+        match (action.verification(), evidence.kind) {
+            (
+                SemanticVerification::TargetState { state, present },
+                SemanticEffectEvidenceKind::Snapshot(snapshot),
+            ) => {
+                let (_, target) = verification_target(action, snapshot)?;
+                if target.states().contains(state) != present {
+                    return Err(SemanticVerificationError::OutcomeNotObserved);
+                }
+                (
+                    SemanticEffectProofKind::TargetState,
+                    snapshot.frame().context(),
+                    Some(snapshot.invocation()),
+                    Some(snapshot.generation()),
+                )
             }
             (
-                SemanticEffectProofKind::TargetState,
-                Some(snapshot.generation()),
-            )
-        }
-        (
-            SemanticVerification::TargetValueMatchesInput,
-            SemanticEffectEvidenceKind::ExactTargetValue {
-                snapshot,
-                before,
-                after,
-            },
-        ) => {
-            let _ = verification_target(action, snapshot)?;
-            let expected = action
-                .fill_text()
-                .ok_or(SemanticVerificationError::ActionMismatch)?;
-            if before.len() > MAX_SEMANTIC_ACTION_TEXT_BYTES
-                || after.len() > MAX_SEMANTIC_ACTION_TEXT_BYTES
-            {
-                return Err(SemanticVerificationError::EvidenceLimit);
-            }
-            if before == expected.as_str() || after != expected.as_str() {
-                return Err(SemanticVerificationError::OutcomeNotObserved);
-            }
-            (
-                SemanticEffectProofKind::ExactTargetValue,
-                Some(snapshot.generation()),
-            )
-        }
-        (
-            SemanticVerification::TargetValueChanged,
-            SemanticEffectEvidenceKind::Snapshot(snapshot),
-        ) => {
-            let (_, target) = verification_target(action, snapshot)?;
-            if target.value() == action.target_value() {
-                return Err(SemanticVerificationError::OutcomeNotObserved);
+                SemanticVerification::TargetValueMatchesInput,
+                SemanticEffectEvidenceKind::ExactTargetValue {
+                    snapshot,
+                    before,
+                    after,
+                },
+            ) => {
+                let _ = verification_target(action, snapshot)?;
+                let expected = action
+                    .fill_text()
+                    .ok_or(SemanticVerificationError::ActionMismatch)?;
+                if before.len() > MAX_SEMANTIC_ACTION_TEXT_BYTES
+                    || after.len() > MAX_SEMANTIC_ACTION_TEXT_BYTES
+                {
+                    return Err(SemanticVerificationError::EvidenceLimit);
+                }
+                if before == expected.as_str() || after != expected.as_str() {
+                    return Err(SemanticVerificationError::OutcomeNotObserved);
+                }
+                (
+                    SemanticEffectProofKind::ExactTargetValue,
+                    snapshot.frame().context(),
+                    Some(snapshot.invocation()),
+                    Some(snapshot.generation()),
+                )
             }
             (
-                SemanticEffectProofKind::TargetValueChanged,
-                Some(snapshot.generation()),
-            )
-        }
-        (
-            SemanticVerification::TargetSelectionMatchesOption,
-            SemanticEffectEvidenceKind::Snapshot(snapshot),
-        ) => {
-            let (target_index, _) = verification_target(action, snapshot)?;
-            let (_, option) = action
-                .verification_option(snapshot, target_index)
-                .map_err(map_target_error)?;
-            if !option.states().contains(SemanticState::Selected) {
-                return Err(SemanticVerificationError::OutcomeNotObserved);
+                SemanticVerification::TargetValueChanged,
+                SemanticEffectEvidenceKind::Snapshot(snapshot),
+            ) => {
+                let (_, target) = verification_target(action, snapshot)?;
+                if target.value() == action.target_value() {
+                    return Err(SemanticVerificationError::OutcomeNotObserved);
+                }
+                (
+                    SemanticEffectProofKind::TargetValueChanged,
+                    snapshot.frame().context(),
+                    Some(snapshot.invocation()),
+                    Some(snapshot.generation()),
+                )
             }
             (
-                SemanticEffectProofKind::ExactSelection,
-                Some(snapshot.generation()),
-            )
-        }
-        (
-            SemanticVerification::TargetSelectionChanged,
-            SemanticEffectEvidenceKind::Snapshot(snapshot),
-        ) => {
-            let (_, target) = verification_target(action, snapshot)?;
-            let selected_changed = target.states().contains(SemanticState::Selected)
-                != action.target_states().contains(SemanticState::Selected);
-            if !selected_changed && target.value() == action.target_value() {
-                return Err(SemanticVerificationError::OutcomeNotObserved);
+                SemanticVerification::TargetSelectionMatchesOption,
+                SemanticEffectEvidenceKind::Snapshot(snapshot),
+            ) => {
+                let (target_index, _) = verification_target(action, snapshot)?;
+                let (_, option) = action
+                    .verification_option(snapshot, target_index)
+                    .map_err(map_target_error)?;
+                if !option.states().contains(SemanticState::Selected) {
+                    return Err(SemanticVerificationError::OutcomeNotObserved);
+                }
+                (
+                    SemanticEffectProofKind::ExactSelection,
+                    snapshot.frame().context(),
+                    Some(snapshot.invocation()),
+                    Some(snapshot.generation()),
+                )
             }
             (
-                SemanticEffectProofKind::SelectionChanged,
-                Some(snapshot.generation()),
-            )
-        }
-        (
-            SemanticVerification::NavigationCommitted,
-            SemanticEffectEvidenceKind::Navigation { prior, current },
-        ) => {
-            if prior != action.frame().context() || !exact_document_successor(prior, current) {
-                return Err(SemanticVerificationError::StaleEvidence);
+                SemanticVerification::TargetSelectionChanged,
+                SemanticEffectEvidenceKind::Snapshot(snapshot),
+            ) => {
+                let (_, target) = verification_target(action, snapshot)?;
+                let selected_changed = target.states().contains(SemanticState::Selected)
+                    != action.target_states().contains(SemanticState::Selected);
+                if !selected_changed && target.value() == action.target_value() {
+                    return Err(SemanticVerificationError::OutcomeNotObserved);
+                }
+                (
+                    SemanticEffectProofKind::SelectionChanged,
+                    snapshot.frame().context(),
+                    Some(snapshot.invocation()),
+                    Some(snapshot.generation()),
+                )
             }
-            (SemanticEffectProofKind::Navigation, None)
-        }
-        (
-            SemanticVerification::Dialog(expected),
-            SemanticEffectEvidenceKind::Dialog {
-                context,
-                before,
-                after,
-            },
-        ) => {
-            if context != action.frame().context() {
-                return Err(SemanticVerificationError::StaleEvidence);
+            (
+                SemanticVerification::NavigationCommitted,
+                SemanticEffectEvidenceKind::Navigation { prior, current },
+            ) => {
+                if prior != action.frame().context() || !exact_document_successor(prior, current) {
+                    return Err(SemanticVerificationError::StaleEvidence);
+                }
+                (SemanticEffectProofKind::Navigation, current, None, None)
             }
-            if before == after || after != expected {
-                return Err(SemanticVerificationError::OutcomeNotObserved);
+            (
+                SemanticVerification::Dialog(expected),
+                SemanticEffectEvidenceKind::Dialog {
+                    context,
+                    before,
+                    after,
+                },
+            ) => {
+                if context != action.frame().context() {
+                    return Err(SemanticVerificationError::StaleEvidence);
+                }
+                if before == after || after != expected {
+                    return Err(SemanticVerificationError::OutcomeNotObserved);
+                }
+                (SemanticEffectProofKind::Dialog, context, None, None)
             }
-            (SemanticEffectProofKind::Dialog, None)
-        }
-        (
-            SemanticVerification::ScrollPositionChanged,
-            SemanticEffectEvidenceKind::Scroll {
-                snapshot,
-                before,
-                after,
-                target_visible_after,
-            },
-        ) => {
-            let _ = verification_target(action, snapshot)?;
-            let (direction, amount) = action
-                .scroll_recipe()
-                .ok_or(SemanticVerificationError::ActionMismatch)?;
-            if !moved_in_direction(before, after, direction)
-                || (amount == SemanticScrollAmount::IntoView && !target_visible_after)
-            {
-                return Err(SemanticVerificationError::OutcomeNotObserved);
+            (
+                SemanticVerification::ScrollPositionChanged,
+                SemanticEffectEvidenceKind::Scroll {
+                    snapshot,
+                    before,
+                    after,
+                    target_visible_after,
+                },
+            ) => {
+                let _ = verification_target(action, snapshot)?;
+                let (direction, amount) = action
+                    .scroll_recipe()
+                    .ok_or(SemanticVerificationError::ActionMismatch)?;
+                if !moved_in_direction(before, after, direction)
+                    || (amount == SemanticScrollAmount::IntoView && !target_visible_after)
+                {
+                    return Err(SemanticVerificationError::OutcomeNotObserved);
+                }
+                (
+                    SemanticEffectProofKind::Scroll,
+                    snapshot.frame().context(),
+                    Some(snapshot.invocation()),
+                    Some(snapshot.generation()),
+                )
             }
-            (SemanticEffectProofKind::Scroll, Some(snapshot.generation()))
-        }
-        _ => return Err(SemanticVerificationError::EvidenceKindMismatch),
-    };
+            _ => return Err(SemanticVerificationError::EvidenceKindMismatch),
+        };
 
     Ok(SemanticVerifiedAction {
         attempt: evidence.attempt,
         ordinal: action.ordinal(),
         verification: action.verification(),
         proof,
+        observed_at: evidence.observed_at,
+        deadline: settlement.deadline(),
+        current_context,
+        current_invocation,
         current_snapshot,
         action_guard: action.verification_guard(),
     })
