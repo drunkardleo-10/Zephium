@@ -34,6 +34,7 @@ mod semantic_diff;
 mod semantic_diff_model;
 mod semantic_model;
 mod semantic_observation;
+mod semantic_read;
 mod semantic_runtime;
 mod semantic_settle;
 mod semantic_verify;
@@ -158,6 +159,13 @@ pub use semantic_observation::{
     SemanticObservationRequest, SemanticScope, SemanticScopeAnchor, SemanticTextWindow,
     MAX_SEMANTIC_OBSERVATION_EXPANSIONS, MAX_SEMANTIC_OBSERVATION_NODES,
     MAX_SEMANTIC_OBSERVATION_TEXT_BYTES, MAX_SEMANTIC_SURROUNDING_TEXT_BYTES,
+};
+pub use semantic_read::{
+    read_semantic_observation, SemanticCaptureInstant, SemanticReadAuthority, SemanticReadBudget,
+    SemanticReadBudgetError, SemanticReadContent, SemanticReadError, SemanticReadField,
+    SemanticReadFragment, SemanticReadOmission, SemanticReadOmissions, SemanticReadProvenance,
+    SemanticReadResult, SemanticReadSensitivityLimit, SemanticReadStats, MAX_SEMANTIC_READ_BYTES,
+    MAX_SEMANTIC_READ_ITEMS,
 };
 pub use semantic_runtime::{
     encode_semantic_runtime_invocation, SemanticRuntimeBudget, SemanticRuntimeBudgetError,

@@ -4,9 +4,11 @@ Status: bounded pre-policy action proposals, exact observation binding,
 one-action rolling checkpoints, typed settle/verification contracts,
 fresh-snapshot structural revalidation, event-driven bounded settlement,
 independent effect verification, and acknowledged action-result diff/fresh-state
-finalization are implemented. Policy permits, platform execution,
+finalization, plus the bounded zero-copy semantic-read core are implemented.
+Policy permits, platform execution,
 visibility/occlusion checks, native observation adapters and timer driving,
-multi-action result aggregation, read/extract/screenshot, and live
+multi-action result aggregation, read-result model encoding, extract,
+screenshot, and live
 qualification remain pending.
 
 This evidence describes a functional-core seam. It does not claim that an
@@ -157,6 +159,26 @@ are trusted, or that M4 is complete.
   or invent a delta. An unacknowledged baseline is a lease failure, not a
   fresh-snapshot success. Diff and full-snapshot bytes still require the
   existing token-admission and committed-delivery boundary.
+- Read derives only borrowed primitives from the validated semantic observation
+  vocabulary; it cannot introduce DOM, selectors, HTML, script, attributes,
+  native handles, or arbitrary page objects. It retains at most 256 fields and
+  64 KiB process-wide (128 fields/32 KiB by default) and creates no content
+  copies. Fixed Booleans/ordinals have conservative rendering charges.
+- An initial read must cover an initial observation. A progressive read requires
+  the exact scope predecessor and its content-digest-bound committed-delivery
+  acknowledgement; parent, anchor, observation generation, and context must all
+  join. A guessed or altered expansion baseline fails before content projection.
+- Every returned primitive carries exact observation and progressive generation,
+  context/run/profile/document, canonical origin, frame and frame generation,
+  native invocation, snapshot generation, opaque reference, source trust,
+  sensitivity, and monotonic capture coordinates. Diagnostics expose only
+  counts/classes; content remains borrowed and redacted from `Debug`.
+- Secret nodes and explicit redacted values are never returned. Sensitive data
+  requires a trusted-policy-selected limit; the enum itself grants no authority.
+  Source truncation, sensitivity refusal, secret redaction, item exhaustion,
+  and byte exhaustion are a complete omission bitset with aggregate counts, so
+  a partial read is never represented as complete. Model encoding/transport
+  remains a separate bounded token-admission step and is not claimed here.
 
 The action core has zero idle overhead. It allocates only when an admitted
 proposal batch is constructed and creates no page/runtime/native work.
@@ -200,5 +222,12 @@ invocation/generation membership in the assembled observation, post-proof and
 pre-deadline observation ordering, complete diff success, navigation successor
 fresh-state fallback, diff-budget fallback without losing the current
 observation, typed failure mapping, and content-redacted diagnostics.
+
+Read coverage includes initial and exact acknowledged progressive authority,
+same-coordinate altered-content acknowledgement refusal, public-only and
+policy-admitted sensitive projection, unconditional secret/redacted omission,
+zero-copy source identity, exact provenance coordinates, item/byte ceilings,
+truthful source truncation and omission accounting, invalid budgets, and
+content-free diagnostics.
 
 No platform action backend or live page is exercised by these tests.
