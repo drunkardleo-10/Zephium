@@ -8,6 +8,7 @@
 
 mod openai;
 mod sse;
+mod tool;
 
 use std::fmt;
 
@@ -19,6 +20,12 @@ use crate::{
 };
 
 pub use openai::OpenAiResponsesStreamDecoder;
+pub use tool::{
+    AgentBrowserActProposal, AgentBrowserHumanReason, AgentBrowserScopeProposal,
+    AgentBrowserSemanticQuery, AgentBrowserToolCall, AgentBrowserToolCallId,
+    AgentBrowserToolContractError, AgentBrowserToolKind, AgentBrowserToolProposal,
+    MAX_AGENT_BROWSER_SEMANTIC_QUERY_BYTES, MAX_AGENT_PROVIDER_TOOL_CALL_ID_BYTES,
+};
 
 /// Maximum bytes in one pinned provider model revision.
 pub const MAX_AGENT_PROVIDER_MODEL_REVISION_BYTES: usize = 96;
@@ -338,12 +345,18 @@ impl fmt::Debug for AgentProviderTextDelta {
 pub enum AgentProviderStreamEvent {
     /// Bounded untrusted plain text. It never authorizes a browser operation.
     TextDelta(AgentProviderTextDelta),
+    /// Closed pre-policy browser proposal from one complete client tool call.
+    ///
+    /// The response terminal must still confirm `ToolCalls`; this value alone
+    /// cannot be bound, authorized, or executed.
+    ToolCall(AgentBrowserToolCall),
 }
 
 impl fmt::Debug for AgentProviderStreamEvent {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::TextDelta(delta) => formatter.debug_tuple("TextDelta").field(delta).finish(),
+            Self::ToolCall(call) => formatter.debug_tuple("ToolCall").field(call).finish(),
         }
     }
 }

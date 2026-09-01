@@ -1,11 +1,12 @@
 //! Bounded OpenAI Responses SSE normalization.
 //!
-//! The decoder accepts only response lifecycle, plain-text/refusal output,
-//! and terminal usage today. Function calls are deliberately rejected until
-//! the closed browser-tool decoder can consume their arguments without
-//! exposing raw JSON. Built-in provider tools and reasoning output are never
-//! requested or surfaced.
+//! The decoder accepts response lifecycle, plain-text/refusal output, the
+//! fixed client browser-tool vocabulary, and terminal usage. Function-call
+//! JSON remains private, is bounded while streaming, and crosses the public
+//! boundary only after the closed browser-tool decoder succeeds. Provider
+//! built-in tools and reasoning output are never requested or surfaced.
 
+use std::borrow::Cow;
 use std::fmt;
 
 use serde::Deserialize;
@@ -13,8 +14,9 @@ use sha2::{Digest, Sha256};
 
 use super::sse::{SseDecoder, SseEvent};
 use super::{
-    AgentProviderCallConfig, AgentProviderCallIdentity, AgentProviderCompletion,
-    AgentProviderFailure, AgentProviderFailureClass, AgentProviderKind, AgentProviderModelRevision,
+    AgentBrowserToolCall, AgentBrowserToolCallId, AgentBrowserToolKind, AgentProviderCallConfig,
+    AgentProviderCallIdentity, AgentProviderCompletion, AgentProviderFailure,
+    AgentProviderFailureClass, AgentProviderKind, AgentProviderModelRevision,
     AgentProviderProtocolError, AgentProviderStopReason, AgentProviderStreamBatch,
     AgentProviderStreamBudget, AgentProviderStreamConclusion, AgentProviderStreamEvent,
     AgentProviderStreamStats, AgentProviderTerminalFailure, AgentProviderTextDelta,
@@ -66,6 +68,16 @@ impl OutputState {
     }
 }
 
+struct ToolAccumulator {
+    item_id: String,
+    call_id: String,
+    name: AgentBrowserToolKind,
+    arguments: Option<String>,
+    argument_bytes: u32,
+    argument_guard: Option<[u8; 32]>,
+    item_done: bool,
+}
+
 /// Single-owner incremental decoder for one OpenAI Responses SSE body.
 ///
 /// The HTTP shell supplies arbitrary byte chunks and must call `finish` once
@@ -81,6 +93,8 @@ pub struct OpenAiResponsesStreamDecoder {
     phase: StreamPhase,
     response_id: Option<String>,
     output: OutputState,
+    tools: Vec<ToolAccumulator>,
+    tool_argument_bytes: u32,
     conclusion: Option<AgentProviderStreamConclusion>,
     failure: Option<AgentProviderProtocolError>,
 }
@@ -105,6 +119,8 @@ impl OpenAiResponsesStreamDecoder {
             phase: StreamPhase::AwaitCreated,
             response_id: None,
             output: OutputState::None,
+            tools: Vec::with_capacity(usize::from(config.stream_budget().max_tool_calls())),
+            tool_argument_bytes: 0,
             conclusion: None,
             failure: None,
         })
@@ -187,6 +203,12 @@ impl OpenAiResponsesStreamDecoder {
             "response.output_text.done" => self.handle_output_done(event.data(), false),
             "response.refusal.delta" => self.handle_output_delta(event.data(), true, output),
             "response.refusal.done" => self.handle_output_done(event.data(), true),
+            "response.function_call_arguments.delta" => {
+                self.handle_tool_arguments_delta(event.data())
+            }
+            "response.function_call_arguments.done" => {
+                self.handle_tool_arguments_done(event.data(), output)
+            }
             "response.completed" | "response.incomplete" => {
                 self.handle_success_terminal(event.data(), kind)
             }
@@ -195,9 +217,7 @@ impl OpenAiResponsesStreamDecoder {
             }
             "error" => self.handle_stream_error(event.data()),
             "ping" => self.require_in_progress(),
-            "response.function_call_arguments.delta"
-            | "response.function_call_arguments.done"
-            | "response.reasoning_text.delta"
+            "response.reasoning_text.delta"
             | "response.reasoning_text.done"
             | "response.reasoning_summary_text.delta"
             | "response.reasoning_summary_text.done" => {
@@ -236,7 +256,7 @@ impl OpenAiResponsesStreamDecoder {
         self.validate_response_id(event.response.id)
     }
 
-    fn handle_output_item(&self, data: &str) -> Result<(), AgentProviderProtocolError> {
+    fn handle_output_item(&mut self, data: &str) -> Result<(), AgentProviderProtocolError> {
         self.require_in_progress()?;
         let event: OutputItemEnvelope<'_> = parse(data)?;
         if !matches!(
@@ -247,8 +267,79 @@ impl OpenAiResponsesStreamDecoder {
         }
         match event.item.kind {
             "message" | "reasoning" => Ok(()),
+            "function_call" if event.kind == "response.output_item.added" => {
+                self.handle_tool_item_added(event.item)
+            }
+            "function_call" => self.handle_tool_item_done(event.item),
             _ => Err(AgentProviderProtocolError::UnsupportedOutput),
         }
+    }
+
+    fn handle_tool_item_added(
+        &mut self,
+        item: OutputItemHead<'_>,
+    ) -> Result<(), AgentProviderProtocolError> {
+        if self.tools.len() >= usize::from(self.budget.max_tool_calls()) {
+            return Err(AgentProviderProtocolError::Limit);
+        }
+        let item_id = item.id.ok_or(AgentProviderProtocolError::Event)?;
+        let call_id = item.call_id.ok_or(AgentProviderProtocolError::Event)?;
+        let name = item.name.ok_or(AgentProviderProtocolError::Event)?;
+        let arguments = item.arguments.ok_or(AgentProviderProtocolError::Event)?;
+        if item.status != Some("in_progress") || !arguments.is_empty() {
+            return Err(AgentProviderProtocolError::Sequence);
+        }
+        validate_response_id(item_id)?;
+        AgentBrowserToolCallId::try_new(call_id.to_owned())
+            .map_err(|_| AgentProviderProtocolError::ToolCall)?;
+        let name = AgentBrowserToolKind::parse(name).ok_or(AgentProviderProtocolError::ToolCall)?;
+        if self
+            .tools
+            .iter()
+            .any(|tool| tool.item_id == item_id || tool.call_id == call_id)
+        {
+            return Err(AgentProviderProtocolError::Sequence);
+        }
+        self.tools.push(ToolAccumulator {
+            item_id: item_id.to_owned(),
+            call_id: call_id.to_owned(),
+            name,
+            arguments: Some(String::new()),
+            argument_bytes: 0,
+            argument_guard: None,
+            item_done: false,
+        });
+        Ok(())
+    }
+
+    fn handle_tool_item_done(
+        &mut self,
+        item: OutputItemHead<'_>,
+    ) -> Result<(), AgentProviderProtocolError> {
+        let item_id = item.id.ok_or(AgentProviderProtocolError::Event)?;
+        let call_id = item.call_id.ok_or(AgentProviderProtocolError::Event)?;
+        let name = item.name.ok_or(AgentProviderProtocolError::Event)?;
+        let arguments = item.arguments.ok_or(AgentProviderProtocolError::Event)?;
+        let tool = self
+            .tools
+            .iter_mut()
+            .find(|tool| tool.item_id == item_id)
+            .ok_or(AgentProviderProtocolError::Sequence)?;
+        let argument_guard = tool
+            .argument_guard
+            .ok_or(AgentProviderProtocolError::Sequence)?;
+        let actual_guard: [u8; 32] = Sha256::digest(arguments.as_bytes()).into();
+        if tool.item_done
+            || item.status != Some("completed")
+            || tool.call_id != call_id
+            || tool.name.as_str() != name
+            || usize::try_from(tool.argument_bytes).ok() != Some(arguments.len())
+            || argument_guard != actual_guard
+        {
+            return Err(AgentProviderProtocolError::Sequence);
+        }
+        tool.item_done = true;
+        Ok(())
     }
 
     fn handle_content_part(&self, data: &str) -> Result<(), AgentProviderProtocolError> {
@@ -324,7 +415,7 @@ impl OpenAiResponsesStreamDecoder {
         *bytes = next;
         if !event.delta.is_empty() {
             output.push(AgentProviderStreamEvent::TextDelta(
-                AgentProviderTextDelta::new(event.delta.to_owned()),
+                AgentProviderTextDelta::new(event.delta.into_owned()),
             ));
         }
         Ok(())
@@ -384,13 +475,99 @@ impl OpenAiResponsesStreamDecoder {
         Ok(())
     }
 
+    fn handle_tool_arguments_delta(
+        &mut self,
+        data: &str,
+    ) -> Result<(), AgentProviderProtocolError> {
+        self.require_in_progress()?;
+        let event: ToolArgumentsDeltaEnvelope<'_> = parse(data)?;
+        if event.kind != "response.function_call_arguments.delta" {
+            return Err(AgentProviderProtocolError::Event);
+        }
+        let delta_bytes =
+            u32::try_from(event.delta.len()).map_err(|_| AgentProviderProtocolError::Limit)?;
+        let next_total = self
+            .tool_argument_bytes
+            .checked_add(delta_bytes)
+            .ok_or(AgentProviderProtocolError::Limit)?;
+        if next_total > self.budget.max_tool_argument_bytes() {
+            return Err(AgentProviderProtocolError::Limit);
+        }
+        let tool = self
+            .tools
+            .iter_mut()
+            .find(|tool| tool.item_id == event.item_id)
+            .ok_or(AgentProviderProtocolError::Sequence)?;
+        let arguments = tool
+            .arguments
+            .as_mut()
+            .ok_or(AgentProviderProtocolError::Sequence)?;
+        if tool.item_done || tool.argument_guard.is_some() {
+            return Err(AgentProviderProtocolError::Sequence);
+        }
+        arguments.push_str(event.delta.as_ref());
+        tool.argument_bytes = tool
+            .argument_bytes
+            .checked_add(delta_bytes)
+            .ok_or(AgentProviderProtocolError::Limit)?;
+        self.tool_argument_bytes = next_total;
+        Ok(())
+    }
+
+    fn handle_tool_arguments_done(
+        &mut self,
+        data: &str,
+        output: &mut Vec<AgentProviderStreamEvent>,
+    ) -> Result<(), AgentProviderProtocolError> {
+        self.require_in_progress()?;
+        let event: ToolArgumentsDoneEnvelope<'_> = parse(data)?;
+        if event.kind != "response.function_call_arguments.done" {
+            return Err(AgentProviderProtocolError::Event);
+        }
+        let tool = self
+            .tools
+            .iter_mut()
+            .find(|tool| tool.item_id == event.item_id)
+            .ok_or(AgentProviderProtocolError::Sequence)?;
+        if tool.item_done || tool.argument_guard.is_some() || tool.name.as_str() != event.name {
+            return Err(AgentProviderProtocolError::Sequence);
+        }
+        let mut arguments = tool
+            .arguments
+            .take()
+            .ok_or(AgentProviderProtocolError::Sequence)?;
+        if arguments.is_empty() && !event.arguments.is_empty() {
+            let argument_bytes = u32::try_from(event.arguments.len())
+                .map_err(|_| AgentProviderProtocolError::Limit)?;
+            let next_total = self
+                .tool_argument_bytes
+                .checked_add(argument_bytes)
+                .ok_or(AgentProviderProtocolError::Limit)?;
+            if next_total > self.budget.max_tool_argument_bytes() {
+                return Err(AgentProviderProtocolError::Limit);
+            }
+            arguments = event.arguments.into_owned();
+            tool.argument_bytes = argument_bytes;
+            self.tool_argument_bytes = next_total;
+        } else if arguments.as_str() != event.arguments.as_ref() {
+            return Err(AgentProviderProtocolError::Sequence);
+        }
+        let guard: [u8; 32] = Sha256::digest(arguments.as_bytes()).into();
+        let call =
+            AgentBrowserToolCall::decode(tool.call_id.clone(), tool.name.as_str(), &arguments)
+                .map_err(|_| AgentProviderProtocolError::ToolCall)?;
+        tool.argument_guard = Some(guard);
+        output.push(AgentProviderStreamEvent::ToolCall(call));
+        Ok(())
+    }
+
     fn handle_success_terminal(
         &mut self,
         data: &str,
         kind: &str,
     ) -> Result<(), AgentProviderProtocolError> {
         self.require_in_progress()?;
-        if !self.output.is_done() {
+        if !self.output.is_done() || self.tools.iter().any(|tool| !tool.item_done) {
             return Err(AgentProviderProtocolError::Sequence);
         }
         let event: TerminalEnvelope<'_> = parse(data)?;
@@ -406,7 +583,7 @@ impl OpenAiResponsesStreamDecoder {
             return Err(AgentProviderProtocolError::Event);
         }
         self.validate_response_id(event.response.id)?;
-        let output_kind = validate_terminal_output(&event.response.output)?;
+        let output_kind = validate_terminal_output(&event.response.output, &self.tools)?;
         if !output_kind.matches_state(&self.output) {
             return Err(AgentProviderProtocolError::Sequence);
         }
@@ -417,6 +594,8 @@ impl OpenAiResponsesStreamDecoder {
             .normalize()?;
         let stop = if self.output.is_refusal() {
             AgentProviderStopReason::Refused
+        } else if kind == "response.completed" && !self.tools.is_empty() {
+            AgentProviderStopReason::ToolCalls
         } else if kind == "response.completed" {
             AgentProviderStopReason::Completed
         } else {
@@ -517,8 +696,8 @@ impl OpenAiResponsesStreamDecoder {
             self.sse.wire_bytes(),
             self.sse.events(),
             self.output.bytes(),
-            0,
-            0,
+            u8::try_from(self.tools.len()).unwrap_or(self.budget.max_tool_calls()),
+            self.tool_argument_bytes,
         )
     }
 }
@@ -573,6 +752,16 @@ struct OutputItemEnvelope<'a> {
 struct OutputItemHead<'a> {
     #[serde(borrow, rename = "type")]
     kind: &'a str,
+    #[serde(borrow)]
+    id: Option<&'a str>,
+    #[serde(borrow)]
+    call_id: Option<&'a str>,
+    #[serde(borrow)]
+    name: Option<&'a str>,
+    #[serde(borrow)]
+    arguments: Option<Cow<'a, str>>,
+    #[serde(borrow)]
+    status: Option<&'a str>,
 }
 
 #[derive(Deserialize)]
@@ -594,7 +783,7 @@ struct DeltaEnvelope<'a> {
     #[serde(borrow, rename = "type")]
     kind: &'a str,
     #[serde(borrow)]
-    delta: &'a str,
+    delta: Cow<'a, str>,
 }
 
 #[derive(Deserialize)]
@@ -602,7 +791,29 @@ struct DoneEnvelope<'a> {
     #[serde(borrow, rename = "type")]
     kind: &'a str,
     #[serde(borrow, alias = "refusal")]
-    text: &'a str,
+    text: Cow<'a, str>,
+}
+
+#[derive(Deserialize)]
+struct ToolArgumentsDeltaEnvelope<'a> {
+    #[serde(borrow, rename = "type")]
+    kind: &'a str,
+    #[serde(borrow)]
+    item_id: &'a str,
+    #[serde(borrow)]
+    delta: Cow<'a, str>,
+}
+
+#[derive(Deserialize)]
+struct ToolArgumentsDoneEnvelope<'a> {
+    #[serde(borrow, rename = "type")]
+    kind: &'a str,
+    #[serde(borrow)]
+    item_id: &'a str,
+    #[serde(borrow)]
+    name: &'a str,
+    #[serde(borrow)]
+    arguments: Cow<'a, str>,
 }
 
 #[derive(Deserialize)]
@@ -640,6 +851,16 @@ struct TerminalOutputItem<'a> {
     kind: &'a str,
     #[serde(borrow, default)]
     content: Vec<TerminalContentPart<'a>>,
+    #[serde(borrow)]
+    id: Option<&'a str>,
+    #[serde(borrow)]
+    call_id: Option<&'a str>,
+    #[serde(borrow)]
+    name: Option<&'a str>,
+    #[serde(borrow)]
+    arguments: Option<Cow<'a, str>>,
+    #[serde(borrow)]
+    status: Option<&'a str>,
 }
 
 #[derive(Deserialize)]
@@ -732,11 +953,13 @@ fn validate_response_id(value: &str) -> Result<(), AgentProviderProtocolError> {
 
 fn validate_terminal_output(
     output: &[TerminalOutputItem<'_>],
+    tools: &[ToolAccumulator],
 ) -> Result<TerminalOutputKind, AgentProviderProtocolError> {
     if output.len() > MAX_OPENAI_TERMINAL_OUTPUT_ITEMS {
         return Err(AgentProviderProtocolError::Limit);
     }
     let mut output_kind = TerminalOutputKind::None;
+    let mut tool_index = 0_usize;
     for item in output {
         match item.kind {
             "reasoning" => {
@@ -767,8 +990,41 @@ fn validate_terminal_output(
                     output_kind = part_kind;
                 }
             }
+            "function_call" => {
+                let tool = tools
+                    .get(tool_index)
+                    .ok_or(AgentProviderProtocolError::Sequence)?;
+                let item_id = item.id.ok_or(AgentProviderProtocolError::Event)?;
+                let call_id = item.call_id.ok_or(AgentProviderProtocolError::Event)?;
+                let name = item.name.ok_or(AgentProviderProtocolError::Event)?;
+                let arguments = item
+                    .arguments
+                    .as_deref()
+                    .ok_or(AgentProviderProtocolError::Event)?;
+                let argument_guard = tool
+                    .argument_guard
+                    .ok_or(AgentProviderProtocolError::Sequence)?;
+                let actual_guard: [u8; 32] = Sha256::digest(arguments.as_bytes()).into();
+                if !item.content.is_empty()
+                    || item.status != Some("completed")
+                    || tool.item_id != item_id
+                    || tool.call_id != call_id
+                    || tool.name.as_str() != name
+                    || usize::try_from(tool.argument_bytes).ok() != Some(arguments.len())
+                    || argument_guard != actual_guard
+                {
+                    return Err(AgentProviderProtocolError::Sequence);
+                }
+                tool_index += 1;
+            }
             _ => return Err(AgentProviderProtocolError::UnsupportedOutput),
         }
+    }
+    if tool_index != tools.len() {
+        return Err(AgentProviderProtocolError::Sequence);
+    }
+    if output_kind == TerminalOutputKind::Refusal && !tools.is_empty() {
+        return Err(AgentProviderProtocolError::UnsupportedOutput);
     }
     Ok(output_kind)
 }
@@ -879,6 +1135,7 @@ mod tests {
             .chain(third.into_events())
             .map(|event| match event {
                 AgentProviderStreamEvent::TextDelta(delta) => delta.as_str().to_owned(),
+                AgentProviderStreamEvent::ToolCall(_) => panic!("unexpected tool call"),
             })
             .collect::<String>();
         assert_eq!(text, "hello world");
@@ -944,25 +1201,184 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_tool_and_reasoning_output_never_cross_the_boundary() {
-        for (name, body) in [
-            (
+    fn hidden_reasoning_output_never_crosses_the_boundary() {
+        let mut decoder =
+            OpenAiResponsesStreamDecoder::try_new(call(), &config(64)).expect("decoder");
+        decoder.push(created("resp_4").as_bytes()).expect("created");
+        assert_eq!(
+            decoder.push(
+                sse(
+                    "response.reasoning_text.delta",
+                    r#"{"type":"response.reasoning_text.delta","delta":"hidden"}"#,
+                )
+                .as_bytes(),
+            ),
+            Err(AgentProviderProtocolError::UnsupportedOutput)
+        );
+    }
+
+    #[test]
+    fn complete_function_call_becomes_only_a_typed_browser_proposal() {
+        let mut decoder =
+            OpenAiResponsesStreamDecoder::try_new(call(), &config(64)).expect("decoder");
+        let arguments = r#"{"url":"https://example.test/path"}"#;
+        let output = serde_json::json!([{
+            "type": "function_call",
+            "id": "fc_1",
+            "call_id": "call_tool1",
+            "name": "navigate",
+            "arguments": arguments,
+            "status": "completed"
+        }])
+        .to_string();
+        let stream = [
+            created("resp_tool"),
+            sse(
+                "response.output_item.added",
+                &serde_json::json!({
+                    "type": "response.output_item.added",
+                    "item": {
+                        "type": "function_call",
+                        "id": "fc_1",
+                        "call_id": "call_tool1",
+                        "name": "navigate",
+                        "arguments": "",
+                        "status": "in_progress"
+                    }
+                })
+                .to_string(),
+            ),
+            sse(
                 "response.function_call_arguments.delta",
-                r#"{"type":"response.function_call_arguments.delta","delta":"{\\\"x\\\":"}"#,
+                &serde_json::json!({
+                    "type": "response.function_call_arguments.delta",
+                    "item_id": "fc_1",
+                    "delta": "{\"url\":"
+                })
+                .to_string(),
             ),
-            (
-                "response.reasoning_text.delta",
-                r#"{"type":"response.reasoning_text.delta","delta":"hidden"}"#,
+            sse(
+                "response.function_call_arguments.delta",
+                &serde_json::json!({
+                    "type": "response.function_call_arguments.delta",
+                    "item_id": "fc_1",
+                    "delta": "\"https://example.test/path\"}"
+                })
+                .to_string(),
             ),
-        ] {
-            let mut decoder =
-                OpenAiResponsesStreamDecoder::try_new(call(), &config(64)).expect("decoder");
-            decoder.push(created("resp_4").as_bytes()).expect("created");
-            assert_eq!(
-                decoder.push(sse(name, body).as_bytes()),
-                Err(AgentProviderProtocolError::UnsupportedOutput)
-            );
-        }
+            sse(
+                "response.function_call_arguments.done",
+                &serde_json::json!({
+                    "type": "response.function_call_arguments.done",
+                    "item_id": "fc_1",
+                    "name": "navigate",
+                    "arguments": arguments
+                })
+                .to_string(),
+            ),
+            sse(
+                "response.output_item.done",
+                &serde_json::json!({
+                    "type": "response.output_item.done",
+                    "item": {
+                        "type": "function_call",
+                        "id": "fc_1",
+                        "call_id": "call_tool1",
+                        "name": "navigate",
+                        "arguments": arguments,
+                        "status": "completed"
+                    }
+                })
+                .to_string(),
+            ),
+            terminal("resp_tool", "response.completed", "completed", &output),
+            "data: [DONE]\n\n".to_owned(),
+        ]
+        .concat();
+        let batch = decoder.push(stream.as_bytes()).expect("tool stream");
+        let mut events = batch.into_events();
+        assert_eq!(events.len(), 1);
+        let AgentProviderStreamEvent::ToolCall(tool) = events.remove(0) else {
+            panic!("typed tool call");
+        };
+        assert_eq!(tool.id().as_str(), "call_tool1");
+        let (_, proposal) = tool.into_parts();
+        let crate::AgentBrowserToolProposal::Navigate(target) = proposal else {
+            panic!("navigate proposal");
+        };
+        assert_eq!(target.as_url().as_str(), "https://example.test/path");
+
+        let AgentProviderStreamConclusion::Completed(completion) =
+            decoder.finish().expect("terminal")
+        else {
+            panic!("completed tool response");
+        };
+        assert_eq!(completion.stop(), AgentProviderStopReason::ToolCalls);
+        assert_eq!(completion.stats().tool_calls(), 1);
+        assert_eq!(
+            completion.stats().tool_argument_bytes(),
+            u32::try_from(arguments.len()).expect("argument bytes")
+        );
+    }
+
+    #[test]
+    fn malformed_tool_arguments_fail_stop_before_raw_json_escapes() {
+        let mut decoder =
+            OpenAiResponsesStreamDecoder::try_new(call(), &config(64)).expect("decoder");
+        decoder
+            .push(created("resp_bad_tool").as_bytes())
+            .expect("created");
+        decoder
+            .push(
+                sse(
+                    "response.output_item.added",
+                    &serde_json::json!({
+                        "type": "response.output_item.added",
+                        "item": {
+                            "type": "function_call",
+                            "id": "fc_bad",
+                            "call_id": "call_bad",
+                            "name": "navigate",
+                            "arguments": "",
+                            "status": "in_progress"
+                        }
+                    })
+                    .to_string(),
+                )
+                .as_bytes(),
+            )
+            .expect("tool start");
+        let arguments = r##"{"url":"https://example.test","selector":"#secret"}"##;
+        decoder
+            .push(
+                sse(
+                    "response.function_call_arguments.delta",
+                    &serde_json::json!({
+                        "type": "response.function_call_arguments.delta",
+                        "item_id": "fc_bad",
+                        "delta": arguments
+                    })
+                    .to_string(),
+                )
+                .as_bytes(),
+            )
+            .expect("arguments");
+        let done = sse(
+            "response.function_call_arguments.done",
+            &serde_json::json!({
+                "type": "response.function_call_arguments.done",
+                "item_id": "fc_bad",
+                "name": "navigate",
+                "arguments": arguments
+            })
+            .to_string(),
+        );
+        assert_eq!(
+            decoder.push(done.as_bytes()),
+            Err(AgentProviderProtocolError::ToolCall)
+        );
+        assert_eq!(decoder.push(b""), Err(AgentProviderProtocolError::ToolCall));
+        assert!(!format!("{decoder:?}").contains("#secret"));
     }
 
     #[test]

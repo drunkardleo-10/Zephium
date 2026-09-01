@@ -10,9 +10,10 @@ the supervisor. A bounded semantic-audit ledger and typed persistence port are
 implemented. The provider-neutral identity, usage, failure, retry-after,
 stream-budget, and bounded SSE framing contracts are implemented. OpenAI and
 Responses plain-text/refusal lifecycle and terminal-usage stream normalization
-is implemented. Fixed request/tool encoding, typed browser-tool decoding, the
-Anthropic codec, the durable store adapter, and live qualification remain
-pending.
+is implemented. The closed browser-tool proposal decoder and OpenAI streamed
+function-call normalization are implemented. Fixed request/tool-schema
+encoding, the Anthropic codec, the durable store adapter, and live
+qualification remain pending.
 
 This evidence describes policy input facts only. A manifest cannot authorize a
 browser action, model call, tool call, data transfer, cost, or native resource.
@@ -354,8 +355,40 @@ browser action, model call, tool call, data transfer, cost, or native resource.
   at one day, accepted only for rate-limit/overload/timeout/transport classes,
   and never grants retry authority. Any retry still requires a new supervisor
   decision, monotonic call identity, policy reservation, and cancellation
-  check. Vendor codecs remain responsible for typed event sequencing and for
-  preventing raw tool arguments from crossing the public boundary.
+  check. Vendor codecs remain responsible for typed event sequencing; raw tool
+  arguments cannot cross the public boundary.
+
+## Implemented closed browser-tool boundary
+
+- The model-facing vocabulary is exactly `navigate`, `back`, `forward`,
+  `reload`, `snapshot`, `locate`, `act`, `wait`, `read`, `extract`,
+  `screenshot`, `show_for_human`, and `resume_after_human`. Unknown tools and
+  unknown JSON fields fail closed. JavaScript, selectors, XPath, DOM, HTML,
+  CDP, native handles, paths, shell-minted operation IDs, and generic bridge
+  requests have no representable variant.
+- Arguments are capped before parsing and preflighted at a maximum JSON depth
+  of 16. Provider tool-call identities are bounded opaque ASCII correlation.
+  Navigation reuses the shipping HTTP(S) target validator; semantic references
+  must use canonical `@aN`; locate input is bounded hostile natural-language
+  text explicitly forbidden from selector APIs; progressive scopes are closed
+  reference/window proposals that still require exact acknowledged-observation
+  binding.
+- `act` converts immediately into the existing click/fill/select/press/scroll,
+  effect, wait, verification, and settle types. Existing secret/control-text
+  refusal and outcome compatibility run during decode. The preflight also caps
+  eight actions, 16 KiB aggregate fill text, 60 seconds aggregate settle time,
+  homogeneous effects, and one-action durable/capability boundaries before an
+  observation is touched; normal exact observation binding repeats the
+  relevant checks.
+- Standalone waits carry a typed condition and relative timeout from which the
+  shell must derive one absolute deadline. Extraction selects only an opaque
+  shell-registered schema ID. Screenshot remains the already implemented
+  viewport-only v1 scope. Human pause/resume values are closed supervisor
+  proposals, never direct control or resume authority.
+- Every decoded tool call remains non-authorizing. The provider stream must
+  reach a valid terminal `ToolCalls` conclusion; the supervisor must then bind
+  current context/observation state and policy must independently classify and
+  authorize any effect before a native adapter can run.
 
 ## Implemented OpenAI Responses stream slice
 
@@ -378,11 +411,13 @@ browser action, model call, tool call, data transfer, cost, or native resource.
   failure. A failed stream may truthfully carry no usage so the later policy
   integration can apply a documented conservative settlement instead of
   inventing zero usage.
-- Function-call arguments, provider built-in tools, hidden reasoning output,
-  unknown output classes, invalid JSON/UTF-8, and premature `[DONE]` fail
-  closed. Raw tool JSON is intentionally not exposed as an interim API. The
-  next provider slice must install the closed browser-tool decoder before
-  function calling is enabled.
+- Function-call IDs, names, ordered item lifecycle, delta bytes, final
+  arguments, item completion, and terminal output are joined exactly. Up to
+  the configured call/argument limits, each completed call is emitted only as
+  the closed proposal above; raw JSON is dropped. Substitution, duplicate or
+  partial lifecycle, invalid proposal JSON, provider built-in tools, hidden
+  reasoning output, unknown output classes, invalid JSON/UTF-8, and premature
+  `[DONE]` fail-stop the stream.
 
 ## Current tests
 
@@ -435,10 +470,13 @@ and authority joins, event/time replay, duplicate refusal, the 64-event and
 reconstruction, refused/cancelled retry, exact prefix commit, mismatch
 fail-stop retention, shutdown quiescence, the closed port contract, and
 redacted diagnostics.
-Fourteen provider-boundary tests cover configuration/usage/retry ceilings,
+Twenty-three provider-boundary tests cover configuration/usage/retry ceilings,
 fragmented CR/LF/CRLF SSE framing, multiline data, comments, invalid UTF-8,
 line/event/event-count/aggregate-wire exhaustion, exact model/response joins,
 text hashing, terminal usage, output limits, failed/incomplete responses,
-unsupported tool and reasoning output, fail-closed ordering, and redacted
+typed OpenAI function-call lifecycle, every closed browser tool and semantic
+action class, URL/reference/query/schema validation, secret and mixed-effect
+refusal, unknown/generic bridge field refusal, argument depth/size exhaustion,
+unsupported built-in and reasoning output, fail-closed ordering, and redacted
 diagnostics. They use only deterministic in-memory wire fragments and no
 provider, network, credential, task, timer, or retry.

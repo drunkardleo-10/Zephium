@@ -77,17 +77,21 @@ pub use agent_policy::{
     MAX_AGENT_TAINT_REFERENCES,
 };
 pub use agent_provider::{
+    AgentBrowserActProposal, AgentBrowserHumanReason, AgentBrowserScopeProposal,
+    AgentBrowserSemanticQuery, AgentBrowserToolCall, AgentBrowserToolCallId,
+    AgentBrowserToolContractError, AgentBrowserToolKind, AgentBrowserToolProposal,
     AgentProviderCallConfig, AgentProviderCallIdentity, AgentProviderCompletion,
     AgentProviderContractError, AgentProviderFailure, AgentProviderFailureClass, AgentProviderKind,
     AgentProviderModelRevision, AgentProviderProtocolError, AgentProviderRetryAfter,
     AgentProviderRetryDisposition, AgentProviderStopReason, AgentProviderStreamBatch,
     AgentProviderStreamBudget, AgentProviderStreamConclusion, AgentProviderStreamEvent,
     AgentProviderStreamStats, AgentProviderTerminalFailure, AgentProviderTextDelta,
-    AgentProviderUsage, OpenAiResponsesStreamDecoder, MAX_AGENT_PROVIDER_MODEL_REVISION_BYTES,
-    MAX_AGENT_PROVIDER_OUTPUT_TEXT_BYTES, MAX_AGENT_PROVIDER_RETRY_AFTER_MILLIS,
-    MAX_AGENT_PROVIDER_SSE_EVENT_BYTES, MAX_AGENT_PROVIDER_SSE_LINE_BYTES,
-    MAX_AGENT_PROVIDER_STREAM_EVENTS, MAX_AGENT_PROVIDER_STREAM_WIRE_BYTES,
-    MAX_AGENT_PROVIDER_TOOL_ARGUMENT_BYTES, MAX_AGENT_PROVIDER_TOOL_CALLS,
+    AgentProviderUsage, OpenAiResponsesStreamDecoder, MAX_AGENT_BROWSER_SEMANTIC_QUERY_BYTES,
+    MAX_AGENT_PROVIDER_MODEL_REVISION_BYTES, MAX_AGENT_PROVIDER_OUTPUT_TEXT_BYTES,
+    MAX_AGENT_PROVIDER_RETRY_AFTER_MILLIS, MAX_AGENT_PROVIDER_SSE_EVENT_BYTES,
+    MAX_AGENT_PROVIDER_SSE_LINE_BYTES, MAX_AGENT_PROVIDER_STREAM_EVENTS,
+    MAX_AGENT_PROVIDER_STREAM_WIRE_BYTES, MAX_AGENT_PROVIDER_TOOL_ARGUMENT_BYTES,
+    MAX_AGENT_PROVIDER_TOOL_CALLS, MAX_AGENT_PROVIDER_TOOL_CALL_ID_BYTES,
 };
 pub use agent_supervisor::{
     AgentDelegationNode, AgentDelegationSpec, AgentDelegationTopology, AgentNodeExecution,
