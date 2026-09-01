@@ -7,7 +7,7 @@
 //! selectors, JavaScript, DOM/HTML, prior-response state, metadata, or secret.
 
 use std::fmt;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 use serde::Serialize;
 use serde_json::{json, Map, Value};
@@ -25,6 +25,7 @@ use crate::{
     MAX_SEMANTIC_MUTATION_QUIET_MILLIS, MAX_SEMANTIC_SURROUNDING_TEXT_BYTES,
 };
 
+use super::continuation::AgentProviderTranscript;
 use super::tool::AgentBrowserToolKind;
 use super::{
     AgentProviderCallConfig, AgentProviderCallIdentity, AgentProviderContinuationSeed,
@@ -59,7 +60,7 @@ const AGENT_BROWSER_INSTRUCTIONS_V1: &str = concat!(
 /// reusable by reference so repeated turns do not duplicate its allocation.
 #[must_use]
 pub struct AgentProviderObjective {
-    content: String,
+    content: Arc<str>,
     measurement: SemanticTokenMeasurement,
 }
 
@@ -95,7 +96,7 @@ impl AgentProviderObjective {
             return Err(AgentProviderObjectiveError::TokenLimit);
         }
         Ok(Self {
-            content,
+            content: Arc::from(content),
             measurement,
         })
     }
@@ -112,6 +113,10 @@ impl AgentProviderObjective {
 
     fn as_str(&self) -> &str {
         &self.content
+    }
+
+    fn shared_content(&self) -> Arc<str> {
+        self.content.clone()
     }
 }
 
@@ -421,12 +426,20 @@ impl AgentProviderInputCommitment {
 pub struct AgentProviderTransportInput {
     request: AgentProviderRequest,
     commitment: AgentProviderInputCommitment,
+    continuation_transcript: Option<AgentProviderTranscript>,
 }
 
 impl AgentProviderTransportInput {
     /// Exact immutable request available for bounded transport admission.
     pub const fn request(&self) -> &AgentProviderRequest {
         &self.request
+    }
+
+    /// Optional private transcript bytes retained through transport commit.
+    pub fn continuation_transcript_bytes(&self) -> Option<usize> {
+        self.continuation_transcript
+            .as_ref()
+            .map(AgentProviderTranscript::retained_bytes)
     }
 
     /// Commits disclosure and returns the request joined to active authority.
@@ -437,10 +450,15 @@ impl AgentProviderTransportInput {
         let Self {
             request,
             commitment,
+            continuation_transcript,
         } = self;
         let input = commitment.commit(policy)?;
-        let continuation =
-            AgentProviderContinuationSeed::from_committed(request.call(), request.config(), &input);
+        let continuation = AgentProviderContinuationSeed::from_committed(
+            request.call(),
+            request.config(),
+            &input,
+            continuation_transcript,
+        );
         Ok(AgentCommittedProviderRequest {
             request,
             input,
@@ -482,6 +500,10 @@ impl fmt::Debug for AgentProviderTransportInput {
             .debug_struct("AgentProviderTransportInput")
             .field("request", &self.request)
             .field("commitment", &"[redacted]")
+            .field(
+                "continuation_transcript",
+                &self.continuation_transcript.is_some(),
+            )
             .finish()
     }
 }
@@ -513,6 +535,13 @@ impl AgentCommittedProviderRequest {
         self.input.evidence()
     }
 
+    /// Optional private transcript bytes retained for a tool-only terminal.
+    pub fn continuation_transcript_bytes(&self) -> Option<usize> {
+        self.continuation
+            .as_ref()
+            .map(AgentProviderContinuationSeed::retained_transcript_bytes)
+    }
+
     /// Moves request, committed input, and optional one-shot continuation seed.
     ///
     /// Only a committed full observation carries a seed. A bounded read never
@@ -535,6 +564,10 @@ impl fmt::Debug for AgentCommittedProviderRequest {
             .field("request", &self.request)
             .field("input", &self.input)
             .field("continuation", &self.continuation.is_some())
+            .field(
+                "continuation_transcript_bytes",
+                &self.continuation_transcript_bytes(),
+            )
             .finish()
     }
 }
@@ -546,14 +579,16 @@ pub struct AgentPreparedObservationRequest {
     admission: AgentModelCallAdmission,
     delivery: crate::semantic_model::SemanticObservationDeliveryAuthority,
     semantic_stats: SemanticEncodingStats,
+    continuation_transcript: Option<AgentProviderTranscript>,
 }
 
 impl AgentPreparedObservationRequest {
     /// Atomically admits and builds one fixed OpenAI observation request.
     ///
     /// Every fallible provider validation/serialization step runs before policy
-    /// reservation. Once admission succeeds, construction is infallible and
-    /// retains no second semantic-content copy.
+    /// reservation. Once admission succeeds, construction is infallible. The
+    /// admitted semantic allocation moves into the bounded continuation
+    /// transcript when eligible; it is never cloned.
     pub fn try_openai(
         policy: &mut AgentRunPolicy,
         call_request: AgentModelCallRequest,
@@ -570,7 +605,9 @@ impl AgentPreparedObservationRequest {
         let body = encode_openai_body(&config, objective.as_str(), payload.as_str())?;
         let admission = policy.prepare_observation_input(call_request, observation, &payload)?;
         let call = AgentProviderCallIdentity::from_admission(&admission);
-        let (_, semantic_stats, delivery) = payload.into_provider_parts();
+        let (semantic_content, semantic_stats, delivery) = payload.into_provider_parts();
+        let continuation_transcript =
+            AgentProviderTranscript::try_initial(objective.shared_content(), semantic_content);
         let request = AgentProviderRequest {
             call,
             config,
@@ -582,14 +619,16 @@ impl AgentPreparedObservationRequest {
             admission,
             delivery,
             semantic_stats,
+            continuation_transcript,
         })
     }
 
     /// Atomically admits and builds one fixed Anthropic observation request.
     ///
     /// Every fallible provider validation/serialization step runs before policy
-    /// reservation. Once admission succeeds, construction is infallible and
-    /// retains no second semantic-content copy.
+    /// reservation. Once admission succeeds, construction is infallible. The
+    /// admitted semantic allocation moves into the bounded continuation
+    /// transcript when eligible; it is never cloned.
     pub fn try_anthropic(
         policy: &mut AgentRunPolicy,
         call_request: AgentModelCallRequest,
@@ -606,7 +645,9 @@ impl AgentPreparedObservationRequest {
         let body = encode_anthropic_body(&config, objective.as_str(), payload.as_str())?;
         let admission = policy.prepare_observation_input(call_request, observation, &payload)?;
         let call = AgentProviderCallIdentity::from_admission(&admission);
-        let (_, semantic_stats, delivery) = payload.into_provider_parts();
+        let (semantic_content, semantic_stats, delivery) = payload.into_provider_parts();
+        let continuation_transcript =
+            AgentProviderTranscript::try_initial(objective.shared_content(), semantic_content);
         let request = AgentProviderRequest {
             call,
             config,
@@ -618,6 +659,7 @@ impl AgentPreparedObservationRequest {
             admission,
             delivery,
             semantic_stats,
+            continuation_transcript,
         })
     }
 
@@ -639,6 +681,7 @@ impl AgentPreparedObservationRequest {
                 admission: self.admission,
                 delivery: self.delivery,
             },
+            continuation_transcript: self.continuation_transcript,
         }
     }
 
@@ -660,6 +703,10 @@ impl fmt::Debug for AgentPreparedObservationRequest {
             .field("admission", &self.admission)
             .field("semantic_stats", &self.semantic_stats)
             .field("delivery", &"[redacted]")
+            .field(
+                "continuation_transcript",
+                &self.continuation_transcript.is_some(),
+            )
             .finish()
     }
 }
@@ -764,6 +811,7 @@ impl AgentPreparedReadRequest {
                 admission: self.admission,
                 delivery: self.delivery,
             },
+            continuation_transcript: None,
         }
     }
 

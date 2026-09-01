@@ -580,9 +580,14 @@ A compact diff is never sent as a standalone stateless provider turn because
 the model would not have the acknowledged baseline it modifies. Provider diff
 delivery requires a separate bounded continuation/tool-result contract that
 retains exact prior-turn correlation without logging or persisting provider
-responses. The provider-neutral one-shot seam retains only an exact committed
-baseline, fixed provider/model/tokenizer/pricing configuration, exact
-model-call lineage, and the bounded terminal tool correlation; failures,
+responses. The provider-neutral seam shares the already-admitted objective
+allocation and moves the initial compact semantic allocation into a private,
+move-only structured transcript; it never retains a raw request or response.
+Seed eligibility is limited to the normal 32 KiB initial-observation envelope,
+and the transcript has a 256 KiB / eight completed-turn ceiling before the
+adapter must rebase with a fresh full observation. Beside that bounded content,
+it retains exact committed baseline, provider/model/tokenizer/pricing
+configuration, model-call lineage, and terminal tool correlation. Failures,
 cancellation, non-tool stops, mixed text/reasoning output, and multi-tool stops
 destroy it. It can bind only a strictly newer same-plan call and the exact
 token-admitted diff extending that baseline. Provider-specific stateless

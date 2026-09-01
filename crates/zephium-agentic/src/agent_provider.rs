@@ -23,7 +23,8 @@ use openai::OpenAiResponsesStreamDecoder;
 
 pub use continuation::{
     AgentProviderBoundDiffContinuation, AgentProviderContinuation, AgentProviderContinuationError,
-    AgentProviderContinuationSeed,
+    AgentProviderContinuationSeed, MAX_AGENT_PROVIDER_CONTINUATION_INITIAL_OBSERVATION_BYTES,
+    MAX_AGENT_PROVIDER_CONTINUATION_TRANSCRIPT_BYTES, MAX_AGENT_PROVIDER_CONTINUATION_TURNS,
 };
 pub use pricing::{
     AgentProviderPricedUsage, AgentProviderPricingAttribution, AgentProviderPricingContractError,

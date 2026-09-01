@@ -162,13 +162,20 @@ have been instrumented or observed on either platform.
   delivery authority. That authority is diagnostics-redacted and can mint the
   exact diff receipt only at transport commit; refusal and cancellation drop
   it without acknowledging the current observation.
-- Committing a full-observation provider request now mints one move-only,
-  memory-only continuation seed beside the immutable request and usage
-  authority. Bounded reads do not. The transport destroys this seed for every
-  pre/post-dispatch cancellation, transport or protocol failure, terminal call
-  mismatch, non-tool or mixed text/reasoning output, or tool count other than
-  exactly one. Policy and trusted-pricing settlement remain independently
-  mandatory even when the caller elects to retain the seed.
+- A normal-envelope full-observation provider request now shares its already
+  admitted objective allocation and moves, rather than copies, its compact
+  semantic allocation into one private structured replay transcript. The
+  initial semantic component is capped at 32 KiB; larger valid first turns do
+  not receive a seed. The transcript has a 256 KiB / eight completed-turn hard
+  ceiling before mandatory fresh-snapshot rebase, retains neither raw request
+  nor raw response, and is move-only, memory-only, diagnostics-redacted, and
+  non-persistable by API. Committing that request mints the continuation seed
+  beside immutable request and usage authority. Bounded reads do not. The
+  transport destroys this seed for every pre/post-dispatch cancellation,
+  transport or protocol failure, terminal call mismatch, non-tool or mixed
+  text/reasoning output, or tool count other than exactly one. Policy and
+  trusted-pricing settlement remain independently mandatory even when the
+  caller elects to retain the seed.
 - Each decoded provider tool call now carries its exact immutable model-call
   lineage plus the provider's bounded tool-call correlation, closed tool kind,
   and already-bounded original arguments. Only a tool-only assistant turn is

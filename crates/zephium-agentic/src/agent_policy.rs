@@ -3123,12 +3123,25 @@ mod tests {
 
         let transport_input = prepared.into_transport_input();
         assert_eq!(transport_input.request().call().call().get(), 1);
+        let transcript_bytes = transport_input
+            .continuation_transcript_bytes()
+            .expect("normal observation transcript");
+        assert!(transcript_bytes > objective.byte_len());
+        assert!(
+            transcript_bytes
+                <= crate::MAX_AGENT_PROVIDER_OBJECTIVE_BYTES
+                    + crate::MAX_AGENT_PROVIDER_CONTINUATION_INITIAL_OBSERVATION_BYTES
+        );
         let transport_debug = format!("{transport_input:?}");
         assert!(!transport_debug.contains("Submit the reviewed form"));
         assert!(!transport_debug.contains("private marker"));
         let committed = transport_input
             .commit(&mut fixture.policy)
             .expect("transport commit");
+        assert_eq!(
+            committed.continuation_transcript_bytes(),
+            Some(transcript_bytes)
+        );
         assert!(committed
             .request()
             .call()
