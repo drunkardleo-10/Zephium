@@ -3,9 +3,9 @@
 //! This functional core reserves one model call before transport, records
 //! source taint only after exact committed observation/read delivery, and
 //! settles provider usage without retries. Its child effect policy reserves
-//! one operation only after exact source-to-sink checks and still cannot
-//! execute an action. The core owns no transport, provider, timer, task,
-//! thread, page, or browser.
+//! one operation per bounded prepared action only after exact source-to-sink
+//! checks and still cannot execute an action. The core owns no transport,
+//! provider, timer, task, thread, page, or browser.
 
 use std::fmt;
 use std::num::NonZeroU64;
@@ -569,7 +569,7 @@ pub struct AgentRunPolicy {
     consumed: ConsumedUsage,
     taints: Vec<AgentTaintCohort>,
     calls: Vec<ModelCallRow>,
-    effect: Option<AgentEffectRow>,
+    effects: Vec<AgentEffectRow>,
     last_call: Option<AgentModelCallId>,
     last_effect: Option<AgentEffectId>,
     last_action_attempt: Option<SemanticActionAttemptId>,
@@ -617,7 +617,7 @@ impl AgentRunPolicy {
             consumed: ConsumedUsage::default(),
             taints: Vec::new(),
             calls: Vec::with_capacity(MAX_AGENT_PENDING_MODEL_CALLS),
-            effect: None,
+            effects: Vec::with_capacity(MAX_AGENT_PENDING_EFFECTS),
             last_call: None,
             last_effect: None,
             last_action_attempt: None,
@@ -640,9 +640,17 @@ impl AgentRunPolicy {
         self.calls.len()
     }
 
-    /// Whether one semantic effect is reserved or dispatched.
+    /// Semantic effects currently reserved or dispatched.
     pub fn pending_effects(&self) -> usize {
-        usize::from(self.effect.is_some())
+        self.effects.len()
+    }
+
+    /// Durable effects currently holding a canonical origin serialization slot.
+    pub fn pending_origin_writes(&self) -> usize {
+        self.effects
+            .iter()
+            .filter(|effect| effect.requires_origin_serialization())
+            .count()
     }
 
     /// Whether a mismatched/ambiguous settlement terminally sealed this policy.
@@ -652,7 +660,7 @@ impl AgentRunPolicy {
 
     /// Consumed and reserved run-wide accounting.
     pub fn accounting(&self) -> AgentPolicyAccounting {
-        accounting(self.consumed, self.calls.iter(), self.effect.as_ref())
+        accounting(self.consumed, self.calls.iter(), self.effects.iter())
     }
 
     /// Consumed and reserved accounting for one exact plan lease.
@@ -664,9 +672,7 @@ impl AgentRunPolicy {
         Some(accounting(
             state.consumed,
             self.calls.iter().filter(|call| call.lease == lease),
-            self.effect
-                .as_ref()
-                .filter(|effect| effect.lease() == lease),
+            self.effects.iter().filter(|effect| effect.lease() == lease),
         ))
     }
 
@@ -843,7 +849,7 @@ impl AgentRunPolicy {
         if self.sealed {
             return Err(AgentPolicyError::Sealed);
         }
-        if self.effect.is_some() {
+        if !self.effects.is_empty() {
             return Err(AgentPolicyError::EffectPending);
         }
         if self.calls.len() >= MAX_AGENT_PENDING_MODEL_CALLS {
@@ -1008,9 +1014,18 @@ pub enum AgentPolicyError {
     /// Pending model-call ceiling was reached.
     #[error("agent policy pending model-call ceiling reached")]
     PendingCallLimit,
-    /// One semantic effect holds the run's single execution reservation.
+    /// At least one semantic effect freezes additional model input.
     #[error("agent policy semantic effect is pending")]
     EffectPending,
+    /// Four prepared/dispatched semantic effects already consume the ceiling.
+    #[error("agent policy pending semantic-effect ceiling reached")]
+    PendingEffectLimit,
+    /// The exact prepared action already has one pending authorization.
+    #[error("agent policy action already has a pending semantic effect")]
+    EffectActionPending,
+    /// A durable write already owns the same canonical destination origin.
+    #[error("agent policy destination origin already has a pending write")]
+    OriginWritePending,
     /// Model input is still reserved or active while an effect seeks authority.
     #[error("agent policy model call is pending at the effect boundary")]
     ModelCallPending,
@@ -1354,7 +1369,7 @@ fn ensure_budget(
 fn accounting<'a>(
     consumed: ConsumedUsage,
     calls: impl Iterator<Item = &'a ModelCallRow>,
-    effect: Option<&AgentEffectRow>,
+    effects: impl Iterator<Item = &'a AgentEffectRow>,
 ) -> AgentPolicyAccounting {
     let mut value = AgentPolicyAccounting {
         consumed_operations: consumed.operations,
@@ -1374,7 +1389,7 @@ fn accounting<'a>(
             .reserved_cost_micro_usd
             .saturating_add(call.cost_limit);
     }
-    if effect.is_some() {
+    for _effect in effects {
         value.reserved_operations = value.reserved_operations.saturating_add(1);
     }
     value
@@ -1653,6 +1668,26 @@ mod tests {
                        "b": {"x": 10, "y": 10, "w": 100, "h": 30}}),
             ],
         )
+    }
+
+    fn multi_actionable_observation(
+        context: ContextJoin,
+        source: SemanticOrigin,
+        observation_id: u64,
+        actions: u16,
+    ) -> SemanticObservation {
+        let mut nodes = vec![json!({"k": 1, "r": "document", "o": 16})];
+        for target in 2..=actions.saturating_add(1) {
+            nodes.push(json!({
+                "k": target,
+                "p": 0,
+                "r": "button",
+                "n": format!("Action {target}"),
+                "o": 9,
+                "b": {"x": 10, "y": i64::from(target) * 40, "w": 100, "h": 30}
+            }));
+        }
+        observation(context, source, observation_id, nodes)
     }
 
     fn read_limited_actionable_observation(
@@ -2699,7 +2734,7 @@ mod tests {
     }
 
     #[test]
-    fn semantic_effect_permit_is_single_flight_verified_accounted_and_nonreplayable() {
+    fn semantic_effect_permit_is_verified_accounted_and_nonreplayable() {
         let source = origin("effect");
         let (mut registry, context) = make_context_registry(107, 108, 109);
         let observation = actionable_observation(context, source.clone(), 1);
@@ -2734,7 +2769,7 @@ mod tests {
             AgentEffectAuthorization::Permit(permit) => permit,
             AgentEffectAuthorization::NeedsHuman(_) => panic!("same-origin effect was in scope"),
         };
-        assert_eq!(fixture.policy.pending_effects(), MAX_AGENT_PENDING_EFFECTS);
+        assert_eq!(fixture.policy.pending_effects(), 1);
         assert!(permit.matches_action(&action));
         assert_eq!(permit.effect(), SemanticEffectClass::LocalWrite);
         assert_eq!(fixture.policy.accounting().consumed_operations(), 1);
@@ -2877,6 +2912,376 @@ mod tests {
         let debug = format!("{:?} {receipt:?} {failed:?}", fixture.policy);
         assert!(!debug.contains("effect.example.test"));
         assert!(!debug.contains("Save draft"));
+    }
+
+    #[test]
+    fn bounded_effect_ledger_admits_four_distinct_actions_and_refuses_duplicates() {
+        let source = origin("parallel-effect");
+        let (mut registry, context) = make_context_registry(207, 208, 209);
+        registry
+            .acknowledge_observation(context.identity().id(), context)
+            .expect("observation current");
+        let automation = registry
+            .automation_state(context.identity().id())
+            .expect("automation state");
+        let binding = account(context, NOW - 1);
+        let observation = multi_actionable_observation(context, source.clone(), 1, 5);
+        let mut fixture = policy_fixture(
+            207,
+            208,
+            source.clone(),
+            SemanticSensitivity::Public,
+            &[SemanticEffectClass::Read, SemanticEffectClass::LocalWrite],
+            run_budget(20, 1_000, 10_000),
+        );
+        commit_observation_to_model(&mut fixture.policy, fixture.lease, 1, binding, &observation);
+
+        let first = prepared_click(&observation, 2, SemanticEffectClass::LocalWrite);
+        let first_assessment =
+            AgentEffectAssessment::new(&first, source.clone(), SemanticEffectClass::LocalWrite);
+        let first_permit = match fixture
+            .policy
+            .authorize_semantic_effect(
+                effect_request(1, fixture.lease, binding, automation),
+                &first,
+                &first_assessment,
+            )
+            .expect("first effect")
+        {
+            AgentEffectAuthorization::Permit(permit) => permit,
+            AgentEffectAuthorization::NeedsHuman(_) => panic!("local write was in scope"),
+        };
+        assert_eq!(
+            fixture
+                .policy
+                .authorize_semantic_effect(
+                    effect_request(2, fixture.lease, binding, automation),
+                    &first,
+                    &first_assessment,
+                )
+                .expect_err("duplicate prepared action"),
+            AgentPolicyError::EffectActionPending
+        );
+
+        let mut permits = vec![first_permit];
+        for (effect_id, target) in [(3, 3), (4, 4), (5, 5)] {
+            let action = prepared_click(&observation, target, SemanticEffectClass::LocalWrite);
+            let assessment = AgentEffectAssessment::new(
+                &action,
+                source.clone(),
+                SemanticEffectClass::LocalWrite,
+            );
+            let permit = match fixture
+                .policy
+                .authorize_semantic_effect(
+                    effect_request(effect_id, fixture.lease, binding, automation),
+                    &action,
+                    &assessment,
+                )
+                .expect("independent effect")
+            {
+                AgentEffectAuthorization::Permit(permit) => permit,
+                AgentEffectAuthorization::NeedsHuman(_) => panic!("local write was in scope"),
+            };
+            permits.push(permit);
+        }
+        assert_eq!(fixture.policy.pending_effects(), MAX_AGENT_PENDING_EFFECTS);
+        assert_eq!(fixture.policy.accounting().reserved_operations(), 4);
+
+        let fifth = prepared_click(&observation, 6, SemanticEffectClass::LocalWrite);
+        let fifth_assessment =
+            AgentEffectAssessment::new(&fifth, source.clone(), SemanticEffectClass::LocalWrite);
+        assert_eq!(
+            fixture
+                .policy
+                .authorize_semantic_effect(
+                    effect_request(6, fixture.lease, binding, automation),
+                    &fifth,
+                    &fifth_assessment,
+                )
+                .expect_err("bounded effect ceiling"),
+            AgentPolicyError::PendingEffectLimit
+        );
+        for permit in permits {
+            fixture
+                .policy
+                .cancel_semantic_effect(permit, AgentEffectCancellation::Cancelled)
+                .expect("cancel exact permit");
+        }
+        assert_eq!(fixture.policy.pending_effects(), 0);
+        assert_eq!(fixture.policy.accounting().reserved_operations(), 0);
+
+        let fifth_permit = match fixture
+            .policy
+            .authorize_semantic_effect(
+                effect_request(6, fixture.lease, binding, automation),
+                &fifth,
+                &fifth_assessment,
+            )
+            .expect("capacity refusal did not consume id")
+        {
+            AgentEffectAuthorization::Permit(permit) => permit,
+            AgentEffectAuthorization::NeedsHuman(_) => panic!("local write was in scope"),
+        };
+        fixture
+            .policy
+            .cancel_semantic_effect(fifth_permit, AgentEffectCancellation::Cancelled)
+            .expect("cancel fifth permit");
+        assert!(!fixture.policy.is_sealed());
+    }
+
+    #[test]
+    fn durable_effects_serialize_by_canonical_origin_without_blocking_local_work() {
+        let source = origin("serialized-effect");
+        let (mut registry, context) = make_context_registry(217, 218, 219);
+        registry
+            .acknowledge_observation(context.identity().id(), context)
+            .expect("observation current");
+        let automation = registry
+            .automation_state(context.identity().id())
+            .expect("automation state");
+        let binding = account(context, NOW - 1);
+        let observation = multi_actionable_observation(context, source.clone(), 1, 3);
+        let mut fixture = policy_fixture(
+            217,
+            218,
+            source.clone(),
+            SemanticSensitivity::Public,
+            &[
+                SemanticEffectClass::Read,
+                SemanticEffectClass::LocalWrite,
+                SemanticEffectClass::ExternalWrite,
+            ],
+            run_budget(20, 1_000, 10_000),
+        );
+        commit_observation_to_model(&mut fixture.policy, fixture.lease, 1, binding, &observation);
+
+        let durable = prepared_click(&observation, 2, SemanticEffectClass::ExternalWrite);
+        let durable_assessment = AgentEffectAssessment::new(
+            &durable,
+            source.clone(),
+            SemanticEffectClass::ExternalWrite,
+        );
+        let durable_permit = match fixture
+            .policy
+            .authorize_semantic_effect(
+                effect_request(1, fixture.lease, binding, automation),
+                &durable,
+                &durable_assessment,
+            )
+            .expect("first durable write")
+        {
+            AgentEffectAuthorization::Permit(permit) => permit,
+            AgentEffectAuthorization::NeedsHuman(_) => panic!("same-origin write was in scope"),
+        };
+
+        let local = prepared_click(&observation, 3, SemanticEffectClass::LocalWrite);
+        let local_assessment =
+            AgentEffectAssessment::new(&local, source.clone(), SemanticEffectClass::LocalWrite);
+        let local_permit = match fixture
+            .policy
+            .authorize_semantic_effect(
+                effect_request(2, fixture.lease, binding, automation),
+                &local,
+                &local_assessment,
+            )
+            .expect("local work remains independent")
+        {
+            AgentEffectAuthorization::Permit(permit) => permit,
+            AgentEffectAuthorization::NeedsHuman(_) => panic!("local write was in scope"),
+        };
+
+        let conflicting = prepared_click(&observation, 4, SemanticEffectClass::ExternalWrite);
+        let conflicting_assessment = AgentEffectAssessment::new(
+            &conflicting,
+            source.clone(),
+            SemanticEffectClass::ExternalWrite,
+        );
+        assert_eq!(
+            fixture
+                .policy
+                .authorize_semantic_effect(
+                    effect_request(3, fixture.lease, binding, automation),
+                    &conflicting,
+                    &conflicting_assessment,
+                )
+                .expect_err("same-origin durable write must serialize"),
+            AgentPolicyError::OriginWritePending
+        );
+        assert_eq!(fixture.policy.pending_effects(), 2);
+        assert_eq!(fixture.policy.pending_origin_writes(), 1);
+        assert_eq!(fixture.policy.accounting().reserved_operations(), 2);
+        fixture
+            .policy
+            .cancel_semantic_effect(durable_permit, AgentEffectCancellation::Cancelled)
+            .expect("release origin write");
+        let conflicting_permit = match fixture
+            .policy
+            .authorize_semantic_effect(
+                effect_request(4, fixture.lease, binding, automation),
+                &conflicting,
+                &conflicting_assessment,
+            )
+            .expect("origin released")
+        {
+            AgentEffectAuthorization::Permit(permit) => permit,
+            AgentEffectAuthorization::NeedsHuman(_) => panic!("same-origin write was in scope"),
+        };
+        fixture
+            .policy
+            .cancel_semantic_effect(local_permit, AgentEffectCancellation::Cancelled)
+            .expect("cancel local work");
+        fixture
+            .policy
+            .cancel_semantic_effect(conflicting_permit, AgentEffectCancellation::Cancelled)
+            .expect("cancel replacement write");
+        assert_eq!(fixture.policy.pending_effects(), 0);
+        let debug = format!("{:?}", fixture.policy);
+        assert!(!debug.contains("serialized-effect"));
+        assert!(!debug.contains("Action 2"));
+    }
+
+    #[test]
+    fn approved_durable_writes_to_distinct_origins_can_progress_concurrently() {
+        let origin_a = origin("parallel-origin-a");
+        let origin_b = origin("parallel-origin-b");
+        let (mut registry_a, context_a) = make_context_registry(227, 228, 229);
+        let (mut registry_b, context_b) = make_context_registry(227, 228, 230);
+        registry_a
+            .acknowledge_observation(context_a.identity().id(), context_a)
+            .expect("observation a current");
+        registry_b
+            .acknowledge_observation(context_b.identity().id(), context_b)
+            .expect("observation b current");
+        let automation_a = registry_a
+            .automation_state(context_a.identity().id())
+            .expect("automation a");
+        let automation_b = registry_b
+            .automation_state(context_b.identity().id())
+            .expect("automation b");
+        let binding_a = account(context_a, NOW - 2);
+        let binding_b = account(context_b, NOW - 1);
+        let observation_a = actionable_observation(context_a, origin_a.clone(), 1);
+        let observation_b = actionable_observation(context_b, origin_b.clone(), 2);
+        let flow_effects = effects(&[SemanticEffectClass::ExternalWrite]);
+        let flows = vec![
+            AgentDataFlowRule::try_new(
+                origin_a.clone(),
+                AgentAccountScope::Anonymous,
+                origin_b.clone(),
+                AgentAccountScope::Anonymous,
+                SemanticSensitivity::Public,
+                flow_effects,
+            )
+            .expect("a to b flow"),
+            AgentDataFlowRule::try_new(
+                origin_b.clone(),
+                AgentAccountScope::Anonymous,
+                origin_a.clone(),
+                AgentAccountScope::Anonymous,
+                SemanticSensitivity::Public,
+                flow_effects,
+            )
+            .expect("b to a flow"),
+        ];
+        let mut fixture = policy_fixture_with_flows(
+            227,
+            228,
+            vec![origin_a.clone(), origin_b.clone()],
+            flows,
+            &[
+                SemanticEffectClass::Read,
+                SemanticEffectClass::ExternalWrite,
+            ],
+            run_budget(20, 1_000, 10_000),
+        );
+        commit_observation_to_model(
+            &mut fixture.policy,
+            fixture.lease,
+            1,
+            binding_a,
+            &observation_a,
+        );
+        commit_observation_to_model(
+            &mut fixture.policy,
+            fixture.lease,
+            2,
+            binding_b,
+            &observation_b,
+        );
+
+        let action_a = prepared_click(&observation_a, 2, SemanticEffectClass::ExternalWrite);
+        let assessment_a = AgentEffectAssessment::new(
+            &action_a,
+            origin_a.clone(),
+            SemanticEffectClass::ExternalWrite,
+        );
+        let permit_a = match fixture
+            .policy
+            .authorize_semantic_effect(
+                effect_request(1, fixture.lease, binding_a, automation_a),
+                &action_a,
+                &assessment_a,
+            )
+            .expect("origin a write")
+        {
+            AgentEffectAuthorization::Permit(permit) => permit,
+            AgentEffectAuthorization::NeedsHuman(_) => panic!("approved a write needed human"),
+        };
+        let action_b = prepared_click(&observation_b, 2, SemanticEffectClass::ExternalWrite);
+        let assessment_b = AgentEffectAssessment::new(
+            &action_b,
+            origin_b.clone(),
+            SemanticEffectClass::ExternalWrite,
+        );
+        let permit_b = match fixture
+            .policy
+            .authorize_semantic_effect(
+                effect_request(2, fixture.lease, binding_b, automation_b),
+                &action_b,
+                &assessment_b,
+            )
+            .expect("origin b write")
+        {
+            AgentEffectAuthorization::Permit(permit) => permit,
+            AgentEffectAuthorization::NeedsHuman(_) => panic!("approved b write needed human"),
+        };
+        assert_eq!(fixture.policy.pending_effects(), 2);
+        assert_eq!(fixture.policy.pending_origin_writes(), 2);
+        assert_eq!(fixture.policy.accounting().reserved_operations(), 2);
+        let active_b = fixture
+            .policy
+            .dispatch_semantic_effect(
+                permit_b,
+                &action_b,
+                effect_dispatch_request(1, binding_b, automation_b),
+            )
+            .expect("dispatch b out of authorization order");
+        let active_a = fixture
+            .policy
+            .dispatch_semantic_effect(
+                permit_a,
+                &action_a,
+                effect_dispatch_request(2, binding_a, automation_a),
+            )
+            .expect("dispatch a");
+        let receipt_a = fixture
+            .policy
+            .settle_failed_semantic_effect(active_a, SemanticActionFailure::BackendRefused)
+            .expect("settle a first");
+        let receipt_b = fixture
+            .policy
+            .settle_failed_semantic_effect(active_b, SemanticActionFailure::BackendRefused)
+            .expect("settle b second");
+        assert_eq!(receipt_a.id().get(), 1);
+        assert_eq!(receipt_b.id().get(), 2);
+        assert_eq!(fixture.policy.pending_effects(), 0);
+        assert_eq!(fixture.policy.accounting().reserved_operations(), 0);
+        assert_eq!(fixture.policy.accounting().consumed_operations(), 4);
+        assert!(!fixture.policy.is_sealed());
+        let debug = format!("{:?}", fixture.policy);
+        assert!(!debug.contains("parallel-origin-a"));
+        assert!(!debug.contains("parallel-origin-b"));
     }
 
     #[test]

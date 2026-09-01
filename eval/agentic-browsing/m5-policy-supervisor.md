@@ -1,12 +1,12 @@
 # M5 policy and supervisor
 
 Status: the immutable approved run-manifest contract, mutable plan-lease/model
-input accounting, single-flight semantic effect policy, and immutable
+input accounting, bounded per-origin semantic effect policy, and immutable
 non-widening delegation topology are implemented. The first mutable bounded
 run-tree scheduler and its exact cancellation/drain tree are also implemented;
 manifest-bound context assignment is implemented over the existing bounded
-context registry. Per-origin write scheduling, semantic progress, provider
-adapters, audit sink, and live qualification remain pending.
+context registry. Semantic progress, provider adapters, audit sink, and live
+qualification remain pending.
 
 This evidence describes policy input facts only. A manifest cannot authorize a
 browser action, model call, tool call, data transfer, cost, or native resource.
@@ -126,11 +126,19 @@ browser action, model call, tool call, data transfer, cost, or native resource.
   control, and unproven cross-origin writes produce content-free,
   non-authorizing `NeedsHuman` transitions. They reserve no operation and
   cannot be converted into a permit by the model.
-- One non-cloneable permit freezes additional model input, binds the complete
+- Each non-cloneable permit freezes additional model input, binds the complete
   immutable manifest revision and committed taint ledger, and reserves exactly
-  one run/node operation. At most one effect is authorized or dispatched per
-  run policy. Pre-dispatch refusal releases the reservation, while dispatched
-  success or typed failure consumes it exactly once.
+  one run/node operation. Up to four distinct prepared/dispatched effects may
+  coexist, matching the executing-agent ceiling; the exact same prepared
+  action guard cannot be authorized twice.
+- Durable `ExternalWrite`, `Communication`, `Purchase`, and `Destructive`
+  effects hold one serialization slot for their canonical independently
+  assessed destination origin from authorization through terminal settlement.
+  A second durable write to that origin is refused without eviction. Reads,
+  local writes, and approved durable writes to different canonical origins may
+  progress independently. Every pending effect remains fully included in
+  run/node operation accounting. Pre-dispatch refusal releases only its exact
+  reservation, while dispatched success or typed failure consumes it once.
 - Dispatch requires a second actor-owned account/lifecycle sample immediately
   before the native boundary. Changed context, cancellation, freshness,
   control, expiry, or account authority consumes the one-shot attempt identity
@@ -254,7 +262,7 @@ secret/read/same-endpoint/out-of-scope/widening/duplicate flow refusal, and
 plan-node identity/scope/budget/expiry inheritance. Ten additional policy tests
 execute real semantic observation/read encode, exact token admission, mutable
 reservation, committed delivery receipt, taint, cancellation, and provider
-settlement paths. Seven further policy tests execute real action bind/prepare,
+settlement paths. Ten further policy tests execute real action bind/prepare,
 registry freshness acknowledgement, exact observation/read delivery,
 source-to-sink decisions, permit reservation, final dispatch revalidation,
 independent semantic verification, cancellation, failure, and accounting.
@@ -262,7 +270,9 @@ Together they cover nonadjacent duplicate leases, four-call, 128-cohort, and
 4,096-reference limits; aggregate and effect operation budgets; replay; empty
 reads; stale/future account authority; wrong run/profile/account/origin/effect/
 sensitivity; guessed read references; absent/exact flow rules; pending model
-calls; capability `NeedsHuman`; stale dispatch state; action substitution;
+calls; four-effect and per-origin-write ceilings; duplicate action guards;
+distinct-origin concurrency and out-of-order settlement; capability
+`NeedsHuman`; stale dispatch state; action substitution;
 payload/receipt substitution; provider failure/overage; and redacted
 diagnostics. They allocate no native or provider resource and perform no I/O.
 Three delegation-topology tests additionally cover canonical order, exact

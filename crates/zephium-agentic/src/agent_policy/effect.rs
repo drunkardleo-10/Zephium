@@ -17,8 +17,8 @@ use crate::{
     SemanticEffectProofKind, SemanticPreparedAction, SemanticVerifiedAction,
 };
 
-/// One run may hold only one semantic effect reservation at a time.
-pub const MAX_AGENT_PENDING_EFFECTS: usize = 1;
+/// Maximum prepared or dispatched semantic effects in one run policy.
+pub const MAX_AGENT_PENDING_EFFECTS: usize = 4;
 
 /// Monotonic shell-minted identity for one exact effect-authorization attempt.
 #[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -491,6 +491,7 @@ pub(super) struct AgentEffectRow {
     lease: AgentPlanLeaseId,
     node: AgentPlanNodeId,
     effect: SemanticEffectClass,
+    destination_origin: SemanticOrigin,
     account: AgentContextAccountBinding,
     action_guard: [u8; 32],
     guard: [u8; 32],
@@ -500,6 +501,14 @@ pub(super) struct AgentEffectRow {
 impl AgentEffectRow {
     pub(super) const fn lease(&self) -> AgentPlanLeaseId {
         self.lease
+    }
+
+    fn serializes_origin(&self, origin: &SemanticOrigin) -> bool {
+        requires_origin_serialization(self.effect) && self.destination_origin == *origin
+    }
+
+    pub(super) const fn requires_origin_serialization(&self) -> bool {
+        requires_origin_serialization(self.effect)
     }
 
     fn matches_permit(&self, permit: &AgentEffectPermit) -> bool {
@@ -533,8 +542,8 @@ impl AgentRunPolicy {
         if self.sealed {
             return Err(AgentPolicyError::Sealed);
         }
-        if self.effect.is_some() {
-            return Err(AgentPolicyError::EffectPending);
+        if self.effects.len() >= MAX_AGENT_PENDING_EFFECTS {
+            return Err(AgentPolicyError::PendingEffectLimit);
         }
         if !self.calls.is_empty() {
             return Err(AgentPolicyError::ModelCallPending);
@@ -621,6 +630,21 @@ impl AgentRunPolicy {
         if let Some(reason) = data_flow_decision(&self.manifest, node, &self.taints, destination)? {
             return Ok(self.needs_human(node_id, context, effect, reason));
         }
+        if self
+            .effects
+            .iter()
+            .any(|row| row.action_guard == action.verification_guard())
+        {
+            return Err(AgentPolicyError::EffectActionPending);
+        }
+        if requires_origin_serialization(effect)
+            && self
+                .effects
+                .iter()
+                .any(|row| row.serializes_origin(assessment.destination_origin()))
+        {
+            return Err(AgentPolicyError::OriginWritePending);
+        }
 
         ensure_budget(self.manifest.budget(), self.accounting(), 0, 0)?;
         let lease_accounting = self
@@ -636,11 +660,12 @@ impl AgentRunPolicy {
             assessment,
             &self.taints,
         );
-        self.effect = Some(AgentEffectRow {
+        self.effects.push(AgentEffectRow {
             id: request.id(),
             lease: request.lease(),
             node: node_id,
             effect,
+            destination_origin: assessment.destination_origin().clone(),
             account: request.account(),
             action_guard: action.verification_guard(),
             guard,
@@ -662,15 +687,16 @@ impl AgentRunPolicy {
         permit: AgentEffectPermit,
         _cancellation: AgentEffectCancellation,
     ) -> Result<(), AgentPolicyError> {
-        let Some(row) = self.effect.as_ref() else {
+        let Some(index) = self.effect_index(permit.id()) else {
             self.sealed = true;
             return Err(AgentPolicyError::EffectMissing);
         };
+        let row = &self.effects[index];
         if row.state != AgentEffectRowState::Authorized || !row.matches_permit(&permit) {
             self.sealed = true;
             return Err(AgentPolicyError::EffectSettlementMismatch);
         }
-        self.effect = None;
+        self.effects.remove(index);
         Ok(())
     }
 
@@ -685,10 +711,11 @@ impl AgentRunPolicy {
         action: &SemanticPreparedAction,
         request: AgentEffectDispatchRequest,
     ) -> Result<AgentActiveEffect, AgentPolicyError> {
-        let Some(row) = self.effect.as_ref() else {
+        let Some(index) = self.effect_index(permit.id()) else {
             self.sealed = true;
             return Err(AgentPolicyError::EffectMissing);
         };
+        let row = &self.effects[index];
         if row.state != AgentEffectRowState::Authorized
             || !row.matches_permit(&permit)
             || permit.action_guard != action.verification_guard()
@@ -707,20 +734,22 @@ impl AgentRunPolicy {
         // lifecycle sample refuses dispatch. Reusing correlation identity
         // after an interrupted handoff would make later audit ambiguous.
         self.last_action_attempt = Some(request.attempt());
+        let node_id = row.node;
+        let expected_account = row.account;
         let node = self
             .manifest
-            .plan_node(row.node)
+            .plan_node(node_id)
             .ok_or(AgentPolicyError::Invariant)?;
         let context = action.frame().context();
-        if request.account() != row.account
+        if request.account() != expected_account
             || request.account().context() != context
             || request.automation().context() != context
         {
-            self.effect = None;
+            self.effects.remove(index);
             return Err(AgentPolicyError::Authority);
         }
         if !request.automation().can_automate() {
-            self.effect = None;
+            self.effects.remove(index);
             return Err(AgentPolicyError::ContextNotAutomatable);
         }
         if let Err(error) = validate_time(
@@ -729,11 +758,10 @@ impl AgentRunPolicy {
             request.account(),
             request.now(),
         ) {
-            self.effect = None;
+            self.effects.remove(index);
             return Err(error);
         }
-        let row = self.effect.as_mut().ok_or(AgentPolicyError::Invariant)?;
-        row.state = AgentEffectRowState::Dispatched(request.attempt());
+        self.effects[index].state = AgentEffectRowState::Dispatched(request.attempt());
         Ok(AgentActiveEffect {
             id: permit.id,
             lease: permit.lease,
@@ -776,10 +804,11 @@ impl AgentRunPolicy {
         active: AgentActiveEffect,
         settlement: AgentEffectSettlement,
     ) -> Result<AgentEffectReceipt, AgentPolicyError> {
-        let Some(row) = self.effect.as_ref() else {
+        let Some(effect_index) = self.effect_index(active.id()) else {
             self.sealed = true;
             return Err(AgentPolicyError::EffectMissing);
         };
+        let row = &self.effects[effect_index];
         if !row.matches_active(&active) {
             self.sealed = true;
             return Err(AgentPolicyError::EffectSettlementMismatch);
@@ -809,7 +838,7 @@ impl AgentRunPolicy {
         };
         self.consumed = run_consumed;
         self.leases[lease_index].consumed = lease_consumed;
-        let row = self.effect.take().ok_or(AgentPolicyError::Invariant)?;
+        let row = self.effects.remove(effect_index);
         Ok(AgentEffectReceipt {
             id: row.id,
             lease: row.lease,
@@ -835,6 +864,10 @@ impl AgentRunPolicy {
             reason,
         })
     }
+
+    fn effect_index(&self, id: AgentEffectId) -> Option<usize> {
+        self.effects.iter().position(|row| row.id == id)
+    }
 }
 
 fn model_received_action(taints: &[AgentTaintCohort], action: &SemanticPreparedAction) -> bool {
@@ -849,6 +882,16 @@ fn model_received_action(taints: &[AgentTaintCohort], action: &SemanticPreparedA
                 .option_reference()
                 .is_none_or(|reference| taint.contains_reference(reference))
     })
+}
+
+const fn requires_origin_serialization(effect: SemanticEffectClass) -> bool {
+    matches!(
+        effect,
+        SemanticEffectClass::ExternalWrite
+            | SemanticEffectClass::Communication
+            | SemanticEffectClass::Purchase
+            | SemanticEffectClass::Destructive
+    )
 }
 
 #[derive(Clone, Copy)]
