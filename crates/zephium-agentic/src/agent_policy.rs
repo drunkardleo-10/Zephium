@@ -619,6 +619,35 @@ struct TerminalModelUsage {
     cost_micro_usd: u64,
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub(crate) struct AgentModelReceiptTestUsage {
+    accounting: AgentModelUsageAccounting,
+    pricing_attribution: Option<AgentProviderPricingAttribution>,
+    input_tokens: u64,
+    output_tokens: u64,
+    cost_micro_usd: u64,
+}
+
+#[cfg(test)]
+impl AgentModelReceiptTestUsage {
+    pub(crate) const fn new(
+        accounting: AgentModelUsageAccounting,
+        pricing_attribution: Option<AgentProviderPricingAttribution>,
+        input_tokens: u64,
+        output_tokens: u64,
+        cost_micro_usd: u64,
+    ) -> Self {
+        Self {
+            accounting,
+            pricing_attribution,
+            input_tokens,
+            output_tokens,
+            cost_micro_usd,
+        }
+    }
+}
+
 /// Content-free terminal model-call accounting receipt.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub struct AgentModelCallReceipt {
@@ -715,6 +744,30 @@ impl AgentModelCallReceipt {
             input_tokens: 0,
             output_tokens: 0,
             cost_micro_usd: 0,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn for_metrics_test(
+        manifest: &AgentRunManifest,
+        id: AgentModelCallId,
+        lease: AgentPlanLeaseId,
+        node: AgentPlanNodeId,
+        settlement: AgentModelCallSettlement,
+        usage: AgentModelReceiptTestUsage,
+    ) -> Self {
+        Self {
+            manifest: manifest.id(),
+            manifest_guard: manifest.guard(),
+            id,
+            lease,
+            node,
+            settlement,
+            usage_accounting: usage.accounting,
+            pricing_attribution: usage.pricing_attribution,
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cost_micro_usd: usage.cost_micro_usd,
         }
     }
 }

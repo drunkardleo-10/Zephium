@@ -16,6 +16,7 @@ compile_error!("the agentic probe harness is forbidden in optimized builds");
 
 mod agent_audit;
 mod agent_manifest;
+mod agent_metrics;
 mod agent_policy;
 mod agent_provider;
 mod agent_supervisor;
@@ -69,6 +70,11 @@ pub use agent_manifest::{
     MAX_AGENT_PLAN_NODES, MAX_AGENT_RUN_ACCOUNTS, MAX_AGENT_RUN_CONTEXTS,
     MAX_AGENT_RUN_COST_MICRO_USD, MAX_AGENT_RUN_LIFETIME_MILLIS, MAX_AGENT_RUN_MODEL_TOKENS,
     MAX_AGENT_RUN_OPERATIONS, MAX_AGENT_RUN_ORIGINS, MAX_AGENT_RUN_PROFILES,
+};
+pub use agent_metrics::{
+    AgentEffectAccountingMetrics, AgentEffectClassMetrics, AgentMetricError,
+    AgentModelAccountingMetrics, AgentNodeAccountingMetrics, AgentPricingScheduleMetrics,
+    AgentRunAccountingMetrics, AgentRunAccountingSnapshot, MAX_AGENT_METRIC_PRICING_SCHEDULES,
 };
 pub use agent_policy::{
     AgentActiveEffect, AgentActiveModelCall, AgentEffectAssessment, AgentEffectAuthorization,

@@ -33,6 +33,10 @@ closed allocation/data dependency inventory. Its non-diagnostic source is
 rejected if it acquires thread, process, file, socket, async-runtime, or HTTP
 client authority. This is a structural zero-idle-authority proof: it does not
 replace the pending named-device CPU, memory, wakeup, or energy measurement.
+The gate also pins the receipt-derived accounting reducer to exact manifest
+revision checks, replay-safe out-of-order identities, run/node budgets, and an
+eight-schedule attribution ceiling, while forbidding it from acquiring a
+telemetry or persistence port.
 
 Run the gate and its focused tests with:
 
@@ -63,6 +67,14 @@ cargo clippy --locked -p xtask --all-targets -- -D warnings
   public manifest identity. The audit ledger independently rejoins that private
   revision on every current-progress snapshot, and the release boundary
   mechanically pins all six progress joins plus the audit admission.
+- An optional run-local accounting reducer now aggregates exact model/effect
+  receipts by usage-accounting, settlement, effect, proof, failure, opaque plan
+  node, and bounded pricing-schedule digest. It independently enforces run/node
+  budgets, accepts valid out-of-order concurrent settlement, and rejects
+  replay or same-ID/different-revision substitution without partial mutation.
+  It is an inert functional core with no application telemetry or persistence
+  seam. It does not claim site, latency, native-resource, or machine-resource
+  values.
 
 The authoritative aggregate records and exact remaining blockers are in
 `native-input-matrix-v1.json` and `browse-baseline-v1.json`.

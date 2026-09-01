@@ -578,6 +578,17 @@ both the public manifest identity and that guard match the supervisor
 topology; reusing an identity for different scope, budget, or lifetime facts
 cannot contaminate the progress projection or its downstream semantic audit.
 
+Run accounting is an explicitly constructed, run-local functional reducer,
+not application telemetry. It accepts only exact policy-derived model/effect
+receipts for the queued supervisor's canonical manifest revision, rejects
+replay while allowing concurrent out-of-order settlement, and independently
+rechecks run and node operation/token/cost budgets. It exposes content-free
+totals by opaque plan responsibility, closed effect/proof/failure class, usage
+accounting class, and at most eight exact pricing-schedule digests. It retains
+no site, origin, model/tokenizer label, rate table, prompt, response, page data,
+credential, or timing source and owns no port, persistence, thread, task, or
+clock. If the reducer is not constructed, it has zero runtime state or work.
+
 ## 12. Probe and test harness
 
 Before Work UI integration, create a non-shipping native probe using the same
@@ -694,6 +705,12 @@ Record at action and run granularity:
 - live/hot/suspended contexts and native processes;
 - CPU time, peak/incremental RSS, GPU/compositor measures available from the
   platform, wakeups, energy impact, disk, and network bytes.
+
+The run-local receipt reducer supplies only the exact accounting subset it can
+prove from policy receipts. Site/platform/backend labels, latency distributions,
+semantic encoding sizes, native/process counts, and machine resource measures
+remain explicit qualification-harness inputs; absence is never represented as
+zero.
 
 Initial qualification gates are:
 

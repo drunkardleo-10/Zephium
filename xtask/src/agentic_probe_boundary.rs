@@ -16,6 +16,7 @@ const AGENTIC_PROVIDER_PRICING: &str = "crates/zephium-agentic/src/agent_provide
 const AGENTIC_POLICY: &str = "crates/zephium-agentic/src/agent_policy.rs";
 const AGENTIC_EFFECT_POLICY: &str = "crates/zephium-agentic/src/agent_policy/effect.rs";
 const AGENTIC_AUDIT: &str = "crates/zephium-agentic/src/agent_audit.rs";
+const AGENTIC_METRICS: &str = "crates/zephium-agentic/src/agent_metrics.rs";
 const AGENTIC_SUPERVISOR: &str = "crates/zephium-agentic/src/agent_supervisor.rs";
 const AGENTIC_SUPERVISOR_PROGRESS: &str =
     "crates/zephium-agentic/src/agent_supervisor/runtime/progress.rs";
@@ -54,6 +55,10 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     crate::agentic_evidence::check(repository)?;
     validate_manifest(&read(repository.join(AGENTIC_MANIFEST))?)?;
     validate_root(&read(repository.join(AGENTIC_ROOT))?)?;
+    validate_agent_metrics_contract(
+        &read(repository.join(AGENTIC_ROOT))?,
+        &read(repository.join(AGENTIC_METRICS))?,
+    )?;
     validate_provider_billing_contract(
         &read(repository.join(AGENTIC_PROVIDER_ROOT))?,
         &read(repository.join(AGENTIC_PROVIDER_REQUEST))?,
@@ -322,6 +327,55 @@ fn validate_root(source: &str) -> Result<(), String> {
         if !source.contains(&required_gate) {
             return Err(format!(
                 "agentic diagnostic module {module} must remain behind probe-harness"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_agent_metrics_contract(root: &str, metrics: &str) -> Result<(), String> {
+    let root = compact(root);
+    for required in [
+        "modagent_metrics;",
+        "AgentRunAccountingMetrics",
+        "MAX_AGENT_METRIC_PRICING_SCHEDULES",
+    ] {
+        if !root.contains(required) {
+            return Err(format!(
+                "agent accounting metrics lost its default-core export {required}"
+            ));
+        }
+    }
+
+    let metrics = compact(metrics);
+    for required in [
+        "pubconstMAX_AGENT_METRIC_PRICING_SCHEDULES:usize=8;",
+        "pubstructAgentRunAccountingMetrics",
+        "pubfntry_new(manifest:&AgentRunManifest,supervisor:&AgentRunSupervisor",
+        "pubfnrecord_model_receipt(",
+        "pubfnrecord_effect_receipt(",
+        "receipt.matches_manifest_revision(self.manifest,self.manifest_guard)",
+        ".binary_search(&receipt.id())",
+        ".binary_search(&receipt.attempt())",
+        "self.validate_run_totals(next_operations,next_model)?",
+        "ifnext_operations>self.operation_limit",
+        "AgentMetricError::PricingScheduleLimit",
+    ] {
+        if !metrics.contains(required) {
+            return Err(format!(
+                "agent accounting metrics lost required bounded boundary {required}"
+            ));
+        }
+    }
+    for forbidden in [
+        "traitAgentMetricPort",
+        "implAgentAuditPort",
+        "SerializeforAgentRunAccountingMetrics",
+        "DeserializeforAgentRunAccountingMetrics",
+    ] {
+        if metrics.contains(forbidden) {
+            return Err(format!(
+                "run-local accounting metrics acquired forbidden telemetry/persistence seam {forbidden}"
             ));
         }
     }
@@ -1122,6 +1176,48 @@ mod tests {
             supervisor,
             &progress,
             "",
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn run_accounting_metrics_remain_bounded_local_and_receipt_derived() {
+        let root = r#"
+            mod agent_metrics;
+            pub use agent_metrics::{
+                AgentRunAccountingMetrics,
+                MAX_AGENT_METRIC_PRICING_SCHEDULES,
+            };
+        "#;
+        let metrics = r#"
+            pub const MAX_AGENT_METRIC_PRICING_SCHEDULES: usize = 8;
+            pub struct AgentRunAccountingMetrics;
+            pub fn try_new(
+                manifest: &AgentRunManifest,
+                supervisor: &AgentRunSupervisor,
+            ) {}
+            pub fn record_model_receipt(receipt: Receipt) {
+                receipt.matches_manifest_revision(self.manifest, self.manifest_guard);
+                values.binary_search(&receipt.id());
+                self.validate_run_totals(next_operations, next_model)?;
+                AgentMetricError::PricingScheduleLimit;
+            }
+            pub fn record_effect_receipt(receipt: Receipt) {
+                receipt.matches_manifest_revision(self.manifest, self.manifest_guard);
+                values.binary_search(&receipt.id());
+                values.binary_search(&receipt.attempt());
+                if next_operations > self.operation_limit {}
+            }
+        "#;
+        validate_agent_metrics_contract(root, metrics).expect("bounded local metrics");
+        assert!(validate_agent_metrics_contract(
+            root,
+            &metrics.replace(".binary_search(&receipt.id())", ".push(receipt.id())"),
+        )
+        .is_err());
+        assert!(validate_agent_metrics_contract(
+            root,
+            &format!("{metrics}\ntrait AgentMetricPort {{}}"),
         )
         .is_err());
     }
