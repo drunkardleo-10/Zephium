@@ -620,6 +620,38 @@ impl ContextStatus {
     }
 }
 
+/// Exact current context authority joined atomically to its automation status.
+///
+/// This is a privacy-preserving registry projection, not an action permit.
+/// Keeping the join and status together prevents a status sampled from one
+/// document or cancellation generation from authorizing another.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ContextAutomationState {
+    context: ContextJoin,
+    status: ContextStatus,
+}
+
+impl ContextAutomationState {
+    pub(crate) const fn new(context: ContextJoin, status: ContextStatus) -> Self {
+        Self { context, status }
+    }
+
+    /// Exact current context/document/cancellation authority.
+    pub const fn context(self) -> ContextJoin {
+        self.context
+    }
+
+    /// Atomically sampled lifecycle/control/freshness projection.
+    pub const fn status(self) -> ContextStatus {
+        self.status
+    }
+
+    /// Whether this exact sampled authority may attempt agent input.
+    pub const fn can_automate(self) -> bool {
+        self.status.can_automate()
+    }
+}
+
 /// Closed native settlement without page or platform error text.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ContextSettlement {

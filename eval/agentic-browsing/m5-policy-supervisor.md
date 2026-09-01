@@ -1,9 +1,9 @@
 # M5 policy and supervisor
 
-Status: the immutable approved run-manifest contract and the first mutable
-plan-lease/model-input policy layer are implemented. Effect permits,
-`NeedsHuman` transitions, the bounded run tree/scheduler/cancellation tree,
-provider adapters, and live qualification remain pending.
+Status: the immutable approved run-manifest contract, mutable plan-lease/model
+input accounting, and single-flight semantic effect policy are implemented.
+The bounded run tree/scheduler/cancellation tree, provider adapters, audit
+sink, and live qualification remain pending.
 
 This evidence describes policy input facts only. A manifest cannot authorize a
 browser action, model call, tool call, data transfer, cost, or native resource.
@@ -79,15 +79,16 @@ browser action, model call, tool call, data transfer, cost, or native resource.
   resupply model-facing bytes, selectors, page JavaScript, DOM, or source facts
   at this boundary, preventing post-transport source substitution.
 - The content-free run-global taint ledger is keyed by exact source
-  context/document/cancellation authority, account, and canonical origin. It
-  retains the oldest trusted account-attestation time plus maximum sensitivity
-  and worst trust for everything committed to the model context. Secret values
-  remain mechanically absent; visible metadata of a redacted secret node is
-  conservatively treated as sensitive.
+  context/document/cancellation authority, observation identity/generation,
+  account, and canonical origin. It retains the oldest trusted
+  account-attestation time plus maximum sensitivity, worst trust, and the
+  canonical union of opaque references actually committed to the model.
+  Secret values remain mechanically absent; visible metadata of a redacted
+  secret node is conservatively treated as sensitive.
 - Taint persists after provider failure or post-delivery cancellation because
   the provider already received the input. Prepared and committed candidate
-  unions are capped at 128 exact cohorts, so concurrent admissions cannot race
-  the persistent ceiling.
+  unions are capped at 128 exact cohorts and 4,096 opaque references, so
+  concurrent admissions cannot race either persistent ceiling.
 - Actual provider usage atomically replaces its reservation in both run and
   lease accounting. A provider-reported overage records actual token/cost
   usage, removes the terminal call, and seals the run; mismatched or missing
@@ -97,6 +98,51 @@ browser action, model call, tool call, data transfer, cost, or native resource.
   taint fact. Public diagnostics expose only redacted opaque identities,
   bounded counts/classes, accounting, and redacted guards.
 
+## Implemented semantic effect boundary
+
+- Effect authorization accepts only one exact prepared semantic action, its
+  independently classified actual effect/canonical destination, a strictly
+  increasing effect identity, exact mutable plan lease, current account
+  attestation, and an atomically sampled lifecycle/context state from the
+  bounded context registry. Construction of an assessment or account binding
+  is not proof; the eventual fixed adapter remains responsible for sourcing
+  those facts independently of model output.
+- Policy requires that the exact action observation generation, frame origin,
+  opaque target reference, and select option reference (when present) were
+  actually committed to the model. A bounded read cannot be used to guess an
+  undisclosed `@aN` reference. No selector, DOM, page JavaScript, raw content,
+  provider response, or generic native bridge crosses this boundary.
+- Every committed taint cohort is checked as a source before a sink can be
+  admitted. Cross-profile context is a hard refusal. Sources outside the exact
+  node scope pause for scope expansion. Cross-origin/account non-read transfer
+  requires the exact manifest flow rule, sensitivity ceiling, and effect.
+  Same-endpoint writes need no synthetic transfer rule. Read effects have no
+  outward sink. Cross-origin writes remain `NeedsHuman` until a fixed adapter
+  can independently attest destination account state.
+- Capability boundaries, scope expansion, absent data-flow approval, human
+  control, and unproven cross-origin writes produce content-free,
+  non-authorizing `NeedsHuman` transitions. They reserve no operation and
+  cannot be converted into a permit by the model.
+- One non-cloneable permit freezes additional model input, binds the complete
+  immutable manifest revision and committed taint ledger, and reserves exactly
+  one run/node operation. At most one effect is authorized or dispatched per
+  run policy. Pre-dispatch refusal releases the reservation, while dispatched
+  success or typed failure consumes it exactly once.
+- Dispatch requires a second actor-owned account/lifecycle sample immediately
+  before the native boundary. Changed context, cancellation, freshness,
+  control, expiry, or account authority consumes the one-shot attempt identity
+  and releases the reservation without minting an active effect. Attempt
+  replay or permit/action substitution seals the policy while retaining
+  ambiguous accounting.
+- Success settlement requires the exact non-cloneable active effect and a real
+  independent `SemanticVerifiedAction` proof for the same prepared action and
+  attempt. Failure settlement uses only the existing closed semantic failure
+  taxonomy. Public diagnostics and receipts remain content-free and redact
+  origins, account state, action guards, and page values.
+- This is an allocation-only functional core with no idle task, timer, queue,
+  worker, provider, page, native view, or native input. The only persistent
+  additions are bounded policy rows and content-free provenance.
+
 ## Current tests
 
 Default crate tests exercise canonical order independence, canonical ULID
@@ -105,8 +151,14 @@ secret/read/same-endpoint/out-of-scope/widening/duplicate flow refusal, and
 plan-node identity/scope/budget/expiry inheritance. Ten additional policy tests
 execute real semantic observation/read encode, exact token admission, mutable
 reservation, committed delivery receipt, taint, cancellation, and provider
-settlement paths. They cover nonadjacent duplicate leases, four-call and
-128-cohort limits, aggregate pending budgets, replay, empty reads, stale/future
-account authority, wrong run/profile/account/origin/effect/sensitivity,
-payload/receipt substitution, provider failure, provider overage, and redacted
+settlement paths. Seven further policy tests execute real action bind/prepare,
+registry freshness acknowledgement, exact observation/read delivery,
+source-to-sink decisions, permit reservation, final dispatch revalidation,
+independent semantic verification, cancellation, failure, and accounting.
+Together they cover nonadjacent duplicate leases, four-call, 128-cohort, and
+4,096-reference limits; aggregate and effect operation budgets; replay; empty
+reads; stale/future account authority; wrong run/profile/account/origin/effect/
+sensitivity; guessed read references; absent/exact flow rules; pending model
+calls; capability `NeedsHuman`; stale dispatch state; action substitution;
+payload/receipt substitution; provider failure/overage; and redacted
 diagnostics. They allocate no native or provider resource and perform no I/O.

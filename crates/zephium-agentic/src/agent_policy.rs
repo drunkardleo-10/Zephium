@@ -2,10 +2,10 @@
 //!
 //! This functional core reserves one model call before transport, records
 //! source taint only after exact committed observation/read delivery, and
-//! settles provider usage without retries. It owns no transport, provider,
-//! timer, task, thread, page, or browser. Effect permits are deliberately a
-//! later layer that consumes this state; the state itself cannot execute an
-//! action.
+//! settles provider usage without retries. Its child effect policy reserves
+//! one operation only after exact source-to-sink checks and still cannot
+//! execute an action. The core owns no transport, provider, timer, task,
+//! thread, page, or browser.
 
 use std::fmt;
 use std::num::NonZeroU64;
@@ -14,19 +14,31 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use zephium_core::ids::ProfileId;
 
+mod effect;
+use effect::AgentEffectRow;
+pub use effect::{
+    AgentActiveEffect, AgentEffectAssessment, AgentEffectAuthorization, AgentEffectCancellation,
+    AgentEffectDispatchRequest, AgentEffectId, AgentEffectPermit, AgentEffectReceipt,
+    AgentEffectRequest, AgentEffectSettlement, AgentNeedsHumanReason, AgentNeedsHumanTransition,
+    MAX_AGENT_PENDING_EFFECTS,
+};
+
 use crate::semantic_diff::SemanticObservationFingerprint;
 use crate::{
     AgentAccountScope, AgentContextAccountBinding, AgentPlanLeaseId, AgentPlanNodeId,
-    AgentPolicyInstant, AgentRunBudget, AgentRunManifest, ContextJoin, SemanticEffectClass,
-    SemanticModelPayload, SemanticObservation, SemanticObservationAcknowledgement, SemanticOrigin,
-    SemanticReadDeliveryReceipt, SemanticReadModelPayload, SemanticReadResult, SemanticSensitivity,
-    SemanticTrust,
+    AgentPolicyInstant, AgentRunBudget, AgentRunManifest, ContextJoin, SemanticActionAttemptId,
+    SemanticEffectClass, SemanticModelPayload, SemanticObservation,
+    SemanticObservationAcknowledgement, SemanticObservationGeneration, SemanticObservationId,
+    SemanticOrigin, SemanticReadDeliveryReceipt, SemanticReadModelPayload, SemanticReadResult,
+    SemanticReferenceId, SemanticSensitivity, SemanticTrust,
 };
 
 /// Maximum model calls reserved or active in one run policy.
 pub const MAX_AGENT_PENDING_MODEL_CALLS: usize = 4;
 /// Maximum distinct profile/account/origin taint cohorts retained per run.
 pub const MAX_AGENT_TAINT_COHORTS: usize = 128;
+/// Maximum opaque actionable references retained across committed model input.
+pub const MAX_AGENT_TAINT_REFERENCES: usize = 4_096;
 /// Maximum age of an account attestation at model-input admission (30 seconds).
 pub const MAX_AGENT_ACCOUNT_ATTESTATION_AGE_MILLIS: u64 = 30_000;
 
@@ -208,17 +220,30 @@ impl fmt::Debug for AgentModelCallRequest {
 #[derive(Clone, Eq, PartialEq)]
 pub struct AgentTaintCohort {
     context: ContextJoin,
+    observation: SemanticObservationId,
+    observation_generation: SemanticObservationGeneration,
     account: AgentAccountScope,
     origin: SemanticOrigin,
     sensitivity: SemanticSensitivity,
     trust: SemanticTrust,
     attested_at: AgentPolicyInstant,
+    references: Vec<SemanticReferenceId>,
 }
 
 impl AgentTaintCohort {
     /// Exact source context/document/cancellation authority delivered to the model.
     pub const fn context(&self) -> ContextJoin {
         self.context
+    }
+
+    /// Exact observation request delivered for this source cohort.
+    pub const fn observation(&self) -> SemanticObservationId {
+        self.observation
+    }
+
+    /// Exact progressive observation generation delivered for this cohort.
+    pub const fn observation_generation(&self) -> SemanticObservationGeneration {
+        self.observation_generation
     }
 
     /// Exact browser profile from source context authority.
@@ -251,8 +276,19 @@ impl AgentTaintCohort {
         self.attested_at
     }
 
+    /// Number of opaque action references actually disclosed for this cohort.
+    pub fn reference_count(&self) -> usize {
+        self.references.len()
+    }
+
+    pub(crate) fn contains_reference(&self, reference: SemanticReferenceId) -> bool {
+        self.references.binary_search(&reference).is_ok()
+    }
+
     fn same_source(&self, other: &Self) -> bool {
         self.context == other.context
+            && self.observation == other.observation
+            && self.observation_generation == other.observation_generation
             && self.account == other.account
             && self.origin == other.origin
     }
@@ -264,6 +300,7 @@ impl AgentTaintCohort {
             self.trust = SemanticTrust::UntrustedPage;
         }
         self.attested_at = self.attested_at.min(other.attested_at);
+        self.references = merge_references(&self.references, &other.references);
     }
 }
 
@@ -277,6 +314,7 @@ impl fmt::Debug for AgentTaintCohort {
             .field("sensitivity", &self.sensitivity)
             .field("trust", &self.trust)
             .field("attested_at", &self.attested_at)
+            .field("references", &self.references.len())
             .finish()
     }
 }
@@ -531,7 +569,10 @@ pub struct AgentRunPolicy {
     consumed: ConsumedUsage,
     taints: Vec<AgentTaintCohort>,
     calls: Vec<ModelCallRow>,
+    effect: Option<AgentEffectRow>,
     last_call: Option<AgentModelCallId>,
+    last_effect: Option<AgentEffectId>,
+    last_action_attempt: Option<SemanticActionAttemptId>,
     sealed: bool,
 }
 
@@ -576,7 +617,10 @@ impl AgentRunPolicy {
             consumed: ConsumedUsage::default(),
             taints: Vec::new(),
             calls: Vec::with_capacity(MAX_AGENT_PENDING_MODEL_CALLS),
+            effect: None,
             last_call: None,
+            last_effect: None,
+            last_action_attempt: None,
             sealed: false,
         })
     }
@@ -596,6 +640,11 @@ impl AgentRunPolicy {
         self.calls.len()
     }
 
+    /// Whether one semantic effect is reserved or dispatched.
+    pub fn pending_effects(&self) -> usize {
+        usize::from(self.effect.is_some())
+    }
+
     /// Whether a mismatched/ambiguous settlement terminally sealed this policy.
     pub const fn is_sealed(&self) -> bool {
         self.sealed
@@ -603,7 +652,7 @@ impl AgentRunPolicy {
 
     /// Consumed and reserved run-wide accounting.
     pub fn accounting(&self) -> AgentPolicyAccounting {
-        accounting(self.consumed, self.calls.iter())
+        accounting(self.consumed, self.calls.iter(), self.effect.as_ref())
     }
 
     /// Consumed and reserved accounting for one exact plan lease.
@@ -615,6 +664,9 @@ impl AgentRunPolicy {
         Some(accounting(
             state.consumed,
             self.calls.iter().filter(|call| call.lease == lease),
+            self.effect
+                .as_ref()
+                .filter(|effect| effect.lease() == lease),
         ))
     }
 
@@ -791,6 +843,9 @@ impl AgentRunPolicy {
         if self.sealed {
             return Err(AgentPolicyError::Sealed);
         }
+        if self.effect.is_some() {
+            return Err(AgentPolicyError::EffectPending);
+        }
         if self.calls.len() >= MAX_AGENT_PENDING_MODEL_CALLS {
             return Err(AgentPolicyError::PendingCallLimit);
         }
@@ -829,8 +884,13 @@ impl AgentRunPolicy {
             reserved_tokens,
             budget.cost_micro_usd(),
         )?;
-        if projected_taint_count(&self.taints, &self.calls, &candidates) > MAX_AGENT_TAINT_COHORTS {
+        let (projected_cohorts, projected_references) =
+            projected_taint_usage(&self.taints, &self.calls, &candidates)?;
+        if projected_cohorts > MAX_AGENT_TAINT_COHORTS {
             return Err(AgentPolicyError::TaintLimit);
+        }
+        if projected_references > MAX_AGENT_TAINT_REFERENCES {
+            return Err(AgentPolicyError::TaintReferenceLimit);
         }
 
         let admission_guard = admission_guard(AdmissionGuardFacts {
@@ -923,6 +983,7 @@ impl fmt::Debug for AgentRunPolicy {
             .field("accounting", &self.accounting())
             .field("taints", &self.taints.len())
             .field("pending_model_calls", &self.calls.len())
+            .field("pending_effects", &self.pending_effects())
             .field("sealed", &self.sealed)
             .field("content", &"[redacted]")
             .finish()
@@ -947,6 +1008,36 @@ pub enum AgentPolicyError {
     /// Pending model-call ceiling was reached.
     #[error("agent policy pending model-call ceiling reached")]
     PendingCallLimit,
+    /// One semantic effect holds the run's single execution reservation.
+    #[error("agent policy semantic effect is pending")]
+    EffectPending,
+    /// Model input is still reserved or active while an effect seeks authority.
+    #[error("agent policy model call is pending at the effect boundary")]
+    ModelCallPending,
+    /// Effect identity was reused or regressed.
+    #[error("agent policy semantic effect identity replay")]
+    EffectReplay,
+    /// Exact effect reservation was absent.
+    #[error("agent policy semantic effect reservation is missing")]
+    EffectMissing,
+    /// Independent effect assessment or prepared action did not exactly join.
+    #[error("agent policy semantic effect assessment mismatch")]
+    EffectMismatch,
+    /// Native action-attempt identity was reused or regressed.
+    #[error("agent policy semantic action attempt replay")]
+    EffectAttemptReplay,
+    /// Current lifecycle/control/freshness state cannot automate.
+    #[error("agent policy context is not currently automatable")]
+    ContextNotAutomatable,
+    /// Prepared action target was not present in committed model input.
+    #[error("agent policy action source was not delivered to the model")]
+    ModelSourceMissing,
+    /// Model context contains data from another browser profile.
+    #[error("agent policy cross-profile model context is forbidden")]
+    CrossProfileData,
+    /// Effect permit, dispatch, or terminal proof did not exactly join.
+    #[error("agent policy semantic effect settlement mismatch")]
+    EffectSettlementMismatch,
     /// Model call was not pending in this exact policy.
     #[error("agent policy model call is missing")]
     CallMissing,
@@ -977,6 +1068,9 @@ pub enum AgentPolicyError {
     /// Projected persistent model-context taint exceeded its hard ceiling.
     #[error("agent policy taint cohort ceiling reached")]
     TaintLimit,
+    /// Projected opaque disclosed-reference inventory exceeded its hard ceiling.
+    #[error("agent policy taint reference ceiling reached")]
+    TaintReferenceLimit,
     /// Run or node operation/token/cost budget could not reserve the call.
     #[error("agent policy budget is exhausted")]
     Budget,
@@ -1070,6 +1164,8 @@ fn observation_taints(
     account: AgentContextAccountBinding,
 ) -> Result<Vec<AgentTaintCohort>, AgentPolicyError> {
     let context = observation.request().context();
+    let observation_id = observation.request().id();
+    let observation_generation = observation.request().generation();
     if account.context() != context {
         return Err(AgentPolicyError::Authority);
     }
@@ -1093,11 +1189,16 @@ fn observation_taints(
             &mut cohorts,
             AgentTaintCohort {
                 context,
+                observation: observation_id,
+                observation_generation,
                 account: account.account(),
                 origin: frame.frame().origin().clone(),
                 sensitivity,
                 trust: SemanticTrust::UntrustedPage,
                 attested_at: account.observed_at(),
+                references: canonical_references(
+                    frame.nodes().iter().map(|node| node.reference()).collect(),
+                ),
             },
         );
     }
@@ -1120,11 +1221,14 @@ fn read_taints(
             &mut cohorts,
             AgentTaintCohort {
                 context: provenance.context(),
+                observation: provenance.observation(),
+                observation_generation: provenance.observation_generation(),
                 account: account.account(),
                 origin: provenance.origin().clone(),
                 sensitivity: provenance.sensitivity(),
                 trust: provenance.trust(),
                 attested_at: account.observed_at(),
+                references: vec![provenance.reference()],
             },
         );
     }
@@ -1142,12 +1246,57 @@ fn merge_taint(cohorts: &mut Vec<AgentTaintCohort>, candidate: AgentTaintCohort)
     }
 }
 
-fn projected_taint_count(
+fn merge_references(
+    left: &[SemanticReferenceId],
+    right: &[SemanticReferenceId],
+) -> Vec<SemanticReferenceId> {
+    let mut merged = Vec::with_capacity(left.len().saturating_add(right.len()));
+    let mut left_index = 0;
+    let mut right_index = 0;
+    while left_index < left.len() || right_index < right.len() {
+        let candidate = match (left.get(left_index), right.get(right_index)) {
+            (Some(left_value), Some(right_value)) if left_value < right_value => {
+                left_index += 1;
+                *left_value
+            }
+            (Some(left_value), Some(right_value)) if right_value < left_value => {
+                right_index += 1;
+                *right_value
+            }
+            (Some(left_value), Some(_)) => {
+                left_index += 1;
+                right_index += 1;
+                *left_value
+            }
+            (Some(left_value), None) => {
+                left_index += 1;
+                *left_value
+            }
+            (None, Some(right_value)) => {
+                right_index += 1;
+                *right_value
+            }
+            (None, None) => break,
+        };
+        if merged.last() != Some(&candidate) {
+            merged.push(candidate);
+        }
+    }
+    merged
+}
+
+fn canonical_references(mut references: Vec<SemanticReferenceId>) -> Vec<SemanticReferenceId> {
+    references.sort_unstable();
+    references.dedup();
+    references
+}
+
+fn projected_taint_usage(
     committed: &[AgentTaintCohort],
     calls: &[ModelCallRow],
     candidates: &[AgentTaintCohort],
-) -> usize {
-    let mut distinct: Vec<&AgentTaintCohort> = Vec::with_capacity(
+) -> Result<(usize, usize), AgentPolicyError> {
+    let mut projected = Vec::with_capacity(
         committed.len()
             + candidates.len()
             + calls
@@ -1155,16 +1304,21 @@ fn projected_taint_count(
                 .map(|call| call.candidates.len())
                 .sum::<usize>(),
     );
-    for cohort in committed
+    projected.extend_from_slice(committed);
+    for cohort in calls
         .iter()
-        .chain(calls.iter().flat_map(|call| call.candidates.iter()))
+        .flat_map(|call| call.candidates.iter())
         .chain(candidates)
+        .cloned()
     {
-        if !distinct.iter().any(|existing| existing.same_source(cohort)) {
-            distinct.push(cohort);
-        }
+        merge_taint(&mut projected, cohort);
     }
-    distinct.len()
+    let references = projected.iter().try_fold(0_usize, |total, cohort| {
+        total
+            .checked_add(cohort.references.len())
+            .ok_or(AgentPolicyError::TaintReferenceLimit)
+    })?;
+    Ok((projected.len(), references))
 }
 
 fn ensure_budget(
@@ -1200,6 +1354,7 @@ fn ensure_budget(
 fn accounting<'a>(
     consumed: ConsumedUsage,
     calls: impl Iterator<Item = &'a ModelCallRow>,
+    effect: Option<&AgentEffectRow>,
 ) -> AgentPolicyAccounting {
     let mut value = AgentPolicyAccounting {
         consumed_operations: consumed.operations,
@@ -1218,6 +1373,9 @@ fn accounting<'a>(
         value.reserved_cost_micro_usd = value
             .reserved_cost_micro_usd
             .saturating_add(call.cost_limit);
+    }
+    if effect.is_some() {
+        value.reserved_operations = value.reserved_operations.saturating_add(1);
     }
     value
 }
@@ -1269,6 +1427,8 @@ fn admission_guard(facts: AdmissionGuardFacts<'_>) -> [u8; 32] {
     hasher.update((facts.candidates.len() as u64).to_be_bytes());
     for candidate in facts.candidates {
         hash_context(&mut hasher, candidate.context);
+        hasher.update(candidate.observation.get().to_be_bytes());
+        hasher.update(candidate.observation_generation.get().to_be_bytes());
         hash_account(&mut hasher, candidate.account);
         let origin = candidate.origin.as_url().as_str().as_bytes();
         hasher.update((origin.len() as u64).to_be_bytes());
@@ -1283,6 +1443,10 @@ fn admission_guard(facts: AdmissionGuardFacts<'_>) -> [u8; 32] {
             SemanticTrust::BrowserDerived => 2,
         }]);
         hasher.update(candidate.attested_at.millis().to_be_bytes());
+        hasher.update((candidate.references.len() as u64).to_be_bytes());
+        for reference in &candidate.references {
+            hasher.update(reference.get().to_be_bytes());
+        }
     }
     hasher.finalize().into()
 }
@@ -1319,17 +1483,22 @@ mod tests {
     use super::*;
     use crate::{
         decode_semantic_snapshot, encode_semantic_observation, encode_semantic_read,
-        read_semantic_observation, AgentAccountAttestationId, AgentAccountId, AgentEffectScope,
-        AgentPlanNodeAuthority, AgentPlanNodeScope, AgentRunManifestId, AgentRunScope,
+        read_semantic_observation, verify_semantic_action, AgentAccountAttestationId,
+        AgentAccountId, AgentDataFlowRule, AgentEffectScope, AgentPlanNodeAuthority,
+        AgentPlanNodeScope, AgentRunManifestId, AgentRunScope, ContextAutomationState,
         ContextCapabilities, ContextCapability, ContextId, ContextIdentity, ContextKind,
         ContextOperationId, ContextRegistry, ContextRunId, ContextSettlement, FrameGeneration,
-        FrameId, SemanticCaptureInstant, SemanticDecodeContext, SemanticFrameJoin,
-        SemanticFrameTrust, SemanticInvocationId, SemanticModelDeliverySettlement,
-        SemanticModelEncodingBudget, SemanticObservationAssembler, SemanticObservationBudget,
-        SemanticObservationId, SemanticObservationRequest, SemanticReadAuthority,
-        SemanticReadBudget, SemanticReadSensitivityLimit, SemanticSnapshotGeneration,
-        SemanticTokenCountQuality, SemanticTokenCountRequirement, SemanticTokenCounter,
-        SemanticTokenCounterError, SemanticTokenMeasurement, SemanticTokenizerRevision,
+        FrameId, SemanticActionBatch, SemanticActionBatchId, SemanticActionFailure,
+        SemanticActionIntent, SemanticActionProposal, SemanticCaptureInstant,
+        SemanticDecodeContext, SemanticEffectEvidence, SemanticFrameJoin, SemanticFrameTrust,
+        SemanticInvocationId, SemanticModelDeliverySettlement, SemanticModelEncodingBudget,
+        SemanticObservationAssembler, SemanticObservationBudget, SemanticObservationId,
+        SemanticObservationRequest, SemanticPreparedAction, SemanticReadAuthority,
+        SemanticReadBudget, SemanticReadSensitivityLimit, SemanticSettleBudget,
+        SemanticSettleInstant, SemanticSettleTracker, SemanticSnapshot, SemanticSnapshotGeneration,
+        SemanticState, SemanticTokenCountQuality, SemanticTokenCountRequirement,
+        SemanticTokenCounter, SemanticTokenCounterError, SemanticTokenMeasurement,
+        SemanticTokenizerRevision, SemanticVerification, SemanticWaitCondition,
         SEMANTIC_WIRE_VERSION,
     };
     use serde_json::{json, Value};
@@ -1346,7 +1515,11 @@ mod tests {
         SemanticOrigin::parse(&format!("https://{host}.example.test/private")).expect("origin")
     }
 
-    fn make_context(run: u128, profile_value: u128, context_value: u128) -> ContextJoin {
+    fn make_context_registry(
+        run: u128,
+        profile_value: u128,
+        context_value: u128,
+    ) -> (ContextRegistry, ContextJoin) {
         let identity = ContextIdentity::new(
             ContextId::from_raw(context_value),
             ContextRunId::from_raw(run),
@@ -1369,7 +1542,12 @@ mod tests {
         registry
             .settle_construction(identity.id(), operation, ContextSettlement::Applied)
             .expect("settle");
-        registry.join(identity.id()).expect("join")
+        let context = registry.join(identity.id()).expect("join");
+        (registry, context)
+    }
+
+    fn make_context(run: u128, profile_value: u128, context_value: u128) -> ContextJoin {
+        make_context_registry(run, profile_value, context_value).1
     }
 
     fn observation(
@@ -1458,6 +1636,103 @@ mod tests {
             observation_id,
             vec![json!({"k": 1, "r": "document", "o": 16})],
         )
+    }
+
+    fn actionable_observation(
+        context: ContextJoin,
+        source: SemanticOrigin,
+        observation_id: u64,
+    ) -> SemanticObservation {
+        observation(
+            context,
+            source,
+            observation_id,
+            vec![
+                json!({"k": 1, "r": "document", "o": 16}),
+                json!({"k": 2, "p": 0, "r": "button", "n": "Save draft", "o": 9,
+                       "b": {"x": 10, "y": 10, "w": 100, "h": 30}}),
+            ],
+        )
+    }
+
+    fn read_limited_actionable_observation(
+        context: ContextJoin,
+        source: SemanticOrigin,
+        observation_id: u64,
+    ) -> SemanticObservation {
+        observation(
+            context,
+            source,
+            observation_id,
+            vec![
+                json!({"k": 1, "r": "document", "o": 16}),
+                json!({"k": 2, "p": 0, "r": "paragraph", "t": "first disclosed value"}),
+                json!({"k": 3, "p": 0, "r": "button", "n": "Undisclosed target", "o": 9,
+                       "b": {"x": 10, "y": 10, "w": 100, "h": 30}}),
+            ],
+        )
+    }
+
+    fn prepared_click(
+        observation: &SemanticObservation,
+        target: u16,
+        effect: SemanticEffectClass,
+    ) -> SemanticPreparedAction {
+        let frames = observation
+            .frames()
+            .iter()
+            .map(|snapshot| snapshot.frame().clone())
+            .collect::<Vec<_>>();
+        let proposal = SemanticActionProposal::try_new(
+            SemanticActionIntent::Click {
+                target: SemanticReferenceId::new(target).expect("target"),
+            },
+            effect,
+            SemanticWaitCondition::Immediate,
+            SemanticVerification::TargetState {
+                state: SemanticState::Focused,
+                present: true,
+            },
+            SemanticSettleBudget::try_new(250).expect("settle budget"),
+        )
+        .expect("proposal");
+        let batch = SemanticActionBatch::bind(
+            SemanticActionBatchId::new(1).expect("batch"),
+            observation,
+            &frames,
+            vec![proposal],
+        )
+        .expect("batch");
+        batch.actions()[0]
+            .prepare(&observation.frames()[0])
+            .expect("prepared action")
+    }
+
+    fn post_action_snapshot(observation: &SemanticObservation) -> SemanticSnapshot {
+        let previous = &observation.frames()[0];
+        let generation = previous
+            .generation()
+            .next()
+            .expect("post-action generation");
+        let invocation = SemanticInvocationId::new(previous.invocation().get() + 1)
+            .expect("post-action invocation");
+        let bytes = serde_json::to_vec(&json!({
+            "v": SEMANTIC_WIRE_VERSION,
+            "i": invocation.get(),
+            "g": generation.get(),
+            "c": "complete",
+            "n": [
+                {"k": 1, "r": "document", "o": 16},
+                {"k": 2, "p": 0, "r": "button", "n": "Save draft", "s": 64, "o": 9,
+                 "b": {"x": 10, "y": 10, "w": 100, "h": 30}}
+            ]
+        }))
+        .expect("post-action wire");
+        decode_semantic_snapshot(
+            SemanticDecodeContext::new(invocation, previous.frame().clone(), generation),
+            &bytes,
+        )
+        .expect("post-action snapshot")
     }
 
     struct FixedCounter {
@@ -1592,6 +1867,55 @@ mod tests {
         PolicyFixture { policy, lease }
     }
 
+    fn policy_fixture_with_flows(
+        run: u128,
+        profile_value: u128,
+        origins: Vec<SemanticOrigin>,
+        data_flows: Vec<AgentDataFlowRule>,
+        effect_values: &[SemanticEffectClass],
+        budget: AgentRunBudget,
+    ) -> PolicyFixture {
+        let effect_scope = effects(effect_values);
+        let scope = AgentRunScope::try_new(
+            vec![profile(profile_value)],
+            vec![AgentAccountScope::Anonymous],
+            origins.clone(),
+            SemanticSensitivity::Sensitive,
+            effect_scope,
+            data_flows,
+        )
+        .expect("scope");
+        let authority = AgentPlanNodeAuthority::try_new(
+            vec![profile(profile_value)],
+            vec![AgentAccountScope::Anonymous],
+            origins,
+            SemanticSensitivity::Sensitive,
+            effect_scope,
+        )
+        .expect("authority");
+        let node_id = AgentPlanNodeId::from_raw(1);
+        let manifest = AgentRunManifest::try_new(
+            AgentRunManifestId::from_raw(1),
+            ContextRunId::from_raw(run),
+            scope,
+            budget,
+            AgentPolicyInstant::from_millis(ISSUED_AT),
+            AgentPolicyInstant::from_millis(EXPIRES_AT),
+            vec![AgentPlanNodeScope::new(
+                node_id,
+                authority,
+                budget,
+                AgentPolicyInstant::from_millis(EXPIRES_AT - 1),
+            )],
+        )
+        .expect("manifest");
+        let lease = AgentPlanLeaseId::from_raw(1);
+        let policy =
+            AgentRunPolicy::try_new(manifest, vec![AgentPlanLeaseBinding::new(lease, node_id)])
+                .expect("policy");
+        PolicyFixture { policy, lease }
+    }
+
     fn account(context: ContextJoin, observed_at: u64) -> AgentContextAccountBinding {
         AgentContextAccountBinding::new(
             AgentAccountAttestationId::from_raw(u128::from(observed_at)),
@@ -1617,6 +1941,60 @@ mod tests {
             AgentModelCallBudget::try_new(additional_input_tokens, output_tokens, cost)
                 .expect("call budget"),
             AgentPolicyInstant::from_millis(now),
+        )
+    }
+
+    fn commit_observation_to_model(
+        policy: &mut AgentRunPolicy,
+        lease: AgentPlanLeaseId,
+        call_id: u64,
+        binding: AgentContextAccountBinding,
+        observation: &SemanticObservation,
+    ) {
+        let payload = observation_payload(observation, 10);
+        let admission = policy
+            .prepare_observation_input(
+                call_request(call_id, lease, binding, 0, 0, 0, NOW),
+                observation,
+                &payload,
+            )
+            .expect("model admission");
+        let delivery = payload
+            .settle_delivery(SemanticModelDeliverySettlement::Committed)
+            .expect("model delivery");
+        let active = policy
+            .commit_observation_input(admission, &delivery)
+            .expect("model commit");
+        policy
+            .settle_model_call(active, AgentModelCallSettlement::Completed, 10, 0, 0)
+            .expect("model settlement");
+    }
+
+    fn effect_request(
+        id: u64,
+        lease: AgentPlanLeaseId,
+        binding: AgentContextAccountBinding,
+        automation: ContextAutomationState,
+    ) -> AgentEffectRequest {
+        AgentEffectRequest::new(
+            AgentEffectId::new(id).expect("effect"),
+            lease,
+            binding,
+            automation,
+            AgentPolicyInstant::from_millis(NOW),
+        )
+    }
+
+    fn effect_dispatch_request(
+        attempt: u64,
+        binding: AgentContextAccountBinding,
+        automation: ContextAutomationState,
+    ) -> AgentEffectDispatchRequest {
+        AgentEffectDispatchRequest::new(
+            SemanticActionAttemptId::new(attempt).expect("attempt"),
+            binding,
+            automation,
+            AgentPolicyInstant::from_millis(NOW),
         )
     }
 
@@ -1669,6 +2047,8 @@ mod tests {
         assert_eq!(fixture.policy.taints().len(), 1);
         let taint = &fixture.policy.taints()[0];
         assert_eq!(taint.context(), context);
+        assert_eq!(taint.observation().get(), 1);
+        assert_eq!(taint.observation_generation().get(), 1);
         assert_eq!(taint.profile(), profile(8));
         assert_eq!(taint.account(), AgentAccountScope::Anonymous);
         assert_eq!(taint.sensitivity(), SemanticSensitivity::Sensitive);
@@ -1677,6 +2057,8 @@ mod tests {
             taint.attested_at(),
             AgentPolicyInstant::from_millis(NOW - 1)
         );
+        assert_eq!(taint.reference_count(), 4);
+        assert!(taint.contains_reference(SemanticReferenceId::new(4).expect("reference")));
         let taint_debug = format!("{taint:?}");
 
         let receipt = fixture
@@ -1752,6 +2134,7 @@ mod tests {
             fixture.policy.taints()[0].sensitivity(),
             SemanticSensitivity::Sensitive
         );
+        assert_eq!(fixture.policy.taints()[0].reference_count(), 2);
         fixture
             .policy
             .settle_model_call(active, AgentModelCallSettlement::ProviderFailed, 43, 0, 12)
@@ -2316,59 +2699,687 @@ mod tests {
     }
 
     #[test]
+    fn semantic_effect_permit_is_single_flight_verified_accounted_and_nonreplayable() {
+        let source = origin("effect");
+        let (mut registry, context) = make_context_registry(107, 108, 109);
+        let observation = actionable_observation(context, source.clone(), 1);
+        let unfresh = registry
+            .automation_state(context.identity().id())
+            .expect("unfresh state");
+        registry
+            .acknowledge_observation(context.identity().id(), context)
+            .expect("observation current");
+        let automation = registry
+            .automation_state(context.identity().id())
+            .expect("automation state");
+        let binding = account(context, NOW - 1);
+        let mut fixture = policy_fixture(
+            107,
+            108,
+            source.clone(),
+            SemanticSensitivity::Sensitive,
+            &[SemanticEffectClass::Read, SemanticEffectClass::LocalWrite],
+            run_budget(10, 1_000, 10_000),
+        );
+        commit_observation_to_model(&mut fixture.policy, fixture.lease, 1, binding, &observation);
+        let action = prepared_click(&observation, 2, SemanticEffectClass::LocalWrite);
+        let assessment =
+            AgentEffectAssessment::new(&action, source.clone(), SemanticEffectClass::LocalWrite);
+        let request = effect_request(1, fixture.lease, binding, automation);
+        let permit = match fixture
+            .policy
+            .authorize_semantic_effect(request, &action, &assessment)
+            .expect("effect decision")
+        {
+            AgentEffectAuthorization::Permit(permit) => permit,
+            AgentEffectAuthorization::NeedsHuman(_) => panic!("same-origin effect was in scope"),
+        };
+        assert_eq!(fixture.policy.pending_effects(), MAX_AGENT_PENDING_EFFECTS);
+        assert!(permit.matches_action(&action));
+        assert_eq!(permit.effect(), SemanticEffectClass::LocalWrite);
+        assert_eq!(fixture.policy.accounting().consumed_operations(), 1);
+        assert_eq!(fixture.policy.accounting().reserved_operations(), 1);
+
+        let payload = observation_payload(&observation, 10);
+        assert_eq!(
+            fixture
+                .policy
+                .prepare_observation_input(
+                    call_request(2, fixture.lease, binding, 0, 0, 0, NOW),
+                    &observation,
+                    &payload,
+                )
+                .expect_err("effect freezes model context"),
+            AgentPolicyError::EffectPending
+        );
+
+        let attempt = SemanticActionAttemptId::new(1).expect("attempt");
+        let active = fixture
+            .policy
+            .dispatch_semantic_effect(
+                permit,
+                &action,
+                effect_dispatch_request(1, binding, automation),
+            )
+            .expect("dispatch");
+        let tracker =
+            SemanticSettleTracker::begin(attempt, &action, SemanticSettleInstant::from_millis(NOW))
+                .expect("settle tracker");
+        let snapshot = post_action_snapshot(&observation);
+        let verified = verify_semantic_action(
+            &tracker,
+            &action,
+            SemanticEffectEvidence::snapshot(
+                attempt,
+                SemanticSettleInstant::from_millis(NOW + 1),
+                &snapshot,
+            ),
+        )
+        .expect("independent proof");
+        let receipt = fixture
+            .policy
+            .settle_verified_semantic_effect(active, &action, &verified)
+            .expect("effect settlement");
+        assert_eq!(receipt.id().get(), 1);
+        assert_eq!(receipt.attempt(), attempt);
+        assert_eq!(
+            receipt.settlement(),
+            AgentEffectSettlement::Verified(crate::SemanticEffectProofKind::TargetState)
+        );
+        assert_eq!(fixture.policy.pending_effects(), 0);
+        assert_eq!(fixture.policy.accounting().consumed_operations(), 2);
+        assert_eq!(fixture.policy.accounting().reserved_operations(), 0);
+        assert_eq!(fixture.policy.taints().len(), 1);
+
+        let cancel_request = effect_request(2, fixture.lease, binding, automation);
+        let cancel_permit = match fixture
+            .policy
+            .authorize_semantic_effect(cancel_request, &action, &assessment)
+            .expect("second effect decision")
+        {
+            AgentEffectAuthorization::Permit(permit) => permit,
+            AgentEffectAuthorization::NeedsHuman(_) => panic!("same-origin effect was in scope"),
+        };
+        fixture
+            .policy
+            .cancel_semantic_effect(cancel_permit, AgentEffectCancellation::Cancelled)
+            .expect("cancel permit");
+        assert_eq!(fixture.policy.accounting().consumed_operations(), 2);
+        assert_eq!(fixture.policy.accounting().reserved_operations(), 0);
+        assert_eq!(
+            fixture
+                .policy
+                .authorize_semantic_effect(cancel_request, &action, &assessment)
+                .expect_err("effect id cannot reopen"),
+            AgentPolicyError::EffectReplay
+        );
+
+        let failed_permit = match fixture
+            .policy
+            .authorize_semantic_effect(
+                effect_request(3, fixture.lease, binding, automation),
+                &action,
+                &assessment,
+            )
+            .expect("third effect decision")
+        {
+            AgentEffectAuthorization::Permit(permit) => permit,
+            AgentEffectAuthorization::NeedsHuman(_) => panic!("same-origin effect was in scope"),
+        };
+        let failed_attempt = SemanticActionAttemptId::new(2).expect("attempt");
+        let failed_active = fixture
+            .policy
+            .dispatch_semantic_effect(
+                failed_permit,
+                &action,
+                effect_dispatch_request(2, binding, automation),
+            )
+            .expect("failed dispatch");
+        let failed = fixture
+            .policy
+            .settle_failed_semantic_effect(failed_active, SemanticActionFailure::BackendRefused)
+            .expect("failed settlement");
+        assert_eq!(
+            failed.settlement(),
+            AgentEffectSettlement::Failed(SemanticActionFailure::BackendRefused)
+        );
+        assert_eq!(failed.attempt(), failed_attempt);
+        assert_eq!(fixture.policy.accounting().consumed_operations(), 3);
+        assert!(!fixture.policy.is_sealed());
+
+        let stale_permit = match fixture
+            .policy
+            .authorize_semantic_effect(
+                effect_request(4, fixture.lease, binding, automation),
+                &action,
+                &assessment,
+            )
+            .expect("fourth effect decision")
+        {
+            AgentEffectAuthorization::Permit(permit) => permit,
+            AgentEffectAuthorization::NeedsHuman(_) => panic!("same-origin effect was in scope"),
+        };
+        assert_eq!(
+            fixture
+                .policy
+                .dispatch_semantic_effect(
+                    stale_permit,
+                    &action,
+                    effect_dispatch_request(3, binding, unfresh),
+                )
+                .expect_err("dispatch must resample automation state"),
+            AgentPolicyError::ContextNotAutomatable
+        );
+        assert_eq!(fixture.policy.pending_effects(), 0);
+        assert_eq!(fixture.policy.accounting().consumed_operations(), 3);
+        assert_eq!(fixture.policy.accounting().reserved_operations(), 0);
+        assert!(!fixture.policy.is_sealed());
+        let debug = format!("{:?} {receipt:?} {failed:?}", fixture.policy);
+        assert!(!debug.contains("effect.example.test"));
+        assert!(!debug.contains("Save draft"));
+    }
+
+    #[test]
+    fn bounded_read_cannot_authorize_a_guessed_undisclosed_reference() {
+        let source = origin("read-reference");
+        let (mut registry, context) = make_context_registry(117, 118, 119);
+        let observation = read_limited_actionable_observation(context, source.clone(), 1);
+        registry
+            .acknowledge_observation(context.identity().id(), context)
+            .expect("observation current");
+        let automation = registry
+            .automation_state(context.identity().id())
+            .expect("automation state");
+        let binding = account(context, NOW - 1);
+        let read = read_semantic_observation(
+            &observation,
+            SemanticReadAuthority::Initial,
+            SemanticCaptureInstant::from_millis(NOW - 2),
+            SemanticReadSensitivityLimit::Sensitive,
+            SemanticReadBudget::try_new(1, 1_024).expect("read budget"),
+        )
+        .expect("bounded read");
+        assert_eq!(read.fragments().len(), 1);
+        assert_eq!(read.fragments()[0].provenance().reference().get(), 2);
+        let payload = read_payload(&read, 10);
+        let mut fixture = policy_fixture(
+            117,
+            118,
+            source.clone(),
+            SemanticSensitivity::Sensitive,
+            &[SemanticEffectClass::Read, SemanticEffectClass::LocalWrite],
+            run_budget(10, 1_000, 10_000),
+        );
+        let admission = fixture
+            .policy
+            .prepare_read_input(
+                call_request(1, fixture.lease, binding, 0, 0, 0, NOW),
+                &read,
+                &payload,
+            )
+            .expect("read admission");
+        let delivery = payload
+            .settle_delivery(SemanticModelDeliverySettlement::Committed)
+            .expect("read delivery");
+        let active = fixture
+            .policy
+            .commit_read_input(admission, &delivery)
+            .expect("read commit");
+        fixture
+            .policy
+            .settle_model_call(active, AgentModelCallSettlement::Completed, 10, 0, 0)
+            .expect("model settlement");
+        assert!(!fixture.policy.taints()[0]
+            .contains_reference(SemanticReferenceId::new(3).expect("reference")));
+
+        let action = prepared_click(&observation, 3, SemanticEffectClass::LocalWrite);
+        let assessment =
+            AgentEffectAssessment::new(&action, source, SemanticEffectClass::LocalWrite);
+        assert_eq!(
+            fixture
+                .policy
+                .authorize_semantic_effect(
+                    effect_request(1, fixture.lease, binding, automation),
+                    &action,
+                    &assessment,
+                )
+                .expect_err("undisclosed reference"),
+            AgentPolicyError::ModelSourceMissing
+        );
+        assert_eq!(fixture.policy.pending_effects(), 0);
+        assert_eq!(fixture.policy.accounting().consumed_operations(), 1);
+    }
+
+    #[test]
+    fn source_to_sink_flow_requires_an_exact_global_rule() {
+        let source = origin("flow-source");
+        let destination = origin("flow-destination");
+        let source_context = make_context(127, 128, 129);
+        let source_observation = mixed_observation(source_context, source.clone(), 1);
+        let (mut destination_registry, destination_context) = make_context_registry(127, 128, 130);
+        let destination_observation =
+            actionable_observation(destination_context, destination.clone(), 2);
+        destination_registry
+            .acknowledge_observation(destination_context.identity().id(), destination_context)
+            .expect("destination observed");
+        let automation = destination_registry
+            .automation_state(destination_context.identity().id())
+            .expect("automation state");
+        let source_binding = account(source_context, NOW - 1);
+        let destination_binding = account(destination_context, NOW - 1);
+        let action = prepared_click(&destination_observation, 2, SemanticEffectClass::LocalWrite);
+        let assessment = AgentEffectAssessment::new(
+            &action,
+            destination.clone(),
+            SemanticEffectClass::LocalWrite,
+        );
+
+        let mut denied = policy_fixture_with_flows(
+            127,
+            128,
+            vec![source.clone(), destination.clone()],
+            Vec::new(),
+            &[SemanticEffectClass::Read, SemanticEffectClass::LocalWrite],
+            run_budget(10, 1_000, 10_000),
+        );
+        commit_observation_to_model(
+            &mut denied.policy,
+            denied.lease,
+            1,
+            source_binding,
+            &source_observation,
+        );
+        commit_observation_to_model(
+            &mut denied.policy,
+            denied.lease,
+            2,
+            destination_binding,
+            &destination_observation,
+        );
+        let transition = match denied
+            .policy
+            .authorize_semantic_effect(
+                effect_request(1, denied.lease, destination_binding, automation),
+                &action,
+                &assessment,
+            )
+            .expect("data-flow decision")
+        {
+            AgentEffectAuthorization::NeedsHuman(transition) => transition,
+            AgentEffectAuthorization::Permit(_) => panic!("unapproved flow admitted"),
+        };
+        assert_eq!(transition.reason(), AgentNeedsHumanReason::DataFlowApproval);
+        assert_eq!(denied.policy.pending_effects(), 0);
+        assert_eq!(denied.policy.accounting().reserved_operations(), 0);
+
+        let flow = AgentDataFlowRule::try_new(
+            source.clone(),
+            AgentAccountScope::Anonymous,
+            destination.clone(),
+            AgentAccountScope::Anonymous,
+            SemanticSensitivity::Sensitive,
+            effects(&[SemanticEffectClass::LocalWrite]),
+        )
+        .expect("flow");
+        let mut allowed = policy_fixture_with_flows(
+            127,
+            128,
+            vec![source, destination],
+            vec![flow],
+            &[SemanticEffectClass::Read, SemanticEffectClass::LocalWrite],
+            run_budget(10, 1_000, 10_000),
+        );
+        commit_observation_to_model(
+            &mut allowed.policy,
+            allowed.lease,
+            1,
+            source_binding,
+            &source_observation,
+        );
+        commit_observation_to_model(
+            &mut allowed.policy,
+            allowed.lease,
+            2,
+            destination_binding,
+            &destination_observation,
+        );
+        let permit = match allowed
+            .policy
+            .authorize_semantic_effect(
+                effect_request(1, allowed.lease, destination_binding, automation),
+                &action,
+                &assessment,
+            )
+            .expect("approved data flow")
+        {
+            AgentEffectAuthorization::Permit(permit) => permit,
+            AgentEffectAuthorization::NeedsHuman(_) => panic!("exact flow refused"),
+        };
+        assert_eq!(allowed.policy.accounting().reserved_operations(), 1);
+        allowed
+            .policy
+            .cancel_semantic_effect(permit, AgentEffectCancellation::Refused)
+            .expect("release flow permit");
+    }
+
+    #[test]
+    fn capability_scope_and_unfresh_context_pause_without_execution_authority() {
+        let source = origin("human-boundary");
+        let (mut registry, context) = make_context_registry(137, 138, 139);
+        let observation = actionable_observation(context, source.clone(), 1);
+        let binding = account(context, NOW - 1);
+        let mut fixture = policy_fixture(
+            137,
+            138,
+            source.clone(),
+            SemanticSensitivity::Sensitive,
+            &[
+                SemanticEffectClass::Read,
+                SemanticEffectClass::CapabilityBoundary,
+            ],
+            run_budget(10, 1_000, 10_000),
+        );
+        commit_observation_to_model(&mut fixture.policy, fixture.lease, 1, binding, &observation);
+        let action = prepared_click(&observation, 2, SemanticEffectClass::CapabilityBoundary);
+        let assessment =
+            AgentEffectAssessment::new(&action, source, SemanticEffectClass::CapabilityBoundary);
+        let unfresh = registry
+            .automation_state(context.identity().id())
+            .expect("unfresh state");
+        assert_eq!(
+            fixture
+                .policy
+                .authorize_semantic_effect(
+                    effect_request(1, fixture.lease, binding, unfresh),
+                    &action,
+                    &assessment,
+                )
+                .expect_err("fresh observation required"),
+            AgentPolicyError::ContextNotAutomatable
+        );
+        registry
+            .acknowledge_observation(context.identity().id(), context)
+            .expect("observation current");
+        let automation = registry
+            .automation_state(context.identity().id())
+            .expect("automation state");
+        let transition = match fixture
+            .policy
+            .authorize_semantic_effect(
+                effect_request(2, fixture.lease, binding, automation),
+                &action,
+                &assessment,
+            )
+            .expect("capability decision")
+        {
+            AgentEffectAuthorization::NeedsHuman(transition) => transition,
+            AgentEffectAuthorization::Permit(_) => panic!("capability boundary admitted"),
+        };
+        assert_eq!(
+            transition.reason(),
+            AgentNeedsHumanReason::CapabilityBoundary
+        );
+        assert_eq!(fixture.policy.pending_effects(), 0);
+        assert_eq!(fixture.policy.accounting().consumed_operations(), 1);
+        assert_eq!(fixture.policy.accounting().reserved_operations(), 0);
+    }
+
+    #[test]
+    fn effect_boundary_blocks_pending_model_calls_and_exhausted_operation_budgets() {
+        let source = origin("effect-budget");
+        let (mut registry, context) = make_context_registry(142, 143, 144);
+        let observation = actionable_observation(context, source.clone(), 1);
+        registry
+            .acknowledge_observation(context.identity().id(), context)
+            .expect("observation current");
+        let automation = registry
+            .automation_state(context.identity().id())
+            .expect("automation state");
+        let binding = account(context, NOW - 1);
+        let action = prepared_click(&observation, 2, SemanticEffectClass::LocalWrite);
+        let assessment =
+            AgentEffectAssessment::new(&action, source.clone(), SemanticEffectClass::LocalWrite);
+
+        let mut pending = policy_fixture(
+            142,
+            143,
+            source.clone(),
+            SemanticSensitivity::Sensitive,
+            &[SemanticEffectClass::Read, SemanticEffectClass::LocalWrite],
+            run_budget(10, 1_000, 10_000),
+        );
+        let payload = observation_payload(&observation, 10);
+        let admission = pending
+            .policy
+            .prepare_observation_input(
+                call_request(1, pending.lease, binding, 0, 0, 0, NOW),
+                &observation,
+                &payload,
+            )
+            .expect("pending model call");
+        assert_eq!(
+            pending
+                .policy
+                .authorize_semantic_effect(
+                    effect_request(1, pending.lease, binding, automation),
+                    &action,
+                    &assessment,
+                )
+                .expect_err("model call must settle first"),
+            AgentPolicyError::ModelCallPending
+        );
+        pending
+            .policy
+            .cancel_prepared_input(admission, AgentModelInputCancellation::Cancelled)
+            .expect("cancel model call");
+
+        let mut exhausted = policy_fixture(
+            142,
+            143,
+            source,
+            SemanticSensitivity::Sensitive,
+            &[SemanticEffectClass::Read, SemanticEffectClass::LocalWrite],
+            run_budget(1, 1_000, 10_000),
+        );
+        commit_observation_to_model(
+            &mut exhausted.policy,
+            exhausted.lease,
+            1,
+            binding,
+            &observation,
+        );
+        assert_eq!(
+            exhausted
+                .policy
+                .authorize_semantic_effect(
+                    effect_request(1, exhausted.lease, binding, automation),
+                    &action,
+                    &assessment,
+                )
+                .expect_err("operation budget exhausted"),
+            AgentPolicyError::Budget
+        );
+        assert_eq!(exhausted.policy.pending_effects(), 0);
+        assert_eq!(exhausted.policy.accounting().consumed_operations(), 1);
+        assert_eq!(exhausted.policy.accounting().reserved_operations(), 0);
+    }
+
+    #[test]
+    fn effect_token_or_action_substitution_seals_and_retains_ambiguity() {
+        let source = origin("effect-mismatch");
+        let (mut registry, context) = make_context_registry(145, 146, 147);
+        let observation = actionable_observation(context, source.clone(), 1);
+        registry
+            .acknowledge_observation(context.identity().id(), context)
+            .expect("observation current");
+        let automation = registry
+            .automation_state(context.identity().id())
+            .expect("automation state");
+        let binding = account(context, NOW - 1);
+        let mut fixture = policy_fixture(
+            145,
+            146,
+            source.clone(),
+            SemanticSensitivity::Sensitive,
+            &[SemanticEffectClass::Read, SemanticEffectClass::LocalWrite],
+            run_budget(10, 1_000, 10_000),
+        );
+        commit_observation_to_model(&mut fixture.policy, fixture.lease, 1, binding, &observation);
+        let action = prepared_click(&observation, 2, SemanticEffectClass::LocalWrite);
+        let wrong_action = prepared_click(&observation, 2, SemanticEffectClass::Read);
+        let assessment =
+            AgentEffectAssessment::new(&action, source, SemanticEffectClass::LocalWrite);
+        let permit = match fixture
+            .policy
+            .authorize_semantic_effect(
+                effect_request(1, fixture.lease, binding, automation),
+                &action,
+                &assessment,
+            )
+            .expect("effect decision")
+        {
+            AgentEffectAuthorization::Permit(permit) => permit,
+            AgentEffectAuthorization::NeedsHuman(_) => panic!("same-origin effect was in scope"),
+        };
+        assert_eq!(
+            fixture
+                .policy
+                .dispatch_semantic_effect(
+                    permit,
+                    &wrong_action,
+                    effect_dispatch_request(1, binding, automation),
+                )
+                .expect_err("action substitution"),
+            AgentPolicyError::EffectSettlementMismatch
+        );
+        assert!(fixture.policy.is_sealed());
+        assert_eq!(fixture.policy.pending_effects(), 1);
+        assert_eq!(fixture.policy.accounting().reserved_operations(), 1);
+    }
+
+    #[test]
+    fn taint_reference_inventory_has_a_run_global_hard_ceiling() {
+        let source = origin("reference-limit");
+        let context = make_context(147, 148, 149);
+        let observation = actionable_observation(context, source.clone(), 2);
+        let binding = account(context, NOW - 1);
+        let mut fixture = policy_fixture(
+            147,
+            148,
+            source.clone(),
+            SemanticSensitivity::Sensitive,
+            &[SemanticEffectClass::Read],
+            run_budget(10, 1_000, 10_000),
+        );
+        fixture.policy.taints = (0..8_u128)
+            .map(|index| AgentTaintCohort {
+                context: make_context(147, 148, 1_000 + index),
+                observation: SemanticObservationId::new(1).expect("observation"),
+                observation_generation: SemanticObservationGeneration::INITIAL,
+                account: AgentAccountScope::Anonymous,
+                origin: source.clone(),
+                sensitivity: SemanticSensitivity::Public,
+                trust: SemanticTrust::BrowserDerived,
+                attested_at: AgentPolicyInstant::from_millis(NOW - 1),
+                references: (1..=crate::MAX_SEMANTIC_NODES as u16)
+                    .map(|value| SemanticReferenceId::new(value).expect("reference"))
+                    .collect(),
+            })
+            .collect();
+        assert_eq!(
+            fixture
+                .policy
+                .taints()
+                .iter()
+                .map(AgentTaintCohort::reference_count)
+                .sum::<usize>(),
+            MAX_AGENT_TAINT_REFERENCES
+        );
+        let payload = observation_payload(&observation, 10);
+        assert_eq!(
+            fixture
+                .policy
+                .prepare_observation_input(
+                    call_request(1, fixture.lease, binding, 0, 0, 0, NOW),
+                    &observation,
+                    &payload,
+                )
+                .expect_err("reference ceiling"),
+            AgentPolicyError::TaintReferenceLimit
+        );
+        assert_eq!(fixture.policy.pending_model_calls(), 0);
+    }
+
+    #[test]
     fn taint_union_is_exact_bounded_and_merges_conservatively() {
         let source = origin("taint");
         let mut committed = Vec::new();
         for id in 1..=MAX_AGENT_TAINT_COHORTS as u128 {
             committed.push(AgentTaintCohort {
                 context: make_context(97, 98, id),
+                observation: SemanticObservationId::new(id as u64).expect("observation"),
+                observation_generation: SemanticObservationGeneration::INITIAL,
                 account: AgentAccountScope::Anonymous,
                 origin: source.clone(),
                 sensitivity: SemanticSensitivity::Public,
                 trust: SemanticTrust::BrowserDerived,
                 attested_at: AgentPolicyInstant::from_millis(NOW),
+                references: vec![SemanticReferenceId::new(1).expect("reference")],
             });
         }
         let extra = AgentTaintCohort {
             context: make_context(97, 98, 10_000),
+            observation: SemanticObservationId::new(10_000).expect("observation"),
+            observation_generation: SemanticObservationGeneration::INITIAL,
             account: AgentAccountScope::Anonymous,
             origin: source.clone(),
             sensitivity: SemanticSensitivity::Public,
             trust: SemanticTrust::BrowserDerived,
             attested_at: AgentPolicyInstant::from_millis(NOW),
+            references: vec![SemanticReferenceId::new(1).expect("reference")],
         };
         assert_eq!(
-            projected_taint_count(&committed, &[], std::slice::from_ref(&extra)),
-            MAX_AGENT_TAINT_COHORTS + 1
+            projected_taint_usage(&committed, &[], std::slice::from_ref(&extra)),
+            Ok((MAX_AGENT_TAINT_COHORTS + 1, MAX_AGENT_TAINT_COHORTS + 1))
         );
         assert_eq!(
-            projected_taint_count(&committed, &[], std::slice::from_ref(&committed[0])),
-            MAX_AGENT_TAINT_COHORTS
+            projected_taint_usage(&committed, &[], std::slice::from_ref(&committed[0])),
+            Ok((MAX_AGENT_TAINT_COHORTS, MAX_AGENT_TAINT_COHORTS))
         );
 
         let exact_context = committed[0].context();
         let mut merged = vec![AgentTaintCohort {
             context: exact_context,
+            observation: committed[0].observation(),
+            observation_generation: committed[0].observation_generation(),
             account: AgentAccountScope::Anonymous,
             origin: source.clone(),
             sensitivity: SemanticSensitivity::Public,
             trust: SemanticTrust::BrowserDerived,
             attested_at: AgentPolicyInstant::from_millis(NOW),
+            references: vec![SemanticReferenceId::new(1).expect("reference")],
         }];
         merge_taint(
             &mut merged,
             AgentTaintCohort {
                 context: exact_context,
+                observation: committed[0].observation(),
+                observation_generation: committed[0].observation_generation(),
                 account: AgentAccountScope::Anonymous,
                 origin: source,
                 sensitivity: SemanticSensitivity::Sensitive,
                 trust: SemanticTrust::UntrustedPage,
                 attested_at: AgentPolicyInstant::from_millis(NOW - 1),
+                references: vec![
+                    SemanticReferenceId::new(1).expect("reference"),
+                    SemanticReferenceId::new(2).expect("reference"),
+                ],
             },
         );
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].sensitivity(), SemanticSensitivity::Sensitive);
         assert_eq!(merged[0].trust(), SemanticTrust::UntrustedPage);
+        assert_eq!(merged[0].reference_count(), 2);
         assert_eq!(
             merged[0].attested_at(),
             AgentPolicyInstant::from_millis(NOW - 1)

@@ -12,9 +12,9 @@ use zephium_core::ids::ProfileId;
 
 use crate::context::ContextRecord;
 use crate::{
-    ContextCapabilities, ContextId, ContextIdentity, ContextJoin, ContextKind, ContextLifecycle,
-    ContextOperationId, ContextOperationJoin, ContextRunId, ContextSettlement, ContextStatus,
-    ContextTerminal, ContextTransitionError,
+    ContextAutomationState, ContextCapabilities, ContextId, ContextIdentity, ContextJoin,
+    ContextKind, ContextLifecycle, ContextOperationId, ContextOperationJoin, ContextRunId,
+    ContextSettlement, ContextStatus, ContextTerminal, ContextTransitionError,
 };
 
 /// Initial hard ceiling for logical agent contexts in one process.
@@ -435,6 +435,18 @@ impl ContextRegistry {
     /// Current complete join for one active context.
     pub fn join(&self, context: ContextId) -> Result<ContextJoin, ContextRegistryError> {
         Ok(self.active(context)?.record.join())
+    }
+
+    /// Returns current authority and automation status from one exact active row.
+    pub fn automation_state(
+        &self,
+        context: ContextId,
+    ) -> Result<ContextAutomationState, ContextRegistryError> {
+        let active = self.active(context)?;
+        Ok(ContextAutomationState::new(
+            active.record.join(),
+            active.record.status(),
+        ))
     }
 
     /// Settles exact initial native construction.

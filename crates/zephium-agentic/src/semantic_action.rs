@@ -737,6 +737,16 @@ impl SemanticBoundAction {
         self.intent.target().states
     }
 
+    /// Sensitivity of the exact target at observation binding.
+    pub const fn target_sensitivity(&self) -> SemanticSensitivity {
+        self.intent.target().sensitivity
+    }
+
+    /// Trust of the exact target at observation binding.
+    pub const fn target_trust(&self) -> SemanticTrust {
+        self.intent.target().trust
+    }
+
     /// Geometry presence/value observed for later native revalidation.
     pub const fn target_geometry(&self) -> Option<SemanticRect> {
         self.intent.target().geometry
@@ -967,6 +977,26 @@ impl SemanticPreparedAction {
     /// Closed action class.
     pub const fn kind(&self) -> SemanticActionKind {
         self.action.kind()
+    }
+
+    /// Opaque target reference actually bound into this action.
+    pub const fn target_reference(&self) -> SemanticReferenceId {
+        self.action.target_reference()
+    }
+
+    /// Independently checked effect declaration, still not policy authority.
+    pub const fn effect(&self) -> SemanticEffectClass {
+        self.action.effect()
+    }
+
+    /// Sensitivity of the exact target at observation binding.
+    pub const fn target_sensitivity(&self) -> SemanticSensitivity {
+        self.action.target_sensitivity()
+    }
+
+    /// Trust of the exact target at observation binding.
+    pub const fn target_trust(&self) -> SemanticTrust {
+        self.action.target_trust()
     }
 
     /// Exact action frame at the pre-execution checkpoint.

@@ -57,19 +57,23 @@ pub use agent_manifest::{
     MAX_AGENT_RUN_OPERATIONS, MAX_AGENT_RUN_ORIGINS, MAX_AGENT_RUN_PROFILES,
 };
 pub use agent_policy::{
-    AgentActiveModelCall, AgentModelCallAdmission, AgentModelCallBudget, AgentModelCallId,
-    AgentModelCallReceipt, AgentModelCallRequest, AgentModelCallSettlement,
-    AgentModelInputCancellation, AgentPlanLeaseBinding, AgentPolicyAccounting, AgentPolicyError,
+    AgentActiveEffect, AgentActiveModelCall, AgentEffectAssessment, AgentEffectAuthorization,
+    AgentEffectCancellation, AgentEffectDispatchRequest, AgentEffectId, AgentEffectPermit,
+    AgentEffectReceipt, AgentEffectRequest, AgentEffectSettlement, AgentModelCallAdmission,
+    AgentModelCallBudget, AgentModelCallId, AgentModelCallReceipt, AgentModelCallRequest,
+    AgentModelCallSettlement, AgentModelInputCancellation, AgentNeedsHumanReason,
+    AgentNeedsHumanTransition, AgentPlanLeaseBinding, AgentPolicyAccounting, AgentPolicyError,
     AgentRunPolicy, AgentTaintCohort, MAX_AGENT_ACCOUNT_ATTESTATION_AGE_MILLIS,
-    MAX_AGENT_PENDING_MODEL_CALLS, MAX_AGENT_TAINT_COHORTS,
+    MAX_AGENT_PENDING_EFFECTS, MAX_AGENT_PENDING_MODEL_CALLS, MAX_AGENT_TAINT_COHORTS,
+    MAX_AGENT_TAINT_REFERENCES,
 };
 
 pub use context::{
-    ContextCapabilities, ContextCapability, ContextCapabilityError, ContextControl,
-    ContextFreshness, ContextGeneration, ContextId, ContextIdentity, ContextJoin, ContextKind,
-    ContextLifecycle, ContextOperationId, ContextOperationJoin, ContextOperationKind, ContextRunId,
-    ContextSettlement, ContextStatus, ContextTerminal, ContextTransitionError, ContextVisibility,
-    FrameGeneration, FrameId, NavigationEpoch, RunCancellationGeneration,
+    ContextAutomationState, ContextCapabilities, ContextCapability, ContextCapabilityError,
+    ContextControl, ContextFreshness, ContextGeneration, ContextId, ContextIdentity, ContextJoin,
+    ContextKind, ContextLifecycle, ContextOperationId, ContextOperationJoin, ContextOperationKind,
+    ContextRunId, ContextSettlement, ContextStatus, ContextTerminal, ContextTransitionError,
+    ContextVisibility, FrameGeneration, FrameId, NavigationEpoch, RunCancellationGeneration,
 };
 pub use context_port::{
     AgentBrowserPort, BorrowedTabLeaseId, ContextCancellationRequest,
