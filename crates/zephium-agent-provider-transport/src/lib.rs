@@ -27,10 +27,10 @@ use zephium_agentic::{
     AgentActiveModelCall, AgentCommittedProviderRequest, AgentModelCallReceipt,
     AgentModelCallSettlement, AgentModelCallUnaccountedSettlement, AgentModelUsageAccounting,
     AgentPolicyError, AgentProviderCallConfig, AgentProviderCallIdentity, AgentProviderEndpoint,
-    AgentProviderFailure, AgentProviderFailureClass, AgentProviderKind, AgentProviderPricingError,
-    AgentProviderPricingSchedule, AgentProviderRequestError, AgentProviderRetryAfter,
-    AgentProviderStreamBatch, AgentProviderStreamConclusion, AgentProviderStreamDecoder,
-    AgentProviderTransportInput, AgentProviderUsage, AgentRunPolicy,
+    AgentProviderFailure, AgentProviderFailureClass, AgentProviderInputEvidence, AgentProviderKind,
+    AgentProviderPricingError, AgentProviderPricingSchedule, AgentProviderRequestError,
+    AgentProviderRetryAfter, AgentProviderStreamBatch, AgentProviderStreamConclusion,
+    AgentProviderStreamDecoder, AgentProviderTransportInput, AgentProviderUsage, AgentRunPolicy,
 };
 use zeroize::Zeroizing;
 
@@ -1148,13 +1148,23 @@ impl AgentProviderAttempt {
         self.committed.request().call()
     }
 
+    /// Exact content-free semantic input proof committed at admission.
+    ///
+    /// Clone an observation proof before consuming the attempt when a future
+    /// bounded continuation protocol needs an exact baseline. Losing this
+    /// optional proof grants no authority and requires a fresh snapshot.
+    pub const fn input_evidence(&self) -> &AgentProviderInputEvidence {
+        self.committed.input_evidence()
+    }
+
     /// Cancels after commitment without polling or transmitting the HTTP request.
     ///
     /// Provider usage and cost are provably zero, while semantic disclosure
     /// taint remains committed because admission already crossed that boundary.
     pub fn cancel_without_dispatch(mut self) -> AgentProviderTransportResult {
         let slot = self.slot.take();
-        let (request, active) = self.committed.into_parts();
+        let (request, input) = self.committed.into_parts();
+        let (active, _) = input.into_parts();
         let (_, config, _, _) = request.into_transport_parts();
         finish_attempt(
             active,
@@ -1175,7 +1185,8 @@ impl AgentProviderAttempt {
         F: FnMut(AgentProviderStreamBatch) -> AgentProviderBatchDisposition,
     {
         let slot = self.slot.take();
-        let (request, active) = self.committed.into_parts();
+        let (request, input) = self.committed.into_parts();
+        let (active, _) = input.into_parts();
         let (call, config, endpoint_class, body) = request.into_transport_parts();
         if !call.matches_active(&active)
             || !provider_endpoint_matches(self.provider, endpoint_class)
@@ -2209,6 +2220,17 @@ mod tests {
         let attempt_debug = format!("{attempt:?}");
         assert!(!attempt_debug.contains("synthetic-openai-key"));
         assert!(!attempt_debug.contains("synthetic fixture marker"));
+        let continuation = attempt.input_evidence().clone();
+        let acknowledgement = continuation
+            .observation_acknowledgement()
+            .expect("observation continuation");
+        assert_eq!(acknowledgement.observation().get(), 1);
+        assert_eq!(acknowledgement.generation().get(), 1);
+        assert!(continuation.read_receipt().is_none());
+        let continuation_debug = format!("{continuation:?}");
+        assert!(!continuation_debug.contains("synthetic fixture marker"));
+        assert!(!continuation_debug.contains("fixture.example.test"));
+        assert!(continuation_debug.contains("[redacted]"));
         assert_eq!(transport.snapshot().expect("snapshot").active_attempts(), 1);
 
         let mut text = String::new();
@@ -2236,6 +2258,14 @@ mod tests {
         assert_eq!(text, "hello");
         assert_eq!(completion.stop(), AgentProviderStopReason::Completed);
         assert_eq!(completion.usage().total_tokens(), 20);
+        assert_eq!(
+            continuation
+                .observation_acknowledgement()
+                .expect("retained continuation")
+                .observation()
+                .get(),
+            1
+        );
         assert_eq!(
             result.usage_knowledge(),
             AgentProviderUsageKnowledge::ProviderReported(completion.usage())

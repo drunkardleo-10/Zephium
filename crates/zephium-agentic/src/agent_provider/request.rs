@@ -17,7 +17,8 @@ use crate::semantic_wire::looks_like_secret_value;
 use crate::{
     AgentActiveModelCall, AgentModelCallAdmission, AgentModelCallRequest,
     AgentModelInputCancellation, AgentPolicyError, AgentRunPolicy, SemanticEncodingStats,
-    SemanticModelPayload, SemanticObservation, SemanticReadEncodingStats, SemanticReadModelPayload,
+    SemanticModelPayload, SemanticObservation, SemanticObservationAcknowledgement,
+    SemanticReadDeliveryReceipt, SemanticReadEncodingStats, SemanticReadModelPayload,
     SemanticReadResult, SemanticTokenCountQuality, SemanticTokenCounter, SemanticTokenCounterError,
     SemanticTokenMeasurement, SemanticTokenizerRevision, MAX_SEMANTIC_ACTIONS_PER_BATCH,
     MAX_SEMANTIC_ACTION_SETTLE_MILLIS, MAX_SEMANTIC_ACTION_TEXT_BYTES,
@@ -232,11 +233,92 @@ pub enum AgentProviderRequestSettlement {
     Cancelled,
 }
 
+/// Content-free proof of the exact semantic input committed with a provider call.
+///
+/// An observation can supply the next exact diff baseline. A bounded-read
+/// receipt deliberately cannot. Cloning this proof neither clones
+/// active provider authority nor authorizes model input, policy, or browser work.
+#[derive(Clone, Eq, PartialEq)]
+pub enum AgentProviderInputEvidence {
+    /// One exact full observation committed to disclosure.
+    Observation(SemanticObservationAcknowledgement),
+    /// One exact bounded semantic read committed to disclosure.
+    Read(SemanticReadDeliveryReceipt),
+}
+
+impl AgentProviderInputEvidence {
+    /// Exact current observation proof when this input can seed the next diff.
+    pub const fn observation_acknowledgement(&self) -> Option<&SemanticObservationAcknowledgement> {
+        match self {
+            Self::Observation(acknowledgement) => Some(acknowledgement),
+            Self::Read(_) => None,
+        }
+    }
+
+    /// Exact bounded-read proof when this call sent a read projection.
+    pub const fn read_receipt(&self) -> Option<&SemanticReadDeliveryReceipt> {
+        match self {
+            Self::Read(receipt) => Some(receipt),
+            Self::Observation(_) => None,
+        }
+    }
+}
+
+impl fmt::Debug for AgentProviderInputEvidence {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Observation(acknowledgement) => formatter
+                .debug_tuple("Observation")
+                .field(acknowledgement)
+                .finish(),
+            Self::Read(receipt) => formatter.debug_tuple("Read").field(receipt).finish(),
+        }
+    }
+}
+
+/// Exact committed semantic input joined to move-only provider usage authority.
+#[must_use]
+pub struct AgentCommittedProviderInput {
+    active: AgentActiveModelCall,
+    evidence: AgentProviderInputEvidence,
+}
+
+impl AgentCommittedProviderInput {
+    /// Exact active authority that must receive one terminal usage settlement.
+    pub const fn active(&self) -> &AgentActiveModelCall {
+        &self.active
+    }
+
+    /// Content-free exact input proof retained for continuation or extraction.
+    pub const fn evidence(&self) -> &AgentProviderInputEvidence {
+        &self.evidence
+    }
+
+    /// Separates terminal usage authority from cloneable content-free input proof.
+    pub fn into_parts(self) -> (AgentActiveModelCall, AgentProviderInputEvidence) {
+        (self.active, self.evidence)
+    }
+}
+
+impl fmt::Debug for AgentCommittedProviderInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentCommittedProviderInput")
+            .field("active", &self.active)
+            .field("evidence", &self.evidence)
+            .finish()
+    }
+}
+
 /// One-shot outcome of settling semantic input and its policy reservation.
 #[must_use]
 pub enum AgentProviderInputOutcome {
-    /// Input committed; this exact authority must later settle provider usage.
-    Committed(AgentActiveModelCall),
+    /// Input committed with continuation proof and terminal usage authority.
+    ///
+    /// Only this compatibility settlement path boxes the comparatively large
+    /// authority tuple so refusal/cancellation outcomes remain stack-small.
+    /// The production transport commit path returns the tuple directly.
+    Committed(Box<AgentCommittedProviderInput>),
     /// Input did not commit and its reservation was released.
     Refused,
     /// Cancellation won before commit and released the reservation.
@@ -246,7 +328,9 @@ pub enum AgentProviderInputOutcome {
 impl fmt::Debug for AgentProviderInputOutcome {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Committed(active) => formatter.debug_tuple("Committed").field(active).finish(),
+            Self::Committed(committed) => {
+                formatter.debug_tuple("Committed").field(committed).finish()
+            }
             Self::Refused => formatter.write_str("Refused"),
             Self::Cancelled => formatter.write_str("Cancelled"),
         }
@@ -268,21 +352,29 @@ impl AgentProviderInputCommitment {
     fn commit(
         self,
         policy: &mut AgentRunPolicy,
-    ) -> Result<AgentActiveModelCall, AgentProviderRequestError> {
+    ) -> Result<AgentCommittedProviderInput, AgentProviderRequestError> {
         match self {
             Self::Observation {
                 admission,
                 delivery,
             } => {
                 let acknowledgement = delivery.commit();
-                Ok(policy.commit_observation_input(admission, &acknowledgement)?)
+                let active = policy.commit_observation_input(admission, &acknowledgement)?;
+                Ok(AgentCommittedProviderInput {
+                    active,
+                    evidence: AgentProviderInputEvidence::Observation(acknowledgement),
+                })
             }
             Self::Read {
                 admission,
                 delivery,
             } => {
                 let receipt = delivery.commit();
-                Ok(policy.commit_read_input(admission, &receipt)?)
+                let active = policy.commit_read_input(admission, &receipt)?;
+                Ok(AgentCommittedProviderInput {
+                    active,
+                    evidence: AgentProviderInputEvidence::Read(receipt),
+                })
             }
         }
     }
@@ -304,9 +396,9 @@ impl AgentProviderInputCommitment {
         settlement: AgentProviderRequestSettlement,
     ) -> Result<AgentProviderInputOutcome, AgentProviderRequestError> {
         match settlement {
-            AgentProviderRequestSettlement::Committed => {
-                Ok(AgentProviderInputOutcome::Committed(self.commit(policy)?))
-            }
+            AgentProviderRequestSettlement::Committed => Ok(AgentProviderInputOutcome::Committed(
+                Box::new(self.commit(policy)?),
+            )),
             AgentProviderRequestSettlement::Refused => {
                 self.release(policy, AgentModelInputCancellation::Refused)?;
                 Ok(AgentProviderInputOutcome::Refused)
@@ -346,8 +438,8 @@ impl AgentProviderTransportInput {
             request,
             commitment,
         } = self;
-        let active = commitment.commit(policy)?;
-        Ok(AgentCommittedProviderRequest { request, active })
+        let input = commitment.commit(policy)?;
+        Ok(AgentCommittedProviderRequest { request, input })
     }
 
     /// Releases the reservation after transport refusal before disclosure.
@@ -395,7 +487,7 @@ impl fmt::Debug for AgentProviderTransportInput {
 #[must_use]
 pub struct AgentCommittedProviderRequest {
     request: AgentProviderRequest,
-    active: AgentActiveModelCall,
+    input: AgentCommittedProviderInput,
 }
 
 impl AgentCommittedProviderRequest {
@@ -406,12 +498,17 @@ impl AgentCommittedProviderRequest {
 
     /// Exact active call authority paired with this request.
     pub const fn active(&self) -> &AgentActiveModelCall {
-        &self.active
+        self.input.active()
     }
 
-    /// Moves the exact request and its terminal-settlement authority together.
-    pub fn into_parts(self) -> (AgentProviderRequest, AgentActiveModelCall) {
-        (self.request, self.active)
+    /// Content-free exact semantic input proof retained across admission.
+    pub const fn input_evidence(&self) -> &AgentProviderInputEvidence {
+        self.input.evidence()
+    }
+
+    /// Moves the exact request and committed semantic input together.
+    pub fn into_parts(self) -> (AgentProviderRequest, AgentCommittedProviderInput) {
+        (self.request, self.input)
     }
 }
 
@@ -420,7 +517,7 @@ impl fmt::Debug for AgentCommittedProviderRequest {
         formatter
             .debug_struct("AgentCommittedProviderRequest")
             .field("request", &self.request)
-            .field("active", &self.active)
+            .field("input", &self.input)
             .finish()
     }
 }

@@ -149,8 +149,8 @@ have been instrumented or observed on either platform.
   payload or receipt. Committed delivery acknowledges the exact current
   observation for the next baseline; refusal or cancellation cannot. Digests
   and page content remain private and diagnostics-redacted. This is the
-  production admission seam, not yet an actual provider/tokenizer measurement
-  claim.
+  production admission seam, not yet a provider continuation or actual
+  provider/tokenizer measurement claim.
 - The native-to-isolated-world request is a separate 2 KiB maximum closed JSON
   grammar containing only protocol/invocation/snapshot generations, one fixed
   initial/region/subtree/table/frame/surrounding-text scope, an internal stable
@@ -293,8 +293,9 @@ rather than silently widening the hostile wire schema.
 1. pin the first OpenAI and Anthropic proof model/tokenizer revisions, implement
    their trusted counters, and record actual fixture token/latency measurements;
 2. record actual fixture action-diff token/latency distributions for the pinned
-   proof models/tokenizers and bind acknowledgement settlement to the eventual
-   model request/response lifecycle adapter;
+   proof models/tokenizers and bind exact diffs to a bounded provider
+   continuation/tool-result contract. A stateless standalone diff is forbidden
+   because it omits the model's acknowledged baseline;
 3. install the frozen program and its already-closed invocation vocabulary
    after the native M2 adapter provides exact world, frame, navigation,
    cancellation, and teardown joins;

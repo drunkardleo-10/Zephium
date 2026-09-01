@@ -563,6 +563,21 @@ capacity and global inference. The stream decoder must attest those actual
 classes before provider usage can reach pricing. Policy authority cannot be
 extracted or a completed call settled until the matching trusted pricing
 schedule supplies cost.
+
+The fixed OpenAI and Anthropic builders accept token-admitted full-observation
+or bounded-read types. Committed admission retains a cloneable content-free
+proof beside move-only usage authority: a full observation can seed later diff
+computation, while a read receipt cannot. If the shell loses this optional proof
+it must request a fresh snapshot; it cannot recover by retaining or
+reconstructing semantic strings or request bytes.
+
+A compact diff is never sent as a standalone stateless provider turn because
+the model would not have the acknowledged baseline it modifies. Provider diff
+delivery requires a separate bounded continuation/tool-result contract that
+retains exact prior-turn correlation without logging or persisting provider
+responses. Until that contract is implemented and qualified, the provider
+adapter sends a fresh full observation.
+
 This is intentionally stricter than assuming an errored `send` transmitted no
 bytes.
 

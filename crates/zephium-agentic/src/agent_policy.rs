@@ -2027,23 +2027,24 @@ mod tests {
         verify_semantic_action, AgentAccountAttestationId, AgentAccountId, AgentDataFlowRule,
         AgentEffectScope, AgentPlanNodeAuthority, AgentPlanNodeScope,
         AgentPreparedObservationRequest, AgentPreparedReadRequest, AgentProviderCallConfig,
-        AgentProviderContractError, AgentProviderEndpoint, AgentProviderInputOutcome,
-        AgentProviderKind, AgentProviderModelRevision, AgentProviderObjective,
-        AgentProviderRequestSettlement, AgentProviderStreamBudget, AgentRunManifestId,
-        AgentRunScope, ContextAutomationState, ContextCapabilities, ContextCapability, ContextId,
-        ContextIdentity, ContextKind, ContextOperationId, ContextRegistry, ContextRunId,
-        ContextSettlement, FrameGeneration, FrameId, SemanticActionBatch, SemanticActionBatchId,
-        SemanticActionFailure, SemanticActionIntent, SemanticActionProposal,
-        SemanticCaptureInstant, SemanticDecodeContext, SemanticDiffBudget, SemanticDiffOutcome,
-        SemanticEffectEvidence, SemanticFrameJoin, SemanticFrameTrust, SemanticInvocationId,
-        SemanticModelDeliverySettlement, SemanticModelEncodingBudget, SemanticObservationAssembler,
-        SemanticObservationBudget, SemanticObservationId, SemanticObservationRequest,
-        SemanticPreparedAction, SemanticReadAuthority, SemanticReadBudget,
-        SemanticReadSensitivityLimit, SemanticSettleBudget, SemanticSettleInstant,
-        SemanticSettleTracker, SemanticSnapshot, SemanticSnapshotGeneration, SemanticState,
-        SemanticTokenCountQuality, SemanticTokenCountRequirement, SemanticTokenCounter,
-        SemanticTokenCounterError, SemanticTokenMeasurement, SemanticTokenizerRevision,
-        SemanticVerification, SemanticWaitCondition, SEMANTIC_WIRE_VERSION,
+        AgentProviderContractError, AgentProviderEndpoint, AgentProviderInputEvidence,
+        AgentProviderInputOutcome, AgentProviderKind, AgentProviderModelRevision,
+        AgentProviderObjective, AgentProviderRequestSettlement, AgentProviderStreamBudget,
+        AgentRunManifestId, AgentRunScope, ContextAutomationState, ContextCapabilities,
+        ContextCapability, ContextId, ContextIdentity, ContextKind, ContextOperationId,
+        ContextRegistry, ContextRunId, ContextSettlement, FrameGeneration, FrameId,
+        SemanticActionBatch, SemanticActionBatchId, SemanticActionFailure, SemanticActionIntent,
+        SemanticActionProposal, SemanticCaptureInstant, SemanticDecodeContext, SemanticDiffBudget,
+        SemanticDiffOutcome, SemanticEffectEvidence, SemanticFrameJoin, SemanticFrameTrust,
+        SemanticInvocationId, SemanticModelDeliverySettlement, SemanticModelEncodingBudget,
+        SemanticObservationAssembler, SemanticObservationBudget, SemanticObservationId,
+        SemanticObservationRequest, SemanticPreparedAction, SemanticReadAuthority,
+        SemanticReadBudget, SemanticReadSensitivityLimit, SemanticSettleBudget,
+        SemanticSettleInstant, SemanticSettleTracker, SemanticSnapshot, SemanticSnapshotGeneration,
+        SemanticState, SemanticTokenCountQuality, SemanticTokenCountRequirement,
+        SemanticTokenCounter, SemanticTokenCounterError, SemanticTokenMeasurement,
+        SemanticTokenizerRevision, SemanticVerification, SemanticWaitCondition,
+        SEMANTIC_WIRE_VERSION,
     };
     use serde_json::{json, Value};
 
@@ -3132,7 +3133,17 @@ mod tests {
             .request()
             .call()
             .matches_active(committed.active()));
-        let (request, active) = committed.into_parts();
+        let AgentProviderInputEvidence::Observation(acknowledgement) = committed.input_evidence()
+        else {
+            panic!("observation evidence")
+        };
+        assert!(acknowledgement.matches(&observation));
+        let (request, input) = committed.into_parts();
+        let (active, evidence) = input.into_parts();
+        assert!(matches!(
+            evidence,
+            AgentProviderInputEvidence::Observation(_)
+        ));
         assert_eq!(request.endpoint(), AgentProviderEndpoint::OpenAiResponses);
         assert_eq!(fixture.policy.taints().len(), 1);
         fixture
@@ -3271,7 +3282,7 @@ mod tests {
         )
         .expect("prepared request");
         assert_eq!(prepared.semantic_stats().items(), read.stats().items());
-        let AgentProviderInputOutcome::Committed(active) = prepared
+        let AgentProviderInputOutcome::Committed(committed) = prepared
             .settle(
                 &mut fixture.policy,
                 AgentProviderRequestSettlement::Committed,
@@ -3280,6 +3291,12 @@ mod tests {
         else {
             panic!("committed input");
         };
+        assert!(committed
+            .evidence()
+            .read_receipt()
+            .is_some_and(|receipt| receipt.matches_read(&read)));
+        assert!(committed.evidence().observation_acknowledgement().is_none());
+        let (active, _) = committed.into_parts();
         assert_eq!(fixture.policy.taints().len(), 1);
         assert_eq!(
             fixture.policy.taints()[0].sensitivity(),

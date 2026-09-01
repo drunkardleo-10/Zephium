@@ -84,6 +84,11 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         &read(repository.join(AGENTIC_SEMANTIC_DIFF_MODEL))?,
         &read(repository.join(AGENTIC_POLICY))?,
     )?;
+    validate_provider_input_evidence_contract(
+        &read(repository.join(AGENTIC_ROOT))?,
+        &read(repository.join(AGENTIC_PROVIDER_REQUEST))?,
+        &read(repository.join(PROVIDER_TRANSPORT_ROOT))?,
+    )?;
     validate_progress_manifest_revision_contract(
         &read(repository.join(AGENTIC_POLICY))?,
         &read(repository.join(AGENTIC_EFFECT_POLICY))?,
@@ -748,6 +753,63 @@ fn validate_semantic_diff_policy_contract(
     Ok(())
 }
 
+fn validate_provider_input_evidence_contract(
+    root: &str,
+    request: &str,
+    transport: &str,
+) -> Result<(), String> {
+    let root = compact(root);
+    for required in ["AgentCommittedProviderInput", "AgentProviderInputEvidence"] {
+        if !root.contains(required) {
+            return Err(format!(
+                "agentic root lost provider input continuation export {required}"
+            ));
+        }
+    }
+
+    let request = compact(request);
+    for required in [
+        "pubenumAgentProviderInputEvidence",
+        "Observation(SemanticObservationAcknowledgement)",
+        "Read(SemanticReadDeliveryReceipt)",
+        "pubstructAgentCommittedProviderInput",
+        "evidence:AgentProviderInputEvidence::Observation(acknowledgement)",
+        "evidence:AgentProviderInputEvidence::Read(receipt)",
+        "Committed(Box<AgentCommittedProviderInput>)",
+        "pubconstfninput_evidence(&self)->&AgentProviderInputEvidence",
+    ] {
+        if !request.contains(required) {
+            return Err(format!(
+                "provider request lost exact input continuation seam {required}"
+            ));
+        }
+    }
+    for forbidden in [
+        "AgentPreparedDiffRequest",
+        "AgentProviderInputCommitment::Diff",
+        "ZDIFF1",
+    ] {
+        if request.contains(forbidden) {
+            return Err(format!(
+                "stateless provider request regained contextless diff input {forbidden}"
+            ));
+        }
+    }
+
+    let transport = compact(transport);
+    for required in [
+        "pubconstfninput_evidence(&self)->&AgentProviderInputEvidence",
+        "self.committed.input_evidence()",
+    ] {
+        if !transport.contains(required) {
+            return Err(format!(
+                "provider transport lost content-free input continuation seam {required}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_progress_manifest_revision_contract(
     policy: &str,
     effect_policy: &str,
@@ -1260,6 +1322,47 @@ mod tests {
         )
         .is_err());
         assert!(validate_semantic_diff_policy_contract(root, diff, "", policy).is_err());
+    }
+
+    #[test]
+    fn provider_input_evidence_forbids_contextless_stateless_diffs() {
+        let root = r#"
+            pub use request::{
+                AgentCommittedProviderInput,
+                AgentProviderInputEvidence,
+            };
+        "#;
+        let request = r#"
+            pub enum AgentProviderInputEvidence {
+                Observation(SemanticObservationAcknowledgement),
+                Read(SemanticReadDeliveryReceipt),
+            }
+            pub struct AgentCommittedProviderInput;
+            evidence: AgentProviderInputEvidence::Observation(acknowledgement),
+            evidence: AgentProviderInputEvidence::Read(receipt),
+            Committed(Box<AgentCommittedProviderInput>),
+            pub const fn input_evidence(&self) -> &AgentProviderInputEvidence {}
+        "#;
+        let transport = r#"
+            pub const fn input_evidence(&self) -> &AgentProviderInputEvidence {
+                self.committed.input_evidence()
+            }
+        "#;
+        validate_provider_input_evidence_contract(root, request, transport)
+            .expect("exact provider input evidence");
+        assert!(validate_provider_input_evidence_contract(
+            root,
+            &request.replace("Read(SemanticReadDeliveryReceipt),", ""),
+            transport,
+        )
+        .is_err());
+        assert!(validate_provider_input_evidence_contract(root, request, "").is_err());
+        assert!(validate_provider_input_evidence_contract(
+            root,
+            &format!("{request}\npub struct AgentPreparedDiffRequest;"),
+            transport,
+        )
+        .is_err());
     }
 
     #[test]

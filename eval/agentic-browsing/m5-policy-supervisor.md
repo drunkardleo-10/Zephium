@@ -481,8 +481,21 @@ browser action, model call, tool call, data transfer, cost, or native resource.
   After reservation, construction is infallible and drops the original
   semantic string, retaining only the one body copy, content-free metrics, and
   private delivery authority. A one-shot settlement either commits exact
-  observation/read taint and returns the active usage authority or releases the
-  full reservation on pre-commit refusal/cancellation.
+  observation/read taint and returns active usage authority joined to a
+  cloneable content-free input proof, or releases the full reservation on
+  pre-commit refusal/cancellation. Observation proof exposes the exact current
+  acknowledgement needed to compute a later diff; a read proof cannot become
+  diff authority. The stateless builders mechanically exclude `ZDIFF1`: a
+  standalone diff would omit the acknowledged model context it modifies.
+- This exclusion follows the current primary contracts. OpenAI's
+  [latest-model guidance](https://developers.openai.com/api/docs/guides/latest-model)
+  requires stateless/`store:false` callers to replay the relevant returned
+  output items, including encrypted reasoning items where applicable.
+  Anthropic's
+  [Messages guide](https://platform.claude.com/docs/en/build-with-claude/working-with-messages)
+  states that the API is stateless and requires the full conversational
+  history. The current decoder intentionally retains neither replay form, so
+  adding a diff-only body would be incorrect rather than a token optimization.
 
 ## Implemented fixed HTTPS transport and policy-settlement join
 
@@ -497,6 +510,11 @@ browser action, model call, tool call, data transfer, cost, or native resource.
   At most four admitted attempts exist. A slot is acquired before semantic
   disclosure commits, is released on every terminal path, and seals the shared
   transport if a committed attempt is abandoned.
+- A committed attempt exposes only the content-free observation/read proof
+  retained by request admission. A shell may clone the observation proof before
+  consuming the attempt so a future bounded continuation can compute an exact
+  diff. Losing it cannot widen authority and requires a fresh snapshot; request
+  bytes and semantic strings are never duplicated for continuation.
 - Credentials are provider-bound, copied once into a sensitive header, and
   zeroized on drop. Debug output exposes only provider and byte count. Request
   bodies, authorization values, provider-authored error bodies, response text,
@@ -673,7 +691,7 @@ transactional append, exact idempotent replay across process reopen,
 substituted-delivery refusal without mutation, independent eight-batch actor
 admission, asynchronous settlement, callback-panic containment, and
 retained-ledger reconciliation.
-Forty provider/request-boundary tests cover configuration/usage/retry ceilings,
+Provider/request-boundary tests cover configuration/usage/retry ceilings,
 fragmented CR/LF/CRLF SSE framing, multiline data, comments, invalid UTF-8,
 line/event/event-count/aggregate-wire exhaustion, exact model/response joins,
 text hashing, terminal usage and billing-class attestation, output limits,
@@ -685,7 +703,8 @@ action class, URL/reference/query/schema validation, secret and mixed-effect
 refusal, unknown/generic bridge field refusal, argument depth/size exhaustion,
 unsupported built-in and reasoning output, objective secret/tokenizer/quality
 refusal, recursive strict-schema completeness, atomic preflight/reservation,
-observation/read one-shot commitment for both providers, provider-compatible
+observation/read one-shot commitment for both providers, exact input-proof
+retention through transport admission, contextless-diff exclusion, provider-compatible
 schema projection, fixed body fields, fail-closed ordering, and redacted
 diagnostics. Checked pricing tests additionally cover four disjoint token
 categories, single upward rounding, exact schedule identity, pre-disclosure and
