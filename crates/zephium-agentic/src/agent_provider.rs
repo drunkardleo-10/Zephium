@@ -41,12 +41,12 @@ use crate::{
 
 pub use request::{
     AgentCommittedProviderInput, AgentCommittedProviderRequest, AgentPreparedObservationRequest,
-    AgentPreparedReadRequest, AgentProviderEndpoint, AgentProviderInputEvidence,
-    AgentProviderInputOutcome, AgentProviderObjective, AgentProviderObjectiveError,
-    AgentProviderRequest, AgentProviderRequestError, AgentProviderRequestSettlement,
-    AgentProviderTransportInput, MAX_AGENT_BROWSER_NAVIGATION_URL_BYTES,
-    MAX_AGENT_PROVIDER_OBJECTIVE_BYTES, MAX_AGENT_PROVIDER_OBJECTIVE_TOKENS,
-    MAX_AGENT_PROVIDER_REQUEST_BYTES,
+    AgentPreparedReadRequest, AgentProviderDiffRequestDraft, AgentProviderEndpoint,
+    AgentProviderInputEvidence, AgentProviderInputOutcome, AgentProviderObjective,
+    AgentProviderObjectiveError, AgentProviderRequest, AgentProviderRequestError,
+    AgentProviderRequestSettlement, AgentProviderTransportInput,
+    MAX_AGENT_BROWSER_NAVIGATION_URL_BYTES, MAX_AGENT_PROVIDER_OBJECTIVE_BYTES,
+    MAX_AGENT_PROVIDER_OBJECTIVE_TOKENS, MAX_AGENT_PROVIDER_REQUEST_BYTES,
 };
 pub use tool::{
     AgentBrowserActProposal, AgentBrowserHumanReason, AgentBrowserScopeProposal,

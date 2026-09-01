@@ -55,7 +55,7 @@ pub(super) struct AgentProviderTranscript {
     retained_bytes: usize,
 }
 
-struct AgentProviderTranscriptTurn {
+pub(super) struct AgentProviderTranscriptTurn {
     correlation: AgentProviderToolCallCorrelation,
     tool_result: String,
 }
@@ -113,6 +113,28 @@ impl AgentProviderTranscript {
 
     pub(super) const fn retained_bytes(&self) -> usize {
         self.retained_bytes
+    }
+
+    pub(super) fn objective(&self) -> &str {
+        &self.objective
+    }
+
+    pub(super) fn initial_observation(&self) -> &str {
+        &self.initial_observation
+    }
+
+    pub(super) fn turns(&self) -> &[AgentProviderTranscriptTurn] {
+        &self.turns
+    }
+}
+
+impl AgentProviderTranscriptTurn {
+    pub(super) const fn correlation(&self) -> &AgentProviderToolCallCorrelation {
+        &self.correlation
+    }
+
+    pub(super) fn tool_result(&self) -> &str {
+        &self.tool_result
     }
 }
 
@@ -386,6 +408,14 @@ impl AgentProviderBoundDiffContinuation {
         self.config.provider()
     }
 
+    pub(super) const fn config(&self) -> &AgentProviderCallConfig {
+        &self.config
+    }
+
+    pub(super) const fn transcript(&self) -> &AgentProviderTranscript {
+        &self.transcript
+    }
+
     /// Exact current observation represented by the bound diff.
     pub const fn current_observation(&self) -> SemanticObservationId {
         self.current_observation
@@ -416,6 +446,24 @@ impl AgentProviderBoundDiffContinuation {
             .turns
             .last()
             .expect("bound diff continuation always appends one transcript turn")
+    }
+
+    pub(super) fn into_request_parts(
+        self,
+    ) -> (
+        AgentProviderCallIdentity,
+        AgentProviderCallConfig,
+        AgentProviderTranscript,
+        SemanticDiffEncodingStats,
+        SemanticDiffDeliveryAuthority,
+    ) {
+        (
+            self.next_call,
+            self.config,
+            self.transcript,
+            self.semantic_stats,
+            self.delivery,
+        )
     }
 }
 
@@ -731,14 +779,32 @@ mod tests {
             baseline: baseline.clone(),
             transcript: transcript(),
         };
+        let arguments =
+            r#"{"semantic_query":"Save \"quoted\" \\ control","scope":{"kind":"initial"}}"#;
+        let correlation = super::super::AgentBrowserToolCall::decode_openai(
+            prior,
+            "fc_continuation_private_1".to_owned(),
+            "call_continuation_private_1".to_owned(),
+            "locate",
+            arguments.to_owned(),
+        )
+        .expect("tool")
+        .into_continuation_parts()
+        .0;
         let continuation = seed
-            .join_terminal_tool(completion(prior, 2), openai_correlation("{}"))
+            .join_terminal_tool(
+                completion(
+                    prior,
+                    u32::try_from(arguments.len()).expect("argument bytes"),
+                ),
+                correlation,
+            )
             .expect("terminal join");
         assert_eq!(continuation.provider(), AgentProviderKind::OpenAiResponses);
-        assert_eq!(continuation.tool_kind(), AgentBrowserToolKind::Back);
-        assert_eq!(continuation.argument_bytes(), 2);
+        assert_eq!(continuation.tool_kind(), AgentBrowserToolKind::Locate);
+        assert_eq!(continuation.argument_bytes(), arguments.len());
         let debug = format!("{continuation:?}");
-        assert!(!debug.contains("call_continuation_1"));
+        assert!(!debug.contains("call_continuation_private_1"));
         assert!(!debug.contains("private old state"));
 
         let transcript_bytes = continuation.retained_transcript_bytes();
@@ -753,6 +819,63 @@ mod tests {
         assert_eq!(bound.semantic_stats().bytes() as usize, diff_bytes);
         assert!(bound.retained_transcript_bytes() > transcript_bytes + diff_bytes);
         assert!(!format!("{bound:?}").contains("private new state"));
+
+        let draft = super::super::request::AgentProviderDiffRequestDraft::try_new(bound)
+            .expect("fixed OpenAI draft");
+        assert_eq!(
+            draft.request().endpoint(),
+            super::super::request::AgentProviderEndpoint::OpenAiResponses
+        );
+        assert_eq!(draft.request().call(), call(2));
+        assert!(draft.request().byte_len() < super::super::MAX_AGENT_PROVIDER_REQUEST_BYTES);
+        assert!(draft.continuation_transcript_bytes() > transcript_bytes + diff_bytes);
+        assert_eq!(draft.semantic_stats().bytes() as usize, diff_bytes);
+        let wire: serde_json::Value =
+            serde_json::from_slice(draft.request().body()).expect("OpenAI draft JSON");
+        assert_eq!(wire["store"], false);
+        assert_eq!(wire["stream"], true);
+        assert_eq!(wire["parallel_tool_calls"], false);
+        assert_eq!(wire["truncation"], "disabled");
+        assert_eq!(wire["service_tier"], "default");
+        assert!(wire.get("previous_response_id").is_none());
+        assert!(wire.get("metadata").is_none());
+        assert!(wire.get("reasoning").is_none());
+        let input = wire["input"].as_array().expect("OpenAI input");
+        assert_eq!(input.len(), 4);
+        assert_eq!(input[0]["role"], "user");
+        assert_eq!(input[0]["content"][0]["text"], "private objective");
+        assert_eq!(input[1]["role"], "user");
+        assert_eq!(
+            input[1]["content"][0]["text"],
+            "private initial observation"
+        );
+        assert_eq!(input[2]["type"], "function_call");
+        assert_eq!(input[2]["id"], "fc_continuation_private_1");
+        assert_eq!(input[2]["call_id"], "call_continuation_private_1");
+        assert_eq!(input[2]["name"], "locate");
+        assert_eq!(input[2]["arguments"], arguments);
+        assert_eq!(input[2]["status"], "completed");
+        assert_eq!(input[3]["type"], "function_call_output");
+        assert_eq!(input[3]["call_id"], "call_continuation_private_1");
+        assert!(input[3]["output"]
+            .as_str()
+            .expect("diff output")
+            .starts_with("ZDIFF1 "));
+        assert_eq!(
+            wire["tools"].as_array().expect("tools").len(),
+            AgentBrowserToolKind::ALL.len()
+        );
+        let debug = format!("{draft:?}");
+        for secret in [
+            "private objective",
+            "private initial observation",
+            "private new state",
+            "fc_continuation_private_1",
+            "call_continuation_private_1",
+        ] {
+            assert!(!debug.contains(secret));
+        }
+        assert!(debug.contains("[redacted]"));
     }
 
     #[test]
@@ -829,9 +952,15 @@ mod tests {
     fn anthropic_tool_correlation_joins_only_its_exact_source_call() {
         let context = context();
         let previous = observation(context, 1, 1, 1, "private prior state");
+        let current = observation(context, 2, 2, 2, "private current state");
         let baseline = SemanticObservationAcknowledgement::from_fingerprint(
             SemanticObservationFingerprint::from_observation(&previous),
         );
+        let SemanticDiffOutcome::Diff(diff) =
+            compute_semantic_diff(&previous, &baseline, &current, SemanticDiffBudget::ACTION)
+        else {
+            panic!("diff");
+        };
         let prior = call(1);
         let correlation = super::super::AgentBrowserToolCall::decode(
             prior,
@@ -842,9 +971,10 @@ mod tests {
         .expect("Anthropic tool")
         .into_continuation_parts()
         .0;
+        let config = config(AgentProviderKind::AnthropicMessages);
         let continuation = AgentProviderContinuationSeed {
             call: prior,
-            config: config(AgentProviderKind::AnthropicMessages),
+            config: config.clone(),
             baseline,
             transcript: transcript(),
         }
@@ -857,6 +987,80 @@ mod tests {
         assert_eq!(continuation.prior_call(), prior);
         assert_eq!(continuation.tool_kind(), AgentBrowserToolKind::Back);
         assert!(!format!("{continuation:?}").contains("private prior state"));
+
+        let counter = FixedCounter {
+            revision: config.tokenizer().clone(),
+        };
+        let payload = encode_semantic_diff(
+            &diff,
+            SemanticModelEncodingBudget::try_new(
+                16 * 1024,
+                16 * 1024,
+                SemanticTokenCountRequirement::Exact,
+            )
+            .expect("encoding budget"),
+        )
+        .expect("encode")
+        .admit(&counter, config.tokenizer())
+        .expect("admit");
+        let diff_bytes = usize::try_from(payload.stats().bytes()).expect("diff bytes");
+        let draft = super::super::request::AgentProviderDiffRequestDraft::try_new(
+            continuation
+                .bind_diff(call(2), &config, &diff, payload)
+                .expect("diff bind"),
+        )
+        .expect("fixed Anthropic draft");
+        assert_eq!(
+            draft.request().endpoint(),
+            super::super::request::AgentProviderEndpoint::AnthropicMessages
+        );
+        assert_eq!(draft.request().call(), call(2));
+        assert_eq!(draft.semantic_stats().bytes() as usize, diff_bytes);
+        let wire: serde_json::Value =
+            serde_json::from_slice(draft.request().body()).expect("Anthropic draft JSON");
+        assert_eq!(wire["stream"], true);
+        assert_eq!(wire["service_tier"], "standard_only");
+        assert_eq!(wire["inference_geo"], "global");
+        assert_eq!(wire["tool_choice"]["type"], "auto");
+        assert_eq!(wire["tool_choice"]["disable_parallel_tool_use"], true);
+        assert!(wire.get("metadata").is_none());
+        assert!(wire.get("thinking").is_none());
+        assert!(wire.get("previous_response_id").is_none());
+        let messages = wire["messages"].as_array().expect("Anthropic messages");
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0]["role"], "user");
+        assert_eq!(messages[0]["content"].as_array().expect("content").len(), 2);
+        assert_eq!(messages[0]["content"][0]["text"], "private objective");
+        assert_eq!(
+            messages[0]["content"][1]["text"],
+            "private initial observation"
+        );
+        assert_eq!(messages[1]["role"], "assistant");
+        assert_eq!(messages[1]["content"].as_array().expect("content").len(), 1);
+        assert_eq!(messages[1]["content"][0]["type"], "tool_use");
+        assert_eq!(messages[1]["content"][0]["id"], "toolu_continuation_1");
+        assert_eq!(messages[1]["content"][0]["name"], "back");
+        assert_eq!(messages[1]["content"][0]["input"], json!({}));
+        assert_eq!(messages[2]["role"], "user");
+        assert_eq!(messages[2]["content"].as_array().expect("content").len(), 1);
+        assert_eq!(messages[2]["content"][0]["type"], "tool_result");
+        assert_eq!(
+            messages[2]["content"][0]["tool_use_id"],
+            "toolu_continuation_1"
+        );
+        assert!(messages[2]["content"][0]["content"]
+            .as_str()
+            .expect("diff result")
+            .starts_with("ZDIFF1 "));
+        let debug = format!("{draft:?}");
+        for secret in [
+            "private objective",
+            "private initial observation",
+            "private current state",
+            "toolu_continuation_1",
+        ] {
+            assert!(!debug.contains(secret));
+        }
     }
 }
 

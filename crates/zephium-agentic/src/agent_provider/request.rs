@@ -13,24 +13,27 @@ use serde::Serialize;
 use serde_json::{json, Map, Value};
 use thiserror::Error;
 
+use crate::semantic_diff_model::SemanticDiffDeliveryAuthority;
 use crate::semantic_wire::looks_like_secret_value;
 use crate::{
     AgentActiveModelCall, AgentModelCallAdmission, AgentModelCallRequest,
-    AgentModelInputCancellation, AgentPolicyError, AgentRunPolicy, SemanticEncodingStats,
-    SemanticModelPayload, SemanticObservation, SemanticObservationAcknowledgement,
-    SemanticReadDeliveryReceipt, SemanticReadEncodingStats, SemanticReadModelPayload,
-    SemanticReadResult, SemanticTokenCountQuality, SemanticTokenCounter, SemanticTokenCounterError,
-    SemanticTokenMeasurement, SemanticTokenizerRevision, MAX_SEMANTIC_ACTIONS_PER_BATCH,
-    MAX_SEMANTIC_ACTION_SETTLE_MILLIS, MAX_SEMANTIC_ACTION_TEXT_BYTES,
-    MAX_SEMANTIC_MUTATION_QUIET_MILLIS, MAX_SEMANTIC_SURROUNDING_TEXT_BYTES,
+    AgentModelInputCancellation, AgentPolicyError, AgentRunPolicy, SemanticDiffEncodingStats,
+    SemanticEncodingStats, SemanticModelPayload, SemanticObservation,
+    SemanticObservationAcknowledgement, SemanticReadDeliveryReceipt, SemanticReadEncodingStats,
+    SemanticReadModelPayload, SemanticReadResult, SemanticTokenCountQuality, SemanticTokenCounter,
+    SemanticTokenCounterError, SemanticTokenMeasurement, SemanticTokenizerRevision,
+    MAX_SEMANTIC_ACTIONS_PER_BATCH, MAX_SEMANTIC_ACTION_SETTLE_MILLIS,
+    MAX_SEMANTIC_ACTION_TEXT_BYTES, MAX_SEMANTIC_MUTATION_QUIET_MILLIS,
+    MAX_SEMANTIC_SURROUNDING_TEXT_BYTES,
 };
 
 use super::continuation::AgentProviderTranscript;
 use super::tool::AgentBrowserToolKind;
 use super::{
-    AgentProviderCallConfig, AgentProviderCallIdentity, AgentProviderContinuationSeed,
-    AgentProviderContractError, AgentProviderKind, ANTHROPIC_GLOBAL_INFERENCE_GEO,
-    ANTHROPIC_STANDARD_SERVICE_TIER_REQUEST, OPENAI_STANDARD_SERVICE_TIER,
+    AgentProviderBoundDiffContinuation, AgentProviderCallConfig, AgentProviderCallIdentity,
+    AgentProviderContinuationSeed, AgentProviderContractError, AgentProviderKind,
+    ANTHROPIC_GLOBAL_INFERENCE_GEO, ANTHROPIC_STANDARD_SERVICE_TIER_REQUEST,
+    OPENAI_STANDARD_SERVICE_TIER,
 };
 
 /// Maximum UTF-8 bytes in one approved browser objective.
@@ -837,6 +840,85 @@ impl fmt::Debug for AgentPreparedReadRequest {
     }
 }
 
+/// Fixed stateless diff request body awaiting whole-input token admission.
+///
+/// This move-only draft has no transport or policy-commit authority. It keeps
+/// the exact diff delivery proof and bounded structured transcript joined to
+/// the immutable provider body so a later trusted full-input counter and
+/// policy admission cannot substitute any component.
+#[must_use]
+pub struct AgentProviderDiffRequestDraft {
+    request: AgentProviderRequest,
+    delivery: SemanticDiffDeliveryAuthority,
+    semantic_stats: SemanticDiffEncodingStats,
+    continuation_transcript: AgentProviderTranscript,
+}
+
+impl AgentProviderDiffRequestDraft {
+    /// Encodes the exact fixed provider protocol selected by the bound turn.
+    pub fn try_new(
+        continuation: AgentProviderBoundDiffContinuation,
+    ) -> Result<Self, AgentProviderRequestError> {
+        let endpoint = match continuation.provider() {
+            AgentProviderKind::OpenAiResponses => AgentProviderEndpoint::OpenAiResponses,
+            AgentProviderKind::AnthropicMessages => AgentProviderEndpoint::AnthropicMessages,
+        };
+        let body = match continuation.provider() {
+            AgentProviderKind::OpenAiResponses => {
+                encode_openai_continuation_body(continuation.config(), continuation.transcript())?
+            }
+            AgentProviderKind::AnthropicMessages => encode_anthropic_continuation_body(
+                continuation.config(),
+                continuation.transcript(),
+            )?,
+        };
+        let (call, config, continuation_transcript, semantic_stats, delivery) =
+            continuation.into_request_parts();
+        Ok(Self {
+            request: AgentProviderRequest {
+                call,
+                config,
+                endpoint,
+                body,
+            },
+            delivery,
+            semantic_stats,
+            continuation_transcript,
+        })
+    }
+
+    /// Immutable provider body available only to a trusted full-input counter.
+    pub const fn request(&self) -> &AgentProviderRequest {
+        &self.request
+    }
+
+    /// Content-free metrics for the newly appended semantic diff.
+    pub const fn semantic_stats(&self) -> SemanticDiffEncodingStats {
+        self.semantic_stats
+    }
+
+    /// Private structured transcript bytes retained by this draft.
+    pub const fn continuation_transcript_bytes(&self) -> usize {
+        self.continuation_transcript.retained_bytes()
+    }
+}
+
+impl fmt::Debug for AgentProviderDiffRequestDraft {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentProviderDiffRequestDraft")
+            .field("request", &self.request)
+            .field("semantic_stats", &self.semantic_stats)
+            .field(
+                "continuation_transcript_bytes",
+                &self.continuation_transcript.retained_bytes(),
+            )
+            .field("delivery", &self.delivery)
+            .field("content", &"[redacted]")
+            .finish()
+    }
+}
+
 /// Closed failure while constructing or settling a fixed provider request.
 #[derive(Debug, Error)]
 pub enum AgentProviderRequestError {
@@ -864,6 +946,46 @@ struct OpenAiRequestWire<'a> {
     service_tier: &'static str,
     stream: bool,
     store: bool,
+}
+
+#[derive(Serialize)]
+struct OpenAiContinuationRequestWire<'a> {
+    model: &'a str,
+    instructions: &'static str,
+    input: Vec<OpenAiContinuationInputWire<'a>>,
+    tools: Vec<OpenAiToolWire<'static>>,
+    tool_choice: &'static str,
+    parallel_tool_calls: bool,
+    max_output_tokens: u32,
+    truncation: &'static str,
+    service_tier: &'static str,
+    stream: bool,
+    store: bool,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum OpenAiContinuationInputWire<'a> {
+    Message(OpenAiInputMessageWire<'a>),
+    FunctionCall(OpenAiFunctionCallWire<'a>),
+    FunctionCallOutput(OpenAiFunctionCallOutputWire<'a>),
+}
+
+#[derive(Serialize)]
+struct OpenAiFunctionCallWire<'a> {
+    r#type: &'static str,
+    id: &'a str,
+    call_id: &'a str,
+    name: &'static str,
+    arguments: &'a str,
+    status: &'static str,
+}
+
+#[derive(Serialize)]
+struct OpenAiFunctionCallOutputWire<'a> {
+    r#type: &'static str,
+    call_id: &'a str,
+    output: &'a str,
 }
 
 #[derive(Serialize)]
@@ -898,6 +1020,48 @@ struct AnthropicRequestWire<'a> {
     service_tier: &'static str,
     inference_geo: &'static str,
     stream: bool,
+}
+
+#[derive(Serialize)]
+struct AnthropicContinuationRequestWire<'a> {
+    model: &'a str,
+    max_tokens: u32,
+    system: &'static str,
+    messages: Vec<AnthropicContinuationMessageWire<'a>>,
+    tools: Vec<AnthropicToolWire<'static>>,
+    tool_choice: AnthropicToolChoiceWire,
+    service_tier: &'static str,
+    inference_geo: &'static str,
+    stream: bool,
+}
+
+#[derive(Serialize)]
+struct AnthropicContinuationMessageWire<'a> {
+    role: &'static str,
+    content: Vec<AnthropicContinuationContentWire<'a>>,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum AnthropicContinuationContentWire<'a> {
+    Text(AnthropicTextWire<'a>),
+    ToolUse(AnthropicToolUseWire<'a>),
+    ToolResult(AnthropicToolResultWire<'a>),
+}
+
+#[derive(Serialize)]
+struct AnthropicToolUseWire<'a> {
+    r#type: &'static str,
+    id: &'a str,
+    name: &'static str,
+    input: Value,
+}
+
+#[derive(Serialize)]
+struct AnthropicToolResultWire<'a> {
+    r#type: &'static str,
+    tool_use_id: &'a str,
+    content: &'a str,
 }
 
 #[derive(Serialize)]
@@ -972,11 +1136,96 @@ fn encode_openai_body(
         stream: true,
         store: false,
     };
-    let body = serde_json::to_vec(&wire).map_err(|_| AgentProviderRequestError::Encoding)?;
-    if body.len() > MAX_AGENT_PROVIDER_REQUEST_BYTES {
-        return Err(AgentProviderRequestError::Encoding);
+    encode_bounded_provider_body(&wire)
+}
+
+fn encode_openai_continuation_body(
+    config: &AgentProviderCallConfig,
+    transcript: &AgentProviderTranscript,
+) -> Result<Vec<u8>, AgentProviderRequestError> {
+    if config.provider() != AgentProviderKind::OpenAiResponses {
+        return Err(AgentProviderContractError::ProviderKind.into());
     }
-    Ok(body)
+    let input_items = 2_usize
+        .checked_add(
+            transcript
+                .turns()
+                .len()
+                .checked_mul(2)
+                .ok_or(AgentProviderRequestError::Encoding)?,
+        )
+        .ok_or(AgentProviderRequestError::Encoding)?;
+    let mut input = Vec::new();
+    input
+        .try_reserve_exact(input_items)
+        .map_err(|_| AgentProviderRequestError::Encoding)?;
+    input.push(OpenAiContinuationInputWire::Message(
+        OpenAiInputMessageWire {
+            role: "user",
+            content: [OpenAiInputTextWire {
+                r#type: "input_text",
+                text: transcript.objective(),
+            }],
+        },
+    ));
+    input.push(OpenAiContinuationInputWire::Message(
+        OpenAiInputMessageWire {
+            role: "user",
+            content: [OpenAiInputTextWire {
+                r#type: "input_text",
+                text: transcript.initial_observation(),
+            }],
+        },
+    ));
+    for turn in transcript.turns() {
+        let correlation = turn.correlation();
+        let provider_item_id = correlation
+            .provider_item_id
+            .as_deref()
+            .ok_or(AgentProviderRequestError::Encoding)?;
+        input.push(OpenAiContinuationInputWire::FunctionCall(
+            OpenAiFunctionCallWire {
+                r#type: "function_call",
+                id: provider_item_id,
+                call_id: correlation.id.as_str(),
+                name: correlation.kind.as_str(),
+                arguments: &correlation.arguments,
+                status: "completed",
+            },
+        ));
+        input.push(OpenAiContinuationInputWire::FunctionCallOutput(
+            OpenAiFunctionCallOutputWire {
+                r#type: "function_call_output",
+                call_id: correlation.id.as_str(),
+                output: turn.tool_result(),
+            },
+        ));
+    }
+    debug_assert_eq!(input.len(), input_items);
+    let tools = browser_tool_definitions()
+        .iter()
+        .map(|tool| OpenAiToolWire {
+            r#type: "function",
+            name: tool.kind.as_str(),
+            description: tool.description,
+            parameters: &tool.parameters,
+            strict: true,
+        })
+        .collect();
+    let wire = OpenAiContinuationRequestWire {
+        model: config.model().as_str(),
+        instructions: AGENT_BROWSER_INSTRUCTIONS_V1,
+        input,
+        tools,
+        tool_choice: "auto",
+        parallel_tool_calls: false,
+        max_output_tokens: config.max_output_tokens(),
+        truncation: "disabled",
+        service_tier: OPENAI_STANDARD_SERVICE_TIER,
+        stream: true,
+        store: false,
+    };
+    encode_bounded_provider_body(&wire)
 }
 
 const MAX_ANTHROPIC_STRICT_TOOLS: usize = 20;
@@ -991,14 +1240,7 @@ fn encode_anthropic_body(
         return Err(AgentProviderContractError::ProviderKind.into());
     }
     let definitions = anthropic_browser_tool_definitions();
-    let union_parameters = definitions.iter().try_fold(0_usize, |total, tool| {
-        total.checked_add(count_schema_unions(&tool.input_schema))
-    });
-    if definitions.len() > MAX_ANTHROPIC_STRICT_TOOLS
-        || union_parameters.is_none_or(|count| count > MAX_ANTHROPIC_SCHEMA_UNIONS)
-    {
-        return Err(AgentProviderRequestError::Encoding);
-    }
+    validate_anthropic_tool_definitions(definitions)?;
     let tools = definitions
         .iter()
         .map(|tool| AnthropicToolWire {
@@ -1034,7 +1276,121 @@ fn encode_anthropic_body(
         inference_geo: ANTHROPIC_GLOBAL_INFERENCE_GEO,
         stream: true,
     };
-    let body = serde_json::to_vec(&wire).map_err(|_| AgentProviderRequestError::Encoding)?;
+    encode_bounded_provider_body(&wire)
+}
+
+fn encode_anthropic_continuation_body(
+    config: &AgentProviderCallConfig,
+    transcript: &AgentProviderTranscript,
+) -> Result<Vec<u8>, AgentProviderRequestError> {
+    if config.provider() != AgentProviderKind::AnthropicMessages {
+        return Err(AgentProviderContractError::ProviderKind.into());
+    }
+    let definitions = anthropic_browser_tool_definitions();
+    validate_anthropic_tool_definitions(definitions)?;
+    let message_count = 1_usize
+        .checked_add(
+            transcript
+                .turns()
+                .len()
+                .checked_mul(2)
+                .ok_or(AgentProviderRequestError::Encoding)?,
+        )
+        .ok_or(AgentProviderRequestError::Encoding)?;
+    let mut messages = Vec::new();
+    messages
+        .try_reserve_exact(message_count)
+        .map_err(|_| AgentProviderRequestError::Encoding)?;
+    messages.push(AnthropicContinuationMessageWire {
+        role: "user",
+        content: vec![
+            AnthropicContinuationContentWire::Text(AnthropicTextWire {
+                r#type: "text",
+                text: transcript.objective(),
+            }),
+            AnthropicContinuationContentWire::Text(AnthropicTextWire {
+                r#type: "text",
+                text: transcript.initial_observation(),
+            }),
+        ],
+    });
+    for turn in transcript.turns() {
+        let correlation = turn.correlation();
+        if correlation.provider_item_id.is_some() {
+            return Err(AgentProviderRequestError::Encoding);
+        }
+        let input: Value = serde_json::from_str(&correlation.arguments)
+            .map_err(|_| AgentProviderRequestError::Encoding)?;
+        if !input.is_object() {
+            return Err(AgentProviderRequestError::Encoding);
+        }
+        messages.push(AnthropicContinuationMessageWire {
+            role: "assistant",
+            content: vec![AnthropicContinuationContentWire::ToolUse(
+                AnthropicToolUseWire {
+                    r#type: "tool_use",
+                    id: correlation.id.as_str(),
+                    name: correlation.kind.as_str(),
+                    input,
+                },
+            )],
+        });
+        messages.push(AnthropicContinuationMessageWire {
+            role: "user",
+            content: vec![AnthropicContinuationContentWire::ToolResult(
+                AnthropicToolResultWire {
+                    r#type: "tool_result",
+                    tool_use_id: correlation.id.as_str(),
+                    content: turn.tool_result(),
+                },
+            )],
+        });
+    }
+    debug_assert_eq!(messages.len(), message_count);
+    let tools = definitions
+        .iter()
+        .map(|tool| AnthropicToolWire {
+            name: tool.kind.as_str(),
+            description: tool.description,
+            input_schema: &tool.input_schema,
+            strict: true,
+        })
+        .collect();
+    let wire = AnthropicContinuationRequestWire {
+        model: config.model().as_str(),
+        max_tokens: config.max_output_tokens(),
+        system: AGENT_BROWSER_INSTRUCTIONS_V1,
+        messages,
+        tools,
+        tool_choice: AnthropicToolChoiceWire {
+            r#type: "auto",
+            disable_parallel_tool_use: true,
+        },
+        service_tier: ANTHROPIC_STANDARD_SERVICE_TIER_REQUEST,
+        inference_geo: ANTHROPIC_GLOBAL_INFERENCE_GEO,
+        stream: true,
+    };
+    encode_bounded_provider_body(&wire)
+}
+
+fn validate_anthropic_tool_definitions(
+    definitions: &[AnthropicBrowserToolDefinition],
+) -> Result<(), AgentProviderRequestError> {
+    let union_parameters = definitions.iter().try_fold(0_usize, |total, tool| {
+        total.checked_add(count_schema_unions(&tool.input_schema))
+    });
+    if definitions.len() > MAX_ANTHROPIC_STRICT_TOOLS
+        || union_parameters.is_none_or(|count| count > MAX_ANTHROPIC_SCHEMA_UNIONS)
+    {
+        return Err(AgentProviderRequestError::Encoding);
+    }
+    Ok(())
+}
+
+fn encode_bounded_provider_body(
+    wire: &impl Serialize,
+) -> Result<Vec<u8>, AgentProviderRequestError> {
+    let body = serde_json::to_vec(wire).map_err(|_| AgentProviderRequestError::Encoding)?;
     if body.len() > MAX_AGENT_PROVIDER_REQUEST_BYTES {
         return Err(AgentProviderRequestError::Encoding);
     }

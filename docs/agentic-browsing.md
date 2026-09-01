@@ -590,17 +590,28 @@ it retains exact committed baseline, provider/model/tokenizer/pricing
 configuration, model-call lineage, and terminal tool correlation. Failures,
 cancellation, non-tool stops, mixed text/reasoning output, and multi-tool stops
 destroy it. It can bind only a strictly newer same-plan call and the exact
-token-admitted diff extending that baseline. Provider-specific stateless
-transcript codecs must still encode the required prior assistant output and
-fixed tool result without enabling remote storage or generic payloads. Until
-those codecs are implemented and qualified, the provider adapter sends a fresh
-full observation.
+token-admitted diff extending that baseline. Fixed provider-specific stateless
+codecs now turn that bound value into an unsendable draft: OpenAI replays the
+two original user inputs, each exact tool-only `function_call` output item, and
+its matching `function_call_output` under `store: false`; Anthropic replays the
+original user message followed by adjacent assistant `tool_use` and user
+`tool_result` messages with matching ids. Both retain the immutable
+instructions, closed tools, disabled parallel calls, model/output bounds,
+service class, and streaming mode. They accept no generic payload, remote
+conversation id, metadata, reasoning/thinking block, selector, DOM, or script.
+The draft retains the bounded structured transcript, exact diff-delivery
+authority, and serialized-body byte accounting but deliberately has no policy
+or transport-commit authority. Production continues to send a fresh full
+observation until a trusted whole-structured-input token counter admits the
+entire replay—not merely its latest diff—under the same model/tokenizer and
+call reservation.
 
 Diff disclosure authority is split from the compact content before a provider
-request can retain it. The fixed encoder may move the content into one request
-body while carrying only a redacted, content-free delivery authority to the
-transport commit point. Refusal or cancellation drops that authority; only an
-exact commit mints the diff receipt and next-baseline acknowledgement.
+request can retain it. The stateless draft keeps the redacted, content-free
+authority inseparable from the exact bounded transcript and body, but cannot
+cross the transport boundary yet. The eventual admitted commit must consume
+that same authority; refusal or cancellation must drop it, and only an exact
+commit may mint the diff receipt and next-baseline acknowledgement.
 
 This is intentionally stricter than assuming an errored `send` transmitted no
 bytes.
