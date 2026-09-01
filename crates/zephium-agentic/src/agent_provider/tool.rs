@@ -22,6 +22,7 @@ use crate::{
 };
 
 use super::request::MAX_AGENT_BROWSER_NAVIGATION_URL_BYTES;
+use super::AgentProviderCallIdentity;
 
 /// Maximum bytes in one opaque provider tool-call identity.
 pub const MAX_AGENT_PROVIDER_TOOL_CALL_ID_BYTES: usize = 128;
@@ -417,19 +418,57 @@ impl fmt::Debug for AgentBrowserToolProposal {
 #[must_use]
 #[derive(Eq, PartialEq)]
 pub struct AgentBrowserToolCall {
+    source_call: AgentProviderCallIdentity,
     id: AgentBrowserToolCallId,
     proposal: AgentBrowserToolProposal,
+    provider_item_id: Option<String>,
+    arguments: String,
 }
 
 impl AgentBrowserToolCall {
     pub(crate) fn decode(
+        source_call: AgentProviderCallIdentity,
         id: String,
         name: &str,
-        arguments: &str,
+        arguments: String,
+    ) -> Result<Self, AgentBrowserToolContractError> {
+        Self::decode_inner(source_call, None, id, name, arguments)
+    }
+
+    pub(crate) fn decode_openai(
+        source_call: AgentProviderCallIdentity,
+        provider_item_id: String,
+        id: String,
+        name: &str,
+        arguments: String,
+    ) -> Result<Self, AgentBrowserToolContractError> {
+        if provider_item_id.is_empty()
+            || provider_item_id.len() > MAX_AGENT_PROVIDER_TOOL_CALL_ID_BYTES
+            || !provider_item_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        {
+            return Err(AgentBrowserToolContractError::CallId);
+        }
+        Self::decode_inner(source_call, Some(provider_item_id), id, name, arguments)
+    }
+
+    fn decode_inner(
+        source_call: AgentProviderCallIdentity,
+        provider_item_id: Option<String>,
+        id: String,
+        name: &str,
+        arguments: String,
     ) -> Result<Self, AgentBrowserToolContractError> {
         let id = AgentBrowserToolCallId::try_new(id)?;
-        let proposal = decode_proposal(name, arguments)?;
-        Ok(Self { id, proposal })
+        let proposal = decode_proposal(name, &arguments)?;
+        Ok(Self {
+            source_call,
+            id,
+            proposal,
+            provider_item_id,
+            arguments,
+        })
     }
 
     /// Opaque provider correlation for a later fixed tool result.
@@ -446,6 +485,26 @@ impl AgentBrowserToolCall {
     pub fn into_parts(self) -> (AgentBrowserToolCallId, AgentBrowserToolProposal) {
         (self.id, self.proposal)
     }
+
+    /// Splits the proposal from its exact one-shot provider-result correlation.
+    ///
+    /// The correlation retains bounded provider-authored arguments only for a
+    /// later fixed continuation request. It exposes no raw JSON or browser
+    /// authority and must never be logged or persisted.
+    pub fn into_continuation_parts(
+        self,
+    ) -> (AgentProviderToolCallCorrelation, AgentBrowserToolProposal) {
+        (
+            AgentProviderToolCallCorrelation {
+                source_call: self.source_call,
+                id: self.id,
+                kind: self.proposal.kind(),
+                provider_item_id: self.provider_item_id,
+                arguments: self.arguments,
+            },
+            self.proposal,
+        )
+    }
 }
 
 impl fmt::Debug for AgentBrowserToolCall {
@@ -454,6 +513,54 @@ impl fmt::Debug for AgentBrowserToolCall {
             .debug_struct("AgentBrowserToolCall")
             .field("id", &self.id)
             .field("proposal", &self.proposal)
+            .finish()
+    }
+}
+
+/// Move-only exact provider correlation retained for one fixed tool result.
+///
+/// This value is neither browser-operation nor model-call authority. Its raw
+/// arguments remain private so no caller can reinterpret them as selectors,
+/// JavaScript, DOM, or a generic provider payload.
+#[must_use]
+pub struct AgentProviderToolCallCorrelation {
+    pub(super) source_call: AgentProviderCallIdentity,
+    pub(super) id: AgentBrowserToolCallId,
+    pub(super) kind: AgentBrowserToolKind,
+    pub(super) provider_item_id: Option<String>,
+    pub(super) arguments: String,
+}
+
+impl AgentProviderToolCallCorrelation {
+    /// Exact bounded provider tool-call identifier.
+    pub const fn id(&self) -> &AgentBrowserToolCallId {
+        &self.id
+    }
+
+    /// Closed browser tool class returned by the provider.
+    pub const fn kind(&self) -> AgentBrowserToolKind {
+        self.kind
+    }
+
+    /// Exact retained provider-argument bytes without exposing their content.
+    pub fn argument_bytes(&self) -> usize {
+        self.arguments.len()
+    }
+}
+
+impl fmt::Debug for AgentProviderToolCallCorrelation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentProviderToolCallCorrelation")
+            .field("source_call", &self.source_call)
+            .field("id", &self.id)
+            .field("kind", &self.kind)
+            .field(
+                "provider_item_id",
+                &self.provider_item_id.as_ref().map(|_| "[redacted]"),
+            )
+            .field("argument_bytes", &self.arguments.len())
+            .field("arguments", &"[redacted]")
             .finish()
     }
 }
@@ -1121,11 +1228,25 @@ impl From<HumanReasonWire> for AgentBrowserHumanReason {
 mod tests {
     use super::*;
 
+    fn source_call() -> AgentProviderCallIdentity {
+        AgentProviderCallIdentity {
+            manifest: crate::AgentRunManifestId::from_raw(1),
+            call: crate::AgentModelCallId::new(2).expect("call"),
+            lease: crate::AgentPlanLeaseId::from_raw(3),
+            node: crate::AgentPlanNodeId::from_raw(4),
+        }
+    }
+
     fn decode(
         name: &str,
         arguments: &str,
     ) -> Result<AgentBrowserToolCall, AgentBrowserToolContractError> {
-        AgentBrowserToolCall::decode("call_abc-123".to_owned(), name, arguments)
+        AgentBrowserToolCall::decode(
+            source_call(),
+            "call_abc-123".to_owned(),
+            name,
+            arguments.to_owned(),
+        )
     }
 
     #[test]
@@ -1335,12 +1456,62 @@ mod tests {
             Err(AgentBrowserToolContractError::ArgumentLimit)
         );
         assert_eq!(
-            AgentBrowserToolCall::decode("bad id".to_owned(), "back", "{}").map(|_| ()),
+            AgentBrowserToolCall::decode(
+                source_call(),
+                "bad id".to_owned(),
+                "back",
+                "{}".to_owned(),
+            )
+            .map(|_| ()),
             Err(AgentBrowserToolContractError::CallId)
         );
         assert_eq!(
-            AgentBrowserToolCall::decode("x".repeat(129), "back", "{}").map(|_| ()),
+            AgentBrowserToolCall::decode(source_call(), "x".repeat(129), "back", "{}".to_owned(),)
+                .map(|_| ()),
             Err(AgentBrowserToolContractError::CallId)
         );
+        for provider_item_id in ["".to_owned(), "bad item".to_owned(), "x".repeat(129)] {
+            assert_eq!(
+                AgentBrowserToolCall::decode_openai(
+                    source_call(),
+                    provider_item_id,
+                    "call_abc-123".to_owned(),
+                    "back",
+                    "{}".to_owned(),
+                )
+                .map(|_| ()),
+                Err(AgentBrowserToolContractError::CallId)
+            );
+        }
+    }
+
+    #[test]
+    fn provider_continuation_correlation_debug_is_content_free() {
+        let arguments = r#"{"url":"https://private.example.test/path?token=provider-secret"}"#;
+        let call = AgentBrowserToolCall::decode_openai(
+            source_call(),
+            "fc_private_item".to_owned(),
+            "call_private_tool".to_owned(),
+            "navigate",
+            arguments.to_owned(),
+        )
+        .expect("OpenAI tool call");
+        let call_debug = format!("{call:?}");
+        assert!(!call_debug.contains("private.example.test"));
+        assert!(!call_debug.contains("call_private_tool"));
+
+        let correlation = call.into_continuation_parts().0;
+        assert_eq!(correlation.kind(), AgentBrowserToolKind::Navigate);
+        assert_eq!(correlation.argument_bytes(), arguments.len());
+        let correlation_debug = format!("{correlation:?}");
+        for private in [
+            "private.example.test",
+            "provider-secret",
+            "fc_private_item",
+            "call_private_tool",
+        ] {
+            assert!(!correlation_debug.contains(private));
+        }
+        assert!(correlation_debug.contains("[redacted]"));
     }
 }

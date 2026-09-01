@@ -508,12 +508,11 @@ impl AnthropicMessagesStreamDecoder {
                         ContentBlockState::Text { .. } => None,
                     })
                     .ok_or(AgentProviderProtocolError::Terminal)?;
-                let call = AgentBrowserToolCall::decode(
-                    tool.id.clone(),
-                    tool.name.as_str(),
-                    tool.arguments.as_str(),
-                )
-                .map_err(|_| AgentProviderProtocolError::ToolCall)?;
+                let id = tool.id.clone();
+                let name = tool.name;
+                let arguments = std::mem::take(&mut tool.arguments);
+                let call = AgentBrowserToolCall::decode(self.call, id, name.as_str(), arguments)
+                    .map_err(|_| AgentProviderProtocolError::ToolCall)?;
                 self.decoded_tool_calls = 1;
                 output.push(AgentProviderStreamEvent::ToolCall(call));
             }
@@ -573,11 +572,13 @@ impl AnthropicMessagesStreamDecoder {
             .usage
             .ok_or(AgentProviderProtocolError::Usage)?
             .normalize()?;
+        let tool_only_output = matches!(self.blocks.as_slice(), [ContentBlockState::Tool(_)]);
         let completion = AgentProviderCompletion::new(
             self.call,
             self.stop.ok_or(AgentProviderProtocolError::Terminal)?,
             usage,
             self.stats(),
+            tool_only_output,
         );
         self.conclusion = Some(AgentProviderStreamConclusion::Completed(completion));
         self.phase = StreamPhase::Terminal;
@@ -969,6 +970,7 @@ mod tests {
             panic!("completion");
         };
         assert_eq!(completion.stop(), AgentProviderStopReason::Completed);
+        assert!(!completion.tool_only_output());
         assert_eq!(completion.usage().input_tokens(), 15);
         assert_eq!(completion.usage().cached_input_tokens(), 5);
         assert_eq!(completion.usage().cache_write_input_tokens(), 3);
@@ -1051,6 +1053,7 @@ mod tests {
             panic!("completion");
         };
         assert_eq!(completion.stop(), AgentProviderStopReason::ToolCalls);
+        assert!(completion.tool_only_output());
         assert_eq!(completion.stats().tool_calls(), 1);
         assert_eq!(
             completion.stats().tool_argument_bytes(),

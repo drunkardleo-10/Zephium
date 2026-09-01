@@ -27,9 +27,9 @@ use crate::{
 
 use super::tool::AgentBrowserToolKind;
 use super::{
-    AgentProviderCallConfig, AgentProviderCallIdentity, AgentProviderContractError,
-    AgentProviderKind, ANTHROPIC_GLOBAL_INFERENCE_GEO, ANTHROPIC_STANDARD_SERVICE_TIER_REQUEST,
-    OPENAI_STANDARD_SERVICE_TIER,
+    AgentProviderCallConfig, AgentProviderCallIdentity, AgentProviderContinuationSeed,
+    AgentProviderContractError, AgentProviderKind, ANTHROPIC_GLOBAL_INFERENCE_GEO,
+    ANTHROPIC_STANDARD_SERVICE_TIER_REQUEST, OPENAI_STANDARD_SERVICE_TIER,
 };
 
 /// Maximum UTF-8 bytes in one approved browser objective.
@@ -439,7 +439,13 @@ impl AgentProviderTransportInput {
             commitment,
         } = self;
         let input = commitment.commit(policy)?;
-        Ok(AgentCommittedProviderRequest { request, input })
+        let continuation =
+            AgentProviderContinuationSeed::from_committed(request.call(), request.config(), &input);
+        Ok(AgentCommittedProviderRequest {
+            request,
+            input,
+            continuation,
+        })
     }
 
     /// Releases the reservation after transport refusal before disclosure.
@@ -488,6 +494,7 @@ impl fmt::Debug for AgentProviderTransportInput {
 pub struct AgentCommittedProviderRequest {
     request: AgentProviderRequest,
     input: AgentCommittedProviderInput,
+    continuation: Option<AgentProviderContinuationSeed>,
 }
 
 impl AgentCommittedProviderRequest {
@@ -506,9 +513,18 @@ impl AgentCommittedProviderRequest {
         self.input.evidence()
     }
 
-    /// Moves the exact request and committed semantic input together.
-    pub fn into_parts(self) -> (AgentProviderRequest, AgentCommittedProviderInput) {
-        (self.request, self.input)
+    /// Moves request, committed input, and optional one-shot continuation seed.
+    ///
+    /// Only a committed full observation carries a seed. A bounded read never
+    /// creates diff-baseline continuation authority.
+    pub fn into_parts(
+        self,
+    ) -> (
+        AgentProviderRequest,
+        AgentCommittedProviderInput,
+        Option<AgentProviderContinuationSeed>,
+    ) {
+        (self.request, self.input, self.continuation)
     }
 }
 
@@ -518,6 +534,7 @@ impl fmt::Debug for AgentCommittedProviderRequest {
             .debug_struct("AgentCommittedProviderRequest")
             .field("request", &self.request)
             .field("input", &self.input)
+            .field("continuation", &self.continuation.is_some())
             .finish()
     }
 }
@@ -1491,9 +1508,15 @@ mod tests {
                 assert!(!schema.contains(forbidden), "forbidden schema field");
             }
             let _ = crate::AgentBrowserToolCall::decode(
+                AgentProviderCallIdentity {
+                    manifest: crate::AgentRunManifestId::from_raw(1),
+                    call: crate::AgentModelCallId::new(1).expect("call"),
+                    lease: crate::AgentPlanLeaseId::from_raw(1),
+                    node: crate::AgentPlanNodeId::from_raw(1),
+                },
                 "call_schema_1".to_owned(),
                 definition.kind.as_str(),
-                sample_arguments(definition.kind),
+                sample_arguments(definition.kind).to_owned(),
             )
             .expect("schema sample must decode");
         }

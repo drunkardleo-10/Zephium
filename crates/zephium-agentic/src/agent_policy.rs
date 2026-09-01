@@ -3138,7 +3138,8 @@ mod tests {
             panic!("observation evidence")
         };
         assert!(acknowledgement.matches(&observation));
-        let (request, input) = committed.into_parts();
+        let (request, input, continuation) = committed.into_parts();
+        assert!(continuation.is_some());
         let (active, evidence) = input.into_parts();
         assert!(matches!(
             evidence,

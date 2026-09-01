@@ -7,6 +7,7 @@
 //! codecs and can cross the public boundary only as closed typed values.
 
 mod anthropic;
+mod continuation;
 mod openai;
 mod pricing;
 mod request;
@@ -20,6 +21,10 @@ use thiserror::Error;
 use anthropic::AnthropicMessagesStreamDecoder;
 use openai::OpenAiResponsesStreamDecoder;
 
+pub use continuation::{
+    AgentProviderBoundDiffContinuation, AgentProviderContinuation, AgentProviderContinuationError,
+    AgentProviderContinuationSeed,
+};
 pub use pricing::{
     AgentProviderPricedUsage, AgentProviderPricingAttribution, AgentProviderPricingContractError,
     AgentProviderPricingError, AgentProviderPricingProfile, AgentProviderPricingRevision,
@@ -46,7 +51,8 @@ pub use tool::{
     AgentBrowserActProposal, AgentBrowserHumanReason, AgentBrowserScopeProposal,
     AgentBrowserSemanticQuery, AgentBrowserToolCall, AgentBrowserToolCallId,
     AgentBrowserToolContractError, AgentBrowserToolKind, AgentBrowserToolProposal,
-    MAX_AGENT_BROWSER_SEMANTIC_QUERY_BYTES, MAX_AGENT_PROVIDER_TOOL_CALL_ID_BYTES,
+    AgentProviderToolCallCorrelation, MAX_AGENT_BROWSER_SEMANTIC_QUERY_BYTES,
+    MAX_AGENT_PROVIDER_TOOL_CALL_ID_BYTES,
 };
 
 /// Maximum bytes in one pinned provider model revision.
@@ -631,6 +637,7 @@ pub struct AgentProviderCompletion {
     stop: AgentProviderStopReason,
     usage: AgentProviderUsage,
     stats: AgentProviderStreamStats,
+    tool_only_output: bool,
 }
 
 impl AgentProviderCompletion {
@@ -639,12 +646,14 @@ impl AgentProviderCompletion {
         stop: AgentProviderStopReason,
         usage: AgentProviderUsage,
         stats: AgentProviderStreamStats,
+        tool_only_output: bool,
     ) -> Self {
         Self {
             call,
             stop,
             usage,
             stats,
+            tool_only_output,
         }
     }
 
@@ -666,6 +675,15 @@ impl AgentProviderCompletion {
     /// Content-free bounded stream counters.
     pub const fn stats(self) -> AgentProviderStreamStats {
         self.stats
+    }
+
+    /// Whether the assistant output contained only decoded client tool calls.
+    ///
+    /// Text, refusal, reasoning, thinking, and provider-owned tool blocks make
+    /// this false because a fixed stateless continuation would need to retain
+    /// and replay more than the closed client-tool correlation.
+    pub const fn tool_only_output(self) -> bool {
+        self.tool_only_output
     }
 }
 

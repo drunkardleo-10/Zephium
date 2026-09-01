@@ -26,11 +26,13 @@ use tokio::sync::Notify;
 use zephium_agentic::{
     AgentActiveModelCall, AgentCommittedProviderRequest, AgentModelCallReceipt,
     AgentModelCallSettlement, AgentModelCallUnaccountedSettlement, AgentModelUsageAccounting,
-    AgentPolicyError, AgentProviderCallConfig, AgentProviderCallIdentity, AgentProviderEndpoint,
-    AgentProviderFailure, AgentProviderFailureClass, AgentProviderInputEvidence, AgentProviderKind,
+    AgentPolicyError, AgentProviderCallConfig, AgentProviderCallIdentity,
+    AgentProviderContinuationSeed, AgentProviderEndpoint, AgentProviderFailure,
+    AgentProviderFailureClass, AgentProviderInputEvidence, AgentProviderKind,
     AgentProviderPricingError, AgentProviderPricingSchedule, AgentProviderRequestError,
-    AgentProviderRetryAfter, AgentProviderStreamBatch, AgentProviderStreamConclusion,
-    AgentProviderStreamDecoder, AgentProviderTransportInput, AgentProviderUsage, AgentRunPolicy,
+    AgentProviderRetryAfter, AgentProviderStopReason, AgentProviderStreamBatch,
+    AgentProviderStreamConclusion, AgentProviderStreamDecoder, AgentProviderTransportInput,
+    AgentProviderUsage, AgentRunPolicy,
 };
 use zeroize::Zeroizing;
 
@@ -781,6 +783,7 @@ pub struct AgentProviderTransportResult {
     config: AgentProviderCallConfig,
     outcome: AgentProviderTransportOutcome,
     failure_dispatch: AgentProviderDispatchEvidence,
+    continuation: Option<AgentProviderContinuationSeed>,
 }
 
 impl AgentProviderTransportResult {
@@ -827,19 +830,43 @@ impl AgentProviderTransportResult {
         }
     }
 
+    /// Whether one exact committed observation/tool-only terminal retained a seed.
+    ///
+    /// The seed is still not continuation authority until the caller consumes
+    /// it with the exact tool correlation emitted by this response.
+    pub const fn has_continuation_seed(&self) -> bool {
+        self.continuation.is_some()
+    }
+
     /// Converts transport evidence into the sole safe policy-settlement route.
     ///
     /// Provider-reported usage retains the exact fixed provider/model/tokenizer
     /// configuration until trusted pricing supplies cost. Pre-dispatch failures
     /// settle exact zero; ambiguous sends consume the complete reservation.
     pub fn into_policy_settlement(self) -> AgentProviderPolicySettlement {
+        self.into_policy_settlement_with_continuation().0
+    }
+
+    /// Separates terminal policy settlement from an optional one-shot seed.
+    ///
+    /// The seed is returned only for a valid completed response whose assistant
+    /// output contains exactly one client tool call and no text or reasoning.
+    /// Pricing and policy settlement remain mandatory and independent;
+    /// retaining the seed cannot settle or replay the call.
+    pub fn into_policy_settlement_with_continuation(
+        self,
+    ) -> (
+        AgentProviderPolicySettlement,
+        Option<AgentProviderContinuationSeed>,
+    ) {
         let Self {
             active,
             config,
             outcome,
             failure_dispatch,
+            continuation,
         } = self;
-        match outcome {
+        let settlement = match outcome {
             AgentProviderTransportOutcome::Stream(conclusion) => match conclusion {
                 AgentProviderStreamConclusion::Completed(completion) => {
                     AgentProviderPolicySettlement::PricingRequired(AgentProviderPricingSettlement {
@@ -889,7 +916,8 @@ impl AgentProviderTransportResult {
                     accounting,
                 })
             }
-        }
+        };
+        (settlement, continuation)
     }
 }
 
@@ -901,6 +929,7 @@ impl fmt::Debug for AgentProviderTransportResult {
             .field("config", &self.config)
             .field("outcome", &self.outcome)
             .field("usage", &self.usage_knowledge())
+            .field("continuation", &self.continuation.is_some())
             .finish()
     }
 }
@@ -1163,7 +1192,7 @@ impl AgentProviderAttempt {
     /// taint remains committed because admission already crossed that boundary.
     pub fn cancel_without_dispatch(mut self) -> AgentProviderTransportResult {
         let slot = self.slot.take();
-        let (request, input) = self.committed.into_parts();
+        let (request, input, _) = self.committed.into_parts();
         let (active, _) = input.into_parts();
         let (_, config, _, _) = request.into_transport_parts();
         finish_attempt(
@@ -1171,6 +1200,7 @@ impl AgentProviderAttempt {
             config,
             cancelled_failure(),
             AgentProviderDispatchEvidence::NotDispatched,
+            None,
             slot,
         )
     }
@@ -1185,7 +1215,7 @@ impl AgentProviderAttempt {
         F: FnMut(AgentProviderStreamBatch) -> AgentProviderBatchDisposition,
     {
         let slot = self.slot.take();
-        let (request, input) = self.committed.into_parts();
+        let (request, input, continuation) = self.committed.into_parts();
         let (active, _) = input.into_parts();
         let (call, config, endpoint_class, body) = request.into_transport_parts();
         if !call.matches_active(&active)
@@ -1196,6 +1226,7 @@ impl AgentProviderAttempt {
                 config,
                 protocol_failure(),
                 AgentProviderDispatchEvidence::NotDispatched,
+                continuation,
                 slot,
             );
         }
@@ -1207,6 +1238,7 @@ impl AgentProviderAttempt {
                     config,
                     protocol_failure(),
                     AgentProviderDispatchEvidence::NotDispatched,
+                    continuation,
                     slot,
                 );
             }
@@ -1219,6 +1251,7 @@ impl AgentProviderAttempt {
                     config,
                     protocol_failure(),
                     AgentProviderDispatchEvidence::NotDispatched,
+                    continuation,
                     slot,
                 );
             }
@@ -1236,6 +1269,7 @@ impl AgentProviderAttempt {
                 config,
                 cancelled_failure(),
                 AgentProviderDispatchEvidence::NotDispatched,
+                continuation,
                 slot,
             );
         }
@@ -1247,6 +1281,7 @@ impl AgentProviderAttempt {
                     config,
                     cancelled_failure(),
                     AgentProviderDispatchEvidence::MayHaveDispatched,
+                    continuation,
                     slot,
                 );
             }
@@ -1256,6 +1291,7 @@ impl AgentProviderAttempt {
                     config,
                     cancelled_failure(),
                     AgentProviderDispatchEvidence::MayHaveDispatched,
+                    continuation,
                     slot,
                 );
             }
@@ -1270,6 +1306,7 @@ impl AgentProviderAttempt {
                     config,
                     outcome,
                     AgentProviderDispatchEvidence::MayHaveDispatched,
+                    continuation,
                     slot,
                 );
             }
@@ -1280,6 +1317,7 @@ impl AgentProviderAttempt {
                 config,
                 protocol_failure(),
                 AgentProviderDispatchEvidence::MayHaveDispatched,
+                continuation,
                 slot,
             );
         }
@@ -1290,6 +1328,7 @@ impl AgentProviderAttempt {
                 config,
                 AgentProviderTransportOutcome::Failed(failure),
                 AgentProviderDispatchEvidence::MayHaveDispatched,
+                continuation,
                 slot,
             );
         }
@@ -1301,6 +1340,7 @@ impl AgentProviderAttempt {
                 config,
                 protocol_failure(),
                 AgentProviderDispatchEvidence::MayHaveDispatched,
+                continuation,
                 slot,
             );
         }
@@ -1315,6 +1355,7 @@ impl AgentProviderAttempt {
                         config,
                         cancelled_failure(),
                         AgentProviderDispatchEvidence::MayHaveDispatched,
+                        continuation,
                         slot,
                     );
                 }
@@ -1324,6 +1365,7 @@ impl AgentProviderAttempt {
                         config,
                         cancelled_failure(),
                         AgentProviderDispatchEvidence::MayHaveDispatched,
+                        continuation,
                         slot,
                     );
                 }
@@ -1339,6 +1381,7 @@ impl AgentProviderAttempt {
                         config,
                         outcome,
                         AgentProviderDispatchEvidence::MayHaveDispatched,
+                        continuation,
                         slot,
                     );
                 }
@@ -1351,6 +1394,7 @@ impl AgentProviderAttempt {
                         config,
                         protocol_failure(),
                         AgentProviderDispatchEvidence::MayHaveDispatched,
+                        continuation,
                         slot,
                     );
                 }
@@ -1362,6 +1406,7 @@ impl AgentProviderAttempt {
                     config,
                     cancelled_failure(),
                     AgentProviderDispatchEvidence::MayHaveDispatched,
+                    continuation,
                     slot,
                 );
             }
@@ -1375,6 +1420,7 @@ impl AgentProviderAttempt {
             config,
             outcome,
             AgentProviderDispatchEvidence::MayHaveDispatched,
+            continuation,
             slot,
         )
     }
@@ -1424,6 +1470,7 @@ fn finish_attempt(
     config: AgentProviderCallConfig,
     mut outcome: AgentProviderTransportOutcome,
     mut failure_dispatch: AgentProviderDispatchEvidence,
+    mut continuation: Option<AgentProviderContinuationSeed>,
     mut slot: Option<AgentProviderSlot>,
 ) -> AgentProviderTransportResult {
     if let AgentProviderTransportOutcome::Stream(conclusion) = outcome {
@@ -1434,7 +1481,18 @@ fn finish_attempt(
         if !call.matches_active(&active) {
             outcome = protocol_failure();
             failure_dispatch = AgentProviderDispatchEvidence::MayHaveDispatched;
+            continuation = None;
         }
+    }
+    if !matches!(
+        outcome,
+        AgentProviderTransportOutcome::Stream(AgentProviderStreamConclusion::Completed(
+            completion
+        )) if completion.stop() == AgentProviderStopReason::ToolCalls
+            && completion.tool_only_output()
+            && completion.stats().tool_calls() == 1
+    ) {
+        continuation = None;
     }
     if let Some(slot) = &mut slot {
         slot.mark_completed();
@@ -1445,6 +1503,7 @@ fn finish_attempt(
         config,
         outcome,
         failure_dispatch,
+        continuation,
     }
 }
 
@@ -2114,6 +2173,36 @@ mod tests {
         .into_bytes()
     }
 
+    fn openai_tool_stream() -> Vec<u8> {
+        [
+            "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_tool_1\",\"status\":\"in_progress\",\"model\":\"gpt-5.6-sol\",\"service_tier\":\"default\"}}\n\n",
+            "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_tool_1\",\"call_id\":\"call_tool_1\",\"name\":\"back\",\"arguments\":\"\",\"status\":\"in_progress\"}}\n\n",
+            "event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_tool_1\",\"delta\":\"{}\"}\n\n",
+            "event: response.function_call_arguments.done\ndata: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_tool_1\",\"name\":\"back\",\"arguments\":\"{}\"}\n\n",
+            "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_tool_1\",\"call_id\":\"call_tool_1\",\"name\":\"back\",\"arguments\":\"{}\",\"status\":\"completed\"}}\n\n",
+            "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_tool_1\",\"status\":\"completed\",\"model\":\"gpt-5.6-sol\",\"service_tier\":\"default\",\"output\":[{\"type\":\"function_call\",\"id\":\"fc_tool_1\",\"call_id\":\"call_tool_1\",\"name\":\"back\",\"arguments\":\"{}\",\"status\":\"completed\"}],\"usage\":{\"input_tokens\":17,\"output_tokens\":3,\"total_tokens\":20,\"input_tokens_details\":{\"cached_tokens\":0},\"output_tokens_details\":{\"reasoning_tokens\":0}}}}\n\n",
+            "data: [DONE]\n\n",
+        ]
+        .concat()
+        .into_bytes()
+    }
+
+    fn openai_mixed_tool_stream() -> Vec<u8> {
+        [
+            "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_mixed_1\",\"status\":\"in_progress\",\"model\":\"gpt-5.6-sol\",\"service_tier\":\"default\"}}\n\n",
+            "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"working\"}\n\n",
+            "event: response.output_text.done\ndata: {\"type\":\"response.output_text.done\",\"text\":\"working\"}\n\n",
+            "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_mixed_1\",\"call_id\":\"call_mixed_1\",\"name\":\"back\",\"arguments\":\"\",\"status\":\"in_progress\"}}\n\n",
+            "event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_mixed_1\",\"delta\":\"{}\"}\n\n",
+            "event: response.function_call_arguments.done\ndata: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_mixed_1\",\"name\":\"back\",\"arguments\":\"{}\"}\n\n",
+            "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_mixed_1\",\"call_id\":\"call_mixed_1\",\"name\":\"back\",\"arguments\":\"{}\",\"status\":\"completed\"}}\n\n",
+            "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_mixed_1\",\"status\":\"completed\",\"model\":\"gpt-5.6-sol\",\"service_tier\":\"default\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\"}]},{\"type\":\"function_call\",\"id\":\"fc_mixed_1\",\"call_id\":\"call_mixed_1\",\"name\":\"back\",\"arguments\":\"{}\",\"status\":\"completed\"}],\"usage\":{\"input_tokens\":17,\"output_tokens\":3,\"total_tokens\":20,\"input_tokens_details\":{\"cached_tokens\":0},\"output_tokens_details\":{\"reasoning_tokens\":0}}}}\n\n",
+            "data: [DONE]\n\n",
+        ]
+        .concat()
+        .into_bytes()
+    }
+
     fn anthropic_failure_stream() -> Vec<u8> {
         [
             "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-opus-5\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":7,\"cache_creation_input_tokens\":3,\"cache_read_input_tokens\":5,\"output_tokens\":1,\"output_tokens_details\":{\"thinking_tokens\":0},\"service_tier\":\"standard\",\"inference_geo\":\"global\"}}}\n\n",
@@ -2270,6 +2359,7 @@ mod tests {
             result.usage_knowledge(),
             AgentProviderUsageKnowledge::ProviderReported(completion.usage())
         );
+        assert!(!result.has_continuation_seed());
         let AgentProviderPolicySettlement::PricingRequired(settlement) =
             result.into_policy_settlement()
         else {
@@ -2342,6 +2432,141 @@ mod tests {
         assert_eq!(body["stream"], true);
         assert_eq!(body["store"], false);
         assert_eq!(body["service_tier"], "default");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn exact_single_tool_terminal_retains_one_shot_observation_seed() {
+        let server = OneShotServer::spawn(
+            "200 OK",
+            &[
+                ("Content-Type", "text/event-stream; charset=utf-8"),
+                ("Content-Encoding", "identity"),
+            ],
+            vec![openai_tool_stream()],
+        );
+        let transport = test_transport(&server);
+        let credential = AgentProviderCredential::try_new(
+            AgentProviderKind::OpenAiResponses,
+            "synthetic-openai-key".to_owned(),
+        )
+        .expect("credential");
+        let (mut policy, input) = provider_fixture(AgentProviderKind::OpenAiResponses);
+        let attempt = transport
+            .try_admit(
+                input,
+                &mut policy,
+                &credential,
+                AgentProviderCancellation::new(),
+            )
+            .expect("admission");
+
+        let mut correlation = None;
+        let result = attempt
+            .execute(|batch| {
+                for event in batch.into_events() {
+                    if let zephium_agentic::AgentProviderStreamEvent::ToolCall(tool) = event {
+                        assert!(correlation.is_none(), "fixture emitted more than one tool");
+                        correlation = Some(tool.into_continuation_parts().0);
+                    }
+                }
+                AgentProviderBatchDisposition::Continue
+            })
+            .await;
+        let AgentProviderTransportOutcome::Stream(AgentProviderStreamConclusion::Completed(
+            completion,
+        )) = result.outcome()
+        else {
+            panic!("normalized tool completion expected")
+        };
+        assert_eq!(completion.stop(), AgentProviderStopReason::ToolCalls);
+        assert_eq!(completion.stats().tool_calls(), 1);
+        assert!(result.has_continuation_seed());
+        assert!(!format!("{result:?}").contains("resp_tool_1"));
+
+        let (settlement, seed) = result.into_policy_settlement_with_continuation();
+        let continuation = seed
+            .expect("single tool observation seed")
+            .join_terminal_tool(completion, correlation.expect("tool correlation"))
+            .expect("exact terminal join");
+        assert_eq!(continuation.prior_call(), completion.call());
+        assert_eq!(continuation.provider(), AgentProviderKind::OpenAiResponses);
+        assert_eq!(
+            continuation.tool_kind(),
+            zephium_agentic::AgentBrowserToolKind::Back
+        );
+        assert_eq!(continuation.argument_bytes(), 2);
+        let continuation_debug = format!("{continuation:?}");
+        assert!(!continuation_debug.contains("fc_tool_1"));
+        assert!(!continuation_debug.contains("call_tool_1"));
+
+        let AgentProviderPolicySettlement::PricingRequired(settlement) = settlement else {
+            panic!("reported tool usage must be priced")
+        };
+        let schedule = pricing_schedule(settlement.config());
+        let receipt = settlement
+            .settle(&mut policy, &schedule)
+            .expect("catalog-priced tool settlement");
+        assert_eq!(receipt.input_tokens(), 17);
+        assert_eq!(receipt.output_tokens(), 3);
+        assert_eq!(policy.pending_model_calls(), 0);
+        assert!(transport.snapshot().expect("snapshot").is_quiescent());
+
+        let captured = server.finish();
+        let body: serde_json::Value = serde_json::from_slice(&captured.body).expect("request body");
+        assert_eq!(body["store"], false);
+        assert!(body.get("previous_response_id").is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mixed_assistant_text_and_tool_terminal_destroys_continuation_seed() {
+        let server = OneShotServer::spawn(
+            "200 OK",
+            &[
+                ("Content-Type", "text/event-stream; charset=utf-8"),
+                ("Content-Encoding", "identity"),
+            ],
+            vec![openai_mixed_tool_stream()],
+        );
+        let transport = test_transport(&server);
+        let credential = AgentProviderCredential::try_new(
+            AgentProviderKind::OpenAiResponses,
+            "synthetic-openai-key".to_owned(),
+        )
+        .expect("credential");
+        let (mut policy, input) = provider_fixture(AgentProviderKind::OpenAiResponses);
+        let result = transport
+            .try_admit(
+                input,
+                &mut policy,
+                &credential,
+                AgentProviderCancellation::new(),
+            )
+            .expect("admission")
+            .execute(|_| AgentProviderBatchDisposition::Continue)
+            .await;
+        let AgentProviderTransportOutcome::Stream(AgentProviderStreamConclusion::Completed(
+            completion,
+        )) = result.outcome()
+        else {
+            panic!("mixed completion expected")
+        };
+        assert_eq!(completion.stop(), AgentProviderStopReason::ToolCalls);
+        assert_eq!(completion.stats().output_text_bytes(), 7);
+        assert!(!completion.tool_only_output());
+        assert!(!result.has_continuation_seed());
+
+        let (settlement, seed) = result.into_policy_settlement_with_continuation();
+        assert!(seed.is_none());
+        let AgentProviderPolicySettlement::PricingRequired(settlement) = settlement else {
+            panic!("reported mixed-output usage must be priced")
+        };
+        let schedule = pricing_schedule(settlement.config());
+        settlement
+            .settle(&mut policy, &schedule)
+            .expect("mixed-output settlement");
+        assert_eq!(policy.pending_model_calls(), 0);
+        assert!(transport.snapshot().expect("snapshot").is_quiescent());
+        server.finish();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

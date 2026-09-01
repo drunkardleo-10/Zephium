@@ -3,14 +3,16 @@
 Status: bounded semantic identity, snapshot, opaque-reference, hostile wire
 decoder, progressive scopes, deterministic multi-frame assembly, compact model
 encoding/token-admission ports, acknowledged stable-id diffs, compact diff
-token admission with exact baseline/current delivery proof, and the immutable
-bounded page-projection program with its fixed reply-channel pull protocol
-implemented. The macOS owned-context adapter now installs and lifecycle-binds
-that program through a fixed content-world reply handler and exposes its
-single-flight result through the bounded native context port. A mechanically
-release-excluded hidden/ephemeral/loopback-only native qualifier is implemented
-but has not been executed; its named-device result and actual pinned provider
-token measurements remain pending.
+token admission with exact baseline/current delivery proof, a provider-neutral
+one-shot diff-continuation authority seam, and the immutable bounded
+page-projection program with its fixed reply-channel pull protocol implemented.
+The macOS owned-context adapter now installs and lifecycle-binds that program
+through a fixed content-world reply handler and exposes its single-flight result
+through the bounded native context port. Provider-specific stateless transcript
+encoders remain disabled. A mechanically release-excluded
+hidden/ephemeral/loopback-only native qualifier is implemented but has not been
+executed; its named-device result and actual pinned provider token measurements
+remain pending.
 
 This evidence records deterministic Rust contracts plus static and synthetic
 DOM execution of the fixed program. It does not claim that arbitrary pages
@@ -153,8 +155,43 @@ have been instrumented or observed on either platform.
   payload or receipt. Committed delivery acknowledges the exact current
   observation for the next baseline; refusal or cancellation cannot. Digests
   and page content remain private and diagnostics-redacted. This is the
-  production admission seam, not yet a provider continuation or actual
-  provider/tokenizer measurement claim.
+  production admission seam, not an actual provider/tokenizer measurement
+  claim.
+- Committing a full-observation provider request now mints one move-only,
+  memory-only continuation seed beside the immutable request and usage
+  authority. Bounded reads do not. The transport destroys this seed for every
+  pre/post-dispatch cancellation, transport or protocol failure, terminal call
+  mismatch, non-tool or mixed text/reasoning output, or tool count other than
+  exactly one. Policy and trusted-pricing settlement remain independently
+  mandatory even when the caller elects to retain the seed.
+- Each decoded provider tool call now carries its exact immutable model-call
+  lineage plus the provider's bounded tool-call correlation, closed tool kind,
+  and already-bounded original arguments. Only a tool-only assistant turn is
+  eligible; text or reasoning alongside the tool requires additional replay
+  state and therefore falls back. Arguments are moved into the call rather
+  than copied. All raw fields remain private, move-only, and
+  diagnostics-redacted. A seed can join only the matching completed one-tool
+  terminal from that same call and provider-specific shape; equal-length tool
+  output from another response cannot substitute.
+- The resulting continuation binds once to a strictly newer call in the same
+  manifest, plan lease, and node; identical provider/model/tokenizer/pricing
+  and stream bounds; the exact acknowledged baseline digest and coordinates;
+  and the exact token-admitted semantic-diff payload. It grants neither
+  browser-operation nor provider-call authority and exposes no generic JSON,
+  DOM, selector, script, or transport payload.
+- Provider-specific transcript encoding is deliberately still absent. OpenAI
+  stateless `store: false` continuation requires replaying the prior response
+  output items and matching `function_call_output` correlation, including any
+  encrypted reasoning items required by the selected reasoning model
+  ([conversation state](https://developers.openai.com/api/docs/guides/conversation-state),
+  [function calling](https://developers.openai.com/api/docs/guides/function-calling)).
+  Anthropic requires the prior assistant `tool_use` block followed immediately
+  by a user `tool_result` block with matching id
+  ([tool-use flow](https://platform.claude.com/docs/en/agents-and-tools/tool-use/how-tool-use-works),
+  [tool-result handling](https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls)).
+  Zephium therefore keeps remote storage disabled and continues to require a
+  fresh full observation until fixed provider codecs consume the bound value;
+  no raw provider response is logged or persisted.
 - The native-to-isolated-world request is a separate 2 KiB maximum closed JSON
   grammar containing only protocol/invocation/snapshot generations, one fixed
   initial/region/subtree/table/frame/surrounding-text scope, an internal stable
@@ -339,9 +376,15 @@ escaping, current frame freshness, byte refusal without partial output,
 exact/estimated quality and revision admission, the 200-token target gate,
 commit-only next-baseline acknowledgement, exact baseline/current payload and
 receipt substitution refusal even when public coordinates match, and
-fresh-snapshot fallback without leaked page content. Runtime-invocation tests
-cover the sole compact initial
-shape, absence of URLs/selectors/scripts, stable-anchor diagnostic redaction,
+fresh-snapshot fallback without leaked page content. Provider-continuation
+coverage proves commit-only seed construction, destruction on non-tool or
+mixed-output terminals, exact tool-only one-tool transport retention,
+mandatory pricing settlement, same-call/provider-shape joins for both
+providers, cross-response substitution refusal, exact
+lineage/baseline/payload binding, bounded identity refusal, single-copy
+argument ownership, and content-free diagnostics. Runtime-invocation tests
+cover the sole compact initial shape, absence of URLs/selectors/scripts,
+stable-anchor diagnostic redaction,
 aggregate/per-frame budgets, exact anchor frame and generation joins, hostile
 invocation substitution, fixed faults, unknown-fault rejection, and response
 wire limits. Program gates additionally pin exact source bytes and digest,
@@ -372,10 +415,12 @@ rather than silently widening the hostile wire schema.
 
 1. pin the first OpenAI and Anthropic proof model/tokenizer revisions, implement
    their trusted counters, and record actual fixture token/latency measurements;
-2. record actual fixture action-diff token/latency distributions for the pinned
-   proof models/tokenizers and bind exact diffs to a bounded provider
-   continuation/tool-result contract. A stateless standalone diff is forbidden
-   because it omits the model's acknowledged baseline;
+2. implement and qualify the fixed OpenAI stateless output-item/function-result
+   replay and Anthropic assistant-tool-use/user-tool-result encoders that consume
+   the provider-neutral bound continuation, then record actual fixture
+   action-diff token/latency distributions for the pinned proof
+   models/tokenizers. A standalone diff and remote stored conversation remain
+   forbidden;
 3. execute the fixed native qualifier with separate authorization, then extend
    live-engine hostile coverage for stale nodes, mutation pressure, and timing
    races beyond its current page-world bridge, prototype collision, frame

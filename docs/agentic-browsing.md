@@ -580,8 +580,16 @@ A compact diff is never sent as a standalone stateless provider turn because
 the model would not have the acknowledged baseline it modifies. Provider diff
 delivery requires a separate bounded continuation/tool-result contract that
 retains exact prior-turn correlation without logging or persisting provider
-responses. Until that contract is implemented and qualified, the provider
-adapter sends a fresh full observation.
+responses. The provider-neutral one-shot seam retains only an exact committed
+baseline, fixed provider/model/tokenizer/pricing configuration, exact
+model-call lineage, and the bounded terminal tool correlation; failures,
+cancellation, non-tool stops, mixed text/reasoning output, and multi-tool stops
+destroy it. It can bind only a strictly newer same-plan call and the exact
+token-admitted diff extending that baseline. Provider-specific stateless
+transcript codecs must still encode the required prior assistant output and
+fixed tool result without enabling remote storage or generic payloads. Until
+those codecs are implemented and qualified, the provider adapter sends a fresh
+full observation.
 
 This is intentionally stricter than assuming an errored `send` transmitted no
 bytes.

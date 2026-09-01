@@ -555,9 +555,14 @@ impl OpenAiResponsesStreamDecoder {
             return Err(AgentProviderProtocolError::Sequence);
         }
         let guard: [u8; 32] = Sha256::digest(arguments.as_bytes()).into();
-        let call =
-            AgentBrowserToolCall::decode(tool.call_id.clone(), tool.name.as_str(), &arguments)
-                .map_err(|_| AgentProviderProtocolError::ToolCall)?;
+        let call = AgentBrowserToolCall::decode_openai(
+            self.call,
+            tool.item_id.clone(),
+            tool.call_id.clone(),
+            tool.name.as_str(),
+            arguments,
+        )
+        .map_err(|_| AgentProviderProtocolError::ToolCall)?;
         tool.argument_guard = Some(guard);
         output.push(AgentProviderStreamEvent::ToolCall(call));
         Ok(())
@@ -590,6 +595,9 @@ impl OpenAiResponsesStreamDecoder {
         if !output_kind.matches_state(&self.output) {
             return Err(AgentProviderProtocolError::Sequence);
         }
+        let tool_only_output = !self.tools.is_empty()
+            && event.response.output.len() == self.tools.len()
+            && output_kind == TerminalOutputKind::None;
         let usage = event
             .response
             .usage
@@ -615,7 +623,7 @@ impl OpenAiResponsesStreamDecoder {
         };
         let stats = self.stats();
         self.conclusion = Some(AgentProviderStreamConclusion::Completed(
-            AgentProviderCompletion::new(self.call, stop, usage, stats),
+            AgentProviderCompletion::new(self.call, stop, usage, stats, tool_only_output),
         ));
         self.phase = StreamPhase::Terminal;
         Ok(())
@@ -1163,6 +1171,7 @@ mod tests {
             panic!("expected completion");
         };
         assert_eq!(completion.stop(), AgentProviderStopReason::Completed);
+        assert!(!completion.tool_only_output());
         assert_eq!(completion.usage().total_tokens(), 20);
         assert_eq!(completion.usage().cached_input_tokens(), 4);
         assert_eq!(completion.stats().output_text_bytes(), 11);
@@ -1333,6 +1342,7 @@ mod tests {
             panic!("completed tool response");
         };
         assert_eq!(completion.stop(), AgentProviderStopReason::ToolCalls);
+        assert!(completion.tool_only_output());
         assert_eq!(completion.stats().tool_calls(), 1);
         assert_eq!(
             completion.stats().tool_argument_bytes(),
