@@ -3087,8 +3087,10 @@ fn validate_semantic_terminal_verification(
         "verified:SemanticVerifiedAction",
         "pubstructSemanticActionVerificationRefusal{",
         "terminal:Box<SemanticActionSettlementTerminal>",
+        "observed_at:SemanticSettleInstant",
         "pubfnverify_semantic_action_terminal(",
         "terminal:SemanticActionSettlementTerminal",
+        "letobserved_at=evidence.observed_at();",
         "letverified=matchverify_semantic_action(terminal.tracker(),action,evidence)",
         "let(active,execution,settlement)=terminal.into_parts();",
         "pub(crate)fnverify_semantic_action(",
@@ -3140,6 +3142,8 @@ fn validate_semantic_terminal_verification(
         "self.settle_verified_semantic_effect(active,action,&verified)?",
         "pubfnsettle_refused_semantic_terminal(",
         "refusal:SemanticActionVerificationRefusal",
+        "let(active,execution,settlement,verification_observed_at,verification_error)=refusal.into_parts();",
+        "verification_observed_at:SemanticSettleInstant",
         "verification_error.action_failure()",
         "pub(crate)fnsettle_verified_semantic_effect(",
     ] {
@@ -3281,6 +3285,8 @@ fn validate_accounted_action_result(
         "settlement_event_count:u16",
         "settlement_elapsed_millis:u64",
         "settlement_terminal_at:SemanticSettleInstant",
+        "verification_observed_at:Option<SemanticSettleInstant>",
+        "pubconstfnverification_observed_at(self)->Option<SemanticSettleInstant>",
         "pubconstMAX_SEMANTIC_ACTION_BATCH_COMPLETION_BYTES:usize=512;",
         "size_of::<SemanticActionBatchCompletion>()<=MAX_SEMANTIC_ACTION_BATCH_COMPLETION_BYTES",
         "pubconstMAX_SEMANTIC_ACTION_BATCH_FAILURE_BYTES:usize=512;",
@@ -4741,6 +4747,7 @@ mod tests {
             }
             pub struct SemanticActionVerificationRefusal {
                 terminal: Box<SemanticActionSettlementTerminal>,
+                observed_at: SemanticSettleInstant,
             }
             impl SemanticActionVerificationRefusal {
                 pub(crate) fn into_parts(self) {}
@@ -4750,6 +4757,7 @@ mod tests {
                 action: &SemanticPreparedAction,
                 evidence: SemanticEffectEvidence<'_>,
             ) {
+                let observed_at = evidence.observed_at();
                 let verified = match verify_semantic_action(terminal.tracker(), action, evidence) {};
                 let (active, execution, settlement) = terminal.into_parts();
             }
@@ -4764,6 +4772,9 @@ mod tests {
             pub struct AgentFailedSemanticEffect {
                 receipt: AgentEffectReceipt,
             }
+            struct AgentFailedSemanticEffectEvidence {
+                verification_observed_at: SemanticSettleInstant,
+            }
             pub fn settle_verified_semantic_terminal(
                 &mut self,
                 terminal: SemanticActionVerifiedTerminal,
@@ -4776,6 +4787,8 @@ mod tests {
                 &mut self,
                 refusal: SemanticActionVerificationRefusal,
             ) {
+                let (active, execution, settlement, verification_observed_at, verification_error) =
+                    refusal.into_parts();
                 verification_error.action_failure();
             }
             pub(crate) fn settle_verified_semantic_effect() {}
@@ -4923,7 +4936,12 @@ mod tests {
                 std::mem::size_of::<SemanticActionBatchCompletion>()
                     <= MAX_SEMANTIC_ACTION_BATCH_COMPLETION_BYTES
             );
-            pub struct SemanticActionBatchFailure {}
+            pub struct SemanticActionBatchFailure {
+                verification_observed_at: Option<SemanticSettleInstant>,
+            }
+            impl SemanticActionBatchFailure {
+                pub const fn verification_observed_at(self) -> Option<SemanticSettleInstant> {}
+            }
             const _: () = assert!(
                 std::mem::size_of::<SemanticActionBatchFailure>()
                     <= MAX_SEMANTIC_ACTION_BATCH_FAILURE_BYTES

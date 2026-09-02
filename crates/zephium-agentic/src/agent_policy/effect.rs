@@ -17,8 +17,8 @@ use crate::{
     SemanticActionExecutionCoordinatorRefusal, SemanticActionFailure,
     SemanticActionSettlementAdmissionRefusal, SemanticActionSettlementRefusal,
     SemanticActionVerificationRefusal, SemanticActionVerifiedTerminal, SemanticEffectProofKind,
-    SemanticPreparedAction, SemanticSettleTracker, SemanticVerificationError,
-    SemanticVerifiedAction,
+    SemanticPreparedAction, SemanticSettleInstant, SemanticSettleTracker,
+    SemanticVerificationError, SemanticVerifiedAction,
 };
 
 /// Maximum prepared or dispatched semantic effects in one run policy.
@@ -766,9 +766,17 @@ enum AgentFailedSemanticEffectEvidence {
     AfterExecution {
         execution: SemanticActionExecutionApplied,
         settlement: SemanticSettleTracker,
+        verification_observed_at: SemanticSettleInstant,
         verification_error: SemanticVerificationError,
     },
 }
+
+type AgentFailedSemanticEffectEvidenceParts = (
+    SemanticActionExecutionApplied,
+    SemanticSettleTracker,
+    SemanticSettleInstant,
+    SemanticVerificationError,
+);
 
 /// Policy-accounted semantic action failure with optional terminal metrics.
 ///
@@ -816,6 +824,16 @@ impl AgentFailedSemanticEffect {
         })
     }
 
+    /// Monotonic instant carried by the consumed independent proof attempt.
+    pub fn verification_observed_at(&self) -> Option<SemanticSettleInstant> {
+        self.evidence.as_deref().map(|evidence| match evidence {
+            AgentFailedSemanticEffectEvidence::AfterExecution {
+                verification_observed_at,
+                ..
+            } => *verification_observed_at,
+        })
+    }
+
     pub(crate) fn matches_action(&self, action: &SemanticPreparedAction) -> bool {
         self.receipt.matches_action(action)
     }
@@ -825,18 +843,20 @@ impl AgentFailedSemanticEffect {
     ) -> (
         AgentEffectReceipt,
         SemanticActionFailure,
-        Option<(
-            SemanticActionExecutionApplied,
-            SemanticSettleTracker,
-            SemanticVerificationError,
-        )>,
+        Option<AgentFailedSemanticEffectEvidenceParts>,
     ) {
         let evidence = self.evidence.map(|evidence| match *evidence {
             AgentFailedSemanticEffectEvidence::AfterExecution {
                 execution,
                 settlement,
+                verification_observed_at,
                 verification_error,
-            } => (execution, settlement, verification_error),
+            } => (
+                execution,
+                settlement,
+                verification_observed_at,
+                verification_error,
+            ),
         });
         (self.receipt, self.failure, evidence)
     }
@@ -1199,7 +1219,8 @@ impl AgentRunPolicy {
         &mut self,
         refusal: SemanticActionVerificationRefusal,
     ) -> Result<AgentFailedSemanticEffect, AgentPolicyError> {
-        let (active, execution, settlement, verification_error) = refusal.into_parts();
+        let (active, execution, settlement, verification_observed_at, verification_error) =
+            refusal.into_parts();
         let failure = verification_error.action_failure();
         let receipt =
             self.settle_semantic_effect(active, AgentEffectSettlement::Failed(failure))?;
@@ -1210,6 +1231,7 @@ impl AgentRunPolicy {
                 AgentFailedSemanticEffectEvidence::AfterExecution {
                     execution,
                     settlement,
+                    verification_observed_at,
                     verification_error,
                 },
             )),

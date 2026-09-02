@@ -172,9 +172,11 @@ are trusted, or that M4 is complete.
   refused proof opportunity. Success retains policy authority, content-free
   execution attribution, terminal settlement, and the opaque proof in one
   non-cloneable owner. Refusal consumes the terminal and returns the same
-  authority, execution/settlement metrics, and closed verification error for
-  one typed failed policy settlement. Borrowed snapshot/text evidence is never
-  retained, and neither path owns a timer, task, queue, callback, or retry.
+  authority, execution/settlement metrics, trusted monotonic proof-observation
+  instant, and closed verification error for one typed failed policy
+  settlement. The clock survives batch terminalization for qualification;
+  borrowed snapshot/text evidence is never retained, and neither path owns a
+  timer, task, queue, callback, or retry.
 - Run policy consumes the joined verified or refused terminal directly. The
   raw “active authority plus borrowed proof” settlement method is crate-private.
   Verified charging returns an immutable effect receipt still joined to

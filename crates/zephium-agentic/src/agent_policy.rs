@@ -5977,6 +5977,13 @@ mod tests {
             Some(crate::SemanticVerificationError::EvidenceKindMismatch)
         );
         assert_eq!(
+            failed
+                .verification_observed_at()
+                .expect("verification observation")
+                .millis(),
+            NOW + 1
+        );
+        assert_eq!(
             failed.settlement().expect("failed settlement").attempt(),
             failed_attempt
         );
@@ -6004,6 +6011,13 @@ mod tests {
         assert_eq!(
             failed_summary.verification_error(),
             Some(crate::SemanticVerificationError::EvidenceKindMismatch)
+        );
+        assert_eq!(
+            failed_summary
+                .verification_observed_at()
+                .expect("verification observation")
+                .millis(),
+            NOW + 1
         );
         assert!(!format!("{failed_batch:?}").contains("Save draft"));
         assert_eq!(fixture.policy.accounting().consumed_operations(), 3);

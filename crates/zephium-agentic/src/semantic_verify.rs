@@ -454,6 +454,7 @@ impl fmt::Debug for SemanticActionVerifiedTerminal {
 #[must_use]
 pub struct SemanticActionVerificationRefusal {
     terminal: Box<SemanticActionSettlementTerminal>,
+    observed_at: SemanticSettleInstant,
     error: SemanticVerificationError,
 }
 
@@ -463,16 +464,22 @@ impl SemanticActionVerificationRefusal {
         self.error
     }
 
+    /// Monotonic instant carried by the consumed independent proof attempt.
+    pub const fn observed_at(&self) -> SemanticSettleInstant {
+        self.observed_at
+    }
+
     pub(crate) fn into_parts(
         self,
     ) -> (
         AgentActiveEffect,
         SemanticActionExecutionApplied,
         SemanticSettleTracker,
+        SemanticSettleInstant,
         SemanticVerificationError,
     ) {
         let (active, execution, settlement) = self.terminal.into_parts();
-        (active, execution, settlement, self.error)
+        (active, execution, settlement, self.observed_at, self.error)
     }
 }
 
@@ -481,6 +488,7 @@ impl fmt::Debug for SemanticActionVerificationRefusal {
         formatter
             .debug_struct("SemanticActionVerificationRefusal")
             .field("terminal", &"[redacted]")
+            .field("observed_at", &self.observed_at)
             .field("error", &self.error)
             .finish()
     }
@@ -496,11 +504,13 @@ pub fn verify_semantic_action_terminal(
     action: &SemanticPreparedAction,
     evidence: SemanticEffectEvidence<'_>,
 ) -> Result<SemanticActionVerifiedTerminal, SemanticActionVerificationRefusal> {
+    let observed_at = evidence.observed_at();
     let verified = match verify_semantic_action(terminal.tracker(), action, evidence) {
         Ok(verified) => verified,
         Err(error) => {
             return Err(SemanticActionVerificationRefusal {
                 terminal: Box::new(terminal),
+                observed_at,
                 error,
             });
         }
@@ -1008,10 +1018,12 @@ mod tests {
             refusal.error(),
             SemanticVerificationError::OutcomeNotObserved
         );
+        assert_eq!(refusal.observed_at().millis(), 101);
         assert!(!format!("{refusal:?}").contains("wrong private title"));
-        let (active, _execution, settlement, error) = refusal.into_parts();
+        let (active, _execution, settlement, observed_at, error) = refusal.into_parts();
         assert_eq!(active.attempt().get(), 22);
         assert_eq!(settlement.attempt().get(), 22);
+        assert_eq!(observed_at.millis(), 101);
         assert_eq!(
             error.action_failure(),
             SemanticActionFailure::VerificationFailed

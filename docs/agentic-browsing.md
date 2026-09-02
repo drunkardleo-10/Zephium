@@ -572,9 +572,11 @@ Independent verification consumes that terminal owner and one borrowed
 evidence value exactly once. The raw tracker verifier is crate-private. Success
 keeps the exact policy authority, execution attribution, terminal settlement,
 and opaque proof together; refusal destroys the proof opportunity and returns
-the same authority plus a closed verification error for one failed policy
-settlement. Neither path retains borrowed evidence or creates a verification
-retry.
+the same authority plus the trusted monotonic observation instant and a closed
+verification error for one failed policy settlement. That content-free clock
+flows through batch terminalization so qualification can measure failed proof
+attempts without inventing a completion time. Neither path retains borrowed
+evidence or creates a verification retry.
 
 Policy accounting then consumes the joined verified or refused terminal rather
 than accepting separately supplied authority and proof. A verified charge

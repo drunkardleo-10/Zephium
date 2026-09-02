@@ -165,6 +165,7 @@ pub struct SemanticActionBatchFailure {
     settlement_event_count: Option<u16>,
     settlement_elapsed_millis: Option<u64>,
     settlement_terminal_at: Option<SemanticSettleInstant>,
+    verification_observed_at: Option<SemanticSettleInstant>,
     verification_error: Option<SemanticVerificationError>,
 }
 
@@ -197,6 +198,11 @@ impl SemanticActionBatchFailure {
     /// Exact content-free terminal settlement instant, when settlement existed.
     pub const fn settlement_terminal_at(self) -> Option<SemanticSettleInstant> {
         self.settlement_terminal_at
+    }
+
+    /// Monotonic instant carried by a refused independent proof attempt.
+    pub const fn verification_observed_at(self) -> Option<SemanticSettleInstant> {
+        self.verification_observed_at
     }
 
     /// Closed verification refusal, when independent verification was reached.
@@ -617,15 +623,18 @@ impl SemanticActionBatchExecution {
         let ordinal = action.ordinal();
         let (receipt, failure, evidence) = failed.into_parts();
         let failure_summary = match evidence {
-            Some((execution, settlement, verification_error)) => SemanticActionBatchFailure {
-                receipt,
-                stage: SemanticActionBatchFailureStage::AfterExecution,
-                execution: Some(execution),
-                settlement_event_count: Some(settlement.event_count()),
-                settlement_elapsed_millis: settlement.elapsed_millis(),
-                settlement_terminal_at: settlement.terminal_at(),
-                verification_error: Some(verification_error),
-            },
+            Some((execution, settlement, verification_observed_at, verification_error)) => {
+                SemanticActionBatchFailure {
+                    receipt,
+                    stage: SemanticActionBatchFailureStage::AfterExecution,
+                    execution: Some(execution),
+                    settlement_event_count: Some(settlement.event_count()),
+                    settlement_elapsed_millis: settlement.elapsed_millis(),
+                    settlement_terminal_at: settlement.terminal_at(),
+                    verification_observed_at: Some(verification_observed_at),
+                    verification_error: Some(verification_error),
+                }
+            }
             None => SemanticActionBatchFailure {
                 receipt,
                 stage: SemanticActionBatchFailureStage::BeforeVerification,
@@ -633,6 +642,7 @@ impl SemanticActionBatchExecution {
                 settlement_event_count: None,
                 settlement_elapsed_millis: None,
                 settlement_terminal_at: None,
+                verification_observed_at: None,
                 verification_error: None,
             },
         };
@@ -673,10 +683,16 @@ impl SemanticActionBatchExecution {
         match (
             failed.execution(),
             failed.settlement(),
+            failed.verification_observed_at(),
             failed.verification_error(),
         ) {
-            (None, None, None) => Ok(()),
-            (Some(execution), Some(settlement), Some(verification_error)) => {
+            (None, None, None, None) => Ok(()),
+            (
+                Some(execution),
+                Some(settlement),
+                Some(verification_observed_at),
+                Some(verification_error),
+            ) => {
                 let Some(terminal_at) = settlement.terminal_at() else {
                     return Err(SemanticActionBatchExecutionError::AccountingMismatch);
                 };
@@ -687,6 +703,12 @@ impl SemanticActionBatchExecution {
                     || !settlement.matches_action(action)
                     || !settlement.status().is_terminal()
                     || verification_error.action_failure() != failure
+                    || !verification_clock_matches(
+                        verification_error,
+                        verification_observed_at,
+                        terminal_at,
+                        settlement.deadline(),
+                    )
                     || terminal_at.millis().checked_sub(elapsed_millis)
                         != Some(execution.settle_started_at().millis())
                 {
@@ -696,6 +718,19 @@ impl SemanticActionBatchExecution {
             }
             _ => Err(SemanticActionBatchExecutionError::AccountingMismatch),
         }
+    }
+}
+
+fn verification_clock_matches(
+    error: SemanticVerificationError,
+    observed_at: SemanticSettleInstant,
+    terminal_at: SemanticSettleInstant,
+    deadline: SemanticSettleInstant,
+) -> bool {
+    match error {
+        SemanticVerificationError::EvidenceBeforeSettlement => observed_at < terminal_at,
+        SemanticVerificationError::EvidenceAfterDeadline => observed_at > deadline,
+        _ => observed_at >= terminal_at && observed_at <= deadline,
     }
 }
 
