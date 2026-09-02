@@ -719,6 +719,14 @@ impl EngineHost {
             self.settle_agent_context_audit(task, audit);
             return;
         }
+        // Cookie admission remains mechanically closed until the Windows
+        // profile-scoped transaction owner is installed. Keep the exact
+        // request/deadline anchor observable here so a future port promotion
+        // cannot fall through to an unrelated native-request refusal path.
+        if task.cookie().is_some() {
+            task.refuse(ContextPortFailure::Unsupported);
+            return;
+        }
         #[cfg(target_os = "macos")]
         if task.is_semantic() {
             self.start_owned_agent_semantic_invocation(task);

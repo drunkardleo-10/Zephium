@@ -165,7 +165,10 @@ It cannot accept a free scope or native deadline: both are derived from the
 exact correlated request, with its functional duration anchored to the
 port-admission `Instant`. Queue time therefore consumes the same terminal
 window, and clock regression or an already elapsed interval refuses before
-enumeration.
+enumeration. The move-only native task captures that anchor only after its
+bounded port permit is acquired and retains it beside the exact request across
+main-thread queueing. The public cookie capability remains false until the
+profile-scoped host transaction is installed.
 Microsoft documents that cookie-manager changes
 apply to the user-profile context, `GetCookies` is URI-scoped, and
 `AddOrUpdateCookie` applies a native cookie; the native cookie object exposes

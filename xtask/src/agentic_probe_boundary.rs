@@ -740,6 +740,9 @@ fn validate_engine_agent_context_boundary(
         "ContextOperationKind::Recover",
         "ContextOperationKind::Close",
         "constfnsupports_cookie_transfer()->bool{false}",
+        "admitted_at:std::time::Instant",
+        "pub(crate)fncookie(&self)->Option<(&ContextCookieTransferRequest,std::time::Instant)>",
+        "Some(AgentPendingRequest::Cookie(request))=>Some((request,self.admitted_at))",
         "pub(crate)structAgentContextPortSlot",
         "catch_unwind",
         "fnemit_renderer_lost",
@@ -9124,6 +9127,13 @@ mod tests {
             ContextOperationKind::Recover;
             ContextOperationKind::Close;
             const fn supports_cookie_transfer() -> bool { false }
+            admitted_at: std::time::Instant,
+            pub(crate) fn cookie(&self) -> Option<(&ContextCookieTransferRequest, std::time::Instant)> {
+                match self.request.as_ref() {
+                    Some(AgentPendingRequest::Cookie(request)) => Some((request, self.admitted_at)),
+                    _ => None,
+                }
+            }
             pub(crate) struct AgentContextPortSlot;
             catch_unwind();
             fn emit_renderer_lost() {}
@@ -9183,6 +9193,15 @@ mod tests {
             engine,
             host_root,
             &format!("{port}\nevaluate_script();"),
+            host,
+            macos,
+            navigation,
+        )
+        .is_err());
+        assert!(validate_engine_agent_context_boundary(
+            engine,
+            host_root,
+            &port.replace("admitted_at: std::time::Instant,", ""),
             host,
             macos,
             navigation,

@@ -398,6 +398,7 @@ struct AgentPendingSemantic {
 
 pub(crate) struct AgentContextTask {
     request: Option<AgentPendingRequest>,
+    admitted_at: std::time::Instant,
     permit: AgentTaskPermit,
     sink: AgentContextEventSink,
 }
@@ -506,6 +507,7 @@ impl AgentContextTask {
     ) -> Self {
         Self {
             request: Some(request),
+            admitted_at: std::time::Instant::now(),
             permit,
             sink,
         }
@@ -523,6 +525,14 @@ impl AgentContextTask {
             Some(AgentPendingRequest::Audit(audit) | AgentPendingRequest::ShutdownAudit(audit)) => {
                 Some(*audit)
             }
+            _ => None,
+        }
+    }
+
+    /// Exact cookie request and native-clock anchor captured after admission.
+    pub(crate) fn cookie(&self) -> Option<(&ContextCookieTransferRequest, std::time::Instant)> {
+        match self.request.as_ref() {
+            Some(AgentPendingRequest::Cookie(request)) => Some((request, self.admitted_at)),
             _ => None,
         }
     }
@@ -1135,7 +1145,9 @@ mod tests {
     use zephium_agentic::{
         decode_semantic_snapshot, encode_semantic_observation, encode_semantic_runtime_invocation,
         prepare_semantic_screenshot, ContextCapabilities, ContextCapability,
-        ContextConstructionRequest, ContextConstructionSource, ContextId, ContextIdentity,
+        ContextConstructionProof, ContextConstructionRequest, ContextConstructionSource,
+        ContextCookieOrigin, ContextCookieScope, ContextCookieTransferId,
+        ContextCookieTransferInstant, ContextCookieTransferWindow, ContextId, ContextIdentity,
         ContextKind, ContextOperationId, ContextProfileLeaseId, ContextProfileLeasePurpose,
         ContextProfileLeaseRegistry, ContextProfileStorageClass, ContextRegistry, ContextRunId,
         ContextSettlement, FrameId, SemanticCaptureInstant, SemanticDecodeContext,
@@ -1187,6 +1199,56 @@ mod tests {
             )
             .expect("request"),
         )
+    }
+
+    fn cookie_request() -> ContextCookieTransferRequest {
+        let identity = ContextIdentity::new(
+            ContextId::generate(),
+            ContextRunId::generate(),
+            ProfileId::generate(),
+            ContextKind::Owned,
+        );
+        let capabilities =
+            ContextCapabilities::try_new(ContextKind::Owned, &[ContextCapability::ImportCookies])
+                .expect("capabilities");
+        let mut registry = ContextRegistry::new();
+        registry.reserve(identity, capabilities).expect("reserve");
+        let construction = registry
+            .begin_context(
+                identity.id(),
+                ContextOperationId::new(1).expect("operation"),
+            )
+            .expect("construction");
+        registry
+            .settle_construction(identity.id(), construction, ContextSettlement::Applied)
+            .expect("settlement");
+        let destination = registry.join(identity.id()).expect("join");
+        let lease = ContextProfileLeaseRegistry::new()
+            .acquire(
+                ContextProfileLeaseId::new(1).expect("lease"),
+                identity,
+                ContextProfileStorageClass::Durable,
+                ContextProfileLeasePurpose::Owned,
+            )
+            .expect("profile lease");
+        ContextCookieTransferRequest::selected_profile_to_owned(
+            ContextCookieTransferId::new(1).expect("transfer"),
+            ContextCookieTransferWindow::try_new(
+                ContextCookieTransferInstant::from_millis(1_000),
+                ContextCookieTransferInstant::from_millis(31_000),
+            )
+            .expect("window"),
+            destination,
+            capabilities,
+            lease,
+            ContextConstructionProof::WindowsOwnedAutomationSubprofileEmptyInventory,
+            ContextCookieScope::try_new(vec![ContextCookieOrigin::parse(
+                "https://port.example.test/private",
+            )
+            .expect("origin")])
+            .expect("scope"),
+        )
+        .expect("cookie request")
     }
 
     fn semantic_invocation(frame_id: FrameId) -> SemanticRuntimeInvocation {
@@ -1406,6 +1468,37 @@ mod tests {
         let sealed = AgentContextPortSlot::new(Arc::new(|_| false), Arc::new(|_| {}));
         sealed.seal();
         assert!(sealed.take(Arc::new(|_| {})).is_none());
+    }
+
+    #[test]
+    fn cookie_task_retains_exact_request_and_post_admission_native_anchor() {
+        let request = cookie_request();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = events.clone();
+        let admission = Arc::new(AgentPortAdmission::new(Arc::new(|_| {})));
+        let permit = admission.reserve().expect("permit");
+        let before = std::time::Instant::now();
+        let task = AgentContextTask::new(
+            AgentPendingRequest::Cookie(request.clone()),
+            permit,
+            Arc::new(move |event| captured.lock().expect("events").push(event)),
+        );
+        let after = std::time::Instant::now();
+        let (retained, admitted_at) = task.cookie().expect("cookie task");
+        assert_eq!(retained, &request);
+        assert!(admitted_at >= before && admitted_at <= after);
+        task.refuse(ContextPortFailure::Cancelled);
+        assert_eq!(admission.pending(), Some(0));
+        let events = events.lock().expect("events");
+        assert!(matches!(
+            events.as_slice(),
+            [ContextNativeEvent::CookieTransferSettled(settlement)]
+                if settlement.request() == &request
+                    && settlement.outcome()
+                        == ContextCookieTransferOutcome::Refused(
+                            ContextCookieTransferFailure::Cancelled,
+                        )
+        ));
     }
 
     #[test]
