@@ -119,8 +119,28 @@ committed result does not authorize future native execution.
 
 The Windows adapter can be compile-qualified from another host, but only a
 physical Windows run is behavioral evidence. On an authorized named Windows
-device, create the ignored local evidence directory and run these exact closed
-modes in order:
+device, the preferred non-focused workflow is the checked-in fail-closed
+orchestrator:
+
+```powershell
+.\scripts\qualification\windows-agentic.ps1 `
+  -Phase CollectNonDebugger -AuthorizedPhysicalWindows
+```
+
+The acknowledgement is not authorization by itself; use it only after the
+physical device and this exact run have been approved. The script refuses a
+non-Windows or non-x86-64-MSVC host, a dirty or different checkout, a
+reparse-point evidence directory, and any pre-existing directory entry. It
+records the exact clean Git revision in a create-new ignored source stamp, runs
+the native compile/link gates, captures the four non-focused input modes and
+six non-debugger semantic modes, reviews the input cohort, and rebuilds the
+exact debugger target. It has no focused-input invocation and cannot launch
+the debugger-only mode.
+
+The equivalent transparent commands follow. They remain the command-level
+review authority and may be run manually when the same clean-checkout,
+create-new, and source-continuity conditions are independently enforced. Create
+the ignored local evidence directory and run these exact closed modes in order:
 
 ```powershell
 New-Item -ItemType Directory -Force `
@@ -268,6 +288,16 @@ and keep it attached until process exit:
 ```text
 --ci-hidden-debugger-coexistence --evidence-directory eval/agentic-browsing/local-results
 ```
+
+After that process exits, the preferred final review is:
+
+```powershell
+.\scripts\qualification\windows-agentic.ps1 -Phase ReviewAfterDebugger
+```
+
+This phase refuses source-revision drift, missing or reparse records, and every
+directory entry other than the exact source stamp, four input records, input
+summary, and seven semantic records before creating the semantic summary.
 
 The debugger mode fails before native construction if no debugger is attached;
 all other modes fail before construction if one is attached. The suspension

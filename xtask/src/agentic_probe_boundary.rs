@@ -161,6 +161,7 @@ const ENGINE_WINDOWS_PROBE_BINARY: &str =
 const ENGINE_WINDOWS_SEMANTIC_PROBE_BINARY: &str =
     "crates/zephium-engine/src/bin/windows_agentic_semantic_probe.rs";
 const CI_WORKFLOW: &str = ".github/workflows/ci.yml";
+const WINDOWS_AGENTIC_QUALIFICATION_SCRIPT: &str = "scripts/qualification/windows-agentic.ps1";
 const AGENTIC_SOURCE_DIRECTORY: &str = "crates/zephium-agentic/src";
 const AGENTIC_DIAGNOSTIC_MODULES: [&str; 11] = [
     "contract.rs",
@@ -493,6 +494,9 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         &read(repository.join(AGENTIC_PROBE_QUALIFICATION))?,
     )?;
     validate_windows_probe_ci(&read(repository.join(CI_WORKFLOW))?)?;
+    validate_windows_physical_workflow(&read(
+        repository.join(WINDOWS_AGENTIC_QUALIFICATION_SCRIPT),
+    )?)?;
     validate_windows_probe_source(&read(repository.join(ENGINE_WINDOWS_PROBE_MODULE))?)?;
     validate_agentic_zero_idle_sources(repository)?;
     validate_shipping_sources(repository)?;
@@ -2608,6 +2612,99 @@ fn validate_windows_probe_ci(source: &str) -> Result<(), String> {
         if !source.contains(required) {
             return Err(format!(
                 "Windows native-input CI lost required native compile gate {required}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_windows_physical_workflow(source: &str) -> Result<(), String> {
+    let compact = compact(source);
+    for required in [
+        "[ValidateSet(\"CollectNonDebugger\",\"ReviewAfterDebugger\")]",
+        "[switch]$AuthorizedPhysicalWindows",
+        "if(-not$AuthorizedPhysicalWindows.IsPresent)",
+        "[System.Environment]::OSVersion.Platform-ne[System.PlatformID]::Win32NT",
+        "[System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture-ne[System.Runtime.InteropServices.Architecture]::X64",
+        "$rustcVersion=@(&rustc-vV)",
+        "$rustcVersion-ccontains\"host:x86_64-pc-windows-msvc\"",
+        "status--porcelain=v1--untracked-files=all",
+        "rev-parse--verifyHEAD",
+        "if($revision-cnotmatch'^[0-9a-f]{40}$')",
+        "$sourceStampName=\"windows-qualification-source-v1.txt\"",
+        "[System.IO.FileMode]::CreateNew",
+        "$stream.Flush($true)",
+        "Assert-DirectDirectory-Path$evidenceDirectory-Create$true",
+        "Assert-ExactDirectoryEntries-Directory$evidenceDirectory-ExpectedNames@()",
+        "Assert-ExactDirectoryEntries-Directory$evidenceDirectory-ExpectedNames$expectedBeforeDebugger",
+        "if($recordedRevision-cne$sourceRevision)",
+        "Assert-ExactDirectoryEntries-Directory$evidenceDirectory-ExpectedNames$expectedBeforeReview",
+        "Assert-ExactDirectoryEntries-Directory$evidenceDirectory-ExpectedNames$expectedAfterReview",
+        "Invoke-Cargo-Arguments@(\"check\",\"--locked\",\"-p\",\"zephium-engine\",\"--features\",\"agentic-browser\")",
+        "Invoke-Cargo-Arguments@(\"clippy\",\"--locked\",\"-p\",\"zephium-engine\",\"--features\",\"native-agentic-input-probe\",\"--bin\",\"windows-agentic-input-probe\")",
+        "Invoke-Cargo-Arguments@(\"build\",\"--locked\",\"-p\",\"zephium-engine\",\"--features\",\"native-agentic-input-probe\",\"--bin\",\"windows-agentic-input-probe\")",
+        "Invoke-Cargo-Arguments@(\"clippy\",\"--locked\",\"-p\",\"zephium-engine\",\"--features\",\"native-agentic-semantic-probe\",\"--bin\",\"windows-agentic-semantic-probe\")",
+        "Invoke-Cargo-Arguments@(\"build\",\"--locked\",\"-p\",\"zephium-engine\",\"--features\",\"native-agentic-semantic-probe\",\"--bin\",\"windows-agentic-semantic-probe\")",
+        "\"--ci-hidden-debugger-coexistence--evidence-directoryeval/agentic-browsing/local-results\"",
+    ] {
+        if !compact.contains(required) {
+            return Err(format!(
+                "physical Windows qualification workflow lost fail-closed requirement {required}"
+            ));
+        }
+    }
+
+    for exact_once in [
+        "--ci-hidden-fixed-dom",
+        "--ci-hidden-hwnd",
+        "--ci-hidden-cdp",
+        "--visible-background-windows-all",
+        "--ci-hidden-fixed-documents",
+        "--ci-hidden-redirect-lifecycle",
+        "--ci-hidden-location-replacement",
+        "--ci-hidden-suspend-resume",
+        "--ci-hidden-event-flood",
+        "--ci-hidden-renderer-loss",
+        "--ci-hidden-debugger-coexistence",
+        "windows-hidden-fixed-dom.jsonl",
+        "windows-hidden-hwnd.jsonl",
+        "windows-hidden-cdp.jsonl",
+        "windows-visible-background-all.jsonl",
+        "windows-semantic-fixed-documents.jsonl",
+        "windows-semantic-redirect-lifecycle.jsonl",
+        "windows-semantic-location-replacement.jsonl",
+        "windows-semantic-suspend-resume.jsonl",
+        "windows-semantic-event-flood.jsonl",
+        "windows-semantic-renderer-loss.jsonl",
+        "windows-semantic-debugger-coexistence.jsonl",
+        "windows-review-summary-v2.json",
+        "windows-semantic-review-summary-v5.json",
+    ] {
+        if source.matches(exact_once).count() != 1 {
+            return Err(format!(
+                "physical Windows qualification workflow must retain exactly one {exact_once}"
+            ));
+        }
+    }
+
+    if source.matches("Invoke-Cargo -Arguments").count() != 18 {
+        return Err(
+            "physical Windows qualification workflow changed its exact command inventory"
+                .to_owned(),
+        );
+    }
+    for forbidden in [
+        "--visible-focused-windows-all",
+        "--allow-visible-focused",
+        "Remove-Item",
+        "Clear-Content",
+        "Set-Content",
+        "Out-File",
+        "System.IO.FileMode]::OpenOrCreate",
+    ] {
+        if source.contains(forbidden) {
+            return Err(format!(
+                "physical Windows qualification workflow acquired forbidden behavior {forbidden}"
             ));
         }
     }
@@ -11737,6 +11834,46 @@ mod tests {
         assert!(validate_windows_probe_ci(&valid.replacen(
             "native-agentic-semantic-probe",
             "missing-semantic-clippy-probe",
+            1,
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn windows_physical_workflow_is_exact_nonfocused_and_source_bound() {
+        let source = include_str!("../../scripts/qualification/windows-agentic.ps1");
+        validate_windows_physical_workflow(source).expect("closed physical workflow");
+        assert!(validate_windows_physical_workflow(&source.replacen(
+            "[switch] $AuthorizedPhysicalWindows",
+            "[switch] $UncheckedPhysicalWindows",
+            1,
+        ))
+        .is_err());
+        assert!(validate_windows_physical_workflow(&source.replacen(
+            "status --porcelain=v1 --untracked-files=all",
+            "status --porcelain=v1 --untracked-files=no",
+            1,
+        ))
+        .is_err());
+        assert!(validate_windows_physical_workflow(&source.replacen(
+            "[System.IO.FileMode]::CreateNew",
+            "[System.IO.FileMode]::OpenOrCreate",
+            1,
+        ))
+        .is_err());
+        assert!(validate_windows_physical_workflow(&source.replacen(
+            "--ci-hidden-event-flood",
+            "--ci-hidden-fixed-documents",
+            1,
+        ))
+        .is_err());
+        assert!(validate_windows_physical_workflow(&format!(
+            "{source}\n--visible-focused-windows-all --allow-visible-focused"
+        ))
+        .is_err());
+        assert!(validate_windows_physical_workflow(&source.replacen(
+            "Assert-ExactDirectoryEntries -Directory $evidenceDirectory -ExpectedNames @()",
+            "Write-Host unchecked",
             1,
         ))
         .is_err());

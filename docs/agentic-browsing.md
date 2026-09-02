@@ -691,6 +691,12 @@ work drains; protocol and review schema v5 require both observations and expose
 only process-count and resident-byte maxima. Until those seven records are
 captured and reviewed on physical Windows, this is cross-compile and producer-
 integrity evidence rather than a device behavior or resource-budget claim.
+The checked-in physical workflow additionally requires an explicitly
+acknowledged authorized Windows device, a clean exact Git revision, an empty
+fixed ignored directory, the x86-64 MSVC host toolchain, create-new records,
+and source continuity through the separate debugger/review phase. It cannot
+invoke visible-focused input or launch the debugger-only case; those
+authorities remain outside the script.
 
 No conclusion is generalized from `isTrusted` alone. Real sites may reject
 automation through many mechanisms. The spike determines which backends are

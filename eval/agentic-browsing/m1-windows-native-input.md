@@ -7,6 +7,15 @@ This evidence describes code and compile-time facts only. It does not authorize
 a product backend, claim event trust or site compatibility, or complete
 Milestone 1 on Windows.
 
+The preferred physical path is now the source-gated two-phase
+`scripts/qualification/windows-agentic.ps1` workflow. Its collection phase
+requires an explicitly acknowledged authorized Windows device, a clean exact
+source revision on the x86-64 MSVC host toolchain, an initially empty fixed
+ignored directory, the four non-focused create-new input records, input review,
+and the six non-debugger semantic records. It contains no focused-input command
+and leaves the seventh debugger-attached semantic run to a separately
+authorized manual launch.
+
 ## Construction and authority
 
 - A run owns one top-level probe HWND and one ordinary Wry child-HWND WebView2

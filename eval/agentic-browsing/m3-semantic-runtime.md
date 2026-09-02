@@ -22,6 +22,13 @@ hidden/ephemeral/loopback-only semantic native qualifier passed on the
 authorized macOS/WebKit host and is retained in a closed aggregate manifest.
 Actual pinned provider token measurements remain pending.
 
+The physical-Windows handoff is executable through the source-gated two-phase
+`scripts/qualification/windows-agentic.ps1` workflow. Its collection phase
+builds and runs only the six non-debugger semantic modes after the exact
+non-focused M1 cohort; its review phase accepts the debugger result only when
+the checkout revision and complete fixed directory inventory still match. The
+script does not create physical evidence and was not run on this macOS host.
+
 This evidence records deterministic Rust contracts, static and synthetic DOM
 execution of the fixed program, and the narrow reviewed macOS native fixture
 aggregate below. It does not claim that arbitrary pages have been instrumented

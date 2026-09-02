@@ -8,6 +8,15 @@ reviewed aggregate evidence and points to executable gates. It must not contain
 raw probe JSONL, page content, screenshots, profiles, credentials, provider
 responses, machine-local paths, or native traces.
 
+The physical-Windows procedure now has a checked-in, source-gated two-phase
+PowerShell orchestrator. It requires a clean exact checkout, create-new source
+stamp and result inventory, the x86-64 MSVC host toolchain, an explicit
+authorized-device acknowledgement, and
+cannot invoke focused input or the debugger-only mode. Final review rejects a
+different checkout or any missing, reparse, or unexpected record. This is
+workflow integrity only; no Windows device behavior is claimed until the
+separately authorized run and human aggregate review occur.
+
 ## Mechanically enforced evidence
 
 `cargo xtask check-agentic-probe-boundary` is part of ordinary CI and now:
