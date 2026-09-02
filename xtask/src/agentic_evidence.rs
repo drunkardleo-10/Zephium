@@ -8,7 +8,7 @@ use serde::Deserialize;
 const BASELINE_PATH: &str = "eval/agentic-browsing/browse-baseline-v1.json";
 const NATIVE_MATRIX_PATH: &str = "eval/agentic-browsing/native-input-matrix-v1.json";
 const CAPABILITIES_PATH: &str = "eval/agentic-browsing/capabilities-v1.json";
-const MACOS_SEMANTIC_RUNTIME_PATH: &str = "eval/agentic-browsing/semantic-runtime-macos-v1.json";
+const MACOS_SEMANTIC_RUNTIME_PATH: &str = "eval/agentic-browsing/semantic-runtime-macos-v2.json";
 const MAX_BASELINE_BYTES: usize = 32 * 1024;
 const MAX_NATIVE_MATRIX_BYTES: usize = 64 * 1024;
 const MAX_CAPABILITIES_BYTES: usize = 64 * 1024;
@@ -55,6 +55,9 @@ struct MacOsSemanticRuntimeEvidence {
     fixture: String,
     snapshots: u32,
     world_epochs: u32,
+    mutation_gate: String,
+    stale_anchor: String,
+    mutation_recovery: String,
     page_world_bridge: String,
     secrets: String,
     focus_theft: u32,
@@ -74,9 +77,9 @@ struct SemanticViewportEvidence {
 
 fn validate_macos_semantic_runtime(evidence: MacOsSemanticRuntimeEvidence) -> Result<(), String> {
     validate_date("macOS semantic-runtime reviewed_on", &evidence.reviewed_on)?;
-    if evidence.schema_version != 1
-        || evidence.reviewed_on != "2026-09-01"
-        || evidence.scope != "authorized_hidden_fixed_dom_semantic_runtime"
+    if evidence.schema_version != 2
+        || evidence.reviewed_on != "2026-09-02"
+        || evidence.scope != "authorized_hidden_fixed_dom_semantic_runtime_v2"
         || evidence.command
             != "cargo run --locked -p zephium-engine --features native-agentic-semantic-probe --bin macos-agentic-semantic-probe -- --ci-hidden-fixed-dom"
         || evidence.platform != "macos"
@@ -90,9 +93,12 @@ fn validate_macos_semantic_runtime(evidence: MacOsSemanticRuntimeEvidence) -> Re
         || evidence.viewport.width != 1_280
         || evidence.viewport.height != 800
         || evidence.viewport.unit != "logical_css_pixels"
-        || evidence.fixture != "loopback_only_fixed_documents"
-        || evidence.snapshots != 2
-        || evidence.world_epochs != 2
+        || evidence.fixture != "loopback_only_fixed_documents_and_host_gated_mutation"
+        || evidence.snapshots != 4
+        || evidence.world_epochs != 3
+        || evidence.mutation_gate != "host_released"
+        || evidence.stale_anchor != "refused"
+        || evidence.mutation_recovery != "verified"
         || evidence.page_world_bridge != "absent"
         || evidence.secrets != "redacted"
         || evidence.focus_theft != 0
@@ -110,6 +116,7 @@ fn validate_macos_semantic_runtime(evidence: MacOsSemanticRuntimeEvidence) -> Re
             "windows_behavior",
             "provider_token_budget",
             "browse_or_agent_resource_baseline",
+            "arbitrary_mutation_compatibility",
         ],
     )
 }
@@ -816,7 +823,7 @@ mod tests {
     const NATIVE_MATRIX: &str =
         include_str!("../../eval/agentic-browsing/native-input-matrix-v1.json");
     const MACOS_SEMANTIC_RUNTIME: &str =
-        include_str!("../../eval/agentic-browsing/semantic-runtime-macos-v1.json");
+        include_str!("../../eval/agentic-browsing/semantic-runtime-macos-v2.json");
     const CAPABILITIES: &str = include_str!("../../eval/agentic-browsing/capabilities-v1.json");
 
     fn repository() -> &'static Path {
@@ -852,6 +859,12 @@ mod tests {
         let mut value = serde_json::from_str::<serde_json::Value>(MACOS_SEMANTIC_RUNTIME)
             .expect("semantic-runtime JSON");
         value["non_claims"] = serde_json::json!([]);
+        let evidence = decode("semantic runtime", &value.to_string()).expect("semantic schema");
+        assert!(validate_macos_semantic_runtime(evidence).is_err());
+
+        let mut value = serde_json::from_str::<serde_json::Value>(MACOS_SEMANTIC_RUNTIME)
+            .expect("semantic-runtime JSON");
+        value["stale_anchor"] = serde_json::json!("accepted");
         let evidence = decode("semantic runtime", &value.to_string()).expect("semantic schema");
         assert!(validate_macos_semantic_runtime(evidence).is_err());
 

@@ -97,16 +97,19 @@ cargo run --locked -p zephium-engine \
   --bin macos-agentic-semantic-probe -- --ci-hidden-fixed-dom
 ```
 
-The reviewed 2026-09-01 result for this exact command is recorded in
-`semantic-runtime-macos-v1.json`. It used one fixed 1280-by-800 logical hidden
-owned view, one ephemeral `WKWebsiteDataStore`, two fixed loopback-only
+The reviewed 2026-09-02 result for this exact command is recorded in
+`semantic-runtime-macos-v2.json`. It used one fixed 1280-by-800 logical hidden
+owned view, one ephemeral `WKWebsiteDataStore`, three fixed loopback-only
 documents, the ordinary content-policy installation seam, and the production
-semantic registration. It performed no OS-wide input, requested no
-Accessibility permission, opened no account or external site, and emitted only
-a content-free aggregate. The source gate mechanically excludes its fixture,
-runner, and feature from optimized and ordinary desktop builds. Re-running it
-still requires separate explicit authorization; the committed result does not
-authorize future native execution.
+semantic registration. Four successful snapshots cover three isolated-world
+epochs plus a host-released, fixed deferred-script mutation: an anchored request
+for the removed node was refused as `AnchorMissing`, and a subsequent fresh
+snapshot verified recovery without stale content. It performed no OS-wide
+input, requested no Accessibility permission, opened no account or external
+site, and emitted only a content-free aggregate. The source gate mechanically
+excludes its fixture, runner, and feature from optimized and ordinary desktop
+builds. Re-running it still requires separate explicit authorization; the
+committed result does not authorize future native execution.
 
 The Windows adapter can be compile-qualified from another host, but only a
 physical Windows run is behavioral evidence. On an authorized named Windows

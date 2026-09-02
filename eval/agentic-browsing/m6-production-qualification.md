@@ -13,7 +13,7 @@ responses, machine-local paths, or native traces.
 `cargo xtask check-agentic-probe-boundary` is part of ordinary CI and now:
 
 - decodes `browse-baseline-v1.json`, `native-input-matrix-v1.json`,
-  `semantic-runtime-macos-v1.json`, and `capabilities-v1.json` with closed
+  `semantic-runtime-macos-v2.json`, and `capabilities-v1.json` with closed
   schemas and file-size ceilings;
 - rejects unknown fields, machine-local paths, and high-confidence secret or
   raw-content fields;
@@ -23,8 +23,9 @@ responses, machine-local paths, or native traces.
   platform, backend, case count, trust/focus/activation results, and teardown
   result;
 - binds the reviewed macOS production semantic aggregate to its exact command,
-  OS/WebKit build, closed viewport, two snapshots/world epochs, bridge,
-  redaction, focus, teardown, and explicit non-claims;
+  OS/WebKit build, closed viewport, four snapshots across three world epochs,
+  host-released mutation, stale-anchor refusal, recovery, bridge, redaction,
+  focus, teardown, and explicit non-claims;
 - prevents the cross-compiled Windows runner from being represented as
   device-qualified without a reviewed gate change;
 - cross-checks the Wry, Tauri, and `tauri-runtime-wry` capability versions and
@@ -273,7 +274,7 @@ agentic-owned Windows modules. Cross-compilation is not device behavior.
   remain separate blockers.
 
 The authoritative aggregate records and exact remaining blockers are in
-`native-input-matrix-v1.json`, `semantic-runtime-macos-v1.json`, and
+`native-input-matrix-v1.json`, `semantic-runtime-macos-v2.json`, and
 `browse-baseline-v1.json`.
 
 ## Remaining release blockers

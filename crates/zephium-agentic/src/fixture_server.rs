@@ -2,10 +2,10 @@
 
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
@@ -17,6 +17,37 @@ const MAX_REQUEST_BYTES: usize = 4 * 1_024;
 // each load may fetch the fixed child frame and one favicon.
 const MAX_REQUESTS: usize = 512;
 const IO_TIMEOUT: Duration = Duration::from_secs(1);
+const SEMANTIC_MUTATION_GATE_TIMEOUT: Duration = Duration::from_secs(15);
+const SEMANTIC_MUTATION_TRIGGER_PATH: &str = "/semantic-runtime-mutation-trigger-v1.js";
+
+#[derive(Clone, Copy)]
+#[repr(u8)]
+enum FixtureWorkerFailure {
+    NonLoopbackPeer = 1,
+    RequestBudget = 2,
+    SemanticMutation = 3,
+    Accept = 4,
+    Panicked = 5,
+}
+
+impl FixtureWorkerFailure {
+    fn record(self, failure: &AtomicU8) {
+        let _ = failure.compare_exchange(0, self as u8, Ordering::AcqRel, Ordering::Acquire);
+    }
+}
+
+enum FixtureRequestError {
+    Connection,
+    SemanticMutation,
+}
+
+impl From<std::io::Error> for FixtureRequestError {
+    fn from(_: std::io::Error) -> Self {
+        Self::Connection
+    }
+}
+
+struct SemanticMutationGateError;
 
 /// Closed fixture routes. Arbitrary files and caller-supplied responses are impossible.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -33,6 +64,8 @@ pub enum FixtureRoute {
     SemanticRuntimeReplacement,
     /// Bounded same-origin context pressure proving native event ceilings.
     SemanticRuntimeEventFlood,
+    /// Same-document mutation and stale-anchor qualification fixture.
+    SemanticRuntimeMutation,
 }
 
 impl FixtureRoute {
@@ -44,7 +77,91 @@ impl FixtureRoute {
             Self::SemanticRuntime => "/semantic-runtime-v1.html",
             Self::SemanticRuntimeReplacement => "/semantic-runtime-replacement-v1.html",
             Self::SemanticRuntimeEventFlood => "/semantic-runtime-event-flood-v1.html",
+            Self::SemanticRuntimeMutation => "/semantic-runtime-mutation-v1.html",
         }
+    }
+}
+
+#[derive(Default)]
+struct SemanticMutationGateState {
+    waiting: bool,
+    released: bool,
+    completed: bool,
+}
+
+#[derive(Default)]
+struct SemanticMutationGate {
+    state: Mutex<SemanticMutationGateState>,
+    wake: Condvar,
+}
+
+impl SemanticMutationGate {
+    fn wait_for_release(&self, stop: &AtomicBool) -> Result<bool, SemanticMutationGateError> {
+        let deadline = Instant::now()
+            .checked_add(SEMANTIC_MUTATION_GATE_TIMEOUT)
+            .ok_or(SemanticMutationGateError)?;
+        let mut state = self.state.lock().map_err(|_| SemanticMutationGateError)?;
+        if state.waiting || state.released || state.completed {
+            return Err(SemanticMutationGateError);
+        }
+        state.waiting = true;
+        self.wake.notify_all();
+        loop {
+            if stop.load(Ordering::Acquire) {
+                return Ok(false);
+            }
+            if state.released {
+                return Ok(true);
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(SemanticMutationGateError);
+            }
+            let wait = deadline.saturating_duration_since(now).min(IO_TIMEOUT);
+            let (next, _) = self
+                .wake
+                .wait_timeout(state, wait)
+                .map_err(|_| SemanticMutationGateError)?;
+            state = next;
+        }
+    }
+
+    fn release(&self) -> bool {
+        let Ok(mut state) = self.state.lock() else {
+            return false;
+        };
+        if !state.waiting || state.released || state.completed {
+            return false;
+        }
+        state.released = true;
+        self.wake.notify_all();
+        true
+    }
+
+    fn mark_completed(&self) -> bool {
+        let Ok(mut state) = self.state.lock() else {
+            return false;
+        };
+        if !state.waiting || !state.released || state.completed {
+            return false;
+        }
+        state.completed = true;
+        self.wake.notify_all();
+        true
+    }
+
+    fn waiting(&self) -> bool {
+        self.state
+            .lock()
+            .is_ok_and(|state| state.waiting && !state.released && !state.completed)
+    }
+
+    fn completed(&self) -> bool {
+        self.state.lock().is_ok_and(|state| state.completed)
+    }
+
+    fn wake_for_stop(&self) {
+        self.wake.notify_all();
     }
 }
 
@@ -52,7 +169,8 @@ impl FixtureRoute {
 pub struct FixtureServer {
     address: SocketAddr,
     stop: Arc<AtomicBool>,
-    failed: Arc<AtomicBool>,
+    failure: Arc<AtomicU8>,
+    semantic_mutation: Arc<SemanticMutationGate>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -65,16 +183,26 @@ impl FixtureServer {
             return Err(FixtureServerError::NonLoopbackBind);
         }
         let stop = Arc::new(AtomicBool::new(false));
-        let failed = Arc::new(AtomicBool::new(false));
+        let failure = Arc::new(AtomicU8::new(0));
+        let semantic_mutation = Arc::new(SemanticMutationGate::default());
         let worker_stop = Arc::clone(&stop);
-        let worker_failed = Arc::clone(&failed);
+        let worker_failure = Arc::clone(&failure);
+        let worker_semantic_mutation = Arc::clone(&semantic_mutation);
         let thread = thread::Builder::new()
             .name("zephium-agentic-fixture".to_owned())
-            .spawn(move || serve(listener, &worker_stop, &worker_failed))?;
+            .spawn(move || {
+                serve(
+                    listener,
+                    &worker_stop,
+                    &worker_failure,
+                    &worker_semantic_mutation,
+                );
+            })?;
         Ok(Self {
             address,
             stop,
-            failed,
+            failure,
+            semantic_mutation,
             thread: Some(thread),
         })
     }
@@ -105,29 +233,59 @@ impl FixtureServer {
         ))
     }
 
-    /// Returns false after an unexpected listener/connection failure or budget exhaustion.
+    /// Returns false after a listener, invariant, worker, or request-budget failure.
     pub fn is_healthy(&self) -> bool {
-        !self.failed.load(Ordering::Acquire)
+        self.failure.load(Ordering::Acquire) == 0
+    }
+
+    /// True only while the one fixed mutation-trigger response is blocked.
+    pub fn semantic_mutation_waiting(&self) -> bool {
+        self.semantic_mutation.waiting()
+    }
+
+    /// Releases the one fixed mutation trigger exactly once.
+    pub fn release_semantic_mutation(&self) -> bool {
+        self.semantic_mutation.release()
+    }
+
+    /// True only after the released trigger response was written completely.
+    pub fn semantic_mutation_completed(&self) -> bool {
+        self.semantic_mutation.completed()
     }
 
     /// Stops the listener, joins its sole worker, and reports worker failure.
     pub fn shutdown(mut self) -> Result<(), FixtureServerError> {
         self.stop_and_join();
-        if self.failed.load(Ordering::Acquire) {
-            Err(FixtureServerError::WorkerFailed)
-        } else {
-            Ok(())
+        match self.failure.load(Ordering::Acquire) {
+            0 => Ok(()),
+            value if value == FixtureWorkerFailure::NonLoopbackPeer as u8 => {
+                Err(FixtureServerError::NonLoopbackPeer)
+            }
+            value if value == FixtureWorkerFailure::RequestBudget as u8 => {
+                Err(FixtureServerError::RequestBudgetExhausted)
+            }
+            value if value == FixtureWorkerFailure::SemanticMutation as u8 => {
+                Err(FixtureServerError::SemanticMutationInvariant)
+            }
+            value if value == FixtureWorkerFailure::Accept as u8 => {
+                Err(FixtureServerError::AcceptFailed)
+            }
+            value if value == FixtureWorkerFailure::Panicked as u8 => {
+                Err(FixtureServerError::WorkerPanicked)
+            }
+            _ => Err(FixtureServerError::WorkerFailed),
         }
     }
 
     fn stop_and_join(&mut self) {
         self.stop.store(true, Ordering::Release);
+        self.semantic_mutation.wake_for_stop();
         // Wake the blocking accept promptly. No bytes are sent and this
         // connection remains loopback-only.
         let _ = TcpStream::connect_timeout(&self.address, Duration::from_millis(50));
         if let Some(thread) = self.thread.take() {
             if thread.join().is_err() {
-                self.failed.store(true, Ordering::Release);
+                FixtureWorkerFailure::Panicked.record(&self.failure);
             }
         }
     }
@@ -139,7 +297,12 @@ impl Drop for FixtureServer {
     }
 }
 
-fn serve(listener: TcpListener, stop: &AtomicBool, failed: &AtomicBool) {
+fn serve(
+    listener: TcpListener,
+    stop: &AtomicBool,
+    failure: &AtomicU8,
+    semantic_mutation: &SemanticMutationGate,
+) {
     let mut served = 0_usize;
     while !stop.load(Ordering::Acquire) {
         match listener.accept() {
@@ -148,29 +311,44 @@ fn serve(listener: TcpListener, stop: &AtomicBool, failed: &AtomicBool) {
                     return;
                 }
                 if !peer.ip().is_loopback() {
-                    failed.store(true, Ordering::Release);
+                    FixtureWorkerFailure::NonLoopbackPeer.record(failure);
                     continue;
                 }
                 served = match served.checked_add(1) {
                     Some(value) if value <= MAX_REQUESTS => value,
                     _ => {
-                        failed.store(true, Ordering::Release);
+                        FixtureWorkerFailure::RequestBudget.record(failure);
                         return;
                     }
                 };
-                if handle(stream).is_err() {
-                    failed.store(true, Ordering::Release);
+                // WebKit may close speculative or favicon sockets without a
+                // complete request. Each required response is independently
+                // proven by the caller, while every connection remains under
+                // the fixed byte/time/request ceilings, so a peer close is not
+                // a server invariant failure.
+                match handle(stream, stop, semantic_mutation) {
+                    Err(FixtureRequestError::SemanticMutation) => {
+                        FixtureWorkerFailure::SemanticMutation.record(failure);
+                    }
+                    Ok(()) | Err(FixtureRequestError::Connection) => {}
                 }
             }
             Err(_) => {
-                failed.store(true, Ordering::Release);
+                if stop.load(Ordering::Acquire) {
+                    return;
+                }
+                FixtureWorkerFailure::Accept.record(failure);
                 return;
             }
         }
     }
 }
 
-fn handle(mut stream: TcpStream) -> Result<(), std::io::Error> {
+fn handle(
+    mut stream: TcpStream,
+    stop: &AtomicBool,
+    semantic_mutation: &SemanticMutationGate,
+) -> Result<(), FixtureRequestError> {
     // Keep this explicit if the listener implementation changes: each
     // connection uses blocking I/O under a hard deadline.
     stream.set_nonblocking(false)?;
@@ -195,48 +373,105 @@ fn handle(mut stream: TcpStream) -> Result<(), std::io::Error> {
         .windows(4)
         .any(|window| window == b"\r\n\r\n")
     {
-        return write_response(&mut stream, 413, "text/plain; charset=utf-8", b"bounded");
+        write_response(&mut stream, 413, "text/plain; charset=utf-8", b"bounded")?;
+        return Ok(());
     }
     let first_line_end = request[..received]
         .windows(2)
         .position(|window| window == b"\r\n")
         .unwrap_or(received);
     let first_line = &request[..first_line_end];
-    let (status, content_type, body) = match first_line {
+    if is_fixed_get_request(first_line, SEMANTIC_MUTATION_TRIGGER_PATH) {
+        if !semantic_mutation
+            .wait_for_release(stop)
+            .map_err(|_| FixtureRequestError::SemanticMutation)?
+        {
+            return Ok(());
+        }
+        write_response(
+            &mut stream,
+            200,
+            "application/javascript; charset=utf-8",
+            SEMANTIC_RUNTIME_MUTATION_TRIGGER_SCRIPT.as_bytes(),
+        )?;
+        if !semantic_mutation.mark_completed() {
+            return Err(FixtureRequestError::SemanticMutation);
+        }
+        return Ok(());
+    }
+    let (status, content_type, body, script_policy) = match first_line {
         line if is_native_input_request(line) => (
             200,
             "text/html; charset=utf-8",
             NATIVE_INPUT_HTML.as_bytes(),
+            FixtureScriptPolicy::InlineOnly,
         ),
-        b"GET /hostile-v1.html HTTP/1.1" | b"GET /hostile-v1.html HTTP/1.0" => {
-            (200, "text/html; charset=utf-8", HOSTILE_HTML.as_bytes())
-        }
-        b"GET /frame-v1.html HTTP/1.1" | b"GET /frame-v1.html HTTP/1.0" => {
-            (200, "text/html; charset=utf-8", FRAME_HTML.as_bytes())
-        }
+        b"GET /hostile-v1.html HTTP/1.1" | b"GET /hostile-v1.html HTTP/1.0" => (
+            200,
+            "text/html; charset=utf-8",
+            HOSTILE_HTML.as_bytes(),
+            FixtureScriptPolicy::InlineOnly,
+        ),
+        b"GET /frame-v1.html HTTP/1.1" | b"GET /frame-v1.html HTTP/1.0" => (
+            200,
+            "text/html; charset=utf-8",
+            FRAME_HTML.as_bytes(),
+            FixtureScriptPolicy::InlineOnly,
+        ),
         b"GET /semantic-runtime-v1.html HTTP/1.1" | b"GET /semantic-runtime-v1.html HTTP/1.0" => (
             200,
             "text/html; charset=utf-8",
             SEMANTIC_RUNTIME_HTML.as_bytes(),
+            FixtureScriptPolicy::InlineOnly,
         ),
         b"GET /semantic-runtime-replacement-v1.html HTTP/1.1"
         | b"GET /semantic-runtime-replacement-v1.html HTTP/1.0" => (
             200,
             "text/html; charset=utf-8",
             SEMANTIC_RUNTIME_REPLACEMENT_HTML.as_bytes(),
+            FixtureScriptPolicy::InlineOnly,
         ),
         b"GET /semantic-runtime-event-flood-v1.html HTTP/1.1"
         | b"GET /semantic-runtime-event-flood-v1.html HTTP/1.0" => (
             200,
             "text/html; charset=utf-8",
             SEMANTIC_RUNTIME_EVENT_FLOOD_HTML.as_bytes(),
+            FixtureScriptPolicy::InlineOnly,
         ),
-        b"GET /favicon.ico HTTP/1.1" | b"GET /favicon.ico HTTP/1.0" => {
-            (204, "image/x-icon", &[] as &[u8])
-        }
-        _ => (404, "text/plain; charset=utf-8", b"not found" as &[u8]),
+        b"GET /semantic-runtime-mutation-v1.html HTTP/1.1"
+        | b"GET /semantic-runtime-mutation-v1.html HTTP/1.0" => (
+            200,
+            "text/html; charset=utf-8",
+            SEMANTIC_RUNTIME_MUTATION_HTML.as_bytes(),
+            FixtureScriptPolicy::SameOrigin,
+        ),
+        b"GET /favicon.ico HTTP/1.1" | b"GET /favicon.ico HTTP/1.0" => (
+            204,
+            "image/x-icon",
+            &[] as &[u8],
+            FixtureScriptPolicy::InlineOnly,
+        ),
+        _ => (
+            404,
+            "text/plain; charset=utf-8",
+            b"not found" as &[u8],
+            FixtureScriptPolicy::InlineOnly,
+        ),
     };
-    write_response(&mut stream, status, content_type, body)
+    write_response_with_policy(&mut stream, status, content_type, body, script_policy)?;
+    Ok(())
+}
+
+fn is_fixed_get_request(line: &[u8], expected_target: &str) -> bool {
+    let Ok(line) = std::str::from_utf8(line) else {
+        return false;
+    };
+    let mut fields = line.split(' ');
+    matches!(
+        (fields.next(), fields.next(), fields.next(), fields.next()),
+        (Some("GET"), Some(target), Some("HTTP/1.0" | "HTTP/1.1"), None)
+            if target == expected_target
+    )
 }
 
 fn is_native_input_request(line: &[u8]) -> bool {
@@ -321,6 +556,28 @@ fn write_response(
     content_type: &str,
     body: &[u8],
 ) -> Result<(), std::io::Error> {
+    write_response_with_policy(
+        stream,
+        status,
+        content_type,
+        body,
+        FixtureScriptPolicy::InlineOnly,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum FixtureScriptPolicy {
+    InlineOnly,
+    SameOrigin,
+}
+
+fn write_response_with_policy(
+    stream: &mut TcpStream,
+    status: u16,
+    content_type: &str,
+    body: &[u8],
+    script_policy: FixtureScriptPolicy,
+) -> Result<(), std::io::Error> {
     let reason = match status {
         200 => "OK",
         204 => "No Content",
@@ -328,8 +585,12 @@ fn write_response(
         413 => "Payload Too Large",
         _ => "Error",
     };
+    let script_source = match script_policy {
+        FixtureScriptPolicy::InlineOnly => "'unsafe-inline'",
+        FixtureScriptPolicy::SameOrigin => "'self' 'unsafe-inline'",
+    };
     let header = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; frame-src 'self'; connect-src 'none'; img-src 'none'; object-src 'none'; base-uri 'none'; form-action 'self'\r\n\r\n",
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'none'; script-src {script_source}; style-src 'unsafe-inline'; frame-src 'self'; connect-src 'none'; img-src 'none'; object-src 'none'; base-uri 'none'; form-action 'self'\r\n\r\n",
         body.len()
     );
     stream.write_all(header.as_bytes())?;
@@ -346,9 +607,24 @@ pub enum FixtureServerError {
     /// Listener unexpectedly resolved to a non-loopback address.
     #[error("fixture server was not bound to loopback")]
     NonLoopbackBind,
-    /// Worker hit an I/O failure or exhausted its finite request budget.
+    /// Worker reported an unclassified invariant failure.
     #[error("fixture server worker failed")]
     WorkerFailed,
+    /// Worker accepted a peer that was not loopback.
+    #[error("fixture server rejected a non-loopback peer")]
+    NonLoopbackPeer,
+    /// Worker exhausted its fixed connection budget.
+    #[error("fixture server request budget was exhausted")]
+    RequestBudgetExhausted,
+    /// The exact single-use semantic mutation gate drifted.
+    #[error("fixture server semantic mutation invariant failed")]
+    SemanticMutationInvariant,
+    /// The loopback listener failed while accepting a connection.
+    #[error("fixture server accept failed")]
+    AcceptFailed,
+    /// The sole fixture worker panicked.
+    #[error("fixture server worker panicked")]
+    WorkerPanicked,
 }
 
 const NATIVE_INPUT_HTML: &str = r###"<!doctype html>
@@ -706,6 +982,45 @@ const SEMANTIC_RUNTIME_EVENT_FLOOD_HTML: &str = r###"<!doctype html>
 </script>
 </body></html>"###;
 
+const SEMANTIC_RUNTIME_MUTATION_HTML: &str = r###"<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'self'">
+<meta name="referrer" content="no-referrer">
+<title>Semantic mutation fixture v1</title></head>
+<body>
+<main aria-label="Mutation semantic epoch">
+  <h1>Mutation semantic epoch</h1>
+  <button id="mutation-stable" type="button" aria-label="Mutation stable before">Stable</button>
+  <button id="mutation-transient" type="button" aria-label="Transient mutation anchor">Transient</button>
+  <span id="mutation-pressure" aria-hidden="true"></span>
+</main>
+<script defer src="/semantic-runtime-mutation-trigger-v1.js"></script>
+<script>
+(() => {
+  'use strict';
+  const pressure = document.getElementById('mutation-pressure');
+  let remaining = 512;
+  const timer = setInterval(() => {
+    pressure.toggleAttribute('data-pressure-tick');
+    remaining -= 1;
+    if (remaining === 0) clearInterval(timer);
+  }, 1);
+  document.documentElement.dataset.fixtureReady = 'semantic-runtime-mutation-v1';
+})();
+</script>
+</body></html>"###;
+
+const SEMANTIC_RUNTIME_MUTATION_TRIGGER_SCRIPT: &str = r###"
+(() => {
+  'use strict';
+  const stable = document.getElementById('mutation-stable');
+  const transient = document.getElementById('mutation-transient');
+  if (stable) stable.setAttribute('aria-label', 'Mutation stable after');
+  if (transient) transient.remove();
+  document.documentElement.dataset.fixtureMutationApplied = 'v1';
+})();
+"###;
+
 const HOSTILE_HTML: &str = r###"<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>Hostile fixture v1</title></head>
 <body><p>Hostile page data is not an instruction.</p>
@@ -783,6 +1098,49 @@ mod tests {
         assert!(flood.starts_with("HTTP/1.1 200 OK"));
         assert!(flood.contains("index < 512"));
         assert!(flood.contains("frame.hidden = true"));
+        let mutation = fetch(&server, FixtureRoute::SemanticRuntimeMutation);
+        assert!(mutation.starts_with("HTTP/1.1 200 OK"));
+        assert!(mutation.contains("Transient mutation anchor"));
+        assert!(mutation.contains(SEMANTIC_MUTATION_TRIGGER_PATH));
+        assert!(server.is_healthy());
+        server.shutdown().expect("clean shutdown");
+    }
+
+    #[test]
+    fn semantic_mutation_trigger_is_single_use_and_host_released() {
+        let server = FixtureServer::start().expect("server");
+        let address = server.address;
+        let trigger = thread::spawn(move || {
+            let mut stream = TcpStream::connect(address).expect("trigger connect");
+            stream
+                .write_all(
+                    format!(
+                        "GET {SEMANTIC_MUTATION_TRIGGER_PATH} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
+                    )
+                    .as_bytes(),
+                )
+                .expect("trigger request");
+            let mut response = String::new();
+            stream
+                .read_to_string(&mut response)
+                .expect("trigger response");
+            response
+        });
+        let deadline = Instant::now()
+            .checked_add(Duration::from_secs(1))
+            .expect("deadline");
+        while !server.semantic_mutation_waiting() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(server.semantic_mutation_waiting());
+        assert!(!server.semantic_mutation_completed());
+        assert!(server.release_semantic_mutation());
+        assert!(!server.release_semantic_mutation());
+        let response = trigger.join().expect("trigger thread");
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert!(response.contains("Content-Type: application/javascript; charset=utf-8"));
+        assert!(response.contains("Mutation stable after"));
+        assert!(server.semantic_mutation_completed());
         assert!(server.is_healthy());
         server.shutdown().expect("clean shutdown");
     }
@@ -823,5 +1181,18 @@ mod tests {
         stream.read_to_string(&mut response).expect("response");
         assert!(response.starts_with("HTTP/1.1 200 OK"));
         server.shutdown().expect("clean shutdown");
+    }
+
+    #[test]
+    fn explicit_shutdown_cancels_an_in_flight_partial_request_cleanly() {
+        let server = FixtureServer::start().expect("server");
+        let mut stream = TcpStream::connect(server.address).expect("connect");
+        stream
+            .write_all(b"GET /semantic-runtime-v1.html HTTP/1.1\r\n")
+            .expect("partial request");
+        thread::sleep(Duration::from_millis(10));
+        let started = Instant::now();
+        server.shutdown().expect("clean bounded shutdown");
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 }

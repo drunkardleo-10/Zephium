@@ -1864,6 +1864,7 @@ fn validate_macos_semantic_probe(
     let source = compact(source);
     for required in [
         "FixtureRoute::SemanticRuntime",
+        "FixtureRoute::SemanticRuntimeMutation",
         "FixtureRoute::SemanticRuntimeReplacement",
         "FixtureServer::start()",
         "new_ephemeral_data_store()",
@@ -1874,15 +1875,28 @@ fn validate_macos_semantic_probe(
         "NSApplicationActivationPolicy::Accessory",
         "NSWindowStyleMask::Borderless",
         "window.orderOut(None)",
-        "!page.isHidden()",
+        "!self.page.isHidden()",
+        "self.app.isActive()",
+        "returnErr(\"focus_baseline\")",
         "view.prepare_semantic_document_load()",
         "view.dispatch_semantic(",
+        "SemanticObservationAssembler::new(",
+        "SemanticFrameUnsupported::PlatformIsolationUnavailable",
+        "SemanticRuntimeFault::AnchorMissing",
+        "wait_for_mutation_gate(",
+        "server.release_semantic_mutation()",
+        "wait_for_mutation_application(",
+        "verify_mutation_before(",
+        "verify_mutation_after(",
+        "server.semantic_mutation_completed()",
+        "structNativeStateGuard",
+        "pump_once(self.run_loop,Some(self.native_guard))",
         "view.attest(",
         "SemanticRuntimeFault::DocumentLoading",
         "MAX_DOCUMENT_LOADING_RETRIES",
         "view.retire_semantic_runtime()",
         "Weak::from_retained(&page)",
-        "pending.server.shutdown()",
+        "server.shutdown()",
     ] {
         if !source.contains(required) {
             return Err(format!(
@@ -1918,6 +1932,11 @@ fn validate_macos_semantic_probe(
         "profile=ephemeral",
         "viewport=1280x800-logical",
         "fixture=loopback-only",
+        "snapshots=4",
+        "world_epochs=3",
+        "mutation_gate=host-released",
+        "stale_anchor=refused",
+        "mutation_recovery=verified",
         "page_world_bridge=absent",
         "focus_theft=0",
         "retained_views=0",
@@ -1935,7 +1954,19 @@ fn validate_macos_semantic_probe(
         "if!address.ip().is_loopback()",
         "format!(\"http://127.0.0.1:{}{}\"",
         "Self::SemanticRuntime=>\"/semantic-runtime-v1.html\"",
+        "Self::SemanticRuntimeMutation=>\"/semantic-runtime-mutation-v1.html\"",
         "Self::SemanticRuntimeReplacement=>\"/semantic-runtime-replacement-v1.html\"",
+        "constSEMANTIC_MUTATION_GATE_TIMEOUT:Duration=Duration::from_secs(15);",
+        "constSEMANTIC_MUTATION_TRIGGER_PATH:&str=\"/semantic-runtime-mutation-trigger-v1.js\";",
+        "structSemanticMutationGate",
+        "wake:Condvar",
+        "ifstate.waiting||state.released||state.completed",
+        "if!state.waiting||state.released||state.completed",
+        "semantic_mutation.wait_for_release(stop)",
+        "semantic_mutation.mark_completed()",
+        "application/javascript;charset=utf-8",
+        "<scriptdefersrc=\"/semantic-runtime-mutation-trigger-v1.js\"></script>",
+        "FixtureScriptPolicy::SameOrigin",
         "connect-src'none'",
         "form-action'none'",
         "frame-src'self'",
@@ -8078,6 +8109,7 @@ mod tests {
         );
         let semantic_source = r#"
             FixtureRoute::SemanticRuntime;
+            FixtureRoute::SemanticRuntimeMutation;
             FixtureRoute::SemanticRuntimeReplacement;
             FixtureServer::start();
             new_ephemeral_data_store();
@@ -8088,27 +8120,51 @@ mod tests {
             NSApplicationActivationPolicy::Accessory;
             NSWindowStyleMask::Borderless;
             window.orderOut(None);
-            !page.isHidden();
+            !self.page.isHidden();
+            self.app.isActive();
+            return Err("focus_baseline");
             view.prepare_semantic_document_load();
             view.dispatch_semantic();
+            SemanticObservationAssembler::new();
+            SemanticFrameUnsupported::PlatformIsolationUnavailable;
+            SemanticRuntimeFault::AnchorMissing;
+            wait_for_mutation_gate();
+            server.release_semantic_mutation();
+            wait_for_mutation_application();
+            verify_mutation_before();
+            verify_mutation_after();
+            server.semantic_mutation_completed();
+            struct NativeStateGuard;
+            pump_once(self.run_loop, Some(self.native_guard));
             view.attest();
             SemanticRuntimeFault::DocumentLoading;
             MAX_DOCUMENT_LOADING_RETRIES;
             view.retire_semantic_runtime();
             Weak::from_retained(&page);
-            pending.server.shutdown();
+            server.shutdown();
         "#;
         let semantic_binary = r#"
             if arguments.as_slice() != ["--ci-hidden-fixed-dom"] {}
             run_macos_agentic_semantic_probe();
-            "profile=ephemeral viewport=1280x800-logical fixture=loopback-only page_world_bridge=absent focus_theft=0 retained_views=0";
+            "profile=ephemeral viewport=1280x800-logical fixture=loopback-only snapshots=4 world_epochs=3 mutation_gate=host-released stale_anchor=refused mutation_recovery=verified page_world_bridge=absent focus_theft=0 retained_views=0";
         "#;
         let semantic_fixture = r#"
             TcpListener::bind((Ipv4Addr::LOCALHOST, 0));
             if !address.ip().is_loopback() {}
             format!("http://127.0.0.1:{}{}", port, path);
             Self::SemanticRuntime => "/semantic-runtime-v1.html";
+            Self::SemanticRuntimeMutation => "/semantic-runtime-mutation-v1.html";
             Self::SemanticRuntimeReplacement => "/semantic-runtime-replacement-v1.html";
+            const SEMANTIC_MUTATION_GATE_TIMEOUT: Duration = Duration::from_secs(15);
+            const SEMANTIC_MUTATION_TRIGGER_PATH: &str = "/semantic-runtime-mutation-trigger-v1.js";
+            struct SemanticMutationGate { wake: Condvar }
+            if state.waiting || state.released || state.completed {}
+            if !state.waiting || state.released || state.completed {}
+            semantic_mutation.wait_for_release(stop);
+            semantic_mutation.mark_completed();
+            "application/javascript; charset=utf-8";
+            "<script defer src="/semantic-runtime-mutation-trigger-v1.js"></script>";
+            FixtureScriptPolicy::SameOrigin;
             "connect-src 'none'; form-action 'none'; frame-src 'self'";
         "#;
         validate_macos_semantic_probe(
@@ -8123,6 +8179,27 @@ mod tests {
             &format!("{semantic_source}\nevaluate_script();"),
             semantic_binary,
             semantic_fixture,
+        )
+        .is_err());
+        assert!(validate_macos_semantic_probe(
+            &semantic_module,
+            &semantic_source.replace("SemanticRuntimeFault::AnchorMissing;", ""),
+            semantic_binary,
+            semantic_fixture,
+        )
+        .is_err());
+        assert!(validate_macos_semantic_probe(
+            &semantic_module,
+            semantic_source,
+            &semantic_binary.replace("mutation_recovery=verified", ""),
+            semantic_fixture,
+        )
+        .is_err());
+        assert!(validate_macos_semantic_probe(
+            &semantic_module,
+            semantic_source,
+            semantic_binary,
+            &semantic_fixture.replace("wake: Condvar", "wake: bool"),
         )
         .is_err());
     }

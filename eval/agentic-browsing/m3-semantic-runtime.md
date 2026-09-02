@@ -515,7 +515,7 @@ extension-owned CDP probe remains unchanged.
 
 ## Reviewed macOS native evidence
 
-On 2026-09-01, the separately authorized production-path qualifier passed on
+On 2026-09-02, the separately authorized production-path qualifier passed on
 macOS 27.0 build 26A5421a with WebKit 22625.1.29.11.25 using this exact command:
 
 ```sh
@@ -525,12 +525,16 @@ cargo run --locked -p zephium-engine \
 ```
 
 The content-free aggregate proves one ephemeral, extension-free, hidden
-1280-by-800 logical owned view across two fixed loopback documents and two
-fresh isolated-world epochs. Both snapshots passed fixed semantic/redaction
-checks, the page-world bridge remained absent, focus theft remained zero, and
-the page, data store, window, fixture listener, and semantic handler drained.
-The closed machine-readable result is
-`semantic-runtime-macos-v1.json`; the ordinary evidence gate rejects field
+1280-by-800 logical owned view across three fixed loopback documents and three
+fresh isolated-world epochs. Four successful snapshots passed fixed semantic
+and redaction checks. A closed deferred-script response held one same-document
+mutation behind an exact host gate while the production runtime captured its
+initial references. After release, an anchored request for the removed node was
+refused as `AnchorMissing`, then a fresh snapshot verified the changed stable
+node and absence of the removed reference. The page-world bridge remained
+absent, focus theft remained zero, and the page, data store, window, fixture
+listener, and semantic handler drained. The closed machine-readable result is
+`semantic-runtime-macos-v2.json`; the ordinary evidence gate rejects field
 widening, retained views, unrecognized fields, raw content, credentials,
 machine-local paths, and claims beyond this fixed fixture.
 
@@ -625,10 +629,11 @@ result under a 1,024-byte request ceiling.
 
 The synthetic smoke and compile/static gates alone are not live-browser
 isolated-world evidence. The authorized fixed macOS qualifier now covers the
-narrow pinned-WebKit wrapper/world, replacement, redaction, fixed viewport, and
-teardown claims recorded above. It does not prove arbitrary-page behavior,
-broader hostile timing/mutation behavior, Windows WebView2 isolation, or
-cross-platform style/layout equivalence.
+narrow pinned-WebKit wrapper/world, replacement, redaction, fixed viewport,
+host-gated same-document mutation, stale-anchor refusal, recovery, and teardown
+claims recorded above. It does not prove arbitrary-page mutation behavior,
+broader hostile timing races, Windows WebView2 isolation, or cross-platform
+style/layout equivalence.
 Surrounding-text windows are admitted up to
 8 KiB by the domain contract, but one runtime node field remains capped at
 4 KiB, so a larger single-node context is returned with truthful `text_limit`
@@ -644,12 +649,11 @@ rather than silently widening the hostile wire schema.
    authorized provider fixture, then record action-diff token/latency
    distributions for the pinned proof models/tokenizers. A standalone diff and
    remote stored conversation remain forbidden;
-3. extend the authorized macOS live-engine coverage for stale nodes, mutation
-   pressure, and timing races beyond its current page-world bridge, prototype
-   collision, frame boundary, redaction, world replacement, and teardown
-   checks. Open/closed shadow behavior and source exclusion currently have
-   deterministic synthetic/static coverage but still require that engine
-   evidence;
+3. extend authorized macOS live-engine coverage beyond the reviewed fixed
+   host-gated stale-node/mutation case into broader adversarial timing races and
+   difficult-page behavior. Open/closed shadow behavior and source exclusion
+   currently have deterministic synthetic/static coverage but still require
+   that engine evidence;
 4. run the five fixed, create-new semantic/lifecycle qualifier records
    documented in the evidence README on physical supported Windows, then pass
    the offline review. The source/cross-build path already covers replacement,
