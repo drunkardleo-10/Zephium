@@ -198,9 +198,7 @@ impl AgentProviderAttemptCredential {
             .try_reserve_exact(credential.secret.len())
             .map_err(|_| AgentProviderCredentialError::Capacity)?;
         secret.extend_from_slice(&credential.secret);
-        let attempt = Self { secret };
-        let _validated = sensitive_header(credential.provider, &attempt.secret)?;
-        Ok(attempt)
+        Ok(Self { secret })
     }
 
     fn into_sensitive_header(
@@ -230,6 +228,10 @@ fn sensitive_header(
         .map_err(|_| AgentProviderCredentialError::Capacity)?;
     encoded.extend_from_slice(prefix);
     encoded.extend_from_slice(secret);
+    // `HeaderValue::from_bytes` copies this temporary zeroizing buffer into
+    // its library-owned `Bytes`. Construct it only at dispatch: the pinned
+    // HTTP type has no zeroizing drop, so an earlier validation construction
+    // would create needless secret residue as well as a second allocation.
     let mut value =
         HeaderValue::from_bytes(&encoded).map_err(|_| AgentProviderCredentialError::Content)?;
     value.set_sensitive(true);

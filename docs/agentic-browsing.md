@@ -754,8 +754,13 @@ error contracts. Local and hosted transports attach later without changing the
 browser vocabulary.
 
 The BYOK HTTPS shell uses private exact provider endpoints, provider-bound
-zeroizing credentials, redirect refusal, identity-only response content
-encoding, bounded deadlines, and at most four simultaneous attempts. Admission
+zeroizing credential owners, redirect refusal, identity-only response content
+encoding, bounded deadlines, and at most four simultaneous attempts. The sole
+library-owned authentication `HeaderValue` is constructed only at dispatch and
+marked sensitive. Pinned `http` copies that value into ordinary `Bytes` and
+does not zeroize it on drop, so the zeroization guarantee applies to
+Zephium-owned credential and construction buffers, not unavoidable HTTP-stack
+or wire copies. Admission
 acquires a transport slot before semantic input commits; after commit, send
 errors and cancellation are terminal outcomes rather than proof that no
 provider work occurred. The final run-cancellation and transport-shutdown

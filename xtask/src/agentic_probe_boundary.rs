@@ -4380,6 +4380,9 @@ fn validate_provider_secret_diagnostic_contract(source: &str) -> Result<(), Stri
     }
     for required in [
         "letmutencoded=Zeroizing::new(Vec::new());",
+        "secret.try_reserve_exact(credential.secret.len())",
+        "secret.extend_from_slice(&credential.secret);",
+        "sensitive_header(provider,&self.secret)",
         "value.set_sensitive(true);",
         ".field(\"secret\",&\"[redacted]\")",
         ".field(\"credential\",&\"[redacted]\")",
@@ -4389,6 +4392,22 @@ fn validate_provider_secret_diagnostic_contract(source: &str) -> Result<(), Stri
         if !source.contains(required) {
             return Err(format!(
                 "agent provider secret/diagnostic boundary lost required protection {required}"
+            ));
+        }
+    }
+
+    let attempt_copy_start = source
+        .find("fntry_from_credential(")
+        .ok_or_else(|| "agent provider bounded attempt credential copy is missing".to_owned())?;
+    let attempt_copy_end = source[attempt_copy_start..]
+        .find("fninto_sensitive_header(")
+        .map(|offset| attempt_copy_start + offset)
+        .ok_or_else(|| "agent provider dispatch-time header conversion is missing".to_owned())?;
+    let attempt_copy = &source[attempt_copy_start..attempt_copy_end];
+    for forbidden in ["sensitive_header(", "HeaderValue"] {
+        if attempt_copy.contains(forbidden) {
+            return Err(format!(
+                "agent provider admission creates an unnecessary non-zeroizing header copy {forbidden}"
             ));
         }
     }
@@ -7086,6 +7105,18 @@ mod tests {
                 secret: Zeroizing<Vec<u8>>,
             }
 
+            impl AgentProviderAttemptCredential {
+                fn try_from_credential(credential: &AgentProviderCredential) {
+                    let mut secret = Zeroizing::new(Vec::new());
+                    secret.try_reserve_exact(credential.secret.len());
+                    secret.extend_from_slice(&credential.secret);
+                }
+
+                fn into_sensitive_header(self, provider: AgentProviderKind) {
+                    sensitive_header(provider, &self.secret);
+                }
+            }
+
             fn sensitive_header() {
                 let mut encoded = Zeroizing::new(Vec::new());
                 value.set_sensitive(true);
@@ -7117,6 +7148,10 @@ mod tests {
             valid.replace(
                 "let class = if error.is_timeout() { Timeout } else { Transport };",
                 "let detail = format!(\"{error:?}\"); let class = Transport;"
+            ),
+            valid.replace(
+                "secret.extend_from_slice(&credential.secret);",
+                "secret.extend_from_slice(&credential.secret); sensitive_header(provider, &secret);"
             ),
             valid.replace(
                 "#[must_use]\n            pub struct AgentProviderCredential",

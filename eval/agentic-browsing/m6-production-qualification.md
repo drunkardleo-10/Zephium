@@ -51,10 +51,14 @@ responses, machine-local paths, or native traces.
   standard-error, and `dbg!` macros. Every non-diagnostic functional-core
   source and each dedicated engine/provider source is also scanned for direct
   Rust and native logging calls. The provider gate separately pins both
-  retained credential owners and the transient header buffer to zeroizing
-  storage, sensitive request headers, manually redacted credential/attempt
-  `Debug`, and a closed reqwest failure classifier that consumes only the
-  timeout bit. Mutation tests prove each protection is required; and
+  retained credential owners and the transient header-construction buffer in
+  zeroizing storage, forbids an extra library-owned header construction during
+  admission, marks the sole dispatch-time request header sensitive, manually
+  redacts credential/attempt `Debug`, and uses a closed reqwest failure
+  classifier that consumes only the timeout bit. Pinned `http` 1.4.2 copies a
+  byte slice into ordinary `Bytes` for `HeaderValue` and has no zeroizing drop,
+  so the evidence does not claim zeroization for that unavoidable HTTP-stack
+  or wire copy. Mutation tests prove each protection is required; and
 - pins the provider's 64 KiB response-header ceiling at both available layers:
   reqwest configures the pre-decode HTTP/2 list limit, then a zero-allocation
   checked pass accounts every decoded field's name, value, and 32-byte
@@ -269,14 +273,17 @@ agentic-owned Windows modules. Cross-compilation is not device behavior.
 - The scoped agentic-owned production graph now has a mechanically enforced
   no-direct-logging boundary: observability remains content-free through typed
   audit, metric, and shell values rather than page/provider output. The dormant
-  provider transport owns credentials only in zeroizing buffers, marks the
-  constructed authentication header sensitive, redacts credential-bearing
+  provider transport retains credentials only in zeroizing buffers, builds no
+  throwaway library-owned header during admission, marks the sole
+  dispatch-time authentication header sensitive, redacts credential-bearing
   `Debug` implementations, and maps reqwest failures to closed classes without
   formatting the underlying error. A regression test against pinned reqwest
   constructs a request and proves neither its credential nor request-body
-  sentinel appears in `Request` debug output. This is a scoped source and test
-  audit; it does not claim review of shared shell, extension-owned, third-party,
-  or non-agentic logging surfaces.
+  sentinel appears in `Request` debug output. Zephium's retained and temporary
+  credential buffers are zeroized; pinned `HeaderValue`, the TLS stack, and
+  wire buffers are not claimed to be. This is a scoped source and test audit;
+  it does not claim review of shared shell, extension-owned, third-party, or
+  non-agentic logging surfaces.
 - The provider transport now distinguishes an open but idle snapshot from a
   terminally quiescent one. After its sticky seal cancels retained attempts and
   permanently refuses admission, only an exact zero-active snapshot can mint a
