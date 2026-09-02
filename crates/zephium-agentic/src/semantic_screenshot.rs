@@ -439,12 +439,18 @@ struct PendingScreenshotEntry {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SemanticScreenshotCoordinatorStatus {
     pending: u8,
+    shutdown_sealed: bool,
 }
 
 impl SemanticScreenshotCoordinatorStatus {
     /// Native captures executing or awaiting exact settlement.
     pub const fn pending(self) -> u8 {
         self.pending
+    }
+
+    /// Whether shutdown permanently closed new native capture admission.
+    pub const fn shutdown_sealed(self) -> bool {
+        self.shutdown_sealed
     }
 }
 
@@ -456,6 +462,7 @@ impl SemanticScreenshotCoordinatorStatus {
 #[derive(Default)]
 pub struct SemanticScreenshotCoordinator {
     pending: Vec<PendingScreenshotEntry>,
+    shutdown_sealed: bool,
 }
 
 impl SemanticScreenshotCoordinator {
@@ -463,6 +470,7 @@ impl SemanticScreenshotCoordinator {
     pub const fn new() -> Self {
         Self {
             pending: Vec::new(),
+            shutdown_sealed: false,
         }
     }
 
@@ -474,6 +482,9 @@ impl SemanticScreenshotCoordinator {
         (SemanticScreenshotPending, SemanticScreenshotNativeRequest),
         SemanticScreenshotCoordinatorError,
     > {
+        if self.shutdown_sealed {
+            return Err(SemanticScreenshotCoordinatorError::Shutdown);
+        }
         if self.pending.iter().any(|entry| entry.id == request.id) {
             return Err(SemanticScreenshotCoordinatorError::DuplicateRequest);
         }
@@ -531,10 +542,22 @@ impl SemanticScreenshotCoordinator {
         Ok(())
     }
 
-    /// Content-free current capacity accounting.
+    /// Permanently refuses new captures while retaining exact terminal debt.
+    pub fn seal_for_shutdown(&mut self) -> SemanticScreenshotCoordinatorStatus {
+        self.shutdown_sealed = true;
+        self.status()
+    }
+
+    /// True only after shutdown sealing and exact settlement of every capture.
+    pub fn is_quiescent(&self) -> bool {
+        self.shutdown_sealed && self.pending.is_empty()
+    }
+
+    /// Content-free current capacity and shutdown accounting.
     pub fn status(&self) -> SemanticScreenshotCoordinatorStatus {
         SemanticScreenshotCoordinatorStatus {
             pending: u8::try_from(self.pending.len()).unwrap_or(u8::MAX),
+            shutdown_sealed: self.shutdown_sealed,
         }
     }
 }
@@ -551,6 +574,9 @@ impl fmt::Debug for SemanticScreenshotCoordinator {
 /// Closed screenshot coordinator refusal.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum SemanticScreenshotCoordinatorError {
+    /// Process shutdown permanently closed native capture admission.
+    #[error("semantic screenshot coordinator is shutting down")]
+    Shutdown,
     /// Two pending requests reused one process-local identity.
     #[error("semantic screenshot request identity is already pending")]
     DuplicateRequest,
@@ -2196,7 +2222,47 @@ mod tests {
             coordinator.cancel(already_cancelled),
             Err(SemanticScreenshotCoordinatorError::UnknownRequest)
         );
-        assert_eq!(format!("{coordinator:?}"), "SemanticScreenshotCoordinator { status: SemanticScreenshotCoordinatorStatus { pending: 0 } }");
+        assert_eq!(format!("{coordinator:?}"), "SemanticScreenshotCoordinator { status: SemanticScreenshotCoordinatorStatus { pending: 0, shutdown_sealed: false } }");
+    }
+
+    #[test]
+    fn shutdown_seal_refuses_new_captures_and_retains_terminal_cleanup() {
+        let first = observation(100);
+        let second = observation(200);
+        let mut coordinator = SemanticScreenshotCoordinator::new();
+        let (pending, _native) = coordinator
+            .begin(request(
+                1,
+                &first,
+                1_000,
+                2_000,
+                SemanticScreenshotBudget::STANDARD,
+            ))
+            .expect("pending capture");
+
+        let status = coordinator.seal_for_shutdown();
+        assert_eq!(status.pending(), 1);
+        assert!(status.shutdown_sealed());
+        assert!(!coordinator.is_quiescent());
+        assert_eq!(
+            coordinator
+                .begin(request(
+                    2,
+                    &second,
+                    1_000,
+                    2_000,
+                    SemanticScreenshotBudget::STANDARD,
+                ))
+                .expect_err("shutdown must close admission"),
+            SemanticScreenshotCoordinatorError::Shutdown
+        );
+
+        coordinator
+            .cancel(pending)
+            .expect("exact pending capture remains drainable");
+        assert!(coordinator.is_quiescent());
+        assert_eq!(coordinator.status().pending(), 0);
+        assert!(coordinator.status().shutdown_sealed());
     }
 
     #[test]

@@ -75,6 +75,18 @@ responses, machine-local paths, or native traces.
   admissible after the seal for asynchronous drain checks. The gate rejects a
   reordered seal, a reopened mutation route, a seal-blocked audit, ordinary-
   audit substitution, or host settlement that bypasses the task-owned route.
+- pins the zero-idle native shutdown coordinator to a consuming cohort of six
+  exact logical owners: contexts, profile leases, cookie transfers, native
+  action execution, post-action settlement, and screenshot capture. Every
+  owner must already be permanently sealed and empty; refusal returns the
+  complete cohort for continued cleanup. Screenshot capture now has a matching
+  retain-and-drain seal. The coordinator distinguishes the first atomic-seal
+  settlement from later ordinary audits, requires strictly increasing audit
+  identities, caps all attempts at eight, checks all nine validated native
+  resource counters for exact zero, and is the only constructor of the
+  move-only terminal proof. Mutation tests remove each critical join, seal,
+  distinct settlement, bound, zero-count check, and constructor closure and
+  prove the release gate refuses the source.
 
 The same check pins the default functional core to an empty feature set and a
 closed allocation/data dependency inventory. Its non-diagnostic source is
@@ -190,9 +202,19 @@ agentic-owned Windows modules. Cross-compilation is not device behavior.
   prove only bounded audits remain admissible for drain verification. The host
   reuses its validated native-resource accounting and the port adds no queue,
   worker, timer, page, or native object until it is taken. This closes the
-  stable port race only; the application actor still must order logical
-  cancellation, native close, repeated zero-resource audit, engine teardown,
-  and durable terminal reporting in an end-to-end shutdown suite.
+  stable port race only.
+- The functional core now consumes its sealed, empty context, profile-lease,
+  cookie-transfer, action-execution, action-settlement, and screenshot owners
+  before allowing the atomic port seal. The screenshot coordinator closes new
+  capture admission without losing accepted terminal debt. One exact barrier
+  audit plus at most seven strictly newer post-seal audits can produce a
+  constructor-closed proof only after every validated native resource count is
+  zero; mismatched events, replayed identities, nonzero snapshots, dispatch
+  refusals, and attempt exhaustion cannot do so. This coordinator owns no port,
+  clock, timer, task, worker, channel, browser object, or I/O. The application
+  actor still must drive logical cancellation/native close into this seam,
+  drain durable run audits and policy authority, require the proof before
+  engine teardown, and exercise the complete order end to end.
 - The Browse named-device baseline intentionally has no values. No CPU, memory,
   GPU/compositor, energy, wakeup, or input-latency budget has been inferred.
 - Checked-priced model receipts now preserve a content-free exact schedule
@@ -299,7 +321,7 @@ The authoritative aggregate records and exact remaining blockers are in
 - completion of native/unsafe, secret, and log review outside the scoped
   agentic-owned production modules and dormant provider transport, plus
   application/platform profile integration, shutdown orchestration and
-  zero-resource settlement, recovery, migration, and stable Work-port audits
-  beyond the bounded native-context shutdown seam.
+  end-to-end use of the bounded zero-resource proof, recovery, migration, and
+  stable Work-port audits beyond the functional-core shutdown seam.
 
 None of these pending items is represented as zero, passing, or non-blocking.

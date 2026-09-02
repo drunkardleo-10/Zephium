@@ -32,6 +32,7 @@ const AGENTIC_ACTION_METRICS: &str = "crates/zephium-agentic/src/agent_action_me
 const AGENTIC_INPUT_METRICS: &str = "crates/zephium-agentic/src/agent_input_metrics.rs";
 const AGENTIC_METRIC_CLOSURE: &str = "crates/zephium-agentic/src/agent_metric_closure.rs";
 const AGENTIC_METRICS: &str = "crates/zephium-agentic/src/agent_metrics.rs";
+const AGENTIC_NATIVE_SHUTDOWN: &str = "crates/zephium-agentic/src/agent_native_shutdown.rs";
 const AGENTIC_PROGRESS_METRICS: &str = "crates/zephium-agentic/src/agent_progress_metrics.rs";
 const AGENTIC_SEMANTIC_DIFF: &str = "crates/zephium-agentic/src/semantic_diff.rs";
 const AGENTIC_SEMANTIC_DIFF_MODEL: &str = "crates/zephium-agentic/src/semantic_diff_model.rs";
@@ -52,6 +53,7 @@ const AGENTIC_SEMANTIC_EXECUTE_COORDINATOR: &str =
 const AGENTIC_SEMANTIC_SETTLE_COORDINATOR: &str =
     "crates/zephium-agentic/src/semantic_settle_coordinator.rs";
 const AGENTIC_SEMANTIC_SETTLE: &str = "crates/zephium-agentic/src/semantic_settle.rs";
+const AGENTIC_SEMANTIC_SCREENSHOT: &str = "crates/zephium-agentic/src/semantic_screenshot.rs";
 const AGENTIC_SEMANTIC_VERIFY: &str = "crates/zephium-agentic/src/semantic_verify.rs";
 const AGENTIC_CONTEXT_PORT: &str = "crates/zephium-agentic/src/context_port.rs";
 const AGENTIC_CONTEXT_REGISTRY: &str = "crates/zephium-agentic/src/context_registry.rs";
@@ -315,6 +317,11 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     validate_context_shutdown_retention_contract(&read(
         repository.join(AGENTIC_CONTEXT_REGISTRY),
     )?)?;
+    validate_agent_native_shutdown_coordinator(
+        &read(repository.join(AGENTIC_ROOT))?,
+        &read(repository.join(AGENTIC_NATIVE_SHUTDOWN))?,
+        &read(repository.join(AGENTIC_SEMANTIC_SCREENSHOT))?,
+    )?;
     validate_provider_transport_manifest(&read(repository.join(PROVIDER_TRANSPORT_MANIFEST))?)?;
     let provider_transport_root = read(repository.join(PROVIDER_TRANSPORT_ROOT))?;
     validate_provider_transport_root(&provider_transport_root)?;
@@ -5189,6 +5196,151 @@ fn validate_context_shutdown_retention_contract(source: &str) -> Result<(), Stri
     Ok(())
 }
 
+fn validate_agent_native_shutdown_coordinator(
+    root: &str,
+    shutdown: &str,
+    screenshot: &str,
+) -> Result<(), String> {
+    fn production(source: &str) -> &str {
+        source
+            .split_once("\n#[cfg(test)]\nmod tests")
+            .map_or(source, |(production, _)| production)
+    }
+
+    let root = compact(root);
+    for required in [
+        "modagent_native_shutdown;",
+        "AgentNativeShutdownCoordinator,",
+        "AgentNativeShutdownProof,",
+        "AgentNativeShutdownResources,",
+        "MAX_AGENT_NATIVE_SHUTDOWN_AUDITS,",
+    ] {
+        if !root.contains(required) {
+            return Err(format!(
+                "agentic root lost native shutdown coordinator export {required}"
+            ));
+        }
+    }
+
+    let screenshot = compact(production(screenshot));
+    for required in [
+        "pubstructSemanticScreenshotCoordinatorStatus{pending:u8,shutdown_sealed:bool,}",
+        "pubstructSemanticScreenshotCoordinator{pending:Vec<PendingScreenshotEntry>,shutdown_sealed:bool,}",
+        "ifself.shutdown_sealed{returnErr(SemanticScreenshotCoordinatorError::Shutdown);}",
+        "pubfnseal_for_shutdown(&mutself)->SemanticScreenshotCoordinatorStatus{self.shutdown_sealed=true;self.status()}",
+        "pubfnis_quiescent(&self)->bool{self.shutdown_sealed&&self.pending.is_empty()}",
+        "Shutdown,",
+    ] {
+        if !screenshot.contains(required) {
+            return Err(format!(
+                "semantic screenshot shutdown seal lost exact behavior {required}"
+            ));
+        }
+    }
+    let screenshot_cancel = screenshot
+        .split_once("pubfncancel(")
+        .and_then(|(_, suffix)| {
+            suffix
+                .split_once("pubfnseal_for_shutdown(")
+                .map(|(body, _)| body)
+        })
+        .ok_or_else(|| "semantic screenshot cancellation boundary is missing".to_owned())?;
+    if screenshot_cancel.contains("shutdown_sealed") {
+        return Err(
+            "semantic screenshot exact terminal cleanup must remain available after sealing"
+                .to_owned(),
+        );
+    }
+
+    let shutdown_production = production(shutdown);
+    let proof_declaration = shutdown_production
+        .find("pub struct AgentNativeShutdownProof")
+        .ok_or_else(|| "agent native shutdown proof is missing".to_owned())?;
+    let proof_attribute_start = shutdown_production[..proof_declaration]
+        .rfind("\n\n")
+        .map_or(0, |start| start + 2);
+    let proof_attributes = &shutdown_production[proof_attribute_start..proof_declaration];
+    for forbidden in ["Clone", "Copy", "Default", "Serialize", "Deserialize"] {
+        if proof_attributes.contains(forbidden) {
+            return Err(format!(
+                "agent native shutdown proof acquired forgeable derive {forbidden}"
+            ));
+        }
+    }
+
+    let shutdown = compact(shutdown_production);
+    for required in [
+        "pubconstMAX_AGENT_NATIVE_SHUTDOWN_AUDITS:u8=8;",
+        "pubstructAgentNativeShutdownResources{contexts:ContextRegistry,profile_leases:ContextProfileLeaseRegistry,cookie_transfers:ContextCookieTransferRegistry,action_executions:SemanticActionExecutionCoordinator,action_settlements:SemanticActionSettlementCoordinator,screenshots:SemanticScreenshotCoordinator,}",
+        "if!self.contexts.is_quiescent(){returnSome(AgentNativeShutdownAdmissionError::Contexts);}",
+        "if!self.profile_leases.is_quiescent(){returnSome(AgentNativeShutdownAdmissionError::ProfileLeases);}",
+        "if!self.cookie_transfers.is_quiescent(){returnSome(AgentNativeShutdownAdmissionError::CookieTransfers);}",
+        "if!action_executions.sealed()||action_executions.pending()!=0",
+        "if!action_settlements.sealed()||action_settlements.pending()!=0",
+        "if!self.screenshots.is_quiescent()",
+        "pubfntry_new(resources:AgentNativeShutdownResources,)->Result<Self,Box<AgentNativeShutdownAdmissionRefusal>>",
+        "ifletSome(error)=resources.readiness_error(){returnErr(Box::new(AgentNativeShutdownAdmissionRefusal{error,resources,}));}",
+        "pubfnbegin_port_seal(&mutself,audit:ContextResourceAuditId,)->Result<(),AgentNativeShutdownError>",
+        "pubfnaccount_port_seal(&mutself,audit:ContextResourceAuditId,dispatch:ContextShutdownDispatch,)",
+        "ContextShutdownDispatch::AuditScheduled=>{NativeShutdownState::ShutdownAuditPending(audit)}",
+        "ContextShutdownDispatch::SealedWithoutAudit(_)=>self.retry_or_exhausted()",
+        "pubfnsettle_shutdown_audit(&mutself,settlement:ContextShutdownAuditSettlement,)",
+        "pubfnbegin_resource_audit(&mutself,audit:ContextResourceAuditId,)",
+        "pubfnaccount_resource_audit(&mutself,audit:ContextResourceAuditId,dispatch:ContextDispatch,)",
+        "pubfnsettle_resource_audit(&mutself,settlement:ContextResourceAuditSettlement,)",
+        "ifself.last_audit.is_some_and(|last_audit|audit<=last_audit){returnErr(AgentNativeShutdownError::AuditReplay);}",
+        "ifattempts>MAX_AGENT_NATIVE_SHUTDOWN_AUDITS{returnErr(AgentNativeShutdownError::Stage);}",
+        "ifself.attempts>=MAX_AGENT_NATIVE_SHUTDOWN_AUDITS{NativeShutdownState::Exhausted}else{NativeShutdownState::ResourceAuditRequired}",
+        "Ok(snapshot)ifnative_snapshot_is_zero(snapshot)=>{NativeShutdownState::ZeroProven{audit,snapshot}}",
+        "Ok(_)|Err(_)=>self.retry_or_exhausted()",
+        "pubfnfinish(self)->Result<AgentNativeShutdownProof,Box<AgentNativeShutdownFinishRefusal>>",
+        "letNativeShutdownState::ZeroProven{audit,snapshot}=self.stateelse",
+        "Ok(AgentNativeShutdownProof{audit,attempts:self.attempts,snapshot,})",
+    ] {
+        if !shutdown.contains(required) {
+            return Err(format!(
+                "agent native shutdown coordinator lost exact drain rule {required}"
+            ));
+        }
+    }
+
+    for field in [
+        "counts.known_bindings==0",
+        "counts.resident_views==0",
+        "counts.owned_reservations==0",
+        "counts.borrowed_leases==0",
+        "counts.visible_surfaces==0",
+        "counts.suspended_views==0",
+        "counts.pending_operations==0",
+        "counts.pending_captures==0",
+        "counts.queued_tasks==0",
+    ] {
+        if !shutdown.contains(field) {
+            return Err(format!(
+                "agent native shutdown zero proof omitted resource field {field}"
+            ));
+        }
+    }
+
+    for forbidden in [
+        "implAgentNativeShutdownProof{pubfnnew(",
+        "implAgentNativeShutdownProof{pubconstfnnew(",
+        "DefaultforAgentNativeShutdownProof",
+        "SerializeforAgentNativeShutdownProof",
+        "DeserializeforAgentNativeShutdownProof",
+    ] {
+        if shutdown.contains(forbidden) {
+            return Err(format!(
+                "agent native shutdown proof acquired forging surface {forbidden}"
+            ));
+        }
+    }
+    if shutdown.matches("Ok(AgentNativeShutdownProof{").count() != 1 {
+        return Err("agent native shutdown proof must have one checked construction".to_owned());
+    }
+    Ok(())
+}
+
 fn validate_agent_context_shutdown_barrier_contract(
     domain: &str,
     port: &str,
@@ -5759,6 +5911,69 @@ mod tests {
             ),
         ] {
             assert!(validate_context_shutdown_retention_contract(&invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn native_shutdown_coordinator_requires_full_logical_drain_and_exact_zero_audits() {
+        let root = include_str!("../../crates/zephium-agentic/src/lib.rs");
+        let shutdown = include_str!("../../crates/zephium-agentic/src/agent_native_shutdown.rs");
+        let screenshot = include_str!("../../crates/zephium-agentic/src/semantic_screenshot.rs");
+        validate_agent_native_shutdown_coordinator(root, shutdown, screenshot)
+            .expect("native shutdown coordinator boundary");
+
+        for invalid in [
+            root.replace("mod agent_native_shutdown;", ""),
+            root.replace("AgentNativeShutdownProof,", ""),
+        ] {
+            assert!(
+                validate_agent_native_shutdown_coordinator(&invalid, shutdown, screenshot).is_err()
+            );
+        }
+        for invalid in [
+            screenshot.replace(
+                "if self.shutdown_sealed {\n            return Err(SemanticScreenshotCoordinatorError::Shutdown);\n        }",
+                "",
+            ),
+            screenshot.replace("self.shutdown_sealed = true;", ""),
+            screenshot.replace(
+                "let Some(index) = self.pending.iter().position(|entry| entry.id == pending.id)",
+                "if self.shutdown_sealed { return Err(SemanticScreenshotCoordinatorError::Shutdown); }\n        let Some(index) = self.pending.iter().position(|entry| entry.id == pending.id)",
+            ),
+        ] {
+            assert!(
+                validate_agent_native_shutdown_coordinator(root, shutdown, &invalid).is_err()
+            );
+        }
+        for (index, invalid) in [
+            shutdown.replace(
+                "MAX_AGENT_NATIVE_SHUTDOWN_AUDITS: u8 = 8",
+                "MAX_AGENT_NATIVE_SHUTDOWN_AUDITS: u8 = 64",
+            ),
+            shutdown.replace("if !self.contexts.is_quiescent()", "if false"),
+            shutdown.replace("if !self.screenshots.is_quiescent()", "if false"),
+            shutdown.replace("counts.pending_captures == 0", "true"),
+            shutdown.replace(
+                "settlement: ContextShutdownAuditSettlement",
+                "settlement: ContextResourceAuditSettlement",
+            ),
+            shutdown.replace(
+                "#[must_use]\npub struct AgentNativeShutdownProof",
+                "#[derive(Clone, Copy)]\n#[must_use]\npub struct AgentNativeShutdownProof",
+            ),
+            shutdown.replacen(
+                "\n#[cfg(test)]\nmod tests",
+                "\nimpl AgentNativeShutdownProof { pub fn new() {} }\n\n#[cfg(test)]\nmod tests",
+                1,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(
+                validate_agent_native_shutdown_coordinator(root, &invalid, screenshot).is_err(),
+                "shutdown mutation {index} was not rejected"
+            );
         }
     }
 

@@ -1010,6 +1010,20 @@ disk pressure, shutdown, and restart. Validate no leaked native view, process,
 task, cookie bridge, profile lease, model stream, secret, or temporary artifact.
 Faults settle as typed recoverable or terminal states; they do not hang.
 
+Process shutdown first permanently seals and exactly drains the process context
+registry, profile leases, cookie transfers, native-action execution,
+post-action settlement, and screenshot capture. Screenshot admission has the
+same retain-and-drain seal as the other native coordinators: sealing refuses new
+captures but cannot discard an accepted capture's terminal obligation. Only a
+consuming join over that complete sealed, empty cohort may begin the native
+port barrier. The distinct audit admitted with the atomic seal is never
+substituted by an earlier ordinary audit. If it does not prove all nine native
+resource counts are zero, the shell may issue only strictly newer, read-only
+audits under the process deadline and an eight-attempt hard ceiling. Engine
+teardown requires the resulting constructor-closed zero proof in addition to,
+not instead of, run cancellation, durable audit drain, policy settlement, and
+the application shutdown barrier.
+
 ## 14. Metrics and gates
 
 Record at action and run granularity:

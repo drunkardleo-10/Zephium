@@ -21,6 +21,7 @@ mod agent_input_metrics;
 mod agent_manifest;
 mod agent_metric_closure;
 mod agent_metrics;
+mod agent_native_shutdown;
 mod agent_policy;
 mod agent_progress_metrics;
 mod agent_provider;
@@ -106,6 +107,13 @@ pub use agent_metrics::{
     AgentEffectAccountingMetrics, AgentEffectClassMetrics, AgentMetricError,
     AgentModelAccountingMetrics, AgentNodeAccountingMetrics, AgentPricingScheduleMetrics,
     AgentRunAccountingMetrics, AgentRunAccountingSnapshot, MAX_AGENT_METRIC_PRICING_SCHEDULES,
+};
+pub use agent_native_shutdown::{
+    AgentNativeShutdownAdmissionError, AgentNativeShutdownAdmissionRefusal,
+    AgentNativeShutdownCoordinator, AgentNativeShutdownError, AgentNativeShutdownFinishRefusal,
+    AgentNativeShutdownProof, AgentNativeShutdownResources, AgentNativeShutdownStage,
+    AgentNativeShutdownStatus, MAX_AGENT_NATIVE_SHUTDOWN_AUDITS,
+    MAX_AGENT_NATIVE_SHUTDOWN_PROOF_BYTES,
 };
 pub use agent_policy::{
     AgentActiveEffect, AgentActiveModelCall, AgentEffectAssessment, AgentEffectAuthorization,
