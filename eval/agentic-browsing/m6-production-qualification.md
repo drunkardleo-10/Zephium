@@ -87,6 +87,12 @@ responses, machine-local paths, or native traces.
   move-only terminal proof. Mutation tests remove each critical join, seal,
   distinct settlement, bound, zero-count check, and constructor closure and
   prove the release gate refuses the source.
+- pins the stable application lifecycle to one `Send`, move-only consuming
+  shutdown operation under the caller's absolute deadline. Its exact closed
+  outcome has no clean variant without the native zero proof and no retryable
+  result after ownership is consumed. The lifecycle contract additionally
+  requires cancellation, provider, durable-audit, policy, and logical-owner
+  settlement; the native proof alone does not imply those facts.
 
 The same check pins the default functional core to an empty feature set and a
 closed allocation/data dependency inventory. Its non-diagnostic source is
@@ -215,6 +221,10 @@ agentic-owned Windows modules. Cross-compilation is not device behavior.
   actor still must drive logical cancellation/native close into this seam,
   drain durable run audits and policy authority, require the proof before
   engine teardown, and exercise the complete order end to end.
+- A stable consuming lifecycle port now prevents an application integration
+  from claiming clean agent shutdown without carrying the zero-resource proof.
+  It remains outside the ordinary desktop graph, and the Shell has not yet
+  taken ownership of a concrete runtime or exercised the full ordered path.
 - The Browse named-device baseline intentionally has no values. No CPU, memory,
   GPU/compositor, energy, wakeup, or input-latency budget has been inferred.
 - Checked-priced model receipts now preserve a content-free exact schedule

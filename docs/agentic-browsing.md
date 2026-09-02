@@ -1024,6 +1024,15 @@ teardown requires the resulting constructor-closed zero proof in addition to,
 not instead of, run cancellation, durable audit drain, policy settlement, and
 the application shutdown barrier.
 
+The stable application boundary is a move-only, consuming agent-browser
+lifecycle. Its terminal `Clean` result necessarily carries that native zero
+proof and additionally attests complete run cancellation, provider settlement,
+durable audit delivery, mutable-policy settlement, and logical-owner drain.
+Failure consumes the lifecycle and is terminal; the application may continue
+best-effort Store and engine cleanup, but it cannot report a clean shutdown.
+The lifecycle owns no ambient application authority and is absent from the
+ordinary desktop dependency graph until a concrete runtime is integrated.
+
 ## 14. Metrics and gates
 
 Record at action and run granularity:

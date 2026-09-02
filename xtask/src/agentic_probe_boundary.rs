@@ -30,6 +30,7 @@ const AGENTIC_EFFECT_POLICY: &str = "crates/zephium-agentic/src/agent_policy/eff
 const AGENTIC_AUDIT: &str = "crates/zephium-agentic/src/agent_audit.rs";
 const AGENTIC_ACTION_METRICS: &str = "crates/zephium-agentic/src/agent_action_metrics.rs";
 const AGENTIC_INPUT_METRICS: &str = "crates/zephium-agentic/src/agent_input_metrics.rs";
+const AGENTIC_LIFECYCLE: &str = "crates/zephium-agentic/src/agent_lifecycle.rs";
 const AGENTIC_METRIC_CLOSURE: &str = "crates/zephium-agentic/src/agent_metric_closure.rs";
 const AGENTIC_METRICS: &str = "crates/zephium-agentic/src/agent_metrics.rs";
 const AGENTIC_NATIVE_SHUTDOWN: &str = "crates/zephium-agentic/src/agent_native_shutdown.rs";
@@ -319,6 +320,7 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     )?)?;
     validate_agent_native_shutdown_coordinator(
         &read(repository.join(AGENTIC_ROOT))?,
+        &read(repository.join(AGENTIC_LIFECYCLE))?,
         &read(repository.join(AGENTIC_NATIVE_SHUTDOWN))?,
         &read(repository.join(AGENTIC_SEMANTIC_SCREENSHOT))?,
     )?;
@@ -5198,6 +5200,7 @@ fn validate_context_shutdown_retention_contract(source: &str) -> Result<(), Stri
 
 fn validate_agent_native_shutdown_coordinator(
     root: &str,
+    lifecycle: &str,
     shutdown: &str,
     screenshot: &str,
 ) -> Result<(), String> {
@@ -5209,7 +5212,10 @@ fn validate_agent_native_shutdown_coordinator(
 
     let root = compact(root);
     for required in [
+        "modagent_lifecycle;",
         "modagent_native_shutdown;",
+        "AgentBrowserLifecycle,",
+        "AgentBrowserShutdownOutcome",
         "AgentNativeShutdownCoordinator,",
         "AgentNativeShutdownProof,",
         "AgentNativeShutdownResources,",
@@ -5218,6 +5224,38 @@ fn validate_agent_native_shutdown_coordinator(
         if !root.contains(required) {
             return Err(format!(
                 "agentic root lost native shutdown coordinator export {required}"
+            ));
+        }
+    }
+
+    let lifecycle_production = production(lifecycle);
+    let outcome_declaration = lifecycle_production
+        .find("pub enum AgentBrowserShutdownOutcome")
+        .ok_or_else(|| "agent browser shutdown outcome is missing".to_owned())?;
+    let outcome_attribute_start = lifecycle_production[..outcome_declaration]
+        .rfind("\n\n")
+        .map_or(0, |start| start + 2);
+    let outcome_attributes = &lifecycle_production[outcome_attribute_start..outcome_declaration];
+    for forbidden in ["Clone", "Copy", "Default", "Serialize", "Deserialize"] {
+        if outcome_attributes.contains(forbidden) {
+            return Err(format!(
+                "agent browser shutdown outcome acquired forgeable derive {forbidden}"
+            ));
+        }
+    }
+    let lifecycle_without_comments = lifecycle_production
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<String>();
+    let lifecycle = compact(&lifecycle_without_comments);
+    for required in [
+        "pubenumAgentBrowserShutdownOutcome{Clean(AgentNativeShutdownProof),Unclean,}",
+        "pubfninto_native_proof(self)->Option<AgentNativeShutdownProof>{matchself{Self::Clean(proof)=>Some(proof),Self::Unclean=>None,}}",
+        "pubtraitAgentBrowserLifecycle:Send{fnshutdown_until(self:Box<Self>,deadline:Instant)->AgentBrowserShutdownOutcome;}",
+    ] {
+        if !lifecycle.contains(required) {
+            return Err(format!(
+                "agent browser lifecycle lost consuming proof-bound shutdown rule {required}"
             ));
         }
     }
@@ -5917,17 +5955,35 @@ mod tests {
     #[test]
     fn native_shutdown_coordinator_requires_full_logical_drain_and_exact_zero_audits() {
         let root = include_str!("../../crates/zephium-agentic/src/lib.rs");
+        let lifecycle = include_str!("../../crates/zephium-agentic/src/agent_lifecycle.rs");
         let shutdown = include_str!("../../crates/zephium-agentic/src/agent_native_shutdown.rs");
         let screenshot = include_str!("../../crates/zephium-agentic/src/semantic_screenshot.rs");
-        validate_agent_native_shutdown_coordinator(root, shutdown, screenshot)
+        validate_agent_native_shutdown_coordinator(root, lifecycle, shutdown, screenshot)
             .expect("native shutdown coordinator boundary");
 
         for invalid in [
             root.replace("mod agent_native_shutdown;", ""),
             root.replace("AgentNativeShutdownProof,", ""),
         ] {
+            assert!(validate_agent_native_shutdown_coordinator(
+                &invalid, lifecycle, shutdown, screenshot,
+            )
+            .is_err());
+        }
+        for invalid in [
+            lifecycle.replace(
+                "Clean(AgentNativeShutdownProof)",
+                "Clean",
+            ),
+            lifecycle.replace("self: Box<Self>", "&mut self"),
+            lifecycle.replace(
+                "#[must_use = \"agent browser shutdown must gate clean application teardown\"]\npub enum AgentBrowserShutdownOutcome",
+                "#[derive(Clone, Copy)]\n#[must_use = \"agent browser shutdown must gate clean application teardown\"]\npub enum AgentBrowserShutdownOutcome",
+            ),
+        ] {
             assert!(
-                validate_agent_native_shutdown_coordinator(&invalid, shutdown, screenshot).is_err()
+                validate_agent_native_shutdown_coordinator(root, &invalid, shutdown, screenshot)
+                    .is_err()
             );
         }
         for invalid in [
@@ -5942,7 +5998,8 @@ mod tests {
             ),
         ] {
             assert!(
-                validate_agent_native_shutdown_coordinator(root, shutdown, &invalid).is_err()
+                validate_agent_native_shutdown_coordinator(root, lifecycle, shutdown, &invalid)
+                    .is_err()
             );
         }
         for (index, invalid) in [
@@ -5971,7 +6028,8 @@ mod tests {
         .enumerate()
         {
             assert!(
-                validate_agent_native_shutdown_coordinator(root, &invalid, screenshot).is_err(),
+                validate_agent_native_shutdown_coordinator(root, lifecycle, &invalid, screenshot,)
+                    .is_err(),
                 "shutdown mutation {index} was not rejected"
             );
         }

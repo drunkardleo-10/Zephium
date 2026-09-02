@@ -18,6 +18,7 @@ compile_error!("the agentic probe harness is forbidden in optimized builds");
 mod agent_action_metrics;
 mod agent_audit;
 mod agent_input_metrics;
+mod agent_lifecycle;
 mod agent_manifest;
 mod agent_metric_closure;
 mod agent_metrics;
@@ -91,6 +92,7 @@ pub use agent_input_metrics::{
     AgentProviderInputNodeMetrics, AgentProviderInputShapeMetrics, AgentRunProviderInputMetrics,
     AgentRunProviderInputSnapshot, MAX_AGENT_PROVIDER_INPUT_SNAPSHOT_BYTES,
 };
+pub use agent_lifecycle::{AgentBrowserLifecycle, AgentBrowserShutdownOutcome};
 pub use agent_manifest::{
     AgentAccountAttestationId, AgentAccountId, AgentAccountScope, AgentContextAccountBinding,
     AgentDataFlowRule, AgentEffectScope, AgentManifestContractError, AgentPlanLeaseId,
