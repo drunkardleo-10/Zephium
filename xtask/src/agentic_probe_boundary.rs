@@ -58,6 +58,7 @@ const AGENTIC_SEMANTIC_SCREENSHOT: &str = "crates/zephium-agentic/src/semantic_s
 const AGENTIC_SEMANTIC_VERIFY: &str = "crates/zephium-agentic/src/semantic_verify.rs";
 const AGENTIC_CONTEXT_PORT: &str = "crates/zephium-agentic/src/context_port.rs";
 const AGENTIC_CONTEXT_REGISTRY: &str = "crates/zephium-agentic/src/context_registry.rs";
+const AGENTIC_COOKIE_TRANSFER: &str = "crates/zephium-agentic/src/cookie_transfer.rs";
 const AGENTIC_PROFILE_LEASE: &str = "crates/zephium-agentic/src/profile_lease.rs";
 const AGENTIC_SUPERVISOR: &str = "crates/zephium-agentic/src/agent_supervisor.rs";
 const AGENTIC_SUPERVISOR_PROGRESS: &str =
@@ -324,6 +325,10 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     validate_context_shutdown_retention_contract(&read(
         repository.join(AGENTIC_CONTEXT_REGISTRY),
     )?)?;
+    validate_cookie_transfer_deadline_contract(
+        &read(repository.join(AGENTIC_ROOT))?,
+        &read(repository.join(AGENTIC_COOKIE_TRANSFER))?,
+    )?;
     validate_agent_native_shutdown_coordinator(
         &read(repository.join(AGENTIC_ROOT))?,
         &read(repository.join(AGENTIC_LIFECYCLE))?,
@@ -909,6 +914,63 @@ fn validate_engine_agent_cookie_preflight(source: &str) -> Result<(), String> {
         if source.contains(forbidden) {
             return Err(format!(
                 "production Windows cookie preflight acquired forbidden surface {forbidden}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_cookie_transfer_deadline_contract(root: &str, source: &str) -> Result<(), String> {
+    let root = compact(root);
+    for required in [
+        "ContextCookieTransferInstant",
+        "ContextCookieTransferWindow",
+        "MAX_COOKIE_TRANSFER_MILLIS",
+    ] {
+        if !root.contains(required) {
+            return Err(format!(
+                "agent cookie transfer root lost bounded deadline export {required}"
+            ));
+        }
+    }
+
+    let source = compact(source);
+    for required in [
+        "pubconstMAX_COOKIE_TRANSFER_MILLIS:u64=30_000;",
+        "pubstructContextCookieTransferInstant(u64);",
+        "pubstructContextCookieTransferWindow{requested_at:ContextCookieTransferInstant,deadline:ContextCookieTransferInstant,}",
+        "deadline.millis().checked_sub(requested_at.millis())",
+        "ifduration==0||duration>MAX_COOKIE_TRANSFER_MILLIS",
+        "pubconstfnduration_millis(self)->u64",
+        "window:ContextCookieTransferWindow,",
+        "pubconstfnwindow(&self)->ContextCookieTransferWindow",
+        ".field(\"window\",&self.window)",
+    ] {
+        if !source.contains(required) {
+            return Err(format!(
+                "agent cookie transfer lost bounded deadline rule {required}"
+            ));
+        }
+    }
+    if source
+        .matches("window:ContextCookieTransferWindow,")
+        .count()
+        != 3
+    {
+        return Err(
+            "cookie transfer window must be retained once and required by both constructors"
+                .to_owned(),
+        );
+    }
+    for forbidden in [
+        "std::time::Instant",
+        "SystemTime",
+        "thread::",
+        "tokio::time",
+    ] {
+        if source.contains(forbidden) {
+            return Err(format!(
+                "functional cookie transfer deadline acquired runtime clock authority {forbidden}"
             ));
         }
     }
@@ -8825,6 +8887,31 @@ mod tests {
         ] {
             assert!(validate_engine_agent_cookie_preflight(&invalid).is_err());
         }
+    }
+
+    #[test]
+    fn cookie_transfer_deadline_is_bounded_exact_and_clock_free() {
+        let root = include_str!("../../crates/zephium-agentic/src/lib.rs");
+        let transfer = include_str!("../../crates/zephium-agentic/src/cookie_transfer.rs");
+        validate_cookie_transfer_deadline_contract(root, transfer)
+            .expect("bounded cookie transfer deadline");
+        for invalid in [
+            transfer.replace("pub const MAX_COOKIE_TRANSFER_MILLIS: u64 = 30_000;", ""),
+            transfer.replace(
+                ".checked_sub(requested_at.millis())",
+                ".saturating_sub(requested_at.millis())",
+            ),
+            transfer.replace("duration > MAX_COOKIE_TRANSFER_MILLIS", "false"),
+            transfer.replacen("window: ContextCookieTransferWindow,", "", 1),
+            format!("{transfer}\nfn runtime_clock() {{ let _ = std::time::Instant::now(); }}"),
+        ] {
+            assert!(validate_cookie_transfer_deadline_contract(root, &invalid).is_err());
+        }
+        assert!(validate_cookie_transfer_deadline_contract(
+            &root.replace("ContextCookieTransferWindow", "MissingCookieWindow"),
+            transfer,
+        )
+        .is_err());
     }
 
     #[test]

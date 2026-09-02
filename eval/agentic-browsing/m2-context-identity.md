@@ -115,7 +115,12 @@ transfers may be pending, and only when their destination profiles differ;
 distinct destination contexts on one WebView2 profile are the same physical
 cookie store and therefore cannot mutate concurrently. Each transfer accepts
 at most 256 unique native-exposed cookies, 16 KiB per cookie, and 512 KiB total
-field data.
+field data. It also retains one exact process-local request/deadline interval:
+the interval must be nonempty and at most 30 seconds, including the Windows
+adapter's ten-second cleanup reserve. The functional core receives ticks from
+the trusted shell but owns no clock, timer, or worker. Exact settlement
+correlation includes this window, so a callback cannot substitute or extend a
+previously admitted deadline.
 
 The adapter contract requires an enumerate/validate/deduplicate preflight with
 zero destination writes before application. Terminal outcomes distinguish
@@ -455,13 +460,15 @@ capacity refusal without eviction, durable/ephemeral storage retention, stale-
 release rejection, deletion races, and shutdown quiescence.
 Cookie-transfer tests cover canonical/deduplicated origins, Windows clean-
 subprofile proof, handoff owner/profile joins, required capabilities, payload
-and HttpOnly count invariants, explicit partial application, destination-
-profile single-flight (including distinct-context alias refusal), process
-concurrency across distinct profiles, redacted debug output, and shutdown
-drain. Engine preflight tests additionally cover exact duplicate and conflict
-handling, all-origin release, sequential apply accounting, invalid native
-shapes, zero/overflow origin and cookie ceilings, raw duplicate-flood refusal,
-strict UTF-16 refusal, write-ticket accounting, and content-free diagnostics.
+and HttpOnly count invariants, nonempty/reversed/over-ceiling native windows,
+deadline redaction and exact settlement, explicit partial application,
+destination-profile single-flight (including distinct-context alias refusal),
+process concurrency across distinct profiles, redacted debug output, and
+shutdown drain. Engine preflight tests additionally cover exact duplicate and
+conflict handling, all-origin release, sequential apply accounting, invalid
+native shapes, zero/overflow origin and cookie ceilings, raw duplicate-flood
+refusal, strict UTF-16 refusal, write-ticket accounting, and content-free
+diagnostics.
 The release boundary mutation-tests the dormant Windows adapter's feature
 gate, count ceiling, destination-side copy, write interlock, sequential
 accounting, profile-wide cleanup/readback, secret conversion, and absence of

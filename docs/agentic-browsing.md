@@ -191,7 +191,11 @@ Before navigation, copy the bounded cookie set needed for the target origins
 from the selected user profile into the automation subprofile through supported
 cookie APIs, including HttpOnly cookies where the native API exposes them. A
 sign-in handoff may repeat that one-way copy after the person completes
-authentication. There is no automatic reverse synchronization.
+authentication. There is no automatic reverse synchronization. The complete
+native attempt, including cleanup proof after a partial write, uses one
+trusted-shell absolute deadline under a fixed product ceiling. Correlation
+retains that exact request/deadline window; native adapters cannot widen or
+replace it.
 
 Do not copy a WebView2 user-data directory, claim that cookies imply complete
 origin storage, or synchronize local/session storage speculatively. Add a

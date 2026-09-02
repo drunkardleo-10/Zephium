@@ -26,6 +26,12 @@ pub const MAX_COOKIES_PER_TRANSFER: usize = 256;
 pub const MAX_COOKIE_TRANSFER_BYTES: usize = 512 * 1024;
 /// Maximum UTF-8 bytes across fields of one native-exposed cookie.
 pub const MAX_COOKIE_BYTES: usize = 16 * 1024;
+/// Maximum native lifetime of one cookie transfer, including cleanup proof.
+///
+/// The Windows adapter reserves the final ten seconds for profile-wide
+/// cleanup. This ceiling bounds retained cookie managers and callback owners;
+/// physical qualification may lower it but cannot widen it at runtime.
+pub const MAX_COOKIE_TRANSFER_MILLIS: u64 = 30_000;
 /// Maximum cookie transfers concurrently retained by the process.
 pub const MAX_PENDING_COOKIE_TRANSFERS: usize = 2;
 
@@ -71,6 +77,9 @@ pub enum ContextCookieTransferError {
     /// Returned counts contradict each other or the requested scope.
     #[error("cookie transfer result is contradictory")]
     ResultInvariant,
+    /// The process-local request/deadline interval was empty or too large.
+    #[error("cookie transfer deadline is invalid")]
+    Deadline,
     /// Process shutdown permanently sealed new transfers.
     #[error("cookie transfers are sealed for shutdown")]
     ShutdownSealed,
@@ -95,6 +104,79 @@ pub enum ContextCookieTransferError {
     /// Internal bounded accounting became contradictory.
     #[error("cookie transfer accounting invariant failed")]
     Invariant,
+}
+
+/// Process-local monotonic time used only to bound native cookie work.
+#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+pub struct ContextCookieTransferInstant(u64);
+
+impl ContextCookieTransferInstant {
+    /// Wraps a monotonic millisecond tick from one process-local clock domain.
+    pub const fn from_millis(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// Returns the process-local tick to the trusted runtime adapter.
+    pub const fn millis(self) -> u64 {
+        self.0
+    }
+}
+
+impl fmt::Debug for ContextCookieTransferInstant {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ContextCookieTransferInstant([redacted])")
+    }
+}
+
+/// Exact bounded lifetime of one native cookie-transfer attempt.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct ContextCookieTransferWindow {
+    requested_at: ContextCookieTransferInstant,
+    deadline: ContextCookieTransferInstant,
+}
+
+impl ContextCookieTransferWindow {
+    /// Validates one nonempty interval under the process hard ceiling.
+    pub const fn try_new(
+        requested_at: ContextCookieTransferInstant,
+        deadline: ContextCookieTransferInstant,
+    ) -> Result<Self, ContextCookieTransferError> {
+        let Some(duration) = deadline.millis().checked_sub(requested_at.millis()) else {
+            return Err(ContextCookieTransferError::Deadline);
+        };
+        if duration == 0 || duration > MAX_COOKIE_TRANSFER_MILLIS {
+            return Err(ContextCookieTransferError::Deadline);
+        }
+        Ok(Self {
+            requested_at,
+            deadline,
+        })
+    }
+
+    /// Exact trusted-shell request time.
+    pub const fn requested_at(self) -> ContextCookieTransferInstant {
+        self.requested_at
+    }
+
+    /// Sole absolute completion deadline in the same clock domain.
+    pub const fn deadline(self) -> ContextCookieTransferInstant {
+        self.deadline
+    }
+
+    /// Validated native lifetime in milliseconds.
+    pub const fn duration_millis(self) -> u64 {
+        self.deadline.millis() - self.requested_at.millis()
+    }
+}
+
+impl fmt::Debug for ContextCookieTransferWindow {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ContextCookieTransferWindow")
+            .field("requested_at", &self.requested_at)
+            .field("deadline", &self.deadline)
+            .finish()
+    }
 }
 
 /// Canonical HTTP(S) origin used only by the trusted native cookie adapter.
@@ -228,6 +310,7 @@ pub enum ContextCookieTransferDirection {
 #[derive(Clone, Eq, PartialEq)]
 pub struct ContextCookieTransferRequest {
     id: ContextCookieTransferId,
+    window: ContextCookieTransferWindow,
     direction: ContextCookieTransferDirection,
     source: Option<ContextJoin>,
     source_profile_lease: Option<ContextProfileLease>,
@@ -240,6 +323,7 @@ impl ContextCookieTransferRequest {
     /// Builds an initial selected-profile-to-automation-subprofile import.
     pub fn selected_profile_to_owned(
         id: ContextCookieTransferId,
+        window: ContextCookieTransferWindow,
         destination: ContextJoin,
         destination_capabilities: ContextCapabilities,
         destination_profile_lease: ContextProfileLease,
@@ -254,6 +338,7 @@ impl ContextCookieTransferRequest {
         )?;
         Ok(Self {
             id,
+            window,
             direction: ContextCookieTransferDirection::SelectedProfileToOwned,
             source: None,
             source_profile_lease: None,
@@ -267,6 +352,7 @@ impl ContextCookieTransferRequest {
     #[allow(clippy::too_many_arguments)]
     pub fn human_handoff_to_owned(
         id: ContextCookieTransferId,
+        window: ContextCookieTransferWindow,
         source: ContextJoin,
         source_capabilities: ContextCapabilities,
         source_profile_lease: ContextProfileLease,
@@ -308,6 +394,7 @@ impl ContextCookieTransferRequest {
         }
         Ok(Self {
             id,
+            window,
             direction: ContextCookieTransferDirection::HumanHandoffToOwned,
             source: Some(source),
             source_profile_lease: Some(source_profile_lease),
@@ -320,6 +407,11 @@ impl ContextCookieTransferRequest {
     /// Exact transfer correlation identity.
     pub const fn id(&self) -> ContextCookieTransferId {
         self.id
+    }
+
+    /// Exact bounded native execution window.
+    pub const fn window(&self) -> ContextCookieTransferWindow {
+        self.window
     }
 
     /// Closed one-way transfer direction.
@@ -365,6 +457,7 @@ impl fmt::Debug for ContextCookieTransferRequest {
         formatter
             .debug_struct("ContextCookieTransferRequest")
             .field("id", &self.id)
+            .field("window", &self.window)
             .field("direction", &self.direction)
             .field("source", &self.source)
             .field("source_profile_lease", &self.source_profile_lease)
@@ -760,6 +853,14 @@ mod tests {
         .expect("scope")
     }
 
+    fn window() -> ContextCookieTransferWindow {
+        ContextCookieTransferWindow::try_new(
+            ContextCookieTransferInstant::from_millis(1_000),
+            ContextCookieTransferInstant::from_millis(11_000),
+        )
+        .expect("window")
+    }
+
     fn selected_request_for_profile(
         value: u64,
         context: u128,
@@ -768,6 +869,7 @@ mod tests {
         let destination = ready_join(context, 50, profile, ContextKind::Owned);
         ContextCookieTransferRequest::selected_profile_to_owned(
             ContextCookieTransferId::new(value).expect("transfer"),
+            window(),
             destination,
             capabilities(ContextKind::Owned),
             profile_lease(destination, value),
@@ -820,6 +922,7 @@ mod tests {
         assert_eq!(
             ContextCookieTransferRequest::selected_profile_to_owned(
                 ContextCookieTransferId::new(1).expect("transfer"),
+                window(),
                 destination,
                 capabilities(ContextKind::Owned),
                 profile_lease(destination, 1),
@@ -837,6 +940,7 @@ mod tests {
         assert_eq!(
             ContextCookieTransferRequest::human_handoff_to_owned(
                 ContextCookieTransferId::new(1).expect("transfer"),
+                window(),
                 source,
                 capabilities(ContextKind::HumanSignInHandoff),
                 profile_lease(source, 1),
@@ -849,6 +953,76 @@ mod tests {
             ),
             Err(ContextCookieTransferError::ProfileMismatch)
         );
+    }
+
+    #[test]
+    fn native_window_is_nonempty_bounded_exact_and_redacted() {
+        let requested_at = ContextCookieTransferInstant::from_millis(50);
+        let deadline = ContextCookieTransferInstant::from_millis(50 + MAX_COOKIE_TRANSFER_MILLIS);
+        let window =
+            ContextCookieTransferWindow::try_new(requested_at, deadline).expect("maximum window");
+        assert_eq!(window.requested_at(), requested_at);
+        assert_eq!(window.deadline(), deadline);
+        assert_eq!(window.duration_millis(), MAX_COOKIE_TRANSFER_MILLIS);
+        assert_eq!(
+            format!("{window:?}"),
+            "ContextCookieTransferWindow { requested_at: ContextCookieTransferInstant([redacted]), deadline: ContextCookieTransferInstant([redacted]) }"
+        );
+        assert_eq!(
+            ContextCookieTransferWindow::try_new(requested_at, requested_at),
+            Err(ContextCookieTransferError::Deadline)
+        );
+        assert_eq!(
+            ContextCookieTransferWindow::try_new(
+                requested_at,
+                ContextCookieTransferInstant::from_millis(
+                    requested_at.millis() + MAX_COOKIE_TRANSFER_MILLIS + 1,
+                ),
+            ),
+            Err(ContextCookieTransferError::Deadline)
+        );
+        assert_eq!(
+            ContextCookieTransferWindow::try_new(
+                requested_at,
+                ContextCookieTransferInstant::from_millis(requested_at.millis() - 1),
+            ),
+            Err(ContextCookieTransferError::Deadline)
+        );
+    }
+
+    #[test]
+    fn settlement_rejoins_the_exact_native_window() {
+        let request = selected_request(1, 1);
+        let mut substituted = request.clone();
+        substituted.window = ContextCookieTransferWindow::try_new(
+            ContextCookieTransferInstant::from_millis(2_000),
+            ContextCookieTransferInstant::from_millis(12_000),
+        )
+        .expect("substituted window");
+        let mut registry = ContextCookieTransferRegistry::new();
+        registry.admit(request.clone()).expect("admit");
+        let stale = ContextCookieTransferSettlement::try_new(
+            substituted,
+            ContextCookieTransferOutcome::Refused(ContextCookieTransferFailure::Cancelled),
+        )
+        .expect("stale settlement");
+        assert_eq!(
+            registry.settle(stale),
+            Err(ContextCookieTransferError::StaleSettlement)
+        );
+        assert_eq!(registry.status().pending(), 1);
+        let exact = ContextCookieTransferSettlement::try_new(
+            request.clone(),
+            ContextCookieTransferOutcome::Refused(ContextCookieTransferFailure::Cancelled),
+        )
+        .expect("exact settlement");
+        assert_eq!(
+            registry.settle(exact),
+            Ok(ContextCookieTransferOutcome::Refused(
+                ContextCookieTransferFailure::Cancelled
+            ))
+        );
+        assert_eq!(request.window(), window());
     }
 
     #[test]

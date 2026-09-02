@@ -239,10 +239,11 @@ pub use control::{ProbeAdmissionError, ProbeGate, ProbeRunPermit};
 pub use cookie_transfer::{
     ContextCookieOrigin, ContextCookieScope, ContextCookieTransferCounts,
     ContextCookieTransferDirection, ContextCookieTransferError, ContextCookieTransferFailure,
-    ContextCookieTransferId, ContextCookieTransferOutcome, ContextCookieTransferRegistry,
-    ContextCookieTransferRegistryStatus, ContextCookieTransferRequest,
-    ContextCookieTransferSettlement, ContextCookieTransferStats, MAX_COOKIES_PER_TRANSFER,
-    MAX_COOKIE_BYTES, MAX_COOKIE_TRANSFER_BYTES, MAX_COOKIE_TRANSFER_ORIGINS,
+    ContextCookieTransferId, ContextCookieTransferInstant, ContextCookieTransferOutcome,
+    ContextCookieTransferRegistry, ContextCookieTransferRegistryStatus,
+    ContextCookieTransferRequest, ContextCookieTransferSettlement, ContextCookieTransferStats,
+    ContextCookieTransferWindow, MAX_COOKIES_PER_TRANSFER, MAX_COOKIE_BYTES,
+    MAX_COOKIE_TRANSFER_BYTES, MAX_COOKIE_TRANSFER_MILLIS, MAX_COOKIE_TRANSFER_ORIGINS,
     MAX_PENDING_COOKIE_TRANSFERS,
 };
 #[cfg(feature = "probe-harness")]

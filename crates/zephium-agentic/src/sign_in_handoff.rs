@@ -732,9 +732,10 @@ mod tests {
     use crate::{
         ContextCapabilities, ContextCapability, ContextConstructionSource,
         ContextCookieTransferCounts, ContextCookieTransferFailure, ContextCookieTransferId,
-        ContextCookieTransferStats, ContextIdentity, ContextNavigationTarget, ContextOperationId,
-        ContextProfileLeaseId, ContextProfileLeasePurpose, ContextProfileLeaseRegistry,
-        ContextProfileStorageClass, ContextRegistry, ContextRunId, ContextSettlement,
+        ContextCookieTransferInstant, ContextCookieTransferStats, ContextCookieTransferWindow,
+        ContextIdentity, ContextNavigationTarget, ContextOperationId, ContextProfileLeaseId,
+        ContextProfileLeasePurpose, ContextProfileLeaseRegistry, ContextProfileStorageClass,
+        ContextRegistry, ContextRunId, ContextSettlement,
     };
     use zephium_core::ids::ProfileId;
 
@@ -744,6 +745,14 @@ mod tests {
         ContextCapability::ImportCookies,
         ContextCapability::Act,
     ];
+
+    fn cookie_window() -> ContextCookieTransferWindow {
+        ContextCookieTransferWindow::try_new(
+            ContextCookieTransferInstant::from_millis(1_000),
+            ContextCookieTransferInstant::from_millis(11_000),
+        )
+        .expect("cookie window")
+    }
     const HANDOFF_CAPABILITIES: [ContextCapability; 5] = [
         ContextCapability::Navigate,
         ContextCapability::Present,
@@ -996,6 +1005,7 @@ mod tests {
         );
         let transfer = ContextCookieTransferRequest::human_handoff_to_owned(
             ContextCookieTransferId::new(1).expect("transfer"),
+            cookie_window(),
             fixture.workflow.handoff.expect("handoff"),
             capabilities(ContextKind::HumanSignInHandoff),
             fixture.handoff_lease,
@@ -1119,6 +1129,7 @@ mod tests {
         perform_human_control(&mut fixture);
         let transfer = ContextCookieTransferRequest::human_handoff_to_owned(
             ContextCookieTransferId::new(1).expect("transfer"),
+            cookie_window(),
             fixture.workflow.handoff.expect("handoff"),
             capabilities(ContextKind::HumanSignInHandoff),
             fixture.handoff_lease,
