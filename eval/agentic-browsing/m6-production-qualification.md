@@ -210,7 +210,9 @@ agentic-owned Windows modules. Cross-compilation is not device behavior.
   preparation—immediately before deriving each bounded window-message timeout.
   The source gate rejects an added direct native dispatch site and mutation-
   tests representative admission, navigation, presentation, HWND, and CDP
-  preflight removal. This
+  preflight removal. It also forbids alternate asynchronous/callback/broadcast
+  message dispatch, synthetic input, window capture/activation, and composition-
+  controller input paths around the sole audited HWND/CDP sites. This
   strengthens future evidence admission and cancellation; it is not physical
   Windows behavior evidence.
 - The physical Windows semantic source gate now binds its content-free success

@@ -196,7 +196,10 @@ widen the subsequent `SendMessageTimeoutW` allowance. The gate rejects
 additional direct navigation, `SendMessageTimeoutW`, CDP,
 foreground, or focus call sites. Its mutation test operates on the actual
 target source and removes representative admission, navigation, presentation,
-HWND, CDP, identity, and bounded-response protections.
+HWND, CDP, identity, and bounded-response protections. Alternate asynchronous,
+callback, broadcast, composition-controller, synthetic-injector, capture, and
+activation message paths are forbidden so they cannot bypass the one audited
+`SendMessageTimeoutW` site or the closed CDP method vocabulary.
 The same gate mutation-tests the event/target join, empty non-dispatch rows,
 link/clipboard effect fields, and popup-request/outcome correspondence used by
 the offline reviewer.

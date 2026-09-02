@@ -1429,6 +1429,7 @@ fn dispatch_cdp_plan(
                 cdp_key_parameters(key, false),
             ),
         };
+        observe_focus();
         let response = call_cdp(
             core,
             method,

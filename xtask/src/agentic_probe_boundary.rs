@@ -2586,6 +2586,7 @@ fn validate_windows_probe_source(source: &str) -> Result<(), String> {
         "if!self.is_current(){returnErr(AdapterError::NativeConstruction);}send_message(self.document,message,wparam,lparam,permit,poll_control,deadline,)?;",
         "letmutresult=0_usize;check_dispatch_control(permit,poll_control,deadline)?;lettimeout_ms=message_timeout_ms(deadline)?;iftimeout_ms==0||timeout_ms>SEND_TIMEOUT_MS{returnErr(AdapterError::Timeout);}letsent=unsafe{SendMessageTimeoutW(",
         "observe_focus();check_dispatch_control(permit,poll_control,deadline)?;",
+        "observe_focus();letresponse=call_cdp(",
         "validate_cdp_response(&response)?;observe_focus();",
         "letparameters=HSTRING::from(parameters);check_dispatch_control(permit,poll_control,deadline)?;",
         "check_dispatch_control(permit,poll_control,deadline)?;view.set_visible(false)",
@@ -2644,9 +2645,26 @@ fn validate_windows_probe_source(source: &str) -> Result<(), String> {
     }
     for forbidden in [
         "SendInput(",
+        "SendMessageW(",
+        "SendNotifyMessageW(",
+        "SendMessageCallbackW(",
+        "PostMessageW(",
+        "PostThreadMessageW(",
+        "BroadcastSystemMessage",
         "SetCursorPos(",
         "mouse_event(",
         "keybd_event(",
+        "InjectMouseInput(",
+        "InjectKeyboardInput(",
+        "InjectSyntheticPointerInput(",
+        "CreateSyntheticPointerDevice(",
+        "SetCapture(",
+        "ReleaseCapture(",
+        "SetActiveWindow(",
+        "BringWindowToTop(",
+        "SendMouseInput(",
+        "SendPointerInput(",
+        "SendKeyEvent(",
         "PostWebMessage",
         "ExecuteScript(",
         ".eval(",
@@ -10658,6 +10676,12 @@ mod tests {
         ))
         .is_err());
         assert!(validate_windows_probe_source(&valid.replacen(
+            "        observe_focus();\n        let response = call_cdp(",
+            "        let response = call_cdp(",
+            1,
+        ))
+        .is_err());
+        assert!(validate_windows_probe_source(&valid.replacen(
             "borrowed_pcwstr_bounded(",
             "unbounded_pcwstr(",
             1,
@@ -10669,6 +10693,18 @@ mod tests {
         .is_err());
         assert!(validate_windows_probe_source(&format!(
             "{valid} fn attach() {{ AttachThreadInput(); }}"
+        ))
+        .is_err());
+        assert!(validate_windows_probe_source(&format!(
+            "{valid} fn bypass() {{ PostMessageW(); }}"
+        ))
+        .is_err());
+        assert!(validate_windows_probe_source(&format!(
+            "{valid} fn capture() {{ SetCapture(); }}"
+        ))
+        .is_err());
+        assert!(validate_windows_probe_source(&format!(
+            "{valid} fn composition() {{ SendMouseInput(); }}"
         ))
         .is_err());
         assert!(validate_windows_probe_source(
