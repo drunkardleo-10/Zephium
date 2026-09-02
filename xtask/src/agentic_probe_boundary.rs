@@ -2319,6 +2319,8 @@ fn validate_windows_probe_ci(source: &str) -> Result<(), String> {
     for required in [
         "cargoclippy--locked-pzephium-engine--featuresnative-agentic-input-probe--binwindows-agentic-input-probe",
         "cargobuild--locked-pzephium-engine--featuresnative-agentic-input-probe--binwindows-agentic-input-probe",
+        "cargoclippy--locked-pzephium-engine--featuresnative-agentic-semantic-probe--binwindows-agentic-semantic-probe",
+        "cargobuild--locked-pzephium-engine--featuresnative-agentic-semantic-probe--binwindows-agentic-semantic-probe",
     ] {
         if !source.contains(required) {
             return Err(format!(
@@ -2412,6 +2414,7 @@ fn validate_windows_semantic_probe(
     binary: &str,
     fixture: &str,
 ) -> Result<(), String> {
+    validate_engine_agentic_native_unsafe_contract(ENGINE_WINDOWS_SEMANTIC_PROBE_MODULE, source)?;
     let module = compact(module);
     for required in [
         "#[cfg(feature=\"native-agentic-semantic-probe\")]modagentic_semantic_probe;",
@@ -9655,6 +9658,20 @@ mod tests {
             .expect("closed Windows semantic qualifier");
         assert!(validate_windows_semantic_probe(
             module,
+            &source.replacen("#![deny(unsafe_op_in_unsafe_fn)]\n", "", 1),
+            binary,
+            fixture,
+        )
+        .is_err());
+        assert!(validate_windows_semantic_probe(
+            module,
+            &source.replacen("#![deny(clippy::undocumented_unsafe_blocks)]\n", "", 1),
+            binary,
+            fixture,
+        )
+        .is_err());
+        assert!(validate_windows_semantic_probe(
+            module,
             &format!("{source}\nSetForegroundWindow(host);"),
             binary,
             fixture,
@@ -9839,10 +9856,22 @@ mod tests {
             cargo build --locked -p zephium-engine \
               --features native-agentic-input-probe \
               --bin windows-agentic-input-probe
+            cargo clippy --locked -p zephium-engine \
+              --features native-agentic-semantic-probe \
+              --bin windows-agentic-semantic-probe
+            cargo build --locked -p zephium-engine \
+              --features native-agentic-semantic-probe \
+              --bin windows-agentic-semantic-probe
         "#;
         validate_windows_probe_ci(valid).expect("native audit and link gates");
         assert!(validate_windows_probe_ci(&valid.replacen("clippy", "check", 1)).is_err());
         assert!(validate_windows_probe_ci(&valid.replacen("build", "check", 1)).is_err());
+        assert!(validate_windows_probe_ci(&valid.replacen(
+            "native-agentic-semantic-probe",
+            "missing-semantic-clippy-probe",
+            1,
+        ))
+        .is_err());
     }
 
     #[test]

@@ -431,7 +431,7 @@ jobs:
 
       # Compile and link the release-excluded physical-device runner on its
       # native toolchain without treating a hosted CI VM as behavioral proof.
-      - name: Audit and build the Windows native-input qualification runner
+      - name: Audit and build the Windows agentic qualification runners
         if: runner.os == 'Windows'
         run: |
           # The probe module itself denies undocumented unsafe blocks and
@@ -443,6 +443,12 @@ jobs:
           cargo build --locked -p zephium-engine \
             --features native-agentic-input-probe \
             --bin windows-agentic-input-probe
+          cargo clippy --locked -p zephium-engine \
+            --features native-agentic-semantic-probe \
+            --bin windows-agentic-semantic-probe
+          cargo build --locked -p zephium-engine \
+            --features native-agentic-semantic-probe \
+            --bin windows-agentic-semantic-probe
 
       - name: cargo nextest (macOS)
         if: runner.os == 'macOS'

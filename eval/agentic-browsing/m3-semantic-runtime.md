@@ -511,7 +511,11 @@ including junctions and mount points that are not ordinary symbolic links.
 Diagnostic code is optimized-build refused and the static boundary permits
 only the fixed `Page.crash` fault; it rejects generic CDP, evaluation,
 selectors, page bridges, input injection, focus mutation, arbitrary output
-paths, and external URLs. The Windows host semantic task remains explicitly
+paths, and external URLs. The release-excluded Windows qualifier additionally
+denies unsafe operations hidden inside unsafe functions and every undocumented
+unsafe block. The source gate pins both denials, while Windows CI and the
+host-independent MSVC cross-target run native Clippy before the final linker
+check. The Windows host semantic task remains explicitly
 unsupported until all five records pass on supported physical Windows. No live
 isolation, timing, arbitrary-page, or Windows product-support claim is made,
 and the extension-owned CDP probe remains unchanged.
@@ -564,6 +568,9 @@ cargo check --locked -p zephium-engine \
   --features native-agentic-semantic-probe \
   --bin macos-agentic-semantic-probe
 cargo check --locked --target x86_64-pc-windows-msvc \
+  -p zephium-engine --features native-agentic-semantic-probe \
+  --bin windows-agentic-semantic-probe
+cargo clippy --locked --target x86_64-pc-windows-msvc \
   -p zephium-engine --features native-agentic-semantic-probe \
   --bin windows-agentic-semantic-probe
 ```

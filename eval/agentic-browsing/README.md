@@ -45,6 +45,9 @@ cargo check --locked --target x86_64-pc-windows-msvc \
 cargo check --locked --target x86_64-pc-windows-msvc \
   -p zephium-engine --features native-agentic-semantic-probe \
   --bin windows-agentic-semantic-probe
+cargo clippy --locked --target x86_64-pc-windows-msvc \
+  -p zephium-engine --features native-agentic-semantic-probe \
+  --bin windows-agentic-semantic-probe
 cargo xtask check-agentic-probe-boundary
 ```
 

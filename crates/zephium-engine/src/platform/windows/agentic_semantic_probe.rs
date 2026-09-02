@@ -1,3 +1,6 @@
+#![deny(unsafe_op_in_unsafe_fn)]
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 //! Release-excluded physical qualification of the production WebView2 semantic adapter.
 
 use std::cell::{Cell, RefCell};
@@ -114,10 +117,15 @@ struct ProbeHostWindow {
 
 impl ProbeHostWindow {
     fn new() -> ProbeResult<Self> {
+        // SAFETY: a null module name requests the current process image and
+        // carries no borrowed buffer or caller-owned lifetime.
         let module = unsafe { GetModuleHandleW(None) }
             .map_err(|_| ProbeError::harness(WindowsSemanticProbeStage::Construct))?;
         let class_name = probe_window_class()
             .ok_or_else(|| ProbeError::harness(WindowsSemanticProbeStage::Construct))?;
+        // SAFETY: the registered class name has process lifetime, the module
+        // is the current executable, and all optional owner/menu/parameter
+        // pointers are intentionally null. `ProbeHostWindow` owns the result.
         let hwnd = unsafe {
             CreateWindowExW(
                 WS_EX_TOOLWINDOW,
@@ -154,6 +162,8 @@ impl HasWindowHandle for ProbeHostWindow {
 impl Drop for ProbeHostWindow {
     fn drop(&mut self) {
         if !self.hwnd.0.is_null() {
+            // SAFETY: this object uniquely owns the non-null top-level HWND;
+            // the production owned view is closed before the host is dropped.
             let _ = unsafe { DestroyWindow(self.hwnd) };
             self.hwnd = HWND::default();
         }
@@ -168,6 +178,7 @@ fn probe_window_class() -> Option<PCWSTR> {
                 .encode_utf16()
                 .chain(std::iter::once(0))
                 .collect::<Vec<_>>();
+            // SAFETY: a null module name requests the current process image.
             let module = unsafe { GetModuleHandleW(None) }.ok()?;
             let class = WNDCLASSW {
                 lpfnWndProc: Some(probe_window_proc),
@@ -175,6 +186,8 @@ fn probe_window_class() -> Option<PCWSTR> {
                 hInstance: module.into(),
                 ..Default::default()
             };
+            // SAFETY: `name` is NUL-terminated and remains retained in the
+            // `OnceLock` on success; the callback uses the Win32 ABI.
             (unsafe { RegisterClassW(&class) } != 0).then_some(name)
         })
         .as_ref()
@@ -187,6 +200,8 @@ unsafe extern "system" fn probe_window_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    // SAFETY: Win32 supplied this exact callback tuple to the registered
+    // window procedure; unhandled messages are delegated unchanged.
     unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
 }
 
@@ -249,7 +264,7 @@ struct NativeStateGuard {
 impl NativeStateGuard {
     fn new(mode: WindowsSemanticProbeMode) -> ProbeResult<Self> {
         let debugger_expected = mode == WindowsSemanticProbeMode::HiddenDebuggerCoexistence;
-        let debugger_attached = unsafe { IsDebuggerPresent() }.as_bool();
+        let debugger_attached = debugger_is_attached();
         if debugger_expected && !debugger_attached {
             return Err(ProbeError::new(
                 WindowsSemanticProbeFailureCode::DebuggerRequired,
@@ -272,17 +287,11 @@ impl NativeStateGuard {
     }
 
     fn sample(&self, host: &ProbeHostWindow, view: Option<&WebView>) {
-        if unsafe { IsDebuggerPresent() }.as_bool() != self.debugger_expected {
+        if debugger_is_attached() != self.debugger_expected {
             self.debugger_drift.set(true);
         }
-        let foreground = unsafe { GetForegroundWindow() };
-        let active = unsafe { GetActiveWindow() };
-        let focus = unsafe { GetFocus() };
-        let view_has_focus = view.is_some_and(|view| {
-            let container = view.hwnd();
-            !focus.0.is_null()
-                && (focus == container || unsafe { IsChild(container, focus) }.as_bool())
-        });
+        let (foreground, active, focus) = native_focus_sample();
+        let view_has_focus = view.is_some_and(|view| focus_is_owned_by_view(view, focus));
         if foreground == host.hwnd || active == host.hwnd || focus == host.hwnd || view_has_focus {
             self.focus_theft.set(true);
         }
@@ -291,6 +300,26 @@ impl NativeStateGuard {
     fn failed(&self) -> bool {
         self.debugger_drift.get() || self.focus_theft.get()
     }
+}
+
+fn debugger_is_attached() -> bool {
+    // SAFETY: this process-state query takes no pointer and returns a scalar.
+    unsafe { IsDebuggerPresent() }.as_bool()
+}
+
+/// Samples independent Win32 focus projections at one explicit observation
+/// boundary. This does not claim the three calls form an atomic snapshot.
+fn native_focus_sample() -> (HWND, HWND, HWND) {
+    // SAFETY: these Win32 queries take no caller pointers and return borrowed
+    // opaque values only; the qualifier never dereferences returned handles.
+    unsafe { (GetForegroundWindow(), GetActiveWindow(), GetFocus()) }
+}
+
+fn focus_is_owned_by_view(view: &WebView, focus: HWND) -> bool {
+    let container = view.hwnd();
+    // SAFETY: both values are opaque HWND identities. `IsChild` performs the
+    // relationship query without transferring or dereferencing either handle.
+    !focus.0.is_null() && (focus == container || unsafe { IsChild(container, focus) }.as_bool())
 }
 
 #[derive(Default)]
@@ -1355,6 +1384,9 @@ fn request_fixed_renderer_crash(view: &AgentOwnedView) -> ProbeResult<()> {
         FixedCrashCompletion.into();
     let method = HSTRING::from("Page.crash");
     let parameters = HSTRING::from("{}");
+    // SAFETY: the production view and fixed completion handler are live owned
+    // references; both fixed HSTRING arguments outlive the call. WebView2
+    // retains the handler for its asynchronous completion.
     unsafe {
         view.view()
             .webview()
@@ -1601,6 +1633,8 @@ fn pump_once(deadline: Instant) -> ProbeResult<()> {
         return Ok(());
     }
     let wait_ms = remaining.as_millis().clamp(1, PUMP_SLICE.as_millis()) as u32;
+    // SAFETY: the qualifier owns this STA message loop. The MSG buffer is
+    // valid for each call and messages are dispatched unchanged on this thread.
     unsafe {
         let _ = MsgWaitForMultipleObjectsEx(None, wait_ms, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
         for _ in 0..256 {
@@ -1624,6 +1658,8 @@ fn runtime_fingerprint() -> ProbeResult<RuntimeFingerprint> {
         dwOSVersionInfoSize: std::mem::size_of::<OSVERSIONINFOW>() as u32,
         ..Default::default()
     };
+    // SAFETY: the initialized structure advertises its exact size and remains
+    // valid writable storage for the duration of the system query.
     let status = unsafe { RtlGetVersion(&mut version) };
     if status.0 < 0 {
         return Err(ProbeError::harness(WindowsSemanticProbeStage::Construct));
