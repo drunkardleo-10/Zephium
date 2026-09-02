@@ -3545,6 +3545,26 @@ fn validate_provider_transport_manifest(source: &str) -> Result<(), String> {
     if actual != expected || actual.len() != features.len() {
         return Err("agent provider transport reqwest feature graph drifted".to_owned());
     }
+    let tokio = manifest
+        .get("dependencies")
+        .and_then(|dependencies| dependencies.get("tokio"))
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| "agent provider transport Tokio dependency is missing".to_owned())?;
+    if tokio.get("workspace").and_then(toml::Value::as_bool) != Some(true) {
+        return Err("agent provider transport Tokio workspace pin drifted".to_owned());
+    }
+    let features = tokio
+        .get("features")
+        .and_then(toml::Value::as_array)
+        .ok_or_else(|| "agent provider transport Tokio features are missing".to_owned())?;
+    let actual = features
+        .iter()
+        .filter_map(toml::Value::as_str)
+        .collect::<BTreeSet<_>>();
+    let expected = ["sync", "time"].into_iter().collect::<BTreeSet<_>>();
+    if actual != expected || actual.len() != features.len() {
+        return Err("agent provider transport Tokio feature graph drifted".to_owned());
+    }
     Ok(())
 }
 
@@ -3745,6 +3765,12 @@ fn validate_provider_transport_shutdown_contract(source: &str) -> Result<(), Str
         "pubconstMAX_AGENT_PROVIDER_TRANSPORT_SHUTDOWN_PROOF_BYTES:usize=32;",
         "pubconstfnis_idle(self)->bool{self.active==0}",
         "pubconstfnis_quiescent(self)->bool{self.sealed&&self.active==0}",
+        "drained:Notify,",
+        "shutdown_waiting:AtomicBool,",
+        "structAgentProviderTransportShutdownWaitGuard<'a>{waiting:&'aAtomicBool,}",
+        "implDropforAgentProviderTransportShutdownWaitGuard<'_>{fndrop(&mutself){self.waiting.store(false,Ordering::Release);}}",
+        "shutdown:AgentProviderCancellation::new(),drained:Notify::new(),",
+        "shutdown_waiting:AtomicBool::new(false),",
         "pubstructAgentProviderTransportShutdownProof{snapshot:AgentProviderTransportSnapshot,}",
         "pubconstfnsnapshot(&self)->AgentProviderTransportSnapshot{self.snapshot}",
         "size_of::<AgentProviderTransportShutdownProof>()<=MAX_AGENT_PROVIDER_TRANSPORT_SHUTDOWN_PROOF_BYTES",
@@ -3754,6 +3780,15 @@ fn validate_provider_transport_shutdown_contract(source: &str) -> Result<(), Str
         "if!snapshot.is_sealed(){returnErr(AgentProviderTransportShutdownError::Unsealed);}",
         "if!snapshot.is_idle(){returnErr(AgentProviderTransportShutdownError::Pending);}",
         "Ok(AgentProviderTransportShutdownProof{snapshot})",
+        "Deadline,",
+        "WaiterActive,",
+        "pubfnseal_and_prove_shutdown_until(&self,deadline:Instant,)->Result<implstd::future::Future<Output=Result<AgentProviderTransportShutdownProof,AgentProviderTransportShutdownError,>,>+Send+'_,AgentProviderTransportShutdownError,>{self.seal();",
+        "self.shared.shutdown_waiting.compare_exchange(false,true,Ordering::AcqRel,Ordering::Acquire).map_err(|_|AgentProviderTransportShutdownError::WaiterActive)?;",
+        "letwait_guard=AgentProviderTransportShutdownWaitGuard{waiting:&self.shared.shutdown_waiting,};Ok(asyncmove{let_wait_guard=wait_guard;",
+        "letdeadline_sleep=tokio::time::sleep_until(tokio::time::Instant::from_std(deadline));tokio::pin!(deadline_sleep);",
+        "letdrained=self.shared.drained.notified();tokio::pin!(drained);drained.as_mut().enable();matchself.try_prove_shutdown()",
+        "tokio::select!{()=&mutdrained=>{}()=&mutdeadline_sleep=>{returnErr(AgentProviderTransportShutdownError::Deadline);}}",
+        "letidle=state.active.is_empty();drop(state);ifidle{self.shared.drained.notify_waiters();}",
         "pubfnseal(&self){self.shared.shutdown.cancel();matchself.shared.state.lock(){Ok(mutstate)=>state.sealed=true,Err(poisoned)=>poisoned.into_inner().sealed=true,}}",
         "ifstate.sealed{returnErr(ReserveError::Sealed);}",
     ] {
@@ -3772,6 +3807,11 @@ fn validate_provider_transport_shutdown_contract(source: &str) -> Result<(), Str
         "SerializeforAgentProviderTransportShutdownProof",
         "DeserializeforAgentProviderTransportShutdownProof",
         "state.sealed=false",
+        "tokio::spawn(",
+        "std::thread",
+        "thread::sleep(",
+        "tokio::time::interval(",
+        "tokio::sync::mpsc",
     ] {
         if source.contains(forbidden) {
             return Err(format!(
@@ -9004,6 +9044,7 @@ mod tests {
             publish = false
             [dependencies]
             reqwest = { version = "=0.13.4", default-features = false, features = ["http2", "rustls", "stream", "system-proxy"] }
+            tokio = { workspace = true, features = ["sync", "time"] }
         "#;
         validate_provider_transport_manifest(manifest).expect("valid transport manifest");
         assert!(
@@ -9013,6 +9054,7 @@ mod tests {
             validate_provider_transport_manifest(&manifest.replace(", \"system-proxy\"", ""))
                 .is_err()
         );
+        assert!(validate_provider_transport_manifest(&manifest.replace(", \"time\"", "")).is_err());
 
         let root = r#"
             const OPENAI_RESPONSES_URL: &str = "https://api.openai.com/v1/responses";
@@ -9063,6 +9105,19 @@ mod tests {
             root.replace("if !snapshot.is_sealed()", "if false"),
             root.replace("if !snapshot.is_idle()", "if false"),
             root.replacen("self.shared.shutdown.cancel();", "", 1),
+            root.replacen("self.seal();", "", 1),
+            root.replace(
+                ".compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)",
+                ".store(true, Ordering::Release)",
+            ),
+            root.replace("let _wait_guard = wait_guard;", ""),
+            root.replace("self.waiting.store(false, Ordering::Release);", ""),
+            root.replace("drained.as_mut().enable();", ""),
+            root.replace("self.shared.drained.notify_waiters();", ""),
+            root.replace(
+                "tokio::time::sleep_until(tokio::time::Instant::from_std(deadline))",
+                "std::future::pending()",
+            ),
             root.replace(
                 "#[must_use]\npub struct AgentProviderTransportShutdownProof",
                 "#[derive(Clone, Copy)]\n#[must_use]\npub struct AgentProviderTransportShutdownProof",
@@ -9074,6 +9129,11 @@ mod tests {
             root.replacen(
                 "\n#[cfg(test)]\nmod tests",
                 "\nimpl AgentProviderTransportShutdownProof { pub fn new() {} }\n\n#[cfg(test)]\nmod tests",
+                1,
+            ),
+            root.replacen(
+                "\n#[cfg(test)]\nmod tests",
+                "\ntokio::spawn(async {});\n\n#[cfg(test)]\nmod tests",
                 1,
             ),
         ]

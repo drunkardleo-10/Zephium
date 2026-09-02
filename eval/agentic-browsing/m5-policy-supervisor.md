@@ -624,6 +624,11 @@ browser action, model call, tool call, data transfer, cost, or native resource.
   proof owns no task, timer, content, credential, policy, usage, audit, or
   native authority. The lifecycle must still terminally settle each provider
   attempt's separately retained policy authority before claiming clean exit.
+  The async drain seam seals synchronously before it returns a future, then
+  registers a notification before each state sample and waits only for the
+  exact last slot or one caller-owned absolute deadline. Cancelling that future
+  cannot reopen admission; one shared atomic admission bounds drain waiters,
+  and no polling task or periodic timer is retained.
 - A committed attempt exposes only the content-free
   observation/read/extraction/screenshot proof retained by request admission
   and the fixed input metrics that crossed that same commit. The transport

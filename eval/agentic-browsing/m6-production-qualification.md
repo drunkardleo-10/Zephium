@@ -54,7 +54,10 @@ responses, machine-local paths, or native traces.
   and pending-attempt refusal, permanent sealing across shared clones, a
   bounded redacted proof, and mutation coverage for every critical predicate.
   The proof is non-authorizing and owns no provider, policy, audit, native,
-  task, timer, or content seam; and
+  task, timer, or content seam. The async drain path must seal before returning
+  its sole admitted future, refuse a concurrent waiter, register before
+  sampling, wake on exact last-slot release, and race one absolute deadline
+  without a polling worker; and
 - pins the Windows owned-context suspension adapter to its feature/target gate,
   fixed atomic callback/timeout/cancellation owner, one late-reconciliation
   path, ten-second UI-thread deadline, `TrySuspend`/`IsSuspended`/`Resume`
@@ -217,7 +220,10 @@ agentic-owned Windows modules. Cross-compilation is not device behavior.
   constructor-closed, move-only shutdown proof. This closes the transport-slot
   drain fact only: every attempt's policy/usage result still requires terminal
   settlement, and no concrete application composition or live provider result
-  is claimed.
+  is claimed. Its cancellation-safe async wait seals before returning a future,
+  bounds shared wait admission to one, wakes on the exact last slot, and fails
+  closed at one absolute deadline; it creates no background worker or periodic
+  polling timer.
 - Profile retention can no longer end from a copied lease alone. The bounded
   profile registry requires the exact supervisor cleanup receipt for that
   context. A never-started row must be registry-cancelled; an owned context must

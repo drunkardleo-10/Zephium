@@ -13,7 +13,7 @@
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures_util::TryStreamExt;
 use reqwest::header::{
@@ -378,6 +378,18 @@ struct TransportState {
 struct SharedTransportState {
     state: Mutex<TransportState>,
     shutdown: AgentProviderCancellation,
+    drained: Notify,
+    shutdown_waiting: AtomicBool,
+}
+
+struct AgentProviderTransportShutdownWaitGuard<'a> {
+    waiting: &'a AtomicBool,
+}
+
+impl Drop for AgentProviderTransportShutdownWaitGuard<'_> {
+    fn drop(&mut self) {
+        self.waiting.store(false, Ordering::Release);
+    }
 }
 
 /// Content-free snapshot of provider transport resource ownership.
@@ -461,6 +473,12 @@ pub enum AgentProviderTransportShutdownError {
     /// At least one admitted provider attempt still owns its slot.
     #[error("agent provider transport shutdown still has active attempts")]
     Pending,
+    /// The caller-owned absolute shutdown deadline elapsed before drain.
+    #[error("agent provider transport shutdown deadline elapsed")]
+    Deadline,
+    /// Another caller already owns the sole provider-drain wait.
+    #[error("agent provider transport shutdown wait is already active")]
+    WaiterActive,
 }
 
 /// Failure to read or mutate transport resource state safely.
@@ -532,6 +550,8 @@ impl AgentProviderTransport {
                     active: Vec::with_capacity(MAX_AGENT_PROVIDER_TRANSPORT_CALLS),
                 }),
                 shutdown: AgentProviderCancellation::new(),
+                drained: Notify::new(),
+                shutdown_waiting: AtomicBool::new(false),
             }),
         })
     }
@@ -584,6 +604,69 @@ impl AgentProviderTransport {
             return Err(AgentProviderTransportShutdownError::Pending);
         }
         Ok(AgentProviderTransportShutdownProof { snapshot })
+    }
+
+    /// Seals admission and asynchronously waits for every provider slot to drain.
+    ///
+    /// Sealing is synchronous, sticky, and happens before the deadline check,
+    /// so dropping or timing out this future cannot reopen provider work. The
+    /// returned future registers before sampling state, sleeps only on a slot-
+    /// release notification or the caller's absolute monotonic deadline, and
+    /// creates no worker, polling timer, socket, or provider request. At most
+    /// one drain future may exist for the shared transport; dropping it
+    /// synchronously releases only that wait admission, never the sticky seal.
+    ///
+    /// A successful return proves only transport-slot drain. The caller must
+    /// independently retain and settle every terminal provider result's policy
+    /// and usage authority.
+    pub fn seal_and_prove_shutdown_until(
+        &self,
+        deadline: Instant,
+    ) -> Result<
+        impl std::future::Future<
+                Output = Result<
+                    AgentProviderTransportShutdownProof,
+                    AgentProviderTransportShutdownError,
+                >,
+            > + Send
+            + '_,
+        AgentProviderTransportShutdownError,
+    > {
+        self.seal();
+        self.shared
+            .shutdown_waiting
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| AgentProviderTransportShutdownError::WaiterActive)?;
+        let wait_guard = AgentProviderTransportShutdownWaitGuard {
+            waiting: &self.shared.shutdown_waiting,
+        };
+        Ok(async move {
+            let _wait_guard = wait_guard;
+            let deadline_sleep = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline));
+            tokio::pin!(deadline_sleep);
+
+            loop {
+                if Instant::now() >= deadline {
+                    return Err(AgentProviderTransportShutdownError::Deadline);
+                }
+
+                let drained = self.shared.drained.notified();
+                tokio::pin!(drained);
+                drained.as_mut().enable();
+                match self.try_prove_shutdown() {
+                    Ok(proof) => return Ok(proof),
+                    Err(AgentProviderTransportShutdownError::Pending) => {}
+                    Err(error) => return Err(error),
+                }
+
+                tokio::select! {
+                    () = &mut drained => {}
+                    () = &mut deadline_sleep => {
+                        return Err(AgentProviderTransportShutdownError::Deadline);
+                    }
+                }
+            }
+        })
     }
 
     /// Permanently refuses new calls and cancels every admitted attempt.
@@ -778,6 +861,11 @@ impl Drop for AgentProviderSlot {
         } else {
             state.sealed = true;
             self.shared.shutdown.cancel();
+        }
+        let idle = state.active.is_empty();
+        drop(state);
+        if idle {
+            self.shared.drained.notify_waiters();
         }
     }
 }
@@ -4044,6 +4132,169 @@ mod tests {
         ));
         assert_eq!(post_proof_policy.pending_model_calls(), 0);
         assert!(proof.snapshot().is_quiescent());
+    }
+
+    #[test]
+    fn shutdown_wait_seals_before_its_future_is_polled_or_retained() {
+        let transport = AgentProviderTransport::try_new_loopback(
+            AgentProviderTransportConfig::STANDARD,
+            Url::parse("http://127.0.0.1:9/v1/responses").expect("openai URL"),
+            Url::parse("http://127.0.0.1:9/v1/messages").expect("anthropic URL"),
+        )
+        .expect("transport");
+        let credential = AgentProviderCredential::try_new(
+            AgentProviderKind::OpenAiResponses,
+            "synthetic-openai-key".to_owned(),
+        )
+        .expect("credential");
+        let (mut policy, input) = provider_fixture(AgentProviderKind::OpenAiResponses);
+        let attempt = transport
+            .try_admit(
+                input,
+                &mut policy,
+                &credential,
+                AgentProviderCancellation::new(),
+            )
+            .expect("attempt");
+
+        let unpolled = transport
+            .seal_and_prove_shutdown_until(
+                Instant::now()
+                    .checked_add(Duration::from_secs(1))
+                    .expect("deadline"),
+            )
+            .expect("shutdown wait admission");
+        assert!(transport.snapshot().expect("sealed snapshot").is_sealed());
+        assert!(matches!(
+            transport.seal_and_prove_shutdown_until(
+                Instant::now()
+                    .checked_add(Duration::from_secs(1))
+                    .expect("deadline")
+            ),
+            Err(AgentProviderTransportShutdownError::WaiterActive)
+        ));
+        drop(unpolled);
+        let readmitted_wait = transport
+            .seal_and_prove_shutdown_until(
+                Instant::now()
+                    .checked_add(Duration::from_secs(1))
+                    .expect("deadline"),
+            )
+            .expect("dropped wait releases bounded admission");
+        drop(readmitted_wait);
+        assert!(matches!(
+            transport.try_prove_shutdown(),
+            Err(AgentProviderTransportShutdownError::Pending)
+        ));
+
+        let result = attempt.cancel_without_dispatch();
+        let AgentProviderPolicySettlement::Immediate(settlement) = result.into_policy_settlement()
+        else {
+            panic!("pre-dispatch shutdown cancellation must settle immediately")
+        };
+        settlement
+            .settle(&mut policy)
+            .expect("cancelled policy settlement");
+        assert!(transport
+            .try_prove_shutdown()
+            .expect("cancelled future leaves sticky seal")
+            .snapshot()
+            .is_quiescent());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_wait_wakes_on_last_slot_and_deadline_refuses_pending_drain() {
+        let transport = AgentProviderTransport::try_new_loopback(
+            AgentProviderTransportConfig::STANDARD,
+            Url::parse("http://127.0.0.1:9/v1/responses").expect("openai URL"),
+            Url::parse("http://127.0.0.1:9/v1/messages").expect("anthropic URL"),
+        )
+        .expect("transport");
+        let credential = AgentProviderCredential::try_new(
+            AgentProviderKind::OpenAiResponses,
+            "synthetic-openai-key".to_owned(),
+        )
+        .expect("credential");
+        let (mut first_policy, first_input) = provider_fixture(AgentProviderKind::OpenAiResponses);
+        let (mut second_policy, second_input) =
+            provider_fixture(AgentProviderKind::OpenAiResponses);
+        let first = transport
+            .try_admit(
+                first_input,
+                &mut first_policy,
+                &credential,
+                AgentProviderCancellation::new(),
+            )
+            .expect("first attempt");
+        let second = transport
+            .try_admit(
+                second_input,
+                &mut second_policy,
+                &credential,
+                AgentProviderCancellation::new(),
+            )
+            .expect("second attempt");
+        let shutdown = transport
+            .seal_and_prove_shutdown_until(
+                Instant::now()
+                    .checked_add(Duration::from_secs(1))
+                    .expect("deadline"),
+            )
+            .expect("shutdown wait admission");
+
+        let settle_attempts = async move {
+            tokio::task::yield_now().await;
+            for (attempt, policy) in [(first, &mut first_policy), (second, &mut second_policy)] {
+                let result = attempt.cancel_without_dispatch();
+                let AgentProviderPolicySettlement::Immediate(settlement) =
+                    result.into_policy_settlement()
+                else {
+                    panic!("pre-dispatch shutdown cancellation must settle immediately")
+                };
+                settlement
+                    .settle(policy)
+                    .expect("cancelled policy settlement");
+            }
+        };
+        let (proof, ()) = tokio::join!(shutdown, settle_attempts);
+        assert!(proof
+            .expect("last slot wakes shutdown waiter")
+            .snapshot()
+            .is_quiescent());
+
+        let pending = AgentProviderTransport::try_new_loopback(
+            AgentProviderTransportConfig::STANDARD,
+            Url::parse("http://127.0.0.1:9/v1/responses").expect("openai URL"),
+            Url::parse("http://127.0.0.1:9/v1/messages").expect("anthropic URL"),
+        )
+        .expect("pending transport");
+        let (mut pending_policy, pending_input) =
+            provider_fixture(AgentProviderKind::OpenAiResponses);
+        let pending_attempt = pending
+            .try_admit(
+                pending_input,
+                &mut pending_policy,
+                &credential,
+                AgentProviderCancellation::new(),
+            )
+            .expect("pending attempt");
+        assert_eq!(
+            pending
+                .seal_and_prove_shutdown_until(Instant::now())
+                .expect("shutdown wait admission")
+                .await
+                .expect_err("elapsed deadline cannot prove pending drain"),
+            AgentProviderTransportShutdownError::Deadline
+        );
+        assert!(pending.snapshot().expect("pending snapshot").is_sealed());
+        let result = pending_attempt.cancel_without_dispatch();
+        let AgentProviderPolicySettlement::Immediate(settlement) = result.into_policy_settlement()
+        else {
+            panic!("pre-dispatch shutdown cancellation must settle immediately")
+        };
+        settlement
+            .settle(&mut pending_policy)
+            .expect("cancelled pending settlement");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

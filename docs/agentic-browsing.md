@@ -775,6 +775,13 @@ an exact sealed, zero-active snapshot. The nonblocking proof remains valid
 across shared transport clones because no operation can clear the seal; it owns
 no task, timer, provider content, credential, or settlement authority and does
 not substitute for provider usage, policy, audit, or native-resource drain.
+The reusable wait seam applies that seal synchronously before returning its
+future, registers its drain notification before every state sample, and waits
+only for the exact last slot or the caller's absolute monotonic deadline.
+Dropping the unpolled or pending future therefore leaves admission closed, and
+releases its sole bounded wait slot for a corrected retry. A concurrent second
+wait is refused, and no polling worker or periodic timer exists when shutdown
+is not being driven.
 
 The fixed OpenAI and Anthropic builders accept token-admitted full-observation
 or bounded-read types. Committed admission retains a cloneable content-free
