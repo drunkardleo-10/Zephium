@@ -475,6 +475,11 @@ agentic-owned Windows modules. Cross-compilation is not device behavior.
   mutations remove each carry or reintroduce `expect`, `unreachable!`, or the
   ordinary transcript type and are rejected. This narrows guarded defects
   under release `panic = "abort"`; it is not a general panic-recovery claim.
+- The production macOS semantic channel likewise treats dispatch during its
+  ordinary `Loading` lifecycle phase as a typed `NotReady` refusal. A
+  bound-view/loading unit path and release source mutation gate replace the
+  former duplicated-precheck `unreachable!()` assumption; no native execution
+  or device behavior is claimed by that deterministic test.
 - A separate optional run-local progress reducer now streams canonical semantic
   audit events and derives observed initial-queue, model, effect, human-wait,
   and root elapsed durations, closed `NeedsHuman` counts, distinct human-

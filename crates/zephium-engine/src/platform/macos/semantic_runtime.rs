@@ -182,18 +182,20 @@ impl SemanticRuntimeChannelState {
         invocation: SemanticRuntimeInvocation,
         completion: SemanticCompletion,
     ) -> Result<ChannelActions, (AgentSemanticRuntimeDispatchError, SemanticCompletion)> {
-        if self.expected_view.is_none() || self.phase == DocumentPhase::Loading {
+        if self.expected_view.is_none() {
             return Err((AgentSemanticRuntimeDispatchError::NotReady, completion));
         }
         match self.phase {
             DocumentPhase::Ready => {}
+            DocumentPhase::Loading => {
+                return Err((AgentSemanticRuntimeDispatchError::NotReady, completion));
+            }
             DocumentPhase::ExhaustionNoticePending | DocumentPhase::Exhausted => {
                 return Err((AgentSemanticRuntimeDispatchError::Exhausted, completion));
             }
             DocumentPhase::RendererLost | DocumentPhase::Failed | DocumentPhase::Retired => {
                 return Err((AgentSemanticRuntimeDispatchError::Retired, completion));
             }
-            DocumentPhase::Loading => unreachable!(),
         }
         if self.pending.is_some() || self.awaiting_result {
             return Err((AgentSemanticRuntimeDispatchError::Busy, completion));
@@ -1175,6 +1177,13 @@ mod tests {
             active_world: Some(8),
             ..SemanticRuntimeChannelState::default()
         };
+        assert!(matches!(
+            state.dispatch(
+                invocation(10, SemanticSnapshotGeneration::INITIAL),
+                Box::new(|_| {}),
+            ),
+            Err((AgentSemanticRuntimeDispatchError::NotReady, _))
+        ));
         let actions = state.on_message(SEMANTIC_RUNTIME_CHANNEL_PULL, reply());
         assert!(actions.first_reply.is_none());
         assert!(state.pull.is_some());

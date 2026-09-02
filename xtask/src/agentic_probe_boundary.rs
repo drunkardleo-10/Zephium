@@ -2374,6 +2374,7 @@ fn validate_engine_semantic_runtime_boundary(source: &str) -> Result<(), String>
         "fnrenderer_lost",
         "fncancel",
         "fnretire",
+        "DocumentPhase::Loading=>{returnErr((AgentSemanticRuntimeDispatchError::NotReady,completion));}",
     ] {
         if !source.contains(required) {
             return Err(format!(
@@ -2389,6 +2390,7 @@ fn validate_engine_semantic_runtime_boundary(source: &str) -> Result<(), String>
         "WKContentWorld::pageWorld",
         "native-agentic-input-probe",
         "native-agentic-semantic-probe",
+        "unreachable!",
     ] {
         if source.contains(forbidden) {
             return Err(format!(
@@ -11058,6 +11060,9 @@ mod tests {
             fn renderer_lost() {}
             fn cancel() {}
             fn retire() {}
+            DocumentPhase::Loading => {
+                return Err((AgentSemanticRuntimeDispatchError::NotReady, completion));
+            }
         "#;
         validate_engine_semantic_runtime_boundary(runtime).expect("closed semantic runtime");
         assert!(validate_engine_semantic_runtime_boundary(&format!(
@@ -11067,6 +11072,11 @@ mod tests {
         assert!(validate_engine_semantic_runtime_boundary(
             &runtime.replace("message.frameInfo();", "")
         )
+        .is_err());
+        assert!(validate_engine_semantic_runtime_boundary(&runtime.replace(
+            "return Err((AgentSemanticRuntimeDispatchError::NotReady, completion));",
+            "unreachable!();",
+        ))
         .is_err());
     }
 

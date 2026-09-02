@@ -266,7 +266,9 @@ world, accepts a closed versioned schema under hard size/generation/frame
 bounds, and exposes neither native authority nor a callable function to page
 world. The M1 fixture runtime uses one-way ready/result messages and no reply;
 the production fixed-recipe invocation mechanism remains evidence-driven and
-must not rely on private WebKit SPI. On Windows, isolated CDP worlds may be an
+must not rely on private WebKit SPI. Its native state machine returns the typed
+`NotReady` refusal for a loading document; it does not encode that ordinary
+lifecycle state as an invariant abort. On Windows, isolated CDP worlds may be an
 internal adapter mechanism, but CDP remains absent from domain and model
 contracts. Do not use a named
 `Page.addScriptToEvaluateOnNewDocument` world: current Blink creates that world

@@ -346,6 +346,12 @@ or observed on either platform.
   the reply as an asynchronous completion retained until reply or finalization
   ([Apple](https://developer.apple.com/documentation/webkit/wkusercontentcontroller/addscriptmessagehandler%28_%3Acontentworld%3Aname%3A%29?language=objc),
   [WebKit](https://github.com/WebKit/WebKit/blob/main/Source/WebKit/UIProcess/API/Cocoa/WKUserContentController.mm)).
+- Native dispatch during the ordinary `Loading` phase returns the same typed
+  `NotReady` refusal whether or not the view has already been bound. It no
+  longer depends on a duplicated precheck followed by `unreachable!()` under
+  release `panic = "abort"`. The state test exercises the bound-view/loading
+  path, and the source gate rejects either removal of the typed arm or a
+  reintroduced invariant abort.
 - Request parsing accepts only ASCII and the exact closed field inventory.
   Invocation, snapshot, and stable-node identities must be positive integers at
   or below JavaScript's exact integer ceiling (`2^53 - 1`); Rust rejects larger
