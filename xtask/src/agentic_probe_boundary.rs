@@ -64,6 +64,12 @@ const AGENTIC_SUPERVISOR_PROGRESS: &str =
     "crates/zephium-agentic/src/agent_supervisor/runtime/progress.rs";
 const AGENTIC_SUPERVISOR_CONTEXT_SCHEDULE: &str =
     "crates/zephium-agentic/src/agent_supervisor/runtime/context_schedule.rs";
+const APP_MANIFEST: &str = "crates/zephium-app/Cargo.toml";
+const APP_ROOT: &str = "crates/zephium-app/src/lib.rs";
+const APP_API: &str = "crates/zephium-app/src/api.rs";
+const APP_ACTOR: &str = "crates/zephium-app/src/actor/mod.rs";
+const APP_SHELL: &str = "crates/zephium-app/src/shell/mod.rs";
+const DESKTOP_MANIFEST: &str = "desktop/Cargo.toml";
 const PROVIDER_TRANSPORT_MANIFEST: &str = "crates/zephium-agent-provider-transport/Cargo.toml";
 const PROVIDER_TRANSPORT_ROOT: &str = "crates/zephium-agent-provider-transport/src/lib.rs";
 const ENGINE_MANIFEST: &str = "crates/zephium-engine/Cargo.toml";
@@ -323,6 +329,14 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         &read(repository.join(AGENTIC_LIFECYCLE))?,
         &read(repository.join(AGENTIC_NATIVE_SHUTDOWN))?,
         &read(repository.join(AGENTIC_SEMANTIC_SCREENSHOT))?,
+    )?;
+    validate_agent_app_lifecycle(
+        &read(repository.join(APP_MANIFEST))?,
+        &read(repository.join(APP_ROOT))?,
+        &read(repository.join(APP_API))?,
+        &read(repository.join(APP_ACTOR))?,
+        &read(repository.join(APP_SHELL))?,
+        &read(repository.join(DESKTOP_MANIFEST))?,
     )?;
     validate_provider_transport_manifest(&read(repository.join(PROVIDER_TRANSPORT_MANIFEST))?)?;
     let provider_transport_root = read(repository.join(PROVIDER_TRANSPORT_ROOT))?;
@@ -5379,6 +5393,171 @@ fn validate_agent_native_shutdown_coordinator(
     Ok(())
 }
 
+fn validate_agent_app_lifecycle(
+    manifest: &str,
+    root: &str,
+    api: &str,
+    actor: &str,
+    shell: &str,
+    desktop_manifest: &str,
+) -> Result<(), String> {
+    fn compact_without_line_comments(source: &str) -> String {
+        compact(
+            &source
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect::<String>(),
+        )
+    }
+
+    let manifest = compact_without_line_comments(manifest);
+    for required in [
+        "agentic-browser=[\"dep:zephium-agentic\"]",
+        "zephium-agentic={workspace=true,optional=true}",
+    ] {
+        if !manifest.contains(required) {
+            return Err(format!(
+                "application agent lifecycle lost dormant feature boundary {required}"
+            ));
+        }
+    }
+    let desktop_manifest = compact_without_line_comments(desktop_manifest);
+    for forbidden in [
+        "zephium-app/agentic-browser",
+        "zephium-engine/agentic-browser",
+    ] {
+        if desktop_manifest.contains(forbidden) {
+            return Err(format!(
+                "ordinary desktop graph prematurely enabled dormant agent lifecycle {forbidden}"
+            ));
+        }
+    }
+
+    let root = compact_without_line_comments(root);
+    for required in [
+        "#[cfg(feature=\"agentic-browser\")]pubuseactor::{spawn_agentic,spawn_agentic_suspended,AgenticLifecycles,AgenticSpawnFailure};",
+        "#[cfg(feature=\"agentic-browser\")]pubuseapi::AgentLifecycle;",
+    ] {
+        if !root.contains(required) {
+            return Err(format!(
+                "application root lost feature-gated agent lifecycle export {required}"
+            ));
+        }
+    }
+
+    let api = compact_without_line_comments(api);
+    if !api.contains(
+        "#[cfg(feature=\"agentic-browser\")]pubtypeAgentLifecycle=Box<dynAgentBrowserLifecycle>;",
+    ) {
+        return Err(
+            "application agent lifecycle must remain a feature-gated move-only trait object"
+                .to_owned(),
+        );
+    }
+
+    let actor = compact_without_line_comments(actor);
+    for required in [
+        "traitPendingAgentLifecycle:Send+'static{typeFailure;",
+        "structPendingAgentBrowserLifecycle(AgentLifecycle);",
+        "typeFailure=AgenticSpawnFailure;",
+        "structShellHandoff<Agent=NoAgentLifecycle>",
+        "agent_lifecycle:Agent,",
+        "pubstructAgenticLifecycles{extension:ExtensionLifecycle,agent:AgentLifecycle,}",
+        "pubfninto_parts(self)->(ExtensionLifecycle,AgentLifecycle)",
+        "pubstructAgenticSpawnFailure{error:SpawnError,extension_lifecycle:ExtensionLifecycle,agent_lifecycle:AgentLifecycle,worker_cleanup_proven:bool,}",
+        "pubfninto_parts(self)->(SpawnError,ExtensionLifecycle,AgentLifecycle)",
+        "pubfnspawn_agentic_suspended(",
+        "agent_lifecycle:PendingAgentBrowserLifecycle(agent_lifecycle),",
+        "letmutagent_lifecycle=Some(agent_lifecycle);",
+        "ShellHandoff<Agent>",
+        "ports.with_agent_lifecycle(agent_lifecycle.into_shell_lifecycle())",
+    ] {
+        if !actor.contains(required) {
+            return Err(format!(
+                "application actor lost lossless agent lifecycle ownership rule {required}"
+            ));
+        }
+    }
+    if actor.matches("agent_lifecycle.into_spawn_failure(").count() != 4 {
+        return Err(
+            "every app worker and handoff refusal must return the agent lifecycle owner".to_owned(),
+        );
+    }
+
+    let shell = compact_without_line_comments(shell);
+    for required in [
+        "enumAgentLifecycleOwner{Absent,Owned(AgentLifecycle),Consumed,}",
+        "agent_lifecycle:AgentLifecycleOwner,",
+        "agent_lifecycle:AgentLifecycleOwner::new(agent_lifecycle),",
+        "std::mem::replace(&mutself.agent_lifecycle,AgentLifecycleOwner::Consumed)",
+        "AgentLifecycleOwner::Absent=>returntrue",
+        "AgentLifecycleOwner::Owned(lifecycle)=>lifecycle",
+        "AgentLifecycleOwner::Consumed=>",
+        "lifecycle.shutdown_until(deadline)",
+        "Ok(AgentBrowserShutdownOutcome::Clean(native_zero_proof))=>{drop(native_zero_proof);true}",
+        "Ok(AgentBrowserShutdownOutcome::Unclean)=>",
+        "&&agent_lifecycle_clean",
+    ] {
+        if !shell.contains(required) {
+            return Err(format!(
+                "application Shell lost proof-gated agent shutdown rule {required}"
+            ));
+        }
+    }
+
+    let shutdown_start = shell
+        .find("fnshutdown_until(&mutself,")
+        .ok_or_else(|| "application ordered shutdown function is missing".to_owned())?;
+    let shutdown_end = shell[shutdown_start..]
+        .find("fnshutdown_native_and_blocker_until(")
+        .map(|offset| shutdown_start + offset)
+        .ok_or_else(|| "application native shutdown boundary is missing".to_owned())?;
+    let ordered = &shell[shutdown_start..shutdown_end];
+    let flush = ordered
+        .find("self.store.flush_until(deadline)")
+        .ok_or_else(|| "application Store preflight is missing".to_owned())?;
+    let agent = ordered
+        .find("self.shutdown_agent_lifecycle_until(deadline)")
+        .ok_or_else(|| "application agent lifecycle shutdown is missing".to_owned())?;
+    let extension = ordered
+        .find("self.shutdown_extension_service_until(deadline)")
+        .ok_or_else(|| "application extension lifecycle shutdown is missing".to_owned())?;
+    let store = ordered
+        .find("self.store.shutdown_until(deadline)")
+        .ok_or_else(|| "application terminal Store shutdown is missing".to_owned())?;
+    let engine = ordered
+        .rfind("self.shutdown_native_and_blocker_until(deadline)")
+        .ok_or_else(|| "application terminal engine shutdown is missing".to_owned())?;
+    if !(flush < agent && agent < extension && extension < store && store < engine) {
+        return Err(
+            "agent lifecycle must follow retryable durability preflight and precede extension, Store, and engine teardown"
+                .to_owned(),
+        );
+    }
+
+    let unexpected_start = shell
+        .find("pub(super)fncleanup_after_unexpected_exit_until(")
+        .ok_or_else(|| "application unexpected-exit cleanup is missing".to_owned())?;
+    let unexpected_end = shell[unexpected_start..]
+        .find("pub(super)fnreport_terminal_failure(")
+        .map(|offset| unexpected_start + offset)
+        .ok_or_else(|| "application unexpected-exit cleanup boundary is malformed".to_owned())?;
+    let unexpected = &shell[unexpected_start..unexpected_end];
+    for required in [
+        "self.shutdown_agent_lifecycle_until(deadline)",
+        "self.shutdown_extension_service_until(deadline)",
+        "self.store.shutdown_until(deadline)",
+        "self.shutdown_native_and_blocker_until(deadline)",
+    ] {
+        if !unexpected.contains(required) {
+            return Err(format!(
+                "unexpected Shell exit can skip agent-owned cleanup rule {required}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_agent_context_shutdown_barrier_contract(
     domain: &str,
     port: &str,
@@ -5603,6 +5782,9 @@ fn validate_release_graph(metadata: &CargoMetadata) -> Result<(), String> {
     let agentic = package_names
         .get("zephium-agentic")
         .ok_or_else(|| "cargo metadata is missing zephium-agentic".to_owned())?;
+    let app = package_names
+        .get("zephium-app")
+        .ok_or_else(|| "cargo metadata is missing zephium-app".to_owned())?;
     let engine = package_names
         .get("zephium-engine")
         .ok_or_else(|| "cargo metadata is missing zephium-engine".to_owned())?;
@@ -5631,6 +5813,17 @@ fn validate_release_graph(metadata: &CargoMetadata) -> Result<(), String> {
             );
         }
         if let Some(node) = graph.get(package) {
+            if package == *app
+                && node
+                    .features
+                    .iter()
+                    .any(|feature| feature == "agentic-browser")
+            {
+                return Err(
+                    "ordinary zephium-desktop release graph activates the dormant agent lifecycle"
+                        .to_owned(),
+                );
+            }
             if package == *agentic
                 && node
                     .features
@@ -6036,6 +6229,79 @@ mod tests {
     }
 
     #[test]
+    fn application_agent_lifecycle_is_lossless_proof_gated_and_release_dormant() {
+        let manifest = include_str!("../../crates/zephium-app/Cargo.toml");
+        let root = include_str!("../../crates/zephium-app/src/lib.rs");
+        let api = include_str!("../../crates/zephium-app/src/api.rs");
+        let actor = include_str!("../../crates/zephium-app/src/actor/mod.rs");
+        let shell = include_str!("../../crates/zephium-app/src/shell/mod.rs");
+        let desktop = include_str!("../../desktop/Cargo.toml");
+        validate_agent_app_lifecycle(manifest, root, api, actor, shell, desktop)
+            .expect("application agent lifecycle boundary");
+
+        for (index, invalid) in [
+            manifest.replace("agentic-browser = [\"dep:zephium-agentic\"]", ""),
+            manifest.replace(
+                "zephium-agentic = { workspace = true, optional = true }",
+                "zephium-agentic.workspace = true",
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(
+                validate_agent_app_lifecycle(&invalid, root, api, actor, shell, desktop).is_err(),
+                "application manifest mutation {index} was not rejected"
+            );
+        }
+
+        let invalid_actor = actor.replacen(
+            "agent_lifecycle.into_spawn_failure(",
+            "SpawnFailure::new(",
+            1,
+        );
+        assert!(
+            validate_agent_app_lifecycle(manifest, root, api, &invalid_actor, shell, desktop)
+                .is_err()
+        );
+        let invalid_actor = actor.replace(
+            "pub fn into_parts(self) -> (SpawnError, ExtensionLifecycle, AgentLifecycle)",
+            "pub fn into_parts(self) -> (SpawnError, ExtensionLifecycle)",
+        );
+        assert!(
+            validate_agent_app_lifecycle(manifest, root, api, &invalid_actor, shell, desktop)
+                .is_err()
+        );
+
+        let invalid_shell = shell.replace(
+            "Ok(AgentBrowserShutdownOutcome::Clean(native_zero_proof))",
+            "Ok(AgentBrowserShutdownOutcome::Unclean)",
+        );
+        assert!(
+            validate_agent_app_lifecycle(manifest, root, api, actor, &invalid_shell, desktop)
+                .is_err()
+        );
+        let invalid_shell = shell.replacen(
+            "let agent_lifecycle_clean = self.shutdown_agent_lifecycle_until(deadline);\n        #[cfg(not(feature = \"agentic-browser\"))]\n        let agent_lifecycle_clean = true;\n        let extension_service_clean = self.shutdown_extension_service_until(deadline);",
+            "let extension_service_clean = self.shutdown_extension_service_until(deadline);\n        #[cfg(not(feature = \"agentic-browser\"))]\n        let agent_lifecycle_clean = true;\n        let agent_lifecycle_clean = self.shutdown_agent_lifecycle_until(deadline);",
+            1,
+        );
+        assert!(
+            validate_agent_app_lifecycle(manifest, root, api, actor, &invalid_shell, desktop)
+                .is_err()
+        );
+
+        let invalid_desktop = desktop.replace(
+            "macos-page-permission-prompts = [",
+            "agentic-browser = [\"zephium-app/agentic-browser\"]\nmacos-page-permission-prompts = [",
+        );
+        assert!(
+            validate_agent_app_lifecycle(manifest, root, api, actor, shell, &invalid_desktop)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn native_shutdown_barrier_is_atomic_distinct_and_drain_auditable() {
         let domain = include_str!("../../crates/zephium-agentic/src/context_port.rs");
         let port = include_str!("../../crates/zephium-engine/src/agent_context_port.rs");
@@ -6183,6 +6449,10 @@ mod tests {
                     name: "zephium-engine".to_owned(),
                 },
                 CargoPackage {
+                    id: "app".to_owned(),
+                    name: "zephium-app".to_owned(),
+                },
+                CargoPackage {
                     id: "agentic".to_owned(),
                     name: "zephium-agentic".to_owned(),
                 },
@@ -6209,6 +6479,11 @@ mod tests {
                         features: Vec::new(),
                     },
                     CargoNode {
+                        id: "app".to_owned(),
+                        dependencies: Vec::new(),
+                        features: Vec::new(),
+                    },
+                    CargoNode {
                         id: "agentic".to_owned(),
                         dependencies: Vec::new(),
                         features: Vec::new(),
@@ -6220,7 +6495,8 @@ mod tests {
 
     #[test]
     fn release_graph_accepts_production_graph_without_diagnostic_features() {
-        validate_release_graph(&metadata(vec!["engine".to_owned()])).expect("isolated graph");
+        validate_release_graph(&metadata(vec!["app".to_owned(), "engine".to_owned()]))
+            .expect("isolated graph");
         validate_release_graph(&metadata(vec!["agentic".to_owned()]))
             .expect("production agentic graph");
     }
@@ -6251,6 +6527,17 @@ mod tests {
             .features
             .push("native-agentic-input-probe".to_owned());
         assert!(validate_release_graph(&transitive).is_err());
+        let mut app = metadata(vec!["app".to_owned()]);
+        app.resolve
+            .as_mut()
+            .expect("resolve")
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "app")
+            .expect("app")
+            .features
+            .push("agentic-browser".to_owned());
+        assert!(validate_release_graph(&app).is_err());
         assert!(validate_release_graph(&metadata(vec!["transport".to_owned()])).is_err());
     }
 

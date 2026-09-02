@@ -541,6 +541,203 @@ fn extension_failure_is_terminal_but_does_not_skip_later_teardown_barriers() {
     );
 }
 
+#[cfg(feature = "agentic-browser")]
+#[test]
+fn clean_agent_lifecycle_proof_precedes_every_terminal_owner() {
+    let order = Arc::new(Mutex::new(Vec::new()));
+    let store = Arc::new(FakeStore::default());
+    *store.shutdown_order.lock().unwrap() = Some(Arc::clone(&order));
+    let engine = Arc::new(FakeEngine::default());
+    *engine.shutdown_order.lock().unwrap() = Some(Arc::clone(&order));
+    let blocker = Arc::new(OrderedShutdownBlocker {
+        order: Arc::clone(&order),
+        panic_on_shutdown: false,
+    });
+    let (extension_service, extension_state) =
+        extension_lifecycle_with_outcome(ExtensionServiceShutdownOutcome::Clean);
+    *extension_state.shutdown_order.lock().unwrap() = Some(Arc::clone(&order));
+    let (agent_lifecycle, agent_state) = agent_lifecycle_with_clean(true);
+    *agent_state.shutdown_order.lock().unwrap() = Some(Arc::clone(&order));
+    let deadline = test_shutdown_deadline();
+    let mut shell = Shell::new_with_agent_lifecycle(
+        engine,
+        store,
+        blocker,
+        extension_service,
+        agent_lifecycle,
+        Arc::new(FakeChrome),
+        Box::new(|_| {}),
+    );
+
+    let (ack, done) = sync_channel(1);
+    shell.handle(Command::Shutdown { deadline, ack });
+
+    assert_eq!(done.recv().unwrap(), ShutdownOutcome::Clean);
+    assert_eq!(
+        order.lock().unwrap().as_slice(),
+        &["agent", "extensions", "store", "engine", "blocker"]
+    );
+    assert_eq!(
+        agent_state.deadlines.lock().unwrap().as_slice(),
+        &[deadline]
+    );
+    assert_eq!(
+        agent_state
+            .shutdown_calls
+            .load(std::sync::atomic::Ordering::Acquire),
+        1
+    );
+    assert!(!agent_state
+        .dropped_without_shutdown
+        .load(std::sync::atomic::Ordering::Acquire));
+}
+
+#[cfg(feature = "agentic-browser")]
+#[test]
+fn unclean_agent_lifecycle_is_terminal_but_does_not_skip_cleanup() {
+    let store = Arc::new(FakeStore::default());
+    let engine = Arc::new(FakeEngine::default());
+    let (extension_service, extension_state) =
+        extension_lifecycle_with_outcome(ExtensionServiceShutdownOutcome::Clean);
+    let (agent_lifecycle, agent_state) = agent_lifecycle_with_clean(false);
+    let mut shell = Shell::new_with_agent_lifecycle(
+        engine.clone(),
+        store.clone(),
+        Arc::new(ImmediateAllowAllCompiler),
+        extension_service,
+        agent_lifecycle,
+        Arc::new(FakeChrome),
+        Box::new(|_| {}),
+    );
+
+    let (ack, done) = sync_channel(1);
+    shell.handle(Command::Shutdown {
+        deadline: test_shutdown_deadline(),
+        ack,
+    });
+
+    assert_eq!(done.recv().unwrap(), ShutdownOutcome::Unclean);
+    assert_eq!(
+        agent_state
+            .shutdown_calls
+            .load(std::sync::atomic::Ordering::Acquire),
+        1
+    );
+    assert_eq!(
+        extension_state
+            .shutdown_calls
+            .load(std::sync::atomic::Ordering::Acquire),
+        1
+    );
+    assert_eq!(
+        store
+            .shutdown_calls
+            .load(std::sync::atomic::Ordering::Acquire),
+        1
+    );
+    assert_eq!(
+        engine
+            .shutdown_calls
+            .load(std::sync::atomic::Ordering::Acquire),
+        1
+    );
+}
+
+#[cfg(feature = "agentic-browser")]
+#[test]
+fn retryable_preflight_preserves_agent_lifecycle_for_one_later_consumption() {
+    let store = Arc::new(FakeStore::default());
+    *store.flush_result.lock().unwrap() = Some(false);
+    let (extension_service, extension_state) =
+        extension_lifecycle_with_outcome(ExtensionServiceShutdownOutcome::Clean);
+    let (agent_lifecycle, agent_state) = agent_lifecycle_with_clean(true);
+    let mut shell = Shell::new_with_agent_lifecycle(
+        Arc::new(FakeEngine::default()),
+        store.clone(),
+        Arc::new(ImmediateAllowAllCompiler),
+        extension_service,
+        agent_lifecycle,
+        Arc::new(FakeChrome),
+        Box::new(|_| {}),
+    );
+
+    let (ack, first) = sync_channel(1);
+    shell.handle(Command::Shutdown {
+        deadline: test_shutdown_deadline(),
+        ack,
+    });
+    assert_eq!(first.recv().unwrap(), ShutdownOutcome::RetryableFailure);
+    assert_eq!(
+        agent_state
+            .shutdown_calls
+            .load(std::sync::atomic::Ordering::Acquire),
+        0
+    );
+    assert_eq!(
+        extension_state
+            .shutdown_calls
+            .load(std::sync::atomic::Ordering::Acquire),
+        0
+    );
+
+    *store.flush_result.lock().unwrap() = Some(true);
+    let (ack, second) = sync_channel(1);
+    shell.handle(Command::Shutdown {
+        deadline: test_shutdown_deadline(),
+        ack,
+    });
+    assert_eq!(second.recv().unwrap(), ShutdownOutcome::Clean);
+    assert_eq!(
+        agent_state
+            .shutdown_calls
+            .load(std::sync::atomic::Ordering::Acquire),
+        1
+    );
+}
+
+#[cfg(feature = "agentic-browser")]
+#[test]
+fn panicking_agent_lifecycle_is_contained_and_later_barriers_run() {
+    let order = Arc::new(Mutex::new(Vec::new()));
+    let store = Arc::new(FakeStore::default());
+    *store.shutdown_order.lock().unwrap() = Some(Arc::clone(&order));
+    let engine = Arc::new(FakeEngine::default());
+    *engine.shutdown_order.lock().unwrap() = Some(Arc::clone(&order));
+    let blocker = Arc::new(OrderedShutdownBlocker {
+        order: Arc::clone(&order),
+        panic_on_shutdown: false,
+    });
+    let (extension_service, extension_state) =
+        extension_lifecycle_with_outcome(ExtensionServiceShutdownOutcome::Clean);
+    *extension_state.shutdown_order.lock().unwrap() = Some(Arc::clone(&order));
+    let (agent_lifecycle, agent_state) = agent_lifecycle_with_clean(true);
+    *agent_state.shutdown_order.lock().unwrap() = Some(Arc::clone(&order));
+    agent_state
+        .panic_on_shutdown
+        .store(true, std::sync::atomic::Ordering::Release);
+    let mut shell = Shell::new_with_agent_lifecycle(
+        engine,
+        store,
+        blocker,
+        extension_service,
+        agent_lifecycle,
+        Arc::new(FakeChrome),
+        Box::new(|_| {}),
+    );
+
+    let (ack, done) = sync_channel(1);
+    shell.handle(Command::Shutdown {
+        deadline: test_shutdown_deadline(),
+        ack,
+    });
+
+    assert_eq!(done.recv().unwrap(), ShutdownOutcome::Unclean);
+    assert_eq!(
+        order.lock().unwrap().as_slice(),
+        &["agent", "extensions", "store", "engine", "blocker"]
+    );
+}
+
 #[test]
 fn every_panicking_terminal_barrier_runs_and_acknowledges_unclean_once() {
     let order = Arc::new(Mutex::new(Vec::new()));

@@ -22,6 +22,16 @@ struct ProbeLifecycle(Arc<LifecycleProbe>);
 
 struct TerminalStartupProbeLifecycle(Arc<LifecycleProbe>);
 
+#[cfg(feature = "agentic-browser")]
+#[derive(Default)]
+struct AgentLifecycleProbe {
+    shutdown_calls: std::sync::atomic::AtomicUsize,
+    dropped_without_shutdown: std::sync::atomic::AtomicBool,
+}
+
+#[cfg(feature = "agentic-browser")]
+struct ProbeAgentLifecycle(Arc<AgentLifecycleProbe>);
+
 impl Drop for ProbeLifecycle {
     fn drop(&mut self) {
         if self
@@ -49,6 +59,35 @@ impl Drop for TerminalStartupProbeLifecycle {
                 .dropped_without_shutdown
                 .store(true, std::sync::atomic::Ordering::Release);
         }
+    }
+}
+
+#[cfg(feature = "agentic-browser")]
+impl Drop for ProbeAgentLifecycle {
+    fn drop(&mut self) {
+        if self
+            .0
+            .shutdown_calls
+            .load(std::sync::atomic::Ordering::Acquire)
+            == 0
+        {
+            self.0
+                .dropped_without_shutdown
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+}
+
+#[cfg(feature = "agentic-browser")]
+impl zephium_agentic::AgentBrowserLifecycle for ProbeAgentLifecycle {
+    fn shutdown_until(
+        self: Box<Self>,
+        _deadline: std::time::Instant,
+    ) -> zephium_agentic::AgentBrowserShutdownOutcome {
+        self.0
+            .shutdown_calls
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        zephium_agentic::AgentBrowserShutdownOutcome::Unclean
     }
 }
 
@@ -101,6 +140,12 @@ impl ExtensionServiceLifecycle for TerminalStartupProbeLifecycle {
 fn lifecycle_probe() -> (ExtensionLifecycle, Arc<LifecycleProbe>) {
     let probe = Arc::new(LifecycleProbe::default());
     (Box::new(ProbeLifecycle(Arc::clone(&probe))), probe)
+}
+
+#[cfg(feature = "agentic-browser")]
+fn agent_lifecycle_probe() -> (AgentLifecycle, Arc<AgentLifecycleProbe>) {
+    let probe = Arc::new(AgentLifecycleProbe::default());
+    (Box::new(ProbeAgentLifecycle(Arc::clone(&probe))), probe)
 }
 
 fn acquired_package_request() -> ExtensionAcquiredPackageProvisioningRequest {
@@ -204,6 +249,28 @@ fn spawn_with_test_workers(
             store: Arc::new(FakeStore::default()),
             blocker: Arc::new(ImmediateAllowAllCompiler),
             extension_service,
+            agent_lifecycle: NoAgentLifecycle,
+            terminal_failure: Box::new(|_| {}),
+            chrome: Arc::new(FakeChrome),
+            emit: Box::new(|_| {}),
+        },
+        spawner,
+    )
+}
+
+#[cfg(feature = "agentic-browser")]
+fn spawn_agentic_with_test_workers(
+    extension_service: ExtensionLifecycle,
+    agent_lifecycle: AgentLifecycle,
+    spawner: impl FnMut(&'static str, WorkerTask) -> std::io::Result<WorkerThread>,
+) -> Result<Handle, AgenticSpawnFailure> {
+    spawn_agentic_with_worker_spawner(
+        ShellHandoff {
+            engine: Arc::new(FakeEngine::default()),
+            store: Arc::new(FakeStore::default()),
+            blocker: Arc::new(ImmediateAllowAllCompiler),
+            extension_service,
+            agent_lifecycle: PendingAgentBrowserLifecycle(agent_lifecycle),
             terminal_failure: Box::new(|_| {}),
             chrome: Arc::new(FakeChrome),
             emit: Box::new(|_| {}),
@@ -324,6 +391,211 @@ fn disconnected_actor_handoff_returns_its_service_owner_losslessly() {
         .load(std::sync::atomic::Ordering::Acquire));
 }
 
+#[cfg(feature = "agentic-browser")]
+#[test]
+fn every_agentic_worker_refusal_returns_both_lifecycle_owners_losslessly() {
+    for target in ["zephium-store-reader", "zephium-shell", "zephium-timer"] {
+        let (extension_lifecycle, extension_probe) = lifecycle_probe();
+        let (agent_lifecycle, agent_probe) = agent_lifecycle_probe();
+        let failure = match spawn_agentic_with_test_workers(
+            extension_lifecycle,
+            agent_lifecycle,
+            |name, task| {
+                if name == target {
+                    drop(task);
+                    Err(std::io::Error::other("injected agentic worker refusal"))
+                } else {
+                    spawn_worker(name, task)
+                }
+            },
+        ) {
+            Ok(_) => panic!("the selected agentic worker spawn must be refused"),
+            Err(failure) => failure,
+        };
+        assert!(failure.worker_cleanup_proven(), "{target} cleanup");
+        assert_eq!(
+            extension_probe
+                .shutdown_calls
+                .load(std::sync::atomic::Ordering::Acquire),
+            0
+        );
+        assert_eq!(
+            agent_probe
+                .shutdown_calls
+                .load(std::sync::atomic::Ordering::Acquire),
+            0
+        );
+        assert!(!extension_probe
+            .dropped_without_shutdown
+            .load(std::sync::atomic::Ordering::Acquire));
+        assert!(!agent_probe
+            .dropped_without_shutdown
+            .load(std::sync::atomic::Ordering::Acquire));
+
+        let (error, extension_lifecycle, agent_lifecycle) = failure.into_parts();
+        assert!(matches!(
+            (target, error),
+            ("zephium-store-reader", SpawnError::StoreReader(_))
+                | ("zephium-shell", SpawnError::Actor(_))
+                | ("zephium-timer", SpawnError::Timer(_))
+        ));
+        assert_eq!(
+            extension_lifecycle.shutdown_until(test_shutdown_deadline()),
+            ExtensionServiceShutdownOutcome::Clean
+        );
+        assert!(matches!(
+            agent_lifecycle.shutdown_until(test_shutdown_deadline()),
+            zephium_agentic::AgentBrowserShutdownOutcome::Unclean
+        ));
+        assert_eq!(
+            extension_probe
+                .shutdown_calls
+                .load(std::sync::atomic::Ordering::Acquire),
+            1
+        );
+        assert_eq!(
+            agent_probe
+                .shutdown_calls
+                .load(std::sync::atomic::Ordering::Acquire),
+            1
+        );
+    }
+}
+
+#[cfg(feature = "agentic-browser")]
+#[test]
+fn disconnected_agentic_handoff_returns_both_lifecycle_owners_losslessly() {
+    let (extension_lifecycle, extension_probe) = lifecycle_probe();
+    let (agent_lifecycle, agent_probe) = agent_lifecycle_probe();
+    let failure =
+        match spawn_agentic_with_test_workers(extension_lifecycle, agent_lifecycle, |name, task| {
+            if name == "zephium-shell" {
+                drop(task);
+                spawn_worker(name, Box::new(|| {}))
+            } else {
+                spawn_worker(name, task)
+            }
+        }) {
+            Ok(_) => panic!("the disconnected agentic handoff must be refused"),
+            Err(failure) => failure,
+        };
+
+    assert!(failure.worker_cleanup_proven());
+    assert!(matches!(failure.error(), SpawnError::ActorHandoff(_)));
+    assert_eq!(
+        extension_probe
+            .shutdown_calls
+            .load(std::sync::atomic::Ordering::Acquire),
+        0
+    );
+    assert_eq!(
+        agent_probe
+            .shutdown_calls
+            .load(std::sync::atomic::Ordering::Acquire),
+        0
+    );
+    let (error, extension_lifecycle, agent_lifecycle) = failure.into_parts();
+    assert!(matches!(error, SpawnError::ActorHandoff(_)));
+    assert_eq!(
+        extension_lifecycle.shutdown_until(test_shutdown_deadline()),
+        ExtensionServiceShutdownOutcome::Clean
+    );
+    assert!(matches!(
+        agent_lifecycle.shutdown_until(test_shutdown_deadline()),
+        zephium_agentic::AgentBrowserShutdownOutcome::Unclean
+    ));
+    assert_eq!(
+        extension_probe
+            .shutdown_calls
+            .load(std::sync::atomic::Ordering::Acquire),
+        1
+    );
+    assert_eq!(
+        agent_probe
+            .shutdown_calls
+            .load(std::sync::atomic::Ordering::Acquire),
+        1
+    );
+}
+
+#[cfg(feature = "agentic-browser")]
+#[test]
+fn last_handle_exit_consumes_agent_and_extension_lifecycles_once() {
+    let (extension_lifecycle, extension_probe) = lifecycle_probe();
+    let (agent_lifecycle, agent_probe) = agent_lifecycle_probe();
+    let handle =
+        spawn_agentic_with_test_workers(extension_lifecycle, agent_lifecycle, spawn_worker)
+            .expect("spawn agentic test shell");
+    drop(handle);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while (extension_probe
+        .shutdown_calls
+        .load(std::sync::atomic::Ordering::Acquire)
+        == 0
+        || agent_probe
+            .shutdown_calls
+            .load(std::sync::atomic::Ordering::Acquire)
+            == 0)
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::yield_now();
+    }
+    assert_eq!(
+        extension_probe
+            .shutdown_calls
+            .load(std::sync::atomic::Ordering::Acquire),
+        1
+    );
+    assert_eq!(
+        agent_probe
+            .shutdown_calls
+            .load(std::sync::atomic::Ordering::Acquire),
+        1
+    );
+    assert!(!extension_probe
+        .dropped_without_shutdown
+        .load(std::sync::atomic::Ordering::Acquire));
+    assert!(!agent_probe
+        .dropped_without_shutdown
+        .load(std::sync::atomic::Ordering::Acquire));
+}
+
+#[cfg(feature = "agentic-browser")]
+#[test]
+fn public_suspended_agentic_spawn_transfers_and_consumes_the_lifecycle_pair() {
+    let (extension_lifecycle, extension_probe) = lifecycle_probe();
+    let (agent_lifecycle, agent_probe) = agent_lifecycle_probe();
+    let handle = spawn_agentic_suspended(
+        Arc::new(FakeEngine::default()),
+        Arc::new(FakeStore::default()),
+        Arc::new(ImmediateAllowAllCompiler),
+        AgenticLifecycles::new(extension_lifecycle, agent_lifecycle),
+        Box::new(|_| {}),
+        Arc::new(FakeChrome),
+        Box::new(|_| {}),
+    )
+    .expect("spawn suspended agentic Shell");
+
+    assert_eq!(
+        handle.shutdown().recv().unwrap(),
+        ShutdownOutcome::Unclean,
+        "the fake agent lifecycle deliberately cannot mint a clean proof"
+    );
+    assert_eq!(
+        extension_probe
+            .shutdown_calls
+            .load(std::sync::atomic::Ordering::Acquire),
+        1
+    );
+    assert_eq!(
+        agent_probe
+            .shutdown_calls
+            .load(std::sync::atomic::Ordering::Acquire),
+        1
+    );
+}
+
 #[test]
 fn last_handle_exit_explicitly_consumes_service_before_shell_drop() {
     let (lifecycle, probe) = lifecycle_probe();
@@ -361,6 +633,7 @@ fn panicking_terminal_handoff_exits_actor_and_consumes_service_once() {
             store: Arc::new(FakeStore::default()),
             blocker: Arc::new(ImmediateAllowAllCompiler),
             extension_service: Box::new(TerminalStartupProbeLifecycle(Arc::clone(&probe))),
+            agent_lifecycle: NoAgentLifecycle,
             terminal_failure: Box::new(move |_| {
                 callback_attempts_for_handoff.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
                 panic!("injected terminal handoff panic");

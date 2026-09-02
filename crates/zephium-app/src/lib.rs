@@ -24,6 +24,10 @@ pub use actor::{
     spawn, spawn_suspended, CallbackHandle, ContentPolicyStatusRequest,
     FocusedContentPolicyStatusRequest, Handle, ShutdownRequest, SpawnError, SpawnFailure,
 };
+#[cfg(feature = "agentic-browser")]
+pub use actor::{spawn_agentic, spawn_agentic_suspended, AgenticLifecycles, AgenticSpawnFailure};
+#[cfg(feature = "agentic-browser")]
+pub use api::AgentLifecycle;
 pub use api::{
     AcquiredExtensionCatalogSubmission, AcquiredExtensionPackageSubmission, ChromePresentation,
     ChromePresentationCallback, ChromePresentationDispatch, Command,

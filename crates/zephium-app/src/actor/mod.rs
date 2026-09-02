@@ -16,6 +16,8 @@ use crate::shell::{
     Shell, ShellPorts, END_TO_END_SHUTDOWN_TIMEOUT, MAINTENANCE_INTERVAL, MAX_OPERATION_ID_BYTES,
 };
 use crate::store_reads::{run as run_store_reader, StoreReadQueue, StoreReaderStopGuard};
+#[cfg(feature = "agentic-browser")]
+use crate::AgentLifecycle;
 use crate::{
     Command, ContentPolicyStatusQueryOutcome, EmitFn, ExtensionLifecycle, SharedBlocker,
     SharedChrome, SharedEngine, SharedStore, ShellTerminalFailureCallback, ShutdownOutcome,
@@ -31,11 +33,67 @@ use zephium_ipc::BlockerStatusView;
 const FAILED_SPAWN_CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 type WorkerTask = Box<dyn FnOnce() + Send + 'static>;
 
-struct ShellHandoff {
+trait PendingAgentLifecycle: Send + 'static {
+    type Failure;
+
+    #[cfg(feature = "agentic-browser")]
+    fn into_shell_lifecycle(self) -> Option<AgentLifecycle>;
+
+    fn into_spawn_failure(
+        self,
+        error: SpawnError,
+        extension_lifecycle: ExtensionLifecycle,
+        worker_cleanup_proven: bool,
+    ) -> Self::Failure;
+}
+
+struct NoAgentLifecycle;
+
+impl PendingAgentLifecycle for NoAgentLifecycle {
+    type Failure = SpawnFailure;
+
+    #[cfg(feature = "agentic-browser")]
+    fn into_shell_lifecycle(self) -> Option<AgentLifecycle> {
+        None
+    }
+
+    fn into_spawn_failure(
+        self,
+        error: SpawnError,
+        extension_lifecycle: ExtensionLifecycle,
+        worker_cleanup_proven: bool,
+    ) -> Self::Failure {
+        SpawnFailure::new(error, extension_lifecycle, worker_cleanup_proven)
+    }
+}
+
+#[cfg(feature = "agentic-browser")]
+struct PendingAgentBrowserLifecycle(AgentLifecycle);
+
+#[cfg(feature = "agentic-browser")]
+impl PendingAgentLifecycle for PendingAgentBrowserLifecycle {
+    type Failure = AgenticSpawnFailure;
+
+    fn into_shell_lifecycle(self) -> Option<AgentLifecycle> {
+        Some(self.0)
+    }
+
+    fn into_spawn_failure(
+        self,
+        error: SpawnError,
+        extension_lifecycle: ExtensionLifecycle,
+        worker_cleanup_proven: bool,
+    ) -> Self::Failure {
+        AgenticSpawnFailure::new(error, extension_lifecycle, self.0, worker_cleanup_proven)
+    }
+}
+
+struct ShellHandoff<Agent = NoAgentLifecycle> {
     engine: SharedEngine,
     store: SharedStore,
     blocker: SharedBlocker,
     extension_service: ExtensionLifecycle,
+    agent_lifecycle: Agent,
     terminal_failure: ShellTerminalFailureCallback,
     chrome: SharedChrome,
     emit: EmitFn,
@@ -281,6 +339,112 @@ impl std::fmt::Display for SpawnFailure {
 }
 
 impl std::error::Error for SpawnFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
+/// Move-only lifecycle pair transferred into an agentic Shell composition.
+///
+/// Pairing these two unique owners keeps the public spawn boundary within a
+/// small fixed argument surface and makes their joint rollback obligation
+/// explicit.
+#[cfg(feature = "agentic-browser")]
+#[must_use = "both lifecycle owners must be transferred or explicitly recovered"]
+pub struct AgenticLifecycles {
+    extension: ExtensionLifecycle,
+    agent: AgentLifecycle,
+}
+
+#[cfg(feature = "agentic-browser")]
+impl AgenticLifecycles {
+    /// Pairs the exact extension and agent lifecycle owners for Shell transfer.
+    pub fn new(extension: ExtensionLifecycle, agent: AgentLifecycle) -> Self {
+        Self { extension, agent }
+    }
+
+    /// Recovers both unique owners before they are transferred to a Shell.
+    pub fn into_parts(self) -> (ExtensionLifecycle, AgentLifecycle) {
+        (self.extension, self.agent)
+    }
+}
+
+#[cfg(feature = "agentic-browser")]
+impl std::fmt::Debug for AgenticLifecycles {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AgenticLifecycles")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Lossless agentic application-composition failure.
+///
+/// This is distinct from [`SpawnFailure`] so the ordinary spawn API cannot
+/// accidentally acquire or discard an agent lifecycle. Both move-only owners
+/// are returned untouched; the composition root must consume them away from a
+/// native UI/event-loop thread.
+#[cfg(feature = "agentic-browser")]
+#[must_use = "recover and explicitly dispose both returned lifecycle owners"]
+pub struct AgenticSpawnFailure {
+    error: SpawnError,
+    extension_lifecycle: ExtensionLifecycle,
+    agent_lifecycle: AgentLifecycle,
+    worker_cleanup_proven: bool,
+}
+
+#[cfg(feature = "agentic-browser")]
+impl AgenticSpawnFailure {
+    fn new(
+        error: SpawnError,
+        extension_lifecycle: ExtensionLifecycle,
+        agent_lifecycle: AgentLifecycle,
+        worker_cleanup_proven: bool,
+    ) -> Self {
+        Self {
+            error,
+            extension_lifecycle,
+            agent_lifecycle,
+            worker_cleanup_proven,
+        }
+    }
+
+    /// Concrete helper-worker construction or handoff failure.
+    pub fn error(&self) -> &SpawnError {
+        &self.error
+    }
+
+    /// Whether every admitted app helper worker was reaped by the rollback deadline.
+    pub fn worker_cleanup_proven(&self) -> bool {
+        self.worker_cleanup_proven
+    }
+
+    /// Recovers the failure and both unique, never-settled lifecycle owners.
+    pub fn into_parts(self) -> (SpawnError, ExtensionLifecycle, AgentLifecycle) {
+        (self.error, self.extension_lifecycle, self.agent_lifecycle)
+    }
+}
+
+#[cfg(feature = "agentic-browser")]
+impl std::fmt::Debug for AgenticSpawnFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AgenticSpawnFailure")
+            .field("error", &self.error)
+            .field("worker_cleanup_proven", &self.worker_cleanup_proven)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "agentic-browser")]
+impl std::fmt::Display for AgenticSpawnFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(formatter)
+    }
+}
+
+#[cfg(feature = "agentic-browser")]
+impl std::error::Error for AgenticSpawnFailure {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(&self.error)
     }
@@ -895,6 +1059,36 @@ pub fn spawn(
     Ok(handle)
 }
 
+/// Starts and immediately admits a Shell that owns the complete agent browser lifecycle.
+///
+/// New composition roots should prefer [`spawn_agentic_suspended`] so the
+/// handle can be published before any external startup port is entered.
+#[cfg(feature = "agentic-browser")]
+pub fn spawn_agentic(
+    engine: SharedEngine,
+    store: SharedStore,
+    blocker: SharedBlocker,
+    lifecycles: AgenticLifecycles,
+    terminal_failure: ShellTerminalFailureCallback,
+    chrome: SharedChrome,
+    emit: EmitFn,
+) -> Result<Handle, AgenticSpawnFailure> {
+    let handle = spawn_agentic_suspended(
+        engine,
+        store,
+        blocker,
+        lifecycles,
+        terminal_failure,
+        chrome,
+        emit,
+    )?;
+    let admitted = handle.admit_startup();
+    debug_assert!(admitted, "new agentic Shell startup gate must be pending");
+    let committed = handle.commit_startup_admission();
+    debug_assert!(committed, "agentic compatibility admission must commit");
+    Ok(handle)
+}
+
 /// Starts helper workers and transfers the move-only lifecycle into a guarded
 /// Shell while keeping every external actor port suspended.
 ///
@@ -917,6 +1111,39 @@ pub fn spawn_suspended(
             store,
             blocker,
             extension_service,
+            agent_lifecycle: NoAgentLifecycle,
+            terminal_failure,
+            chrome,
+            emit,
+        },
+        spawn_worker,
+    )
+}
+
+/// Starts a guarded Shell and transfers both move-only lifecycle owners while
+/// keeping every external actor port suspended.
+///
+/// Every construction refusal returns both owners through
+/// [`AgenticSpawnFailure`]. After success the Shell consumes the agent
+/// lifecycle before terminal Store and engine teardown.
+#[cfg(feature = "agentic-browser")]
+pub fn spawn_agentic_suspended(
+    engine: SharedEngine,
+    store: SharedStore,
+    blocker: SharedBlocker,
+    lifecycles: AgenticLifecycles,
+    terminal_failure: ShellTerminalFailureCallback,
+    chrome: SharedChrome,
+    emit: EmitFn,
+) -> Result<Handle, AgenticSpawnFailure> {
+    let (extension_service, agent_lifecycle) = lifecycles.into_parts();
+    spawn_suspended_with_worker_spawner(
+        ShellHandoff {
+            engine,
+            store,
+            blocker,
+            extension_service,
+            agent_lifecycle: PendingAgentBrowserLifecycle(agent_lifecycle),
             terminal_failure,
             chrome,
             emit,
@@ -927,7 +1154,7 @@ pub fn spawn_suspended(
 
 #[cfg(test)]
 fn spawn_with_worker_spawner(
-    ports: ShellHandoff,
+    ports: ShellHandoff<NoAgentLifecycle>,
     worker_spawner: impl FnMut(&'static str, WorkerTask) -> std::io::Result<WorkerThread>,
 ) -> Result<Handle, SpawnFailure> {
     let handle = spawn_suspended_with_worker_spawner(ports, worker_spawner)?;
@@ -938,15 +1165,29 @@ fn spawn_with_worker_spawner(
     Ok(handle)
 }
 
-fn spawn_suspended_with_worker_spawner(
-    ports: ShellHandoff,
+#[cfg(all(test, feature = "agentic-browser"))]
+fn spawn_agentic_with_worker_spawner(
+    ports: ShellHandoff<PendingAgentBrowserLifecycle>,
+    worker_spawner: impl FnMut(&'static str, WorkerTask) -> std::io::Result<WorkerThread>,
+) -> Result<Handle, AgenticSpawnFailure> {
+    let handle = spawn_suspended_with_worker_spawner(ports, worker_spawner)?;
+    let admitted = handle.admit_startup();
+    debug_assert!(admitted, "new agentic Shell startup gate must be pending");
+    let committed = handle.commit_startup_admission();
+    debug_assert!(committed, "agentic compatibility admission must commit");
+    Ok(handle)
+}
+
+fn spawn_suspended_with_worker_spawner<Agent: PendingAgentLifecycle>(
+    ports: ShellHandoff<Agent>,
     mut worker_spawner: impl FnMut(&'static str, WorkerTask) -> std::io::Result<WorkerThread>,
-) -> Result<Handle, SpawnFailure> {
+) -> Result<Handle, Agent::Failure> {
     let ShellHandoff {
         engine,
         store,
         blocker,
         extension_service,
+        agent_lifecycle,
         terminal_failure,
         chrome,
         emit,
@@ -960,6 +1201,7 @@ fn spawn_suspended_with_worker_spawner(
     let handle = Handle::with_workers(queue.clone(), workers.clone(), startup.clone());
     let store_reads = StoreReadQueue::new();
     let mut extension_service = Some(extension_service);
+    let mut agent_lifecycle = Some(agent_lifecycle);
     let store_reader_task: WorkerTask = Box::new({
         let reader_store = store.clone();
         let reader_queue = store_reads.clone();
@@ -972,8 +1214,11 @@ fn spawn_suspended_with_worker_spawner(
             let extension_service = extension_service
                 .take()
                 .expect("pending extension-service owner is unique");
+            let agent_lifecycle = agent_lifecycle
+                .take()
+                .expect("pending agent lifecycle owner is unique");
             let cleanup_proven = cleanup_failed_workers(&queue, &store_reads, &workers);
-            return Err(SpawnFailure::new(
+            return Err(agent_lifecycle.into_spawn_failure(
                 SpawnError::StoreReader(error),
                 extension_service,
                 cleanup_proven,
@@ -981,7 +1226,7 @@ fn spawn_suspended_with_worker_spawner(
         }
     };
     workers.install_store_reader(store_reader);
-    let (shell_handoff, shell_receiver) = sync_channel::<ShellHandoff>(1);
+    let (shell_handoff, shell_receiver) = sync_channel::<ShellHandoff<Agent>>(1);
     let actor_queue = queue.clone();
     let actor_store_reads = store_reads.clone();
     let actor_startup = startup;
@@ -997,20 +1242,26 @@ fn spawn_suspended_with_worker_spawner(
             store,
             blocker,
             extension_service,
+            agent_lifecycle,
             terminal_failure,
             chrome,
             emit,
         } = handoff;
+        let ports = ShellPorts::new(
+            engine,
+            store,
+            blocker,
+            extension_service,
+            terminal_failure,
+            chrome,
+            emit,
+        );
+        #[cfg(feature = "agentic-browser")]
+        let ports = ports.with_agent_lifecycle(agent_lifecycle.into_shell_lifecycle());
+        #[cfg(not(feature = "agentic-browser"))]
+        drop(agent_lifecycle);
         let shell = Shell::with_store_reads_deferred_blocker_catalog(
-            ShellPorts::new(
-                engine,
-                store,
-                blocker,
-                extension_service,
-                terminal_failure,
-                chrome,
-                emit,
-            ),
+            ports,
             shell_store_reads,
             #[cfg(test)]
             false,
@@ -1049,8 +1300,11 @@ fn spawn_suspended_with_worker_spawner(
             let extension_service = extension_service
                 .take()
                 .expect("pending extension-service owner is unique");
+            let agent_lifecycle = agent_lifecycle
+                .take()
+                .expect("pending agent lifecycle owner is unique");
             let cleanup_proven = cleanup_failed_workers(&queue, &store_reads, &workers);
-            return Err(SpawnFailure::new(
+            return Err(agent_lifecycle.into_spawn_failure(
                 SpawnError::Actor(error),
                 extension_service,
                 cleanup_proven,
@@ -1195,8 +1449,11 @@ fn spawn_suspended_with_worker_spawner(
             let extension_service = extension_service
                 .take()
                 .expect("pending extension-service owner is unique");
+            let agent_lifecycle = agent_lifecycle
+                .take()
+                .expect("pending agent lifecycle owner is unique");
             let cleanup_proven = cleanup_failed_workers(&queue, &store_reads, &workers);
-            return Err(SpawnFailure::new(
+            return Err(agent_lifecycle.into_spawn_failure(
                 SpawnError::Timer(error),
                 extension_service,
                 cleanup_proven,
@@ -1216,6 +1473,9 @@ fn spawn_suspended_with_worker_spawner(
         extension_service: extension_service
             .take()
             .expect("pending extension-service owner is unique"),
+        agent_lifecycle: agent_lifecycle
+            .take()
+            .expect("pending agent lifecycle owner is unique"),
         terminal_failure,
         chrome,
         emit,
@@ -1228,6 +1488,7 @@ fn spawn_suspended_with_worker_spawner(
                 store,
                 blocker,
                 extension_service,
+                agent_lifecycle,
                 terminal_failure,
                 chrome,
                 emit,
@@ -1250,7 +1511,7 @@ fn spawn_suspended_with_worker_spawner(
                     );
                 }
             }
-            return Err(SpawnFailure::new(
+            return Err(agent_lifecycle.into_spawn_failure(
                 SpawnError::ActorHandoff(std::io::Error::new(
                     std::io::ErrorKind::BrokenPipe,
                     "shell actor exited before accepting its unique owner",

@@ -1019,10 +1019,11 @@ consuming join over that complete sealed, empty cohort may begin the native
 port barrier. The distinct audit admitted with the atomic seal is never
 substituted by an earlier ordinary audit. If it does not prove all nine native
 resource counts are zero, the shell may issue only strictly newer, read-only
-audits under the process deadline and an eight-attempt hard ceiling. Engine
-teardown requires the resulting constructor-closed zero proof in addition to,
-not instead of, run cancellation, durable audit drain, policy settlement, and
-the application shutdown barrier.
+audits under the process deadline and an eight-attempt hard ceiling. Reporting
+clean process teardown requires the resulting constructor-closed zero proof in
+addition to, not instead of, run cancellation, durable audit drain, policy
+settlement, and the application shutdown barrier. A failed proof may not skip
+best-effort engine cleanup, but that path is terminally unclean.
 
 The stable application boundary is a move-only, consuming agent-browser
 lifecycle. Its terminal `Clean` result necessarily carries that native zero
@@ -1030,8 +1031,15 @@ proof and additionally attests complete run cancellation, provider settlement,
 durable audit delivery, mutable-policy settlement, and logical-owner drain.
 Failure consumes the lifecycle and is terminal; the application may continue
 best-effort Store and engine cleanup, but it cannot report a clean shutdown.
-The lifecycle owns no ambient application authority and is absent from the
-ordinary desktop dependency graph until a concrete runtime is integrated.
+The feature-gated application Shell can own this lifecycle without learning
+its internal runtime vocabulary. Every worker-construction or actor-handoff
+failure returns both the agent and extension owners losslessly. After the
+retryable Store durability preflight succeeds, the Shell consumes agent
+shutdown first, then extension shutdown and the terminal Store barrier, and
+finally requests engine/blocker teardown under the same absolute deadline. An
+unclean or panicking agent lifecycle cannot skip those later best-effort
+barriers or produce `Clean`. The entire seam remains absent from the ordinary
+desktop dependency graph until a concrete runtime is integrated.
 
 ## 14. Metrics and gates
 

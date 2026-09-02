@@ -35,6 +35,9 @@ use zephium_ipc::{BlockerStatusView, Projection, TabView};
 
 use crate::store_reads::StoreReadResult;
 
+#[cfg(feature = "agentic-browser")]
+use zephium_agentic::AgentBrowserLifecycle;
+
 struct AcquiredPackageSubmissionInner {
     request: ExtensionAcquiredPackageProvisioningRequest,
     deadline: std::time::Instant,
@@ -174,6 +177,13 @@ pub type SharedEngine = Arc<dyn Engine + Send + Sync>;
 pub type SharedStore = Arc<dyn Store + Send + Sync>;
 pub type SharedBlocker = Arc<dyn ContentBlocker + Send + Sync>;
 pub type SharedChrome = Arc<dyn PresentationChrome + Send + Sync>;
+/// Unique application-owned lifecycle authority for the agent browser.
+///
+/// This exists only in the dormant agentic composition graph. It is consumed
+/// before terminal Store and engine teardown and has no cloneable shutdown
+/// surface.
+#[cfg(feature = "agentic-browser")]
+pub type AgentLifecycle = Box<dyn AgentBrowserLifecycle>;
 /// Unique application-owned lifecycle authority for the extension service.
 ///
 /// Unlike the cloneable observation handles exposed by the concrete service,
@@ -295,8 +305,8 @@ pub trait PresentationChrome: GeometryChrome {
 /// A retryable failure happens before the unique extension-service owner or
 /// native engine is torn down and leaves the actor live. `Unclean` is
 /// terminal: either the actor exited without completing the barrier or one of
-/// extension, Store, blocker, or native cleanup was not proven, so the process
-/// must exit unsuccessfully.
+/// agent lifecycle, extension, Store, blocker, or native cleanup was not
+/// proven, so the process must exit unsuccessfully.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShutdownOutcome {
     RetryableFailure,

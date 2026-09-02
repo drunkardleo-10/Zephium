@@ -722,6 +722,142 @@ pub(super) fn extension_lifecycle_with_startup_outcomes(
     (lifecycle, state)
 }
 
+#[cfg(feature = "agentic-browser")]
+#[derive(Default)]
+pub(super) struct FakeAgentLifecycleState {
+    pub(super) shutdown_calls: std::sync::atomic::AtomicUsize,
+    pub(super) panic_on_shutdown: std::sync::atomic::AtomicBool,
+    pub(super) dropped_without_shutdown: std::sync::atomic::AtomicBool,
+    pub(super) clean: std::sync::atomic::AtomicBool,
+    pub(super) shutdown_order: Mutex<Option<Arc<Mutex<Vec<&'static str>>>>>,
+    pub(super) deadlines: Mutex<Vec<std::time::Instant>>,
+}
+
+#[cfg(feature = "agentic-browser")]
+struct FakeAgentLifecycle {
+    state: Arc<FakeAgentLifecycleState>,
+}
+
+#[cfg(feature = "agentic-browser")]
+impl Drop for FakeAgentLifecycle {
+    fn drop(&mut self) {
+        if self
+            .state
+            .shutdown_calls
+            .load(std::sync::atomic::Ordering::Acquire)
+            == 0
+        {
+            self.state
+                .dropped_without_shutdown
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+}
+
+#[cfg(feature = "agentic-browser")]
+impl zephium_agentic::AgentBrowserLifecycle for FakeAgentLifecycle {
+    fn shutdown_until(
+        self: Box<Self>,
+        deadline: std::time::Instant,
+    ) -> zephium_agentic::AgentBrowserShutdownOutcome {
+        self.state
+            .shutdown_calls
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        self.state.deadlines.lock().unwrap().push(deadline);
+        if let Some(order) = self.state.shutdown_order.lock().unwrap().as_ref() {
+            order.lock().unwrap().push("agent");
+        }
+        assert!(
+            !self
+                .state
+                .panic_on_shutdown
+                .load(std::sync::atomic::Ordering::Acquire),
+            "injected agent shutdown panic"
+        );
+        if self.state.clean.load(std::sync::atomic::Ordering::Acquire) {
+            zephium_agentic::AgentBrowserShutdownOutcome::Clean(test_agent_native_shutdown_proof())
+        } else {
+            zephium_agentic::AgentBrowserShutdownOutcome::Unclean
+        }
+    }
+}
+
+#[cfg(feature = "agentic-browser")]
+fn test_agent_native_shutdown_proof() -> zephium_agentic::AgentNativeShutdownProof {
+    use zephium_agentic::{
+        AgentNativeShutdownCoordinator, AgentNativeShutdownResources,
+        ContextCookieTransferRegistry, ContextNativeResourceCounts, ContextNativeResourceSnapshot,
+        ContextProfileLeaseRegistry, ContextRegistry, ContextResourceAuditId,
+        ContextShutdownAuditSettlement, ContextShutdownDispatch,
+        SemanticActionExecutionCoordinator, SemanticActionSettlementCoordinator,
+        SemanticScreenshotCoordinator,
+    };
+
+    let mut contexts = ContextRegistry::new();
+    contexts.seal_for_shutdown().expect("context seal");
+    let mut profile_leases = ContextProfileLeaseRegistry::new();
+    profile_leases
+        .seal_for_shutdown()
+        .expect("profile lease seal");
+    let mut cookie_transfers = ContextCookieTransferRegistry::new();
+    cookie_transfers
+        .seal_for_shutdown()
+        .expect("cookie transfer seal");
+    let mut action_executions = SemanticActionExecutionCoordinator::new();
+    action_executions.seal();
+    let mut action_settlements = SemanticActionSettlementCoordinator::new();
+    action_settlements.seal();
+    let mut screenshots = SemanticScreenshotCoordinator::new();
+    screenshots.seal_for_shutdown();
+    let resources = AgentNativeShutdownResources::new(
+        contexts,
+        profile_leases,
+        cookie_transfers,
+        action_executions,
+        action_settlements,
+        screenshots,
+    );
+    let mut coordinator =
+        AgentNativeShutdownCoordinator::try_new(resources).expect("logical drain");
+    let audit = ContextResourceAuditId::new(1).expect("audit id");
+    coordinator.begin_port_seal(audit).expect("begin seal");
+    coordinator
+        .account_port_seal(audit, ContextShutdownDispatch::AuditScheduled)
+        .expect("account seal");
+    let snapshot = ContextNativeResourceSnapshot::try_new(ContextNativeResourceCounts {
+        known_bindings: 0,
+        resident_views: 0,
+        owned_reservations: 0,
+        borrowed_leases: 0,
+        visible_surfaces: 0,
+        suspended_views: 0,
+        pending_operations: 0,
+        pending_captures: 0,
+        queued_tasks: 0,
+    })
+    .expect("zero snapshot");
+    coordinator
+        .settle_shutdown_audit(ContextShutdownAuditSettlement::new(audit, Ok(snapshot)))
+        .expect("zero settlement");
+    coordinator.finish().expect("native zero proof")
+}
+
+#[cfg(feature = "agentic-browser")]
+pub(super) fn agent_lifecycle_with_clean(
+    clean: bool,
+) -> (AgentLifecycle, Arc<FakeAgentLifecycleState>) {
+    let state = Arc::new(FakeAgentLifecycleState::default());
+    state
+        .clean
+        .store(clean, std::sync::atomic::Ordering::Release);
+    (
+        Box::new(FakeAgentLifecycle {
+            state: Arc::clone(&state),
+        }),
+        state,
+    )
+}
+
 #[derive(Default)]
 pub(crate) struct FakeEngine {
     calls: Mutex<Vec<String>>,

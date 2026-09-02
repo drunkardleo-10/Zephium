@@ -5,12 +5,17 @@ edition.workspace = true
 license.workspace = true
 
 [features]
+# Dormant composition seam for the production agent browser runtime. The
+# ordinary desktop graph does not enable it until a concrete lifecycle owner
+# and its full platform qualification are integrated.
+agentic-browser = ["dep:zephium-agentic"]
 # Release capability gate. Desktop does not enable this until the real
 # WKWebView camera/microphone product probe passes on the supported macOS
 # security floor and packaged build.
 macos-page-permission-prompts = []
 
 [dependencies]
+zephium-agentic = { workspace = true, optional = true }
 zephium-core.workspace = true
 zephium-ipc.workspace = true
 base64.workspace = true

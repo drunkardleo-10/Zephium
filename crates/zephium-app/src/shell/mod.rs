@@ -59,6 +59,8 @@ use persistence::{PERSIST_DEBOUNCE, PERSIST_MAX_AGE, URL_CHECKPOINT_INTERVAL};
 #[cfg(test)]
 use crate::actor::{spawn, Handle, TryPushError};
 use crate::actor::{CallbackHandle, CommandQueue};
+#[cfg(feature = "agentic-browser")]
+use crate::api::AgentLifecycle;
 use crate::api::PagePermissionPromptDecision;
 use crate::api::{
     ChromePresentation, ChromePresentationDispatch, Command, ContentPolicyStatusQueryOutcome,
@@ -76,6 +78,8 @@ use std::collections::VecDeque;
 use std::sync::mpsc::{sync_channel, SyncSender};
 use std::sync::{Arc, Mutex};
 
+#[cfg(feature = "agentic-browser")]
+use zephium_agentic::AgentBrowserShutdownOutcome;
 #[cfg(test)]
 use zephium_core::extensions::ExtensionBrowserRequestId;
 use zephium_core::extensions::{
@@ -163,6 +167,20 @@ pub(super) const END_TO_END_SHUTDOWN_TIMEOUT: std::time::Duration =
 pub(super) const END_TO_END_SHUTDOWN_TIMEOUT: std::time::Duration =
     std::time::Duration::from_millis(50);
 
+#[cfg(feature = "agentic-browser")]
+enum AgentLifecycleOwner {
+    Absent,
+    Owned(AgentLifecycle),
+    Consumed,
+}
+
+#[cfg(feature = "agentic-browser")]
+impl AgentLifecycleOwner {
+    fn new(lifecycle: Option<AgentLifecycle>) -> Self {
+        lifecycle.map_or(Self::Absent, Self::Owned)
+    }
+}
+
 pub struct Shell {
     profiles: Profiles,
     spaces: Spaces,
@@ -191,6 +209,8 @@ pub struct Shell {
     /// native website data remain independently usable.
     degraded_storage_profiles: std::collections::HashSet<ProfileId>,
     blocker: blocker::BlockerCoordinator,
+    #[cfg(feature = "agentic-browser")]
+    agent_lifecycle: AgentLifecycleOwner,
     extension_service: Option<ExtensionLifecycle>,
     extension_startup_ready: bool,
     extension_browser_surfaces: ExtensionBrowserSurfaceState,
@@ -224,6 +244,8 @@ pub(super) struct ShellPorts {
     engine: SharedEngine,
     store: SharedStore,
     blocker: SharedBlocker,
+    #[cfg(feature = "agentic-browser")]
+    agent_lifecycle: Option<AgentLifecycle>,
     extension_service: ExtensionLifecycle,
     terminal_failure: ShellTerminalFailureCallback,
     chrome: SharedChrome,
@@ -244,11 +266,19 @@ impl ShellPorts {
             engine,
             store,
             blocker,
+            #[cfg(feature = "agentic-browser")]
+            agent_lifecycle: None,
             extension_service,
             terminal_failure,
             chrome,
             emit,
         }
+    }
+
+    #[cfg(feature = "agentic-browser")]
+    pub(super) fn with_agent_lifecycle(mut self, lifecycle: Option<AgentLifecycle>) -> Self {
+        self.agent_lifecycle = lifecycle;
+        self
     }
 }
 
@@ -343,6 +373,32 @@ impl Shell {
         )
     }
 
+    #[cfg(all(test, feature = "agentic-browser"))]
+    pub(super) fn new_with_agent_lifecycle(
+        engine: SharedEngine,
+        store: SharedStore,
+        blocker: SharedBlocker,
+        extension_service: ExtensionLifecycle,
+        agent_lifecycle: AgentLifecycle,
+        chrome: SharedChrome,
+        emit: EmitFn,
+    ) -> Self {
+        Self::with_store_reads(
+            ShellPorts::new(
+                engine,
+                store,
+                blocker,
+                extension_service,
+                Box::new(|_| {}),
+                chrome,
+                emit,
+            )
+            .with_agent_lifecycle(Some(agent_lifecycle)),
+            None,
+            true,
+        )
+    }
+
     #[cfg(test)]
     pub(super) fn with_store_reads(
         ports: ShellPorts,
@@ -372,6 +428,8 @@ impl Shell {
             engine,
             store,
             blocker,
+            #[cfg(feature = "agentic-browser")]
+            agent_lifecycle,
             extension_service,
             terminal_failure,
             chrome,
@@ -402,6 +460,8 @@ impl Shell {
             profile_deletion: ProfileDeletionCoordinator::default(),
             degraded_storage_profiles: std::collections::HashSet::new(),
             blocker: blocker::BlockerCoordinator::new_deferred(blocker),
+            #[cfg(feature = "agentic-browser")]
+            agent_lifecycle: AgentLifecycleOwner::new(agent_lifecycle),
             extension_service: Some(extension_service),
             extension_startup_ready: false,
             extension_browser_surfaces: ExtensionBrowserSurfaceState::default(),
@@ -865,6 +925,10 @@ impl Shell {
             }
         }
 
+        #[cfg(feature = "agentic-browser")]
+        let agent_lifecycle_clean = self.shutdown_agent_lifecycle_until(deadline);
+        #[cfg(not(feature = "agentic-browser"))]
+        let agent_lifecycle_clean = true;
         let extension_service_clean = self.shutdown_extension_service_until(deadline);
         // Fold every result already published before Store's terminal
         // barrier while ordinary Store/native admission is still valid. Any
@@ -927,6 +991,7 @@ impl Shell {
         let (native_clean, blocker_clean) = self.shutdown_native_and_blocker_until(deadline);
 
         let clean = terminal_clean
+            && agent_lifecycle_clean
             && extension_service_clean
             && storage_clean
             && coordination_clean
@@ -1000,6 +1065,10 @@ impl Shell {
         let reads_stopped = self.store_reads.as_ref().is_none_or(|reads| {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| reads.stop())).is_ok()
         });
+        #[cfg(feature = "agentic-browser")]
+        let agent_lifecycle_clean = self.shutdown_agent_lifecycle_until(deadline);
+        #[cfg(not(feature = "agentic-browser"))]
+        let agent_lifecycle_clean = true;
         let extension_clean = self.shutdown_extension_service_until(deadline);
         let storage_clean = matches!(
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1015,6 +1084,7 @@ impl Shell {
         let (native_clean, blocker_clean) = self.shutdown_native_and_blocker_until(deadline);
         reads_quiesced
             && reads_stopped
+            && agent_lifecycle_clean
             && extension_clean
             && storage_clean
             && native_clean
@@ -1028,6 +1098,40 @@ impl Shell {
         if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(failure))).is_err() {
             crate::diagnostic!("shutdown: terminal shell failure handoff panicked");
             self.terminal_failure_handoff_panicked = true;
+        }
+    }
+
+    /// Consumes the optional complete agent runtime before terminal Store and
+    /// engine teardown. A clean result cannot exist without its native zero
+    /// proof; the proof is deliberately consumed inside the actor barrier.
+    #[cfg(feature = "agentic-browser")]
+    fn shutdown_agent_lifecycle_until(&mut self, deadline: std::time::Instant) -> bool {
+        let owner = std::mem::replace(&mut self.agent_lifecycle, AgentLifecycleOwner::Consumed);
+        let lifecycle = match owner {
+            AgentLifecycleOwner::Absent => return true,
+            AgentLifecycleOwner::Owned(lifecycle) => lifecycle,
+            AgentLifecycleOwner::Consumed => {
+                crate::diagnostic!("shutdown: agent browser lifecycle owner is missing");
+                return false;
+            }
+        };
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            lifecycle.shutdown_until(deadline)
+        })) {
+            Ok(AgentBrowserShutdownOutcome::Clean(native_zero_proof)) => {
+                drop(native_zero_proof);
+                true
+            }
+            Ok(AgentBrowserShutdownOutcome::Unclean) => {
+                crate::diagnostic!(
+                    "shutdown: agent browser lifecycle did not prove complete cleanup"
+                );
+                false
+            }
+            Err(_) => {
+                crate::diagnostic!("shutdown: agent browser lifecycle shutdown panicked");
+                false
+            }
         }
     }
 

@@ -93,6 +93,14 @@ responses, machine-local paths, or native traces.
   result after ownership is consumed. The lifecycle contract additionally
   requires cancellation, provider, durable-audit, policy, and logical-owner
   settlement; the native proof alone does not imply those facts.
+- pins the application integration behind one non-default optional dependency
+  that the ordinary desktop graph cannot enable. Separate agentic spawn and
+  failure types preserve both move-only agent and extension lifecycle owners
+  across each helper-worker refusal and disconnected actor handoff. The Shell
+  consumes agent shutdown after retryable durability preflight and before
+  extension, terminal Store, and engine teardown; `Clean` joins the proof,
+  while unclean results and panics still run every later barrier. The same
+  consuming cleanup is mandatory on unexpected actor exit.
 
 The same check pins the default functional core to an empty feature set and a
 closed allocation/data dependency inventory. Its non-diagnostic source is
@@ -127,8 +135,10 @@ Run the gate and its focused tests with:
 ```sh
 cargo test --locked -p xtask agentic_evidence
 cargo test --locked -p xtask agentic_probe_boundary
+cargo test --locked -p zephium-app --features agentic-browser
 cargo xtask check-agentic-probe-boundary
 cargo clippy --locked -p xtask --all-targets -- -D warnings
+cargo clippy --locked -p zephium-app --all-targets --features agentic-browser -- -D warnings
 cargo clippy --locked -p zephium-engine --features agentic-browser --all-targets -- -D warnings
 cargo clippy --locked -p zephium-engine --features agentic-browser --all-targets --target x86_64-pc-windows-msvc
 ```
@@ -217,14 +227,16 @@ agentic-owned Windows modules. Cross-compilation is not device behavior.
   constructor-closed proof only after every validated native resource count is
   zero; mismatched events, replayed identities, nonzero snapshots, dispatch
   refusals, and attempt exhaustion cannot do so. This coordinator owns no port,
-  clock, timer, task, worker, channel, browser object, or I/O. The application
-  actor still must drive logical cancellation/native close into this seam,
-  drain durable run audits and policy authority, require the proof before
-  engine teardown, and exercise the complete order end to end.
+  clock, timer, task, worker, channel, browser object, or I/O. A concrete
+  lifecycle implementation still must drive logical cancellation/native close
+  into this seam and drain durable run audits and policy authority.
 - A stable consuming lifecycle port now prevents an application integration
   from claiming clean agent shutdown without carrying the zero-resource proof.
-  It remains outside the ordinary desktop graph, and the Shell has not yet
-  taken ownership of a concrete runtime or exercised the full ordered path.
+  The dormant feature-gated Shell now owns and consumes that port before
+  extension, Store, and engine teardown, returns it losslessly on every spawn
+  failure, contains panics, and applies the same ordering on unexpected actor
+  exit. This proves application control flow with fake lifecycles; no concrete
+  runtime has been composed and no end-to-end native shutdown is claimed.
 - The Browse named-device baseline intentionally has no values. No CPU, memory,
   GPU/compositor, energy, wakeup, or input-latency budget has been inferred.
 - Checked-priced model receipts now preserve a content-free exact schedule
@@ -330,8 +342,8 @@ The authoritative aggregate records and exact remaining blockers are in
 - hot-path and zero-unused-agent-overhead measurements; and
 - completion of native/unsafe, secret, and log review outside the scoped
   agentic-owned production modules and dormant provider transport, plus
-  application/platform profile integration, shutdown orchestration and
-  end-to-end use of the bounded zero-resource proof, recovery, migration, and
-  stable Work-port audits beyond the functional-core shutdown seam.
+  application/platform profile integration, a concrete lifecycle and
+  end-to-end native use of the bounded zero-resource proof, recovery,
+  migration, and stable Work-port audits beyond the dormant Shell seam.
 
 None of these pending items is represented as zero, passing, or non-blocking.
