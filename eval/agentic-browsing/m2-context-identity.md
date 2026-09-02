@@ -593,14 +593,27 @@ owned screenshot as soon as it records a replacement. Native lifecycle work
 temporarily defers the single location sample until its exact terminal; it does
 not rewrite or overtake the lifecycle settlement.
 
-This is unit, static-boundary, and macOS/Windows compile evidence. The new
-observer path has not yet received a dedicated physical same-document fixture
-qualification, and it does not promote presentation support.
-The release-excluded Windows semantic qualifier does now retain and settle
-ordinary full-navigation `SourceChanged`/`HistoryChanged` claims against the
-exact committed native `Source`; it refuses a pending, dirty, substituted, or
-teardown-surviving claim. That closes the qualifier's multi-navigation harness
-without claiming the still-unrun same-document replacement behavior.
+This is unit, static-boundary, and macOS/Windows compile evidence. The
+release-excluded Windows semantic qualifier now includes a dedicated physical
+same-document mode, but that mode has not run on a Windows device and does not
+promote presentation support. Its loopback document reaches native load
+completion before requesting a single host-held script. The host releases only
+one fixed `history.replaceState`; the qualifier then requires the exact bounded
+native `Source`, same-origin target, functional-core navigation/frame successor,
+stale-prior refusal, native replacement rejoin, drained callback/dirty state,
+and a fresh post-replacement semantic snapshot. The delayed script shape avoids
+making WebView2's `NavigationCompleted` wait on the held response. Microsoft
+documents that `NavigationCompleted` coincides with `body.onload`, while
+`SourceChanged` covers same-page URL changes and `HistoryChanged` covers joint
+session-history changes
+([navigation events](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/navigation-events),
+[CoreWebView2](https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/winrt/microsoft_web_webview2_core/corewebview2)).
+
+The same qualifier also retains and settles ordinary full-navigation
+`SourceChanged`/`HistoryChanged` claims against the exact committed native
+`Source`; it refuses a pending, dirty, substituted, or teardown-surviving claim.
+Together these checks prepare the exact physical evidence path without claiming
+the still-unrun Windows behavior.
 
 ## Bounded identity-bearing redirects
 

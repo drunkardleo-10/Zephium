@@ -2384,11 +2384,11 @@ fn validate_macos_semantic_probe(
         "Self::SemanticRuntimeReplacement=>\"/semantic-runtime-replacement-v1.html\"",
         "constSEMANTIC_MUTATION_GATE_TIMEOUT:Duration=Duration::from_secs(15);",
         "constSEMANTIC_MUTATION_TRIGGER_PATH:&str=\"/semantic-runtime-mutation-trigger-v1.js\";",
-        "structSemanticMutationGate",
+        "structSemanticGate",
         "wake:Condvar",
         "ifstate.waiting||state.released||state.completed",
         "if!state.waiting||state.released||state.completed",
-        "semantic_mutation.wait_for_release(stop)",
+        "semantic_mutation.wait_for_release(stop,SEMANTIC_MUTATION_GATE_TIMEOUT)",
         "semantic_mutation.mark_completed()",
         "application/javascript;charset=utf-8",
         "<scriptdefersrc=\"/semantic-runtime-mutation-trigger-v1.js\"></script>",
@@ -2689,6 +2689,7 @@ fn validate_windows_semantic_probe(
         "FixtureRoute::SemanticRuntime",
         "FixtureRoute::SemanticRuntimeReplacement",
         "FixtureRoute::SemanticRuntimeEventFlood",
+        "FixtureRoute::SemanticLocationMutation",
         "FixtureRoute::SemanticRedirectStart",
         "FixtureRoute::SemanticRedirectFinal",
         "FixtureRoute::SemanticRedirectLoopA",
@@ -2720,7 +2721,18 @@ fn validate_windows_semantic_probe(
         "view.resume_and_attest_active()==Ok(true)",
         "WindowsSemanticProbeMode::HiddenSuspendResume",
         "WindowsSemanticProbeMode::HiddenRedirectLifecycle",
-        "EvidenceLabel::new(\"semantic-runtime-m3-lifecycle-m2-redirect-v1\")",
+        "WindowsSemanticProbeMode::HiddenLocationReplacement",
+        "server.semantic_location_waiting()",
+        "server.release_semantic_location()",
+        "server.semantic_location_completed()",
+        "server.semantic_location_replacement_url()",
+        "view.navigation().finish_location_check(true)",
+        "registry.observe_navigation_replacement(context_id,prior)",
+        "view.navigation().acknowledge_location_replacement()",
+        "view.navigation().location_state_for_audit()!=Some((false,false,false))",
+        "verify_location_before_snapshot(&before)?;",
+        "verify_location_after_snapshot(&after)?;",
+        "\"semantic-runtime-m3-lifecycle-m2-redirect-location-v1\"",
         "SemanticRuntimePortFailure::Transport",
         "SemanticRuntimePortFailure::RendererLost",
         "SemanticRuntimeFault::DocumentLoading",
@@ -2757,6 +2769,10 @@ fn validate_windows_semantic_probe(
         "facts.redirect_limit_refused=true;",
         "facts.redirect_chain_verified=true;",
         "facts.redirect_recovery_verified=true;",
+        "facts.same_document_replacement_observed=true;",
+        "facts.same_document_replacement_rejoined=true;",
+        "facts.stale_location_join_refused=true;",
+        "facts.post_location_snapshot_verified=true;",
         "first_snapshot_verified:facts.first_snapshot_verified",
         "replacement_snapshot_verified:facts.replacement_snapshot_verified",
         "event_flood_refused:facts.event_flood_refused",
@@ -2765,6 +2781,10 @@ fn validate_windows_semantic_probe(
         "redirect_chain_verified:facts.redirect_chain_verified",
         "redirect_limit_refused:facts.redirect_limit_refused",
         "redirect_recovery_verified:facts.redirect_recovery_verified",
+        "same_document_replacement_observed:facts.same_document_replacement_observed",
+        "same_document_replacement_rejoined:facts.same_document_replacement_rejoined",
+        "stale_location_join_refused:facts.stale_location_join_refused",
+        "post_location_snapshot_verified:facts.post_location_snapshot_verified",
         "semantic_work_drained:facts.semantic_work_drained",
         "runtime_retired:teardown.runtime_retired",
         "work_drained:teardown.work_drained",
@@ -2853,6 +2873,10 @@ fn validate_windows_semantic_probe(
         "connect-src'none'",
         "form-action'none'",
         "frame-src'self'",
+        "Self::SemanticLocationMutation=>\"/semantic-location-mutation-v1.html\"",
+        "window.addEventListener('load'",
+        "trigger.src='/semantic-location-trigger-v1.js'",
+        "history.replaceState(null,'','/semantic-location-replaced-v1.html')",
     ] {
         if !fixture.contains(required) {
             return Err(format!(
@@ -3073,7 +3097,7 @@ fn validate_windows_review_binary(source: &str, qualification: &str) -> Result<(
 fn validate_windows_semantic_review_binary(source: &str, evidence: &str) -> Result<(), String> {
     let source = compact(source);
     for required in [
-        "constREVIEW_SCHEMA_VERSION:u16=3;",
+        "constREVIEW_SCHEMA_VERSION:u16=4;",
         "WINDOWS_SEMANTIC_PHYSICAL_REVIEW_MODES",
         "symlink_metadata(directory)",
         "evidence_metadata_is_direct_directory(&metadata)",
@@ -3084,7 +3108,7 @@ fn validate_windows_semantic_review_binary(source: &str, evidence: &str) -> Resu
         "output.len()>MAX_WINDOWS_SEMANTIC_PROBE_OUTPUT_BYTES",
         "stdout.write_all(&output)",
         "--write-summary",
-        "windows-semantic-review-summary-v3.json",
+        "windows-semantic-review-summary-v4.json",
         ".create_new(true)",
         "write_new_record(&directory,REVIEW_SUMMARY_FILENAME,&output)",
     ] {
@@ -3096,10 +3120,11 @@ fn validate_windows_semantic_review_binary(source: &str, evidence: &str) -> Resu
     }
     let evidence = compact(evidence);
     for required in [
-        "pubconstWINDOWS_SEMANTIC_PROBE_PROTOCOL_VERSION:u16=3;",
-        "pubconstWINDOWS_SEMANTIC_PHYSICAL_REVIEW_MODES:[WindowsSemanticProbeMode;6]",
+        "pubconstWINDOWS_SEMANTIC_PROBE_PROTOCOL_VERSION:u16=4;",
+        "pubconstWINDOWS_SEMANTIC_PHYSICAL_REVIEW_MODES:[WindowsSemanticProbeMode;7]",
         "windows-semantic-fixed-documents.jsonl",
         "windows-semantic-redirect-lifecycle.jsonl",
+        "windows-semantic-location-replacement.jsonl",
         "windows-semantic-suspend-resume.jsonl",
         "windows-semantic-event-flood.jsonl",
         "windows-semantic-renderer-loss.jsonl",
@@ -3116,7 +3141,11 @@ fn validate_windows_semantic_review_binary(source: &str, evidence: &str) -> Resu
         "evidence.redirect_limit_refused",
         "evidence.redirect_limit_hops_observed==MAX_CONTEXT_NAVIGATION_REDIRECTSasu8",
         "evidence.redirect_recovery_verified",
-        "semantic-runtime-m3-lifecycle-m2-redirect-v1",
+        "evidence.same_document_replacement_observed",
+        "evidence.same_document_replacement_rejoined",
+        "evidence.stale_location_join_refused",
+        "evidence.post_location_snapshot_verified",
+        "semantic-runtime-m3-lifecycle-m2-redirect-location-v1",
     ] {
         if !evidence.contains(required) {
             return Err(format!(
@@ -9690,10 +9719,10 @@ mod tests {
             Self::SemanticRuntimeReplacement => "/semantic-runtime-replacement-v1.html";
             const SEMANTIC_MUTATION_GATE_TIMEOUT: Duration = Duration::from_secs(15);
             const SEMANTIC_MUTATION_TRIGGER_PATH: &str = "/semantic-runtime-mutation-trigger-v1.js";
-            struct SemanticMutationGate { wake: Condvar }
+            struct SemanticGate { wake: Condvar }
             if state.waiting || state.released || state.completed {}
             if !state.waiting || state.released || state.completed {}
-            semantic_mutation.wait_for_release(stop);
+            semantic_mutation.wait_for_release(stop, SEMANTIC_MUTATION_GATE_TIMEOUT);
             semantic_mutation.mark_completed();
             "application/javascript; charset=utf-8";
             "<script defer src="/semantic-runtime-mutation-trigger-v1.js"></script>";
@@ -10422,6 +10451,30 @@ mod tests {
                 "facts.suspended_state_attested = false;",
             ),
             (
+                "facts.same_document_replacement_observed = true;",
+                "facts.same_document_replacement_observed = false;",
+            ),
+            (
+                "facts.same_document_replacement_rejoined = true;",
+                "facts.same_document_replacement_rejoined = false;",
+            ),
+            (
+                "facts.stale_location_join_refused = true;",
+                "facts.stale_location_join_refused = false;",
+            ),
+            (
+                "facts.post_location_snapshot_verified = true;",
+                "facts.post_location_snapshot_verified = false;",
+            ),
+            (
+                "registry\n        .observe_navigation_replacement(context_id, prior)",
+                "registry\n        .join(context_id)",
+            ),
+            (
+                "verify_location_after_snapshot(&after)?;",
+                "let _ = &after;",
+            ),
+            (
                 "move || location_callbacks.request_location_check(),",
                 "|| {},",
             ),
@@ -10811,7 +10864,7 @@ mod tests {
     #[test]
     fn windows_semantic_reviewer_is_closed_and_content_free() {
         let binary = r#"
-            const REVIEW_SCHEMA_VERSION: u16 = 3;
+            const REVIEW_SCHEMA_VERSION: u16 = 4;
             WINDOWS_SEMANTIC_PHYSICAL_REVIEW_MODES;
             symlink_metadata(directory);
             evidence_metadata_is_direct_directory(&metadata);
@@ -10822,15 +10875,16 @@ mod tests {
             if output.len() > MAX_WINDOWS_SEMANTIC_PROBE_OUTPUT_BYTES {}
             stdout.write_all(&output);
             "--write-summary";
-            "windows-semantic-review-summary-v3.json";
+            "windows-semantic-review-summary-v4.json";
             OpenOptions::new().create_new(true);
             write_new_record(&directory, REVIEW_SUMMARY_FILENAME, &output);
         "#;
         let evidence = r#"
-            pub const WINDOWS_SEMANTIC_PROBE_PROTOCOL_VERSION: u16 = 3;
-            pub const WINDOWS_SEMANTIC_PHYSICAL_REVIEW_MODES: [WindowsSemanticProbeMode; 6];
+            pub const WINDOWS_SEMANTIC_PROBE_PROTOCOL_VERSION: u16 = 4;
+            pub const WINDOWS_SEMANTIC_PHYSICAL_REVIEW_MODES: [WindowsSemanticProbeMode; 7];
             "windows-semantic-fixed-documents.jsonl";
             "windows-semantic-redirect-lifecycle.jsonl";
+            "windows-semantic-location-replacement.jsonl";
             "windows-semantic-suspend-resume.jsonl";
             "windows-semantic-event-flood.jsonl";
             "windows-semantic-renderer-loss.jsonl";
@@ -10847,7 +10901,11 @@ mod tests {
             evidence.redirect_limit_refused;
             evidence.redirect_limit_hops_observed == MAX_CONTEXT_NAVIGATION_REDIRECTS as u8;
             evidence.redirect_recovery_verified;
-            "semantic-runtime-m3-lifecycle-m2-redirect-v1";
+            evidence.same_document_replacement_observed;
+            evidence.same_document_replacement_rejoined;
+            evidence.stale_location_join_refused;
+            evidence.post_location_snapshot_verified;
+            "semantic-runtime-m3-lifecycle-m2-redirect-location-v1";
         "#;
         validate_windows_semantic_review_binary(binary, evidence).expect("closed reviewer");
         assert!(validate_windows_semantic_review_binary(
@@ -10863,7 +10921,7 @@ mod tests {
         assert!(validate_windows_semantic_review_binary(
             binary,
             &evidence.replace(
-                "WINDOWS_SEMANTIC_PROBE_PROTOCOL_VERSION: u16 = 3",
+                "WINDOWS_SEMANTIC_PROBE_PROTOCOL_VERSION: u16 = 4",
                 "WINDOWS_SEMANTIC_PROBE_PROTOCOL_VERSION: u16 = 2",
             ),
         )

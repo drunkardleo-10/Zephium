@@ -10,16 +10,17 @@ use thiserror::Error;
 use crate::{Platform, RuntimeFingerprint, MAX_CONTEXT_NAVIGATION_REDIRECTS};
 
 /// Version of the Windows semantic-probe result grammar.
-pub const WINDOWS_SEMANTIC_PROBE_PROTOCOL_VERSION: u16 = 3;
+pub const WINDOWS_SEMANTIC_PROBE_PROTOCOL_VERSION: u16 = 4;
 /// Maximum canonical JSONL bytes emitted by one semantic-probe process.
 pub const MAX_WINDOWS_SEMANTIC_PROBE_OUTPUT_BYTES: usize = 16 * 1024;
 const MAX_RUN_ELAPSED_MS: u64 = 2 * 60_000;
 const MAX_CLEANUP_MS: u32 = 10_000;
 
 /// Exact physical runs required before Windows semantic support can be reviewed.
-pub const WINDOWS_SEMANTIC_PHYSICAL_REVIEW_MODES: [WindowsSemanticProbeMode; 6] = [
+pub const WINDOWS_SEMANTIC_PHYSICAL_REVIEW_MODES: [WindowsSemanticProbeMode; 7] = [
     WindowsSemanticProbeMode::HiddenFixedDocuments,
     WindowsSemanticProbeMode::HiddenRedirectLifecycle,
+    WindowsSemanticProbeMode::HiddenLocationReplacement,
     WindowsSemanticProbeMode::HiddenSuspendResume,
     WindowsSemanticProbeMode::HiddenEventFlood,
     WindowsSemanticProbeMode::HiddenRendererLoss,
@@ -34,6 +35,8 @@ pub enum WindowsSemanticProbeMode {
     HiddenFixedDocuments,
     /// A fixed loop and chain prove bounded redirects, recovery, and final identity.
     HiddenRedirectLifecycle,
+    /// A host-gated History API mutation proves native replacement and rejoin.
+    HiddenLocationReplacement,
     /// One fixed document proves native suspend/readback/resume and fresh observation.
     HiddenSuspendResume,
     /// A bounded context-event flood must fail closed and recover on navigation.
@@ -50,6 +53,7 @@ impl WindowsSemanticProbeMode {
         match argument {
             "--ci-hidden-fixed-documents" => Some(Self::HiddenFixedDocuments),
             "--ci-hidden-redirect-lifecycle" => Some(Self::HiddenRedirectLifecycle),
+            "--ci-hidden-location-replacement" => Some(Self::HiddenLocationReplacement),
             "--ci-hidden-suspend-resume" => Some(Self::HiddenSuspendResume),
             "--ci-hidden-event-flood" => Some(Self::HiddenEventFlood),
             "--ci-hidden-renderer-loss" => Some(Self::HiddenRendererLoss),
@@ -63,6 +67,7 @@ impl WindowsSemanticProbeMode {
         match self {
             Self::HiddenFixedDocuments => "--ci-hidden-fixed-documents",
             Self::HiddenRedirectLifecycle => "--ci-hidden-redirect-lifecycle",
+            Self::HiddenLocationReplacement => "--ci-hidden-location-replacement",
             Self::HiddenSuspendResume => "--ci-hidden-suspend-resume",
             Self::HiddenEventFlood => "--ci-hidden-event-flood",
             Self::HiddenRendererLoss => "--ci-hidden-renderer-loss",
@@ -75,6 +80,7 @@ impl WindowsSemanticProbeMode {
         match self {
             Self::HiddenFixedDocuments => "windows-semantic-fixed-documents.jsonl",
             Self::HiddenRedirectLifecycle => "windows-semantic-redirect-lifecycle.jsonl",
+            Self::HiddenLocationReplacement => "windows-semantic-location-replacement.jsonl",
             Self::HiddenSuspendResume => "windows-semantic-suspend-resume.jsonl",
             Self::HiddenEventFlood => "windows-semantic-event-flood.jsonl",
             Self::HiddenRendererLoss => "windows-semantic-renderer-loss.jsonl",
@@ -171,6 +177,14 @@ pub struct WindowsSemanticProbeEvidence {
     pub redirect_limit_hops_observed: u8,
     /// A fresh semantic snapshot passed after the redirect-limit refusal.
     pub redirect_recovery_verified: bool,
+    /// Native WebView2 source observation found the exact same-origin History API target.
+    pub same_document_replacement_observed: bool,
+    /// The exact functional-core successor rejoined the native replacement barrier.
+    pub same_document_replacement_rejoined: bool,
+    /// The pre-replacement context join was refused after the successor was minted.
+    pub stale_location_join_refused: bool,
+    /// A fresh semantic snapshot passed against the replacement target and successor join.
+    pub post_location_snapshot_verified: bool,
     /// Windows reported a debugger attached for the complete mode.
     pub debugger_attached: bool,
     /// Probe host ever displaced foreground, active-window, or thread focus.
@@ -194,13 +208,13 @@ impl WindowsSemanticProbeEvidence {
         if self.runtime.platform != Platform::Windows
             || self.runtime.engine.as_str() != "WebView2"
             || self.runtime.adapter_revision.as_str()
-                != "semantic-runtime-m3-lifecycle-m2-redirect-v1"
+                != "semantic-runtime-m3-lifecycle-m2-redirect-location-v1"
         {
             return Err(WindowsSemanticProbeValidationError::Runtime);
         }
         if self.viewport_width == 0
             || self.viewport_height == 0
-            || self.snapshots > 2
+            || self.snapshots > 3
             || self.document_epochs == 0
             || self.document_epochs > 3
             || self.peak_pending_invocations > 1
@@ -444,6 +458,7 @@ pub fn qualify_windows_semantic_probe_evidence(
             fixed_documents(evidence)
                 && no_suspend_evidence(evidence)
                 && no_redirect_evidence(evidence)
+                && no_location_evidence(evidence)
                 && !evidence.debugger_attached
         }
         WindowsSemanticProbeMode::HiddenRedirectLifecycle => {
@@ -463,6 +478,25 @@ pub fn qualify_windows_semantic_probe_evidence(
                 && evidence.redirect_limit_refused
                 && evidence.redirect_limit_hops_observed == MAX_CONTEXT_NAVIGATION_REDIRECTS as u8
                 && evidence.redirect_recovery_verified
+                && no_location_evidence(evidence)
+        }
+        WindowsSemanticProbeMode::HiddenLocationReplacement => {
+            !evidence.debugger_attached
+                && evidence.snapshots == 3
+                && evidence.document_epochs == 2
+                && evidence.first_snapshot_verified
+                && !evidence.replacement_snapshot_verified
+                && !evidence.replacement_stale_state_absent
+                && !evidence.event_flood_refused
+                && !evidence.recovered_after_event_flood
+                && !evidence.renderer_loss_observed
+                && !evidence.renderer_lost_refused
+                && no_suspend_evidence(evidence)
+                && no_redirect_evidence(evidence)
+                && evidence.same_document_replacement_observed
+                && evidence.same_document_replacement_rejoined
+                && evidence.stale_location_join_refused
+                && evidence.post_location_snapshot_verified
         }
         WindowsSemanticProbeMode::HiddenSuspendResume => {
             !evidence.debugger_attached
@@ -480,11 +514,13 @@ pub fn qualify_windows_semantic_probe_evidence(
                 && evidence.resume_state_attested
                 && evidence.post_resume_snapshot_verified
                 && no_redirect_evidence(evidence)
+                && no_location_evidence(evidence)
         }
         WindowsSemanticProbeMode::HiddenDebuggerCoexistence => {
             fixed_documents(evidence)
                 && no_suspend_evidence(evidence)
                 && no_redirect_evidence(evidence)
+                && no_location_evidence(evidence)
                 && evidence.debugger_attached
         }
         WindowsSemanticProbeMode::HiddenEventFlood => {
@@ -500,6 +536,7 @@ pub fn qualify_windows_semantic_probe_evidence(
                 && !evidence.renderer_lost_refused
                 && no_suspend_evidence(evidence)
                 && no_redirect_evidence(evidence)
+                && no_location_evidence(evidence)
         }
         WindowsSemanticProbeMode::HiddenRendererLoss => {
             !evidence.debugger_attached
@@ -514,6 +551,7 @@ pub fn qualify_windows_semantic_probe_evidence(
                 && evidence.renderer_lost_refused
                 && no_suspend_evidence(evidence)
                 && no_redirect_evidence(evidence)
+                && no_location_evidence(evidence)
         }
     };
     if !mode_valid {
@@ -559,6 +597,13 @@ fn no_redirect_evidence(evidence: &WindowsSemanticProbeEvidence) -> bool {
         && !evidence.redirect_recovery_verified
 }
 
+fn no_location_evidence(evidence: &WindowsSemanticProbeEvidence) -> bool {
+    !evidence.same_document_replacement_observed
+        && !evidence.same_document_replacement_rejoined
+        && !evidence.stale_location_join_refused
+        && !evidence.post_location_snapshot_verified
+}
+
 #[cfg(test)]
 pub(crate) fn tests_fixture(mode: WindowsSemanticProbeMode) -> WindowsSemanticProbeEvidence {
     use crate::EvidenceLabel;
@@ -567,6 +612,7 @@ pub(crate) fn tests_fixture(mode: WindowsSemanticProbeMode) -> WindowsSemanticPr
     let renderer = mode == WindowsSemanticProbeMode::HiddenRendererLoss;
     let suspension = mode == WindowsSemanticProbeMode::HiddenSuspendResume;
     let redirects = mode == WindowsSemanticProbeMode::HiddenRedirectLifecycle;
+    let location = mode == WindowsSemanticProbeMode::HiddenLocationReplacement;
     WindowsSemanticProbeEvidence {
         run_id: 1,
         runtime: RuntimeFingerprint {
@@ -574,8 +620,10 @@ pub(crate) fn tests_fixture(mode: WindowsSemanticProbeMode) -> WindowsSemanticPr
             os_version: EvidenceLabel::new("10.0.26100").expect("OS label"),
             engine: EvidenceLabel::new("WebView2").expect("engine label"),
             engine_version: EvidenceLabel::new("140.0.0.0").expect("version label"),
-            adapter_revision: EvidenceLabel::new("semantic-runtime-m3-lifecycle-m2-redirect-v1")
-                .expect("adapter label"),
+            adapter_revision: EvidenceLabel::new(
+                "semantic-runtime-m3-lifecycle-m2-redirect-location-v1",
+            )
+            .expect("adapter label"),
         },
         mode,
         ephemeral_profile: true,
@@ -585,7 +633,13 @@ pub(crate) fn tests_fixture(mode: WindowsSemanticProbeMode) -> WindowsSemanticPr
         viewport_width: 1_280,
         viewport_height: 800,
         loopback_only: true,
-        snapshots: if renderer { 1 } else { 2 },
+        snapshots: if renderer {
+            1
+        } else if location {
+            3
+        } else {
+            2
+        },
         document_epochs: if flood {
             3
         } else if renderer || suspension {
@@ -594,8 +648,8 @@ pub(crate) fn tests_fixture(mode: WindowsSemanticProbeMode) -> WindowsSemanticPr
             2
         },
         first_snapshot_verified: true,
-        replacement_snapshot_verified: !renderer && !suspension && !redirects,
-        replacement_stale_state_absent: !renderer && !suspension && !redirects,
+        replacement_snapshot_verified: !renderer && !suspension && !redirects && !location,
+        replacement_stale_state_absent: !renderer && !suspension && !redirects && !location,
         page_world_bridge_absent: true,
         secrets_redacted: true,
         event_flood_refused: flood,
@@ -616,6 +670,10 @@ pub(crate) fn tests_fixture(mode: WindowsSemanticProbeMode) -> WindowsSemanticPr
             0
         },
         redirect_recovery_verified: redirects,
+        same_document_replacement_observed: location,
+        same_document_replacement_rejoined: location,
+        stale_location_join_refused: location,
+        post_location_snapshot_verified: location,
         debugger_attached: mode == WindowsSemanticProbeMode::HiddenDebuggerCoexistence,
         focus_theft_observed: false,
         peak_pending_invocations: 1,
@@ -770,6 +828,24 @@ mod tests {
             qualify_windows_semantic_probe_evidence(
                 WindowsSemanticProbeMode::HiddenFixedDocuments,
                 &smuggled_redirect,
+            ),
+            Err(WindowsSemanticProbeQualificationError::Mode)
+        );
+
+        let location_mode = WindowsSemanticProbeMode::HiddenLocationReplacement;
+        let mut incomplete_location = tests_fixture(location_mode);
+        incomplete_location.stale_location_join_refused = false;
+        assert_eq!(
+            qualify_windows_semantic_probe_evidence(location_mode, &incomplete_location),
+            Err(WindowsSemanticProbeQualificationError::Mode)
+        );
+
+        let mut smuggled_location = tests_fixture(WindowsSemanticProbeMode::HiddenFixedDocuments);
+        smuggled_location.same_document_replacement_observed = true;
+        assert_eq!(
+            qualify_windows_semantic_probe_evidence(
+                WindowsSemanticProbeMode::HiddenFixedDocuments,
+                &smuggled_location,
             ),
             Err(WindowsSemanticProbeQualificationError::Mode)
         );

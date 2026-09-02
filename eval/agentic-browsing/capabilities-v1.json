@@ -90,7 +90,7 @@
         "crates/zephium-agentic/src/semantic_probe_evidence.rs",
         "https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2_3"
       ],
-      "limitations": "Only hidden owned contexts with exact Suspend capability and no other native work are admitted. An atomic fixed-deadline owner retains late TrySuspend callback reconciliation after timeout or cancellation; final state is recorded only after hidden-owner attestation and IsSuspended readback. Resource audit and content-policy replacement fail closed while state is ambiguous. A release-excluded suspension mode within the six-mode Windows semantic/lifecycle cohort and offline reviewer is implemented but has no physical result. Cross-compilation does not prove physical suspend/resume behavior, memory reduction, long-running-script timing, renderer-loss races, or resource savings."
+      "limitations": "Only hidden owned contexts with exact Suspend capability and no other native work are admitted. An atomic fixed-deadline owner retains late TrySuspend callback reconciliation after timeout or cancellation; final state is recorded only after hidden-owner attestation and IsSuspended readback. Resource audit and content-policy replacement fail closed while state is ambiguous. A release-excluded suspension mode within the seven-mode Windows semantic/lifecycle cohort and offline reviewer is implemented but has no physical result. Cross-compilation does not prove physical suspend/resume behavior, memory reduction, long-running-script timing, renderer-loss races, or resource savings."
     },
     {
       "platform": "windows",
@@ -104,6 +104,20 @@
         "https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2navigationstartingeventargs"
       ],
       "limitations": "WebView2 exposes URI, NavigationId, and IsRedirected together and preserves one NavigationId across redirects. Zephium admits only an explicit bounded origin scope, requires exact native identity and at most eight redirect events, and settles the authoritative final committed URL. This is an acceptance and settlement boundary, not proof of zero network contact: Microsoft notes that the GET may already be in progress while NavigationStarting is handled. The release-excluded fixed loop/chain mode is prepared but has no physical result."
+    },
+    {
+      "platform": "windows",
+      "mechanism": "webview2_native_location_replacement_observation",
+      "code_status": "implemented_in_feature_gated_production_adapter_cross_compiled",
+      "device_status": "pending_device_capture",
+      "evidence": [
+        "crates/zephium-engine/src/platform/windows/mod.rs",
+        "crates/zephium-engine/src/platform/agent_navigation.rs",
+        "crates/zephium-engine/src/platform/windows/agentic_semantic_probe.rs",
+        "https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/navigation-events",
+        "https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/winrt/microsoft_web_webview2_core/corewebview2"
+      ],
+      "limitations": "The production adapter coalesces SourceChanged and HistoryChanged into one callback plus one dirty bit, samples only the bounded native Source, permits only an exact unchanged target or same-origin replacement, and holds replacement until the functional core and native controller rejoin the exact successor. A release-excluded host-gated history.replaceState fixture now proves the intended native-source, stale-prior, rejoin, callback-drain, and fresh-snapshot path when run, but it has no physical Windows result. Cross-compilation and unit tests do not prove WebView2 event timing or device behavior."
     },
     {
       "platform": "macos",

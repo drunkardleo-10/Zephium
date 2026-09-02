@@ -19,6 +19,9 @@ const MAX_REQUESTS: usize = 512;
 const IO_TIMEOUT: Duration = Duration::from_secs(1);
 const SEMANTIC_MUTATION_GATE_TIMEOUT: Duration = Duration::from_secs(15);
 const SEMANTIC_MUTATION_TRIGGER_PATH: &str = "/semantic-runtime-mutation-trigger-v1.js";
+const SEMANTIC_LOCATION_GATE_TIMEOUT: Duration = Duration::from_secs(15);
+const SEMANTIC_LOCATION_TRIGGER_PATH: &str = "/semantic-location-trigger-v1.js";
+const SEMANTIC_LOCATION_REPLACED_PATH: &str = "/semantic-location-replaced-v1.html";
 
 #[derive(Clone, Copy)]
 #[repr(u8)]
@@ -26,8 +29,9 @@ enum FixtureWorkerFailure {
     NonLoopbackPeer = 1,
     RequestBudget = 2,
     SemanticMutation = 3,
-    Accept = 4,
-    Panicked = 5,
+    SemanticLocation = 4,
+    Accept = 5,
+    Panicked = 6,
 }
 
 impl FixtureWorkerFailure {
@@ -39,6 +43,7 @@ impl FixtureWorkerFailure {
 enum FixtureRequestError {
     Connection,
     SemanticMutation,
+    SemanticLocation,
 }
 
 impl From<std::io::Error> for FixtureRequestError {
@@ -47,7 +52,7 @@ impl From<std::io::Error> for FixtureRequestError {
     }
 }
 
-struct SemanticMutationGateError;
+struct SemanticGateError;
 
 /// Closed fixture routes. Arbitrary files and caller-supplied responses are impossible.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -66,6 +71,8 @@ pub enum FixtureRoute {
     SemanticRuntimeEventFlood,
     /// Same-document mutation and stale-anchor qualification fixture.
     SemanticRuntimeMutation,
+    /// Same-document History API replacement qualification fixture.
+    SemanticLocationMutation,
     /// First hop of the fixed same-origin semantic redirect chain.
     SemanticRedirectStart,
     /// Intermediate hop of the fixed same-origin semantic redirect chain.
@@ -88,6 +95,7 @@ impl FixtureRoute {
             Self::SemanticRuntimeReplacement => "/semantic-runtime-replacement-v1.html",
             Self::SemanticRuntimeEventFlood => "/semantic-runtime-event-flood-v1.html",
             Self::SemanticRuntimeMutation => "/semantic-runtime-mutation-v1.html",
+            Self::SemanticLocationMutation => "/semantic-location-mutation-v1.html",
             Self::SemanticRedirectStart => "/semantic-redirect-start-v1",
             Self::SemanticRedirectHop => "/semantic-redirect-hop-v1",
             Self::SemanticRedirectFinal => "/semantic-redirect-final-v1.html",
@@ -98,26 +106,30 @@ impl FixtureRoute {
 }
 
 #[derive(Default)]
-struct SemanticMutationGateState {
+struct SemanticGateState {
     waiting: bool,
     released: bool,
     completed: bool,
 }
 
 #[derive(Default)]
-struct SemanticMutationGate {
-    state: Mutex<SemanticMutationGateState>,
+struct SemanticGate {
+    state: Mutex<SemanticGateState>,
     wake: Condvar,
 }
 
-impl SemanticMutationGate {
-    fn wait_for_release(&self, stop: &AtomicBool) -> Result<bool, SemanticMutationGateError> {
+impl SemanticGate {
+    fn wait_for_release(
+        &self,
+        stop: &AtomicBool,
+        timeout: Duration,
+    ) -> Result<bool, SemanticGateError> {
         let deadline = Instant::now()
-            .checked_add(SEMANTIC_MUTATION_GATE_TIMEOUT)
-            .ok_or(SemanticMutationGateError)?;
-        let mut state = self.state.lock().map_err(|_| SemanticMutationGateError)?;
+            .checked_add(timeout)
+            .ok_or(SemanticGateError)?;
+        let mut state = self.state.lock().map_err(|_| SemanticGateError)?;
         if state.waiting || state.released || state.completed {
-            return Err(SemanticMutationGateError);
+            return Err(SemanticGateError);
         }
         state.waiting = true;
         self.wake.notify_all();
@@ -130,13 +142,13 @@ impl SemanticMutationGate {
             }
             let now = Instant::now();
             if now >= deadline {
-                return Err(SemanticMutationGateError);
+                return Err(SemanticGateError);
             }
             let wait = deadline.saturating_duration_since(now).min(IO_TIMEOUT);
             let (next, _) = self
                 .wake
                 .wait_timeout(state, wait)
-                .map_err(|_| SemanticMutationGateError)?;
+                .map_err(|_| SemanticGateError)?;
             state = next;
         }
     }
@@ -185,7 +197,8 @@ pub struct FixtureServer {
     address: SocketAddr,
     stop: Arc<AtomicBool>,
     failure: Arc<AtomicU8>,
-    semantic_mutation: Arc<SemanticMutationGate>,
+    semantic_mutation: Arc<SemanticGate>,
+    semantic_location: Arc<SemanticGate>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -199,10 +212,12 @@ impl FixtureServer {
         }
         let stop = Arc::new(AtomicBool::new(false));
         let failure = Arc::new(AtomicU8::new(0));
-        let semantic_mutation = Arc::new(SemanticMutationGate::default());
+        let semantic_mutation = Arc::new(SemanticGate::default());
+        let semantic_location = Arc::new(SemanticGate::default());
         let worker_stop = Arc::clone(&stop);
         let worker_failure = Arc::clone(&failure);
         let worker_semantic_mutation = Arc::clone(&semantic_mutation);
+        let worker_semantic_location = Arc::clone(&semantic_location);
         let thread = thread::Builder::new()
             .name("zephium-agentic-fixture".to_owned())
             .spawn(move || {
@@ -211,6 +226,7 @@ impl FixtureServer {
                     &worker_stop,
                     &worker_failure,
                     &worker_semantic_mutation,
+                    &worker_semantic_location,
                 );
             })?;
         Ok(Self {
@@ -218,6 +234,7 @@ impl FixtureServer {
             stop,
             failure,
             semantic_mutation,
+            semantic_location,
             thread: Some(thread),
         })
     }
@@ -268,6 +285,29 @@ impl FixtureServer {
         self.semantic_mutation.completed()
     }
 
+    /// Returns the only allowed same-document replacement target.
+    pub fn semantic_location_replacement_url(&self) -> String {
+        format!(
+            "http://127.0.0.1:{}{SEMANTIC_LOCATION_REPLACED_PATH}",
+            self.address.port()
+        )
+    }
+
+    /// True only while the one fixed History API trigger response is blocked.
+    pub fn semantic_location_waiting(&self) -> bool {
+        self.semantic_location.waiting()
+    }
+
+    /// Releases the one fixed History API trigger exactly once.
+    pub fn release_semantic_location(&self) -> bool {
+        self.semantic_location.release()
+    }
+
+    /// True only after the released History API trigger response was written completely.
+    pub fn semantic_location_completed(&self) -> bool {
+        self.semantic_location.completed()
+    }
+
     /// Stops the listener, joins its sole worker, and reports worker failure.
     pub fn shutdown(mut self) -> Result<(), FixtureServerError> {
         self.stop_and_join();
@@ -282,6 +322,9 @@ impl FixtureServer {
             value if value == FixtureWorkerFailure::SemanticMutation as u8 => {
                 Err(FixtureServerError::SemanticMutationInvariant)
             }
+            value if value == FixtureWorkerFailure::SemanticLocation as u8 => {
+                Err(FixtureServerError::SemanticLocationInvariant)
+            }
             value if value == FixtureWorkerFailure::Accept as u8 => {
                 Err(FixtureServerError::AcceptFailed)
             }
@@ -295,6 +338,7 @@ impl FixtureServer {
     fn stop_and_join(&mut self) {
         self.stop.store(true, Ordering::Release);
         self.semantic_mutation.wake_for_stop();
+        self.semantic_location.wake_for_stop();
         // Wake the blocking accept promptly. No bytes are sent and this
         // connection remains loopback-only.
         let _ = TcpStream::connect_timeout(&self.address, Duration::from_millis(50));
@@ -316,7 +360,8 @@ fn serve(
     listener: TcpListener,
     stop: &AtomicBool,
     failure: &AtomicU8,
-    semantic_mutation: &SemanticMutationGate,
+    semantic_mutation: &SemanticGate,
+    semantic_location: &SemanticGate,
 ) {
     let mut served = 0_usize;
     while !stop.load(Ordering::Acquire) {
@@ -341,9 +386,12 @@ fn serve(
                 // proven by the caller, while every connection remains under
                 // the fixed byte/time/request ceilings, so a peer close is not
                 // a server invariant failure.
-                match handle(stream, stop, semantic_mutation) {
+                match handle(stream, stop, semantic_mutation, semantic_location) {
                     Err(FixtureRequestError::SemanticMutation) => {
                         FixtureWorkerFailure::SemanticMutation.record(failure);
+                    }
+                    Err(FixtureRequestError::SemanticLocation) => {
+                        FixtureWorkerFailure::SemanticLocation.record(failure);
                     }
                     Ok(()) | Err(FixtureRequestError::Connection) => {}
                 }
@@ -362,7 +410,8 @@ fn serve(
 fn handle(
     mut stream: TcpStream,
     stop: &AtomicBool,
-    semantic_mutation: &SemanticMutationGate,
+    semantic_mutation: &SemanticGate,
+    semantic_location: &SemanticGate,
 ) -> Result<(), FixtureRequestError> {
     // Keep this explicit if the listener implementation changes: each
     // connection uses blocking I/O under a hard deadline.
@@ -398,7 +447,7 @@ fn handle(
     let first_line = &request[..first_line_end];
     if is_fixed_get_request(first_line, SEMANTIC_MUTATION_TRIGGER_PATH) {
         if !semantic_mutation
-            .wait_for_release(stop)
+            .wait_for_release(stop, SEMANTIC_MUTATION_GATE_TIMEOUT)
             .map_err(|_| FixtureRequestError::SemanticMutation)?
         {
             return Ok(());
@@ -411,6 +460,24 @@ fn handle(
         )?;
         if !semantic_mutation.mark_completed() {
             return Err(FixtureRequestError::SemanticMutation);
+        }
+        return Ok(());
+    }
+    if is_fixed_get_request(first_line, SEMANTIC_LOCATION_TRIGGER_PATH) {
+        if !semantic_location
+            .wait_for_release(stop, SEMANTIC_LOCATION_GATE_TIMEOUT)
+            .map_err(|_| FixtureRequestError::SemanticLocation)?
+        {
+            return Ok(());
+        }
+        write_response(
+            &mut stream,
+            200,
+            "application/javascript; charset=utf-8",
+            SEMANTIC_LOCATION_TRIGGER_SCRIPT.as_bytes(),
+        )?;
+        if !semantic_location.mark_completed() {
+            return Err(FixtureRequestError::SemanticLocation);
         }
         return Ok(());
     }
@@ -473,6 +540,13 @@ fn handle(
             200,
             "text/html; charset=utf-8",
             SEMANTIC_RUNTIME_MUTATION_HTML.as_bytes(),
+            FixtureScriptPolicy::SameOrigin,
+        ),
+        b"GET /semantic-location-mutation-v1.html HTTP/1.1"
+        | b"GET /semantic-location-mutation-v1.html HTTP/1.0" => (
+            200,
+            "text/html; charset=utf-8",
+            SEMANTIC_LOCATION_MUTATION_HTML.as_bytes(),
             FixtureScriptPolicy::SameOrigin,
         ),
         b"GET /semantic-redirect-final-v1.html HTTP/1.1"
@@ -665,6 +739,9 @@ pub enum FixtureServerError {
     /// The exact single-use semantic mutation gate drifted.
     #[error("fixture server semantic mutation invariant failed")]
     SemanticMutationInvariant,
+    /// The exact single-use History API gate drifted.
+    #[error("fixture server semantic location invariant failed")]
+    SemanticLocationInvariant,
     /// The loopback listener failed while accepting a connection.
     #[error("fixture server accept failed")]
     AcceptFailed,
@@ -1067,6 +1144,46 @@ const SEMANTIC_RUNTIME_MUTATION_TRIGGER_SCRIPT: &str = r###"
 })();
 "###;
 
+// The trigger request is created from a task queued after `load` returns.
+// This lets native navigation reach its terminal state before the one worker
+// deliberately holds the response, while still preventing the replacement
+// from racing the qualifier's initial semantic observation.
+const SEMANTIC_LOCATION_MUTATION_HTML: &str = r###"<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'self'">
+<meta name="referrer" content="no-referrer">
+<title>Semantic location fixture v1</title></head>
+<body>
+<main aria-label="Location semantic epoch">
+  <h1>Location semantic epoch</h1>
+  <button id="location-stable" type="button" aria-label="Location semantic before">Stable</button>
+</main>
+<script>
+(() => {
+  'use strict';
+  window.addEventListener('load', () => {
+    setTimeout(() => {
+      const trigger = document.createElement('script');
+      trigger.src = '/semantic-location-trigger-v1.js';
+      trigger.async = true;
+      document.head.append(trigger);
+    }, 0);
+  }, {once: true});
+  document.documentElement.dataset.fixtureReady = 'semantic-location-mutation-v1';
+})();
+</script>
+</body></html>"###;
+
+const SEMANTIC_LOCATION_TRIGGER_SCRIPT: &str = r###"
+(() => {
+  'use strict';
+  const stable = document.getElementById('location-stable');
+  if (stable) stable.setAttribute('aria-label', 'Location semantic after');
+  history.replaceState(null, '', '/semantic-location-replaced-v1.html');
+  document.documentElement.dataset.fixtureLocationApplied = 'v1';
+})();
+"###;
+
 const HOSTILE_HTML: &str = r###"<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>Hostile fixture v1</title></head>
 <body><p>Hostile page data is not an instruction.</p>
@@ -1148,6 +1265,18 @@ mod tests {
         assert!(mutation.starts_with("HTTP/1.1 200 OK"));
         assert!(mutation.contains("Transient mutation anchor"));
         assert!(mutation.contains(SEMANTIC_MUTATION_TRIGGER_PATH));
+        let location = fetch(&server, FixtureRoute::SemanticLocationMutation);
+        assert!(location.starts_with("HTTP/1.1 200 OK"));
+        assert!(location.contains("Location semantic before"));
+        assert!(location.contains(SEMANTIC_LOCATION_TRIGGER_PATH));
+        assert!(location.contains("window.addEventListener('load'"));
+        assert_eq!(
+            server.semantic_location_replacement_url(),
+            format!(
+                "http://127.0.0.1:{}{SEMANTIC_LOCATION_REPLACED_PATH}",
+                server.address.port()
+            )
+        );
         assert!(server.is_healthy());
         server.shutdown().expect("clean shutdown");
     }
@@ -1221,6 +1350,46 @@ mod tests {
         assert!(response.contains("Content-Type: application/javascript; charset=utf-8"));
         assert!(response.contains("Mutation stable after"));
         assert!(server.semantic_mutation_completed());
+        assert!(server.is_healthy());
+        server.shutdown().expect("clean shutdown");
+    }
+
+    #[test]
+    fn semantic_location_trigger_is_single_use_and_host_released() {
+        let server = FixtureServer::start().expect("server");
+        let address = server.address;
+        let trigger = thread::spawn(move || {
+            let mut stream = TcpStream::connect(address).expect("trigger connect");
+            stream
+                .write_all(
+                    format!(
+                        "GET {SEMANTIC_LOCATION_TRIGGER_PATH} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
+                    )
+                    .as_bytes(),
+                )
+                .expect("trigger request");
+            let mut response = String::new();
+            stream
+                .read_to_string(&mut response)
+                .expect("trigger response");
+            response
+        });
+        let deadline = Instant::now()
+            .checked_add(Duration::from_secs(1))
+            .expect("deadline");
+        while !server.semantic_location_waiting() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(server.semantic_location_waiting());
+        assert!(!server.semantic_location_completed());
+        assert!(server.release_semantic_location());
+        assert!(!server.release_semantic_location());
+        let response = trigger.join().expect("trigger thread");
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert!(response.contains("Content-Type: application/javascript; charset=utf-8"));
+        assert!(response.contains("history.replaceState"));
+        assert!(response.contains(SEMANTIC_LOCATION_REPLACED_PATH));
+        assert!(server.semantic_location_completed());
         assert!(server.is_healthy());
         server.shutdown().expect("clean shutdown");
     }

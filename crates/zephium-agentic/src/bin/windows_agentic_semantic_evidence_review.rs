@@ -1,4 +1,4 @@
-//! Offline, content-free review of the six required physical Windows semantic results.
+//! Offline, content-free review of the seven required physical Windows semantic results.
 
 use std::ffi::OsString;
 use std::io::{self, Read as _, Write as _};
@@ -12,8 +12,8 @@ use zephium_agentic::{
     MAX_WINDOWS_SEMANTIC_PROBE_OUTPUT_BYTES, WINDOWS_SEMANTIC_PHYSICAL_REVIEW_MODES,
 };
 
-const REVIEW_SCHEMA_VERSION: u16 = 3;
-const REVIEW_SUMMARY_FILENAME: &str = "windows-semantic-review-summary-v3.json";
+const REVIEW_SCHEMA_VERSION: u16 = 4;
+const REVIEW_SUMMARY_FILENAME: &str = "windows-semantic-review-summary-v4.json";
 
 #[derive(Serialize)]
 #[serde(deny_unknown_fields)]
@@ -242,6 +242,7 @@ mod tests {
         let renderer = mode == WindowsSemanticProbeMode::HiddenRendererLoss;
         let suspension = mode == WindowsSemanticProbeMode::HiddenSuspendResume;
         let redirects = mode == WindowsSemanticProbeMode::HiddenRedirectLifecycle;
+        let location = mode == WindowsSemanticProbeMode::HiddenLocationReplacement;
         WindowsSemanticProbeEvidence {
             run_id: 1,
             runtime: RuntimeFingerprint {
@@ -250,7 +251,7 @@ mod tests {
                 engine: EvidenceLabel::new("WebView2").expect("engine label"),
                 engine_version: EvidenceLabel::new("140.0.0.0").expect("version label"),
                 adapter_revision: EvidenceLabel::new(
-                    "semantic-runtime-m3-lifecycle-m2-redirect-v1",
+                    "semantic-runtime-m3-lifecycle-m2-redirect-location-v1",
                 )
                 .expect("adapter label"),
             },
@@ -262,7 +263,13 @@ mod tests {
             viewport_width: 1_280,
             viewport_height: 800,
             loopback_only: true,
-            snapshots: u8::from(!renderer) + 1,
+            snapshots: if renderer {
+                1
+            } else if location {
+                3
+            } else {
+                2
+            },
             document_epochs: if flood {
                 3
             } else if renderer || suspension {
@@ -271,8 +278,8 @@ mod tests {
                 2
             },
             first_snapshot_verified: true,
-            replacement_snapshot_verified: !renderer && !suspension && !redirects,
-            replacement_stale_state_absent: !renderer && !suspension && !redirects,
+            replacement_snapshot_verified: !renderer && !suspension && !redirects && !location,
+            replacement_stale_state_absent: !renderer && !suspension && !redirects && !location,
             page_world_bridge_absent: true,
             secrets_redacted: true,
             event_flood_refused: flood,
@@ -293,6 +300,10 @@ mod tests {
                 0
             },
             redirect_recovery_verified: redirects,
+            same_document_replacement_observed: location,
+            same_document_replacement_rejoined: location,
+            stale_location_join_refused: location,
+            post_location_snapshot_verified: location,
             debugger_attached: mode == WindowsSemanticProbeMode::HiddenDebuggerCoexistence,
             focus_theft_observed: false,
             peak_pending_invocations: 1,
@@ -322,14 +333,14 @@ mod tests {
     }
 
     #[test]
-    fn exact_six_mode_set_reviews_successfully() {
+    fn exact_seven_mode_set_reviews_successfully() {
         let directory = TestDirectory::new();
         for mode in WINDOWS_SEMANTIC_PHYSICAL_REVIEW_MODES {
             write_mode(&directory.0, mode);
         }
         let review = review_directory(&directory.0).expect("review");
         assert_eq!(review.schema_version, REVIEW_SCHEMA_VERSION);
-        assert_eq!(review.modes.len(), 6);
+        assert_eq!(review.modes.len(), 7);
         assert_eq!(review.runtime.platform, Platform::Windows);
     }
 

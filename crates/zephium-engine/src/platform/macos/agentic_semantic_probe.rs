@@ -455,6 +455,7 @@ fn fixture_failure_stage(failure: FixtureServerError) -> &'static str {
         FixtureServerError::NonLoopbackPeer => "fixture_peer",
         FixtureServerError::RequestBudgetExhausted => "fixture_budget",
         FixtureServerError::SemanticMutationInvariant => "fixture_mutation_gate",
+        FixtureServerError::SemanticLocationInvariant => "fixture_location_gate",
         FixtureServerError::AcceptFailed => "fixture_accept",
         FixtureServerError::WorkerPanicked => "fixture_panic",
     }

@@ -69,6 +69,8 @@ const NAVIGATION_TIMEOUT: Duration = Duration::from_secs(10);
 const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(5);
 const SUSPEND_TIMEOUT: Duration = Duration::from_secs(10);
 const FAULT_TIMEOUT: Duration = Duration::from_secs(5);
+const LOCATION_TIMEOUT: Duration = Duration::from_secs(5);
+const LOCATION_SETTLE: Duration = Duration::from_millis(100);
 const NATIVE_CLEANUP_TIMEOUT: Duration = Duration::from_millis(750);
 const PROCESS_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
 const PUMP_SLICE: Duration = Duration::from_millis(5);
@@ -354,6 +356,10 @@ struct ExecutionFacts {
     redirect_limit_refused: bool,
     redirect_limit_hops_observed: u8,
     redirect_recovery_verified: bool,
+    same_document_replacement_observed: bool,
+    same_document_replacement_rejoined: bool,
+    stale_location_join_refused: bool,
+    post_location_snapshot_verified: bool,
     peak_pending_invocations: u8,
     semantic_work_drained: bool,
 }
@@ -612,6 +618,7 @@ pub(crate) fn run(
             WindowsSemanticProbeMode::HiddenRendererLoss => CallbackAllowance::RENDERER_LOST,
             WindowsSemanticProbeMode::HiddenFixedDocuments
             | WindowsSemanticProbeMode::HiddenRedirectLifecycle
+            | WindowsSemanticProbeMode::HiddenLocationReplacement
             | WindowsSemanticProbeMode::HiddenSuspendResume
             | WindowsSemanticProbeMode::HiddenDebuggerCoexistence => CallbackAllowance::NONE,
         };
@@ -692,6 +699,10 @@ pub(crate) fn run(
         redirect_limit_refused: facts.redirect_limit_refused,
         redirect_limit_hops_observed: facts.redirect_limit_hops_observed,
         redirect_recovery_verified: facts.redirect_recovery_verified,
+        same_document_replacement_observed: facts.same_document_replacement_observed,
+        same_document_replacement_rejoined: facts.same_document_replacement_rejoined,
+        stale_location_join_refused: facts.stale_location_join_refused,
+        post_location_snapshot_verified: facts.post_location_snapshot_verified,
         debugger_attached: native_guard.debugger_expected,
         focus_theft_observed: native_guard.focus_theft.get(),
         peak_pending_invocations: facts.peak_pending_invocations,
@@ -872,6 +883,91 @@ fn execute_mode(
             facts.redirect_chain_hops_observed = chain_hops;
             facts.redirect_recovery_verified = true;
         }
+        WindowsSemanticProbeMode::HiddenLocationReplacement => {
+            let location_url = server.url(FixtureRoute::SemanticLocationMutation);
+            let location = navigate(
+                view,
+                registry,
+                context_id,
+                take_operation(&mut next_operation)?,
+                &location_url,
+                callbacks,
+                CallbackAllowance::NONE,
+                host,
+                native_guard,
+                run_deadline,
+            )?;
+            facts.document_epochs = 2;
+            wait_for_location_gate(
+                view,
+                &location_url,
+                server,
+                callbacks,
+                host,
+                native_guard,
+                run_deadline,
+            )?;
+            let before = capture_snapshot(
+                view,
+                location,
+                &location_url,
+                SemanticSnapshotGeneration::INITIAL,
+                &mut next_invocation,
+                callbacks,
+                CallbackAllowance::NONE,
+                host,
+                native_guard,
+                run_deadline,
+                &mut facts.peak_pending_invocations,
+            )?;
+            verify_location_before_snapshot(&before)?;
+            let post_location_generation = before
+                .generation()
+                .next()
+                .ok_or_else(|| ProbeError::verify(WindowsSemanticProbeStage::Observe))?;
+            registry
+                .acknowledge_observation(context_id, location)
+                .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Verify))?;
+            facts.snapshots = 2;
+            if !server.release_semantic_location() {
+                return Err(ProbeError::verify(WindowsSemanticProbeStage::Verify));
+            }
+            let replacement_url = server.semantic_location_replacement_url();
+            let replacement = observe_location_replacement(
+                view,
+                registry,
+                context_id,
+                location,
+                &replacement_url,
+                server,
+                callbacks,
+                host,
+                native_guard,
+                run_deadline,
+            )?;
+            facts.same_document_replacement_observed = true;
+            facts.same_document_replacement_rejoined = true;
+            facts.stale_location_join_refused = true;
+            let after = capture_snapshot(
+                view,
+                replacement,
+                &replacement_url,
+                post_location_generation,
+                &mut next_invocation,
+                callbacks,
+                CallbackAllowance::NONE,
+                host,
+                native_guard,
+                run_deadline,
+                &mut facts.peak_pending_invocations,
+            )?;
+            verify_location_after_snapshot(&after)?;
+            registry
+                .acknowledge_observation(context_id, replacement)
+                .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Verify))?;
+            facts.snapshots = 3;
+            facts.post_location_snapshot_verified = true;
+        }
         WindowsSemanticProbeMode::HiddenSuspendResume => {
             wait_for_semantic_drain(
                 view,
@@ -1034,6 +1130,131 @@ fn execute_mode(
         }
     }
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn wait_for_location_gate(
+    view: &AgentOwnedView,
+    expected_url: &str,
+    server: &FixtureServer,
+    callbacks: &CallbackState,
+    host: &ProbeHostWindow,
+    native_guard: &NativeStateGuard,
+    run_deadline: Instant,
+) -> ProbeResult<()> {
+    let expected = ContextNavigationTarget::parse(expected_url)
+        .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Navigate))?;
+    let deadline = earlier_deadline(run_deadline, LOCATION_TIMEOUT)?;
+    while !server.semantic_location_waiting() && Instant::now() < deadline {
+        settle_expected_location(view, &expected, callbacks)?;
+        if callbacks.fatal(CallbackAllowance::NONE)
+            || native_guard.failed()
+            || !callbacks
+                .navigation
+                .try_borrow()
+                .is_ok_and(|slot| slot.is_none())
+            || !server.is_healthy()
+        {
+            return Err(ProbeError::verify(WindowsSemanticProbeStage::Navigate));
+        }
+        pump_and_sample(deadline, host, Some(view.view()), native_guard)?;
+    }
+    settle_expected_location(view, &expected, callbacks)?;
+    if !server.semantic_location_waiting()
+        || !server.is_healthy()
+        || !view.navigation().location_stable_for_result()
+    {
+        return Err(ProbeError::timeout(WindowsSemanticProbeStage::Navigate));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn observe_location_replacement(
+    view: &AgentOwnedView,
+    registry: &mut ContextRegistry,
+    context_id: ContextId,
+    prior: ContextJoin,
+    expected_url: &str,
+    server: &FixtureServer,
+    callbacks: &CallbackState,
+    host: &ProbeHostWindow,
+    native_guard: &NativeStateGuard,
+    run_deadline: Instant,
+) -> ProbeResult<ContextJoin> {
+    let expected = ContextNavigationTarget::parse(expected_url)
+        .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Navigate))?;
+    let deadline = earlier_deadline(run_deadline, LOCATION_TIMEOUT)?;
+    while (!server.semantic_location_completed() || !callbacks.location_check_pending.get())
+        && Instant::now() < deadline
+    {
+        if callbacks.fatal(CallbackAllowance::NONE)
+            || native_guard.failed()
+            || !callbacks
+                .navigation
+                .try_borrow()
+                .is_ok_and(|slot| slot.is_none())
+            || !server.is_healthy()
+        {
+            return Err(ProbeError::verify(WindowsSemanticProbeStage::Navigate));
+        }
+        pump_and_sample(deadline, host, Some(view.view()), native_guard)?;
+    }
+    if !server.semantic_location_completed()
+        || !server.is_healthy()
+        || !callbacks.location_check_pending.replace(false)
+    {
+        return Err(ProbeError::timeout(WindowsSemanticProbeStage::Navigate));
+    }
+    let sampled =
+        super::current_url(view.view()).and_then(|url| ContextNavigationTarget::parse(&url).ok());
+    if sampled.as_ref() != Some(&expected) {
+        super::stop_loading(view.view());
+        let _ = view.navigation().finish_location_check(false);
+        return Err(ProbeError::verify(WindowsSemanticProbeStage::Navigate));
+    }
+    view.navigation()
+        .finish_location_check(true)
+        .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Navigate))?;
+    let successor = registry
+        .observe_navigation_replacement(context_id, prior)
+        .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Navigate))?;
+    if registry.acknowledge_observation(context_id, prior).is_ok() {
+        return Err(ProbeError::verify(WindowsSemanticProbeStage::Navigate));
+    }
+    if view
+        .navigation()
+        .acknowledge_location_replacement()
+        .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Navigate))?
+    {
+        callbacks.request_location_check();
+    }
+
+    // SourceChanged and HistoryChanged may be delivered in either order.
+    // Drain the controller's one callback plus one dirty bit across a small,
+    // fixed message-loop window; no event payload or URL cohort is retained.
+    let settle_deadline = earlier_deadline(run_deadline, LOCATION_SETTLE)?;
+    while Instant::now() < settle_deadline {
+        settle_expected_location(view, &expected, callbacks)?;
+        if callbacks.fatal(CallbackAllowance::NONE)
+            || native_guard.failed()
+            || !callbacks
+                .navigation
+                .try_borrow()
+                .is_ok_and(|slot| slot.is_none())
+        {
+            return Err(ProbeError::verify(WindowsSemanticProbeStage::Navigate));
+        }
+        pump_and_sample(settle_deadline, host, Some(view.view()), native_guard)?;
+    }
+    settle_expected_location(view, &expected, callbacks)?;
+    if callbacks.location_check_pending.get()
+        || view.navigation().location_state_for_audit() != Some((false, false, false))
+        || !view.navigation().location_stable_for_result()
+    {
+        return Err(ProbeError::verify(WindowsSemanticProbeStage::Navigate));
+    }
+    Ok(successor)
 }
 
 struct SuspendResumeResult {
@@ -1757,6 +1978,28 @@ fn verify_replacement_snapshot(snapshot: &SemanticSnapshot) -> ProbeResult<()> {
     Ok(())
 }
 
+fn verify_location_before_snapshot(snapshot: &SemanticSnapshot) -> ProbeResult<()> {
+    if snapshot.completeness() != SemanticCompleteness::Complete
+        || !snapshot_contains(snapshot, "Location semantic epoch")
+        || !snapshot_contains(snapshot, "Location semantic before")
+        || snapshot_contains(snapshot, "Location semantic after")
+    {
+        return Err(ProbeError::verify(WindowsSemanticProbeStage::Verify));
+    }
+    Ok(())
+}
+
+fn verify_location_after_snapshot(snapshot: &SemanticSnapshot) -> ProbeResult<()> {
+    if snapshot.completeness() != SemanticCompleteness::Complete
+        || !snapshot_contains(snapshot, "Location semantic epoch")
+        || !snapshot_contains(snapshot, "Location semantic after")
+        || snapshot_contains(snapshot, "Location semantic before")
+    {
+        return Err(ProbeError::verify(WindowsSemanticProbeStage::Verify));
+    }
+    Ok(())
+}
+
 fn snapshot_contains(snapshot: &SemanticSnapshot, needle: &str) -> bool {
     snapshot.nodes().iter().any(|node| {
         node.name()
@@ -1891,6 +2134,7 @@ fn teardown(
         WindowsSemanticProbeMode::HiddenRendererLoss => CallbackAllowance::RENDERER_LOST,
         WindowsSemanticProbeMode::HiddenFixedDocuments
         | WindowsSemanticProbeMode::HiddenRedirectLifecycle
+        | WindowsSemanticProbeMode::HiddenLocationReplacement
         | WindowsSemanticProbeMode::HiddenSuspendResume
         | WindowsSemanticProbeMode::HiddenDebuggerCoexistence => CallbackAllowance::NONE,
     };
@@ -1981,8 +2225,10 @@ fn runtime_fingerprint() -> ProbeResult<RuntimeFingerprint> {
             .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Construct))?,
         engine_version: EvidenceLabel::new(engine_version)
             .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Construct))?,
-        adapter_revision: EvidenceLabel::new("semantic-runtime-m3-lifecycle-m2-redirect-v1")
-            .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Construct))?,
+        adapter_revision: EvidenceLabel::new(
+            "semantic-runtime-m3-lifecycle-m2-redirect-location-v1",
+        )
+        .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Construct))?,
     })
 }
 

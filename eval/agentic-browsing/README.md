@@ -196,7 +196,7 @@ or failed fixture makes the review command nonzero. The exact
 bytes to the fixed create-new summary filename. The aggregate remains ignored
 until reviewed into the committed manifest.
 
-The production Windows semantic adapter has a separate six-process physical
+The production Windows semantic adapter has a separate seven-process physical
 qualification. It is fully hidden and uses no OS-wide pointer or keyboard
 input, focus API, Accessibility permission, account, credential, external
 site, extension-owned native seam, screenshot, or page-world bridge. Each run
@@ -210,7 +210,7 @@ Every accepted document also consumes the production `SourceChanged`/
 the canonical target, and requiring it to equal the committed URL. A pending,
 dirty, substituted, or teardown-surviving location claim fails the run.
 
-Run the five non-debugger modes as ordinary processes on an authorized
+Run the six non-debugger modes as ordinary processes on an authorized
 physical Windows device:
 
 ```powershell
@@ -221,6 +221,10 @@ cargo run --locked -p zephium-engine `
 cargo run --locked -p zephium-engine `
   --features native-agentic-semantic-probe `
   --bin windows-agentic-semantic-probe -- --ci-hidden-redirect-lifecycle `
+  --evidence-directory eval/agentic-browsing/local-results
+cargo run --locked -p zephium-engine `
+  --features native-agentic-semantic-probe `
+  --bin windows-agentic-semantic-probe -- --ci-hidden-location-replacement `
   --evidence-directory eval/agentic-browsing/local-results
 cargo run --locked -p zephium-engine `
   --features native-agentic-semantic-probe `
@@ -239,7 +243,7 @@ cargo build --locked -p zephium-engine `
   --bin windows-agentic-semantic-probe
 ```
 
-For the sixth mode, configure an authorized debugger to launch the exact
+For the seventh mode, configure an authorized debugger to launch the exact
 freshly built executable
 `target\debug\windows-agentic-semantic-probe.exe` with these exact arguments,
 and keep it attached until process exit:
@@ -255,9 +259,13 @@ bit, resumes with final active readback, and requires a fresh same-document
 semantic observation. The redirect mode first requires the production gate to
 refuse the fixed loop at exactly eight admitted redirect events, then proves
 recovery by committing the fixed two-hop chain to its authoritative final URL
-and taking a fresh semantic snapshot. Every mode also
+and taking a fresh semantic snapshot. The location mode reaches native load
+completion before a one-shot loopback script response is held, captures the
+pre-mutation semantics, releases one fixed `history.replaceState`, and then
+requires WebView2's native current `Source`, the functional-core successor,
+stale-prior refusal, native rejoin, and a fresh post-mutation snapshot. Every mode also
 samples debugger state and foreground, active-window, and thread-focus state
-throughout native work. Review only the exact six create-new records:
+throughout native work. Review only the exact seven create-new records:
 
 ```powershell
 cargo run --locked -p zephium-agentic `
@@ -268,12 +276,13 @@ cargo run --locked -p zephium-agentic `
 ```
 
 The offline reviewer requires one identical Windows/WebView2/adapter
-fingerprint. Protocol v3 and the
-`semantic-runtime-m3-lifecycle-m2-redirect-v1` adapter revision prevent older
-five-record results from mixing with this cohort. It
+fingerprint. Protocol v4 and the
+`semantic-runtime-m3-lifecycle-m2-redirect-location-v1` adapter revision
+prevent older six-record results from mixing with this cohort. It
 also requires exact mode-specific snapshot, document-epoch, suspension,
-pressure, bounded redirect/refusal/recovery, renderer-loss, debugger, focus,
-pending-work, process-exit, profile, fixture, and native-view teardown facts.
+pressure, bounded redirect/refusal/recovery, same-document native replacement/
+rejoin/stale-prior recovery, renderer-loss, debugger, focus, pending-work,
+process-exit, profile, fixture, and native-view teardown facts.
 The aggregate retains the
 bounded suspend-callback duration but no page content, path, native error,
 world/context identity, or trace. It reads no other filename. The runner
