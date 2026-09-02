@@ -45,7 +45,11 @@ eight-schedule attribution ceiling, while forbidding it from acquiring a
 telemetry or persistence port. A separate gate pins the audit-derived progress
 reducer to the canonical event revision seal, strict event/time ordering,
 bounded topology and active-operation storage, optional observed durations,
-and the absence of runtime clocks, serialization, or telemetry ports.
+and the absence of runtime clocks, serialization, or telemetry ports. A third
+gate pins the exact batch-terminal action reducer to fixed duration buckets, a
+1 KiB snapshot ceiling, manifest/node authority, batch/effect/attempt replay
+indexes, the manifest operation ceiling, and bounded preflight storage while
+forbidding telemetry, persistence serialization, and unbounded maps.
 
 Run the gate and its focused tests with:
 
@@ -99,6 +103,15 @@ cargo clippy --locked -p xtask --all-targets -- -D warnings
   without partial logical mutation. Unobserved durations remain absent. The
   reducer retains no site/platform/resource labels and no sample distribution;
   exact medians and percentiles still require the qualification harness.
+- A separate optional run-local action-performance reducer now borrows exact
+  immutable batch terminals and derives complete/stopped/failed batch counts,
+  verified and typed failed action counts, all three closed backend counts,
+  settlement-event aggregates, and fixed 18-bucket distributions for native,
+  settlement, native-to-settlement, and ordered proof-observation latency. It
+  rejoins exact manifest/node authority, rejects replay and malformed terminal
+  shapes transactionally, and cannot exceed the run operation budget. Its
+  snapshot is compile-capped at 1 KiB and it owns no site/page label, raw
+  sample, clock, task, telemetry, persistence, or browser/native resource.
 
 The authoritative aggregate records and exact remaining blockers are in
 `native-input-matrix-v1.json`, `semantic-runtime-macos-v1.json`, and
@@ -112,8 +125,9 @@ The authoritative aggregate records and exact remaining blockers are in
 - named macOS and Windows Browse startup, idle, tab-pressure, and concurrent-use
   baselines plus reviewed acceptable agent deltas;
 - retained action/run timing samples and reviewed per-site latency
-  distributions from the qualification harness (the local reducer exposes
-  only exact observed count/sum/maximum aggregates);
+  distributions from the qualification harness (the local action reducer
+  retains only fixed content-free histograms without site, device, or platform
+  labels);
 - deterministic semantic/action/policy suite closure, the six-site matrix,
   concurrent production configuration, endurance, and fault-injection evidence;
 - hot-path and zero-unused-agent-overhead measurements; and

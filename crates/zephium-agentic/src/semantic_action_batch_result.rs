@@ -145,6 +145,38 @@ impl SemanticActionBatchCompletion {
     pub const fn next_state(self) -> SemanticActionNextState {
         self.next_state
     }
+
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) const fn for_action_metrics_test(
+        ordinal: u8,
+        kind: SemanticActionKind,
+        receipt: AgentEffectReceipt,
+        execution: SemanticActionExecutionApplied,
+        settlement_event_count: u16,
+        settlement_elapsed_millis: u64,
+        settlement_terminal_at: SemanticSettleInstant,
+        attempt: SemanticActionAttemptId,
+        proof: SemanticEffectProofKind,
+        observed_at: SemanticSettleInstant,
+        current_context: ContextJoin,
+        next_state: SemanticActionNextState,
+    ) -> Self {
+        Self {
+            ordinal,
+            kind,
+            receipt,
+            execution,
+            settlement_event_count,
+            settlement_elapsed_millis,
+            settlement_terminal_at,
+            attempt,
+            proof,
+            observed_at,
+            current_context,
+            next_state,
+        }
+    }
 }
 
 /// Closed pipeline stage that supplied an accounted failure.
@@ -208,6 +240,30 @@ impl SemanticActionBatchFailure {
     /// Closed verification refusal, when independent verification was reached.
     pub const fn verification_error(self) -> Option<SemanticVerificationError> {
         self.verification_error
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) const fn for_action_metrics_test(
+        receipt: AgentEffectReceipt,
+        stage: SemanticActionBatchFailureStage,
+        execution: Option<SemanticActionExecutionApplied>,
+        settlement_event_count: Option<u16>,
+        settlement_elapsed_millis: Option<u64>,
+        settlement_terminal_at: Option<SemanticSettleInstant>,
+        verification_observed_at: Option<SemanticSettleInstant>,
+        verification_error: Option<SemanticVerificationError>,
+    ) -> Self {
+        Self {
+            receipt,
+            stage,
+            execution,
+            settlement_event_count,
+            settlement_elapsed_millis,
+            settlement_terminal_at,
+            verification_observed_at,
+            verification_error,
+        }
     }
 }
 
@@ -293,6 +349,26 @@ impl SemanticActionBatchResult {
     /// Moves the latest state update into model encoding, when safe.
     pub fn into_final_state(self) -> Option<SemanticActionResult> {
         self.final_state
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_action_metrics_test(
+        batch: SemanticActionBatchId,
+        effect: SemanticEffectClass,
+        total: u8,
+        completions: Vec<SemanticActionBatchCompletion>,
+        outcome: SemanticActionBatchOutcome,
+        failure: Option<SemanticActionBatchFailure>,
+    ) -> Self {
+        Self {
+            batch,
+            effect,
+            total,
+            completions,
+            outcome,
+            final_state: None,
+            failure,
+        }
     }
 }
 

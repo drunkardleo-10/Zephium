@@ -1029,10 +1029,18 @@ The run-local receipt reducer supplies only the exact accounting subset it can
 prove from policy receipts. The independent audit-derived progress reducer
 supplies observed duration sample counts, sums, and maxima for initial queue,
 model, effect, and human waits, together with root elapsed time and closed
-completion/takeover counts. It deliberately does not retain action samples, so
-exact medians, percentiles, and per-site distributions remain qualification-
-harness inputs. Site/platform/backend labels, semantic encoding sizes,
-native/process counts, and machine resource measures also remain explicit
+completion/takeover counts. A separate optional exact batch-terminal reducer
+supplies closed batch/action outcomes, backend counts, settlement-event counts,
+and fixed content-free histograms for native execution, settlement,
+revalidation-to-settlement, and ordered revalidation-to-verification timing.
+It rejects manifest-revision, plan-node, effect, attempt, batch, shape, and
+operation-budget mismatches before logical mutation; its copyable snapshot is
+capped at 1 KiB and it owns no clock, telemetry, persistence, task, or browser
+resource. The reducer is constructed and fed explicitly, so unused agentic
+browsing pays no reducer allocation or execution cost. Neither reducer retains
+raw action samples or site/platform/resource labels, so exact medians,
+percentiles, reviewed per-site distributions, semantic encoding sizes,
+native/process counts, and machine resource measures remain qualification-
 harness inputs; absence is never represented as zero.
 
 Initial qualification gates are:

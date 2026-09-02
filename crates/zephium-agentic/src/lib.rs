@@ -14,6 +14,7 @@
 #[cfg(all(feature = "probe-harness", not(debug_assertions)))]
 compile_error!("the agentic probe harness is forbidden in optimized builds");
 
+mod agent_action_metrics;
 mod agent_audit;
 mod agent_manifest;
 mod agent_metrics;
@@ -66,6 +67,12 @@ mod semantic_verify;
 mod semantic_wire;
 mod sign_in_handoff;
 
+pub use agent_action_metrics::{
+    AgentActionBackendMetrics, AgentActionDurationMetrics, AgentActionMetricError,
+    AgentActionSettleEventMetrics, AgentRunActionPerformanceMetrics,
+    AgentRunActionPerformanceSnapshot, AGENT_ACTION_DURATION_BUCKET_COUNT,
+    AGENT_ACTION_DURATION_BUCKET_UPPER_BOUNDS_MILLIS, MAX_AGENT_ACTION_PERFORMANCE_SNAPSHOT_BYTES,
+};
 pub use agent_audit::{
     AgentAuditCompletion, AgentAuditDelivery, AgentAuditDeliveryId, AgentAuditDeliveryOutcome,
     AgentAuditDeliveryProof, AgentAuditDeliverySettlement, AgentAuditDispatch, AgentAuditError,

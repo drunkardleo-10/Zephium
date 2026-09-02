@@ -318,6 +318,16 @@ are trusted, or that M4 is complete.
   attempt identity, and carry non-regressing independent-proof time. A complete
   batch returns only after every action independently reached finalization.
   Incomplete aggregation cannot be represented as success.
+- An optional run-local performance reducer borrows only immutable exact batch
+  terminals after aggregation. It rejoins the canonical manifest revision,
+  approved plan node, unique batch/effect/attempt identities, outcome shape,
+  settlement clocks, and run operation ceiling before atomically updating
+  fixed backend counts and 18-bucket content-free timing distributions. Failed
+  actions remain separated into pre-verification and post-execution stages;
+  proof observations predating native revalidation are counted as unorderable
+  rather than converted into invented latency. The reducer retains no page
+  content, site/platform label, raw sample, runtime clock, task, telemetry port,
+  or persistence port, and its copyable snapshot has a 1 KiB compile-time cap.
 - Failed batch admission consumes only the non-cloneable policy-accounted
   failed owner for the exact prepared next action. It rejoins the receipt's
   private action guard, effect, failed settlement, unique attempt, batch order,
@@ -640,6 +650,12 @@ pre-verification and post-execution failed owners, retains exact stage and
 content-free evidence, and recovers then readmits an exact owner after a
 wrong-batch refusal. The static gate rejects a shipping loose finalizer, loose
 success or failure admission, or a refusal that drops owned state.
+Three action-performance reducer tests cover complete/stopped/pre-verification/
+post-execution terminals, all three closed backends, fixed histogram boundaries,
+settlement facts, unorderable proof clocks, start-state/authority/shape/budget/
+replay refusal, and no-partial-mutation behavior. A repository gate pins its
+fixed bounds, manifest-revision joins, replay indexes, batch ceiling, snapshot
+size, and absence of telemetry, serialization, or unbounded-map seams.
 
 Action-result coverage includes exact committed-baseline/content binding,
 source observation and batch guard substitution, exact verification

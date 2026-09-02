@@ -583,6 +583,22 @@ impl SemanticActionExecutionApplied {
     pub const fn settle_started_at(self) -> SemanticSettleInstant {
         SemanticSettleInstant::from_millis(self.completed_at.millis())
     }
+
+    #[cfg(test)]
+    pub(crate) fn for_action_metrics_test(
+        backend: SemanticActionExecutionBackend,
+        revalidated_at: SemanticActionExecutionInstant,
+        completed_at: SemanticActionExecutionInstant,
+    ) -> Self {
+        Self {
+            backend,
+            readiness: SemanticActionNativeReadiness::ExactVisibleUnoccludedTarget,
+            viewport: SemanticActionNativeViewport::try_new(800, 600).expect("test viewport"),
+            actual_geometry: SemanticRect::try_new(10, 10, 20, 20).expect("test geometry"),
+            revalidated_at,
+            completed_at,
+        }
+    }
 }
 
 /// Terminal result of rejoining retained policy authority and native work.

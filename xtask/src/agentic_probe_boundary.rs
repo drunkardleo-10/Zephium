@@ -27,6 +27,7 @@ const AGENTIC_PROVIDER_PRICING: &str = "crates/zephium-agentic/src/agent_provide
 const AGENTIC_POLICY: &str = "crates/zephium-agentic/src/agent_policy.rs";
 const AGENTIC_EFFECT_POLICY: &str = "crates/zephium-agentic/src/agent_policy/effect.rs";
 const AGENTIC_AUDIT: &str = "crates/zephium-agentic/src/agent_audit.rs";
+const AGENTIC_ACTION_METRICS: &str = "crates/zephium-agentic/src/agent_action_metrics.rs";
 const AGENTIC_METRICS: &str = "crates/zephium-agentic/src/agent_metrics.rs";
 const AGENTIC_PROGRESS_METRICS: &str = "crates/zephium-agentic/src/agent_progress_metrics.rs";
 const AGENTIC_SEMANTIC_DIFF: &str = "crates/zephium-agentic/src/semantic_diff.rs";
@@ -137,6 +138,10 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     validate_agent_metrics_contract(
         &read(repository.join(AGENTIC_ROOT))?,
         &read(repository.join(AGENTIC_METRICS))?,
+    )?;
+    validate_agent_action_metrics_contract(
+        &read(repository.join(AGENTIC_ROOT))?,
+        &read(repository.join(AGENTIC_ACTION_METRICS))?,
     )?;
     validate_agent_progress_metrics_contract(
         &read(repository.join(AGENTIC_ROOT))?,
@@ -1840,6 +1845,69 @@ fn validate_agent_metrics_contract(root: &str, metrics: &str) -> Result<(), Stri
         if metrics.contains(forbidden) {
             return Err(format!(
                 "run-local accounting metrics acquired forbidden telemetry/persistence seam {forbidden}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_agent_action_metrics_contract(root: &str, metrics: &str) -> Result<(), String> {
+    let root = compact(root);
+    for required in [
+        "modagent_action_metrics;",
+        "AgentRunActionPerformanceMetrics",
+        "AgentRunActionPerformanceSnapshot",
+        "AGENT_ACTION_DURATION_BUCKET_UPPER_BOUNDS_MILLIS",
+        "MAX_AGENT_ACTION_PERFORMANCE_SNAPSHOT_BYTES",
+    ] {
+        if !root.contains(required) {
+            return Err(format!(
+                "agent action metrics lost its default-core export {required}"
+            ));
+        }
+    }
+
+    let metrics = compact(metrics);
+    for required in [
+        "pubconstAGENT_ACTION_DURATION_BUCKET_UPPER_BOUNDS_MILLIS:[u64;17]",
+        "pubconstAGENT_ACTION_DURATION_BUCKET_COUNT:usize",
+        "pubconstMAX_AGENT_ACTION_PERFORMANCE_SNAPSHOT_BYTES:usize=1_024;",
+        "size_of::<AgentRunActionPerformanceSnapshot>()<=MAX_AGENT_ACTION_PERFORMANCE_SNAPSHOT_BYTES",
+        "pubstructAgentRunActionPerformanceMetrics",
+        "pubfntry_new(manifest:&AgentRunManifest,supervisor:&AgentRunSupervisor",
+        "ifmanifest.plan_nodes().len()>MAX_AGENT_PLAN_NODES",
+        "try_reserve_exact(manifest.plan_nodes().len())",
+        "operation_limit:manifest.budget().operations()",
+        "pubfnrecord_batch_result(&mutself,result:&SemanticActionBatchResult",
+        "self.batches.binary_search(&result.batch())",
+        "receipt.matches_manifest_revision(self.manifest,self.manifest_guard)",
+        "existing_ids.binary_search(&id)",
+        "existing_attempts.binary_search(&attempt)",
+        "ifnext_actions>self.operation_limit",
+        "ifresult.total()==0||usize::from(result.total())>MAX_SEMANTIC_ACTIONS_PER_BATCH",
+        "ifadmitted!=usize::try_from(executed)",
+        "[None;MAX_SEMANTIC_ACTIONS_PER_BATCH]",
+        "self.batches.try_reserve(1)",
+        "self.effect_receipts.try_reserve(admitted)",
+        "self.effect_attempts.try_reserve(admitted)",
+        "pubconstfnsnapshot(&self)->AgentRunActionPerformanceSnapshot",
+    ] {
+        if !metrics.contains(required) {
+            return Err(format!(
+                "agent action metrics lost required bounded boundary {required}"
+            ));
+        }
+    }
+    for forbidden in [
+        "traitAgentActionMetricPort",
+        "SerializeforAgentRunActionPerformanceMetrics",
+        "DeserializeforAgentRunActionPerformanceMetrics",
+        "HashMap<",
+        "BTreeMap<",
+    ] {
+        if metrics.contains(forbidden) {
+            return Err(format!(
+                "run-local action metrics acquired forbidden telemetry/unbounded seam {forbidden}"
             ));
         }
     }
@@ -5340,6 +5408,67 @@ mod tests {
         assert!(validate_agent_metrics_contract(
             root,
             &format!("{metrics}\ntrait AgentMetricPort {{}}"),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn run_action_metrics_remain_fixed_bounded_and_batch_derived() {
+        let root = r#"
+            mod agent_action_metrics;
+            pub use agent_action_metrics::{
+                AgentRunActionPerformanceMetrics,
+                AgentRunActionPerformanceSnapshot,
+                AGENT_ACTION_DURATION_BUCKET_UPPER_BOUNDS_MILLIS,
+                MAX_AGENT_ACTION_PERFORMANCE_SNAPSHOT_BYTES,
+            };
+        "#;
+        let metrics = r#"
+            pub const AGENT_ACTION_DURATION_BUCKET_UPPER_BOUNDS_MILLIS: [u64; 17] = [];
+            pub const AGENT_ACTION_DURATION_BUCKET_COUNT: usize = 18;
+            pub const MAX_AGENT_ACTION_PERFORMANCE_SNAPSHOT_BYTES: usize = 1_024;
+            const _: () = assert!(
+                std::mem::size_of::<AgentRunActionPerformanceSnapshot>()
+                    <= MAX_AGENT_ACTION_PERFORMANCE_SNAPSHOT_BYTES
+            );
+            pub struct AgentRunActionPerformanceMetrics;
+            pub fn try_new(
+                manifest: &AgentRunManifest,
+                supervisor: &AgentRunSupervisor,
+            ) {
+                if manifest.plan_nodes().len() > MAX_AGENT_PLAN_NODES {}
+                values.try_reserve_exact(manifest.plan_nodes().len());
+                operation_limit: manifest.budget().operations();
+            }
+            pub fn record_batch_result(
+                &mut self,
+                result: &SemanticActionBatchResult,
+            ) {
+                self.batches.binary_search(&result.batch());
+                receipt.matches_manifest_revision(self.manifest, self.manifest_guard);
+                existing_ids.binary_search(&id);
+                existing_attempts.binary_search(&attempt);
+                if next_actions > self.operation_limit {}
+                if result.total() == 0
+                    || usize::from(result.total()) > MAX_SEMANTIC_ACTIONS_PER_BATCH {}
+                if admitted != usize::try_from(executed) {}
+                let ids = [None; MAX_SEMANTIC_ACTIONS_PER_BATCH];
+                self.batches.try_reserve(1);
+                self.effect_receipts.try_reserve(admitted);
+                self.effect_attempts.try_reserve(admitted);
+            }
+            pub const fn snapshot(&self) -> AgentRunActionPerformanceSnapshot {}
+        "#;
+        validate_agent_action_metrics_contract(root, metrics)
+            .expect("fixed bounded action metrics");
+        assert!(validate_agent_action_metrics_contract(
+            root,
+            &metrics.replace("existing_ids.binary_search(&id)", "existing_ids.push(id)"),
+        )
+        .is_err());
+        assert!(validate_agent_action_metrics_contract(
+            root,
+            &format!("{metrics}\ntrait AgentActionMetricPort {{}}"),
         )
         .is_err());
     }
