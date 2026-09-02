@@ -26,23 +26,24 @@ use zephium_agentic::{
     ContextConstructionRequest, ContextConstructionSettlement, ContextConstructionSource,
     ContextCookieTransferDirection, ContextCookieTransferFailure, ContextCookieTransferId,
     ContextCookieTransferOutcome, ContextCookieTransferSettlement, ContextId, ContextJoin,
-    ContextNativeRequest, ContextNavigationRequest, ContextNavigationSettlement,
-    ContextNavigationTarget, ContextOperationJoin, ContextOperationKind, ContextOwnedViewport,
-    ContextProfileLease, ContextProfileLeasePurpose, ContextProfileStorageClass,
-    ContextTransitionRequest, ContextTransitionSettlement, MAX_LIVE_CONTEXTS,
-    MAX_PENDING_COOKIE_TRANSFERS,
+    ContextNativeRequest, ContextNavigationRedirectPolicy, ContextNavigationRequest,
+    ContextNavigationSettlement, ContextNavigationTarget, ContextOperationJoin,
+    ContextOperationKind, ContextOwnedViewport, ContextProfileLease, ContextProfileLeasePurpose,
+    ContextProfileStorageClass, ContextTransitionRequest, ContextTransitionSettlement,
+    MAX_LIVE_CONTEXTS, MAX_PENDING_COOKIE_TRANSFERS,
 };
 #[cfg(target_os = "macos")]
 use zephium_agentic::{
     ContextCancellationSettlement, ContextCapabilities, ContextConstructionProof,
     ContextConstructionRequest, ContextConstructionSettlement, ContextConstructionSource,
-    ContextId, ContextJoin, ContextNativeRequest, ContextNavigationRequest,
-    ContextNavigationSettlement, ContextNavigationTarget, ContextOperationJoin,
-    ContextOperationKind, ContextOwnedViewport, ContextProfileLease, ContextProfileLeasePurpose,
-    ContextProfileStorageClass, ContextTransitionRequest, ContextTransitionSettlement, FrameId,
-    SemanticFrameTrust, SemanticInvocationId, SemanticRuntimePortFailure,
-    SemanticRuntimeSettlement, SemanticScreenshotNativeCapture, SemanticScreenshotNativeFailure,
-    SemanticScreenshotRequestId, SemanticSnapshotGeneration, MAX_LIVE_CONTEXTS,
+    ContextId, ContextJoin, ContextNativeRequest, ContextNavigationRedirectPolicy,
+    ContextNavigationRequest, ContextNavigationSettlement, ContextNavigationTarget,
+    ContextOperationJoin, ContextOperationKind, ContextOwnedViewport, ContextProfileLease,
+    ContextProfileLeasePurpose, ContextProfileStorageClass, ContextTransitionRequest,
+    ContextTransitionSettlement, FrameId, SemanticFrameTrust, SemanticInvocationId,
+    SemanticRuntimePortFailure, SemanticRuntimeSettlement, SemanticScreenshotNativeCapture,
+    SemanticScreenshotNativeFailure, SemanticScreenshotRequestId, SemanticSnapshotGeneration,
+    MAX_LIVE_CONTEXTS,
 };
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use zephium_core::ports::engine::Partition;
@@ -123,6 +124,7 @@ impl AgentPendingScreenshot {
 struct AgentPendingNavigation {
     operation: ContextOperationJoin,
     target: ContextNavigationTarget,
+    redirect_policy: Option<ContextNavigationRedirectPolicy>,
     watchdog: crate::platform::imp::ContentPolicyTimeout,
     task: AgentContextTask,
 }
@@ -155,6 +157,7 @@ impl AgentPendingNavigation {
         let Self {
             operation,
             target: _,
+            redirect_policy: _,
             watchdog,
             task,
         } = self;
@@ -414,8 +417,20 @@ impl AgentOwnedContext {
 struct AgentPendingNavigation {
     operation: ContextOperationJoin,
     target: ContextNavigationTarget,
+    redirect_policy: Option<ContextNavigationRedirectPolicy>,
     watchdog: crate::platform::imp::ContentPolicyTimeout,
     task: AgentContextTask,
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+impl AgentPendingNavigation {
+    fn accepts_committed_target(&self, committed: &ContextNavigationTarget) -> bool {
+        committed == &self.target
+            || self
+                .redirect_policy
+                .as_ref()
+                .is_some_and(|policy| policy.allows(committed))
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -476,6 +491,7 @@ impl AgentPendingNavigation {
         let Self {
             operation,
             target: _,
+            redirect_policy: _,
             watchdog,
             task,
         } = self;
@@ -1740,6 +1756,7 @@ impl EngineHost {
         let requested = operation.context();
         let id = requested.identity().id();
         let target = request.target().clone();
+        let redirect_policy = request.redirect_policy().cloned();
         let Some((task, replacement_rejoined)) = self.admit_navigation_replacement_rejoin(
             task,
             requested,
@@ -1829,12 +1846,21 @@ impl EngineHost {
             task.refuse(ContextPortFailure::Stale);
             return;
         };
-        if binding
-            .view
-            .navigation()
-            .arm(operation, target.clone(), terminal_claimed.clone())
-            .is_err()
-        {
+        let armed = match redirect_policy.clone() {
+            Some(policy) => binding.view.navigation().arm_with_redirect_policy(
+                operation,
+                target.clone(),
+                policy,
+                terminal_claimed.clone(),
+            ),
+            None => {
+                binding
+                    .view
+                    .navigation()
+                    .arm(operation, target.clone(), terminal_claimed.clone())
+            }
+        };
+        if armed.is_err() {
             drop(watchdog);
             self.fail_agent_context_invariant(
                 "agent-context navigation gate retained a contradictory operation",
@@ -1845,6 +1871,7 @@ impl EngineHost {
         binding.pending_navigation = Some(AgentPendingNavigation {
             operation,
             target,
+            redirect_policy,
             watchdog,
             task,
         });
@@ -2244,7 +2271,7 @@ impl EngineHost {
             let mut invariant_failed = !binding.view.navigation().disarm(operation);
             let mut outcome = match outcome {
                 Ok(crate::platform::imp::AgentNavigationCommit::Web(committed))
-                    if committed == pending.target =>
+                    if pending.accepts_committed_target(&committed) =>
                 {
                     if !invariant_failed {
                         binding.committed_target = Some(committed.clone());
@@ -3212,6 +3239,7 @@ impl EngineHost {
         let requested = operation.context();
         let id = requested.identity().id();
         let target = request.target().clone();
+        let redirect_policy = request.redirect_policy().cloned();
         let Some((task, replacement_rejoined)) = self.admit_navigation_replacement_rejoin(
             task,
             requested,
@@ -3300,12 +3328,21 @@ impl EngineHost {
             task.refuse(ContextPortFailure::Stale);
             return;
         };
-        if binding
-            .view
-            .navigation()
-            .arm(operation, target.clone(), terminal_claimed.clone())
-            .is_err()
-        {
+        let armed = match redirect_policy.clone() {
+            Some(policy) => binding.view.navigation().arm_with_redirect_policy(
+                operation,
+                target.clone(),
+                policy,
+                terminal_claimed.clone(),
+            ),
+            None => {
+                binding
+                    .view
+                    .navigation()
+                    .arm(operation, target.clone(), terminal_claimed.clone())
+            }
+        };
+        if armed.is_err() {
             drop(watchdog);
             self.fail_agent_context_invariant(
                 "Windows agent navigation gate retained a contradictory operation",
@@ -3316,6 +3353,7 @@ impl EngineHost {
         binding.pending_navigation = Some(AgentPendingNavigation {
             operation,
             target,
+            redirect_policy,
             watchdog,
             task,
         });
@@ -4099,7 +4137,7 @@ impl EngineHost {
             let mut invariant_failed = !binding.view.navigation().disarm(operation);
             let mut outcome = match outcome {
                 Ok(crate::platform::imp::AgentNavigationCommit::Web(committed))
-                    if committed == pending.target =>
+                    if pending.accepts_committed_target(&committed) =>
                 {
                     if !invariant_failed {
                         binding.committed_target = Some(committed.clone());
@@ -5072,7 +5110,7 @@ mod tests {
             .find("schedule_content_policy_timeout(")
             .expect("watchdog");
         let native_gate = navigation
-            .find(".navigation()\n            .arm(")
+            .find("let armed = match redirect_policy.clone()")
             .expect("native gate");
         assert!(rejoin < rotate && rotate < watchdog && watchdog < native_gate);
     }

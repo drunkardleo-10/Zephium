@@ -7,9 +7,10 @@ renderer-loss detection, same-view recovery, explicit close, and resource
 accounting. The initial Windows selected-profile-to-automation-subprofile
 cookie transaction is now host-reachable under that feature, but all Windows
 behavior remains cross-compiled only. Same-document page-driven location
-replacement is bounded and host-reachable; redirects, cross-document
-page-driven navigation, presentation, borrowed/handoff native adapters, and
-named-device qualification remain pending.
+replacement and the bounded identity-bearing redirect contract are
+host-reachable. Native redirect qualification, cross-document page-driven
+navigation, presentation, borrowed/handoff native adapters, and named-device
+qualification remain pending.
 
 This evidence records code properties only. It does not claim that either
 owned native adapter has passed a live production-context qualification, or
@@ -282,16 +283,19 @@ synchronously unsupported. Owned construction:
 
 Navigation advances only the exact functional-core navigation/frame successor
 and retains its accepted port task until a native commit or closed refusal.
-macOS and Windows now use one shared navigation state machine rather than
-platform copies. The gate admits the canonical requested URL only: its construction-only
-`about:blank` permit is one-shot, and unarmed page navigation plus redirects
-remain denied until their policy contract is implemented. Commit and a
+macOS and Windows use one shared navigation state machine rather than platform
+copies. Exact-target/no-redirect remains the default. A request may instead
+carry a trusted-shell redirect scope containing at most eight canonical
+origins; the adapter then accepts at most eight redirect observations under
+the exact native navigation identity. The construction-only `about:blank`
+permit is one-shot, and unarmed page navigation remains denied. Commit and a
 30-second watchdog share one atomic terminal claim, so exactly one can enqueue
-the settlement. A committed native `NavigationId` retains one content-free
-`Finished` fact even after logical settlement; duplicate or post-failure
-completion is an invariant failure. This provides the same exact readiness
-evidence to both platform adapters without retaining a URL, page value, timer,
-or additional queue entry. One navigation-or-recovery page-load terminal and one
+the settlement. A committed native `NavigationId` and authoritative final
+target retain one content-free `Finished` fact even after logical settlement;
+duplicate, unobserved-target, over-limit, or post-failure completion is an
+invariant failure or closed refusal. This provides the same exact readiness
+evidence to both platform adapters without retaining a page value, timer, or
+additional queue entry. One navigation-or-recovery page-load terminal and one
 renderer loss can each contribute at most one callback per live context, so
 native callbacks own an independent fixed 16-entry host band; they cannot
 compete with the 16-entry request band.
@@ -406,9 +410,10 @@ provenance, and installation of the ordinary native content policy.
 The controller then enters only the private `ContextId` map; ordinary tab,
 session, stage, suspension, navigation-snapshot, and extension-principal maps
 remain untouched. Navigation uses the shared exact one-at-a-time state machine:
-one construction bootstrap, canonical target match,
-native Wry `NavigationId`, commit-or-timeout atomic claim, redirect denial,
-one post-settlement `Finished` fact, renderer-loss seal, and recovery-only rearm.
+one construction bootstrap, canonical initial-target match, native Wry
+`NavigationId`, bounded explicit redirect scope and hop count,
+commit-or-timeout atomic claim, authoritative final-target settlement, one
+post-settlement `Finished` fact, renderer-loss seal, and recovery-only rearm.
 Windows deadlines use at most 16
 fixed UI-thread `SetTimer` slots, allocate no worker, channel, or map, and have
 zero timer activity while idle. Native callbacks use the independently bounded
@@ -488,6 +493,12 @@ exclusivity, non-wrapping exhaustion, both registry ceilings, no-eviction
 pressure, terminal resource disposition, shutdown quiescence, closed native
 request classes, construction-proof compatibility, unsafe URL rejection,
 redacted debug output, and bounded/consistent native resource snapshots.
+Redirect tests additionally cover canonical/deduplicated/redacted origin
+scope, exact no-redirect defaults, wrong native identity, absent policy,
+same-origin and cross-origin permitted targets, opaque macOS redirect URLs,
+unobserved final-target substitution, the eight-hop ceiling, authoritative
+final settlement, and sign-in refresh preflight against the already-approved
+cookie-origin cohort.
 Profile-lease tests cover exact selection, kind compatibility, duplicate and
 capacity refusal without eviction, durable/ephemeral storage retention, stale-
 release rejection, deletion races, and shutdown quiescence.
@@ -561,8 +572,8 @@ the private committed target and emits the already-closed
 `ContextNativeEvent::NavigationReplaced` against the exact prior join. A
 cross-origin, malformed, missing, or bootstrap substitution stops loading and
 fail-stops the adapter; it is never interpreted as a redirect grant. Unarmed
-network navigation and redirects remain denied by the exact Wry navigation
-gate.
+network navigation and redirects without an explicit operation-local scope
+remain denied by the exact Wry navigation gate.
 
 The host holds the replacement until a later request proves the functional
 core's deterministic successor. Direct observation/screenshot/cookie work must
@@ -584,16 +595,61 @@ not rewrite or overtake the lifecycle settlement.
 
 This is unit, static-boundary, and macOS/Windows compile evidence. The new
 observer path has not yet received a dedicated physical same-document fixture
-qualification, and it does not promote redirect or presentation support.
+qualification, and it does not promote presentation support.
+
+## Bounded identity-bearing redirects
+
+`ContextNavigationRequest` remains exact and redirect-free unless the trusted
+shell attaches an immutable operation-local `ContextNavigationRedirectPolicy`.
+The policy stores one to eight sorted, unique `SemanticOrigin` values and has a
+redacted debug representation. It is a projection of already-approved run
+policy, not authority supplied by a model or page. The human sign-in refresh
+workflow preflights every redirect origin against its exact cookie-origin
+scope before it enters a pending state.
+
+The native controller first binds `Started` to the exact requested target and
+then accepts at most eight `Redirected` events carrying that same native
+navigation identity. Exact requests refuse even a redirect back to the same
+URL. A scoped request can settle only after at least one observed redirect and
+an authoritative `Committed` URL that is either the exact requested target or
+inside the retained origin scope. A changed commit without a preceding
+identity-bearing redirect is refused. The host retains and returns that actual
+final target, not the initially requested URL, and stops loading on every
+refusal.
+
+On WebView2, Wry obtains URI, `NavigationId`, and `IsRedirected` from one
+`NavigationStarting` callback and preserves the last admitted URI through
+commit and completion. On WebKit, intermediate redirect callbacks preserve
+the exact `WKNavigation` identity but intentionally report the registered
+initial URL; the authoritative destination is sampled from `WKWebView.URL` at
+commit. This is why the common controller treats redirect-event URL as a
+policy check but native identity, hop count, and final commit as the
+attribution proof. No public Wry API, model-facing JavaScript, selector, CDP
+surface, generic native bridge, worker, channel, or idle task was added.
+
+The synchronous engine URL policy refuses destinations outside the static
+scope when the platform exposes them. This is an acceptance, presentation,
+and settlement boundary, not a promise that a disallowed HTTP request emitted
+zero network traffic: Microsoft explicitly notes that the GET may already be
+in progress while `NavigationStarting` is handled. A rejected or over-limit
+navigation is stopped and never becomes an accepted context result
+([WebView2 navigation starting](https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2navigationstartingeventargs),
+[WebKit navigation action](https://developer.apple.com/documentation/webkit/wknavigationaction)).
+
+The loopback fixture now contains a fixed relative two-hop redirect chain and
+a fixed two-node loop, with no caller-selected `Location` value. Unit tests
+and the release-boundary mutation gate cover the contract. Neither native
+adapter has yet run that fixture on a physical named-device qualification, so
+this evidence makes no runtime redirect-support claim.
 
 ## Remaining M2 work
 
 1. physically qualify Windows owned construction, selected/subprofile
    inventory, hidden/focus state, navigation, loss, close, debt, and shutdown
    on an explicitly authorized named Windows device/runtime;
-2. physically qualify the bounded same-document replacement observer, add an
-   identity-bearing redirect policy/observation contract, and add presentation
-   only with a dedicated non-overlapping Work surface owner;
+2. physically qualify the bounded same-document replacement observer and the
+   fixed redirect-chain/loop contract, then add presentation only with a
+   dedicated non-overlapping Work surface owner;
 3. physically qualify the bounded selected-profile Windows cookie transaction
    and its partial-cleanup/quarantine behavior, then add native
    borrowed/handoff source transactions without changing ordinary extension

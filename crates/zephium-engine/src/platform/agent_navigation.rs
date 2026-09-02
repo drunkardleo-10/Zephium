@@ -11,7 +11,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use zephium_agentic::{
-    ContextNavigationTarget, ContextOperationJoin, ContextOperationKind, ContextPortFailure,
+    ContextNavigationRedirectPolicy, ContextNavigationTarget, ContextOperationJoin,
+    ContextOperationKind, ContextPortFailure, MAX_CONTEXT_NAVIGATION_REDIRECTS,
 };
 
 /// Closed committed target for one exact native page load.
@@ -252,6 +253,235 @@ mod tests {
             ))
             .expect("late failure")
             .is_none());
+    }
+
+    #[test]
+    fn redirect_scope_commits_the_authoritative_final_target_under_one_native_id() {
+        let gate = super::AgentNavigationController::default();
+        let operation = operation(zephium_agentic::ContextOperationKind::Navigate);
+        let requested = zephium_agentic::ContextNavigationTarget::parse("https://start.test/path")
+            .expect("requested");
+        let final_target =
+            zephium_agentic::ContextNavigationTarget::parse("https://final.test/landing")
+                .expect("final");
+        let policy = zephium_agentic::ContextNavigationRedirectPolicy::try_new(vec![
+            zephium_agentic::SemanticOrigin::parse("https://final.test/").expect("origin"),
+        ])
+        .expect("policy");
+        gate.arm_with_redirect_policy(
+            operation,
+            requested.clone(),
+            policy,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect("arm");
+
+        assert!(gate.allows(requested.as_url().as_str()));
+        assert!(gate.allows(final_target.as_url().as_str()));
+        assert!(!gate.allows("https://outside.test/"));
+        gate.observe(event(
+            81,
+            wry::NavigationEventPhase::Started,
+            requested.as_url().as_str(),
+        ))
+        .expect("start");
+        assert!(gate
+            .observe(event(
+                81,
+                wry::NavigationEventPhase::Redirected,
+                final_target.as_url().as_str(),
+            ))
+            .expect("redirect")
+            .is_none());
+        let terminal = gate
+            .observe(event(
+                81,
+                wry::NavigationEventPhase::Committed,
+                final_target.as_url().as_str(),
+            ))
+            .expect("commit")
+            .expect("terminal");
+        assert_eq!(
+            terminal.into_outcome(),
+            Ok(super::AgentNavigationCommit::Web(final_target.clone()))
+        );
+        assert!(gate.disarm(operation));
+        gate.observe(event(
+            81,
+            wry::NavigationEventPhase::Finished,
+            final_target.as_url().as_str(),
+        ))
+        .expect("finished");
+        assert_eq!(gate.document_finished_for_audit(operation), Some(true));
+    }
+
+    #[test]
+    fn macos_style_redirect_observations_use_identity_and_final_commit_url() {
+        let gate = super::AgentNavigationController::default();
+        let operation = operation(zephium_agentic::ContextOperationKind::Navigate);
+        let requested = zephium_agentic::ContextNavigationTarget::parse("https://start.test/path")
+            .expect("requested");
+        let final_target =
+            zephium_agentic::ContextNavigationTarget::parse("https://final.test/landing")
+                .expect("final");
+        let policy = zephium_agentic::ContextNavigationRedirectPolicy::try_new(vec![
+            zephium_agentic::SemanticOrigin::parse("https://final.test/").expect("origin"),
+        ])
+        .expect("policy");
+        gate.arm_with_redirect_policy(
+            operation,
+            requested.clone(),
+            policy,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect("arm");
+        gate.observe(event(
+            82,
+            wry::NavigationEventPhase::Started,
+            requested.as_url().as_str(),
+        ))
+        .expect("start");
+        for _ in 0..2 {
+            assert!(gate
+                .observe(event(
+                    82,
+                    wry::NavigationEventPhase::Redirected,
+                    requested.as_url().as_str(),
+                ))
+                .expect("opaque redirect")
+                .is_none());
+        }
+        let terminal = gate
+            .observe(event(
+                82,
+                wry::NavigationEventPhase::Committed,
+                final_target.as_url().as_str(),
+            ))
+            .expect("commit")
+            .expect("terminal");
+        assert_eq!(
+            terminal.into_outcome(),
+            Ok(super::AgentNavigationCommit::Web(final_target))
+        );
+    }
+
+    #[test]
+    fn redirect_without_scope_or_beyond_hard_limit_is_refused_once() {
+        let gate = super::AgentNavigationController::default();
+        let exact_operation = operation(zephium_agentic::ContextOperationKind::Navigate);
+        let target = zephium_agentic::ContextNavigationTarget::parse("https://example.test/start")
+            .expect("target");
+        gate.arm(
+            exact_operation,
+            target.clone(),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect("arm");
+        gate.observe(event(
+            83,
+            wry::NavigationEventPhase::Started,
+            target.as_url().as_str(),
+        ))
+        .expect("start");
+        let refusal = gate
+            .observe(event(
+                83,
+                wry::NavigationEventPhase::Redirected,
+                target.as_url().as_str(),
+            ))
+            .expect("redirect")
+            .expect("terminal");
+        assert_eq!(
+            refusal.into_outcome(),
+            Err(zephium_agentic::ContextPortFailure::NativeRefused)
+        );
+        assert!(gate
+            .observe(event(
+                83,
+                wry::NavigationEventPhase::Committed,
+                target.as_url().as_str(),
+            ))
+            .expect("late commit")
+            .is_none());
+        assert!(gate.disarm(exact_operation));
+
+        let bounded = super::AgentNavigationController::default();
+        let bounded_operation = operation(zephium_agentic::ContextOperationKind::Navigate);
+        let policy =
+            zephium_agentic::ContextNavigationRedirectPolicy::same_origin(&target).expect("policy");
+        bounded
+            .arm_with_redirect_policy(
+                bounded_operation,
+                target.clone(),
+                policy,
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect("bounded arm");
+        bounded
+            .observe(event(
+                84,
+                wry::NavigationEventPhase::Started,
+                target.as_url().as_str(),
+            ))
+            .expect("bounded start");
+        for hop in 0..zephium_agentic::MAX_CONTEXT_NAVIGATION_REDIRECTS {
+            assert!(bounded
+                .observe(event(
+                    84,
+                    wry::NavigationEventPhase::Redirected,
+                    &format!("https://example.test/hop-{hop}"),
+                ))
+                .expect("bounded redirect")
+                .is_none());
+        }
+        let overflow = bounded
+            .observe(event(
+                84,
+                wry::NavigationEventPhase::Redirected,
+                "https://example.test/overflow",
+            ))
+            .expect("overflow")
+            .expect("overflow terminal");
+        assert_eq!(
+            overflow.into_outcome(),
+            Err(zephium_agentic::ContextPortFailure::NativeRefused)
+        );
+    }
+
+    #[test]
+    fn changed_commit_without_identity_bearing_redirect_is_refused() {
+        let gate = super::AgentNavigationController::default();
+        let operation = operation(zephium_agentic::ContextOperationKind::Navigate);
+        let requested =
+            zephium_agentic::ContextNavigationTarget::parse("https://example.test/start")
+                .expect("requested");
+        let policy = zephium_agentic::ContextNavigationRedirectPolicy::same_origin(&requested)
+            .expect("policy");
+        gate.arm_with_redirect_policy(
+            operation,
+            requested.clone(),
+            policy,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect("arm");
+        gate.observe(event(
+            85,
+            wry::NavigationEventPhase::Started,
+            requested.as_url().as_str(),
+        ))
+        .expect("start");
+        let terminal = gate
+            .observe(event(
+                85,
+                wry::NavigationEventPhase::Committed,
+                "https://example.test/unobserved",
+            ))
+            .expect("commit")
+            .expect("terminal");
+        assert_eq!(
+            terminal.into_outcome(),
+            Err(zephium_agentic::ContextPortFailure::NativeRefused)
+        );
     }
 
     #[test]
@@ -503,30 +733,84 @@ mod tests {
 
 #[derive(Clone)]
 enum AgentLoadExpectation {
-    Web(ContextNavigationTarget),
+    Web {
+        requested: ContextNavigationTarget,
+        redirects: Option<ContextNavigationRedirectPolicy>,
+    },
     Bootstrap,
 }
 
 impl AgentLoadExpectation {
-    fn matches(&self, candidate: &str) -> bool {
+    fn matches_initial(&self, candidate: &str) -> bool {
         match self {
-            Self::Web(expected) => ContextNavigationTarget::parse(candidate)
+            Self::Web { requested, .. } => ContextNavigationTarget::parse(candidate)
                 .ok()
-                .is_some_and(|candidate| candidate == *expected),
+                .is_some_and(|candidate| candidate == *requested),
             Self::Bootstrap => candidate == "about:blank",
         }
     }
 
-    fn commit(&self, candidate: &str) -> Result<AgentNavigationCommit, ContextPortFailure> {
+    fn allows(&self, candidate: &str) -> bool {
         match self {
-            Self::Web(expected) => ContextNavigationTarget::parse(candidate)
+            Self::Web {
+                requested,
+                redirects,
+            } => ContextNavigationTarget::parse(candidate)
                 .ok()
-                .filter(|candidate| candidate == expected)
-                .map(AgentNavigationCommit::Web)
-                .ok_or(ContextPortFailure::NativeRefused),
+                .is_some_and(|candidate| {
+                    candidate == *requested
+                        || redirects
+                            .as_ref()
+                            .is_some_and(|policy| policy.allows(&candidate))
+                }),
+            Self::Bootstrap => candidate == "about:blank",
+        }
+    }
+
+    fn allows_observed_redirect(&self, candidate: &str) -> bool {
+        match self {
+            Self::Web {
+                requested,
+                redirects: Some(redirects),
+            } => ContextNavigationTarget::parse(candidate)
+                .ok()
+                .is_some_and(|candidate| candidate == *requested || redirects.allows(&candidate)),
+            Self::Web {
+                redirects: None, ..
+            }
+            | Self::Bootstrap => false,
+        }
+    }
+
+    fn commit(
+        &self,
+        candidate: &str,
+        redirects_observed: usize,
+    ) -> Result<AgentNavigationCommit, ContextPortFailure> {
+        match self {
+            Self::Web {
+                requested,
+                redirects,
+            } => {
+                let candidate = ContextNavigationTarget::parse(candidate)
+                    .map_err(|_| ContextPortFailure::NativeRefused)?;
+                let exact_without_redirect = redirects_observed == 0 && candidate == *requested;
+                let allowed_redirect = redirects_observed > 0
+                    && (candidate == *requested
+                        || redirects
+                            .as_ref()
+                            .is_some_and(|policy| policy.allows(&candidate)));
+                (exact_without_redirect || allowed_redirect)
+                    .then_some(AgentNavigationCommit::Web(candidate))
+                    .ok_or(ContextPortFailure::NativeRefused)
+            }
             Self::Bootstrap if candidate == "about:blank" => Ok(AgentNavigationCommit::Bootstrap),
             Self::Bootstrap => Err(ContextPortFailure::NativeRefused),
         }
+    }
+
+    const fn is_web(&self) -> bool {
+        matches!(self, Self::Web { .. })
     }
 }
 
@@ -536,6 +820,8 @@ struct AgentNavigationArm {
     terminal_claimed: Arc<AtomicBool>,
     native_id: Option<wry::NavigationId>,
     committed: bool,
+    committed_target: Option<ContextNavigationTarget>,
+    redirects_observed: usize,
     finished: bool,
 }
 
@@ -580,8 +866,9 @@ impl Default for AgentNavigationState {
 ///
 /// Unarmed page navigation is denied. The one bootstrap `about:blank` permit
 /// exists solely for construction and is permanently consumed or sealed by
-/// the first shell arm. Redirects are deliberately denied until the policy
-/// port can authorize their exact destination.
+/// the first shell arm. Redirects remain denied by default; an explicit
+/// trusted-shell scope admits only bounded destinations while native event
+/// identity and hop observations retain attribution authority.
 #[derive(Clone, Default)]
 pub(crate) struct AgentNavigationController {
     state: Arc<Mutex<AgentNavigationState>>,
@@ -599,7 +886,32 @@ impl AgentNavigationController {
         }
         self.arm_exact(
             operation,
-            AgentLoadExpectation::Web(target),
+            AgentLoadExpectation::Web {
+                requested: target,
+                redirects: None,
+            },
+            terminal_claimed,
+            false,
+        )
+    }
+
+    /// Arms one navigation with immutable trusted-shell redirect authority.
+    pub(crate) fn arm_with_redirect_policy(
+        &self,
+        operation: ContextOperationJoin,
+        target: ContextNavigationTarget,
+        redirects: ContextNavigationRedirectPolicy,
+        terminal_claimed: Arc<AtomicBool>,
+    ) -> Result<(), ()> {
+        if operation.kind() != ContextOperationKind::Navigate {
+            return Err(());
+        }
+        self.arm_exact(
+            operation,
+            AgentLoadExpectation::Web {
+                requested: target,
+                redirects: Some(redirects),
+            },
             terminal_claimed,
             false,
         )
@@ -617,7 +929,12 @@ impl AgentNavigationController {
         }
         self.arm_exact(
             operation,
-            target.map_or(AgentLoadExpectation::Bootstrap, AgentLoadExpectation::Web),
+            target.map_or(AgentLoadExpectation::Bootstrap, |requested| {
+                AgentLoadExpectation::Web {
+                    requested,
+                    redirects: None,
+                }
+            }),
             terminal_claimed,
             true,
         )
@@ -654,6 +971,8 @@ impl AgentNavigationController {
             terminal_claimed,
             native_id: None,
             committed: false,
+            committed_target: None,
+            redirects_observed: 0,
             finished: false,
         });
         Ok(())
@@ -676,7 +995,7 @@ impl AgentNavigationController {
             operation,
             native_id,
             finished: armed.finished,
-            observes_web_location: matches!(armed.expected, AgentLoadExpectation::Web(_)),
+            observes_web_location: armed.expected.is_web(),
         });
         true
     }
@@ -702,7 +1021,7 @@ impl AgentNavigationController {
                 operation,
                 native_id,
                 finished: armed.finished,
-                observes_web_location: matches!(armed.expected, AgentLoadExpectation::Web(_)),
+                observes_web_location: armed.expected.is_web(),
             })
         } else {
             None
@@ -727,7 +1046,7 @@ impl AgentNavigationController {
             if armed.terminal_claimed.load(Ordering::Acquire) {
                 return false;
             }
-            return armed.expected.matches(candidate);
+            return armed.expected.allows(candidate);
         }
         if state.bootstrap_available && candidate == "about:blank" {
             state.bootstrap_available = false;
@@ -800,18 +1119,52 @@ impl AgentNavigationController {
             };
         };
         if event.phase == wry::NavigationEventPhase::Started {
-            let matches_target = armed.expected.matches(&event.url);
+            let matches_target = armed.expected.matches_initial(&event.url);
             if matches_target && armed.native_id.is_none() {
                 armed.native_id = Some(event.id);
             }
             return Ok(AgentNavigationObservation::none());
         }
+        if event.phase == wry::NavigationEventPhase::Redirected {
+            if armed.native_id != Some(event.id) {
+                return Ok(AgentNavigationObservation::none());
+            }
+            let redirect_is_allowed = !armed.committed
+                && armed.redirects_observed < MAX_CONTEXT_NAVIGATION_REDIRECTS
+                && armed.expected.allows_observed_redirect(&event.url);
+            if redirect_is_allowed {
+                armed.redirects_observed += 1;
+                return Ok(AgentNavigationObservation::none());
+            }
+            if armed
+                .terminal_claimed
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+            {
+                return Ok(AgentNavigationObservation::none());
+            }
+            return Ok(AgentNavigationObservation::terminal(
+                false,
+                AgentNavigationTerminal {
+                    operation: armed.operation,
+                    outcome: Err(ContextPortFailure::NativeRefused),
+                },
+            ));
+        }
         if event.phase == wry::NavigationEventPhase::Finished && armed.native_id == Some(event.id) {
-            if !armed.committed || !armed.expected.matches(&event.url) || armed.finished {
+            let matches_committed = armed.committed_target.as_ref().map_or_else(
+                || event.url == "about:blank",
+                |target| {
+                    ContextNavigationTarget::parse(&event.url)
+                        .ok()
+                        .is_some_and(|candidate| candidate == *target)
+                },
+            );
+            if !armed.committed || !matches_committed || armed.finished {
                 return Err(());
             }
             armed.finished = true;
-            state.location_ready = matches!(armed.expected, AgentLoadExpectation::Web(_));
+            state.location_ready = armed.expected.is_web();
             if state.location_ready
                 && state.location_dirty
                 && !state.location_callback_pending
@@ -840,7 +1193,9 @@ impl AgentNavigationController {
         let operation = armed.operation;
         let expected = armed.expected.clone();
         let outcome = match event.phase {
-            wry::NavigationEventPhase::Committed => expected.commit(&event.url),
+            wry::NavigationEventPhase::Committed => {
+                expected.commit(&event.url, armed.redirects_observed)
+            }
             wry::NavigationEventPhase::Failed => Err(ContextPortFailure::NativeRefused),
             wry::NavigationEventPhase::Started
             | wry::NavigationEventPhase::Redirected
@@ -848,6 +1203,10 @@ impl AgentNavigationController {
         };
         let document_committed = outcome.is_ok();
         armed.committed = document_committed;
+        armed.committed_target = match &outcome {
+            Ok(AgentNavigationCommit::Web(target)) => Some(target.clone()),
+            Ok(AgentNavigationCommit::Bootstrap) | Err(_) => None,
+        };
         Ok(AgentNavigationObservation::terminal(
             document_committed,
             AgentNavigationTerminal { operation, outcome },
@@ -880,12 +1239,14 @@ impl AgentNavigationController {
             return Ok(false);
         }
         if !state.location_ready {
-            let committed_web_document = state.armed.as_ref().is_some_and(|armed| {
-                armed.committed && matches!(armed.expected, AgentLoadExpectation::Web(_))
-            }) || state
-                .last_committed
+            let committed_web_document = state
+                .armed
                 .as_ref()
-                .is_some_and(|committed| committed.observes_web_location);
+                .is_some_and(|armed| armed.committed && armed.expected.is_web())
+                || state
+                    .last_committed
+                    .as_ref()
+                    .is_some_and(|committed| committed.observes_web_location);
             state.location_dirty |= committed_web_document;
             return Ok(false);
         }

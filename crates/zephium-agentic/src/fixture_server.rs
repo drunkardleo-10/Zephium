@@ -66,6 +66,16 @@ pub enum FixtureRoute {
     SemanticRuntimeEventFlood,
     /// Same-document mutation and stale-anchor qualification fixture.
     SemanticRuntimeMutation,
+    /// First hop of the fixed same-origin semantic redirect chain.
+    SemanticRedirectStart,
+    /// Intermediate hop of the fixed same-origin semantic redirect chain.
+    SemanticRedirectHop,
+    /// Final document of the fixed same-origin semantic redirect chain.
+    SemanticRedirectFinal,
+    /// First half of the fixed redirect loop used to prove hop refusal.
+    SemanticRedirectLoopA,
+    /// Second half of the fixed redirect loop used to prove hop refusal.
+    SemanticRedirectLoopB,
 }
 
 impl FixtureRoute {
@@ -78,6 +88,11 @@ impl FixtureRoute {
             Self::SemanticRuntimeReplacement => "/semantic-runtime-replacement-v1.html",
             Self::SemanticRuntimeEventFlood => "/semantic-runtime-event-flood-v1.html",
             Self::SemanticRuntimeMutation => "/semantic-runtime-mutation-v1.html",
+            Self::SemanticRedirectStart => "/semantic-redirect-start-v1",
+            Self::SemanticRedirectHop => "/semantic-redirect-hop-v1",
+            Self::SemanticRedirectFinal => "/semantic-redirect-final-v1.html",
+            Self::SemanticRedirectLoopA => "/semantic-redirect-loop-a-v1",
+            Self::SemanticRedirectLoopB => "/semantic-redirect-loop-b-v1",
         }
     }
 }
@@ -399,6 +414,21 @@ fn handle(
         }
         return Ok(());
     }
+    let redirect = if is_fixed_get_request(first_line, FixtureRoute::SemanticRedirectStart.path()) {
+        Some(FixtureRoute::SemanticRedirectHop)
+    } else if is_fixed_get_request(first_line, FixtureRoute::SemanticRedirectHop.path()) {
+        Some(FixtureRoute::SemanticRedirectFinal)
+    } else if is_fixed_get_request(first_line, FixtureRoute::SemanticRedirectLoopA.path()) {
+        Some(FixtureRoute::SemanticRedirectLoopB)
+    } else if is_fixed_get_request(first_line, FixtureRoute::SemanticRedirectLoopB.path()) {
+        Some(FixtureRoute::SemanticRedirectLoopA)
+    } else {
+        None
+    };
+    if let Some(location) = redirect {
+        write_redirect(&mut stream, location)?;
+        return Ok(());
+    }
     let (status, content_type, body, script_policy) = match first_line {
         line if is_native_input_request(line) => (
             200,
@@ -444,6 +474,13 @@ fn handle(
             "text/html; charset=utf-8",
             SEMANTIC_RUNTIME_MUTATION_HTML.as_bytes(),
             FixtureScriptPolicy::SameOrigin,
+        ),
+        b"GET /semantic-redirect-final-v1.html HTTP/1.1"
+        | b"GET /semantic-redirect-final-v1.html HTTP/1.0" => (
+            200,
+            "text/html; charset=utf-8",
+            SEMANTIC_RUNTIME_HTML.as_bytes(),
+            FixtureScriptPolicy::InlineOnly,
         ),
         b"GET /favicon.ico HTTP/1.1" | b"GET /favicon.ico HTTP/1.0" => (
             204,
@@ -563,6 +600,15 @@ fn write_response(
         body,
         FixtureScriptPolicy::InlineOnly,
     )
+}
+
+fn write_redirect(stream: &mut TcpStream, destination: FixtureRoute) -> Result<(), std::io::Error> {
+    let location = destination.path();
+    let header = format!(
+        "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'none'\r\n\r\n"
+    );
+    stream.write_all(header.as_bytes())?;
+    stream.flush()
 }
 
 #[derive(Clone, Copy)]
@@ -1102,6 +1148,40 @@ mod tests {
         assert!(mutation.starts_with("HTTP/1.1 200 OK"));
         assert!(mutation.contains("Transient mutation anchor"));
         assert!(mutation.contains(SEMANTIC_MUTATION_TRIGGER_PATH));
+        assert!(server.is_healthy());
+        server.shutdown().expect("clean shutdown");
+    }
+
+    #[test]
+    fn semantic_redirect_routes_are_fixed_relative_and_bounded() {
+        let server = FixtureServer::start().expect("server");
+        for (source, destination) in [
+            (
+                FixtureRoute::SemanticRedirectStart,
+                FixtureRoute::SemanticRedirectHop,
+            ),
+            (
+                FixtureRoute::SemanticRedirectHop,
+                FixtureRoute::SemanticRedirectFinal,
+            ),
+            (
+                FixtureRoute::SemanticRedirectLoopA,
+                FixtureRoute::SemanticRedirectLoopB,
+            ),
+            (
+                FixtureRoute::SemanticRedirectLoopB,
+                FixtureRoute::SemanticRedirectLoopA,
+            ),
+        ] {
+            let response = fetch(&server, source);
+            assert!(response.starts_with("HTTP/1.1 302 Found\r\n"));
+            assert!(response.contains(&format!("\r\nLocation: {}\r\n", destination.path())));
+            assert!(!response.contains("Location: http"));
+            assert!(response.ends_with("\r\n\r\n"));
+        }
+        let final_document = fetch(&server, FixtureRoute::SemanticRedirectFinal);
+        assert!(final_document.starts_with("HTTP/1.1 200 OK"));
+        assert!(final_document.contains("Page bridge absent"));
         assert!(server.is_healthy());
         server.shutdown().expect("clean shutdown");
     }

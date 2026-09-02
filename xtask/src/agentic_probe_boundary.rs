@@ -385,6 +385,12 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         &read(repository.join(ENGINE_MACOS_AGENT_CONTEXT))?,
         &read(repository.join(ENGINE_AGENT_NAVIGATION))?,
     )?;
+    validate_engine_agent_redirect_contract(
+        &read(repository.join(AGENTIC_CONTEXT_PORT))?,
+        &read(repository.join(ENGINE_AGENT_CONTEXT_HOST))?,
+        &read(repository.join(ENGINE_AGENT_NAVIGATION))?,
+        &read(repository.join(AGENTIC_FIXTURE_SERVER))?,
+    )?;
     validate_engine_agent_cookie_preflight(&read(repository.join(ENGINE_AGENT_COOKIE_PREFLIGHT))?)?;
     validate_agent_context_shutdown_barrier_contract(
         &read(repository.join(AGENTIC_CONTEXT_PORT))?,
@@ -873,6 +879,118 @@ fn validate_engine_agent_context_boundary(
                     "production agent-context {label} acquired forbidden surface {forbidden}"
                 ));
             }
+        }
+    }
+    Ok(())
+}
+
+fn validate_engine_agent_redirect_contract(
+    domain: &str,
+    host: &str,
+    navigation: &str,
+    fixture: &str,
+) -> Result<(), String> {
+    let domain = compact(domain);
+    for required in [
+        "pubconstMAX_CONTEXT_NAVIGATION_REDIRECT_ORIGINS:usize=8;",
+        "pubconstMAX_CONTEXT_NAVIGATION_REDIRECTS:usize=8;",
+        "pubstructContextNavigationRedirectPolicy{allowed_origins:Vec<SemanticOrigin>,}",
+        "ifallowed_origins.is_empty()",
+        "ifallowed_origins.len()>MAX_CONTEXT_NAVIGATION_REDIRECT_ORIGINS",
+        "allowed_origins.sort();",
+        "allowed_origins.windows(2).any(|pair|pair[0]==pair[1])",
+        "redirect_policy:Option<ContextNavigationRedirectPolicy>",
+        "redirect_policy:None",
+        "pubfntry_new_with_redirect_policy(",
+        "pubfnallows_redirect_target(",
+    ] {
+        if !domain.contains(required) {
+            return Err(format!(
+                "agent navigation redirect domain lost bounded authority {required}"
+            ));
+        }
+    }
+    for forbidden in ["Vec<String>", "HashMap", "VecDeque", "unsafe{"] {
+        if domain.contains(forbidden) {
+            return Err(format!(
+                "agent navigation redirect domain acquired forbidden state {forbidden}"
+            ));
+        }
+    }
+
+    let navigation = compact(navigation);
+    for required in [
+        "redirects_observed:usize",
+        "fnarm_with_redirect_policy(",
+        "NavigationEventPhase::Redirected",
+        "ifarmed.native_id!=Some(event.id)",
+        "armed.redirects_observed<MAX_CONTEXT_NAVIGATION_REDIRECTS",
+        "armed.expected.allows_observed_redirect(&event.url)",
+        "armed.redirects_observed+=1;",
+        "expected.commit(&event.url,armed.redirects_observed)",
+        "outcome:Err(ContextPortFailure::NativeRefused)",
+    ] {
+        if !navigation.contains(required) {
+            return Err(format!(
+                "agent navigation redirect gate lost identity/bound check {required}"
+            ));
+        }
+    }
+    for forbidden in ["HashMap", "VecDeque", "thread::spawn", "channel("] {
+        if navigation.contains(forbidden) {
+            return Err(format!(
+                "agent navigation redirect gate acquired unbounded work {forbidden}"
+            ));
+        }
+    }
+
+    let host = compact(host);
+    for required in [
+        "letredirect_policy=request.redirect_policy().cloned();",
+        "Some(policy)=>binding.view.navigation().arm_with_redirect_policy(",
+        "redirect_policy,watchdog,task,",
+        "pending.accepts_committed_target(&committed)",
+        "ifoutcome.is_err(){crate::platform::imp::stop_loading(binding.view.view());}",
+    ] {
+        if !host.contains(required) {
+            return Err(format!(
+                "agent navigation redirect host lost settlement obligation {required}"
+            ));
+        }
+    }
+    if host
+        .matches("letredirect_policy=request.redirect_policy().cloned();")
+        .count()
+        != 2
+        || host
+            .matches("pending.accepts_committed_target(&committed)")
+            .count()
+            != 2
+    {
+        return Err(
+            "agent navigation redirect contract must remain symmetric on macOS and Windows"
+                .to_owned(),
+        );
+    }
+
+    let fixture = compact(fixture);
+    for required in [
+        "Self::SemanticRedirectStart=>\"/semantic-redirect-start-v1\"",
+        "Self::SemanticRedirectHop=>\"/semantic-redirect-hop-v1\"",
+        "Self::SemanticRedirectFinal=>\"/semantic-redirect-final-v1.html\"",
+        "Self::SemanticRedirectLoopA=>\"/semantic-redirect-loop-a-v1\"",
+        "Self::SemanticRedirectLoopB=>\"/semantic-redirect-loop-b-v1\"",
+        "Some(FixtureRoute::SemanticRedirectHop)",
+        "Some(FixtureRoute::SemanticRedirectFinal)",
+        "Some(FixtureRoute::SemanticRedirectLoopB)",
+        "Some(FixtureRoute::SemanticRedirectLoopA)",
+        "fnwrite_redirect(stream:&mutTcpStream,destination:FixtureRoute)",
+        "Location:{location}\\r\\nContent-Length:0",
+    ] {
+        if !fixture.contains(required) {
+            return Err(format!(
+                "agent navigation redirect fixture lost closed route {required}"
+            ));
         }
     }
     Ok(())
@@ -9974,6 +10092,62 @@ mod tests {
             &page_world,
             windows,
             navigation,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn production_agent_redirects_are_scoped_bounded_and_identity_exact() {
+        let domain = include_str!("../../crates/zephium-agentic/src/context_port.rs");
+        let host = include_str!("../../crates/zephium-engine/src/host/agent_context.rs");
+        let navigation =
+            include_str!("../../crates/zephium-engine/src/platform/agent_navigation.rs");
+        let fixture = include_str!("../../crates/zephium-agentic/src/fixture_server.rs");
+        validate_engine_agent_redirect_contract(domain, host, navigation, fixture)
+            .expect("repository redirect contract");
+
+        assert!(validate_engine_agent_redirect_contract(
+            &domain.replace(
+                "allowed_origins: Vec<SemanticOrigin>",
+                "allowed_origins: Vec<String>"
+            ),
+            host,
+            navigation,
+            fixture,
+        )
+        .is_err());
+        assert!(validate_engine_agent_redirect_contract(
+            &domain.replace(
+                "MAX_CONTEXT_NAVIGATION_REDIRECTS: usize = 8",
+                "MAX_CONTEXT_NAVIGATION_REDIRECTS: usize = 9",
+            ),
+            host,
+            navigation,
+            fixture,
+        )
+        .is_err());
+        assert!(validate_engine_agent_redirect_contract(
+            domain,
+            host,
+            &navigation.replace(
+                "armed.native_id != Some(event.id)",
+                "armed.native_id == Some(event.id)",
+            ),
+            fixture,
+        )
+        .is_err());
+        assert!(validate_engine_agent_redirect_contract(
+            domain,
+            &host.replace("pending.accepts_committed_target(&committed)", "true",),
+            navigation,
+            fixture,
+        )
+        .is_err());
+        assert!(validate_engine_agent_redirect_contract(
+            domain,
+            host,
+            navigation,
+            &fixture.replace("destination: FixtureRoute", "destination: &str"),
         )
         .is_err());
     }

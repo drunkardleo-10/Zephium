@@ -473,6 +473,15 @@ impl ContextSignInHandoff {
         if !self.scope.origins().contains(&origin) {
             return Err(ContextSignInHandoffError::RefreshTarget);
         }
+        if request.redirect_policy().is_some_and(|policy| {
+            policy.allowed_origins().iter().any(|origin| {
+                ContextCookieOrigin::parse(origin.as_url().as_str())
+                    .ok()
+                    .is_none_or(|origin| !self.scope.origins().contains(&origin))
+            })
+        }) {
+            return Err(ContextSignInHandoffError::RefreshTarget);
+        }
         self.pending_operation = Some(request.operation());
         self.state = ContextSignInHandoffState::RefreshingOwned;
         Ok(())
@@ -1118,6 +1127,41 @@ mod tests {
         assert_eq!(
             fixture.workflow.state(),
             ContextSignInHandoffState::Blocked(ContextSignInHandoffBlocker::RefreshOutsideScope)
+        );
+    }
+
+    #[test]
+    fn refresh_rejects_redirect_origins_outside_cookie_scope_before_dispatch() {
+        let platform = ContextSignInHandoffPlatform::MacOsSharedProfile;
+        let mut fixture = fixture(platform);
+        construct_handoff(&mut fixture, platform);
+        perform_human_control(&mut fixture);
+        release_handoff(&mut fixture);
+        let owned = fixture.workflow.owned.identity().id();
+        let navigation = fixture
+            .registry
+            .begin_navigation(owned, operation(7))
+            .expect("navigation");
+        let requested =
+            ContextNavigationTarget::parse("https://example.test/account").expect("target");
+        let redirects =
+            crate::ContextNavigationRedirectPolicy::try_new(vec![crate::SemanticOrigin::parse(
+                "https://outside.test/",
+            )
+            .expect("origin")])
+            .expect("redirect policy");
+        let request = ContextNavigationRequest::try_new_with_redirect_policy(
+            navigation, requested, redirects,
+        )
+        .expect("request");
+
+        assert_eq!(
+            fixture.workflow.begin_owned_refresh(&request),
+            Err(ContextSignInHandoffError::RefreshTarget)
+        );
+        assert_eq!(
+            fixture.workflow.state(),
+            ContextSignInHandoffState::AwaitingOwnedRefresh
         );
     }
 

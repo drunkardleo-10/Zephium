@@ -14,9 +14,10 @@ use url::Url;
 use crate::{
     ContextCapabilities, ContextCookieTransferRequest, ContextCookieTransferSettlement,
     ContextJoin, ContextKind, ContextOperationJoin, ContextOperationKind, ContextProfileLease,
-    SemanticActionNativeRequest, SemanticActionNativeSettlement, SemanticRuntimeInvocation,
-    SemanticRuntimeSettlement, SemanticScreenshotNativeCapture, SemanticScreenshotNativeFailure,
-    SemanticScreenshotNativeRequest, MAX_LIVE_CONTEXTS, MAX_PENDING_SEMANTIC_SCREENSHOTS,
+    SemanticActionNativeRequest, SemanticActionNativeSettlement, SemanticOrigin,
+    SemanticRuntimeInvocation, SemanticRuntimeSettlement, SemanticScreenshotNativeCapture,
+    SemanticScreenshotNativeFailure, SemanticScreenshotNativeRequest, MAX_LIVE_CONTEXTS,
+    MAX_PENDING_SEMANTIC_SCREENSHOTS,
 };
 
 /// Maximum number of lifecycle tasks one native adapter may retain.
@@ -25,6 +26,15 @@ use crate::{
 /// context. The second cohort leaves room for cancellation and resource-audit
 /// work without creating an unbounded native queue.
 pub const MAX_PENDING_NATIVE_CONTEXT_TASKS: usize = MAX_LIVE_CONTEXTS * 2;
+
+/// Maximum canonical destination origins one navigation may authorize for redirects.
+///
+/// This is intentionally narrower than a complete run manifest. A shell must
+/// project only the origins needed by this exact navigation operation.
+pub const MAX_CONTEXT_NAVIGATION_REDIRECT_ORIGINS: usize = 8;
+
+/// Maximum server redirects one exact native navigation identity may follow.
+pub const MAX_CONTEXT_NAVIGATION_REDIRECTS: usize = 8;
 
 /// Fixed logical viewport for a run-owned browser context.
 ///
@@ -79,6 +89,15 @@ pub enum ContextPortContractError {
     /// The target is malformed or forbidden by the browser navigation gate.
     #[error("context navigation target is forbidden")]
     NavigationTarget,
+    /// A redirect policy did not name any destination origin.
+    #[error("context navigation redirect policy is empty")]
+    EmptyRedirectPolicy,
+    /// A redirect policy exceeded its fixed destination-origin ceiling.
+    #[error("context navigation redirect origin ceiling exceeded")]
+    RedirectOriginLimit,
+    /// A redirect policy repeated one canonical destination origin.
+    #[error("context navigation redirect policy contains a duplicate origin")]
+    DuplicateRedirectOrigin,
     /// One resource count exceeds its fixed process ceiling.
     #[error("native context resource ceiling exceeded")]
     ResourceLimit,
@@ -123,6 +142,70 @@ impl ContextNavigationTarget {
 impl fmt::Debug for ContextNavigationTarget {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("ContextNavigationTarget([redacted])")
+    }
+}
+
+/// Immutable bounded redirect authority for one exact navigation operation.
+///
+/// The trusted shell derives this allowlist from already-approved run policy;
+/// it is never supplied by page content or a model. The initial exact target
+/// remains separately bound by [`ContextNavigationRequest`]. This value grants
+/// only a possible redirect destination origin and never proves that a native
+/// redirect or commit belongs to the requested navigation identity.
+#[derive(Clone, Eq, PartialEq)]
+pub struct ContextNavigationRedirectPolicy {
+    allowed_origins: Vec<SemanticOrigin>,
+}
+
+impl ContextNavigationRedirectPolicy {
+    /// Constructs a canonical, nonempty redirect-origin allowlist.
+    pub fn try_new(
+        mut allowed_origins: Vec<SemanticOrigin>,
+    ) -> Result<Self, ContextPortContractError> {
+        if allowed_origins.is_empty() {
+            return Err(ContextPortContractError::EmptyRedirectPolicy);
+        }
+        if allowed_origins.len() > MAX_CONTEXT_NAVIGATION_REDIRECT_ORIGINS {
+            return Err(ContextPortContractError::RedirectOriginLimit);
+        }
+        allowed_origins.sort();
+        if allowed_origins.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(ContextPortContractError::DuplicateRedirectOrigin);
+        }
+        Ok(Self { allowed_origins })
+    }
+
+    /// Constructs a policy that permits redirects only within the target's origin.
+    pub fn same_origin(target: &ContextNavigationTarget) -> Result<Self, ContextPortContractError> {
+        let origin = SemanticOrigin::parse(target.as_url().as_str())
+            .map_err(|_| ContextPortContractError::NavigationTarget)?;
+        Self::try_new(vec![origin])
+    }
+
+    /// Checks one validated native destination against this immutable scope.
+    pub fn allows(&self, target: &ContextNavigationTarget) -> bool {
+        SemanticOrigin::parse(target.as_url().as_str())
+            .ok()
+            .is_some_and(|origin| self.allowed_origins.binary_search(&origin).is_ok())
+    }
+
+    /// Number of canonical origins retained by this operation-local scope.
+    pub fn origin_count(&self) -> usize {
+        self.allowed_origins.len()
+    }
+
+    /// Canonical destination origins retained by the trusted policy layer.
+    pub fn allowed_origins(&self) -> &[SemanticOrigin] {
+        &self.allowed_origins
+    }
+}
+
+impl fmt::Debug for ContextNavigationRedirectPolicy {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ContextNavigationRedirectPolicy")
+            .field("origin_count", &self.origin_count())
+            .finish()
     }
 }
 
@@ -270,6 +353,7 @@ impl fmt::Debug for ContextConstructionRequest {
 pub struct ContextNavigationRequest {
     operation: ContextOperationJoin,
     target: ContextNavigationTarget,
+    redirect_policy: Option<ContextNavigationRedirectPolicy>,
 }
 
 impl ContextNavigationRequest {
@@ -279,7 +363,25 @@ impl ContextNavigationRequest {
         target: ContextNavigationTarget,
     ) -> Result<Self, ContextPortContractError> {
         require_operation(operation, ContextOperationKind::Navigate)?;
-        Ok(Self { operation, target })
+        Ok(Self {
+            operation,
+            target,
+            redirect_policy: None,
+        })
+    }
+
+    /// Binds an exact target and immutable redirect scope to one navigation.
+    pub fn try_new_with_redirect_policy(
+        operation: ContextOperationJoin,
+        target: ContextNavigationTarget,
+        redirect_policy: ContextNavigationRedirectPolicy,
+    ) -> Result<Self, ContextPortContractError> {
+        require_operation(operation, ContextOperationKind::Navigate)?;
+        Ok(Self {
+            operation,
+            target,
+            redirect_policy: Some(redirect_policy),
+        })
     }
 
     /// Exact navigation operation and complete lifecycle join.
@@ -291,6 +393,21 @@ impl ContextNavigationRequest {
     pub const fn target(&self) -> &ContextNavigationTarget {
         &self.target
     }
+
+    /// Immutable redirect authority, or `None` when every redirect is denied.
+    pub const fn redirect_policy(&self) -> Option<&ContextNavigationRedirectPolicy> {
+        self.redirect_policy.as_ref()
+    }
+
+    /// Checks whether a validated target is a permitted redirect destination.
+    ///
+    /// This is only a policy fact. Native navigation identity and redirect
+    /// count still have to be proven by the platform adapter.
+    pub fn allows_redirect_target(&self, target: &ContextNavigationTarget) -> bool {
+        self.redirect_policy
+            .as_ref()
+            .is_some_and(|policy| policy.allows(target))
+    }
 }
 
 impl fmt::Debug for ContextNavigationRequest {
@@ -299,6 +416,7 @@ impl fmt::Debug for ContextNavigationRequest {
             .debug_struct("ContextNavigationRequest")
             .field("operation", &self.operation)
             .field("target", &self.target)
+            .field("redirect_policy", &self.redirect_policy)
             .finish()
     }
 }
@@ -1099,6 +1217,84 @@ mod tests {
             .expect("ordinary web target");
         assert_eq!(format!("{target:?}"), "ContextNavigationTarget([redacted])");
         assert!(!format!("{target:?}").contains("secret"));
+    }
+
+    #[test]
+    fn redirect_policy_is_canonical_bounded_and_redacted() {
+        let target = ContextNavigationTarget::parse("https://example.test/start?secret=value")
+            .expect("target");
+        let policy = ContextNavigationRedirectPolicy::same_origin(&target).expect("same origin");
+        assert!(policy
+            .allows(&ContextNavigationTarget::parse("https://example.test/final").expect("final")));
+        assert!(!policy.allows(
+            &ContextNavigationTarget::parse("http://example.test/final").expect("downgrade")
+        ));
+        assert_eq!(policy.origin_count(), 1);
+        assert_eq!(
+            format!("{policy:?}"),
+            "ContextNavigationRedirectPolicy { origin_count: 1 }"
+        );
+        assert!(!format!("{policy:?}").contains("secret"));
+
+        let first = SemanticOrigin::parse("https://first.test/").expect("first origin");
+        let second = SemanticOrigin::parse("https://second.test/").expect("second origin");
+        let forward = ContextNavigationRedirectPolicy::try_new(vec![first.clone(), second.clone()])
+            .expect("forward policy");
+        let reversed =
+            ContextNavigationRedirectPolicy::try_new(vec![second, first]).expect("reversed policy");
+        assert_eq!(forward, reversed);
+
+        assert_eq!(
+            ContextNavigationRedirectPolicy::try_new(Vec::new()),
+            Err(ContextPortContractError::EmptyRedirectPolicy)
+        );
+        let duplicate = SemanticOrigin::parse("https://duplicate.test/path").expect("origin");
+        assert_eq!(
+            ContextNavigationRedirectPolicy::try_new(vec![duplicate.clone(), duplicate]),
+            Err(ContextPortContractError::DuplicateRedirectOrigin)
+        );
+        let too_many = (0..=MAX_CONTEXT_NAVIGATION_REDIRECT_ORIGINS)
+            .map(|index| {
+                SemanticOrigin::parse(&format!("https://origin-{index}.test/")).expect("origin")
+            })
+            .collect();
+        assert_eq!(
+            ContextNavigationRedirectPolicy::try_new(too_many),
+            Err(ContextPortContractError::RedirectOriginLimit)
+        );
+    }
+
+    #[test]
+    fn navigation_request_keeps_redirect_authority_explicit() {
+        let mut registry = ready_owned();
+        let context = identity(10, ContextKind::Owned).id();
+        let navigation = registry
+            .begin_navigation(context, operation(2))
+            .expect("navigation");
+        let requested =
+            ContextNavigationTarget::parse("https://start.test/path").expect("requested");
+        let redirected =
+            ContextNavigationTarget::parse("https://final.test/path").expect("redirected");
+        let policy = ContextNavigationRedirectPolicy::try_new(vec![SemanticOrigin::parse(
+            "https://final.test/",
+        )
+        .expect("origin")])
+        .expect("policy");
+
+        let exact = ContextNavigationRequest::try_new(navigation, requested.clone())
+            .expect("exact request");
+        assert!(exact.redirect_policy().is_none());
+        assert!(!exact.allows_redirect_target(&redirected));
+
+        let scoped =
+            ContextNavigationRequest::try_new_with_redirect_policy(navigation, requested, policy)
+                .expect("redirect request");
+        assert_eq!(
+            scoped.redirect_policy().map(|value| value.origin_count()),
+            Some(1)
+        );
+        assert!(scoped.allows_redirect_target(&redirected));
+        assert!(!format!("{scoped:?}").contains("final.test"));
     }
 
     #[test]
