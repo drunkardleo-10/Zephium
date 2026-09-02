@@ -616,6 +616,14 @@ browser action, model call, tool call, data transfer, cost, or native resource.
   At most four admitted attempts exist. A slot is acquired before semantic
   disclosure commits, is released on every terminal path, and seals the shared
   transport if a committed attempt is abandoned.
+- A zero-active snapshot is explicitly `idle`, not terminal: admission remains
+  possible until the shared transport's cancellation/admission seal is set.
+  The transport can mint its move-only shutdown proof only from a sticky
+  sealed, exactly zero-active snapshot; pending attempts and open admission are
+  distinct refusals, and no shared clone can reopen a proved transport. The
+  proof owns no task, timer, content, credential, policy, usage, audit, or
+  native authority. The lifecycle must still terminally settle each provider
+  attempt's separately retained policy authority before claiming clean exit.
 - A committed attempt exposes only the content-free
   observation/read/extraction/screenshot proof retained by request admission
   and the fixed input metrics that crossed that same commit. The transport

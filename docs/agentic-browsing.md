@@ -767,6 +767,15 @@ classes before provider usage can reach pricing. Policy authority cannot be
 extracted or a completed call settled until the matching trusted pricing
 schedule supplies cost.
 
+An idle provider-transport snapshot is observational only because admission
+may still reopen it. Process shutdown first applies the transport's sticky
+cancellation/admission seal, settles every retained attempt and its separate
+policy authority, and then requests a constructor-closed shutdown proof from
+an exact sealed, zero-active snapshot. The nonblocking proof remains valid
+across shared transport clones because no operation can clear the seal; it owns
+no task, timer, provider content, credential, or settlement authority and does
+not substitute for provider usage, policy, audit, or native-resource drain.
+
 The fixed OpenAI and Anthropic builders accept token-admitted full-observation
 or bounded-read types. Committed admission retains a cloneable content-free
 proof beside move-only usage authority: a full observation can seed later diff

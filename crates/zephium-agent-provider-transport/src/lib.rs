@@ -49,6 +49,8 @@ pub const MAX_AGENT_PROVIDER_CONNECT_TIMEOUT_MILLIS: u64 = 30 * 1_000;
 pub const MAX_AGENT_PROVIDER_READ_TIMEOUT_MILLIS: u64 = 2 * 60 * 1_000;
 /// Maximum HTTP/2 response-header list bytes accepted from a provider.
 pub const MAX_AGENT_PROVIDER_RESPONSE_HEADER_BYTES: u32 = 64 * 1_024;
+/// Maximum byte width of one provider-transport shutdown proof.
+pub const MAX_AGENT_PROVIDER_TRANSPORT_SHUTDOWN_PROOF_BYTES: usize = 32;
 
 const OPENAI_RESPONSES_URL: &str = "https://api.openai.com/v1/responses";
 const ANTHROPIC_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
@@ -401,10 +403,64 @@ impl AgentProviderTransportSnapshot {
         MAX_AGENT_PROVIDER_TRANSPORT_CALLS
     }
 
-    /// Whether shutdown has drained every admitted attempt.
-    pub const fn is_quiescent(self) -> bool {
+    /// Whether no provider attempt is currently admitted.
+    ///
+    /// Idle is observational only: new admission remains possible until the
+    /// transport is sealed and therefore cannot prove shutdown quiescence.
+    pub const fn is_idle(self) -> bool {
         self.active == 0
     }
+
+    /// Whether sticky shutdown admission and every admitted attempt are drained.
+    pub const fn is_quiescent(self) -> bool {
+        self.sealed && self.active == 0
+    }
+}
+
+/// Constructor-closed evidence of one permanently sealed, idle transport.
+///
+/// The proof is process-local and non-authorizing. It does not prove policy
+/// settlement, provider usage accounting, durable audit delivery, or native
+/// browser drain.
+#[must_use]
+pub struct AgentProviderTransportShutdownProof {
+    snapshot: AgentProviderTransportSnapshot,
+}
+
+impl AgentProviderTransportShutdownProof {
+    /// Exact sealed, zero-active snapshot admitted by the constructor.
+    pub const fn snapshot(&self) -> AgentProviderTransportSnapshot {
+        self.snapshot
+    }
+}
+
+impl fmt::Debug for AgentProviderTransportShutdownProof {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentProviderTransportShutdownProof")
+            .field("sealed", &self.snapshot.is_sealed())
+            .field("active_attempts", &self.snapshot.active_attempts())
+            .finish()
+    }
+}
+
+const _: () = assert!(
+    std::mem::size_of::<AgentProviderTransportShutdownProof>()
+        <= MAX_AGENT_PROVIDER_TRANSPORT_SHUTDOWN_PROOF_BYTES
+);
+
+/// Closed refusal to prove terminal provider-transport drain.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum AgentProviderTransportShutdownError {
+    /// Shared transport state could not be read safely.
+    #[error("agent provider transport shutdown state is unavailable")]
+    State,
+    /// Provider admission has not been permanently sealed.
+    #[error("agent provider transport is not sealed for shutdown")]
+    Unsealed,
+    /// At least one admitted provider attempt still owns its slot.
+    #[error("agent provider transport shutdown still has active attempts")]
+    Pending,
 }
 
 /// Failure to read or mutate transport resource state safely.
@@ -507,6 +563,27 @@ impl AgentProviderTransport {
             sealed: state.sealed,
             active: state.active.len(),
         })
+    }
+
+    /// Proves that sticky shutdown admission and all provider attempts drained.
+    ///
+    /// Call [`Self::seal`] first, cancel or terminally settle every retained
+    /// attempt, and retry this nonblocking check under the process shutdown
+    /// deadline. Once returned, the fact remains true because transport
+    /// admission cannot reopen after sealing.
+    pub fn try_prove_shutdown(
+        &self,
+    ) -> Result<AgentProviderTransportShutdownProof, AgentProviderTransportShutdownError> {
+        let snapshot = self
+            .snapshot()
+            .map_err(|_| AgentProviderTransportShutdownError::State)?;
+        if !snapshot.is_sealed() {
+            return Err(AgentProviderTransportShutdownError::Unsealed);
+        }
+        if !snapshot.is_idle() {
+            return Err(AgentProviderTransportShutdownError::Pending);
+        }
+        Ok(AgentProviderTransportShutdownProof { snapshot })
     }
 
     /// Permanently refuses new calls and cancels every admitted attempt.
@@ -2798,7 +2875,7 @@ mod tests {
         assert_eq!(attribution.cached_input_tokens(), 0);
         assert_eq!(attribution.cache_write_input_tokens(), 0);
         assert_eq!(attribution.reasoning_output_tokens(), 0);
-        assert!(transport.snapshot().expect("snapshot").is_quiescent());
+        assert!(transport.snapshot().expect("snapshot").is_idle());
 
         let captured = server.finish();
         let head = std::str::from_utf8(&captured.head)
@@ -2890,7 +2967,7 @@ mod tests {
         assert_eq!(receipt.input_tokens(), 17);
         assert_eq!(receipt.output_tokens(), 3);
         assert_eq!(policy.pending_model_calls(), 0);
-        assert!(transport.snapshot().expect("snapshot").is_quiescent());
+        assert!(transport.snapshot().expect("snapshot").is_idle());
 
         let captured = server.finish();
         let body: serde_json::Value = serde_json::from_slice(&captured.body).expect("request body");
@@ -2971,7 +3048,7 @@ mod tests {
         assert!(initial_transport
             .snapshot()
             .expect("initial snapshot")
-            .is_quiescent());
+            .is_idle());
         initial_server.finish();
 
         let current = successor_observation(&fixture.observation);
@@ -3131,10 +3208,7 @@ mod tests {
             }
         );
         assert_eq!(fixture.policy.pending_model_calls(), 0);
-        assert!(diff_transport
-            .snapshot()
-            .expect("diff snapshot")
-            .is_quiescent());
+        assert!(diff_transport.snapshot().expect("diff snapshot").is_idle());
 
         let captured = diff_server.finish();
         let body: serde_json::Value =
@@ -3380,7 +3454,7 @@ mod tests {
         assert!(output_transport
             .snapshot()
             .expect("extraction snapshot")
-            .is_quiescent());
+            .is_idle());
 
         let captured = output_server.finish();
         let body: serde_json::Value =
@@ -3467,7 +3541,7 @@ mod tests {
             .settle(&mut policy, &schedule)
             .expect("mixed-output settlement");
         assert_eq!(policy.pending_model_calls(), 0);
-        assert!(transport.snapshot().expect("snapshot").is_quiescent());
+        assert!(transport.snapshot().expect("snapshot").is_idle());
         server.finish();
     }
 
@@ -3549,7 +3623,7 @@ mod tests {
         assert_eq!(attribution.cached_input_tokens(), 5);
         assert_eq!(attribution.cache_write_input_tokens(), 3);
         assert_eq!(attribution.reasoning_output_tokens(), 0);
-        assert!(transport.snapshot().expect("snapshot").is_quiescent());
+        assert!(transport.snapshot().expect("snapshot").is_idle());
         server.finish();
     }
 
@@ -3602,7 +3676,7 @@ mod tests {
         assert_eq!(receipt.input_tokens(), 18);
         assert_eq!(receipt.output_tokens(), 20);
         assert_eq!(receipt.cost_micro_usd(), 100);
-        assert!(transport.snapshot().expect("snapshot").is_quiescent());
+        assert!(transport.snapshot().expect("snapshot").is_idle());
         server.finish();
     }
 
@@ -3872,7 +3946,7 @@ mod tests {
             assert_eq!(accounting.consumed_model_tokens(), 0);
             assert_eq!(accounting.consumed_cost_micro_usd(), 0);
         }
-        assert!(transport.snapshot().expect("snapshot").is_quiescent());
+        assert!(transport.snapshot().expect("snapshot").is_idle());
 
         transport.seal();
         let (mut sealed_policy, sealed_input) =
@@ -3888,6 +3962,88 @@ mod tests {
         ));
         assert_eq!(sealed_policy.pending_model_calls(), 0);
         assert!(transport.snapshot().expect("snapshot").is_sealed());
+    }
+
+    #[test]
+    fn shutdown_proof_distinguishes_open_idle_from_sealed_drain() {
+        let transport = AgentProviderTransport::try_new_loopback(
+            AgentProviderTransportConfig::STANDARD,
+            Url::parse("http://127.0.0.1:9/v1/responses").expect("openai URL"),
+            Url::parse("http://127.0.0.1:9/v1/messages").expect("anthropic URL"),
+        )
+        .expect("transport");
+        let shared_clone = transport.clone();
+        let idle = transport.snapshot().expect("idle snapshot");
+        assert!(idle.is_idle());
+        assert!(!idle.is_quiescent());
+        assert_eq!(
+            transport
+                .try_prove_shutdown()
+                .expect_err("open admission cannot prove shutdown"),
+            AgentProviderTransportShutdownError::Unsealed
+        );
+
+        let credential = AgentProviderCredential::try_new(
+            AgentProviderKind::OpenAiResponses,
+            "synthetic-openai-key".to_owned(),
+        )
+        .expect("credential");
+        let (mut policy, input) = provider_fixture(AgentProviderKind::OpenAiResponses);
+        let attempt = transport
+            .try_admit(
+                input,
+                &mut policy,
+                &credential,
+                AgentProviderCancellation::new(),
+            )
+            .expect("attempt");
+        transport.seal();
+        let pending = transport.snapshot().expect("pending snapshot");
+        assert!(pending.is_sealed());
+        assert!(!pending.is_idle());
+        assert!(!pending.is_quiescent());
+        assert_eq!(
+            transport
+                .try_prove_shutdown()
+                .expect_err("active attempt cannot prove shutdown"),
+            AgentProviderTransportShutdownError::Pending
+        );
+
+        let result = attempt.cancel_without_dispatch();
+        let AgentProviderPolicySettlement::Immediate(settlement) = result.into_policy_settlement()
+        else {
+            panic!("pre-dispatch shutdown cancellation must settle immediately")
+        };
+        settlement
+            .settle(&mut policy)
+            .expect("cancelled policy settlement");
+        let proof = transport
+            .try_prove_shutdown()
+            .expect("sealed idle transport proof");
+        assert!(proof.snapshot().is_quiescent());
+        assert_eq!(proof.snapshot().active_attempts(), 0);
+        assert_eq!(
+            format!("{proof:?}"),
+            "AgentProviderTransportShutdownProof { sealed: true, active_attempts: 0 }"
+        );
+        assert!(
+            std::mem::size_of::<AgentProviderTransportShutdownProof>()
+                <= MAX_AGENT_PROVIDER_TRANSPORT_SHUTDOWN_PROOF_BYTES
+        );
+
+        let (mut post_proof_policy, post_proof_input) =
+            provider_fixture(AgentProviderKind::OpenAiResponses);
+        assert!(matches!(
+            shared_clone.try_admit(
+                post_proof_input,
+                &mut post_proof_policy,
+                &credential,
+                AgentProviderCancellation::new()
+            ),
+            Err(AgentProviderAdmissionError::Sealed)
+        ));
+        assert_eq!(post_proof_policy.pending_model_calls(), 0);
+        assert!(proof.snapshot().is_quiescent());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4026,7 +4182,7 @@ mod tests {
         assert_eq!(receipt.input_tokens(), 18);
         assert_eq!(receipt.output_tokens(), 20);
         assert_eq!(receipt.cost_micro_usd(), 100);
-        assert!(transport.snapshot().expect("snapshot").is_quiescent());
+        assert!(transport.snapshot().expect("snapshot").is_idle());
 
         let captured = server.finish();
         let head = std::str::from_utf8(&captured.head).expect("request head");

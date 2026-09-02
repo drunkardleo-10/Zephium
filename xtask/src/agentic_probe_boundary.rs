@@ -355,6 +355,7 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     validate_provider_transport_manifest(&read(repository.join(PROVIDER_TRANSPORT_MANIFEST))?)?;
     let provider_transport_root = read(repository.join(PROVIDER_TRANSPORT_ROOT))?;
     validate_provider_transport_root(&provider_transport_root)?;
+    validate_provider_transport_shutdown_contract(&provider_transport_root)?;
     validate_agentic_no_direct_logging_attribute(
         PROVIDER_TRANSPORT_ROOT,
         &provider_transport_root,
@@ -3711,6 +3712,81 @@ fn validate_provider_transport_root(source: &str) -> Result<(), String> {
                 "agent provider transport exposes forbidden authority {forbidden}"
             ));
         }
+    }
+    Ok(())
+}
+
+fn validate_provider_transport_shutdown_contract(source: &str) -> Result<(), String> {
+    let production = source
+        .split_once("\n#[cfg(test)]\nmod tests")
+        .map_or(source, |(production, _)| production);
+    let proof_declaration = production
+        .find("pub struct AgentProviderTransportShutdownProof")
+        .ok_or_else(|| "agent provider transport shutdown proof is missing".to_owned())?;
+    let proof_attribute_start = production[..proof_declaration]
+        .rfind("\n\n")
+        .map_or(0, |start| start + 2);
+    let proof_attributes = &production[proof_attribute_start..proof_declaration];
+    for forbidden in ["Clone", "Copy", "Default", "Serialize", "Deserialize"] {
+        if proof_attributes.contains(forbidden) {
+            return Err(format!(
+                "agent provider transport shutdown proof acquired forgeable derive {forbidden}"
+            ));
+        }
+    }
+
+    let source = compact(
+        &production
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<String>(),
+    );
+    for required in [
+        "pubconstMAX_AGENT_PROVIDER_TRANSPORT_SHUTDOWN_PROOF_BYTES:usize=32;",
+        "pubconstfnis_idle(self)->bool{self.active==0}",
+        "pubconstfnis_quiescent(self)->bool{self.sealed&&self.active==0}",
+        "pubstructAgentProviderTransportShutdownProof{snapshot:AgentProviderTransportSnapshot,}",
+        "pubconstfnsnapshot(&self)->AgentProviderTransportSnapshot{self.snapshot}",
+        "size_of::<AgentProviderTransportShutdownProof>()<=MAX_AGENT_PROVIDER_TRANSPORT_SHUTDOWN_PROOF_BYTES",
+        "pubenumAgentProviderTransportShutdownError{",
+        "pubfntry_prove_shutdown(&self,)->Result<AgentProviderTransportShutdownProof,AgentProviderTransportShutdownError>",
+        ".snapshot().map_err(|_|AgentProviderTransportShutdownError::State)?;",
+        "if!snapshot.is_sealed(){returnErr(AgentProviderTransportShutdownError::Unsealed);}",
+        "if!snapshot.is_idle(){returnErr(AgentProviderTransportShutdownError::Pending);}",
+        "Ok(AgentProviderTransportShutdownProof{snapshot})",
+        "pubfnseal(&self){self.shared.shutdown.cancel();matchself.shared.state.lock(){Ok(mutstate)=>state.sealed=true,Err(poisoned)=>poisoned.into_inner().sealed=true,}}",
+        "ifstate.sealed{returnErr(ReserveError::Sealed);}",
+    ] {
+        if !source.contains(required) {
+            return Err(format!(
+                "agent provider transport lost exact shutdown proof rule {required}"
+            ));
+        }
+    }
+    for forbidden in [
+        "implAgentProviderTransportShutdownProof{pubfnnew(",
+        "implAgentProviderTransportShutdownProof{pubconstfnnew(",
+        "implCloneforAgentProviderTransportShutdownProof",
+        "implCopyforAgentProviderTransportShutdownProof",
+        "DefaultforAgentProviderTransportShutdownProof",
+        "SerializeforAgentProviderTransportShutdownProof",
+        "DeserializeforAgentProviderTransportShutdownProof",
+        "state.sealed=false",
+    ] {
+        if source.contains(forbidden) {
+            return Err(format!(
+                "agent provider transport shutdown proof acquired forbidden surface {forbidden}"
+            ));
+        }
+    }
+    if source
+        .matches("Ok(AgentProviderTransportShutdownProof{snapshot})")
+        .count()
+        != 1
+    {
+        return Err(
+            "agent provider transport shutdown proof must have one checked construction".to_owned(),
+        );
     }
     Ok(())
 }
@@ -8974,6 +9050,41 @@ mod tests {
         assert!(
             validate_provider_transport_root(&format!("{root}\npub fn into_parts() {{}}")).is_err()
         );
+    }
+
+    #[test]
+    fn provider_transport_shutdown_proof_requires_sticky_seal_and_exact_idle() {
+        let root = include_str!("../../crates/zephium-agent-provider-transport/src/lib.rs");
+        validate_provider_transport_shutdown_contract(root)
+            .expect("provider transport shutdown proof boundary");
+
+        for (index, invalid) in [
+            root.replace("self.sealed && self.active == 0", "self.active == 0"),
+            root.replace("if !snapshot.is_sealed()", "if false"),
+            root.replace("if !snapshot.is_idle()", "if false"),
+            root.replacen("self.shared.shutdown.cancel();", "", 1),
+            root.replace(
+                "#[must_use]\npub struct AgentProviderTransportShutdownProof",
+                "#[derive(Clone, Copy)]\n#[must_use]\npub struct AgentProviderTransportShutdownProof",
+            ),
+            root.replace(
+                "#[must_use]\npub struct AgentProviderTransportShutdownProof",
+                "impl Clone for AgentProviderTransportShutdownProof { fn clone(&self) -> Self { unreachable!() } }\n#[must_use]\npub struct AgentProviderTransportShutdownProof",
+            ),
+            root.replacen(
+                "\n#[cfg(test)]\nmod tests",
+                "\nimpl AgentProviderTransportShutdownProof { pub fn new() {} }\n\n#[cfg(test)]\nmod tests",
+                1,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(
+                validate_provider_transport_shutdown_contract(&invalid).is_err(),
+                "provider shutdown proof mutation {index} was not rejected"
+            );
+        }
     }
 
     #[test]

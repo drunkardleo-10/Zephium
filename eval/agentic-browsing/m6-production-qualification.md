@@ -48,6 +48,13 @@ responses, machine-local paths, or native traces.
   storage, sensitive request headers, manually redacted credential/attempt
   `Debug`, and a closed reqwest failure classifier that consumes only the
   timeout bit. Mutation tests prove each protection is required; and
+- distinguishes an observationally idle provider transport from shutdown
+  quiescence, which requires both its sticky cancellation/admission seal and
+  exactly zero active slots. The gate pins constructor closure, open-admission
+  and pending-attempt refusal, permanent sealing across shared clones, a
+  bounded redacted proof, and mutation coverage for every critical predicate.
+  The proof is non-authorizing and owns no provider, policy, audit, native,
+  task, timer, or content seam; and
 - pins the Windows owned-context suspension adapter to its feature/target gate,
   fixed atomic callback/timeout/cancellation owner, one late-reconciliation
   path, ten-second UI-thread deadline, `TrySuspend`/`IsSuspended`/`Resume`
@@ -204,6 +211,13 @@ agentic-owned Windows modules. Cross-compilation is not device behavior.
   sentinel appears in `Request` debug output. This is a scoped source and test
   audit; it does not claim review of shared shell, extension-owned, third-party,
   or non-agentic logging surfaces.
+- The provider transport now distinguishes an open but idle snapshot from a
+  terminally quiescent one. After its sticky seal cancels retained attempts and
+  permanently refuses admission, only an exact zero-active snapshot can mint a
+  constructor-closed, move-only shutdown proof. This closes the transport-slot
+  drain fact only: every attempt's policy/usage result still requires terminal
+  settlement, and no concrete application composition or live provider result
+  is claimed.
 - Profile retention can no longer end from a copied lease alone. The bounded
   profile registry requires the exact supervisor cleanup receipt for that
   context. A never-started row must be registry-cancelled; an owned context must
@@ -366,7 +380,8 @@ The authoritative aggregate records and exact remaining blockers are in
 - completion of native/unsafe, secret, and log review outside the scoped
   agentic-owned production modules and dormant provider transport, plus
   application/platform profile integration, composition of the higher
-  cancellation/provider/policy/audit lifecycle with a real application event
+  cancellation lifecycle with the provider-transport shutdown proof and
+  terminal provider usage/policy/audit settlement, a real application event
   source, end-to-end native use of the bounded zero-resource proof, recovery,
   migration, and stable Work-port audits beyond the dormant Shell seam.
 
