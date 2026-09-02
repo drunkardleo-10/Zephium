@@ -125,40 +125,64 @@ destination must be destroyed/recreated before navigation. Results carry only
 origin/cookie/HttpOnly/byte counts and closed failures. Reverse sync and
 local/session-storage copying are not representable.
 
-The engine now contains the platform-neutral production preflight owner used
-by the Windows adapter. It takes zeroizing ownership of every native-exposed
-string before the first validation branch, has no cookie-field diagnostic or
-serialization surface, bounds both raw observations per origin and the unique
-cohort, rejects contradictory duplicate identity snapshots, and permanently
-poisons a cohort after any admission failure. Native cookie handles become
-available only through a sequential apply owner after all requested origins
-complete. This is a memory/accounting/type boundary only: it does not acquire a
-cookie manager, call `GetCookies`, or perform a destination write.
+The engine now contains both the platform-neutral production preflight owner
+and a dormant, feature-gated WebView2 adapter. Native UTF-16 fields are decoded
+strictly into zeroizing bounded storage before cookie-shape validation;
+malformed UTF-16 is rejected rather than replaced. The preflight has no
+cookie-field diagnostic or serialization surface, bounds both raw observations
+per origin and the unique cohort, rejects contradictory duplicate identity
+snapshots, and permanently poisons a cohort after any admission failure.
+Native cookie handles become available only through a sequential apply owner
+after all requested origins complete.
+
+The Windows adapter is callback-driven and has no event-pumping wait, worker,
+channel, page script, or generic Wry cookie conversion. It queries each exact
+origin sequentially, refuses an over-limit native list before indexing it,
+copies native cookie objects through the destination manager without writing,
+and starts `AddOrUpdateCookie` only after the whole cohort passes preflight.
+An in-flight write bit closes the re-entrant cancellation window: a successful
+native write is accounted before cancellation can settle. Failure after a
+confirmed write first deletes cookies, then clears the destination profile's
+browsing data, then requires a profile-wide null-URI `GetCookies` readback with
+count zero. The private terminal distinguishes proven from unproven cleanup so
+the host can quarantine the stable automation profile when proof is absent.
+Dropping the owner requests shutdown cancellation rather than abandoning
+callback-held state.
 
 This seam deliberately does not use Wry's generic Windows cookie helper. The
 pinned helper allocates from the native-reported count, loops that complete
 count, silently drops conversion failures, blocks through an event-pumping
 wait, and returns cookie values to its caller
 ([pinned source](../../vendor/wry/src/webview2/mod.rs)). The production adapter
-will use profile-scoped WebView2 cookie managers with bounded native callback
-reservations and deadlines. Microsoft documents that cookie-manager changes
+uses profile-scoped WebView2 cookie managers with bounded native callback
+ownership and an application deadline that reserves ten seconds for cleanup.
+Microsoft documents that cookie-manager changes
 apply to the user-profile context, `GetCookies` is URI-scoped, and
 `AddOrUpdateCookie` applies a native cookie; the native cookie object exposes
 `IsHttpOnly` for exact preservation
 ([CookieManager](https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2cookiemanager),
 [Cookie](https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/winrt/microsoft_web_webview2_core/corewebview2cookie)).
+`ClearBrowsingDataAll` clears the entirety of the selected profile and invokes
+its completion only after that asynchronous operation settles; closing the
+associated WebView early may release the handler without invoking it, which is
+why host retention through terminal cleanup is mandatory
+([Profile2](https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2profile2)).
 
-The same profile-scoped behavior exposes an unresolved native recovery
-boundary, not an implementation detail that may be hand-waved away. Destroying
-one owned WebView does not remove cookies already written to the stable
+The same profile-scoped behavior still exposes a host integration boundary,
+not an implementation detail that may be hand-waved away. Destroying one owned
+WebView does not remove cookies already written to the stable
 `agent-<ProfileId>` profile, and multiple WebViews on that profile share those
-values. Before destination writes can ship, the host must own an exclusive
-automation-profile mutation transaction and a bounded cleanup/re-attestation
-receipt that removes a partial cookie cohort before the stable profile is
-usable again. `ICoreWebView2Profile8::Delete` is not an immediate recreation
-primitive: Microsoft documents that the name remains delete-pending until the
-browser process exits. This evidence therefore makes no native cookie-write or
-partial-recovery claim.
+values. Before destination writes can be reachable, the host must own the one
+automation-profile mutation transaction, retain the destination through the
+adapter terminal, and consume its cleanup proof by either re-attesting an empty
+profile or placing an unproven profile in sticky quarantine. The profile must
+also remain unavailable to navigation after any partial outcome.
+`ICoreWebView2Profile8::Delete` is not an immediate recreation primitive:
+Microsoft documents that the name remains delete-pending until the browser
+process exits. The adapter currently cross-compiles but is not exported to the
+host, the public capability remains false, and no physical Windows execution
+has occurred. This evidence therefore makes no reachable native cookie-write,
+cleanup-qualification, or shipped-support claim.
 
 For extension inventory, an empty `GetBrowserExtensions` result is accepted
 only when extension support was enabled for the inventory environment. The
@@ -400,7 +424,13 @@ concurrency across distinct profiles, redacted debug output, and shutdown
 drain. Engine preflight tests additionally cover exact duplicate and conflict
 handling, all-origin release, sequential apply accounting, invalid native
 shapes, zero/overflow origin and cookie ceilings, raw duplicate-flood refusal,
-and content-free diagnostics.
+strict UTF-16 refusal, write-ticket accounting, and content-free diagnostics.
+The release boundary mutation-tests the dormant Windows adapter's feature
+gate, count ceiling, destination-side copy, write interlock, sequential
+accounting, profile-wide cleanup/readback, secret conversion, and absence of
+thread, message-pump, script, CDP, serialization, or direct diagnostic
+surfaces. The adapter additionally cross-compiles against the pinned Windows
+target; runtime behavior remains a physical-Windows evidence item.
 Handoff tests execute complete macOS shared-store and Windows cookie-bridge
 flows through the real context registry, including exclusive human control,
 temporary-context release, scoped refresh, fresh observation, incompatible
@@ -424,9 +454,10 @@ loses its hidden/profile/inventory/process/policy/cleanup checks.
    on an explicitly authorized named Windows device/runtime;
 2. add bounded redirect/page-replacement observation, presentation, and
    suspension while preserving exact context/world/frame generations;
-3. implement the bounded Windows cookie adapter, exclusive automation-profile
-   mutation/partial-cleanup receipt, and native borrowed/handoff transactions
-   without changing ordinary extension principals;
+3. integrate and physically qualify the bounded Windows cookie adapter under
+   one exclusive automation-profile transaction, consume its partial-cleanup
+   receipt with sticky quarantine, and add native borrowed/handoff source
+   transactions without changing ordinary extension principals;
 4. qualify macOS construction/storage/inventory/close and both-platform
    lifecycle, idle-resource, cancellation, recovery, and shutdown behavior on
    explicitly authorized named devices.

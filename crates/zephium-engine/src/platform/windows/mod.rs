@@ -15,6 +15,12 @@ mod agentic_semantic_probe;
 #[allow(dead_code)]
 mod cdp;
 mod content_filter;
+#[cfg(feature = "agentic-browser")]
+// Compiled and source-gated before the host enables native cookie mutation.
+// The public port remains mechanically closed until cleanup integration and
+// physical Windows qualification are complete.
+#[allow(dead_code)]
+mod cookie_transfer;
 #[allow(dead_code)]
 mod extensions;
 #[cfg(feature = "agentic-browser")]

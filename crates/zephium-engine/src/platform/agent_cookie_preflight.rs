@@ -17,6 +17,47 @@ use zephium_agentic::{
 };
 use zeroize::Zeroizing;
 
+/// Strict, bounded UTF-16 cookie text that owns zeroizing UTF-8 storage.
+///
+/// WebView2 exposes cookie fields as NUL-terminated UTF-16. The native reader
+/// establishes the pointer bound; this constructor rejects malformed UTF-16
+/// instead of silently replacing it and owns the decoded allocation before it
+/// can reach any cookie-shape validation.
+pub(crate) struct AgentCookieText(Zeroizing<String>);
+
+impl AgentCookieText {
+    pub(crate) fn try_from_utf16(units: &[u16]) -> Result<Self, AgentCookiePreflightFailure> {
+        if units.len() > MAX_COOKIE_BYTES {
+            return Err(AgentCookiePreflightFailure::LimitExceeded);
+        }
+        let mut utf8_bytes = 0usize;
+        for character in char::decode_utf16(units.iter().copied()) {
+            let character = character.map_err(|_| AgentCookiePreflightFailure::InvalidCookie)?;
+            utf8_bytes = utf8_bytes
+                .checked_add(character.len_utf8())
+                .ok_or(AgentCookiePreflightFailure::LimitExceeded)?;
+            if utf8_bytes > MAX_COOKIE_BYTES {
+                return Err(AgentCookiePreflightFailure::LimitExceeded);
+            }
+        }
+        // Acquire zeroizing ownership before decoding any secret-bearing
+        // content. The first pass makes the second infallible for UTF-16
+        // shape, but this remains safe if that implementation changes.
+        let mut value = Zeroizing::new(String::new());
+        value
+            .try_reserve_exact(utf8_bytes)
+            .map_err(|_| AgentCookiePreflightFailure::ResourceExhausted)?;
+        for character in char::decode_utf16(units.iter().copied()) {
+            value.push(character.map_err(|_| AgentCookiePreflightFailure::InvalidCookie)?);
+        }
+        Ok(Self(value))
+    }
+
+    fn as_text(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
 /// Closed preflight failure without cookie content or native error detail.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AgentCookiePreflightFailure {
@@ -40,10 +81,10 @@ pub(crate) enum AgentCookieSameSite {
 /// `Debug`, serialization, or value accessor; only the preflight owner can
 /// compare and account it.
 pub(crate) struct AgentCookieFields {
-    name: Zeroizing<String>,
-    value: Zeroizing<String>,
-    domain: Zeroizing<String>,
-    path: Zeroizing<String>,
+    name: AgentCookieText,
+    value: AgentCookieText,
+    domain: AgentCookieText,
+    path: AgentCookieText,
     expires: f64,
     http_only: bool,
     secure: bool,
@@ -55,37 +96,35 @@ pub(crate) struct AgentCookieFields {
 impl AgentCookieFields {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn try_new(
-        name: String,
-        value: String,
-        domain: String,
-        path: String,
+        name: AgentCookieText,
+        value: AgentCookieText,
+        domain: AgentCookieText,
+        path: AgentCookieText,
         expires: f64,
         http_only: bool,
         secure: bool,
         same_site: AgentCookieSameSite,
         session: bool,
     ) -> Result<Self, AgentCookiePreflightFailure> {
-        // Take zeroizing ownership before the first validation branch so
-        // malformed native values receive the same cleanup as valid ones.
-        let name = Zeroizing::new(name);
-        let value = Zeroizing::new(value);
-        let domain = Zeroizing::new(domain);
-        let path = Zeroizing::new(path);
-        if !valid_cookie_name(&name)
-            || domain.is_empty()
+        // The native reader must transfer zeroizing ownership for every field
+        // before this first validation branch. The type signature makes that
+        // sequencing a compile-time obligation.
+        if !valid_cookie_name(name.as_text())
+            || domain.as_text().is_empty()
             || [&value, &domain, &path]
                 .into_iter()
-                .any(|field| field.contains('\0'))
+                .any(|field| field.as_text().contains('\0'))
             || (same_site == AgentCookieSameSite::None && !secure)
             || !valid_expiry(expires, session)
         {
             return Err(AgentCookiePreflightFailure::InvalidCookie);
         }
         let payload_bytes = name
+            .as_text()
             .len()
-            .checked_add(value.len())
-            .and_then(|bytes| bytes.checked_add(domain.len()))
-            .and_then(|bytes| bytes.checked_add(path.len()))
+            .checked_add(value.as_text().len())
+            .and_then(|bytes| bytes.checked_add(domain.as_text().len()))
+            .and_then(|bytes| bytes.checked_add(path.as_text().len()))
             .ok_or(AgentCookiePreflightFailure::LimitExceeded)?;
         if payload_bytes > MAX_COOKIE_BYTES {
             return Err(AgentCookiePreflightFailure::LimitExceeded);
@@ -105,14 +144,14 @@ impl AgentCookieFields {
     }
 
     fn same_identity(&self, other: &Self) -> bool {
-        self.name.as_str() == other.name.as_str()
-            && self.domain.as_str() == other.domain.as_str()
-            && self.path.as_str() == other.path.as_str()
+        self.name.as_text() == other.name.as_text()
+            && self.domain.as_text() == other.domain.as_text()
+            && self.path.as_text() == other.path.as_text()
     }
 
     fn same_snapshot(&self, other: &Self) -> bool {
         self.same_identity(other)
-            && self.value.as_str() == other.value.as_str()
+            && self.value.as_text() == other.value.as_text()
             && self.expires.to_bits() == other.expires.to_bits()
             && self.http_only == other.http_only
             && self.secure == other.secure
@@ -302,47 +341,43 @@ pub(crate) struct AgentCookieApplication<NativeCookie> {
 }
 
 impl<NativeCookie> AgentCookieApplication<NativeCookie> {
-    pub(crate) fn current(&self) -> Option<AgentPreparedCookie<'_, NativeCookie>> {
-        let cookie = self.cookies.get(self.next)?.as_ref()?;
-        Some(AgentPreparedCookie {
+    pub(crate) fn current(
+        &self,
+    ) -> Result<Option<AgentPreparedCookie<'_, NativeCookie>>, AgentCookiePreflightFailure> {
+        let Some(cookie) = self.cookies.get(self.next).and_then(Option::as_ref) else {
+            return Ok(None);
+        };
+        let after_apply = self.stats_after_applying(cookie)?;
+        Ok(Some(AgentPreparedCookie {
             native: &cookie.native,
-        })
+            after_apply,
+        }))
     }
 
-    pub(crate) fn record_current_applied(&mut self) -> Result<(), AgentCookiePreflightFailure> {
+    pub(crate) fn record_current_applied(
+        &mut self,
+        expected: ContextCookieTransferStats,
+    ) -> Result<(), AgentCookiePreflightFailure> {
         let cookie = self
             .cookies
             .get(self.next)
             .and_then(Option::as_ref)
             .ok_or(AgentCookiePreflightFailure::Incomplete)?;
-        let cookies_applied = self
-            .counts
-            .cookies_applied
-            .checked_add(1)
-            .ok_or(AgentCookiePreflightFailure::LimitExceeded)?;
-        let http_only_applied = self
-            .counts
-            .http_only_applied
-            .checked_add(u16::from(cookie.fields.http_only))
-            .ok_or(AgentCookiePreflightFailure::LimitExceeded)?;
+        let after_apply = self.stats_after_applying(cookie)?;
+        if after_apply != expected {
+            return Err(AgentCookiePreflightFailure::Incomplete);
+        }
         let next = self
             .next
             .checked_add(1)
             .ok_or(AgentCookiePreflightFailure::LimitExceeded)?;
-        let counts = ContextCookieTransferCounts {
-            cookies_applied,
-            http_only_applied,
-            ..self.counts
-        };
-        ContextCookieTransferStats::try_new(counts)
-            .map_err(|_| AgentCookiePreflightFailure::Incomplete)?;
         let cookie = self
             .cookies
             .get_mut(self.next)
             .and_then(Option::take)
             .ok_or(AgentCookiePreflightFailure::Incomplete)?;
         drop(cookie);
-        self.counts = counts;
+        self.counts = after_apply.counts();
         self.next = next;
         Ok(())
     }
@@ -357,6 +392,28 @@ impl<NativeCookie> AgentCookieApplication<NativeCookie> {
             && self.counts.http_only_applied == self.counts.http_only_observed
             && self.next == self.cookies.len()
             && self.cookies.iter().all(Option::is_none)
+    }
+
+    fn stats_after_applying(
+        &self,
+        cookie: &ValidatedCookie<NativeCookie>,
+    ) -> Result<ContextCookieTransferStats, AgentCookiePreflightFailure> {
+        let cookies_applied = self
+            .counts
+            .cookies_applied
+            .checked_add(1)
+            .ok_or(AgentCookiePreflightFailure::LimitExceeded)?;
+        let http_only_applied = self
+            .counts
+            .http_only_applied
+            .checked_add(u16::from(cookie.fields.http_only))
+            .ok_or(AgentCookiePreflightFailure::LimitExceeded)?;
+        ContextCookieTransferStats::try_new(ContextCookieTransferCounts {
+            cookies_applied,
+            http_only_applied,
+            ..self.counts
+        })
+        .map_err(|_| AgentCookiePreflightFailure::Incomplete)
     }
 }
 
@@ -373,11 +430,16 @@ impl<NativeCookie> fmt::Debug for AgentCookieApplication<NativeCookie> {
 /// One validated cookie released to the apply phase.
 pub(crate) struct AgentPreparedCookie<'a, NativeCookie> {
     native: &'a NativeCookie,
+    after_apply: ContextCookieTransferStats,
 }
 
 impl<NativeCookie> AgentPreparedCookie<'_, NativeCookie> {
     pub(crate) const fn native(&self) -> &NativeCookie {
         self.native
+    }
+
+    pub(crate) const fn after_apply(&self) -> ContextCookieTransferStats {
+        self.after_apply
     }
 }
 
@@ -422,12 +484,16 @@ fn valid_expiry(expires: f64, session: bool) -> bool {
 mod tests {
     use super::*;
 
+    fn text(value: &str) -> AgentCookieText {
+        AgentCookieText::try_from_utf16(&value.encode_utf16().collect::<Vec<_>>()).expect("text")
+    }
+
     fn fields(name: &str, value: &str, http_only: bool) -> AgentCookieFields {
         AgentCookieFields::try_new(
-            name.to_owned(),
-            value.to_owned(),
-            ".example.test".to_owned(),
-            "/".to_owned(),
+            text(name),
+            text(value),
+            text(".example.test"),
+            text("/"),
             1_900_000_000.0,
             http_only,
             true,
@@ -499,14 +565,21 @@ mod tests {
             .expect("second");
         preflight.complete_origin().expect("complete");
         let mut application = preflight.finish().expect("application");
-        let first = application.current().expect("first cookie");
+        let first = application.current().expect("valid").expect("first cookie");
         assert_eq!(*first.native(), 1);
-        application.record_current_applied().expect("first applied");
-        assert!(!application.is_complete());
-        let second = application.current().expect("second cookie");
-        assert_eq!(*second.native(), 2);
+        let first_stats = first.after_apply();
         application
-            .record_current_applied()
+            .record_current_applied(first_stats)
+            .expect("first applied");
+        assert!(!application.is_complete());
+        let second = application
+            .current()
+            .expect("valid")
+            .expect("second cookie");
+        assert_eq!(*second.native(), 2);
+        let second_stats = second.after_apply();
+        application
+            .record_current_applied(second_stats)
             .expect("second applied");
         assert!(application.is_complete());
         let counts = application.stats().expect("stats").counts();
@@ -526,10 +599,11 @@ mod tests {
         ));
         assert_eq!(
             AgentCookieFields::try_new(
-                "name".to_owned(),
-                "x".repeat(MAX_COOKIE_BYTES),
-                ".example.test".to_owned(),
-                "/".to_owned(),
+                text("name"),
+                AgentCookieText::try_from_utf16(&vec![b'x' as u16; MAX_COOKIE_BYTES])
+                    .expect("limit text"),
+                text(".example.test"),
+                text("/"),
                 1.0,
                 false,
                 true,
@@ -574,12 +648,25 @@ mod tests {
 
     #[test]
     fn invalid_native_shapes_are_rejected_and_debug_is_content_free() {
+        assert!(matches!(
+            AgentCookieText::try_from_utf16(&[0xD800]),
+            Err(AgentCookiePreflightFailure::InvalidCookie)
+        ));
+        assert!(matches!(
+            AgentCookieText::try_from_utf16(&vec![b'x' as u16; MAX_COOKIE_BYTES + 1]),
+            Err(AgentCookiePreflightFailure::LimitExceeded)
+        ));
+        let oversized_utf8 = "🦀".repeat(MAX_COOKIE_BYTES / 4 + 1);
+        assert!(matches!(
+            AgentCookieText::try_from_utf16(&oversized_utf8.encode_utf16().collect::<Vec<_>>()),
+            Err(AgentCookiePreflightFailure::LimitExceeded)
+        ));
         for candidate in [
             AgentCookieFields::try_new(
-                "bad name".to_owned(),
-                "secret".to_owned(),
-                ".example.test".to_owned(),
-                "/".to_owned(),
+                text("bad name"),
+                text("secret"),
+                text(".example.test"),
+                text("/"),
                 1.0,
                 false,
                 true,
@@ -587,10 +674,10 @@ mod tests {
                 false,
             ),
             AgentCookieFields::try_new(
-                "name".to_owned(),
-                "secret".to_owned(),
-                String::new(),
-                "/".to_owned(),
+                text("name"),
+                text("secret"),
+                text(""),
+                text("/"),
                 1.0,
                 false,
                 true,
@@ -598,10 +685,10 @@ mod tests {
                 false,
             ),
             AgentCookieFields::try_new(
-                "name".to_owned(),
-                "secret".to_owned(),
-                ".example.test".to_owned(),
-                "/".to_owned(),
+                text("name"),
+                text("secret"),
+                text(".example.test"),
+                text("/"),
                 -1.0,
                 false,
                 true,
@@ -609,10 +696,10 @@ mod tests {
                 false,
             ),
             AgentCookieFields::try_new(
-                "name".to_owned(),
-                "secret".to_owned(),
-                ".example.test".to_owned(),
-                "/".to_owned(),
+                text("name"),
+                text("secret"),
+                text(".example.test"),
+                text("/"),
                 f64::NAN,
                 false,
                 true,
@@ -620,10 +707,10 @@ mod tests {
                 false,
             ),
             AgentCookieFields::try_new(
-                "name".to_owned(),
-                "secret".to_owned(),
-                ".example.test".to_owned(),
-                "/".to_owned(),
+                text("name"),
+                text("secret"),
+                text(".example.test"),
+                text("/"),
                 -1.0,
                 false,
                 false,

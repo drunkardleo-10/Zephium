@@ -86,22 +86,25 @@ const ENGINE_AGENT_SCREENSHOT_BUFFER: &str =
     "crates/zephium-engine/src/platform/agent_screenshot_buffer.rs";
 const ENGINE_AGENT_COOKIE_PREFLIGHT: &str =
     "crates/zephium-engine/src/platform/agent_cookie_preflight.rs";
+const ENGINE_WINDOWS_COOKIE_TRANSFER: &str =
+    "crates/zephium-engine/src/platform/windows/cookie_transfer.rs";
 const ENGINE_WINDOWS_SEMANTIC_PROTOCOL: &str =
     "crates/zephium-engine/src/platform/agent_semantic_cdp_protocol.rs";
 const ENGINE_WINDOWS_SEMANTIC_RUNTIME: &str =
     "crates/zephium-engine/src/platform/windows/semantic_runtime.rs";
 const ENGINE_WINDOWS_SEMANTIC_SCREENSHOT: &str =
     "crates/zephium-engine/src/platform/windows/semantic_screenshot.rs";
-const ENGINE_AGENTIC_NATIVE_UNSAFE_MODULES: [&str; 7] = [
+const ENGINE_AGENTIC_NATIVE_UNSAFE_MODULES: [&str; 8] = [
     ENGINE_MACOS_AGENT_CONTEXT,
     ENGINE_MACOS_SEMANTIC_RUNTIME,
     ENGINE_MACOS_SEMANTIC_SCREENSHOT,
     ENGINE_WINDOWS_AGENT_CONTEXT,
+    ENGINE_WINDOWS_COOKIE_TRANSFER,
     ENGINE_WINDOWS_SEMANTIC_RUNTIME,
     ENGINE_WINDOWS_SEMANTIC_SCREENSHOT,
     ENGINE_WINDOWS_AGENT_TIMEOUT,
 ];
-const ENGINE_AGENTIC_PRODUCTION_MODULES: [&str; 13] = [
+const ENGINE_AGENTIC_PRODUCTION_MODULES: [&str; 14] = [
     ENGINE_AGENT_CONTEXT_PORT,
     ENGINE_AGENT_CONTEXT_HOST,
     ENGINE_AGENT_NAVIGATION,
@@ -112,6 +115,7 @@ const ENGINE_AGENTIC_PRODUCTION_MODULES: [&str; 13] = [
     ENGINE_MACOS_SEMANTIC_RUNTIME,
     ENGINE_MACOS_SEMANTIC_SCREENSHOT,
     ENGINE_WINDOWS_AGENT_CONTEXT,
+    ENGINE_WINDOWS_COOKIE_TRANSFER,
     ENGINE_WINDOWS_SEMANTIC_RUNTIME,
     ENGINE_WINDOWS_SEMANTIC_SCREENSHOT,
     ENGINE_WINDOWS_AGENT_TIMEOUT,
@@ -363,6 +367,10 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         &read(repository.join(ENGINE_WINDOWS_AGENT_TIMEOUT))?,
         &read(repository.join(ENGINE_AGENT_NAVIGATION))?,
         &read(repository.join(ENGINE_AGENT_CONTEXT_HOST))?,
+    )?;
+    validate_engine_windows_cookie_transfer(
+        &windows_module,
+        &read(repository.join(ENGINE_WINDOWS_COOKIE_TRANSFER))?,
     )?;
     validate_engine_windows_semantic_protocol(
         &read(repository.join(ENGINE_PLATFORM_MODULE))?,
@@ -801,14 +809,15 @@ fn validate_engine_agent_cookie_preflight(source: &str) -> Result<(), String> {
     let source = compact(source);
     for required in [
         "usezeroize::Zeroizing;",
-        "name:Zeroizing<String>",
-        "value:Zeroizing<String>",
-        "domain:Zeroizing<String>",
-        "path:Zeroizing<String>",
-        "letname=Zeroizing::new(name);",
-        "letvalue=Zeroizing::new(value);",
-        "letdomain=Zeroizing::new(domain);",
-        "letpath=Zeroizing::new(path);",
+        "structAgentCookieText(Zeroizing<String>);",
+        "fntry_from_utf16(units:&[u16])",
+        "char::decode_utf16(units.iter().copied())",
+        "try_reserve_exact(utf8_bytes)",
+        "name:AgentCookieText",
+        "value:AgentCookieText",
+        "domain:AgentCookieText",
+        "path:AgentCookieText",
+        "pub(crate)fntry_new(name:AgentCookieText,value:AgentCookieText,domain:AgentCookieText,path:AgentCookieText",
         "try_reserve_exact(MAX_COOKIES_PER_TRANSFER)",
         "current_origin_observations:u16",
         "observations:u16",
@@ -823,7 +832,10 @@ fn validate_engine_agent_cookie_preflight(source: &str) -> Result<(), String> {
         "ifself.completed_origins!=self.requested_origins",
         "cookies:Vec<Option<ValidatedCookie<NativeCookie>>>",
         "and_then(Option::take)",
-        "ContextCookieTransferStats::try_new(counts)",
+        "ContextCookieTransferStats::try_new(ContextCookieTransferCounts{",
+        "ContextCookieTransferStats::try_new(self.counts)",
+        "after_apply:ContextCookieTransferStats",
+        "record_current_applied(&mutself,expected:ContextCookieTransferStats,",
     ] {
         if !source.contains(required) {
             return Err(format!(
@@ -855,6 +867,7 @@ fn validate_engine_agent_cookie_preflight(source: &str) -> Result<(), String> {
         "pub(crate)fnfields(",
         "unsafe{",
         "HashMap<",
+        "unwrap_or(char::REPLACEMENT_CHARACTER)",
     ] {
         if source.contains(forbidden) {
             return Err(format!(
@@ -862,17 +875,135 @@ fn validate_engine_agent_cookie_preflight(source: &str) -> Result<(), String> {
             ));
         }
     }
-    let wrapped_at = source
-        .find("letname=Zeroizing::new(name);")
-        .ok_or_else(|| "production Windows cookie name zeroization is missing".to_owned())?;
-    let validated_at = source
-        .find("if!valid_cookie_name(&name)")
-        .ok_or_else(|| "production Windows cookie validation is missing".to_owned())?;
-    if wrapped_at > validated_at {
+    Ok(())
+}
+
+fn validate_engine_windows_cookie_transfer(module: &str, source: &str) -> Result<(), String> {
+    let module_marker = "mod cookie_transfer;";
+    let module_at = module
+        .find(module_marker)
+        .ok_or_else(|| "production Windows cookie adapter module is missing".to_owned())?;
+    let module_prefix = &module[..module_at];
+    let gate_at = module_prefix
+        .rfind("#[cfg")
+        .ok_or_else(|| "production Windows cookie adapter lost its feature gate".to_owned())?;
+    let gate = compact(&module_prefix[gate_at..]);
+    if !gate.contains("#[cfg(feature=\"agentic-browser\")]")
+        || !gate.contains("#[allow(dead_code)]")
+    {
         return Err(
-            "production Windows cookie strings must acquire zeroizing ownership before validation"
+            "production Windows cookie adapter must remain dormant and agentic-browser gated"
                 .to_owned(),
         );
+    }
+
+    let source = compact(source);
+    for required in [
+        "pub(crate)constAGENT_COOKIE_CLEANUP_RESERVE:Duration=Duration::from_secs(10);",
+        "state:RefCell<Option<TransferState>>",
+        "cancellation:Cell<Option<ContextCookieTransferFailure>>",
+        "terminal:Cell<bool>",
+        "terminal_deadline.checked_sub(AGENT_COOKIE_CLEANUP_RESERVE)",
+        "AgentCookiePreflight::try_new(scope.len())",
+        "GetCookies(PCWSTR::from_raw(origin.as_ptr()),&handler)",
+        "count>maximum",
+        "state.destination.CopyCookie(&source_cookie)",
+        "AgentCookieText::try_from_utf16(units)",
+        "TransferPhase::Applying{in_flight:false}",
+        "TransferPhase::Applying{in_flight:true}",
+        "Some(TransferPhase::Applying{in_flight:true})=>{}",
+        "destination.AddOrUpdateCookie(&cookie)",
+        "application.record_current_applied(after_apply)",
+        "destination.DeleteAllCookies()",
+        "profile.ClearBrowsingDataAll(&handler)",
+        "destination.GetCookies(PCWSTR::null(),&handler)",
+        "count==0",
+        "WindowsAgentCookieCleanup::Proven",
+        "WindowsAgentCookieCleanup::Unproven",
+        "ContextCookieTransferOutcome::Partial{failure,stats}",
+        "shared.cancellation.set(None);",
+        "shared.terminal.replace(true)",
+        "std::panic::catch_unwind",
+        "implDropforWindowsAgentCookieTransfer",
+        "ContextCookieTransferFailure::Shutdown",
+    ] {
+        if !source.contains(required) {
+            return Err(format!(
+                "production Windows cookie adapter lost required closed mechanism {required}"
+            ));
+        }
+    }
+
+    let entered = source
+        .find("state.phase=TransferPhase::Applying{in_flight:true};")
+        .ok_or_else(|| "production Windows cookie write interlock is missing".to_owned())?;
+    let write = source
+        .find("destination.AddOrUpdateCookie(&cookie)")
+        .ok_or_else(|| "production Windows cookie write is missing".to_owned())?;
+    let accounted = source
+        .find("application.record_current_applied(after_apply)")
+        .ok_or_else(|| "production Windows cookie write accounting is missing".to_owned())?;
+    if !(entered < write && write < accounted) {
+        return Err(
+            "production Windows cookie write must be interlocked before mutation and accounted afterward"
+                .to_owned(),
+        );
+    }
+
+    let cleanup = source
+        .split_once("fnbegin_cleanup(")
+        .map(|(_, cleanup)| cleanup)
+        .ok_or_else(|| "production Windows cookie cleanup owner is missing".to_owned())?;
+    let clear_cancellation = cleanup
+        .find("shared.cancellation.set(None);")
+        .ok_or_else(|| {
+            "production Windows cookie cleanup cannot run after cancellation".to_owned()
+        })?;
+    let delete = cleanup
+        .find("destination.DeleteAllCookies()")
+        .ok_or_else(|| "production Windows cookie cleanup delete is missing".to_owned())?;
+    let clear_all = cleanup
+        .find("profile.ClearBrowsingDataAll(&handler)")
+        .ok_or_else(|| "production Windows profile cleanup is missing".to_owned())?;
+    let verify = cleanup
+        .find("destination.GetCookies(PCWSTR::null(),&handler)")
+        .ok_or_else(|| "production Windows cookie cleanup verification is missing".to_owned())?;
+    if !(clear_cancellation < delete && delete < clear_all && clear_all < verify) {
+        return Err(
+            "production Windows cookie cleanup must delete, clear, then verify the whole profile"
+                .to_owned(),
+        );
+    }
+
+    for forbidden in [
+        "std::sync::mpsc",
+        "channel(",
+        "thread::spawn",
+        "thread::sleep",
+        "WaitForSingleObject",
+        "MsgWaitForMultipleObjects",
+        "PeekMessage",
+        "GetMessage",
+        "DispatchMessage",
+        "cookies_for_url",
+        "string_from_pcwstr",
+        "String::from_utf16_lossy",
+        "unwrap_or(char::REPLACEMENT_CHARACTER)",
+        "with_ipc_handler",
+        "PostWebMessage",
+        "evaluate_script",
+        "ExecuteScript",
+        "CallDevToolsProtocolMethod",
+        "querySelector",
+        "document.cookie",
+        "Serialize",
+        "Deserialize",
+    ] {
+        if source.contains(forbidden) {
+            return Err(format!(
+                "production Windows cookie adapter acquired forbidden surface {forbidden}"
+            ));
+        }
     }
     Ok(())
 }
@@ -5159,6 +5290,7 @@ mod tests {
                 ENGINE_MACOS_SEMANTIC_RUNTIME,
                 ENGINE_MACOS_SEMANTIC_SCREENSHOT,
                 ENGINE_WINDOWS_AGENT_CONTEXT,
+                ENGINE_WINDOWS_COOKIE_TRANSFER,
                 ENGINE_WINDOWS_SEMANTIC_RUNTIME,
                 ENGINE_WINDOWS_SEMANTIC_SCREENSHOT,
                 ENGINE_WINDOWS_AGENT_TIMEOUT,
@@ -5381,6 +5513,7 @@ mod tests {
                 ENGINE_MACOS_SEMANTIC_RUNTIME,
                 ENGINE_MACOS_SEMANTIC_SCREENSHOT,
                 ENGINE_WINDOWS_AGENT_CONTEXT,
+                ENGINE_WINDOWS_COOKIE_TRANSFER,
                 ENGINE_WINDOWS_SEMANTIC_RUNTIME,
                 ENGINE_WINDOWS_SEMANTIC_SCREENSHOT,
                 ENGINE_WINDOWS_AGENT_TIMEOUT,
@@ -7757,7 +7890,10 @@ mod tests {
         validate_engine_agent_cookie_preflight(preflight)
             .expect("bounded secret-owning cookie preflight");
         for invalid in [
-            preflight.replace("let name = Zeroizing::new(name);", ""),
+            preflight.replace(
+                "name: AgentCookieText,\n        value: AgentCookieText,",
+                "name: String,\n        value: String,",
+            ),
             preflight.replace("> MAX_COOKIES_PER_TRANSFER", "> usize::MAX"),
             preflight.replace(".same_snapshot(&fields)", ".same_identity(&fields)"),
             preflight.replace(".and_then(Option::take)", ".and_then(Option::as_ref)"),
@@ -7767,6 +7903,47 @@ mod tests {
             ),
         ] {
             assert!(validate_engine_agent_cookie_preflight(&invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn production_windows_cookie_adapter_is_bounded_callback_driven_and_recoverable() {
+        let module = include_str!("../../crates/zephium-engine/src/platform/windows/mod.rs");
+        let transfer =
+            include_str!("../../crates/zephium-engine/src/platform/windows/cookie_transfer.rs");
+        validate_engine_windows_cookie_transfer(module, transfer)
+            .expect("bounded dormant Windows cookie adapter");
+        let invalid_modules = [
+            module.replacen("#[cfg(feature = \"agentic-browser\")]", "", 2),
+            module.replace(
+                "#[allow(dead_code)]\nmod cookie_transfer;",
+                "mod cookie_transfer;",
+            ),
+        ];
+        for invalid in invalid_modules {
+            assert!(validate_engine_windows_cookie_transfer(&invalid, transfer).is_err());
+        }
+        for invalid in [
+            transfer.replace(
+                "state.destination.CopyCookie(&source_cookie)",
+                "source_cookie.clone()",
+            ),
+            transfer.replace("count > maximum", "false"),
+            transfer.replace(
+                "state.phase = TransferPhase::Applying { in_flight: true };",
+                "state.phase = TransferPhase::Applying { in_flight: false };",
+            ),
+            transfer.replace("let _ = unsafe { destination.DeleteAllCookies() };", ""),
+            transfer.replace("profile.ClearBrowsingDataAll(&handler)", "handler.clone()"),
+            transfer.replace(
+                "destination.GetCookies(PCWSTR::null(), &handler)",
+                "destination.GetCookies(PCWSTR::from_raw(origin.as_ptr()), &handler)",
+            ),
+            transfer.replace("shared.cancellation.set(None);", ""),
+            format!("{transfer}\nstd::sync::mpsc::channel();"),
+            format!("{transfer}\nevaluate_script();"),
+        ] {
+            assert!(validate_engine_windows_cookie_transfer(module, &invalid).is_err());
         }
     }
 
