@@ -1476,6 +1476,20 @@ impl AgentProviderAttempt {
                 slot,
             );
         }
+        // Avoid materializing an authentication header or request for an
+        // attempt whose sticky cancellation was already observable when this
+        // future began. The later check remains required to close the window
+        // after request construction and before the send future is polled.
+        if self.cancellation.is_cancelled() || self.shutdown.is_cancelled() {
+            return finish_attempt(
+                active,
+                config,
+                cancelled_failure(),
+                AgentProviderDispatchEvidence::NotDispatched,
+                continuation,
+                slot,
+            );
+        }
         let mut decoder = match AgentProviderStreamDecoder::try_new(call, &config) {
             Ok(decoder) => decoder,
             Err(_) => {

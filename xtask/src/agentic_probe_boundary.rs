@@ -366,6 +366,7 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     )?;
     validate_agentic_no_direct_logging_calls(PROVIDER_TRANSPORT_ROOT, &provider_transport_root)?;
     validate_provider_secret_diagnostic_contract(&provider_transport_root)?;
+    validate_provider_revocation_before_secret_materialization(&provider_transport_root)?;
     validate_engine_manifest(&read(repository.join(ENGINE_MANIFEST))?)?;
     validate_engine_root(&read(repository.join(ENGINE_ROOT))?)?;
     for path in ENGINE_AGENTIC_PRODUCTION_MODULES {
@@ -4463,6 +4464,56 @@ fn validate_provider_secret_diagnostic_contract(source: &str) -> Result<(), Stri
     Ok(())
 }
 
+fn validate_provider_revocation_before_secret_materialization(source: &str) -> Result<(), String> {
+    let production = source
+        .split_once("\n#[cfg(test)]\nmod tests")
+        .map_or(source, |(production, _)| production);
+    let source = compact(
+        &production
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<String>(),
+    );
+    let execute_start = source
+        .find("pubasyncfnexecute<F>")
+        .ok_or_else(|| "agent provider attempt execution boundary is missing".to_owned())?;
+    let execute_end = source[execute_start..]
+        .find("implfmt::DebugforAgentProviderAttempt")
+        .map(|offset| execute_start + offset)
+        .ok_or_else(|| "agent provider attempt execution boundary is unclosed".to_owned())?;
+    let execute = &source[execute_start..execute_end];
+    let cancellation =
+        "ifself.cancellation.is_cancelled()||self.shutdown.is_cancelled(){returnfinish_attempt(";
+    let checks = execute
+        .match_indices(cancellation)
+        .map(|(offset, _)| offset)
+        .collect::<Vec<_>>();
+    if checks.len() != 2 {
+        return Err(
+            "agent provider dispatch requires exactly two terminal sticky-cancellation checks"
+                .to_owned(),
+        );
+    }
+    let decoder = execute
+        .find("letmutdecoder=matchAgentProviderStreamDecoder::try_new")
+        .ok_or_else(|| "agent provider stream decoder construction is missing".to_owned())?;
+    let header = execute
+        .find("letcredential=matchself.credential.into_sensitive_header(self.provider)")
+        .ok_or_else(|| {
+            "agent provider dispatch-time authentication header is missing".to_owned()
+        })?;
+    let request = execute
+        .find("letrequest=provider_request(")
+        .ok_or_else(|| "agent provider fixed request construction is missing".to_owned())?;
+    if !(checks[0] < decoder && decoder < header && header < request && request < checks[1]) {
+        return Err(
+            "agent provider cancellation must precede secret materialization and be rechecked before dispatch"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
 fn validate_semantic_diff_policy_contract(
     root: &str,
     diff: &str,
@@ -7160,6 +7211,54 @@ mod tests {
         ] {
             assert!(validate_provider_secret_diagnostic_contract(&invalid).is_err());
         }
+    }
+
+    #[test]
+    fn provider_revocation_precedes_authentication_materialization() {
+        let valid = r#"
+            pub async fn execute<F>() {
+                if self.cancellation.is_cancelled() || self.shutdown.is_cancelled() {
+                    return finish_attempt();
+                }
+                let mut decoder = match AgentProviderStreamDecoder::try_new() {};
+                let credential = match self.credential.into_sensitive_header(self.provider) {};
+                let request = provider_request();
+                if self.cancellation.is_cancelled() || self.shutdown.is_cancelled() {
+                    return finish_attempt();
+                }
+            }
+            impl fmt::Debug for AgentProviderAttempt {}
+        "#;
+        validate_provider_revocation_before_secret_materialization(valid)
+            .expect("pre-materialization revocation boundary");
+
+        let cancellation = r#"
+                if self.cancellation.is_cancelled() || self.shutdown.is_cancelled() {
+                    return finish_attempt();
+                }
+        "#;
+        assert!(
+            validate_provider_revocation_before_secret_materialization(&valid.replacen(
+                cancellation,
+                "",
+                1
+            ))
+            .is_err()
+        );
+        assert!(
+            validate_provider_revocation_before_secret_materialization(&valid.replace(
+                "let request = provider_request();\n                if self.cancellation",
+                "if self.cancellation"
+            ))
+            .is_err()
+        );
+        assert!(validate_provider_revocation_before_secret_materialization(
+            &valid.replace(
+                "let mut decoder = match AgentProviderStreamDecoder::try_new() {};",
+                "let credential = match self.credential.into_sensitive_header(self.provider) {};\n                let mut decoder = match AgentProviderStreamDecoder::try_new() {};"
+            )
+        )
+        .is_err());
     }
 
     #[test]

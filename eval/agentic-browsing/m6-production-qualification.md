@@ -58,7 +58,10 @@ responses, machine-local paths, or native traces.
   classifier that consumes only the timeout bit. Pinned `http` 1.4.2 copies a
   byte slice into ordinary `Bytes` for `HeaderValue` and has no zeroizing drop,
   so the evidence does not claim zeroization for that unavoidable HTTP-stack
-  or wire copy. Mutation tests prove each protection is required; and
+  or wire copy. The gate also requires sticky cancellation before authentication
+  materialization and a second check after request construction but before the
+  send future can be polled. Mutation tests prove each protection and ordering
+  edge is required; and
 - pins the provider's 64 KiB response-header ceiling at both available layers:
   reqwest configures the pre-decode HTTP/2 list limit, then a zero-allocation
   checked pass accounts every decoded field's name, value, and 32-byte
@@ -281,9 +284,11 @@ agentic-owned Windows modules. Cross-compilation is not device behavior.
   constructs a request and proves neither its credential nor request-body
   sentinel appears in `Request` debug output. Zephium's retained and temporary
   credential buffers are zeroized; pinned `HeaderValue`, the TLS stack, and
-  wire buffers are not claimed to be. This is a scoped source and test audit;
-  it does not claim review of shared shell, extension-owned, third-party, or
-  non-agentic logging surfaces.
+  wire buffers are not claimed to be. Sticky cancellation now short-circuits
+  before authentication materialization when observable at execution entry,
+  while the existing second check still closes request construction before
+  dispatch. This is a scoped source and test audit; it does not claim review of
+  shared shell, extension-owned, third-party, or non-agentic logging surfaces.
 - The provider transport now distinguishes an open but idle snapshot from a
   terminally quiescent one. After its sticky seal cancels retained attempts and
   permanently refuses admission, only an exact zero-active snapshot can mint a
