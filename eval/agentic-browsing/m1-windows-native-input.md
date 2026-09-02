@@ -106,13 +106,19 @@ key-up messages to acquire inconsistent scan metadata.
   events, JSON, navigation state, and durations are bounded.
 - The run has a 90-second absolute deadline, each navigation a ten-second
   ceiling, each case a five-second ceiling, and native waits pump at most five
-  milliseconds before rechecking cancellation. Every HWND step polls control
-  and checks cancellation/deadline before dispatch and immediately after it;
-  the synchronous message timeout cannot exceed the remaining case deadline.
+  milliseconds before rechecking cancellation. The exact permit and absolute
+  deadline are now polled before fixture/profile/native allocation, again
+  immediately before Wry controller construction, before every loopback
+  navigation, and before each visibility/focus transition. Every HWND step
+  performs an early check before focus sampling and a second check after its
+  message payload, timeout, and owned-document identity are ready, immediately
+  before the one bounded `SendMessageTimeoutW`; it checks again after dispatch.
+  The synchronous message timeout cannot exceed the remaining case deadline.
   Every fixed CDP observation or input command performs the same control poll
   and cancellation/deadline check immediately before native submission, then
   continues polling during its one outstanding completion. An already-revoked
-  permit therefore cannot enqueue the next CDP step.
+  permit therefore cannot allocate a new run, navigate, change presentation,
+  or enqueue the next HWND/CDP step.
 - Explicit Wry close debt is retried for 500 ms and the bounded orphan-debt
   registry is drained. A sticky cleanup-overflow marker fails teardown.
 - The adapter captures the exact browser PID and a non-reusable process HANDLE,
@@ -182,6 +188,12 @@ receiver-exit failure, Windows reparse-point rejection for physical evidence,
 strict bounded raw CDP completion, fixed method
 allowlist, and absence of input-queue attachment, global `SendInput`, cursor
 movement, page IPC, host objects, or generic script calls.
+The source gate now also binds the three run/construction/navigation
+preflights, every presentation operation, and the final HWND message preflight;
+it rejects additional direct navigation, `SendMessageTimeoutW`, CDP,
+foreground, or focus call sites. Its mutation test operates on the actual
+target source and removes representative admission, navigation, presentation,
+HWND, CDP, identity, and bounded-response protections.
 The same gate mutation-tests the event/target join, empty non-dispatch rows,
 link/clipboard effect fields, and popup-request/outcome correspondence used by
 the offline reviewer.

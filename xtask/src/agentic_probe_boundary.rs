@@ -2428,6 +2428,12 @@ fn validate_macos_probe_source(source: &str) -> Result<(), String> {
 
 fn validate_windows_probe_source(source: &str) -> Result<(), String> {
     validate_engine_agentic_native_unsafe_contract(ENGINE_WINDOWS_PROBE_MODULE, source)?;
+    let code = compact(
+        &source
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<String>(),
+    );
     let source = compact(source);
     for required in [
         "attest_native_view(&host,view,matrix.presentation)",
@@ -2452,34 +2458,68 @@ fn validate_windows_probe_source(source: &str) -> Result<(), String> {
         "keyboard_layout==self.keyboard_layout",
         "SendMessageTimeoutW(",
         "SMTO_ABORTIFHUNG|SMTO_BLOCK|SMTO_ERRORONEXIT,timeout_ms",
-        "check_dispatch_control(permit,poll_control,deadline)?;observe_focus();lettimeout_ms=message_timeout_ms(deadline)?;",
+        "check_dispatch_control(permit,&mutpoll_control,run_deadline).map_err(|error|adapter_failure(error,ProbeStage::Admit,None,None))?;",
+        "check_dispatch_control(permit,&mutpoll_control,run_deadline).map_err(|error|adapter_failure(error,ProbeStage::Construct,None,None))?;letmutwebview=builder.build_as_child(&host).ok();",
+        "check_dispatch_control(permit,&mutpoll_control,run_deadline).map_err(|error|adapter_failure(error,ProbeStage::Navigate,Some(case),Some(backend)),)?;view.load_url(&url)",
+        "check_dispatch_control(permit,poll_control,deadline)?;observe_focus();match*step",
+        "if!self.is_current(){returnErr(AdapterError::NativeConstruction);}send_message(self.document,message,wparam,lparam,permit,poll_control,deadline,)?;",
+        "lettimeout_ms=message_timeout_ms(deadline)?;iftimeout_ms==0||timeout_ms>SEND_TIMEOUT_MS{returnErr(AdapterError::Timeout);}letmutresult=0_usize;check_dispatch_control(permit,poll_control,deadline)?;letsent=unsafe{SendMessageTimeoutW(",
         "observe_focus();check_dispatch_control(permit,poll_control,deadline)?;",
         "validate_cdp_response(&response)?;observe_focus();",
         "letparameters=HSTRING::from(parameters);check_dispatch_control(permit,poll_control,deadline)?;",
+        "check_dispatch_control(permit,poll_control,deadline)?;view.set_visible(false)",
+        "check_dispatch_control(permit,poll_control,deadline)?;let_=unsafe{ShowWindow(host.hwnd,SW_HIDE)};",
+        "check_dispatch_control(permit,poll_control,deadline)?;unsafe{SetWindowPos(",
+        "check_dispatch_control(permit,poll_control,deadline)?;let_=unsafe{ShowWindow(host.hwnd,SW_SHOWNOACTIVATE)};",
+        "check_dispatch_control(permit,poll_control,deadline)?;let_=unsafe{ShowWindow(host.hwnd,SW_SHOW)};",
+        "check_dispatch_control(permit,poll_control,deadline)?;if!unsafe{SetForegroundWindow(host.hwnd)}.as_bool()",
+        "check_dispatch_control(permit,poll_control,deadline)?;unsafe{SetFocus(Some(view.hwnd()))}",
         "MAPVK_VK_TO_VSC_EX",
         "MapVirtualKeyExW(",
         "Some(target.keyboard_layout)",
         "windows_key_message_lparam(mapped_scan,down)",
         "windows_key_message_lparam(mapped_scan,true)",
-        "target.send(WM_CHAR,WPARAM(usize::from(b'x')),LPARAM(lparam),timeout_ms,)",
+        "target.send(WM_CHAR,WPARAM(usize::from(b'x')),LPARAM(lparam),permit,poll_control,deadline,)",
         "verify_nonactivating_presentation(&host,view,matrix.presentation)",
         "foreground==host.hwnd||active==host.hwnd||focus_is_owned_by_view(view,focus)",
         "let(foreground_during,active_during,thread_focus_during)=native_focus_sample();",
         "unsafe{(GetForegroundWindow(),GetActiveWindow(),GetFocus())}",
         "focus_is_owned_by_view(view,thread_focus_during)",
         "ICoreWebView2CallDevToolsProtocolMethodCompletedHandler",
-        "borrowed_pcwstr_bounded(",
+        "borrowed_pcwstr_bounded(response,MAX_CDP_RESPONSE_UTF16_UNITS,MAX_CDP_RESPONSE_BYTES,).ok_or(AdapterError::InvalidEvidence)",
         "method:FixedCdpMethod",
         "Self::InputDispatchMouseEvent=>\"Input.dispatchMouseEvent\"",
         "Self::InputDispatchKeyEvent=>\"Input.dispatchKeyEvent\"",
         "Self::RuntimeEvaluate=>\"Runtime.evaluate\"",
         "\"userGesture\":false",
     ] {
-        if !source.contains(required) {
+        if !code.contains(required) {
             return Err(format!(
                 "Windows native-input probe lost required bounded mechanism {required}"
             ));
         }
+    }
+    if code
+        .matches("check_dispatch_control(permit,&mutpoll_control,run_deadline)")
+        .count()
+        != 3
+        || code.matches("view.load_url(&url)").count() != 1
+        || code.matches("SendMessageTimeoutW(").count() != 1
+        || code.matches("core.CallDevToolsProtocolMethod(").count() != 1
+        || code.matches("view.set_visible(true)").count() != 2
+        || code
+            .matches("check_dispatch_control(permit,poll_control,deadline)?;view.set_visible(true)")
+            .count()
+            != 2
+        || code.matches("ShowWindow(host.hwnd").count() != 3
+        || code.matches("SetWindowPos(").count() != 1
+        || code.matches("SetForegroundWindow(host.hwnd)").count() != 1
+        || code.matches("SetFocus(Some(view.hwnd()))").count() != 1
+    {
+        return Err(
+            "Windows native-input probe must preflight every construction, navigation, and presentation effect exactly once"
+                .to_owned(),
+        );
     }
     for forbidden in [
         "SendInput(",
@@ -10293,64 +10333,9 @@ mod tests {
 
     #[test]
     fn windows_probe_requires_closed_scoped_input_and_bounded_cdp() {
-        let valid = format!(
-            "{ENGINE_AGENTIC_NATIVE_UNSAFE_HEADER}{}",
-            r#"
-            attest_native_view(&host, view, matrix.presentation);
-            IsWindow(Some(host.hwnd));
-            GetParent(container);
-            controller.ParentWindow(&mut controller_parent);
-            controller.IsVisible(&mut controller_visible);
-            GetClientRect(container, &mut container_bounds);
-            controller.Bounds(&mut controller_bounds);
-            GetDpiForWindow(container);
-            expected_physical_extent(PROBE_WIDTH, dpi);
-            GetWindow(container, GW_CHILD);
-            GetWindow(self.container, GW_CHILD);
-            GetParent(self.document);
-            GetWindowThreadProcessId(document, Some(&mut owner_process_id));
-            GetCurrentThreadId();
-            owner_thread_id == current_thread_id;
-            owner_thread_id == self.owner_thread_id;
-            owner_process_id == self.owner_process_id;
-            let keyboard_layout = unsafe { GetKeyboardLayout(owner_thread_id) };
-            keyboard_layout.is_invalid();
-            keyboard_layout == self.keyboard_layout;
-            SendMessageTimeoutW(hwnd, SMTO_ABORTIFHUNG | SMTO_BLOCK | SMTO_ERRORONEXIT, timeout_ms);
-            check_dispatch_control(permit, poll_control, deadline)?;
-            observe_focus();
-            let timeout_ms = message_timeout_ms(deadline)?;
-            observe_focus();
-            check_dispatch_control(permit, poll_control, deadline)?;
-            validate_cdp_response(&response)?;
-            observe_focus();
-            MAPVK_VK_TO_VSC_EX;
-            MapVirtualKeyExW(code, MAPVK_VK_TO_VSC_EX, Some(target.keyboard_layout));
-            windows_key_message_lparam(mapped_scan, down);
-            windows_key_message_lparam(mapped_scan, true);
-            target.send(
-                WM_CHAR,
-                WPARAM(usize::from(b'x')),
-                LPARAM(lparam),
-                timeout_ms,
-            );
-            verify_nonactivating_presentation(&host, view, matrix.presentation);
-            foreground == host.hwnd || active == host.hwnd || focus_is_owned_by_view(view, focus);
-            let (foreground_during, active_during, thread_focus_during) = native_focus_sample();
-            unsafe { (GetForegroundWindow(), GetActiveWindow(), GetFocus()) };
-            focus_is_owned_by_view(view, thread_focus_during);
-            let parameters = HSTRING::from(parameters);
-            check_dispatch_control(permit, poll_control, deadline)?;
-            ICoreWebView2CallDevToolsProtocolMethodCompletedHandler;
-            borrowed_pcwstr_bounded(response);
-            fn call(method: FixedCdpMethod) {}
-            Self::InputDispatchMouseEvent => "Input.dispatchMouseEvent";
-            Self::InputDispatchKeyEvent => "Input.dispatchKeyEvent";
-            Self::RuntimeEvaluate => "Runtime.evaluate";
-            json!({ "userGesture": false });
-        "#
-        );
-        validate_windows_probe_source(&valid).expect("valid bounded Windows probe");
+        let valid =
+            include_str!("../../crates/zephium-engine/src/platform/windows/agentic_input_probe.rs");
+        validate_windows_probe_source(valid).expect("valid bounded Windows probe");
         assert!(validate_windows_probe_source(&valid.replacen(
             "#![deny(unsafe_op_in_unsafe_fn)]\n",
             "",
@@ -10363,23 +10348,23 @@ mod tests {
             1
         ))
         .is_err());
-        assert!(validate_windows_probe_source(&valid.replace(
-            "SendMessageTimeoutW(hwnd, SMTO_ABORTIFHUNG | SMTO_BLOCK | SMTO_ERRORONEXIT, timeout_ms);",
-            "SendInput(payload);",
+        assert!(validate_windows_probe_source(&valid.replacen(
+            "        SendMessageTimeoutW(\n",
+            "        SendInput(\n",
+            1,
         ))
         .is_err());
         assert!(validate_windows_probe_source(&valid.replace(
-            "owner_thread_id == current_thread_id;",
-            "owner_thread_id == 0;",
-        ))
-        .is_err());
-        assert!(validate_windows_probe_source(&valid.replace(
-            "MapVirtualKeyExW(code, MAPVK_VK_TO_VSC_EX, Some(target.keyboard_layout));",
-            "MapVirtualKeyW(code, MAPVK_VK_TO_VSC_EX);",
+            "owner_thread_id == current_thread_id",
+            "owner_thread_id == 0",
         ))
         .is_err());
         assert!(validate_windows_probe_source(
-            &valid.replace("keyboard_layout == self.keyboard_layout;", "true;",)
+            &valid.replace("MapVirtualKeyExW(", "MapVirtualKeyW(")
+        )
+        .is_err());
+        assert!(validate_windows_probe_source(
+            &valid.replace("keyboard_layout == self.keyboard_layout", "true",)
         )
         .is_err());
         assert!(validate_windows_probe_source(&valid.replace(
@@ -10388,14 +10373,15 @@ mod tests {
         ))
         .is_err());
         assert!(validate_windows_probe_source(&valid.replacen(
-            "validate_cdp_response(&response)?;\n            observe_focus();",
-            "validate_cdp_response(&response)?;",
+            "        validate_cdp_response(&response)?;\n        observe_focus();",
+            "        observe_focus();",
             1,
         ))
         .is_err());
-        assert!(validate_windows_probe_source(&valid.replace(
-            "borrowed_pcwstr_bounded(response);",
-            "response.to_string();"
+        assert!(validate_windows_probe_source(&valid.replacen(
+            "borrowed_pcwstr_bounded(",
+            "unbounded_pcwstr(",
+            1,
         ))
         .is_err());
         assert!(validate_windows_probe_source(&format!(
@@ -10407,12 +10393,36 @@ mod tests {
         ))
         .is_err());
         assert!(validate_windows_probe_source(
-            &valid.replace("focus_is_owned_by_view(view, thread_focus_during);", "")
+            &valid.replace("focus_is_owned_by_view(view, thread_focus_during)", "false",)
         )
         .is_err());
         assert!(validate_windows_probe_source(&valid.replacen(
-            "let parameters = HSTRING::from(parameters);\n            check_dispatch_control(permit, poll_control, deadline)?;",
+            "    let parameters = HSTRING::from(parameters);\n    check_dispatch_control(permit, poll_control, deadline)?;",
             "let parameters = HSTRING::from(parameters);",
+            1,
+        ))
+        .is_err());
+        assert!(validate_windows_probe_source(&valid.replacen(
+            "    check_dispatch_control(permit, &mut poll_control, run_deadline)\n        .map_err(|error| adapter_failure(error, ProbeStage::Admit, None, None))?;\n",
+            "",
+            1,
+        ))
+        .is_err());
+        assert!(validate_windows_probe_source(&valid.replacen(
+            "                check_dispatch_control(permit, &mut poll_control, run_deadline).map_err(\n                    |error| adapter_failure(error, ProbeStage::Navigate, Some(case), Some(backend)),\n                )?;\n",
+            "",
+            1,
+        ))
+        .is_err());
+        assert!(validate_windows_probe_source(&valid.replacen(
+            "    let mut result = 0_usize;\n    check_dispatch_control(permit, poll_control, deadline)?;",
+            "    let mut result = 0_usize;",
+            1,
+        ))
+        .is_err());
+        assert!(validate_windows_probe_source(&valid.replacen(
+            "            check_dispatch_control(permit, poll_control, deadline)?;\n            view.set_visible(false)",
+            "            view.set_visible(false)",
             1,
         ))
         .is_err());

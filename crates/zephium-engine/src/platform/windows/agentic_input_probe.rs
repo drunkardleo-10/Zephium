@@ -420,6 +420,8 @@ pub(crate) fn run(
             false,
         )
     })?;
+    check_dispatch_control(permit, &mut poll_control, run_deadline)
+        .map_err(|error| adapter_failure(error, ProbeStage::Admit, None, None))?;
     let server = FixtureServer::start().map_err(|_| {
         failure(
             ProbeFailureCode::HarnessFailure,
@@ -502,6 +504,8 @@ pub(crate) fn run(
             *slot = Some(environment.clone());
         });
 
+    check_dispatch_control(permit, &mut poll_control, run_deadline)
+        .map_err(|error| adapter_failure(error, ProbeStage::Construct, None, None))?;
     let mut webview = builder.build_as_child(&host).ok();
     let environment = captured_environment
         .try_borrow_mut()
@@ -583,8 +587,15 @@ pub(crate) fn run(
                 )
             },
         )?);
-        apply_presentation(&host, view, matrix.presentation)
-            .map_err(|error| adapter_failure(error, ProbeStage::Construct, None, None))?;
+        apply_presentation(
+            &host,
+            view,
+            matrix.presentation,
+            permit,
+            &mut poll_control,
+            run_deadline,
+        )
+        .map_err(|error| adapter_failure(error, ProbeStage::Construct, None, None))?;
         attest_native_view(&host, view, matrix.presentation)
             .map_err(|error| adapter_failure(error, ProbeStage::Construct, None, None))?;
         verify_nonactivating_presentation(&host, view, matrix.presentation)
@@ -635,6 +646,9 @@ pub(crate) fn run(
                 navigation.arm(url.clone()).map_err(|error| {
                     adapter_failure(error, ProbeStage::Navigate, Some(case), Some(backend))
                 })?;
+                check_dispatch_control(permit, &mut poll_control, run_deadline).map_err(
+                    |error| adapter_failure(error, ProbeStage::Navigate, Some(case), Some(backend)),
+                )?;
                 view.load_url(&url).map_err(|_| {
                     adapter_failure(
                         AdapterError::Navigation,
@@ -1048,7 +1062,6 @@ fn dispatch_hwnd_plan(
     for step in plan {
         check_dispatch_control(permit, poll_control, deadline)?;
         observe_focus();
-        let timeout_ms = message_timeout_ms(deadline)?;
         match *step {
             WindowsInputStep::MouseMove {
                 point,
@@ -1059,20 +1072,40 @@ fn dispatch_hwnd_plan(
                     WM_MOUSEMOVE,
                     WPARAM(usize::from(primary_down)),
                     point_lparam(point),
-                    timeout_ms,
+                    permit,
+                    poll_control,
+                    deadline,
                 )?;
             }
             WindowsInputStep::PrimaryDown(point) => {
                 let point = physical_point(point, geometry.device_pixel_ratio(), width, height)?;
-                target.send(WM_LBUTTONDOWN, WPARAM(1), point_lparam(point), timeout_ms)?;
+                target.send(
+                    WM_LBUTTONDOWN,
+                    WPARAM(1),
+                    point_lparam(point),
+                    permit,
+                    poll_control,
+                    deadline,
+                )?;
             }
             WindowsInputStep::PrimaryUp(point) => {
                 let point = physical_point(point, geometry.device_pixel_ratio(), width, height)?;
-                target.send(WM_LBUTTONUP, WPARAM(0), point_lparam(point), timeout_ms)?;
+                target.send(
+                    WM_LBUTTONUP,
+                    WPARAM(0),
+                    point_lparam(point),
+                    permit,
+                    poll_control,
+                    deadline,
+                )?;
             }
-            WindowsInputStep::KeyDown(key) => send_key(target, key, true, timeout_ms)?,
-            WindowsInputStep::TextX => send_text_x(target, timeout_ms)?,
-            WindowsInputStep::KeyUp(key) => send_key(target, key, false, timeout_ms)?,
+            WindowsInputStep::KeyDown(key) => {
+                send_key(target, key, true, permit, poll_control, deadline)?
+            }
+            WindowsInputStep::TextX => send_text_x(target, permit, poll_control, deadline)?,
+            WindowsInputStep::KeyUp(key) => {
+                send_key(target, key, false, permit, poll_control, deadline)?
+            }
         }
         observe_focus();
         check_dispatch_control(permit, poll_control, deadline)?;
@@ -1171,12 +1204,22 @@ impl OwnedDocumentHwnd {
         message: u32,
         wparam: WPARAM,
         lparam: LPARAM,
-        timeout_ms: u32,
+        permit: &ProbeRunPermit,
+        poll_control: &mut impl FnMut(),
+        deadline: Instant,
     ) -> Result<(), AdapterError> {
         if !self.is_current() {
             return Err(AdapterError::NativeConstruction);
         }
-        send_message(self.document, message, wparam, lparam, timeout_ms)?;
+        send_message(
+            self.document,
+            message,
+            wparam,
+            lparam,
+            permit,
+            poll_control,
+            deadline,
+        )?;
         self.is_current()
             .then_some(())
             .ok_or(AdapterError::NativeConstruction)
@@ -1221,7 +1264,9 @@ fn send_key(
     target: OwnedDocumentHwnd,
     key: WindowsProbeKey,
     down: bool,
-    timeout_ms: u32,
+    permit: &ProbeRunPermit,
+    poll_control: &mut impl FnMut(),
+    deadline: Instant,
 ) -> Result<(), AdapterError> {
     let virtual_key = match key {
         WindowsProbeKey::X => 0x58_u16,
@@ -1243,11 +1288,18 @@ fn send_key(
         if down { WM_KEYDOWN } else { WM_KEYUP },
         WPARAM(usize::from(virtual_key)),
         LPARAM(lparam),
-        timeout_ms,
+        permit,
+        poll_control,
+        deadline,
     )
 }
 
-fn send_text_x(target: OwnedDocumentHwnd, timeout_ms: u32) -> Result<(), AdapterError> {
+fn send_text_x(
+    target: OwnedDocumentHwnd,
+    permit: &ProbeRunPermit,
+    poll_control: &mut impl FnMut(),
+    deadline: Instant,
+) -> Result<(), AdapterError> {
     // SAFETY: the exact document-thread HKL was captured and is revalidated
     // around every send; this pure mapping call owns no returned pointer.
     let mapped_scan = unsafe {
@@ -1263,7 +1315,9 @@ fn send_text_x(target: OwnedDocumentHwnd, timeout_ms: u32) -> Result<(), Adapter
         WM_CHAR,
         WPARAM(usize::from(b'x')),
         LPARAM(lparam),
-        timeout_ms,
+        permit,
+        poll_control,
+        deadline,
     )
 }
 
@@ -1272,12 +1326,16 @@ fn send_message(
     message: u32,
     wparam: WPARAM,
     lparam: LPARAM,
-    timeout_ms: u32,
+    permit: &ProbeRunPermit,
+    poll_control: &mut impl FnMut(),
+    deadline: Instant,
 ) -> Result<(), AdapterError> {
+    let timeout_ms = message_timeout_ms(deadline)?;
     if timeout_ms == 0 || timeout_ms > SEND_TIMEOUT_MS {
         return Err(AdapterError::Timeout);
     }
     let mut result = 0_usize;
+    check_dispatch_control(permit, poll_control, deadline)?;
     // SAFETY: the caller revalidates the owned descendant HWND immediately
     // before and after this bounded synchronous message. All scalar payloads
     // are message-defined values and the result pointer is valid for the call.
@@ -1601,16 +1659,22 @@ fn apply_presentation(
     host: &ProbeHostWindow,
     view: &WebView,
     presentation: PresentationState,
+    permit: &ProbeRunPermit,
+    poll_control: &mut impl FnMut(),
+    deadline: Instant,
 ) -> Result<(), AdapterError> {
     match presentation {
         PresentationState::Hidden => {
+            check_dispatch_control(permit, poll_control, deadline)?;
             view.set_visible(false)
                 .map_err(|_| AdapterError::NativeConstruction)?;
+            check_dispatch_control(permit, poll_control, deadline)?;
             // SAFETY: `host` uniquely owns this live HWND; hiding it neither
             // transfers ownership nor accesses caller memory.
             let _ = unsafe { ShowWindow(host.hwnd, SW_HIDE) };
         }
         PresentationState::VisibleBackground => {
+            check_dispatch_control(permit, poll_control, deadline)?;
             // SAFETY: `host` uniquely owns this live HWND. The flags suppress
             // activation and make the zero position/size arguments unused.
             unsafe {
@@ -1625,23 +1689,29 @@ fn apply_presentation(
                 )
             }
             .map_err(|_| AdapterError::NativeConstruction)?;
+            check_dispatch_control(permit, poll_control, deadline)?;
             // SAFETY: `host` uniquely owns this live HWND and
             // `SW_SHOWNOACTIVATE` preserves the background focus policy.
             let _ = unsafe { ShowWindow(host.hwnd, SW_SHOWNOACTIVATE) };
+            check_dispatch_control(permit, poll_control, deadline)?;
             view.set_visible(true)
                 .map_err(|_| AdapterError::NativeConstruction)?;
         }
         PresentationState::VisibleFocused => {
+            check_dispatch_control(permit, poll_control, deadline)?;
             // SAFETY: this branch is reachable only through the separately
             // authorized focused mode and `host` owns the live HWND.
             let _ = unsafe { ShowWindow(host.hwnd, SW_SHOW) };
+            check_dispatch_control(permit, poll_control, deadline)?;
             view.set_visible(true)
                 .map_err(|_| AdapterError::NativeConstruction)?;
+            check_dispatch_control(permit, poll_control, deadline)?;
             // SAFETY: the separately authorized mode permits foregrounding
             // only this adapter-owned top-level window.
             if !unsafe { SetForegroundWindow(host.hwnd) }.as_bool() {
                 return Err(AdapterError::NativeConstruction);
             }
+            check_dispatch_control(permit, poll_control, deadline)?;
             // SAFETY: Wry exposes this live child HWND and the focused mode
             // explicitly permits focus within the adapter-owned subtree.
             unsafe { SetFocus(Some(view.hwnd())) }.map_err(|_| AdapterError::NativeConstruction)?;

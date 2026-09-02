@@ -204,9 +204,14 @@ agentic-owned Windows modules. Cross-compilation is not device behavior.
   mutation-tests those joins. The Windows CDP candidate additionally polls
   control and rejects cancellation/deadline immediately before every fixed
   native submission, rather than first discovering revoked authority after the
-  command was queued; a source mutation that removes this preflight fails the
-  same gate. This strengthens future evidence admission and cancellation; it
-  is not physical Windows behavior evidence.
+  command was queued. The qualifier now applies the same exact permit/deadline
+  boundary before run allocation, Wry construction, loopback navigation, every
+  visibility/focus transition, and—after payload, timeout, and document-HWND
+  preparation—immediately before each bounded window message. The source gate
+  rejects an added direct native dispatch site and mutation-tests representative
+  admission, navigation, presentation, HWND, and CDP preflight removal. This
+  strengthens future evidence admission and cancellation; it is not physical
+  Windows behavior evidence.
 - The physical Windows semantic source gate now binds its content-free success
   fields to the closed snapshot verifiers, exact flood and renderer-loss
   refusals, native suspend/readback/resume result, semantic drain audit, and
