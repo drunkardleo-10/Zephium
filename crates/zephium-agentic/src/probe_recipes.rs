@@ -435,8 +435,8 @@ pub fn windows_input_plan(
 
 /// Encodes one Win32 keyboard-message `lParam` from a validated scan mapping.
 ///
-/// `MapVirtualKeyW(MAPVK_VK_TO_VSC_EX)` returns the scan code in the low byte
-/// and an optional `0xE0`/`0xE1` extended prefix in the high byte. Win32
+/// `MapVirtualKeyExW(MAPVK_VK_TO_VSC_EX)` returns the scan code in the low
+/// byte and an optional `0xE0`/`0xE1` extended prefix in the high byte. Win32
 /// keyboard messages carry only the low scan byte in bits 16-23 and represent
 /// that prefix with the extended-key flag in bit 24. A zero or unexpected
 /// mapping is refused instead of dispatching an ambiguous message.

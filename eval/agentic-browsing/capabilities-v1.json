@@ -73,9 +73,10 @@
         "vendor/wry/src/webview2/mod.rs",
         "https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendmessagetimeoutw",
         "https://learn.microsoft.com/en-us/windows/win32/inputdev/wm-keydown",
+        "https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getkeyboardlayout",
         "https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-mapvirtualkeyexw"
       ],
-      "limitations": "Pinned Wry exposes its WRY_WEBVIEW container, whose window procedure identifies the first direct child as the WebView document for focus. The adapter revalidates that owned child's container/first-child/parent identity before and after every fixed bounded SendMessageTimeoutW mouse/key step. Keyboard messages use the extended scan-code mapping and preserve the Win32 extended-key and up-transition flags. Hidden/background admission rejects host foreground/activation or owned-subtree keyboard focus before the first row, rather than accepting a stolen baseline. It verifies exact navigation identity, an ephemeral UDF plus InPrivate postcondition, and two-factor process exit before deletion. Cross-compilation does not prove hidden/background trusted input, effect coverage, or no focus theft."
+      "limitations": "Pinned Wry exposes its WRY_WEBVIEW container, whose window procedure identifies the first direct child as the WebView document for focus. The adapter revalidates that owned child's container/first-child/parent/thread/process/input-locale identity before and after every fixed bounded SendMessageTimeoutW mouse/key step, and receiver destruction fails dispatch. Key and character messages use target-layout MapVirtualKeyExW extended scan-code mapping and preserve the Win32 extended-key and up-transition flags. Hidden/background admission rejects host foreground/activation or owned-subtree keyboard focus before the first row, rather than accepting a stolen baseline. It verifies exact navigation identity, an ephemeral UDF plus InPrivate postcondition, and two-factor process exit before deletion. Cross-compilation does not prove hidden/background trusted input, effect coverage, or no focus theft."
     },
     {
       "platform": "windows",

@@ -2037,13 +2037,20 @@ fn validate_windows_probe_source(source: &str) -> Result<(), String> {
         "owner_thread_id==unsafe{GetCurrentThreadId()}",
         "owner_thread_id==self.owner_thread_id",
         "owner_process_id==self.owner_process_id",
+        "letkeyboard_layout=unsafe{GetKeyboardLayout(owner_thread_id)};",
+        "keyboard_layout.is_invalid()",
+        "GetKeyboardLayout(owner_thread_id)}==self.keyboard_layout",
         "SendMessageTimeoutW(",
-        "SMTO_ABORTIFHUNG|SMTO_BLOCK,timeout_ms",
+        "SMTO_ABORTIFHUNG|SMTO_BLOCK|SMTO_ERRORONEXIT,timeout_ms",
         "check_dispatch_control(permit,poll_control,deadline)?;observe_focus();lettimeout_ms=message_timeout_ms(deadline)?;",
         "observe_focus();check_dispatch_control(permit,poll_control,deadline)?;",
         "validate_cdp_response(&response)?;observe_focus();",
         "MAPVK_VK_TO_VSC_EX",
+        "MapVirtualKeyExW(",
+        "Some(target.keyboard_layout)",
         "windows_key_message_lparam(mapped_scan,down)",
+        "windows_key_message_lparam(mapped_scan,true)",
+        "target.send(WM_CHAR,WPARAM(usize::from(b'x')),LPARAM(lparam),timeout_ms,)",
         "verify_nonactivating_presentation(&host,view,matrix.presentation)",
         "foreground==host.hwnd||active==host.hwnd||focus_is_owned_by_view(view,focus)",
         "letthread_focus_during=unsafe{GetFocus()};",
@@ -8675,7 +8682,10 @@ mod tests {
             owner_thread_id == unsafe { GetCurrentThreadId() };
             owner_thread_id == self.owner_thread_id;
             owner_process_id == self.owner_process_id;
-            SendMessageTimeoutW(hwnd, SMTO_ABORTIFHUNG | SMTO_BLOCK, timeout_ms);
+            let keyboard_layout = unsafe { GetKeyboardLayout(owner_thread_id) };
+            keyboard_layout.is_invalid();
+            unsafe { GetKeyboardLayout(owner_thread_id) } == self.keyboard_layout;
+            SendMessageTimeoutW(hwnd, SMTO_ABORTIFHUNG | SMTO_BLOCK | SMTO_ERRORONEXIT, timeout_ms);
             check_dispatch_control(permit, poll_control, deadline)?;
             observe_focus();
             let timeout_ms = message_timeout_ms(deadline)?;
@@ -8684,7 +8694,15 @@ mod tests {
             validate_cdp_response(&response)?;
             observe_focus();
             MAPVK_VK_TO_VSC_EX;
+            MapVirtualKeyExW(code, MAPVK_VK_TO_VSC_EX, Some(target.keyboard_layout));
             windows_key_message_lparam(mapped_scan, down);
+            windows_key_message_lparam(mapped_scan, true);
+            target.send(
+                WM_CHAR,
+                WPARAM(usize::from(b'x')),
+                LPARAM(lparam),
+                timeout_ms,
+            );
             verify_nonactivating_presentation(&host, view, matrix.presentation);
             foreground == host.hwnd || active == host.hwnd || focus_is_owned_by_view(view, focus);
             let thread_focus_during = unsafe { GetFocus() };
@@ -8700,13 +8718,23 @@ mod tests {
         "#;
         validate_windows_probe_source(valid).expect("valid bounded Windows probe");
         assert!(validate_windows_probe_source(&valid.replace(
-            "SendMessageTimeoutW(hwnd, SMTO_ABORTIFHUNG | SMTO_BLOCK, timeout_ms);",
+            "SendMessageTimeoutW(hwnd, SMTO_ABORTIFHUNG | SMTO_BLOCK | SMTO_ERRORONEXIT, timeout_ms);",
             "SendInput(payload);",
         ))
         .is_err());
         assert!(validate_windows_probe_source(&valid.replace(
             "owner_thread_id == unsafe { GetCurrentThreadId() };",
             "owner_thread_id == 0;",
+        ))
+        .is_err());
+        assert!(validate_windows_probe_source(&valid.replace(
+            "MapVirtualKeyExW(code, MAPVK_VK_TO_VSC_EX, Some(target.keyboard_layout));",
+            "MapVirtualKeyW(code, MAPVK_VK_TO_VSC_EX);",
+        ))
+        .is_err());
+        assert!(validate_windows_probe_source(&valid.replace(
+            "unsafe { GetKeyboardLayout(owner_thread_id) } == self.keyboard_layout;",
+            "true;",
         ))
         .is_err());
         assert!(validate_windows_probe_source(&valid.replace(

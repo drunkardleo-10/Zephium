@@ -1293,9 +1293,12 @@ sources rather than copying another browser agent's architecture:
   therefore resolves and validates the direct WebView document child that
   pinned Wry itself uses for focus instead of sending to Wry's container.
 - [Win32 keyboard-message flags](https://learn.microsoft.com/en-us/windows/win32/inputdev/wm-keydown)
+  together with [`GetKeyboardLayout`](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getkeyboardlayout)
   and [`MapVirtualKeyExW`](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-mapvirtualkeyexw)
-  define the scan-code, extended-key, previous-state, and transition fields.
-  The M1 HWND encoder preserves those fields and refuses an unknown mapping.
+  define the target thread's input-locale binding plus the scan-code,
+  extended-key, previous-state, and transition fields. The M1 HWND encoder
+  preserves those fields, refuses an unknown mapping or mid-row locale change,
+  and applies the same scan metadata to its fixed character message.
 - [Win32 `ShowWindow`](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-showwindow)
   defines `SW_SHOWNOACTIVATE`; the M1 adapter additionally verifies host
   foreground/activation and owned-subtree keyboard focus before accepting a

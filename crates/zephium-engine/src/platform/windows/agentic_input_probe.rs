@@ -28,7 +28,8 @@ use windows::Win32::System::SystemInformation::OSVERSIONINFOW;
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetActiveWindow, GetFocus, MapVirtualKeyW, SetFocus, MAPVK_VK_TO_VSC_EX, VK_DOWN, VK_RETURN,
+    GetActiveWindow, GetFocus, GetKeyboardLayout, MapVirtualKeyExW, SetFocus, MAPVK_VK_TO_VSC_EX,
+    VK_DOWN, VK_RETURN,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
@@ -36,9 +37,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     IsWindowVisible, MsgWaitForMultipleObjectsEx, PeekMessageW, PostQuitMessage, RegisterClassW,
     SendMessageTimeoutW, SetForegroundWindow, SetWindowPos, ShowWindow, TranslateMessage,
     CW_USEDEFAULT, GW_CHILD, HWND_BOTTOM, MSG, MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT,
-    SMTO_ABORTIFHUNG, SMTO_BLOCK, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOW,
-    SW_SHOWNOACTIVATE, WM_CHAR, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-    WM_QUIT, WNDCLASSW, WS_EX_TOOLWINDOW, WS_OVERLAPPEDWINDOW,
+    SMTO_ABORTIFHUNG, SMTO_BLOCK, SMTO_ERRORONEXIT, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SW_HIDE, SW_SHOW, SW_SHOWNOACTIVATE, WM_CHAR, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_QUIT, WNDCLASSW, WS_EX_TOOLWINDOW, WS_OVERLAPPEDWINDOW,
 };
 use windows_core::{Interface, HRESULT, HSTRING, PCWSTR};
 use wry::dpi::{LogicalPosition, LogicalSize, Position, Size};
@@ -1052,9 +1053,7 @@ fn dispatch_hwnd_plan(
                 target.send(WM_LBUTTONUP, WPARAM(0), point_lparam(point), timeout_ms)?;
             }
             WindowsInputStep::KeyDown(key) => send_key(target, key, true, timeout_ms)?,
-            WindowsInputStep::TextX => {
-                target.send(WM_CHAR, WPARAM(usize::from(b'x')), LPARAM(1), timeout_ms)?
-            }
+            WindowsInputStep::TextX => send_text_x(target, timeout_ms)?,
             WindowsInputStep::KeyUp(key) => send_key(target, key, false, timeout_ms)?,
         }
         observe_focus();
@@ -1074,6 +1073,7 @@ struct OwnedDocumentHwnd {
     document: HWND,
     owner_thread_id: u32,
     owner_process_id: u32,
+    keyboard_layout: windows::Win32::UI::Input::KeyboardAndMouse::HKL,
 }
 
 impl OwnedDocumentHwnd {
@@ -1097,11 +1097,16 @@ impl OwnedDocumentHwnd {
         {
             return Err(AdapterError::NativeConstruction);
         }
+        let keyboard_layout = unsafe { GetKeyboardLayout(owner_thread_id) };
+        if keyboard_layout.is_invalid() {
+            return Err(AdapterError::NativeConstruction);
+        }
         let target = Self {
             container,
             document,
             owner_thread_id,
             owner_process_id,
+            keyboard_layout,
         };
         target
             .is_current()
@@ -1117,6 +1122,7 @@ impl OwnedDocumentHwnd {
             && owner_thread_id == self.owner_thread_id
             && owner_process_id == self.owner_process_id
             && owner_thread_id != unsafe { GetCurrentThreadId() }
+            && unsafe { GetKeyboardLayout(owner_thread_id) } == self.keyboard_layout
             && unsafe { GetWindow(self.container, GW_CHILD) }.ok() == Some(self.document)
             && unsafe { GetParent(self.document) }.ok() == Some(self.container)
             && unsafe { IsChild(self.container, self.document) }.as_bool()
@@ -1182,12 +1188,36 @@ fn send_key(
         WindowsProbeKey::ArrowDown => VK_DOWN.0,
         WindowsProbeKey::Enter => VK_RETURN.0,
     };
-    let mapped_scan = unsafe { MapVirtualKeyW(u32::from(virtual_key), MAPVK_VK_TO_VSC_EX) };
+    let mapped_scan = unsafe {
+        MapVirtualKeyExW(
+            u32::from(virtual_key),
+            MAPVK_VK_TO_VSC_EX,
+            Some(target.keyboard_layout),
+        )
+    };
     let lparam =
         windows_key_message_lparam(mapped_scan, down).ok_or(AdapterError::NativeConstruction)?;
     target.send(
         if down { WM_KEYDOWN } else { WM_KEYUP },
         WPARAM(usize::from(virtual_key)),
+        LPARAM(lparam),
+        timeout_ms,
+    )
+}
+
+fn send_text_x(target: OwnedDocumentHwnd, timeout_ms: u32) -> Result<(), AdapterError> {
+    let mapped_scan = unsafe {
+        MapVirtualKeyExW(
+            u32::from(b'X'),
+            MAPVK_VK_TO_VSC_EX,
+            Some(target.keyboard_layout),
+        )
+    };
+    let lparam =
+        windows_key_message_lparam(mapped_scan, true).ok_or(AdapterError::NativeConstruction)?;
+    target.send(
+        WM_CHAR,
+        WPARAM(usize::from(b'x')),
         LPARAM(lparam),
         timeout_ms,
     )
@@ -1210,7 +1240,7 @@ fn send_message(
             message,
             wparam,
             lparam,
-            SMTO_ABORTIFHUNG | SMTO_BLOCK,
+            SMTO_ABORTIFHUNG | SMTO_BLOCK | SMTO_ERRORONEXIT,
             timeout_ms,
             Some(&mut result),
         )

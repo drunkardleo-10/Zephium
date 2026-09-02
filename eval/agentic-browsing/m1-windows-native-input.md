@@ -50,7 +50,7 @@ than a string.
 | Route | Implemented behavior | Qualification state |
 | --- | --- | --- |
 | Fixed DOM recipe | One compiled fixture recipe evaluated with `userGesture: false` | Cross-compiled; hidden physical result pending |
-| Ordinary child HWND | Pinned Wry's public HWND is its `WRY_WEBVIEW` container, whose procedure forwards focus to the first direct child as the WebView document. The adapter scales fixed geometry to that direct child's client area, records the direct child's owning thread/process, rejects a zero or calling-thread owner, and revalidates container/first-child/parent plus owner identity before and after every message. It then issues at most sixteen `SendMessageTimeoutW` mouse/key steps. Each timeout is clamped to the lesser of the remaining case deadline and 250 ms. Keyboard messages use `MAPVK_VK_TO_VSC_EX`, reject missing/unrecognized mappings, and preserve the extended-key and up-transition flags. | Cross-compiled; hidden/background physical result pending |
+| Ordinary child HWND | Pinned Wry's public HWND is its `WRY_WEBVIEW` container, whose procedure forwards focus to the first direct child as the WebView document. The adapter scales fixed geometry to that direct child's client area, records the direct child's owning thread/process and input-locale handle, rejects a zero/calling-thread owner or invalid locale, and revalidates container/first-child/parent, owner identity, and locale before and after every message. It then issues at most sixteen `SendMessageTimeoutW` mouse/key steps. Each timeout is clamped to the lesser of the remaining case deadline and 250 ms, and `SMTO_ERRORONEXIT` makes receiver destruction fail the dispatch. Keyboard and character messages use `MapVirtualKeyExW(MAPVK_VK_TO_VSC_EX)` with the document thread's exact input locale, reject missing/unrecognized mappings, and preserve scan-code, extended-key, and up-transition fields. | Cross-compiled; hidden/background physical result pending |
 | Composition controller | No cast or call is made | `UnsupportedByIntegration`; pinned Wry creates an ordinary controller |
 | CDP input | One fixed `Input.dispatchMouseEvent` or `Input.dispatchKeyEvent` completes before the next | Diagnostics only; physical result pending |
 | Focused/human | No global input is generated | Human baseline remains explicit and visible |
@@ -90,6 +90,14 @@ that fact before the route can qualify. See Microsoft's
 and
 [`GetWindowThreadProcessId`](https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-getwindowthreadprocessid)
 contracts.
+
+The document thread's input locale can change dynamically. The probe binds the
+fixed key sequence to the locale returned by
+[`GetKeyboardLayout`](https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-getkeyboardlayout),
+rechecks it at every target-identity boundary, and uses that exact handle with
+[`MapVirtualKeyExW`](https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-mapvirtualkeyexw).
+A layout change aborts the row rather than allowing key-down, character, and
+key-up messages to acquire inconsistent scan metadata.
 
 ## Bounds, cancellation, and teardown
 
@@ -149,10 +157,11 @@ refusals in the engine and contract crates. It also locks the Windows runner's
 closed process gates, JSONL evidence path, owned-document HWND resolution,
 bounds/visibility/controller ownership attestation, during-dispatch active and
 thread-focus sampling, per-step deadline/cancellation checks, document HWND
-thread/process identity and non-calling-thread precondition, strict bounded raw
-CDP completion, fixed method allowlist, and absence of input-queue attachment,
-global `SendInput`, cursor movement, page IPC, host objects, or generic script
-calls.
+thread/process/input-locale identity and non-calling-thread precondition,
+target-layout `MapVirtualKeyExW` mapping for key and character messages,
+receiver-exit failure, strict bounded raw CDP completion, fixed method
+allowlist, and absence of input-queue attachment, global `SendInput`, cursor
+movement, page IPC, host objects, or generic script calls.
 The production functional core may now be reached through the durable Store
 adapter.
 
