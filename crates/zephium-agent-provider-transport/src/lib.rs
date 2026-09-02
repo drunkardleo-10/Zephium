@@ -909,6 +909,17 @@ impl AgentProviderSlot {
     fn mark_completed(&mut self) {
         self.completed = true;
     }
+
+    fn fail_stop(&self) {
+        // Match the public shutdown order: make cancellation sticky before
+        // publishing the admission seal, then recover poison only to retain
+        // that terminal state. No transport clone may admit after this call.
+        self.shared.shutdown.cancel();
+        match self.shared.state.lock() {
+            Ok(mut state) => state.sealed = true,
+            Err(poisoned) => poisoned.into_inner().sealed = true,
+        }
+    }
 }
 
 impl Drop for AgentProviderSlot {
@@ -1672,8 +1683,27 @@ impl AgentProviderAttempt {
                     );
                 }
             };
-            if !batch.events().is_empty() && consume(batch) == AgentProviderBatchDisposition::Cancel
-            {
+            let disposition = if batch.events().is_empty() {
+                AgentProviderBatchDisposition::Continue
+            } else {
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| consume(batch))) {
+                    Ok(disposition) => disposition,
+                    Err(_) => {
+                        if let Some(slot) = &slot {
+                            slot.fail_stop();
+                        }
+                        return finish_attempt(
+                            active,
+                            config,
+                            integration_failure(),
+                            AgentProviderDispatchEvidence::MayHaveDispatched,
+                            continuation,
+                            slot,
+                        );
+                    }
+                }
+            };
+            if disposition == AgentProviderBatchDisposition::Cancel {
                 return finish_attempt(
                     active,
                     config,
@@ -1807,6 +1837,12 @@ fn cancelled_failure() -> AgentProviderTransportOutcome {
 fn protocol_failure() -> AgentProviderTransportOutcome {
     AgentProviderTransportOutcome::Failed(AgentProviderFailure::new(
         AgentProviderFailureClass::Protocol,
+    ))
+}
+
+fn integration_failure() -> AgentProviderTransportOutcome {
+    AgentProviderTransportOutcome::Failed(AgentProviderFailure::new(
+        AgentProviderFailureClass::Integration,
     ))
 }
 
@@ -4695,6 +4731,90 @@ mod tests {
         let captured = server.finish();
         let head = std::str::from_utf8(&captured.head).expect("request head");
         assert!(head.starts_with("POST /v1/responses HTTP/1.1\r\n"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn panicking_batch_consumer_returns_authority_and_fail_stops_transport() {
+        let server = OneShotServer::spawn(
+            "200 OK",
+            &[
+                ("Content-Type", "text/event-stream; charset=utf-8"),
+                ("Content-Encoding", "identity"),
+            ],
+            vec![openai_success_stream()],
+        );
+        let transport = test_transport(&server);
+        let credential = AgentProviderCredential::try_new(
+            AgentProviderKind::OpenAiResponses,
+            "synthetic-openai-key".to_owned(),
+        )
+        .expect("credential");
+        let (mut policy, input) = provider_fixture(AgentProviderKind::OpenAiResponses);
+        let attempt = transport
+            .try_admit(
+                input,
+                &mut policy,
+                &credential,
+                AgentProviderCancellation::new(),
+            )
+            .expect("admission");
+        let mut consumed = false;
+        let result = attempt
+            .execute(|batch| {
+                consumed = true;
+                assert!(!batch.events().is_empty());
+                panic!("synthetic provider batch consumer panic");
+            })
+            .await;
+        assert!(consumed);
+        assert_eq!(
+            result.usage_knowledge(),
+            AgentProviderUsageKnowledge::UnknownAfterDispatch
+        );
+        assert!(matches!(
+            result.outcome(),
+            AgentProviderTransportOutcome::Failed(failure)
+                if failure.class() == AgentProviderFailureClass::Integration
+                    && failure.retry_disposition()
+                        == zephium_agentic::AgentProviderRetryDisposition::Never
+        ));
+        let snapshot = transport.snapshot().expect("snapshot");
+        assert!(snapshot.is_sealed());
+        assert!(snapshot.is_quiescent());
+
+        let (mut refused_policy, refused_input) =
+            provider_fixture(AgentProviderKind::OpenAiResponses);
+        assert!(matches!(
+            transport.try_admit(
+                refused_input,
+                &mut refused_policy,
+                &credential,
+                AgentProviderCancellation::new(),
+            ),
+            Err(AgentProviderAdmissionError::Sealed)
+        ));
+        assert_eq!(refused_policy.pending_model_calls(), 0);
+
+        let AgentProviderPolicySettlement::Immediate(settlement) = result.into_policy_settlement()
+        else {
+            panic!("integration panic must settle immediately")
+        };
+        assert_eq!(
+            settlement.usage_accounting(),
+            AgentModelUsageAccounting::ReservationCeiling
+        );
+        assert_eq!(
+            settlement.settlement(),
+            AgentModelCallSettlement::ProviderFailed
+        );
+        let receipt = settlement
+            .settle(&mut policy)
+            .expect("conservative integration settlement");
+        assert_eq!(receipt.input_tokens(), 18);
+        assert_eq!(receipt.output_tokens(), 20);
+        assert_eq!(receipt.cost_micro_usd(), 100);
+        assert_eq!(policy.pending_model_calls(), 0);
+        let _captured = server.finish();
     }
 
     #[test]

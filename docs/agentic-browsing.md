@@ -796,6 +796,15 @@ classes before provider usage can reach pricing. Policy authority cannot be
 extracted or a completed call settled until the matching trusted pricing
 schedule supplies cost.
 
+The normalized stream-batch consumer is an external imperative boundary. In
+unwind-capable development and evaluation builds, a consumer panic is caught,
+the shared transport is permanently sealed and cancelled, and the attempt
+returns its move-only policy authority as a non-retryable integration failure
+with conservative post-dispatch accounting. This prevents one callback panic
+from stranding the model reservation or escaping a provider task. Optimized
+desktop builds retain `panic = "abort"`, so no recoverable release-panic claim
+is made.
+
 An idle provider-transport snapshot is observational only because admission
 may still reopen it. Process shutdown first applies the transport's sticky
 cancellation/admission seal, settles every retained attempt and its separate

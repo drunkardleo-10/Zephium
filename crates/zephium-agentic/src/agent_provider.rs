@@ -944,6 +944,8 @@ pub enum AgentProviderFailureClass {
     Transport,
     /// Provider wire data violated the typed protocol contract.
     Protocol,
+    /// A trusted transport consumer violated its integration contract.
+    Integration,
     /// Provider returned another terminal server-side failure.
     Provider,
     /// Exact run cancellation won the terminal race.
@@ -967,6 +969,7 @@ impl AgentProviderFailureClass {
             | Self::NotFound
             | Self::Conflict
             | Self::Protocol
+            | Self::Integration
             | Self::Provider
             | Self::Cancelled => AgentProviderRetryDisposition::Never,
         }
@@ -1267,6 +1270,17 @@ mod tests {
         assert_eq!(
             AgentProviderFailureClass::Cancelled.retry_disposition(),
             AgentProviderRetryDisposition::Never
+        );
+        assert_eq!(
+            AgentProviderFailureClass::Integration.retry_disposition(),
+            AgentProviderRetryDisposition::Never
+        );
+        assert_eq!(
+            AgentProviderFailure::try_new(
+                AgentProviderFailureClass::Integration,
+                Some(retry_after),
+            ),
+            Err(AgentProviderContractError::RetryAfter)
         );
     }
 }

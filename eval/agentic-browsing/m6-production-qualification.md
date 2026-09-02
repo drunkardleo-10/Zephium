@@ -308,6 +308,16 @@ agentic-owned Windows modules. Cross-compilation is not device behavior.
   concurrent gate, poison fail-stop, and shared-authority no-deadlock cases;
   the release boundary mutation-tests every critical ordering edge. This is
   deterministic concurrency evidence, not a live-provider qualification.
+- A panic from the external normalized provider-batch consumer no longer
+  unwinds past the transport and drops the exact active model authority in
+  development/evaluation builds. The transport catches that boundary,
+  permanently cancels and seals every clone, returns one non-retryable
+  `Integration` failure with conservative post-dispatch accounting, and lets
+  policy release the full reservation through its ordinary terminal path. A
+  loopback fault test proves returned authority, shared quiescence, future
+  admission refusal, and exact settlement. The release gate mutation-tests the
+  catch, seal, failure class, and retry refusal. Optimized desktop remains
+  process-terminal under `panic = "abort"`.
 - Provider response headers now have a protocol-neutral decoded 64 KiB
   admission check in addition to reqwest's HTTP/2 pre-decode setting. Checked
   accounting runs before status and body interpretation and rejects one

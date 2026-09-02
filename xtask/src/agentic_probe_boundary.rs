@@ -358,6 +358,10 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     let provider_transport_root = read(repository.join(PROVIDER_TRANSPORT_ROOT))?;
     validate_provider_transport_root(&provider_transport_root)?;
     validate_provider_transport_commit_boundary(&provider_transport_root)?;
+    validate_provider_consumer_panic_boundary(
+        &provider_transport_root,
+        &read(repository.join(AGENTIC_PROVIDER_ROOT))?,
+    )?;
     validate_provider_transport_response_header_boundary(&provider_transport_root)?;
     validate_provider_transport_shutdown_contract(&provider_transport_root)?;
     validate_agentic_no_direct_logging_attribute(
@@ -4204,6 +4208,52 @@ fn validate_provider_transport_commit_boundary(source: &str) -> Result<(), Strin
             "agent provider transport must hold both cancellation gates through disclosure and slot commitment"
                 .to_owned(),
         );
+    }
+    Ok(())
+}
+
+fn validate_provider_consumer_panic_boundary(
+    transport: &str,
+    provider_contract: &str,
+) -> Result<(), String> {
+    let production = transport
+        .split_once("\n#[cfg(test)]\nmod tests")
+        .map_or(transport, |(production, _)| production);
+    let transport = compact(
+        &production
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<String>(),
+    );
+    for required in [
+        "fnfail_stop(&self){self.shared.shutdown.cancel();matchself.shared.state.lock(){Ok(mutstate)=>state.sealed=true,Err(poisoned)=>poisoned.into_inner().sealed=true,}}",
+        "matchstd::panic::catch_unwind(std::panic::AssertUnwindSafe(||consume(batch)))",
+        "Err(_)=>{ifletSome(slot)=&slot{slot.fail_stop();}returnfinish_attempt(active,config,integration_failure(),AgentProviderDispatchEvidence::MayHaveDispatched,continuation,slot,);}",
+        "fnintegration_failure()->AgentProviderTransportOutcome",
+        "AgentProviderFailureClass::Integration",
+    ] {
+        if !transport.contains(required) {
+            return Err(format!(
+                "agent provider consumer panic boundary lost required fail-stop rule {required}"
+            ));
+        }
+    }
+    if transport.matches("std::panic::catch_unwind").count() != 1
+        || transport.contains("resume_unwind")
+    {
+        return Err(
+            "agent provider transport must contain exactly the normalized batch consumer panic"
+                .to_owned(),
+        );
+    }
+
+    let provider_contract = compact(provider_contract);
+    for required in ["Integration,", "|Self::Integration"] {
+        if !provider_contract.contains(required) {
+            return Err(format!(
+                "agent provider integration failure lost non-retryable contract {required}"
+            ));
+        }
     }
     Ok(())
 }
@@ -9792,6 +9842,32 @@ mod tests {
         ] {
             assert!(validate_provider_transport_commit_boundary(&invalid).is_err());
         }
+    }
+
+    #[test]
+    fn provider_batch_consumer_panic_is_contained_and_fail_stopped() {
+        let transport = include_str!("../../crates/zephium-agent-provider-transport/src/lib.rs");
+        let provider = include_str!("../../crates/zephium-agentic/src/agent_provider.rs");
+        validate_provider_consumer_panic_boundary(transport, provider)
+            .expect("provider consumer panic boundary");
+
+        for invalid in [
+            transport.replacen("std::panic::catch_unwind", "Ok", 1),
+            transport.replacen("                            slot.fail_stop();", "", 1),
+            transport.replace("        self.shared.shutdown.cancel();", ""),
+            transport.replacen(
+                "AgentProviderFailureClass::Integration",
+                "AgentProviderFailureClass::Protocol",
+                1,
+            ),
+        ] {
+            assert!(validate_provider_consumer_panic_boundary(&invalid, provider).is_err());
+        }
+        assert!(validate_provider_consumer_panic_boundary(
+            transport,
+            &provider.replacen("            | Self::Integration", "", 1)
+        )
+        .is_err());
     }
 
     #[test]

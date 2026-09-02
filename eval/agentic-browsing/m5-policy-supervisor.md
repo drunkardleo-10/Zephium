@@ -660,12 +660,17 @@ browser action, model call, tool call, data transfer, cost, or native resource.
   Production visual enablement therefore still requires an explicit reviewed
   provider/model/data-handling catalog and installed local visual counter. No
   provider request or image disclosure was made for this evidence.
-- Credentials are provider-bound, copied once into a sensitive header, and
-  zeroized on drop. Debug output exposes only provider and byte count. Request
-  bodies, authorization values, provider-authored error bodies, response text,
+- Credentials are provider-bound and retained only in Zephium-owned zeroizing
+  buffers. A zeroizing construction buffer creates one sensitive
+  authentication `HeaderValue` only at dispatch. Pinned `http` 1.4.2 copies
+  that slice into ordinary `Bytes` and has no zeroizing drop, so neither that
+  unavoidable HTTP-stack copy nor TLS/wire buffers are claimed to be zeroized.
+  Debug output exposes only provider and byte count. Request bodies,
+  authorization values, provider-authored error bodies, response text,
   semantic content, and model values are absent from transport diagnostics.
-- Cancellation is sticky and checked before commitment, immediately before
-  the HTTP send future can be polled, during send, and before every body chunk.
+- Cancellation is sticky and checked before commitment, at execution entry
+  before authentication materialization, again immediately before the HTTP
+  send future can be polled, during send, and before every body chunk.
   The pre-commit check is not a racy atomic sample: run cancellation and
   transport shutdown each own a zero-worker mutex gate, their cancellation
   transition acquires that gate, and transport admission holds both gates only
@@ -709,10 +714,19 @@ browser action, model call, tool call, data transfer, cost, or native resource.
   batches to its callback. No raw SSE, generic HTTP response, provider-native
   browser tool, selector, JavaScript, DOM, HTML, CDP, retry authority, queue,
   worker, timer, or idle task crosses the public boundary.
+- In unwind-capable development and evaluation builds, a normalized-batch
+  consumer panic is contained at that external callback boundary. It
+  permanently cancels and seals the shared transport, returns the exact active
+  policy authority as a non-retryable `Integration` failure, and selects
+  reservation-ceiling accounting because dispatch already occurred. The
+  caller can therefore settle the run instead of losing its move-only model
+  authority. Optimized desktop builds use `panic = "abort"`; this is not a
+  recoverable release-panic claim.
 - The repository boundary gate mechanically pins the two production endpoints,
   rustls/system-proxy dependency feature set, redirect/retry refusal, sensitive
-  credential marking, identity encoding, pre-send cancellation proof, and
-  move-only settlement route. It also pins both fixed billing classes, their
+  credential marking, identity encoding, pre-send cancellation proof,
+  consumer-panic fail-stop and authority return, and move-only settlement
+  route. It also pins both fixed billing classes, their
   request controls, their decoder attestations, and refusal of the beta-only
   Anthropic speed field on the stable endpoint. The gate additionally pins
   price identity/range/category checks, the opaque `PricedCeiling` join,
