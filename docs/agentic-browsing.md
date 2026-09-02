@@ -758,7 +758,14 @@ zeroizing credentials, redirect refusal, identity-only response content
 encoding, bounded deadlines, and at most four simultaneous attempts. Admission
 acquires a transport slot before semantic input commits; after commit, send
 errors and cancellation are terminal outcomes rather than proof that no
-provider work occurred. The HTTP client disables even library-default
+provider work occurred. The final run-cancellation and transport-shutdown
+checks are linearized with the synchronous semantic-disclosure commit: each
+cancellation authority owns a zero-worker commit gate, cancellation takes that
+gate before becoming sticky, and admission holds both gates only across policy
+commit and transport-slot commitment. A cancellation that wins cannot race a
+later disclosure; a commit that wins is already post-commit authority and must
+be terminally settled. A poisoned gate becomes sticky cancellation in
+unwind-capable builds. The HTTP client disables even library-default
 protocol-NACK retries; any future retry requires a new call identity and policy
 admission. A committed attempt proven not to have polled the HTTP send future
 settles exact zero provider usage and cost while retaining its already-committed

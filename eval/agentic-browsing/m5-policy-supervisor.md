@@ -659,6 +659,14 @@ browser action, model call, tool call, data transfer, cost, or native resource.
   semantic content, and model values are absent from transport diagnostics.
 - Cancellation is sticky and checked before commitment, immediately before
   the HTTP send future can be polled, during send, and before every body chunk.
+  The pre-commit check is not a racy atomic sample: run cancellation and
+  transport shutdown each own a zero-worker mutex gate, their cancellation
+  transition acquires that gate, and transport admission holds both gates only
+  across the synchronous policy/disclosure commit and slot commitment. Thus a
+  cancellation that linearizes first prevents disclosure, while a commit that
+  linearizes first is unambiguously post-commit. Exact shared authority cannot
+  self-deadlock, and a poisoned gate becomes sticky cancellation in an
+  unwind-capable build.
   A committed attempt proven not to have polled send carries
   `ExactZeroBeforeDispatch`; once send may have been polled, any missing usage
   carries `UnknownAfterDispatch`. Network errors, HTTP statuses, redirects,

@@ -357,6 +357,7 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     validate_provider_transport_manifest(&read(repository.join(PROVIDER_TRANSPORT_MANIFEST))?)?;
     let provider_transport_root = read(repository.join(PROVIDER_TRANSPORT_ROOT))?;
     validate_provider_transport_root(&provider_transport_root)?;
+    validate_provider_transport_commit_boundary(&provider_transport_root)?;
     validate_provider_transport_shutdown_contract(&provider_transport_root)?;
     validate_agentic_no_direct_logging_attribute(
         PROVIDER_TRANSPORT_ROOT,
@@ -4136,6 +4137,71 @@ fn validate_provider_transport_root(source: &str) -> Result<(), String> {
                 "agent provider transport exposes forbidden authority {forbidden}"
             ));
         }
+    }
+    Ok(())
+}
+
+fn validate_provider_transport_commit_boundary(source: &str) -> Result<(), String> {
+    let production = source
+        .split_once("\n#[cfg(test)]\nmod tests")
+        .map_or(source, |(production, _)| production);
+    let source = compact(
+        &production
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<String>(),
+    );
+    for required in [
+        "commit_gate:Mutex<()>,",
+        "commit_gate:Mutex::new(()),",
+        "let_commit_gate=self.inner.commit_gate.lock().unwrap_or_else(std::sync::PoisonError::into_inner);self.publish_cancellation()",
+        "fnlock_commit_gate(&self)->Option<MutexGuard<'_,()>>",
+        "Err(poisoned)=>{letguard=poisoned.into_inner();self.publish_cancellation();drop(guard);None}",
+        "fnshares_authority(&self,other:&Self)->bool{Arc::ptr_eq(&self.inner,&other.inner)}",
+        "letcancellation_gate=matchcancellation.lock_commit_gate()",
+        "letshutdown_gate=ifcancellation.shares_authority(&self.shared.shutdown)",
+        "matchself.shared.shutdown.lock_commit_gate()",
+        "ifcancellation.is_cancelled()||self.shared.shutdown.is_cancelled()",
+        "letcommitted=matchinput.commit(policy)",
+        "slot.mark_committed();drop(shutdown_gate);drop(cancellation_gate);",
+    ] {
+        if !source.contains(required) {
+            return Err(format!(
+                "agent provider transport lost linearized disclosure commit boundary {required}"
+            ));
+        }
+    }
+    if source.contains("fntry_claim_commit") {
+        return Err(
+            "agent provider transport regained a racy cancellation load before disclosure commit"
+                .to_owned(),
+        );
+    }
+
+    let run_gate = source
+        .find("letcancellation_gate=matchcancellation.lock_commit_gate()")
+        .ok_or_else(|| "agent provider transport run commit gate is missing".to_owned())?;
+    let shutdown_gate = source
+        .find("letshutdown_gate=ifcancellation.shares_authority(&self.shared.shutdown)")
+        .ok_or_else(|| "agent provider transport shutdown commit gate is missing".to_owned())?;
+    let final_check = source
+        .find("ifcancellation.is_cancelled()||self.shared.shutdown.is_cancelled()")
+        .ok_or_else(|| "agent provider transport final cancellation check is missing".to_owned())?;
+    let commit = source
+        .find("letcommitted=matchinput.commit(policy)")
+        .ok_or_else(|| "agent provider transport disclosure commit is missing".to_owned())?;
+    let marked = source
+        .find("slot.mark_committed();drop(shutdown_gate);drop(cancellation_gate);")
+        .ok_or_else(|| "agent provider transport committed slot ordering is missing".to_owned())?;
+    if !(run_gate < shutdown_gate
+        && shutdown_gate < final_check
+        && final_check < commit
+        && commit < marked)
+    {
+        return Err(
+            "agent provider transport must hold both cancellation gates through disclosure and slot commitment"
+                .to_owned(),
+        );
     }
     Ok(())
 }
@@ -9496,6 +9562,49 @@ mod tests {
         assert!(
             validate_provider_transport_root(&format!("{root}\npub fn into_parts() {{}}")).is_err()
         );
+    }
+
+    #[test]
+    fn provider_transport_disclosure_commit_is_linearized_with_cancellation() {
+        let root = include_str!("../../crates/zephium-agent-provider-transport/src/lib.rs");
+        validate_provider_transport_commit_boundary(root)
+            .expect("provider transport disclosure commit boundary");
+
+        for invalid in [
+            root.replacen("commit_gate: Mutex<()>,", "", 1),
+            root.replacen(
+                "        let _commit_gate = self\n            .inner\n            .commit_gate\n            .lock()\n            .unwrap_or_else(std::sync::PoisonError::into_inner);",
+                "",
+                1,
+            ),
+            root.replacen(
+                "let cancellation_gate = match cancellation.lock_commit_gate()",
+                "let cancellation_gate = match unguarded_cancellation()",
+                1,
+            ),
+            root.replacen(
+                "match self.shared.shutdown.lock_commit_gate()",
+                "match unguarded_shutdown()",
+                1,
+            ),
+            root.replacen(
+                "if cancellation.is_cancelled() || self.shared.shutdown.is_cancelled()",
+                "if false",
+                1,
+            ),
+            root.replacen(
+                "        slot.mark_committed();\n        drop(shutdown_gate);\n        drop(cancellation_gate);",
+                "        drop(shutdown_gate);\n        drop(cancellation_gate);\n        slot.mark_committed();",
+                1,
+            ),
+            root.replacen(
+                "                self.publish_cancellation();\n                drop(guard);\n                None",
+                "                drop(guard);\n                None",
+                1,
+            ),
+        ] {
+            assert!(validate_provider_transport_commit_boundary(&invalid).is_err());
+        }
     }
 
     #[test]

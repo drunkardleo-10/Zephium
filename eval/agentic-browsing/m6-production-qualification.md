@@ -65,6 +65,14 @@ responses, machine-local paths, or native traces.
   its sole admitted future, refuse a concurrent waiter, register before
   sampling, wake on exact last-slot release, and race one absolute deadline
   without a polling worker; and
+- requires run cancellation and provider-transport shutdown to linearize with
+  semantic disclosure rather than relying on adjacent atomic loads. The gate
+  pins one zero-worker commit mutex per cancellation authority, both exact
+  commit-gate acquisitions, the final cancellation check, policy commit and
+  transport-slot commitment under those gates, shared-authority deadlock
+  avoidance, and poison-to-sticky-cancellation behavior. Mutations that remove
+  either gate, the final check, poison fail-stop, or release a gate before slot
+  commitment are rejected; and
 - pins the Windows owned-context suspension adapter to its feature/target gate,
   fixed atomic callback/timeout/cancellation owner, one late-reconciliation
   path, ten-second UI-thread deadline, `TrySuspend`/`IsSuspended`/`Resume`
@@ -270,6 +278,15 @@ agentic-owned Windows modules. Cross-compilation is not device behavior.
   bounds shared wait admission to one, wakes on the exact last slot, and fails
   closed at one absolute deadline; it creates no background worker or periodic
   polling timer.
+- Provider semantic disclosure is now linearized against both its exact run
+  cancellation and the shared shutdown root. Cancellation blocks only behind
+  an already-running synchronous policy commit; once it becomes sticky, a
+  later admission cannot commit page-derived input. Conversely, a commit that
+  wins marks its transport slot committed before releasing either gate and is
+  therefore conservatively settled as post-commit. Unit tests cover the
+  concurrent gate, poison fail-stop, and shared-authority no-deadlock cases;
+  the release boundary mutation-tests every critical ordering edge. This is
+  deterministic concurrency evidence, not a live-provider qualification.
 - Profile retention can no longer end from a copied lease alone. The bounded
   profile registry requires the exact supervisor cleanup receipt for that
   context. A never-started row must be registry-cancelled; an owned context must

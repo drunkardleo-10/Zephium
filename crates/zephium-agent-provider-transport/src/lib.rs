@@ -12,7 +12,7 @@
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use futures_util::TryStreamExt;
@@ -243,6 +243,9 @@ pub struct AgentProviderCancellation {
 struct AgentProviderCancellationInner {
     cancelled: AtomicBool,
     notify: Notify,
+    /// Linearizes the last pre-disclosure cancellation check with commit.
+    /// This mutex never crosses an await or network operation.
+    commit_gate: Mutex<()>,
 }
 
 impl AgentProviderCancellation {
@@ -252,12 +255,25 @@ impl AgentProviderCancellation {
             inner: Arc::new(AgentProviderCancellationInner {
                 cancelled: AtomicBool::new(false),
                 notify: Notify::new(),
+                commit_gate: Mutex::new(()),
             }),
         }
     }
 
     /// Makes cancellation sticky and wakes all currently admitted attempts.
     pub fn cancel(&self) -> bool {
+        // A disclosure commit holds this gate only for its synchronous policy
+        // mutation. Once this lock is acquired, either that commit already
+        // linearized or this cancellation will be visible to its final check.
+        let _commit_gate = self
+            .inner
+            .commit_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.publish_cancellation()
+    }
+
+    fn publish_cancellation(&self) -> bool {
         let first = !self.inner.cancelled.swap(true, Ordering::SeqCst);
         if first {
             self.inner.notify.notify_waiters();
@@ -270,8 +286,23 @@ impl AgentProviderCancellation {
         self.inner.cancelled.load(Ordering::SeqCst)
     }
 
-    fn try_claim_commit(&self) -> bool {
-        !self.inner.cancelled.load(Ordering::SeqCst)
+    /// Acquires the synchronous semantic-disclosure boundary. Poison means a
+    /// prior commit panicked in an unwind-capable build; cancellation becomes
+    /// sticky and no later disclosure may proceed through this authority.
+    fn lock_commit_gate(&self) -> Option<MutexGuard<'_, ()>> {
+        match self.inner.commit_gate.lock() {
+            Ok(guard) => Some(guard),
+            Err(poisoned) => {
+                let guard = poisoned.into_inner();
+                self.publish_cancellation();
+                drop(guard);
+                None
+            }
+        }
+    }
+
+    fn shares_authority(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
     }
 
     async fn cancelled(&self) {
@@ -727,7 +758,38 @@ impl AgentProviderTransport {
                 return Err(error.into());
             }
         };
-        if !cancellation.try_claim_commit() || !self.shared.shutdown.try_claim_commit() {
+        let cancellation_gate = match cancellation.lock_commit_gate() {
+            Some(gate) => gate,
+            None => {
+                let _outcome = input
+                    .cancel(policy)
+                    .map_err(AgentProviderAdmissionError::Settlement)?;
+                drop(slot);
+                return Err(AgentProviderAdmissionError::Cancelled);
+            }
+        };
+        // The transport shutdown authority is private, but tolerate an exact
+        // shared authority defensively so a future internal composition cannot
+        // self-deadlock while acquiring the two commit gates.
+        let shutdown_gate = if cancellation.shares_authority(&self.shared.shutdown) {
+            None
+        } else {
+            match self.shared.shutdown.lock_commit_gate() {
+                Some(gate) => Some(gate),
+                None => {
+                    drop(cancellation_gate);
+                    self.seal();
+                    let _outcome = input
+                        .cancel(policy)
+                        .map_err(AgentProviderAdmissionError::Settlement)?;
+                    drop(slot);
+                    return Err(AgentProviderAdmissionError::Cancelled);
+                }
+            }
+        };
+        if cancellation.is_cancelled() || self.shared.shutdown.is_cancelled() {
+            drop(shutdown_gate);
+            drop(cancellation_gate);
             let _outcome = input
                 .cancel(policy)
                 .map_err(AgentProviderAdmissionError::Settlement)?;
@@ -737,11 +799,15 @@ impl AgentProviderTransport {
         let committed = match input.commit(policy) {
             Ok(committed) => committed,
             Err(error) => {
+                drop(shutdown_gate);
+                drop(cancellation_gate);
                 drop(slot);
                 return Err(AgentProviderAdmissionError::Settlement(error));
             }
         };
         slot.mark_committed();
+        drop(shutdown_gate);
+        drop(cancellation_gate);
         Ok(AgentProviderAttempt {
             client: self.client.clone(),
             endpoint: self.endpoints.endpoint(endpoint).clone(),
@@ -2283,10 +2349,13 @@ mod tests {
                 while Instant::now() < deadline {
                     match listener.accept() {
                         Ok((mut stream, _)) => {
+                            // Count transport attempts at accept. This fixture
+                            // intentionally drops the connection, so request
+                            // parsing is not a prerequisite for proving that
+                            // the HTTP client opened another attempt.
+                            count += 1;
                             let _deadline = stream.set_read_timeout(Some(Duration::from_secs(2)));
-                            if read_request(&mut stream).is_ok() {
-                                count += 1;
-                            }
+                            let _request = read_request(&mut stream);
                         }
                         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                             thread::sleep(Duration::from_millis(5));
@@ -4050,6 +4119,80 @@ mod tests {
         ));
         assert_eq!(sealed_policy.pending_model_calls(), 0);
         assert!(transport.snapshot().expect("snapshot").is_sealed());
+    }
+
+    #[test]
+    fn cancellation_linearizes_after_an_inflight_disclosure_gate() {
+        let cancellation = AgentProviderCancellation::new();
+        let commit_gate = cancellation.lock_commit_gate().expect("commit gate");
+        let (attempted_sender, attempted) = mpsc::sync_channel(0);
+        let (completed_sender, completed) = mpsc::sync_channel(0);
+        let cancelling = cancellation.clone();
+        let cancellation_thread = thread::spawn(move || {
+            attempted_sender.send(()).expect("announce cancellation");
+            let first = cancelling.cancel();
+            completed_sender
+                .send(first)
+                .expect("report cancellation result");
+        });
+
+        attempted.recv().expect("cancellation attempted");
+        assert!(!cancellation.is_cancelled());
+        assert!(matches!(
+            completed.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        drop(commit_gate);
+        assert!(completed
+            .recv_timeout(Duration::from_secs(1))
+            .expect("cancellation completed"));
+        cancellation_thread.join().expect("cancellation thread");
+        assert!(cancellation.is_cancelled());
+    }
+
+    #[test]
+    fn poisoned_disclosure_gate_becomes_sticky_cancellation() {
+        let cancellation = AgentProviderCancellation::new();
+        let poisoning = cancellation.clone();
+        let _ = std::panic::catch_unwind(move || {
+            let _gate = poisoning.lock_commit_gate().expect("commit gate");
+            panic!("poison provider disclosure gate");
+        });
+
+        assert!(cancellation.lock_commit_gate().is_none());
+        assert!(cancellation.is_cancelled());
+        assert!(!cancellation.cancel());
+    }
+
+    #[test]
+    fn shared_run_and_shutdown_authority_cannot_self_deadlock() {
+        let transport = AgentProviderTransport::try_new_loopback(
+            AgentProviderTransportConfig::STANDARD,
+            Url::parse("http://127.0.0.1:9/v1/responses").expect("openai URL"),
+            Url::parse("http://127.0.0.1:9/v1/messages").expect("anthropic URL"),
+        )
+        .expect("transport");
+        let credential = AgentProviderCredential::try_new(
+            AgentProviderKind::OpenAiResponses,
+            "synthetic-openai-key".to_owned(),
+        )
+        .expect("credential");
+        let (mut policy, input) = provider_fixture(AgentProviderKind::OpenAiResponses);
+        let attempt = transport
+            .try_admit(
+                input,
+                &mut policy,
+                &credential,
+                transport.shared.shutdown.clone(),
+            )
+            .expect("shared-authority admission");
+
+        let settlement = attempt.cancel_without_dispatch().into_policy_settlement();
+        let AgentProviderPolicySettlement::Immediate(settlement) = settlement else {
+            panic!("unpolled attempt must settle immediately")
+        };
+        settlement.settle(&mut policy).expect("settlement");
+        assert!(transport.snapshot().expect("snapshot").is_idle());
     }
 
     #[test]
