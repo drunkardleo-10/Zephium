@@ -548,6 +548,10 @@ browser action, model call, tool call, data transfer, cost, or native resource.
   when applicable, and a whole structured-input count only when that trusted
   local count ran. It is at most 64 bytes and contains no content, image,
   tokenizer label, URL, provider response, or serialization authority.
+  Commitment additionally mints a copyable content-free metric receipt bound
+  to the private canonical manifest revision and exact call/lease/node. The
+  receipt is compile-capped at 192 bytes, cannot be publicly constructed, and
+  grants no provider, policy, transport, continuation, or browser authority.
   Observation proof exposes the exact current acknowledgement needed to
   compute a later diff; a read proof cannot become diff authority. The
   stateless builders mechanically exclude `ZDIFF1`: a standalone diff would
@@ -617,7 +621,9 @@ browser action, model call, tool call, data transfer, cost, or native resource.
   and the fixed input metrics that crossed that same commit. The transport
   input has no public metrics accessor, so a rejected credential, capacity
   refusal, shutdown, or pre-commit cancellation cannot be misreported as
-  disclosure. A shell may clone the observation proof
+  disclosure. The attempt also delegates the exact copyable metric receipt for
+  an optional run-local reducer; it does not mint or reconstruct a sample in
+  the transport shell. A shell may clone the observation proof
   before consuming the attempt so a future bounded continuation can compute an
   exact diff. A read receipt cannot expose an acknowledgement; only the fixed
   bound-read transport may carry forward the exact acknowledgement already in

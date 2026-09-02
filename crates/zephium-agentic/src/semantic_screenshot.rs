@@ -786,6 +786,34 @@ pub struct SemanticScreenshotStats {
 }
 
 impl SemanticScreenshotStats {
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) const fn for_input_metrics_test(
+        width: u16,
+        height: u16,
+        pixels: u32,
+        native_png_bytes: u32,
+        canonical_png_bytes: u32,
+        native_chunks: u16,
+        retained_chunks: u16,
+        dropped_ancillary_chunks: u16,
+        dropped_ancillary_bytes: u32,
+        layout: SemanticScreenshotPixelLayout,
+    ) -> Self {
+        Self {
+            width,
+            height,
+            pixels,
+            native_png_bytes,
+            canonical_png_bytes,
+            native_chunks,
+            retained_chunks,
+            dropped_ancillary_chunks,
+            dropped_ancillary_bytes,
+            layout,
+        }
+    }
+
     /// Physical pixel width.
     pub const fn width(self) -> u16 {
         self.width

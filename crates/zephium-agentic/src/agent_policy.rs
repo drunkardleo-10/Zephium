@@ -597,6 +597,10 @@ impl AgentActiveModelCall {
         self.manifest == manifest && self.manifest_guard == manifest_guard
     }
 
+    pub(crate) const fn manifest_guard_for_metrics(&self) -> [u8; 32] {
+        self.manifest_guard
+    }
+
     #[cfg(test)]
     pub(crate) const fn for_progress_test(
         manifest: &AgentRunManifest,
@@ -2467,16 +2471,18 @@ mod tests {
         encode_semantic_extraction_request, encode_semantic_locate_result,
         encode_semantic_observation, encode_semantic_read, locate_semantic_observation,
         read_semantic_observation, AgentAccountAttestationId, AgentAccountId, AgentDataFlowRule,
-        AgentEffectScope, AgentPlanNodeAuthority, AgentPlanNodeScope,
-        AgentPreparedObservationRequest, AgentPreparedReadRequest, AgentProviderCallConfig,
-        AgentProviderContractError, AgentProviderDiffRequestDraft, AgentProviderEndpoint,
-        AgentProviderExtractionRequestDraft, AgentProviderInputEvidence, AgentProviderInputOutcome,
-        AgentProviderKind, AgentProviderLocalInputTokenCounter, AgentProviderLocateRequestDraft,
+        AgentDelegationSpec, AgentDelegationTopology, AgentEffectScope, AgentPlanNodeAuthority,
+        AgentPlanNodeScope, AgentPreparedObservationRequest, AgentPreparedReadRequest,
+        AgentProviderCallConfig, AgentProviderContractError, AgentProviderDiffRequestDraft,
+        AgentProviderEndpoint, AgentProviderExtractionRequestDraft, AgentProviderInputEvidence,
+        AgentProviderInputKind, AgentProviderInputOutcome, AgentProviderKind,
+        AgentProviderLocalInputTokenCounter, AgentProviderLocateRequestDraft,
         AgentProviderModelRevision, AgentProviderObjective,
         AgentProviderReadContinuationRequestDraft, AgentProviderRequestSettlement,
         AgentProviderScreenshotRequestDraft, AgentProviderSemanticInputStats,
         AgentProviderStreamBatch, AgentProviderStreamBudget, AgentProviderStreamConclusion,
-        AgentProviderStreamEvent, AgentProviderTextDelta, AgentRunManifestId, AgentRunScope,
+        AgentProviderStreamEvent, AgentProviderTextDelta, AgentRunManifestId,
+        AgentRunProviderInputMetrics, AgentRunScope, AgentRunSupervisor, AgentSupervisorId,
         ContextAutomationState, ContextCapabilities, ContextCapability, ContextId, ContextIdentity,
         ContextKind, ContextOperationId, ContextRegistry, ContextRunId, ContextSettlement,
         FrameGeneration, FrameId, SemanticActionBatch, SemanticActionBatchId,
@@ -3787,6 +3793,17 @@ mod tests {
             &[SemanticEffectClass::Read],
             run_budget(10, 1_000, 10_000),
         );
+        let supervisor = AgentRunSupervisor::new(
+            AgentSupervisorId::new(1).expect("supervisor"),
+            AgentDelegationTopology::try_new(
+                fixture.policy.manifest(),
+                vec![AgentDelegationSpec::new(AgentPlanNodeId::from_raw(1), None)],
+            )
+            .expect("topology"),
+        );
+        let mut input_reducer =
+            AgentRunProviderInputMetrics::try_new(fixture.policy.manifest(), &supervisor)
+                .expect("input metrics reducer");
         let prepared = AgentPreparedObservationRequest::try_openai(
             &mut fixture.policy,
             call_request(1, fixture.lease, account(context, NOW), 15, 20, 100, NOW),
@@ -3845,6 +3862,27 @@ mod tests {
             .commit(&mut fixture.policy)
             .expect("transport commit");
         let input_metrics = committed.input_metrics();
+        let metric_receipt = committed.input_metric_receipt();
+        assert_eq!(metric_receipt.manifest(), committed.active().manifest());
+        assert_eq!(metric_receipt.call(), committed.active().id());
+        assert_eq!(metric_receipt.lease(), committed.active().lease());
+        assert_eq!(metric_receipt.node(), committed.active().node());
+        assert_eq!(metric_receipt.metrics(), input_metrics);
+        input_reducer
+            .record(metric_receipt)
+            .expect("committed input metrics");
+        let input_snapshot = input_reducer.snapshot();
+        assert_eq!(input_snapshot.calls(), 1);
+        assert_eq!(
+            input_snapshot
+                .kind(AgentProviderInputKind::Observation)
+                .serialized_request_bytes(),
+            u64::from(serialized_request_bytes)
+        );
+        assert_eq!(
+            input_snapshot.shapes().observation_nodes(),
+            u64::from(semantic_stats.nodes())
+        );
         assert_eq!(
             input_metrics.serialized_request_bytes(),
             serialized_request_bytes
@@ -3872,6 +3910,10 @@ mod tests {
             SemanticTokenCountQuality::ExactLocal
         );
         assert_eq!(input_metrics.structured_input_tokens(), None);
+        let metric_debug = format!("{metric_receipt:?}");
+        assert!(metric_debug.contains("[redacted]"));
+        assert!(!metric_debug.contains("Submit the reviewed form"));
+        assert!(!metric_debug.contains("private marker"));
         assert_eq!(
             committed.continuation_transcript_bytes(),
             Some(transcript_bytes)

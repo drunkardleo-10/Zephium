@@ -1037,8 +1037,8 @@ It rejects manifest-revision, plan-node, effect, attempt, batch, shape, and
 operation-budget mismatches before logical mutation; its copyable snapshot is
 capped at 1 KiB and it owns no clock, telemetry, persistence, task, or browser
 resource. The reducer is constructed and fed explicitly, so unused agentic
-browsing pays no reducer allocation or execution cost. Neither reducer retains
-raw action samples or site/platform/resource labels, so exact medians,
+browsing pays no reducer allocation or execution cost. These reducers retain
+no raw action samples or site/platform/resource labels, so exact medians,
 percentiles, reviewed per-site distributions, native/process counts, and
 machine resource measures remain qualification-harness inputs. Committed
 provider input now carries a separate fixed, content-free qualification value
@@ -1047,8 +1047,18 @@ screenshot encoding stats, the newest semantic-payload token count when one
 exists, and the whole structured-replay count only when the trusted local
 counter actually ran. It is inaccessible before disclosure commit, capped at
 64 bytes, and owns no content, tokenizer label, sink, clock, task, or browser
-resource. The harness may retain those samples; the in-process reducers do
-not, and absence is never represented as zero.
+resource. That commit also mints an at-most-192-byte copyable metric receipt
+bound to the private canonical manifest revision, call, lease, and node. A
+separate optional run-local reducer consumes only those receipts, rejects
+revision/node mismatch, call replay, contradictory closed shapes, arithmetic
+overflow, and run or node operation-budget excess before logical mutation,
+then aggregates exact bytes, lines, source-shape/redaction counts, and measured
+token totals/quality counts across the six closed input classes. Its copyable
+snapshot is capped at 1 KiB; it retains only a bounded sorted call-identity
+index and canonical plan-node counts, never raw samples or content. The
+qualification harness must still retain reviewed samples when medians or
+percentiles are required, and an absent token measurement is never represented
+as zero.
 
 Initial qualification gates are:
 

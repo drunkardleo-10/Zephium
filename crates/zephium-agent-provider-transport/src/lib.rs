@@ -28,11 +28,11 @@ use zephium_agentic::{
     AgentModelCallSettlement, AgentModelCallUnaccountedSettlement, AgentModelUsageAccounting,
     AgentPolicyError, AgentProviderCallConfig, AgentProviderCallIdentity,
     AgentProviderContinuationSeed, AgentProviderEndpoint, AgentProviderFailure,
-    AgentProviderFailureClass, AgentProviderInputEvidence, AgentProviderInputMetrics,
-    AgentProviderKind, AgentProviderPricingError, AgentProviderPricingSchedule,
-    AgentProviderRequestError, AgentProviderRetryAfter, AgentProviderStopReason,
-    AgentProviderStreamBatch, AgentProviderStreamConclusion, AgentProviderStreamDecoder,
-    AgentProviderTransportInput, AgentProviderUsage, AgentRunPolicy,
+    AgentProviderFailureClass, AgentProviderInputEvidence, AgentProviderInputMetricReceipt,
+    AgentProviderInputMetrics, AgentProviderKind, AgentProviderPricingError,
+    AgentProviderPricingSchedule, AgentProviderRequestError, AgentProviderRetryAfter,
+    AgentProviderStopReason, AgentProviderStreamBatch, AgentProviderStreamConclusion,
+    AgentProviderStreamDecoder, AgentProviderTransportInput, AgentProviderUsage, AgentRunPolicy,
 };
 use zeroize::Zeroizing;
 
@@ -1189,6 +1189,11 @@ impl AgentProviderAttempt {
     /// Content-free metrics for the exact input that crossed disclosure commit.
     pub const fn input_metrics(&self) -> AgentProviderInputMetrics {
         self.committed.input_metrics()
+    }
+
+    /// Copyable exact identity and metrics proof for run-local qualification.
+    pub fn input_metric_receipt(&self) -> AgentProviderInputMetricReceipt {
+        self.committed.input_metric_receipt()
     }
 
     /// Cancels after commitment without polling or transmitting the HTTP request.
@@ -2646,6 +2651,9 @@ mod tests {
         assert!(!attempt_debug.contains("synthetic fixture marker"));
         let continuation = attempt.input_evidence().clone();
         let input_metrics = attempt.input_metrics();
+        let metric_receipt = attempt.input_metric_receipt();
+        assert_eq!(metric_receipt.call(), attempt.call().call());
+        assert_eq!(metric_receipt.metrics(), input_metrics);
         assert!(input_metrics.serialized_request_bytes() > 0);
         let zephium_agentic::AgentProviderSemanticInputStats::Observation(semantic_stats) =
             input_metrics.semantic()
@@ -2665,6 +2673,10 @@ mod tests {
             10
         );
         assert_eq!(input_metrics.structured_input_tokens(), None);
+        let metric_debug = format!("{metric_receipt:?}");
+        assert!(metric_debug.contains("[redacted]"));
+        assert!(!metric_debug.contains("synthetic fixture marker"));
+        assert!(!metric_debug.contains("fixture.example.test"));
         let acknowledgement = continuation
             .observation_acknowledgement()
             .expect("observation continuation");

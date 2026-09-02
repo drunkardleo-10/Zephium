@@ -16,6 +16,7 @@ compile_error!("the agentic probe harness is forbidden in optimized builds");
 
 mod agent_action_metrics;
 mod agent_audit;
+mod agent_input_metrics;
 mod agent_manifest;
 mod agent_metrics;
 mod agent_policy;
@@ -80,6 +81,11 @@ pub use agent_audit::{
     AgentAuditRecordV1, AgentAuditSinkFailure, AGENT_AUDIT_RECORD_V1_BYTES,
     MAX_AGENT_AUDIT_DELIVERY_EVENTS, MAX_PENDING_AGENT_AUDIT_EVENTS,
 };
+pub use agent_input_metrics::{
+    AgentProviderInputKind, AgentProviderInputKindMetrics, AgentProviderInputMetricError,
+    AgentProviderInputNodeMetrics, AgentProviderInputShapeMetrics, AgentRunProviderInputMetrics,
+    AgentRunProviderInputSnapshot, MAX_AGENT_PROVIDER_INPUT_SNAPSHOT_BYTES,
+};
 pub use agent_manifest::{
     AgentAccountAttestationId, AgentAccountId, AgentAccountScope, AgentContextAccountBinding,
     AgentDataFlowRule, AgentEffectScope, AgentManifestContractError, AgentPlanLeaseId,
@@ -126,12 +132,13 @@ pub use agent_provider::{
     AgentProviderEndpoint, AgentProviderExtractionOutputBinding,
     AgentProviderExtractionOutputCollector, AgentProviderExtractionOutputError,
     AgentProviderExtractionRequestDraft, AgentProviderFailure, AgentProviderFailureClass,
-    AgentProviderInputEvidence, AgentProviderInputMetrics, AgentProviderInputOutcome,
-    AgentProviderInputTokenCount, AgentProviderKind, AgentProviderLocalInputTokenCounter,
-    AgentProviderLocateRequestDraft, AgentProviderModelRevision, AgentProviderObjective,
-    AgentProviderObjectiveError, AgentProviderPricedUsage, AgentProviderPricingAttribution,
-    AgentProviderPricingContractError, AgentProviderPricingError, AgentProviderPricingProfile,
-    AgentProviderPricingRevision, AgentProviderPricingSchedule, AgentProviderProtocolError,
+    AgentProviderInputEvidence, AgentProviderInputMetricReceipt, AgentProviderInputMetrics,
+    AgentProviderInputOutcome, AgentProviderInputTokenCount, AgentProviderKind,
+    AgentProviderLocalInputTokenCounter, AgentProviderLocateRequestDraft,
+    AgentProviderModelRevision, AgentProviderObjective, AgentProviderObjectiveError,
+    AgentProviderPricedUsage, AgentProviderPricingAttribution, AgentProviderPricingContractError,
+    AgentProviderPricingError, AgentProviderPricingProfile, AgentProviderPricingRevision,
+    AgentProviderPricingSchedule, AgentProviderProtocolError,
     AgentProviderReadContinuationRequestDraft, AgentProviderRequest, AgentProviderRequestError,
     AgentProviderRequestSettlement, AgentProviderRetryAfter, AgentProviderRetryDisposition,
     AgentProviderScreenshotRequestDraft, AgentProviderSemanticInputStats, AgentProviderStopReason,
@@ -142,14 +149,15 @@ pub use agent_provider::{
     MAX_AGENT_BROWSER_NAVIGATION_URL_BYTES, MAX_AGENT_BROWSER_SEMANTIC_QUERY_BYTES,
     MAX_AGENT_PROVIDER_CONTINUATION_INITIAL_OBSERVATION_BYTES,
     MAX_AGENT_PROVIDER_CONTINUATION_TRANSCRIPT_BYTES, MAX_AGENT_PROVIDER_CONTINUATION_TURNS,
-    MAX_AGENT_PROVIDER_MODEL_REVISION_BYTES, MAX_AGENT_PROVIDER_OBJECTIVE_BYTES,
-    MAX_AGENT_PROVIDER_OBJECTIVE_TOKENS, MAX_AGENT_PROVIDER_OUTPUT_TEXT_BYTES,
-    MAX_AGENT_PROVIDER_RATE_MICRO_USD_PER_MILLION_TOKENS, MAX_AGENT_PROVIDER_REQUEST_BYTES,
-    MAX_AGENT_PROVIDER_RETRY_AFTER_MILLIS, MAX_AGENT_PROVIDER_SCREENSHOT_PNG_BYTES,
-    MAX_AGENT_PROVIDER_SCREENSHOT_TRANSCRIPT_BYTES, MAX_AGENT_PROVIDER_SSE_EVENT_BYTES,
-    MAX_AGENT_PROVIDER_SSE_LINE_BYTES, MAX_AGENT_PROVIDER_STREAM_EVENTS,
-    MAX_AGENT_PROVIDER_STREAM_WIRE_BYTES, MAX_AGENT_PROVIDER_TOOL_ARGUMENT_BYTES,
-    MAX_AGENT_PROVIDER_TOOL_CALLS, MAX_AGENT_PROVIDER_TOOL_CALL_ID_BYTES,
+    MAX_AGENT_PROVIDER_INPUT_METRIC_RECEIPT_BYTES, MAX_AGENT_PROVIDER_MODEL_REVISION_BYTES,
+    MAX_AGENT_PROVIDER_OBJECTIVE_BYTES, MAX_AGENT_PROVIDER_OBJECTIVE_TOKENS,
+    MAX_AGENT_PROVIDER_OUTPUT_TEXT_BYTES, MAX_AGENT_PROVIDER_RATE_MICRO_USD_PER_MILLION_TOKENS,
+    MAX_AGENT_PROVIDER_REQUEST_BYTES, MAX_AGENT_PROVIDER_RETRY_AFTER_MILLIS,
+    MAX_AGENT_PROVIDER_SCREENSHOT_PNG_BYTES, MAX_AGENT_PROVIDER_SCREENSHOT_TRANSCRIPT_BYTES,
+    MAX_AGENT_PROVIDER_SSE_EVENT_BYTES, MAX_AGENT_PROVIDER_SSE_LINE_BYTES,
+    MAX_AGENT_PROVIDER_STREAM_EVENTS, MAX_AGENT_PROVIDER_STREAM_WIRE_BYTES,
+    MAX_AGENT_PROVIDER_TOOL_ARGUMENT_BYTES, MAX_AGENT_PROVIDER_TOOL_CALLS,
+    MAX_AGENT_PROVIDER_TOOL_CALL_ID_BYTES,
 };
 pub use agent_supervisor::{
     AgentDelegationNode, AgentDelegationSpec, AgentDelegationTopology, AgentNodeExecution,

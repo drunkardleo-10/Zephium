@@ -22,8 +22,8 @@ use crate::semantic_locate_model::SemanticLocateDeliveryAuthority;
 use crate::semantic_wire::looks_like_secret_value;
 use crate::{
     AgentActiveModelCall, AgentModelCallAdmission, AgentModelCallRequest,
-    AgentModelInputCancellation, AgentPolicyError, AgentRunPolicy, SemanticDiff,
-    SemanticDiffDeliveryReceipt, SemanticDiffEncodingStats, SemanticEncodingStats,
+    AgentModelInputCancellation, AgentPolicyError, AgentRunManifestId, AgentRunPolicy,
+    SemanticDiff, SemanticDiffDeliveryReceipt, SemanticDiffEncodingStats, SemanticEncodingStats,
     SemanticExtractionDeliveryReceipt, SemanticExtractionEncodingStats, SemanticExtractionSchema,
     SemanticLocateDeliveryReceipt, SemanticLocateEncodingStats, SemanticLocateResult,
     SemanticModelPayload, SemanticObservation, SemanticObservationAcknowledgement,
@@ -53,6 +53,8 @@ pub const MAX_AGENT_PROVIDER_OBJECTIVE_BYTES: usize = 8 * 1024;
 pub const MAX_AGENT_PROVIDER_OBJECTIVE_TOKENS: u32 = 4_096;
 /// Maximum serialized bytes in one provider request body.
 pub const MAX_AGENT_PROVIDER_REQUEST_BYTES: usize = 2 * 1024 * 1024;
+/// Maximum in-memory size of one copyable committed-input metric receipt.
+pub const MAX_AGENT_PROVIDER_INPUT_METRIC_RECEIPT_BYTES: usize = 192;
 /// Maximum canonical PNG bytes admitted to one provider screenshot result.
 pub const MAX_AGENT_PROVIDER_SCREENSHOT_PNG_BYTES: usize = 1_300_000;
 /// Maximum prior text transcript retained beside a provider screenshot result.
@@ -63,6 +65,10 @@ pub const MAX_AGENT_BROWSER_NAVIGATION_URL_BYTES: usize = 8 * 1024;
 const _: () = {
     assert!(MAX_AGENT_PROVIDER_REQUEST_BYTES <= u32::MAX as usize);
     assert!(std::mem::size_of::<AgentProviderInputMetrics>() <= 64);
+    assert!(
+        std::mem::size_of::<AgentProviderInputMetricReceipt>()
+            <= MAX_AGENT_PROVIDER_INPUT_METRIC_RECEIPT_BYTES
+    );
     assert!(MAX_AGENT_PROVIDER_SCREENSHOT_PNG_BYTES < MAX_AGENT_PROVIDER_REQUEST_BYTES);
     assert!(
         MAX_AGENT_PROVIDER_SCREENSHOT_PNG_BYTES
@@ -444,6 +450,120 @@ impl AgentProviderInputMetrics {
     pub const fn structured_input_tokens(self) -> Option<AgentProviderInputTokenCount> {
         self.structured_input_tokens
     }
+
+    #[cfg(test)]
+    pub(crate) const fn for_reducer_test(
+        serialized_request_bytes: u32,
+        semantic: AgentProviderSemanticInputStats,
+        semantic_payload_tokens: Option<(u32, SemanticTokenCountQuality)>,
+        structured_input_tokens: Option<(u32, SemanticTokenCountQuality)>,
+    ) -> Self {
+        Self {
+            serialized_request_bytes,
+            semantic,
+            semantic_payload_tokens: match semantic_payload_tokens {
+                Some((tokens, quality)) => Some(AgentProviderInputTokenCount { tokens, quality }),
+                None => None,
+            },
+            structured_input_tokens: match structured_input_tokens {
+                Some((tokens, quality)) => Some(AgentProviderInputTokenCount { tokens, quality }),
+                None => None,
+            },
+        }
+    }
+}
+
+/// Copyable content-free proof of one exact committed provider input sample.
+///
+/// The private manifest-revision guard prevents a reused public run identity
+/// from accepting a sample from a different canonical scope. This receipt has
+/// no provider, policy, transport, continuation, or browser authority.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct AgentProviderInputMetricReceipt {
+    manifest: AgentRunManifestId,
+    manifest_guard: [u8; 32],
+    call: crate::AgentModelCallId,
+    lease: crate::AgentPlanLeaseId,
+    node: crate::AgentPlanNodeId,
+    metrics: AgentProviderInputMetrics,
+}
+
+impl AgentProviderInputMetricReceipt {
+    fn from_committed(input: &AgentCommittedProviderInput) -> Self {
+        Self {
+            manifest: input.active.manifest(),
+            manifest_guard: input.active.manifest_guard_for_metrics(),
+            call: input.active.id(),
+            lease: input.active.lease(),
+            node: input.active.node(),
+            metrics: input.metrics,
+        }
+    }
+
+    /// Exact immutable run-manifest identity.
+    pub const fn manifest(self) -> AgentRunManifestId {
+        self.manifest
+    }
+
+    /// Exact committed provider-call identity.
+    pub const fn call(self) -> crate::AgentModelCallId {
+        self.call
+    }
+
+    /// Exact plan lease holding the committed call.
+    pub const fn lease(self) -> crate::AgentPlanLeaseId {
+        self.lease
+    }
+
+    /// Exact approved plan node responsible for this call.
+    pub const fn node(self) -> crate::AgentPlanNodeId {
+        self.node
+    }
+
+    /// Fixed content-free input metrics committed with this call.
+    pub const fn metrics(self) -> AgentProviderInputMetrics {
+        self.metrics
+    }
+
+    pub(crate) fn matches_manifest_revision(
+        self,
+        manifest: AgentRunManifestId,
+        manifest_guard: [u8; 32],
+    ) -> bool {
+        self.manifest == manifest && self.manifest_guard == manifest_guard
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn for_reducer_test(
+        manifest: &crate::AgentRunManifest,
+        call: crate::AgentModelCallId,
+        lease: crate::AgentPlanLeaseId,
+        node: crate::AgentPlanNodeId,
+        metrics: AgentProviderInputMetrics,
+    ) -> Self {
+        Self {
+            manifest: manifest.id(),
+            manifest_guard: manifest.guard(),
+            call,
+            lease,
+            node,
+            metrics,
+        }
+    }
+}
+
+impl fmt::Debug for AgentProviderInputMetricReceipt {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentProviderInputMetricReceipt")
+            .field("manifest", &self.manifest)
+            .field("manifest_guard", &"[redacted]")
+            .field("call", &self.call)
+            .field("lease", &self.lease)
+            .field("node", &self.node)
+            .field("metrics", &self.metrics)
+            .finish()
+    }
 }
 
 impl AgentProviderInputEvidence {
@@ -558,6 +678,11 @@ impl AgentCommittedProviderInput {
     /// Content-free metrics for the exact input that crossed disclosure commit.
     pub const fn metrics(&self) -> AgentProviderInputMetrics {
         self.metrics
+    }
+
+    /// Copyable exact identity and metrics proof for run-local qualification.
+    pub fn metric_receipt(&self) -> AgentProviderInputMetricReceipt {
+        AgentProviderInputMetricReceipt::from_committed(self)
     }
 
     /// Separates terminal usage authority from cloneable content-free input proof.
@@ -906,6 +1031,11 @@ impl AgentCommittedProviderRequest {
     /// Content-free metrics for the exact input that crossed disclosure commit.
     pub const fn input_metrics(&self) -> AgentProviderInputMetrics {
         self.input.metrics()
+    }
+
+    /// Copyable exact identity and metrics proof for run-local qualification.
+    pub fn input_metric_receipt(&self) -> AgentProviderInputMetricReceipt {
+        self.input.metric_receipt()
     }
 
     /// Optional private transcript bytes retained for a tool-only terminal.

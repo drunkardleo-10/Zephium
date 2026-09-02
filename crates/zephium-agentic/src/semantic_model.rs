@@ -295,6 +295,23 @@ pub struct SemanticEncodingStats {
 }
 
 impl SemanticEncodingStats {
+    #[cfg(test)]
+    pub(crate) const fn for_input_metrics_test(
+        bytes: u32,
+        lines: u16,
+        frames: u8,
+        nodes: u16,
+        secret_nodes: u16,
+    ) -> Self {
+        Self {
+            bytes,
+            lines,
+            frames,
+            nodes,
+            secret_nodes,
+        }
+    }
+
     /// Encoded UTF-8 bytes.
     pub const fn bytes(self) -> u32 {
         self.bytes

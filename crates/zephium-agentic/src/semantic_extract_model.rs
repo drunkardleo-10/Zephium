@@ -33,6 +33,21 @@ pub struct SemanticExtractionEncodingStats {
 }
 
 impl SemanticExtractionEncodingStats {
+    #[cfg(test)]
+    pub(crate) const fn for_input_metrics_test(
+        bytes: u32,
+        lines: u16,
+        fields: u8,
+        read: SemanticReadEncodingStats,
+    ) -> Self {
+        Self {
+            bytes,
+            lines,
+            fields,
+            read,
+        }
+    }
+
     /// Encoded UTF-8 bytes for schema and read evidence together.
     pub const fn bytes(self) -> u32 {
         self.bytes

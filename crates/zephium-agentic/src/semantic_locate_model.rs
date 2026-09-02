@@ -36,6 +36,30 @@ pub struct SemanticLocateEncodingStats {
 }
 
 impl SemanticLocateEncodingStats {
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) const fn for_input_metrics_test(
+        bytes: u32,
+        lines: u8,
+        matches: u8,
+        sensitive_matches: u8,
+        matched_nodes: u16,
+        scanned_nodes: u16,
+        withheld_secret_nodes: u16,
+        truncated: bool,
+    ) -> Self {
+        Self {
+            bytes,
+            lines,
+            matches,
+            sensitive_matches,
+            matched_nodes,
+            scanned_nodes,
+            withheld_secret_nodes,
+            truncated,
+        }
+    }
+
     /// Encoded UTF-8 bytes.
     pub const fn bytes(self) -> u32 {
         self.bytes

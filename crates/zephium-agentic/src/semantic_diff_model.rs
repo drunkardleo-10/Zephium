@@ -37,6 +37,25 @@ pub struct SemanticDiffEncodingStats {
 }
 
 impl SemanticDiffEncodingStats {
+    #[cfg(test)]
+    pub(crate) const fn for_input_metrics_test(
+        bytes: u32,
+        lines: u16,
+        frames: u8,
+        entries: u16,
+        reference_rebases: u16,
+        secret_nodes: u16,
+    ) -> Self {
+        Self {
+            bytes,
+            lines,
+            frames,
+            entries,
+            reference_rebases,
+            secret_nodes,
+        }
+    }
+
     /// Encoded UTF-8 bytes.
     pub const fn bytes(self) -> u32 {
         self.bytes

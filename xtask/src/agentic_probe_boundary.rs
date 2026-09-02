@@ -28,6 +28,7 @@ const AGENTIC_POLICY: &str = "crates/zephium-agentic/src/agent_policy.rs";
 const AGENTIC_EFFECT_POLICY: &str = "crates/zephium-agentic/src/agent_policy/effect.rs";
 const AGENTIC_AUDIT: &str = "crates/zephium-agentic/src/agent_audit.rs";
 const AGENTIC_ACTION_METRICS: &str = "crates/zephium-agentic/src/agent_action_metrics.rs";
+const AGENTIC_INPUT_METRICS: &str = "crates/zephium-agentic/src/agent_input_metrics.rs";
 const AGENTIC_METRICS: &str = "crates/zephium-agentic/src/agent_metrics.rs";
 const AGENTIC_PROGRESS_METRICS: &str = "crates/zephium-agentic/src/agent_progress_metrics.rs";
 const AGENTIC_SEMANTIC_DIFF: &str = "crates/zephium-agentic/src/semantic_diff.rs";
@@ -142,6 +143,13 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     validate_agent_action_metrics_contract(
         &read(repository.join(AGENTIC_ROOT))?,
         &read(repository.join(AGENTIC_ACTION_METRICS))?,
+    )?;
+    validate_agent_input_metrics_contract(
+        &read(repository.join(AGENTIC_ROOT))?,
+        &read(repository.join(AGENTIC_INPUT_METRICS))?,
+        &read(repository.join(AGENTIC_PROVIDER_REQUEST))?,
+        &read(repository.join(AGENTIC_POLICY))?,
+        &read(repository.join(PROVIDER_TRANSPORT_ROOT))?,
     )?;
     validate_agent_progress_metrics_contract(
         &read(repository.join(AGENTIC_ROOT))?,
@@ -1910,6 +1918,184 @@ fn validate_agent_action_metrics_contract(root: &str, metrics: &str) -> Result<(
                 "run-local action metrics acquired forbidden telemetry/unbounded seam {forbidden}"
             ));
         }
+    }
+    Ok(())
+}
+
+fn validate_agent_input_metrics_contract(
+    root: &str,
+    metrics: &str,
+    request: &str,
+    policy: &str,
+    transport: &str,
+) -> Result<(), String> {
+    let root = compact(root);
+    for required in [
+        "modagent_input_metrics;",
+        "AgentProviderInputMetricReceipt",
+        "AgentRunProviderInputMetrics",
+        "AgentRunProviderInputSnapshot",
+        "MAX_AGENT_PROVIDER_INPUT_SNAPSHOT_BYTES",
+        "MAX_AGENT_PROVIDER_INPUT_METRIC_RECEIPT_BYTES",
+    ] {
+        if !root.contains(required) {
+            return Err(format!(
+                "agent provider-input metrics lost its default-core export {required}"
+            ));
+        }
+    }
+
+    let metrics = compact(metrics);
+    for required in [
+        "pubconstMAX_AGENT_PROVIDER_INPUT_SNAPSHOT_BYTES:usize=1_024;",
+        "pubstructAgentProviderInputKindMetrics{calls:u32,serialized_request_bytes:u64,disclosed_bytes:u64,semantic_lines:u64,semantic_payload_token_samples:u32,semantic_payload_tokens:u64,semantic_payload_qualities:[u32;4],structured_input_token_samples:u32,structured_input_tokens:u64,structured_input_qualities:[u32;4],}",
+        "observation_secret_nodes:u64",
+        "diff_secret_nodes:u64",
+        "locate_withheld_secret_nodes:u64",
+        "read_sensitive_items:u64",
+        "extraction_sensitive_items:u64",
+        "screenshot_dropped_ancillary_bytes:u64",
+        "screenshot_layouts:[u32;2]",
+        "pubstructAgentRunProviderInputSnapshot",
+        "size_of::<AgentRunProviderInputSnapshot>()<=MAX_AGENT_PROVIDER_INPUT_SNAPSHOT_BYTES",
+        "pubstructAgentRunProviderInputMetrics",
+        "kinds:[AgentProviderInputKindMetrics;6]",
+        "receipts:Vec<AgentModelCallId>",
+        "pubfntry_new(manifest:&AgentRunManifest,supervisor:&AgentRunSupervisor",
+        "ifmanifest.plan_nodes().len()>MAX_AGENT_PLAN_NODES",
+        "try_reserve_exact(manifest.plan_nodes().len())",
+        "operation_limit:manifest.budget().operations()",
+        "pubfnrecord(&mutself,receipt:AgentProviderInputMetricReceipt",
+        "receipt.matches_manifest_revision(self.manifest,self.manifest_guard)",
+        "self.receipts.binary_search(&receipt.call())",
+        "binary_search_by_key(&receipt.node(),|row|row.metrics.node())",
+        "ifnext_calls>self.operation_limit||next_node_calls>self.nodes[node_index].operation_limit",
+        "validate_input_metrics(metrics)?",
+        "self.receipts.try_reserve(1)",
+        "self.receipts.insert(receipt_index,receipt.call())",
+        "pubconstfnsnapshot(&self)->AgentRunProviderInputSnapshot",
+        "AgentProviderSemanticInputStats::Observation(stats)",
+        "AgentProviderSemanticInputStats::Diff(stats)",
+        "AgentProviderSemanticInputStats::Locate(stats)",
+        "AgentProviderSemanticInputStats::Read(stats)",
+        "AgentProviderSemanticInputStats::Extraction(stats)",
+        "AgentProviderSemanticInputStats::Screenshot(stats)",
+    ] {
+        if !metrics.contains(required) {
+            return Err(format!(
+                "agent provider-input metrics lost required bounded boundary {required}"
+            ));
+        }
+    }
+    for forbidden in [
+        "traitAgentProviderInputMetricPort",
+        "SerializeforAgentRunProviderInputMetrics",
+        "DeserializeforAgentRunProviderInputMetrics",
+        "HashMap<",
+        "BTreeMap<",
+        "std::thread",
+        "std::time",
+        "std::fs",
+        "tokio::",
+        "Mutex<",
+        "Arc<",
+    ] {
+        if metrics.contains(forbidden) {
+            return Err(format!(
+                "run-local provider-input metrics acquired forbidden telemetry/runtime seam {forbidden}"
+            ));
+        }
+    }
+
+    let request = compact(request);
+    for required in [
+        "pubconstMAX_AGENT_PROVIDER_INPUT_METRIC_RECEIPT_BYTES:usize=192;",
+        "size_of::<AgentProviderInputMetricReceipt>()<=MAX_AGENT_PROVIDER_INPUT_METRIC_RECEIPT_BYTES",
+        "pubstructAgentProviderInputMetricReceipt{manifest:AgentRunManifestId,manifest_guard:[u8;32],call:crate::AgentModelCallId,lease:crate::AgentPlanLeaseId,node:crate::AgentPlanNodeId,metrics:AgentProviderInputMetrics,}",
+        "manifest_guard:input.active.manifest_guard_for_metrics()",
+        "pub(crate)fnmatches_manifest_revision(",
+        "self.manifest==manifest&&self.manifest_guard==manifest_guard",
+        "pubfnmetric_receipt(&self)->AgentProviderInputMetricReceipt",
+        "AgentProviderInputMetricReceipt::from_committed(self)",
+        "pubfninput_metric_receipt(&self)->AgentProviderInputMetricReceipt",
+        "self.input.metric_receipt()",
+    ] {
+        if !request.contains(required) {
+            return Err(format!(
+                "committed provider input lost exact content-free metric receipt {required}"
+            ));
+        }
+    }
+    let receipt_start = request
+        .find("pubstructAgentProviderInputMetricReceipt")
+        .ok_or_else(|| "provider input metric receipt boundary is missing".to_owned())?;
+    let receipt_end = request[receipt_start..]
+        .find("implAgentProviderInputEvidence")
+        .map(|offset| receipt_start + offset)
+        .ok_or_else(|| "provider input metric receipt boundary is unclosed".to_owned())?;
+    let receipt = &request[receipt_start..receipt_end];
+    for forbidden in [
+        "pubfnnew(",
+        "pubconstfnnew(",
+        "Serialize",
+        "Deserialize",
+        "String",
+        "Vec<",
+        "Box<",
+        "Arc<",
+        "body:",
+        "content:",
+    ] {
+        if receipt.contains(forbidden) {
+            return Err(format!(
+                "provider input metric receipt acquired forging/content authority {forbidden}"
+            ));
+        }
+    }
+    if request
+        .matches("pubfnmetric_receipt(&self)->AgentProviderInputMetricReceipt")
+        .count()
+        != 1
+        || request
+            .matches("pubfninput_metric_receipt(&self)->AgentProviderInputMetricReceipt")
+            .count()
+            != 1
+    {
+        return Err(
+            "provider input metric receipt must surface only after exact disclosure commit"
+                .to_owned(),
+        );
+    }
+
+    let policy = compact(policy);
+    if !policy.contains(
+        "pub(crate)constfnmanifest_guard_for_metrics(&self)->[u8;32]{self.manifest_guard}",
+    ) {
+        return Err(
+            "provider input metric receipt lost crate-private manifest revision binding".to_owned(),
+        );
+    }
+
+    let transport = compact(transport);
+    for required in [
+        "pubfninput_metric_receipt(&self)->AgentProviderInputMetricReceipt",
+        "self.committed.input_metric_receipt()",
+    ] {
+        if !transport.contains(required) {
+            return Err(format!(
+                "provider transport lost committed input metric receipt propagation {required}"
+            ));
+        }
+    }
+    if transport
+        .matches("pubfninput_metric_receipt(&self)->AgentProviderInputMetricReceipt")
+        .count()
+        != 1
+    {
+        return Err(
+            "provider transport must expose the input metric receipt only on committed attempts"
+                .to_owned(),
+        );
     }
     Ok(())
 }
@@ -5598,6 +5784,162 @@ mod tests {
             &format!("{metrics}\ntrait AgentActionMetricPort {{}}"),
         )
         .is_err());
+    }
+
+    #[test]
+    fn run_provider_input_metrics_remain_commit_derived_and_bounded() {
+        let root = r#"
+            mod agent_input_metrics;
+            pub use agent_input_metrics::{
+                AgentRunProviderInputMetrics,
+                AgentRunProviderInputSnapshot,
+                MAX_AGENT_PROVIDER_INPUT_SNAPSHOT_BYTES,
+            };
+            pub use agent_provider::{
+                AgentProviderInputMetricReceipt,
+                MAX_AGENT_PROVIDER_INPUT_METRIC_RECEIPT_BYTES,
+            };
+        "#;
+        let metrics = r#"
+            pub const MAX_AGENT_PROVIDER_INPUT_SNAPSHOT_BYTES: usize = 1_024;
+            pub struct AgentProviderInputKindMetrics {
+                calls: u32,
+                serialized_request_bytes: u64,
+                disclosed_bytes: u64,
+                semantic_lines: u64,
+                semantic_payload_token_samples: u32,
+                semantic_payload_tokens: u64,
+                semantic_payload_qualities: [u32; 4],
+                structured_input_token_samples: u32,
+                structured_input_tokens: u64,
+                structured_input_qualities: [u32; 4],
+            }
+            pub struct AgentProviderInputShapeMetrics {
+                observation_secret_nodes: u64,
+                diff_secret_nodes: u64,
+                locate_withheld_secret_nodes: u64,
+                read_sensitive_items: u64,
+                extraction_sensitive_items: u64,
+                screenshot_dropped_ancillary_bytes: u64,
+                screenshot_layouts: [u32; 2],
+            }
+            pub struct AgentRunProviderInputSnapshot;
+            const _: () = assert!(
+                size_of::<AgentRunProviderInputSnapshot>()
+                    <= MAX_AGENT_PROVIDER_INPUT_SNAPSHOT_BYTES
+            );
+            pub struct AgentRunProviderInputMetrics {
+                kinds: [AgentProviderInputKindMetrics; 6],
+                receipts: Vec<AgentModelCallId>,
+            }
+            pub fn try_new(
+                manifest: &AgentRunManifest,
+                supervisor: &AgentRunSupervisor,
+            ) {
+                if manifest.plan_nodes().len() > MAX_AGENT_PLAN_NODES {}
+                values.try_reserve_exact(manifest.plan_nodes().len());
+                operation_limit: manifest.budget().operations();
+            }
+            pub fn record(
+                &mut self,
+                receipt: AgentProviderInputMetricReceipt,
+            ) {
+                receipt.matches_manifest_revision(self.manifest, self.manifest_guard);
+                self.receipts.binary_search(&receipt.call());
+                values.binary_search_by_key(&receipt.node(), |row| row.metrics.node());
+                if next_calls > self.operation_limit
+                    || next_node_calls > self.nodes[node_index].operation_limit {}
+                validate_input_metrics(metrics)?;
+                self.receipts.try_reserve(1);
+                self.receipts.insert(receipt_index, receipt.call());
+            }
+            pub const fn snapshot(&self) -> AgentRunProviderInputSnapshot {}
+            AgentProviderSemanticInputStats::Observation(stats);
+            AgentProviderSemanticInputStats::Diff(stats);
+            AgentProviderSemanticInputStats::Locate(stats);
+            AgentProviderSemanticInputStats::Read(stats);
+            AgentProviderSemanticInputStats::Extraction(stats);
+            AgentProviderSemanticInputStats::Screenshot(stats);
+        "#;
+        let request = r#"
+            pub const MAX_AGENT_PROVIDER_INPUT_METRIC_RECEIPT_BYTES: usize = 192;
+            assert!(
+                size_of::<AgentProviderInputMetricReceipt>()
+                    <= MAX_AGENT_PROVIDER_INPUT_METRIC_RECEIPT_BYTES
+            );
+            pub struct AgentProviderInputMetricReceipt {
+                manifest: AgentRunManifestId,
+                manifest_guard: [u8; 32],
+                call: crate::AgentModelCallId,
+                lease: crate::AgentPlanLeaseId,
+                node: crate::AgentPlanNodeId,
+                metrics: AgentProviderInputMetrics,
+            }
+            impl AgentProviderInputMetricReceipt {
+                fn from_committed(input: &AgentCommittedProviderInput) -> Self {
+                    manifest_guard: input.active.manifest_guard_for_metrics();
+                }
+                pub(crate) fn matches_manifest_revision(
+                    self,
+                    manifest: AgentRunManifestId,
+                    manifest_guard: [u8; 32],
+                ) -> bool {
+                    self.manifest == manifest && self.manifest_guard == manifest_guard
+                }
+            }
+            impl AgentProviderInputEvidence {}
+            impl AgentCommittedProviderInput {
+                pub fn metric_receipt(&self) -> AgentProviderInputMetricReceipt {
+                    AgentProviderInputMetricReceipt::from_committed(self)
+                }
+            }
+            impl AgentCommittedProviderRequest {
+                pub fn input_metric_receipt(&self) -> AgentProviderInputMetricReceipt {
+                    self.input.metric_receipt()
+                }
+            }
+        "#;
+        let policy = r#"
+            pub(crate) const fn manifest_guard_for_metrics(&self) -> [u8; 32] {
+                self.manifest_guard
+            }
+        "#;
+        let transport = r#"
+            pub fn input_metric_receipt(&self) -> AgentProviderInputMetricReceipt {
+                self.committed.input_metric_receipt()
+            }
+        "#;
+
+        validate_agent_input_metrics_contract(root, metrics, request, policy, transport)
+            .expect("commit-derived input metrics");
+        assert!(validate_agent_input_metrics_contract(
+            root,
+            &metrics.replace(
+                "receipt.matches_manifest_revision(self.manifest, self.manifest_guard);",
+                "receipt.manifest() == self.manifest;",
+            ),
+            request,
+            policy,
+            transport,
+        )
+        .is_err());
+        assert!(validate_agent_input_metrics_contract(
+            root,
+            &format!("{metrics}\ntrait AgentProviderInputMetricPort {{}}"),
+            request,
+            policy,
+            transport,
+        )
+        .is_err());
+        assert!(validate_agent_input_metrics_contract(
+            root,
+            metrics,
+            &request.replace("manifest_guard: [u8; 32],", "content: String,"),
+            policy,
+            transport,
+        )
+        .is_err());
+        assert!(validate_agent_input_metrics_contract(root, metrics, request, policy, "").is_err());
     }
 
     #[test]

@@ -54,12 +54,19 @@ provider-input gate additionally pins the six closed semantic/screenshot stats
 variants, scalar token-quality projections, exact request-byte bound, 64-byte
 value ceiling, commit-only accessors, and propagation through the trusted HTTPS
 attempt. It rejects content allocations and serialization fields in that
-metrics value.
+metrics value. A fourth reducer gate pins the at-most-192-byte commit-minted
+receipt to a crate-private canonical manifest-revision join, then pins the
+optional reducer to sorted replay rejection, canonical bounded plan-node
+storage, run/node operation ceilings, transactional reservation, all six
+closed input classes, and a 1 KiB snapshot ceiling. It forbids public receipt
+construction plus telemetry, persistence serialization, runtime clocks/tasks,
+unbounded maps, and browser/native ownership.
 
 Run the gate and its focused tests with:
 
 ```sh
 cargo test --locked -p xtask agentic_evidence
+cargo test --locked -p xtask agentic_probe_boundary
 cargo xtask check-agentic-probe-boundary
 cargo clippy --locked -p xtask --all-targets -- -D warnings
 ```
@@ -126,6 +133,17 @@ cargo clippy --locked -p xtask --all-targets -- -D warnings
   counts remain absent rather than inferred. Refused/cancelled transport has no
   public metrics surface, and the committed HTTPS attempt delegates the same
   value without retaining another page/image allocation.
+- A separate optional run-local provider-input reducer now consumes only the
+  exact copyable metric receipt minted by disclosure commit. It rejoins the
+  private canonical manifest revision and rejects unknown nodes, duplicate
+  call identities, contradictory closed source shapes, overflow, and run/node
+  operation-budget excess without partial logical mutation. Its at-most-1-KiB
+  snapshot reports aggregate exact request/disclosed bytes, semantic lines,
+  measured-token sample/totals and quality counts, plus
+  observation/diff/locate/read/extraction/screenshot source-shape and redaction
+  facts. It retains no raw sample, content, site, model/tokenizer label, clock,
+  task, telemetry, persistence, or native/browser resource; exact
+  distributions still belong to the qualification harness.
 
 The authoritative aggregate records and exact remaining blockers are in
 `native-input-matrix-v1.json`, `semantic-runtime-macos-v1.json`, and
@@ -144,8 +162,9 @@ The authoritative aggregate records and exact remaining blockers are in
   labels);
 - reviewed committed semantic-input size, redaction, and token distributions
   from authorized provider/tokenizer qualification (the stable content-free
-  commit seam exists, but this repository intentionally provides no telemetry
-  sink and no live-provider result);
+  commit and aggregate seams exist, but the reducer deliberately retains no
+  raw distribution and this repository provides neither a telemetry sink nor
+  a live-provider result);
 - deterministic semantic/action/policy suite closure, the six-site matrix,
   concurrent production configuration, endurance, and fault-injection evidence;
 - hot-path and zero-unused-agent-overhead measurements; and
