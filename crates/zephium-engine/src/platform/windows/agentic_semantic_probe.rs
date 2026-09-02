@@ -496,6 +496,7 @@ pub(crate) fn run(
                     }
                     navigation_callbacks.record_invariant();
                 },
+                || {},
                 move || renderer_callbacks.renderer_lost.set(true),
                 move || browser_callbacks.browser_lost.set(true),
                 move || invariant_callbacks.record_invariant(),

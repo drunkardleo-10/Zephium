@@ -95,19 +95,28 @@ impl AgentOwnedProfile {
 }
 
 /// Typed callback cohort retained by one WebView2 controller generation.
-pub(crate) struct AgentOwnedViewCallbacks<Navigation, RendererLost, BrowserLost, Invariant, Panic> {
+pub(crate) struct AgentOwnedViewCallbacks<
+    Navigation,
+    Location,
+    RendererLost,
+    BrowserLost,
+    Invariant,
+    Panic,
+> {
     navigation: Navigation,
+    location: Location,
     renderer_lost: RendererLost,
     browser_lost: BrowserLost,
     invariant: Invariant,
     panic: Panic,
 }
 
-impl<Navigation, RendererLost, BrowserLost, Invariant, Panic>
-    AgentOwnedViewCallbacks<Navigation, RendererLost, BrowserLost, Invariant, Panic>
+impl<Navigation, Location, RendererLost, BrowserLost, Invariant, Panic>
+    AgentOwnedViewCallbacks<Navigation, Location, RendererLost, BrowserLost, Invariant, Panic>
 {
     pub(crate) const fn new(
         navigation: Navigation,
+        location: Location,
         renderer_lost: RendererLost,
         browser_lost: BrowserLost,
         invariant: Invariant,
@@ -115,6 +124,7 @@ impl<Navigation, RendererLost, BrowserLost, Invariant, Panic>
     ) -> Self {
         Self {
             navigation,
+            location,
             renderer_lost,
             browser_lost,
             invariant,
@@ -133,6 +143,7 @@ pub(crate) struct AgentOwnedView {
     expected_parent: HWND,
     viewport: ContextOwnedViewport,
     _crash_observer: super::CrashObserver,
+    _navigation_observer: super::InstalledNavigationObserver,
     _security_policy: super::SecurityPolicy,
     view: WebView,
 }
@@ -570,7 +581,14 @@ const fn map_inventory_failure(
 /// native-proven non-universal isolated world. Network navigation remains
 /// denied until the host arms one exact operation and attaches its native
 /// content policy.
-pub(crate) fn build_owned_agent_view<Navigation, RendererLost, BrowserLost, Invariant, Panic>(
+pub(crate) fn build_owned_agent_view<
+    Navigation,
+    Location,
+    RendererLost,
+    BrowserLost,
+    Invariant,
+    Panic,
+>(
     parent: &impl HasWindowHandle,
     viewport: ContextOwnedViewport,
     environment: &ICoreWebView2Environment,
@@ -578,10 +596,18 @@ pub(crate) fn build_owned_agent_view<Navigation, RendererLost, BrowserLost, Inva
     storage_class: ContextProfileStorageClass,
     expected_user_data_folder: &Path,
     deadline: Instant,
-    callbacks: AgentOwnedViewCallbacks<Navigation, RendererLost, BrowserLost, Invariant, Panic>,
+    callbacks: AgentOwnedViewCallbacks<
+        Navigation,
+        Location,
+        RendererLost,
+        BrowserLost,
+        Invariant,
+        Panic,
+    >,
 ) -> Result<(AgentOwnedView, ContextConstructionProof), AgentOwnedViewConstructionError>
 where
     Navigation: Fn(AgentNavigationTerminal) + 'static,
+    Location: Fn() + 'static,
     RendererLost: Fn() + 'static,
     BrowserLost: Fn() + 'static,
     Invariant: Fn() + 'static,
@@ -596,6 +622,7 @@ where
         .map_err(|_| AgentOwnedViewConstructionError::Native)?;
     let AgentOwnedViewCallbacks {
         navigation: on_navigation,
+        location: on_location,
         renderer_lost: on_renderer_lost,
         browser_lost: on_browser_lost,
         invariant: on_invariant_failure,
@@ -606,6 +633,8 @@ where
     let navigation_events = navigation.clone();
     let renderer_events = navigation.clone();
     let navigation_callback = Rc::new(on_navigation);
+    let location_callback = Rc::new(on_location);
+    let navigation_event_location_callback = location_callback.clone();
     let renderer_lost_callback = Rc::new(on_renderer_lost);
     let browser_lost_callback = Rc::new(on_browser_lost);
     let invariant_callback = Rc::new(on_invariant_failure);
@@ -614,6 +643,7 @@ where
     let renderer_invariant = invariant_callback.clone();
     let semantic_invariant = invariant_callback.clone();
     let navigation_panic = panic_callback.clone();
+    let location_panic = panic_callback.clone();
     let renderer_panic = panic_callback.clone();
     let browser_panic = panic_callback.clone();
     let semantic_panic = panic_callback.clone();
@@ -647,6 +677,12 @@ where
                 {
                     invoke_unit_callback(navigation_invariant.as_ref(), navigation_panic.as_ref());
                     return;
+                }
+                if observation.should_check_location() {
+                    invoke_unit_callback(
+                        navigation_event_location_callback.as_ref(),
+                        location_panic.as_ref(),
+                    );
                 }
                 if let Some(terminal) = observation.into_terminal() {
                     invoke_navigation_callback(
@@ -733,6 +769,17 @@ where
         }
     })
     .map_err(|_| AgentOwnedViewConstructionError::Native)?;
+    let location_events = navigation.clone();
+    let location_invariant = invariant_callback.clone();
+    let location_panic = panic_callback.clone();
+    let navigation_observer = super::install_navigation_observer(&view, move || {
+        match location_events.request_location_check() {
+            Ok(true) => invoke_unit_callback(location_callback.as_ref(), location_panic.as_ref()),
+            Ok(false) => {}
+            Err(()) => invoke_unit_callback(location_invariant.as_ref(), location_panic.as_ref()),
+        }
+    })
+    .map_err(|_| AgentOwnedViewConstructionError::Native)?;
     Ok((
         AgentOwnedView {
             navigation,
@@ -743,6 +790,7 @@ where
             expected_parent,
             viewport,
             _crash_observer: crash_observer,
+            _navigation_observer: navigation_observer,
             _security_policy: security_policy,
             view,
         },

@@ -6,9 +6,10 @@ are implemented. Both retain exact shell-requested navigation, one-shot
 renderer-loss detection, same-view recovery, explicit close, and resource
 accounting. The initial Windows selected-profile-to-automation-subprofile
 cookie transaction is now host-reachable under that feature, but all Windows
-behavior remains cross-compiled only. Redirect and page-driven navigation,
-presentation, borrowed/handoff native adapters, and named-device
-qualification remain pending.
+behavior remains cross-compiled only. Same-document page-driven location
+replacement is bounded and host-reachable; redirects, cross-document
+page-driven navigation, presentation, borrowed/handoff native adapters, and
+named-device qualification remain pending.
 
 This evidence records code properties only. It does not claim that either
 owned native adapter has passed a live production-context qualification, or
@@ -532,13 +533,67 @@ boundary independently rejects Windows production source that acquires a page
 script/IPC/CDP/selector/native-input surface, an unbounded timer authority, or
 loses its hidden/profile/inventory/process/policy/cleanup checks.
 
+## Bounded native location replacement
+
+Owned contexts now observe same-document native location/history replacement
+without adding page-world JavaScript, selectors, DOM access, CDP commands, a
+worker, a channel, or an unbounded event queue. The macOS adapter retains the
+existing KVO-backed `WKWebView` URL/history observer beside the private view;
+the Windows adapter retains `SourceChanged` plus `HistoryChanged` registrations
+on the exact WebView2 controller. Both registrations are removed before their
+native view can be released.
+
+The shared navigation controller opens observation only after the exact web
+document reaches its native `Finished` event. Four booleans represent all
+runtime state: readiness, one claimed callback, one coalesced dirty fact, and
+one emitted replacement awaiting shell rejoin. Repeated or continuously
+generated History API signals therefore retain no URL cohort and can own at
+most one terminal callback per context. A signal between commit and finish is
+collapsed into the same dirty fact. Page-load arms, recovery, renderer loss,
+cancellation, and teardown close observation rather than allowing it to widen
+navigation authority.
+
+The host samples only the native current URL through the existing 8 KiB
+UTF-16/UTF-8 bound, reparses it as `ContextNavigationTarget`, and compares the
+canonical `SemanticOrigin` with the last exact committed target. An unchanged
+URL consumes the signal. A same-origin path/query/fragment replacement updates
+the private committed target and emits the already-closed
+`ContextNativeEvent::NavigationReplaced` against the exact prior join. A
+cross-origin, malformed, missing, or bootstrap substitution stops loading and
+fail-stops the adapter; it is never interpreted as a redirect grant. Unarmed
+network navigation and redirects remain denied by the exact Wry navigation
+gate.
+
+The host holds the replacement until a later request proves the functional
+core's deterministic successor. Direct observation/screenshot/cookie work must
+carry the one navigation/frame successor; a new navigation carries the double
+navigation/frame successor; cancellation, suspension, or close carries the
+replacement followed by one full generation advance. A later native location
+signal remains one dirty bit and forces that request to settle stale before a
+second replacement can be emitted. Renderer loss racing an unjoined
+replacement is likewise held until the replacement successor is proven, so a
+loss event is never mislabeled with the pre-replacement join; exact close may
+consume both barriers without manufacturing a redundant loss event.
+
+Semantic and screenshot completions recheck that no native location signal,
+page load, replacement rejoin, or renderer loss raced their result. The host
+also clears the current semantic snapshot authority and terminally stales an
+owned screenshot as soon as it records a replacement. Native lifecycle work
+temporarily defers the single location sample until its exact terminal; it does
+not rewrite or overtake the lifecycle settlement.
+
+This is unit, static-boundary, and macOS/Windows compile evidence. The new
+observer path has not yet received a dedicated physical same-document fixture
+qualification, and it does not promote redirect or presentation support.
+
 ## Remaining M2 work
 
 1. physically qualify Windows owned construction, selected/subprofile
    inventory, hidden/focus state, navigation, loss, close, debt, and shutdown
    on an explicitly authorized named Windows device/runtime;
-2. add bounded redirect/page-replacement observation and presentation while
-   preserving exact context/world/frame generations;
+2. physically qualify the bounded same-document replacement observer, add an
+   identity-bearing redirect policy/observation contract, and add presentation
+   only with a dedicated non-overlapping Work surface owner;
 3. physically qualify the bounded selected-profile Windows cookie transaction
    and its partial-cleanup/quarantine behavior, then add native
    borrowed/handoff source transactions without changing ordinary extension

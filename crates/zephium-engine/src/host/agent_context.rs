@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use zephium_agentic::{
     ContextNativeEvent, ContextNativeResourceCounts, ContextNativeResourceSnapshot,
-    ContextPortFailure,
+    ContextPortFailure, SemanticOrigin,
 };
 
 #[cfg(target_os = "windows")]
@@ -40,7 +40,7 @@ use zephium_agentic::{
     ContextNavigationSettlement, ContextNavigationTarget, ContextOperationJoin,
     ContextOperationKind, ContextOwnedViewport, ContextProfileLease, ContextProfileLeasePurpose,
     ContextProfileStorageClass, ContextTransitionRequest, ContextTransitionSettlement, FrameId,
-    SemanticFrameTrust, SemanticInvocationId, SemanticOrigin, SemanticRuntimePortFailure,
+    SemanticFrameTrust, SemanticInvocationId, SemanticRuntimePortFailure,
     SemanticRuntimeSettlement, SemanticScreenshotNativeCapture, SemanticScreenshotNativeFailure,
     SemanticScreenshotRequestId, SemanticSnapshotGeneration, MAX_LIVE_CONTEXTS,
 };
@@ -68,6 +68,24 @@ const AGENT_PAGE_LOAD_COMMIT_TIMEOUT: Duration = Duration::from_secs(30);
 const AGENT_SUSPEND_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(target_os = "macos")]
 const AGENT_SEMANTIC_RUNTIME_TIMEOUT: Duration = Duration::from_secs(15);
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AgentReplacementAdvance {
+    #[cfg(target_os = "macos")]
+    Direct,
+    Navigation,
+    Full,
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AgentReplacementRejoin {
+    NotPending,
+    Ready,
+    DeferredLocation,
+    DeferredRendererLoss,
+}
 
 #[cfg(target_os = "macos")]
 struct AgentPendingScreenshot {
@@ -182,9 +200,12 @@ pub(super) struct AgentOwnedContext {
     pending_screenshot: Option<AgentPendingScreenshot>,
     renderer_lost: bool,
     renderer_loss_rejoin_pending: bool,
+    renderer_loss_deferred_for_replacement: bool,
+    navigation_replacement_rejoin_pending: bool,
     last_semantic_invocation: Option<SemanticInvocationId>,
     semantic_snapshot_generation: Option<SemanticSnapshotGeneration>,
     content_policy_registration: Option<crate::platform::imp::ContentPolicyRegistration>,
+    event_emitter: crate::agent_context_port::AgentContextCallbackGuard,
     view: crate::platform::imp::AgentOwnedView,
     native_resource: Option<NativeResourceLease>,
 }
@@ -196,6 +217,7 @@ impl AgentOwnedContext {
         capabilities: ContextCapabilities,
         profile_lease: ContextProfileLease,
         content_policy_registration: crate::platform::imp::ContentPolicyRegistration,
+        event_emitter: crate::agent_context_port::AgentContextCallbackGuard,
         view: crate::platform::imp::AgentOwnedView,
         native_resource: NativeResourceLease,
     ) -> Self {
@@ -210,9 +232,12 @@ impl AgentOwnedContext {
             pending_screenshot: None,
             renderer_lost: false,
             renderer_loss_rejoin_pending: false,
+            renderer_loss_deferred_for_replacement: false,
+            navigation_replacement_rejoin_pending: false,
             last_semantic_invocation: None,
             semantic_snapshot_generation: None,
             content_policy_registration: Some(content_policy_registration),
+            event_emitter,
             view,
             native_resource: Some(native_resource),
         }
@@ -220,6 +245,39 @@ impl AgentOwnedContext {
 
     pub(super) fn profile(&self) -> zephium_core::ids::ProfileId {
         self.join.identity().profile()
+    }
+
+    fn rejoin_navigation_replacement(
+        &mut self,
+        requested: ContextJoin,
+        advance: AgentReplacementAdvance,
+    ) -> Result<AgentReplacementRejoin, ContextPortFailure> {
+        if !self.navigation_replacement_rejoin_pending {
+            return Ok(AgentReplacementRejoin::NotPending);
+        }
+        if !replacement_rejoin_matches(self.join, requested, advance) {
+            return Err(ContextPortFailure::Stale);
+        }
+        let deferred_location = self
+            .view
+            .navigation()
+            .acknowledge_location_replacement()
+            .map_err(|_| ContextPortFailure::NativeRefused)?;
+        self.join = requested;
+        self.navigation_replacement_rejoin_pending = false;
+        if self.renderer_lost {
+            if !self.renderer_loss_deferred_for_replacement || deferred_location {
+                return Err(ContextPortFailure::NativeRefused);
+            }
+            self.renderer_loss_deferred_for_replacement = false;
+            self.renderer_loss_rejoin_pending = true;
+            return Ok(AgentReplacementRejoin::DeferredRendererLoss);
+        }
+        Ok(if deferred_location {
+            AgentReplacementRejoin::DeferredLocation
+        } else {
+            AgentReplacementRejoin::Ready
+        })
     }
 
     pub(super) fn view(&self) -> &wry::WebView {
@@ -262,6 +320,19 @@ impl AgentOwnedContext {
             && self.profile_lease.identity() == identity
             && self.profile_lease.purpose() == ContextProfileLeasePurpose::Owned
             && (!self.renderer_loss_rejoin_pending || self.renderer_lost)
+            && (!self.renderer_loss_deferred_for_replacement
+                || (self.renderer_lost
+                    && self.navigation_replacement_rejoin_pending
+                    && !self.renderer_loss_rejoin_pending))
+            && !(self.renderer_loss_deferred_for_replacement && self.renderer_loss_rejoin_pending)
+            && self
+                .view
+                .navigation()
+                .location_state_for_audit()
+                .is_some_and(|(callback, dirty, replacement)| {
+                    replacement == self.navigation_replacement_rejoin_pending
+                        && (!self.renderer_lost || (!callback && !dirty))
+                })
             && (self.pending_navigation.is_none() || self.pending_recovery.is_none())
             && (self.pending_navigation.is_none() || self.pending_screenshot.is_none())
             && (self.pending_recovery.is_none() || self.pending_screenshot.is_none())
@@ -474,7 +545,10 @@ pub(super) struct AgentOwnedContext {
     suspend_state: AgentNativeSuspendState,
     renderer_lost: bool,
     renderer_loss_rejoin_pending: bool,
+    renderer_loss_deferred_for_replacement: bool,
+    navigation_replacement_rejoin_pending: bool,
     content_policy_registration: Option<crate::platform::imp::ContentPolicyRegistration>,
+    event_emitter: crate::agent_context_port::AgentContextCallbackGuard,
     view: crate::platform::imp::AgentOwnedView,
     cleanup_profile: zephium_core::ids::ProfileId,
     native_close_attempted: bool,
@@ -489,6 +563,7 @@ impl AgentOwnedContext {
         capabilities: ContextCapabilities,
         profile_lease: ContextProfileLease,
         content_policy_registration: crate::platform::imp::ContentPolicyRegistration,
+        event_emitter: crate::agent_context_port::AgentContextCallbackGuard,
         view: crate::platform::imp::AgentOwnedView,
         native_terminal_failure: Arc<dyn Fn(&'static str) + Send + Sync>,
         native_resource: NativeResourceLease,
@@ -508,7 +583,10 @@ impl AgentOwnedContext {
             suspend_state: AgentNativeSuspendState::Active,
             renderer_lost: false,
             renderer_loss_rejoin_pending: false,
+            renderer_loss_deferred_for_replacement: false,
+            navigation_replacement_rejoin_pending: false,
             content_policy_registration: Some(content_policy_registration),
+            event_emitter,
             view,
             cleanup_profile: join.identity().profile(),
             native_close_attempted: false,
@@ -519,6 +597,39 @@ impl AgentOwnedContext {
 
     pub(super) fn profile(&self) -> zephium_core::ids::ProfileId {
         self.join.identity().profile()
+    }
+
+    fn rejoin_navigation_replacement(
+        &mut self,
+        requested: ContextJoin,
+        advance: AgentReplacementAdvance,
+    ) -> Result<AgentReplacementRejoin, ContextPortFailure> {
+        if !self.navigation_replacement_rejoin_pending {
+            return Ok(AgentReplacementRejoin::NotPending);
+        }
+        if !replacement_rejoin_matches(self.join, requested, advance) {
+            return Err(ContextPortFailure::Stale);
+        }
+        let deferred_location = self
+            .view
+            .navigation()
+            .acknowledge_location_replacement()
+            .map_err(|_| ContextPortFailure::NativeRefused)?;
+        self.join = requested;
+        self.navigation_replacement_rejoin_pending = false;
+        if self.renderer_lost {
+            if !self.renderer_loss_deferred_for_replacement || deferred_location {
+                return Err(ContextPortFailure::NativeRefused);
+            }
+            self.renderer_loss_deferred_for_replacement = false;
+            self.renderer_loss_rejoin_pending = true;
+            return Ok(AgentReplacementRejoin::DeferredRendererLoss);
+        }
+        Ok(if deferred_location {
+            AgentReplacementRejoin::DeferredLocation
+        } else {
+            AgentReplacementRejoin::Ready
+        })
     }
 
     pub(super) fn view(&self) -> &wry::WebView {
@@ -589,6 +700,19 @@ impl AgentOwnedContext {
             && self.profile_lease.identity() == identity
             && self.profile_lease.purpose() == ContextProfileLeasePurpose::Owned
             && (!self.renderer_loss_rejoin_pending || self.renderer_lost)
+            && (!self.renderer_loss_deferred_for_replacement
+                || (self.renderer_lost
+                    && self.navigation_replacement_rejoin_pending
+                    && !self.renderer_loss_rejoin_pending))
+            && !(self.renderer_loss_deferred_for_replacement && self.renderer_loss_rejoin_pending)
+            && self
+                .view
+                .navigation()
+                .location_state_for_audit()
+                .is_some_and(|(callback, dirty, replacement)| {
+                    replacement == self.navigation_replacement_rejoin_pending
+                        && (!self.renderer_lost || (!callback && !dirty))
+                })
             && (self.pending_navigation.is_none() || self.pending_recovery.is_none())
             && (self.pending_navigation.is_none() || self.pending_suspend.is_none())
             && (self.pending_recovery.is_none() || self.pending_suspend.is_none())
@@ -753,6 +877,58 @@ impl Drop for AgentOwnedContext {
 }
 
 impl EngineHost {
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn admit_navigation_replacement_rejoin(
+        &mut self,
+        task: AgentContextTask,
+        requested: ContextJoin,
+        advance: AgentReplacementAdvance,
+        close_terminal: bool,
+    ) -> Option<(AgentContextTask, bool)> {
+        let id = requested.identity().id();
+        let outcome = self
+            .agent_contexts
+            .get_mut(&id)
+            .ok_or(ContextPortFailure::Stale)
+            .and_then(|binding| binding.rejoin_navigation_replacement(requested, advance));
+        match outcome {
+            Ok(AgentReplacementRejoin::NotPending) => Some((task, false)),
+            Ok(AgentReplacementRejoin::Ready) => Some((task, true)),
+            Ok(AgentReplacementRejoin::DeferredLocation) => {
+                task.refuse(ContextPortFailure::Stale);
+                self.retry_deferred_owned_agent_location_check(id);
+                None
+            }
+            Ok(AgentReplacementRejoin::DeferredRendererLoss) => {
+                if close_terminal {
+                    return Some((task, true));
+                }
+                let emitter = self
+                    .agent_contexts
+                    .get(&id)
+                    .map(|binding| binding.event_emitter.clone());
+                task.refuse(ContextPortFailure::Stale);
+                if let Some(emitter) = emitter {
+                    emitter.emit_renderer_lost(requested);
+                } else {
+                    self.fail_agent_context_invariant(
+                        "agent-context deferred renderer loss lost its native owner",
+                    );
+                }
+                None
+            }
+            Err(failure) => {
+                if failure == ContextPortFailure::NativeRefused {
+                    self.fail_agent_context_invariant(
+                        "agent-context replacement rejoin contradicted native observer state",
+                    );
+                }
+                task.refuse(failure);
+                None
+            }
+        }
+    }
+
     pub(crate) fn handle_agent_context_task(&mut self, task: AgentContextTask) {
         if let Some(audit) = task.audit() {
             self.settle_agent_context_audit(task, audit);
@@ -817,7 +993,15 @@ impl EngineHost {
             }
             ContextNativeRequest::Cancel(request) => {
                 let current = request.current();
-                let outcome = self.cancel_owned_agent_context(current);
+                let Some((task, replacement_rejoined)) = self.admit_navigation_replacement_rejoin(
+                    task,
+                    current,
+                    AgentReplacementAdvance::Full,
+                    false,
+                ) else {
+                    return;
+                };
+                let outcome = self.cancel_owned_agent_context(current, replacement_rejoined);
                 task.complete(ContextNativeEvent::CancellationSettled(
                     ContextCancellationSettlement::new(current, outcome),
                 ));
@@ -1081,6 +1265,7 @@ impl EngineHost {
 
         let view_origin = join;
         let navigation_guard = callback_guard.clone();
+        let location_guard = callback_guard.clone();
         let renderer_guard = callback_guard.clone();
         let invariant_guard = callback_guard.clone();
         let panic_guard = callback_guard.clone();
@@ -1095,6 +1280,14 @@ impl EngineHost {
                     let rejected = navigation_guard.clone();
                     if !crate::host::try_with_agent_context_terminal(move |host| {
                         host.on_owned_agent_navigation_terminal(id, terminal);
+                    }) {
+                        rejected.callback_dispatch_rejected();
+                    }
+                },
+                move || {
+                    let rejected = location_guard.clone();
+                    if !crate::host::try_with_agent_context_terminal(move |host| {
+                        host.on_owned_agent_location_check(id, view_origin);
                     }) {
                         rejected.callback_dispatch_rejected();
                     }
@@ -1134,6 +1327,7 @@ impl EngineHost {
             request.capabilities(),
             request.profile_lease(),
             content_policy_registration,
+            callback_guard,
             view,
             native_resource,
         );
@@ -1173,6 +1367,14 @@ impl EngineHost {
 
         let context = invocation.frame().context();
         let id = context.identity().id();
+        let Some((task, _replacement_rejoined)) = self.admit_navigation_replacement_rejoin(
+            task,
+            context,
+            AgentReplacementAdvance::Direct,
+            false,
+        ) else {
+            return;
+        };
         let failure = match self.agent_contexts.get(&id) {
             None => Some(SemanticRuntimePortFailure::Stale),
             Some(binding) if binding.join != context => Some(SemanticRuntimePortFailure::Stale),
@@ -1273,8 +1475,14 @@ impl EngineHost {
             task.refuse(ContextPortFailure::Stale);
             return;
         };
+        let result_navigation = binding.view.navigation().clone();
         let dispatched = binding.view.dispatch_semantic(invocation, move |outcome| {
             drop(watchdog);
+            let outcome = if result_navigation.location_stable_for_result() {
+                outcome
+            } else {
+                Err(SemanticRuntimePortFailure::DocumentReplaced)
+            };
             match SemanticRuntimeSettlement::try_new(callback_correlation, outcome) {
                 Ok(settlement) => task.complete(ContextNativeEvent::SemanticRuntimeSettled(
                     Box::new(settlement),
@@ -1318,6 +1526,46 @@ impl EngineHost {
         if capture_window.is_zero() || elapsed >= capture_window {
             task.refuse(SemanticScreenshotNativeFailure::TimedOut);
             return;
+        }
+
+        let rejoin = self
+            .agent_contexts
+            .get_mut(&id)
+            .ok_or(ContextPortFailure::Stale)
+            .and_then(|binding| {
+                binding.rejoin_navigation_replacement(context, AgentReplacementAdvance::Direct)
+            });
+        match rejoin {
+            Ok(AgentReplacementRejoin::NotPending | AgentReplacementRejoin::Ready) => {}
+            Ok(AgentReplacementRejoin::DeferredLocation) => {
+                task.refuse(SemanticScreenshotNativeFailure::Stale);
+                self.retry_deferred_owned_agent_location_check(id);
+                return;
+            }
+            Ok(AgentReplacementRejoin::DeferredRendererLoss) => {
+                let emitter = self
+                    .agent_contexts
+                    .get(&id)
+                    .map(|binding| binding.event_emitter.clone());
+                task.refuse(SemanticScreenshotNativeFailure::Stale);
+                if let Some(emitter) = emitter {
+                    emitter.emit_renderer_lost(context);
+                } else {
+                    self.fail_agent_context_invariant(
+                        "agent-context screenshot rejoin lost deferred renderer owner",
+                    );
+                }
+                return;
+            }
+            Err(failure) => {
+                if failure == ContextPortFailure::NativeRefused {
+                    self.fail_agent_context_invariant(
+                        "agent-context screenshot rejoin contradicted native observer state",
+                    );
+                }
+                task.refuse(map_context_failure_to_screenshot(failure));
+                return;
+            }
         }
 
         let failure = match self.agent_contexts.get(&id) {
@@ -1418,12 +1666,18 @@ impl EngineHost {
 
         let native_guard = callback_guard.clone();
         let panic_guard = callback_guard.clone();
+        let result_navigation = binding.view.navigation().clone();
         let dispatched = binding.view.dispatch_screenshot(
             request,
             admitted_at,
             cancelled,
             move |outcome| {
                 drop(physical);
+                let outcome = if result_navigation.location_stable_for_result() {
+                    outcome
+                } else {
+                    Err(SemanticScreenshotNativeFailure::Stale)
+                };
                 let rejected = native_guard.clone();
                 if !crate::host::try_with_agent_context_terminal(move |host| {
                     host.finish_owned_agent_screenshot(id, request_id, outcome);
@@ -1486,6 +1740,14 @@ impl EngineHost {
         let requested = operation.context();
         let id = requested.identity().id();
         let target = request.target().clone();
+        let Some((task, replacement_rejoined)) = self.admit_navigation_replacement_rejoin(
+            task,
+            requested,
+            AgentReplacementAdvance::Navigation,
+            false,
+        ) else {
+            return;
+        };
         let failure = match self.agent_contexts.get(&id) {
             None => Some(ContextPortFailure::Stale),
             Some(binding) if binding.renderer_lost => Some(ContextPortFailure::Stale),
@@ -1503,7 +1765,9 @@ impl EngineHost {
             {
                 Some(ContextPortFailure::Unsupported)
             }
-            Some(binding) if !navigation_successor(binding.join, requested) => {
+            Some(binding)
+                if !replacement_rejoined && !navigation_successor(binding.join, requested) =>
+            {
                 Some(ContextPortFailure::Stale)
             }
             Some(_) => None,
@@ -1770,6 +2034,122 @@ impl EngineHost {
     }
 
     #[cfg(target_os = "macos")]
+    fn on_owned_agent_location_check(&mut self, id: ContextId, view_origin: ContextJoin) {
+        let mut invariant_failure = None;
+        let mut replacement = None;
+        {
+            let Some(binding) = self.agent_contexts.get_mut(&id) else {
+                return;
+            };
+            if binding.native_view_origin != view_origin || binding.renderer_lost {
+                return;
+            }
+            if binding.pending_navigation.is_some() || binding.pending_recovery.is_some() {
+                if binding.view.navigation().defer_location_check().is_err() {
+                    invariant_failure = Some(
+                        "agent-context location callback could not defer across page-load work",
+                    );
+                }
+            } else {
+                let sampled = crate::platform::imp::current_url(binding.view.view())
+                    .and_then(|url| ContextNavigationTarget::parse(&url).ok());
+                match (binding.committed_target.as_ref(), sampled) {
+                    (Some(previous), Some(current)) if *previous == current => {
+                        if binding
+                            .view
+                            .navigation()
+                            .finish_location_check(false)
+                            .is_err()
+                        {
+                            invariant_failure = Some(
+                                "agent-context unchanged location lost its callback ownership",
+                            );
+                        }
+                    }
+                    (Some(previous), Some(current))
+                        if navigation_targets_share_origin(previous, &current) =>
+                    {
+                        if binding
+                            .view
+                            .navigation()
+                            .finish_location_check(true)
+                            .is_err()
+                        {
+                            invariant_failure =
+                                Some("agent-context replacement lost its callback ownership");
+                        } else {
+                            let prior = binding.join;
+                            let pending_screenshot = binding.pending_screenshot.take();
+                            binding.committed_target = Some(current.clone());
+                            binding.navigation_replacement_rejoin_pending = true;
+                            binding.last_semantic_invocation = None;
+                            binding.semantic_snapshot_generation = None;
+                            replacement = Some((
+                                prior,
+                                current,
+                                pending_screenshot,
+                                binding.event_emitter.clone(),
+                            ));
+                        }
+                    }
+                    (Some(_), Some(_)) | (None, _) | (_, None) => {
+                        crate::platform::imp::stop_loading(binding.view.view());
+                        if binding
+                            .view
+                            .navigation()
+                            .finish_location_check(false)
+                            .is_err()
+                        {
+                            invariant_failure =
+                                Some("agent-context invalid location lost its callback ownership");
+                        } else {
+                            invariant_failure = Some(
+                                "agent-context native location escaped its committed same-origin target",
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(message) = invariant_failure {
+            self.fail_agent_context_invariant(message);
+            return;
+        }
+        if let Some((prior, target, pending_screenshot, emitter)) = replacement {
+            if let Some(pending) = pending_screenshot {
+                pending.complete(Err(SemanticScreenshotNativeFailure::Stale));
+            }
+            emitter.emit_navigation_replaced(prior, target);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn retry_deferred_owned_agent_location_check(&mut self, id: ContextId) {
+        let queued = self.agent_contexts.get(&id).and_then(|binding| {
+            if binding.renderer_lost
+                || binding.pending_navigation.is_some()
+                || binding.pending_recovery.is_some()
+            {
+                return None;
+            }
+            match binding.view.navigation().request_deferred_location_check() {
+                Ok(true) => Some((binding.native_view_origin, binding.event_emitter.clone())),
+                Ok(false) => None,
+                Err(()) => Some((binding.native_view_origin, binding.event_emitter.clone())),
+            }
+        });
+        let Some((view_origin, emitter)) = queued else {
+            return;
+        };
+        let rejected = emitter.clone();
+        if !crate::host::try_with_agent_context_terminal(move |host| {
+            host.on_owned_agent_location_check(id, view_origin);
+        }) {
+            rejected.callback_dispatch_rejected();
+        }
+    }
+
+    #[cfg(target_os = "macos")]
     fn on_owned_agent_renderer_lost(
         &mut self,
         id: ContextId,
@@ -1806,9 +2186,12 @@ impl EngineHost {
                     .is_none_or(|operation| binding.view.navigation().disarm(operation));
             let navigation_clean =
                 disarmed && binding.view.navigation().matches_for_audit(None, true);
-            let emit_loss = pending_recovery.is_none();
+            let emit_loss =
+                pending_recovery.is_none() && !binding.navigation_replacement_rejoin_pending;
             binding.renderer_lost = true;
             binding.renderer_loss_rejoin_pending = emit_loss;
+            binding.renderer_loss_deferred_for_replacement =
+                pending_recovery.is_none() && binding.navigation_replacement_rejoin_pending;
             (
                 prior,
                 pending_navigation,
@@ -1888,6 +2271,7 @@ impl EngineHost {
             );
         }
         pending.complete(outcome);
+        self.retry_deferred_owned_agent_location_check(id);
     }
 
     #[cfg(target_os = "macos")]
@@ -1947,6 +2331,7 @@ impl EngineHost {
             );
         }
         pending.complete(outcome);
+        self.retry_deferred_owned_agent_location_check(id);
     }
 
     #[cfg(target_os = "macos")]
@@ -1958,6 +2343,14 @@ impl EngineHost {
         let operation = request.operation();
         let requested = operation.context();
         let id = requested.identity().id();
+        let Some((task, _replacement_rejoined)) = self.admit_navigation_replacement_rejoin(
+            task,
+            requested,
+            AgentReplacementAdvance::Full,
+            true,
+        ) else {
+            return;
+        };
         let outcome = self
             .agent_contexts
             .get(&id)
@@ -1995,6 +2388,7 @@ impl EngineHost {
     fn cancel_owned_agent_context(
         &mut self,
         current: ContextJoin,
+        replacement_rejoined: bool,
     ) -> Result<(), ContextPortFailure> {
         let id = current.identity().id();
         let (pending_navigation, pending_recovery, pending_screenshot, disarmed) = {
@@ -2002,7 +2396,9 @@ impl EngineHost {
                 .agent_contexts
                 .get_mut(&id)
                 .ok_or(ContextPortFailure::Stale)?;
-            let rejoins = if binding.renderer_loss_rejoin_pending {
+            let rejoins = if replacement_rejoined {
+                binding.join == current
+            } else if binding.renderer_loss_rejoin_pending {
                 full_successor(binding.join, current)
                     || double_full_successor(binding.join, current)
             } else {
@@ -2020,6 +2416,9 @@ impl EngineHost {
             binding.join = current;
             binding.semantic_snapshot_generation = None;
             binding.renderer_loss_rejoin_pending = false;
+            binding.renderer_loss_deferred_for_replacement = false;
+            binding.navigation_replacement_rejoin_pending = false;
+            let location_sealed = binding.view.navigation().seal_location_observation();
             let pending_navigation = binding.pending_navigation.take();
             let pending_recovery = binding.pending_recovery.take();
             let pending_screenshot = binding.pending_screenshot.take();
@@ -2042,7 +2441,7 @@ impl EngineHost {
                 pending_navigation,
                 pending_recovery,
                 pending_screenshot,
-                mutually_exclusive && navigation_disarmed && recovery_disarmed,
+                mutually_exclusive && navigation_disarmed && recovery_disarmed && location_sealed,
             )
         };
         if let Some(pending) = pending_navigation {
@@ -2260,6 +2659,7 @@ impl EngineHost {
 
         let view_origin = join;
         let navigation_guard = callback_guard.clone();
+        let location_guard = callback_guard.clone();
         let renderer_guard = callback_guard.clone();
         let browser_guard = callback_guard.clone();
         let invariant_guard = callback_guard.clone();
@@ -2278,6 +2678,14 @@ impl EngineHost {
                     let rejected = navigation_guard.clone();
                     if !crate::host::try_with_agent_context_terminal(move |host| {
                         host.on_owned_agent_navigation_terminal(id, terminal);
+                    }) {
+                        rejected.callback_dispatch_rejected();
+                    }
+                },
+                move || {
+                    let rejected = location_guard.clone();
+                    if !crate::host::try_with_agent_context_terminal(move |host| {
+                        host.on_owned_agent_location_check(id, view_origin);
                     }) {
                         rejected.callback_dispatch_rejected();
                     }
@@ -2388,6 +2796,7 @@ impl EngineHost {
             request.capabilities(),
             request.profile_lease(),
             content_policy_registration,
+            callback_guard,
             view,
             self.native_terminal_failure.clone(),
             native_resource,
@@ -2764,6 +3173,7 @@ impl EngineHost {
                 task.refuse(ContextPortFailure::NativeRefused);
             }
         }
+        self.retry_deferred_owned_agent_location_check(destination);
     }
 
     fn close_unpublished_windows_agent_view(
@@ -2802,6 +3212,14 @@ impl EngineHost {
         let requested = operation.context();
         let id = requested.identity().id();
         let target = request.target().clone();
+        let Some((task, replacement_rejoined)) = self.admit_navigation_replacement_rejoin(
+            task,
+            requested,
+            AgentReplacementAdvance::Navigation,
+            false,
+        ) else {
+            return;
+        };
         let failure = match self.agent_contexts.get(&id) {
             None => Some(ContextPortFailure::Stale),
             Some(binding) if binding.renderer_lost => Some(ContextPortFailure::Stale),
@@ -2826,7 +3244,9 @@ impl EngineHost {
             {
                 Some(ContextPortFailure::Unsupported)
             }
-            Some(binding) if !navigation_successor(binding.join, requested) => {
+            Some(binding)
+                if !replacement_rejoined && !navigation_successor(binding.join, requested) =>
+            {
                 Some(ContextPortFailure::Stale)
             }
             Some(_) => None,
@@ -3046,6 +3466,14 @@ impl EngineHost {
         let operation = request.operation();
         let requested = operation.context();
         let id = requested.identity().id();
+        let Some((task, replacement_rejoined)) = self.admit_navigation_replacement_rejoin(
+            task,
+            requested,
+            AgentReplacementAdvance::Full,
+            false,
+        ) else {
+            return;
+        };
         let structural_failure = match self.agent_contexts.get(&id) {
             None => Some(ContextPortFailure::Stale),
             Some(binding)
@@ -3055,7 +3483,7 @@ impl EngineHost {
             {
                 Some(ContextPortFailure::Unsupported)
             }
-            Some(binding) if !full_successor(binding.join, requested) => {
+            Some(binding) if !replacement_rejoined && !full_successor(binding.join, requested) => {
                 Some(ContextPortFailure::Stale)
             }
             Some(_) => None,
@@ -3214,6 +3642,7 @@ impl EngineHost {
             return;
         };
         pending.complete(outcome);
+        self.retry_deferred_owned_agent_location_check(id);
     }
 
     fn on_owned_agent_suspend_native(
@@ -3302,6 +3731,7 @@ impl EngineHost {
             return;
         };
         pending.complete(outcome);
+        self.retry_deferred_owned_agent_location_check(id);
     }
 
     fn reconcile_owned_agent_suspend(&mut self, id: ContextId, operation: ContextOperationJoin) {
@@ -3328,6 +3758,8 @@ impl EngineHost {
             self.fail_agent_context_invariant(
                 "Windows agent late suspend callback could not restore active state",
             );
+        } else if reconciled {
+            self.retry_deferred_owned_agent_location_check(id);
         }
     }
 
@@ -3401,6 +3833,7 @@ impl EngineHost {
                 task.refuse(ContextPortFailure::NativeRefused);
             }
         }
+        self.retry_deferred_owned_agent_location_check(id);
     }
 
     fn on_owned_agent_navigation_terminal(
@@ -3426,6 +3859,121 @@ impl EngineHost {
             _ => self.fail_agent_context_invariant(
                 "Windows agent page-load callback carried an unsupported operation",
             ),
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn on_owned_agent_location_check(&mut self, id: ContextId, view_origin: ContextJoin) {
+        let mut invariant_failure = None;
+        let mut replacement = None;
+        {
+            let Some(binding) = self.agent_contexts.get_mut(&id) else {
+                return;
+            };
+            if binding.native_view_origin != view_origin || binding.renderer_lost {
+                return;
+            }
+            if binding.pending_navigation.is_some()
+                || binding.pending_recovery.is_some()
+                || binding.pending_suspend.is_some()
+                || binding.pending_cookie_transfer.is_some()
+                || binding.suspend_state != AgentNativeSuspendState::Active
+                || binding.late_suspend_claim.is_some()
+            {
+                if binding.view.navigation().defer_location_check().is_err() {
+                    invariant_failure = Some(
+                        "Windows agent location callback could not defer across lifecycle work",
+                    );
+                }
+            } else {
+                let sampled = crate::platform::imp::current_url(binding.view.view())
+                    .and_then(|url| ContextNavigationTarget::parse(&url).ok());
+                match (binding.committed_target.as_ref(), sampled) {
+                    (Some(previous), Some(current)) if *previous == current => {
+                        if binding
+                            .view
+                            .navigation()
+                            .finish_location_check(false)
+                            .is_err()
+                        {
+                            invariant_failure = Some(
+                                "Windows agent unchanged location lost its callback ownership",
+                            );
+                        }
+                    }
+                    (Some(previous), Some(current))
+                        if navigation_targets_share_origin(previous, &current) =>
+                    {
+                        if binding
+                            .view
+                            .navigation()
+                            .finish_location_check(true)
+                            .is_err()
+                        {
+                            invariant_failure =
+                                Some("Windows agent replacement lost its callback ownership");
+                        } else {
+                            let prior = binding.join;
+                            binding.committed_target = Some(current.clone());
+                            binding.navigation_replacement_rejoin_pending = true;
+                            replacement = Some((prior, current, binding.event_emitter.clone()));
+                        }
+                    }
+                    (Some(_), Some(_)) | (None, _) | (_, None) => {
+                        crate::platform::imp::stop_loading(binding.view.view());
+                        if binding
+                            .view
+                            .navigation()
+                            .finish_location_check(false)
+                            .is_err()
+                        {
+                            invariant_failure =
+                                Some("Windows agent invalid location lost its callback ownership");
+                        } else {
+                            invariant_failure = Some(
+                                "Windows agent native location escaped its committed same-origin target",
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(message) = invariant_failure {
+            self.fail_agent_context_invariant(message);
+            return;
+        }
+        if let Some((prior, target, emitter)) = replacement {
+            emitter.emit_navigation_replaced(prior, target);
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn retry_deferred_owned_agent_location_check(&mut self, id: ContextId) {
+        let queued = self.agent_contexts.get(&id).and_then(|binding| {
+            if binding.renderer_lost
+                || binding.pending_navigation.is_some()
+                || binding.pending_recovery.is_some()
+                || binding.pending_suspend.is_some()
+                || binding.pending_cookie_transfer.is_some()
+                || binding.suspend_state != AgentNativeSuspendState::Active
+                || binding.late_suspend_claim.is_some()
+            {
+                return None;
+            }
+            match binding.view.navigation().request_deferred_location_check() {
+                Ok(true) => Some((binding.native_view_origin, binding.event_emitter.clone())),
+                Ok(false) => None,
+                Err(()) => Some((binding.native_view_origin, binding.event_emitter.clone())),
+            }
+        });
+        let Some((view_origin, emitter)) = queued else {
+            return;
+        };
+        let rejected = emitter.clone();
+        if !crate::host::try_with_agent_context_terminal(move |host| {
+            host.on_owned_agent_location_check(id, view_origin);
+        }) {
+            rejected.callback_dispatch_rejected();
         }
     }
 
@@ -3476,10 +4024,13 @@ impl EngineHost {
                     .is_none_or(|operation| binding.view.navigation().disarm(operation));
             let navigation_clean =
                 disarmed && binding.view.navigation().matches_for_audit(None, true);
-            let emit_loss = pending_recovery.is_none();
+            let emit_loss =
+                pending_recovery.is_none() && !binding.navigation_replacement_rejoin_pending;
             binding.suspend_state = AgentNativeSuspendState::Active;
             binding.renderer_lost = true;
             binding.renderer_loss_rejoin_pending = emit_loss;
+            binding.renderer_loss_deferred_for_replacement =
+                pending_recovery.is_none() && binding.navigation_replacement_rejoin_pending;
             (
                 prior,
                 pending_navigation,
@@ -3575,6 +4126,7 @@ impl EngineHost {
             );
         }
         pending.complete(outcome);
+        self.retry_deferred_owned_agent_location_check(id);
     }
 
     fn finish_owned_agent_recovery(
@@ -3633,6 +4185,7 @@ impl EngineHost {
             );
         }
         pending.complete(outcome);
+        self.retry_deferred_owned_agent_location_check(id);
     }
 
     fn close_owned_agent_context(
@@ -3643,6 +4196,14 @@ impl EngineHost {
         let operation = request.operation();
         let requested = operation.context();
         let id = requested.identity().id();
+        let Some((task, _replacement_rejoined)) = self.admit_navigation_replacement_rejoin(
+            task,
+            requested,
+            AgentReplacementAdvance::Full,
+            true,
+        ) else {
+            return;
+        };
         let outcome = self
             .agent_contexts
             .get(&id)
@@ -3687,6 +4248,7 @@ impl EngineHost {
     fn cancel_owned_agent_context(
         &mut self,
         current: ContextJoin,
+        replacement_rejoined: bool,
     ) -> Result<(), ContextPortFailure> {
         let id = current.identity().id();
         let (
@@ -3700,7 +4262,9 @@ impl EngineHost {
                 .agent_contexts
                 .get_mut(&id)
                 .ok_or(ContextPortFailure::Stale)?;
-            let rejoins = if binding.renderer_loss_rejoin_pending {
+            let rejoins = if replacement_rejoined {
+                binding.join == current
+            } else if binding.renderer_loss_rejoin_pending {
                 full_successor(binding.join, current)
                     || double_full_successor(binding.join, current)
             } else {
@@ -3712,6 +4276,9 @@ impl EngineHost {
             crate::platform::imp::stop_loading(binding.view.view());
             binding.join = current;
             binding.renderer_loss_rejoin_pending = false;
+            binding.renderer_loss_deferred_for_replacement = false;
+            binding.navigation_replacement_rejoin_pending = false;
+            let location_sealed = binding.view.navigation().seal_location_observation();
             let pending_navigation = binding.pending_navigation.take();
             let pending_recovery = binding.pending_recovery.take();
             let pending_suspend = binding.pending_suspend.take();
@@ -3750,7 +4317,8 @@ impl EngineHost {
                 lifecycle_count <= 1
                     && navigation_disarmed
                     && recovery_disarmed
-                    && suspend_disarmed,
+                    && suspend_disarmed
+                    && location_sealed,
             )
         };
         if let Some(transfer_id) = pending_cookie_transfer {
@@ -3986,6 +4554,17 @@ const fn map_context_failure_to_screenshot(
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
+fn navigation_targets_share_origin(
+    prior: &ContextNavigationTarget,
+    current: &ContextNavigationTarget,
+) -> bool {
+    SemanticOrigin::parse(prior.as_url().as_str())
+        .ok()
+        .zip(SemanticOrigin::parse(current.as_url().as_str()).ok())
+        .is_some_and(|(prior, current)| prior == current)
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn full_successor(prior: ContextJoin, current: ContextJoin) -> bool {
     prior.identity() == current.identity()
         && prior.frame() == current.frame()
@@ -4029,6 +4608,56 @@ fn navigation_successor(prior: ContextJoin, current: ContextJoin) -> bool {
         && prior.navigation_epoch().next() == Some(current.navigation_epoch())
         && prior.frame_generation().next() == Some(current.frame_generation())
         && prior.cancellation_generation() == current.cancellation_generation()
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn double_navigation_successor(prior: ContextJoin, current: ContextJoin) -> bool {
+    prior.identity() == current.identity()
+        && prior.frame() == current.frame()
+        && prior.context_generation() == current.context_generation()
+        && prior
+            .navigation_epoch()
+            .next()
+            .and_then(|epoch| epoch.next())
+            == Some(current.navigation_epoch())
+        && prior
+            .frame_generation()
+            .next()
+            .and_then(|generation| generation.next())
+            == Some(current.frame_generation())
+        && prior.cancellation_generation() == current.cancellation_generation()
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn replacement_then_full_successor(prior: ContextJoin, current: ContextJoin) -> bool {
+    prior.identity() == current.identity()
+        && prior.frame() == current.frame()
+        && prior.context_generation().next() == Some(current.context_generation())
+        && prior
+            .navigation_epoch()
+            .next()
+            .and_then(|epoch| epoch.next())
+            == Some(current.navigation_epoch())
+        && prior
+            .frame_generation()
+            .next()
+            .and_then(|generation| generation.next())
+            == Some(current.frame_generation())
+        && prior.cancellation_generation().next() == Some(current.cancellation_generation())
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn replacement_rejoin_matches(
+    prior: ContextJoin,
+    current: ContextJoin,
+    advance: AgentReplacementAdvance,
+) -> bool {
+    match advance {
+        #[cfg(target_os = "macos")]
+        AgentReplacementAdvance::Direct => navigation_successor(prior, current),
+        AgentReplacementAdvance::Navigation => double_navigation_successor(prior, current),
+        AgentReplacementAdvance::Full => replacement_then_full_successor(prior, current),
+    }
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -4262,6 +4891,94 @@ mod tests {
             .expect("cancellation");
         assert!(!super::navigation_successor(prior, cancelled));
         assert!(super::full_successor(navigation.context(), cancelled));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn replacement_rejoin_shapes_match_exact_followup_transitions() {
+        let (mut registry, id, construction) = owned_context();
+        registry
+            .settle_construction(
+                id,
+                construction,
+                zephium_agentic::ContextSettlement::Applied,
+            )
+            .expect("construction");
+        let prior = registry.join(id).expect("join");
+        let replacement = registry
+            .observe_navigation_replacement(id, prior)
+            .expect("replacement");
+        assert!(super::replacement_rejoin_matches(
+            prior,
+            replacement,
+            super::AgentReplacementAdvance::Direct,
+        ));
+        let navigation = registry
+            .begin_navigation(
+                id,
+                zephium_agentic::ContextOperationId::new(8).expect("operation"),
+            )
+            .expect("navigation");
+        assert!(super::replacement_rejoin_matches(
+            prior,
+            navigation.context(),
+            super::AgentReplacementAdvance::Navigation,
+        ));
+        assert!(!super::replacement_rejoin_matches(
+            prior,
+            navigation.context(),
+            super::AgentReplacementAdvance::Direct,
+        ));
+
+        let (mut registry, id, construction) = owned_context();
+        registry
+            .settle_construction(
+                id,
+                construction,
+                zephium_agentic::ContextSettlement::Applied,
+            )
+            .expect("construction");
+        let prior = registry.join(id).expect("join");
+        let replacement = registry
+            .observe_navigation_replacement(id, prior)
+            .expect("replacement");
+        let cancelled = registry.cancel_run(id, replacement).expect("cancellation");
+        assert!(super::replacement_rejoin_matches(
+            prior,
+            cancelled,
+            super::AgentReplacementAdvance::Full,
+        ));
+        assert!(!super::replacement_rejoin_matches(
+            prior,
+            cancelled,
+            super::AgentReplacementAdvance::Navigation,
+        ));
+    }
+
+    #[test]
+    fn page_location_replacement_is_limited_to_the_committed_origin() {
+        let prior =
+            zephium_agentic::ContextNavigationTarget::parse("https://example.test:8443/start")
+                .expect("prior");
+        let same = zephium_agentic::ContextNavigationTarget::parse(
+            "https://example.test:8443/history?step=2#done",
+        )
+        .expect("same origin");
+        let port_change =
+            zephium_agentic::ContextNavigationTarget::parse("https://example.test:9443/history")
+                .expect("different port");
+        let scheme_change =
+            zephium_agentic::ContextNavigationTarget::parse("http://example.test:8443/history")
+                .expect("different scheme");
+        assert!(super::navigation_targets_share_origin(&prior, &same));
+        assert!(!super::navigation_targets_share_origin(
+            &prior,
+            &port_change
+        ));
+        assert!(!super::navigation_targets_share_origin(
+            &prior,
+            &scheme_change
+        ));
     }
 
     #[cfg(target_os = "macos")]

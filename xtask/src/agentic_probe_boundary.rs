@@ -404,6 +404,13 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         &read(repository.join(ENGINE_AGENT_NAVIGATION))?,
         &read(repository.join(ENGINE_AGENT_CONTEXT_HOST))?,
     )?;
+    validate_engine_agent_location_observation(
+        &read(repository.join(ENGINE_AGENT_CONTEXT_PORT))?,
+        &read(repository.join(ENGINE_AGENT_CONTEXT_HOST))?,
+        &read(repository.join(ENGINE_MACOS_AGENT_CONTEXT))?,
+        &read(repository.join(ENGINE_WINDOWS_AGENT_CONTEXT))?,
+        &read(repository.join(ENGINE_AGENT_NAVIGATION))?,
+    )?;
     validate_engine_windows_agent_cookie_source(
         &read(repository.join(ENGINE_HOST_ROOT))?,
         &read(repository.join(ENGINE_AGENT_COOKIE_SOURCE))?,
@@ -854,6 +861,108 @@ fn validate_engine_agent_context_boundary(
                     "production agent-context {label} acquired forbidden surface {forbidden}"
                 ));
             }
+        }
+    }
+    Ok(())
+}
+
+fn validate_engine_agent_location_observation(
+    port: &str,
+    host: &str,
+    macos: &str,
+    windows: &str,
+    navigation: &str,
+) -> Result<(), String> {
+    let port = compact(port);
+    for required in [
+        "fnemit_navigation_replaced",
+        "ContextNativeEvent::NavigationReplaced(ContextNavigationReplacement::new(prior,target,))",
+    ] {
+        if !port.contains(required) {
+            return Err(format!(
+                "production location observer lost closed port event {required}"
+            ));
+        }
+    }
+
+    let host = compact(host);
+    for required in [
+        "navigation_replacement_rejoin_pending:bool",
+        "renderer_loss_deferred_for_replacement:bool",
+        "fnon_owned_agent_location_check",
+        "crate::platform::imp::current_url(binding.view.view())",
+        "ContextNavigationTarget::parse(&url)",
+        "navigation_targets_share_origin(previous,&current)",
+        "finish_location_check(true)",
+        "pending.complete(Err(SemanticScreenshotNativeFailure::Stale))",
+        "emitter.emit_navigation_replaced(prior,target)",
+        "fnreplacement_rejoin_matches",
+        "AgentReplacementAdvance::Navigation=>double_navigation_successor(prior,current)",
+        "AgentReplacementAdvance::Full=>replacement_then_full_successor(prior,current)",
+        "result_navigation.location_stable_for_result()",
+    ] {
+        if !host.contains(required) {
+            return Err(format!(
+                "production location observer host lost exact identity mechanism {required}"
+            ));
+        }
+    }
+
+    for (platform, source) in [("macOS", macos), ("Windows", windows)] {
+        let source = compact(source);
+        for required in [
+            "_navigation_observer:super::InstalledNavigationObserver",
+            "super::install_navigation_observer(&view",
+            "location_events.request_location_check()",
+            "observation.should_check_location()",
+        ] {
+            if !source.contains(required) {
+                return Err(format!(
+                    "production {platform} location observer lost native mechanism {required}"
+                ));
+            }
+        }
+        for forbidden in [
+            "evaluate_script",
+            "querySelector",
+            "MutationObserver",
+            "with_ipc_handler",
+        ] {
+            if source.contains(forbidden) {
+                return Err(format!(
+                    "production {platform} location observer acquired page surface {forbidden}"
+                ));
+            }
+        }
+    }
+
+    let navigation = compact(navigation);
+    for required in [
+        "location_callback_pending:bool",
+        "location_dirty:bool",
+        "location_replacement_pending:bool",
+        "fnrequest_location_check",
+        "fnfinish_location_check",
+        "fndefer_location_check",
+        "fnrequest_deferred_location_check",
+        "fnacknowledge_location_replacement",
+        "fnlocation_stable_for_result",
+        "state.location_callback_pending=true",
+        "state.location_dirty=true",
+        "state.location_replacement_pending=true",
+        "||state.location_callback_pending||state.location_dirty||state.location_replacement_pending",
+    ] {
+        if !navigation.contains(required) {
+            return Err(format!(
+                "production location observer lost bounded state mechanism {required}"
+            ));
+        }
+    }
+    for forbidden in ["VecDeque", "HashMap", "thread::spawn", "channel("] {
+        if navigation.contains(forbidden) {
+            return Err(format!(
+                "production location observer acquired unbounded/asynchronous state {forbidden}"
+            ));
         }
     }
     Ok(())
@@ -9322,6 +9431,35 @@ mod tests {
             port,
             host,
             &macos.replace("semantic.attest_configuration(&configuration);", ""),
+            navigation,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn production_location_observation_is_native_bounded_and_generation_exact() {
+        let port = include_str!("../../crates/zephium-engine/src/agent_context_port.rs");
+        let host = include_str!("../../crates/zephium-engine/src/host/agent_context.rs");
+        let macos = include_str!("../../crates/zephium-engine/src/platform/macos/agent_context.rs");
+        let windows =
+            include_str!("../../crates/zephium-engine/src/platform/windows/agent_context.rs");
+        let navigation =
+            include_str!("../../crates/zephium-engine/src/platform/agent_navigation.rs");
+        validate_engine_agent_location_observation(port, host, macos, windows, navigation)
+            .expect("repository location observation boundary");
+
+        let unbounded = navigation.replace("location_dirty: bool", "location_queue: VecDeque<()>");
+        assert!(
+            validate_engine_agent_location_observation(port, host, macos, windows, &unbounded)
+                .is_err()
+        );
+
+        let page_world = format!("{macos}\nfn widened() {{ evaluate_script(\"location.href\"); }}");
+        assert!(validate_engine_agent_location_observation(
+            port,
+            host,
+            &page_world,
+            windows,
             navigation,
         )
         .is_err());

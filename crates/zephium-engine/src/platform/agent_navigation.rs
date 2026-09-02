@@ -41,6 +41,7 @@ impl AgentNavigationTerminal {
 
 pub(crate) struct AgentNavigationObservation {
     document_committed: bool,
+    location_check_requested: bool,
     terminal: Option<AgentNavigationTerminal>,
 }
 
@@ -48,6 +49,7 @@ impl AgentNavigationObservation {
     const fn none() -> Self {
         Self {
             document_committed: false,
+            location_check_requested: false,
             terminal: None,
         }
     }
@@ -55,6 +57,7 @@ impl AgentNavigationObservation {
     const fn document_committed() -> Self {
         Self {
             document_committed: true,
+            location_check_requested: false,
             terminal: None,
         }
     }
@@ -62,12 +65,25 @@ impl AgentNavigationObservation {
     fn terminal(_document_committed: bool, terminal: AgentNavigationTerminal) -> Self {
         Self {
             document_committed: _document_committed,
+            location_check_requested: false,
             terminal: Some(terminal),
+        }
+    }
+
+    const fn location_check_requested() -> Self {
+        Self {
+            document_committed: false,
+            location_check_requested: true,
+            terminal: None,
         }
     }
 
     pub(crate) const fn did_commit_document(&self) -> bool {
         self.document_committed
+    }
+
+    pub(crate) const fn should_check_location(&self) -> bool {
+        self.location_check_requested
     }
 
     pub(crate) fn into_terminal(self) -> Option<AgentNavigationTerminal> {
@@ -352,6 +368,137 @@ mod tests {
         assert!(gate.settle_recovery(operation, false));
         assert!(gate.matches_for_audit(None, true));
     }
+
+    #[test]
+    fn finished_document_coalesces_location_signals_until_exact_rejoin() {
+        let gate = super::AgentNavigationController::default();
+        let operation = operation(zephium_agentic::ContextOperationKind::Navigate);
+        let target =
+            zephium_agentic::ContextNavigationTarget::parse("https://example.test/history-start")
+                .expect("target");
+        gate.arm(operation, target.clone(), Arc::new(AtomicBool::new(false)))
+            .expect("arm");
+        assert!(gate.allows(target.as_url().as_str()));
+        gate.observe(event(
+            31,
+            wry::NavigationEventPhase::Started,
+            target.as_url().as_str(),
+        ))
+        .expect("start");
+        gate.observe(event(
+            31,
+            wry::NavigationEventPhase::Committed,
+            target.as_url().as_str(),
+        ))
+        .expect("commit")
+        .expect("terminal");
+
+        // A page can mutate history after commit but before the native load
+        // completion. Retain only one content-free dirty fact until Finished.
+        assert_eq!(gate.request_location_check(), Ok(false));
+        assert_eq!(gate.request_location_check(), Ok(false));
+        assert!(gate.disarm(operation));
+        let finished = gate
+            .observe(event(
+                31,
+                wry::NavigationEventPhase::Finished,
+                target.as_url().as_str(),
+            ))
+            .expect("finished");
+        assert!(finished.should_check_location());
+        assert_eq!(gate.location_state_for_audit(), Some((true, false, false)));
+
+        // A hostile History API loop cannot enqueue more callbacks while the
+        // sole check is owned, nor while its replacement awaits shell rejoin.
+        assert_eq!(gate.request_location_check(), Ok(false));
+        assert_eq!(gate.finish_location_check(true), Ok(()));
+        assert_eq!(gate.location_state_for_audit(), Some((false, true, true)));
+        assert_eq!(gate.request_location_check(), Ok(false));
+        assert_eq!(gate.acknowledge_location_replacement(), Ok(true));
+        assert_eq!(gate.location_state_for_audit(), Some((true, false, false)));
+        assert_eq!(gate.finish_location_check(false), Ok(()));
+        assert_eq!(gate.location_state_for_audit(), Some((false, false, false)));
+    }
+
+    #[test]
+    fn location_check_can_defer_without_creating_a_second_queue_entry() {
+        let gate = super::AgentNavigationController::default();
+        let operation = operation(zephium_agentic::ContextOperationKind::Navigate);
+        let target =
+            zephium_agentic::ContextNavigationTarget::parse("https://example.test/deferred")
+                .expect("target");
+        gate.arm(operation, target.clone(), Arc::new(AtomicBool::new(false)))
+            .expect("arm");
+        assert!(gate.allows(target.as_url().as_str()));
+        gate.observe(event(
+            32,
+            wry::NavigationEventPhase::Started,
+            target.as_url().as_str(),
+        ))
+        .expect("start");
+        gate.observe(event(
+            32,
+            wry::NavigationEventPhase::Committed,
+            target.as_url().as_str(),
+        ))
+        .expect("commit")
+        .expect("terminal");
+        assert!(gate.disarm(operation));
+        gate.observe(event(
+            32,
+            wry::NavigationEventPhase::Finished,
+            target.as_url().as_str(),
+        ))
+        .expect("finished");
+
+        assert_eq!(gate.request_location_check(), Ok(true));
+        assert_eq!(gate.defer_location_check(), Ok(()));
+        assert_eq!(gate.location_state_for_audit(), Some((false, true, false)));
+        assert_eq!(gate.request_deferred_location_check(), Ok(true));
+        assert_eq!(gate.finish_location_check(false), Ok(()));
+        assert_eq!(gate.location_state_for_audit(), Some((false, false, false)));
+    }
+
+    #[test]
+    fn renderer_loss_preserves_only_an_emitted_rejoin_barrier() {
+        let gate = super::AgentNavigationController::default();
+        let operation = operation(zephium_agentic::ContextOperationKind::Navigate);
+        let target = zephium_agentic::ContextNavigationTarget::parse(
+            "https://example.test/replacement-before-loss",
+        )
+        .expect("target");
+        gate.arm(operation, target.clone(), Arc::new(AtomicBool::new(false)))
+            .expect("arm");
+        assert!(gate.allows(target.as_url().as_str()));
+        gate.observe(event(
+            33,
+            wry::NavigationEventPhase::Started,
+            target.as_url().as_str(),
+        ))
+        .expect("start");
+        gate.observe(event(
+            33,
+            wry::NavigationEventPhase::Committed,
+            target.as_url().as_str(),
+        ))
+        .expect("commit")
+        .expect("terminal");
+        assert!(gate.disarm(operation));
+        gate.observe(event(
+            33,
+            wry::NavigationEventPhase::Finished,
+            target.as_url().as_str(),
+        ))
+        .expect("finished");
+        assert_eq!(gate.request_location_check(), Ok(true));
+        assert_eq!(gate.finish_location_check(true), Ok(()));
+
+        assert_eq!(gate.claim_renderer_loss(), Ok(true));
+        assert_eq!(gate.location_state_for_audit(), Some((false, false, true)));
+        assert_eq!(gate.acknowledge_location_replacement(), Ok(false));
+        assert_eq!(gate.location_state_for_audit(), Some((false, false, false)));
+        assert!(!gate.location_stable_for_result());
+    }
 }
 
 #[derive(Clone)]
@@ -396,6 +543,7 @@ struct AgentCommittedNavigation {
     operation: ContextOperationJoin,
     native_id: wry::NavigationId,
     finished: bool,
+    observes_web_location: bool,
 }
 
 struct AgentNavigationState {
@@ -405,6 +553,10 @@ struct AgentNavigationState {
     renderer_lost: bool,
     armed: Option<AgentNavigationArm>,
     last_committed: Option<AgentCommittedNavigation>,
+    location_ready: bool,
+    location_callback_pending: bool,
+    location_dirty: bool,
+    location_replacement_pending: bool,
 }
 
 impl Default for AgentNavigationState {
@@ -416,6 +568,10 @@ impl Default for AgentNavigationState {
             renderer_lost: false,
             armed: None,
             last_committed: None,
+            location_ready: false,
+            location_callback_pending: false,
+            location_dirty: false,
+            location_replacement_pending: false,
         }
     }
 }
@@ -478,7 +634,12 @@ impl AgentNavigationController {
             return Err(());
         }
         let mut state = self.state.lock().map_err(|_| ())?;
-        if state.renderer_lost != requires_renderer_loss || state.armed.is_some() {
+        if state.renderer_lost != requires_renderer_loss
+            || state.armed.is_some()
+            || state.location_callback_pending
+            || state.location_dirty
+            || state.location_replacement_pending
+        {
             return Err(());
         }
         state.bootstrap_available = false;
@@ -486,6 +647,7 @@ impl AgentNavigationController {
         state.bootstrap_native_id = None;
         state.renderer_lost = false;
         state.last_committed = None;
+        state.location_ready = false;
         state.armed = Some(AgentNavigationArm {
             operation,
             expected,
@@ -514,6 +676,7 @@ impl AgentNavigationController {
             operation,
             native_id,
             finished: armed.finished,
+            observes_web_location: matches!(armed.expected, AgentLoadExpectation::Web(_)),
         });
         true
     }
@@ -531,8 +694,19 @@ impl AgentNavigationController {
         {
             return false;
         }
-        state.armed = None;
-        state.last_committed = None;
+        let Some(armed) = state.armed.take() else {
+            return false;
+        };
+        state.last_committed = if applied && armed.committed && !state.renderer_lost {
+            armed.native_id.map(|native_id| AgentCommittedNavigation {
+                operation,
+                native_id,
+                finished: armed.finished,
+                observes_web_location: matches!(armed.expected, AgentLoadExpectation::Web(_)),
+            })
+        } else {
+            None
+        };
         // A termination callback can win after the commit callback has
         // claimed the terminal but before the host consumes either queued
         // callback. Successful settlement must not erase that newer loss.
@@ -583,6 +757,16 @@ impl AgentNavigationController {
                         return Err(());
                     }
                     committed.finished = true;
+                    state.location_ready = committed.observes_web_location;
+                    if state.location_ready
+                        && state.location_dirty
+                        && !state.location_callback_pending
+                        && !state.location_replacement_pending
+                    {
+                        state.location_dirty = false;
+                        state.location_callback_pending = true;
+                        return Ok(AgentNavigationObservation::location_check_requested());
+                    }
                     return Ok(AgentNavigationObservation::none());
                 }
             }
@@ -627,6 +811,16 @@ impl AgentNavigationController {
                 return Err(());
             }
             armed.finished = true;
+            state.location_ready = matches!(armed.expected, AgentLoadExpectation::Web(_));
+            if state.location_ready
+                && state.location_dirty
+                && !state.location_callback_pending
+                && !state.location_replacement_pending
+            {
+                state.location_dirty = false;
+                state.location_callback_pending = true;
+                return Ok(AgentNavigationObservation::location_check_requested());
+            }
             return Ok(AgentNavigationObservation::none());
         }
         if !matches!(
@@ -667,10 +861,147 @@ impl AgentNavigationController {
         }
         state.renderer_lost = true;
         state.last_committed = None;
+        state.location_ready = false;
+        state.location_callback_pending = false;
+        state.location_dirty = false;
         if let Some(armed) = state.armed.as_ref() {
             armed.terminal_claimed.store(true, Ordering::Release);
         }
         Ok(true)
+    }
+
+    /// Claims the single bounded native-location callback for an idle,
+    /// finished web document. Repeated platform signals collapse into one
+    /// dirty bit until the host either samples the current URL or rejoins a
+    /// replacement event.
+    pub(crate) fn request_location_check(&self) -> Result<bool, ()> {
+        let mut state = self.state.lock().map_err(|_| ())?;
+        if state.renderer_lost {
+            return Ok(false);
+        }
+        if !state.location_ready {
+            let committed_web_document = state.armed.as_ref().is_some_and(|armed| {
+                armed.committed && matches!(armed.expected, AgentLoadExpectation::Web(_))
+            }) || state
+                .last_committed
+                .as_ref()
+                .is_some_and(|committed| committed.observes_web_location);
+            state.location_dirty |= committed_web_document;
+            return Ok(false);
+        }
+        if state.location_callback_pending || state.location_replacement_pending {
+            state.location_dirty = true;
+            return Ok(false);
+        }
+        state.location_dirty = false;
+        state.location_callback_pending = true;
+        Ok(true)
+    }
+
+    /// Finishes one claimed URL sample. A detected replacement holds the
+    /// observer closed until the shell proves the successor join on a later
+    /// request. A no-change sample consumes every signal that preceded it.
+    pub(crate) fn finish_location_check(&self, replacement: bool) -> Result<(), ()> {
+        let mut state = self.state.lock().map_err(|_| ())?;
+        if !state.location_callback_pending || !state.location_ready || state.renderer_lost {
+            return Err(());
+        }
+        state.location_callback_pending = false;
+        if replacement {
+            if state.location_replacement_pending {
+                return Err(());
+            }
+            state.location_replacement_pending = true;
+        } else {
+            state.location_dirty = false;
+        }
+        Ok(())
+    }
+
+    /// Defers a claimed sample while the host owns an exact lifecycle
+    /// operation. The one dirty bit is retried only after that operation has
+    /// reached a terminal state.
+    pub(crate) fn defer_location_check(&self) -> Result<(), ()> {
+        let mut state = self.state.lock().map_err(|_| ())?;
+        if !state.location_callback_pending || state.renderer_lost {
+            return Err(());
+        }
+        state.location_callback_pending = false;
+        state.location_dirty = true;
+        Ok(())
+    }
+
+    /// Claims a previously deferred dirty fact once the host is idle again.
+    pub(crate) fn request_deferred_location_check(&self) -> Result<bool, ()> {
+        let mut state = self.state.lock().map_err(|_| ())?;
+        if state.renderer_lost
+            || !state.location_ready
+            || !state.location_dirty
+            || state.location_callback_pending
+            || state.location_replacement_pending
+        {
+            return Ok(false);
+        }
+        state.location_dirty = false;
+        state.location_callback_pending = true;
+        Ok(true)
+    }
+
+    /// Acknowledges the exact shell rejoin for the last emitted replacement.
+    /// Returns true only when one coalesced later signal now owns the sole
+    /// follow-up callback slot.
+    pub(crate) fn acknowledge_location_replacement(&self) -> Result<bool, ()> {
+        let mut state = self.state.lock().map_err(|_| ())?;
+        if !state.location_replacement_pending {
+            return Err(());
+        }
+        state.location_replacement_pending = false;
+        if state.renderer_lost {
+            return Ok(false);
+        }
+        if state.location_ready && state.location_dirty {
+            state.location_dirty = false;
+            state.location_callback_pending = true;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    pub(crate) fn location_state_for_audit(&self) -> Option<(bool, bool, bool)> {
+        self.state.lock().ok().map(|state| {
+            (
+                state.location_callback_pending,
+                state.location_dirty,
+                state.location_replacement_pending,
+            )
+        })
+    }
+
+    /// Revalidates that a semantic or visual result did not race any native
+    /// location signal, replacement rejoin, page load, or renderer loss.
+    #[cfg(any(target_os = "macos", test))]
+    pub(crate) fn location_stable_for_result(&self) -> bool {
+        self.state.lock().is_ok_and(|state| {
+            state.location_ready
+                && !state.location_callback_pending
+                && !state.location_dirty
+                && !state.location_replacement_pending
+                && !state.renderer_lost
+                && state.armed.is_none()
+        })
+    }
+
+    /// Permanently closes location observation for a cancelled or retiring
+    /// context without granting or changing navigation authority.
+    pub(crate) fn seal_location_observation(&self) -> bool {
+        let Ok(mut state) = self.state.lock() else {
+            return false;
+        };
+        state.location_ready = false;
+        state.location_callback_pending = false;
+        state.location_dirty = false;
+        state.location_replacement_pending = false;
+        true
     }
 
     /// Reports whether the exact committed navigation has reached native load

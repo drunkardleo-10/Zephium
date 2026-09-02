@@ -207,6 +207,7 @@ fn begin() -> Result<PendingTeardown, &'static str> {
                 }
                 navigation_callbacks.invariant_failed.set(true);
             },
+            || {},
             move || renderer_callbacks.renderer_lost.set(true),
             move || invariant_callbacks.invariant_failed.set(true),
             move || panic_callbacks.callback_panicked.set(true),

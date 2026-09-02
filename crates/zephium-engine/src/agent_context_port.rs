@@ -17,7 +17,10 @@ use zephium_agentic::{
     MAX_PENDING_NATIVE_CONTEXT_TASKS, MAX_PENDING_SEMANTIC_SCREENSHOTS,
 };
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-use zephium_agentic::{ContextJoin, ContextOperationKind, ContextRendererLoss};
+use zephium_agentic::{
+    ContextJoin, ContextNavigationReplacement, ContextNavigationTarget, ContextOperationKind,
+    ContextRendererLoss,
+};
 #[cfg(any(target_os = "macos", test))]
 use zephium_agentic::{SemanticScreenshotNativeCapture, SemanticScreenshotNativeFailure};
 
@@ -64,6 +67,23 @@ impl AgentContextCallbackGuard {
             &self.sink,
             &self.admission,
             ContextNativeEvent::RendererLost(ContextRendererLoss::new(prior)),
+        );
+    }
+
+    pub(crate) fn emit_navigation_replaced(
+        &self,
+        prior: ContextJoin,
+        target: ContextNavigationTarget,
+    ) {
+        if self.admission.pending().is_none() {
+            return;
+        }
+        emit_event(
+            &self.sink,
+            &self.admission,
+            ContextNativeEvent::NavigationReplaced(ContextNavigationReplacement::new(
+                prior, target,
+            )),
         );
     }
 }
@@ -2058,7 +2078,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn retained_callback_guard_emits_only_the_closed_renderer_loss_event() {
+    fn retained_callback_guard_emits_only_closed_unsolicited_events() {
         let prior = construction_request().context();
         let events = Arc::new(Mutex::new(Vec::new()));
         let captured = events.clone();
@@ -2074,13 +2094,23 @@ mod tests {
             .admission
             .clone()
             .expect("admission");
-        AgentContextCallbackGuard { admission, sink }.emit_renderer_lost(prior);
+        let guard = AgentContextCallbackGuard { admission, sink };
+        guard.emit_renderer_lost(prior);
+        let target =
+            zephium_agentic::ContextNavigationTarget::parse("https://example.test/same-document")
+                .expect("target");
+        guard.emit_navigation_replaced(prior, target.clone());
 
         let events = events.lock().expect("events");
+        assert!(
+            matches!(events.first(), Some(ContextNativeEvent::RendererLost(loss)) if loss.prior() == prior)
+        );
         assert!(matches!(
-            events.as_slice(),
-            [ContextNativeEvent::RendererLost(loss)] if loss.prior() == prior
+            events.get(1),
+            Some(ContextNativeEvent::NavigationReplaced(replacement))
+                if replacement.prior() == prior && replacement.target() == &target
         ));
+        assert_eq!(events.len(), 2);
     }
 
     #[test]

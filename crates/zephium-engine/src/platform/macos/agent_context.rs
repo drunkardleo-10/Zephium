@@ -112,6 +112,7 @@ pub(crate) struct AgentOwnedView {
     navigation: AgentNavigationController,
     semantic: Option<AgentSemanticRuntimeRegistration>,
     viewport: ContextOwnedViewport,
+    _navigation_observer: super::InstalledNavigationObserver,
     view: WebView,
 }
 
@@ -229,24 +230,27 @@ const fn map_semantic_runtime_failure(
 }
 
 /// Typed callback cohort retained by one native view delegate graph.
-pub(crate) struct AgentOwnedViewCallbacks<Navigation, RendererLost, Invariant, Panic> {
+pub(crate) struct AgentOwnedViewCallbacks<Navigation, Location, RendererLost, Invariant, Panic> {
     navigation: Navigation,
+    location: Location,
     renderer_lost: RendererLost,
     invariant: Invariant,
     panic: Panic,
 }
 
-impl<Navigation, RendererLost, Invariant, Panic>
-    AgentOwnedViewCallbacks<Navigation, RendererLost, Invariant, Panic>
+impl<Navigation, Location, RendererLost, Invariant, Panic>
+    AgentOwnedViewCallbacks<Navigation, Location, RendererLost, Invariant, Panic>
 {
     pub(crate) const fn new(
         navigation: Navigation,
+        location: Location,
         renderer_lost: RendererLost,
         invariant: Invariant,
         panic: Panic,
     ) -> Self {
         Self {
             navigation,
+            location,
             renderer_lost,
             invariant,
             panic,
@@ -259,22 +263,24 @@ impl<Navigation, RendererLost, Invariant, Panic>
 /// The only initial document is `about:blank`. Network navigation remains
 /// denied until a later exact context-navigation adapter is installed, so the
 /// caller can attach native content policy before any web request exists.
-pub(crate) fn build_owned_agent_view<Navigation, RendererLost, Invariant, Panic>(
+pub(crate) fn build_owned_agent_view<Navigation, Location, RendererLost, Invariant, Panic>(
     parent: &impl HasWindowHandle,
     viewport: ContextOwnedViewport,
     profile: ProfileId,
     storage_class: ContextProfileStorageClass,
     ephemeral_store: Option<&WebsiteDataStore>,
-    callbacks: AgentOwnedViewCallbacks<Navigation, RendererLost, Invariant, Panic>,
+    callbacks: AgentOwnedViewCallbacks<Navigation, Location, RendererLost, Invariant, Panic>,
 ) -> Result<AgentOwnedView, AgentOwnedViewConstructionError>
 where
     Navigation: Fn(AgentNavigationTerminal) + 'static,
+    Location: Fn() + 'static,
     RendererLost: Fn() + 'static,
     Invariant: Fn() + 'static,
     Panic: Fn() + 'static,
 {
     let AgentOwnedViewCallbacks {
         navigation: on_navigation,
+        location: on_location,
         renderer_lost: on_renderer_lost,
         invariant: on_invariant_failure,
         panic: on_callback_panic,
@@ -284,18 +290,21 @@ where
     let navigation_events = navigation.clone();
     let renderer_events = navigation.clone();
     let navigation_callback = Rc::new(on_navigation);
+    let location_callback = Rc::new(on_location);
+    let navigation_event_location_callback = location_callback.clone();
     let renderer_lost_callback = Rc::new(on_renderer_lost);
     let invariant_failure_callback = Rc::new(on_invariant_failure);
     let navigation_invariant_failure = invariant_failure_callback.clone();
     let renderer_invariant_failure = invariant_failure_callback.clone();
     let on_callback_panic = Rc::new(on_callback_panic);
     let navigation_callback_panicked = on_callback_panic.clone();
+    let location_callback_panicked = on_callback_panic.clone();
     let renderer_callback_panicked = on_callback_panic.clone();
     let configuration = new_owned_agent_configuration(profile, storage_class, ephemeral_store)?;
     let semantic = AgentSemanticRuntimeRegistration::install(
         &configuration,
-        invariant_failure_callback,
-        on_callback_panic,
+        invariant_failure_callback.clone(),
+        on_callback_panic.clone(),
     )
     .map_err(|_| AgentOwnedViewConstructionError::ExtensionIsolation)?;
     let navigation_semantic = semantic.controller().clone();
@@ -321,6 +330,12 @@ where
             Ok(observation) => {
                 if observation.did_commit_document() {
                     navigation_semantic.document_committed();
+                }
+                if observation.should_check_location() {
+                    invoke_owned_unit_callback(
+                        navigation_event_location_callback.as_ref(),
+                        location_callback_panicked.as_ref(),
+                    );
                 }
                 if let Some(terminal) = observation.into_terminal() {
                     invoke_owned_navigation_callback(
@@ -378,10 +393,26 @@ where
         storage_class,
         ephemeral_store,
     )?;
+    let location_events = navigation.clone();
+    let location_invariant = invariant_failure_callback.clone();
+    let location_panic = on_callback_panic.clone();
+    let navigation_observer = super::install_navigation_observer(&view, move || {
+        match location_events.request_location_check() {
+            Ok(true) => {
+                invoke_owned_unit_callback(location_callback.as_ref(), location_panic.as_ref())
+            }
+            Ok(false) => {}
+            Err(()) => {
+                invoke_owned_unit_callback(location_invariant.as_ref(), location_panic.as_ref())
+            }
+        }
+    })
+    .map_err(|_| AgentOwnedViewConstructionError::Native)?;
     Ok(AgentOwnedView {
         navigation,
         semantic: Some(semantic),
         viewport,
+        _navigation_observer: navigation_observer,
         view,
     })
 }
