@@ -1190,8 +1190,12 @@ Failure consumes the lifecycle and is terminal; the application may continue
 best-effort Store and engine cleanup, but it cannot report a clean shutdown.
 The feature-gated application Shell can own this lifecycle without learning
 its internal runtime vocabulary. Every worker-construction or actor-handoff
-failure returns both the agent and extension owners losslessly. After the
-retryable Store durability preflight succeeds, the Shell consumes agent
+failure returns both the agent and extension owners losslessly. The shared
+spawn path carries both unique owners directly through diverging failure
+branches and the single successful handoff; it uses no temporary optional
+owner or release-path invariant abort, and its function-local Clippy contract
+denies `unwrap`/`expect`, `panic`, and `unreachable`. After the retryable Store
+durability preflight succeeds, the Shell consumes agent
 shutdown first, then extension shutdown and the terminal Store barrier, and
 finally requests engine/blocker teardown under the same absolute deadline. An
 unclean or panicking agent lifecycle cannot skip those later best-effort

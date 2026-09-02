@@ -173,7 +173,11 @@ separately authorized run and human aggregate review occur.
 - pins the application integration behind one non-default optional dependency
   that the ordinary desktop graph cannot enable. Separate agentic spawn and
   failure types preserve both move-only agent and extension lifecycle owners
-  across each helper-worker refusal and disconnected actor handoff. The Shell
+  across each helper-worker refusal and disconnected actor handoff. The shared
+  spawn function carries those owners directly through its diverging failure
+  branches and one successful handoff, with no temporary `Option` or
+  release-path `expect`; a function-local Clippy contract and source mutation
+  gate reject `unwrap`/`expect`, `panic`, or `unreachable` regressions. The Shell
   consumes agent shutdown after retryable durability preflight and before
   extension, terminal Store, and engine teardown; `Clean` joins the proof,
   while unclean results and panics still run every later barrier. The same
@@ -452,9 +456,12 @@ agentic-owned Windows modules. Cross-compilation is not device behavior.
   from claiming clean agent shutdown without carrying the zero-resource proof.
   The dormant feature-gated Shell now owns and consumes that port before
   extension, Store, and engine teardown, returns it losslessly on every spawn
-  failure, contains panics, and applies the same ordering on unexpected actor
-  exit. This proves application control flow with fake lifecycles; no concrete
-  runtime has been composed and no end-to-end native shutdown is claimed.
+  failure through direct ownership flow rather than optional state and
+  invariant aborts, contains panics, and applies the same ordering on
+  unexpected actor exit. Worker-refusal and disconnected-handoff tests cover
+  every rollback branch. This proves application control flow with fake
+  lifecycles; no concrete runtime has been composed and no end-to-end native
+  shutdown is claimed.
 - The Browse named-device baseline intentionally has no values. No CPU, memory,
   GPU/compositor, energy, wakeup, or input-latency budget has been inferred.
 - Checked-priced model receipts now preserve a content-free exact schedule

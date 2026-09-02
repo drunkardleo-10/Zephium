@@ -1178,6 +1178,10 @@ fn spawn_agentic_with_worker_spawner(
     Ok(handle)
 }
 
+#[cfg_attr(
+    not(test),
+    deny(clippy::panic, clippy::unreachable, clippy::unwrap_used)
+)]
 fn spawn_suspended_with_worker_spawner<Agent: PendingAgentLifecycle>(
     ports: ShellHandoff<Agent>,
     mut worker_spawner: impl FnMut(&'static str, WorkerTask) -> std::io::Result<WorkerThread>,
@@ -1200,8 +1204,6 @@ fn spawn_suspended_with_worker_spawner<Agent: PendingAgentLifecycle>(
     let startup = Arc::new(ActorStartupGate::new());
     let handle = Handle::with_workers(queue.clone(), workers.clone(), startup.clone());
     let store_reads = StoreReadQueue::new();
-    let mut extension_service = Some(extension_service);
-    let mut agent_lifecycle = Some(agent_lifecycle);
     let store_reader_task: WorkerTask = Box::new({
         let reader_store = store.clone();
         let reader_queue = store_reads.clone();
@@ -1211,12 +1213,6 @@ fn spawn_suspended_with_worker_spawner<Agent: PendingAgentLifecycle>(
     let store_reader = match worker_spawner("zephium-store-reader", store_reader_task) {
         Ok(worker) => worker,
         Err(error) => {
-            let extension_service = extension_service
-                .take()
-                .expect("pending extension-service owner is unique");
-            let agent_lifecycle = agent_lifecycle
-                .take()
-                .expect("pending agent lifecycle owner is unique");
             let cleanup_proven = cleanup_failed_workers(&queue, &store_reads, &workers);
             return Err(agent_lifecycle.into_spawn_failure(
                 SpawnError::StoreReader(error),
@@ -1297,12 +1293,6 @@ fn spawn_suspended_with_worker_spawner<Agent: PendingAgentLifecycle>(
         Ok(actor) => actor,
         Err(error) => {
             drop(shell_handoff);
-            let extension_service = extension_service
-                .take()
-                .expect("pending extension-service owner is unique");
-            let agent_lifecycle = agent_lifecycle
-                .take()
-                .expect("pending agent lifecycle owner is unique");
             let cleanup_proven = cleanup_failed_workers(&queue, &store_reads, &workers);
             return Err(agent_lifecycle.into_spawn_failure(
                 SpawnError::Actor(error),
@@ -1446,12 +1436,6 @@ fn spawn_suspended_with_worker_spawner<Agent: PendingAgentLifecycle>(
             // Wake the actor waiter before joining it. The unique service
             // owner is still local and has not crossed the handoff boundary.
             drop(shell_handoff);
-            let extension_service = extension_service
-                .take()
-                .expect("pending extension-service owner is unique");
-            let agent_lifecycle = agent_lifecycle
-                .take()
-                .expect("pending agent lifecycle owner is unique");
             let cleanup_proven = cleanup_failed_workers(&queue, &store_reads, &workers);
             return Err(agent_lifecycle.into_spawn_failure(
                 SpawnError::Timer(error),
@@ -1470,12 +1454,8 @@ fn spawn_suspended_with_worker_spawner<Agent: PendingAgentLifecycle>(
         engine,
         store,
         blocker,
-        extension_service: extension_service
-            .take()
-            .expect("pending extension-service owner is unique"),
-        agent_lifecycle: agent_lifecycle
-            .take()
-            .expect("pending agent lifecycle owner is unique"),
+        extension_service,
+        agent_lifecycle,
         terminal_failure,
         chrome,
         emit,

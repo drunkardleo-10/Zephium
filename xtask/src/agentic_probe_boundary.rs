@@ -7166,7 +7166,8 @@ fn validate_agent_app_lifecycle(
         "pubfninto_parts(self)->(SpawnError,ExtensionLifecycle,AgentLifecycle)",
         "pubfnspawn_agentic_suspended(",
         "agent_lifecycle:PendingAgentBrowserLifecycle(agent_lifecycle),",
-        "letmutagent_lifecycle=Some(agent_lifecycle);",
+        "#[cfg_attr(not(test),deny(clippy::panic,clippy::unreachable,clippy::unwrap_used))]fnspawn_suspended_with_worker_spawner",
+        "lethandoff=ShellHandoff{engine,store,blocker,extension_service,agent_lifecycle,terminal_failure,chrome,emit,};",
         "ShellHandoff<Agent>",
         "ports.with_agent_lifecycle(agent_lifecycle.into_shell_lifecycle())",
     ] {
@@ -7180,6 +7181,18 @@ fn validate_agent_app_lifecycle(
         return Err(
             "every app worker and handoff refusal must return the agent lifecycle owner".to_owned(),
         );
+    }
+    for forbidden in [
+        "letmutextension_service=Some(extension_service)",
+        "letmutagent_lifecycle=Some(agent_lifecycle)",
+        "expect(\"pendingextension-serviceownerisunique\")",
+        "expect(\"pendingagentlifecycleownerisunique\")",
+    ] {
+        if actor.contains(forbidden) {
+            return Err(format!(
+                "application actor must carry unique lifecycle ownership structurally, not through {forbidden}"
+            ));
+        }
     }
 
     let shell = compact_without_line_comments(shell);
@@ -8094,6 +8107,14 @@ mod tests {
         let invalid_actor = actor.replace(
             "pub fn into_parts(self) -> (SpawnError, ExtensionLifecycle, AgentLifecycle)",
             "pub fn into_parts(self) -> (SpawnError, ExtensionLifecycle)",
+        );
+        assert!(
+            validate_agent_app_lifecycle(manifest, root, api, &invalid_actor, shell, desktop)
+                .is_err()
+        );
+        let invalid_actor = actor.replace(
+            "        extension_service,\n        agent_lifecycle,\n        terminal_failure,",
+            "        extension_service: Some(extension_service)\n            .take()\n            .expect(\"pending extension-service owner is unique\"),\n        agent_lifecycle,\n        terminal_failure,",
         );
         assert!(
             validate_agent_app_lifecycle(manifest, root, api, &invalid_actor, shell, desktop)
