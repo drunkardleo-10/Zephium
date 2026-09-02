@@ -14,9 +14,11 @@ use sha2::{Digest, Sha256};
 use super::*;
 use crate::{
     AgentRunManifestId, ContextAutomationState, ContextControl, SemanticActionExecutionApplied,
-    SemanticActionFailure, SemanticActionVerificationRefusal, SemanticActionVerifiedTerminal,
-    SemanticEffectProofKind, SemanticPreparedAction, SemanticSettleTracker,
-    SemanticVerificationError, SemanticVerifiedAction,
+    SemanticActionExecutionCoordinatorRefusal, SemanticActionFailure,
+    SemanticActionSettlementAdmissionRefusal, SemanticActionSettlementRefusal,
+    SemanticActionVerificationRefusal, SemanticActionVerifiedTerminal, SemanticEffectProofKind,
+    SemanticPreparedAction, SemanticSettleTracker, SemanticVerificationError,
+    SemanticVerifiedAction,
 };
 
 /// Maximum prepared or dispatched semantic effects in one run policy.
@@ -1214,6 +1216,40 @@ impl AgentRunPolicy {
         })
     }
 
+    /// Consumes an exact native-execution admission refusal into one charged failure.
+    pub fn settle_execution_admission_refusal(
+        &mut self,
+        refusal: SemanticActionExecutionCoordinatorRefusal,
+        action: &SemanticPreparedAction,
+    ) -> Result<AgentFailedSemanticEffect, AgentPolicyError> {
+        let failure = refusal.action_failure();
+        let (active, _error) = refusal.into_parts();
+        self.settle_failed_semantic_effect(active, action, failure)
+    }
+
+    /// Consumes an exact native-to-settlement refusal into one charged failure.
+    pub fn settle_settlement_start_refusal(
+        &mut self,
+        refusal: SemanticActionSettlementRefusal,
+        action: &SemanticPreparedAction,
+    ) -> Result<AgentFailedSemanticEffect, AgentPolicyError> {
+        let failure = refusal.action_failure();
+        let (active, _error) = refusal.into_parts();
+        self.settle_failed_semantic_effect(active, action, failure)
+    }
+
+    /// Consumes an exact settlement-coordinator admission refusal into one charged failure.
+    pub fn settle_settlement_admission_refusal(
+        &mut self,
+        refusal: SemanticActionSettlementAdmissionRefusal,
+        action: &SemanticPreparedAction,
+    ) -> Result<AgentFailedSemanticEffect, AgentPolicyError> {
+        let failure = refusal.action_failure();
+        let (start, _error) = refusal.into_parts();
+        let (active, _execution, _tracker) = start.into_parts();
+        self.settle_failed_semantic_effect(active, action, failure)
+    }
+
     /// Settles a dispatched effect only with its exact independent proof.
     pub(crate) fn settle_verified_semantic_effect(
         &mut self,
@@ -1232,7 +1268,7 @@ impl AgentRunPolicy {
     }
 
     /// Settles a dispatched effect under the closed action failure taxonomy.
-    pub fn settle_failed_semantic_effect(
+    pub(crate) fn settle_failed_semantic_effect(
         &mut self,
         active: AgentActiveEffect,
         action: &SemanticPreparedAction,

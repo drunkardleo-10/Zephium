@@ -259,7 +259,7 @@ impl SemanticActionExecutionCoordinator {
 }
 
 /// Exhaustive fail-closed mapping from the shared native dispatch vocabulary.
-pub const fn semantic_action_dispatch_failure(
+pub(crate) const fn semantic_action_dispatch_failure(
     dispatch: ContextDispatch,
 ) -> Option<SemanticActionFailure> {
     match dispatch {
@@ -320,8 +320,26 @@ impl SemanticActionExecutionCoordinatorRefusal {
         self.error
     }
 
+    /// Closed action failure derived from this exact consuming refusal.
+    pub const fn action_failure(&self) -> SemanticActionFailure {
+        match self.error {
+            SemanticActionExecutionCoordinatorError::Preparation(error) => error.action_failure(),
+            SemanticActionExecutionCoordinatorError::ContextBusy
+            | SemanticActionExecutionCoordinatorError::Capacity => {
+                SemanticActionFailure::ResourceExhausted
+            }
+            SemanticActionExecutionCoordinatorError::DuplicateRequest
+            | SemanticActionExecutionCoordinatorError::Shutdown
+            | SemanticActionExecutionCoordinatorError::UnknownRequest
+            | SemanticActionExecutionCoordinatorError::RequestMismatch
+            | SemanticActionExecutionCoordinatorError::PrematureTimeout => {
+                SemanticActionFailure::BackendRefused
+            }
+        }
+    }
+
     /// Recovers dispatched authority for one terminal policy failure.
-    pub fn into_parts(self) -> (AgentActiveEffect, SemanticActionExecutionCoordinatorError) {
+    pub(crate) fn into_parts(self) -> (AgentActiveEffect, SemanticActionExecutionCoordinatorError) {
         (*self.active, self.error)
     }
 }
@@ -674,6 +692,10 @@ mod tests {
             duplicate.error(),
             SemanticActionExecutionCoordinatorError::DuplicateRequest
         );
+        assert_eq!(
+            duplicate.action_failure(),
+            SemanticActionFailure::BackendRefused
+        );
         assert_eq!(duplicate.into_parts().0.attempt().get(), 21);
 
         let busy = coordinator
@@ -686,6 +708,10 @@ mod tests {
         assert_eq!(
             busy.error(),
             SemanticActionExecutionCoordinatorError::ContextBusy
+        );
+        assert_eq!(
+            busy.action_failure(),
+            SemanticActionFailure::ResourceExhausted
         );
         assert_eq!(busy.into_parts().0.attempt().get(), 22);
         let _outcome = coordinator
@@ -716,6 +742,10 @@ mod tests {
         assert_eq!(
             overflow.error(),
             SemanticActionExecutionCoordinatorError::Capacity
+        );
+        assert_eq!(
+            overflow.action_failure(),
+            SemanticActionFailure::ResourceExhausted
         );
         assert_eq!(overflow.into_parts().0.attempt().get(), 900);
         for reservation in reservations {
@@ -774,6 +804,10 @@ mod tests {
                 SemanticActionExecutionPreparationError::InvalidGeometry
             )
         );
+        assert_eq!(
+            refusal.action_failure(),
+            SemanticActionFailure::TargetChanged
+        );
         assert_eq!(refusal.into_parts().0.attempt().get(), 51);
 
         let observation = button_observation(50, true);
@@ -793,6 +827,10 @@ mod tests {
         assert_eq!(
             refusal.error(),
             SemanticActionExecutionCoordinatorError::Shutdown
+        );
+        assert_eq!(
+            refusal.action_failure(),
+            SemanticActionFailure::BackendRefused
         );
         assert_eq!(refusal.into_parts().0.attempt().get(), 53);
         let debug = format!("{coordinator:?} {reservation:?}");

@@ -141,6 +141,16 @@ are trusted, or that M4 is complete.
   deadline overflow returns policy authority without creating a tracker. The
   transition owns no task, timer, queue, retry, native object, or content
   buffer.
+- Raw native preparation and every active-authority destructuring path are now
+  crate-private. Shipping code must enter through the bounded execution
+  coordinator and pass complete execution-admission, native-to-settlement, or
+  settlement-admission refusals directly to run policy. Each refusal derives
+  its own closed failure before its authority is consumed: typed native
+  failures remain exact, absent fresh geometry becomes target change,
+  capacity/context contention becomes resource exhaustion, and contract,
+  shutdown, replay, or routing violations become backend refusal. No caller can
+  relabel a failed attempt, and these pre-verification terminals retain no page
+  evidence, allocate no evidence box, and mint no retry authority.
 - A zero-idle settlement coordinator retains the complete applied authority
   while a typed settle condition remains pending. Its empty `Vec` allocates
   only on first use; it admits at most four applied actions process-wide and
@@ -612,7 +622,11 @@ diagnostics; the static gate rejects a public borrow-only verifier or terminal
 recovery retry path. Policy-join coverage runs the complete
 dispatch→native→settle→verify→charge success path and the refused-evidence
 failure path, asserting exact receipt/attempt/proof/failure/backend retention;
-the static gate rejects a public raw verified-effect settlement method.
+it also charges native failure, execution-coordinator shutdown, and
+settlement-coordinator shutdown through their consuming refusal owners. The
+static gate rejects public raw native preparation, active-authority
+destructuring, raw verified-effect settlement, or caller-selected failure
+settlement.
 Accounted-result coverage additionally refuses an altered baseline
 acknowledgement, recovers the same charged owner and current observation, then
 succeeds with the exact acknowledgement while retaining

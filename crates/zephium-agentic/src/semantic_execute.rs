@@ -212,14 +212,15 @@ impl NativeRecipe {
 
 /// Retained policy authority waiting for one exact native terminal.
 #[must_use]
-pub struct SemanticActionExecutionPending {
+pub(crate) struct SemanticActionExecutionPending {
     correlation: NativeCorrelation,
     active: AgentActiveEffect,
 }
 
 impl SemanticActionExecutionPending {
     /// Exact dispatched attempt retained by this one-shot join.
-    pub const fn attempt(&self) -> SemanticActionAttemptId {
+    #[cfg(test)]
+    pub(crate) const fn attempt(&self) -> SemanticActionAttemptId {
         self.correlation.attempt
     }
 
@@ -628,7 +629,7 @@ impl SemanticActionExecutionOutcome {
     }
 
     /// Consumes the outcome into policy authority and content-free disposition.
-    pub fn into_parts(self) -> (AgentActiveEffect, SemanticActionExecutionDisposition) {
+    pub(crate) fn into_parts(self) -> (AgentActiveEffect, SemanticActionExecutionDisposition) {
         (self.active, self.disposition)
     }
 }
@@ -715,8 +716,13 @@ impl SemanticActionSettlementRefusal {
         self.error
     }
 
+    /// Closed action failure derived from this exact consuming refusal.
+    pub const fn action_failure(&self) -> SemanticActionFailure {
+        self.error.action_failure()
+    }
+
     /// Recovers policy authority for one terminal charged settlement.
-    pub fn into_parts(self) -> (AgentActiveEffect, SemanticActionSettlementStartError) {
+    pub(crate) fn into_parts(self) -> (AgentActiveEffect, SemanticActionSettlementStartError) {
         (*self.active, self.error)
     }
 }
@@ -746,6 +752,18 @@ pub enum SemanticActionSettlementStartError {
     /// The settlement tracker refused its clock/deadline contract.
     #[error("semantic action settlement could not start: {0}")]
     Settlement(SemanticSettleError),
+}
+
+impl SemanticActionSettlementStartError {
+    /// Maps a failed native-to-settlement transition into the closed action taxonomy.
+    pub const fn action_failure(self) -> SemanticActionFailure {
+        match self {
+            Self::ExecutionFailed(failure) => failure,
+            Self::AuthorityMismatch | Self::ExecutionContract(_) | Self::Settlement(_) => {
+                SemanticActionFailure::BackendRefused
+            }
+        }
+    }
 }
 
 /// Consumes one exact native execution outcome into bounded settlement state.
@@ -801,19 +819,20 @@ pub fn begin_semantic_action_settlement(
 
 /// Preparation failure that returns the still-dispatched policy authority.
 #[must_use]
-pub struct SemanticActionExecutionRefusal {
+pub(crate) struct SemanticActionExecutionRefusal {
     active: Box<AgentActiveEffect>,
     error: SemanticActionExecutionPreparationError,
 }
 
 impl SemanticActionExecutionRefusal {
     /// Closed preparation refusal.
-    pub const fn error(&self) -> SemanticActionExecutionPreparationError {
+    #[cfg(test)]
+    pub(crate) const fn error(&self) -> SemanticActionExecutionPreparationError {
         self.error
     }
 
     /// Recovers authority so policy can settle the dispatched effect as failed.
-    pub fn into_parts(self) -> (AgentActiveEffect, SemanticActionExecutionPreparationError) {
+    pub(crate) fn into_parts(self) -> (AgentActiveEffect, SemanticActionExecutionPreparationError) {
         (*self.active, self.error)
     }
 }
@@ -845,6 +864,18 @@ pub enum SemanticActionExecutionPreparationError {
     Invariant,
 }
 
+impl SemanticActionExecutionPreparationError {
+    /// Maps exact pre-native preparation failure into the closed action taxonomy.
+    pub const fn action_failure(self) -> SemanticActionFailure {
+        match self {
+            Self::InvalidGeometry => SemanticActionFailure::TargetChanged,
+            Self::AuthorityMismatch | Self::DeadlineOverflow | Self::Invariant => {
+                SemanticActionFailure::BackendRefused
+            }
+        }
+    }
+}
+
 /// Contract violation while admitting a claimed native terminal.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum SemanticActionExecutionContractError {
@@ -870,7 +901,7 @@ pub enum SemanticActionExecutionContractError {
 /// The function clones at most one already-bounded 4 KiB fill value into the
 /// native half. No work, task, timer, queue, or native object exists until a
 /// caller explicitly dispatches the returned request.
-pub fn prepare_semantic_action_execution(
+pub(crate) fn prepare_semantic_action_execution(
     active: AgentActiveEffect,
     action: &SemanticPreparedAction,
     requested_at: SemanticActionExecutionInstant,
@@ -1338,6 +1369,10 @@ mod tests {
         );
         let refusal = begin_semantic_action_settlement(outcome, &substituted)
             .expect_err("substituted action");
+        assert_eq!(
+            refusal.action_failure(),
+            SemanticActionFailure::BackendRefused
+        );
         let (returned, error) = refusal.into_parts();
         assert_eq!(returned.attempt().get(), 16);
         assert_eq!(error, SemanticActionSettlementStartError::AuthorityMismatch);
@@ -1362,6 +1397,10 @@ mod tests {
         );
         let refusal =
             begin_semantic_action_settlement(outcome, &action).expect_err("failed execution");
+        assert_eq!(
+            refusal.action_failure(),
+            SemanticActionFailure::TargetOccluded
+        );
         let (returned, error) = refusal.into_parts();
         assert_eq!(returned.attempt().get(), 17);
         assert_eq!(

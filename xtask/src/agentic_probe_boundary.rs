@@ -482,7 +482,6 @@ fn validate_engine_agent_context_boundary(
             ));
         }
     }
-
     let host_root = compact(host_root);
     for required in [
         "#[cfg(feature=\"agentic-browser\")]modagent_context;",
@@ -494,7 +493,6 @@ fn validate_engine_agent_context_boundary(
             ));
         }
     }
-
     let port = compact(port);
     for required in [
         "MAX_PENDING_NATIVE_CONTEXT_TASKS",
@@ -2723,8 +2721,10 @@ fn validate_semantic_execution_contract(
     for required in [
         "modsemantic_execute;",
         "modsemantic_execute_coordinator;",
+        "pub(crate)usesemantic_execute::{",
         "begin_semantic_action_settlement",
         "prepare_semantic_action_execution",
+        "SemanticActionExecutionPending",
         "SemanticActionSettlementStart",
         "SemanticActionExecutionCoordinator",
     ] {
@@ -2782,10 +2782,37 @@ fn validate_semantic_execution_contract(
         "SemanticActionSettlementStartError::ExecutionFailed",
         "SemanticActionSettlementStartError::ExecutionContract",
         "SemanticActionSettlementStartError::Settlement",
+        "pub(crate)structSemanticActionExecutionPending{",
+        "pub(crate)fninto_parts(self",
+        "(AgentActiveEffect,SemanticActionExecutionDisposition)",
+        "pubconstfnaction_failure(&self)->SemanticActionFailure",
+        "self.error.action_failure()",
+        "Self::ExecutionFailed(failure)=>failure",
+        "pub(crate)fnprepare_semantic_action_execution(",
     ] {
         if !execution.contains(required) {
             return Err(format!(
                 "semantic execution seam lost required one-shot bound {required}"
+            ));
+        }
+    }
+    for (return_type, label) in [
+        (
+            "(AgentActiveEffect,SemanticActionExecutionDisposition)",
+            "native execution outcome",
+        ),
+        (
+            "(AgentActiveEffect,SemanticActionSettlementStartError)",
+            "settlement-start refusal",
+        ),
+        (
+            "(AgentActiveEffect,SemanticActionExecutionPreparationError)",
+            "raw preparation refusal",
+        ),
+    ] {
+        if !has_crate_private_into_parts(&execution, return_type) {
+            return Err(format!(
+                "semantic execution exposed or lost {label} ownership"
             ));
         }
     }
@@ -2800,6 +2827,8 @@ fn validate_semantic_execution_contract(
         "WebView2",
         "std::thread",
         "std::fs",
+        "pubfnprepare_semantic_action_execution(",
+        "pubfninto_parts(self",
     ] {
         if execution.contains(forbidden) {
             return Err(format!(
@@ -2820,16 +2849,29 @@ fn validate_semantic_execution_contract(
         "now<self.pending[index].deadline()",
         "self.sealed=true",
         "semantic_action_dispatch_failure(dispatch)",
+        "pub(crate)constfnsemantic_action_dispatch_failure(",
         "ContextDispatch::Scheduled=>None",
         "ContextDispatch::Unsupported|ContextDispatch::Rejected(ContextPortFailure::Unsupported)",
         "ContextPortFailure::ResourceExhausted)=>{Some(SemanticActionFailure::ResourceExhausted)",
         "SemanticActionExecutionCoordinatorError::PrematureTimeout",
+        "pubstructSemanticActionExecutionCoordinatorRefusal{",
+        "pubconstfnaction_failure(&self)->SemanticActionFailure",
+        "SemanticActionExecutionCoordinatorError::Preparation(error)=>error.action_failure()",
+        "SemanticActionExecutionCoordinatorError::ContextBusy|SemanticActionExecutionCoordinatorError::Capacity=>{SemanticActionFailure::ResourceExhausted}",
+        "pub(crate)fninto_parts(self",
+        "(AgentActiveEffect,SemanticActionExecutionCoordinatorError)",
     ] {
         if !coordinator.contains(required) {
             return Err(format!(
                 "semantic execution coordinator lost required bound {required}"
             ));
         }
+    }
+    if !has_crate_private_into_parts(
+        &coordinator,
+        "(AgentActiveEffect,SemanticActionExecutionCoordinatorError)",
+    ) {
+        return Err("semantic execution coordinator exposed returned policy authority".to_owned());
     }
     for forbidden in [
         "evaluateJavaScript",
@@ -2842,6 +2884,8 @@ fn validate_semantic_execution_contract(
         "std::fs",
         "Mutex<",
         "Arc<",
+        "pubconstfnsemantic_action_dispatch_failure(",
+        "pubfninto_parts(self",
     ] {
         if coordinator.contains(forbidden) {
             return Err(format!(
@@ -2944,7 +2988,12 @@ fn validate_semantic_settlement_coordinator(root: &str, coordinator: &str) -> Re
         "pubstructSemanticActionSettlementTerminal{",
         "Terminal(Box<SemanticActionSettlementTerminal>)",
         "SemanticActionSettlementTerminal::new(",
-        "pubfninto_authority(",
+        "pub(crate)fninto_parts(self",
+        "(AgentActiveEffect,SemanticActionExecutionApplied,SemanticSettleTracker",
+        "pubstructSemanticActionSettlementAdmissionRefusal{",
+        "pubconstfnaction_failure(&self)->SemanticActionFailure",
+        "SemanticActionSettlementCoordinatorError::ContextBusy|SemanticActionSettlementCoordinatorError::Capacity=>{SemanticActionFailure::ResourceExhausted}",
+        "(SemanticActionSettlementStart,SemanticActionSettlementCoordinatorError",
         "next_wake:SemanticSettleInstant",
         "start.tracker().status().is_terminal()",
         "entry.key.context()==key.context()",
@@ -2961,6 +3010,22 @@ fn validate_semantic_settlement_coordinator(root: &str, coordinator: &str) -> Re
         if !coordinator.contains(required) {
             return Err(format!(
                 "semantic settlement coordinator lost required bound {required}"
+            ));
+        }
+    }
+    for (return_type, label) in [
+        (
+            "(AgentActiveEffect,SemanticActionExecutionApplied,SemanticSettleTracker)",
+            "settlement terminal",
+        ),
+        (
+            "(SemanticActionSettlementStart,SemanticActionSettlementCoordinatorError)",
+            "settlement admission refusal",
+        ),
+    ] {
+        if !has_crate_private_into_parts(&coordinator, return_type) {
+            return Err(format!(
+                "semantic settlement coordinator exposed or lost {label} ownership"
             ));
         }
     }
@@ -2981,6 +3046,7 @@ fn validate_semantic_settlement_coordinator(root: &str, coordinator: &str) -> Re
         "Arc<",
         "sleep(",
         "interval(",
+        "pubfninto_authority(",
     ] {
         if coordinator.contains(forbidden) {
             return Err(format!(
@@ -3131,7 +3197,14 @@ fn validate_accounted_action_result(
         "pubstructAgentVerifiedSemanticEffect{",
         "pubstructAgentFailedSemanticEffect{",
         "evidence:Option<Box<AgentFailedSemanticEffectEvidence>>",
-        "pubfnsettle_failed_semantic_effect(",
+        "pubfnsettle_execution_admission_refusal(",
+        "refusal:SemanticActionExecutionCoordinatorRefusal",
+        "pubfnsettle_settlement_start_refusal(",
+        "refusal:SemanticActionSettlementRefusal",
+        "pubfnsettle_settlement_admission_refusal(",
+        "refusal:SemanticActionSettlementAdmissionRefusal",
+        "letfailure=refusal.action_failure();",
+        "pub(crate)fnsettle_failed_semantic_effect(",
         "action:&SemanticPreparedAction",
         "Result<AgentFailedSemanticEffect,AgentPolicyError>",
         "if!active.matches_action(action)",
@@ -3142,6 +3215,18 @@ fn validate_accounted_action_result(
                 "verified effect escaped exact result finalization {required}"
             ));
         }
+    }
+    if policy
+        .matches("letfailure=refusal.action_failure();")
+        .count()
+        < 3
+    {
+        return Err(
+            "every pre-verification refusal must derive its own closed action failure".to_owned(),
+        );
+    }
+    if policy.contains("pubfnsettle_failed_semantic_effect(") {
+        return Err("effect policy exposed raw caller-selected failure settlement".to_owned());
     }
 
     let result = compact(result);
@@ -3718,6 +3803,23 @@ fn compact(source: &str) -> String {
         .collect()
 }
 
+fn has_crate_private_into_parts(source: &str, return_type: &str) -> bool {
+    let trailing_comma_return = return_type
+        .strip_suffix(')')
+        .map(|prefix| format!("{prefix},)"));
+    let mut signatures = vec![
+        format!("pub(crate)fninto_parts(self)->{return_type}"),
+        format!("pub(crate)fninto_parts(self,)->{return_type}"),
+    ];
+    if let Some(return_type) = trailing_comma_return {
+        signatures.push(format!("pub(crate)fninto_parts(self)->{return_type}"));
+        signatures.push(format!("pub(crate)fninto_parts(self,)->{return_type}"));
+    }
+    signatures
+        .iter()
+        .any(|signature| source.contains(signature))
+}
+
 #[derive(Deserialize)]
 struct CargoMetadata {
     packages: Vec<CargoPackage>,
@@ -4204,9 +4306,12 @@ mod tests {
         let root = r#"
             mod semantic_execute;
             mod semantic_execute_coordinator;
+            pub(crate) use semantic_execute::{
+                prepare_semantic_action_execution,
+                SemanticActionExecutionPending,
+            };
             pub use semantic_execute::{
                 begin_semantic_action_settlement,
-                prepare_semantic_action_execution,
                 SemanticActionSettlementStart,
             };
             pub use semantic_execute_coordinator::SemanticActionExecutionCoordinator;
@@ -4232,6 +4337,13 @@ mod tests {
             if applied.completed_at > deadline {}
             SemanticActionFailure::BackendRefused;
             SemanticSettleInstant::from_millis(1);
+            pub(crate) struct SemanticActionExecutionPending {}
+            pub struct SemanticActionExecutionOutcome;
+            impl SemanticActionExecutionOutcome {
+                pub(crate) fn into_parts(
+                    self,
+                ) -> (AgentActiveEffect, SemanticActionExecutionDisposition) {}
+            }
             pub struct SemanticActionSettlementStart {
                 execution: SemanticActionExecutionApplied,
             }
@@ -4241,6 +4353,29 @@ mod tests {
             }
             pub struct SemanticActionSettlementRefusal {
                 active: Box<AgentActiveEffect>,
+                error: SemanticActionSettlementStartError,
+            }
+            impl SemanticActionSettlementRefusal {
+                pub const fn action_failure(&self) -> SemanticActionFailure {
+                    self.error.action_failure()
+                }
+                pub(crate) fn into_parts(
+                    self,
+                ) -> (AgentActiveEffect, SemanticActionSettlementStartError) {}
+            }
+            impl SemanticActionSettlementStartError {
+                pub const fn action_failure(self) -> SemanticActionFailure {
+                    match self {
+                        Self::ExecutionFailed(failure) => failure,
+                        _ => SemanticActionFailure::BackendRefused,
+                    }
+                }
+            }
+            pub(crate) struct SemanticActionExecutionRefusal;
+            impl SemanticActionExecutionRefusal {
+                pub(crate) fn into_parts(
+                    self,
+                ) -> (AgentActiveEffect, SemanticActionExecutionPreparationError) {}
             }
             pub fn begin_semantic_action_settlement(
                 outcome: SemanticActionExecutionOutcome,
@@ -4257,6 +4392,7 @@ mod tests {
                 SemanticActionSettlementStartError::ExecutionContract(error);
                 SemanticActionSettlementStartError::Settlement(error);
             }
+            pub(crate) fn prepare_semantic_action_execution() {}
         "#;
         let coordinator = r#"
             const MAX_PENDING_SEMANTIC_ACTION_EXECUTIONS: usize = MAX_AGENT_PENDING_EFFECTS;
@@ -4268,6 +4404,9 @@ mod tests {
             !self.pending[index].matches_native_settlement(&settlement);
             now < self.pending[index].deadline();
             self.sealed = true;
+            pub(crate) const fn semantic_action_dispatch_failure(
+                dispatch: ContextDispatch,
+            ) -> Option<SemanticActionFailure> {
             semantic_action_dispatch_failure(dispatch);
             ContextDispatch::Scheduled => None;
             ContextDispatch::Unsupported
@@ -4276,6 +4415,27 @@ mod tests {
                 Some(SemanticActionFailure::ResourceExhausted)
             }
             SemanticActionExecutionCoordinatorError::PrematureTimeout;
+            }
+            pub struct SemanticActionExecutionCoordinatorRefusal {
+                active: Box<AgentActiveEffect>,
+                error: SemanticActionExecutionCoordinatorError,
+            }
+            impl SemanticActionExecutionCoordinatorRefusal {
+                pub const fn action_failure(&self) -> SemanticActionFailure {
+                    match self.error {
+                        SemanticActionExecutionCoordinatorError::Preparation(error) =>
+                            error.action_failure(),
+                        SemanticActionExecutionCoordinatorError::ContextBusy |
+                        SemanticActionExecutionCoordinatorError::Capacity => {
+                            SemanticActionFailure::ResourceExhausted
+                        }
+                        _ => SemanticActionFailure::BackendRefused,
+                    }
+                }
+                pub(crate) fn into_parts(
+                    self,
+                ) -> (AgentActiveEffect, SemanticActionExecutionCoordinatorError) {}
+            }
         "#;
         let settle = r#"
             pub(crate) fn begin() {}
@@ -4404,6 +4564,29 @@ mod tests {
             engine_port,
         )
         .is_err());
+        assert!(validate_semantic_execution_contract(
+            root,
+            effect,
+            action,
+            &execution.replace(
+                "pub(crate) fn prepare_semantic_action_execution() {}",
+                "pub fn prepare_semantic_action_execution() {}",
+            ),
+            coordinator,
+            context_port,
+            engine_port,
+        )
+        .is_err());
+        assert!(validate_semantic_execution_contract(
+            root,
+            effect,
+            action,
+            execution,
+            &coordinator.replace("pub(crate) fn into_parts(", "pub fn into_parts(",),
+            context_port,
+            engine_port,
+        )
+        .is_err());
         validate_semantic_settle_wake(settle).expect("exact no-poll wake plan");
         assert!(validate_semantic_settle_wake(
             &settle.replace("self.last_mutation_at.checked_add(quiet.millis());", ""),
@@ -4447,7 +4630,36 @@ mod tests {
             fn terminal(start: SemanticActionSettlementStart) {
                 SemanticActionSettlementTerminal::new(start);
             }
-            pub fn into_authority() {}
+            impl SemanticActionSettlementTerminal {
+                pub(crate) fn into_parts(
+                    self,
+                ) -> (
+                    AgentActiveEffect,
+                    SemanticActionExecutionApplied,
+                    SemanticSettleTracker,
+                ) {}
+            }
+            pub struct SemanticActionSettlementAdmissionRefusal {
+                start: Box<SemanticActionSettlementStart>,
+                error: SemanticActionSettlementCoordinatorError,
+            }
+            impl SemanticActionSettlementAdmissionRefusal {
+                pub const fn action_failure(&self) -> SemanticActionFailure {
+                    match self.error {
+                        SemanticActionSettlementCoordinatorError::ContextBusy |
+                        SemanticActionSettlementCoordinatorError::Capacity => {
+                            SemanticActionFailure::ResourceExhausted
+                        }
+                        _ => SemanticActionFailure::BackendRefused,
+                    }
+                }
+                pub(crate) fn into_parts(
+                    self,
+                ) -> (
+                    SemanticActionSettlementStart,
+                    SemanticActionSettlementCoordinatorError,
+                ) {}
+            }
             struct Reservation {
                 next_wake: SemanticSettleInstant,
             }
@@ -4482,6 +4694,11 @@ mod tests {
                 "self.pending.len() >= MAX_PENDING_SEMANTIC_ACTION_SETTLEMENTS;",
                 ""
             ),
+        )
+        .is_err());
+        assert!(validate_semantic_settlement_coordinator(
+            root,
+            &coordinator.replace("pub(crate) fn into_parts(", "pub fn into_parts("),
         )
         .is_err());
         assert!(validate_semantic_settlement_coordinator(
@@ -4630,7 +4847,25 @@ mod tests {
             impl AgentFailedSemanticEffect {
                 pub(crate) fn into_parts(self) {}
             }
-            pub fn settle_failed_semantic_effect(
+            pub fn settle_execution_admission_refusal(
+                refusal: SemanticActionExecutionCoordinatorRefusal,
+                action: &SemanticPreparedAction,
+            ) -> Result<AgentFailedSemanticEffect, AgentPolicyError> {
+                let failure = refusal.action_failure();
+            }
+            pub fn settle_settlement_start_refusal(
+                refusal: SemanticActionSettlementRefusal,
+                action: &SemanticPreparedAction,
+            ) -> Result<AgentFailedSemanticEffect, AgentPolicyError> {
+                let failure = refusal.action_failure();
+            }
+            pub fn settle_settlement_admission_refusal(
+                refusal: SemanticActionSettlementAdmissionRefusal,
+                action: &SemanticPreparedAction,
+            ) -> Result<AgentFailedSemanticEffect, AgentPolicyError> {
+                let failure = refusal.action_failure();
+            }
+            pub(crate) fn settle_failed_semantic_effect(
                 active: AgentActiveEffect,
                 action: &SemanticPreparedAction,
             ) -> Result<AgentFailedSemanticEffect, AgentPolicyError> {
@@ -4790,6 +5025,26 @@ mod tests {
                 "failed: AgentFailedSemanticEffect,",
                 "failure: SemanticActionFailure,"
             ),
+        )
+        .is_err());
+        assert!(validate_accounted_action_result(
+            root,
+            &policy.replace(
+                "pub(crate) fn settle_failed_semantic_effect(",
+                "pub fn settle_failed_semantic_effect(",
+            ),
+            result,
+            batch,
+        )
+        .is_err());
+        assert!(validate_accounted_action_result(
+            root,
+            &policy.replace(
+                "let failure = refusal.action_failure();",
+                "let failure = SemanticActionFailure::BackendRefused;",
+            ),
+            result,
+            batch,
         )
         .is_err());
     }

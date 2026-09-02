@@ -2777,6 +2777,20 @@ mod tests {
         target: u16,
         effect: SemanticEffectClass,
     ) -> SemanticActionBatch {
+        click_batch_with_wait(
+            observation,
+            target,
+            effect,
+            SemanticWaitCondition::Immediate,
+        )
+    }
+
+    fn click_batch_with_wait(
+        observation: &SemanticObservation,
+        target: u16,
+        effect: SemanticEffectClass,
+        wait: SemanticWaitCondition,
+    ) -> SemanticActionBatch {
         let frames = observation
             .frames()
             .iter()
@@ -2787,7 +2801,7 @@ mod tests {
                 target: SemanticReferenceId::new(target).expect("target"),
             },
             effect,
-            SemanticWaitCondition::Immediate,
+            wait,
             SemanticVerification::TargetState {
                 state: SemanticState::Focused,
                 present: true,
@@ -3304,6 +3318,38 @@ mod tests {
             automation,
             AgentPolicyInstant::from_millis(NOW),
         )
+    }
+
+    fn dispatch_local_effect(
+        fixture: &mut PolicyFixture,
+        action: &SemanticPreparedAction,
+        destination: &SemanticOrigin,
+        binding: AgentContextAccountBinding,
+        automation: ContextAutomationState,
+        effect_id: u64,
+        attempt: u64,
+    ) -> AgentActiveEffect {
+        let assessment = AgentEffectAssessment::new(action, destination.clone(), action.effect());
+        let permit = match fixture
+            .policy
+            .authorize_semantic_effect(
+                effect_request(effect_id, fixture.lease, binding, automation),
+                action,
+                &assessment,
+            )
+            .expect("effect authorization")
+        {
+            AgentEffectAuthorization::Permit(permit) => permit,
+            AgentEffectAuthorization::NeedsHuman(_) => panic!("local effect needed human"),
+        };
+        fixture
+            .policy
+            .dispatch_semantic_effect(
+                permit,
+                action,
+                effect_dispatch_request(attempt, binding, automation),
+            )
+            .expect("effect dispatch")
     }
 
     #[test]
@@ -5992,6 +6038,177 @@ mod tests {
         assert!(!fixture.policy.is_sealed());
         let debug = format!("{:?} {receipt:?} {failed_batch:?}", fixture.policy);
         assert!(!debug.contains("effect.example.test"));
+        assert!(!debug.contains("Save draft"));
+    }
+
+    #[test]
+    fn preverification_refusals_map_and_charge_without_raw_failure_authority() {
+        let source = origin("preverification-failure");
+        let (mut registry, context) = make_context_registry(407, 408, 409);
+        let observation = actionable_observation(context, source.clone(), 1);
+        registry
+            .acknowledge_observation(context.identity().id(), context)
+            .expect("observation current");
+        let automation = registry
+            .automation_state(context.identity().id())
+            .expect("automation state");
+        let binding = account(context, NOW - 1);
+        let mut fixture = policy_fixture(
+            407,
+            408,
+            source.clone(),
+            SemanticSensitivity::Sensitive,
+            &[SemanticEffectClass::Read, SemanticEffectClass::LocalWrite],
+            run_budget(10, 1_000, 10_000),
+        );
+        commit_observation_to_model(&mut fixture.policy, fixture.lease, 1, binding, &observation);
+        let batch = click_batch(&observation, 2, SemanticEffectClass::LocalWrite);
+        let action = batch.actions()[0]
+            .prepare(&observation.frames()[0])
+            .expect("prepared action");
+
+        let active =
+            dispatch_local_effect(&mut fixture, &action, &source, binding, automation, 1, 1);
+        let mut execution_coordinator = crate::SemanticActionExecutionCoordinator::new();
+        let (reservation, native) = execution_coordinator
+            .begin(
+                active,
+                &action,
+                crate::SemanticActionExecutionInstant::from_millis(NOW),
+            )
+            .expect("native admission");
+        drop(native);
+        let outcome = execution_coordinator
+            .refuse(&reservation, SemanticActionFailure::TargetOccluded)
+            .expect("native refusal");
+        let refusal = crate::begin_semantic_action_settlement(outcome, &action)
+            .expect_err("failed execution cannot settle");
+        let failed = fixture
+            .policy
+            .settle_settlement_start_refusal(refusal, &action)
+            .expect("charged native refusal");
+        assert_eq!(
+            failed.receipt().settlement(),
+            AgentEffectSettlement::Failed(SemanticActionFailure::TargetOccluded)
+        );
+        let terminal = crate::SemanticActionBatchExecution::new(&batch)
+            .expect("batch")
+            .fail(&action, failed)
+            .expect("failed terminal");
+        assert_eq!(
+            terminal.failure().expect("failure").stage(),
+            crate::SemanticActionBatchFailureStage::BeforeVerification
+        );
+
+        let active =
+            dispatch_local_effect(&mut fixture, &action, &source, binding, automation, 2, 2);
+        let mut sealed_execution = crate::SemanticActionExecutionCoordinator::new();
+        sealed_execution.seal();
+        let refusal = sealed_execution
+            .begin(
+                active,
+                &action,
+                crate::SemanticActionExecutionInstant::from_millis(NOW),
+            )
+            .expect_err("shutdown admission");
+        let failed = fixture
+            .policy
+            .settle_execution_admission_refusal(refusal, &action)
+            .expect("charged admission refusal");
+        assert_eq!(
+            failed.receipt().settlement(),
+            AgentEffectSettlement::Failed(SemanticActionFailure::BackendRefused)
+        );
+        let admission_terminal = crate::SemanticActionBatchExecution::new(&batch)
+            .expect("batch")
+            .fail(&action, failed)
+            .expect("failed terminal");
+        assert_eq!(
+            admission_terminal.outcome(),
+            crate::SemanticActionBatchOutcome::Failed {
+                ordinal: 1,
+                failure: SemanticActionFailure::BackendRefused,
+                recovery: crate::SemanticActionRecoveryHint::FreshObservationRequired,
+            }
+        );
+
+        let waiting_batch = click_batch_with_wait(
+            &observation,
+            2,
+            SemanticEffectClass::LocalWrite,
+            SemanticWaitCondition::TargetState {
+                state: SemanticState::Focused,
+                present: true,
+            },
+        );
+        let waiting_action = waiting_batch.actions()[0]
+            .prepare(&observation.frames()[0])
+            .expect("waiting action");
+        let active = dispatch_local_effect(
+            &mut fixture,
+            &waiting_action,
+            &source,
+            binding,
+            automation,
+            3,
+            3,
+        );
+        let mut execution_coordinator = crate::SemanticActionExecutionCoordinator::new();
+        let (_reservation, native) = execution_coordinator
+            .begin(
+                active,
+                &waiting_action,
+                crate::SemanticActionExecutionInstant::from_millis(NOW - 20),
+            )
+            .expect("native admission");
+        let actual_geometry = native.expected_geometry();
+        let outcome = execution_coordinator
+            .settle(
+                waiting_action.frame(),
+                native.complete(
+                    crate::SemanticActionExecutionBackend::FixedSemanticRecipe,
+                    crate::SemanticActionNativeReadiness::ExactVisibleUnoccludedTarget,
+                    crate::SemanticActionNativeViewport::try_new(800, 600).expect("viewport"),
+                    actual_geometry,
+                    crate::SemanticActionExecutionInstant::from_millis(NOW - 10),
+                    crate::SemanticActionExecutionInstant::from_millis(NOW),
+                ),
+            )
+            .expect("native settlement");
+        let start = crate::begin_semantic_action_settlement(outcome, &waiting_action)
+            .expect("settlement start");
+        let mut sealed_settlement = crate::SemanticActionSettlementCoordinator::new();
+        sealed_settlement.seal();
+        let refusal = sealed_settlement
+            .begin(start)
+            .expect_err("settlement admission after shutdown");
+        let failed = fixture
+            .policy
+            .settle_settlement_admission_refusal(refusal, &waiting_action)
+            .expect("charged settlement admission refusal");
+        assert_eq!(
+            failed.receipt().settlement(),
+            AgentEffectSettlement::Failed(SemanticActionFailure::BackendRefused)
+        );
+        let settlement_terminal = crate::SemanticActionBatchExecution::new(&waiting_batch)
+            .expect("waiting batch")
+            .fail(&waiting_action, failed)
+            .expect("failed terminal");
+        assert_eq!(
+            settlement_terminal.outcome(),
+            crate::SemanticActionBatchOutcome::Failed {
+                ordinal: 1,
+                failure: SemanticActionFailure::BackendRefused,
+                recovery: crate::SemanticActionRecoveryHint::FreshObservationRequired,
+            }
+        );
+
+        assert_eq!(fixture.policy.pending_effects(), 0);
+        assert_eq!(fixture.policy.accounting().reserved_operations(), 0);
+        assert_eq!(fixture.policy.accounting().consumed_operations(), 4);
+        assert!(!fixture.policy.is_sealed());
+        let debug = format!("{:?}", fixture.policy);
+        assert!(!debug.contains("preverification-failure"));
         assert!(!debug.contains("Save draft"));
     }
 

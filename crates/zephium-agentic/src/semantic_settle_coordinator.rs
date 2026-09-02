@@ -12,9 +12,10 @@ use thiserror::Error;
 
 use crate::semantic_execute::SemanticActionCoordinatorKey;
 use crate::{
-    AgentActiveEffect, SemanticActionExecutionApplied, SemanticActionSettlementStart,
-    SemanticSettleError, SemanticSettleEvent, SemanticSettleFact, SemanticSettleInstant,
-    SemanticSettleStatus, SemanticSettleTracker, SemanticSnapshot, MAX_AGENT_PENDING_EFFECTS,
+    AgentActiveEffect, SemanticActionExecutionApplied, SemanticActionFailure,
+    SemanticActionSettlementStart, SemanticSettleError, SemanticSettleEvent, SemanticSettleFact,
+    SemanticSettleInstant, SemanticSettleStatus, SemanticSettleTracker, SemanticSnapshot,
+    MAX_AGENT_PENDING_EFFECTS,
 };
 
 /// Process-wide ceiling for applied actions awaiting independent verification.
@@ -111,7 +112,7 @@ impl SemanticActionSettlementTerminal {
     }
 
     /// Separates terminal policy authority, execution metrics, and verification state.
-    pub fn into_parts(
+    pub(crate) fn into_parts(
         self,
     ) -> (
         AgentActiveEffect,
@@ -383,26 +384,33 @@ impl SemanticActionSettlementAdmissionRefusal {
         self.error
     }
 
+    /// Closed action failure derived from this exact consuming refusal.
+    pub const fn action_failure(&self) -> SemanticActionFailure {
+        match self.error {
+            SemanticActionSettlementCoordinatorError::ContextBusy
+            | SemanticActionSettlementCoordinatorError::Capacity => {
+                SemanticActionFailure::ResourceExhausted
+            }
+            SemanticActionSettlementCoordinatorError::DuplicateSettlement
+            | SemanticActionSettlementCoordinatorError::Shutdown
+            | SemanticActionSettlementCoordinatorError::UnknownSettlement
+            | SemanticActionSettlementCoordinatorError::ReservationMismatch
+            | SemanticActionSettlementCoordinatorError::ScheduleMismatch
+            | SemanticActionSettlementCoordinatorError::PrematureWake
+            | SemanticActionSettlementCoordinatorError::Settlement(_) => {
+                SemanticActionFailure::BackendRefused
+            }
+        }
+    }
+
     /// Recovers applied policy authority and the bounded tracker.
-    pub fn into_parts(
+    pub(crate) fn into_parts(
         self,
     ) -> (
         SemanticActionSettlementStart,
         SemanticActionSettlementCoordinatorError,
     ) {
         (*self.start, self.error)
-    }
-
-    /// Consumes the refused tracker and recovers authority for terminal policy charging.
-    pub fn into_authority(
-        self,
-    ) -> (
-        AgentActiveEffect,
-        SemanticActionExecutionApplied,
-        SemanticActionSettlementCoordinatorError,
-    ) {
-        let (active, execution, _tracker) = self.start.into_parts();
-        (active, execution, self.error)
     }
 }
 
@@ -919,6 +927,10 @@ mod tests {
             duplicate.error(),
             SemanticActionSettlementCoordinatorError::DuplicateSettlement
         );
+        assert_eq!(
+            duplicate.action_failure(),
+            SemanticActionFailure::BackendRefused
+        );
         assert_eq!(duplicate.into_parts().0.active().attempt().get(), 100);
 
         let mut reservations = vec![first];
@@ -944,6 +956,10 @@ mod tests {
             overflow.error(),
             SemanticActionSettlementCoordinatorError::Capacity
         );
+        assert_eq!(
+            overflow.action_failure(),
+            SemanticActionFailure::ResourceExhausted
+        );
         assert_eq!(overflow.into_parts().0.active().attempt().get(), 800);
 
         assert_eq!(
@@ -959,6 +975,10 @@ mod tests {
         assert_eq!(
             shutdown.error(),
             SemanticActionSettlementCoordinatorError::Shutdown
+        );
+        assert_eq!(
+            shutdown.action_failure(),
+            SemanticActionFailure::BackendRefused
         );
         assert_eq!(shutdown.into_parts().0.active().attempt().get(), 900);
 

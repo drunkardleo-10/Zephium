@@ -542,6 +542,19 @@ time as the settle start. A typed execution failure, contract violation, action
 substitution, or deadline overflow returns the retained policy authority and
 creates no tracker, timer, worker, or retry path.
 
+Shipping code cannot split that authority through the raw preparation helper
+or destructure an execution outcome, execution-admission refusal,
+native-to-settlement refusal, settlement terminal, or settlement-admission
+refusal. Those escape hatches are crate-private. The bounded execution and
+settlement coordinators are the only public admission owners, and run policy
+consumes each complete refusal directly. The refusal itself selects the closed
+action failure: exact native failures remain exact, missing fresh geometry maps
+to target change, capacity/context contention maps to resource exhaustion, and
+contract, shutdown, replay, or internal routing violations fail as backend
+refusal. A caller therefore cannot relabel one failed attempt before charging
+or batch terminalization. Pre-verification refusal charging retains no page
+evidence, creates no retry authority, and allocates no evidence box.
+
 Pending settlement is retained by one zero-idle single-owner coordinator. Its
 empty vector allocates nothing; it admits at most four applied actions and one
 per logical context. Each accepted fact or borrowed snapshot consumes a

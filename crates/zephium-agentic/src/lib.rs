@@ -292,22 +292,24 @@ pub use semantic_diff_model::{
     SemanticDiffModelPayload, SemanticEncodedDiff, SEMANTIC_DIFF_MODEL_SCHEMA_VERSION,
 };
 pub use semantic_execute::{
-    begin_semantic_action_settlement, prepare_semantic_action_execution,
-    SemanticActionExecutionApplied, SemanticActionExecutionBackend,
-    SemanticActionExecutionContractError, SemanticActionExecutionDisposition,
-    SemanticActionExecutionInstant, SemanticActionExecutionOutcome, SemanticActionExecutionPending,
-    SemanticActionExecutionPreparationError, SemanticActionExecutionRefusal,
+    begin_semantic_action_settlement, SemanticActionExecutionApplied,
+    SemanticActionExecutionBackend, SemanticActionExecutionContractError,
+    SemanticActionExecutionDisposition, SemanticActionExecutionInstant,
+    SemanticActionExecutionOutcome, SemanticActionExecutionPreparationError,
     SemanticActionNativeFailure, SemanticActionNativeReadiness, SemanticActionNativeRequest,
     SemanticActionNativeSettlement, SemanticActionNativeTargetId, SemanticActionNativeViewport,
     SemanticActionNativeViewportError, SemanticActionSettlementRefusal,
     SemanticActionSettlementStart, SemanticActionSettlementStartError,
     MAX_SEMANTIC_ACTION_NATIVE_EXECUTION_MILLIS, MAX_SEMANTIC_ACTION_VIEWPORT_DIMENSION,
 };
+pub(crate) use semantic_execute::{
+    prepare_semantic_action_execution, SemanticActionExecutionPending,
+};
 pub use semantic_execute_coordinator::{
-    semantic_action_dispatch_failure, SemanticActionExecutionCoordinator,
-    SemanticActionExecutionCoordinatorError, SemanticActionExecutionCoordinatorRefusal,
-    SemanticActionExecutionCoordinatorStatus, SemanticActionExecutionDispatch,
-    SemanticActionExecutionReservation, MAX_PENDING_SEMANTIC_ACTION_EXECUTIONS,
+    SemanticActionExecutionCoordinator, SemanticActionExecutionCoordinatorError,
+    SemanticActionExecutionCoordinatorRefusal, SemanticActionExecutionCoordinatorStatus,
+    SemanticActionExecutionDispatch, SemanticActionExecutionReservation,
+    MAX_PENDING_SEMANTIC_ACTION_EXECUTIONS,
 };
 pub use semantic_extract::{
     extract_delivered_semantic_read, extract_semantic_read, SemanticExtractedBoolean,

@@ -176,9 +176,11 @@ browser action, model call, tool call, data transfer, cost, or native resource.
   ambiguous accounting.
 - Success settlement requires the exact non-cloneable active effect and a real
   independent `SemanticVerifiedAction` proof for the same prepared action and
-  attempt. Failure settlement uses only the existing closed semantic failure
-  taxonomy. Public diagnostics and receipts remain content-free and redact
-  origins, account state, action guards, and page values.
+  attempt. Pre-verification failure settlement consumes the exact opaque
+  execution/settlement refusal and derives its closed failure internally; the
+  raw caller-selected method is crate-private. Verification refusal likewise
+  maps its exact error once. Public diagnostics and receipts remain content-free
+  and redact origins, account state, action guards, and page values.
 - This is an allocation-only functional core with no idle task, timer, queue,
   worker, provider, page, native view, or native input. The only persistent
   additions are bounded policy rows and content-free provenance.
