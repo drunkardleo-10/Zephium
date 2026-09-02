@@ -1102,18 +1102,17 @@ impl AgentRunSupervisor {
 
     fn finalize_drained_cancellations(&mut self) {
         loop {
-            let candidate = self.nodes.iter().position(|row| {
-                matches!(
-                    row.state,
-                    NodeState::Cancelling(CancellingState { running: None, .. })
-                ) && !self.has_live_descendant(row.node)
-                    && !self.has_assigned_context(row.node)
+            let candidate = self.nodes.iter().enumerate().find_map(|(index, row)| {
+                let NodeState::Cancelling(cancelling) = row.state else {
+                    return None;
+                };
+                (cancelling.running.is_none()
+                    && !self.has_live_descendant(row.node)
+                    && !self.has_assigned_context(row.node))
+                .then_some((index, cancelling))
             });
-            let Some(index) = candidate else {
+            let Some((index, cancelling)) = candidate else {
                 return;
-            };
-            let NodeState::Cancelling(cancelling) = self.nodes[index].state else {
-                unreachable!("candidate was proven cancelling");
             };
             let node = self.nodes[index].node;
             let activity = self.nodes[index].progress.activity();

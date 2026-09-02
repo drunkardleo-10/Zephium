@@ -469,10 +469,14 @@ agentic-owned Windows modules. Cross-compilation is not device behavior.
   audit events and derives observed initial-queue, model, effect, human-wait,
   and root elapsed durations, closed `NeedsHuman` counts, distinct human-
   takeover cancellations, and the root terminal outcome. Event/revision/time
-  replay, skipped operation starts, and invalid node sequences are rejected
-  without partial logical mutation. Unobserved durations remain absent. The
-  reducer retains no site/platform/resource labels and no sample distribution;
-  exact medians and percentiles still require the qualification harness.
+  replay, skipped operation starts, an open model/effect at supervisor terminal,
+  and invalid node sequences are rejected without partial logical mutation.
+  Validated vector insertions and drained-cancellation matches carry their
+  proven values into mutation rather than re-matching through an `unreachable!`
+  process-termination branch; source-gate mutations pin both properties.
+  Unobserved durations remain absent. The reducer retains no
+  site/platform/resource labels and no sample distribution; exact medians and
+  percentiles still require the qualification harness.
 - A separate optional run-local action-performance reducer now borrows exact
   immutable batch terminals and derives complete/stopped/failed batch counts,
   verified and typed failed action counts, all three closed backend counts,

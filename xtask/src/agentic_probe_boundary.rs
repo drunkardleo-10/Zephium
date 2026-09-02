@@ -63,6 +63,7 @@ const AGENTIC_CONTEXT_REGISTRY: &str = "crates/zephium-agentic/src/context_regis
 const AGENTIC_COOKIE_TRANSFER: &str = "crates/zephium-agentic/src/cookie_transfer.rs";
 const AGENTIC_PROFILE_LEASE: &str = "crates/zephium-agentic/src/profile_lease.rs";
 const AGENTIC_SUPERVISOR: &str = "crates/zephium-agentic/src/agent_supervisor.rs";
+const AGENTIC_SUPERVISOR_RUNTIME: &str = "crates/zephium-agentic/src/agent_supervisor/runtime.rs";
 const AGENTIC_SUPERVISOR_PROGRESS: &str =
     "crates/zephium-agentic/src/agent_supervisor/runtime/progress.rs";
 const AGENTIC_SUPERVISOR_CONTEXT_SCHEDULE: &str =
@@ -225,6 +226,9 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         &read(repository.join(AGENTIC_PROGRESS_METRICS))?,
         &read(repository.join(AGENTIC_AUDIT))?,
     )?;
+    validate_agent_supervisor_cancellation_finalization(&read(
+        repository.join(AGENTIC_SUPERVISOR_RUNTIME),
+    )?)?;
     validate_agent_metric_closure_contract(
         &read(repository.join(AGENTIC_ROOT))?,
         &read(repository.join(AGENTIC_METRIC_CLOSURE))?,
@@ -3890,6 +3894,9 @@ fn validate_agent_progress_metrics_contract(
         "self.active_models.try_reserve_exact(1)",
         "self.active_effects.try_reserve_exact(1)",
         "self.takeover_cancellations.try_reserve_exact(1)",
+        "self.active_models.iter().any(|active|active.node==node)||self.active_effects.iter().any(|active|active.node==node)",
+        "VectorAction::Insert(index,active)=>self.active_models.insert(index,active)",
+        "VectorAction::Insert(index,active)=>self.active_effects.insert(index,active)",
         "MAX_AGENT_PENDING_MODEL_CALLS",
         "MAX_AGENT_PENDING_EFFECTS",
         "MAX_AGENT_PLAN_NODES",
@@ -3912,6 +3919,7 @@ fn validate_agent_progress_metrics_contract(
         "DeserializeforAgentRunProgressMetrics",
         "std::time::Instant",
         "std::time::SystemTime",
+        "unreachable!",
     ] {
         if metrics.contains(forbidden) {
             return Err(format!(
@@ -3930,6 +3938,32 @@ fn validate_agent_progress_metrics_contract(
                 "canonical audit events lost their private revision seal {required}"
             ));
         }
+    }
+    Ok(())
+}
+
+fn validate_agent_supervisor_cancellation_finalization(source: &str) -> Result<(), String> {
+    let production = source
+        .split_once("\n#[cfg(test)]\nmod tests")
+        .map_or(source, |(production, _)| production);
+    let production = compact(production);
+    for required in [
+        "self.nodes.iter().enumerate().find_map(|(index,row)|",
+        "letNodeState::Cancelling(cancelling)=row.stateelse{returnNone;}",
+        ".then_some((index,cancelling))",
+        "letSome((index,cancelling))=candidateelse{return;};",
+    ] {
+        if !production.contains(required) {
+            return Err(format!(
+                "agent supervisor cancellation finalization lost its proven-state carry {required}"
+            ));
+        }
+    }
+    if production.contains("unreachable!") {
+        return Err(
+            "agent supervisor cancellation finalization regained a process-terminating invariant branch"
+                .to_owned(),
+        );
     }
     Ok(())
 }
@@ -9902,6 +9936,15 @@ mod tests {
                 self.active_models.try_reserve_exact(1);
                 self.active_effects.try_reserve_exact(1);
                 self.takeover_cancellations.try_reserve_exact(1);
+                if self.active_models.iter().any(|active| active.node == node)
+                    || self.active_effects.iter().any(|active| active.node == node)
+                {}
+                match model_action {
+                    VectorAction::Insert(index, active) => self.active_models.insert(index, active),
+                }
+                match effect_action {
+                    VectorAction::Insert(index, active) => self.active_effects.insert(index, active),
+                }
             }
             pub const fn snapshot(&self) -> AgentRunProgressSnapshot {}
             pub const fn queue_wait(self) -> Option<AgentDurationMetrics> {}
@@ -9938,6 +9981,36 @@ mod tests {
         )
         .is_err());
         assert!(validate_agent_progress_metrics_contract(root, metrics, "").is_err());
+        assert!(validate_agent_progress_metrics_contract(
+            root,
+            &metrics.replace(
+                "self.active_models.iter().any(|active| active.node == node)",
+                "false",
+            ),
+            audit,
+        )
+        .is_err());
+        assert!(validate_agent_progress_metrics_contract(
+            root,
+            &format!("{metrics}\nunreachable!();"),
+            audit,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn supervisor_cancellation_finalization_carries_its_proven_variant() {
+        let runtime = include_str!("../../crates/zephium-agentic/src/agent_supervisor/runtime.rs");
+        validate_agent_supervisor_cancellation_finalization(runtime)
+            .expect("fail-closed cancellation finalization");
+
+        for invalid in [
+            runtime.replace(".enumerate().find_map(|(index, row)|", ".position(|row|"),
+            runtime.replace(".then_some((index, cancelling))", ".then_some(index)"),
+            format!("{runtime}\nunreachable!();"),
+        ] {
+            assert!(validate_agent_supervisor_cancellation_finalization(&invalid).is_err());
+        }
     }
 
     #[test]

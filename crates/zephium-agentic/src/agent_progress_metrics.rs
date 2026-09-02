@@ -253,9 +253,9 @@ enum ProjectionKind {
 }
 
 #[derive(Clone, Copy)]
-enum VectorAction {
+enum VectorAction<T> {
     None,
-    Insert(usize),
+    Insert(usize, T),
     Remove(usize),
 }
 
@@ -450,7 +450,14 @@ impl AgentRunProgressMetrics {
                 if self.active_models.len() >= MAX_AGENT_PENDING_MODEL_CALLS {
                     return Err(AgentProgressMetricError::ActiveLimit);
                 }
-                model_action = VectorAction::Insert(index);
+                model_action = VectorAction::Insert(
+                    index,
+                    ActiveModelMetric {
+                        id,
+                        node,
+                        started_at: recorded_at,
+                    },
+                );
             }
             ProjectionKind::ModelTerminal(id) => {
                 let index = self
@@ -476,7 +483,14 @@ impl AgentRunProgressMetrics {
                 if self.active_effects.len() >= MAX_AGENT_PENDING_EFFECTS {
                     return Err(AgentProgressMetricError::ActiveLimit);
                 }
-                effect_action = VectorAction::Insert(index);
+                effect_action = VectorAction::Insert(
+                    index,
+                    ActiveEffectMetric {
+                        id,
+                        node,
+                        started_at: recorded_at,
+                    },
+                );
             }
             ProjectionKind::EffectTerminal(id) => {
                 let index = self
@@ -496,6 +510,11 @@ impl AgentRunProgressMetrics {
                 next_node.human_wait_at = Some(recorded_at);
             }
             ProjectionKind::SupervisorTerminal(outcome) => {
+                if self.active_models.iter().any(|active| active.node == node)
+                    || self.active_effects.iter().any(|active| active.node == node)
+                {
+                    return Err(AgentProgressMetricError::OperationSequence);
+                }
                 next_node.terminal = true;
                 next_node.queued_at = None;
                 next_terminal_nodes = next_terminal_nodes
@@ -525,12 +544,12 @@ impl AgentRunProgressMetrics {
             | ProjectionKind::Other => {}
         }
 
-        if matches!(model_action, VectorAction::Insert(_)) {
+        if matches!(model_action, VectorAction::Insert(_, _)) {
             self.active_models
                 .try_reserve_exact(1)
                 .map_err(|_| AgentProgressMetricError::Capacity)?;
         }
-        if matches!(effect_action, VectorAction::Insert(_)) {
+        if matches!(effect_action, VectorAction::Insert(_, _)) {
             self.active_effects
                 .try_reserve_exact(1)
                 .map_err(|_| AgentProgressMetricError::Capacity)?;
@@ -546,41 +565,17 @@ impl AgentRunProgressMetrics {
 
         match model_action {
             VectorAction::None => {}
-            VectorAction::Insert(index) => self.active_models.insert(
-                index,
-                ActiveModelMetric {
-                    id: match projection {
-                        ProjectionKind::ModelActive(id) => id,
-                        _ => unreachable!("insert action requires active model projection"),
-                    },
-                    node,
-                    started_at: recorded_at,
-                },
-            ),
+            VectorAction::Insert(index, active) => self.active_models.insert(index, active),
             VectorAction::Remove(index) => {
                 self.active_models.remove(index);
             }
         }
         match effect_action {
             VectorAction::None => {}
-            VectorAction::Insert(index) => self.active_effects.insert(
-                index,
-                ActiveEffectMetric {
-                    id: match projection {
-                        ProjectionKind::EffectActive(id) => id,
-                        _ => unreachable!("insert action requires active effect projection"),
-                    },
-                    node,
-                    started_at: recorded_at,
-                },
-            ),
+            VectorAction::Insert(index, active) => self.active_effects.insert(index, active),
             VectorAction::Remove(index) => {
                 self.active_effects.remove(index);
             }
-        }
-        if matches!(projection, ProjectionKind::SupervisorTerminal(_)) {
-            self.active_models.retain(|active| active.node != node);
-            self.active_effects.retain(|active| active.node != node);
         }
         if let Some((index, cancellation)) = takeover_insert {
             self.takeover_cancellations.insert(index, cancellation);
@@ -1314,6 +1309,100 @@ mod tests {
             metrics.snapshot().model().expect("model").total_millis(),
             20
         );
+    }
+
+    #[test]
+    fn supervisor_terminal_with_an_active_operation_is_refused_without_mutation() {
+        let manifest = make_manifest(6, 100, false);
+        let root = AgentPlanNodeId::from_raw(1);
+        let mut supervisor = make_supervisor(&manifest, 6, false);
+        let mut ledger = AgentAuditLedger::try_new(&manifest, &supervisor).expect("ledger");
+        let mut metrics =
+            AgentRunProgressMetrics::try_new(&manifest, &supervisor).expect("metrics");
+        record(&mut ledger, &mut metrics, &supervisor, root, 1, 100);
+        let execution = supervisor.start(root, attempt(1)).expect("start");
+        record(&mut ledger, &mut metrics, &supervisor, root, 2, 110);
+
+        let active = AgentActiveModelCall::for_progress_test(
+            &manifest,
+            AgentModelCallId::new(1).expect("model"),
+            AgentPlanLeaseId::from_raw(10),
+            root,
+        );
+        supervisor
+            .record_active_model_call(&execution, &active)
+            .expect("active model");
+        record(&mut ledger, &mut metrics, &supervisor, root, 3, 120);
+        let before = metrics.snapshot();
+        assert_eq!(metrics.active_models.len(), 1);
+
+        supervisor
+            .complete(execution, AgentSupervisorCompletion::Succeeded)
+            .expect("complete supervisor");
+        let terminal = ledger
+            .record_current(
+                &supervisor,
+                root,
+                event(4),
+                AgentPolicyInstant::from_millis(130),
+            )
+            .expect("canonical supervisor terminal");
+        assert_eq!(
+            metrics
+                .record_event(terminal)
+                .expect_err("active operation must block terminal metrics"),
+            AgentProgressMetricError::OperationSequence
+        );
+        assert_eq!(metrics.snapshot(), before);
+        assert_eq!(metrics.active_models.len(), 1);
+    }
+
+    #[test]
+    fn supervisor_terminal_with_an_active_effect_is_refused_without_mutation() {
+        let manifest = make_manifest(7, 100, false);
+        let root = AgentPlanNodeId::from_raw(1);
+        let mut supervisor = make_supervisor(&manifest, 7, false);
+        let mut ledger = AgentAuditLedger::try_new(&manifest, &supervisor).expect("ledger");
+        let mut metrics =
+            AgentRunProgressMetrics::try_new(&manifest, &supervisor).expect("metrics");
+        record(&mut ledger, &mut metrics, &supervisor, root, 1, 100);
+        let execution = supervisor.start(root, attempt(1)).expect("start");
+        record(&mut ledger, &mut metrics, &supervisor, root, 2, 110);
+
+        let active = AgentActiveEffect::for_progress_test(
+            &manifest,
+            AgentEffectId::new(1).expect("effect"),
+            AgentPlanLeaseId::from_raw(10),
+            root,
+            SemanticEffectClass::Read,
+            SemanticActionAttemptId::new(1).expect("action attempt"),
+        );
+        supervisor
+            .record_active_effect(&execution, &active)
+            .expect("active effect");
+        record(&mut ledger, &mut metrics, &supervisor, root, 3, 120);
+        let before = metrics.snapshot();
+        assert_eq!(metrics.active_effects.len(), 1);
+
+        supervisor
+            .complete(execution, AgentSupervisorCompletion::Succeeded)
+            .expect("complete supervisor");
+        let terminal = ledger
+            .record_current(
+                &supervisor,
+                root,
+                event(4),
+                AgentPolicyInstant::from_millis(130),
+            )
+            .expect("canonical supervisor terminal");
+        assert_eq!(
+            metrics
+                .record_event(terminal)
+                .expect_err("active effect must block terminal metrics"),
+            AgentProgressMetricError::OperationSequence
+        );
+        assert_eq!(metrics.snapshot(), before);
+        assert_eq!(metrics.active_effects.len(), 1);
     }
 
     #[test]

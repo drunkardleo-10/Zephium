@@ -992,15 +992,21 @@ clock. If the reducer is not constructed, it has zero runtime state or work.
 Run progress measurement is a separate explicitly constructed streaming
 functional reducer. It accepts only canonical semantic audit events sealed to
 the exact manifest revision and supervisor, rejects event/time replay and
-invalid node or operation sequences without partial mutation, and retains at
-most the manifest topology, four active model calls, four active effects, and
-one cancellation identity per topology node. It derives only observed initial
-queue, model, effect, `NeedsHuman`, and root queued-to-terminal durations from
-the audit event's trusted monotonic timestamp, plus closed human-pause counts,
-distinct takeover cancellations, and the root outcome. Unobserved and still
-open durations are `None`, never synthetic zeroes. It owns no clock, telemetry
-or persistence port, task, worker, channel, browser context, or native
-resource; if it is not constructed, it has zero runtime state or work.
+invalid node or operation sequences without partial mutation, and refuses a
+supervisor terminal while that node still has an observed active model call or
+effect instead of silently discarding the open duration. Its transactional
+vector mutations carry the already-validated operation row, and cancellation
+finalization carries the matched cancelling variant; neither path re-matches a
+mutable projection through a process-terminating invariant branch. The reducer
+retains at most the manifest topology, four active model calls, four active
+effects, and one cancellation identity per topology node. It derives only
+observed initial queue, model, effect, `NeedsHuman`, and root queued-to-terminal
+durations from the audit event's trusted monotonic timestamp, plus closed
+human-pause counts, distinct takeover cancellations, and the root outcome.
+Unobserved and still open durations are `None`, never synthetic zeroes. It owns
+no clock, telemetry or persistence port, task, worker, channel, browser
+context, or native resource; if it is not constructed, it has zero runtime
+state or work.
 
 ## 12. Probe and test harness
 
