@@ -4227,6 +4227,10 @@ fn validate_provider_transport_response_header_boundary(source: &str) -> Result<
         ".checked_add(HTTP_HEADER_FIELD_OVERHEAD_BYTES)",
         "usize::try_from(MAX_AGENT_PROVIDER_RESPONSE_HEADER_BYTES)",
         "if!response_headers_admitted(response.headers())",
+        "fnresponse_content_length_admitted(headers:&HeaderMap,max_wire_bytes:u32)->bool",
+        "headers.get_all(CONTENT_LENGTH).iter()",
+        "declared<=u64::from(max_wire_bytes)",
+        "if!response_content_length_admitted(response.headers(),config.stream_budget().max_wire_bytes(),)",
     ] {
         if !source.contains(required) {
             return Err(format!(
@@ -4243,9 +4247,12 @@ fn validate_provider_transport_response_header_boundary(source: &str) -> Result<
     let body = source
         .find("letmutstream=response.bytes_stream()")
         .ok_or_else(|| "provider response body stream is missing".to_owned())?;
-    if !(header_check < status && status < body) {
+    let content_length = source
+        .find("if!response_content_length_admitted(response.headers(),config.stream_budget().max_wire_bytes(),)")
+        .ok_or_else(|| "provider response content-length admission is missing".to_owned())?;
+    if !(header_check < status && status < content_length && content_length < body) {
         return Err(
-            "provider response headers must be bounded before status and body processing"
+            "provider response headers and declared body must be bounded before body processing"
                 .to_owned(),
         );
     }
@@ -9688,6 +9695,16 @@ mod tests {
             root.replacen(
                 "        if response.status() != StatusCode::OK {",
                 "        if !response_headers_admitted(response.headers()) {",
+                1,
+            ),
+            root.replacen(
+                "        if !response_content_length_admitted(\n            response.headers(),\n            config.stream_budget().max_wire_bytes(),\n        ) || !response_encoding_admitted(response.headers())",
+                "        if !response_encoding_admitted(response.headers())",
+                1,
+            ),
+            root.replacen(
+                "        .is_some_and(|declared| declared <= u64::from(max_wire_bytes))",
+                "        .is_some()",
                 1,
             ),
         ] {

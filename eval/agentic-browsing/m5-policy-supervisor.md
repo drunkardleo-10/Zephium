@@ -617,8 +617,10 @@ browser action, model call, tool call, data transfer, cost, or native resource.
   every response before status, retry-hint, content-type, or body processing,
   including HTTP/1 fallback where pinned reqwest does not expose Hyper's
   receive-buffer setting. Name bytes, value bytes, and the protocol-defined
-  32-byte per-field overhead use checked arithmetic. At most four admitted
-  attempts exist. A slot is acquired before semantic
+  32-byte per-field overhead use checked arithmetic. A successful response's
+  optional `Content-Length` is accepted only when it is singular, canonical,
+  and no larger than that exact call's wire budget before body streaming.
+  At most four admitted attempts exist. A slot is acquired before semantic
   disclosure commits, is released on every terminal path, and seals the shared
   transport if a committed attempt is abandoned.
 - A zero-active snapshot is explicitly `idle`, not terminal: admission remains

@@ -770,7 +770,10 @@ limit before decode and rechecks the decoded field list with checked
 name/value/per-field-overhead accounting before status, retry-hint,
 content-type, or body processing. That second protocol-neutral check also
 covers an HTTP/1 fallback, whose receive-buffer ceiling is not exposed by the
-pinned reqwest builder. The HTTP client disables even library-default
+pinned reqwest builder. Before streaming a successful response, the transport
+also rejects a duplicate, non-canonical, or over-budget `Content-Length`;
+absence remains valid for SSE, and incremental decoding still enforces the
+same exact per-call wire ceiling. The HTTP client disables even library-default
 protocol-NACK retries; any future retry requires a new call identity and policy
 admission. A committed attempt proven not to have polled the HTTP send future
 settles exact zero provider usage and cost while retaining its already-committed

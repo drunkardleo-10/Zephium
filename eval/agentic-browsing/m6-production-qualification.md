@@ -60,7 +60,9 @@ responses, machine-local paths, or native traces.
   checked pass accounts every decoded field's name, value, and 32-byte
   protocol overhead before status, retry-hint, content-type, or body handling.
   This second pass includes HTTP/1 fallback, for which pinned reqwest exposes no
-  Hyper receive-buffer control. Exact-limit/over-limit tests and source-order
+  Hyper receive-buffer control. Successful responses also refuse a duplicate,
+  non-canonical, or exact-call-over-budget `Content-Length` before streaming,
+  while allowing omission for SSE. Exact-limit/over-limit tests and source-order
   mutations make the accepted response boundary explicit; and
 - distinguishes an observationally idle provider transport from shutdown
   quiescence, which requires both its sticky cancellation/admission seal and
@@ -300,7 +302,10 @@ agentic-owned Windows modules. Cross-compilation is not device behavior.
   additional field beyond the exact ceiling. Pinned reqwest/Hyper source shows
   that HTTP/1 may allocate within Hyper's larger internal receive ceiling
   before this check; this change makes accepted processing bounded but does not
-  claim a smaller pre-parser HTTP/1 allocation or live-provider behavior.
+  claim a smaller pre-parser HTTP/1 allocation or live-provider behavior. A
+  declared successful-response body now also fails before streaming if its
+  `Content-Length` is duplicated, non-canonical, or above the per-call SSE wire
+  ceiling.
 - Profile retention can no longer end from a copied lease alone. The bounded
   profile registry requires the exact supervisor cleanup receipt for that
   context. A never-started row must be registry-cancelled; an owned context must

@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use futures_util::TryStreamExt;
 use reqwest::header::{
     HeaderMap, HeaderName, HeaderValue, ACCEPT, ACCEPT_ENCODING, AUTHORIZATION, CACHE_CONTROL,
-    CONTENT_ENCODING, CONTENT_TYPE, RETRY_AFTER,
+    CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, RETRY_AFTER,
 };
 use reqwest::redirect::Policy;
 use reqwest::{Client, StatusCode, Url};
@@ -1586,7 +1586,10 @@ impl AgentProviderAttempt {
                 slot,
             );
         }
-        if !response_encoding_admitted(response.headers())
+        if !response_content_length_admitted(
+            response.headers(),
+            config.stream_budget().max_wire_bytes(),
+        ) || !response_encoding_admitted(response.headers())
             || !response_content_type_admitted(response.headers())
         {
             return finish_attempt(
@@ -1878,6 +1881,33 @@ fn response_encoding_admitted(headers: &HeaderMap) -> bool {
         (Some(value), None) => value.as_bytes().eq_ignore_ascii_case(b"identity"),
         _ => false,
     }
+}
+
+/// Refuses a declared success body larger than this exact call's wire budget
+/// before the response body stream can allocate or yield any bytes. Streaming
+/// responses may omit the field, but an ambiguous, non-canonical, or duplicate
+/// declaration is never trusted as a resource bound.
+fn response_content_length_admitted(headers: &HeaderMap, max_wire_bytes: u32) -> bool {
+    let mut values = headers.get_all(CONTENT_LENGTH).iter();
+    let bytes = match (values.next(), values.next()) {
+        (None, None) => return true,
+        (Some(value), None) => value.as_bytes(),
+        _ => return false,
+    };
+    if bytes.is_empty()
+        || (bytes.len() > 1 && bytes[0] == b'0')
+        || !bytes.iter().all(u8::is_ascii_digit)
+    {
+        return false;
+    }
+    bytes
+        .iter()
+        .try_fold(0_u64, |value, byte| {
+            value
+                .checked_mul(10)?
+                .checked_add(u64::from(byte.saturating_sub(b'0')))
+        })
+        .is_some_and(|declared| declared <= u64::from(max_wire_bytes))
 }
 
 fn response_content_type_admitted(headers: &HeaderMap) -> bool {
@@ -2916,6 +2946,23 @@ mod tests {
         assert!(response_headers_admitted(&bounded_headers));
         bounded_headers.append(field_name, HeaderValue::from_static("b"));
         assert!(!response_headers_admitted(&bounded_headers));
+
+        let mut declared_body = HeaderMap::new();
+        assert!(response_content_length_admitted(&declared_body, 1_024));
+        declared_body.insert(CONTENT_LENGTH, HeaderValue::from_static("1024"));
+        assert!(response_content_length_admitted(&declared_body, 1_024));
+        declared_body.insert(CONTENT_LENGTH, HeaderValue::from_static("1025"));
+        assert!(!response_content_length_admitted(&declared_body, 1_024));
+        for invalid in ["", "00", "01", "+1", "1_024", "18446744073709551616"] {
+            declared_body.insert(
+                CONTENT_LENGTH,
+                HeaderValue::from_str(invalid).expect("syntactically valid header value"),
+            );
+            assert!(!response_content_length_admitted(&declared_body, 1_024));
+        }
+        declared_body.insert(CONTENT_LENGTH, HeaderValue::from_static("1"));
+        declared_body.append(CONTENT_LENGTH, HeaderValue::from_static("1"));
+        assert!(!response_content_length_admitted(&declared_body, 1_024));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
