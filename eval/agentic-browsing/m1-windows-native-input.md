@@ -162,10 +162,16 @@ key-up messages to acquire inconsistent scan metadata.
   fixed ignored filenames, direct regular files, exact response/run identity,
   exact matrix order and capability inventory, and one identical runtime
   fingerprint. It emits one content-free aggregate and never echoes raw records
-  or paths. Its exact `--write-summary` option creates the fixed UTF-8 summary
-  file and refuses to replace an existing result. Directory, input-record, and
-  output preflights reject every Windows reparse point rather than relying on
-  `FileType::is_symlink`, which is insufficient for NTFS junctions.
+  or paths. The qualifier also rejoins all three coarse focus-owner samples to
+  the exact presentation: hidden/background rows must begin and remain external,
+  while an explicitly authorized focused row must begin and remain in the probe
+  host; only an independently observed target DOM-focus event may change the
+  final owner to the fixture target. A contradictory record fails even if its
+  focus-theft Booleans were cleared. Its exact `--write-summary` option creates
+  the fixed UTF-8 summary file and refuses to replace an existing result.
+  Directory, input-record, and output preflights reject every Windows reparse
+  point rather than relying on `FileType::is_symlink`, which is insufficient
+  for NTFS junctions.
 
 ## Compile evidence and physical run path
 

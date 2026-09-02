@@ -5,8 +5,8 @@ use thiserror::Error;
 
 use crate::{
     BackendAvailability, BackendCapability, CaseEvidence, CaseOutcome, EvidenceValidationError,
-    FixtureCase, GateOutcome, InputBackend, InputEventKind, Platform, PresentationState,
-    RunEvidence, RunMatrixRequest,
+    FixtureCase, FocusOwner, GateOutcome, InputBackend, InputEventKind, Platform,
+    PresentationState, RunEvidence, RunMatrixRequest,
 };
 
 /// Fixed fixture order used by every Windows qualification mode.
@@ -300,7 +300,10 @@ pub fn qualify_windows_probe_evidence(
         {
             return Err(WindowsProbeQualificationError::Matrix);
         }
-        if actual.focus.browse_focus_was_stolen || actual.focus.probe_host_became_key {
+        if actual.focus.browse_focus_was_stolen
+            || actual.focus.probe_host_became_key
+            || !focus_sequence_matches_presentation(actual.focus, mode.presentation())
+        {
             return Err(WindowsProbeQualificationError::Focus);
         }
         if actual.resources_before.native_views != 1
@@ -464,6 +467,27 @@ fn activation_observed(activation: &crate::ActivationEvidence) -> bool {
         || activation.has_been_active
 }
 
+/// Rejoins the coarse serialized focus owners to the exact native projection
+/// emitted by the Windows adapter. Hidden/background rows start and remain
+/// outside the probe's native subtree; explicitly focused rows start and
+/// remain in it. Only an independently observed target DOM-focus event may
+/// replace the final coarse owner with `FixtureTarget`.
+fn focus_sequence_matches_presentation(
+    focus: crate::FocusEvidence,
+    presentation: PresentationState,
+) -> bool {
+    let baseline = match presentation {
+        PresentationState::VisibleFocused => FocusOwner::ProbeHost,
+        PresentationState::VisibleBackground | PresentationState::Hidden => FocusOwner::External,
+    };
+    let after = if focus.target_received_dom_focus {
+        FocusOwner::FixtureTarget
+    } else {
+        baseline
+    };
+    focus.before == baseline && focus.during == baseline && focus.after == after
+}
+
 fn has_qualifying_event(evidence: &CaseEvidence) -> bool {
     let required = qualifying_event_kind(evidence.case);
     evidence
@@ -555,6 +579,11 @@ fn tests_fixture(mode: WindowsProbeMode) -> RunEvidence {
                 CaseOutcome::Verified
             };
             let target_verified = !does_not_dispatch;
+            let baseline_focus = if mode.presentation() == PresentationState::VisibleFocused {
+                FocusOwner::ProbeHost
+            } else {
+                FocusOwner::External
+            };
             cases.push(crate::CaseEvidence {
                 case,
                 backend: *backend,
@@ -569,9 +598,9 @@ fn tests_fixture(mode: WindowsProbeMode) -> RunEvidence {
                     .into_iter()
                     .collect(),
                 focus: FocusEvidence {
-                    before: FocusOwner::External,
-                    during: FocusOwner::External,
-                    after: FocusOwner::External,
+                    before: baseline_focus,
+                    during: baseline_focus,
+                    after: baseline_focus,
                     probe_host_became_key: false,
                     browse_focus_was_stolen: false,
                     target_received_dom_focus: false,
@@ -662,6 +691,30 @@ mod tests {
         evidence.cases[0].focus.probe_host_became_key = true;
         assert_eq!(
             qualify_windows_probe_evidence(mode, &evidence),
+            Err(WindowsProbeQualificationError::Focus)
+        );
+
+        let mut evidence = tests_fixture(mode);
+        evidence.cases[0].focus.before = FocusOwner::ProbeHost;
+        assert_eq!(
+            qualify_windows_probe_evidence(mode, &evidence),
+            Err(WindowsProbeQualificationError::Focus)
+        );
+
+        let mut evidence = tests_fixture(mode);
+        evidence.cases[0].focus.target_received_dom_focus = true;
+        assert_eq!(
+            qualify_windows_probe_evidence(mode, &evidence),
+            Err(WindowsProbeQualificationError::Focus)
+        );
+        evidence.cases[0].focus.after = FocusOwner::FixtureTarget;
+        assert!(qualify_windows_probe_evidence(mode, &evidence).is_ok());
+
+        let focused_mode = WindowsProbeMode::VisibleFocusedAll;
+        let mut focused = tests_fixture(focused_mode);
+        focused.cases[0].focus.during = FocusOwner::External;
+        assert_eq!(
+            qualify_windows_probe_evidence(focused_mode, &focused),
             Err(WindowsProbeQualificationError::Focus)
         );
 

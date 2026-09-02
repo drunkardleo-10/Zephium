@@ -47,7 +47,7 @@ responses, machine-local paths, or native traces.
   mutation test removes or misplaces each lint header and proves the gate
   refuses the source; and
 - requires the agentic functional-core crate, dormant provider transport, and
-  all 15 dedicated production engine modules to deny direct standard-output,
+  all 16 dedicated production engine modules to deny direct standard-output,
   standard-error, and `dbg!` macros. Every non-diagnostic functional-core
   source and each dedicated engine/provider source is also scanned for direct
   Rust and native logging calls. The provider gate separately pins both
@@ -234,12 +234,16 @@ agentic-owned Windows modules. Cross-compilation is not device behavior.
   submission. Because Win32 `GetFocus`/`GetActiveWindow` expose only the
   caller's attached queue, the adapter also samples the revalidated owned
   document thread through read-only `GetGUIThreadInfo`; failure to obtain that
-  projection rejects the evidence. After the final HWND control poll, the
-  adapter samples both queues, rejoins document HWND/thread/process/layout,
-  and only then derives the bounded window-message timeout. CDP uses the same
-  final-poll/sample/submission order. The source gate rejects an added direct
-  native dispatch site and mutation-tests representative admission, navigation,
-  presentation, HWND, CDP, document-focus, and adjacency preflight removal. It
+  projection rejects the evidence. The offline qualifier now also requires the
+  three coarse focus-owner samples to match the selected presentation and the
+  independently observed target DOM-focus bit; clearing the summary theft
+  Booleans cannot hide a contradictory serialized focus sequence. After the
+  final HWND control poll, the adapter samples both queues, rejoins document
+  HWND/thread/process/layout, and only then derives the bounded window-message
+  timeout. CDP uses the same final-poll/sample/submission order. The source gate
+  rejects an added direct native dispatch site and mutation-tests representative
+  admission, navigation, presentation, HWND, CDP, document-focus, and adjacency
+  preflight removal. It
   also forbids alternate asynchronous/callback/broadcast
   message dispatch, synthetic input, window capture/activation, and composition-
   controller input paths around the sole audited HWND/CDP sites. This

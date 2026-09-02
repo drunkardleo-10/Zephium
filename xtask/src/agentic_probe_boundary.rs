@@ -2493,6 +2493,8 @@ fn validate_windows_probe_binary(source: &str, qualification: &str) -> Result<()
         "--ci-hidden-cdp",
         "--visible-background-windows-all",
         "--visible-focused-windows-all",
+        "focus_sequence_matches_presentation(actual.focus,mode.presentation())",
+        "focus.before==baseline&&focus.during==baseline&&focus.after==after",
         "if!no_dispatch_evidence_is_empty(actual)",
         "elseif!actual.target.target_verified||!has_qualifying_event(actual)",
         "event.kind==required&&event.target==evidence.target.intended",
@@ -11345,6 +11347,8 @@ mod tests {
             "--ci-hidden-cdp";
             "--visible-background-windows-all";
             "--visible-focused-windows-all";
+            focus_sequence_matches_presentation(actual.focus, mode.presentation());
+            focus.before == baseline && focus.during == baseline && focus.after == after;
             if !no_dispatch_evidence_is_empty(actual) {}
             else if !actual.target.target_verified || !has_qualifying_event(actual) {}
             event.kind == required && event.target == evidence.target.intended;
@@ -11366,6 +11370,14 @@ mod tests {
         assert!(validate_windows_probe_binary(
             &binary.replace("encode_response_line(&response);", "println!(\"passed\");"),
             qualification,
+        )
+        .is_err());
+        assert!(validate_windows_probe_binary(
+            binary,
+            &qualification.replace(
+                "focus_sequence_matches_presentation(actual.focus, mode.presentation());",
+                "true;",
+            ),
         )
         .is_err());
         assert!(validate_windows_probe_binary(
