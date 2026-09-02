@@ -55,6 +55,13 @@ responses, machine-local paths, or native traces.
   storage, sensitive request headers, manually redacted credential/attempt
   `Debug`, and a closed reqwest failure classifier that consumes only the
   timeout bit. Mutation tests prove each protection is required; and
+- pins the provider's 64 KiB response-header ceiling at both available layers:
+  reqwest configures the pre-decode HTTP/2 list limit, then a zero-allocation
+  checked pass accounts every decoded field's name, value, and 32-byte
+  protocol overhead before status, retry-hint, content-type, or body handling.
+  This second pass includes HTTP/1 fallback, for which pinned reqwest exposes no
+  Hyper receive-buffer control. Exact-limit/over-limit tests and source-order
+  mutations make the accepted response boundary explicit; and
 - distinguishes an observationally idle provider transport from shutdown
   quiescence, which requires both its sticky cancellation/admission seal and
   exactly zero active slots. The gate pins constructor closure, open-admission
@@ -287,6 +294,13 @@ agentic-owned Windows modules. Cross-compilation is not device behavior.
   concurrent gate, poison fail-stop, and shared-authority no-deadlock cases;
   the release boundary mutation-tests every critical ordering edge. This is
   deterministic concurrency evidence, not a live-provider qualification.
+- Provider response headers now have a protocol-neutral decoded 64 KiB
+  admission check in addition to reqwest's HTTP/2 pre-decode setting. Checked
+  accounting runs before status and body interpretation and rejects one
+  additional field beyond the exact ceiling. Pinned reqwest/Hyper source shows
+  that HTTP/1 may allocate within Hyper's larger internal receive ceiling
+  before this check; this change makes accepted processing bounded but does not
+  claim a smaller pre-parser HTTP/1 allocation or live-provider behavior.
 - Profile retention can no longer end from a copied lease alone. The bounded
   profile registry requires the exact supervisor cleanup receipt for that
   context. A never-started row must be registry-cancelled; an owned context must

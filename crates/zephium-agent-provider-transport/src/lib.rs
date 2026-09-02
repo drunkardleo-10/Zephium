@@ -47,8 +47,10 @@ pub const MAX_AGENT_PROVIDER_REQUEST_TIMEOUT_MILLIS: u64 = 10 * 60 * 1_000;
 pub const MAX_AGENT_PROVIDER_CONNECT_TIMEOUT_MILLIS: u64 = 30 * 1_000;
 /// Maximum interval without response-body progress accepted by configuration.
 pub const MAX_AGENT_PROVIDER_READ_TIMEOUT_MILLIS: u64 = 2 * 60 * 1_000;
-/// Maximum HTTP/2 response-header list bytes accepted from a provider.
+/// Maximum decoded response-header list bytes accepted from a provider.
 pub const MAX_AGENT_PROVIDER_RESPONSE_HEADER_BYTES: u32 = 64 * 1_024;
+/// Per-field accounting overhead from the HTTP/2 header-list size definition.
+const HTTP_HEADER_FIELD_OVERHEAD_BYTES: usize = 32;
 /// Maximum byte width of one provider-transport shutdown proof.
 pub const MAX_AGENT_PROVIDER_TRANSPORT_SHUTDOWN_PROOF_BYTES: usize = 32;
 
@@ -1563,6 +1565,16 @@ impl AgentProviderAttempt {
                 slot,
             );
         }
+        if !response_headers_admitted(response.headers()) {
+            return finish_attempt(
+                active,
+                config,
+                protocol_failure(),
+                AgentProviderDispatchEvidence::MayHaveDispatched,
+                continuation,
+                slot,
+            );
+        }
         if response.status() != StatusCode::OK {
             let failure = status_failure(response.status(), response.headers());
             return finish_attempt(
@@ -1835,6 +1847,28 @@ fn parse_retry_after(headers: &HeaderMap) -> Option<AgentProviderRetryAfter> {
     })?;
     let millis = seconds.checked_mul(1_000)?;
     AgentProviderRetryAfter::try_from_millis(millis).ok()
+}
+
+/// Applies one protocol-neutral decoded header-list ceiling before any status,
+/// retry hint, content-type, or body processing. Reqwest forwards the same
+/// limit to HTTP/2 before decode; pinned reqwest does not expose Hyper's HTTP/1
+/// receive-buffer ceiling, so this additional checked pass is also mandatory
+/// after an HTTP/1 response has been parsed.
+fn response_headers_admitted(headers: &HeaderMap) -> bool {
+    headers
+        .iter()
+        .try_fold(0_usize, |total, (name, value)| {
+            total
+                .checked_add(name.as_str().len())?
+                .checked_add(value.as_bytes().len())?
+                .checked_add(HTTP_HEADER_FIELD_OVERHEAD_BYTES)
+        })
+        .is_some_and(
+            |bytes| match usize::try_from(MAX_AGENT_PROVIDER_RESPONSE_HEADER_BYTES) {
+                Ok(limit) => bytes <= limit,
+                Err(_) => false,
+            },
+        )
 }
 
 fn response_encoding_admitted(headers: &HeaderMap) -> bool {
@@ -2865,6 +2899,23 @@ mod tests {
         );
         headers.insert(RETRY_AFTER, HeaderValue::from_static("02"));
         assert_eq!(parse_retry_after(&headers), None);
+
+        let header_limit = usize::try_from(MAX_AGENT_PROVIDER_RESPONSE_HEADER_BYTES)
+            .expect("header limit fits host usize");
+        let field_name = HeaderName::from_static("x-agent-boundary");
+        let exact_value_len = header_limit
+            .checked_sub(field_name.as_str().len())
+            .and_then(|remaining| remaining.checked_sub(HTTP_HEADER_FIELD_OVERHEAD_BYTES))
+            .expect("header limit exceeds field overhead");
+        let exact_value = vec![b'a'; exact_value_len];
+        let mut bounded_headers = HeaderMap::new();
+        bounded_headers.insert(
+            field_name.clone(),
+            HeaderValue::from_bytes(&exact_value).expect("bounded header value"),
+        );
+        assert!(response_headers_admitted(&bounded_headers));
+        bounded_headers.append(field_name, HeaderValue::from_static("b"));
+        assert!(!response_headers_admitted(&bounded_headers));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

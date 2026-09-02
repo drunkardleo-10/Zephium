@@ -613,7 +613,12 @@ browser action, model call, tool call, data transfer, cost, or native resource.
 - One shared rustls client uses the system proxy, refuses redirects, disables
   automatic retries and referer propagation, requests identity encoding, and
   applies bounded connect, idle-read, whole-request, and HTTP/2 header limits.
-  At most four admitted attempts exist. A slot is acquired before semantic
+  It additionally applies the same 64 KiB decoded header-list accounting to
+  every response before status, retry-hint, content-type, or body processing,
+  including HTTP/1 fallback where pinned reqwest does not expose Hyper's
+  receive-buffer setting. Name bytes, value bytes, and the protocol-defined
+  32-byte per-field overhead use checked arithmetic. At most four admitted
+  attempts exist. A slot is acquired before semantic
   disclosure commits, is released on every terminal path, and seals the shared
   transport if a committed attempt is abandoned.
 - A zero-active snapshot is explicitly `idle`, not terminal: admission remains

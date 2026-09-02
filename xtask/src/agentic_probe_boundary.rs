@@ -358,6 +358,7 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     let provider_transport_root = read(repository.join(PROVIDER_TRANSPORT_ROOT))?;
     validate_provider_transport_root(&provider_transport_root)?;
     validate_provider_transport_commit_boundary(&provider_transport_root)?;
+    validate_provider_transport_response_header_boundary(&provider_transport_root)?;
     validate_provider_transport_shutdown_contract(&provider_transport_root)?;
     validate_agentic_no_direct_logging_attribute(
         PROVIDER_TRANSPORT_ROOT,
@@ -4200,6 +4201,51 @@ fn validate_provider_transport_commit_boundary(source: &str) -> Result<(), Strin
     {
         return Err(
             "agent provider transport must hold both cancellation gates through disclosure and slot commitment"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_provider_transport_response_header_boundary(source: &str) -> Result<(), String> {
+    let production = source
+        .split_once("\n#[cfg(test)]\nmod tests")
+        .map_or(source, |(production, _)| production);
+    let source = compact(
+        &production
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<String>(),
+    );
+    for required in [
+        "pubconstMAX_AGENT_PROVIDER_RESPONSE_HEADER_BYTES:u32=64*1_024;",
+        "constHTTP_HEADER_FIELD_OVERHEAD_BYTES:usize=32;",
+        ".http2_max_header_list_size(MAX_AGENT_PROVIDER_RESPONSE_HEADER_BYTES)",
+        "fnresponse_headers_admitted(headers:&HeaderMap)->bool",
+        ".checked_add(name.as_str().len())?",
+        ".checked_add(value.as_bytes().len())?",
+        ".checked_add(HTTP_HEADER_FIELD_OVERHEAD_BYTES)",
+        "usize::try_from(MAX_AGENT_PROVIDER_RESPONSE_HEADER_BYTES)",
+        "if!response_headers_admitted(response.headers())",
+    ] {
+        if !source.contains(required) {
+            return Err(format!(
+                "agent provider transport lost decoded response-header boundary {required}"
+            ));
+        }
+    }
+    let header_check = source
+        .find("if!response_headers_admitted(response.headers())")
+        .ok_or_else(|| "provider response-header admission is missing".to_owned())?;
+    let status = source
+        .find("ifresponse.status()!=StatusCode::OK")
+        .ok_or_else(|| "provider response status handling is missing".to_owned())?;
+    let body = source
+        .find("letmutstream=response.bytes_stream()")
+        .ok_or_else(|| "provider response body stream is missing".to_owned())?;
+    if !(header_check < status && status < body) {
+        return Err(
+            "provider response headers must be bounded before status and body processing"
                 .to_owned(),
         );
     }
@@ -9604,6 +9650,48 @@ mod tests {
             ),
         ] {
             assert!(validate_provider_transport_commit_boundary(&invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn provider_transport_bounds_decoded_headers_before_status_or_body() {
+        let root = include_str!("../../crates/zephium-agent-provider-transport/src/lib.rs");
+        validate_provider_transport_response_header_boundary(root)
+            .expect("provider transport response-header boundary");
+
+        for invalid in [
+            root.replacen(
+                "        if !response_headers_admitted(response.headers()) {",
+                "        if false {",
+                1,
+            ),
+            root.replacen(
+                "            .checked_add(name.as_str().len())?",
+                "            .checked_add(0)?",
+                1,
+            ),
+            root.replacen(
+                "                .checked_add(value.as_bytes().len())?",
+                "                .checked_add(0)?",
+                1,
+            ),
+            root.replacen(
+                "                .checked_add(HTTP_HEADER_FIELD_OVERHEAD_BYTES)",
+                "                .checked_add(0)",
+                1,
+            ),
+            root.replacen(
+                "        if !response_headers_admitted(response.headers()) {",
+                "        if response.status() != StatusCode::OK {",
+                1,
+            ),
+            root.replacen(
+                "        if response.status() != StatusCode::OK {",
+                "        if !response_headers_admitted(response.headers()) {",
+                1,
+            ),
+        ] {
+            assert!(validate_provider_transport_response_header_boundary(&invalid).is_err());
         }
     }
 

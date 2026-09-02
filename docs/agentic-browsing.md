@@ -765,7 +765,12 @@ gate before becoming sticky, and admission holds both gates only across policy
 commit and transport-slot commitment. A cancellation that wins cannot race a
 later disclosure; a commit that wins is already post-commit authority and must
 be terminally settled. A poisoned gate becomes sticky cancellation in
-unwind-capable builds. The HTTP client disables even library-default
+unwind-capable builds. The HTTP client applies a 64 KiB HTTP/2 header-list
+limit before decode and rechecks the decoded field list with checked
+name/value/per-field-overhead accounting before status, retry-hint,
+content-type, or body processing. That second protocol-neutral check also
+covers an HTTP/1 fallback, whose receive-buffer ceiling is not exposed by the
+pinned reqwest builder. The HTTP client disables even library-default
 protocol-NACK retries; any future retry requires a new call identity and policy
 admission. A committed attempt proven not to have polled the HTTP send future
 settles exact zero provider usage and cost while retaining its already-committed
