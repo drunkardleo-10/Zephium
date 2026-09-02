@@ -685,6 +685,16 @@ impl AgentAuditLedger {
         self.shutdown_sealed && self.events.is_empty() && self.in_flight.is_none()
     }
 
+    pub(crate) fn matches_run_scope(
+        &self,
+        manifest: &AgentRunManifest,
+        supervisor: AgentSupervisorId,
+    ) -> bool {
+        self.manifest == manifest.id()
+            && self.manifest_guard == manifest.guard()
+            && self.supervisor == supervisor
+    }
+
     fn validate(&self) -> Result<(), AgentAuditError> {
         if self.events.len() > MAX_PENDING_AGENT_AUDIT_EVENTS
             || self.progress.len() > crate::MAX_AGENT_PLAN_NODES

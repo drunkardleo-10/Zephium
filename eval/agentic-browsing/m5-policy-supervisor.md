@@ -763,20 +763,24 @@ browser action, model call, tool call, data transfer, cost, or native resource.
 - Terminal policy settlement consumes the single-owner `AgentRunPolicy`; there
   is no successful path that leaves model/effect admission reusable. It joins
   only the already-closed metric value and exact receipt-accounting reducer,
-  including the private canonical manifest revision and supervisor.
+  including the private canonical manifest revision and supervisor. It also
+  consumes the exact run audit ledger after shutdown seal and durable drain.
 - A sealed policy or any pending model call, effect, serialized origin write,
   operation reservation, token reservation, or cost reservation refuses
   settlement. Run-wide and every canonical plan-node consumed operation,
   model-token, and cost total must equal receipt accounting, with checked token
   arithmetic.
 - Refusal retains and returns the entire move-only policy for exact cleanup or
-  corrected retry. Successful settlement is copyable, compile-capped at 256
-  bytes, redacted, and non-authorizing. It does not qualify native resources,
-  sites, providers, devices, or production execution.
+  corrected retry together with the complete audit ledger for drain or
+  reconciliation. A fail-stopped, unsealed, pending, in-flight, foreign, or
+  incompletely committed ledger cannot settle. Successful settlement is
+  copyable, compile-capped at 256 bytes, redacted, and non-authorizing. It does
+  not qualify native resources, sites, providers, devices, or production
+  execution.
 - The release boundary pins the consuming signature, retained-policy refusal,
-  zero-debt checks, exact private joins, run/node reconciliation, redacted
-  diagnostics, size ceiling, and absence of a constructor, serialization, or
-  runtime port.
+  retained audit ownership, zero-debt checks, exact private joins, run/node and
+  durable-event reconciliation, redacted diagnostics, size ceiling, and
+  absence of a constructor, serialization, or runtime port.
 
 ## Current tests
 

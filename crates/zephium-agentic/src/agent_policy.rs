@@ -30,8 +30,8 @@ use crate::semantic_locate_model::SemanticLocateDeliveryAuthority;
 use crate::semantic_read_model::SemanticReadDeliveryAuthority;
 use crate::semantic_screenshot::SemanticScreenshotDeliveryAuthority;
 use crate::{
-    AgentAccountScope, AgentContextAccountBinding, AgentPlanLeaseId, AgentPlanNodeId,
-    AgentPolicyInstant, AgentProviderPricedUsage, AgentProviderPricingAttribution,
+    AgentAccountScope, AgentAuditLedger, AgentContextAccountBinding, AgentPlanLeaseId,
+    AgentPlanNodeId, AgentPolicyInstant, AgentProviderPricedUsage, AgentProviderPricingAttribution,
     AgentRunAccountingMetrics, AgentRunBudget, AgentRunManifest, AgentRunManifestId,
     AgentRunMetricClosure, ContextJoin, SemanticActionAttemptId, SemanticDiff,
     SemanticDiffDeliveryReceipt, SemanticDiffModelPayload, SemanticEffectClass,
@@ -376,11 +376,12 @@ impl AgentPolicyAccounting {
     }
 }
 
-/// Non-authorizing proof that a run policy was consumed without pending debt.
+/// Non-authorizing proof that run policy and durable audit drain were consumed.
 ///
-/// Success consumes the mutable policy, so later model/effect admission cannot
-/// reopen the settled run. This value does not prove native-resource, site,
-/// provider, device, or production qualification.
+/// Success consumes both the mutable policy and shutdown-quiescent audit
+/// ledger, so neither admission nor durable delivery can reopen the settled
+/// run. This value does not prove native-resource, site, provider, device, or
+/// production qualification.
 #[derive(Clone, Copy, Eq, PartialEq)]
 #[must_use]
 pub struct AgentRunPolicySettlement {
@@ -434,13 +435,29 @@ pub enum AgentRunPolicySettlementError {
     /// Checked final token arithmetic overflowed.
     #[error("agent run policy settlement arithmetic overflowed")]
     Overflow,
+    /// Durable audit ledger belonged to another manifest revision/supervisor.
+    #[error("agent run policy settlement audit authority mismatched")]
+    AuditAuthority,
+    /// Durable audit ledger must reject new records before terminal drain.
+    #[error("agent run policy settlement audit ledger is not shutdown-sealed")]
+    AuditUnsealed,
+    /// Durable audit events or a delivery remain pending.
+    #[error("agent run policy settlement audit drain is pending")]
+    AuditPending,
+    /// Ambiguous durable audit settlement fail-stopped the ledger.
+    #[error("agent run policy settlement audit ledger is fail-stopped")]
+    AuditFailStopped,
+    /// Durable audit commits did not cover every metric-closure event.
+    #[error("agent run policy settlement audit coverage mismatched")]
+    AuditCoverage,
 }
 
-/// Recoverable refusal retaining the complete mutable policy for cleanup/retry.
+/// Recoverable refusal retaining complete policy and audit-drain ownership.
 #[must_use]
 pub struct AgentRunPolicySettlementRefusal {
     error: AgentRunPolicySettlementError,
     policy: AgentRunPolicy,
+    audit: AgentAuditLedger,
 }
 
 impl AgentRunPolicySettlementRefusal {
@@ -454,9 +471,14 @@ impl AgentRunPolicySettlementRefusal {
         &self.policy
     }
 
-    /// Recovers the complete mutable policy for exact cleanup or corrected retry.
-    pub fn into_policy(self) -> AgentRunPolicy {
-        self.policy
+    /// Retained durable audit ledger for exact drain or inspection.
+    pub const fn audit(&self) -> &AgentAuditLedger {
+        &self.audit
+    }
+
+    /// Recovers complete mutable policy and audit-drain ownership.
+    pub fn into_parts(self) -> (AgentRunPolicy, AgentAuditLedger) {
+        (self.policy, self.audit)
     }
 }
 
@@ -469,6 +491,7 @@ impl fmt::Debug for AgentRunPolicySettlementRefusal {
             .field("pending_model_calls", &self.policy.pending_model_calls())
             .field("pending_effects", &self.policy.pending_effects())
             .field("sealed", &self.policy.is_sealed())
+            .field("audit", &self.audit.status())
             .field("authority", &"[retained]")
             .field("content", &"[redacted]")
             .finish()
@@ -1085,18 +1108,20 @@ impl AgentRunPolicy {
         ))
     }
 
-    /// Consumes one clean terminal policy after exact metric reconciliation.
+    /// Consumes one clean terminal policy and its exact durable audit drain.
     ///
     /// Every refusal retains the complete policy so pending or ambiguous state
-    /// cannot be discarded as a false terminal. Success drops mutable taint and
-    /// lease state only after all reservations are zero and consumed run/node
-    /// accounting matches the already-closed receipt reducers.
+    /// cannot be discarded as a false terminal. Success drops mutable taint,
+    /// lease, and audit-delivery state only after all reservations are zero,
+    /// consumed run/node accounting matches the already-closed receipt
+    /// reducers, and every closure event is durably committed.
     pub fn settle_metric_closure(
         self,
         closure: AgentRunMetricClosure,
         metrics: &AgentRunAccountingMetrics,
+        audit: AgentAuditLedger,
     ) -> Result<AgentRunPolicySettlement, Box<AgentRunPolicySettlementRefusal>> {
-        match validate_metric_settlement(&self, closure, metrics) {
+        match validate_metric_settlement(&self, closure, metrics, &audit) {
             Ok(accounting) => Ok(AgentRunPolicySettlement {
                 closure,
                 accounting,
@@ -1104,6 +1129,7 @@ impl AgentRunPolicy {
             Err(error) => Err(Box::new(AgentRunPolicySettlementRefusal {
                 error,
                 policy: self,
+                audit,
             })),
         }
     }
@@ -1844,11 +1870,15 @@ fn validate_metric_settlement(
     policy: &AgentRunPolicy,
     closure: AgentRunMetricClosure,
     metrics: &AgentRunAccountingMetrics,
+    audit: &AgentAuditLedger,
 ) -> Result<AgentPolicyAccounting, AgentRunPolicySettlementError> {
     if !closure.matches_manifest_revision(policy.manifest())
         || !metrics.matches_metric_scope(policy.manifest(), closure.supervisor())
     {
         return Err(AgentRunPolicySettlementError::Authority);
+    }
+    if !audit.matches_run_scope(policy.manifest(), closure.supervisor()) {
+        return Err(AgentRunPolicySettlementError::AuditAuthority);
     }
     let snapshot = metrics.snapshot();
     if snapshot.operations() != closure.operations()
@@ -1899,6 +1929,20 @@ fn validate_metric_settlement(
         {
             return Err(AgentRunPolicySettlementError::Accounting);
         }
+    }
+
+    let audit_status = audit.status();
+    if audit_status.fail_stopped() {
+        return Err(AgentRunPolicySettlementError::AuditFailStopped);
+    }
+    if !audit_status.shutdown_sealed() {
+        return Err(AgentRunPolicySettlementError::AuditUnsealed);
+    }
+    if !audit.is_quiescent() || audit_status.pending() != 0 || audit_status.in_flight() != 0 {
+        return Err(AgentRunPolicySettlementError::AuditPending);
+    }
+    if audit_status.committed() != closure.events() {
+        return Err(AgentRunPolicySettlementError::AuditCoverage);
     }
     Ok(accounting)
 }

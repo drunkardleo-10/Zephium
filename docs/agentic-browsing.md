@@ -1080,12 +1080,15 @@ exact metric closure and accounting reducer, rejoins their private manifest
 revision and supervisor, refuses a sealed policy, and requires zero pending
 model calls, effects, origin writes, and reserved operations/tokens/cost. It
 then checks run-wide and every canonical plan-node consumed operation,
-model-token, and cost total against receipt accounting. Success destroys the
-only mutable policy and returns an at-most-256-byte copyable, non-authorizing
-settlement; every refusal returns the complete move-only policy for cleanup or
-a corrected retry, so pending authority cannot be discarded as a false
-terminal. This closes mutable policy only. It does not prove native-resource,
-site, provider, device, or production qualification.
+model-token, and cost total against receipt accounting. The same operation
+consumes an exact shutdown-sealed audit ledger only when it is unambiguous,
+quiescent, and its durable commit count covers every closure event. Success
+destroys both mutable owners and returns an at-most-256-byte copyable,
+non-authorizing settlement; every refusal returns the complete move-only policy
+and audit ledger for cleanup, drain, or a corrected retry, so pending authority
+cannot be discarded as a false terminal. This closes mutable policy and local
+durable audit delivery only. It does not prove native-resource, site, provider,
+device, or production qualification.
 
 Initial qualification gates are:
 

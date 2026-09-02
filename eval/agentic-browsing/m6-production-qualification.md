@@ -158,11 +158,13 @@ cargo clippy --locked -p xtask --all-targets -- -D warnings
 - A subsequent clean-policy settlement now consumes the only mutable run
   policy after rejoining that exact closure and receipt-accounting scope. It
   requires an unsealed policy, zero pending/reserved debt, and exact run plus
-  per-plan-node operation/token/cost reconciliation. Every refusal returns the
-  complete move-only policy, preventing pending authority from being discarded;
-  success yields a redacted, non-authorizing value capped at 256 bytes. Native
-  resources and all named-device/site/provider qualification remain separate
-  blockers.
+  per-plan-node operation/token/cost reconciliation. The consuming call also
+  requires its exact audit ledger to be shutdown-sealed, unambiguous, fully
+  drained, and durably committed for every closure event. Every refusal returns
+  both move-only owners, preventing pending authority or delivery debt from
+  being discarded; success yields a redacted, non-authorizing value capped at
+  256 bytes. Native resources and all named-device/site/provider qualification
+  remain separate blockers.
 
 The authoritative aggregate records and exact remaining blockers are in
 `native-input-matrix-v1.json`, `semantic-runtime-macos-v1.json`, and

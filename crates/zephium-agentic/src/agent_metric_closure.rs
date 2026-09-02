@@ -472,13 +472,13 @@ fn require_input_totals(
 mod tests {
     use super::*;
     use crate::{
-        AgentAccountScope, AgentActiveEffect, AgentActiveModelCall, AgentAuditEventId,
-        AgentAuditLedger, AgentDelegationSpec, AgentDelegationTopology, AgentEffectId,
-        AgentEffectReceipt, AgentEffectScope, AgentEffectSettlement, AgentModelCallId,
-        AgentModelCallReceipt, AgentModelCallSettlement, AgentPlanLeaseBinding, AgentPlanLeaseId,
-        AgentPlanNodeAuthority, AgentPlanNodeId, AgentPlanNodeScope, AgentPolicyInstant,
-        AgentProviderInputMetricReceipt, AgentProviderInputMetrics,
-        AgentProviderSemanticInputStats, AgentRunBudget, AgentRunPolicy,
+        AgentAccountScope, AgentActiveEffect, AgentActiveModelCall, AgentAuditDeliveryId,
+        AgentAuditDeliveryOutcome, AgentAuditError, AgentAuditEventId, AgentAuditLedger,
+        AgentDelegationSpec, AgentDelegationTopology, AgentEffectId, AgentEffectReceipt,
+        AgentEffectScope, AgentEffectSettlement, AgentModelCallId, AgentModelCallReceipt,
+        AgentModelCallSettlement, AgentPlanLeaseBinding, AgentPlanLeaseId, AgentPlanNodeAuthority,
+        AgentPlanNodeId, AgentPlanNodeScope, AgentPolicyInstant, AgentProviderInputMetricReceipt,
+        AgentProviderInputMetrics, AgentProviderSemanticInputStats, AgentRunBudget, AgentRunPolicy,
         AgentRunPolicySettlementError, AgentRunScope, AgentSupervisorAttemptId,
         AgentSupervisorCompletion, AgentSupervisorFailure, ContextCapabilities, ContextCapability,
         ContextId, ContextIdentity, ContextKind, ContextOperationId, ContextRegistry, ContextRunId,
@@ -565,6 +565,25 @@ mod tests {
             )
             .expect("audit event");
         progress.record_event(event).expect("progress event");
+    }
+
+    fn drain_audit(ledger: &mut AgentAuditLedger) {
+        ledger.seal_for_shutdown().expect("audit shutdown seal");
+        let mut delivery_id = 1_u64;
+        while ledger.status().pending() != 0 {
+            let proof = ledger
+                .begin_delivery(
+                    AgentAuditDeliveryId::new(delivery_id).expect("delivery id"),
+                    crate::MAX_AGENT_AUDIT_DELIVERY_EVENTS,
+                )
+                .expect("audit delivery")
+                .proof();
+            ledger
+                .settle_delivery(proof.settle(AgentAuditDeliveryOutcome::Committed))
+                .expect("audit commit");
+            delivery_id += 1;
+        }
+        assert!(ledger.is_quiescent());
     }
 
     fn input_receipt(manifest: &AgentRunManifest, call: u64) -> AgentProviderInputMetricReceipt {
@@ -945,13 +964,14 @@ mod tests {
         let mut fixture = Fixture::new(8);
         fixture.run_success(1, 1);
         let closure = fixture.close().expect("metric closure");
+        drain_audit(&mut fixture.ledger);
         fixture
             .policy
             .set_single_lease_consumed_for_metric_settlement_test(2, 0, 0);
 
         let settlement = fixture
             .policy
-            .settle_metric_closure(closure, &fixture.accounting)
+            .settle_metric_closure(closure, &fixture.accounting, fixture.ledger)
             .expect("clean policy settlement");
         assert_eq!(settlement.closure(), closure);
         assert_eq!(settlement.accounting().consumed_operations(), 2);
@@ -973,23 +993,110 @@ mod tests {
         let mut fixture = Fixture::new(9);
         fixture.run_success(1, 1);
         let closure = fixture.close().expect("metric closure");
+        drain_audit(&mut fixture.ledger);
 
         let refusal = fixture
             .policy
-            .settle_metric_closure(closure, &fixture.accounting)
+            .settle_metric_closure(closure, &fixture.accounting, fixture.ledger)
             .expect_err("missing consumed policy accounting");
         assert_eq!(refusal.error(), AgentRunPolicySettlementError::Accounting);
         assert_eq!(refusal.policy().accounting().consumed_operations(), 0);
+        assert!(refusal.audit().is_quiescent());
         let debug = format!("{refusal:?}");
         assert!(debug.contains("[retained]"));
         assert!(debug.contains("[redacted]"));
         assert!(!debug.contains("metric-closure.example.test"));
 
-        let mut policy = refusal.into_policy();
+        let (mut policy, audit) = refusal.into_parts();
         policy.set_single_lease_consumed_for_metric_settlement_test(2, 0, 0);
         let _settlement = policy
-            .settle_metric_closure(closure, &fixture.accounting)
+            .settle_metric_closure(closure, &fixture.accounting, audit)
             .expect("corrected retry");
+    }
+
+    #[test]
+    fn policy_settlement_requires_exact_durable_audit_drain() {
+        let mut fixture = Fixture::new(12);
+        fixture.run_success(1, 1);
+        let closure = fixture.close().expect("metric closure");
+        fixture
+            .policy
+            .set_single_lease_consumed_for_metric_settlement_test(2, 0, 0);
+
+        let refusal = fixture
+            .policy
+            .settle_metric_closure(closure, &fixture.accounting, fixture.ledger)
+            .expect_err("unsealed audit ledger");
+        assert_eq!(
+            refusal.error(),
+            AgentRunPolicySettlementError::AuditUnsealed
+        );
+        let (policy, mut audit) = refusal.into_parts();
+        audit.seal_for_shutdown().expect("audit shutdown seal");
+
+        let refusal = policy
+            .settle_metric_closure(closure, &fixture.accounting, audit)
+            .expect_err("pending durable audit events");
+        assert_eq!(refusal.error(), AgentRunPolicySettlementError::AuditPending);
+        let (policy, mut audit) = refusal.into_parts();
+        drain_audit(&mut audit);
+        let _settlement = policy
+            .settle_metric_closure(closure, &fixture.accounting, audit)
+            .expect("drained audit settlement");
+    }
+
+    #[test]
+    fn policy_settlement_refuses_incomplete_or_ambiguous_audit_evidence() {
+        let mut incomplete = Fixture::new(13);
+        let mut empty_audit =
+            AgentAuditLedger::try_new(&incomplete.manifest, &incomplete.supervisor)
+                .expect("empty parallel audit ledger");
+        incomplete.run_success(1, 1);
+        let closure = incomplete.close().expect("metric closure");
+        incomplete
+            .policy
+            .set_single_lease_consumed_for_metric_settlement_test(2, 0, 0);
+        drain_audit(&mut empty_audit);
+        let refusal = incomplete
+            .policy
+            .settle_metric_closure(closure, &incomplete.accounting, empty_audit)
+            .expect_err("missing durable audit coverage");
+        assert_eq!(
+            refusal.error(),
+            AgentRunPolicySettlementError::AuditCoverage
+        );
+
+        let mut ambiguous = Fixture::new(14);
+        ambiguous.run_success(1, 1);
+        let closure = ambiguous.close().expect("metric closure");
+        ambiguous
+            .policy
+            .set_single_lease_consumed_for_metric_settlement_test(2, 0, 0);
+        let proof = ambiguous
+            .ledger
+            .begin_delivery(
+                AgentAuditDeliveryId::new(1).expect("delivery id"),
+                crate::MAX_AGENT_AUDIT_DELIVERY_EVENTS,
+            )
+            .expect("audit delivery")
+            .proof();
+        let cancelled = proof.settle(AgentAuditDeliveryOutcome::Cancelled);
+        ambiguous
+            .ledger
+            .settle_delivery(cancelled)
+            .expect("audit cancellation");
+        assert_eq!(
+            ambiguous.ledger.settle_delivery(cancelled),
+            Err(AgentAuditError::DeliveryMissing)
+        );
+        let refusal = ambiguous
+            .policy
+            .settle_metric_closure(closure, &ambiguous.accounting, ambiguous.ledger)
+            .expect_err("fail-stopped audit ledger");
+        assert_eq!(
+            refusal.error(),
+            AgentRunPolicySettlementError::AuditFailStopped
+        );
     }
 
     #[test]
@@ -997,6 +1104,7 @@ mod tests {
         let mut sealed = Fixture::new(10);
         sealed.run_success(1, 1);
         let closure = sealed.close().expect("metric closure");
+        drain_audit(&mut sealed.ledger);
         let fake_active = AgentActiveModelCall::for_progress_test(
             &sealed.manifest,
             AgentModelCallId::new(99).expect("call"),
@@ -1015,10 +1123,10 @@ mod tests {
         );
         let refusal = sealed
             .policy
-            .settle_metric_closure(closure, &sealed.accounting)
+            .settle_metric_closure(closure, &sealed.accounting, sealed.ledger)
             .expect_err("sealed policy");
         assert_eq!(refusal.error(), AgentRunPolicySettlementError::Sealed);
-        assert!(refusal.into_policy().is_sealed());
+        assert!(refusal.into_parts().0.is_sealed());
 
         let mut exact = Fixture::with_operations(11, 8);
         exact.run_success(1, 1);
@@ -1030,7 +1138,7 @@ mod tests {
             .set_single_lease_consumed_for_metric_settlement_test(2, 0, 0);
         let refusal = changed
             .policy
-            .settle_metric_closure(exact_closure, &exact.accounting)
+            .settle_metric_closure(exact_closure, &exact.accounting, changed.ledger)
             .expect_err("foreign revision");
         assert_eq!(refusal.error(), AgentRunPolicySettlementError::Authority);
     }

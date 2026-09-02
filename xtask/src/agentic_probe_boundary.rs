@@ -169,6 +169,7 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         &read(repository.join(AGENTIC_ROOT))?,
         &read(repository.join(AGENTIC_METRIC_CLOSURE))?,
         &read(repository.join(AGENTIC_METRICS))?,
+        &read(repository.join(AGENTIC_AUDIT))?,
         &read(repository.join(AGENTIC_POLICY))?,
     )?;
     validate_provider_billing_contract(
@@ -2326,6 +2327,7 @@ fn validate_agent_policy_settlement_contract(
     root: &str,
     closure: &str,
     accounting: &str,
+    audit: &str,
     policy: &str,
 ) -> Result<(), String> {
     let root = compact(root);
@@ -2379,16 +2381,44 @@ fn validate_agent_policy_settlement_contract(
         }
     }
 
+    let audit = compact(audit);
+    for required in [
+        "pubstructAgentAuditLedger{manifest:AgentRunManifestId,manifest_guard:[u8;32]",
+        "pub(crate)fnmatches_run_scope(&self,manifest:&AgentRunManifest,supervisor:AgentSupervisorId,)->bool",
+        "self.manifest==manifest.id()&&self.manifest_guard==manifest.guard()&&self.supervisor==supervisor",
+        "pubfnis_quiescent(&self)->bool",
+        "self.shutdown_sealed&&self.events.is_empty()&&self.in_flight.is_none()",
+    ] {
+        if !audit.contains(required) {
+            return Err(format!(
+                "clean agent policy settlement lost its durable-audit join {required}"
+            ));
+        }
+    }
+    for forbidden in [
+        "pubfnmatches_run_scope(",
+        "pubconstfnmatches_run_scope(",
+        "implCloneforAgentAuditLedger",
+    ] {
+        if audit.contains(forbidden) {
+            return Err(format!(
+                "durable audit ledger exposed or duplicated terminal authority {forbidden}"
+            ));
+        }
+    }
+
     let policy = compact(policy);
     for required in [
         "pubconstMAX_AGENT_RUN_POLICY_SETTLEMENT_BYTES:usize=256;",
         "size_of::<AgentRunPolicySettlement>()<=MAX_AGENT_RUN_POLICY_SETTLEMENT_BYTES",
         "pubstructAgentRunPolicySettlement{closure:AgentRunMetricClosure,accounting:AgentPolicyAccounting,}",
-        "pubstructAgentRunPolicySettlementRefusal{error:AgentRunPolicySettlementError,policy:AgentRunPolicy,}",
-        "pubfninto_policy(self)->AgentRunPolicy{self.policy}",
-        "pubfnsettle_metric_closure(self,closure:AgentRunMetricClosure,metrics:&AgentRunAccountingMetrics,)->Result<AgentRunPolicySettlement,Box<AgentRunPolicySettlementRefusal>>",
-        "matchvalidate_metric_settlement(&self,closure,metrics)",
+        "pubstructAgentRunPolicySettlementRefusal{error:AgentRunPolicySettlementError,policy:AgentRunPolicy,audit:AgentAuditLedger,}",
+        "pubconstfnaudit(&self)->&AgentAuditLedger{&self.audit}",
+        "pubfninto_parts(self)->(AgentRunPolicy,AgentAuditLedger){(self.policy,self.audit)}",
+        "pubfnsettle_metric_closure(self,closure:AgentRunMetricClosure,metrics:&AgentRunAccountingMetrics,audit:AgentAuditLedger,)->Result<AgentRunPolicySettlement,Box<AgentRunPolicySettlementRefusal>>",
+        "matchvalidate_metric_settlement(&self,closure,metrics,&audit)",
         "policy:self",
+        "audit,",
         "!closure.matches_manifest_revision(policy.manifest())",
         "!metrics.matches_metric_scope(policy.manifest(),closure.supervisor())",
         "snapshot.operations()!=closure.operations()",
@@ -2419,6 +2449,19 @@ fn validate_agent_policy_settlement_contract(
         "AgentRunPolicySettlementError::Pending",
         "AgentRunPolicySettlementError::Accounting",
         "AgentRunPolicySettlementError::Overflow",
+        "!audit.matches_run_scope(policy.manifest(),closure.supervisor())",
+        "AgentRunPolicySettlementError::AuditAuthority",
+        "ifaudit_status.fail_stopped()",
+        "AgentRunPolicySettlementError::AuditFailStopped",
+        "if!audit_status.shutdown_sealed()",
+        "AgentRunPolicySettlementError::AuditUnsealed",
+        "!audit.is_quiescent()",
+        "audit_status.pending()!=0",
+        "audit_status.in_flight()!=0",
+        "AgentRunPolicySettlementError::AuditPending",
+        "audit_status.committed()!=closure.events()",
+        "AgentRunPolicySettlementError::AuditCoverage",
+        "field(\"audit\",&self.audit.status())",
         "field(\"authority\",&\"[none]\")",
         "field(\"authority\",&\"[retained]\")",
         "field(\"content\",&\"[redacted]\")",
@@ -6339,14 +6382,16 @@ mod tests {
         let root = include_str!("../../crates/zephium-agentic/src/lib.rs");
         let closure = include_str!("../../crates/zephium-agentic/src/agent_metric_closure.rs");
         let accounting = include_str!("../../crates/zephium-agentic/src/agent_metrics.rs");
+        let audit = include_str!("../../crates/zephium-agentic/src/agent_audit.rs");
         let policy = include_str!("../../crates/zephium-agentic/src/agent_policy.rs");
 
-        validate_agent_policy_settlement_contract(root, closure, accounting, policy)
+        validate_agent_policy_settlement_contract(root, closure, accounting, audit, policy)
             .expect("clean move-only policy settlement");
         assert!(validate_agent_policy_settlement_contract(
             root,
             closure,
             accounting,
+            audit,
             &policy.replace("policy.pending_effects() != 0", "false"),
         )
         .is_err());
@@ -6354,6 +6399,7 @@ mod tests {
             root,
             closure,
             accounting,
+            audit,
             &policy.replace("policy: self", "policy: AgentRunPolicy::placeholder()"),
         )
         .is_err());
@@ -6363,6 +6409,7 @@ mod tests {
                 "{closure}\nimpl AgentRunMetricClosure {{ pub fn matches_manifest_revision() {{}} }}"
             ),
             accounting,
+            audit,
             policy,
         )
         .is_err());
@@ -6370,7 +6417,27 @@ mod tests {
             root,
             closure,
             accounting,
+            audit,
             &format!("{policy}\ntrait AgentRunPolicySettlementPort {{}}"),
+        )
+        .is_err());
+        assert!(validate_agent_policy_settlement_contract(
+            root,
+            closure,
+            accounting,
+            audit,
+            &policy.replace("audit_status.pending() != 0", "false"),
+        )
+        .is_err());
+        assert!(validate_agent_policy_settlement_contract(
+            root,
+            closure,
+            accounting,
+            &audit.replace(
+                "pub(crate) fn matches_run_scope",
+                "pub fn matches_run_scope"
+            ),
+            policy,
         )
         .is_err());
     }
