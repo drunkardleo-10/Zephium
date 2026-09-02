@@ -62,6 +62,8 @@ use crate::agent_context_port::AgentScreenshotTask;
 const AGENT_PAGE_LOAD_COMMIT_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(target_os = "windows")]
 const AGENT_PAGE_LOAD_COMMIT_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(target_os = "windows")]
+const AGENT_SUSPEND_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(target_os = "macos")]
 const AGENT_SEMANTIC_RUNTIME_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -352,6 +354,22 @@ struct AgentPendingRecovery {
 }
 
 #[cfg(target_os = "windows")]
+struct AgentPendingSuspend {
+    operation: ContextOperationJoin,
+    claim: crate::platform::agent_suspension::AgentSuspendClaim,
+    watchdog: crate::platform::imp::ContentPolicyTimeout,
+    task: AgentContextTask,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AgentNativeSuspendState {
+    Active,
+    Suspended,
+    Uncertain(ContextOperationJoin),
+}
+
+#[cfg(target_os = "windows")]
 struct AgentContextRetirement {
     navigation_clean: bool,
     content_policy_clean: bool,
@@ -403,6 +421,23 @@ impl AgentPendingRecovery {
     }
 }
 
+#[cfg(target_os = "windows")]
+impl AgentPendingSuspend {
+    fn complete(self, outcome: Result<(), ContextPortFailure>) {
+        let Self {
+            operation,
+            claim: _,
+            watchdog,
+            task,
+        } = self;
+        drop(watchdog);
+        match ContextTransitionSettlement::try_new(operation, outcome) {
+            Ok(settlement) => task.complete(ContextNativeEvent::TransitionSettled(settlement)),
+            Err(_) => task.refuse(ContextPortFailure::NativeRefused),
+        }
+    }
+}
+
 /// Exact native owner for one run-owned Windows automation surface.
 ///
 /// The view never enters tab, stage, session, suspension, or extension maps.
@@ -417,6 +452,12 @@ pub(super) struct AgentOwnedContext {
     committed_target: Option<ContextNavigationTarget>,
     pending_navigation: Option<AgentPendingNavigation>,
     pending_recovery: Option<AgentPendingRecovery>,
+    pending_suspend: Option<AgentPendingSuspend>,
+    late_suspend_claim: Option<(
+        ContextOperationJoin,
+        crate::platform::agent_suspension::AgentSuspendClaim,
+    )>,
+    suspend_state: AgentNativeSuspendState,
     renderer_lost: bool,
     renderer_loss_rejoin_pending: bool,
     content_policy_registration: Option<crate::platform::imp::ContentPolicyRegistration>,
@@ -446,6 +487,9 @@ impl AgentOwnedContext {
             committed_target: None,
             pending_navigation: None,
             pending_recovery: None,
+            pending_suspend: None,
+            late_suspend_claim: None,
+            suspend_state: AgentNativeSuspendState::Active,
             renderer_lost: false,
             renderer_loss_rejoin_pending: false,
             content_policy_registration: Some(content_policy_registration),
@@ -465,6 +509,13 @@ impl AgentOwnedContext {
         self.view.view()
     }
 
+    pub(super) fn permits_content_policy_install(&self) -> bool {
+        !self.renderer_lost
+            && self.pending_suspend.is_none()
+            && self.late_suspend_claim.is_none()
+            && self.suspend_state == AgentNativeSuspendState::Active
+    }
+
     pub(super) fn replace_content_policy_registration(
         &mut self,
         registration: crate::platform::imp::ContentPolicyRegistration,
@@ -473,15 +524,31 @@ impl AgentOwnedContext {
     }
 
     fn pending_operation_for_audit(&self) -> Option<bool> {
-        let lifecycle_pending =
-            self.pending_navigation.is_some() || self.pending_recovery.is_some();
+        if matches!(self.suspend_state, AgentNativeSuspendState::Uncertain(_)) {
+            return None;
+        }
+        let lifecycle_pending = self.pending_navigation.is_some()
+            || self.pending_recovery.is_some()
+            || self.pending_suspend.is_some();
         let semantic_pending = self.view.semantic_pending_for_audit()?;
-        if (self.pending_navigation.is_some() && self.pending_recovery.is_some())
-            || (lifecycle_pending && semantic_pending)
-        {
+        let lifecycle_count = usize::from(self.pending_navigation.is_some())
+            + usize::from(self.pending_recovery.is_some())
+            + usize::from(self.pending_suspend.is_some());
+        if lifecycle_count > 1 || (lifecycle_pending && semantic_pending) {
             None
         } else {
             Some(lifecycle_pending || semantic_pending)
+        }
+    }
+
+    fn suspended_for_audit(&self) -> Option<bool> {
+        if self.pending_suspend.is_some() || self.renderer_lost {
+            return self.renderer_lost.then_some(false);
+        }
+        match self.suspend_state {
+            AgentNativeSuspendState::Active => Some(false),
+            AgentNativeSuspendState::Suspended => Some(true),
+            AgentNativeSuspendState::Uncertain(_) => None,
         }
     }
 
@@ -503,10 +570,31 @@ impl AgentOwnedContext {
             && self.profile_lease.purpose() == ContextProfileLeasePurpose::Owned
             && (!self.renderer_loss_rejoin_pending || self.renderer_lost)
             && (self.pending_navigation.is_none() || self.pending_recovery.is_none())
+            && (self.pending_navigation.is_none() || self.pending_suspend.is_none())
+            && (self.pending_recovery.is_none() || self.pending_suspend.is_none())
             && self
-                .pending_navigation
+                .pending_suspend
                 .as_ref()
-                .is_none_or(|_| !self.renderer_lost)
+                .is_none_or(|_| self.late_suspend_claim.is_none())
+            && self
+                .late_suspend_claim
+                .as_ref()
+                .is_none_or(|(operation, _)| {
+                    matches!(
+                        self.suspend_state,
+                        AgentNativeSuspendState::Uncertain(expected) if expected == *operation
+                    )
+                })
+            && (!matches!(
+                self.suspend_state,
+                AgentNativeSuspendState::Active | AgentNativeSuspendState::Suspended
+            ) || self.late_suspend_claim.is_none())
+            && (!self.renderer_lost
+                || (self.pending_suspend.is_none()
+                    && self.suspend_state == AgentNativeSuspendState::Active))
+            && self.pending_navigation.as_ref().is_none_or(|_| {
+                !self.renderer_lost && self.suspend_state == AgentNativeSuspendState::Active
+            })
             && self.pending_recovery.as_ref().is_none_or(|pending| {
                 self.renderer_lost
                     && !self.renderer_loss_rejoin_pending
@@ -520,6 +608,11 @@ impl AgentOwnedContext {
             && self.pending_navigation.as_ref().is_none_or(|pending| {
                 pending.operation.context() == self.join
                     && pending.operation.kind() == ContextOperationKind::Navigate
+            })
+            && self.pending_suspend.as_ref().is_none_or(|pending| {
+                pending.operation.context() == self.join
+                    && pending.operation.kind() == ContextOperationKind::Suspend
+                    && self.suspend_state == AgentNativeSuspendState::Active
             })
             && self.pending_operation_for_audit().is_some()
             && !self.native_close_attempted
@@ -571,6 +664,13 @@ impl AgentOwnedContext {
                 ContextPortFailure::NativeRefused
             }));
         }
+        if let Some(pending) = self.pending_suspend.take() {
+            pending.claim.retire();
+            pending.complete(Err(pending_failure));
+        }
+        if let Some((_, claim)) = self.late_suspend_claim.take() {
+            claim.retire();
+        }
         let content_policy_clean = self
             .content_policy_registration
             .take()
@@ -589,6 +689,12 @@ impl AgentOwnedContext {
 #[cfg(target_os = "windows")]
 impl Drop for AgentOwnedContext {
     fn drop(&mut self) {
+        if let Some(pending) = self.pending_suspend.as_ref() {
+            pending.claim.retire();
+        }
+        if let Some((_, claim)) = self.late_suspend_claim.as_ref() {
+            claim.retire();
+        }
         let policy_cleanup_failed = self
             .content_policy_registration
             .take()
@@ -642,6 +748,18 @@ impl EngineHost {
                 if request.operation().kind() == ContextOperationKind::Recover =>
             {
                 self.start_owned_agent_recovery(task, request);
+            }
+            #[cfg(target_os = "windows")]
+            ContextNativeRequest::Transition(request)
+                if request.operation().kind() == ContextOperationKind::Suspend =>
+            {
+                self.start_owned_agent_suspend(task, request);
+            }
+            #[cfg(target_os = "windows")]
+            ContextNativeRequest::Transition(request)
+                if request.operation().kind() == ContextOperationKind::Resume =>
+            {
+                self.resume_owned_agent_context(task, request);
             }
             ContextNativeRequest::Transition(request)
                 if request.operation().kind() == ContextOperationKind::Close =>
@@ -704,6 +822,18 @@ impl EngineHost {
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         let pending_operations = Some(0);
 
+        #[cfg(target_os = "windows")]
+        let suspended_view_count = self
+            .agent_contexts
+            .values()
+            .try_fold(0usize, |count, binding| {
+                let suspended = binding.suspended_for_audit()?;
+                count.checked_add(usize::from(suspended))
+            })
+            .and_then(|count| u8::try_from(count).ok());
+        #[cfg(not(target_os = "windows"))]
+        let suspended_view_count = Some(0);
+
         let admission_counts = task.admission_counts();
         let queued_request_tasks = admission_counts
             .map(|(pending, _)| pending)
@@ -742,6 +872,7 @@ impl EngineHost {
             binding_count,
             resident_view_count,
             pending_operations,
+            suspended_view_count,
             pending_captures,
             queued_tasks,
         ) {
@@ -749,6 +880,7 @@ impl EngineHost {
                 Some(binding_count),
                 Some(resident_view_count),
                 Some(pending_operations),
+                Some(suspended_view_count),
                 Some(pending_captures),
                 Some(queued_tasks),
             ) if !self.native_resource_accounting_failed
@@ -762,7 +894,7 @@ impl EngineHost {
                     owned_reservations: binding_count,
                     borrowed_leases: 0,
                     visible_surfaces: 0,
-                    suspended_views: 0,
+                    suspended_views: suspended_view_count,
                     pending_operations,
                     pending_captures,
                     queued_tasks,
@@ -2223,9 +2355,14 @@ impl EngineHost {
             None => Some(ContextPortFailure::Stale),
             Some(binding) if binding.renderer_lost => Some(ContextPortFailure::Stale),
             Some(binding)
-                if binding.pending_navigation.is_some() || binding.pending_recovery.is_some() =>
+                if binding.pending_navigation.is_some()
+                    || binding.pending_recovery.is_some()
+                    || binding.pending_suspend.is_some() =>
             {
                 Some(ContextPortFailure::ResourceExhausted)
+            }
+            Some(binding) if binding.suspend_state != AgentNativeSuspendState::Active => {
+                Some(ContextPortFailure::NativeRefused)
             }
             Some(binding)
                 if !binding
@@ -2332,9 +2469,14 @@ impl EngineHost {
         let failure = match self.agent_contexts.get(&id) {
             None => Some(ContextPortFailure::Stale),
             Some(binding)
-                if binding.pending_navigation.is_some() || binding.pending_recovery.is_some() =>
+                if binding.pending_navigation.is_some()
+                    || binding.pending_recovery.is_some()
+                    || binding.pending_suspend.is_some() =>
             {
                 Some(ContextPortFailure::ResourceExhausted)
+            }
+            Some(binding) if binding.suspend_state != AgentNativeSuspendState::Active => {
+                Some(ContextPortFailure::NativeRefused)
             }
             Some(binding) if !binding.renderer_lost || !binding.renderer_loss_rejoin_pending => {
                 Some(ContextPortFailure::Stale)
@@ -2437,6 +2579,365 @@ impl EngineHost {
         }
     }
 
+    fn start_owned_agent_suspend(
+        &mut self,
+        task: AgentContextTask,
+        request: ContextTransitionRequest,
+    ) {
+        let operation = request.operation();
+        let requested = operation.context();
+        let id = requested.identity().id();
+        let structural_failure = match self.agent_contexts.get(&id) {
+            None => Some(ContextPortFailure::Stale),
+            Some(binding)
+                if !binding
+                    .capabilities
+                    .contains(zephium_agentic::ContextCapability::Suspend) =>
+            {
+                Some(ContextPortFailure::Unsupported)
+            }
+            Some(binding) if !full_successor(binding.join, requested) => {
+                Some(ContextPortFailure::Stale)
+            }
+            Some(_) => None,
+        };
+        if let Some(failure) = structural_failure {
+            task.refuse(failure);
+            return;
+        }
+        let Some(binding) = self.agent_contexts.get_mut(&id) else {
+            task.refuse(ContextPortFailure::Stale);
+            return;
+        };
+
+        // The core advances every join coordinate before native work. Retain
+        // that exact successor even when watchdog or COM admission refuses.
+        binding.join = requested;
+        let native_failure = if binding.renderer_lost {
+            Some(ContextPortFailure::Stale)
+        } else if binding.pending_navigation.is_some()
+            || binding.pending_recovery.is_some()
+            || binding.pending_suspend.is_some()
+        {
+            Some(ContextPortFailure::ResourceExhausted)
+        } else if binding.suspend_state != AgentNativeSuspendState::Active
+            || binding.late_suspend_claim.is_some()
+        {
+            Some(ContextPortFailure::NativeRefused)
+        } else if binding.pending_operation_for_audit() != Some(false) {
+            Some(ContextPortFailure::ResourceExhausted)
+        } else {
+            None
+        };
+        if let Some(failure) = native_failure {
+            task.refuse(failure);
+            return;
+        }
+        let claim = crate::platform::agent_suspension::AgentSuspendClaim::new();
+        let timeout_claim = claim.clone();
+        let timeout_guard = task.callback_guard();
+        let rejected_guard = timeout_guard.clone();
+        let Some(watchdog) = crate::platform::imp::schedule_content_policy_timeout(
+            AGENT_SUSPEND_TIMEOUT,
+            move || {
+                if !timeout_claim.timeout() {
+                    return;
+                }
+                let rejected = rejected_guard.clone();
+                if !crate::host::try_with_agent_context_terminal(move |host| {
+                    host.finish_owned_agent_suspend_timeout(id, operation);
+                }) {
+                    rejected.callback_dispatch_rejected();
+                }
+            },
+        ) else {
+            task.refuse(ContextPortFailure::NativeRefused);
+            return;
+        };
+        let callback_claim = claim.clone();
+        let callback_guard = task.callback_guard();
+        let panic_guard = callback_guard.clone();
+        binding.pending_suspend = Some(AgentPendingSuspend {
+            operation,
+            claim,
+            watchdog,
+            task,
+        });
+        let native_refused = binding
+            .view
+            .try_suspend(
+                move |native_succeeded| {
+                    let disposition = callback_claim.native_completed();
+                    let rejected = callback_guard.clone();
+                    if !crate::host::try_with_agent_context_terminal(move |host| {
+                        host.on_owned_agent_suspend_native(
+                            id,
+                            operation,
+                            disposition,
+                            native_succeeded,
+                        );
+                    }) {
+                        rejected.callback_dispatch_rejected();
+                    }
+                },
+                move || panic_guard.callback_dispatch_rejected(),
+            )
+            .is_err();
+        if native_refused {
+            self.finish_owned_agent_suspend_immediate_failure(id, operation);
+        }
+    }
+
+    fn finish_owned_agent_suspend_timeout(
+        &mut self,
+        id: ContextId,
+        operation: ContextOperationJoin,
+    ) {
+        let Some(pending) = self.agent_contexts.get_mut(&id).and_then(|binding| {
+            if binding
+                .pending_suspend
+                .as_ref()
+                .is_none_or(|pending| pending.operation != operation)
+            {
+                return None;
+            }
+            let pending = binding.pending_suspend.take()?;
+            binding.late_suspend_claim = Some((operation, pending.claim.clone()));
+            binding.suspend_state = AgentNativeSuspendState::Uncertain(operation);
+            Some(pending)
+        }) else {
+            return;
+        };
+        pending.complete(Err(ContextPortFailure::TimedOut));
+    }
+
+    fn finish_owned_agent_suspend_immediate_failure(
+        &mut self,
+        id: ContextId,
+        operation: ContextOperationJoin,
+    ) {
+        let Some((pending, outcome)) = (|| {
+            let binding = self.agent_contexts.get_mut(&id)?;
+            if binding
+                .pending_suspend
+                .as_ref()
+                .is_none_or(|pending| pending.operation != operation)
+            {
+                return None;
+            }
+            let pending = binding.pending_suspend.take()?;
+            pending.claim.retire();
+            let outcome = match binding.view.attest_suspension_state() {
+                Ok(true) => match binding.view.resume_and_attest_active() {
+                    Ok(true) => {
+                        binding.suspend_state = AgentNativeSuspendState::Active;
+                        Err(ContextPortFailure::NativeRefused)
+                    }
+                    Ok(false) | Err(_) => {
+                        binding.suspend_state = AgentNativeSuspendState::Uncertain(operation);
+                        Err(ContextPortFailure::NativeRefused)
+                    }
+                },
+                Ok(false) => {
+                    binding.suspend_state = AgentNativeSuspendState::Active;
+                    Err(ContextPortFailure::NativeRefused)
+                }
+                Err(_) => {
+                    binding.suspend_state = AgentNativeSuspendState::Uncertain(operation);
+                    Err(ContextPortFailure::NativeRefused)
+                }
+            };
+            Some((pending, outcome))
+        })() else {
+            return;
+        };
+        pending.complete(outcome);
+    }
+
+    fn on_owned_agent_suspend_native(
+        &mut self,
+        id: ContextId,
+        operation: ContextOperationJoin,
+        disposition: crate::platform::agent_suspension::AgentSuspendNativeDisposition,
+        native_succeeded: bool,
+    ) {
+        use crate::platform::agent_suspension::AgentSuspendNativeDisposition as Disposition;
+
+        match disposition {
+            Disposition::Retired => {}
+            Disposition::Duplicate => self.fail_agent_context_invariant(
+                "Windows agent suspend callback completed more than once",
+            ),
+            Disposition::Reconcile => {
+                self.reconcile_owned_agent_suspend(id, operation);
+            }
+            Disposition::Terminal => {
+                let pending_matches = self.agent_contexts.get(&id).is_some_and(|binding| {
+                    binding
+                        .pending_suspend
+                        .as_ref()
+                        .is_some_and(|pending| pending.operation == operation)
+                });
+                if pending_matches {
+                    self.finish_owned_agent_suspend_native_terminal(
+                        id,
+                        operation,
+                        native_succeeded,
+                    );
+                } else if self.agent_contexts.get(&id).is_some_and(|binding| {
+                    binding.suspend_state == AgentNativeSuspendState::Uncertain(operation)
+                }) {
+                    // A cancellation can retire the external task after the
+                    // native callback won but before this queued terminal ran.
+                    self.reconcile_owned_agent_suspend(id, operation);
+                }
+            }
+        }
+    }
+
+    fn finish_owned_agent_suspend_native_terminal(
+        &mut self,
+        id: ContextId,
+        operation: ContextOperationJoin,
+        native_succeeded: bool,
+    ) {
+        let Some((pending, outcome)) = (|| {
+            let binding = self.agent_contexts.get_mut(&id)?;
+            if binding
+                .pending_suspend
+                .as_ref()
+                .is_none_or(|pending| pending.operation != operation)
+            {
+                return None;
+            }
+            let pending = binding.pending_suspend.take()?;
+            let outcome = match binding.view.attest_suspension_state() {
+                Ok(true) if native_succeeded => {
+                    binding.suspend_state = AgentNativeSuspendState::Suspended;
+                    Ok(())
+                }
+                Ok(true) => match binding.view.resume_and_attest_active() {
+                    Ok(true) => {
+                        binding.suspend_state = AgentNativeSuspendState::Active;
+                        Err(ContextPortFailure::NativeRefused)
+                    }
+                    Ok(false) | Err(_) => {
+                        binding.suspend_state = AgentNativeSuspendState::Uncertain(operation);
+                        Err(ContextPortFailure::NativeRefused)
+                    }
+                },
+                Ok(false) => {
+                    binding.suspend_state = AgentNativeSuspendState::Active;
+                    Err(ContextPortFailure::NativeRefused)
+                }
+                Err(_) => {
+                    binding.suspend_state = AgentNativeSuspendState::Uncertain(operation);
+                    Err(ContextPortFailure::NativeRefused)
+                }
+            };
+            Some((pending, outcome))
+        })() else {
+            return;
+        };
+        pending.complete(outcome);
+    }
+
+    fn reconcile_owned_agent_suspend(&mut self, id: ContextId, operation: ContextOperationJoin) {
+        let reconciled = self.agent_contexts.get_mut(&id).is_some_and(|binding| {
+            if binding.pending_suspend.is_some()
+                || binding.suspend_state != AgentNativeSuspendState::Uncertain(operation)
+                || binding
+                    .late_suspend_claim
+                    .as_ref()
+                    .is_none_or(|(expected, _)| *expected != operation)
+            {
+                return false;
+            }
+            let _completed_claim = binding.late_suspend_claim.take();
+            match binding.view.resume_and_attest_active() {
+                Ok(true) => {
+                    binding.suspend_state = AgentNativeSuspendState::Active;
+                    true
+                }
+                Ok(false) | Err(_) => false,
+            }
+        });
+        if self.agent_contexts.contains_key(&id) && !reconciled {
+            self.fail_agent_context_invariant(
+                "Windows agent late suspend callback could not restore active state",
+            );
+        }
+    }
+
+    fn resume_owned_agent_context(
+        &mut self,
+        task: AgentContextTask,
+        request: ContextTransitionRequest,
+    ) {
+        let operation = request.operation();
+        let requested = operation.context();
+        let id = requested.identity().id();
+        let structural_failure = match self.agent_contexts.get(&id) {
+            None => Some(ContextPortFailure::Stale),
+            Some(binding)
+                if !binding
+                    .capabilities
+                    .contains(zephium_agentic::ContextCapability::Suspend) =>
+            {
+                Some(ContextPortFailure::Unsupported)
+            }
+            Some(binding) if !full_successor(binding.join, requested) => {
+                Some(ContextPortFailure::Stale)
+            }
+            Some(_) => None,
+        };
+        if let Some(failure) = structural_failure {
+            task.refuse(failure);
+            return;
+        }
+        let Some(binding) = self.agent_contexts.get_mut(&id) else {
+            task.refuse(ContextPortFailure::Stale);
+            return;
+        };
+        binding.join = requested;
+        let outcome = if binding.renderer_lost {
+            Err(ContextPortFailure::Stale)
+        } else if binding.pending_navigation.is_some()
+            || binding.pending_recovery.is_some()
+            || binding.pending_suspend.is_some()
+        {
+            Err(ContextPortFailure::ResourceExhausted)
+        } else if binding.suspend_state != AgentNativeSuspendState::Suspended
+            || binding.late_suspend_claim.is_some()
+        {
+            Err(ContextPortFailure::NativeRefused)
+        } else {
+            match binding.view.resume_and_attest_active() {
+                Ok(true) => {
+                    binding.suspend_state = AgentNativeSuspendState::Active;
+                    Ok(())
+                }
+                Ok(false) => {
+                    binding.suspend_state = AgentNativeSuspendState::Suspended;
+                    Err(ContextPortFailure::NativeRefused)
+                }
+                Err(_) => {
+                    binding.suspend_state = AgentNativeSuspendState::Uncertain(operation);
+                    Err(ContextPortFailure::NativeRefused)
+                }
+            }
+        };
+        match ContextTransitionSettlement::try_new(operation, outcome) {
+            Ok(settlement) => task.complete(ContextNativeEvent::TransitionSettled(settlement)),
+            Err(_) => {
+                self.fail_agent_context_invariant(
+                    "Windows agent resume settlement violated its closed operation contract",
+                );
+                task.refuse(ContextPortFailure::NativeRefused);
+            }
+        }
+    }
+
     fn on_owned_agent_navigation_terminal(
         &mut self,
         id: ContextId,
@@ -2469,7 +2970,14 @@ impl EngineHost {
         view_origin: ContextJoin,
         emitter: crate::agent_context_port::AgentContextCallbackGuard,
     ) {
-        let (prior, pending_navigation, pending_recovery, navigation_clean, emit_loss) = {
+        let (
+            prior,
+            pending_navigation,
+            pending_recovery,
+            pending_suspend,
+            navigation_clean,
+            emit_loss,
+        ) = {
             let Some(binding) = self.agent_contexts.get_mut(&id) else {
                 return;
             };
@@ -2481,23 +2989,34 @@ impl EngineHost {
             let prior = binding.join;
             let pending_navigation = binding.pending_navigation.take();
             let pending_recovery = binding.pending_recovery.take();
+            let pending_suspend = binding.pending_suspend.take();
+            if let Some(pending) = pending_suspend.as_ref() {
+                pending.claim.retire();
+            }
+            if let Some((_, claim)) = binding.late_suspend_claim.take() {
+                claim.retire();
+            }
             let pending_operation = pending_navigation
                 .as_ref()
                 .map(|pending| pending.operation)
                 .or_else(|| pending_recovery.as_ref().map(|pending| pending.operation));
-            let mutually_exclusive = pending_navigation.is_none() || pending_recovery.is_none();
-            let disarmed = mutually_exclusive
+            let lifecycle_count = usize::from(pending_navigation.is_some())
+                + usize::from(pending_recovery.is_some())
+                + usize::from(pending_suspend.is_some());
+            let disarmed = lifecycle_count <= 1
                 && pending_operation
                     .is_none_or(|operation| binding.view.navigation().disarm(operation));
             let navigation_clean =
                 disarmed && binding.view.navigation().matches_for_audit(None, true);
             let emit_loss = pending_recovery.is_none();
+            binding.suspend_state = AgentNativeSuspendState::Active;
             binding.renderer_lost = true;
             binding.renderer_loss_rejoin_pending = emit_loss;
             (
                 prior,
                 pending_navigation,
                 pending_recovery,
+                pending_suspend,
                 navigation_clean,
                 emit_loss,
             )
@@ -2506,6 +3025,9 @@ impl EngineHost {
             pending.complete(Err(ContextPortFailure::NativeRefused));
         }
         if let Some(pending) = pending_recovery {
+            pending.complete(Err(ContextPortFailure::NativeRefused));
+        }
+        if let Some(pending) = pending_suspend {
             pending.complete(Err(ContextPortFailure::NativeRefused));
         }
         if !navigation_clean {
@@ -2674,7 +3196,7 @@ impl EngineHost {
         current: ContextJoin,
     ) -> Result<(), ContextPortFailure> {
         let id = current.identity().id();
-        let (pending_navigation, pending_recovery, disarmed) = {
+        let (pending_navigation, pending_recovery, pending_suspend, disarmed) = {
             let binding = self
                 .agent_contexts
                 .get_mut(&id)
@@ -2693,7 +3215,10 @@ impl EngineHost {
             binding.renderer_loss_rejoin_pending = false;
             let pending_navigation = binding.pending_navigation.take();
             let pending_recovery = binding.pending_recovery.take();
-            let mutually_exclusive = pending_navigation.is_none() || pending_recovery.is_none();
+            let pending_suspend = binding.pending_suspend.take();
+            let lifecycle_count = usize::from(pending_navigation.is_some())
+                + usize::from(pending_recovery.is_some())
+                + usize::from(pending_suspend.is_some());
             let navigation_disarmed = pending_navigation
                 .as_ref()
                 .is_none_or(|pending| binding.view.navigation().disarm(pending.operation));
@@ -2704,12 +3229,26 @@ impl EngineHost {
                     .settle_recovery(pending.operation, false)
             });
             if pending_recovery.is_some() {
+                binding.suspend_state = AgentNativeSuspendState::Active;
                 binding.renderer_lost = true;
             }
+            let suspend_disarmed = pending_suspend.as_ref().is_none_or(|pending| {
+                let _ = pending.claim.cancel();
+                if binding.late_suspend_claim.is_some() {
+                    return false;
+                }
+                binding.late_suspend_claim = Some((pending.operation, pending.claim.clone()));
+                binding.suspend_state = AgentNativeSuspendState::Uncertain(pending.operation);
+                true
+            });
             (
                 pending_navigation,
                 pending_recovery,
-                mutually_exclusive && navigation_disarmed && recovery_disarmed,
+                pending_suspend,
+                lifecycle_count <= 1
+                    && navigation_disarmed
+                    && recovery_disarmed
+                    && suspend_disarmed,
             )
         };
         if let Some(pending) = pending_navigation {
@@ -2726,9 +3265,16 @@ impl EngineHost {
                 ContextPortFailure::NativeRefused
             }));
         }
+        if let Some(pending) = pending_suspend {
+            pending.complete(Err(if disarmed {
+                ContextPortFailure::Cancelled
+            } else {
+                ContextPortFailure::NativeRefused
+            }));
+        }
         if !disarmed {
             self.fail_agent_context_invariant(
-                "Windows agent cancellation lost its exact navigation gate",
+                "Windows agent cancellation lost its exact native lifecycle gate",
             );
             return Err(ContextPortFailure::NativeRefused);
         }

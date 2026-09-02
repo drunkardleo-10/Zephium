@@ -18,8 +18,9 @@ use std::time::Instant;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use webview2_com::Microsoft::Web::WebView2::Win32::{
     ICoreWebView2, ICoreWebView2Environment, ICoreWebView2Profile, ICoreWebView2Profile7,
-    ICoreWebView2_13, ICoreWebView2_2,
+    ICoreWebView2_13, ICoreWebView2_2, ICoreWebView2_3,
 };
+use webview2_com::TrySuspendCompletedHandler;
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::GetFocus;
@@ -217,6 +218,82 @@ impl AgentOwnedView {
 
     pub(crate) fn semantic_work_drained_for_audit(&self) -> Option<bool> {
         self.semantic()?.work_drained_for_audit()
+    }
+
+    /// Starts WebView2's invisible-view suspension primitive.
+    ///
+    /// The host retains the transition task and a separate reconciliation
+    /// claim because WebView2 exposes no cancellation for this callback.
+    pub(crate) fn try_suspend(
+        &self,
+        completion: impl FnOnce(bool) + 'static,
+        callback_panicked: impl Fn() + 'static,
+    ) -> Result<(), AgentOwnedViewConstructionError> {
+        attest_hidden_owner(&self.view, self.expected_parent, self.viewport)?;
+        if self.is_suspended()? {
+            return Err(AgentOwnedViewConstructionError::Native);
+        }
+        let core = self
+            .view
+            .webview()
+            .cast::<ICoreWebView2_3>()
+            .map_err(|_| AgentOwnedViewConstructionError::Native)?;
+        let handler = TrySuspendCompletedHandler::create(Box::new(move |result, suspended| {
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                completion(result.is_ok() && suspended);
+            }))
+            .is_err()
+            {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback_panicked));
+            }
+            Ok(())
+        }));
+        // SAFETY: `core` and `handler` are live reference-counted COM
+        // interfaces on the owning STA. WebView2 retains the one-shot handler
+        // until completion; the host separately bounds and reconciles it.
+        unsafe { core.TrySuspend(&handler) }.map_err(|_| AgentOwnedViewConstructionError::Native)
+    }
+
+    /// Reads the exact native suspension bit without exposing the COM object.
+    pub(crate) fn is_suspended(&self) -> Result<bool, AgentOwnedViewConstructionError> {
+        let core = self
+            .view
+            .webview()
+            .cast::<ICoreWebView2_3>()
+            .map_err(|_| AgentOwnedViewConstructionError::Native)?;
+        let mut suspended = windows_core::BOOL::default();
+        // SAFETY: `core` is the live view-owned interface and `suspended` is
+        // initialized writable storage of the exact BOOL type.
+        unsafe { core.IsSuspended(&mut suspended) }
+            .map_err(|_| AgentOwnedViewConstructionError::Native)?;
+        Ok(suspended.as_bool())
+    }
+
+    /// Reattests the fixed hidden owner and reads the final native bit.
+    ///
+    /// The read happens after every other attestation API because Microsoft
+    /// documents that some WebView APIs can implicitly resume a suspended
+    /// view. The returned bit is therefore the state the host may record.
+    pub(crate) fn attest_suspension_state(&self) -> Result<bool, AgentOwnedViewConstructionError> {
+        attest_hidden_owner(&self.view, self.expected_parent, self.viewport)?;
+        self.is_suspended()
+    }
+
+    /// Requests native resume and returns whether active state was proven.
+    ///
+    /// An HRESULT alone is not the postcondition: a failed call can race an
+    /// already-active view, while a successful call must still be checked.
+    pub(crate) fn resume_and_attest_active(&self) -> Result<bool, AgentOwnedViewConstructionError> {
+        let core = self
+            .view
+            .webview()
+            .cast::<ICoreWebView2_3>()
+            .map_err(|_| AgentOwnedViewConstructionError::Native)?;
+        // SAFETY: `core` is owned by this view on its creating STA. Microsoft
+        // documents that the page is immediately interactive after success.
+        let _resume_result = unsafe { core.Resume() };
+        attest_hidden_owner(&self.view, self.expected_parent, self.viewport)?;
+        self.is_suspended().map(|suspended| !suspended)
     }
 
     pub(crate) fn attest(&self, deadline: Instant) -> Result<(), AgentOwnedViewConstructionError> {

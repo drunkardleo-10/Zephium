@@ -1060,11 +1060,9 @@ fn supports_native_request(request: &ContextNativeRequest) -> bool {
                 zephium_agentic::ContextConstructionSource::Owned
             ),
             ContextNativeRequest::Transition(request) => {
-                matches!(
-                    request.operation().kind(),
-                    ContextOperationKind::Recover | ContextOperationKind::Close
-                ) && request.operation().context().identity().kind()
-                    == zephium_agentic::ContextKind::Owned
+                supports_owned_transition(request.operation().kind())
+                    && request.operation().context().identity().kind()
+                        == zephium_agentic::ContextKind::Owned
             }
             ContextNativeRequest::Cancel(request) => {
                 request.current().identity().kind() == zephium_agentic::ContextKind::Owned
@@ -1078,6 +1076,31 @@ fn supports_native_request(request: &ContextNativeRequest) -> bool {
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let _ = request;
+        false
+    }
+}
+
+const fn supports_owned_transition(kind: ContextOperationKind) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        matches!(
+            kind,
+            ContextOperationKind::Suspend
+                | ContextOperationKind::Resume
+                | ContextOperationKind::Recover
+                | ContextOperationKind::Close
+        )
+    }
+    #[cfg(target_os = "macos")]
+    {
+        matches!(
+            kind,
+            ContextOperationKind::Recover | ContextOperationKind::Close
+        )
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = kind;
         false
     }
 }
@@ -1329,7 +1352,7 @@ mod tests {
             .1
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn recovery_request() -> ContextNativeRequest {
         let identity = ContextIdentity::new(
             ContextId::generate(),
@@ -1769,19 +1792,27 @@ mod tests {
             Arc::new(|_| {}),
         );
         let port = slot.take(Arc::new(|_| {})).expect("port");
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         assert!(supports_native_request(&recovery_request()));
+        assert_eq!(
+            supports_owned_transition(ContextOperationKind::Suspend),
+            cfg!(target_os = "windows")
+        );
+        assert_eq!(
+            supports_owned_transition(ContextOperationKind::Resume),
+            cfg!(target_os = "windows")
+        );
         let outcome = port.dispatch(construction_request());
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         assert_eq!(
             outcome,
             ContextDispatch::Rejected(ContextPortFailure::Shutdown)
         );
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         assert_eq!(outcome, ContextDispatch::Unsupported);
         assert_eq!(
             dispatches.load(Ordering::Relaxed),
-            usize::from(cfg!(target_os = "macos"))
+            usize::from(cfg!(any(target_os = "macos", target_os = "windows")))
         );
     }
 

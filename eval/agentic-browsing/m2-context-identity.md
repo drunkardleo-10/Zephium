@@ -5,7 +5,7 @@ the initial feature-gated macOS and Windows owned-context lifecycle adapters
 are implemented. Both retain exact shell-requested navigation, one-shot
 renderer-loss detection, same-view recovery, explicit close, and resource
 accounting. The Windows implementation is cross-compiled only. Redirect and
-page-driven navigation, presentation, suspension, native Windows cookies,
+page-driven navigation, presentation, native Windows cookies,
 borrowed/handoff adapters, and named-device qualification remain pending.
 
 This evidence records code properties only. It does not claim that either
@@ -380,6 +380,38 @@ fixed UI-thread `SetTimer` slots, allocate no worker, channel, or map, and have
 zero timer activity while idle. Native callbacks use the independently bounded
 terminal host band and cannot replace an accepted request debt.
 
+Windows owned contexts now implement the functional core's hidden suspend and
+resume transitions through `ICoreWebView2_3`. Admission requires the exact full
+generation successor, the owned `Suspend` capability, no navigation, recovery,
+semantic, or prior suspend work, and the already-attested hidden/unfocused
+owner. `TrySuspend` is best effort and has no cancellation primitive, so a
+fixed ten-second UI-thread watchdog and the native callback share one atomic
+claim. The winner owns the sole external transition settlement. A callback
+that loses to timeout or logical cancellation remains a private cleanup debt:
+the host blocks navigation, recovery, policy replacement, further suspension,
+and clean resource audit until it calls `Resume` and proves the final native
+bit active, or destroys/loses the exact view. Renderer loss, close, and shutdown
+retire that late callback authority before releasing the binding.
+
+The adapter rechecks hidden HWND/controller ownership before recording the
+final `IsSuspended` bit. Resume is not inferred from its HRESULT: the host calls
+`Resume`, reattests hidden ownership, then reads the bit again. This ordering is
+intentional because Microsoft documents that `TrySuspend` is best effort,
+`IsSuspended` is true only from successful completion until resume, and some
+WebView APIs can implicitly resume a suspended view
+([ICoreWebView2_3](https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2_3)).
+Resource snapshots count only settled suspended residents; they refuse while a
+suspend or unreconciled late callback can make the physical count ambiguous.
+Content-policy replacement refuses before touching any suspended or uncertain
+Windows owned view, so a blocker update cannot silently auto-resume it.
+
+This is compile-time, pure-state, and MSVC cross-target evidence only. No
+physical Windows suspend/resume behavior, process-memory reduction, timer
+latency, renderer-loss race, or long-running-script case has been qualified.
+macOS remains explicitly unsupported at the native port because no equivalent
+public `WKWebView` suspension/readback primitive has been proven for the pinned
+engine.
+
 Close, cancellation, profile erasure, and shutdown stop loading and settle any
 retained navigation before retiring content policy and calling WebView2 close.
 A failed close transfers the exact native-resource lease to the existing
@@ -429,8 +461,12 @@ The release boundary mutation-tests the dormant Windows adapter's feature
 gate, count ceiling, destination-side copy, write interlock, sequential
 accounting, profile-wide cleanup/readback, secret conversion, and absence of
 thread, message-pump, script, CDP, serialization, or direct diagnostic
-surfaces. The adapter additionally cross-compiles against the pinned Windows
-target; runtime behavior remains a physical-Windows evidence item.
+surfaces. It also pins suspension's target/feature gate, atomic
+callback/timeout/cancellation ownership, late reconciliation, fixed deadline,
+native readback, resource count, teardown retirement, and refusal to replace a
+content policy on a suspended view. The adapter additionally cross-compiles
+against the pinned Windows target; runtime behavior remains a physical-Windows
+evidence item.
 Handoff tests execute complete macOS shared-store and Windows cookie-bridge
 flows through the real context registry, including exclusive human control,
 temporary-context release, scoped refresh, fresh observation, incompatible
@@ -452,8 +488,8 @@ loses its hidden/profile/inventory/process/policy/cleanup checks.
 1. physically qualify Windows owned construction, selected/subprofile
    inventory, hidden/focus state, navigation, loss, close, debt, and shutdown
    on an explicitly authorized named Windows device/runtime;
-2. add bounded redirect/page-replacement observation, presentation, and
-   suspension while preserving exact context/world/frame generations;
+2. add bounded redirect/page-replacement observation and presentation while
+   preserving exact context/world/frame generations;
 3. integrate and physically qualify the bounded Windows cookie adapter under
    one exclusive automation-profile transaction, consume its partial-cleanup
    receipt with sticky quarantine, and add native borrowed/handoff source

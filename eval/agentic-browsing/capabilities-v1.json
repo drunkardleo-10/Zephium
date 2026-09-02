@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "reviewed_on": "2026-09-01",
+  "reviewed_on": "2026-09-02",
   "repository_revision": "commit-containing-this-manifest",
   "pinned_components": {
     "wry": {
@@ -76,6 +76,29 @@
         "https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-mapvirtualkeyexw"
       ],
       "limitations": "Pinned Wry exposes its WRY_WEBVIEW container, whose window procedure identifies the first direct child as the WebView document for focus. The adapter revalidates that owned child's container/first-child/parent identity before and after every fixed bounded SendMessageTimeoutW mouse/key step. Keyboard messages use the extended scan-code mapping and preserve the Win32 extended-key and up-transition flags. Hidden/background admission rejects host foreground/activation or owned-subtree keyboard focus before the first row, rather than accepting a stolen baseline. It verifies exact navigation identity, an ephemeral UDF plus InPrivate postcondition, and two-factor process exit before deletion. Cross-compilation does not prove hidden/background trusted input, effect coverage, or no focus theft."
+    },
+    {
+      "platform": "windows",
+      "mechanism": "owned_webview2_try_suspend",
+      "code_status": "implemented_in_feature_gated_production_adapter_cross_compiled",
+      "device_status": "pending_device_capture",
+      "evidence": [
+        "crates/zephium-engine/src/platform/windows/agent_context.rs",
+        "crates/zephium-engine/src/platform/agent_suspension.rs",
+        "https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2_3"
+      ],
+      "limitations": "Only hidden owned contexts with exact Suspend capability and no other native work are admitted. An atomic fixed-deadline owner retains late TrySuspend callback reconciliation after timeout or cancellation; final state is recorded only after hidden-owner attestation and IsSuspended readback. Resource audit and content-policy replacement fail closed while state is ambiguous. Cross-compilation does not prove physical suspend/resume behavior, memory reduction, long-running-script timing, renderer-loss races, or resource savings."
+    },
+    {
+      "platform": "macos",
+      "mechanism": "owned_webview_public_suspension",
+      "code_status": "intentionally_unsupported",
+      "device_status": "not_applicable_without_public_native_primitive",
+      "evidence": [
+        "crates/zephium-engine/src/agent_context_port.rs",
+        "https://developer.apple.com/documentation/webkit/wkwebview"
+      ],
+      "limitations": "The pinned public WKWebView surface has no proven equivalent to WebView2 TrySuspend plus IsSuspended readback. Hiding a view or relying on process policy is not reported as a settled suspend transition."
     },
     {
       "platform": "windows",

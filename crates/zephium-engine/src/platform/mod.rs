@@ -11,6 +11,8 @@ mod agent_screenshot_buffer;
 #[cfg(all(feature = "agentic-browser", any(target_os = "windows", test)))]
 #[cfg_attr(all(target_os = "windows", not(test)), allow(dead_code))]
 mod agent_semantic_cdp_protocol;
+#[cfg(all(feature = "agentic-browser", any(target_os = "windows", test)))]
+pub(crate) mod agent_suspension;
 
 #[cfg(target_os = "macos")]
 pub mod macos;

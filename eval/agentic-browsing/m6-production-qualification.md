@@ -33,13 +33,13 @@ responses, machine-local paths, or native traces.
   transport are absent from the ordinary desktop release graph; and
 - independently compile-refuses the fixed macOS semantic qualifier in
   optimized builds and proves it absent from that graph.
-- enumerates all seven agentic-owned production platform modules that contain
+- enumerates all eight agentic-owned production platform modules that contain
   native/unsafe boundaries and requires each module to deny both undocumented
   unsafe blocks and unsafe operations outside explicit unsafe blocks. A
   mutation test removes or misplaces each lint header and proves the gate
   refuses the source; and
 - requires the agentic functional-core crate, dormant provider transport, and
-  all 12 dedicated production engine modules to deny direct standard-output,
+  all 15 dedicated production engine modules to deny direct standard-output,
   standard-error, and `dbg!` macros. Every non-diagnostic functional-core
   source and each dedicated engine/provider source is also scanned for direct
   Rust and native logging calls. The provider gate separately pins both
@@ -47,6 +47,12 @@ responses, machine-local paths, or native traces.
   storage, sensitive request headers, manually redacted credential/attempt
   `Debug`, and a closed reqwest failure classifier that consumes only the
   timeout bit. Mutation tests prove each protection is required; and
+- pins the Windows owned-context suspension adapter to its feature/target gate,
+  fixed atomic callback/timeout/cancellation owner, one late-reconciliation
+  path, ten-second UI-thread deadline, `TrySuspend`/`IsSuspended`/`Resume`
+  readbacks, ambiguous-state audit refusal, callback retirement at teardown,
+  and content-policy replacement exclusion. Mutation tests remove the late
+  state and teardown retirement and prove both changes fail; and
 - forbids releasing an explicit profile lease from the lease value alone.
   Release now consumes the constructor-closed supervisor receipt emitted only
   after queued cancellation or terminal registry reaping, rejoins the exact
@@ -127,11 +133,16 @@ agentic-owned Windows modules. Cross-compilation is not device behavior.
   closed manifest explicitly excludes arbitrary-site, Windows, provider-token,
   and Browse/resource claims.
 - The Windows adapter is source-guarded and cross-compiles. Cross-compilation is
-  not physical-device behavioral evidence.
+  not physical-device behavioral evidence. Its owned-context port now admits
+  hidden suspend/resume through WebView2 only, with a ten-second UI-thread
+  deadline, exact callback/timeout/cancellation ownership, retained late
+  reconciliation, final `IsSuspended` readback, content-policy exclusion, and
+  resource-audit refusal while physical state is ambiguous. macOS remains
+  unsupported at this port. No suspend/resume device or resource claim is made.
 - The functional agentic core forbids unsafe code. The agentic-owned production
-  native graph currently contains exactly seven audited modules: the macOS and
+  native graph currently contains exactly eight audited modules: the macOS and
   Windows owned-context, semantic-runtime, and semantic-screenshot adapters,
-  plus the Windows UI timeout adapter. Every unsafe block in those modules now
+  plus the Windows cookie and UI-timeout adapters. Every unsafe block in those modules now
   carries a local lifetime, thread/apartment, pointer, ownership, or ABI proof,
   and module-level lints make both missing proofs and implicit unsafe operations
   compile failures. The audit also made macOS view hardening/attestation refuse

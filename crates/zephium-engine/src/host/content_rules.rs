@@ -1008,6 +1008,11 @@ impl EngineHost {
                     agent_failure = Some(ContentRuleApplyFailure::NativeInstallation);
                     break;
                 };
+                #[cfg(target_os = "windows")]
+                if !context.permits_content_policy_install() {
+                    agent_failure = Some(ContentRuleApplyFailure::NativeInstallation);
+                    break;
+                }
                 match crate::platform::imp::install_content_policy_on_view(context.view(), &native)
                 {
                     Ok(registration) => agent_registrations.push((id, registration)),

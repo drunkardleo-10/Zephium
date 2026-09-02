@@ -82,6 +82,7 @@ const ENGINE_WINDOWS_AGENT_CONTEXT: &str =
     "crates/zephium-engine/src/platform/windows/agent_context.rs";
 const ENGINE_WINDOWS_AGENT_TIMEOUT: &str = "crates/zephium-engine/src/platform/windows/timeout.rs";
 const ENGINE_AGENT_NAVIGATION: &str = "crates/zephium-engine/src/platform/agent_navigation.rs";
+const ENGINE_AGENT_SUSPENSION: &str = "crates/zephium-engine/src/platform/agent_suspension.rs";
 const ENGINE_AGENT_SCREENSHOT_BUFFER: &str =
     "crates/zephium-engine/src/platform/agent_screenshot_buffer.rs";
 const ENGINE_AGENT_COOKIE_PREFLIGHT: &str =
@@ -94,6 +95,7 @@ const ENGINE_WINDOWS_SEMANTIC_RUNTIME: &str =
     "crates/zephium-engine/src/platform/windows/semantic_runtime.rs";
 const ENGINE_WINDOWS_SEMANTIC_SCREENSHOT: &str =
     "crates/zephium-engine/src/platform/windows/semantic_screenshot.rs";
+const ENGINE_HOST_CONTENT_RULES: &str = "crates/zephium-engine/src/host/content_rules.rs";
 const ENGINE_AGENTIC_NATIVE_UNSAFE_MODULES: [&str; 8] = [
     ENGINE_MACOS_AGENT_CONTEXT,
     ENGINE_MACOS_SEMANTIC_RUNTIME,
@@ -104,10 +106,11 @@ const ENGINE_AGENTIC_NATIVE_UNSAFE_MODULES: [&str; 8] = [
     ENGINE_WINDOWS_SEMANTIC_SCREENSHOT,
     ENGINE_WINDOWS_AGENT_TIMEOUT,
 ];
-const ENGINE_AGENTIC_PRODUCTION_MODULES: [&str; 14] = [
+const ENGINE_AGENTIC_PRODUCTION_MODULES: [&str; 15] = [
     ENGINE_AGENT_CONTEXT_PORT,
     ENGINE_AGENT_CONTEXT_HOST,
     ENGINE_AGENT_NAVIGATION,
+    ENGINE_AGENT_SUSPENSION,
     ENGINE_AGENT_SCREENSHOT_BUFFER,
     ENGINE_AGENT_COOKIE_PREFLIGHT,
     ENGINE_WINDOWS_SEMANTIC_PROTOCOL,
@@ -367,6 +370,14 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         &read(repository.join(ENGINE_WINDOWS_AGENT_TIMEOUT))?,
         &read(repository.join(ENGINE_AGENT_NAVIGATION))?,
         &read(repository.join(ENGINE_AGENT_CONTEXT_HOST))?,
+    )?;
+    validate_engine_windows_agent_suspension_boundary(
+        &read(repository.join(ENGINE_PLATFORM_MODULE))?,
+        &read(repository.join(ENGINE_WINDOWS_AGENT_CONTEXT))?,
+        &read(repository.join(ENGINE_AGENT_SUSPENSION))?,
+        &read(repository.join(ENGINE_AGENT_CONTEXT_HOST))?,
+        &read(repository.join(ENGINE_HOST_CONTENT_RULES))?,
+        &read(repository.join(ENGINE_AGENT_CONTEXT_PORT))?,
     )?;
     validate_engine_windows_cookie_transfer(
         &windows_module,
@@ -1263,6 +1274,7 @@ fn validate_engine_windows_agent_context_boundary(
             ));
         }
     }
+
     let windows_host = host
         .split_once("fnclose_unpublished_windows_agent_view")
         .and_then(|(_, source)| source.split_once("fnstart_owned_agent_navigation"))
@@ -1305,6 +1317,215 @@ fn validate_engine_windows_agent_context_boundary(
                     "production Windows agent-context {label} acquired forbidden surface {forbidden}"
                 ));
             }
+        }
+    }
+    Ok(())
+}
+
+fn validate_engine_windows_agent_suspension_boundary(
+    platform_module: &str,
+    adapter: &str,
+    suspension: &str,
+    host: &str,
+    content_rules: &str,
+    port: &str,
+) -> Result<(), String> {
+    let platform_module = compact(platform_module);
+    if !platform_module.contains(
+        "#[cfg(all(feature=\"agentic-browser\",any(target_os=\"windows\",test)))]pub(crate)modagent_suspension;",
+    ) {
+        return Err(
+            "production Windows suspension claim lost its target/feature gate".to_owned(),
+        );
+    }
+
+    let adapter = compact(adapter);
+    for required in [
+        "core.TrySuspend(&handler)",
+        "core.IsSuspended(&mutsuspended)",
+        "core.Resume()",
+        "fnattest_suspension_state",
+        "fnresume_and_attest_active",
+        "catch_unwind",
+    ] {
+        if !adapter.contains(required) {
+            return Err(format!(
+                "production Windows suspension adapter lost native proof {required}"
+            ));
+        }
+    }
+
+    let suspension = compact(suspension);
+    for required in [
+        "state:Arc<AtomicU8>",
+        "compare_exchange(PENDING,TIMED_OUT",
+        "compare_exchange(PENDING,CANCELLED",
+        "LATE_NATIVE_COMPLETED",
+        "AgentSuspendNativeDisposition::Terminal",
+        "AgentSuspendNativeDisposition::Reconcile",
+        "AgentSuspendNativeDisposition::Retired",
+        "AgentSuspendNativeDisposition::Duplicate",
+        "self.state.store(RETIRED,Ordering::Release)",
+    ] {
+        if !suspension.contains(required) {
+            return Err(format!(
+                "production Windows suspend ownership lost required mechanism {required}"
+            ));
+        }
+    }
+    for forbidden in [
+        "thread::spawn",
+        "thread::sleep",
+        "channel(",
+        "Mutex<",
+        "Condvar",
+        "println!",
+        "eprintln!",
+    ] {
+        if suspension.contains(forbidden) {
+            return Err(format!(
+                "production Windows suspend ownership acquired forbidden work {forbidden}"
+            ));
+        }
+    }
+
+    let host = compact(host);
+    for required in [
+        "constAGENT_SUSPEND_TIMEOUT:Duration=Duration::from_secs(10);",
+        "pending_suspend:Option<AgentPendingSuspend>",
+        "late_suspend_claim:Option<(",
+        "enumAgentNativeSuspendState",
+        "fnstart_owned_agent_suspend",
+        "fnfinish_owned_agent_suspend_timeout",
+        "fnon_owned_agent_suspend_native",
+        "fnreconcile_owned_agent_suspend",
+        "fnresume_owned_agent_context",
+        "schedule_content_policy_timeout(AGENT_SUSPEND_TIMEOUT",
+        "binding.suspend_state=AgentNativeSuspendState::Uncertain(operation)",
+        "suspended_views:suspended_view_count",
+        "pending.claim.retire()",
+    ] {
+        if !host.contains(required) {
+            return Err(format!(
+                "production Windows suspend host lost required obligation {required}"
+            ));
+        }
+    }
+
+    let suspend_start = host
+        .split_once("fnstart_owned_agent_suspend(")
+        .and_then(|(_, source)| {
+            source
+                .split_once("fnfinish_owned_agent_suspend_timeout(")
+                .map(|(source, _)| source)
+        })
+        .ok_or_else(|| "production Windows suspend start boundary is missing".to_owned())?;
+    let join = suspend_start
+        .find("binding.join=requested;")
+        .ok_or_else(|| "production Windows suspend does not retain the accepted join".to_owned())?;
+    let dynamic_admission = suspend_start
+        .find("letnative_failure=")
+        .ok_or_else(|| "production Windows suspend dynamic admission is missing".to_owned())?;
+    let watchdog = suspend_start
+        .find("schedule_content_policy_timeout(AGENT_SUSPEND_TIMEOUT")
+        .ok_or_else(|| "production Windows suspend watchdog is missing".to_owned())?;
+    let publish_pending = suspend_start
+        .find("binding.pending_suspend=Some(AgentPendingSuspend")
+        .ok_or_else(|| "production Windows suspend pending publication is missing".to_owned())?;
+    let claim_native = suspend_start
+        .find("callback_claim.native_completed()")
+        .ok_or_else(|| {
+            "production Windows suspend callback ownership claim is missing".to_owned()
+        })?;
+    let queue_native = suspend_start[claim_native..]
+        .find("try_with_agent_context_terminal(move|host|")
+        .map(|offset| claim_native + offset)
+        .ok_or_else(|| {
+            "production Windows suspend callback terminal dispatch is missing".to_owned()
+        })?;
+    let dispatch_native = suspend_start
+        .find(".try_suspend(")
+        .ok_or_else(|| "production Windows suspend native dispatch is missing".to_owned())?;
+    if !(join < dynamic_admission
+        && dynamic_admission < watchdog
+        && watchdog < publish_pending
+        && publish_pending < dispatch_native
+        && claim_native < queue_native)
+    {
+        return Err(
+            "production Windows suspend must rejoin, admit, arm, publish, then dispatch, and its callback must claim before queuing"
+                .to_owned(),
+        );
+    }
+
+    let suspend_timeout = host
+        .split_once("fnfinish_owned_agent_suspend_timeout(")
+        .and_then(|(_, source)| {
+            source
+                .split_once("fnfinish_owned_agent_suspend_immediate_failure(")
+                .map(|(source, _)| source)
+        })
+        .ok_or_else(|| "production Windows suspend timeout boundary is missing".to_owned())?;
+    let retain_late = suspend_timeout
+        .find("binding.late_suspend_claim=Some((operation,pending.claim.clone()));")
+        .ok_or_else(|| "production Windows suspend timeout drops late cleanup debt".to_owned())?;
+    let settle_timeout = suspend_timeout
+        .find("pending.complete(Err(ContextPortFailure::TimedOut));")
+        .ok_or_else(|| "production Windows suspend timeout settlement is missing".to_owned())?;
+    if retain_late >= settle_timeout {
+        return Err(
+            "production Windows suspend timeout must retain late cleanup before external settlement"
+                .to_owned(),
+        );
+    }
+
+    let resume = host
+        .split_once("fnresume_owned_agent_context(")
+        .and_then(|(_, source)| {
+            source
+                .split_once("fnon_owned_agent_navigation_terminal(")
+                .map(|(source, _)| source)
+        })
+        .ok_or_else(|| "production Windows resume boundary is missing".to_owned())?;
+    let resume_join = resume
+        .find("binding.join=requested;")
+        .ok_or_else(|| "production Windows resume does not retain the accepted join".to_owned())?;
+    let resume_native = resume
+        .find("binding.view.resume_and_attest_active()")
+        .ok_or_else(|| "production Windows resume native postcondition is missing".to_owned())?;
+    if resume_join >= resume_native {
+        return Err(
+            "production Windows resume must retain the accepted join before native work".to_owned(),
+        );
+    }
+
+    for required in [
+        "ifletSome((_,claim))=self.late_suspend_claim.take(){claim.retire();}",
+        "ifletSome((_,claim))=binding.late_suspend_claim.take(){claim.retire();}",
+    ] {
+        if !host.contains(required) {
+            return Err(format!(
+                "production Windows suspend teardown lost retained callback retirement {required}"
+            ));
+        }
+    }
+
+    let content_rules = compact(content_rules);
+    if !content_rules.contains("if!context.permits_content_policy_install()") {
+        return Err(
+            "Windows content-policy replacement can touch a suspended owned context".to_owned(),
+        );
+    }
+
+    let port = compact(port);
+    for required in [
+        "#[cfg(target_os=\"windows\")]",
+        "ContextOperationKind::Suspend|ContextOperationKind::Resume|ContextOperationKind::Recover|ContextOperationKind::Close",
+    ] {
+        if !port.contains(required) {
+            return Err(format!(
+                "Windows native context port lost suspension support gate {required}"
+            ));
         }
     }
     Ok(())
@@ -5293,6 +5514,7 @@ mod tests {
                 ENGINE_AGENT_CONTEXT_PORT,
                 ENGINE_AGENT_CONTEXT_HOST,
                 ENGINE_AGENT_NAVIGATION,
+                ENGINE_AGENT_SUSPENSION,
                 ENGINE_AGENT_SCREENSHOT_BUFFER,
                 ENGINE_AGENT_COOKIE_PREFLIGHT,
                 ENGINE_WINDOWS_SEMANTIC_PROTOCOL,
@@ -8180,14 +8402,28 @@ mod tests {
     #[test]
     fn windows_production_agent_context_boundary_is_closed_and_bounded() {
         let module = include_str!("../../crates/zephium-engine/src/platform/windows/mod.rs");
+        let platform_module = include_str!("../../crates/zephium-engine/src/platform/mod.rs");
         let adapter =
             include_str!("../../crates/zephium-engine/src/platform/windows/agent_context.rs");
+        let suspension =
+            include_str!("../../crates/zephium-engine/src/platform/agent_suspension.rs");
         let timeout = include_str!("../../crates/zephium-engine/src/platform/windows/timeout.rs");
         let navigation =
             include_str!("../../crates/zephium-engine/src/platform/agent_navigation.rs");
         let host = include_str!("../../crates/zephium-engine/src/host/agent_context.rs");
+        let content_rules = include_str!("../../crates/zephium-engine/src/host/content_rules.rs");
+        let port = include_str!("../../crates/zephium-engine/src/agent_context_port.rs");
         validate_engine_windows_agent_context_boundary(module, adapter, timeout, navigation, host)
             .expect("closed Windows production owner");
+        validate_engine_windows_agent_suspension_boundary(
+            platform_module,
+            adapter,
+            suspension,
+            host,
+            content_rules,
+            port,
+        )
+        .expect("closed Windows suspension owner");
         assert!(validate_engine_windows_agent_context_boundary(
             module,
             &format!("{adapter}\nevaluate_script();"),
@@ -8202,6 +8438,24 @@ mod tests {
             &timeout.replace("MAX_PENDING_NATIVE_CONTEXT_TASKS", "usize::MAX"),
             navigation,
             host,
+        )
+        .is_err());
+        assert!(validate_engine_windows_agent_suspension_boundary(
+            platform_module,
+            adapter,
+            &suspension.replace("LATE_NATIVE_COMPLETED", "LATE_NATIVE_DROPPED"),
+            host,
+            content_rules,
+            port,
+        )
+        .is_err());
+        assert!(validate_engine_windows_agent_suspension_boundary(
+            platform_module,
+            adapter,
+            suspension,
+            &host.replace("pending.claim.retire();", "drop(pending.claim);"),
+            content_rules,
+            port,
         )
         .is_err());
     }

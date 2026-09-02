@@ -678,6 +678,18 @@ fn validate_capability_rows(rows: &[Capability]) -> Result<(), String> {
         ),
         (
             "windows",
+            "owned_webview2_try_suspend",
+            "implemented_in_feature_gated_production_adapter_cross_compiled",
+            "pending_device_capture",
+        ),
+        (
+            "macos",
+            "owned_webview_public_suspension",
+            "intentionally_unsupported",
+            "not_applicable_without_public_native_primitive",
+        ),
+        (
+            "windows",
             "composition_controller_send_mouse_input",
             "explicitly_unsupported_by_pinned_wry_integration",
             "not_applicable_without_integration_change",
