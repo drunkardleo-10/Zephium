@@ -498,17 +498,18 @@ The production plumbing and its release-excluded physical qualifier are
 compile-qualified, not physical Windows evidence. The qualifier constructs the
 same hidden owned view through the production profile-inventory, navigation,
 content-policy, semantic, crash-observer, browser-process, and cleanup seams.
-Its four exact modes cover two document epochs, bounded context-event pressure
-with recovery in a third epoch, fixed local renderer loss followed by typed
-refusal, and coexistence while a debugger remains attached. A canonical
-content-free JSONL contract, four fixed create-new filenames, and an offline
+Its five exact modes cover two document epochs, native hidden suspend/readback/
+resume followed by a fresh same-document observation, bounded context-event
+pressure with recovery in a third epoch, fixed local renderer loss followed by
+typed refusal, and coexistence while a debugger remains attached. A canonical
+content-free JSONL contract, five fixed create-new filenames, and an offline
 reviewer require one identical runtime fingerprint and exact focus, pending,
 process, profile, fixture, and teardown facts. Diagnostic code is
 optimized-build refused and the static boundary permits only the fixed
 `Page.crash` fault; it rejects generic CDP, evaluation, selectors, page
 bridges, input injection, focus mutation, arbitrary output paths, and external
 URLs. The Windows host semantic task remains explicitly unsupported until all
-four records pass on supported physical Windows. No live isolation, timing,
+five records pass on supported physical Windows. No live isolation, timing,
 arbitrary-page, or Windows product-support claim is made, and the
 extension-owned CDP probe remains unchanged.
 
@@ -649,11 +650,11 @@ rather than silently widening the hostile wire schema.
    checks. Open/closed shadow behavior and source exclusion currently have
    deterministic synthetic/static coverage but still require that engine
    evidence;
-4. run the four fixed, create-new semantic qualifier records documented in the
-   evidence README on physical supported Windows, then pass the offline review.
-   The source/cross-build path already covers replacement, renderer loss,
-   bounded event-pressure recovery, exact process/profile teardown, debugger
-   continuity, and focus sampling, but none is behavioral evidence until the
-   physical records pass. Keep the host port unsupported until then. No
-   document-start named-world, main-world, numeric-context, or generic-CDP
-   fallback is allowed.
+4. run the five fixed, create-new semantic/lifecycle qualifier records
+   documented in the evidence README on physical supported Windows, then pass
+   the offline review. The source/cross-build path already covers replacement,
+   renderer loss, bounded event-pressure recovery, suspend/resume continuity,
+   exact process/profile teardown, debugger continuity, and focus sampling,
+   but none is behavioral evidence until the physical records pass. Keep the
+   host port unsupported until then. No document-start named-world,
+   main-world, numeric-context, or generic-CDP fallback is allowed.

@@ -10,15 +10,16 @@ use thiserror::Error;
 use crate::{Platform, RuntimeFingerprint};
 
 /// Version of the Windows semantic-probe result grammar.
-pub const WINDOWS_SEMANTIC_PROBE_PROTOCOL_VERSION: u16 = 1;
+pub const WINDOWS_SEMANTIC_PROBE_PROTOCOL_VERSION: u16 = 2;
 /// Maximum canonical JSONL bytes emitted by one semantic-probe process.
 pub const MAX_WINDOWS_SEMANTIC_PROBE_OUTPUT_BYTES: usize = 16 * 1024;
 const MAX_RUN_ELAPSED_MS: u64 = 2 * 60_000;
 const MAX_CLEANUP_MS: u32 = 10_000;
 
 /// Exact physical runs required before Windows semantic support can be reviewed.
-pub const WINDOWS_SEMANTIC_PHYSICAL_REVIEW_MODES: [WindowsSemanticProbeMode; 4] = [
+pub const WINDOWS_SEMANTIC_PHYSICAL_REVIEW_MODES: [WindowsSemanticProbeMode; 5] = [
     WindowsSemanticProbeMode::HiddenFixedDocuments,
+    WindowsSemanticProbeMode::HiddenSuspendResume,
     WindowsSemanticProbeMode::HiddenEventFlood,
     WindowsSemanticProbeMode::HiddenRendererLoss,
     WindowsSemanticProbeMode::HiddenDebuggerCoexistence,
@@ -30,6 +31,8 @@ pub const WINDOWS_SEMANTIC_PHYSICAL_REVIEW_MODES: [WindowsSemanticProbeMode; 4] 
 pub enum WindowsSemanticProbeMode {
     /// Two fixed documents prove isolation, redaction, replacement, and reuse.
     HiddenFixedDocuments,
+    /// One fixed document proves native suspend/readback/resume and fresh observation.
+    HiddenSuspendResume,
     /// A bounded context-event flood must fail closed and recover on navigation.
     HiddenEventFlood,
     /// A fixed diagnostics-only renderer crash must revoke semantic authority.
@@ -43,6 +46,7 @@ impl WindowsSemanticProbeMode {
     pub fn from_argument(argument: &str) -> Option<Self> {
         match argument {
             "--ci-hidden-fixed-documents" => Some(Self::HiddenFixedDocuments),
+            "--ci-hidden-suspend-resume" => Some(Self::HiddenSuspendResume),
             "--ci-hidden-event-flood" => Some(Self::HiddenEventFlood),
             "--ci-hidden-renderer-loss" => Some(Self::HiddenRendererLoss),
             "--ci-hidden-debugger-coexistence" => Some(Self::HiddenDebuggerCoexistence),
@@ -54,6 +58,7 @@ impl WindowsSemanticProbeMode {
     pub const fn argument(self) -> &'static str {
         match self {
             Self::HiddenFixedDocuments => "--ci-hidden-fixed-documents",
+            Self::HiddenSuspendResume => "--ci-hidden-suspend-resume",
             Self::HiddenEventFlood => "--ci-hidden-event-flood",
             Self::HiddenRendererLoss => "--ci-hidden-renderer-loss",
             Self::HiddenDebuggerCoexistence => "--ci-hidden-debugger-coexistence",
@@ -64,6 +69,7 @@ impl WindowsSemanticProbeMode {
     pub const fn local_result_filename(self) -> &'static str {
         match self {
             Self::HiddenFixedDocuments => "windows-semantic-fixed-documents.jsonl",
+            Self::HiddenSuspendResume => "windows-semantic-suspend-resume.jsonl",
             Self::HiddenEventFlood => "windows-semantic-event-flood.jsonl",
             Self::HiddenRendererLoss => "windows-semantic-renderer-loss.jsonl",
             Self::HiddenDebuggerCoexistence => "windows-semantic-debugger-coexistence.jsonl",
@@ -139,6 +145,16 @@ pub struct WindowsSemanticProbeEvidence {
     pub renderer_loss_observed: bool,
     /// A later semantic dispatch returned the typed renderer-lost refusal.
     pub renderer_lost_refused: bool,
+    /// The native `TrySuspend` callback reported successful suspension.
+    pub suspend_callback_succeeded: bool,
+    /// Hidden-owner attestation followed by `IsSuspended` proved suspended state.
+    pub suspended_state_attested: bool,
+    /// `Resume` plus hidden-owner and final native-bit readback proved active state.
+    pub resume_state_attested: bool,
+    /// A fresh exact semantic observation passed after native resume.
+    pub post_resume_snapshot_verified: bool,
+    /// Bounded wall-clock duration through the native suspend callback.
+    pub suspend_ms: u32,
     /// Windows reported a debugger attached for the complete mode.
     pub debugger_attached: bool,
     /// Probe host ever displaced foreground, active-window, or thread focus.
@@ -161,7 +177,7 @@ impl WindowsSemanticProbeEvidence {
         }
         if self.runtime.platform != Platform::Windows
             || self.runtime.engine.as_str() != "WebView2"
-            || self.runtime.adapter_revision.as_str() != "semantic-runtime-m3"
+            || self.runtime.adapter_revision.as_str() != "semantic-runtime-m3-lifecycle-m2"
         {
             return Err(WindowsSemanticProbeValidationError::Runtime);
         }
@@ -171,6 +187,7 @@ impl WindowsSemanticProbeEvidence {
             || self.document_epochs == 0
             || self.document_epochs > 3
             || self.peak_pending_invocations > 1
+            || self.suspend_ms > 10_000
             || self.elapsed_ms > MAX_RUN_ELAPSED_MS
         {
             return Err(WindowsSemanticProbeValidationError::Bounds);
@@ -214,6 +231,8 @@ pub enum WindowsSemanticProbeStage {
     Navigate,
     /// Bounded semantic invocation.
     Observe,
+    /// Native hidden suspend, readback, and resume.
+    Suspend,
     /// Fault injection or recovery.
     Fault,
     /// Closed fixture assertion.
@@ -306,6 +325,7 @@ pub struct WindowsSemanticProbeAggregate {
     mode: WindowsSemanticProbeMode,
     snapshots: u8,
     document_epochs: u8,
+    suspend_ms: u32,
     elapsed_ms: u64,
     cleanup_ms: u32,
     status: WindowsSemanticProbeAggregateStatus,
@@ -402,10 +422,28 @@ pub fn qualify_windows_semantic_probe_evidence(
 
     let mode_valid = match expected_mode {
         WindowsSemanticProbeMode::HiddenFixedDocuments => {
-            fixed_documents(evidence) && !evidence.debugger_attached
+            fixed_documents(evidence)
+                && no_suspend_evidence(evidence)
+                && !evidence.debugger_attached
+        }
+        WindowsSemanticProbeMode::HiddenSuspendResume => {
+            !evidence.debugger_attached
+                && evidence.snapshots == 2
+                && evidence.document_epochs == 1
+                && evidence.first_snapshot_verified
+                && !evidence.replacement_snapshot_verified
+                && !evidence.replacement_stale_state_absent
+                && !evidence.event_flood_refused
+                && !evidence.recovered_after_event_flood
+                && !evidence.renderer_loss_observed
+                && !evidence.renderer_lost_refused
+                && evidence.suspend_callback_succeeded
+                && evidence.suspended_state_attested
+                && evidence.resume_state_attested
+                && evidence.post_resume_snapshot_verified
         }
         WindowsSemanticProbeMode::HiddenDebuggerCoexistence => {
-            fixed_documents(evidence) && evidence.debugger_attached
+            fixed_documents(evidence) && no_suspend_evidence(evidence) && evidence.debugger_attached
         }
         WindowsSemanticProbeMode::HiddenEventFlood => {
             !evidence.debugger_attached
@@ -418,6 +456,7 @@ pub fn qualify_windows_semantic_probe_evidence(
                 && evidence.recovered_after_event_flood
                 && !evidence.renderer_loss_observed
                 && !evidence.renderer_lost_refused
+                && no_suspend_evidence(evidence)
         }
         WindowsSemanticProbeMode::HiddenRendererLoss => {
             !evidence.debugger_attached
@@ -430,6 +469,7 @@ pub fn qualify_windows_semantic_probe_evidence(
                 && !evidence.recovered_after_event_flood
                 && evidence.renderer_loss_observed
                 && evidence.renderer_lost_refused
+                && no_suspend_evidence(evidence)
         }
     };
     if !mode_valid {
@@ -440,6 +480,7 @@ pub fn qualify_windows_semantic_probe_evidence(
         mode: evidence.mode,
         snapshots: evidence.snapshots,
         document_epochs: evidence.document_epochs,
+        suspend_ms: evidence.suspend_ms,
         elapsed_ms: evidence.elapsed_ms,
         cleanup_ms: evidence.teardown.cleanup_ms,
         status: WindowsSemanticProbeAggregateStatus::Qualified,
@@ -458,12 +499,21 @@ fn fixed_documents(evidence: &WindowsSemanticProbeEvidence) -> bool {
         && !evidence.renderer_lost_refused
 }
 
+fn no_suspend_evidence(evidence: &WindowsSemanticProbeEvidence) -> bool {
+    !evidence.suspend_callback_succeeded
+        && !evidence.suspended_state_attested
+        && !evidence.resume_state_attested
+        && !evidence.post_resume_snapshot_verified
+        && evidence.suspend_ms == 0
+}
+
 #[cfg(test)]
 pub(crate) fn tests_fixture(mode: WindowsSemanticProbeMode) -> WindowsSemanticProbeEvidence {
     use crate::EvidenceLabel;
 
     let flood = mode == WindowsSemanticProbeMode::HiddenEventFlood;
     let renderer = mode == WindowsSemanticProbeMode::HiddenRendererLoss;
+    let suspension = mode == WindowsSemanticProbeMode::HiddenSuspendResume;
     WindowsSemanticProbeEvidence {
         run_id: 1,
         runtime: RuntimeFingerprint {
@@ -471,7 +521,8 @@ pub(crate) fn tests_fixture(mode: WindowsSemanticProbeMode) -> WindowsSemanticPr
             os_version: EvidenceLabel::new("10.0.26100").expect("OS label"),
             engine: EvidenceLabel::new("WebView2").expect("engine label"),
             engine_version: EvidenceLabel::new("140.0.0.0").expect("version label"),
-            adapter_revision: EvidenceLabel::new("semantic-runtime-m3").expect("adapter label"),
+            adapter_revision: EvidenceLabel::new("semantic-runtime-m3-lifecycle-m2")
+                .expect("adapter label"),
         },
         mode,
         ephemeral_profile: true,
@@ -484,20 +535,25 @@ pub(crate) fn tests_fixture(mode: WindowsSemanticProbeMode) -> WindowsSemanticPr
         snapshots: if renderer { 1 } else { 2 },
         document_epochs: if flood {
             3
-        } else if renderer {
+        } else if renderer || suspension {
             1
         } else {
             2
         },
         first_snapshot_verified: true,
-        replacement_snapshot_verified: !renderer,
-        replacement_stale_state_absent: !renderer,
+        replacement_snapshot_verified: !renderer && !suspension,
+        replacement_stale_state_absent: !renderer && !suspension,
         page_world_bridge_absent: true,
         secrets_redacted: true,
         event_flood_refused: flood,
         recovered_after_event_flood: flood,
         renderer_loss_observed: renderer,
         renderer_lost_refused: renderer,
+        suspend_callback_succeeded: suspension,
+        suspended_state_attested: suspension,
+        resume_state_attested: suspension,
+        post_resume_snapshot_verified: suspension,
+        suspend_ms: if suspension { 25 } else { 0 },
         debugger_attached: mode == WindowsSemanticProbeMode::HiddenDebuggerCoexistence,
         focus_theft_observed: false,
         peak_pending_invocations: 1,
@@ -604,6 +660,38 @@ mod tests {
                 &renderer,
             ),
             Err(WindowsSemanticProbeQualificationError::Mode)
+        );
+
+        let mut suspension = tests_fixture(WindowsSemanticProbeMode::HiddenSuspendResume);
+        suspension.resume_state_attested = false;
+        assert_eq!(
+            qualify_windows_semantic_probe_evidence(
+                WindowsSemanticProbeMode::HiddenSuspendResume,
+                &suspension,
+            ),
+            Err(WindowsSemanticProbeQualificationError::Mode)
+        );
+
+        let mut unexpected_suspend = tests_fixture(WindowsSemanticProbeMode::HiddenFixedDocuments);
+        unexpected_suspend.suspend_ms = 1;
+        assert_eq!(
+            qualify_windows_semantic_probe_evidence(
+                WindowsSemanticProbeMode::HiddenFixedDocuments,
+                &unexpected_suspend,
+            ),
+            Err(WindowsSemanticProbeQualificationError::Mode)
+        );
+
+        let mut unbounded_suspend = tests_fixture(WindowsSemanticProbeMode::HiddenSuspendResume);
+        unbounded_suspend.suspend_ms = 10_001;
+        assert_eq!(
+            qualify_windows_semantic_probe_evidence(
+                WindowsSemanticProbeMode::HiddenSuspendResume,
+                &unbounded_suspend,
+            ),
+            Err(WindowsSemanticProbeQualificationError::Evidence(
+                WindowsSemanticProbeValidationError::Bounds,
+            ))
         );
     }
 }

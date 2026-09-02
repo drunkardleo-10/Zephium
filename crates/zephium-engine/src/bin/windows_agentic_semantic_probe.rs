@@ -99,7 +99,7 @@ mod capture {
         }
 
         #[test]
-        fn invocation_allows_only_four_fixed_records_in_the_ignored_directory() {
+        fn invocation_allows_only_five_fixed_records_in_the_ignored_directory() {
             for mode in WINDOWS_SEMANTIC_PHYSICAL_REVIEW_MODES {
                 let invocation = Invocation::parse(&arguments(&[
                     mode.argument(),
@@ -197,8 +197,15 @@ mod windows {
         };
         let qualification = qualify_windows_semantic_probe_evidence(mode, &evidence);
         let summary = format!(
-            "windows-agentic-semantic-probe: passed; mode={mode:?}; profile=ephemeral-udf+inprivate; extensions=construction-empty; presentation=hidden; viewport=1280x800-logical; fixture=loopback-only; snapshots={}; world_epochs={}; page_world_bridge=absent; secrets=redacted; peak_pending={}; focus_theft=0; retained_views=0",
-            evidence.snapshots, evidence.document_epochs, evidence.peak_pending_invocations,
+            "windows-agentic-semantic-probe: passed; mode={mode:?}; profile=ephemeral-udf+inprivate; extensions=construction-empty; presentation=hidden; viewport=1280x800-logical; fixture=loopback-only; snapshots={}; world_epochs={}; page_world_bridge=absent; secrets=redacted; suspend_callback={}; suspended_readback={}; resume_readback={}; post_resume_snapshot={}; suspend_ms={}; peak_pending={}; focus_theft=0; retained_views=0",
+            evidence.snapshots,
+            evidence.document_epochs,
+            evidence.suspend_callback_succeeded,
+            evidence.suspended_state_attested,
+            evidence.resume_state_attested,
+            evidence.post_resume_snapshot_verified,
+            evidence.suspend_ms,
+            evidence.peak_pending_invocations,
         );
         if !emit_reply(&mut sink, WindowsSemanticProbeReply::Completed(evidence)) {
             fail("machine evidence output failed");

@@ -85,9 +85,11 @@
       "evidence": [
         "crates/zephium-engine/src/platform/windows/agent_context.rs",
         "crates/zephium-engine/src/platform/agent_suspension.rs",
+        "crates/zephium-engine/src/platform/windows/agentic_semantic_probe.rs",
+        "crates/zephium-agentic/src/semantic_probe_evidence.rs",
         "https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2_3"
       ],
-      "limitations": "Only hidden owned contexts with exact Suspend capability and no other native work are admitted. An atomic fixed-deadline owner retains late TrySuspend callback reconciliation after timeout or cancellation; final state is recorded only after hidden-owner attestation and IsSuspended readback. Resource audit and content-policy replacement fail closed while state is ambiguous. Cross-compilation does not prove physical suspend/resume behavior, memory reduction, long-running-script timing, renderer-loss races, or resource savings."
+      "limitations": "Only hidden owned contexts with exact Suspend capability and no other native work are admitted. An atomic fixed-deadline owner retains late TrySuspend callback reconciliation after timeout or cancellation; final state is recorded only after hidden-owner attestation and IsSuspended readback. Resource audit and content-policy replacement fail closed while state is ambiguous. A release-excluded fifth Windows semantic/lifecycle mode and offline reviewer are implemented but have no physical result. Cross-compilation does not prove physical suspend/resume behavior, memory reduction, long-running-script timing, renderer-loss races, or resource savings."
     },
     {
       "platform": "macos",

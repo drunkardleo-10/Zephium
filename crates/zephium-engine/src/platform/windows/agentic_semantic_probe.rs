@@ -50,6 +50,8 @@ use zephium_agentic::{
 };
 use zephium_core::ids::ProfileId;
 
+use crate::platform::agent_suspension::{AgentSuspendClaim, AgentSuspendNativeDisposition};
+
 use super::{
     attest_environment, browser_process, browser_process_for_environment,
     install_browser_process_exit_observer, AgentNavigationCommit, AgentNavigationTerminal,
@@ -61,6 +63,7 @@ const RUN_TIMEOUT: Duration = Duration::from_secs(90);
 const CONSTRUCTION_TIMEOUT: Duration = Duration::from_secs(15);
 const NAVIGATION_TIMEOUT: Duration = Duration::from_secs(10);
 const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(5);
+const SUSPEND_TIMEOUT: Duration = Duration::from_secs(10);
 const FAULT_TIMEOUT: Duration = Duration::from_secs(5);
 const NATIVE_CLEANUP_TIMEOUT: Duration = Duration::from_millis(750);
 const PROCESS_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -194,6 +197,8 @@ struct CallbackState {
     browser_lost: Cell<bool>,
     invariant_failures: Cell<u8>,
     callback_panicked: Cell<bool>,
+    suspend_callback_pending: Cell<bool>,
+    suspend_callback_failed: Cell<bool>,
 }
 
 impl CallbackState {
@@ -207,6 +212,7 @@ impl CallbackState {
 
     fn fatal(&self, allowance: CallbackAllowance) -> bool {
         self.callback_panicked.get()
+            || self.suspend_callback_failed.get()
             || self.browser_lost.get()
             || (self.renderer_lost.get() && !allowance.renderer_lost)
             || self.invariant_failures.get() > allowance.invariant_failures
@@ -301,6 +307,11 @@ struct ExecutionFacts {
     recovered_after_event_flood: bool,
     renderer_loss_observed: bool,
     renderer_lost_refused: bool,
+    suspend_callback_succeeded: bool,
+    suspended_state_attested: bool,
+    resume_state_attested: bool,
+    post_resume_snapshot_verified: bool,
+    suspend_ms: u32,
     peak_pending_invocations: u8,
     semantic_work_drained: bool,
 }
@@ -433,7 +444,11 @@ pub(crate) fn run(
         );
         let capabilities = ContextCapabilities::try_new(
             ContextKind::Owned,
-            &[ContextCapability::Observe, ContextCapability::Navigate],
+            &[
+                ContextCapability::Observe,
+                ContextCapability::Navigate,
+                ContextCapability::Suspend,
+            ],
         )
         .map_err(|_| ProbeError::harness(WindowsSemanticProbeStage::Construct))?;
         let mut context_registry = ContextRegistry::new();
@@ -552,6 +567,7 @@ pub(crate) fn run(
             WindowsSemanticProbeMode::HiddenEventFlood => CallbackAllowance::EVENT_FLOOD,
             WindowsSemanticProbeMode::HiddenRendererLoss => CallbackAllowance::RENDERER_LOST,
             WindowsSemanticProbeMode::HiddenFixedDocuments
+            | WindowsSemanticProbeMode::HiddenSuspendResume
             | WindowsSemanticProbeMode::HiddenDebuggerCoexistence => CallbackAllowance::NONE,
         };
         if callbacks.fatal(allowance)
@@ -619,6 +635,11 @@ pub(crate) fn run(
         recovered_after_event_flood: facts.recovered_after_event_flood,
         renderer_loss_observed: facts.renderer_loss_observed,
         renderer_lost_refused: facts.renderer_lost_refused,
+        suspend_callback_succeeded: facts.suspend_callback_succeeded,
+        suspended_state_attested: facts.suspended_state_attested,
+        resume_state_attested: facts.resume_state_attested,
+        post_resume_snapshot_verified: facts.post_resume_snapshot_verified,
+        suspend_ms: facts.suspend_ms,
         debugger_attached: native_guard.debugger_expected,
         focus_theft_observed: native_guard.focus_theft.get(),
         peak_pending_invocations: facts.peak_pending_invocations,
@@ -644,7 +665,7 @@ fn execute_mode(
     view: &mut AgentOwnedView,
     registry: &mut ContextRegistry,
     server: &FixtureServer,
-    callbacks: &CallbackState,
+    callbacks: &Rc<CallbackState>,
     host: &ProbeHostWindow,
     native_guard: &NativeStateGuard,
     run_deadline: Instant,
@@ -670,6 +691,7 @@ fn execute_mode(
         view,
         first,
         &first_url,
+        SemanticSnapshotGeneration::INITIAL,
         &mut next_invocation,
         callbacks,
         CallbackAllowance::NONE,
@@ -679,6 +701,10 @@ fn execute_mode(
         &mut facts.peak_pending_invocations,
     )?;
     verify_first_snapshot(&first_snapshot)?;
+    let next_first_snapshot_generation = first_snapshot
+        .generation()
+        .next()
+        .ok_or_else(|| ProbeError::verify(WindowsSemanticProbeStage::Observe))?;
     registry
         .acknowledge_observation(context_id, first)
         .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Verify))?;
@@ -708,6 +734,7 @@ fn execute_mode(
                 view,
                 replacement,
                 &replacement_url,
+                SemanticSnapshotGeneration::INITIAL,
                 &mut next_invocation,
                 callbacks,
                 CallbackAllowance::NONE,
@@ -723,6 +750,51 @@ fn execute_mode(
             facts.snapshots = 2;
             facts.replacement_snapshot_verified = true;
             facts.replacement_stale_state_absent = true;
+        }
+        WindowsSemanticProbeMode::HiddenSuspendResume => {
+            wait_for_semantic_drain(
+                view,
+                callbacks,
+                CallbackAllowance::NONE,
+                host,
+                native_guard,
+                run_deadline,
+            )?;
+            let suspended_at = Instant::now();
+            let resumed = suspend_and_resume(
+                view,
+                registry,
+                context_id,
+                take_operation(&mut next_operation)?,
+                take_operation(&mut next_operation)?,
+                callbacks,
+                host,
+                native_guard,
+                run_deadline,
+            )?;
+            facts.suspend_callback_succeeded = true;
+            facts.suspended_state_attested = true;
+            facts.resume_state_attested = true;
+            facts.suspend_ms = duration_ms_u32(resumed.suspended_at.duration_since(suspended_at));
+            let snapshot = capture_snapshot(
+                view,
+                resumed.context,
+                &first_url,
+                next_first_snapshot_generation,
+                &mut next_invocation,
+                callbacks,
+                CallbackAllowance::NONE,
+                host,
+                native_guard,
+                run_deadline,
+                &mut facts.peak_pending_invocations,
+            )?;
+            verify_first_snapshot(&snapshot)?;
+            registry
+                .acknowledge_observation(context_id, resumed.context)
+                .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Verify))?;
+            facts.snapshots = 2;
+            facts.post_resume_snapshot_verified = true;
         }
         WindowsSemanticProbeMode::HiddenEventFlood => {
             let flood_url = server.url(FixtureRoute::SemanticRuntimeEventFlood);
@@ -743,6 +815,7 @@ fn execute_mode(
                 view,
                 flood,
                 &flood_url,
+                SemanticSnapshotGeneration::INITIAL,
                 &mut next_invocation,
                 callbacks,
                 CallbackAllowance::EVENT_FLOOD,
@@ -784,6 +857,7 @@ fn execute_mode(
                 view,
                 replacement,
                 &replacement_url,
+                SemanticSnapshotGeneration::INITIAL,
                 &mut next_invocation,
                 callbacks,
                 CallbackAllowance::EVENT_FLOOD,
@@ -820,6 +894,7 @@ fn execute_mode(
                 view,
                 first,
                 &first_url,
+                next_first_snapshot_generation,
                 &mut next_invocation,
                 callbacks,
                 CallbackAllowance::RENDERER_LOST,
@@ -836,6 +911,145 @@ fn execute_mode(
         }
     }
     Ok(())
+}
+
+struct SuspendResumeResult {
+    context: ContextJoin,
+    suspended_at: Instant,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn suspend_and_resume(
+    view: &AgentOwnedView,
+    registry: &mut ContextRegistry,
+    context_id: ContextId,
+    suspend_operation: u64,
+    resume_operation: u64,
+    callbacks: &Rc<CallbackState>,
+    host: &ProbeHostWindow,
+    native_guard: &NativeStateGuard,
+    run_deadline: Instant,
+) -> ProbeResult<SuspendResumeResult> {
+    if callbacks.suspend_callback_pending.get()
+        || callbacks.suspend_callback_failed.get()
+        || callbacks.fatal(CallbackAllowance::NONE)
+    {
+        return Err(ProbeError::verify(WindowsSemanticProbeStage::Suspend));
+    }
+    let suspend = registry
+        .begin_suspend(
+            context_id,
+            ContextOperationId::new(suspend_operation)
+                .ok_or_else(|| ProbeError::verify(WindowsSemanticProbeStage::Suspend))?,
+        )
+        .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Suspend))?;
+    callbacks.suspend_callback_pending.set(true);
+    let claim = AgentSuspendClaim::new();
+    let callback_claim = claim.clone();
+    let result = Rc::new(RefCell::new(None));
+    let callback_result = Rc::clone(&result);
+    let completion_callbacks = Rc::clone(callbacks);
+    let panic_callbacks = Rc::clone(callbacks);
+    if view
+        .try_suspend(
+            move |native_succeeded| {
+                let disposition = callback_claim.native_completed();
+                completion_callbacks.suspend_callback_pending.set(false);
+                let Ok(mut slot) = callback_result.try_borrow_mut() else {
+                    completion_callbacks.suspend_callback_failed.set(true);
+                    return;
+                };
+                if slot.is_some() {
+                    completion_callbacks.suspend_callback_failed.set(true);
+                } else {
+                    *slot = Some((disposition, native_succeeded, Instant::now()));
+                }
+            },
+            move || {
+                panic_callbacks.suspend_callback_pending.set(false);
+                panic_callbacks.suspend_callback_failed.set(true);
+            },
+        )
+        .is_err()
+    {
+        callbacks.suspend_callback_pending.set(false);
+        claim.retire();
+        let _ = registry.settle_suspend(context_id, suspend, ContextSettlement::Refused);
+        return Err(ProbeError::harness(WindowsSemanticProbeStage::Suspend));
+    }
+
+    let deadline = earlier_deadline(run_deadline, SUSPEND_TIMEOUT)?;
+    while result.borrow().is_none()
+        && callbacks.suspend_callback_pending.get()
+        && !callbacks.fatal(CallbackAllowance::NONE)
+        && !native_guard.failed()
+        && Instant::now() < deadline
+    {
+        pump_and_sample(deadline, host, Some(view.view()), native_guard)?;
+    }
+    let terminal = result
+        .try_borrow_mut()
+        .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Suspend))?
+        .take();
+    let Some((disposition, native_succeeded, suspended_at)) = terminal else {
+        let _ = claim.timeout();
+        claim.retire();
+        let _ = registry.settle_suspend(context_id, suspend, ContextSettlement::Refused);
+        return if Instant::now() >= deadline {
+            Err(ProbeError::timeout(WindowsSemanticProbeStage::Suspend))
+        } else {
+            Err(ProbeError::verify(WindowsSemanticProbeStage::Suspend))
+        };
+    };
+    let suspended = view.attest_suspension_state() == Ok(true);
+    native_guard.sample(host, Some(view.view()));
+    if disposition != AgentSuspendNativeDisposition::Terminal
+        || !native_succeeded
+        || !suspended
+        || callbacks.suspend_callback_pending.get()
+        || callbacks.fatal(CallbackAllowance::NONE)
+        || native_guard.failed()
+    {
+        if suspended {
+            let _ = view.resume_and_attest_active();
+        }
+        let _ = registry.settle_suspend(context_id, suspend, ContextSettlement::Refused);
+        return Err(ProbeError::verify(WindowsSemanticProbeStage::Suspend));
+    }
+    registry
+        .settle_suspend(context_id, suspend, ContextSettlement::Applied)
+        .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Suspend))?;
+
+    let resume = registry
+        .begin_resume(
+            context_id,
+            ContextOperationId::new(resume_operation)
+                .ok_or_else(|| ProbeError::verify(WindowsSemanticProbeStage::Suspend))?,
+        )
+        .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Suspend))?;
+    let active = view.resume_and_attest_active() == Ok(true);
+    native_guard.sample(host, Some(view.view()));
+    registry
+        .settle_resume(
+            context_id,
+            resume,
+            if active {
+                ContextSettlement::Applied
+            } else {
+                ContextSettlement::Refused
+            },
+        )
+        .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Suspend))?;
+    if !active || callbacks.fatal(CallbackAllowance::NONE) || native_guard.failed() {
+        return Err(ProbeError::verify(WindowsSemanticProbeStage::Suspend));
+    }
+    let context = registry
+        .join(context_id)
+        .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Suspend))?;
+    Ok(SuspendResumeResult {
+        context,
+        suspended_at,
+    })
 }
 
 fn take_operation(next: &mut u64) -> ProbeResult<u64> {
@@ -962,6 +1176,7 @@ fn capture_snapshot(
     view: &AgentOwnedView,
     context: ContextJoin,
     url: &str,
+    first_generation: SemanticSnapshotGeneration,
     next_invocation: &mut u64,
     callbacks: &CallbackState,
     allowance: CallbackAllowance,
@@ -974,6 +1189,7 @@ fn capture_snapshot(
         view,
         context,
         url,
+        first_generation,
         next_invocation,
         callbacks,
         allowance,
@@ -990,6 +1206,7 @@ fn capture_outcome(
     view: &AgentOwnedView,
     context: ContextJoin,
     url: &str,
+    first_generation: SemanticSnapshotGeneration,
     next_invocation: &mut u64,
     callbacks: &CallbackState,
     allowance: CallbackAllowance,
@@ -1023,7 +1240,10 @@ fn capture_outcome(
             .ok_or_else(|| ProbeError::verify(WindowsSemanticProbeStage::Observe))?;
         let invocation_id = SemanticInvocationId::new(invocation_value)
             .ok_or_else(|| ProbeError::verify(WindowsSemanticProbeStage::Observe))?;
-        let generation = SemanticSnapshotGeneration::new(u64::from(retry) + 1)
+        let generation = first_generation
+            .get()
+            .checked_add(u64::from(retry))
+            .and_then(SemanticSnapshotGeneration::new)
             .ok_or_else(|| ProbeError::verify(WindowsSemanticProbeStage::Observe))?;
         let request = SemanticObservationRequest::initial(
             SemanticObservationId::new(invocation_value)
@@ -1336,12 +1556,14 @@ fn teardown(
         WindowsSemanticProbeMode::HiddenEventFlood => CallbackAllowance::EVENT_FLOOD,
         WindowsSemanticProbeMode::HiddenRendererLoss => CallbackAllowance::RENDERER_LOST,
         WindowsSemanticProbeMode::HiddenFixedDocuments
+        | WindowsSemanticProbeMode::HiddenSuspendResume
         | WindowsSemanticProbeMode::HiddenDebuggerCoexistence => CallbackAllowance::NONE,
     };
     let callbacks_drained = callbacks
         .navigation
         .try_borrow()
         .is_ok_and(|slot| slot.is_none())
+        && !callbacks.suspend_callback_pending.get()
         && !callbacks.fatal(expected_allowance);
     TeardownResult {
         runtime_retired,
@@ -1419,7 +1641,7 @@ fn runtime_fingerprint() -> ProbeResult<RuntimeFingerprint> {
             .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Construct))?,
         engine_version: EvidenceLabel::new(engine_version)
             .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Construct))?,
-        adapter_revision: EvidenceLabel::new("semantic-runtime-m3")
+        adapter_revision: EvidenceLabel::new("semantic-runtime-m3-lifecycle-m2")
             .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Construct))?,
     })
 }

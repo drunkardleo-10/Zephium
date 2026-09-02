@@ -2095,6 +2095,12 @@ fn validate_windows_semantic_probe(
         "view.navigation().document_finished_for_audit(operation)",
         "view.dispatch_semantic(",
         "view.semantic_work_drained_for_audit()",
+        "AgentSuspendClaim::new()",
+        "view.try_suspend(",
+        "view.attest_suspension_state()==Ok(true)",
+        "view.resume_and_attest_active()==Ok(true)",
+        "WindowsSemanticProbeMode::HiddenSuspendResume",
+        "EvidenceLabel::new(\"semantic-runtime-m3-lifecycle-m2\")",
         "SemanticRuntimePortFailure::Transport",
         "SemanticRuntimePortFailure::RendererLost",
         "SemanticRuntimeFault::DocumentLoading",
@@ -2399,7 +2405,7 @@ fn validate_windows_semantic_review_binary(source: &str, evidence: &str) -> Resu
         "output.len()>MAX_WINDOWS_SEMANTIC_PROBE_OUTPUT_BYTES",
         "stdout.write_all(&output)",
         "--write-summary",
-        "windows-semantic-review-summary-v1.json",
+        "windows-semantic-review-summary-v2.json",
         ".create_new(true)",
         "write_new_record(&directory,REVIEW_SUMMARY_FILENAME,&output)",
     ] {
@@ -2412,12 +2418,18 @@ fn validate_windows_semantic_review_binary(source: &str, evidence: &str) -> Resu
     let evidence = compact(evidence);
     for required in [
         "windows-semantic-fixed-documents.jsonl",
+        "windows-semantic-suspend-resume.jsonl",
         "windows-semantic-event-flood.jsonl",
         "windows-semantic-renderer-loss.jsonl",
         "windows-semantic-debugger-coexistence.jsonl",
         "pubfnqualify_windows_semantic_probe_evidence(",
         "evidence.peak_pending_invocations!=1",
         "evidence.teardown.retained_native_views!=0",
+        "evidence.suspend_callback_succeeded",
+        "evidence.suspended_state_attested",
+        "evidence.resume_state_attested",
+        "evidence.post_resume_snapshot_verified",
+        "semantic-runtime-m3-lifecycle-m2",
     ] {
         if !evidence.contains(required) {
             return Err(format!(
@@ -8523,6 +8535,13 @@ mod tests {
             fixture,
         )
         .is_err());
+        assert!(validate_windows_semantic_probe(
+            module,
+            &source.replace("view.attest_suspension_state() == Ok(true)", "false"),
+            binary,
+            fixture,
+        )
+        .is_err());
     }
 
     #[test]
@@ -8725,18 +8744,24 @@ mod tests {
             if output.len() > MAX_WINDOWS_SEMANTIC_PROBE_OUTPUT_BYTES {}
             stdout.write_all(&output);
             "--write-summary";
-            "windows-semantic-review-summary-v1.json";
+            "windows-semantic-review-summary-v2.json";
             OpenOptions::new().create_new(true);
             write_new_record(&directory, REVIEW_SUMMARY_FILENAME, &output);
         "#;
         let evidence = r#"
             "windows-semantic-fixed-documents.jsonl";
+            "windows-semantic-suspend-resume.jsonl";
             "windows-semantic-event-flood.jsonl";
             "windows-semantic-renderer-loss.jsonl";
             "windows-semantic-debugger-coexistence.jsonl";
             pub fn qualify_windows_semantic_probe_evidence() {}
             evidence.peak_pending_invocations != 1;
             evidence.teardown.retained_native_views != 0;
+            evidence.suspend_callback_succeeded;
+            evidence.suspended_state_attested;
+            evidence.resume_state_attested;
+            evidence.post_resume_snapshot_verified;
+            "semantic-runtime-m3-lifecycle-m2";
         "#;
         validate_windows_semantic_review_binary(binary, evidence).expect("closed reviewer");
         assert!(validate_windows_semantic_review_binary(

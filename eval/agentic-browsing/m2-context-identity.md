@@ -410,7 +410,12 @@ physical Windows suspend/resume behavior, process-memory reduction, timer
 latency, renderer-loss race, or long-running-script case has been qualified.
 macOS remains explicitly unsupported at the native port because no equivalent
 public `WKWebView` suspension/readback primitive has been proven for the pinned
-engine.
+engine. The release-excluded Windows semantic/lifecycle qualifier now has a
+fifth create-new hidden mode that runs the same production `TrySuspend`
+adapter, final suspended and resumed readbacks, and a fresh same-document
+semantic observation. Its closed offline reviewer cannot promote support until
+that record and the other four exact records pass on one matching physical
+Windows runtime.
 
 Close, cancellation, profile erasure, and shutdown stop loading and settle any
 retained navigation before retiring content policy and calling WebView2 close.

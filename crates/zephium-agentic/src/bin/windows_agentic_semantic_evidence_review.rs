@@ -1,4 +1,4 @@
-//! Offline, content-free review of the four required physical Windows semantic results.
+//! Offline, content-free review of the five required physical Windows semantic results.
 
 use std::ffi::OsString;
 use std::io::{self, Read as _, Write as _};
@@ -11,8 +11,8 @@ use zephium_agentic::{
     MAX_WINDOWS_SEMANTIC_PROBE_OUTPUT_BYTES, WINDOWS_SEMANTIC_PHYSICAL_REVIEW_MODES,
 };
 
-const REVIEW_SCHEMA_VERSION: u16 = 1;
-const REVIEW_SUMMARY_FILENAME: &str = "windows-semantic-review-summary-v1.json";
+const REVIEW_SCHEMA_VERSION: u16 = 2;
+const REVIEW_SUMMARY_FILENAME: &str = "windows-semantic-review-summary-v2.json";
 
 #[derive(Serialize)]
 #[serde(deny_unknown_fields)]
@@ -239,6 +239,7 @@ mod tests {
     fn evidence(mode: WindowsSemanticProbeMode) -> WindowsSemanticProbeEvidence {
         let flood = mode == WindowsSemanticProbeMode::HiddenEventFlood;
         let renderer = mode == WindowsSemanticProbeMode::HiddenRendererLoss;
+        let suspension = mode == WindowsSemanticProbeMode::HiddenSuspendResume;
         WindowsSemanticProbeEvidence {
             run_id: 1,
             runtime: RuntimeFingerprint {
@@ -246,7 +247,8 @@ mod tests {
                 os_version: EvidenceLabel::new("10.0.26100").expect("OS label"),
                 engine: EvidenceLabel::new("WebView2").expect("engine label"),
                 engine_version: EvidenceLabel::new("140.0.0.0").expect("version label"),
-                adapter_revision: EvidenceLabel::new("semantic-runtime-m3").expect("adapter label"),
+                adapter_revision: EvidenceLabel::new("semantic-runtime-m3-lifecycle-m2")
+                    .expect("adapter label"),
             },
             mode,
             ephemeral_profile: true,
@@ -259,20 +261,25 @@ mod tests {
             snapshots: u8::from(!renderer) + 1,
             document_epochs: if flood {
                 3
-            } else if renderer {
+            } else if renderer || suspension {
                 1
             } else {
                 2
             },
             first_snapshot_verified: true,
-            replacement_snapshot_verified: !renderer,
-            replacement_stale_state_absent: !renderer,
+            replacement_snapshot_verified: !renderer && !suspension,
+            replacement_stale_state_absent: !renderer && !suspension,
             page_world_bridge_absent: true,
             secrets_redacted: true,
             event_flood_refused: flood,
             recovered_after_event_flood: flood,
             renderer_loss_observed: renderer,
             renderer_lost_refused: renderer,
+            suspend_callback_succeeded: suspension,
+            suspended_state_attested: suspension,
+            resume_state_attested: suspension,
+            post_resume_snapshot_verified: suspension,
+            suspend_ms: if suspension { 25 } else { 0 },
             debugger_attached: mode == WindowsSemanticProbeMode::HiddenDebuggerCoexistence,
             focus_theft_observed: false,
             peak_pending_invocations: 1,
@@ -302,14 +309,14 @@ mod tests {
     }
 
     #[test]
-    fn exact_four_mode_set_reviews_successfully() {
+    fn exact_five_mode_set_reviews_successfully() {
         let directory = TestDirectory::new();
         for mode in WINDOWS_SEMANTIC_PHYSICAL_REVIEW_MODES {
             write_mode(&directory.0, mode);
         }
         let review = review_directory(&directory.0).expect("review");
         assert_eq!(review.schema_version, REVIEW_SCHEMA_VERSION);
-        assert_eq!(review.modes.len(), 4);
+        assert_eq!(review.modes.len(), 5);
         assert_eq!(review.runtime.platform, Platform::Windows);
     }
 
@@ -387,7 +394,7 @@ mod tests {
     #[test]
     fn summary_writer_is_create_new_and_byte_exact() {
         let directory = TestDirectory::new();
-        let bytes = b"{\"schema_version\":1}\n";
+        let bytes = b"{\"schema_version\":2}\n";
         write_new_record(&directory.0, REVIEW_SUMMARY_FILENAME, bytes).expect("write summary");
         assert_eq!(
             std::fs::read(directory.0.join(REVIEW_SUMMARY_FILENAME)).expect("read summary"),

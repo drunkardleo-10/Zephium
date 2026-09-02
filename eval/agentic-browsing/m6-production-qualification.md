@@ -279,7 +279,7 @@ The authoritative aggregate records and exact remaining blockers are in
 ## Remaining release blockers
 
 - authorized named-device macOS native-input routes beyond fixed DOM;
-- the closed physical-Windows four-mode matrix;
+- the closed physical-Windows five-mode semantic/lifecycle matrix;
 - one separately authorized difficult real-site run per platform;
 - named macOS and Windows Browse startup, idle, tab-pressure, and concurrent-use
   baselines plus reviewed acceptable agent deltas;
