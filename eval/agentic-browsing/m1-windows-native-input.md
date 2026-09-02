@@ -136,6 +136,11 @@ key-up messages to acquire inconsistent scan metadata.
 - Evidence contains only closed enums, Booleans, counters, durations, and
   validated runtime labels. Paths, handles, PIDs, URLs, profile data, page
   content, native errors, and CDP responses are not emitted.
+- Qualification requires the WebView2 Environment8 process inventory to yield
+  a nonzero bounded helper-process count both before and after every row. The
+  adapter does not implement a resident-memory sampler yet, so a record that
+  supplies that otherwise ignored optional field is refused instead of silently
+  projecting an unimplemented measurement into a qualified result.
 - Each physical mode writes one bounded versioned JSON response to its selected
   machine-evidence sink before qualification. A failed behavioral gate
   therefore retains redacted case evidence instead of collapsing to a generic
@@ -220,9 +225,9 @@ callback, broadcast, composition-controller, synthetic-injector, capture, and
 activation message paths are forbidden so they cannot bypass the one audited
 `SendMessageTimeoutW` site or the closed CDP method vocabulary.
 The same gate mutation-tests the event/target/trust join, target-focus event
-join, exact native routes that require trust, empty non-dispatch rows,
-link/clipboard effect fields, and popup-request/outcome correspondence used by
-the offline reviewer.
+join, exact native routes that require trust, exact native-view/queue/helper
+process/resident-memory shape, empty non-dispatch rows, link/clipboard effect
+fields, and popup-request/outcome correspondence used by the offline reviewer.
 The Windows input module also denies unsafe operations hidden inside an unsafe
 function and every undocumented unsafe block. The boundary checker pins both
 module-level denials, and Windows CI runs native Clippy before linking the

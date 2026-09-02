@@ -311,6 +311,16 @@ pub fn qualify_windows_probe_evidence(
             || actual.resources_after.native_views != 1
             || actual.resources_before.queued_actions != 0
             || actual.resources_after.queued_actions != 0
+            || actual
+                .resources_before
+                .helper_processes
+                .is_none_or(|count| count == 0)
+            || actual
+                .resources_after
+                .helper_processes
+                .is_none_or(|count| count == 0)
+            || actual.resources_before.resident_bytes.is_some()
+            || actual.resources_after.resident_bytes.is_some()
         {
             return Err(WindowsProbeQualificationError::Resources);
         }
@@ -767,6 +777,27 @@ mod tests {
 
         let mut evidence = tests_fixture(mode);
         evidence.cases[0].resources_after.native_views = 0;
+        assert_eq!(
+            qualify_windows_probe_evidence(mode, &evidence),
+            Err(WindowsProbeQualificationError::Resources)
+        );
+
+        let mut evidence = tests_fixture(mode);
+        evidence.cases[0].resources_before.helper_processes = None;
+        assert_eq!(
+            qualify_windows_probe_evidence(mode, &evidence),
+            Err(WindowsProbeQualificationError::Resources)
+        );
+
+        let mut evidence = tests_fixture(mode);
+        evidence.cases[0].resources_after.helper_processes = Some(0);
+        assert_eq!(
+            qualify_windows_probe_evidence(mode, &evidence),
+            Err(WindowsProbeQualificationError::Resources)
+        );
+
+        let mut evidence = tests_fixture(mode);
+        evidence.cases[0].resources_before.resident_bytes = Some(4_096);
         assert_eq!(
             qualify_windows_probe_evidence(mode, &evidence),
             Err(WindowsProbeQualificationError::Resources)

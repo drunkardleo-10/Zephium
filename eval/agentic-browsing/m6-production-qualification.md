@@ -246,7 +246,10 @@ agentic-owned Windows modules. Cross-compilation is not device behavior.
   three coarse focus-owner samples to match the selected presentation, and
   rejoins the serialized target DOM-focus bit to a retained focus event on the
   exact intended target; clearing the summary theft Booleans cannot hide a
-  contradictory serialized focus sequence. After the
+  contradictory serialized focus sequence. Qualified rows additionally require
+  nonzero bounded WebView2 helper-process samples on both sides of the action
+  and reject the not-yet-implemented resident-memory field rather than silently
+  dropping it. After the
   final HWND control poll, the adapter samples both queues, rejoins document
   HWND/thread/process/layout, and only then derives the bounded window-message
   timeout. CDP uses the same final-poll/sample/submission order. The source gate

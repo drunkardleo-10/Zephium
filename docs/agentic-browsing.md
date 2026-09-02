@@ -670,7 +670,11 @@ event before it can refine the coarse native focus owner. A backend classified
 as non-dispatching must retain no event, target, focus, activation, navigation,
 popup, or clipboard effect. Popup and clipboard results additionally rejoin
 their dedicated native request and closed gate fields; a generic `Unsupported`
-label cannot stand in for evidence that the intended control was reached.
+label cannot stand in for evidence that the intended control was reached. A
+qualified Windows row also requires nonzero bounded WebView2 helper-process
+counts before and after the action and refuses the resident-memory field until
+that adapter implements it, so absent or silently dropped measurements cannot
+be presented as resource evidence.
 
 No conclusion is generalized from `isTrusted` alone. Real sites may reject
 automation through many mechanisms. The spike determines which backends are

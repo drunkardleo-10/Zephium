@@ -2503,6 +2503,14 @@ fn validate_windows_probe_binary(source: &str, qualification: &str) -> Result<()
         "fnhas_trusted_qualifying_event(evidence:&CaseEvidence)->bool{letrequired=qualifying_event_kind(evidence.case);evidence.events.iter().any(|event|{event.is_trusted&&event.kind==required&&event.target==evidence.target.intended})}",
         "fntarget_focus_event_observed(evidence:&CaseEvidence)->bool{evidence.events.iter().any(|event|{event.kind==InputEventKind::Focus&&event.target==evidence.target.intended})}",
         "constfnbackend_requires_trusted_qualifying_event(backend:InputBackend)->bool{matches!(backend,InputBackend::WindowsHwndInput|InputBackend::WindowsCdpInput)}",
+        "actual.resources_before.native_views!=1",
+        "actual.resources_after.native_views!=1",
+        "actual.resources_before.queued_actions!=0",
+        "actual.resources_after.queued_actions!=0",
+        "actual.resources_before.helper_processes.is_none_or(|count|count==0)",
+        "actual.resources_after.helper_processes.is_none_or(|count|count==0)",
+        "actual.resources_before.resident_bytes.is_some()",
+        "actual.resources_after.resident_bytes.is_some()",
         "fnno_dispatch_evidence_is_empty(evidence:&CaseEvidence)->bool",
         "actual.target.navigation_observed!=(case==FixtureCase::Link&&!does_not_dispatch)",
         "GateOutcome::Denied|GateOutcome::Indeterminate",
@@ -11454,6 +11462,14 @@ mod tests {
             const fn backend_requires_trusted_qualifying_event(backend: InputBackend) -> bool {
                 matches!(backend, InputBackend::WindowsHwndInput | InputBackend::WindowsCdpInput)
             }
+            actual.resources_before.native_views != 1;
+            actual.resources_after.native_views != 1;
+            actual.resources_before.queued_actions != 0;
+            actual.resources_after.queued_actions != 0;
+            actual.resources_before.helper_processes.is_none_or(|count| count == 0);
+            actual.resources_after.helper_processes.is_none_or(|count| count == 0);
+            actual.resources_before.resident_bytes.is_some();
+            actual.resources_after.resident_bytes.is_some();
             fn no_dispatch_evidence_is_empty(evidence: &CaseEvidence) -> bool { true }
             actual.target.navigation_observed != (case == FixtureCase::Link && !does_not_dispatch);
             GateOutcome::Denied | GateOutcome::Indeterminate;
@@ -11515,6 +11531,19 @@ mod tests {
                 "InputBackend::WindowsHwndInput | InputBackend::WindowsCdpInput",
                 "InputBackend::FixedDomRecipe",
             ),
+        )
+        .is_err());
+        assert!(validate_windows_probe_binary(
+            binary,
+            &qualification.replace(
+                "actual.resources_before.helper_processes.is_none_or(|count| count == 0);",
+                "false;",
+            ),
+        )
+        .is_err());
+        assert!(validate_windows_probe_binary(
+            binary,
+            &qualification.replace("actual.resources_after.resident_bytes.is_some();", "false;",),
         )
         .is_err());
         assert!(validate_windows_probe_binary(
