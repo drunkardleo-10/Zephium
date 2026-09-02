@@ -50,17 +50,18 @@ use zephium_agentic::{
     SemanticRuntimeResultError, SemanticSensitivity, SemanticSnapshot, SemanticSnapshotGeneration,
     SemanticValueSummary, WindowsSemanticProbeEvidence, WindowsSemanticProbeFailure,
     WindowsSemanticProbeFailureCode, WindowsSemanticProbeMode, WindowsSemanticProbeStage,
-    WindowsSemanticTeardownEvidence, MAX_CONTEXT_NAVIGATION_REDIRECTS,
+    WindowsSemanticResourceEvidence, WindowsSemanticTeardownEvidence,
+    MAX_CONTEXT_NAVIGATION_REDIRECTS,
 };
 use zephium_core::ids::ProfileId;
 
 use crate::platform::agent_suspension::{AgentSuspendClaim, AgentSuspendNativeDisposition};
 
 use super::{
-    attest_environment, browser_process, browser_process_for_environment,
-    install_browser_process_exit_observer, AgentNavigationCommit, AgentNavigationTerminal,
-    AgentOwnedProfile, AgentOwnedView, AgentOwnedViewCallbacks, BrowserProcess,
-    BrowserProcessExitObserver, ContentPolicyRegistration, NativeContentPolicy,
+    agentic_probe_resources::WebView2ResourceSample, attest_environment, browser_process,
+    browser_process_for_environment, install_browser_process_exit_observer, AgentNavigationCommit,
+    AgentNavigationTerminal, AgentOwnedProfile, AgentOwnedView, AgentOwnedViewCallbacks,
+    BrowserProcess, BrowserProcessExitObserver, ContentPolicyRegistration, NativeContentPolicy,
 };
 
 const RUN_TIMEOUT: Duration = Duration::from_secs(90);
@@ -362,6 +363,8 @@ struct ExecutionFacts {
     post_location_snapshot_verified: bool,
     peak_pending_invocations: u8,
     semantic_work_drained: bool,
+    resources_before: Option<WebView2ResourceSample>,
+    resources_after: Option<WebView2ResourceSample>,
 }
 
 struct TeardownResult {
@@ -589,6 +592,16 @@ pub(crate) fn run(
             return Err(ProbeError::verify(WindowsSemanticProbeStage::Construct));
         }
         facts.runtime = Some(runtime_fingerprint()?);
+        facts.resources_before = Some(sample_resources(
+            environment
+                .as_ref()
+                .ok_or_else(|| ProbeError::harness(WindowsSemanticProbeStage::Construct))?,
+            &host,
+            owned.view(),
+            &native_guard,
+            run_deadline,
+            WindowsSemanticProbeStage::Construct,
+        )?);
 
         execute_mode(
             mode,
@@ -613,6 +626,16 @@ pub(crate) fn run(
             .attest(run_deadline)
             .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Verify))?;
         native_guard.sample(&host, Some(owned.view()));
+        facts.resources_after = Some(sample_resources(
+            environment
+                .as_ref()
+                .ok_or_else(|| ProbeError::harness(WindowsSemanticProbeStage::Verify))?,
+            &host,
+            owned.view(),
+            &native_guard,
+            run_deadline,
+            WindowsSemanticProbeStage::Verify,
+        )?);
         let allowance = match mode {
             WindowsSemanticProbeMode::HiddenEventFlood => CallbackAllowance::EVENT_FLOOD,
             WindowsSemanticProbeMode::HiddenRendererLoss => CallbackAllowance::RENDERER_LOST,
@@ -667,6 +690,12 @@ pub(crate) fn run(
     let runtime = facts
         .runtime
         .ok_or_else(|| ProbeError::verify(WindowsSemanticProbeStage::Verify).0)?;
+    let resources_before = facts
+        .resources_before
+        .ok_or_else(|| ProbeError::verify(WindowsSemanticProbeStage::Verify).0)?;
+    let resources_after = facts
+        .resources_after
+        .ok_or_else(|| ProbeError::verify(WindowsSemanticProbeStage::Verify).0)?;
     Ok(WindowsSemanticProbeEvidence {
         run_id: request_id,
         runtime,
@@ -707,6 +736,14 @@ pub(crate) fn run(
         focus_theft_observed: native_guard.focus_theft.get(),
         peak_pending_invocations: facts.peak_pending_invocations,
         semantic_work_drained: facts.semantic_work_drained,
+        resources_before: WindowsSemanticResourceEvidence {
+            webview2_processes: resources_before.processes,
+            resident_bytes: resources_before.resident_bytes,
+        },
+        resources_after: WindowsSemanticResourceEvidence {
+            webview2_processes: resources_after.processes,
+            resident_bytes: resources_after.resident_bytes,
+        },
         elapsed_ms: duration_ms_u64(started.elapsed()),
         teardown: WindowsSemanticTeardownEvidence {
             runtime_retired: teardown.runtime_retired,
@@ -2174,6 +2211,41 @@ fn pump_and_sample(
     Ok(())
 }
 
+fn sample_resources(
+    environment: &ICoreWebView2Environment,
+    host: &ProbeHostWindow,
+    view: &WebView,
+    native_guard: &NativeStateGuard,
+    deadline: Instant,
+    stage: WindowsSemanticProbeStage,
+) -> ProbeResult<WebView2ResourceSample> {
+    if Instant::now() >= deadline {
+        return Err(ProbeError::timeout(stage));
+    }
+    native_guard.sample(host, Some(view));
+    if native_guard.failed() {
+        return Err(ProbeError::verify(stage));
+    }
+    let mut check_control = || {
+        if Instant::now() >= deadline {
+            Err(ProbeError::timeout(stage))
+        } else {
+            Ok(())
+        }
+    };
+    let sample =
+        super::agentic_probe_resources::sample_webview2_resources(environment, &mut check_control)?
+            .ok_or_else(|| ProbeError::verify(stage))?;
+    native_guard.sample(host, Some(view));
+    if native_guard.failed() {
+        return Err(ProbeError::verify(stage));
+    }
+    if Instant::now() >= deadline {
+        return Err(ProbeError::timeout(stage));
+    }
+    Ok(sample)
+}
+
 fn pump_once(deadline: Instant) -> ProbeResult<()> {
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() {
@@ -2226,7 +2298,7 @@ fn runtime_fingerprint() -> ProbeResult<RuntimeFingerprint> {
         engine_version: EvidenceLabel::new(engine_version)
             .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Construct))?,
         adapter_revision: EvidenceLabel::new(
-            "semantic-runtime-m3-lifecycle-m2-redirect-location-v1",
+            "semantic-runtime-m3-lifecycle-m2-redirect-location-resources-v2",
         )
         .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Construct))?,
     })

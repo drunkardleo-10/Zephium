@@ -268,9 +268,17 @@ agentic-owned Windows modules. Cross-compilation is not device behavior.
 - The physical Windows semantic source gate now binds its content-free success
   fields to the closed snapshot verifiers, exact flood and renderer-loss
   refusals, native suspend/readback/resume result, semantic drain audit, and
-  teardown result. Mutation tests replace each evidence class with an
-  unconditional label and prove release qualification fails. This is producer
-  integrity coverage, not physical Windows behavior evidence.
+  teardown result. It also requires stable nonzero bounded WebView2 process and
+  aggregate resident-working-set observations before mode work and after the
+  semantic drain. Both Windows qualifiers share one release-excluded sampler:
+  query-limited non-inheritable handles remain owned through an exact
+  Environment8 PID-cohort rejoin, and any partial, changing, overflowing, or
+  close-failed observation is rejected. Protocol and review schema v5 retain
+  only the two maxima. Mutation tests replace each evidence class or resource
+  producer with an unconditional value and prove release qualification fails.
+  The sampler and its exact-pinned Win32 dependency are absent from ordinary
+  engine builds. This is producer integrity and cross-compile coverage, not
+  physical Windows behavior or a resource-budget claim.
 - The macOS diagnostic input adapter now carries the same module-level unsafe
   lint contract as the Windows input adapter. Every current Objective-C unsafe
   operation has a local ownership, lifetime, thread, selector, or exception

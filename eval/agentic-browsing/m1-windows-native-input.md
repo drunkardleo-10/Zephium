@@ -149,7 +149,8 @@ key-up messages to acquire inconsistent scan metadata.
   changed, partial, duplicate, zero, overflowing, inaccessible, or close-failed
   sample fails qualification; no PID or handle enters evidence. The
   exact-pinned raw Win32 binding dependency is optional and activated only by
-  `native-agentic-input-probe`. The
+  the release-excluded input or semantic probe feature. Both Windows physical
+  qualifiers reuse this one sampler implementation. The
   producer/qualifier pair requires adapter revision
   `native-input-m1-resources-v2`; review schema v2 retains the maximum process
   count and resident bytes across the four required runs.

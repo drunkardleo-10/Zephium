@@ -214,6 +214,13 @@ Every accepted document also consumes the production `SourceChanged`/
 `HistoryChanged` claim by sampling WebView2's bounded native `Source`, parsing
 the canonical target, and requiring it to equal the committed URL. A pending,
 dirty, substituted, or teardown-surviving location claim fails the run.
+Every mode also takes a stable, bounded WebView2 process-cohort and aggregate
+resident-working-set sample before its mode-specific work and after semantic
+work drains. Sampling admits at most 64 unique nonzero process IDs, opens only
+non-inheritable query-limited handles, checked-sums under 1 TiB, and exactly
+rejoins the Environment8 PID cohort while those handles remain owned. Missing,
+partial, changed, overflowing, or close-failed samples reject the run; process
+identities never enter evidence.
 
 Run the six non-debugger modes as ordinary processes on an authorized
 physical Windows device:
@@ -281,16 +288,17 @@ cargo run --locked -p zephium-agentic `
 ```
 
 The offline reviewer requires one identical Windows/WebView2/adapter
-fingerprint. Protocol v4 and the
-`semantic-runtime-m3-lifecycle-m2-redirect-location-v1` adapter revision
+fingerprint. Protocol v5 and the
+`semantic-runtime-m3-lifecycle-m2-redirect-location-resources-v2` adapter revision
 prevent older six-record results from mixing with this cohort. It
 also requires exact mode-specific snapshot, document-epoch, suspension,
 pressure, bounded redirect/refusal/recovery, same-document native replacement/
 rejoin/stale-prior recovery, renderer-loss, debugger, focus, pending-work,
-process-exit, profile, fixture, and native-view teardown facts.
-The aggregate retains the
-bounded suspend-callback duration but no page content, path, native error,
-world/context identity, or trace. It reads no other filename. The runner
+process-exit, profile, fixture, native-view teardown, and before/after resource
+facts. Review schema v5 retains only the maximum process count and aggregate
+resident bytes alongside the bounded suspend-callback duration; it retains no
+process identity, page content, path, native error, world/context identity, or
+trace. It reads no other filename. The runner
 accepts no stdout form and neither runner nor reviewer overwrites an existing
 record. It shares the same direct-path/reparse-point rejection as the input
 evidence path. Archive the local directory before any retry.

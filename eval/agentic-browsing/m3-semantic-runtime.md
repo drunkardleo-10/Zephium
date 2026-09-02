@@ -508,9 +508,18 @@ typed refusal, and coexistence while a debugger remains attached. A canonical
 content-free JSONL contract, seven fixed create-new
 filenames, and an offline
 reviewer require one identical runtime fingerprint and exact focus, pending,
-process, profile, fixture, and teardown facts. The runner and reviewer share
-the input qualifier's direct directory/file checks and additionally reject
-every Windows filesystem object carrying `FILE_ATTRIBUTE_REPARSE_POINT`,
+process, profile, fixture, and teardown facts. Before mode-specific work and
+after semantic work drains, the qualifier also uses the same release-excluded
+sampler as M1 to measure the exact ephemeral user-data-folder's stable WebView2
+process cohort and checked aggregate resident working set. The sampler permits
+at most 64 unique nonzero PIDs, owns query-limited non-inheritable handles
+through an exact Environment8 PID rejoin, closes them on every path, and fails
+closed on an unavailable, partial, changed, overflowing, or close-failed
+sample. Protocol v5 and review schema v5 require both observations and retain
+only their process-count and resident-byte maxima, never process identity. The
+runner and reviewer share the input qualifier's direct directory/file checks
+and additionally reject every Windows filesystem object carrying
+`FILE_ATTRIBUTE_REPARSE_POINT`,
 including junctions and mount points that are not ordinary symbolic links.
 The runner also handles the production `SourceChanged`/`HistoryChanged`
 observer instead of discarding its callback: after every accepted load it
@@ -529,12 +538,15 @@ only the fixed `Page.crash` fault; it rejects generic CDP, evaluation,
 selectors, page bridges, input injection, focus mutation, arbitrary output
 paths, and external URLs. The release-excluded Windows qualifier additionally
 denies unsafe operations hidden inside unsafe functions and every undocumented
-unsafe block. The source gate pins both denials, while Windows CI and the
-host-independent MSVC cross-target run native Clippy before the final linker
-check. The Windows host semantic task remains explicitly
-unsupported until all seven records pass on supported physical Windows. No live
-isolation, timing, arbitrary-page, or Windows product-support claim is made,
-and the extension-owned CDP probe remains unchanged.
+unsafe block. The shared resource sampler carries the same lints and is gated
+only by the two Windows qualifier features; neither it nor its exact-pinned raw
+Win32 dependency enters the ordinary engine graph. The source gate pins these
+properties and the sample producers, while Windows CI and the host-independent
+MSVC cross-target run native Clippy before the final linker check. The Windows
+host semantic task remains explicitly unsupported until all seven records pass
+on supported physical Windows. No live
+isolation, timing, arbitrary-page, resource-budget, or Windows product-support
+claim is made, and the extension-owned CDP probe remains unchanged.
 
 ## Reviewed macOS native evidence
 

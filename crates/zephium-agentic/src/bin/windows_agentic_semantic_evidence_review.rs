@@ -12,8 +12,8 @@ use zephium_agentic::{
     MAX_WINDOWS_SEMANTIC_PROBE_OUTPUT_BYTES, WINDOWS_SEMANTIC_PHYSICAL_REVIEW_MODES,
 };
 
-const REVIEW_SCHEMA_VERSION: u16 = 4;
-const REVIEW_SUMMARY_FILENAME: &str = "windows-semantic-review-summary-v4.json";
+const REVIEW_SCHEMA_VERSION: u16 = 5;
+const REVIEW_SUMMARY_FILENAME: &str = "windows-semantic-review-summary-v5.json";
 
 #[derive(Serialize)]
 #[serde(deny_unknown_fields)]
@@ -211,8 +211,8 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use zephium_agentic::{
         encode_windows_semantic_probe_response, EvidenceLabel, WindowsSemanticProbeEvidence,
-        WindowsSemanticProbeMode, WindowsSemanticProbeResponse, WindowsSemanticTeardownEvidence,
-        WINDOWS_SEMANTIC_PROBE_PROTOCOL_VERSION,
+        WindowsSemanticProbeMode, WindowsSemanticProbeResponse, WindowsSemanticResourceEvidence,
+        WindowsSemanticTeardownEvidence, WINDOWS_SEMANTIC_PROBE_PROTOCOL_VERSION,
     };
 
     static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -251,7 +251,7 @@ mod tests {
                 engine: EvidenceLabel::new("WebView2").expect("engine label"),
                 engine_version: EvidenceLabel::new("140.0.0.0").expect("version label"),
                 adapter_revision: EvidenceLabel::new(
-                    "semantic-runtime-m3-lifecycle-m2-redirect-location-v1",
+                    "semantic-runtime-m3-lifecycle-m2-redirect-location-resources-v2",
                 )
                 .expect("adapter label"),
             },
@@ -308,6 +308,14 @@ mod tests {
             focus_theft_observed: false,
             peak_pending_invocations: 1,
             semantic_work_drained: true,
+            resources_before: WindowsSemanticResourceEvidence {
+                webview2_processes: 4,
+                resident_bytes: 256 * 1_024 * 1_024,
+            },
+            resources_after: WindowsSemanticResourceEvidence {
+                webview2_processes: 5,
+                resident_bytes: 320 * 1_024 * 1_024,
+            },
             elapsed_ms: 800,
             teardown: WindowsSemanticTeardownEvidence {
                 runtime_retired: true,
@@ -326,7 +334,7 @@ mod tests {
         let response = WindowsSemanticProbeResponse {
             protocol_version: WINDOWS_SEMANTIC_PROBE_PROTOCOL_VERSION,
             request_id: 1,
-            reply: WindowsSemanticProbeReply::Completed(evidence(mode)),
+            reply: WindowsSemanticProbeReply::Completed(Box::new(evidence(mode))),
         };
         let bytes = encode_windows_semantic_probe_response(&response).expect("encode response");
         std::fs::write(directory.join(mode.local_result_filename()), bytes).expect("write result");
@@ -354,9 +362,9 @@ mod tests {
         let response = WindowsSemanticProbeResponse {
             protocol_version: WINDOWS_SEMANTIC_PROBE_PROTOCOL_VERSION,
             request_id: 1,
-            reply: WindowsSemanticProbeReply::Completed(evidence(
+            reply: WindowsSemanticProbeReply::Completed(Box::new(evidence(
                 WindowsSemanticProbeMode::HiddenFixedDocuments,
-            )),
+            ))),
         };
         std::fs::write(
             directory.0.join(mode.local_result_filename()),
@@ -375,7 +383,7 @@ mod tests {
         let response = WindowsSemanticProbeResponse {
             protocol_version: WINDOWS_SEMANTIC_PROBE_PROTOCOL_VERSION,
             request_id: 1,
-            reply: WindowsSemanticProbeReply::Completed(changed),
+            reply: WindowsSemanticProbeReply::Completed(Box::new(changed)),
         };
         std::fs::write(
             directory.0.join(debugger.local_result_filename()),
@@ -418,7 +426,7 @@ mod tests {
     #[test]
     fn summary_writer_is_create_new_and_byte_exact() {
         let directory = TestDirectory::new();
-        let bytes = b"{\"schema_version\":2}\n";
+        let bytes = b"{\"schema_version\":5}\n";
         write_new_record(&directory.0, REVIEW_SUMMARY_FILENAME, bytes).expect("write summary");
         assert_eq!(
             std::fs::read(directory.0.join(REVIEW_SUMMARY_FILENAME)).expect("read summary"),

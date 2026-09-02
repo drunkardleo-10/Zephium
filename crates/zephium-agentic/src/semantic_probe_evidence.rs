@@ -7,10 +7,13 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{Platform, RuntimeFingerprint, MAX_CONTEXT_NAVIGATION_REDIRECTS};
+use crate::{
+    Platform, RuntimeFingerprint, MAX_CONTEXT_NAVIGATION_REDIRECTS, MAX_RESOURCE_HELPER_PROCESSES,
+    MAX_RESOURCE_RESIDENT_BYTES,
+};
 
 /// Version of the Windows semantic-probe result grammar.
-pub const WINDOWS_SEMANTIC_PROBE_PROTOCOL_VERSION: u16 = 4;
+pub const WINDOWS_SEMANTIC_PROBE_PROTOCOL_VERSION: u16 = 5;
 /// Maximum canonical JSONL bytes emitted by one semantic-probe process.
 pub const MAX_WINDOWS_SEMANTIC_PROBE_OUTPUT_BYTES: usize = 16 * 1024;
 const MAX_RUN_ELAPSED_MS: u64 = 2 * 60_000;
@@ -111,6 +114,16 @@ pub struct WindowsSemanticTeardownEvidence {
     pub cleanup_ms: u32,
 }
 
+/// One bounded content-free WebView2 process resource observation.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WindowsSemanticResourceEvidence {
+    /// Complete process count returned for the exact ephemeral user-data folder.
+    pub webview2_processes: u8,
+    /// Checked aggregate resident working set for that exact process cohort.
+    pub resident_bytes: u64,
+}
+
 /// One machine-readable, content-free physical Windows semantic result.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -193,6 +206,10 @@ pub struct WindowsSemanticProbeEvidence {
     pub peak_pending_invocations: u8,
     /// No semantic work remained immediately before teardown.
     pub semantic_work_drained: bool,
+    /// Stable process/RSS cohort sampled before the mode-specific work.
+    pub resources_before: WindowsSemanticResourceEvidence,
+    /// Stable process/RSS cohort sampled after all semantic work drained.
+    pub resources_after: WindowsSemanticResourceEvidence,
     /// Bounded whole-run wall-clock duration.
     pub elapsed_ms: u64,
     /// Exact teardown evidence.
@@ -208,7 +225,7 @@ impl WindowsSemanticProbeEvidence {
         if self.runtime.platform != Platform::Windows
             || self.runtime.engine.as_str() != "WebView2"
             || self.runtime.adapter_revision.as_str()
-                != "semantic-runtime-m3-lifecycle-m2-redirect-location-v1"
+                != "semantic-runtime-m3-lifecycle-m2-redirect-location-resources-v2"
         {
             return Err(WindowsSemanticProbeValidationError::Runtime);
         }
@@ -222,6 +239,8 @@ impl WindowsSemanticProbeEvidence {
             || self.redirect_chain_hops_observed > MAX_CONTEXT_NAVIGATION_REDIRECTS as u8
             || self.redirect_limit_hops_observed > MAX_CONTEXT_NAVIGATION_REDIRECTS as u8
             || self.elapsed_ms > MAX_RUN_ELAPSED_MS
+            || !valid_resource_sample(self.resources_before)
+            || !valid_resource_sample(self.resources_after)
         {
             return Err(WindowsSemanticProbeValidationError::Bounds);
         }
@@ -230,6 +249,13 @@ impl WindowsSemanticProbeEvidence {
         }
         Ok(())
     }
+}
+
+const fn valid_resource_sample(sample: WindowsSemanticResourceEvidence) -> bool {
+    sample.webview2_processes != 0
+        && sample.webview2_processes <= MAX_RESOURCE_HELPER_PROCESSES
+        && sample.resident_bytes != 0
+        && sample.resident_bytes <= MAX_RESOURCE_RESIDENT_BYTES
 }
 
 /// Closed semantic-probe failure code with no native or page-controlled detail.
@@ -291,7 +317,7 @@ pub struct WindowsSemanticProbeFailure {
 #[serde(tag = "kind", content = "payload", rename_all = "snake_case")]
 pub enum WindowsSemanticProbeReply {
     /// Run returned bounded evidence, independently qualified afterward.
-    Completed(WindowsSemanticProbeEvidence),
+    Completed(Box<WindowsSemanticProbeEvidence>),
     /// Run failed with a closed rejection.
     Rejected(WindowsSemanticProbeFailure),
 }
@@ -361,6 +387,8 @@ pub struct WindowsSemanticProbeAggregate {
     suspend_ms: u32,
     elapsed_ms: u64,
     cleanup_ms: u32,
+    maximum_webview2_processes: u8,
+    maximum_resident_bytes: u64,
     status: WindowsSemanticProbeAggregateStatus,
 }
 
@@ -565,6 +593,14 @@ pub fn qualify_windows_semantic_probe_evidence(
         suspend_ms: evidence.suspend_ms,
         elapsed_ms: evidence.elapsed_ms,
         cleanup_ms: evidence.teardown.cleanup_ms,
+        maximum_webview2_processes: evidence
+            .resources_before
+            .webview2_processes
+            .max(evidence.resources_after.webview2_processes),
+        maximum_resident_bytes: evidence
+            .resources_before
+            .resident_bytes
+            .max(evidence.resources_after.resident_bytes),
         status: WindowsSemanticProbeAggregateStatus::Qualified,
     })
 }
@@ -621,7 +657,7 @@ pub(crate) fn tests_fixture(mode: WindowsSemanticProbeMode) -> WindowsSemanticPr
             engine: EvidenceLabel::new("WebView2").expect("engine label"),
             engine_version: EvidenceLabel::new("140.0.0.0").expect("version label"),
             adapter_revision: EvidenceLabel::new(
-                "semantic-runtime-m3-lifecycle-m2-redirect-location-v1",
+                "semantic-runtime-m3-lifecycle-m2-redirect-location-resources-v2",
             )
             .expect("adapter label"),
         },
@@ -678,6 +714,14 @@ pub(crate) fn tests_fixture(mode: WindowsSemanticProbeMode) -> WindowsSemanticPr
         focus_theft_observed: false,
         peak_pending_invocations: 1,
         semantic_work_drained: true,
+        resources_before: WindowsSemanticResourceEvidence {
+            webview2_processes: 4,
+            resident_bytes: 256 * 1_024 * 1_024,
+        },
+        resources_after: WindowsSemanticResourceEvidence {
+            webview2_processes: 5,
+            resident_bytes: 320 * 1_024 * 1_024,
+        },
         elapsed_ms: 800,
         teardown: WindowsSemanticTeardownEvidence {
             runtime_retired: true,
@@ -700,12 +744,11 @@ mod tests {
     fn every_required_mode_has_one_exact_qualification() {
         for mode in WINDOWS_SEMANTIC_PHYSICAL_REVIEW_MODES {
             let evidence = tests_fixture(mode);
-            assert_eq!(
-                qualify_windows_semantic_probe_evidence(mode, &evidence)
-                    .expect("qualified")
-                    .mode(),
-                mode
-            );
+            let aggregate =
+                qualify_windows_semantic_probe_evidence(mode, &evidence).expect("qualified");
+            assert_eq!(aggregate.mode(), mode);
+            assert_eq!(aggregate.maximum_webview2_processes, 5);
+            assert_eq!(aggregate.maximum_resident_bytes, 320 * 1_024 * 1_024);
             assert_eq!(
                 WindowsSemanticProbeMode::from_argument(mode.argument()),
                 Some(mode)
@@ -718,9 +761,9 @@ mod tests {
         let response = WindowsSemanticProbeResponse {
             protocol_version: WINDOWS_SEMANTIC_PROBE_PROTOCOL_VERSION,
             request_id: 1,
-            reply: WindowsSemanticProbeReply::Completed(tests_fixture(
+            reply: WindowsSemanticProbeReply::Completed(Box::new(tests_fixture(
                 WindowsSemanticProbeMode::HiddenFixedDocuments,
-            )),
+            ))),
         };
         let encoded = encode_windows_semantic_probe_response(&response).expect("encode");
         assert_eq!(
@@ -757,6 +800,24 @@ mod tests {
         assert_eq!(
             qualify_windows_semantic_probe_evidence(mode, &evidence),
             Err(WindowsSemanticProbeQualificationError::CommonInvariant)
+        );
+
+        let mut evidence = tests_fixture(mode);
+        evidence.resources_before.webview2_processes = 0;
+        assert_eq!(
+            qualify_windows_semantic_probe_evidence(mode, &evidence),
+            Err(WindowsSemanticProbeQualificationError::Evidence(
+                WindowsSemanticProbeValidationError::Bounds,
+            ))
+        );
+
+        let mut evidence = tests_fixture(mode);
+        evidence.resources_after.resident_bytes = MAX_RESOURCE_RESIDENT_BYTES + 1;
+        assert_eq!(
+            qualify_windows_semantic_probe_evidence(mode, &evidence),
+            Err(WindowsSemanticProbeQualificationError::Evidence(
+                WindowsSemanticProbeValidationError::Bounds,
+            ))
         );
     }
 

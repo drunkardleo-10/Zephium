@@ -682,7 +682,12 @@ snapshot, closing the process-exit/PID-reuse gap. Any unavailable, changed, or
 partial sample rejects the row; the content-free review aggregate retains both
 maxima without emitting process IDs. The required raw Win32 bindings are
 an exact-pinned optional dependency activated only by the release-excluded
-probe feature.
+input or semantic probe features. The same sampler qualifies the seven-mode
+Windows semantic-runtime harness before mode-specific work and after semantic
+work drains; protocol and review schema v5 require both observations and expose
+only process-count and resident-byte maxima. Until those seven records are
+captured and reviewed on physical Windows, this is cross-compile and producer-
+integrity evidence rather than a device behavior or resource-budget claim.
 
 No conclusion is generalized from `isTrusted` alone. Real sites may reject
 automation through many mechanisms. The spike determines which backends are
@@ -1418,7 +1423,7 @@ sources rather than copying another browser agent's architecture:
   define platform frame observation constraints.
 - [WebView2 `ICoreWebView2Environment8::GetProcessInfos`](https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2environment8#getprocessinfos)
   defines the user-data-folder process snapshot and process-ID surface used by
-  the Windows probe's bounded resource sample.
+  both release-excluded Windows qualifiers' shared bounded resource sampler.
 - [Win32 `GetProcessMemoryInfo`](https://learn.microsoft.com/en-us/windows/win32/api/psapi/nf-psapi-getprocessmemoryinfo)
   defines the query-limited process-handle and working-set measurement used for
   aggregate resident bytes. Partial or inaccessible samples fail qualification.

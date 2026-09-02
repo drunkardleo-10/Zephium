@@ -216,7 +216,10 @@ mod windows {
             evidence.post_location_snapshot_verified,
             evidence.peak_pending_invocations,
         );
-        if !emit_reply(&mut sink, WindowsSemanticProbeReply::Completed(evidence)) {
+        if !emit_reply(
+            &mut sink,
+            WindowsSemanticProbeReply::Completed(Box::new(evidence)),
+        ) {
             fail("machine evidence output failed");
         }
         match qualification {

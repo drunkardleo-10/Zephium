@@ -407,8 +407,9 @@ pub use semantic_probe_evidence::{
     WindowsSemanticProbeMode, WindowsSemanticProbeProtocolError,
     WindowsSemanticProbeQualificationError, WindowsSemanticProbeReply,
     WindowsSemanticProbeResponse, WindowsSemanticProbeStage, WindowsSemanticProbeValidationError,
-    WindowsSemanticTeardownEvidence, MAX_WINDOWS_SEMANTIC_PROBE_OUTPUT_BYTES,
-    WINDOWS_SEMANTIC_PHYSICAL_REVIEW_MODES, WINDOWS_SEMANTIC_PROBE_PROTOCOL_VERSION,
+    WindowsSemanticResourceEvidence, WindowsSemanticTeardownEvidence,
+    MAX_WINDOWS_SEMANTIC_PROBE_OUTPUT_BYTES, WINDOWS_SEMANTIC_PHYSICAL_REVIEW_MODES,
+    WINDOWS_SEMANTIC_PROBE_PROTOCOL_VERSION,
 };
 pub use semantic_read::{
     read_semantic_observation, SemanticCaptureInstant, SemanticReadAuthority, SemanticReadBudget,

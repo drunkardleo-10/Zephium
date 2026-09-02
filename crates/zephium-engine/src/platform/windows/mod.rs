@@ -9,6 +9,11 @@
 mod agent_context;
 #[cfg(feature = "native-agentic-input-probe")]
 mod agentic_input_probe;
+#[cfg(any(
+    feature = "native-agentic-input-probe",
+    feature = "native-agentic-semantic-probe"
+))]
+mod agentic_probe_resources;
 #[cfg(feature = "native-agentic-semantic-probe")]
 mod agentic_semantic_probe;
 #[cfg(any(test, feature = "windows-cdp-spike"))]
