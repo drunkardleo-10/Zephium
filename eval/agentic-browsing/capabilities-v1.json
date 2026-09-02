@@ -90,7 +90,32 @@
         "crates/zephium-agentic/src/semantic_probe_evidence.rs",
         "https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2_3"
       ],
-      "limitations": "Only hidden owned contexts with exact Suspend capability and no other native work are admitted. An atomic fixed-deadline owner retains late TrySuspend callback reconciliation after timeout or cancellation; final state is recorded only after hidden-owner attestation and IsSuspended readback. Resource audit and content-policy replacement fail closed while state is ambiguous. A release-excluded fifth Windows semantic/lifecycle mode and offline reviewer are implemented but have no physical result. Cross-compilation does not prove physical suspend/resume behavior, memory reduction, long-running-script timing, renderer-loss races, or resource savings."
+      "limitations": "Only hidden owned contexts with exact Suspend capability and no other native work are admitted. An atomic fixed-deadline owner retains late TrySuspend callback reconciliation after timeout or cancellation; final state is recorded only after hidden-owner attestation and IsSuspended readback. Resource audit and content-policy replacement fail closed while state is ambiguous. A release-excluded suspension mode within the six-mode Windows semantic/lifecycle cohort and offline reviewer is implemented but has no physical result. Cross-compilation does not prove physical suspend/resume behavior, memory reduction, long-running-script timing, renderer-loss races, or resource savings."
+    },
+    {
+      "platform": "windows",
+      "mechanism": "webview2_navigation_id_redirect_observation",
+      "code_status": "implemented_in_feature_gated_production_adapter_cross_compiled",
+      "device_status": "pending_device_capture",
+      "evidence": [
+        "vendor/wry/src/webview2/mod.rs",
+        "crates/zephium-engine/src/platform/agent_navigation.rs",
+        "crates/zephium-engine/src/platform/windows/agentic_semantic_probe.rs",
+        "https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2navigationstartingeventargs"
+      ],
+      "limitations": "WebView2 exposes URI, NavigationId, and IsRedirected together and preserves one NavigationId across redirects. Zephium admits only an explicit bounded origin scope, requires exact native identity and at most eight redirect events, and settles the authoritative final committed URL. This is an acceptance and settlement boundary, not proof of zero network contact: Microsoft notes that the GET may already be in progress while NavigationStarting is handled. The release-excluded fixed loop/chain mode is prepared but has no physical result."
+    },
+    {
+      "platform": "macos",
+      "mechanism": "wk_navigation_identity_redirect_observation",
+      "code_status": "implemented_in_feature_gated_production_adapter_unit_qualified",
+      "device_status": "pending_device_capture",
+      "evidence": [
+        "vendor/wry/src/wkwebview/navigation.rs",
+        "crates/zephium-engine/src/platform/agent_navigation.rs",
+        "https://developer.apple.com/documentation/webkit/wknavigationdelegate/webview(_:didreceiveserverredirectforprovisionalnavigation:)"
+      ],
+      "limitations": "The supported WKNavigation callback surface preserves native identity but does not provide an authoritative intermediate destination URL. Pinned Wry therefore reports the registered initial URL for redirect events and samples WKWebView.URL at commit. Zephium combines the synchronous static URL policy with exact native identity, an eight-hop ceiling, and final-commit validation. No physical redirect run has occurred."
     },
     {
       "platform": "macos",

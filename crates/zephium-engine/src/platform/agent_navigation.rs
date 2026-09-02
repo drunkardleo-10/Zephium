@@ -107,6 +107,32 @@ impl AgentNavigationObservation {
     }
 }
 
+/// Content-free redirect result visible only to the non-shipping native
+/// qualification feature.
+#[cfg(all(
+    feature = "native-agentic-semantic-probe",
+    any(test, target_os = "windows")
+))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct AgentRedirectProbeAudit {
+    redirects_observed: u8,
+    limit_refused: bool,
+}
+
+#[cfg(all(
+    feature = "native-agentic-semantic-probe",
+    any(test, target_os = "windows")
+))]
+impl AgentRedirectProbeAudit {
+    pub(crate) const fn redirects_observed(self) -> u8 {
+        self.redirects_observed
+    }
+
+    pub(crate) const fn limit_refused(self) -> bool {
+        self.limit_refused
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -301,6 +327,12 @@ mod tests {
             ))
             .expect("commit")
             .expect("terminal");
+        #[cfg(feature = "native-agentic-semantic-probe")]
+        {
+            let audit = gate.redirect_probe_audit(operation).expect("probe audit");
+            assert_eq!(audit.redirects_observed(), 1);
+            assert!(!audit.limit_refused());
+        }
         assert_eq!(
             terminal.into_outcome(),
             Ok(super::AgentNavigationCommit::Web(final_target.clone()))
@@ -442,6 +474,17 @@ mod tests {
             ))
             .expect("overflow")
             .expect("overflow terminal");
+        #[cfg(feature = "native-agentic-semantic-probe")]
+        {
+            let audit = bounded
+                .redirect_probe_audit(bounded_operation)
+                .expect("probe audit");
+            assert_eq!(
+                audit.redirects_observed(),
+                zephium_agentic::MAX_CONTEXT_NAVIGATION_REDIRECTS as u8
+            );
+            assert!(audit.limit_refused());
+        }
         assert_eq!(
             overflow.into_outcome(),
             Err(zephium_agentic::ContextPortFailure::NativeRefused)
@@ -822,6 +865,11 @@ struct AgentNavigationArm {
     committed: bool,
     committed_target: Option<ContextNavigationTarget>,
     redirects_observed: usize,
+    #[cfg(all(
+        feature = "native-agentic-semantic-probe",
+        any(test, target_os = "windows")
+    ))]
+    redirect_limit_refused: bool,
     finished: bool,
 }
 
@@ -973,6 +1021,11 @@ impl AgentNavigationController {
             committed: false,
             committed_target: None,
             redirects_observed: 0,
+            #[cfg(all(
+                feature = "native-agentic-semantic-probe",
+                any(test, target_os = "windows")
+            ))]
+            redirect_limit_refused: false,
             finished: false,
         });
         Ok(())
@@ -1142,6 +1195,14 @@ impl AgentNavigationController {
                 .is_err()
             {
                 return Ok(AgentNavigationObservation::none());
+            }
+            #[cfg(all(
+                feature = "native-agentic-semantic-probe",
+                any(test, target_os = "windows")
+            ))]
+            {
+                armed.redirect_limit_refused =
+                    armed.redirects_observed >= MAX_CONTEXT_NAVIGATION_REDIRECTS;
             }
             return Ok(AgentNavigationObservation::terminal(
                 false,
@@ -1386,6 +1447,28 @@ impl AgentNavigationController {
             .as_ref()
             .filter(|committed| committed.operation == operation)
             .map(|committed| committed.finished)
+    }
+
+    /// Returns content-free redirect facts only to the mechanically excluded
+    /// native qualifier. Shipping builds retain neither the refusal bit nor
+    /// this inspection surface.
+    #[cfg(all(
+        feature = "native-agentic-semantic-probe",
+        any(test, target_os = "windows")
+    ))]
+    pub(crate) fn redirect_probe_audit(
+        &self,
+        operation: ContextOperationJoin,
+    ) -> Option<AgentRedirectProbeAudit> {
+        let state = self.state.lock().ok()?;
+        let armed = state
+            .armed
+            .as_ref()
+            .filter(|armed| armed.operation == operation)?;
+        Some(AgentRedirectProbeAudit {
+            redirects_observed: u8::try_from(armed.redirects_observed).ok()?,
+            limit_refused: armed.redirect_limit_refused,
+        })
     }
 
     pub(crate) fn matches_for_audit(

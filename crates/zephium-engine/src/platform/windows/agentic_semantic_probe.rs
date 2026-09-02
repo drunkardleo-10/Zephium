@@ -40,16 +40,17 @@ use wry::{
 use zephium_agentic::{
     encode_semantic_runtime_invocation, ContextCapabilities, ContextCapability,
     ContextConstructionProof, ContextId, ContextIdentity, ContextJoin, ContextKind,
-    ContextNavigationTarget, ContextOperationId, ContextOwnedViewport, ContextProfileStorageClass,
-    ContextRegistry, ContextRunId, ContextSettlement, EvidenceLabel, FixtureRoute, FixtureServer,
-    FrameId, Platform, RuntimeFingerprint, SemanticCompleteness, SemanticFrameJoin,
-    SemanticFrameTrust, SemanticInvocationId, SemanticObservationBudget, SemanticObservationId,
+    ContextNavigationRedirectPolicy, ContextNavigationTarget, ContextOperationId,
+    ContextOwnedViewport, ContextProfileStorageClass, ContextRegistry, ContextRunId,
+    ContextSettlement, EvidenceLabel, FixtureRoute, FixtureServer, FrameId, Platform,
+    RuntimeFingerprint, SemanticCompleteness, SemanticFrameJoin, SemanticFrameTrust,
+    SemanticInvocationId, SemanticObservationBudget, SemanticObservationId,
     SemanticObservationRequest, SemanticOperationClass, SemanticOrigin, SemanticRole,
     SemanticRuntimeBudget, SemanticRuntimeFault, SemanticRuntimePortFailure,
     SemanticRuntimeResultError, SemanticSensitivity, SemanticSnapshot, SemanticSnapshotGeneration,
     SemanticValueSummary, WindowsSemanticProbeEvidence, WindowsSemanticProbeFailure,
     WindowsSemanticProbeFailureCode, WindowsSemanticProbeMode, WindowsSemanticProbeStage,
-    WindowsSemanticTeardownEvidence,
+    WindowsSemanticTeardownEvidence, MAX_CONTEXT_NAVIGATION_REDIRECTS,
 };
 use zephium_core::ids::ProfileId;
 
@@ -341,6 +342,11 @@ struct ExecutionFacts {
     resume_state_attested: bool,
     post_resume_snapshot_verified: bool,
     suspend_ms: u32,
+    redirect_chain_verified: bool,
+    redirect_chain_hops_observed: u8,
+    redirect_limit_refused: bool,
+    redirect_limit_hops_observed: u8,
+    redirect_recovery_verified: bool,
     peak_pending_invocations: u8,
     semantic_work_drained: bool,
 }
@@ -597,6 +603,7 @@ pub(crate) fn run(
             WindowsSemanticProbeMode::HiddenEventFlood => CallbackAllowance::EVENT_FLOOD,
             WindowsSemanticProbeMode::HiddenRendererLoss => CallbackAllowance::RENDERER_LOST,
             WindowsSemanticProbeMode::HiddenFixedDocuments
+            | WindowsSemanticProbeMode::HiddenRedirectLifecycle
             | WindowsSemanticProbeMode::HiddenSuspendResume
             | WindowsSemanticProbeMode::HiddenDebuggerCoexistence => CallbackAllowance::NONE,
         };
@@ -670,6 +677,11 @@ pub(crate) fn run(
         resume_state_attested: facts.resume_state_attested,
         post_resume_snapshot_verified: facts.post_resume_snapshot_verified,
         suspend_ms: facts.suspend_ms,
+        redirect_chain_verified: facts.redirect_chain_verified,
+        redirect_chain_hops_observed: facts.redirect_chain_hops_observed,
+        redirect_limit_refused: facts.redirect_limit_refused,
+        redirect_limit_hops_observed: facts.redirect_limit_hops_observed,
+        redirect_recovery_verified: facts.redirect_recovery_verified,
         debugger_attached: native_guard.debugger_expected,
         focus_theft_observed: native_guard.focus_theft.get(),
         peak_pending_invocations: facts.peak_pending_invocations,
@@ -780,6 +792,75 @@ fn execute_mode(
             facts.snapshots = 2;
             facts.replacement_snapshot_verified = true;
             facts.replacement_stale_state_absent = true;
+        }
+        WindowsSemanticProbeMode::HiddenRedirectLifecycle => {
+            let loop_url = server.url(FixtureRoute::SemanticRedirectLoopA);
+            let loop_target = ContextNavigationTarget::parse(&loop_url)
+                .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Navigate))?;
+            let loop_policy = ContextNavigationRedirectPolicy::same_origin(&loop_target)
+                .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Navigate))?;
+            let refused_hops = refuse_redirect_limit(
+                view,
+                registry,
+                context_id,
+                take_operation(&mut next_operation)?,
+                &loop_url,
+                loop_policy,
+                callbacks,
+                host,
+                native_guard,
+                run_deadline,
+            )?;
+            if refused_hops != MAX_CONTEXT_NAVIGATION_REDIRECTS as u8 {
+                return Err(ProbeError::verify(WindowsSemanticProbeStage::Navigate));
+            }
+            facts.redirect_limit_refused = true;
+            facts.redirect_limit_hops_observed = refused_hops;
+
+            let redirect_url = server.url(FixtureRoute::SemanticRedirectStart);
+            let final_url = server.url(FixtureRoute::SemanticRedirectFinal);
+            let redirect_target = ContextNavigationTarget::parse(&redirect_url)
+                .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Navigate))?;
+            let redirect_policy = ContextNavigationRedirectPolicy::same_origin(&redirect_target)
+                .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Navigate))?;
+            let (redirected, chain_hops) = navigate_redirect(
+                view,
+                registry,
+                context_id,
+                take_operation(&mut next_operation)?,
+                &redirect_url,
+                &final_url,
+                redirect_policy,
+                callbacks,
+                host,
+                native_guard,
+                run_deadline,
+            )?;
+            if chain_hops != 2 {
+                return Err(ProbeError::verify(WindowsSemanticProbeStage::Navigate));
+            }
+            facts.document_epochs = 2;
+            let snapshot = capture_snapshot(
+                view,
+                redirected,
+                &final_url,
+                SemanticSnapshotGeneration::INITIAL,
+                &mut next_invocation,
+                callbacks,
+                CallbackAllowance::NONE,
+                host,
+                native_guard,
+                run_deadline,
+                &mut facts.peak_pending_invocations,
+            )?;
+            verify_first_snapshot(&snapshot)?;
+            registry
+                .acknowledge_observation(context_id, redirected)
+                .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Verify))?;
+            facts.snapshots = 2;
+            facts.redirect_chain_verified = true;
+            facts.redirect_chain_hops_observed = chain_hops;
+            facts.redirect_recovery_verified = true;
         }
         WindowsSemanticProbeMode::HiddenSuspendResume => {
             wait_for_semantic_drain(
@@ -1106,6 +1187,71 @@ fn navigate(
     native_guard: &NativeStateGuard,
     run_deadline: Instant,
 ) -> ProbeResult<ContextJoin> {
+    let (context, redirects) = navigate_with_redirects(
+        view,
+        registry,
+        id,
+        operation_id,
+        url,
+        url,
+        None,
+        callbacks,
+        allowance,
+        host,
+        native_guard,
+        run_deadline,
+    )?;
+    if redirects != 0 {
+        return Err(ProbeError::verify(WindowsSemanticProbeStage::Navigate));
+    }
+    Ok(context)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn navigate_redirect(
+    view: &mut AgentOwnedView,
+    registry: &mut ContextRegistry,
+    id: ContextId,
+    operation_id: u64,
+    url: &str,
+    expected_final_url: &str,
+    redirect_policy: ContextNavigationRedirectPolicy,
+    callbacks: &CallbackState,
+    host: &ProbeHostWindow,
+    native_guard: &NativeStateGuard,
+    run_deadline: Instant,
+) -> ProbeResult<(ContextJoin, u8)> {
+    navigate_with_redirects(
+        view,
+        registry,
+        id,
+        operation_id,
+        url,
+        expected_final_url,
+        Some(redirect_policy),
+        callbacks,
+        CallbackAllowance::NONE,
+        host,
+        native_guard,
+        run_deadline,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn navigate_with_redirects(
+    view: &mut AgentOwnedView,
+    registry: &mut ContextRegistry,
+    id: ContextId,
+    operation_id: u64,
+    url: &str,
+    expected_final_url: &str,
+    redirect_policy: Option<ContextNavigationRedirectPolicy>,
+    callbacks: &CallbackState,
+    allowance: CallbackAllowance,
+    host: &ProbeHostWindow,
+    native_guard: &NativeStateGuard,
+    run_deadline: Instant,
+) -> ProbeResult<(ContextJoin, u8)> {
     if callbacks.fatal(allowance) || callbacks.navigation.borrow().is_some() {
         return Err(ProbeError::verify(WindowsSemanticProbeStage::Navigate));
     }
@@ -1118,16 +1264,25 @@ fn navigate(
         .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Navigate))?;
     let target = ContextNavigationTarget::parse(url)
         .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Navigate))?;
+    let expected_final = ContextNavigationTarget::parse(expected_final_url)
+        .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Navigate))?;
     if view.prepare_semantic_document_load().is_err() {
         let _ = registry.settle_navigation(id, operation, ContextSettlement::Refused);
         return Err(ProbeError::verify(WindowsSemanticProbeStage::Navigate));
     }
     let terminal_claimed = Arc::new(AtomicBool::new(false));
-    if view
-        .navigation()
-        .arm(operation, target.clone(), Arc::clone(&terminal_claimed))
-        .is_err()
-    {
+    let armed = match redirect_policy {
+        Some(policy) => view.navigation().arm_with_redirect_policy(
+            operation,
+            target,
+            policy,
+            Arc::clone(&terminal_claimed),
+        ),
+        None => view
+            .navigation()
+            .arm(operation, target, Arc::clone(&terminal_claimed)),
+    };
+    if armed.is_err() {
         let _ = registry.settle_navigation(id, operation, ContextSettlement::Refused);
         return Err(ProbeError::verify(WindowsSemanticProbeStage::Navigate));
     }
@@ -1149,11 +1304,15 @@ fn navigate(
         .try_borrow_mut()
         .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Navigate))?
         .take();
+    let audit = view
+        .navigation()
+        .redirect_probe_audit(operation)
+        .ok_or_else(|| ProbeError::verify(WindowsSemanticProbeStage::Navigate))?;
     let applied = terminal.is_some_and(|terminal| {
         terminal.operation() == operation
             && matches!(
                 terminal.into_outcome(),
-                Ok(AgentNavigationCommit::Web(committed)) if committed == target
+                Ok(AgentNavigationCommit::Web(committed)) if committed == expected_final
             )
     });
     let mut finished = false;
@@ -1193,12 +1352,101 @@ fn navigate(
         || callbacks.fatal(allowance)
         || native_guard.failed()
         || !terminal_claimed.load(Ordering::Acquire)
+        || audit.limit_refused()
     {
         return Err(ProbeError::verify(WindowsSemanticProbeStage::Navigate));
     }
-    registry
+    let context = registry
         .join(id)
-        .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Navigate))
+        .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Navigate))?;
+    Ok((context, audit.redirects_observed()))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn refuse_redirect_limit(
+    view: &mut AgentOwnedView,
+    registry: &mut ContextRegistry,
+    id: ContextId,
+    operation_id: u64,
+    url: &str,
+    redirect_policy: ContextNavigationRedirectPolicy,
+    callbacks: &CallbackState,
+    host: &ProbeHostWindow,
+    native_guard: &NativeStateGuard,
+    run_deadline: Instant,
+) -> ProbeResult<u8> {
+    if callbacks.fatal(CallbackAllowance::NONE) || callbacks.navigation.borrow().is_some() {
+        return Err(ProbeError::verify(WindowsSemanticProbeStage::Navigate));
+    }
+    let operation = registry
+        .begin_navigation(
+            id,
+            ContextOperationId::new(operation_id)
+                .ok_or_else(|| ProbeError::verify(WindowsSemanticProbeStage::Navigate))?,
+        )
+        .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Navigate))?;
+    let target = ContextNavigationTarget::parse(url)
+        .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Navigate))?;
+    if view.prepare_semantic_document_load().is_err() {
+        let _ = registry.settle_navigation(id, operation, ContextSettlement::Refused);
+        return Err(ProbeError::verify(WindowsSemanticProbeStage::Navigate));
+    }
+    let terminal_claimed = Arc::new(AtomicBool::new(false));
+    if view
+        .navigation()
+        .arm_with_redirect_policy(
+            operation,
+            target,
+            redirect_policy,
+            Arc::clone(&terminal_claimed),
+        )
+        .is_err()
+    {
+        let _ = registry.settle_navigation(id, operation, ContextSettlement::Refused);
+        return Err(ProbeError::verify(WindowsSemanticProbeStage::Navigate));
+    }
+    if view.view().load_url(url).is_err() {
+        let _ = view.navigation().disarm(operation);
+        let _ = registry.settle_navigation(id, operation, ContextSettlement::Refused);
+        return Err(ProbeError::harness(WindowsSemanticProbeStage::Navigate));
+    }
+
+    let deadline = earlier_deadline(run_deadline, NAVIGATION_TIMEOUT)?;
+    while !callbacks.fatal(CallbackAllowance::NONE)
+        && callbacks.navigation.borrow().is_none()
+        && Instant::now() < deadline
+    {
+        pump_and_sample(deadline, host, Some(view.view()), native_guard)?;
+    }
+    let terminal = callbacks
+        .navigation
+        .try_borrow_mut()
+        .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Navigate))?
+        .take();
+    let refused = terminal.is_some_and(|terminal| {
+        terminal.operation() == operation
+            && terminal.into_outcome() == Err(zephium_agentic::ContextPortFailure::NativeRefused)
+    });
+    let audit = view
+        .navigation()
+        .redirect_probe_audit(operation)
+        .ok_or_else(|| ProbeError::verify(WindowsSemanticProbeStage::Navigate))?;
+    super::stop_loading(view.view());
+    native_guard.sample(host, Some(view.view()));
+    let disarmed = view.navigation().disarm(operation);
+    registry
+        .settle_navigation(id, operation, ContextSettlement::Refused)
+        .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Navigate))?;
+    if !refused
+        || !audit.limit_refused()
+        || !disarmed
+        || callbacks.fatal(CallbackAllowance::NONE)
+        || native_guard.failed()
+        || !terminal_claimed.load(Ordering::Acquire)
+    {
+        return Err(ProbeError::verify(WindowsSemanticProbeStage::Navigate));
+    }
+    Ok(audit.redirects_observed())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1589,6 +1837,7 @@ fn teardown(
         WindowsSemanticProbeMode::HiddenEventFlood => CallbackAllowance::EVENT_FLOOD,
         WindowsSemanticProbeMode::HiddenRendererLoss => CallbackAllowance::RENDERER_LOST,
         WindowsSemanticProbeMode::HiddenFixedDocuments
+        | WindowsSemanticProbeMode::HiddenRedirectLifecycle
         | WindowsSemanticProbeMode::HiddenSuspendResume
         | WindowsSemanticProbeMode::HiddenDebuggerCoexistence => CallbackAllowance::NONE,
     };
@@ -1678,7 +1927,7 @@ fn runtime_fingerprint() -> ProbeResult<RuntimeFingerprint> {
             .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Construct))?,
         engine_version: EvidenceLabel::new(engine_version)
             .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Construct))?,
-        adapter_revision: EvidenceLabel::new("semantic-runtime-m3-lifecycle-m2")
+        adapter_revision: EvidenceLabel::new("semantic-runtime-m3-lifecycle-m2-redirect-v1")
             .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Construct))?,
     })
 }

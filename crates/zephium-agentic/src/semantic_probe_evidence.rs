@@ -7,18 +7,19 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{Platform, RuntimeFingerprint};
+use crate::{Platform, RuntimeFingerprint, MAX_CONTEXT_NAVIGATION_REDIRECTS};
 
 /// Version of the Windows semantic-probe result grammar.
-pub const WINDOWS_SEMANTIC_PROBE_PROTOCOL_VERSION: u16 = 2;
+pub const WINDOWS_SEMANTIC_PROBE_PROTOCOL_VERSION: u16 = 3;
 /// Maximum canonical JSONL bytes emitted by one semantic-probe process.
 pub const MAX_WINDOWS_SEMANTIC_PROBE_OUTPUT_BYTES: usize = 16 * 1024;
 const MAX_RUN_ELAPSED_MS: u64 = 2 * 60_000;
 const MAX_CLEANUP_MS: u32 = 10_000;
 
 /// Exact physical runs required before Windows semantic support can be reviewed.
-pub const WINDOWS_SEMANTIC_PHYSICAL_REVIEW_MODES: [WindowsSemanticProbeMode; 5] = [
+pub const WINDOWS_SEMANTIC_PHYSICAL_REVIEW_MODES: [WindowsSemanticProbeMode; 6] = [
     WindowsSemanticProbeMode::HiddenFixedDocuments,
+    WindowsSemanticProbeMode::HiddenRedirectLifecycle,
     WindowsSemanticProbeMode::HiddenSuspendResume,
     WindowsSemanticProbeMode::HiddenEventFlood,
     WindowsSemanticProbeMode::HiddenRendererLoss,
@@ -31,6 +32,8 @@ pub const WINDOWS_SEMANTIC_PHYSICAL_REVIEW_MODES: [WindowsSemanticProbeMode; 5] 
 pub enum WindowsSemanticProbeMode {
     /// Two fixed documents prove isolation, redaction, replacement, and reuse.
     HiddenFixedDocuments,
+    /// A fixed loop and chain prove bounded redirects, recovery, and final identity.
+    HiddenRedirectLifecycle,
     /// One fixed document proves native suspend/readback/resume and fresh observation.
     HiddenSuspendResume,
     /// A bounded context-event flood must fail closed and recover on navigation.
@@ -46,6 +49,7 @@ impl WindowsSemanticProbeMode {
     pub fn from_argument(argument: &str) -> Option<Self> {
         match argument {
             "--ci-hidden-fixed-documents" => Some(Self::HiddenFixedDocuments),
+            "--ci-hidden-redirect-lifecycle" => Some(Self::HiddenRedirectLifecycle),
             "--ci-hidden-suspend-resume" => Some(Self::HiddenSuspendResume),
             "--ci-hidden-event-flood" => Some(Self::HiddenEventFlood),
             "--ci-hidden-renderer-loss" => Some(Self::HiddenRendererLoss),
@@ -58,6 +62,7 @@ impl WindowsSemanticProbeMode {
     pub const fn argument(self) -> &'static str {
         match self {
             Self::HiddenFixedDocuments => "--ci-hidden-fixed-documents",
+            Self::HiddenRedirectLifecycle => "--ci-hidden-redirect-lifecycle",
             Self::HiddenSuspendResume => "--ci-hidden-suspend-resume",
             Self::HiddenEventFlood => "--ci-hidden-event-flood",
             Self::HiddenRendererLoss => "--ci-hidden-renderer-loss",
@@ -69,6 +74,7 @@ impl WindowsSemanticProbeMode {
     pub const fn local_result_filename(self) -> &'static str {
         match self {
             Self::HiddenFixedDocuments => "windows-semantic-fixed-documents.jsonl",
+            Self::HiddenRedirectLifecycle => "windows-semantic-redirect-lifecycle.jsonl",
             Self::HiddenSuspendResume => "windows-semantic-suspend-resume.jsonl",
             Self::HiddenEventFlood => "windows-semantic-event-flood.jsonl",
             Self::HiddenRendererLoss => "windows-semantic-renderer-loss.jsonl",
@@ -155,6 +161,16 @@ pub struct WindowsSemanticProbeEvidence {
     pub post_resume_snapshot_verified: bool,
     /// Bounded wall-clock duration through the native suspend callback.
     pub suspend_ms: u32,
+    /// The fixed allowed redirect chain committed its authoritative final target.
+    pub redirect_chain_verified: bool,
+    /// Exact redirect events observed for the allowed fixed chain.
+    pub redirect_chain_hops_observed: u8,
+    /// The fixed loop was refused by Zephium's own redirect ceiling.
+    pub redirect_limit_refused: bool,
+    /// Exact admitted redirect events retained before the loop refusal.
+    pub redirect_limit_hops_observed: u8,
+    /// A fresh semantic snapshot passed after the redirect-limit refusal.
+    pub redirect_recovery_verified: bool,
     /// Windows reported a debugger attached for the complete mode.
     pub debugger_attached: bool,
     /// Probe host ever displaced foreground, active-window, or thread focus.
@@ -177,7 +193,8 @@ impl WindowsSemanticProbeEvidence {
         }
         if self.runtime.platform != Platform::Windows
             || self.runtime.engine.as_str() != "WebView2"
-            || self.runtime.adapter_revision.as_str() != "semantic-runtime-m3-lifecycle-m2"
+            || self.runtime.adapter_revision.as_str()
+                != "semantic-runtime-m3-lifecycle-m2-redirect-v1"
         {
             return Err(WindowsSemanticProbeValidationError::Runtime);
         }
@@ -188,6 +205,8 @@ impl WindowsSemanticProbeEvidence {
             || self.document_epochs > 3
             || self.peak_pending_invocations > 1
             || self.suspend_ms > 10_000
+            || self.redirect_chain_hops_observed > MAX_CONTEXT_NAVIGATION_REDIRECTS as u8
+            || self.redirect_limit_hops_observed > MAX_CONTEXT_NAVIGATION_REDIRECTS as u8
             || self.elapsed_ms > MAX_RUN_ELAPSED_MS
         {
             return Err(WindowsSemanticProbeValidationError::Bounds);
@@ -424,7 +443,26 @@ pub fn qualify_windows_semantic_probe_evidence(
         WindowsSemanticProbeMode::HiddenFixedDocuments => {
             fixed_documents(evidence)
                 && no_suspend_evidence(evidence)
+                && no_redirect_evidence(evidence)
                 && !evidence.debugger_attached
+        }
+        WindowsSemanticProbeMode::HiddenRedirectLifecycle => {
+            !evidence.debugger_attached
+                && evidence.snapshots == 2
+                && evidence.document_epochs == 2
+                && evidence.first_snapshot_verified
+                && !evidence.replacement_snapshot_verified
+                && !evidence.replacement_stale_state_absent
+                && !evidence.event_flood_refused
+                && !evidence.recovered_after_event_flood
+                && !evidence.renderer_loss_observed
+                && !evidence.renderer_lost_refused
+                && no_suspend_evidence(evidence)
+                && evidence.redirect_chain_verified
+                && evidence.redirect_chain_hops_observed == 2
+                && evidence.redirect_limit_refused
+                && evidence.redirect_limit_hops_observed == MAX_CONTEXT_NAVIGATION_REDIRECTS as u8
+                && evidence.redirect_recovery_verified
         }
         WindowsSemanticProbeMode::HiddenSuspendResume => {
             !evidence.debugger_attached
@@ -441,9 +479,13 @@ pub fn qualify_windows_semantic_probe_evidence(
                 && evidence.suspended_state_attested
                 && evidence.resume_state_attested
                 && evidence.post_resume_snapshot_verified
+                && no_redirect_evidence(evidence)
         }
         WindowsSemanticProbeMode::HiddenDebuggerCoexistence => {
-            fixed_documents(evidence) && no_suspend_evidence(evidence) && evidence.debugger_attached
+            fixed_documents(evidence)
+                && no_suspend_evidence(evidence)
+                && no_redirect_evidence(evidence)
+                && evidence.debugger_attached
         }
         WindowsSemanticProbeMode::HiddenEventFlood => {
             !evidence.debugger_attached
@@ -457,6 +499,7 @@ pub fn qualify_windows_semantic_probe_evidence(
                 && !evidence.renderer_loss_observed
                 && !evidence.renderer_lost_refused
                 && no_suspend_evidence(evidence)
+                && no_redirect_evidence(evidence)
         }
         WindowsSemanticProbeMode::HiddenRendererLoss => {
             !evidence.debugger_attached
@@ -470,6 +513,7 @@ pub fn qualify_windows_semantic_probe_evidence(
                 && evidence.renderer_loss_observed
                 && evidence.renderer_lost_refused
                 && no_suspend_evidence(evidence)
+                && no_redirect_evidence(evidence)
         }
     };
     if !mode_valid {
@@ -507,6 +551,14 @@ fn no_suspend_evidence(evidence: &WindowsSemanticProbeEvidence) -> bool {
         && evidence.suspend_ms == 0
 }
 
+fn no_redirect_evidence(evidence: &WindowsSemanticProbeEvidence) -> bool {
+    !evidence.redirect_chain_verified
+        && evidence.redirect_chain_hops_observed == 0
+        && !evidence.redirect_limit_refused
+        && evidence.redirect_limit_hops_observed == 0
+        && !evidence.redirect_recovery_verified
+}
+
 #[cfg(test)]
 pub(crate) fn tests_fixture(mode: WindowsSemanticProbeMode) -> WindowsSemanticProbeEvidence {
     use crate::EvidenceLabel;
@@ -514,6 +566,7 @@ pub(crate) fn tests_fixture(mode: WindowsSemanticProbeMode) -> WindowsSemanticPr
     let flood = mode == WindowsSemanticProbeMode::HiddenEventFlood;
     let renderer = mode == WindowsSemanticProbeMode::HiddenRendererLoss;
     let suspension = mode == WindowsSemanticProbeMode::HiddenSuspendResume;
+    let redirects = mode == WindowsSemanticProbeMode::HiddenRedirectLifecycle;
     WindowsSemanticProbeEvidence {
         run_id: 1,
         runtime: RuntimeFingerprint {
@@ -521,7 +574,7 @@ pub(crate) fn tests_fixture(mode: WindowsSemanticProbeMode) -> WindowsSemanticPr
             os_version: EvidenceLabel::new("10.0.26100").expect("OS label"),
             engine: EvidenceLabel::new("WebView2").expect("engine label"),
             engine_version: EvidenceLabel::new("140.0.0.0").expect("version label"),
-            adapter_revision: EvidenceLabel::new("semantic-runtime-m3-lifecycle-m2")
+            adapter_revision: EvidenceLabel::new("semantic-runtime-m3-lifecycle-m2-redirect-v1")
                 .expect("adapter label"),
         },
         mode,
@@ -541,8 +594,8 @@ pub(crate) fn tests_fixture(mode: WindowsSemanticProbeMode) -> WindowsSemanticPr
             2
         },
         first_snapshot_verified: true,
-        replacement_snapshot_verified: !renderer && !suspension,
-        replacement_stale_state_absent: !renderer && !suspension,
+        replacement_snapshot_verified: !renderer && !suspension && !redirects,
+        replacement_stale_state_absent: !renderer && !suspension && !redirects,
         page_world_bridge_absent: true,
         secrets_redacted: true,
         event_flood_refused: flood,
@@ -554,6 +607,15 @@ pub(crate) fn tests_fixture(mode: WindowsSemanticProbeMode) -> WindowsSemanticPr
         resume_state_attested: suspension,
         post_resume_snapshot_verified: suspension,
         suspend_ms: if suspension { 25 } else { 0 },
+        redirect_chain_verified: redirects,
+        redirect_chain_hops_observed: if redirects { 2 } else { 0 },
+        redirect_limit_refused: redirects,
+        redirect_limit_hops_observed: if redirects {
+            MAX_CONTEXT_NAVIGATION_REDIRECTS as u8
+        } else {
+            0
+        },
+        redirect_recovery_verified: redirects,
         debugger_attached: mode == WindowsSemanticProbeMode::HiddenDebuggerCoexistence,
         focus_theft_observed: false,
         peak_pending_invocations: 1,
@@ -692,6 +754,24 @@ mod tests {
             Err(WindowsSemanticProbeQualificationError::Evidence(
                 WindowsSemanticProbeValidationError::Bounds,
             ))
+        );
+
+        let redirect_mode = WindowsSemanticProbeMode::HiddenRedirectLifecycle;
+        let mut incomplete_redirect = tests_fixture(redirect_mode);
+        incomplete_redirect.redirect_limit_hops_observed -= 1;
+        assert_eq!(
+            qualify_windows_semantic_probe_evidence(redirect_mode, &incomplete_redirect),
+            Err(WindowsSemanticProbeQualificationError::Mode)
+        );
+
+        let mut smuggled_redirect = tests_fixture(WindowsSemanticProbeMode::HiddenFixedDocuments);
+        smuggled_redirect.redirect_chain_verified = true;
+        assert_eq!(
+            qualify_windows_semantic_probe_evidence(
+                WindowsSemanticProbeMode::HiddenFixedDocuments,
+                &smuggled_redirect,
+            ),
+            Err(WindowsSemanticProbeQualificationError::Mode)
         );
     }
 }

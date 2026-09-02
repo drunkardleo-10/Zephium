@@ -690,6 +690,18 @@ fn validate_capability_rows(rows: &[Capability]) -> Result<(), String> {
             "pending_device_capture",
         ),
         (
+            "windows",
+            "webview2_navigation_id_redirect_observation",
+            "implemented_in_feature_gated_production_adapter_cross_compiled",
+            "pending_device_capture",
+        ),
+        (
+            "macos",
+            "wk_navigation_identity_redirect_observation",
+            "implemented_in_feature_gated_production_adapter_unit_qualified",
+            "pending_device_capture",
+        ),
+        (
             "macos",
             "owned_webview_public_suspension",
             "intentionally_unsupported",

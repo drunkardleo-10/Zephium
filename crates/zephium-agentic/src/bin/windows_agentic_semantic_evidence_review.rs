@@ -1,4 +1,4 @@
-//! Offline, content-free review of the five required physical Windows semantic results.
+//! Offline, content-free review of the six required physical Windows semantic results.
 
 use std::ffi::OsString;
 use std::io::{self, Read as _, Write as _};
@@ -12,8 +12,8 @@ use zephium_agentic::{
     MAX_WINDOWS_SEMANTIC_PROBE_OUTPUT_BYTES, WINDOWS_SEMANTIC_PHYSICAL_REVIEW_MODES,
 };
 
-const REVIEW_SCHEMA_VERSION: u16 = 2;
-const REVIEW_SUMMARY_FILENAME: &str = "windows-semantic-review-summary-v2.json";
+const REVIEW_SCHEMA_VERSION: u16 = 3;
+const REVIEW_SUMMARY_FILENAME: &str = "windows-semantic-review-summary-v3.json";
 
 #[derive(Serialize)]
 #[serde(deny_unknown_fields)]
@@ -241,6 +241,7 @@ mod tests {
         let flood = mode == WindowsSemanticProbeMode::HiddenEventFlood;
         let renderer = mode == WindowsSemanticProbeMode::HiddenRendererLoss;
         let suspension = mode == WindowsSemanticProbeMode::HiddenSuspendResume;
+        let redirects = mode == WindowsSemanticProbeMode::HiddenRedirectLifecycle;
         WindowsSemanticProbeEvidence {
             run_id: 1,
             runtime: RuntimeFingerprint {
@@ -248,8 +249,10 @@ mod tests {
                 os_version: EvidenceLabel::new("10.0.26100").expect("OS label"),
                 engine: EvidenceLabel::new("WebView2").expect("engine label"),
                 engine_version: EvidenceLabel::new("140.0.0.0").expect("version label"),
-                adapter_revision: EvidenceLabel::new("semantic-runtime-m3-lifecycle-m2")
-                    .expect("adapter label"),
+                adapter_revision: EvidenceLabel::new(
+                    "semantic-runtime-m3-lifecycle-m2-redirect-v1",
+                )
+                .expect("adapter label"),
             },
             mode,
             ephemeral_profile: true,
@@ -268,8 +271,8 @@ mod tests {
                 2
             },
             first_snapshot_verified: true,
-            replacement_snapshot_verified: !renderer && !suspension,
-            replacement_stale_state_absent: !renderer && !suspension,
+            replacement_snapshot_verified: !renderer && !suspension && !redirects,
+            replacement_stale_state_absent: !renderer && !suspension && !redirects,
             page_world_bridge_absent: true,
             secrets_redacted: true,
             event_flood_refused: flood,
@@ -281,6 +284,15 @@ mod tests {
             resume_state_attested: suspension,
             post_resume_snapshot_verified: suspension,
             suspend_ms: if suspension { 25 } else { 0 },
+            redirect_chain_verified: redirects,
+            redirect_chain_hops_observed: if redirects { 2 } else { 0 },
+            redirect_limit_refused: redirects,
+            redirect_limit_hops_observed: if redirects {
+                zephium_agentic::MAX_CONTEXT_NAVIGATION_REDIRECTS as u8
+            } else {
+                0
+            },
+            redirect_recovery_verified: redirects,
             debugger_attached: mode == WindowsSemanticProbeMode::HiddenDebuggerCoexistence,
             focus_theft_observed: false,
             peak_pending_invocations: 1,
@@ -310,14 +322,14 @@ mod tests {
     }
 
     #[test]
-    fn exact_five_mode_set_reviews_successfully() {
+    fn exact_six_mode_set_reviews_successfully() {
         let directory = TestDirectory::new();
         for mode in WINDOWS_SEMANTIC_PHYSICAL_REVIEW_MODES {
             write_mode(&directory.0, mode);
         }
         let review = review_directory(&directory.0).expect("review");
         assert_eq!(review.schema_version, REVIEW_SCHEMA_VERSION);
-        assert_eq!(review.modes.len(), 5);
+        assert_eq!(review.modes.len(), 6);
         assert_eq!(review.runtime.platform, Platform::Windows);
     }
 

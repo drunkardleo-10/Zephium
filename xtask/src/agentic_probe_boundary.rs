@@ -929,6 +929,9 @@ fn validate_engine_agent_redirect_contract(
         "armed.redirects_observed+=1;",
         "expected.commit(&event.url,armed.redirects_observed)",
         "outcome:Err(ContextPortFailure::NativeRefused)",
+        "#[cfg(all(feature=\"native-agentic-semantic-probe\",any(test,target_os=\"windows\")))]redirect_limit_refused:bool,",
+        "#[cfg(all(feature=\"native-agentic-semantic-probe\",any(test,target_os=\"windows\")))]pub(crate)fnredirect_probe_audit(",
+        "redirects_observed:u8::try_from(armed.redirects_observed).ok()?",
     ] {
         if !navigation.contains(required) {
             return Err(format!(
@@ -2686,6 +2689,9 @@ fn validate_windows_semantic_probe(
         "FixtureRoute::SemanticRuntime",
         "FixtureRoute::SemanticRuntimeReplacement",
         "FixtureRoute::SemanticRuntimeEventFlood",
+        "FixtureRoute::SemanticRedirectStart",
+        "FixtureRoute::SemanticRedirectFinal",
+        "FixtureRoute::SemanticRedirectLoopA",
         "FixtureServer::start()",
         "tempfile::tempdir()",
         "WebContext::new(Some(profile.path().to_path_buf()))",
@@ -2708,7 +2714,8 @@ fn validate_windows_semantic_probe(
         "view.attest_suspension_state()==Ok(true)",
         "view.resume_and_attest_active()==Ok(true)",
         "WindowsSemanticProbeMode::HiddenSuspendResume",
-        "EvidenceLabel::new(\"semantic-runtime-m3-lifecycle-m2\")",
+        "WindowsSemanticProbeMode::HiddenRedirectLifecycle",
+        "EvidenceLabel::new(\"semantic-runtime-m3-lifecycle-m2-redirect-v1\")",
         "SemanticRuntimePortFailure::Transport",
         "SemanticRuntimePortFailure::RendererLost",
         "SemanticRuntimeFault::DocumentLoading",
@@ -2735,11 +2742,24 @@ fn validate_windows_semantic_probe(
         "ifoutcome!=Err(SemanticRuntimePortFailure::RendererLost)",
         "facts.renderer_loss_observed=true;facts.renderer_lost_refused=true;",
         "facts.suspend_callback_succeeded=true;facts.suspended_state_attested=true;facts.resume_state_attested=true;",
+        "ContextNavigationRedirectPolicy::same_origin(&loop_target)",
+        "refuse_redirect_limit(",
+        "navigate_redirect(",
+        "view.navigation().redirect_probe_audit(operation)",
+        "super::stop_loading(view.view());",
+        "ifrefused_hops!=MAX_CONTEXT_NAVIGATION_REDIRECTSasu8",
+        "ifchain_hops!=2",
+        "facts.redirect_limit_refused=true;",
+        "facts.redirect_chain_verified=true;",
+        "facts.redirect_recovery_verified=true;",
         "first_snapshot_verified:facts.first_snapshot_verified",
         "replacement_snapshot_verified:facts.replacement_snapshot_verified",
         "event_flood_refused:facts.event_flood_refused",
         "renderer_loss_observed:facts.renderer_loss_observed",
         "suspend_callback_succeeded:facts.suspend_callback_succeeded",
+        "redirect_chain_verified:facts.redirect_chain_verified",
+        "redirect_limit_refused:facts.redirect_limit_refused",
+        "redirect_recovery_verified:facts.redirect_recovery_verified",
         "semantic_work_drained:facts.semantic_work_drained",
         "runtime_retired:teardown.runtime_retired",
         "work_drained:teardown.work_drained",
@@ -3048,6 +3068,7 @@ fn validate_windows_review_binary(source: &str, qualification: &str) -> Result<(
 fn validate_windows_semantic_review_binary(source: &str, evidence: &str) -> Result<(), String> {
     let source = compact(source);
     for required in [
+        "constREVIEW_SCHEMA_VERSION:u16=3;",
         "WINDOWS_SEMANTIC_PHYSICAL_REVIEW_MODES",
         "symlink_metadata(directory)",
         "evidence_metadata_is_direct_directory(&metadata)",
@@ -3058,7 +3079,7 @@ fn validate_windows_semantic_review_binary(source: &str, evidence: &str) -> Resu
         "output.len()>MAX_WINDOWS_SEMANTIC_PROBE_OUTPUT_BYTES",
         "stdout.write_all(&output)",
         "--write-summary",
-        "windows-semantic-review-summary-v2.json",
+        "windows-semantic-review-summary-v3.json",
         ".create_new(true)",
         "write_new_record(&directory,REVIEW_SUMMARY_FILENAME,&output)",
     ] {
@@ -3070,7 +3091,10 @@ fn validate_windows_semantic_review_binary(source: &str, evidence: &str) -> Resu
     }
     let evidence = compact(evidence);
     for required in [
+        "pubconstWINDOWS_SEMANTIC_PROBE_PROTOCOL_VERSION:u16=3;",
+        "pubconstWINDOWS_SEMANTIC_PHYSICAL_REVIEW_MODES:[WindowsSemanticProbeMode;6]",
         "windows-semantic-fixed-documents.jsonl",
+        "windows-semantic-redirect-lifecycle.jsonl",
         "windows-semantic-suspend-resume.jsonl",
         "windows-semantic-event-flood.jsonl",
         "windows-semantic-renderer-loss.jsonl",
@@ -3082,7 +3106,12 @@ fn validate_windows_semantic_review_binary(source: &str, evidence: &str) -> Resu
         "evidence.suspended_state_attested",
         "evidence.resume_state_attested",
         "evidence.post_resume_snapshot_verified",
-        "semantic-runtime-m3-lifecycle-m2",
+        "evidence.redirect_chain_verified",
+        "evidence.redirect_chain_hops_observed==2",
+        "evidence.redirect_limit_refused",
+        "evidence.redirect_limit_hops_observed==MAX_CONTEXT_NAVIGATION_REDIRECTSasu8",
+        "evidence.redirect_recovery_verified",
+        "semantic-runtime-m3-lifecycle-m2-redirect-v1",
     ] {
         if !evidence.contains(required) {
             return Err(format!(
@@ -10117,6 +10146,16 @@ mod tests {
         )
         .is_err());
         assert!(validate_engine_agent_redirect_contract(
+            domain,
+            host,
+            &navigation.replace(
+                "#[cfg(all(\n        feature = \"native-agentic-semantic-probe\",\n        any(test, target_os = \"windows\")\n    ))]\n    pub(crate) fn redirect_probe_audit",
+                "pub(crate) fn redirect_probe_audit",
+            ),
+            fixture,
+        )
+        .is_err());
+        assert!(validate_engine_agent_redirect_contract(
             &domain.replace(
                 "MAX_CONTEXT_NAVIGATION_REDIRECTS: usize = 8",
                 "MAX_CONTEXT_NAVIGATION_REDIRECTS: usize = 9",
@@ -10759,6 +10798,7 @@ mod tests {
     #[test]
     fn windows_semantic_reviewer_is_closed_and_content_free() {
         let binary = r#"
+            const REVIEW_SCHEMA_VERSION: u16 = 3;
             WINDOWS_SEMANTIC_PHYSICAL_REVIEW_MODES;
             symlink_metadata(directory);
             evidence_metadata_is_direct_directory(&metadata);
@@ -10769,12 +10809,15 @@ mod tests {
             if output.len() > MAX_WINDOWS_SEMANTIC_PROBE_OUTPUT_BYTES {}
             stdout.write_all(&output);
             "--write-summary";
-            "windows-semantic-review-summary-v2.json";
+            "windows-semantic-review-summary-v3.json";
             OpenOptions::new().create_new(true);
             write_new_record(&directory, REVIEW_SUMMARY_FILENAME, &output);
         "#;
         let evidence = r#"
+            pub const WINDOWS_SEMANTIC_PROBE_PROTOCOL_VERSION: u16 = 3;
+            pub const WINDOWS_SEMANTIC_PHYSICAL_REVIEW_MODES: [WindowsSemanticProbeMode; 6];
             "windows-semantic-fixed-documents.jsonl";
+            "windows-semantic-redirect-lifecycle.jsonl";
             "windows-semantic-suspend-resume.jsonl";
             "windows-semantic-event-flood.jsonl";
             "windows-semantic-renderer-loss.jsonl";
@@ -10786,7 +10829,12 @@ mod tests {
             evidence.suspended_state_attested;
             evidence.resume_state_attested;
             evidence.post_resume_snapshot_verified;
-            "semantic-runtime-m3-lifecycle-m2";
+            evidence.redirect_chain_verified;
+            evidence.redirect_chain_hops_observed == 2;
+            evidence.redirect_limit_refused;
+            evidence.redirect_limit_hops_observed == MAX_CONTEXT_NAVIGATION_REDIRECTS as u8;
+            evidence.redirect_recovery_verified;
+            "semantic-runtime-m3-lifecycle-m2-redirect-v1";
         "#;
         validate_windows_semantic_review_binary(binary, evidence).expect("closed reviewer");
         assert!(validate_windows_semantic_review_binary(
@@ -10797,6 +10845,14 @@ mod tests {
         assert!(validate_windows_semantic_review_binary(
             binary,
             &evidence.replace("windows-semantic-event-flood.jsonl", "windows-any.jsonl"),
+        )
+        .is_err());
+        assert!(validate_windows_semantic_review_binary(
+            binary,
+            &evidence.replace(
+                "WINDOWS_SEMANTIC_PROBE_PROTOCOL_VERSION: u16 = 3",
+                "WINDOWS_SEMANTIC_PROBE_PROTOCOL_VERSION: u16 = 2",
+            ),
         )
         .is_err());
     }
