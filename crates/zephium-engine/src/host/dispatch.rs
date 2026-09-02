@@ -475,6 +475,10 @@ pub(crate) fn install(
                 any(target_os = "macos", target_os = "windows")
             ))]
             agent_contexts: HashMap::new(),
+            #[cfg(all(feature = "agentic-browser", target_os = "windows"))]
+            agent_cookie_transfers: HashMap::new(),
+            #[cfg(all(feature = "agentic-browser", target_os = "windows"))]
+            agent_cookie_quarantined_profiles: HashSet::new(),
             native_resources: NativeResourceLedger::default(),
             extension_runtime_registry:
                 super::extension_runtime::ExtensionRuntimeRegistry::new(extension_runtime_gate),

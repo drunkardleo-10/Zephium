@@ -1116,7 +1116,14 @@ const fn supports_owned_transition(kind: ContextOperationKind) -> bool {
 }
 
 const fn supports_cookie_transfer() -> bool {
-    false
+    #[cfg(target_os = "windows")]
+    {
+        true
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
 }
 
 fn supports_semantic_invocation(invocation: &SemanticRuntimeInvocation) -> bool {

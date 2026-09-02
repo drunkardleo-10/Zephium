@@ -1,5 +1,7 @@
 #[cfg(feature = "agentic-browser")]
 mod agent_context;
+#[cfg(all(feature = "agentic-browser", target_os = "windows"))]
+mod agent_cookie_source;
 mod construction;
 mod content_rules;
 mod discard;
@@ -653,6 +655,19 @@ pub(crate) struct EngineHost {
         any(target_os = "macos", target_os = "windows")
     ))]
     agent_contexts: HashMap<zephium_agentic::ContextId, agent_context::AgentOwnedContext>,
+    // Native cookie callbacks retain their exact port task and deadline owner
+    // outside the context map. At most two exist and each destination context
+    // carries the matching id, so navigation/lifecycle cannot race mutation.
+    #[cfg(all(feature = "agentic-browser", target_os = "windows"))]
+    agent_cookie_transfers: HashMap<
+        zephium_agentic::ContextCookieTransferId,
+        agent_context::AgentPendingCookieTransfer,
+    >,
+    // An unproven cleanup quarantines only the stable automation subprofile;
+    // ordinary Browse/extension principals for the logical profile continue
+    // to use their existing environment and default WebView2 profile.
+    #[cfg(all(feature = "agentic-browser", target_os = "windows"))]
+    agent_cookie_quarantined_profiles: HashSet<ProfileId>,
     native_resources: NativeResourceLedger,
     extension_runtime_registry: extension_runtime::ExtensionRuntimeRegistry,
     extension_document_authority: ExtensionDocumentAuthority,

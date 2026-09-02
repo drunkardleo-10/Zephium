@@ -16,10 +16,8 @@ mod agentic_semantic_probe;
 mod cdp;
 mod content_filter;
 #[cfg(feature = "agentic-browser")]
-// Compiled and source-gated before the host enables native cookie mutation.
-// The public port remains mechanically closed until cleanup integration and
-// physical Windows qualification are complete.
-#[allow(dead_code)]
+// The host is the sole transaction owner. Physical Windows qualification is
+// still required before claiming runtime behavior beyond cross-compilation.
 mod cookie_transfer;
 #[allow(dead_code)]
 mod extensions;
@@ -47,6 +45,8 @@ pub use stage::Stage;
 pub(crate) use timeout::{schedule_content_policy_timeout, ContentPolicyTimeout};
 
 #[cfg(feature = "agentic-browser")]
+pub(crate) use crate::platform::agent_cookie_preflight::map_cookie_transfer_deadline;
+#[cfg(feature = "agentic-browser")]
 pub(crate) use agent_context::{
     build_owned_agent_view, AgentNavigationCommit, AgentNavigationTerminal, AgentOwnedProfile,
     AgentOwnedView, AgentOwnedViewCallbacks, AgentOwnedViewConstructionError,
@@ -55,6 +55,11 @@ pub(crate) use agent_context::{
 pub(crate) use agentic_input_probe::run as run_agentic_input_matrix;
 #[cfg(feature = "native-agentic-semantic-probe")]
 pub(crate) use agentic_semantic_probe::run as run_agentic_semantic_probe;
+#[cfg(feature = "agentic-browser")]
+pub(crate) use cookie_transfer::{
+    selected_profile_cookie_manager, WindowsAgentCookieCleanup, WindowsAgentCookieTerminal,
+    WindowsAgentCookieTransfer,
+};
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;

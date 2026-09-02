@@ -4,14 +4,16 @@ Status: pure domain contract, bounded registry, closed shell/native port, and
 the initial feature-gated macOS and Windows owned-context lifecycle adapters
 are implemented. Both retain exact shell-requested navigation, one-shot
 renderer-loss detection, same-view recovery, explicit close, and resource
-accounting. The Windows implementation is cross-compiled only. Redirect and
-page-driven navigation, presentation, native Windows cookies,
-borrowed/handoff adapters, and named-device qualification remain pending.
+accounting. The initial Windows selected-profile-to-automation-subprofile
+cookie transaction is now host-reachable under that feature, but all Windows
+behavior remains cross-compiled only. Redirect and page-driven navigation,
+presentation, borrowed/handoff native adapters, and named-device
+qualification remain pending.
 
 This evidence records code properties only. It does not claim that either
 owned native adapter has passed a live production-context qualification, or
-that a Windows cookie bridge, borrowed-tab native lease, or native sign-in
-handoff has shipped.
+that the Windows cookie bridge, borrowed-tab native lease, or native sign-in
+handoff is enabled in the shipping desktop graph.
 
 ## Implemented boundary
 
@@ -130,9 +132,10 @@ destination must be destroyed/recreated before navigation. Results carry only
 origin/cookie/HttpOnly/byte counts and closed failures. Reverse sync and
 local/session-storage copying are not representable.
 
-The engine now contains both the platform-neutral production preflight owner
-and a dormant, feature-gated WebView2 adapter. Native UTF-16 fields are decoded
-strictly into zeroizing bounded storage before cookie-shape validation;
+The engine now contains the platform-neutral production preflight owner, a
+feature-gated WebView2 adapter, and the private host transaction that joins it
+to exact source and destination profile authorities. Native UTF-16 fields are
+decoded strictly into zeroizing bounded storage before cookie-shape validation;
 malformed UTF-16 is rejected rather than replaced. The preflight has no
 cookie-field diagnostic or serialization surface, bounds both raw observations
 per origin and the unique cohort, rejects contradictory duplicate identity
@@ -167,8 +170,10 @@ port-admission `Instant`. Queue time therefore consumes the same terminal
 window, and clock regression or an already elapsed interval refuses before
 enumeration. The move-only native task captures that anchor only after its
 bounded port permit is acquired and retains it beside the exact request across
-main-thread queueing. The public cookie capability remains false until the
-profile-scoped host transaction is installed.
+main-thread queueing. The public engine port accepts cookie transfers only on
+Windows when `agentic-browser` is compiled; every other target remains
+mechanically unsupported, and the ordinary shipping graph still does not
+enable that feature.
 Microsoft documents that cookie-manager changes
 apply to the user-profile context, `GetCookies` is URI-scoped, and
 `AddOrUpdateCookie` applies a native cookie; the native cookie object exposes
@@ -181,21 +186,36 @@ associated WebView early may release the handler without invoking it, which is
 why host retention through terminal cleanup is mandatory
 ([Profile2](https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2profile2)).
 
-The same profile-scoped behavior still exposes a host integration boundary,
-not an implementation detail that may be hand-waved away. Destroying one owned
-WebView does not remove cookies already written to the stable
-`agent-<ProfileId>` profile, and multiple WebViews on that profile share those
-values. Before destination writes can be reachable, the host must own the one
-automation-profile mutation transaction, retain the destination through the
-adapter terminal, and consume its cleanup proof by either re-attesting an empty
-profile or placing an unproven profile in sticky quarantine. The profile must
-also remain unavailable to navigation after any partial outcome.
+The same profile-scoped behavior is enforced as a host-owned transaction.
+Destroying one owned WebView does not remove cookies already written to the
+stable `agent-<ProfileId>` profile, and multiple WebViews on that profile share
+those values. The host therefore admits at most two native transfers globally
+and only one per logical destination profile. It derives the read-only source
+cookie manager from an existing ordinary Browse view or spare whose exact
+logical profile and retained WebView2 environment match; no `ItemId`, cookie
+field, or extension principal crosses that isolated source seam. It derives
+the destination only from the exact clean, hidden, active automation context
+after re-attesting its join, profile lease, import capability, extension
+inventory, storage, owner, suspension bit, semantic idleness, and environment.
+Navigation, recovery, suspension, resume, policy replacement, renderer loss,
+cancellation, erasure, close, audit, and shutdown all account for the retained
+transaction.
+
+Every partial outcome permanently contaminates that exact context, including
+one whose profile-wide empty readback succeeded, so only close and recreation
+can return it to navigation. When cleanup is unproven, a process-sticky
+profile quarantine additionally refuses later automation-subprofile
+construction for that logical profile while leaving ordinary Browse and
+extension principals untouched. The native task, exact admitted request,
+watchdog, destination binding, cleanup receipt, and terminal settlement remain
+in one bounded host bijection until terminal cleanup or fail-stop teardown.
 `ICoreWebView2Profile8::Delete` is not an immediate recreation primitive:
 Microsoft documents that the name remains delete-pending until the browser
 process exits. The adapter currently cross-compiles but is not exported to the
-host, the public capability remains false, and no physical Windows execution
-has occurred. This evidence therefore makes no reachable native cookie-write,
-cleanup-qualification, or shipped-support claim.
+shipping desktop graph, and no physical Windows execution has occurred. This
+evidence therefore makes no runtime cookie-write, cleanup-qualification, or
+shipped-support claim. The post-auth handoff direction also remains a typed
+`SourceUnavailable` refusal until a native temporary-handoff source exists.
 
 For extension inventory, an empty `GetBrowserExtensions` result is accepted
 only when extension support was enabled for the inventory environment. The
@@ -452,6 +472,10 @@ cargo clippy --locked -p zephium-engine --features agentic-browser \
   --all-targets -- -D warnings
 cargo check --locked --target x86_64-pc-windows-msvc \
   -p zephium-engine --features agentic-browser
+cargo check --locked --target x86_64-pc-windows-msvc \
+  -p zephium-engine --features agentic-browser --tests
+cargo check --locked --release --target x86_64-pc-windows-msvc \
+  -p zephium-engine --features agentic-browser
 cargo xtask check-agentic-probe-boundary
 ```
 
@@ -477,12 +501,16 @@ conflict handling, all-origin release, sequential apply accounting, invalid
 native shapes, zero/overflow origin and cookie ceilings, raw duplicate-flood
 refusal, strict UTF-16 refusal, write-ticket accounting, and content-free
 diagnostics.
-The release boundary mutation-tests the dormant Windows adapter's feature
+The release boundary mutation-tests the Windows adapter's non-shipping feature
 gate, exact request-derived scope/deadline mapping, admission-inclusive queue
 time, count ceiling, destination-side copy, write interlock, sequential
 accounting, profile-wide cleanup/readback, secret conversion, and absence of
 thread, message-pump, script, CDP, serialization, or direct diagnostic
-surfaces. It also pins suspension's target/feature gate, atomic
+surfaces. It separately pins the host's exact profile/environment source join,
+automation-only destination, global and profile-local concurrency ceilings,
+deadline watchdog, context contamination, unproven-cleanup quarantine,
+cancellation, shutdown ownership, and absence of direct cookie reads in the
+ordinary Browse projection. It also pins suspension's target/feature gate, atomic
 callback/timeout/cancellation ownership, late reconciliation, fixed deadline,
 native readback, resource count, teardown retirement, and refusal to replace a
 content policy on a suspended view. The adapter additionally cross-compiles
@@ -511,10 +539,10 @@ loses its hidden/profile/inventory/process/policy/cleanup checks.
    on an explicitly authorized named Windows device/runtime;
 2. add bounded redirect/page-replacement observation and presentation while
    preserving exact context/world/frame generations;
-3. integrate and physically qualify the bounded Windows cookie adapter under
-   one exclusive automation-profile transaction, consume its partial-cleanup
-   receipt with sticky quarantine, and add native borrowed/handoff source
-   transactions without changing ordinary extension principals;
+3. physically qualify the bounded selected-profile Windows cookie transaction
+   and its partial-cleanup/quarantine behavior, then add native
+   borrowed/handoff source transactions without changing ordinary extension
+   principals;
 4. qualify macOS construction/storage/inventory/close and both-platform
    lifecycle, idle-resource, cancellation, recovery, and shutdown behavior on
    explicitly authorized named devices.

@@ -17,8 +17,9 @@ use std::time::Instant;
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use webview2_com::Microsoft::Web::WebView2::Win32::{
-    ICoreWebView2, ICoreWebView2Environment, ICoreWebView2Profile, ICoreWebView2Profile7,
-    ICoreWebView2_13, ICoreWebView2_2, ICoreWebView2_3,
+    ICoreWebView2, ICoreWebView2CookieManager, ICoreWebView2Environment, ICoreWebView2Profile,
+    ICoreWebView2Profile2, ICoreWebView2Profile7, ICoreWebView2_13, ICoreWebView2_2,
+    ICoreWebView2_3,
 };
 use webview2_com::TrySuspendCompletedHandler;
 use windows::Win32::Foundation::{HWND, RECT};
@@ -312,6 +313,44 @@ impl AgentOwnedView {
             return Err(AgentOwnedViewConstructionError::ExtensionIsolation);
         }
         attest_hidden_owner(&self.view, self.expected_parent, self.viewport)
+    }
+
+    /// Returns the exact automation-subprofile cookie mutation authority.
+    ///
+    /// The selected/default profile is deliberately unrepresentable here: it
+    /// is a read-only source for this bridge, never a destination. Inventory,
+    /// hidden ownership, active suspension state, controller profile, and the
+    /// original environment are re-attested before either COM owner escapes.
+    pub(crate) fn cookie_destination(
+        &self,
+        expected_environment: &ICoreWebView2Environment,
+        deadline: Instant,
+    ) -> Result<(ICoreWebView2CookieManager, ICoreWebView2Profile2), AgentOwnedViewConstructionError>
+    {
+        if !matches!(self.profile, AgentOwnedProfile::Automation { .. }) {
+            return Err(AgentOwnedViewConstructionError::ExtensionIsolation);
+        }
+        if !super::same_environment(&self.view.environment(), expected_environment) {
+            return Err(AgentOwnedViewConstructionError::Storage);
+        }
+        self.attest(deadline)?;
+        if self.attest_suspension_state()? {
+            return Err(AgentOwnedViewConstructionError::Native);
+        }
+        let core = self
+            .view
+            .webview()
+            .cast::<ICoreWebView2_2>()
+            .map_err(|_| AgentOwnedViewConstructionError::Native)?;
+        // SAFETY: `self.attest` rejoined this exact live controller with its
+        // retained environment/profile and hidden owner. These getters return
+        // separately AddRef'd profile-scoped COM owners on the same STA.
+        let manager =
+            unsafe { core.CookieManager() }.map_err(|_| AgentOwnedViewConstructionError::Native)?;
+        let profile = controller_profile(&self.view.webview())
+            .and_then(|profile| profile.cast::<ICoreWebView2Profile2>().map_err(|_| ()))
+            .map_err(|_| AgentOwnedViewConstructionError::Native)?;
+        Ok((manager, profile))
     }
 
     pub(crate) fn close(&mut self) -> Result<(), wry::WebView2CleanupDebt> {

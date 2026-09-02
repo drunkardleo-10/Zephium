@@ -17,12 +17,13 @@ use std::time::{Duration, Instant};
 
 use webview2_com::Microsoft::Web::WebView2::Win32::{
     ICoreWebView2Cookie, ICoreWebView2CookieList, ICoreWebView2CookieManager,
-    ICoreWebView2Profile2, COREWEBVIEW2_COOKIE_SAME_SITE_KIND,
-    COREWEBVIEW2_COOKIE_SAME_SITE_KIND_LAX, COREWEBVIEW2_COOKIE_SAME_SITE_KIND_NONE,
-    COREWEBVIEW2_COOKIE_SAME_SITE_KIND_STRICT,
+    ICoreWebView2Environment, ICoreWebView2Profile2, ICoreWebView2_2,
+    COREWEBVIEW2_COOKIE_SAME_SITE_KIND, COREWEBVIEW2_COOKIE_SAME_SITE_KIND_LAX,
+    COREWEBVIEW2_COOKIE_SAME_SITE_KIND_NONE, COREWEBVIEW2_COOKIE_SAME_SITE_KIND_STRICT,
 };
 use webview2_com::{ClearBrowsingDataCompletedHandler, GetCookiesCompletedHandler};
-use windows_core::{HSTRING, PCWSTR, PWSTR};
+use windows_core::{Interface as _, HSTRING, PCWSTR, PWSTR};
+use wry::WebViewExtWindows as _;
 use zephium_agentic::{
     ContextCookieScope, ContextCookieTransferFailure, ContextCookieTransferOutcome,
     ContextCookieTransferRequest, ContextCookieTransferStats, MAX_COOKIES_PER_TRANSFER,
@@ -37,6 +38,35 @@ use crate::platform::agent_cookie_preflight::{
 /// Time reserved after enumeration/application for a profile-wide cleanup and
 /// cookie-empty verification. The host supplies the absolute outer deadline.
 pub(crate) const AGENT_COOKIE_CLEANUP_RESERVE: Duration = Duration::from_secs(10);
+
+/// Derives a profile-scoped cookie manager only from an ordinary Browse view
+/// already bound to the selected logical profile's exact environment.
+///
+/// The host chooses the view through its private item/partition registries;
+/// this adapter reattests both Wry's environment and the controller-reported
+/// environment before returning native authority. It never reads cookies.
+pub(crate) fn selected_profile_cookie_manager(
+    view: &wry::WebView,
+    expected_environment: &ICoreWebView2Environment,
+) -> Result<ICoreWebView2CookieManager, ContextCookieTransferFailure> {
+    if !super::same_environment(&view.environment(), expected_environment) {
+        return Err(ContextCookieTransferFailure::SourceUnavailable);
+    }
+    let core = view
+        .webview()
+        .cast::<ICoreWebView2_2>()
+        .map_err(|_| ContextCookieTransferFailure::SourceUnavailable)?;
+    // SAFETY: `core` is the live reference-counted interface retained by the
+    // exact ordinary Browse view. Both getters return separately AddRef'd COM
+    // owners on this same STA and retain no caller pointer.
+    let (controller_environment, manager) = unsafe { (core.Environment(), core.CookieManager()) };
+    let controller_environment =
+        controller_environment.map_err(|_| ContextCookieTransferFailure::SourceUnavailable)?;
+    if !super::same_environment(&controller_environment, expected_environment) {
+        return Err(ContextCookieTransferFailure::SourceUnavailable);
+    }
+    manager.map_err(|_| ContextCookieTransferFailure::SourceUnavailable)
+}
 
 /// Whether a partial transfer restored an empty destination cookie store.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

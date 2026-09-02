@@ -20,6 +20,18 @@ use zephium_agentic::{
     ContextPortFailure,
 };
 
+#[cfg(target_os = "windows")]
+use zephium_agentic::{
+    ContextCancellationSettlement, ContextCapabilities, ContextConstructionProof,
+    ContextConstructionRequest, ContextConstructionSettlement, ContextConstructionSource,
+    ContextCookieTransferDirection, ContextCookieTransferFailure, ContextCookieTransferId,
+    ContextCookieTransferOutcome, ContextCookieTransferSettlement, ContextId, ContextJoin,
+    ContextNativeRequest, ContextNavigationRequest, ContextNavigationSettlement,
+    ContextNavigationTarget, ContextOperationJoin, ContextOperationKind, ContextOwnedViewport,
+    ContextProfileLease, ContextProfileLeasePurpose, ContextProfileStorageClass,
+    ContextTransitionRequest, ContextTransitionSettlement, MAX_LIVE_CONTEXTS,
+    MAX_PENDING_COOKIE_TRANSFERS,
+};
 #[cfg(target_os = "macos")]
 use zephium_agentic::{
     ContextCancellationSettlement, ContextCapabilities, ContextConstructionProof,
@@ -31,16 +43,6 @@ use zephium_agentic::{
     SemanticFrameTrust, SemanticInvocationId, SemanticOrigin, SemanticRuntimePortFailure,
     SemanticRuntimeSettlement, SemanticScreenshotNativeCapture, SemanticScreenshotNativeFailure,
     SemanticScreenshotRequestId, SemanticSnapshotGeneration, MAX_LIVE_CONTEXTS,
-};
-#[cfg(target_os = "windows")]
-use zephium_agentic::{
-    ContextCancellationSettlement, ContextCapabilities, ContextConstructionProof,
-    ContextConstructionRequest, ContextConstructionSettlement, ContextConstructionSource,
-    ContextId, ContextJoin, ContextNativeRequest, ContextNavigationRequest,
-    ContextNavigationSettlement, ContextNavigationTarget, ContextOperationJoin,
-    ContextOperationKind, ContextOwnedViewport, ContextProfileLease, ContextProfileLeasePurpose,
-    ContextProfileStorageClass, ContextTransitionRequest, ContextTransitionSettlement,
-    MAX_LIVE_CONTEXTS,
 };
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use zephium_core::ports::engine::Partition;
@@ -362,6 +364,16 @@ struct AgentPendingSuspend {
 }
 
 #[cfg(target_os = "windows")]
+pub(super) struct AgentPendingCookieTransfer {
+    id: ContextCookieTransferId,
+    destination: ContextId,
+    destination_profile: zephium_core::ids::ProfileId,
+    watchdog: crate::platform::imp::ContentPolicyTimeout,
+    transfer: crate::platform::imp::WindowsAgentCookieTransfer,
+    task: AgentContextTask,
+}
+
+#[cfg(target_os = "windows")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AgentNativeSuspendState {
     Active,
@@ -453,6 +465,8 @@ pub(super) struct AgentOwnedContext {
     pending_navigation: Option<AgentPendingNavigation>,
     pending_recovery: Option<AgentPendingRecovery>,
     pending_suspend: Option<AgentPendingSuspend>,
+    pending_cookie_transfer: Option<ContextCookieTransferId>,
+    cookie_contaminated: bool,
     late_suspend_claim: Option<(
         ContextOperationJoin,
         crate::platform::agent_suspension::AgentSuspendClaim,
@@ -488,6 +502,8 @@ impl AgentOwnedContext {
             pending_navigation: None,
             pending_recovery: None,
             pending_suspend: None,
+            pending_cookie_transfer: None,
+            cookie_contaminated: false,
             late_suspend_claim: None,
             suspend_state: AgentNativeSuspendState::Active,
             renderer_lost: false,
@@ -512,6 +528,8 @@ impl AgentOwnedContext {
     pub(super) fn permits_content_policy_install(&self) -> bool {
         !self.renderer_lost
             && self.pending_suspend.is_none()
+            && self.pending_cookie_transfer.is_none()
+            && !self.cookie_contaminated
             && self.late_suspend_claim.is_none()
             && self.suspend_state == AgentNativeSuspendState::Active
     }
@@ -529,11 +547,13 @@ impl AgentOwnedContext {
         }
         let lifecycle_pending = self.pending_navigation.is_some()
             || self.pending_recovery.is_some()
-            || self.pending_suspend.is_some();
+            || self.pending_suspend.is_some()
+            || self.pending_cookie_transfer.is_some();
         let semantic_pending = self.view.semantic_pending_for_audit()?;
         let lifecycle_count = usize::from(self.pending_navigation.is_some())
             + usize::from(self.pending_recovery.is_some())
-            + usize::from(self.pending_suspend.is_some());
+            + usize::from(self.pending_suspend.is_some())
+            + usize::from(self.pending_cookie_transfer.is_some());
         if lifecycle_count > 1 || (lifecycle_pending && semantic_pending) {
             None
         } else {
@@ -572,6 +592,15 @@ impl AgentOwnedContext {
             && (self.pending_navigation.is_none() || self.pending_recovery.is_none())
             && (self.pending_navigation.is_none() || self.pending_suspend.is_none())
             && (self.pending_recovery.is_none() || self.pending_suspend.is_none())
+            && (self.pending_cookie_transfer.is_none()
+                || (self.pending_navigation.is_none()
+                    && self.pending_recovery.is_none()
+                    && self.pending_suspend.is_none()
+                    && self.committed_target.is_none()
+                    && !self.cookie_contaminated
+                    && !self.renderer_lost
+                    && self.suspend_state == AgentNativeSuspendState::Active))
+            && (!self.cookie_contaminated || self.pending_cookie_transfer.is_none())
             && self
                 .pending_suspend
                 .as_ref()
@@ -641,6 +670,11 @@ impl AgentOwnedContext {
     }
 
     fn retire(mut self, pending_failure: ContextPortFailure) -> AgentContextRetirement {
+        if self.pending_cookie_transfer.take().is_some() {
+            (self.native_terminal_failure)(
+                "Windows agent context retired before its cookie transfer terminal",
+            );
+        }
         crate::platform::imp::stop_loading(self.view.view());
         let mut navigation_clean = true;
         if let Some(pending) = self.pending_navigation.take() {
@@ -689,6 +723,11 @@ impl AgentOwnedContext {
 #[cfg(target_os = "windows")]
 impl Drop for AgentOwnedContext {
     fn drop(&mut self) {
+        if self.pending_cookie_transfer.is_some() {
+            (self.native_terminal_failure)(
+                "Windows agent cookie transfer escaped explicit host retirement",
+            );
+        }
         if let Some(pending) = self.pending_suspend.as_ref() {
             pending.claim.retire();
         }
@@ -719,10 +758,12 @@ impl EngineHost {
             self.settle_agent_context_audit(task, audit);
             return;
         }
-        // Cookie admission remains mechanically closed until the Windows
-        // profile-scoped transaction owner is installed. Keep the exact
-        // request/deadline anchor observable here so a future port promotion
-        // cannot fall through to an unrelated native-request refusal path.
+        #[cfg(target_os = "windows")]
+        if task.cookie().is_some() {
+            self.start_windows_agent_cookie_transfer(task);
+            return;
+        }
+        #[cfg(not(target_os = "windows"))]
         if task.cookie().is_some() {
             task.refuse(ContextPortFailure::Unsupported);
             return;
@@ -867,6 +908,46 @@ impl EngineHost {
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         let bindings_consistent = true;
 
+        #[cfg(target_os = "windows")]
+        let cookie_bindings_consistent = self.agent_cookie_transfers.len()
+            <= MAX_PENDING_COOKIE_TRANSFERS
+            && self.agent_cookie_transfers.iter().all(|(id, pending)| {
+                pending.id == *id
+                    && pending.task.cookie().is_some_and(|(request, _)| {
+                        request.id() == *id
+                            && request.destination().identity().id() == pending.destination
+                            && request.destination().identity().profile()
+                                == pending.destination_profile
+                    })
+                    && self
+                        .agent_contexts
+                        .get(&pending.destination)
+                        .is_some_and(|binding| {
+                            binding.pending_cookie_transfer == Some(*id)
+                                && binding.profile() == pending.destination_profile
+                        })
+            })
+            && self
+                .agent_contexts
+                .values()
+                .filter(|binding| binding.pending_cookie_transfer.is_some())
+                .count()
+                == self.agent_cookie_transfers.len()
+            && self
+                .agent_cookie_transfers
+                .values()
+                .enumerate()
+                .all(|(index, pending)| {
+                    self.agent_cookie_transfers
+                        .values()
+                        .skip(index + 1)
+                        .all(|candidate| {
+                            candidate.destination_profile != pending.destination_profile
+                        })
+                });
+        #[cfg(not(target_os = "windows"))]
+        let cookie_bindings_consistent = true;
+
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         let resource_count_matches = binding_count.is_some_and(|binding_count| {
             self.native_resources
@@ -894,6 +975,7 @@ impl EngineHost {
             ) if !self.native_resource_accounting_failed
                 && self.native_resources.is_healthy()
                 && bindings_consistent
+                && cookie_bindings_consistent
                 && resource_count_matches =>
             {
                 ContextNativeResourceSnapshot::try_new(ContextNativeResourceCounts {
@@ -2153,6 +2235,9 @@ impl EngineHost {
             } else {
                 false
             };
+        if !selected_is_empty && self.agent_cookie_quarantined_profiles.contains(&profile) {
+            return Err(ContextPortFailure::CookieTransferFailed);
+        }
         let owned_profile = if selected_is_empty {
             crate::platform::imp::AgentOwnedProfile::selected(native_profile)
         } else {
@@ -2323,6 +2408,364 @@ impl EngineHost {
         Ok(proof)
     }
 
+    /// Starts one selected-profile-to-automation-profile transfer.
+    ///
+    /// Source and destination native authorities are derived from private host
+    /// registries and re-attested on this UI thread. Neither COM owner nor any
+    /// cookie field crosses the engine boundary.
+    fn start_windows_agent_cookie_transfer(&mut self, task: AgentContextTask) {
+        let Some((request, admitted_at)) = task.cookie() else {
+            self.fail_agent_context_invariant(
+                "Windows agent cookie task lost its exact admitted request",
+            );
+            task.refuse(ContextPortFailure::NativeRefused);
+            return;
+        };
+        let request = request.clone();
+        let transfer_id = request.id();
+        let destination = request.destination();
+        let destination_id = destination.identity().id();
+        let destination_profile = destination.identity().profile();
+        let Some(terminal_deadline) = crate::platform::imp::map_cookie_transfer_deadline(
+            request.window(),
+            admitted_at,
+            Instant::now(),
+        ) else {
+            self.complete_windows_agent_cookie_refusal(
+                task,
+                ContextCookieTransferFailure::TimedOut,
+            );
+            return;
+        };
+
+        if request.direction() != ContextCookieTransferDirection::SelectedProfileToOwned {
+            self.complete_windows_agent_cookie_refusal(
+                task,
+                ContextCookieTransferFailure::SourceUnavailable,
+            );
+            return;
+        }
+        if self.agent_cookie_transfers.contains_key(&transfer_id)
+            || self.agent_cookie_transfers.len() >= MAX_PENDING_COOKIE_TRANSFERS
+            || self
+                .agent_cookie_transfers
+                .values()
+                .any(|pending| pending.destination_profile == destination_profile)
+        {
+            self.complete_windows_agent_cookie_refusal(
+                task,
+                ContextCookieTransferFailure::DestinationUnavailable,
+            );
+            return;
+        }
+        if self.erasure_tombstones.contains(&destination_profile)
+            || self
+                .agent_cookie_quarantined_profiles
+                .contains(&destination_profile)
+        {
+            self.complete_windows_agent_cookie_refusal(
+                task,
+                ContextCookieTransferFailure::DestinationUnavailable,
+            );
+            return;
+        }
+
+        let Some(expected_environment) = self.environments.get(&destination_profile).cloned()
+        else {
+            self.complete_windows_agent_cookie_refusal(
+                task,
+                ContextCookieTransferFailure::SourceUnavailable,
+            );
+            return;
+        };
+        let destination_ready = self
+            .agent_contexts
+            .get(&destination_id)
+            .is_some_and(|binding| {
+                binding.join == destination
+                    && binding.profile_lease == request.destination_profile_lease()
+                    && binding
+                        .capabilities
+                        .contains(zephium_agentic::ContextCapability::ImportCookies)
+                    && binding.committed_target.is_none()
+                    && binding.pending_navigation.is_none()
+                    && binding.pending_recovery.is_none()
+                    && binding.pending_suspend.is_none()
+                    && binding.pending_cookie_transfer.is_none()
+                    && !binding.cookie_contaminated
+                    && binding.late_suspend_claim.is_none()
+                    && binding.suspend_state == AgentNativeSuspendState::Active
+                    && !binding.renderer_lost
+                    && binding.view.semantic_pending_for_audit() == Some(false)
+            });
+        if !destination_ready {
+            self.complete_windows_agent_cookie_refusal(
+                task,
+                ContextCookieTransferFailure::DestinationUnavailable,
+            );
+            return;
+        }
+
+        let source =
+            match self.selected_profile_cookie_source(destination_profile, &expected_environment) {
+                Ok(source) => source,
+                Err(failure) => {
+                    self.complete_windows_agent_cookie_refusal(task, failure);
+                    return;
+                }
+            };
+        let destination_authority = self
+            .agent_contexts
+            .get(&destination_id)
+            .ok_or(ContextCookieTransferFailure::DestinationUnavailable)
+            .and_then(|binding| {
+                binding
+                    .view
+                    .cookie_destination(&expected_environment, terminal_deadline)
+                    .map_err(|_| ContextCookieTransferFailure::DestinationUnavailable)
+            });
+        let (destination_manager, destination_native_profile) = match destination_authority {
+            Ok(authority) => authority,
+            Err(failure) => {
+                self.complete_windows_agent_cookie_refusal(task, failure);
+                return;
+            }
+        };
+        let Some(watchdog_duration) = terminal_deadline.checked_duration_since(Instant::now())
+        else {
+            self.complete_windows_agent_cookie_refusal(
+                task,
+                ContextCookieTransferFailure::TimedOut,
+            );
+            return;
+        };
+        if watchdog_duration.is_zero() {
+            self.complete_windows_agent_cookie_refusal(
+                task,
+                ContextCookieTransferFailure::TimedOut,
+            );
+            return;
+        }
+
+        let timeout_guard = task.callback_guard();
+        let Some(watchdog) =
+            crate::platform::imp::schedule_content_policy_timeout(watchdog_duration, move || {
+                let rejected = timeout_guard.clone();
+                if !crate::host::try_with_agent_context_terminal(move |host| {
+                    host.timeout_windows_agent_cookie_transfer(transfer_id);
+                }) {
+                    rejected.callback_dispatch_rejected();
+                }
+            })
+        else {
+            self.complete_windows_agent_cookie_refusal(
+                task,
+                ContextCookieTransferFailure::DestinationUnavailable,
+            );
+            return;
+        };
+
+        let Some(binding) = self.agent_contexts.get_mut(&destination_id) else {
+            drop(watchdog);
+            self.complete_windows_agent_cookie_refusal(
+                task,
+                ContextCookieTransferFailure::DestinationUnavailable,
+            );
+            return;
+        };
+        binding.pending_cookie_transfer = Some(transfer_id);
+
+        let terminal_guard = task.callback_guard();
+        let panic_guard = task.callback_guard();
+        let transfer = crate::platform::imp::WindowsAgentCookieTransfer::start(
+            source,
+            destination_manager,
+            destination_native_profile,
+            &request,
+            admitted_at,
+            move |terminal| {
+                let rejected = terminal_guard.clone();
+                if !crate::host::try_with_agent_context_terminal(move |host| {
+                    host.finish_windows_agent_cookie_transfer(transfer_id, terminal);
+                }) {
+                    rejected.callback_dispatch_rejected();
+                }
+            },
+            move || panic_guard.callback_dispatch_rejected(),
+        );
+        let transfer = match transfer {
+            Ok(transfer) => transfer,
+            Err(failure) => {
+                drop(watchdog);
+                if let Some(binding) = self.agent_contexts.get_mut(&destination_id) {
+                    if binding.pending_cookie_transfer == Some(transfer_id) {
+                        binding.pending_cookie_transfer = None;
+                    }
+                }
+                self.complete_windows_agent_cookie_refusal(task, failure);
+                return;
+            }
+        };
+
+        let pending = AgentPendingCookieTransfer {
+            id: transfer_id,
+            destination: destination_id,
+            destination_profile,
+            watchdog,
+            transfer,
+            task,
+        };
+        match self.agent_cookie_transfers.entry(transfer_id) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(pending);
+            }
+            std::collections::hash_map::Entry::Occupied(_) => {
+                if let Some(binding) = self.agent_contexts.get_mut(&destination_id) {
+                    if binding.pending_cookie_transfer == Some(transfer_id) {
+                        binding.pending_cookie_transfer = None;
+                    }
+                }
+                let _ = pending
+                    .transfer
+                    .cancel(ContextCookieTransferFailure::Cancelled);
+                self.fail_agent_context_invariant(
+                    "Windows agent cookie identity became occupied during native admission",
+                );
+                pending.task.refuse(ContextPortFailure::NativeRefused);
+            }
+        }
+    }
+
+    fn complete_windows_agent_cookie_refusal(
+        &mut self,
+        task: AgentContextTask,
+        failure: ContextCookieTransferFailure,
+    ) {
+        let Some((request, _)) = task.cookie() else {
+            self.fail_agent_context_invariant(
+                "Windows agent cookie refusal lost its exact admitted request",
+            );
+            task.refuse(ContextPortFailure::NativeRefused);
+            return;
+        };
+        let settlement = ContextCookieTransferSettlement::try_new(
+            request.clone(),
+            ContextCookieTransferOutcome::Refused(failure),
+        );
+        match settlement {
+            Ok(settlement) => task.complete(ContextNativeEvent::CookieTransferSettled(Box::new(
+                settlement,
+            ))),
+            Err(_) => {
+                self.fail_agent_context_invariant(
+                    "Windows agent cookie refusal violated its closed request contract",
+                );
+                task.refuse(ContextPortFailure::NativeRefused);
+            }
+        }
+    }
+
+    fn timeout_windows_agent_cookie_transfer(&mut self, id: ContextCookieTransferId) {
+        let Some(pending) = self.agent_cookie_transfers.get(&id) else {
+            return;
+        };
+        let accepted = pending
+            .transfer
+            .cancel(ContextCookieTransferFailure::TimedOut);
+        if !accepted && !pending.transfer.is_terminal() {
+            self.fail_agent_context_invariant(
+                "Windows agent cookie watchdog lost its exact native transfer",
+            );
+        }
+    }
+
+    fn finish_windows_agent_cookie_transfer(
+        &mut self,
+        id: ContextCookieTransferId,
+        terminal: crate::platform::imp::WindowsAgentCookieTerminal,
+    ) {
+        let Some(pending) = self.agent_cookie_transfers.remove(&id) else {
+            self.fail_agent_context_invariant(
+                "Windows agent cookie terminal did not match an active transfer",
+            );
+            return;
+        };
+        let AgentPendingCookieTransfer {
+            id: retained_id,
+            destination,
+            destination_profile,
+            watchdog,
+            transfer,
+            task,
+        } = pending;
+        drop(watchdog);
+        let native_terminal = transfer.is_terminal();
+        drop(transfer);
+
+        let outcome = terminal.outcome();
+        let cleanup = terminal.cleanup();
+        let cleanup_consistent = matches!(
+            (outcome, cleanup),
+            (
+                ContextCookieTransferOutcome::Applied(_) | ContextCookieTransferOutcome::Refused(_),
+                crate::platform::imp::WindowsAgentCookieCleanup::NotRequired
+            ) | (
+                ContextCookieTransferOutcome::Partial { .. },
+                crate::platform::imp::WindowsAgentCookieCleanup::Proven
+                    | crate::platform::imp::WindowsAgentCookieCleanup::Unproven
+            )
+        );
+        let request = task.cookie().map(|(request, _)| request.clone());
+        let task_consistent = request.as_ref().is_some_and(|request| {
+            retained_id == id
+                && request.id() == id
+                && request.destination().identity().id() == destination
+                && request.destination().identity().profile() == destination_profile
+        });
+        let binding_consistent = self
+            .agent_contexts
+            .get_mut(&destination)
+            .is_some_and(|binding| {
+                if binding.pending_cookie_transfer != Some(id)
+                    || binding.profile() != destination_profile
+                {
+                    return false;
+                }
+                binding.pending_cookie_transfer = None;
+                if matches!(outcome, ContextCookieTransferOutcome::Partial { .. }) {
+                    binding.cookie_contaminated = true;
+                }
+                true
+            });
+        if matches!(outcome, ContextCookieTransferOutcome::Partial { .. })
+            && cleanup != crate::platform::imp::WindowsAgentCookieCleanup::Proven
+        {
+            self.agent_cookie_quarantined_profiles
+                .insert(destination_profile);
+        }
+        if !native_terminal || !cleanup_consistent || !task_consistent || !binding_consistent {
+            self.fail_agent_context_invariant(
+                "Windows agent cookie terminal violated host transaction ownership",
+            );
+        }
+
+        let Some(request) = request else {
+            task.refuse(ContextPortFailure::NativeRefused);
+            return;
+        };
+        match ContextCookieTransferSettlement::try_new(request, outcome) {
+            Ok(settlement) => task.complete(ContextNativeEvent::CookieTransferSettled(Box::new(
+                settlement,
+            ))),
+            Err(_) => {
+                self.fail_agent_context_invariant(
+                    "Windows agent cookie terminal violated its bounded result contract",
+                );
+                task.refuse(ContextPortFailure::NativeRefused);
+            }
+        }
+    }
+
     fn close_unpublished_windows_agent_view(
         &mut self,
         profile: zephium_core::ids::ProfileId,
@@ -2365,9 +2808,13 @@ impl EngineHost {
             Some(binding)
                 if binding.pending_navigation.is_some()
                     || binding.pending_recovery.is_some()
-                    || binding.pending_suspend.is_some() =>
+                    || binding.pending_suspend.is_some()
+                    || binding.pending_cookie_transfer.is_some() =>
             {
                 Some(ContextPortFailure::ResourceExhausted)
+            }
+            Some(binding) if binding.cookie_contaminated => {
+                Some(ContextPortFailure::CookieTransferFailed)
             }
             Some(binding) if binding.suspend_state != AgentNativeSuspendState::Active => {
                 Some(ContextPortFailure::NativeRefused)
@@ -2479,9 +2926,13 @@ impl EngineHost {
             Some(binding)
                 if binding.pending_navigation.is_some()
                     || binding.pending_recovery.is_some()
-                    || binding.pending_suspend.is_some() =>
+                    || binding.pending_suspend.is_some()
+                    || binding.pending_cookie_transfer.is_some() =>
             {
                 Some(ContextPortFailure::ResourceExhausted)
+            }
+            Some(binding) if binding.cookie_contaminated => {
+                Some(ContextPortFailure::CookieTransferFailed)
             }
             Some(binding) if binding.suspend_state != AgentNativeSuspendState::Active => {
                 Some(ContextPortFailure::NativeRefused)
@@ -2626,8 +3077,11 @@ impl EngineHost {
         } else if binding.pending_navigation.is_some()
             || binding.pending_recovery.is_some()
             || binding.pending_suspend.is_some()
+            || binding.pending_cookie_transfer.is_some()
         {
             Some(ContextPortFailure::ResourceExhausted)
+        } else if binding.cookie_contaminated {
+            Some(ContextPortFailure::CookieTransferFailed)
         } else if binding.suspend_state != AgentNativeSuspendState::Active
             || binding.late_suspend_claim.is_some()
         {
@@ -2913,8 +3367,11 @@ impl EngineHost {
         } else if binding.pending_navigation.is_some()
             || binding.pending_recovery.is_some()
             || binding.pending_suspend.is_some()
+            || binding.pending_cookie_transfer.is_some()
         {
             Err(ContextPortFailure::ResourceExhausted)
+        } else if binding.cookie_contaminated {
+            Err(ContextPortFailure::CookieTransferFailed)
         } else if binding.suspend_state != AgentNativeSuspendState::Suspended
             || binding.late_suspend_claim.is_some()
         {
@@ -2983,6 +3440,7 @@ impl EngineHost {
             pending_navigation,
             pending_recovery,
             pending_suspend,
+            pending_cookie_transfer,
             navigation_clean,
             emit_loss,
         ) = {
@@ -2998,6 +3456,7 @@ impl EngineHost {
             let pending_navigation = binding.pending_navigation.take();
             let pending_recovery = binding.pending_recovery.take();
             let pending_suspend = binding.pending_suspend.take();
+            let pending_cookie_transfer = binding.pending_cookie_transfer;
             if let Some(pending) = pending_suspend.as_ref() {
                 pending.claim.retire();
             }
@@ -3010,7 +3469,8 @@ impl EngineHost {
                 .or_else(|| pending_recovery.as_ref().map(|pending| pending.operation));
             let lifecycle_count = usize::from(pending_navigation.is_some())
                 + usize::from(pending_recovery.is_some())
-                + usize::from(pending_suspend.is_some());
+                + usize::from(pending_suspend.is_some())
+                + usize::from(pending_cookie_transfer.is_some());
             let disarmed = lifecycle_count <= 1
                 && pending_operation
                     .is_none_or(|operation| binding.view.navigation().disarm(operation));
@@ -3025,6 +3485,7 @@ impl EngineHost {
                 pending_navigation,
                 pending_recovery,
                 pending_suspend,
+                pending_cookie_transfer,
                 navigation_clean,
                 emit_loss,
             )
@@ -3037,6 +3498,23 @@ impl EngineHost {
         }
         if let Some(pending) = pending_suspend {
             pending.complete(Err(ContextPortFailure::NativeRefused));
+        }
+        if let Some(transfer_id) = pending_cookie_transfer {
+            let cancelled = self
+                .agent_cookie_transfers
+                .get(&transfer_id)
+                .is_some_and(|pending| {
+                    pending.destination == id
+                        && (pending
+                            .transfer
+                            .cancel(ContextCookieTransferFailure::Cancelled)
+                            || pending.transfer.is_terminal())
+                });
+            if !cancelled {
+                self.fail_agent_context_invariant(
+                    "Windows renderer loss could not cancel its cookie transfer",
+                );
+            }
         }
         if !navigation_clean {
             self.fail_agent_context_invariant(
@@ -3176,6 +3654,13 @@ impl EngineHost {
             .filter(|matches| *matches)
             .ok_or(ContextPortFailure::Stale)
             .and_then(|_| {
+                if self
+                    .agent_contexts
+                    .get(&id)
+                    .is_some_and(|binding| binding.pending_cookie_transfer.is_some())
+                {
+                    return Err(ContextPortFailure::ResourceExhausted);
+                }
                 let binding = self
                     .agent_contexts
                     .remove(&id)
@@ -3204,7 +3689,13 @@ impl EngineHost {
         current: ContextJoin,
     ) -> Result<(), ContextPortFailure> {
         let id = current.identity().id();
-        let (pending_navigation, pending_recovery, pending_suspend, disarmed) = {
+        let (
+            pending_navigation,
+            pending_recovery,
+            pending_suspend,
+            pending_cookie_transfer,
+            mut disarmed,
+        ) = {
             let binding = self
                 .agent_contexts
                 .get_mut(&id)
@@ -3224,9 +3715,11 @@ impl EngineHost {
             let pending_navigation = binding.pending_navigation.take();
             let pending_recovery = binding.pending_recovery.take();
             let pending_suspend = binding.pending_suspend.take();
+            let pending_cookie_transfer = binding.pending_cookie_transfer;
             let lifecycle_count = usize::from(pending_navigation.is_some())
                 + usize::from(pending_recovery.is_some())
-                + usize::from(pending_suspend.is_some());
+                + usize::from(pending_suspend.is_some())
+                + usize::from(pending_cookie_transfer.is_some());
             let navigation_disarmed = pending_navigation
                 .as_ref()
                 .is_none_or(|pending| binding.view.navigation().disarm(pending.operation));
@@ -3253,12 +3746,26 @@ impl EngineHost {
                 pending_navigation,
                 pending_recovery,
                 pending_suspend,
+                pending_cookie_transfer,
                 lifecycle_count <= 1
                     && navigation_disarmed
                     && recovery_disarmed
                     && suspend_disarmed,
             )
         };
+        if let Some(transfer_id) = pending_cookie_transfer {
+            let cookie_disarmed =
+                self.agent_cookie_transfers
+                    .get(&transfer_id)
+                    .is_some_and(|pending| {
+                        pending.destination == id
+                            && (pending
+                                .transfer
+                                .cancel(ContextCookieTransferFailure::Cancelled)
+                                || pending.transfer.is_terminal())
+                    });
+            disarmed &= cookie_disarmed;
+        }
         if let Some(pending) = pending_navigation {
             pending.complete(Err(if disarmed {
                 ContextPortFailure::Cancelled
@@ -3343,10 +3850,37 @@ impl EngineHost {
         self.agent_contexts
             .values()
             .any(|binding| binding.profile() == profile)
+            || self
+                .agent_cookie_transfers
+                .values()
+                .any(|pending| pending.destination_profile == profile)
     }
 
     pub(super) fn force_shutdown_agent_contexts(&mut self) -> bool {
-        let shell_was_quiescent = self.agent_contexts.is_empty();
+        let shell_was_quiescent =
+            self.agent_contexts.is_empty() && self.agent_cookie_transfers.is_empty();
+        let transfers = std::mem::take(&mut self.agent_cookie_transfers);
+        for (id, pending) in transfers {
+            let binding_detached = self
+                .agent_contexts
+                .get_mut(&pending.destination)
+                .is_some_and(|binding| {
+                    if binding.pending_cookie_transfer != Some(id) {
+                        return false;
+                    }
+                    binding.pending_cookie_transfer = None;
+                    true
+                });
+            if !binding_detached {
+                self.fail_agent_context_invariant(
+                    "Windows shutdown lost an active cookie destination binding",
+                );
+            }
+            let _ = pending
+                .transfer
+                .cancel(ContextCookieTransferFailure::Shutdown);
+            drop(pending);
+        }
         let contexts = std::mem::take(&mut self.agent_contexts);
         let mut native_clean = true;
         for (_, binding) in contexts {

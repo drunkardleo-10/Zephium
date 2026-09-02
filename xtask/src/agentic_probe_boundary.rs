@@ -79,6 +79,7 @@ const ENGINE_PLATFORM_MODULE: &str = "crates/zephium-engine/src/platform/mod.rs"
 const ENGINE_HOST_ROOT: &str = "crates/zephium-engine/src/host/mod.rs";
 const ENGINE_AGENT_CONTEXT_PORT: &str = "crates/zephium-engine/src/agent_context_port.rs";
 const ENGINE_AGENT_CONTEXT_HOST: &str = "crates/zephium-engine/src/host/agent_context.rs";
+const ENGINE_AGENT_COOKIE_SOURCE: &str = "crates/zephium-engine/src/host/agent_cookie_source.rs";
 const ENGINE_MACOS_MODULE: &str = "crates/zephium-engine/src/platform/macos/mod.rs";
 const ENGINE_MACOS_AGENT_CONTEXT: &str =
     "crates/zephium-engine/src/platform/macos/agent_context.rs";
@@ -117,9 +118,10 @@ const ENGINE_AGENTIC_NATIVE_UNSAFE_MODULES: [&str; 8] = [
     ENGINE_WINDOWS_SEMANTIC_SCREENSHOT,
     ENGINE_WINDOWS_AGENT_TIMEOUT,
 ];
-const ENGINE_AGENTIC_PRODUCTION_MODULES: [&str; 15] = [
+const ENGINE_AGENTIC_PRODUCTION_MODULES: [&str; 16] = [
     ENGINE_AGENT_CONTEXT_PORT,
     ENGINE_AGENT_CONTEXT_HOST,
+    ENGINE_AGENT_COOKIE_SOURCE,
     ENGINE_AGENT_NAVIGATION,
     ENGINE_AGENT_SUSPENSION,
     ENGINE_AGENT_SCREENSHOT_BUFFER,
@@ -401,6 +403,10 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         &read(repository.join(ENGINE_WINDOWS_AGENT_TIMEOUT))?,
         &read(repository.join(ENGINE_AGENT_NAVIGATION))?,
         &read(repository.join(ENGINE_AGENT_CONTEXT_HOST))?,
+    )?;
+    validate_engine_windows_agent_cookie_source(
+        &read(repository.join(ENGINE_HOST_ROOT))?,
+        &read(repository.join(ENGINE_AGENT_COOKIE_SOURCE))?,
     )?;
     validate_engine_windows_agent_suspension_boundary(
         &read(repository.join(ENGINE_PLATFORM_MODULE))?,
@@ -721,7 +727,10 @@ fn validate_engine_agent_context_boundary(
     let host_root = compact(host_root);
     for required in [
         "#[cfg(feature=\"agentic-browser\")]modagent_context;",
+        "#[cfg(all(feature=\"agentic-browser\",target_os=\"windows\"))]modagent_cookie_source;",
         "agent_contexts:HashMap<zephium_agentic::ContextId,agent_context::AgentOwnedContext>",
+        "agent_cookie_transfers:HashMap<zephium_agentic::ContextCookieTransferId,agent_context::AgentPendingCookieTransfer",
+        "agent_cookie_quarantined_profiles:HashSet<ProfileId>",
     ] {
         if !host_root.contains(required) {
             return Err(format!(
@@ -739,7 +748,7 @@ fn validate_engine_agent_context_boundary(
         "fncapture_semantic_screenshot",
         "ContextOperationKind::Recover",
         "ContextOperationKind::Close",
-        "constfnsupports_cookie_transfer()->bool{false}",
+        "constfnsupports_cookie_transfer()->bool{#[cfg(target_os=\"windows\")]{true}#[cfg(not(target_os=\"windows\"))]{false}}",
         "admitted_at:std::time::Instant",
         "pub(crate)fncookie(&self)->Option<(&ContextCookieTransferRequest,std::time::Instant)>",
         "Some(AgentPendingRequest::Cookie(request))=>Some((request,self.admitted_at))",
@@ -994,18 +1003,19 @@ fn validate_engine_windows_cookie_transfer(module: &str, source: &str) -> Result
         .rfind("#[cfg")
         .ok_or_else(|| "production Windows cookie adapter lost its feature gate".to_owned())?;
     let gate = compact(&module_prefix[gate_at..]);
-    if !gate.contains("#[cfg(feature=\"agentic-browser\")]")
-        || !gate.contains("#[allow(dead_code)]")
-    {
+    if !gate.contains("#[cfg(feature=\"agentic-browser\")]") {
         return Err(
-            "production Windows cookie adapter must remain dormant and agentic-browser gated"
-                .to_owned(),
+            "production Windows cookie adapter must remain agentic-browser gated".to_owned(),
         );
     }
 
     let source = compact(source);
     for required in [
         "pub(crate)constAGENT_COOKIE_CLEANUP_RESERVE:Duration=Duration::from_secs(10);",
+        "pub(crate)fnselected_profile_cookie_manager(",
+        "super::same_environment(&view.environment(),expected_environment)",
+        "let(controller_environment,manager)=unsafe{(core.Environment(),core.CookieManager())};",
+        "super::same_environment(&controller_environment,expected_environment)",
         "state:RefCell<Option<TransferState>>",
         "cancellation:Cell<Option<ContextCookieTransferFailure>>",
         "terminal:Cell<bool>",
@@ -1264,6 +1274,7 @@ fn validate_engine_windows_agent_context_boundary(
         "#[allow(dead_code)]modsemantic_runtime;",
         "#[cfg(feature=\"agentic-browser\")]modtimeout;",
         "build_owned_agent_view",
+        "pub(crate)usecookie_transfer::{selected_profile_cookie_manager,WindowsAgentCookieCleanup,WindowsAgentCookieTerminal,WindowsAgentCookieTransfer,};",
         "schedule_content_policy_timeout",
     ] {
         if !module.contains(required) {
@@ -1301,6 +1312,13 @@ fn validate_engine_windows_agent_context_boundary(
         "semantic_renderer.renderer_lost()",
         "semantic.controller().attest(&view.webview())",
         "pub(crate)fnretire_semantic_runtime(&mutself)->bool",
+        "pub(crate)fncookie_destination(",
+        "matches!(self.profile,AgentOwnedProfile::Automation{..})",
+        "super::same_environment(&self.view.environment(),expected_environment)",
+        "self.attest(deadline)?",
+        "ifself.attest_suspension_state()?",
+        "core.CookieManager()",
+        "profile.cast::<ICoreWebView2Profile2>()",
         "pub(crate)fnclose(&mutself)->Result<(),wry::WebView2CleanupDebt>",
         "ContextConstructionProof::WindowsOwnedSelectedProfileEmptyInventory",
         "ContextConstructionProof::WindowsOwnedAutomationSubprofileEmptyInventory",
@@ -1366,6 +1384,24 @@ fn validate_engine_windows_agent_context_boundary(
         "letsemantic_clean=self.view.retire_semantic_runtime();",
         "semantic_clean:bool",
         "letsemantic_pending=self.view.semantic_pending_for_audit()?;",
+        "structAgentPendingCookieTransfer{",
+        "pending_cookie_transfer:Option<ContextCookieTransferId>",
+        "cookie_contaminated:bool",
+        "cookie_bindings_consistent",
+        "fnstart_windows_agent_cookie_transfer",
+        "ContextCookieTransferDirection::SelectedProfileToOwned",
+        "self.agent_cookie_transfers.len()>=MAX_PENDING_COOKIE_TRANSFERS",
+        "pending.destination_profile==destination_profile",
+        "self.selected_profile_cookie_source(",
+        ".cookie_destination(&expected_environment,terminal_deadline)",
+        "map_cookie_transfer_deadline(request.window(),admitted_at,Instant::now(),)",
+        "schedule_content_policy_timeout(watchdog_duration",
+        "fnfinish_windows_agent_cookie_transfer",
+        "WindowsAgentCookieCleanup::Proven",
+        "agent_cookie_quarantined_profiles.insert(destination_profile)",
+        "binding.cookie_contaminated=true",
+        ".cancel(ContextCookieTransferFailure::Cancelled)",
+        "std::mem::take(&mutself.agent_cookie_transfers)",
     ] {
         if !host.contains(required) {
             return Err(format!(
@@ -1416,6 +1452,55 @@ fn validate_engine_windows_agent_context_boundary(
                     "production Windows agent-context {label} acquired forbidden surface {forbidden}"
                 ));
             }
+        }
+    }
+    Ok(())
+}
+
+fn validate_engine_windows_agent_cookie_source(module: &str, source: &str) -> Result<(), String> {
+    let module = compact(module);
+    if !module.contains(
+        "#[cfg(all(feature=\"agentic-browser\",target_os=\"windows\"))]modagent_cookie_source;",
+    ) {
+        return Err(
+            "ordinary-profile agent cookie authority lost its Windows feature gate".to_owned(),
+        );
+    }
+
+    let source = compact(source);
+    for required in [
+        "pub(super)fnselected_profile_cookie_source(",
+        "expected_environment:&ICoreWebView2Environment",
+        "for(id,partition)in&self.partitions",
+        "ifpartition.profile()!=profile",
+        "self.views.get(id).ok_or(ContextCookieTransferFailure::SourceUnavailable)?",
+        "selected_profile_cookie_manager(&view.view,expected_environment,)?",
+        ".filter(|spare|spare.partition.profile()==profile)",
+        "selected_profile_cookie_manager(&spare.view.view,expected_environment,)?",
+        "source.ok_or(ContextCookieTransferFailure::SourceUnavailable)",
+    ] {
+        if !source.contains(required) {
+            return Err(format!(
+                "ordinary-profile agent cookie authority lost required check {required}"
+            ));
+        }
+    }
+    for forbidden in [
+        "GetCookies",
+        "AddOrUpdateCookie",
+        "DeleteAllCookies",
+        "usezephium_core::ids::ItemId",
+        "self.stages",
+        "extension_document_authority",
+        "extension_browser_surfaces",
+        "navigation_snapshots",
+        "println!",
+        "eprintln!",
+    ] {
+        if source.contains(forbidden) {
+            return Err(format!(
+                "ordinary-profile agent cookie authority acquired forbidden surface {forbidden}"
+            ));
         }
     }
     Ok(())
@@ -6050,6 +6135,7 @@ mod tests {
             [
                 ENGINE_AGENT_CONTEXT_PORT,
                 ENGINE_AGENT_CONTEXT_HOST,
+                ENGINE_AGENT_COOKIE_SOURCE,
                 ENGINE_AGENT_NAVIGATION,
                 ENGINE_AGENT_SUSPENSION,
                 ENGINE_AGENT_SCREENSHOT_BUFFER,
@@ -8940,13 +9026,7 @@ mod tests {
             include_str!("../../crates/zephium-engine/src/platform/windows/cookie_transfer.rs");
         validate_engine_windows_cookie_transfer(module, transfer)
             .expect("bounded dormant Windows cookie adapter");
-        let invalid_modules = [
-            module.replacen("#[cfg(feature = \"agentic-browser\")]", "", 2),
-            module.replace(
-                "#[allow(dead_code)]\nmod cookie_transfer;",
-                "mod cookie_transfer;",
-            ),
-        ];
+        let invalid_modules = [module.replacen("#[cfg(feature = \"agentic-browser\")]", "", 2)];
         for invalid in invalid_modules {
             assert!(validate_engine_windows_cookie_transfer(&invalid, transfer).is_err());
         }
@@ -8967,6 +9047,14 @@ mod tests {
                 "destination.GetCookies(PCWSTR::from_raw(origin.as_ptr()), &handler)",
             ),
             transfer.replace("shared.cancellation.set(None);", ""),
+            transfer.replace(
+                "super::same_environment(&view.environment(), expected_environment)",
+                "true",
+            ),
+            transfer.replace(
+                "(core.Environment(), core.CookieManager())",
+                "(Ok(expected_environment.clone()), core.CookieManager())",
+            ),
             transfer.replace(
                 "request: &ContextCookieTransferRequest,",
                 "scope: ContextCookieScope,",
@@ -9115,7 +9203,11 @@ mod tests {
         let host_root = r#"
             #[cfg(feature = "agentic-browser")]
             mod agent_context;
+            #[cfg(all(feature = "agentic-browser", target_os = "windows"))]
+            mod agent_cookie_source;
             agent_contexts: HashMap<zephium_agentic::ContextId, agent_context::AgentOwnedContext>,
+            agent_cookie_transfers: HashMap<zephium_agentic::ContextCookieTransferId, agent_context::AgentPendingCookieTransfer>,
+            agent_cookie_quarantined_profiles: HashSet<ProfileId>,
         "#;
         let port = r#"
             use x::MAX_PENDING_NATIVE_CONTEXT_TASKS;
@@ -9126,7 +9218,12 @@ mod tests {
             fn capture_semantic_screenshot() {}
             ContextOperationKind::Recover;
             ContextOperationKind::Close;
-            const fn supports_cookie_transfer() -> bool { false }
+            const fn supports_cookie_transfer() -> bool {
+                #[cfg(target_os = "windows")]
+                { true }
+                #[cfg(not(target_os = "windows"))]
+                { false }
+            }
             admitted_at: std::time::Instant,
             pub(crate) fn cookie(&self) -> Option<(&ContextCookieTransferRequest, std::time::Instant)> {
                 match self.request.as_ref() {
@@ -9210,6 +9307,18 @@ mod tests {
         assert!(validate_engine_agent_context_boundary(
             engine,
             host_root,
+            &port.replace(
+                "#[cfg(target_os = \"windows\")]\n                { true }",
+                ""
+            ),
+            host,
+            macos,
+            navigation,
+        )
+        .is_err());
+        assert!(validate_engine_agent_context_boundary(
+            engine,
+            host_root,
             port,
             host,
             &macos.replace("semantic.attest_configuration(&configuration);", ""),
@@ -9232,6 +9341,9 @@ mod tests {
         let host = include_str!("../../crates/zephium-engine/src/host/agent_context.rs");
         let content_rules = include_str!("../../crates/zephium-engine/src/host/content_rules.rs");
         let port = include_str!("../../crates/zephium-engine/src/agent_context_port.rs");
+        let host_root = include_str!("../../crates/zephium-engine/src/host/mod.rs");
+        let cookie_source =
+            include_str!("../../crates/zephium-engine/src/host/agent_cookie_source.rs");
         validate_engine_windows_agent_context_boundary(module, adapter, timeout, navigation, host)
             .expect("closed Windows production owner");
         validate_engine_windows_agent_suspension_boundary(
@@ -9243,12 +9355,68 @@ mod tests {
             port,
         )
         .expect("closed Windows suspension owner");
+        validate_engine_windows_agent_cookie_source(host_root, cookie_source)
+            .expect("closed ordinary-profile cookie source");
         assert!(validate_engine_windows_agent_context_boundary(
             module,
             &format!("{adapter}\nevaluate_script();"),
             timeout,
             navigation,
             host,
+        )
+        .is_err());
+        assert!(validate_engine_windows_agent_cookie_source(
+            host_root,
+            &cookie_source.replace(
+                "partition.profile() != profile",
+                "partition.profile() == profile",
+            ),
+        )
+        .is_err());
+        assert!(validate_engine_windows_agent_cookie_source(
+            host_root,
+            &format!("{cookie_source}\nGetCookies();"),
+        )
+        .is_err());
+        assert!(validate_engine_windows_agent_context_boundary(
+            module,
+            &adapter.replace(
+                "if !matches!(self.profile, AgentOwnedProfile::Automation { .. })",
+                "if false",
+            ),
+            timeout,
+            navigation,
+            host,
+        )
+        .is_err());
+        assert!(validate_engine_windows_agent_context_boundary(
+            module,
+            &adapter.replace(
+                "super::same_environment(&self.view.environment(), expected_environment)",
+                "true",
+            ),
+            timeout,
+            navigation,
+            host,
+        )
+        .is_err());
+        assert!(validate_engine_windows_agent_context_boundary(
+            module,
+            adapter,
+            timeout,
+            navigation,
+            &host.replace("binding.cookie_contaminated = true;", ""),
+        )
+        .is_err());
+        assert!(validate_engine_windows_agent_context_boundary(
+            module,
+            adapter,
+            timeout,
+            navigation,
+            &host.replace(
+                "std::mem::take(&mut self.agent_cookie_transfers)",
+                "std::mem::take(&mut self.agent_contexts)",
+            ),
         )
         .is_err());
         assert!(validate_engine_windows_agent_context_boundary(
