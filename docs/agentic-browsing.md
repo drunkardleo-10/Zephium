@@ -661,6 +661,13 @@ drag, iframe, and a minimal shadow-DOM case. Tests record event trust, event
 sequence, focus, activation lifetime, target verification, focus theft, and
 background/hidden behavior.
 
+Qualification rejoins each claimed effect to a case-specific event on the
+exact intended fixture target. A backend classified as non-dispatching must
+retain no event, target, focus, activation, navigation, popup, or clipboard
+effect. Popup and clipboard results additionally rejoin their dedicated native
+request and closed gate fields; a generic `Unsupported` label cannot stand in
+for evidence that the intended control was reached.
+
 No conclusion is generalized from `isTrusted` alone. Real sites may reject
 automation through many mechanisms. The spike determines which backends are
 available and safe, then the early real-site slice verifies their practical

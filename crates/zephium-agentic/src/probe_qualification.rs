@@ -4,8 +4,9 @@ use serde::Serialize;
 use thiserror::Error;
 
 use crate::{
-    BackendAvailability, BackendCapability, CaseOutcome, EvidenceValidationError, FixtureCase,
-    InputBackend, InputEventKind, Platform, PresentationState, RunEvidence, RunMatrixRequest,
+    BackendAvailability, BackendCapability, CaseEvidence, CaseOutcome, EvidenceValidationError,
+    FixtureCase, GateOutcome, InputBackend, InputEventKind, Platform, PresentationState,
+    RunEvidence, RunMatrixRequest,
 };
 
 /// Fixed fixture order used by every Windows qualification mode.
@@ -246,6 +247,9 @@ pub enum WindowsProbeQualificationError {
     /// A fixture outcome did not meet its typed qualification rule.
     #[error("Windows probe fixture outcome is invalid")]
     Outcome,
+    /// Retained events/effect fields did not prove the claimed interaction.
+    #[error("Windows probe interaction evidence is invalid")]
+    Interaction,
     /// Fixed DOM acquired trusted effect events or user activation.
     #[error("Windows fixed DOM trust invariant failed")]
     FixedDomTrust,
@@ -306,13 +310,19 @@ pub fn qualify_windows_probe_evidence(
         {
             return Err(WindowsProbeQualificationError::Resources);
         }
-        if backend_does_not_dispatch(case, backend)
-            && (activation_observed(&actual.activation)
-                || actual.target.target_verified
-                || actual.target.popup_requested
-                || actual.target.popup_observed)
+        let does_not_dispatch = backend_does_not_dispatch(case, backend);
+        if does_not_dispatch {
+            if !no_dispatch_evidence_is_empty(actual) {
+                return Err(WindowsProbeQualificationError::Interaction);
+            }
+        } else if !actual.target.target_verified || !has_qualifying_event(actual) {
+            return Err(WindowsProbeQualificationError::Interaction);
+        }
+        if actual.target.navigation_observed != (case == FixtureCase::Link && !does_not_dispatch)
+            || (case == FixtureCase::ClipboardGate && !does_not_dispatch)
+                != (actual.target.clipboard_gate != GateOutcome::NotApplicable)
         {
-            return Err(WindowsProbeQualificationError::Outcome);
+            return Err(WindowsProbeQualificationError::Interaction);
         }
         let accepted = match backend {
             InputBackend::WindowsCompositionInput => actual.outcome == CaseOutcome::Unsupported,
@@ -320,12 +330,20 @@ pub fn qualify_windows_probe_evidence(
             InputBackend::FixedDomRecipe if case == FixtureCase::ClosedShadow => {
                 actual.outcome == CaseOutcome::Unsupported
             }
-            _ if case == FixtureCase::ClipboardGate => actual.outcome == CaseOutcome::Unsupported,
+            _ if case == FixtureCase::ClipboardGate => {
+                actual.outcome == CaseOutcome::Unsupported
+                    && matches!(
+                        actual.target.clipboard_gate,
+                        GateOutcome::Denied | GateOutcome::Indeterminate
+                    )
+            }
             _ if case == FixtureCase::Popup => {
-                matches!(
-                    actual.outcome,
-                    CaseOutcome::Verified | CaseOutcome::Unsupported
-                ) && !actual.target.popup_observed
+                !actual.target.popup_observed
+                    && if actual.target.popup_requested {
+                        actual.outcome == CaseOutcome::Verified
+                    } else {
+                        actual.outcome == CaseOutcome::Unsupported
+                    }
             }
             _ => actual.outcome == CaseOutcome::Verified && actual.target.target_verified,
         };
@@ -446,6 +464,44 @@ fn activation_observed(activation: &crate::ActivationEvidence) -> bool {
         || activation.has_been_active
 }
 
+fn has_qualifying_event(evidence: &CaseEvidence) -> bool {
+    let required = qualifying_event_kind(evidence.case);
+    evidence
+        .events
+        .iter()
+        .any(|event| event.kind == required && event.target == evidence.target.intended)
+}
+
+const fn qualifying_event_kind(case: FixtureCase) -> InputEventKind {
+    match case {
+        FixtureCase::TextInput | FixtureCase::ContentEditable => InputEventKind::Input,
+        FixtureCase::Select => InputEventKind::Change,
+        FixtureCase::Keyboard => InputEventKind::KeyDown,
+        FixtureCase::Drag => InputEventKind::Drop,
+        FixtureCase::Button
+        | FixtureCase::Link
+        | FixtureCase::PointerMouse
+        | FixtureCase::TransientActivation
+        | FixtureCase::Popup
+        | FixtureCase::ClipboardGate
+        | FixtureCase::Iframe
+        | FixtureCase::OpenShadow
+        | FixtureCase::ClosedShadow => InputEventKind::Click,
+    }
+}
+
+fn no_dispatch_evidence_is_empty(evidence: &CaseEvidence) -> bool {
+    evidence.events.is_empty()
+        && evidence.target.actual.is_none()
+        && !evidence.target.target_verified
+        && !evidence.target.navigation_observed
+        && !evidence.target.popup_requested
+        && !evidence.target.popup_observed
+        && evidence.target.clipboard_gate == GateOutcome::NotApplicable
+        && !evidence.focus.target_received_dom_focus
+        && !activation_observed(&evidence.activation)
+}
+
 const fn backend_does_not_dispatch(case: FixtureCase, backend: InputBackend) -> bool {
     matches!(
         backend,
@@ -482,25 +538,36 @@ fn tests_fixture(mode: WindowsProbeMode) -> RunEvidence {
     let mut cases = Vec::new();
     for case in WINDOWS_PROBE_CASES {
         for backend in mode.backends() {
+            let does_not_dispatch = backend_does_not_dispatch(case, *backend);
+            let popup_requested = case == FixtureCase::Popup
+                && !does_not_dispatch
+                && *backend != InputBackend::FixedDomRecipe;
             let outcome = if *backend == InputBackend::WindowsCompositionInput {
                 CaseOutcome::Unsupported
             } else if *backend == InputBackend::HumanBaseline {
                 CaseOutcome::NeedsHuman
             } else if case == FixtureCase::ClipboardGate
                 || (*backend == InputBackend::FixedDomRecipe && case == FixtureCase::ClosedShadow)
-                || case == FixtureCase::Popup
+                || (case == FixtureCase::Popup && !popup_requested)
             {
                 CaseOutcome::Unsupported
             } else {
                 CaseOutcome::Verified
             };
-            let target_verified = !backend_does_not_dispatch(case, *backend);
+            let target_verified = !does_not_dispatch;
             cases.push(crate::CaseEvidence {
                 case,
                 backend: *backend,
                 presentation: mode.presentation(),
                 outcome,
-                events: Vec::new(),
+                events: (!does_not_dispatch)
+                    .then_some(crate::InputEventEvidence {
+                        kind: qualifying_event_kind(case),
+                        is_trusted: *backend != InputBackend::FixedDomRecipe,
+                        target: case.target(),
+                    })
+                    .into_iter()
+                    .collect(),
                 focus: FocusEvidence {
                     before: FocusOwner::External,
                     during: FocusOwner::External,
@@ -518,12 +585,16 @@ fn tests_fixture(mode: WindowsProbeMode) -> RunEvidence {
                 },
                 target: TargetEvidence {
                     intended: case.target(),
-                    actual: Some(case.target()),
+                    actual: (!does_not_dispatch).then_some(case.target()),
                     target_verified,
-                    navigation_observed: false,
-                    popup_requested: false,
+                    navigation_observed: case == FixtureCase::Link && !does_not_dispatch,
+                    popup_requested,
                     popup_observed: false,
-                    clipboard_gate: GateOutcome::NotApplicable,
+                    clipboard_gate: if case == FixtureCase::ClipboardGate && !does_not_dispatch {
+                        GateOutcome::Denied
+                    } else {
+                        GateOutcome::NotApplicable
+                    },
                 },
                 resources_before: resource(),
                 resources_after: resource(),
@@ -624,6 +695,99 @@ mod tests {
             qualify_windows_probe_evidence(mode, &evidence),
             Err(WindowsProbeQualificationError::FixedDomTrust)
         );
+    }
+
+    #[test]
+    fn interaction_claims_rejoin_events_and_closed_effect_fields() {
+        let mode = WindowsProbeMode::VisibleBackgroundAll;
+
+        let mut missing_event = tests_fixture(mode);
+        let button = case_mut(
+            &mut missing_event,
+            FixtureCase::Button,
+            InputBackend::WindowsHwndInput,
+        );
+        button.events.clear();
+        assert_eq!(
+            qualify_windows_probe_evidence(mode, &missing_event),
+            Err(WindowsProbeQualificationError::Interaction)
+        );
+
+        let mut wrong_event = tests_fixture(mode);
+        let button = case_mut(
+            &mut wrong_event,
+            FixtureCase::Button,
+            InputBackend::WindowsHwndInput,
+        );
+        button.events[0].kind = InputEventKind::Focus;
+        assert_eq!(
+            qualify_windows_probe_evidence(mode, &wrong_event),
+            Err(WindowsProbeQualificationError::Interaction)
+        );
+
+        let mut nondispatch_event = tests_fixture(mode);
+        let composition = case_mut(
+            &mut nondispatch_event,
+            FixtureCase::Button,
+            InputBackend::WindowsCompositionInput,
+        );
+        composition.events.push(InputEventEvidence {
+            kind: InputEventKind::Click,
+            is_trusted: true,
+            target: FixtureTarget::Button,
+        });
+        assert_eq!(
+            qualify_windows_probe_evidence(mode, &nondispatch_event),
+            Err(WindowsProbeQualificationError::Interaction)
+        );
+
+        let mut missing_navigation = tests_fixture(mode);
+        let link = case_mut(
+            &mut missing_navigation,
+            FixtureCase::Link,
+            InputBackend::WindowsCdpInput,
+        );
+        link.target.navigation_observed = false;
+        assert_eq!(
+            qualify_windows_probe_evidence(mode, &missing_navigation),
+            Err(WindowsProbeQualificationError::Interaction)
+        );
+
+        let mut missing_clipboard_gate = tests_fixture(mode);
+        let clipboard = case_mut(
+            &mut missing_clipboard_gate,
+            FixtureCase::ClipboardGate,
+            InputBackend::WindowsHwndInput,
+        );
+        clipboard.target.clipboard_gate = GateOutcome::NotApplicable;
+        assert_eq!(
+            qualify_windows_probe_evidence(mode, &missing_clipboard_gate),
+            Err(WindowsProbeQualificationError::Interaction)
+        );
+
+        let mut popup_mismatch = tests_fixture(mode);
+        let popup = case_mut(
+            &mut popup_mismatch,
+            FixtureCase::Popup,
+            InputBackend::WindowsHwndInput,
+        );
+        popup.outcome = CaseOutcome::Unsupported;
+        assert_eq!(
+            qualify_windows_probe_evidence(mode, &popup_mismatch),
+            Err(WindowsProbeQualificationError::Outcome)
+        );
+    }
+
+    fn case_mut(
+        evidence: &mut RunEvidence,
+        fixture: FixtureCase,
+        backend: InputBackend,
+    ) -> &mut CaseEvidence {
+        evidence
+            .cases
+            .iter_mut()
+            .find(|case| case.case == fixture && case.backend == backend)
+            .expect("closed fixture row")
     }
 
     #[test]

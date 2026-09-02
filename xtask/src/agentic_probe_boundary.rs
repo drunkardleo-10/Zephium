@@ -2311,6 +2311,13 @@ fn validate_windows_probe_binary(source: &str, qualification: &str) -> Result<()
         "--ci-hidden-cdp",
         "--visible-background-windows-all",
         "--visible-focused-windows-all",
+        "if!no_dispatch_evidence_is_empty(actual)",
+        "elseif!actual.target.target_verified||!has_qualifying_event(actual)",
+        "event.kind==required&&event.target==evidence.target.intended",
+        "fnno_dispatch_evidence_is_empty(evidence:&CaseEvidence)->bool",
+        "actual.target.navigation_observed!=(case==FixtureCase::Link&&!does_not_dispatch)",
+        "GateOutcome::Denied|GateOutcome::Indeterminate",
+        "ifactual.target.popup_requested{actual.outcome==CaseOutcome::Verified}else{actual.outcome==CaseOutcome::Unsupported}",
     ] {
         if !qualification.contains(required) {
             return Err(format!(
@@ -10258,6 +10265,17 @@ mod tests {
             "--ci-hidden-cdp";
             "--visible-background-windows-all";
             "--visible-focused-windows-all";
+            if !no_dispatch_evidence_is_empty(actual) {}
+            else if !actual.target.target_verified || !has_qualifying_event(actual) {}
+            event.kind == required && event.target == evidence.target.intended;
+            fn no_dispatch_evidence_is_empty(evidence: &CaseEvidence) -> bool { true }
+            actual.target.navigation_observed != (case == FixtureCase::Link && !does_not_dispatch);
+            GateOutcome::Denied | GateOutcome::Indeterminate;
+            if actual.target.popup_requested {
+                actual.outcome == CaseOutcome::Verified
+            } else {
+                actual.outcome == CaseOutcome::Unsupported
+            };
         "#;
         validate_windows_probe_binary(binary, qualification).expect("valid physical runner");
         assert!(validate_windows_probe_binary(
@@ -10268,6 +10286,30 @@ mod tests {
         assert!(validate_windows_probe_binary(
             &binary.replace("encode_response_line(&response);", "println!(\"passed\");"),
             qualification,
+        )
+        .is_err());
+        assert!(validate_windows_probe_binary(
+            binary,
+            &qualification.replace(
+                "event.kind == required && event.target == evidence.target.intended;",
+                "true;",
+            ),
+        )
+        .is_err());
+        assert!(validate_windows_probe_binary(
+            binary,
+            &qualification.replace(
+                "fn no_dispatch_evidence_is_empty(evidence: &CaseEvidence) -> bool { true }",
+                "fn no_dispatch_evidence_is_empty(_: &CaseEvidence) -> bool { true }",
+            ),
+        )
+        .is_err());
+        assert!(validate_windows_probe_binary(
+            binary,
+            &qualification.replace(
+                "actual.outcome == CaseOutcome::Verified",
+                "actual.outcome == CaseOutcome::Unsupported",
+            ),
         )
         .is_err());
     }

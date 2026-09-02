@@ -124,6 +124,14 @@ key-up messages to acquire inconsistent scan metadata.
   therefore retains redacted case evidence instead of collapsing to a generic
   process error; pass/fail diagnostics remain on stderr and local JSONL paths
   are gitignored.
+- The shared offline qualifier independently rejoins every accepted dispatched
+  row to the case-specific effect event on the exact intended fixture target.
+  It requires link, clipboard, and popup fields to agree with that event and
+  terminal outcome. A composition, human-baseline, or closed-shadow fixed-DOM
+  row classified as non-dispatching must carry no event, target, focus,
+  activation, navigation, popup, or clipboard effect. This prevents a bare
+  `target_verified` or generic `Unsupported` value from promoting incomplete
+  machine evidence.
 - The required device workflow uses the runner's closed
   `--evidence-directory eval/agentic-browsing/local-results` option instead of
   shell redirection. Only the four required non-focused modes map to fixed
@@ -170,6 +178,9 @@ receiver-exit failure, Windows reparse-point rejection for physical evidence,
 strict bounded raw CDP completion, fixed method
 allowlist, and absence of input-queue attachment, global `SendInput`, cursor
 movement, page IPC, host objects, or generic script calls.
+The same gate mutation-tests the event/target join, empty non-dispatch rows,
+link/clipboard effect fields, and popup-request/outcome correspondence used by
+the offline reviewer.
 The Windows input module also denies unsafe operations hidden inside an unsafe
 function and every undocumented unsafe block. The boundary checker pins both
 module-level denials, and Windows CI runs native Clippy before linking the

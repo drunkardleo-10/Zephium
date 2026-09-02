@@ -190,6 +190,12 @@ agentic-owned Windows modules. Cross-compilation is not device behavior.
   reconciliation, final `IsSuspended` readback, content-policy exclusion, and
   resource-audit refusal while physical state is ambiguous. macOS remains
   unsupported at this port. No suspend/resume device or resource claim is made.
+- The physical Windows M1 reviewer now refuses a success label without the
+  case-specific effect event on the exact intended target, refuses any retained
+  effect for a non-dispatch route, and cross-checks link, clipboard, and popup
+  fields against the claimed terminal outcome. The release boundary
+  mutation-tests those joins. This strengthens future evidence admission; it is
+  not physical Windows behavior evidence.
 - The functional agentic core forbids unsafe code. The agentic-owned production
   native graph currently contains exactly eight audited modules: the macOS and
   Windows owned-context, semantic-runtime, and semantic-screenshot adapters,
