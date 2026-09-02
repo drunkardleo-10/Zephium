@@ -53,9 +53,12 @@ const AGENTIC_SEMANTIC_SETTLE_COORDINATOR: &str =
 const AGENTIC_SEMANTIC_SETTLE: &str = "crates/zephium-agentic/src/semantic_settle.rs";
 const AGENTIC_SEMANTIC_VERIFY: &str = "crates/zephium-agentic/src/semantic_verify.rs";
 const AGENTIC_CONTEXT_PORT: &str = "crates/zephium-agentic/src/context_port.rs";
+const AGENTIC_PROFILE_LEASE: &str = "crates/zephium-agentic/src/profile_lease.rs";
 const AGENTIC_SUPERVISOR: &str = "crates/zephium-agentic/src/agent_supervisor.rs";
 const AGENTIC_SUPERVISOR_PROGRESS: &str =
     "crates/zephium-agentic/src/agent_supervisor/runtime/progress.rs";
+const AGENTIC_SUPERVISOR_CONTEXT_SCHEDULE: &str =
+    "crates/zephium-agentic/src/agent_supervisor/runtime/context_schedule.rs";
 const PROVIDER_TRANSPORT_MANIFEST: &str = "crates/zephium-agent-provider-transport/Cargo.toml";
 const PROVIDER_TRANSPORT_ROOT: &str = "crates/zephium-agent-provider-transport/src/lib.rs";
 const ENGINE_MANIFEST: &str = "crates/zephium-engine/Cargo.toml";
@@ -289,6 +292,11 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         &read(repository.join(AGENTIC_SUPERVISOR))?,
         &read(repository.join(AGENTIC_SUPERVISOR_PROGRESS))?,
         &read(repository.join(AGENTIC_AUDIT))?,
+    )?;
+    validate_profile_lease_release_contract(
+        &read(repository.join(AGENTIC_ROOT))?,
+        &read(repository.join(AGENTIC_PROFILE_LEASE))?,
+        &read(repository.join(AGENTIC_SUPERVISOR_CONTEXT_SCHEDULE))?,
     )?;
     validate_provider_transport_manifest(&read(repository.join(PROVIDER_TRANSPORT_MANIFEST))?)?;
     let provider_transport_root = read(repository.join(PROVIDER_TRANSPORT_ROOT))?;
@@ -4424,6 +4432,132 @@ fn validate_progress_manifest_revision_contract(
     Ok(())
 }
 
+fn validate_profile_lease_release_contract(
+    root: &str,
+    profile_lease: &str,
+    supervisor_context: &str,
+) -> Result<(), String> {
+    let root = compact(root);
+    for required in [
+        "AgentSupervisorContextRelease,",
+        "AgentSupervisorContextReleaseOutcome,",
+        "ContextProfileLeaseRegistry,",
+    ] {
+        if !root.contains(required) {
+            return Err(format!(
+                "agentic root lost profile cleanup proof export {required}"
+            ));
+        }
+    }
+
+    let profile_lease = profile_lease
+        .split_once("\n#[cfg(test)]\nmod tests")
+        .map_or(profile_lease, |(production, _)| production);
+    let profile_lease = compact(profile_lease);
+    for required in [
+        "proof:AgentSupervisorContextRelease",
+        "proof.assignment().identity()!=lease.identity",
+        "profile_release_outcome_matches(lease.purpose,proof.outcome())",
+        "ContextProfileLeaseError::ReleaseProof",
+        "(_,AgentSupervisorContextReleaseOutcome::QueuedCancelled)",
+        "terminal:ContextTerminal::Closed,resource:ContextResourceDisposition::Destroyed",
+        "terminal:ContextTerminal::Adopted,resource:ContextResourceDisposition::TransferredToBrowse",
+        "terminal:ContextTerminal::Released,resource:ContextResourceDisposition::ExistingBrowseRetained",
+        "ContextProfileLeasePurpose::HumanSignInHandoff,AgentSupervisorContextReleaseOutcome::Retired{terminal:ContextTerminal::Released,resource:ContextResourceDisposition::Destroyed",
+    ] {
+        if !profile_lease.contains(required) {
+            return Err(format!(
+                "profile lease release lost exact cleanup proof boundary {required}"
+            ));
+        }
+    }
+    if profile_lease.contains(
+        "pubfnrelease(&mutself,lease:ContextProfileLease)->Result<ContextIdentity,ContextProfileLeaseError>",
+    ) || profile_lease.matches("pubfnrelease(").count() != 1
+    {
+        return Err("profile leases regained a bare or ambiguous release path".to_owned());
+    }
+    let proof_check = profile_lease
+        .find("ifproof.assignment().identity()!=lease.identity")
+        .ok_or_else(|| "profile lease cleanup proof check is missing".to_owned())?;
+    let removal = profile_lease
+        .find("letremoved=self.leases.remove(&lease.identity.id())")
+        .ok_or_else(|| "profile lease exact removal is missing".to_owned())?;
+    if proof_check >= removal {
+        return Err("profile lease removal must follow exact cleanup proof".to_owned());
+    }
+
+    let release_declaration = supervisor_context
+        .find("pub struct AgentSupervisorContextRelease")
+        .ok_or_else(|| "supervisor profile cleanup receipt is missing".to_owned())?;
+    let release_attribute_start = supervisor_context[..release_declaration]
+        .rfind("\n\n")
+        .map_or(0, |start| start + 2);
+    let release_attributes = &supervisor_context[release_attribute_start..release_declaration];
+    for forbidden in ["Serialize", "Deserialize", "Default"] {
+        if release_attributes.contains(forbidden) {
+            return Err(format!(
+                "supervisor profile cleanup receipt acquired forgeable derive {forbidden}"
+            ));
+        }
+    }
+
+    let supervisor_context = compact(supervisor_context);
+    for required in [
+        "pubstructAgentSupervisorContextRelease{assignment:AgentSupervisorContextAssignment,outcome:AgentSupervisorContextReleaseOutcome,}",
+        "letidentity=registry.cancel_queued(context)?;",
+        "letretired=registry.reap_terminal(context)?;",
+        "#[cfg(test)]pub(crate)fnfor_profile_lease_test(",
+    ] {
+        if !supervisor_context.contains(required) {
+            return Err(format!(
+                "supervisor profile cleanup receipt lost constructor-closed registry proof {required}"
+            ));
+        }
+    }
+    if supervisor_context
+        .matches("Ok(AgentSupervisorContextRelease{")
+        .count()
+        != 2
+    {
+        return Err(
+            "supervisor must emit profile cleanup receipts only from queued cancel and terminal reap"
+                .to_owned(),
+        );
+    }
+    let release_impl_start = supervisor_context
+        .find("implAgentSupervisorContextRelease{")
+        .ok_or_else(|| "supervisor profile cleanup receipt impl is missing".to_owned())?;
+    let release_impl_end = supervisor_context[release_impl_start..]
+        .find("pub(super)structSupervisorContextRow")
+        .map(|offset| release_impl_start + offset)
+        .ok_or_else(|| "supervisor profile cleanup receipt impl boundary is missing".to_owned())?;
+    let release_impl = &supervisor_context[release_impl_start..release_impl_end];
+    if release_impl.matches("pubfn").count() != 0
+        || release_impl.matches("pub(crate)fn").count() != 1
+        || release_impl.matches("Self{assignment:").count() != 1
+    {
+        return Err(
+            "supervisor profile cleanup receipt acquired an additional constructor surface"
+                .to_owned(),
+        );
+    }
+    for forbidden in [
+        "implAgentSupervisorContextRelease{pubfnnew(",
+        "implAgentSupervisorContextRelease{pubconstfnnew(",
+        "SerializeforAgentSupervisorContextRelease",
+        "DeserializeforAgentSupervisorContextRelease",
+        "DefaultforAgentSupervisorContextRelease",
+    ] {
+        if supervisor_context.contains(forbidden) {
+            return Err(format!(
+                "supervisor profile cleanup receipt acquired forging surface {forbidden}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_agentic_zero_idle_sources(repository: &Path) -> Result<(), String> {
     let source_directory = repository.join(AGENTIC_SOURCE_DIRECTORY);
     let mut files = Vec::new();
@@ -4812,6 +4946,51 @@ mod tests {
             ),
         ] {
             assert!(validate_provider_secret_diagnostic_contract(&invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn profile_release_requires_constructor_closed_supervisor_cleanup_proof() {
+        let root = include_str!("../../crates/zephium-agentic/src/lib.rs");
+        let profile_lease = include_str!("../../crates/zephium-agentic/src/profile_lease.rs");
+        let supervisor_context = include_str!(
+            "../../crates/zephium-agentic/src/agent_supervisor/runtime/context_schedule.rs"
+        );
+        validate_profile_lease_release_contract(root, profile_lease, supervisor_context)
+            .expect("profile release proof boundary");
+        assert!(validate_profile_lease_release_contract(
+            &root.replace("AgentSupervisorContextRelease,", ""),
+            profile_lease,
+            supervisor_context,
+        )
+        .is_err());
+        for invalid in [
+            profile_lease.replace(
+                "proof: AgentSupervisorContextRelease",
+                "proof: ContextProfileLease",
+            ),
+            profile_lease.replace("proof.assignment().identity() != lease.identity", "false"),
+            profile_lease.replacen("ContextTerminal::Adopted", "ContextTerminal::Closed", 1),
+        ] {
+            assert!(
+                validate_profile_lease_release_contract(root, &invalid, supervisor_context)
+                    .is_err()
+            );
+        }
+        for invalid in [
+            supervisor_context.replace("let identity = registry.cancel_queued(context)?;", ""),
+            supervisor_context.replace("#[cfg(test)]", ""),
+            supervisor_context.replace(
+                "#[derive(Clone, Copy, Debug, Eq, PartialEq)]\npub struct AgentSupervisorContextRelease",
+                "#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize)]\npub struct AgentSupervisorContextRelease"
+            ),
+            format!(
+                "{supervisor_context}\nimpl AgentSupervisorContextRelease {{ pub fn new() {{}} }}"
+            ),
+        ] {
+            assert!(
+                validate_profile_lease_release_contract(root, profile_lease, &invalid).is_err()
+            );
         }
     }
 

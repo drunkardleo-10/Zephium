@@ -392,9 +392,11 @@ mod tests {
         AgentModelCallId, AgentModelCallReceipt, AgentModelCallSettlement, AgentNeedsHumanReason,
         AgentNeedsHumanTransition, AgentPlanLeaseId, AgentPlanNodeAuthority, AgentPolicyInstant,
         AgentRunBudget, AgentRunScope, ContextCapabilities, ContextCapability, ContextId,
-        ContextIdentity, ContextKind, ContextOperationId, ContextRegistry, ContextRegistryError,
-        ContextResourceDisposition, ContextSettlement, ContextTerminal, SemanticActionAttemptId,
-        SemanticActionFailure, SemanticEffectClass, SemanticOrigin, SemanticSensitivity,
+        ContextIdentity, ContextKind, ContextOperationId, ContextProfileLeaseId,
+        ContextProfileLeasePurpose, ContextProfileLeaseRegistry, ContextProfileStorageClass,
+        ContextRegistry, ContextRegistryError, ContextResourceDisposition, ContextSettlement,
+        ContextTerminal, SemanticActionAttemptId, SemanticActionFailure, SemanticEffectClass,
+        SemanticOrigin, SemanticSensitivity,
     };
     use zephium_core::ids::ProfileId;
 
@@ -1594,7 +1596,16 @@ mod tests {
         );
         let root = supervisor.start(root_id, attempt(1)).expect("start root");
         let mut registry = ContextRegistry::new();
+        let mut profile_leases = ContextProfileLeaseRegistry::new();
         let identity = context_identity(20, 2, 1);
+        let profile_lease = profile_leases
+            .acquire(
+                ContextProfileLeaseId::new(1).expect("profile lease"),
+                identity,
+                ContextProfileStorageClass::Durable,
+                ContextProfileLeasePurpose::Owned,
+            )
+            .expect("profile lease");
         supervisor
             .reserve_context(
                 &root,
@@ -1622,9 +1633,13 @@ mod tests {
         assert_eq!(supervisor.status().live(), 1);
         assert_eq!(supervisor.status().contexts(), 1);
         assert_eq!(supervisor.context_cancellation_targets().count(), 1);
-        supervisor
+        let queued_release = supervisor
             .cancel_queued_context(&mut registry, identity.id())
             .expect("cleanup context");
+        assert_eq!(
+            profile_leases.release(profile_lease, queued_release),
+            Ok(identity)
+        );
         assert_eq!(supervisor.status().live(), 0);
         assert_eq!(supervisor.status().cancelled(), 1);
 
@@ -1638,6 +1653,14 @@ mod tests {
             .expect("start root");
         let mut active_registry = ContextRegistry::new();
         let active_identity = context_identity(21, 2, 1);
+        let active_profile_lease = profile_leases
+            .acquire(
+                ContextProfileLeaseId::new(2).expect("profile lease"),
+                active_identity,
+                ContextProfileStorageClass::Durable,
+                ContextProfileLeasePurpose::Owned,
+            )
+            .expect("active profile lease");
         active_supervisor
             .reserve_context(
                 &execution,
@@ -1672,6 +1695,10 @@ mod tests {
                 terminal: ContextTerminal::Closed,
                 resource: ContextResourceDisposition::Destroyed,
             }
+        );
+        assert_eq!(
+            profile_leases.release(active_profile_lease, release),
+            Ok(active_identity)
         );
         active_supervisor
             .complete(execution, AgentSupervisorCompletion::Succeeded)

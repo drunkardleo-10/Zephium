@@ -46,7 +46,13 @@ responses, machine-local paths, or native traces.
   retained credential owners and the transient header buffer to zeroizing
   storage, sensitive request headers, manually redacted credential/attempt
   `Debug`, and a closed reqwest failure classifier that consumes only the
-  timeout bit. Mutation tests prove each protection is required.
+  timeout bit. Mutation tests prove each protection is required; and
+- forbids releasing an explicit profile lease from the lease value alone.
+  Release now consumes the constructor-closed supervisor receipt emitted only
+  after queued cancellation or terminal registry reaping, rejoins the exact
+  context identity, and admits only the native-resource disposition compatible
+  with the immutable context kind. Mutation tests remove the receipt, identity
+  join, closed disposition, and constructor gate and prove each change fails.
 
 The same check pins the default functional core to an empty feature set and a
 closed allocation/data dependency inventory. Its non-diagnostic source is
@@ -131,6 +137,16 @@ agentic-owned Windows modules. Cross-compilation is not device behavior.
   sentinel appears in `Request` debug output. This is a scoped source and test
   audit; it does not claim review of shared shell, extension-owned, third-party,
   or non-agentic logging surfaces.
+- Profile retention can no longer end from a copied lease alone. The bounded
+  profile registry requires the exact supervisor cleanup receipt for that
+  context. A never-started row must be registry-cancelled; an owned context must
+  be destroyed or explicitly transferred to Browse; a borrowed tab must remain
+  in Browse after release; and a sign-in handoff must be destroyed. Mismatched
+  identities or terminal/resource substitutions leave the lease retained.
+  Tests exercise both queued and active native-resource paths through the real
+  supervisor. This closes the functional-core early-release path, not the
+  remaining application actor, profile-directory, platform-store, deletion,
+  concurrency, or migration qualification.
 - The Browse named-device baseline intentionally has no values. No CPU, memory,
   GPU/compositor, energy, wakeup, or input-latency budget has been inferred.
 - Checked-priced model receipts now preserve a content-free exact schedule
@@ -236,6 +252,7 @@ The authoritative aggregate records and exact remaining blockers are in
 - hot-path and zero-unused-agent-overhead measurements; and
 - completion of native/unsafe, secret, and log review outside the scoped
   agentic-owned production modules and dormant provider transport, plus
-  profile, shutdown, recovery, migration, and stable Work-port audits.
+  application/platform profile integration, shutdown, recovery, migration, and
+  stable Work-port audits.
 
 None of these pending items is represented as zero, passing, or non-blocking.

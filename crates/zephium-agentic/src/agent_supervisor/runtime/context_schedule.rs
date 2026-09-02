@@ -85,6 +85,21 @@ impl AgentSupervisorContextRelease {
     pub const fn outcome(self) -> AgentSupervisorContextReleaseOutcome {
         self.outcome
     }
+
+    #[cfg(test)]
+    pub(crate) fn for_profile_lease_test(
+        identity: ContextIdentity,
+        outcome: AgentSupervisorContextReleaseOutcome,
+    ) -> Self {
+        Self {
+            assignment: AgentSupervisorContextAssignment {
+                supervisor: AgentSupervisorId::new(1).expect("test supervisor id"),
+                node: AgentPlanNodeId::from_raw(1),
+                identity,
+            },
+            outcome,
+        }
+    }
 }
 
 pub(super) struct SupervisorContextRow {

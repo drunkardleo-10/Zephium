@@ -11,7 +11,10 @@ use std::num::NonZeroU64;
 use thiserror::Error;
 use zephium_core::ids::ProfileId;
 
-use crate::{ContextId, ContextIdentity, ContextKind, MAX_LIVE_CONTEXTS};
+use crate::{
+    AgentSupervisorContextRelease, AgentSupervisorContextReleaseOutcome, ContextId,
+    ContextIdentity, ContextKind, ContextResourceDisposition, ContextTerminal, MAX_LIVE_CONTEXTS,
+};
 
 /// Maximum number of profile tombstones retained by the process.
 pub const MAX_CONTEXT_PROFILE_TOMBSTONES: usize = zephium_core::session::MAX_SESSION_PROFILES;
@@ -175,6 +178,9 @@ pub enum ContextProfileLeaseError {
     /// Release authority does not match the retained lease exactly.
     #[error("context profile lease authority is stale")]
     StaleLease,
+    /// Context cleanup did not prove an exact compatible resource disposition.
+    #[error("context profile release proof is incompatible")]
+    ReleaseProof,
     /// Internal bounded accounting became contradictory.
     #[error("context profile lease accounting invariant failed")]
     Invariant,
@@ -239,10 +245,16 @@ impl ContextProfileLeaseRegistry {
         Ok(lease)
     }
 
-    /// Releases exactly one retained lease without changing context identity.
+    /// Releases exactly one retained lease after supervisor-owned cleanup.
+    ///
+    /// The receipt can exist only after the bounded context registry proves
+    /// that native construction never started or that the exact native
+    /// resource reached its kind-compatible terminal disposition. A lease
+    /// alone is deliberately insufficient release authority.
     pub fn release(
         &mut self,
         lease: ContextProfileLease,
+        proof: AgentSupervisorContextRelease,
     ) -> Result<ContextIdentity, ContextProfileLeaseError> {
         self.validate()?;
         let retained = self
@@ -252,6 +264,11 @@ impl ContextProfileLeaseRegistry {
             .ok_or(ContextProfileLeaseError::NotFound)?;
         if retained != lease {
             return Err(ContextProfileLeaseError::StaleLease);
+        }
+        if proof.assignment().identity() != lease.identity
+            || !profile_release_outcome_matches(lease.purpose, proof.outcome())
+        {
+            return Err(ContextProfileLeaseError::ReleaseProof);
         }
         let removed = self
             .leases
@@ -353,6 +370,44 @@ impl ContextProfileLeaseRegistry {
     }
 }
 
+const fn profile_release_outcome_matches(
+    purpose: ContextProfileLeasePurpose,
+    outcome: AgentSupervisorContextReleaseOutcome,
+) -> bool {
+    matches!(
+        (purpose, outcome),
+        (_, AgentSupervisorContextReleaseOutcome::QueuedCancelled)
+            | (
+                ContextProfileLeasePurpose::Owned,
+                AgentSupervisorContextReleaseOutcome::Retired {
+                    terminal: ContextTerminal::Closed,
+                    resource: ContextResourceDisposition::Destroyed,
+                },
+            )
+            | (
+                ContextProfileLeasePurpose::Owned,
+                AgentSupervisorContextReleaseOutcome::Retired {
+                    terminal: ContextTerminal::Adopted,
+                    resource: ContextResourceDisposition::TransferredToBrowse,
+                },
+            )
+            | (
+                ContextProfileLeasePurpose::BorrowedTab,
+                AgentSupervisorContextReleaseOutcome::Retired {
+                    terminal: ContextTerminal::Released,
+                    resource: ContextResourceDisposition::ExistingBrowseRetained,
+                },
+            )
+            | (
+                ContextProfileLeasePurpose::HumanSignInHandoff,
+                AgentSupervisorContextReleaseOutcome::Retired {
+                    terminal: ContextTerminal::Released,
+                    resource: ContextResourceDisposition::Destroyed,
+                },
+            )
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -371,6 +426,20 @@ mod tests {
 
     fn lease_id(value: u64) -> ContextProfileLeaseId {
         ContextProfileLeaseId::new(value).expect("lease id")
+    }
+
+    fn release_proof(
+        identity: ContextIdentity,
+        outcome: AgentSupervisorContextReleaseOutcome,
+    ) -> AgentSupervisorContextRelease {
+        AgentSupervisorContextRelease::for_profile_lease_test(identity, outcome)
+    }
+
+    fn queued_release(identity: ContextIdentity) -> AgentSupervisorContextRelease {
+        release_proof(
+            identity,
+            AgentSupervisorContextReleaseOutcome::QueuedCancelled,
+        )
     }
 
     #[test]
@@ -467,7 +536,9 @@ mod tests {
             ),
             Err(ContextProfileLeaseError::ProfileRetired)
         );
-        registry.release(first).expect("release first");
+        registry
+            .release(first, queued_release(first.identity()))
+            .expect("release first");
         assert!(registry.leases_for_profile(ProfileId::from(100)).is_empty());
         assert_eq!(registry.lease(second.identity().id()), Some(second));
     }
@@ -488,7 +559,7 @@ mod tests {
             ..retained
         };
         assert_eq!(
-            registry.release(stale),
+            registry.release(stale, queued_release(retained.identity())),
             Err(ContextProfileLeaseError::StaleLease)
         );
         let substituted_storage = ContextProfileLease {
@@ -496,10 +567,89 @@ mod tests {
             ..retained
         };
         assert_eq!(
-            registry.release(substituted_storage),
+            registry.release(substituted_storage, queued_release(retained.identity())),
             Err(ContextProfileLeaseError::StaleLease)
         );
         assert_eq!(registry.lease(retained.identity().id()), Some(retained));
+    }
+
+    #[test]
+    fn release_requires_exact_supervisor_owned_resource_disposition() {
+        let mut registry = ContextProfileLeaseRegistry::new();
+        let lease = registry
+            .acquire(
+                lease_id(1),
+                identity(1, 100, ContextKind::Owned),
+                DURABLE,
+                ContextProfileLeasePurpose::Owned,
+            )
+            .expect("lease");
+        assert_eq!(
+            registry.release(lease, queued_release(identity(2, 100, ContextKind::Owned))),
+            Err(ContextProfileLeaseError::ReleaseProof)
+        );
+        assert_eq!(
+            registry.release(
+                lease,
+                release_proof(
+                    lease.identity(),
+                    AgentSupervisorContextReleaseOutcome::Retired {
+                        terminal: ContextTerminal::Released,
+                        resource: ContextResourceDisposition::ExistingBrowseRetained,
+                    },
+                ),
+            ),
+            Err(ContextProfileLeaseError::ReleaseProof)
+        );
+        assert_eq!(registry.lease(lease.identity().id()), Some(lease));
+        assert_eq!(
+            registry.release(
+                lease,
+                release_proof(
+                    lease.identity(),
+                    AgentSupervisorContextReleaseOutcome::Retired {
+                        terminal: ContextTerminal::Closed,
+                        resource: ContextResourceDisposition::Destroyed,
+                    },
+                ),
+            ),
+            Ok(lease.identity())
+        );
+    }
+
+    #[test]
+    fn every_context_kind_has_only_its_exact_terminal_profile_release() {
+        assert!(profile_release_outcome_matches(
+            ContextProfileLeasePurpose::Owned,
+            AgentSupervisorContextReleaseOutcome::Retired {
+                terminal: ContextTerminal::Adopted,
+                resource: ContextResourceDisposition::TransferredToBrowse,
+            }
+        ));
+        assert!(profile_release_outcome_matches(
+            ContextProfileLeasePurpose::BorrowedTab,
+            AgentSupervisorContextReleaseOutcome::Retired {
+                terminal: ContextTerminal::Released,
+                resource: ContextResourceDisposition::ExistingBrowseRetained,
+            }
+        ));
+        assert!(profile_release_outcome_matches(
+            ContextProfileLeasePurpose::HumanSignInHandoff,
+            AgentSupervisorContextReleaseOutcome::Retired {
+                terminal: ContextTerminal::Released,
+                resource: ContextResourceDisposition::Destroyed,
+            }
+        ));
+        for purpose in [
+            ContextProfileLeasePurpose::Owned,
+            ContextProfileLeasePurpose::BorrowedTab,
+            ContextProfileLeasePurpose::HumanSignInHandoff,
+        ] {
+            assert!(profile_release_outcome_matches(
+                purpose,
+                AgentSupervisorContextReleaseOutcome::QueuedCancelled
+            ));
+        }
     }
 
     #[test]
@@ -549,7 +699,9 @@ mod tests {
             ),
             Err(ContextProfileLeaseError::ShutdownSealed)
         );
-        registry.release(lease).expect("release");
+        registry
+            .release(lease, queued_release(lease.identity()))
+            .expect("release");
         assert!(registry.is_quiescent());
     }
 }
