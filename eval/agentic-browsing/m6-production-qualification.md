@@ -247,13 +247,16 @@ agentic-owned Windows modules. Cross-compilation is not device behavior.
   rejoins the serialized target DOM-focus bit to a retained focus event on the
   exact intended target; clearing the summary theft Booleans cannot hide a
   contradictory serialized focus sequence. Qualified rows additionally require
-  a joint nonzero bounded WebView2 helper-process and aggregate resident-working-
-  set sample on both sides of the action. The cross-compiled adapter rejects
-  duplicate/invalid or changed PID sets, partial query-limited handle or memory
-  queries, close failure, overflow, and more than 64 processes; it holds the
-  handles through an exact post-sample Environment8 PID rejoin. Its exact-pinned
-  raw bindings remain optional behind the probe feature, and review schema v2
-  retains both maxima without emitting identity. After the
+  exactly one Browser-kind process plus a joint nonzero bounded derived helper-
+  process and aggregate Environment8-cohort resident-working-set sample on both
+  sides of the action. The cross-compiled adapter rejects duplicate/invalid or
+  changed PID/kind cohorts, partial query-limited handle or memory queries,
+  close failure, overflow, and more than 64 total processes; it holds the
+  handles through an exact post-sample Environment8 PID/total/helper rejoin.
+  WebView2 excludes crashpad from this API, so the sum is not a whole-process-
+  family or resource-budget measurement. Its exact-pinned raw bindings remain
+  optional behind the probe feature, and review schema v2 retains both maxima
+  without emitting identity. After the
   final HWND control poll, the adapter samples both queues, rejoins document
   HWND/thread/process/layout, and only then derives the bounded window-message
   timeout. CDP uses the same final-poll/sample/submission order. The source gate
@@ -268,14 +271,17 @@ agentic-owned Windows modules. Cross-compilation is not device behavior.
 - The physical Windows semantic source gate now binds its content-free success
   fields to the closed snapshot verifiers, exact flood and renderer-loss
   refusals, native suspend/readback/resume result, semantic drain audit, and
-  teardown result. It also requires stable nonzero bounded WebView2 process and
-  aggregate resident-working-set observations before mode work and after the
-  semantic drain. Both Windows qualifiers share one release-excluded sampler:
+  teardown result. It also requires stable nonzero bounded WebView2 Environment8
+  process and aggregate resident-working-set observations before mode work and
+  after the semantic drain. Both Windows qualifiers share one release-excluded
+  sampler: exactly one Browser kind and at least one helper are required;
   query-limited non-inheritable handles remain owned through an exact
-  Environment8 PID-cohort rejoin, and any partial, changing, overflowing, or
-  close-failed observation is rejected. Protocol and review schema v5 retain
-  only the two maxima. Mutation tests replace each evidence class or resource
-  producer with an unconditional value and prove release qualification fails.
+  PID/total/helper cohort rejoin, and any partial, changing, overflowing, or
+  close-failed observation is rejected. WebView2 omits crashpad, so this is not
+  a whole-process-family or resource-budget measurement. Protocol and review
+  schema v5 retain only the two maxima. Mutation tests replace each evidence
+  class or resource producer with an unconditional value and prove release
+  qualification fails.
   The sampler and its exact-pinned Win32 dependency are absent from ordinary
   engine builds. This is producer integrity and cross-compile coverage, not
   physical Windows behavior or a resource-budget claim.

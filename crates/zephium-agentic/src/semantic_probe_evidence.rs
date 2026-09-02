@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    Platform, RuntimeFingerprint, MAX_CONTEXT_NAVIGATION_REDIRECTS, MAX_RESOURCE_HELPER_PROCESSES,
-    MAX_RESOURCE_RESIDENT_BYTES,
+    Platform, RuntimeFingerprint, MAX_CONTEXT_NAVIGATION_REDIRECTS, MAX_RESOURCE_RESIDENT_BYTES,
+    MAX_RESOURCE_WEBVIEW2_PROCESSES,
 };
 
 /// Version of the Windows semantic-probe result grammar.
@@ -118,7 +118,7 @@ pub struct WindowsSemanticTeardownEvidence {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WindowsSemanticResourceEvidence {
-    /// Complete process count returned for the exact ephemeral user-data folder.
+    /// Environment8 process count for the exact UDF; WebView2 omits crashpad.
     pub webview2_processes: u8,
     /// Checked aggregate resident working set for that exact process cohort.
     pub resident_bytes: u64,
@@ -225,7 +225,7 @@ impl WindowsSemanticProbeEvidence {
         if self.runtime.platform != Platform::Windows
             || self.runtime.engine.as_str() != "WebView2"
             || self.runtime.adapter_revision.as_str()
-                != "semantic-runtime-m3-lifecycle-m2-redirect-location-resources-v2"
+                != "semantic-runtime-m3-lifecycle-m2-redirect-location-resources-v3"
         {
             return Err(WindowsSemanticProbeValidationError::Runtime);
         }
@@ -253,7 +253,7 @@ impl WindowsSemanticProbeEvidence {
 
 const fn valid_resource_sample(sample: WindowsSemanticResourceEvidence) -> bool {
     sample.webview2_processes != 0
-        && sample.webview2_processes <= MAX_RESOURCE_HELPER_PROCESSES
+        && sample.webview2_processes <= MAX_RESOURCE_WEBVIEW2_PROCESSES
         && sample.resident_bytes != 0
         && sample.resident_bytes <= MAX_RESOURCE_RESIDENT_BYTES
 }
@@ -657,7 +657,7 @@ pub(crate) fn tests_fixture(mode: WindowsSemanticProbeMode) -> WindowsSemanticPr
             engine: EvidenceLabel::new("WebView2").expect("engine label"),
             engine_version: EvidenceLabel::new("140.0.0.0").expect("version label"),
             adapter_revision: EvidenceLabel::new(
-                "semantic-runtime-m3-lifecycle-m2-redirect-location-resources-v2",
+                "semantic-runtime-m3-lifecycle-m2-redirect-location-resources-v3",
             )
             .expect("adapter label"),
         },
@@ -804,6 +804,15 @@ mod tests {
 
         let mut evidence = tests_fixture(mode);
         evidence.resources_before.webview2_processes = 0;
+        assert_eq!(
+            qualify_windows_semantic_probe_evidence(mode, &evidence),
+            Err(WindowsSemanticProbeQualificationError::Evidence(
+                WindowsSemanticProbeValidationError::Bounds,
+            ))
+        );
+
+        let mut evidence = tests_fixture(mode);
+        evidence.resources_before.webview2_processes = MAX_RESOURCE_WEBVIEW2_PROCESSES + 1;
         assert_eq!(
             qualify_windows_semantic_probe_evidence(mode, &evidence),
             Err(WindowsSemanticProbeQualificationError::Evidence(

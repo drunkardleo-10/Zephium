@@ -137,23 +137,28 @@ key-up messages to acquire inconsistent scan metadata.
   validated runtime labels. Paths, handles, PIDs, URLs, profile data, page
   content, native errors, and CDP responses are not emitted.
 - Qualification requires the WebView2 Environment8 process inventory to yield
-  a nonzero bounded helper-process count and aggregate resident working set both
-  before and after every row. One snapshot may contain at most 64 unique,
-  nonzero PIDs. The adapter opens each through a non-inheritable
+  exactly one Browser-kind process, a nonzero derived helper-process count, and
+  an aggregate resident working set both before and after every row. One API
+  snapshot may contain at most 64 unique, nonzero PIDs across Browser and helper
+  kinds. The adapter opens each through a non-inheritable
   `PROCESS_QUERY_LIMITED_INFORMATION` handle, reads `WorkingSetSize`, and
   checked-sums under the 1 TiB evidence ceiling. An owned guard closes every
   successfully opened handle on all return paths and requires explicit close
   success for an accepted sample. The adapter holds all handles while it
-  re-reads and exactly rejoins the sorted Environment8 PID set, preventing
-  process churn or PID reuse from becoming accepted evidence. A missing,
-  changed, partial, duplicate, zero, overflowing, inaccessible, or close-failed
-  sample fails qualification; no PID or handle enters evidence. The
+  re-reads and exactly rejoins the sorted Environment8 PID set plus its total
+  and helper counts, preventing process churn, kind substitution, or PID reuse
+  from becoming accepted evidence. `GetProcessInfos` omits crashpad, so the
+  resident sum covers the exact reported API cohort and is not a whole-process-
+  family or resource-budget measurement. A missing, changed, partial,
+  duplicate, zero, overflowing, inaccessible, or close-failed sample fails
+  qualification; no PID or handle enters evidence. The
   exact-pinned raw Win32 binding dependency is optional and activated only by
   the release-excluded input or semantic probe feature. Both Windows physical
   qualifiers reuse this one sampler implementation. The
   producer/qualifier pair requires adapter revision
-  `native-input-m1-resources-v2`; review schema v2 retains the maximum process
-  count and resident bytes across the four required runs.
+  `native-input-m1-resources-v3`; review schema v2 retains the maximum derived
+  helper-process count and API-cohort resident bytes across the four required
+  runs.
 - Each physical mode writes one bounded versioned JSON response to its selected
   machine-evidence sink before qualification. A failed behavioral gate
   therefore retains redacted case evidence instead of collapsing to a generic

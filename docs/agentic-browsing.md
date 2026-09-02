@@ -671,16 +671,19 @@ as non-dispatching must retain no event, target, focus, activation, navigation,
 popup, or clipboard effect. Popup and clipboard results additionally rejoin
 their dedicated native request and closed gate fields; a generic `Unsupported`
 label cannot stand in for evidence that the intended control was reached. A
-qualified Windows row also requires a joint nonzero bounded WebView2
-helper-process count and aggregate resident-working-set sample before and after
-the action. The adapter obtains each count from one Environment8 process
-snapshot, rejects zero, duplicate, or more than 64 process IDs, opens only
-query-limited non-inheritable handles, closes each through an owned guard, and
-checked-sums `WorkingSetSize` under a 1 TiB evidence ceiling. It holds those
-handles while re-reading and exactly rejoining the sorted Environment8 PID
-snapshot, closing the process-exit/PID-reuse gap. Any unavailable, changed, or
-partial sample rejects the row; the content-free review aggregate retains both
-maxima without emitting process IDs. The required raw Win32 bindings are
+qualified Windows row also requires exactly one Browser-kind process plus a
+joint nonzero bounded derived helper-process count and aggregate resident-
+working-set sample before and after the action. The adapter obtains each count
+from one Environment8 process snapshot, rejects zero, duplicate, or more than
+64 total process IDs, opens only query-limited non-inheritable handles, closes
+each through an owned guard, and checked-sums `WorkingSetSize` under a 1 TiB
+evidence ceiling. It holds those handles while re-reading and exactly rejoining
+the sorted Environment8 PID, total-count, and helper-count cohort, closing the
+process-exit/PID-reuse and kind-substitution gaps. `GetProcessInfos` excludes
+crashpad, so the resident sum covers the reported API cohort and is not a
+whole-process-family or resource-budget measurement. Any unavailable, changed,
+or partial sample rejects the row; the content-free review aggregate retains
+both maxima without emitting process IDs. The required raw Win32 bindings are
 an exact-pinned optional dependency activated only by the release-excluded
 input or semantic probe features. The same sampler qualifies the seven-mode
 Windows semantic-runtime harness before mode-specific work and after semantic
@@ -1423,7 +1426,8 @@ sources rather than copying another browser agent's architecture:
   define platform frame observation constraints.
 - [WebView2 `ICoreWebView2Environment8::GetProcessInfos`](https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2environment8#getprocessinfos)
   defines the user-data-folder process snapshot and process-ID surface used by
-  both release-excluded Windows qualifiers' shared bounded resource sampler.
+  both release-excluded Windows qualifiers' shared bounded resource sampler;
+  the contract explicitly omits the crashpad process.
 - [Win32 `GetProcessMemoryInfo`](https://learn.microsoft.com/en-us/windows/win32/api/psapi/nf-psapi-getprocessmemoryinfo)
   defines the query-limited process-handle and working-set measurement used for
   aggregate resident bytes. Partial or inaccessible samples fail qualification.

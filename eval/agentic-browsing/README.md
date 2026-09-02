@@ -197,8 +197,10 @@ review; a typed rejection, partial matrix, runtime substitution, focus theft,
 or failed fixture makes the review command nonzero. The exact
 `--write-summary` form instead writes those same validated UTF-8 aggregate
 bytes to the fixed create-new `windows-review-summary-v2.json` filename. Review
-schema v2 includes maximum WebView2 process count and aggregate resident
-working-set bytes; individual process identities remain absent. The aggregate
+schema v2 includes maximum derived helper-process count and aggregate
+Environment8-cohort resident working-set bytes; individual process identities
+remain absent. WebView2 excludes crashpad from that API, so this is not a
+whole-process-family measurement. The aggregate
 remains ignored until reviewed into the committed manifest.
 
 The production Windows semantic adapter has a separate seven-process physical
@@ -214,12 +216,15 @@ Every accepted document also consumes the production `SourceChanged`/
 `HistoryChanged` claim by sampling WebView2's bounded native `Source`, parsing
 the canonical target, and requiring it to equal the committed URL. A pending,
 dirty, substituted, or teardown-surviving location claim fails the run.
-Every mode also takes a stable, bounded WebView2 process-cohort and aggregate
-resident-working-set sample before its mode-specific work and after semantic
-work drains. Sampling admits at most 64 unique nonzero process IDs, opens only
-non-inheritable query-limited handles, checked-sums under 1 TiB, and exactly
-rejoins the Environment8 PID cohort while those handles remain owned. Missing,
-partial, changed, overflowing, or close-failed samples reject the run; process
+Every mode also takes a stable, bounded WebView2 Environment8 process-cohort
+and aggregate resident-working-set sample before its mode-specific work and
+after semantic work drains. Qualification requires exactly one Browser kind
+and at least one helper, admits at most 64 unique nonzero process IDs, opens
+only non-inheritable query-limited handles, checked-sums under 1 TiB, and
+exactly rejoins the PID, total-count, and helper-count cohort while those
+handles remain owned. `GetProcessInfos` excludes crashpad, so the aggregate is
+not a whole-process-family or resource-budget measurement. Missing, partial,
+changed, overflowing, or close-failed samples reject the run; process
 identities never enter evidence.
 
 Run the six non-debugger modes as ordinary processes on an authorized
@@ -289,7 +294,7 @@ cargo run --locked -p zephium-agentic `
 
 The offline reviewer requires one identical Windows/WebView2/adapter
 fingerprint. Protocol v5 and the
-`semantic-runtime-m3-lifecycle-m2-redirect-location-resources-v2` adapter revision
+`semantic-runtime-m3-lifecycle-m2-redirect-location-resources-v3` adapter revision
 prevent older six-record results from mixing with this cohort. It
 also requires exact mode-specific snapshot, document-epoch, suspension,
 pressure, bounded redirect/refusal/recovery, same-document native replacement/

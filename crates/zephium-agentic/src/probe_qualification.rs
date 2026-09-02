@@ -264,7 +264,7 @@ pub fn qualify_windows_probe_evidence(
     evidence.validate()?;
     if evidence.runtime.platform != Platform::Windows
         || evidence.runtime.engine.as_str() != "WebView2"
-        || evidence.runtime.adapter_revision.as_str() != "native-input-m1-resources-v2"
+        || evidence.runtime.adapter_revision.as_str() != "native-input-m1-resources-v3"
     {
         return Err(WindowsProbeQualificationError::Runtime);
     }
@@ -697,7 +697,7 @@ fn tests_fixture(mode: WindowsProbeMode) -> RunEvidence {
             os_version: label("10.0.26100"),
             engine: label("WebView2"),
             engine_version: label("140.0.0.0"),
-            adapter_revision: label("native-input-m1-resources-v2"),
+            adapter_revision: label("native-input-m1-resources-v3"),
         },
         capabilities: WINDOWS_PROBE_CAPABILITIES.to_vec(),
         peak_queue_depth: 1,

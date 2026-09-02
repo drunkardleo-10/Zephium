@@ -18,6 +18,8 @@ pub const MAX_CASE_EVIDENCE: usize = 128;
 pub const MAX_EVENT_EVIDENCE: usize = 64;
 /// Maximum browser-helper processes retained in one resource sample.
 pub const MAX_RESOURCE_HELPER_PROCESSES: u8 = 64;
+/// Maximum WebView2 Environment8 processes retained in one resource sample.
+pub const MAX_RESOURCE_WEBVIEW2_PROCESSES: u8 = 64;
 /// Maximum aggregate resident bytes retained in one resource sample.
 pub const MAX_RESOURCE_RESIDENT_BYTES: u64 = 1 << 40;
 const MAX_CAPABILITIES: usize = 8;

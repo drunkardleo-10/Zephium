@@ -511,12 +511,15 @@ reviewer require one identical runtime fingerprint and exact focus, pending,
 process, profile, fixture, and teardown facts. Before mode-specific work and
 after semantic work drains, the qualifier also uses the same release-excluded
 sampler as M1 to measure the exact ephemeral user-data-folder's stable WebView2
-process cohort and checked aggregate resident working set. The sampler permits
-at most 64 unique nonzero PIDs, owns query-limited non-inheritable handles
-through an exact Environment8 PID rejoin, closes them on every path, and fails
+Environment8 process cohort and checked aggregate resident working set. The
+sampler requires exactly one Browser kind and at least one helper, permits at
+most 64 unique nonzero PIDs, owns query-limited non-inheritable handles through
+an exact PID/total/helper cohort rejoin, closes them on every path, and fails
 closed on an unavailable, partial, changed, overflowing, or close-failed
-sample. Protocol v5 and review schema v5 require both observations and retain
-only their process-count and resident-byte maxima, never process identity. The
+sample. WebView2 omits crashpad from this API, so the observation is not a
+whole-process-family or resource-budget measurement. Protocol v5 and review
+schema v5 require both observations and retain only their total process-count
+and resident-byte maxima, never process identity. The
 runner and reviewer share the input qualifier's direct directory/file checks
 and additionally reject every Windows filesystem object carrying
 `FILE_ATTRIBUTE_REPARSE_POINT`,

@@ -2086,7 +2086,7 @@ fn live_resource_sample(
     Ok(ResourceEvidence {
         native_views: 1,
         queued_actions: 0,
-        helper_processes: sample.map(|sample| sample.processes),
+        helper_processes: sample.and_then(|sample| sample.processes.checked_sub(1)),
         resident_bytes: sample.map(|sample| sample.resident_bytes),
     })
 }
@@ -2137,7 +2137,7 @@ fn runtime_fingerprint() -> Result<RuntimeFingerprint, AdapterError> {
         engine: EvidenceLabel::new("WebView2").map_err(|_| AdapterError::InvalidEvidence)?,
         engine_version: EvidenceLabel::new(engine_version)
             .map_err(|_| AdapterError::InvalidEvidence)?,
-        adapter_revision: EvidenceLabel::new("native-input-m1-resources-v2")
+        adapter_revision: EvidenceLabel::new("native-input-m1-resources-v3")
             .map_err(|_| AdapterError::InvalidEvidence)?,
     })
 }
