@@ -596,6 +596,11 @@ not rewrite or overtake the lifecycle settlement.
 This is unit, static-boundary, and macOS/Windows compile evidence. The new
 observer path has not yet received a dedicated physical same-document fixture
 qualification, and it does not promote presentation support.
+The release-excluded Windows semantic qualifier does now retain and settle
+ordinary full-navigation `SourceChanged`/`HistoryChanged` claims against the
+exact committed native `Source`; it refuses a pending, dirty, substituted, or
+teardown-surviving claim. That closes the qualifier's multi-navigation harness
+without claiming the still-unrun same-document replacement behavior.
 
 ## Bounded identity-bearing redirects
 

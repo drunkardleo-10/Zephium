@@ -510,6 +510,12 @@ process, profile, fixture, and teardown facts. The runner and reviewer share
 the input qualifier's direct directory/file checks and additionally reject
 every Windows filesystem object carrying `FILE_ATTRIBUTE_REPARSE_POINT`,
 including junctions and mount points that are not ordinary symbolic links.
+The runner also handles the production `SourceChanged`/`HistoryChanged`
+observer instead of discarding its callback: after every accepted load it
+samples only the bounded native `Source`, requires the exact canonical
+committed target, settles the one claimed callback, and refuses semantic
+results or teardown while the location gate is pending or dirty. The static
+gate mutation-tests that callback, sample, settlement, and result recheck.
 The release gate also binds each reported success fact back to its closed
 producer check: first/replacement snapshot verification, exact flood and
 renderer-loss refusal, native suspend/readback/resume, semantic drain, and

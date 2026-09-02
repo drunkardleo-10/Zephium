@@ -209,6 +209,7 @@ unsafe extern "system" fn probe_window_proc(
 #[derive(Default)]
 struct CallbackState {
     navigation: RefCell<Option<AgentNavigationTerminal>>,
+    location_check_pending: Cell<bool>,
     renderer_lost: Cell<bool>,
     browser_lost: Cell<bool>,
     invariant_failures: Cell<u8>,
@@ -218,6 +219,12 @@ struct CallbackState {
 }
 
 impl CallbackState {
+    fn request_location_check(&self) {
+        if self.location_check_pending.replace(true) {
+            self.record_invariant();
+        }
+    }
+
     fn record_invariant(&self) {
         if let Some(next) = self.invariant_failures.get().checked_add(1) {
             self.invariant_failures.set(next);
@@ -499,6 +506,7 @@ pub(crate) fn run(
             .map_err(|_| ProbeError::harness(WindowsSemanticProbeStage::Construct))?;
 
         let navigation_callbacks = Rc::clone(&callbacks);
+        let location_callbacks = Rc::clone(&callbacks);
         let renderer_callbacks = Rc::clone(&callbacks);
         let browser_callbacks = Rc::clone(&callbacks);
         let invariant_callbacks = Rc::clone(&callbacks);
@@ -531,7 +539,7 @@ pub(crate) fn run(
                     }
                     navigation_callbacks.record_invariant();
                 },
-                || {},
+                move || location_callbacks.request_location_check(),
                 move || renderer_callbacks.renderer_lost.set(true),
                 move || browser_callbacks.browser_lost.set(true),
                 move || invariant_callbacks.record_invariant(),
@@ -610,6 +618,8 @@ pub(crate) fn run(
         if callbacks.fatal(allowance)
             || native_guard.failed()
             || !facts.semantic_work_drained
+            || callbacks.location_check_pending.get()
+            || !owned.navigation().location_stable_for_result()
             || !server.is_healthy()
         {
             return Err(ProbeError::verify(WindowsSemanticProbeStage::Verify));
@@ -865,6 +875,7 @@ fn execute_mode(
         WindowsSemanticProbeMode::HiddenSuspendResume => {
             wait_for_semantic_drain(
                 view,
+                &first_url,
                 callbacks,
                 CallbackAllowance::NONE,
                 host,
@@ -942,6 +953,7 @@ fn execute_mode(
             }
             wait_for_semantic_drain(
                 view,
+                &flood_url,
                 callbacks,
                 CallbackAllowance::EVENT_FLOOD,
                 host,
@@ -1298,6 +1310,7 @@ fn navigate_with_redirects(
         && Instant::now() < deadline
     {
         pump_and_sample(deadline, host, Some(view.view()), native_guard)?;
+        settle_expected_location(view, &expected_final, callbacks)?;
     }
     let terminal = callbacks
         .navigation
@@ -1332,8 +1345,10 @@ fn navigate_with_redirects(
             if pump_and_sample(deadline, host, Some(view.view()), native_guard).is_err() {
                 break;
             }
+            settle_expected_location(view, &expected_final, callbacks)?;
         }
     }
+    settle_expected_location(view, &expected_final, callbacks)?;
     let disarmed = view.navigation().disarm(operation);
     registry
         .settle_navigation(
@@ -1353,6 +1368,8 @@ fn navigate_with_redirects(
         || native_guard.failed()
         || !terminal_claimed.load(Ordering::Acquire)
         || audit.limit_refused()
+        || callbacks.location_check_pending.get()
+        || !view.navigation().location_stable_for_result()
     {
         return Err(ProbeError::verify(WindowsSemanticProbeStage::Navigate));
     }
@@ -1360,6 +1377,26 @@ fn navigate_with_redirects(
         .join(id)
         .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Navigate))?;
     Ok((context, audit.redirects_observed()))
+}
+
+fn settle_expected_location(
+    view: &AgentOwnedView,
+    expected: &ContextNavigationTarget,
+    callbacks: &CallbackState,
+) -> ProbeResult<()> {
+    if !callbacks.location_check_pending.replace(false) {
+        return Ok(());
+    }
+    let sampled =
+        super::current_url(view.view()).and_then(|url| ContextNavigationTarget::parse(&url).ok());
+    if sampled.as_ref() != Some(expected) {
+        super::stop_loading(view.view());
+        let _ = view.navigation().finish_location_check(false);
+        return Err(ProbeError::verify(WindowsSemanticProbeStage::Navigate));
+    }
+    view.navigation()
+        .finish_location_check(false)
+        .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Navigate))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1493,6 +1530,8 @@ fn capture_outcome(
     run_deadline: Instant,
     peak_pending: &mut u8,
 ) -> ProbeResult<Result<SemanticSnapshot, SemanticRuntimePortFailure>> {
+    let expected_target = ContextNavigationTarget::parse(url)
+        .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Observe))?;
     let origin = SemanticOrigin::parse(url)
         .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Observe))?;
     let frame = SemanticFrameJoin::try_new(
@@ -1506,7 +1545,11 @@ fn capture_outcome(
     let deadline = earlier_deadline(run_deadline, SNAPSHOT_TIMEOUT)?;
 
     for retry in 0..MAX_DOCUMENT_LOADING_RETRIES {
+        settle_expected_location(view, &expected_target, callbacks)?;
         if callbacks.fatal(allowance) || native_guard.failed() {
+            return Err(ProbeError::verify(WindowsSemanticProbeStage::Observe));
+        }
+        if !view.navigation().location_stable_for_result() {
             return Err(ProbeError::verify(WindowsSemanticProbeStage::Observe));
         }
         if Instant::now() >= deadline {
@@ -1564,6 +1607,7 @@ fn capture_outcome(
             && Instant::now() < deadline
         {
             pump_and_sample(deadline, host, Some(view.view()), native_guard)?;
+            settle_expected_location(view, &expected_target, callbacks)?;
         }
         if completion_failed.get() || callbacks.fatal(allowance) || native_guard.failed() {
             return Err(ProbeError::verify(WindowsSemanticProbeStage::Observe));
@@ -1581,11 +1625,16 @@ fn capture_outcome(
             }
             return Err(ProbeError::verify(WindowsSemanticProbeStage::Observe));
         };
+        settle_expected_location(view, &expected_target, callbacks)?;
+        if !view.navigation().location_stable_for_result() {
+            return Err(ProbeError::verify(WindowsSemanticProbeStage::Observe));
+        }
         match outcome {
             Err(SemanticRuntimePortFailure::Result(SemanticRuntimeResultError::Runtime(
                 SemanticRuntimeFault::DocumentLoading,
             ))) => {
                 pump_and_sample(deadline, host, Some(view.view()), native_guard)?;
+                settle_expected_location(view, &expected_target, callbacks)?;
             }
             terminal => return Ok(terminal),
         }
@@ -1595,14 +1644,18 @@ fn capture_outcome(
 
 fn wait_for_semantic_drain(
     view: &AgentOwnedView,
+    expected_url: &str,
     callbacks: &CallbackState,
     allowance: CallbackAllowance,
     host: &ProbeHostWindow,
     native_guard: &NativeStateGuard,
     run_deadline: Instant,
 ) -> ProbeResult<()> {
+    let expected_target = ContextNavigationTarget::parse(expected_url)
+        .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Fault))?;
     let deadline = earlier_deadline(run_deadline, SNAPSHOT_TIMEOUT)?;
     loop {
+        settle_expected_location(view, &expected_target, callbacks)?;
         if callbacks.fatal(allowance) || native_guard.failed() {
             return Err(ProbeError::verify(WindowsSemanticProbeStage::Fault));
         }
@@ -1845,6 +1898,7 @@ fn teardown(
         .navigation
         .try_borrow()
         .is_ok_and(|slot| slot.is_none())
+        && !callbacks.location_check_pending.get()
         && !callbacks.suspend_callback_pending.get()
         && !callbacks.fatal(expected_allowance);
     TeardownResult {

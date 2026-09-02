@@ -1401,7 +1401,11 @@ impl AgentNavigationController {
 
     /// Revalidates that a semantic or visual result did not race any native
     /// location signal, replacement rejoin, page load, or renderer loss.
-    #[cfg(any(target_os = "macos", test))]
+    #[cfg(any(
+        target_os = "macos",
+        test,
+        all(target_os = "windows", feature = "native-agentic-semantic-probe")
+    ))]
     pub(crate) fn location_stable_for_result(&self) -> bool {
         self.state.lock().is_ok_and(|state| {
             state.location_ready

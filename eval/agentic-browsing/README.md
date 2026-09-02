@@ -205,6 +205,10 @@ subprofile whose extension inventory is proven empty, one fixed 1280-by-800
 logical owned view, and only loopback fixtures. The release-excluded renderer
 case issues the sole fixed `Page.crash` diagnostic command against that local
 view; no generic CDP method, expression, selector, or target is accepted.
+Every accepted document also consumes the production `SourceChanged`/
+`HistoryChanged` claim by sampling WebView2's bounded native `Source`, parsing
+the canonical target, and requiring it to equal the committed URL. A pending,
+dirty, substituted, or teardown-surviving location claim fails the run.
 
 Run the five non-debugger modes as ordinary processes on an authorized
 physical Windows device:

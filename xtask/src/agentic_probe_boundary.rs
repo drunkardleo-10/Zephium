@@ -2703,10 +2703,15 @@ fn validate_windows_semantic_probe(
         "ContextOwnedViewport::STANDARD",
         "AgentOwnedProfile::automation(profile_id)",
         "build_owned_agent_view(",
+        "move||location_callbacks.request_location_check()",
         "ContextConstructionProof::WindowsOwnedAutomationSubprofileEmptyInventory",
         "NativeContentPolicy::AllowAll",
         "view.prepare_semantic_document_load()",
         "view.navigation().document_finished_for_audit(operation)",
+        "super::current_url(view.view())",
+        "view.navigation().finish_location_check(false).map_err(|_|ProbeError::verify(WindowsSemanticProbeStage::Navigate))",
+        "view.navigation().location_stable_for_result()",
+        "!callbacks.location_check_pending.get()",
         "view.dispatch_semantic(",
         "view.semantic_work_drained_for_audit()",
         "AgentSuspendClaim::new()",
@@ -10415,6 +10420,14 @@ mod tests {
             (
                 "facts.suspended_state_attested = true;",
                 "facts.suspended_state_attested = false;",
+            ),
+            (
+                "move || location_callbacks.request_location_check(),",
+                "|| {},",
+            ),
+            (
+                "    view.navigation()\n        .finish_location_check(false)\n        .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Navigate))",
+                "    Ok(())",
             ),
             (
                 "semantic_work_drained: facts.semantic_work_drained",
