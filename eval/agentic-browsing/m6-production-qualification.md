@@ -71,6 +71,15 @@ separately authorized run and human aggregate review occur.
   materialization and a second check after request construction but before the
   send future can be polled. Mutation tests prove each protection and ordering
   edge is required; and
+- requires the agentic functional core, dormant provider transport, and the
+  same complete inventory of 16 dedicated production engine modules to deny
+  direct Clippy `unwrap`, `panic`, and `unreachable` findings outside test
+  builds. The Windows semantic-protocol gate additionally requires the three
+  parameter-free control commands to use one compile-time-bounded literal
+  payload and rejects a fallible JSON-construction/`expect` regression. These
+  checks cover explicit invariant-abort mechanisms in owned source; they do
+  not prove freedom from allocation failure, bounds-check panics, dependency
+  defects, or every possible Rust panic source; and
 - pins the provider's 64 KiB response-header ceiling at both available layers:
   reqwest configures the pre-decode HTTP/2 list limit, then a zero-allocation
   checked pass accounts every decoded field's name, value, and 32-byte
@@ -205,6 +214,8 @@ cargo test --locked -p xtask agentic_evidence
 cargo test --locked -p xtask agentic_probe_boundary
 cargo test --locked -p zephium-app --features agentic-browser
 cargo xtask check-agentic-probe-boundary
+cargo clippy --locked -p zephium-agentic --all-features --all-targets -- -D warnings
+cargo clippy --locked -p zephium-agent-provider-transport --all-targets -- -D warnings
 cargo clippy --locked -p xtask --all-targets -- -D warnings
 cargo clippy --locked -p zephium-app --all-targets --features agentic-browser -- -D warnings
 cargo clippy --locked -p zephium-engine --features agentic-browser --all-targets -- -D warnings
@@ -480,6 +491,20 @@ agentic-owned Windows modules. Cross-compilation is not device behavior.
   bound-view/loading unit path and release source mutation gate replace the
   former duplicated-precheck `unreachable!()` assumption; no native execution
   or device behavior is claimed by that deterministic test.
+- The full owned production inventory now carries a compile-time refusal for
+  direct `unwrap`, `panic`, and `unreachable` findings: the agentic core,
+  dormant provider transport, and all 16 dedicated engine agentic modules.
+  Host all-feature/all-target Clippy passed for the two crates and engine graph;
+  the two release-excluded Windows qualification binaries also passed their
+  exact native-feature Clippy builds against the installed x86-64 MSVC target.
+  Those cross-target builds emitted only the already documented shared
+  target-CFG warning baseline. The Windows semantic protocol's three empty
+  control commands now allocate their owned `"{}"` string directly under a
+  compile-time size assertion instead of allocating a temporary JSON value and
+  relying on `expect`. Unit and source-mutation tests pin the payload, response
+  ceiling, constructor count, and abort refusal. This is compile/source
+  evidence only; it does not qualify physical Windows behavior or establish a
+  general release-panic-recovery guarantee.
 - A separate optional run-local progress reducer now streams canonical semantic
   audit events and derives observed initial-queue, model, effect, human-wait,
   and root elapsed durations, closed `NeedsHuman` counts, distinct human-

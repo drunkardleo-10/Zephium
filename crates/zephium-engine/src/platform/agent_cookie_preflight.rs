@@ -1,4 +1,8 @@
 #![deny(clippy::dbg_macro, clippy::print_stderr, clippy::print_stdout)]
+#![cfg_attr(
+    not(test),
+    deny(clippy::panic, clippy::unreachable, clippy::unwrap_used)
+)]
 
 //! Secret-safe, bounded preflight for native Windows cookie transfer.
 //!

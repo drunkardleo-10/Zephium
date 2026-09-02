@@ -467,6 +467,15 @@ The source gate forbids document-start registration, `Runtime.evaluate`,
 generic method strings, Web messages, host objects, DOM selectors, input CDP,
 and message-pump or worker escape hatches.
 
+The parameter-free frame-tree, runtime-enable, and runtime-disable commands
+share one literal `"{}"` payload with a compile-time assertion against the
+control-parameter ceiling. Their direct constructor performs only the owned
+string allocation required by the native command value; it cannot fail through
+JSON serialization and no longer converts that fixed invariant into an
+`expect`. The exact method, payload, and response ceiling are unit-tested, and
+the release source gate rejects either an invariant-abort call or a replacement
+that bypasses the fixed constructor.
+
 The original named `Page.addScriptToEvaluateOnNewDocument` design was rejected
 after reviewing current Blink implementation rather than trusting the protocol
 surface alone. Blink's `EvaluateScriptOnNewDocument` creates a named inspector

@@ -9,6 +9,10 @@
 #![deny(missing_docs)]
 #![deny(unsafe_code)]
 #![deny(clippy::dbg_macro, clippy::print_stderr, clippy::print_stdout)]
+#![cfg_attr(
+    not(test),
+    deny(clippy::panic, clippy::unreachable, clippy::unwrap_used)
+)]
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};

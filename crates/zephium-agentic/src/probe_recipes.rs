@@ -427,7 +427,7 @@ pub fn windows_input_plan(
         | FixtureCase::Iframe
         | FixtureCase::OpenShadow
         | FixtureCase::ClosedShadow => {}
-        FixtureCase::Drag => unreachable!("drag returned above"),
+        FixtureCase::Drag => return None,
     }
     debug_assert!(steps.len() <= MAX_WINDOWS_INPUT_STEPS);
     Some(steps)

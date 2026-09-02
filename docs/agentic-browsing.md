@@ -282,6 +282,11 @@ name, so reusing a name across documents is forbidden. These requirements are
 grounded in the current primary
 [Blink inspector implementation](https://chromium.googlesource.com/chromium/src/third_party/+/34509812c5711b92703c48b0970f587c2fd442d3/blink/renderer/core/inspector/inspector_page_agent.cc#1041).
 Every use is fixed, audited, generation-bound, and covered by hostile tests.
+The three parameter-free Windows control commands are constructed directly
+from one immutable `"{}"` payload whose size is checked against the control
+ceiling at compile time. This avoids a temporary JSON value and a fallible
+constructor followed by an invariant abort; the only payload allocation is
+the owned string required at the native command boundary.
 The release-excluded M1 Windows fixture adapter uses only fixed
 `Runtime.evaluate` expressions with `userGesture: false` for bounded fixture
 observation and fixed semantic recipes. It issues only one CDP request at a
@@ -1025,6 +1030,15 @@ both carries and the structurally nonempty provider continuation above. This
 narrows avoidable exposure to the workspace `panic = "abort"` policy without
 claiming that allocation failure or defects outside these guarded seams are
 recoverable.
+
+Production builds of the agentic functional core, provider transport, and all
+sixteen dedicated engine agentic modules additionally deny direct Clippy
+`unwrap`, `panic`, and `unreachable` findings. The release source gate pins the
+complete current module inventory and mutation-tests both the lint contract
+and the fixed Windows control-command construction. This is a narrow rule
+against explicit invariant-abort mechanisms in owned code; it is not proof
+against allocation failure, bounds-check panics, dependency defects, or every
+possible Rust panic source.
 
 ## 12. Probe and test harness
 

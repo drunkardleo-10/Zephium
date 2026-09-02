@@ -147,6 +147,8 @@ const ENGINE_AGENTIC_NATIVE_UNSAFE_HEADER: &str = concat!(
 );
 const AGENTIC_NO_DIRECT_LOGGING_ATTRIBUTE: &str =
     "#![deny(clippy::dbg_macro,clippy::print_stderr,clippy::print_stdout)]";
+const AGENTIC_NO_INVARIANT_PANIC_ATTRIBUTE: &str =
+    "#![cfg_attr(not(test),deny(clippy::panic,clippy::unreachable,clippy::unwrap_used))]";
 const ENGINE_MACOS_PROBE_MODULE: &str =
     "crates/zephium-engine/src/platform/macos/agentic_input_probe.rs";
 const ENGINE_WINDOWS_PROBE_MODULE: &str =
@@ -208,6 +210,7 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     let agentic_root = read(repository.join(AGENTIC_ROOT))?;
     validate_root(&agentic_root)?;
     validate_agentic_no_direct_logging_attribute(AGENTIC_ROOT, &agentic_root)?;
+    validate_agentic_no_invariant_panic_attribute(AGENTIC_ROOT, &agentic_root)?;
     validate_agent_metrics_contract(
         &read(repository.join(AGENTIC_ROOT))?,
         &read(repository.join(AGENTIC_METRICS))?,
@@ -385,6 +388,10 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         PROVIDER_TRANSPORT_ROOT,
         &provider_transport_root,
     )?;
+    validate_agentic_no_invariant_panic_attribute(
+        PROVIDER_TRANSPORT_ROOT,
+        &provider_transport_root,
+    )?;
     validate_agentic_no_direct_logging_calls(PROVIDER_TRANSPORT_ROOT, &provider_transport_root)?;
     validate_provider_secret_diagnostic_contract(&provider_transport_root)?;
     validate_provider_revocation_before_secret_materialization(&provider_transport_root)?;
@@ -393,6 +400,7 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     for path in ENGINE_AGENTIC_PRODUCTION_MODULES {
         let source = read(repository.join(path))?;
         validate_agentic_no_direct_logging_attribute(path, &source)?;
+        validate_agentic_no_invariant_panic_attribute(path, &source)?;
         validate_agentic_no_direct_logging_calls(path, &source)?;
     }
     for path in ENGINE_AGENTIC_NATIVE_UNSAFE_MODULES {
@@ -521,6 +529,15 @@ fn validate_agentic_no_direct_logging_attribute(label: &str, source: &str) -> Re
     if !compact(source).contains(AGENTIC_NO_DIRECT_LOGGING_ATTRIBUTE) {
         return Err(format!(
             "production agentic module {label} must deny stdout, stderr, and dbg macros"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_agentic_no_invariant_panic_attribute(label: &str, source: &str) -> Result<(), String> {
+    if !compact(source).contains(AGENTIC_NO_INVARIANT_PANIC_ATTRIBUTE) {
+        return Err(format!(
+            "production agentic module {label} must deny unwrap, panic, and unreachable macros"
         ));
     }
     Ok(())
@@ -2130,6 +2147,10 @@ fn validate_engine_windows_semantic_protocol(module: &str, source: &str) -> Resu
         );
     }
 
+    let production = source
+        .split_once("\n#[cfg(test)]\nmod tests")
+        .map_or(source, |(production, _)| production);
+    let production = compact(production);
     let source = compact(source);
     for required in [
         "enumFixedSemanticCdpMethod",
@@ -2144,6 +2165,10 @@ fn validate_engine_windows_semantic_protocol(module: &str, source: &str) -> Resu
         "MAX_SEMANTIC_RUNTIME_REQUEST_BYTES",
         "MAX_SEMANTIC_WIRE_BYTES",
         "MAX_CONTROL_PARAMETERS_BYTES:usize=128*1_024",
+        "constEMPTY_CONTROL_PARAMETERS:&str=\"{}\";",
+        "assert!(EMPTY_CONTROL_PARAMETERS.len()<=MAX_CONTROL_PARAMETERS_BYTES);",
+        "fnempty_control_command(method:FixedSemanticCdpMethod)->FixedSemanticCdpCommand",
+        "parameters:EMPTY_CONTROL_PARAMETERS.to_owned()",
         "MAX_CONTEXT_EVENTS_PER_INVOCATION:u16=512",
         "MAX_CONTEXT_EVENT_BYTES_PER_INVOCATION:usize=512*1_024",
         "SemanticWorldName::from_nonce",
@@ -2168,6 +2193,17 @@ fn validate_engine_windows_semantic_protocol(module: &str, source: &str) -> Resu
                 "production Windows semantic CDP protocol lost required closed mechanism {required}"
             ));
         }
+    }
+    if production.contains("expect(")
+        || production.contains("unwrap(")
+        || production.contains("panic!")
+        || production.contains("unreachable!")
+        || production.matches("empty_control_command(").count() != 4
+    {
+        return Err(
+            "production Windows semantic CDP protocol regained an invariant abort or non-fixed empty command"
+                .to_owned(),
+        );
     }
     for forbidden in [
         "Page.addScriptToEvaluateOnNewDocument",
@@ -7657,10 +7693,16 @@ mod tests {
         );
         let valid = r#"
             #![deny(clippy::dbg_macro, clippy::print_stderr, clippy::print_stdout)]
+            #![cfg_attr(
+                not(test),
+                deny(clippy::panic, clippy::unreachable, clippy::unwrap_used)
+            )]
             fn content_free_observation() {}
         "#;
         validate_agentic_no_direct_logging_attribute("fixture", valid)
             .expect("compile-time direct-output lint");
+        validate_agentic_no_invariant_panic_attribute("fixture", valid)
+            .expect("compile-time invariant-abort lint");
         validate_agentic_no_direct_logging_calls("fixture", valid)
             .expect("content-free observation");
         assert!(validate_agentic_no_direct_logging_attribute(
@@ -7669,6 +7711,14 @@ mod tests {
                 "#![deny(clippy::dbg_macro, clippy::print_stderr, clippy::print_stdout)]",
                 ""
             )
+        )
+        .is_err());
+        assert!(validate_agentic_no_invariant_panic_attribute(
+            "fixture",
+            &valid.replace(
+                "deny(clippy::panic, clippy::unreachable, clippy::unwrap_used)",
+                "allow(clippy::panic, clippy::unreachable, clippy::unwrap_used)",
+            ),
         )
         .is_err());
         for forbidden in [
@@ -11569,6 +11619,14 @@ mod tests {
         assert!(validate_engine_windows_semantic_protocol(
             module,
             &source.replace("\"userGesture\": false", "\"userGesture\": true"),
+        )
+        .is_err());
+        assert!(validate_engine_windows_semantic_protocol(
+            module,
+            &source.replace(
+                "empty_control_command(FixedSemanticCdpMethod::RuntimeEnable)",
+                "command(FixedSemanticCdpMethod::RuntimeEnable, serde_json::json!({}), MAX_CONTROL_PARAMETERS_BYTES, MAX_CONTROL_RESPONSE_BYTES).expect(\"fixed\")",
+            ),
         )
         .is_err());
     }

@@ -1,4 +1,8 @@
 #![deny(clippy::dbg_macro, clippy::print_stderr, clippy::print_stdout)]
+#![cfg_attr(
+    not(test),
+    deny(clippy::panic, clippy::unreachable, clippy::unwrap_used)
+)]
 
 //! Closed WebView2 CDP vocabulary for the production semantic runtime.
 //!
@@ -36,6 +40,7 @@ pub(crate) const MAX_CONTEXT_EVENTS_PER_INVOCATION: u16 = 512;
 pub(crate) const MAX_CONTEXT_EVENT_BYTES_PER_INVOCATION: usize = 512 * 1_024;
 pub(crate) const MAX_INVOCATION_RESPONSE_BYTES: usize = 2 * MAX_SEMANTIC_WIRE_BYTES + 16 * 1_024;
 const MAX_INVOCATION_PARAMETERS_BYTES: usize = 8 * 1_024;
+const EMPTY_CONTROL_PARAMETERS: &str = "{}";
 const INSTALL_RESPONSE_MARKER: &str = "I1";
 const INSTALL_FUNCTION_PREFIX: &str = "function(){";
 const INSTALL_FUNCTION_SUFFIX: &str = concat!(
@@ -49,6 +54,10 @@ const INSTALL_FUNCTION_SUFFIX: &str = concat!(
 
 const INVOKE_FUNCTION: &str =
     "function(encoded){return globalThis.__zephiumSemanticRuntimeV1.invoke(encoded);}";
+
+const _: () = {
+    assert!(EMPTY_CONTROL_PARAMETERS.len() <= MAX_CONTROL_PARAMETERS_BYTES);
+};
 
 /// The complete production CDP method vocabulary. No stringly-typed method
 /// crosses the adapter boundary.
@@ -396,13 +405,7 @@ pub(crate) fn decode_runtime_install_response(
 }
 
 pub(crate) fn get_frame_tree_command() -> FixedSemanticCdpCommand {
-    command(
-        FixedSemanticCdpMethod::GetFrameTree,
-        json!({}),
-        MAX_CONTROL_PARAMETERS_BYTES,
-        MAX_CONTROL_RESPONSE_BYTES,
-    )
-    .expect("fixed empty CDP parameters fit their compile-time ceiling")
+    empty_control_command(FixedSemanticCdpMethod::GetFrameTree)
 }
 
 pub(crate) fn decode_root_frame(
@@ -421,23 +424,11 @@ pub(crate) fn decode_root_frame(
 }
 
 pub(crate) fn runtime_enable_command() -> FixedSemanticCdpCommand {
-    command(
-        FixedSemanticCdpMethod::RuntimeEnable,
-        json!({}),
-        MAX_CONTROL_PARAMETERS_BYTES,
-        MAX_CONTROL_RESPONSE_BYTES,
-    )
-    .expect("fixed empty CDP parameters fit their compile-time ceiling")
+    empty_control_command(FixedSemanticCdpMethod::RuntimeEnable)
 }
 
 pub(crate) fn runtime_disable_command() -> FixedSemanticCdpCommand {
-    command(
-        FixedSemanticCdpMethod::RuntimeDisable,
-        json!({}),
-        MAX_CONTROL_PARAMETERS_BYTES,
-        MAX_CONTROL_RESPONSE_BYTES,
-    )
-    .expect("fixed empty CDP parameters fit their compile-time ceiling")
+    empty_control_command(FixedSemanticCdpMethod::RuntimeDisable)
 }
 
 pub(crate) fn decode_empty_success(response: &str) -> Result<(), SemanticCdpProtocolError> {
@@ -539,6 +530,14 @@ fn command(
         parameters,
         response_limit,
     })
+}
+
+fn empty_control_command(method: FixedSemanticCdpMethod) -> FixedSemanticCdpCommand {
+    FixedSemanticCdpCommand {
+        method,
+        parameters: EMPTY_CONTROL_PARAMETERS.to_owned(),
+        response_limit: MAX_CONTROL_RESPONSE_BYTES,
+    }
 }
 
 fn parse_object(response: &str, limit: usize) -> Result<Value, SemanticCdpProtocolError> {
@@ -807,15 +806,15 @@ mod tests {
 
     #[test]
     fn responses_are_bounded_and_closed() {
-        assert_eq!(
-            get_frame_tree_command().method().as_str(),
-            "Page.getFrameTree"
-        );
-        assert_eq!(runtime_enable_command().method().as_str(), "Runtime.enable");
-        assert_eq!(
-            runtime_disable_command().method().as_str(),
-            "Runtime.disable"
-        );
+        for (command, method) in [
+            (get_frame_tree_command(), "Page.getFrameTree"),
+            (runtime_enable_command(), "Runtime.enable"),
+            (runtime_disable_command(), "Runtime.disable"),
+        ] {
+            assert_eq!(command.method().as_str(), method);
+            assert_eq!(command.parameters(), EMPTY_CONTROL_PARAMETERS);
+            assert_eq!(command.response_limit(), MAX_CONTROL_RESPONSE_BYTES);
+        }
         assert_eq!(
             decode_runtime_install_response(r#"{"result":{"type":"string","value":"I1"}}"#),
             Ok(())
