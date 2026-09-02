@@ -1029,6 +1029,20 @@ addition to, not instead of, run cancellation, durable audit drain, policy
 settlement, and the application shutdown barrier. A failed proof may not skip
 best-effort engine cleanup, but that path is terminally unclean.
 
+The reusable imperative driver for this terminal native phase consumes the
+coordinator only after its lossless admission has accepted the sealed cohort;
+the caller retains every logical owner when admission refuses. The driver also
+takes an existing native port, a shell-minted first audit identity, and a
+caller-owned native-event source. It rechecks the absolute deadline
+before native dispatch, accepts only the exact audit event class expected by
+the current coordinator stage, and mints retry identities with checked
+addition. Nonzero or refused audits use fixed exponential waits beginning at
+100 ms and capped at one second; the coordinator still owns the eight-attempt
+ceiling. The driver creates no worker, timer, channel, page, or native object,
+and its diagnostics cannot project event payloads. The concrete application
+runtime remains responsible for settling higher run/provider/policy/audit
+owners and for supplying the real event source.
+
 The stable application boundary is a move-only, consuming agent-browser
 lifecycle. Its terminal `Clean` result necessarily carries that native zero
 proof and additionally attests complete run cancellation, provider settlement,

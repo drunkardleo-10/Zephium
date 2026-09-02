@@ -34,6 +34,8 @@ const AGENTIC_LIFECYCLE: &str = "crates/zephium-agentic/src/agent_lifecycle.rs";
 const AGENTIC_METRIC_CLOSURE: &str = "crates/zephium-agentic/src/agent_metric_closure.rs";
 const AGENTIC_METRICS: &str = "crates/zephium-agentic/src/agent_metrics.rs";
 const AGENTIC_NATIVE_SHUTDOWN: &str = "crates/zephium-agentic/src/agent_native_shutdown.rs";
+const AGENTIC_NATIVE_SHUTDOWN_DRIVER: &str =
+    "crates/zephium-agentic/src/agent_native_shutdown_driver.rs";
 const AGENTIC_PROGRESS_METRICS: &str = "crates/zephium-agentic/src/agent_progress_metrics.rs";
 const AGENTIC_SEMANTIC_DIFF: &str = "crates/zephium-agentic/src/semantic_diff.rs";
 const AGENTIC_SEMANTIC_DIFF_MODEL: &str = "crates/zephium-agentic/src/semantic_diff_model.rs";
@@ -337,6 +339,10 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         &read(repository.join(AGENTIC_LIFECYCLE))?,
         &read(repository.join(AGENTIC_NATIVE_SHUTDOWN))?,
         &read(repository.join(AGENTIC_SEMANTIC_SCREENSHOT))?,
+    )?;
+    validate_agent_native_shutdown_driver(
+        &read(repository.join(AGENTIC_ROOT))?,
+        &read(repository.join(AGENTIC_NATIVE_SHUTDOWN_DRIVER))?,
     )?;
     validate_agent_app_lifecycle(
         &read(repository.join(APP_MANIFEST))?,
@@ -5682,6 +5688,123 @@ fn validate_agent_native_shutdown_coordinator(
     Ok(())
 }
 
+fn validate_agent_native_shutdown_driver(root: &str, driver: &str) -> Result<(), String> {
+    let production = driver
+        .split_once("\n#[cfg(test)]\nmod tests")
+        .map_or(driver, |(production, _)| production);
+    let root = compact(root);
+    for required in [
+        "modagent_native_shutdown_driver;",
+        "drive_agent_native_shutdown_until,",
+        "AgentNativeShutdownDriveError,",
+        "AgentNativeShutdownEventSource,",
+        "AgentNativeShutdownWait,",
+        "AGENT_NATIVE_SHUTDOWN_RETRY_BASE_MILLIS,",
+        "AGENT_NATIVE_SHUTDOWN_RETRY_MAX_MILLIS,",
+    ] {
+        if !root.contains(required) {
+            return Err(format!(
+                "agentic root lost native shutdown driver export {required}"
+            ));
+        }
+    }
+
+    let wait_declaration = production
+        .find("pub enum AgentNativeShutdownWait")
+        .ok_or_else(|| "agent native shutdown wait result is missing".to_owned())?;
+    let wait_attribute_start = production[..wait_declaration]
+        .rfind("\n\n")
+        .map_or(0, |start| start + 2);
+    let wait_attributes = &production[wait_attribute_start..wait_declaration];
+    for forbidden in ["Clone", "Copy", "Serialize", "Deserialize", "Debug"] {
+        if wait_attributes.contains(forbidden) {
+            return Err(format!(
+                "agent native shutdown wait acquired payload-copying derive {forbidden}"
+            ));
+        }
+    }
+
+    let driver = compact(
+        &production
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<String>(),
+    );
+    for required in [
+        "pubconstAGENT_NATIVE_SHUTDOWN_RETRY_BASE_MILLIS:u64=100;",
+        "pubconstAGENT_NATIVE_SHUTDOWN_RETRY_MAX_MILLIS:u64=1_000;",
+        "pubenumAgentNativeShutdownWait{Event(Box<ContextNativeEvent>),Elapsed,Closed,}",
+        "pubtraitAgentNativeShutdownEventSource:Send{fnwait_until(&mutself,wake:Instant)->AgentNativeShutdownWait;}",
+        "pubfndrive_agent_native_shutdown_until(mutcoordinator:AgentNativeShutdownCoordinator,port:&dynAgentBrowserPort,first_audit:ContextResourceAuditId,events:&mutdynAgentNativeShutdownEventSource,deadline:Instant,)->Result<AgentNativeShutdownProof,AgentNativeShutdownDriveError>",
+        "coordinator.begin_port_seal(first_audit)",
+        "letdispatch=port.seal_for_shutdown(first_audit);",
+        "coordinator.account_port_seal(first_audit,dispatch)",
+        "letContextNativeEvent::ShutdownAuditSettled(settlement)=eventelse{returnErr(AgentNativeShutdownDriveError::UnexpectedEvent);};",
+        "letContextNativeEvent::ResourceAuditSettled(settlement)=eventelse{returnErr(AgentNativeShutdownDriveError::UnexpectedEvent);};",
+        "wait_for_retry(events,coordinator.status().attempts(),deadline)?;",
+        ".checked_add(1).and_then(ContextResourceAuditId::new)",
+        "coordinator.begin_resource_audit(next)",
+        "letdispatch=port.audit_resources(next);",
+        "coordinator.account_resource_audit(next,dispatch)",
+        "AgentNativeShutdownStage::ZeroProven=>{returncoordinator.finish()",
+        "AgentNativeShutdownStage::Exhausted=>{returnErr(AgentNativeShutdownDriveError::AttemptsExhausted);}",
+        "Self::Event(_)=>formatter.write_str(\"AgentNativeShutdownWait::Event([redacted])\")",
+        "AGENT_NATIVE_SHUTDOWN_RETRY_BASE_MILLIS.saturating_mul(1_u64<<shift).min(AGENT_NATIVE_SHUTDOWN_RETRY_MAX_MILLIS)",
+    ] {
+        if !driver.contains(required) {
+            return Err(format!(
+                "agent native shutdown driver lost bounded drain rule {required}"
+            ));
+        }
+    }
+    if driver.matches("ifInstant::now()>=deadline").count() < 4 {
+        return Err(
+            "agent native shutdown driver must recheck its absolute deadline around dispatch"
+                .to_owned(),
+        );
+    }
+    for forbidden in [
+        "std::thread",
+        "thread::",
+        "sleep(",
+        "spawn(",
+        "channel(",
+        "mpsc::",
+        "Sender<",
+        "Receiver<",
+        "Timer",
+        "interval(",
+        "tokio::",
+        "async_std::",
+        "std::net",
+        "std::fs",
+        "std::process",
+        "wry::",
+        "tauri_runtime_wry",
+        "WebView",
+        "ICoreWebView",
+        "WKWebView",
+        "windows_sys::",
+        "objc2::",
+        "raw_window_handle",
+        "evaluate_script",
+        "Selector",
+        "println!",
+        "eprintln!",
+        "tracing::",
+        "log::",
+        "Self::Event(event)=>formatter",
+        "AgentNativeShutdownResources",
+    ] {
+        if driver.contains(forbidden) {
+            return Err(format!(
+                "agent native shutdown driver acquired forbidden authority {forbidden}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_agent_app_lifecycle(
     manifest: &str,
     root: &str,
@@ -6514,6 +6637,56 @@ mod tests {
                 validate_agent_native_shutdown_coordinator(root, lifecycle, &invalid, screenshot,)
                     .is_err(),
                 "shutdown mutation {index} was not rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn native_shutdown_driver_consumes_the_port_with_bounded_redacted_waits() {
+        let root = include_str!("../../crates/zephium-agentic/src/lib.rs");
+        let driver =
+            include_str!("../../crates/zephium-agentic/src/agent_native_shutdown_driver.rs");
+        validate_agent_native_shutdown_driver(root, driver)
+            .expect("bounded native shutdown driver boundary");
+
+        for invalid in [
+            root.replace("mod agent_native_shutdown_driver;", ""),
+            root.replace("AgentNativeShutdownEventSource,", ""),
+        ] {
+            assert!(validate_agent_native_shutdown_driver(&invalid, driver).is_err());
+        }
+        for (index, invalid) in [
+            driver.replace("let dispatch = port.seal_for_shutdown(first_audit);", ""),
+            driver.replace(
+                "mut coordinator: AgentNativeShutdownCoordinator",
+                "resources: AgentNativeShutdownResources",
+            ),
+            driver.replace(
+                "ContextNativeEvent::ShutdownAuditSettled(settlement)",
+                "ContextNativeEvent::ResourceAuditSettled(settlement)",
+            ),
+            driver.replace(".checked_add(1)", ".wrapping_add(1)"),
+            driver.replace(
+                "AgentNativeShutdownEventSource: Send",
+                "AgentNativeShutdownEventSource",
+            ),
+            driver.replace(
+                "AgentNativeShutdownWait::Event([redacted])",
+                "AgentNativeShutdownWait::Event({event:?})",
+            ),
+            driver.replace("if Instant::now() >= deadline", "if false"),
+            driver.replacen(
+                "\n#[cfg(test)]\nmod tests",
+                "\nfn forbidden_worker() { std::thread::spawn(|| {}); }\n\n#[cfg(test)]\nmod tests",
+                1,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(
+                validate_agent_native_shutdown_driver(root, &invalid).is_err(),
+                "native shutdown driver mutation {index} was not rejected"
             );
         }
     }

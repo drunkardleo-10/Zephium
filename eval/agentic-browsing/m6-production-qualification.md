@@ -86,7 +86,19 @@ responses, machine-local paths, or native traces.
   resource counters for exact zero, and is the only constructor of the
   move-only terminal proof. Mutation tests remove each critical join, seal,
   distinct settlement, bound, zero-count check, and constructor closure and
-  prove the release gate refuses the source.
+  prove the release gate refuses the source; and
+- pins the terminal native shutdown driver to an already-admitted consuming
+  coordinator, keeping the lossless logical-owner refusal outside the driver.
+  It also pins an existing stable port, a shell-minted first identity, one
+  caller-owned event source, and one absolute deadline. It rechecks the
+  deadline around dispatch,
+  accepts only the exact event class for the pending coordinator stage, uses
+  checked successor identities, and applies fixed 100 ms exponential retry
+  waits capped at one second and eight total audits. Its manual diagnostics
+  redact the event payload, and the source gate forbids worker, timer, channel,
+  network, file, browser-engine, script-evaluation, or logging authority.
+  Mutation tests prove the port calls, event separation, checked identity,
+  deadline checks, redaction, and authority exclusions are required.
 - pins the stable application lifecycle to one `Send`, move-only consuming
   shutdown operation under the caller's absolute deadline. Its exact closed
   outcome has no clean variant without the native zero proof and no retryable
@@ -228,8 +240,19 @@ agentic-owned Windows modules. Cross-compilation is not device behavior.
   zero; mismatched events, replayed identities, nonzero snapshots, dispatch
   refusals, and attempt exhaustion cannot do so. This coordinator owns no port,
   clock, timer, task, worker, channel, browser object, or I/O. A concrete
-  lifecycle implementation still must drive logical cancellation/native close
-  into this seam and drain durable run audits and policy authority.
+  lifecycle implementation still must drive logical cancellation/native close,
+  the real application event source, durable run audits, and policy authority.
+- A stable terminal driver now consumes the coordinator only after its
+  lossless admission has accepted the sealed cohort, so a readiness refusal
+  returns every logical owner for continued cleanup. It drives the actual
+  native port barrier under one caller-owned absolute deadline, accepts only
+  the exact shutdown- and resource-audit event classes, uses checked strictly
+  increasing identities, and waits between failed audits at a fixed 100 ms
+  exponential cadence capped at one second and the coordinator's eight total
+  attempts. It creates no worker, timer, channel, page, or native object, and
+  its event diagnostics redact the complete payload. This closes the reusable
+  imperative drain seam, not its concrete application/runtime composition or
+  native-device qualification.
 - A stable consuming lifecycle port now prevents an application integration
   from claiming clean agent shutdown without carrying the zero-resource proof.
   The dormant feature-gated Shell now owns and consumes that port before
@@ -342,8 +365,9 @@ The authoritative aggregate records and exact remaining blockers are in
 - hot-path and zero-unused-agent-overhead measurements; and
 - completion of native/unsafe, secret, and log review outside the scoped
   agentic-owned production modules and dormant provider transport, plus
-  application/platform profile integration, a concrete lifecycle and
-  end-to-end native use of the bounded zero-resource proof, recovery,
+  application/platform profile integration, composition of the higher
+  cancellation/provider/policy/audit lifecycle with a real application event
+  source, end-to-end native use of the bounded zero-resource proof, recovery,
   migration, and stable Work-port audits beyond the dormant Shell seam.
 
 None of these pending items is represented as zero, passing, or non-blocking.
