@@ -85,6 +85,9 @@
         "zero_transient_activation",
         "zero_focus_theft",
         "zero_admitted_popups",
+        "stable_environment8_process_cohort",
+        "exactly_one_browser_and_nonzero_helper_count",
+        "bounded_api_cohort_resident_working_set",
         "exact_browser_process_exit_before_udf_deletion",
         "zero_retained_native_views",
         "drained_teardown"

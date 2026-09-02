@@ -464,6 +464,9 @@ fn validate_deterministic_ci(rows: &[DeterministicCi]) -> Result<(), String> {
             "zero_transient_activation",
             "zero_focus_theft",
             "zero_admitted_popups",
+            "stable_environment8_process_cohort",
+            "exactly_one_browser_and_nonzero_helper_count",
+            "bounded_api_cohort_resident_working_set",
             "exact_browser_process_exit_before_udf_deletion",
             "zero_retained_native_views",
             "drained_teardown",
@@ -685,6 +688,12 @@ fn validate_capability_rows(rows: &[Capability]) -> Result<(), String> {
         ),
         (
             "windows",
+            "webview2_environment8_resource_sampling",
+            "implemented_in_release_excluded_shared_probe_adapter_cross_compiled",
+            "pending_device_capture",
+        ),
+        (
+            "windows",
             "owned_webview2_try_suspend",
             "implemented_in_feature_gated_production_adapter_cross_compiled",
             "pending_device_capture",
@@ -873,6 +882,18 @@ mod tests {
     }
 
     #[test]
+    fn native_matrix_cannot_drop_windows_resource_qualification() {
+        let mut value =
+            serde_json::from_str::<serde_json::Value>(NATIVE_MATRIX).expect("native matrix JSON");
+        value["deterministic_ci"][1]["required_invariants"]
+            .as_array_mut()
+            .expect("Windows invariants")
+            .retain(|invariant| invariant != "stable_environment8_process_cohort");
+        let evidence = decode("native matrix", &value.to_string()).expect("native schema");
+        assert!(validate_native_matrix(evidence).is_err());
+    }
+
+    #[test]
     fn semantic_runtime_result_cannot_widen_beyond_the_reviewed_fixed_fixture() {
         let mut value = serde_json::from_str::<serde_json::Value>(MACOS_SEMANTIC_RUNTIME)
             .expect("semantic-runtime JSON");
@@ -898,6 +919,21 @@ mod tests {
         let mut value =
             serde_json::from_str::<serde_json::Value>(CAPABILITIES).expect("capabilities JSON");
         value["pinned_components"]["wry"]["version"] = serde_json::json!("0.55.2");
+        let evidence = decode("capabilities", &value.to_string()).expect("capability schema");
+        assert!(validate_capabilities(repository(), evidence).is_err());
+    }
+
+    #[test]
+    fn pending_windows_resource_capability_cannot_be_promoted_without_evidence() {
+        let mut value =
+            serde_json::from_str::<serde_json::Value>(CAPABILITIES).expect("capabilities JSON");
+        let resource = value["capabilities"]
+            .as_array_mut()
+            .expect("capability rows")
+            .iter_mut()
+            .find(|row| row["mechanism"] == "webview2_environment8_resource_sampling")
+            .expect("resource-sampling capability");
+        resource["device_status"] = serde_json::json!("qualified");
         let evidence = decode("capabilities", &value.to_string()).expect("capability schema");
         assert!(validate_capabilities(repository(), evidence).is_err());
     }

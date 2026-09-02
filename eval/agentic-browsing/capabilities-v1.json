@@ -80,6 +80,19 @@
     },
     {
       "platform": "windows",
+      "mechanism": "webview2_environment8_resource_sampling",
+      "code_status": "implemented_in_release_excluded_shared_probe_adapter_cross_compiled",
+      "device_status": "pending_device_capture",
+      "evidence": [
+        "crates/zephium-engine/src/platform/windows/agentic_probe_resources.rs",
+        "https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2environment8#getprocessinfos",
+        "https://learn.microsoft.com/en-us/windows/win32/api/psapi/nf-psapi-getprocessmemoryinfo",
+        "https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-openprocess"
+      ],
+      "limitations": "The shared input and semantic qualifiers require exactly one Browser-kind process and at least one helper in a stable Environment8 cohort of at most 64 unique nonzero process IDs. They hold non-inheritable PROCESS_QUERY_LIMITED_INFORMATION handles while checked-summing WorkingSetSize below 1 TiB and exactly rejoining the sorted PID, total-count, and helper-count cohort. WebView2 excludes crashpad from GetProcessInfos, so this is an API-cohort aggregate resident-working-set observation, not a whole-process-family or resource-budget measurement. Cross-compilation and source gates do not prove availability, stability, or resource behavior on a physical Windows device."
+    },
+    {
+      "platform": "windows",
       "mechanism": "owned_webview2_try_suspend",
       "code_status": "implemented_in_feature_gated_production_adapter_cross_compiled",
       "device_status": "pending_device_capture",
