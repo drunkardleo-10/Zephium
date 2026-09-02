@@ -125,6 +125,16 @@ destination must be destroyed/recreated before navigation. Results carry only
 origin/cookie/HttpOnly/byte counts and closed failures. Reverse sync and
 local/session-storage copying are not representable.
 
+The engine now contains the platform-neutral production preflight owner used
+by the Windows adapter. It takes zeroizing ownership of every native-exposed
+string before the first validation branch, has no cookie-field diagnostic or
+serialization surface, bounds both raw observations per origin and the unique
+cohort, rejects contradictory duplicate identity snapshots, and permanently
+poisons a cohort after any admission failure. Native cookie handles become
+available only through a sequential apply owner after all requested origins
+complete. This is a memory/accounting/type boundary only: it does not acquire a
+cookie manager, call `GetCookies`, or perform a destination write.
+
 This seam deliberately does not use Wry's generic Windows cookie helper. The
 pinned helper allocates from the native-reported count, loops that complete
 count, silently drops conversion failures, blocks through an event-pumping
@@ -387,7 +397,10 @@ subprofile proof, handoff owner/profile joins, required capabilities, payload
 and HttpOnly count invariants, explicit partial application, destination-
 profile single-flight (including distinct-context alias refusal), process
 concurrency across distinct profiles, redacted debug output, and shutdown
-drain.
+drain. Engine preflight tests additionally cover exact duplicate and conflict
+handling, all-origin release, sequential apply accounting, invalid native
+shapes, zero/overflow origin and cookie ceilings, raw duplicate-flood refusal,
+and content-free diagnostics.
 Handoff tests execute complete macOS shared-store and Windows cookie-bridge
 flows through the real context registry, including exclusive human control,
 temporary-context release, scoped refresh, fresh observation, incompatible

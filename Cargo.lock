@@ -6345,6 +6345,7 @@ dependencies = [
  "zephium-core",
  "zephium-extension-package",
  "zephium-extension-runtime-api",
+ "zeroize",
 ]
 
 [[package]]

@@ -63,7 +63,7 @@ native-agentic-semantic-probe = [
 ]
 # Compiles the production, zero-idle agent-browser native port. The feature is
 # intentionally separate from the release-excluded probe vocabulary.
-agentic-browser = ["dep:zephium-agentic"]
+agentic-browser = ["dep:zephium-agentic", "dep:zeroize"]
 
 [[bin]]
 name = "macos-principal-isolation-probe"
@@ -140,6 +140,7 @@ serde = { workspace = true, optional = true }
 sha2 = { version = "=0.10.9", optional = true }
 tempfile = { workspace = true, optional = true }
 url.workspace = true
+zeroize = { version = "=1.9.0", optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true

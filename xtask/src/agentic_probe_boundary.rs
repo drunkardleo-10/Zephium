@@ -84,6 +84,8 @@ const ENGINE_WINDOWS_AGENT_TIMEOUT: &str = "crates/zephium-engine/src/platform/w
 const ENGINE_AGENT_NAVIGATION: &str = "crates/zephium-engine/src/platform/agent_navigation.rs";
 const ENGINE_AGENT_SCREENSHOT_BUFFER: &str =
     "crates/zephium-engine/src/platform/agent_screenshot_buffer.rs";
+const ENGINE_AGENT_COOKIE_PREFLIGHT: &str =
+    "crates/zephium-engine/src/platform/agent_cookie_preflight.rs";
 const ENGINE_WINDOWS_SEMANTIC_PROTOCOL: &str =
     "crates/zephium-engine/src/platform/agent_semantic_cdp_protocol.rs";
 const ENGINE_WINDOWS_SEMANTIC_RUNTIME: &str =
@@ -99,11 +101,12 @@ const ENGINE_AGENTIC_NATIVE_UNSAFE_MODULES: [&str; 7] = [
     ENGINE_WINDOWS_SEMANTIC_SCREENSHOT,
     ENGINE_WINDOWS_AGENT_TIMEOUT,
 ];
-const ENGINE_AGENTIC_PRODUCTION_MODULES: [&str; 12] = [
+const ENGINE_AGENTIC_PRODUCTION_MODULES: [&str; 13] = [
     ENGINE_AGENT_CONTEXT_PORT,
     ENGINE_AGENT_CONTEXT_HOST,
     ENGINE_AGENT_NAVIGATION,
     ENGINE_AGENT_SCREENSHOT_BUFFER,
+    ENGINE_AGENT_COOKIE_PREFLIGHT,
     ENGINE_WINDOWS_SEMANTIC_PROTOCOL,
     ENGINE_MACOS_AGENT_CONTEXT,
     ENGINE_MACOS_SEMANTIC_RUNTIME,
@@ -332,6 +335,7 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         &read(repository.join(ENGINE_MACOS_AGENT_CONTEXT))?,
         &read(repository.join(ENGINE_AGENT_NAVIGATION))?,
     )?;
+    validate_engine_agent_cookie_preflight(&read(repository.join(ENGINE_AGENT_COOKIE_PREFLIGHT))?)?;
     validate_agent_context_shutdown_barrier_contract(
         &read(repository.join(AGENTIC_CONTEXT_PORT))?,
         &read(repository.join(ENGINE_AGENT_CONTEXT_PORT))?,
@@ -490,7 +494,12 @@ fn validate_engine_manifest(source: &str) -> Result<(), String> {
         .and_then(|features| features.get("agentic-browser"))
         .and_then(toml::Value::as_array)
         .ok_or_else(|| "engine agentic-browser feature is missing".to_owned())?;
-    if production_feature.as_slice() != [toml::Value::String("dep:zephium-agentic".to_owned())] {
+    if production_feature.as_slice()
+        != [
+            toml::Value::String("dep:zephium-agentic".to_owned()),
+            toml::Value::String("dep:zeroize".to_owned()),
+        ]
+    {
         return Err(
             "engine production agentic-browser feature must remain probe-independent".to_owned(),
         );
@@ -526,6 +535,24 @@ fn validate_engine_manifest(source: &str) -> Result<(), String> {
         != Some(true)
     {
         return Err("engine zephium-agentic dependency must remain optional".to_owned());
+    }
+    let zeroize_dependency = manifest
+        .get("dependencies")
+        .and_then(|dependencies| dependencies.get("zeroize"))
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| "engine zeroize dependency is missing".to_owned())?;
+    if zeroize_dependency
+        .get("version")
+        .and_then(toml::Value::as_str)
+        != Some("=1.9.0")
+        || zeroize_dependency
+            .get("optional")
+            .and_then(toml::Value::as_bool)
+            != Some(true)
+    {
+        return Err(
+            "engine cookie-memory zeroize dependency must remain pinned and optional".to_owned(),
+        );
     }
     let binaries = manifest
         .get("bin")
@@ -766,6 +793,86 @@ fn validate_engine_agent_context_boundary(
                 ));
             }
         }
+    }
+    Ok(())
+}
+
+fn validate_engine_agent_cookie_preflight(source: &str) -> Result<(), String> {
+    let source = compact(source);
+    for required in [
+        "usezeroize::Zeroizing;",
+        "name:Zeroizing<String>",
+        "value:Zeroizing<String>",
+        "domain:Zeroizing<String>",
+        "path:Zeroizing<String>",
+        "letname=Zeroizing::new(name);",
+        "letvalue=Zeroizing::new(value);",
+        "letdomain=Zeroizing::new(domain);",
+        "letpath=Zeroizing::new(path);",
+        "try_reserve_exact(MAX_COOKIES_PER_TRANSFER)",
+        "current_origin_observations:u16",
+        "observations:u16",
+        "ifusize::from(current_origin_observations)>MAX_COOKIES_PER_TRANSFER",
+        "MAX_COOKIE_TRANSFER_ORIGINS",
+        "MAX_COOKIE_TRANSFER_BYTES",
+        "MAX_COOKIE_BYTES",
+        "existing.fields.same_identity(&fields)",
+        "existing.fields.same_snapshot(&fields)",
+        "failure:Option<AgentCookiePreflightFailure>",
+        "self.poison(AgentCookiePreflightFailure::InvalidCookie)",
+        "ifself.completed_origins!=self.requested_origins",
+        "cookies:Vec<Option<ValidatedCookie<NativeCookie>>>",
+        "and_then(Option::take)",
+        "ContextCookieTransferStats::try_new(counts)",
+    ] {
+        if !source.contains(required) {
+            return Err(format!(
+                "production Windows cookie preflight lost required closed mechanism {required}"
+            ));
+        }
+    }
+    let fields_marker = "pub(crate)structAgentCookieFields";
+    let fields_offset = source
+        .find(fields_marker)
+        .ok_or_else(|| "production Windows cookie fields owner is missing".to_owned())?;
+    let fields_prefix = &source[..fields_offset];
+    if fields_prefix
+        .rsplit('}')
+        .next()
+        .is_some_and(|item| item.contains("#[derive"))
+    {
+        return Err(
+            "production Windows cookie fields must not derive diagnostic or serialization traits"
+                .to_owned(),
+        );
+    }
+    for forbidden in [
+        "implfmt::DebugforAgentCookieFields",
+        "SerializeforAgentCookieFields",
+        "DeserializeforAgentCookieFields",
+        "pubfn",
+        "pub(crate)fnvalue(",
+        "pub(crate)fnfields(",
+        "unsafe{",
+        "HashMap<",
+    ] {
+        if source.contains(forbidden) {
+            return Err(format!(
+                "production Windows cookie preflight acquired forbidden surface {forbidden}"
+            ));
+        }
+    }
+    let wrapped_at = source
+        .find("letname=Zeroizing::new(name);")
+        .ok_or_else(|| "production Windows cookie name zeroization is missing".to_owned())?;
+    let validated_at = source
+        .find("if!valid_cookie_name(&name)")
+        .ok_or_else(|| "production Windows cookie validation is missing".to_owned())?;
+    if wrapped_at > validated_at {
+        return Err(
+            "production Windows cookie strings must acquire zeroizing ownership before validation"
+                .to_owned(),
+        );
     }
     Ok(())
 }
@@ -5046,6 +5153,7 @@ mod tests {
                 ENGINE_AGENT_CONTEXT_HOST,
                 ENGINE_AGENT_NAVIGATION,
                 ENGINE_AGENT_SCREENSHOT_BUFFER,
+                ENGINE_AGENT_COOKIE_PREFLIGHT,
                 ENGINE_WINDOWS_SEMANTIC_PROTOCOL,
                 ENGINE_MACOS_AGENT_CONTEXT,
                 ENGINE_MACOS_SEMANTIC_RUNTIME,
@@ -7511,7 +7619,7 @@ mod tests {
               "dep:zephium-agentic",
               "zephium-agentic/probe-harness",
             ]
-            agentic-browser = ["dep:zephium-agentic"]
+            agentic-browser = ["dep:zephium-agentic", "dep:zeroize"]
             native-agentic-semantic-probe = [
               "agentic-browser",
               "dep:tempfile",
@@ -7535,6 +7643,7 @@ mod tests {
             required-features = ["native-agentic-semantic-probe"]
             [dependencies]
             zephium-agentic = { optional = true }
+            zeroize = { version = "=1.9.0", optional = true }
         "#;
         validate_engine_manifest(valid).expect("valid engine probe gate");
         assert!(
@@ -7546,10 +7655,11 @@ mod tests {
         )
         .is_err());
         assert!(validate_engine_manifest(&valid.replace(
-            "agentic-browser = [\"dep:zephium-agentic\"]",
+            "agentic-browser = [\"dep:zephium-agentic\", \"dep:zeroize\"]",
             "agentic-browser = [\"zephium-agentic/probe-harness\"]",
         ))
         .is_err());
+        assert!(validate_engine_manifest(&valid.replace("=1.9.0", "=1.9.1")).is_err());
     }
 
     #[test]
@@ -7638,6 +7748,26 @@ mod tests {
             semantic_fixture,
         )
         .is_err());
+    }
+
+    #[test]
+    fn production_cookie_preflight_is_bounded_and_secret_owning() {
+        let preflight =
+            include_str!("../../crates/zephium-engine/src/platform/agent_cookie_preflight.rs");
+        validate_engine_agent_cookie_preflight(preflight)
+            .expect("bounded secret-owning cookie preflight");
+        for invalid in [
+            preflight.replace("let name = Zeroizing::new(name);", ""),
+            preflight.replace("> MAX_COOKIES_PER_TRANSFER", "> usize::MAX"),
+            preflight.replace(".same_snapshot(&fields)", ".same_identity(&fields)"),
+            preflight.replace(".and_then(Option::take)", ".and_then(Option::as_ref)"),
+            preflight.replace(
+                "pub(crate) struct AgentCookieFields",
+                "#[derive(Debug)]\npub(crate) struct AgentCookieFields",
+            ),
+        ] {
+            assert!(validate_engine_agent_cookie_preflight(&invalid).is_err());
+        }
     }
 
     #[test]
