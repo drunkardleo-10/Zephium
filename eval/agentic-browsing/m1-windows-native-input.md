@@ -129,14 +129,18 @@ key-up messages to acquire inconsistent scan metadata.
   shell redirection. Only the four required non-focused modes map to fixed
   filenames. Each destination must be absent before native work; validated
   UTF-8 protocol bytes are synced through an in-directory temporary file and
-  atomically published without clobbering prior evidence.
+  atomically published without clobbering prior evidence. The runner rejects
+  a Windows directory carrying `FILE_ATTRIBUTE_REPARSE_POINT`, including a
+  junction or mount point rather than only a symbolic link.
 - The offline review binary decodes those records through the same closed
   protocol and qualification core used by the runner. It accepts only the four
-  fixed ignored filenames, real non-symlink files, exact response/run identity,
+  fixed ignored filenames, direct regular files, exact response/run identity,
   exact matrix order and capability inventory, and one identical runtime
   fingerprint. It emits one content-free aggregate and never echoes raw records
   or paths. Its exact `--write-summary` option creates the fixed UTF-8 summary
-  file and refuses to replace an existing result.
+  file and refuses to replace an existing result. Directory, input-record, and
+  output preflights reject every Windows reparse point rather than relying on
+  `FileType::is_symlink`, which is insufficient for NTFS junctions.
 
 ## Compile evidence and physical run path
 
@@ -159,7 +163,8 @@ bounds/visibility/controller ownership attestation, during-dispatch active and
 thread-focus sampling, per-step deadline/cancellation checks, document HWND
 thread/process/input-locale identity and non-calling-thread precondition,
 target-layout `MapVirtualKeyExW` mapping for key and character messages,
-receiver-exit failure, strict bounded raw CDP completion, fixed method
+receiver-exit failure, Windows reparse-point rejection for physical evidence,
+strict bounded raw CDP completion, fixed method
 allowlist, and absence of input-queue attachment, global `SendInput`, cursor
 movement, page IPC, host objects, or generic script calls.
 The production functional core may now be reached through the durable Store

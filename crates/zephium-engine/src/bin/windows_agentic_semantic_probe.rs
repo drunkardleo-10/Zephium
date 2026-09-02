@@ -6,9 +6,9 @@ mod capture {
     use std::io::{self, Write as _};
     use std::path::{Path, PathBuf};
 
-    use zephium_agentic::WindowsSemanticProbeMode;
     #[cfg(test)]
     use zephium_agentic::WINDOWS_SEMANTIC_PHYSICAL_REVIEW_MODES;
+    use zephium_agentic::{evidence_metadata_is_direct_directory, WindowsSemanticProbeMode};
 
     const EVIDENCE_DIRECTORY_FLAG: &str = "--evidence-directory";
     const EVIDENCE_DIRECTORY: &str = "eval/agentic-browsing/local-results";
@@ -54,7 +54,7 @@ mod capture {
     impl EvidenceSink {
         fn prepare_review_record(directory: &Path, filename: &str) -> io::Result<Self> {
             let metadata = std::fs::symlink_metadata(directory)?;
-            if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+            if !evidence_metadata_is_direct_directory(&metadata) {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "evidence directory is not a real directory",

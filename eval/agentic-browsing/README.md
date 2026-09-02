@@ -173,8 +173,11 @@ rerun; neither runner nor reviewer overwrites evidence. The stdout form remains
 available for an individually authorized diagnostic run.
 
 The final review command is offline and can run on the same Windows device or
-another trusted checkout. It opens only the four fixed filenames as real,
-non-symlink files under one real directory; decodes exactly one bounded JSONL
+another trusted checkout. It opens only the four fixed filenames as direct
+regular files under one direct directory; on Windows, both runners and both
+offline reviewers additionally reject the `FILE_ATTRIBUTE_REPARSE_POINT` bit,
+so a junction, mount point, symbolic link, or other reparse provider cannot be
+treated as a direct evidence path. It decodes exactly one bounded JSONL
 response from each; requires the response/run identity, Windows/WebView2
 runtime, adapter revision, capability inventory, case/backend order,
 presentation, focus, resource, outcome, trust, activation, and teardown joins;
@@ -256,7 +259,8 @@ profile, fixture, and native-view teardown facts. The aggregate retains the
 bounded suspend-callback duration but no page content, path, native error,
 world/context identity, or trace. It reads no other filename. The runner
 accepts no stdout form and neither runner nor reviewer overwrites an existing
-record. Archive the local directory before any retry.
+record. It shares the same direct-path/reparse-point rejection as the input
+evidence path. Archive the local directory before any retry.
 
 The authorized hidden fixed-DOM macOS safety result is recorded only as reviewed
 aggregate fields. Native AppKit/accessibility, visible/background behavior,

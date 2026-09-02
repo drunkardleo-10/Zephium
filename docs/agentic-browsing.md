@@ -1303,6 +1303,14 @@ sources rather than copying another browser agent's architecture:
   defines `SW_SHOWNOACTIVATE`; the M1 adapter additionally verifies host
   foreground/activation and owned-subtree keyboard focus before accepting a
   hidden or background baseline.
+- [Windows reparse-point operations](https://learn.microsoft.com/en-us/windows/win32/fileio/reparse-point-operations)
+  define `FILE_ATTRIBUTE_REPARSE_POINT` as the filesystem-level check for a
+  file or directory with an associated reparse point. The release-excluded
+  Windows physical runners and offline reviewers reject that attribute for
+  evidence directories and records, covering junctions and mount points in
+  addition to ordinary symbolic links. Rust's Windows
+  [`MetadataExt::file_attributes`](https://doc.rust-lang.org/stable/std/os/windows/fs/trait.MetadataExt.html#tymethod.file_attributes)
+  exposes the exact attribute field used by that check.
 - [Chrome DevTools Protocol Input](https://chromedevtools.github.io/devtools-protocol/tot/Input/)
   defines the fixed diagnostic mouse and key command coordinates and fields.
 - [Chrome DevTools Protocol `Runtime.evaluate`](https://chromedevtools.github.io/devtools-protocol/tot/Runtime/#method-evaluate)

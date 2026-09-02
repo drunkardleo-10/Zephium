@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use zephium_agentic::{
-    decode_response_line, qualify_windows_probe_evidence, Platform, ProbeReply, RuntimeFingerprint,
+    decode_response_line, evidence_metadata_is_direct_directory, evidence_metadata_is_direct_file,
+    qualify_windows_probe_evidence, Platform, ProbeReply, RuntimeFingerprint,
     WindowsProbeAggregate, MAX_PROTOCOL_OUTPUT_BYTES, WINDOWS_PHYSICAL_REVIEW_MODES,
 };
 
@@ -81,7 +82,7 @@ fn run(arguments: Vec<OsString>) -> Result<(), ReviewError> {
     };
     let directory = PathBuf::from(directory);
     let metadata = std::fs::symlink_metadata(&directory).map_err(|_| ReviewError::Directory)?;
-    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+    if !evidence_metadata_is_direct_directory(&metadata) {
         return Err(ReviewError::Directory);
     }
 
@@ -136,7 +137,7 @@ fn run(arguments: Vec<OsString>) -> Result<(), ReviewError> {
 
 fn write_new_record(directory: &Path, filename: &str, bytes: &[u8]) -> Result<(), ReviewError> {
     let metadata = std::fs::symlink_metadata(directory).map_err(|_| ReviewError::Directory)?;
-    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+    if !evidence_metadata_is_direct_directory(&metadata) {
         return Err(ReviewError::Directory);
     }
     let path = directory.join(filename);
@@ -166,7 +167,7 @@ fn read_record(directory: &Path, filename: &str) -> Result<Vec<u8>, ReviewError>
             ReviewError::RecordRead
         }
     })?;
-    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+    if !evidence_metadata_is_direct_file(&metadata) {
         return Err(ReviewError::RecordType);
     }
     if metadata.len() == 0 || metadata.len() > MAX_PROTOCOL_OUTPUT_BYTES as u64 {

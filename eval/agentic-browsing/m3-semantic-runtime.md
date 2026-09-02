@@ -504,14 +504,17 @@ pressure with recovery in a third epoch, fixed local renderer loss followed by
 typed refusal, and coexistence while a debugger remains attached. A canonical
 content-free JSONL contract, five fixed create-new filenames, and an offline
 reviewer require one identical runtime fingerprint and exact focus, pending,
-process, profile, fixture, and teardown facts. Diagnostic code is
-optimized-build refused and the static boundary permits only the fixed
-`Page.crash` fault; it rejects generic CDP, evaluation, selectors, page
-bridges, input injection, focus mutation, arbitrary output paths, and external
-URLs. The Windows host semantic task remains explicitly unsupported until all
-five records pass on supported physical Windows. No live isolation, timing,
-arbitrary-page, or Windows product-support claim is made, and the
-extension-owned CDP probe remains unchanged.
+process, profile, fixture, and teardown facts. The runner and reviewer share
+the input qualifier's direct directory/file checks and additionally reject
+every Windows filesystem object carrying `FILE_ATTRIBUTE_REPARSE_POINT`,
+including junctions and mount points that are not ordinary symbolic links.
+Diagnostic code is optimized-build refused and the static boundary permits
+only the fixed `Page.crash` fault; it rejects generic CDP, evaluation,
+selectors, page bridges, input injection, focus mutation, arbitrary output
+paths, and external URLs. The Windows host semantic task remains explicitly
+unsupported until all five records pass on supported physical Windows. No live
+isolation, timing, arbitrary-page, or Windows product-support claim is made,
+and the extension-owned CDP probe remains unchanged.
 
 ## Reviewed macOS native evidence
 

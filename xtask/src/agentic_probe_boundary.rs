@@ -9,6 +9,7 @@ use serde::Deserialize;
 const AGENTIC_MANIFEST: &str = "crates/zephium-agentic/Cargo.toml";
 const AGENTIC_ROOT: &str = "crates/zephium-agentic/src/lib.rs";
 const AGENTIC_FIXTURE_SERVER: &str = "crates/zephium-agentic/src/fixture_server.rs";
+const AGENTIC_PROBE_EVIDENCE_PATH: &str = "crates/zephium-agentic/src/probe_evidence_path.rs";
 const AGENTIC_PROVIDER_ROOT: &str = "crates/zephium-agentic/src/agent_provider.rs";
 const AGENTIC_WINDOWS_REVIEW_BINARY: &str =
     "crates/zephium-agentic/src/bin/windows_agentic_input_evidence_review.rs";
@@ -142,11 +143,12 @@ const ENGINE_WINDOWS_PROBE_BINARY: &str =
 const ENGINE_WINDOWS_SEMANTIC_PROBE_BINARY: &str =
     "crates/zephium-engine/src/bin/windows_agentic_semantic_probe.rs";
 const AGENTIC_SOURCE_DIRECTORY: &str = "crates/zephium-agentic/src";
-const AGENTIC_DIAGNOSTIC_MODULES: [&str; 10] = [
+const AGENTIC_DIAGNOSTIC_MODULES: [&str; 11] = [
     "contract.rs",
     "control.rs",
     "evidence.rs",
     "fixture_server.rs",
+    "probe_evidence_path.rs",
     "probe_recipes.rs",
     "probe_qualification.rs",
     "protocol.rs",
@@ -171,6 +173,7 @@ const ENGINE_SEMANTIC_PROBE_RELEASE_REFUSAL: &str = concat!(
 pub(crate) fn check(repository: &Path) -> Result<(), String> {
     crate::agentic_evidence::check(repository)?;
     validate_manifest(&read(repository.join(AGENTIC_MANIFEST))?)?;
+    validate_probe_evidence_path(&read(repository.join(AGENTIC_PROBE_EVIDENCE_PATH))?)?;
     validate_windows_review_binary(
         &read(repository.join(AGENTIC_WINDOWS_REVIEW_BINARY))?,
         &read(repository.join(AGENTIC_PROBE_QUALIFICATION))?,
@@ -1988,6 +1991,7 @@ fn validate_windows_probe_binary(source: &str, qualification: &str) -> Result<()
         "eval/agentic-browsing/local-results",
         "WindowsProbeMode::from_argument",
         "mode.local_result_filename()",
+        "evidence_metadata_is_direct_directory(&metadata)",
         "NamedTempFile::new_in(directory)",
         "pending.file.as_file().sync_all()",
         "persist_noclobber(pending.destination)",
@@ -2209,6 +2213,7 @@ fn validate_windows_semantic_probe(
         "--evidence-directory",
         "eval/agentic-browsing/local-results",
         "mode.local_result_filename()",
+        "evidence_metadata_is_direct_directory(&metadata)",
         "NamedTempFile::new_in(directory)",
         "pending.file.as_file().sync_all()",
         "persist_noclobber(pending.destination)",
@@ -2365,6 +2370,7 @@ fn validate_root(source: &str) -> Result<(), String> {
         "control",
         "evidence",
         "fixture_server",
+        "probe_evidence_path",
         "probe_recipes",
         "probe_qualification",
         "protocol",
@@ -2380,11 +2386,34 @@ fn validate_root(source: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_probe_evidence_path(source: &str) -> Result<(), String> {
+    let source = compact(source);
+    for required in [
+        "constWINDOWS_FILE_ATTRIBUTE_REPARSE_POINT:u32=0x0000_0400;",
+        "usestd::os::windows::fs::MetadataExtas_;",
+        "windows_attributes_have_no_reparse_point(metadata.file_attributes())",
+        "pubfnevidence_metadata_is_direct_directory(metadata:&Metadata)->bool",
+        "metadata.file_type().is_dir()&&!metadata.file_type().is_symlink()&&metadata_has_no_windows_reparse_point(metadata)",
+        "pubfnevidence_metadata_is_direct_file(metadata:&Metadata)->bool",
+        "metadata.file_type().is_file()&&!metadata.file_type().is_symlink()&&metadata_has_no_windows_reparse_point(metadata)",
+        "attributes&WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT==0",
+    ] {
+        if !source.contains(required) {
+            return Err(format!(
+                "Windows evidence path validation lost required direct-path rule {required}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_windows_review_binary(source: &str, qualification: &str) -> Result<(), String> {
     let source = compact(source);
     for required in [
         "WINDOWS_PHYSICAL_REVIEW_MODES",
         "symlink_metadata(&directory)",
+        "evidence_metadata_is_direct_directory(&metadata)",
+        "evidence_metadata_is_direct_file(&metadata)",
         "decode_response_line(&bytes)",
         "qualify_windows_probe_evidence(mode,&evidence)",
         "file.take((MAX_PROTOCOL_OUTPUT_BYTES+1)asu64)",
@@ -2437,6 +2466,8 @@ fn validate_windows_semantic_review_binary(source: &str, evidence: &str) -> Resu
     for required in [
         "WINDOWS_SEMANTIC_PHYSICAL_REVIEW_MODES",
         "symlink_metadata(directory)",
+        "evidence_metadata_is_direct_directory(&metadata)",
+        "evidence_metadata_is_direct_file(&metadata)",
         "decode_windows_semantic_probe_response(&bytes)",
         "qualify_windows_semantic_probe_evidence(mode,&evidence)",
         "file.take((MAX_WINDOWS_SEMANTIC_PROBE_OUTPUT_BYTES+1)asu64)",
@@ -5964,6 +5995,8 @@ mod tests {
             #[cfg(feature = "probe-harness")]
             mod fixture_server;
             #[cfg(feature = "probe-harness")]
+            mod probe_evidence_path;
+            #[cfg(feature = "probe-harness")]
             mod probe_recipes;
             #[cfg(feature = "probe-harness")]
             mod probe_qualification;
@@ -8768,12 +8801,31 @@ mod tests {
     }
 
     #[test]
+    fn windows_evidence_paths_reject_every_reparse_point_class() {
+        let source = include_str!("../../crates/zephium-agentic/src/probe_evidence_path.rs");
+        validate_probe_evidence_path(source).expect("direct Windows evidence paths");
+        assert!(
+            validate_probe_evidence_path(&source.replace("0x0000_0400", "0x0000_0000")).is_err()
+        );
+        assert!(validate_probe_evidence_path(&source.replace(
+            "windows_attributes_have_no_reparse_point(metadata.file_attributes())",
+            "true",
+        ))
+        .is_err());
+        assert!(validate_probe_evidence_path(
+            &source.replace("&& metadata_has_no_windows_reparse_point(metadata)", "",)
+        )
+        .is_err());
+    }
+
+    #[test]
     fn windows_physical_runner_retains_exact_modes_and_jsonl_evidence() {
         let binary = r#"
             WindowsProbeMode::from_argument;
             "--evidence-directory";
             "eval/agentic-browsing/local-results";
             mode.local_result_filename();
+            evidence_metadata_is_direct_directory(&metadata);
             NamedTempFile::new_in(directory);
             pending.file.as_file().sync_all();
             persist_noclobber(pending.destination);
@@ -8807,6 +8859,8 @@ mod tests {
         let binary = r#"
             WINDOWS_PHYSICAL_REVIEW_MODES;
             symlink_metadata(&directory);
+            evidence_metadata_is_direct_directory(&metadata);
+            evidence_metadata_is_direct_file(&metadata);
             decode_response_line(&bytes);
             qualify_windows_probe_evidence(mode, &evidence);
             file.take((MAX_PROTOCOL_OUTPUT_BYTES + 1) as u64);
@@ -8843,6 +8897,8 @@ mod tests {
         let binary = r#"
             WINDOWS_SEMANTIC_PHYSICAL_REVIEW_MODES;
             symlink_metadata(directory);
+            evidence_metadata_is_direct_directory(&metadata);
+            evidence_metadata_is_direct_file(&metadata);
             decode_windows_semantic_probe_response(&bytes);
             qualify_windows_semantic_probe_evidence(mode, &evidence);
             file.take((MAX_WINDOWS_SEMANTIC_PROBE_OUTPUT_BYTES + 1) as u64);

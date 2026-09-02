@@ -38,6 +38,8 @@ mod evidence;
 #[cfg(feature = "probe-harness")]
 mod fixture_server;
 #[cfg(feature = "probe-harness")]
+mod probe_evidence_path;
+#[cfg(feature = "probe-harness")]
 mod probe_qualification;
 #[cfg(feature = "probe-harness")]
 mod probe_recipes;
@@ -242,6 +244,10 @@ pub use evidence::{
 };
 #[cfg(feature = "probe-harness")]
 pub use fixture_server::{FixtureRoute, FixtureServer, FixtureServerError};
+#[cfg(feature = "probe-harness")]
+pub use probe_evidence_path::{
+    evidence_metadata_is_direct_directory, evidence_metadata_is_direct_file,
+};
 #[cfg(feature = "probe-harness")]
 pub use probe_qualification::{
     qualify_windows_probe_evidence, WindowsProbeAggregate, WindowsProbeMode,
