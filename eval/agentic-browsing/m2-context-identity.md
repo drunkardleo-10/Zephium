@@ -161,6 +161,11 @@ wait, and returns cookie values to its caller
 ([pinned source](../../vendor/wry/src/webview2/mod.rs)). The production adapter
 uses profile-scoped WebView2 cookie managers with bounded native callback
 ownership and an application deadline that reserves ten seconds for cleanup.
+It cannot accept a free scope or native deadline: both are derived from the
+exact correlated request, with its functional duration anchored to the
+port-admission `Instant`. Queue time therefore consumes the same terminal
+window, and clock regression or an already elapsed interval refuses before
+enumeration.
 Microsoft documents that cookie-manager changes
 apply to the user-profile context, `GetCookies` is URI-scoped, and
 `AddOrUpdateCookie` applies a native cookie; the native cookie object exposes
@@ -470,7 +475,8 @@ native shapes, zero/overflow origin and cookie ceilings, raw duplicate-flood
 refusal, strict UTF-16 refusal, write-ticket accounting, and content-free
 diagnostics.
 The release boundary mutation-tests the dormant Windows adapter's feature
-gate, count ceiling, destination-side copy, write interlock, sequential
+gate, exact request-derived scope/deadline mapping, admission-inclusive queue
+time, count ceiling, destination-side copy, write interlock, sequential
 accounting, profile-wide cleanup/readback, secret conversion, and absence of
 thread, message-pump, script, CDP, serialization, or direct diagnostic
 surfaces. It also pins suspension's target/feature gate, atomic

@@ -10,12 +10,30 @@
 //! not callback convention.
 
 use std::fmt;
+use std::time::{Duration, Instant};
 
 use zephium_agentic::{
-    ContextCookieTransferCounts, ContextCookieTransferStats, MAX_COOKIES_PER_TRANSFER,
-    MAX_COOKIE_BYTES, MAX_COOKIE_TRANSFER_BYTES, MAX_COOKIE_TRANSFER_ORIGINS,
+    ContextCookieTransferCounts, ContextCookieTransferStats, ContextCookieTransferWindow,
+    MAX_COOKIES_PER_TRANSFER, MAX_COOKIE_BYTES, MAX_COOKIE_TRANSFER_BYTES,
+    MAX_COOKIE_TRANSFER_ORIGINS,
 };
 use zeroize::Zeroizing;
+
+/// Maps an admitted functional request window into the native monotonic clock.
+///
+/// Queue and adapter work share the one interval: the trusted request time is
+/// anchored to the port's admission `Instant`, and callers cannot supply a
+/// replacement duration. Clock regression and an already elapsed window fail
+/// closed.
+pub(crate) fn map_cookie_transfer_deadline(
+    window: ContextCookieTransferWindow,
+    admitted_at: Instant,
+    now: Instant,
+) -> Option<Instant> {
+    now.checked_duration_since(admitted_at)?;
+    let deadline = admitted_at.checked_add(Duration::from_millis(window.duration_millis()))?;
+    (now < deadline).then_some(deadline)
+}
 
 /// Strict, bounded UTF-16 cookie text that owns zeroizing UTF-8 storage.
 ///
@@ -483,6 +501,7 @@ fn valid_expiry(expires: f64, session: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zephium_agentic::ContextCookieTransferInstant;
 
     fn text(value: &str) -> AgentCookieText {
         AgentCookieText::try_from_utf16(&value.encode_utf16().collect::<Vec<_>>()).expect("text")
@@ -501,6 +520,34 @@ mod tests {
             false,
         )
         .expect("fields")
+    }
+
+    #[test]
+    fn native_deadline_is_exact_and_includes_port_queue_time() {
+        let window = ContextCookieTransferWindow::try_new(
+            ContextCookieTransferInstant::from_millis(5_000),
+            ContextCookieTransferInstant::from_millis(35_000),
+        )
+        .expect("window");
+        let admitted_at = Instant::now();
+        let deadline = admitted_at
+            .checked_add(Duration::from_secs(30))
+            .expect("deadline");
+        let after_queue = admitted_at
+            .checked_add(Duration::from_secs(7))
+            .expect("queued");
+        assert_eq!(
+            map_cookie_transfer_deadline(window, admitted_at, after_queue),
+            Some(deadline)
+        );
+        assert_eq!(
+            map_cookie_transfer_deadline(window, admitted_at, deadline),
+            None
+        );
+        assert_eq!(
+            map_cookie_transfer_deadline(window, after_queue, admitted_at),
+            None
+        );
     }
 
     #[test]

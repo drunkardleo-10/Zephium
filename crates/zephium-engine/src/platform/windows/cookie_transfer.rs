@@ -25,12 +25,13 @@ use webview2_com::{ClearBrowsingDataCompletedHandler, GetCookiesCompletedHandler
 use windows_core::{HSTRING, PCWSTR, PWSTR};
 use zephium_agentic::{
     ContextCookieScope, ContextCookieTransferFailure, ContextCookieTransferOutcome,
-    ContextCookieTransferStats, MAX_COOKIES_PER_TRANSFER, MAX_COOKIE_BYTES,
+    ContextCookieTransferRequest, ContextCookieTransferStats, MAX_COOKIES_PER_TRANSFER,
+    MAX_COOKIE_BYTES,
 };
 
 use crate::platform::agent_cookie_preflight::{
-    AgentCookieApplication, AgentCookieFields, AgentCookiePreflight, AgentCookiePreflightFailure,
-    AgentCookieSameSite, AgentCookieText,
+    map_cookie_transfer_deadline, AgentCookieApplication, AgentCookieFields, AgentCookiePreflight,
+    AgentCookiePreflightFailure, AgentCookieSameSite, AgentCookieText,
 };
 
 /// Time reserved after enumeration/application for a profile-wide cleanup and
@@ -124,12 +125,14 @@ impl WindowsAgentCookieTransfer {
         source: ICoreWebView2CookieManager,
         destination: ICoreWebView2CookieManager,
         destination_profile: ICoreWebView2Profile2,
-        scope: ContextCookieScope,
-        terminal_deadline: Instant,
+        request: &ContextCookieTransferRequest,
+        admitted_at: Instant,
         completion: impl FnOnce(WindowsAgentCookieTerminal) + 'static,
         callback_panicked: impl Fn() + 'static,
     ) -> Result<Self, ContextCookieTransferFailure> {
         let now = Instant::now();
+        let terminal_deadline = map_cookie_transfer_deadline(request.window(), admitted_at, now)
+            .ok_or(ContextCookieTransferFailure::TimedOut)?;
         let Some(application_deadline) =
             terminal_deadline.checked_sub(AGENT_COOKIE_CLEANUP_RESERVE)
         else {
@@ -139,13 +142,13 @@ impl WindowsAgentCookieTransfer {
             return Err(ContextCookieTransferFailure::TimedOut);
         }
         let preflight =
-            AgentCookiePreflight::try_new(scope.len()).map_err(map_preflight_failure)?;
+            AgentCookiePreflight::try_new(request.scope().len()).map_err(map_preflight_failure)?;
         let shared = Rc::new(TransferShared {
             state: RefCell::new(Some(TransferState {
                 source,
                 destination,
                 destination_profile,
-                scope,
+                scope: request.scope().clone(),
                 preflight: Some(preflight),
                 application: None,
                 phase: TransferPhase::Enumerating(0),

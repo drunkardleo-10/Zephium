@@ -850,6 +850,10 @@ fn validate_engine_agent_context_boundary(
 fn validate_engine_agent_cookie_preflight(source: &str) -> Result<(), String> {
     let source = compact(source);
     for required in [
+        "pub(crate)fnmap_cookie_transfer_deadline(",
+        "now.checked_duration_since(admitted_at)?",
+        "admitted_at.checked_add(Duration::from_millis(window.duration_millis()))?",
+        "(now<deadline).then_some(deadline)",
         "usezeroize::Zeroizing;",
         "structAgentCookieText(Zeroizing<String>);",
         "fntry_from_utf16(units:&[u16])",
@@ -1002,8 +1006,12 @@ fn validate_engine_windows_cookie_transfer(module: &str, source: &str) -> Result
         "state:RefCell<Option<TransferState>>",
         "cancellation:Cell<Option<ContextCookieTransferFailure>>",
         "terminal:Cell<bool>",
+        "request:&ContextCookieTransferRequest",
+        "admitted_at:Instant",
+        "map_cookie_transfer_deadline(request.window(),admitted_at,now)",
         "terminal_deadline.checked_sub(AGENT_COOKIE_CLEANUP_RESERVE)",
-        "AgentCookiePreflight::try_new(scope.len())",
+        "AgentCookiePreflight::try_new(request.scope().len())",
+        "scope:request.scope().clone()",
         "GetCookies(PCWSTR::from_raw(origin.as_ptr()),&handler)",
         "count>maximum",
         "state.destination.CopyCookie(&source_cookie)",
@@ -8884,6 +8892,14 @@ mod tests {
                 "pub(crate) struct AgentCookieFields",
                 "#[derive(Debug)]\npub(crate) struct AgentCookieFields",
             ),
+            preflight.replace(
+                "now.checked_duration_since(admitted_at)?;",
+                "let _ = admitted_at;",
+            ),
+            preflight.replace(
+                "Duration::from_millis(window.duration_millis())",
+                "Duration::from_secs(300)",
+            ),
         ] {
             assert!(validate_engine_agent_cookie_preflight(&invalid).is_err());
         }
@@ -8948,6 +8964,14 @@ mod tests {
                 "destination.GetCookies(PCWSTR::from_raw(origin.as_ptr()), &handler)",
             ),
             transfer.replace("shared.cancellation.set(None);", ""),
+            transfer.replace(
+                "request: &ContextCookieTransferRequest,",
+                "scope: ContextCookieScope,",
+            ),
+            transfer.replace(
+                "map_cookie_transfer_deadline(request.window(), admitted_at, now)",
+                "admitted_at.checked_add(Duration::from_secs(300))",
+            ),
             format!("{transfer}\nstd::sync::mpsc::channel();"),
             format!("{transfer}\nevaluate_script();"),
         ] {
