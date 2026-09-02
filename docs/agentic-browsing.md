@@ -701,7 +701,13 @@ integrity evidence rather than a device behavior or resource-budget claim.
 The checked-in physical workflow additionally requires an explicitly
 acknowledged authorized Windows device, a clean exact Git revision, an empty
 fixed ignored directory, the x86-64 MSVC host toolchain, create-new records,
-and source continuity through the separate debugger/review phase. It cannot
+and source continuity through the separate debugger/review phase. Every Cargo
+operation in both phases is offline; dependencies must be acquired before
+collection authority begins. Before the manual handoff it resolves Cargo's
+active target directory, hashes the direct semantic-probe executable before
+collection, requires the final build to retain that digest, and records it in
+a create-new SHA-256 stamp. Review rehashes that same direct file before
+accepting the debugger record. It cannot
 invoke visible-focused input or launch the debugger-only case; those
 authorities remain outside the script.
 

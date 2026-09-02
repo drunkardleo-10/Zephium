@@ -2684,14 +2684,21 @@ fn validate_windows_physical_workflow(source: &str) -> Result<(), String> {
         "[ValidateSet(\"CollectNonDebugger\",\"ReviewAfterDebugger\")]",
         "[switch]$AuthorizedPhysicalWindows",
         "if(-not$AuthorizedPhysicalWindows.IsPresent)",
+        "&cargo--offline@Arguments",
         "[System.Environment]::OSVersion.Platform-ne[System.PlatformID]::Win32NT",
         "[System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture-ne[System.Runtime.InteropServices.Architecture]::X64",
         "$rustcVersion=@(&rustc-vV)",
         "$rustcVersion-ccontains\"host:x86_64-pc-windows-msvc\"",
+        "$metadataLines=@(&cargo--offlinemetadata--locked--format-version1--no-deps--manifest-path(Join-Path$Repository\"Cargo.toml\"))",
+        "[System.IO.Path]::GetFullPath([string]$metadata.target_directory)",
         "status--porcelain=v1--untracked-files=all",
         "rev-parse--verifyHEAD",
         "if($revision-cnotmatch'^[0-9a-f]{40}$')",
         "$sourceStampName=\"windows-qualification-source-v1.txt\"",
+        "$debuggerBinaryHashStampName=\"windows-semantic-debugger-binary-sha256-v1.txt\"",
+        "Get-FileHash-LiteralPath$Path-AlgorithmSHA256",
+        "if($hash-notmatch'^[0-9a-fA-F]{64}$')",
+        "if($Hash-cnotmatch'^[0-9a-f]{64}$')",
         "[System.IO.FileMode]::CreateNew",
         "$stream.Flush($true)",
         "Assert-DirectDirectory-Path$evidenceDirectory-Create$true",
@@ -2710,6 +2717,15 @@ fn validate_windows_physical_workflow(source: &str) -> Result<(), String> {
         "Invoke-Cargo-Arguments@(\"build\",\"--locked\",\"-p\",\"zephium-engine\",\"--features\",\"native-agentic-semantic-probe\",\"--bin\",\"windows-agentic-semantic-probe\")",
         "$preflightRevision=Get-SourceRevision-Repository$repository",
         "if($preflightRevision-cne$sourceRevision)",
+        "$semanticProbeBinary=Join-Path$cargoTargetDirectory\"debug\\windows-agentic-semantic-probe.exe\"",
+        "Write-BinaryHashStamp-Path(Join-Path$evidenceDirectory$debuggerBinaryHashStampName)-Hash$semanticProbeBinaryHash",
+        "if($semanticProbeBinaryHash-cne$preflightSemanticProbeBinaryHash)",
+        "if($recordedSourceStamp-cnotmatch'^[0-9a-f]{40}\\n$')",
+        "$recordedRevision=$recordedSourceStamp.Substring(0,40)",
+        "if($recordedDebuggerBinaryHashStamp-cnotmatch'^[0-9a-f]{64}\\n$')",
+        "$recordedDebuggerBinaryHash=$recordedDebuggerBinaryHashStamp.Substring(0,64)",
+        "if($currentDebuggerBinaryHash-cne$recordedDebuggerBinaryHash)",
+        "Write-Host$semanticProbeBinary",
         "\"--ci-hidden-debugger-coexistence--evidence-directoryeval/agentic-browsing/local-results\"",
     ] {
         if !compact.contains(required) {
@@ -2744,6 +2760,7 @@ fn validate_windows_physical_workflow(source: &str) -> Result<(), String> {
         "windows-semantic-debugger-coexistence.jsonl",
         "windows-review-summary-v2.json",
         "windows-semantic-review-summary-v5.json",
+        "windows-semantic-debugger-binary-sha256-v1.txt",
     ] {
         if source.matches(exact_once).count() != 1 {
             return Err(format!(
@@ -2755,6 +2772,33 @@ fn validate_windows_physical_workflow(source: &str) -> Result<(), String> {
     if source.matches("Invoke-Cargo -Arguments").count() != 21 {
         return Err(
             "physical Windows qualification workflow changed its exact command inventory"
+                .to_owned(),
+        );
+    }
+    if source.matches("[System.IO.FileMode]::CreateNew").count() != 2 {
+        return Err("physical Windows qualification stamps must both be create-new".to_owned());
+    }
+    if source
+        .matches("Get-CargoTargetDirectory -Repository $repository")
+        .count()
+        != 2
+        || source
+            .matches("Get-FileSha256 -Path $semanticProbeBinary")
+            .count()
+            != 3
+        || source
+            .matches("Assert-DirectDirectory -Path $cargoTargetDirectory -Create $false")
+            .count()
+            != 2
+        || source
+            .matches(
+                "$semanticProbeBinary = Join-Path $cargoTargetDirectory \"debug\\windows-agentic-semantic-probe.exe\"",
+            )
+            .count()
+            != 2
+    {
+        return Err(
+            "physical Windows qualification must rejoin the exact debugger binary during collection and review"
                 .to_owned(),
         );
     }
@@ -2784,15 +2828,66 @@ fn validate_windows_physical_workflow(source: &str) -> Result<(), String> {
     let clean_recheck = compact
         .rfind("Assert-CleanCheckout-Repository$repository")
         .ok_or_else(|| "physical Windows qualification clean recheck is missing".to_owned())?;
+    let preflight_binary_hash = compact
+        .find("$preflightSemanticProbeBinaryHash=Get-FileSha256-Path$semanticProbeBinary")
+        .ok_or_else(|| {
+            "physical Windows qualification debugger binary preflight is missing".to_owned()
+        })?;
     let stamp = compact
         .find("Write-SourceStamp-Path(Join-Path$evidenceDirectory$sourceStampName)")
         .ok_or_else(|| "physical Windows qualification source stamp is missing".to_owned())?;
     let first_native_run = compact
         .find("Invoke-Cargo-Arguments@(\"run\",\"--locked\",\"-p\",\"zephium-engine\",\"--features\",\"native-agentic-input-probe\",\"--bin\",\"windows-agentic-input-probe\",\"--\",\"--ci-hidden-fixed-dom\"")
         .ok_or_else(|| "physical Windows qualification native run is missing".to_owned())?;
-    if !(preflight < clean_recheck && clean_recheck < stamp && stamp < first_native_run) {
+    if !(preflight < preflight_binary_hash
+        && preflight_binary_hash < clean_recheck
+        && clean_recheck < stamp
+        && stamp < first_native_run)
+    {
         return Err(
             "physical Windows qualification must preflight, recheck source, stamp, then run"
+                .to_owned(),
+        );
+    }
+    let final_debugger_build = compact
+        .rfind("Invoke-Cargo-Arguments@(\"build\",\"--locked\",\"-p\",\"zephium-engine\",\"--features\",\"native-agentic-semantic-probe\",\"--bin\",\"windows-agentic-semantic-probe\")")
+        .ok_or_else(|| "physical Windows qualification debugger build is missing".to_owned())?;
+    let binary_hash_stamp = compact
+        .find("Write-BinaryHashStamp-Path(Join-Path$evidenceDirectory$debuggerBinaryHashStampName)-Hash$semanticProbeBinaryHash")
+        .ok_or_else(|| "physical Windows qualification debugger binary stamp is missing".to_owned())?;
+    let collection_binary_hash_rejoin = compact
+        .find("if($semanticProbeBinaryHash-cne$preflightSemanticProbeBinaryHash)")
+        .ok_or_else(|| {
+            "physical Windows qualification collection binary hash rejoin is missing".to_owned()
+        })?;
+    let debugger_instruction = compact
+        .find(
+            "Write-Host\"Launchthisexactsource-boundbinaryundertheseparatelyauthorizeddebugger:\"",
+        )
+        .ok_or_else(|| {
+            "physical Windows qualification debugger instruction is missing".to_owned()
+        })?;
+    if !(final_debugger_build < collection_binary_hash_rejoin
+        && collection_binary_hash_rejoin < binary_hash_stamp
+        && binary_hash_stamp < debugger_instruction)
+    {
+        return Err(
+            "physical Windows qualification must build, hash, then hand off the debugger binary"
+                .to_owned(),
+        );
+    }
+    let recorded_binary_hash = compact
+        .find("$recordedDebuggerBinaryHashStamp=[System.IO.File]::ReadAllText($debuggerBinaryHashStamp)")
+        .ok_or_else(|| "physical Windows qualification recorded binary hash is missing".to_owned())?;
+    let binary_hash_rejoin = compact
+        .find("if($currentDebuggerBinaryHash-cne$recordedDebuggerBinaryHash)")
+        .ok_or_else(|| "physical Windows qualification binary hash rejoin is missing".to_owned())?;
+    let semantic_review = compact
+        .rfind("Invoke-Cargo-Arguments@(\"run\",\"--locked\",\"-p\",\"zephium-agentic\",\"--features\",\"probe-harness\",\"--bin\",\"windows-agentic-semantic-evidence-review\"")
+        .ok_or_else(|| "physical Windows qualification semantic reviewer is missing".to_owned())?;
+    if !(recorded_binary_hash < binary_hash_rejoin && binary_hash_rejoin < semantic_review) {
+        return Err(
+            "physical Windows qualification must rejoin the debugger binary before review"
                 .to_owned(),
         );
     }
@@ -12465,6 +12560,12 @@ mod tests {
         ))
         .is_err());
         assert!(validate_windows_physical_workflow(&source.replacen(
+            "& cargo --offline @Arguments",
+            "& cargo @Arguments",
+            1,
+        ))
+        .is_err());
+        assert!(validate_windows_physical_workflow(&source.replacen(
             "status --porcelain=v1 --untracked-files=all",
             "status --porcelain=v1 --untracked-files=no",
             1,
@@ -12473,6 +12574,30 @@ mod tests {
         assert!(validate_windows_physical_workflow(&source.replacen(
             "[System.IO.FileMode]::CreateNew",
             "[System.IO.FileMode]::OpenOrCreate",
+            1,
+        ))
+        .is_err());
+        assert!(validate_windows_physical_workflow(&source.replacen(
+            "Get-FileHash -LiteralPath $Path -Algorithm SHA256",
+            "Get-Item -LiteralPath $Path",
+            1,
+        ))
+        .is_err());
+        assert!(validate_windows_physical_workflow(&source.replacen(
+            "if ($currentDebuggerBinaryHash -cne $recordedDebuggerBinaryHash)",
+            "if ($currentDebuggerBinaryHash -ceq $recordedDebuggerBinaryHash)",
+            1,
+        ))
+        .is_err());
+        assert!(validate_windows_physical_workflow(&source.replacen(
+            "if ($semanticProbeBinaryHash -cne $preflightSemanticProbeBinaryHash)",
+            "if ($semanticProbeBinaryHash -ceq $preflightSemanticProbeBinaryHash)",
+            1,
+        ))
+        .is_err());
+        assert!(validate_windows_physical_workflow(&source.replacen(
+            "Get-CargoTargetDirectory -Repository $repository",
+            "Join-Path $repository target",
             1,
         ))
         .is_err());

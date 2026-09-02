@@ -16,7 +16,7 @@ function Invoke-Cargo {
         [string[]] $Arguments
     )
 
-    & cargo @Arguments
+    & cargo --offline @Arguments
     if ($LASTEXITCODE -ne 0) {
         throw "cargo command failed with exit code $LASTEXITCODE"
     }
@@ -37,6 +37,23 @@ function Get-SourceRevision {
         throw "the qualification checkout revision is not canonical"
     }
     return $revision
+}
+
+function Get-CargoTargetDirectory {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Repository
+    )
+
+    $metadataLines = @(& cargo --offline metadata --locked --format-version 1 --no-deps --manifest-path (Join-Path $Repository "Cargo.toml"))
+    if ($LASTEXITCODE -ne 0 -or $metadataLines.Count -eq 0) {
+        throw "the qualification Cargo target directory is unavailable"
+    }
+    $metadata = ($metadataLines -join "`n") | ConvertFrom-Json
+    if ($null -eq $metadata -or [string]::IsNullOrWhiteSpace([string] $metadata.target_directory)) {
+        throw "the qualification Cargo target directory is invalid"
+    }
+    return [System.IO.Path]::GetFullPath([string] $metadata.target_directory)
 }
 
 function Assert-CleanCheckout {
@@ -117,6 +134,49 @@ function Write-SourceStamp {
     }
 }
 
+function Get-FileSha256 {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Path
+    )
+
+    Assert-DirectFile -Path $Path
+    $hash = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
+    if ($hash -notmatch '^[0-9a-fA-F]{64}$') {
+        throw "the qualification binary hash is not canonical"
+    }
+    return $hash.ToLowerInvariant()
+}
+
+function Write-BinaryHashStamp {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Path,
+
+        [Parameter(Mandatory = $true)]
+        [string] $Hash
+    )
+
+    if ($Hash -cnotmatch '^[0-9a-f]{64}$') {
+        throw "the qualification binary hash is not canonical"
+    }
+    $encoding = New-Object System.Text.UTF8Encoding($false)
+    $bytes = $encoding.GetBytes("$Hash`n")
+    $stream = [System.IO.File]::Open(
+        $Path,
+        [System.IO.FileMode]::CreateNew,
+        [System.IO.FileAccess]::Write,
+        [System.IO.FileShare]::None
+    )
+    try {
+        $stream.Write($bytes, 0, $bytes.Length)
+        $stream.Flush($true)
+    }
+    finally {
+        $stream.Dispose()
+    }
+}
+
 function Assert-ExactDirectoryEntries {
     param(
         [Parameter(Mandatory = $true)]
@@ -164,6 +224,7 @@ Assert-CleanCheckout -Repository $repository
 $sourceRevision = Get-SourceRevision -Repository $repository
 $evidenceDirectory = Join-Path $repository "eval\agentic-browsing\local-results"
 $sourceStampName = "windows-qualification-source-v1.txt"
+$debuggerBinaryHashStampName = "windows-semantic-debugger-binary-sha256-v1.txt"
 $inputRecords = @(
     "windows-hidden-fixed-dom.jsonl",
     "windows-hidden-hwnd.jsonl",
@@ -200,6 +261,11 @@ try {
         Invoke-Cargo -Arguments @("clippy", "--locked", "-p", "zephium-engine", "--features", "native-agentic-semantic-probe", "--bin", "windows-agentic-semantic-probe")
         Invoke-Cargo -Arguments @("build", "--locked", "-p", "zephium-engine", "--features", "native-agentic-semantic-probe", "--bin", "windows-agentic-semantic-probe")
 
+        $cargoTargetDirectory = Get-CargoTargetDirectory -Repository $repository
+        Assert-DirectDirectory -Path $cargoTargetDirectory -Create $false
+        $semanticProbeBinary = Join-Path $cargoTargetDirectory "debug\windows-agentic-semantic-probe.exe"
+        $preflightSemanticProbeBinaryHash = Get-FileSha256 -Path $semanticProbeBinary
+
         # Tests/build scripts must not alter the qualified source or pre-create
         # a result. Bind the stamp only after every offline/native preflight is
         # green so a failed compile also leaves the create-new evidence path
@@ -226,10 +292,21 @@ try {
         Invoke-Cargo -Arguments @("run", "--locked", "-p", "zephium-engine", "--features", "native-agentic-semantic-probe", "--bin", "windows-agentic-semantic-probe", "--", "--ci-hidden-renderer-loss", "--evidence-directory", "eval/agentic-browsing/local-results")
         Invoke-Cargo -Arguments @("build", "--locked", "-p", "zephium-engine", "--features", "native-agentic-semantic-probe", "--bin", "windows-agentic-semantic-probe")
 
-        $expectedBeforeDebugger = @($sourceStampName) + $inputRecords + @($inputSummary) + $semanticRecords[0..5]
+        # The debugger launch is intentionally manual and separately
+        # authorized. Bind it to the exact executable produced by this source-
+        # checked collection rather than assuming Cargo's default target path.
+        $semanticProbeBinaryHash = Get-FileSha256 -Path $semanticProbeBinary
+        if ($semanticProbeBinaryHash -cne $preflightSemanticProbeBinaryHash) {
+            throw "the debugger binary changed during non-debugger collection"
+        }
+        Write-BinaryHashStamp -Path (Join-Path $evidenceDirectory $debuggerBinaryHashStampName) -Hash $semanticProbeBinaryHash
+
+        $expectedBeforeDebugger = @($sourceStampName, $debuggerBinaryHashStampName) + $inputRecords + @($inputSummary) + $semanticRecords[0..5]
         Assert-ExactDirectoryEntries -Directory $evidenceDirectory -ExpectedNames $expectedBeforeDebugger
         Write-Host "Non-debugger evidence is complete for source revision $sourceRevision."
-        Write-Host "Launch target\debug\windows-agentic-semantic-probe.exe under the separately authorized debugger with exactly:"
+        Write-Host "Launch this exact source-bound binary under the separately authorized debugger:"
+        Write-Host $semanticProbeBinary
+        Write-Host "Use exactly these arguments:"
         Write-Host "--ci-hidden-debugger-coexistence --evidence-directory eval/agentic-browsing/local-results"
         Write-Host "Then run this script with -Phase ReviewAfterDebugger."
     }
@@ -237,14 +314,32 @@ try {
         Assert-DirectDirectory -Path $evidenceDirectory -Create $false
         $sourceStamp = Join-Path $evidenceDirectory $sourceStampName
         Assert-DirectFile -Path $sourceStamp
-        $recordedRevision = [System.IO.File]::ReadAllText($sourceStamp).Trim()
+        $recordedSourceStamp = [System.IO.File]::ReadAllText($sourceStamp)
+        if ($recordedSourceStamp -cnotmatch '^[0-9a-f]{40}\n$') {
+            throw "the qualification source stamp is invalid"
+        }
+        $recordedRevision = $recordedSourceStamp.Substring(0, 40)
         if ($recordedRevision -cne $sourceRevision) {
             throw "the debugger/review phase checkout differs from collection"
+        }
+        $debuggerBinaryHashStamp = Join-Path $evidenceDirectory $debuggerBinaryHashStampName
+        Assert-DirectFile -Path $debuggerBinaryHashStamp
+        $recordedDebuggerBinaryHashStamp = [System.IO.File]::ReadAllText($debuggerBinaryHashStamp)
+        if ($recordedDebuggerBinaryHashStamp -cnotmatch '^[0-9a-f]{64}\n$') {
+            throw "the debugger binary hash stamp is invalid"
+        }
+        $recordedDebuggerBinaryHash = $recordedDebuggerBinaryHashStamp.Substring(0, 64)
+        $cargoTargetDirectory = Get-CargoTargetDirectory -Repository $repository
+        Assert-DirectDirectory -Path $cargoTargetDirectory -Create $false
+        $semanticProbeBinary = Join-Path $cargoTargetDirectory "debug\windows-agentic-semantic-probe.exe"
+        $currentDebuggerBinaryHash = Get-FileSha256 -Path $semanticProbeBinary
+        if ($currentDebuggerBinaryHash -cne $recordedDebuggerBinaryHash) {
+            throw "the debugger binary differs from the collection-phase build"
         }
         foreach ($name in $inputRecords + @($inputSummary) + $semanticRecords) {
             Assert-DirectFile -Path (Join-Path $evidenceDirectory $name)
         }
-        $expectedBeforeReview = @($sourceStampName) + $inputRecords + @($inputSummary) + $semanticRecords
+        $expectedBeforeReview = @($sourceStampName, $debuggerBinaryHashStampName) + $inputRecords + @($inputSummary) + $semanticRecords
         Assert-ExactDirectoryEntries -Directory $evidenceDirectory -ExpectedNames $expectedBeforeReview
         if (Test-Path -LiteralPath (Join-Path $evidenceDirectory $semanticSummary)) {
             throw "the semantic review summary already exists"

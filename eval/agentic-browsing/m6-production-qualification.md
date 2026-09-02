@@ -10,12 +10,14 @@ responses, machine-local paths, or native traces.
 
 The physical-Windows procedure now has a checked-in, source-gated two-phase
 PowerShell orchestrator. It requires a clean exact checkout, create-new source
-stamp and result inventory, the x86-64 MSVC host toolchain, an explicit
-authorized-device acknowledgement, and
-cannot invoke focused input or the debugger-only mode. Final review rejects a
-different checkout or any missing, reparse, or unexpected record. This is
-workflow integrity only; no Windows device behavior is claimed until the
-separately authorized run and human aggregate review occur.
+and debugger-binary hash stamps, an exact result inventory, the x86-64 MSVC
+host toolchain, and an explicit authorized-device acknowledgement. It cannot
+invoke focused input or the debugger-only mode. Final review rejects a
+different checkout, a changed debugger executable, or any missing, reparse, or
+unexpected record. This is workflow integrity only; no Windows device behavior
+is claimed until the separately authorized run and human aggregate review
+occur. Every Cargo command in both phases is offline; dependency acquisition
+must finish before collection authority is exercised.
 
 ## Mechanically enforced evidence
 
@@ -312,6 +314,18 @@ agentic-owned Windows modules. Cross-compilation is not device behavior.
   be mistaken for a partial evidence cohort. The static gate pins the command
   inventory and preflight→recheck→stamp→run order; no Windows behavior is
   inferred until the separately authorized physical records pass review.
+  The wrapper and locked metadata lookup force Cargo offline throughout both
+  phases; a missing local dependency fails before collection can create the
+  source stamp.
+- The manual debugger handoff no longer assumes Cargo's default target
+  directory or trusts any compatible probe executable. The orchestrator
+  resolves the active target directory from locked Cargo metadata, verifies
+  the executable is a direct non-reparse file, and hashes it before collection.
+  The final build must retain that digest before it is recorded in a create-new
+  stamp. The review phase resolves and hashes the file again before it accepts
+  the debugger record. The static gate pins both joins and
+  preflight-hash→collection→final-build→stamp→handoff→review ordering; the
+  script still cannot launch or authorize a debugger.
 - The physical Windows semantic source gate now binds its content-free success
   fields to the closed snapshot verifiers, exact flood and renderer-loss
   refusals, native suspend/readback/resume result, semantic drain audit, and

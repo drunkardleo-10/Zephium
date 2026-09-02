@@ -133,42 +133,51 @@ non-Windows or non-x86-64-MSVC host, a dirty or different checkout, a
 reparse-point evidence directory, and any pre-existing directory entry. It
 first runs the repository boundary gate, the complete offline probe-harness
 tests, the production engine's agentic library tests, and the native
-compile/link gates. It then rechecks source cleanliness, revision identity, and
-the still-empty result directory before recording the exact revision in a
-create-new ignored source stamp. Only then does it capture the four non-focused
-input modes and six non-debugger semantic modes, review the input cohort, and
-rebuild the exact debugger target. A failed preflight therefore cannot leave a
-stamp that resembles collected evidence. The workflow has no focused-input
-invocation and cannot launch the debugger-only mode.
+compile/link gates. Every Cargo invocation, including target-directory
+discovery, runs in offline mode; dependencies must be fetched before the
+authorized qualification begins. It then rechecks source cleanliness, revision
+identity, and the still-empty result directory before recording the exact
+revision in a create-new ignored source stamp. Only then does it capture the
+four non-focused input modes and six non-debugger semantic modes, review the
+input cohort, and rebuild the exact debugger target. It resolves Cargo's
+active target directory, hashes the direct executable before collection,
+requires the final build to
+retain that digest, writes it into a second create-new stamp, and prints the
+resolved path for the separately authorized manual debugger launch. Final
+review rejoins the executable to that SHA-256 stamp before admitting the
+debugger record. A failed preflight therefore cannot leave a stamp that
+resembles collected evidence. The workflow has no focused-input invocation and
+cannot launch the debugger-only mode.
 
 The individual transparent mode commands follow for review. They are not a
 substitute for the source-bound orchestrator unless its full offline/native
 preflight, post-preflight clean-revision check, create-new stamp, directory
-inventory, and source-continuity conditions are independently enforced. Create
-the ignored local evidence directory and run these exact closed modes in order:
+inventory, debugger-binary hash binding, and source-continuity conditions are
+independently enforced. Create the ignored local evidence directory and run
+these exact closed modes in order:
 
 ```powershell
 New-Item -ItemType Directory -Force `
   eval/agentic-browsing/local-results | Out-Null
-cargo check --locked --target x86_64-pc-windows-msvc `
+cargo --offline check --locked --target x86_64-pc-windows-msvc `
   -p zephium-engine --features agentic-browser
-cargo run --locked -p zephium-engine `
+cargo --offline run --locked -p zephium-engine `
   --features native-agentic-input-probe `
   --bin windows-agentic-input-probe -- --ci-hidden-fixed-dom `
   --evidence-directory eval/agentic-browsing/local-results
-cargo run --locked -p zephium-engine `
+cargo --offline run --locked -p zephium-engine `
   --features native-agentic-input-probe `
   --bin windows-agentic-input-probe -- --ci-hidden-hwnd `
   --evidence-directory eval/agentic-browsing/local-results
-cargo run --locked -p zephium-engine `
+cargo --offline run --locked -p zephium-engine `
   --features native-agentic-input-probe `
   --bin windows-agentic-input-probe -- --ci-hidden-cdp `
   --evidence-directory eval/agentic-browsing/local-results
-cargo run --locked -p zephium-engine `
+cargo --offline run --locked -p zephium-engine `
   --features native-agentic-input-probe `
   --bin windows-agentic-input-probe -- --visible-background-windows-all `
   --evidence-directory eval/agentic-browsing/local-results
-cargo run --locked -p zephium-agentic `
+cargo --offline run --locked -p zephium-agentic `
   --features probe-harness `
   --bin windows-agentic-input-evidence-review -- `
   --directory eval/agentic-browsing/local-results `
@@ -256,39 +265,40 @@ Run the six non-debugger modes as ordinary processes on an authorized
 physical Windows device:
 
 ```powershell
-cargo run --locked -p zephium-engine `
+cargo --offline run --locked -p zephium-engine `
   --features native-agentic-semantic-probe `
   --bin windows-agentic-semantic-probe -- --ci-hidden-fixed-documents `
   --evidence-directory eval/agentic-browsing/local-results
-cargo run --locked -p zephium-engine `
+cargo --offline run --locked -p zephium-engine `
   --features native-agentic-semantic-probe `
   --bin windows-agentic-semantic-probe -- --ci-hidden-redirect-lifecycle `
   --evidence-directory eval/agentic-browsing/local-results
-cargo run --locked -p zephium-engine `
+cargo --offline run --locked -p zephium-engine `
   --features native-agentic-semantic-probe `
   --bin windows-agentic-semantic-probe -- --ci-hidden-location-replacement `
   --evidence-directory eval/agentic-browsing/local-results
-cargo run --locked -p zephium-engine `
+cargo --offline run --locked -p zephium-engine `
   --features native-agentic-semantic-probe `
   --bin windows-agentic-semantic-probe -- --ci-hidden-suspend-resume `
   --evidence-directory eval/agentic-browsing/local-results
-cargo run --locked -p zephium-engine `
+cargo --offline run --locked -p zephium-engine `
   --features native-agentic-semantic-probe `
   --bin windows-agentic-semantic-probe -- --ci-hidden-event-flood `
   --evidence-directory eval/agentic-browsing/local-results
-cargo run --locked -p zephium-engine `
+cargo --offline run --locked -p zephium-engine `
   --features native-agentic-semantic-probe `
   --bin windows-agentic-semantic-probe -- --ci-hidden-renderer-loss `
   --evidence-directory eval/agentic-browsing/local-results
-cargo build --locked -p zephium-engine `
+cargo --offline build --locked -p zephium-engine `
   --features native-agentic-semantic-probe `
   --bin windows-agentic-semantic-probe
 ```
 
 For the seventh mode, configure an authorized debugger to launch the exact
-freshly built executable
-`target\debug\windows-agentic-semantic-probe.exe` with these exact arguments,
-and keep it attached until process exit:
+freshly built executable path printed by the preferred orchestrator. That path
+comes from Cargo metadata rather than an assumption about `target-dir` (the
+usual default is `target\debug\windows-agentic-semantic-probe.exe`). Use these
+exact arguments and keep the debugger attached until process exit:
 
 ```text
 --ci-hidden-debugger-coexistence --evidence-directory eval/agentic-browsing/local-results
@@ -300,9 +310,11 @@ After that process exits, the preferred final review is:
 .\scripts\qualification\windows-agentic.ps1 -Phase ReviewAfterDebugger
 ```
 
-This phase refuses source-revision drift, missing or reparse records, and every
-directory entry other than the exact source stamp, four input records, input
-summary, and seven semantic records before creating the semantic summary.
+This phase refuses source-revision drift, a changed/missing/reparse debugger
+binary, a noncanonical or mismatched create-new SHA-256 stamp, missing or
+reparse records, and every directory entry other than the two exact stamps,
+four input records, input summary, and seven semantic records before creating
+the semantic summary.
 
 The debugger mode fails before native construction if no debugger is attached;
 all other modes fail before construction if one is attached. The suspension
@@ -320,7 +332,7 @@ samples debugger state and foreground, active-window, and thread-focus state
 throughout native work. Review only the exact seven create-new records:
 
 ```powershell
-cargo run --locked -p zephium-agentic `
+cargo --offline run --locked -p zephium-agentic `
   --features probe-harness `
   --bin windows-agentic-semantic-evidence-review -- `
   --directory eval/agentic-browsing/local-results `
