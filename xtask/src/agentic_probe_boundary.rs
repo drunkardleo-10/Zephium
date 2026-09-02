@@ -37,6 +37,8 @@ const AGENTIC_NATIVE_SHUTDOWN: &str = "crates/zephium-agentic/src/agent_native_s
 const AGENTIC_NATIVE_SHUTDOWN_DRIVER: &str =
     "crates/zephium-agentic/src/agent_native_shutdown_driver.rs";
 const AGENTIC_PROGRESS_METRICS: &str = "crates/zephium-agentic/src/agent_progress_metrics.rs";
+const AGENTIC_SEMANTIC: &str = "crates/zephium-agentic/src/semantic.rs";
+const AGENTIC_SEMANTIC_WIRE: &str = "crates/zephium-agentic/src/semantic_wire.rs";
 const AGENTIC_SEMANTIC_DIFF: &str = "crates/zephium-agentic/src/semantic_diff.rs";
 const AGENTIC_SEMANTIC_DIFF_MODEL: &str = "crates/zephium-agentic/src/semantic_diff_model.rs";
 const AGENTIC_SEMANTIC_LOCATE: &str = "crates/zephium-agentic/src/semantic_locate.rs";
@@ -229,6 +231,13 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     validate_agent_supervisor_cancellation_finalization(&read(
         repository.join(AGENTIC_SUPERVISOR_RUNTIME),
     )?)?;
+    validate_agentic_default_core_panic_boundary(
+        &read(repository.join(AGENTIC_SEMANTIC))?,
+        &read(repository.join(AGENTIC_SEMANTIC_WIRE))?,
+        &read(repository.join(AGENTIC_SEMANTIC_EXECUTE))?,
+        &read(repository.join(AGENTIC_PROVIDER_CONTINUATION))?,
+        &read(repository.join(AGENTIC_PROVIDER_REQUEST))?,
+    )?;
     validate_agent_metric_closure_contract(
         &read(repository.join(AGENTIC_ROOT))?,
         &read(repository.join(AGENTIC_METRIC_CLOSURE))?,
@@ -3968,6 +3977,104 @@ fn validate_agent_supervisor_cancellation_finalization(source: &str) -> Result<(
     Ok(())
 }
 
+fn validate_agentic_default_core_panic_boundary(
+    semantic: &str,
+    wire: &str,
+    execution: &str,
+    continuation: &str,
+    request: &str,
+) -> Result<(), String> {
+    let semantic = compact(semantic);
+    if !semantic.contains("pub(crate)constfninto_nonzero(self)->NonZeroU64{self.0}") {
+        return Err("semantic node identity lost its proven nonzero carry".to_owned());
+    }
+
+    let execution = compact(execution);
+    if !execution.contains("Self(key.into_nonzero())")
+        || execution.contains("semanticnodekeysarenonzero")
+    {
+        return Err("native target identity regained a process-aborting nonzero rewrap".to_owned());
+    }
+
+    let wire = compact(wire);
+    for required in [
+        "letallowed=allowed_operations(role)?;",
+        "fnallowed_operations(role:SemanticRole)->Result<SemanticOperations,SemanticDecodeError>",
+        "SemanticOperations::try_new(operations).map_err(|_|SemanticDecodeError::NodeContract)",
+    ] {
+        if !wire.contains(required) {
+            return Err(format!(
+                "semantic wire operation validation lost fail-closed decoding {required}"
+            ));
+        }
+    }
+    if wire.contains("staticoperationsareduplicate-free") {
+        return Err("semantic wire operation validation regained an invariant abort".to_owned());
+    }
+
+    let continuation = continuation
+        .split_once("\n#[cfg(test)]\nmod tests")
+        .map_or(continuation, |(production, _)| production);
+    let continuation = compact(continuation);
+    for required in [
+        "pub(super)structAgentProviderBoundTranscript{prior:AgentProviderTranscript,latest:AgentProviderTranscriptTurn,retained_bytes:usize,}",
+        "fntry_bind(mutself,correlation:AgentProviderToolCallCorrelation,tool_result:String,)->Result<AgentProviderBoundTranscript,AgentProviderContinuationError>",
+        "self.turns.try_reserve(1).map_err(|_|AgentProviderContinuationError::TranscriptLimit)?;",
+        "latest:AgentProviderTranscriptTurn{correlation,tool_result,}",
+        "fninto_transcript(self)->AgentProviderTranscript",
+        "prior.turns.push(latest);prior.retained_bytes=retained_bytes;prior",
+    ] {
+        if !continuation.contains(required) {
+            return Err(format!(
+                "provider continuation lost allocation-free proven latest-turn carry {required}"
+            ));
+        }
+    }
+    for (required, expected) in [
+        (
+            "lettranscript=transcript.try_bind(correlation,tool_result)?;",
+            4,
+        ),
+        ("self.transcript.latest().correlation.id()", 3),
+        ("self.transcript.into_transcript()", 4),
+    ] {
+        if continuation.matches(required).count() != expected {
+            return Err(format!(
+                "provider continuation does not carry every bound turn structurally {required}"
+            ));
+        }
+    }
+    for forbidden in [
+        "latest_turn",
+        "expect(",
+        "unwrap(",
+        "unreachable!",
+        "panic!",
+    ] {
+        if continuation.contains(forbidden) {
+            return Err(format!(
+                "provider continuation regained a process-aborting invariant branch {forbidden}"
+            ));
+        }
+    }
+
+    let request = compact(request);
+    if request
+        .matches("transcript:&AgentProviderBoundTranscript")
+        .count()
+        != 4
+        || request
+            .matches("transcript.latest().correlation().kind()!=AgentBrowserToolKind::Extract")
+            .count()
+            != 2
+    {
+        return Err(
+            "provider encoders stopped consuming the structurally nonempty transcript".to_owned(),
+        );
+    }
+    Ok(())
+}
+
 fn validate_agent_metric_closure_contract(
     root: &str,
     closure: &str,
@@ -5143,7 +5250,7 @@ fn validate_semantic_locate_contract(
         "ifself.correlation.kind()!=AgentBrowserToolKind::Locate",
         "if!result.matches_acknowledgement(&self.baseline)",
         "if!payload.matches_result(result)",
-        "lettranscript=transcript.try_append(correlation,tool_result)?;",
+        "lettranscript=transcript.try_bind(correlation,tool_result)?;",
         "AgentBrowserToolKind::Locate|AgentBrowserToolKind::Read|AgentBrowserToolKind::Extract|AgentBrowserToolKind::Screenshot",
         "pubstructAgentProviderBoundLocateContinuation",
     ] {
@@ -10011,6 +10118,80 @@ mod tests {
         ] {
             assert!(validate_agent_supervisor_cancellation_finalization(&invalid).is_err());
         }
+    }
+
+    #[test]
+    fn default_agentic_core_carries_invariants_without_release_aborts() {
+        let semantic = include_str!("../../crates/zephium-agentic/src/semantic.rs");
+        let wire = include_str!("../../crates/zephium-agentic/src/semantic_wire.rs");
+        let execution = include_str!("../../crates/zephium-agentic/src/semantic_execute.rs");
+        let continuation =
+            include_str!("../../crates/zephium-agentic/src/agent_provider/continuation.rs");
+        let request = include_str!("../../crates/zephium-agentic/src/agent_provider/request.rs");
+
+        validate_agentic_default_core_panic_boundary(
+            semantic,
+            wire,
+            execution,
+            continuation,
+            request,
+        )
+        .expect("default core invariant carry");
+        assert!(validate_agentic_default_core_panic_boundary(
+            &semantic.replace("into_nonzero", "get"),
+            wire,
+            execution,
+            continuation,
+            request,
+        )
+        .is_err());
+        assert!(validate_agentic_default_core_panic_boundary(
+            semantic,
+            &wire.replace(
+                "SemanticOperations::try_new(operations).map_err(|_| SemanticDecodeError::NodeContract)",
+                "SemanticOperations::try_new(operations)\n        .expect(\"static operations are duplicate-free\")",
+            ),
+            execution,
+            continuation,
+            request,
+        )
+        .is_err());
+        assert!(validate_agentic_default_core_panic_boundary(
+            semantic,
+            wire,
+            &execution.replace("Self(key.into_nonzero())", "unreachable!()"),
+            continuation,
+            request,
+        )
+        .is_err());
+        assert!(validate_agentic_default_core_panic_boundary(
+            semantic,
+            wire,
+            execution,
+            &continuation.replace(".try_reserve(1)", ".reserve(1)"),
+            request,
+        )
+        .is_err());
+        assert!(validate_agentic_default_core_panic_boundary(
+            semantic,
+            wire,
+            execution,
+            &continuation.replacen(
+                "\n#[cfg(test)]\nmod tests",
+                "\nunreachable!();\n#[cfg(test)]\nmod tests",
+                1,
+            ),
+            request,
+        )
+        .is_err());
+        assert!(validate_agentic_default_core_panic_boundary(
+            semantic,
+            wire,
+            execution,
+            continuation,
+            &request.replace("&AgentProviderBoundTranscript", "&AgentProviderTranscript"),
+        )
+        .is_err());
     }
 
     #[test]

@@ -465,6 +465,16 @@ agentic-owned Windows modules. Cross-compilation is not device behavior.
   It is an inert functional core with no application telemetry or persistence
   seam. It does not claim site, latency, native-resource, or machine-resource
   values.
+- Default-core release gating now rejects three avoidable invariant-abort
+  classes: rewrapping an already-proven nonzero semantic key, asserting static
+  role-operation construction, and recovering a newly appended provider turn
+  from a possibly-empty transcript. The replacement provider carrier reserves
+  its eventual slot before binding, exposes the latest turn structurally, and
+  merges it after serialization without a content copy or vector allocation.
+  Unit tests preserve allocation/capacity and redaction facts; source
+  mutations remove each carry or reintroduce `expect`, `unreachable!`, or the
+  ordinary transcript type and are rejected. This narrows guarded defects
+  under release `panic = "abort"`; it is not a general panic-recovery claim.
 - A separate optional run-local progress reducer now streams canonical semantic
   audit events and derives observed initial-queue, model, effect, human-wait,
   and root elapsed durations, closed `NeedsHuman` counts, distinct human-

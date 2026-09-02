@@ -231,6 +231,16 @@ or observed on either platform.
   and the exact token-admitted semantic-diff payload. It grants neither
   browser-operation nor provider-call authority and exposes no generic JSON,
   DOM, selector, script, or transport payload.
+- Transcript binding reserves the one eventual prior-vector slot before it
+  creates a private structurally nonempty carrier containing the exact new
+  turn. The diff, locate, read, and extraction encoders iterate that carrier
+  and read its latest correlation directly; they no longer recover the turn
+  with `last().expect(...)` under the release `panic = "abort"` policy. After
+  body serialization the carrier moves the same turn into the reserved slot,
+  with unit evidence that vector capacity and the tool-result allocation are
+  unchanged. Source-gate mutations remove the reservation, substitute the
+  ordinary possibly-empty transcript, or add a production invariant abort and
+  are rejected.
 - Fixed provider-specific transcript encoders now consume the bound value into
   a move-only draft. OpenAI stateless `store: false` replay contains the two
   original user inputs, every exact prior tool-only `function_call` output item
@@ -267,6 +277,12 @@ or observed on either platform.
   eligible tool-only turn. Refusal or cancellation releases the reservation
   without advancing either. Concrete reviewed counters are not yet installed,
   so production continues to require a fresh full observation.
+- Two other constructor assumptions in the default semantic core are now
+  carried or refused rather than asserted: the already-nonzero semantic node
+  key moves directly into the native target recipe, while static role
+  operation construction maps any invalid set to `NodeContract`. The release
+  gate mutation-tests both paths. This is deterministic source/unit evidence,
+  not native-input or live-provider qualification.
 - Fixed loopback transport integrations now exercise the complete admitted
   OpenAI and Anthropic paths from full-observation commit and exact tool-only
   terminal through diff computation, fixed stateless replay, synthetic

@@ -385,14 +385,14 @@ fn validate_operations(
     if states.contains(SemanticState::Disabled) && !operations.is_empty() {
         return Err(SemanticDecodeError::NodeContract);
     }
-    let allowed = allowed_operations(role);
+    let allowed = allowed_operations(role)?;
     if operations.bits() & !allowed.bits() != 0 {
         return Err(SemanticDecodeError::NodeContract);
     }
     Ok(())
 }
 
-fn allowed_operations(role: SemanticRole) -> SemanticOperations {
+fn allowed_operations(role: SemanticRole) -> Result<SemanticOperations, SemanticDecodeError> {
     use SemanticOperationClass::{Click, Fill, Press, Scroll, Select};
     let operations: &[SemanticOperationClass] = match role {
         SemanticRole::Link
@@ -426,7 +426,7 @@ fn allowed_operations(role: SemanticRole) -> SemanticOperations {
         | SemanticRole::Status
         | SemanticRole::FrameBoundary => &[],
     };
-    SemanticOperations::try_new(operations).expect("static operations are duplicate-free")
+    SemanticOperations::try_new(operations).map_err(|_| SemanticDecodeError::NodeContract)
 }
 
 const fn role_accepts_text_value(role: SemanticRole) -> bool {

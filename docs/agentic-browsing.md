@@ -889,8 +889,14 @@ it retains exact committed baseline, provider/model/tokenizer/pricing
 configuration, model-call lineage, and terminal tool correlation. Failures,
 cancellation, non-tool stops, mixed text/reasoning output, and multi-tool stops
 destroy it. It can bind only a strictly newer same-plan call and the exact
-token-admitted diff extending that baseline. Fixed provider-specific stateless
-codecs turn that bound value into a move-only draft: OpenAI replays the
+token-admitted diff extending that baseline. Binding first reserves the one
+eventual vector slot, then holds the newly completed turn in a structurally
+nonempty carrier beside the prior transcript. Provider encoders therefore
+receive an infallible latest correlation without indexing or a release-aborting
+invariant assertion; after serialization, the carrier moves that turn into the
+already-reserved slot without copying content or allocating. Fixed
+provider-specific stateless codecs turn that bound value into a move-only
+draft: OpenAI replays the
 two original user inputs, each exact tool-only `function_call` output item, and
 its matching `function_call_output` under `store: false`; Anthropic replays the
 original user message followed by adjacent assistant `tool_use` and user
@@ -1007,6 +1013,16 @@ Unobserved and still open durations are `None`, never synthetic zeroes. It owns
 no clock, telemetry or persistence port, task, worker, channel, browser
 context, or native resource; if it is not constructed, it has zero runtime
 state or work.
+
+The default semantic core does not convert validated internal identity or
+static operation assumptions back through process-terminating constructors.
+Opaque node keys move their existing nonzero representation directly into the
+native target recipe; operation allowlists propagate a typed decode refusal if
+their construction is ever invalid. The release source gate mutation-tests
+both carries and the structurally nonempty provider continuation above. This
+narrows avoidable exposure to the workspace `panic = "abort"` policy without
+claiming that allocation failure or defects outside these guarded seams are
+recoverable.
 
 ## 12. Probe and test harness
 

@@ -35,7 +35,7 @@ use crate::{
     MAX_SEMANTIC_MUTATION_QUIET_MILLIS, MAX_SEMANTIC_SURROUNDING_TEXT_BYTES,
 };
 
-use super::continuation::AgentProviderTranscript;
+use super::continuation::{AgentProviderBoundTranscript, AgentProviderTranscript};
 use super::tool::AgentBrowserToolKind;
 use super::{
     AgentProviderBoundDiffContinuation, AgentProviderBoundExtractionContinuation,
@@ -2798,7 +2798,7 @@ fn encode_openai_body(
 
 fn encode_openai_continuation_body(
     config: &AgentProviderCallConfig,
-    transcript: &AgentProviderTranscript,
+    transcript: &AgentProviderBoundTranscript,
 ) -> Result<Vec<u8>, AgentProviderRequestError> {
     if config.provider() != AgentProviderKind::OpenAiResponses {
         return Err(AgentProviderContractError::ProviderKind.into());
@@ -2806,8 +2806,7 @@ fn encode_openai_continuation_body(
     let input_items = 2_usize
         .checked_add(
             transcript
-                .turns()
-                .len()
+                .turn_count()
                 .checked_mul(2)
                 .ok_or(AgentProviderRequestError::Encoding)?,
         )
@@ -2887,21 +2886,17 @@ fn encode_openai_continuation_body(
 
 fn encode_openai_extraction_body(
     config: &AgentProviderCallConfig,
-    transcript: &AgentProviderTranscript,
+    transcript: &AgentProviderBoundTranscript,
 ) -> Result<Vec<u8>, AgentProviderRequestError> {
     if config.provider() != AgentProviderKind::OpenAiResponses
-        || transcript
-            .turns()
-            .last()
-            .is_none_or(|turn| turn.correlation().kind() != AgentBrowserToolKind::Extract)
+        || transcript.latest().correlation().kind() != AgentBrowserToolKind::Extract
     {
         return Err(AgentProviderRequestError::Encoding);
     }
     let input_items = 2_usize
         .checked_add(
             transcript
-                .turns()
-                .len()
+                .turn_count()
                 .checked_mul(2)
                 .ok_or(AgentProviderRequestError::Encoding)?,
         )
@@ -3144,7 +3139,7 @@ fn encode_anthropic_body(
 
 fn encode_anthropic_continuation_body(
     config: &AgentProviderCallConfig,
-    transcript: &AgentProviderTranscript,
+    transcript: &AgentProviderBoundTranscript,
 ) -> Result<Vec<u8>, AgentProviderRequestError> {
     if config.provider() != AgentProviderKind::AnthropicMessages {
         return Err(AgentProviderContractError::ProviderKind.into());
@@ -3154,8 +3149,7 @@ fn encode_anthropic_continuation_body(
     let message_count = 1_usize
         .checked_add(
             transcript
-                .turns()
-                .len()
+                .turn_count()
                 .checked_mul(2)
                 .ok_or(AgentProviderRequestError::Encoding)?,
         )
@@ -3238,21 +3232,17 @@ fn encode_anthropic_continuation_body(
 
 fn encode_anthropic_extraction_body(
     config: &AgentProviderCallConfig,
-    transcript: &AgentProviderTranscript,
+    transcript: &AgentProviderBoundTranscript,
 ) -> Result<Vec<u8>, AgentProviderRequestError> {
     if config.provider() != AgentProviderKind::AnthropicMessages
-        || transcript
-            .turns()
-            .last()
-            .is_none_or(|turn| turn.correlation().kind() != AgentBrowserToolKind::Extract)
+        || transcript.latest().correlation().kind() != AgentBrowserToolKind::Extract
     {
         return Err(AgentProviderRequestError::Encoding);
     }
     let message_count = 1_usize
         .checked_add(
             transcript
-                .turns()
-                .len()
+                .turn_count()
                 .checked_mul(2)
                 .ok_or(AgentProviderRequestError::Encoding)?,
         )

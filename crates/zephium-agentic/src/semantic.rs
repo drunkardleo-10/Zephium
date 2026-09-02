@@ -695,6 +695,10 @@ impl SemanticNodeKey {
     pub(crate) const fn get(self) -> u64 {
         self.0.get()
     }
+
+    pub(crate) const fn into_nonzero(self) -> NonZeroU64 {
+        self.0
+    }
 }
 
 impl fmt::Debug for SemanticNodeKey {

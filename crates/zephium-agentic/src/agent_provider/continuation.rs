@@ -68,6 +68,18 @@ pub(super) struct AgentProviderTranscriptTurn {
     tool_result: String,
 }
 
+/// Bounded prior transcript plus the exact newly bound tool-result turn.
+///
+/// Keeping the new turn structurally separate makes its presence infallible to
+/// continuation consumers. The prior vector reserves its eventual slot before
+/// this value is created, so merging after request serialization cannot copy
+/// content or allocate.
+pub(super) struct AgentProviderBoundTranscript {
+    prior: AgentProviderTranscript,
+    latest: AgentProviderTranscriptTurn,
+    retained_bytes: usize,
+}
+
 impl AgentProviderTranscript {
     pub(super) fn try_initial(objective: Arc<str>, initial_observation: String) -> Option<Self> {
         if objective.len() > super::MAX_AGENT_PROVIDER_OBJECTIVE_BYTES
@@ -87,11 +99,11 @@ impl AgentProviderTranscript {
         })
     }
 
-    fn try_append(
+    fn try_bind(
         mut self,
         correlation: AgentProviderToolCallCorrelation,
         tool_result: String,
-    ) -> Result<Self, AgentProviderContinuationError> {
+    ) -> Result<AgentProviderBoundTranscript, AgentProviderContinuationError> {
         if self.turns.len() >= MAX_AGENT_PROVIDER_CONTINUATION_TURNS {
             return Err(AgentProviderContinuationError::TranscriptLimit);
         }
@@ -111,12 +123,24 @@ impl AgentProviderTranscript {
         self.turns
             .try_reserve(1)
             .map_err(|_| AgentProviderContinuationError::TranscriptLimit)?;
-        self.turns.push(AgentProviderTranscriptTurn {
-            correlation,
-            tool_result,
-        });
-        self.retained_bytes = retained_bytes;
-        Ok(self)
+        Ok(AgentProviderBoundTranscript {
+            prior: self,
+            latest: AgentProviderTranscriptTurn {
+                correlation,
+                tool_result,
+            },
+            retained_bytes,
+        })
+    }
+
+    #[cfg(test)]
+    fn try_append(
+        self,
+        correlation: AgentProviderToolCallCorrelation,
+        tool_result: String,
+    ) -> Result<Self, AgentProviderContinuationError> {
+        self.try_bind(correlation, tool_result)
+            .map(AgentProviderBoundTranscript::into_transcript)
     }
 
     pub(super) const fn retained_bytes(&self) -> usize {
@@ -133,6 +157,43 @@ impl AgentProviderTranscript {
 
     pub(super) fn turns(&self) -> &[AgentProviderTranscriptTurn] {
         &self.turns
+    }
+}
+
+impl AgentProviderBoundTranscript {
+    pub(super) const fn retained_bytes(&self) -> usize {
+        self.retained_bytes
+    }
+
+    pub(super) fn objective(&self) -> &str {
+        self.prior.objective()
+    }
+
+    pub(super) fn initial_observation(&self) -> &str {
+        self.prior.initial_observation()
+    }
+
+    pub(super) fn turns(&self) -> impl Iterator<Item = &AgentProviderTranscriptTurn> {
+        self.prior.turns.iter().chain(std::iter::once(&self.latest))
+    }
+
+    pub(super) const fn turn_count(&self) -> usize {
+        self.prior.turns.len() + 1
+    }
+
+    pub(super) const fn latest(&self) -> &AgentProviderTranscriptTurn {
+        &self.latest
+    }
+
+    fn into_transcript(self) -> AgentProviderTranscript {
+        let Self {
+            mut prior,
+            latest,
+            retained_bytes,
+        } = self;
+        prior.turns.push(latest);
+        prior.retained_bytes = retained_bytes;
+        prior
     }
 }
 
@@ -166,6 +227,22 @@ impl fmt::Debug for AgentProviderTranscriptTurn {
             .field("tool_kind", &self.correlation.kind())
             .field("correlation_bytes", &self.correlation.argument_bytes())
             .field("tool_result_bytes", &self.tool_result.len())
+            .field("content", &"[redacted]")
+            .finish()
+    }
+}
+
+impl fmt::Debug for AgentProviderBoundTranscript {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentProviderBoundTranscript")
+            .field("objective_bytes", &self.prior.objective.len())
+            .field(
+                "initial_observation_bytes",
+                &self.prior.initial_observation.len(),
+            )
+            .field("retained_bytes", &self.retained_bytes)
+            .field("completed_turns", &self.turn_count())
             .field("content", &"[redacted]")
             .finish()
     }
@@ -367,7 +444,7 @@ impl AgentProviderContinuation {
         self.validate_diff_turn(next_call, next_config, diff, &payload)?;
         let (prior_call, config, baseline, correlation, transcript) = self.into_parts();
         let (tool_result, semantic_stats, delivery) = payload.into_provider_parts();
-        let transcript = transcript.try_append(correlation, tool_result)?;
+        let transcript = transcript.try_bind(correlation, tool_result)?;
         Ok(AgentProviderBoundDiffContinuation {
             prior_call,
             next_call,
@@ -430,7 +507,7 @@ impl AgentProviderContinuation {
         }
         let (prior_call, config, baseline, correlation, transcript) = self.into_parts();
         let (tool_result, semantic_stats, delivery) = payload.into_provider_parts();
-        let transcript = transcript.try_append(correlation, tool_result)?;
+        let transcript = transcript.try_bind(correlation, tool_result)?;
         Ok(AgentProviderBoundLocateContinuation {
             prior_call,
             next_call,
@@ -494,7 +571,7 @@ impl AgentProviderContinuation {
         }
         let (prior_call, config, baseline, correlation, transcript) = self.into_parts();
         let (tool_result, semantic_stats, delivery) = payload.into_provider_parts();
-        let transcript = transcript.try_append(correlation, tool_result)?;
+        let transcript = transcript.try_bind(correlation, tool_result)?;
         Ok(AgentProviderBoundReadContinuation {
             prior_call,
             next_call,
@@ -563,7 +640,7 @@ impl AgentProviderContinuation {
         }
         let (prior_call, config, baseline, correlation, transcript) = self.into_parts();
         let (tool_result, semantic_stats, delivery) = payload.into_provider_parts();
-        let transcript = transcript.try_append(correlation, tool_result)?;
+        let transcript = transcript.try_bind(correlation, tool_result)?;
         Ok(AgentProviderBoundExtractionContinuation {
             prior_call,
             next_call,
@@ -696,7 +773,7 @@ pub struct AgentProviderBoundDiffContinuation {
     next_call: AgentProviderCallIdentity,
     config: AgentProviderCallConfig,
     baseline: SemanticObservationAcknowledgement,
-    transcript: AgentProviderTranscript,
+    transcript: AgentProviderBoundTranscript,
     semantic_stats: SemanticDiffEncodingStats,
     delivery: SemanticDiffDeliveryAuthority,
     current_observation: SemanticObservationId,
@@ -723,7 +800,7 @@ impl AgentProviderBoundDiffContinuation {
         &self.config
     }
 
-    pub(super) const fn transcript(&self) -> &AgentProviderTranscript {
+    pub(super) const fn transcript(&self) -> &AgentProviderBoundTranscript {
         &self.transcript
     }
 
@@ -739,7 +816,7 @@ impl AgentProviderBoundDiffContinuation {
 
     /// Exact pending provider tool-call identifier.
     pub fn tool_call_id(&self) -> &AgentBrowserToolCallId {
-        self.latest_turn().correlation.id()
+        self.transcript.latest().correlation.id()
     }
 
     /// Private structured transcript bytes retained for resource accounting.
@@ -750,13 +827,6 @@ impl AgentProviderBoundDiffContinuation {
     /// Content-free metrics for the exact admitted diff now in the transcript.
     pub const fn semantic_stats(&self) -> SemanticDiffEncodingStats {
         self.semantic_stats
-    }
-
-    fn latest_turn(&self) -> &AgentProviderTranscriptTurn {
-        self.transcript
-            .turns
-            .last()
-            .expect("bound diff continuation always appends one transcript turn")
     }
 
     pub(super) fn into_request_parts(
@@ -771,7 +841,7 @@ impl AgentProviderBoundDiffContinuation {
         (
             self.next_call,
             self.config,
-            self.transcript,
+            self.transcript.into_transcript(),
             self.semantic_stats,
             self.delivery,
         )
@@ -790,11 +860,11 @@ impl fmt::Debug for AgentProviderBoundDiffContinuation {
             .field("current_generation", &self.current_generation)
             .field("semantic_stats", &self.semantic_stats)
             .field("delivery", &self.delivery)
-            .field("tool_kind", &self.latest_turn().correlation.kind())
+            .field("tool_kind", &self.transcript.latest().correlation.kind())
             .field("tool_call_id", &"[redacted]")
             .field(
                 "argument_bytes",
-                &self.latest_turn().correlation.argument_bytes(),
+                &self.transcript.latest().correlation.argument_bytes(),
             )
             .field("transcript_bytes", &self.transcript.retained_bytes())
             .field("content", &"[redacted]")
@@ -812,7 +882,7 @@ pub struct AgentProviderBoundLocateContinuation {
     next_call: AgentProviderCallIdentity,
     config: AgentProviderCallConfig,
     baseline: SemanticObservationAcknowledgement,
-    transcript: AgentProviderTranscript,
+    transcript: AgentProviderBoundTranscript,
     semantic_stats: SemanticLocateEncodingStats,
     delivery: SemanticLocateDeliveryAuthority,
     observation: SemanticObservationId,
@@ -847,7 +917,7 @@ impl AgentProviderBoundLocateContinuation {
 
     /// Exact pending provider tool-call identifier.
     pub fn tool_call_id(&self) -> &AgentBrowserToolCallId {
-        self.latest_turn().correlation.id()
+        self.transcript.latest().correlation.id()
     }
 
     /// Private structured transcript bytes retained for resource accounting.
@@ -864,15 +934,8 @@ impl AgentProviderBoundLocateContinuation {
         &self.config
     }
 
-    pub(super) const fn transcript(&self) -> &AgentProviderTranscript {
+    pub(super) const fn transcript(&self) -> &AgentProviderBoundTranscript {
         &self.transcript
-    }
-
-    fn latest_turn(&self) -> &AgentProviderTranscriptTurn {
-        self.transcript
-            .turns
-            .last()
-            .expect("bound locate continuation always appends one transcript turn")
     }
 
     pub(super) fn into_request_parts(
@@ -887,7 +950,7 @@ impl AgentProviderBoundLocateContinuation {
         (
             self.next_call,
             self.config,
-            self.transcript,
+            self.transcript.into_transcript(),
             self.semantic_stats,
             self.delivery,
         )
@@ -906,11 +969,11 @@ impl fmt::Debug for AgentProviderBoundLocateContinuation {
             .field("observation_generation", &self.observation_generation)
             .field("semantic_stats", &self.semantic_stats)
             .field("delivery", &self.delivery)
-            .field("tool_kind", &self.latest_turn().correlation.kind())
+            .field("tool_kind", &self.transcript.latest().correlation.kind())
             .field("tool_call_id", &"[redacted]")
             .field(
                 "argument_bytes",
-                &self.latest_turn().correlation.argument_bytes(),
+                &self.transcript.latest().correlation.argument_bytes(),
             )
             .field("transcript_bytes", &self.transcript.retained_bytes())
             .field("content", &"[redacted]")
@@ -929,7 +992,7 @@ pub struct AgentProviderBoundReadContinuation {
     next_call: AgentProviderCallIdentity,
     config: AgentProviderCallConfig,
     baseline: SemanticObservationAcknowledgement,
-    transcript: AgentProviderTranscript,
+    transcript: AgentProviderBoundTranscript,
     semantic_stats: SemanticReadEncodingStats,
     delivery: SemanticReadDeliveryAuthority,
     observation: SemanticObservationId,
@@ -964,7 +1027,7 @@ impl AgentProviderBoundReadContinuation {
 
     /// Exact pending provider tool-call identifier.
     pub fn tool_call_id(&self) -> &AgentBrowserToolCallId {
-        self.latest_turn().correlation.id()
+        self.transcript.latest().correlation.id()
     }
 
     /// Private structured transcript bytes retained for resource accounting.
@@ -981,15 +1044,8 @@ impl AgentProviderBoundReadContinuation {
         &self.config
     }
 
-    pub(super) const fn transcript(&self) -> &AgentProviderTranscript {
+    pub(super) const fn transcript(&self) -> &AgentProviderBoundTranscript {
         &self.transcript
-    }
-
-    fn latest_turn(&self) -> &AgentProviderTranscriptTurn {
-        self.transcript
-            .turns
-            .last()
-            .expect("bound read continuation always appends one transcript turn")
     }
 
     pub(super) fn into_request_parts(
@@ -1006,7 +1062,7 @@ impl AgentProviderBoundReadContinuation {
             self.next_call,
             self.config,
             self.baseline,
-            self.transcript,
+            self.transcript.into_transcript(),
             self.semantic_stats,
             self.delivery,
         )
@@ -1025,11 +1081,11 @@ impl fmt::Debug for AgentProviderBoundReadContinuation {
             .field("observation_generation", &self.observation_generation)
             .field("semantic_stats", &self.semantic_stats)
             .field("delivery", &"[redacted]")
-            .field("tool_kind", &self.latest_turn().correlation.kind())
+            .field("tool_kind", &self.transcript.latest().correlation.kind())
             .field("tool_call_id", &"[redacted]")
             .field(
                 "argument_bytes",
-                &self.latest_turn().correlation.argument_bytes(),
+                &self.transcript.latest().correlation.argument_bytes(),
             )
             .field("transcript_bytes", &self.transcript.retained_bytes())
             .field("content", &"[redacted]")
@@ -1047,7 +1103,7 @@ pub struct AgentProviderBoundExtractionContinuation {
     next_call: AgentProviderCallIdentity,
     config: AgentProviderCallConfig,
     baseline: SemanticObservationAcknowledgement,
-    transcript: AgentProviderTranscript,
+    transcript: AgentProviderBoundTranscript,
     semantic_stats: SemanticExtractionEncodingStats,
     delivery: SemanticExtractionDeliveryAuthority,
     schema: crate::SemanticExtractionSchemaId,
@@ -1100,7 +1156,7 @@ impl AgentProviderBoundExtractionContinuation {
         &self.config
     }
 
-    pub(super) const fn transcript(&self) -> &AgentProviderTranscript {
+    pub(super) const fn transcript(&self) -> &AgentProviderBoundTranscript {
         &self.transcript
     }
 
@@ -1118,7 +1174,7 @@ impl AgentProviderBoundExtractionContinuation {
             self.next_call,
             self.config,
             self.baseline,
-            self.transcript,
+            self.transcript.into_transcript(),
             self.semantic_stats,
             self.delivery,
         )
@@ -1664,6 +1720,39 @@ mod tests {
             String::new(),
         )
         .is_none());
+    }
+
+    #[test]
+    fn bound_transcript_carries_latest_turn_and_merges_without_allocation() {
+        let tool_result = "private bound result".to_owned();
+        let result_allocation = tool_result.as_ptr();
+        let bound = transcript()
+            .try_bind(openai_correlation("{}"), tool_result)
+            .expect("bounded turn");
+
+        assert_eq!(bound.turn_count(), 1);
+        assert_eq!(bound.turns().count(), 1);
+        assert_eq!(
+            bound.latest().correlation().id().as_str(),
+            "call_continuation_1"
+        );
+        assert_eq!(bound.latest().tool_result().as_ptr(), result_allocation);
+        assert!(bound.prior.turns.capacity() > bound.prior.turns.len());
+        let reserved_capacity = bound.prior.turns.capacity();
+        let retained_bytes = bound.retained_bytes();
+        let transcript = bound.into_transcript();
+
+        assert_eq!(transcript.turns.len(), 1);
+        assert_eq!(transcript.turns.capacity(), reserved_capacity);
+        assert_eq!(transcript.retained_bytes(), retained_bytes);
+        assert_eq!(
+            transcript.turns[0].tool_result().as_ptr(),
+            result_allocation
+        );
+        let debug = format!("{transcript:?} {:?}", transcript.turns[0]);
+        assert!(!debug.contains("private bound result"));
+        assert!(!debug.contains("call_continuation_1"));
+        assert!(debug.contains("[redacted]"));
     }
 
     #[test]

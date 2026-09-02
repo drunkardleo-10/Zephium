@@ -60,7 +60,7 @@ pub struct SemanticActionNativeTargetId(NonZeroU64);
 
 impl SemanticActionNativeTargetId {
     fn from_key(key: crate::semantic::SemanticNodeKey) -> Self {
-        Self(NonZeroU64::new(key.get()).expect("semantic node keys are nonzero"))
+        Self(key.into_nonzero())
     }
 
     /// Returns the process-local stable key for the fixed isolated/native adapter.
