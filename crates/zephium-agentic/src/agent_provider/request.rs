@@ -61,6 +61,8 @@ pub const MAX_AGENT_PROVIDER_SCREENSHOT_TRANSCRIPT_BYTES: usize = 64 * 1024;
 pub const MAX_AGENT_BROWSER_NAVIGATION_URL_BYTES: usize = 8 * 1024;
 
 const _: () = {
+    assert!(MAX_AGENT_PROVIDER_REQUEST_BYTES <= u32::MAX as usize);
+    assert!(std::mem::size_of::<AgentProviderInputMetrics>() <= 64);
     assert!(MAX_AGENT_PROVIDER_SCREENSHOT_PNG_BYTES < MAX_AGENT_PROVIDER_REQUEST_BYTES);
     assert!(
         MAX_AGENT_PROVIDER_SCREENSHOT_PNG_BYTES
@@ -327,6 +329,123 @@ pub enum AgentProviderInputEvidence {
     Screenshot(SemanticScreenshotDeliveryReceipt),
 }
 
+/// Content-free source metrics for one provider-disclosed browser projection.
+///
+/// The variants deliberately reuse the closed semantic encoder and screenshot
+/// statistics. They contain counts and fixed labels only: no page text, image
+/// bytes, objective, URL, selector, tokenizer name, or provider response.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgentProviderSemanticInputStats {
+    /// One complete compact semantic observation.
+    Observation(SemanticEncodingStats),
+    /// One compact semantic diff appended to a bounded replay.
+    Diff(SemanticDiffEncodingStats),
+    /// One content-free semantic locate result appended to a bounded replay.
+    Locate(SemanticLocateEncodingStats),
+    /// One bounded semantic read, either direct or appended to a replay.
+    Read(SemanticReadEncodingStats),
+    /// One constrained extraction schema/read mapping input.
+    Extraction(SemanticExtractionEncodingStats),
+    /// One canonicalized viewport screenshot.
+    Screenshot(SemanticScreenshotStats),
+}
+
+impl AgentProviderSemanticInputStats {
+    /// Exact model-facing semantic bytes, or canonical PNG bytes for a screenshot.
+    pub const fn disclosed_bytes(self) -> u32 {
+        match self {
+            Self::Observation(stats) => stats.bytes(),
+            Self::Diff(stats) => stats.bytes(),
+            Self::Locate(stats) => stats.bytes(),
+            Self::Read(stats) => stats.bytes(),
+            Self::Extraction(stats) => stats.bytes(),
+            Self::Screenshot(stats) => stats.canonical_png_bytes(),
+        }
+    }
+}
+
+/// Content-free scalar projection of one trusted token measurement.
+///
+/// The selected tokenizer revision remains available from the immutable call
+/// configuration and is not copied into every metrics sample.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AgentProviderInputTokenCount {
+    tokens: u32,
+    quality: SemanticTokenCountQuality,
+}
+
+impl AgentProviderInputTokenCount {
+    fn from_measurement(measurement: &SemanticTokenMeasurement) -> Self {
+        Self {
+            tokens: measurement.tokens(),
+            quality: measurement.quality(),
+        }
+    }
+
+    /// Counted or conservatively bounded tokens.
+    pub const fn tokens(self) -> u32 {
+        self.tokens
+    }
+
+    /// Exact/provider/conservative measurement class.
+    pub const fn quality(self) -> SemanticTokenCountQuality {
+        self.quality
+    }
+}
+
+/// Content-free metrics for the exact browser input committed to one request.
+///
+/// `semantic_payload_tokens` measures only the newest compact semantic
+/// projection. `structured_input_tokens` measures the complete provider replay
+/// and envelope when an exact local structured-input counter ran. Initial
+/// stateless requests have no such whole-request count, while screenshots have
+/// no text-semantic payload count. Absence is preserved as `None` and is never
+/// estimated from serialized byte length.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AgentProviderInputMetrics {
+    serialized_request_bytes: u32,
+    semantic: AgentProviderSemanticInputStats,
+    semantic_payload_tokens: Option<AgentProviderInputTokenCount>,
+    structured_input_tokens: Option<AgentProviderInputTokenCount>,
+}
+
+impl AgentProviderInputMetrics {
+    fn from_request(
+        request: &AgentProviderRequest,
+        semantic: AgentProviderSemanticInputStats,
+        semantic_payload_tokens: Option<AgentProviderInputTokenCount>,
+        structured_input_tokens: Option<AgentProviderInputTokenCount>,
+    ) -> Self {
+        debug_assert!(request.byte_len() <= MAX_AGENT_PROVIDER_REQUEST_BYTES);
+        Self {
+            serialized_request_bytes: request.byte_len() as u32,
+            semantic,
+            semantic_payload_tokens,
+            structured_input_tokens,
+        }
+    }
+
+    /// Exact serialized provider request-body bytes committed to transport.
+    pub const fn serialized_request_bytes(self) -> u32 {
+        self.serialized_request_bytes
+    }
+
+    /// Closed source-specific semantic/screenshot encoding metrics.
+    pub const fn semantic(self) -> AgentProviderSemanticInputStats {
+        self.semantic
+    }
+
+    /// Token count for the newest compact semantic payload, when applicable.
+    pub const fn semantic_payload_tokens(self) -> Option<AgentProviderInputTokenCount> {
+        self.semantic_payload_tokens
+    }
+
+    /// Whole provider-structured replay count when one was actually measured.
+    pub const fn structured_input_tokens(self) -> Option<AgentProviderInputTokenCount> {
+        self.structured_input_tokens
+    }
+}
+
 impl AgentProviderInputEvidence {
     /// Exact current observation proof when this input can seed the next diff.
     pub const fn observation_acknowledgement(&self) -> Option<&SemanticObservationAcknowledgement> {
@@ -422,6 +541,7 @@ impl fmt::Debug for AgentProviderInputEvidence {
 pub struct AgentCommittedProviderInput {
     active: AgentActiveModelCall,
     evidence: AgentProviderInputEvidence,
+    metrics: AgentProviderInputMetrics,
 }
 
 impl AgentCommittedProviderInput {
@@ -435,7 +555,15 @@ impl AgentCommittedProviderInput {
         &self.evidence
     }
 
+    /// Content-free metrics for the exact input that crossed disclosure commit.
+    pub const fn metrics(&self) -> AgentProviderInputMetrics {
+        self.metrics
+    }
+
     /// Separates terminal usage authority from cloneable content-free input proof.
+    ///
+    /// Callers that retain qualification metrics must read `metrics` before
+    /// consuming this owner; dropping metrics never drops settlement authority.
     pub fn into_parts(self) -> (AgentActiveModelCall, AgentProviderInputEvidence) {
         (self.active, self.evidence)
     }
@@ -447,6 +575,7 @@ impl fmt::Debug for AgentCommittedProviderInput {
             .debug_struct("AgentCommittedProviderInput")
             .field("active", &self.active)
             .field("evidence", &self.evidence)
+            .field("metrics", &self.metrics)
             .finish()
     }
 }
@@ -509,6 +638,7 @@ impl AgentProviderInputCommitment {
     fn commit(
         self,
         policy: &mut AgentRunPolicy,
+        metrics: AgentProviderInputMetrics,
     ) -> Result<AgentCommittedProviderInput, AgentProviderRequestError> {
         match self {
             Self::Observation {
@@ -520,6 +650,7 @@ impl AgentProviderInputCommitment {
                 Ok(AgentCommittedProviderInput {
                     active,
                     evidence: AgentProviderInputEvidence::Observation(acknowledgement),
+                    metrics,
                 })
             }
             Self::Diff {
@@ -531,6 +662,7 @@ impl AgentProviderInputCommitment {
                 Ok(AgentCommittedProviderInput {
                     active,
                     evidence: AgentProviderInputEvidence::Diff(receipt),
+                    metrics,
                 })
             }
             Self::Locate {
@@ -542,6 +674,7 @@ impl AgentProviderInputCommitment {
                 Ok(AgentCommittedProviderInput {
                     active,
                     evidence: AgentProviderInputEvidence::Locate(receipt),
+                    metrics,
                 })
             }
             Self::Read {
@@ -553,6 +686,7 @@ impl AgentProviderInputCommitment {
                 Ok(AgentCommittedProviderInput {
                     active,
                     evidence: AgentProviderInputEvidence::Read(receipt),
+                    metrics,
                 })
             }
             Self::Extraction {
@@ -564,6 +698,7 @@ impl AgentProviderInputCommitment {
                 Ok(AgentCommittedProviderInput {
                     active,
                     evidence: AgentProviderInputEvidence::Extraction(receipt),
+                    metrics,
                 })
             }
             Self::Screenshot {
@@ -575,6 +710,7 @@ impl AgentProviderInputCommitment {
                 Ok(AgentCommittedProviderInput {
                     active,
                     evidence: AgentProviderInputEvidence::Screenshot(receipt),
+                    metrics,
                 })
             }
         }
@@ -600,10 +736,11 @@ impl AgentProviderInputCommitment {
         self,
         policy: &mut AgentRunPolicy,
         settlement: AgentProviderRequestSettlement,
+        metrics: AgentProviderInputMetrics,
     ) -> Result<AgentProviderInputOutcome, AgentProviderRequestError> {
         match settlement {
             AgentProviderRequestSettlement::Committed => Ok(AgentProviderInputOutcome::Committed(
-                Box::new(self.commit(policy)?),
+                Box::new(self.commit(policy, metrics)?),
             )),
             AgentProviderRequestSettlement::Refused => {
                 self.release(policy, AgentModelInputCancellation::Refused)?;
@@ -627,6 +764,7 @@ impl AgentProviderInputCommitment {
 pub struct AgentProviderTransportInput {
     request: AgentProviderRequest,
     commitment: AgentProviderInputCommitment,
+    input_metrics: AgentProviderInputMetrics,
     continuation_transcript: Option<AgentProviderTranscript>,
     continuation_baseline: Option<SemanticObservationAcknowledgement>,
 }
@@ -652,10 +790,11 @@ impl AgentProviderTransportInput {
         let Self {
             request,
             commitment,
+            input_metrics,
             continuation_transcript,
             continuation_baseline,
         } = self;
-        let input = commitment.commit(policy)?;
+        let input = commitment.commit(policy, input_metrics)?;
         let continuation = AgentProviderContinuationSeed::from_committed(
             request.call(),
             request.config(),
@@ -675,8 +814,16 @@ impl AgentProviderTransportInput {
         self,
         policy: &mut AgentRunPolicy,
     ) -> Result<AgentProviderInputOutcome, AgentProviderRequestError> {
-        let Self { commitment, .. } = self;
-        commitment.settle(policy, AgentProviderRequestSettlement::Refused)
+        let Self {
+            commitment,
+            input_metrics,
+            ..
+        } = self;
+        commitment.settle(
+            policy,
+            AgentProviderRequestSettlement::Refused,
+            input_metrics,
+        )
     }
 
     /// Releases the reservation when exact cancellation wins before disclosure.
@@ -684,8 +831,16 @@ impl AgentProviderTransportInput {
         self,
         policy: &mut AgentRunPolicy,
     ) -> Result<AgentProviderInputOutcome, AgentProviderRequestError> {
-        let Self { commitment, .. } = self;
-        commitment.settle(policy, AgentProviderRequestSettlement::Cancelled)
+        let Self {
+            commitment,
+            input_metrics,
+            ..
+        } = self;
+        commitment.settle(
+            policy,
+            AgentProviderRequestSettlement::Cancelled,
+            input_metrics,
+        )
     }
 
     fn settle(
@@ -693,8 +848,12 @@ impl AgentProviderTransportInput {
         policy: &mut AgentRunPolicy,
         settlement: AgentProviderRequestSettlement,
     ) -> Result<AgentProviderInputOutcome, AgentProviderRequestError> {
-        let Self { commitment, .. } = self;
-        commitment.settle(policy, settlement)
+        let Self {
+            commitment,
+            input_metrics,
+            ..
+        } = self;
+        commitment.settle(policy, settlement, input_metrics)
     }
 }
 
@@ -704,6 +863,7 @@ impl fmt::Debug for AgentProviderTransportInput {
             .debug_struct("AgentProviderTransportInput")
             .field("request", &self.request)
             .field("commitment", &"[redacted]")
+            .field("input_metrics", &"[commit-only]")
             .field(
                 "continuation_transcript",
                 &self.continuation_transcript.is_some(),
@@ -741,6 +901,11 @@ impl AgentCommittedProviderRequest {
     /// Content-free exact semantic input proof retained across admission.
     pub const fn input_evidence(&self) -> &AgentProviderInputEvidence {
         self.input.evidence()
+    }
+
+    /// Content-free metrics for the exact input that crossed disclosure commit.
+    pub const fn input_metrics(&self) -> AgentProviderInputMetrics {
+        self.input.metrics()
     }
 
     /// Optional private transcript bytes retained for a tool-only terminal.
@@ -787,6 +952,7 @@ pub struct AgentPreparedObservationRequest {
     admission: AgentModelCallAdmission,
     delivery: crate::semantic_model::SemanticObservationDeliveryAuthority,
     semantic_stats: SemanticEncodingStats,
+    semantic_payload_tokens: AgentProviderInputTokenCount,
     continuation_transcript: Option<AgentProviderTranscript>,
 }
 
@@ -810,6 +976,8 @@ impl AgentPreparedObservationRequest {
             payload.token_measurement(),
             objective.token_measurement(),
         )?;
+        let semantic_payload_tokens =
+            AgentProviderInputTokenCount::from_measurement(payload.token_measurement());
         let body = encode_openai_body(&config, objective.as_str(), payload.as_str())?;
         let admission = policy.prepare_observation_input(call_request, observation, &payload)?;
         let call = AgentProviderCallIdentity::from_admission(&admission);
@@ -827,6 +995,7 @@ impl AgentPreparedObservationRequest {
             admission,
             delivery,
             semantic_stats,
+            semantic_payload_tokens,
             continuation_transcript,
         })
     }
@@ -850,6 +1019,8 @@ impl AgentPreparedObservationRequest {
             payload.token_measurement(),
             objective.token_measurement(),
         )?;
+        let semantic_payload_tokens =
+            AgentProviderInputTokenCount::from_measurement(payload.token_measurement());
         let body = encode_anthropic_body(&config, objective.as_str(), payload.as_str())?;
         let admission = policy.prepare_observation_input(call_request, observation, &payload)?;
         let call = AgentProviderCallIdentity::from_admission(&admission);
@@ -867,6 +1038,7 @@ impl AgentPreparedObservationRequest {
             admission,
             delivery,
             semantic_stats,
+            semantic_payload_tokens,
             continuation_transcript,
         })
     }
@@ -883,12 +1055,19 @@ impl AgentPreparedObservationRequest {
 
     /// Joins the request body and observation authority for transport admission.
     pub fn into_transport_input(self) -> AgentProviderTransportInput {
+        let input_metrics = AgentProviderInputMetrics::from_request(
+            &self.request,
+            AgentProviderSemanticInputStats::Observation(self.semantic_stats),
+            Some(self.semantic_payload_tokens),
+            None,
+        );
         AgentProviderTransportInput {
             request: self.request,
             commitment: AgentProviderInputCommitment::Observation {
                 admission: self.admission,
                 delivery: self.delivery,
             },
+            input_metrics,
             continuation_transcript: self.continuation_transcript,
             continuation_baseline: None,
         }
@@ -911,6 +1090,7 @@ impl fmt::Debug for AgentPreparedObservationRequest {
             .field("request", &self.request)
             .field("admission", &self.admission)
             .field("semantic_stats", &self.semantic_stats)
+            .field("semantic_payload_tokens", &self.semantic_payload_tokens)
             .field("delivery", &"[redacted]")
             .field(
                 "continuation_transcript",
@@ -1014,12 +1194,21 @@ impl AgentPreparedReadRequest {
 
     /// Joins the request body and read authority for transport admission.
     pub fn into_transport_input(self) -> AgentProviderTransportInput {
+        let input_metrics = AgentProviderInputMetrics::from_request(
+            &self.request,
+            AgentProviderSemanticInputStats::Read(self.semantic_stats),
+            Some(AgentProviderInputTokenCount::from_measurement(
+                self.delivery.token_measurement(),
+            )),
+            None,
+        );
         AgentProviderTransportInput {
             request: self.request,
             commitment: AgentProviderInputCommitment::Read {
                 admission: self.admission,
                 delivery: self.delivery,
             },
+            input_metrics,
             continuation_transcript: None,
             continuation_baseline: None,
         }
@@ -1219,12 +1408,23 @@ impl AgentPreparedDiffRequest {
 
     /// Joins the exact request, diff proof, and policy admission for transport.
     pub fn into_transport_input(self) -> AgentProviderTransportInput {
+        let input_metrics = AgentProviderInputMetrics::from_request(
+            &self.request,
+            AgentProviderSemanticInputStats::Diff(self.semantic_stats),
+            Some(AgentProviderInputTokenCount::from_measurement(
+                self.delivery.token_measurement(),
+            )),
+            Some(AgentProviderInputTokenCount::from_measurement(
+                &self.structured_input,
+            )),
+        );
         AgentProviderTransportInput {
             request: self.request,
             commitment: AgentProviderInputCommitment::Diff {
                 admission: self.admission,
                 delivery: self.delivery,
             },
+            input_metrics,
             continuation_transcript: Some(self.continuation_transcript),
             continuation_baseline: None,
         }
@@ -1431,12 +1631,23 @@ impl AgentPreparedReadContinuationRequest {
 
     /// Joins the exact request, read proof, baseline, and policy admission.
     pub fn into_transport_input(self) -> AgentProviderTransportInput {
+        let input_metrics = AgentProviderInputMetrics::from_request(
+            &self.request,
+            AgentProviderSemanticInputStats::Read(self.semantic_stats),
+            Some(AgentProviderInputTokenCount::from_measurement(
+                self.delivery.token_measurement(),
+            )),
+            Some(AgentProviderInputTokenCount::from_measurement(
+                &self.structured_input,
+            )),
+        );
         AgentProviderTransportInput {
             request: self.request,
             commitment: AgentProviderInputCommitment::Read {
                 admission: self.admission,
                 delivery: self.delivery,
             },
+            input_metrics,
             continuation_transcript: Some(self.continuation_transcript),
             continuation_baseline: Some(self.baseline),
         }
@@ -1654,6 +1865,16 @@ impl AgentPreparedExtractionRequest {
         AgentProviderTransportInput,
         AgentProviderExtractionOutputBinding,
     ) {
+        let input_metrics = AgentProviderInputMetrics::from_request(
+            &self.request,
+            AgentProviderSemanticInputStats::Extraction(self.semantic_stats),
+            Some(AgentProviderInputTokenCount::from_measurement(
+                self.delivery.token_measurement(),
+            )),
+            Some(AgentProviderInputTokenCount::from_measurement(
+                &self.structured_input,
+            )),
+        );
         (
             AgentProviderTransportInput {
                 request: self.request,
@@ -1661,6 +1882,7 @@ impl AgentPreparedExtractionRequest {
                     admission: self.admission,
                     delivery: self.delivery,
                 },
+                input_metrics,
                 // Extraction output is terminal and never re-enters browser replay.
                 continuation_transcript: None,
                 continuation_baseline: None,
@@ -1866,12 +2088,23 @@ impl AgentPreparedLocateRequest {
 
     /// Joins the exact request, locate proof, and policy admission for transport.
     pub fn into_transport_input(self) -> AgentProviderTransportInput {
+        let input_metrics = AgentProviderInputMetrics::from_request(
+            &self.request,
+            AgentProviderSemanticInputStats::Locate(self.semantic_stats),
+            Some(AgentProviderInputTokenCount::from_measurement(
+                self.delivery.token_measurement(),
+            )),
+            Some(AgentProviderInputTokenCount::from_measurement(
+                &self.structured_input,
+            )),
+        );
         AgentProviderTransportInput {
             request: self.request,
             commitment: AgentProviderInputCommitment::Locate {
                 admission: self.admission,
                 delivery: self.delivery,
             },
+            input_metrics,
             continuation_transcript: Some(self.continuation_transcript),
             continuation_baseline: None,
         }
@@ -2073,12 +2306,21 @@ impl AgentPreparedScreenshotRequest {
 
     /// Joins the exact image body, receipt authority, and policy reservation.
     pub fn into_transport_input(self) -> AgentProviderTransportInput {
+        let input_metrics = AgentProviderInputMetrics::from_request(
+            &self.request,
+            AgentProviderSemanticInputStats::Screenshot(self.screenshot_stats),
+            None,
+            Some(AgentProviderInputTokenCount::from_measurement(
+                &self.structured_input,
+            )),
+        );
         AgentProviderTransportInput {
             request: self.request,
             commitment: AgentProviderInputCommitment::Screenshot {
                 admission: self.admission,
                 delivery: self.delivery,
             },
+            input_metrics,
             // Visual bytes are deliberately one-shot and never replayed.
             continuation_transcript: None,
             continuation_baseline: None,

@@ -28,11 +28,11 @@ use zephium_agentic::{
     AgentModelCallSettlement, AgentModelCallUnaccountedSettlement, AgentModelUsageAccounting,
     AgentPolicyError, AgentProviderCallConfig, AgentProviderCallIdentity,
     AgentProviderContinuationSeed, AgentProviderEndpoint, AgentProviderFailure,
-    AgentProviderFailureClass, AgentProviderInputEvidence, AgentProviderKind,
-    AgentProviderPricingError, AgentProviderPricingSchedule, AgentProviderRequestError,
-    AgentProviderRetryAfter, AgentProviderStopReason, AgentProviderStreamBatch,
-    AgentProviderStreamConclusion, AgentProviderStreamDecoder, AgentProviderTransportInput,
-    AgentProviderUsage, AgentRunPolicy,
+    AgentProviderFailureClass, AgentProviderInputEvidence, AgentProviderInputMetrics,
+    AgentProviderKind, AgentProviderPricingError, AgentProviderPricingSchedule,
+    AgentProviderRequestError, AgentProviderRetryAfter, AgentProviderStopReason,
+    AgentProviderStreamBatch, AgentProviderStreamConclusion, AgentProviderStreamDecoder,
+    AgentProviderTransportInput, AgentProviderUsage, AgentRunPolicy,
 };
 use zeroize::Zeroizing;
 
@@ -1184,6 +1184,11 @@ impl AgentProviderAttempt {
     /// optional proof grants no authority and requires a fresh snapshot.
     pub const fn input_evidence(&self) -> &AgentProviderInputEvidence {
         self.committed.input_evidence()
+    }
+
+    /// Content-free metrics for the exact input that crossed disclosure commit.
+    pub const fn input_metrics(&self) -> AgentProviderInputMetrics {
+        self.committed.input_metrics()
     }
 
     /// Cancels after commitment without polling or transmitting the HTTP request.
@@ -2640,6 +2645,26 @@ mod tests {
         assert!(!attempt_debug.contains("synthetic-openai-key"));
         assert!(!attempt_debug.contains("synthetic fixture marker"));
         let continuation = attempt.input_evidence().clone();
+        let input_metrics = attempt.input_metrics();
+        assert!(input_metrics.serialized_request_bytes() > 0);
+        let zephium_agentic::AgentProviderSemanticInputStats::Observation(semantic_stats) =
+            input_metrics.semantic()
+        else {
+            panic!("observation input metrics")
+        };
+        assert_eq!(semantic_stats.nodes(), 2);
+        assert_eq!(
+            input_metrics.semantic().disclosed_bytes(),
+            semantic_stats.bytes()
+        );
+        assert_eq!(
+            input_metrics
+                .semantic_payload_tokens()
+                .expect("semantic token count")
+                .tokens(),
+            10
+        );
+        assert_eq!(input_metrics.structured_input_tokens(), None);
         let acknowledgement = continuation
             .observation_acknowledgement()
             .expect("observation continuation");

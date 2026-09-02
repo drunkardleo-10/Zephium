@@ -541,11 +541,17 @@ browser action, model call, tool call, data transfer, cost, or native resource.
   semantic string, retaining only the one body copy, content-free metrics, and
   private delivery authority. A one-shot settlement either commits exact
   observation/read taint and returns active usage authority joined to a
-  cloneable content-free input proof, or releases the full reservation on
-  pre-commit refusal/cancellation. Observation proof exposes the exact current
-  acknowledgement needed to compute a later diff; a read proof cannot become
-  diff authority. The stateless builders mechanically exclude `ZDIFF1`: a
-  standalone diff would omit the acknowledged model context it modifies.
+  cloneable content-free input proof and its exact input metrics, or releases
+  the full reservation on pre-commit refusal/cancellation without surfacing a
+  metrics sample. The fixed metrics value records serialized body bytes, the
+  existing closed semantic/screenshot stats, the newest semantic token count
+  when applicable, and a whole structured-input count only when that trusted
+  local count ran. It is at most 64 bytes and contains no content, image,
+  tokenizer label, URL, provider response, or serialization authority.
+  Observation proof exposes the exact current acknowledgement needed to
+  compute a later diff; a read proof cannot become diff authority. The
+  stateless builders mechanically exclude `ZDIFF1`: a standalone diff would
+  omit the acknowledged model context it modifies.
 - A constrained extraction draft holds its schema/read delivery authority and
   fixed replay until a synchronous pinned local counter measures the exact
   complete body. Policy independently checks manifest/call/lease/node,
@@ -607,8 +613,11 @@ browser action, model call, tool call, data transfer, cost, or native resource.
   disclosure commits, is released on every terminal path, and seals the shared
   transport if a committed attempt is abandoned.
 - A committed attempt exposes only the content-free
-  observation/read/extraction/screenshot proof retained by request admission.
-  A shell may clone the observation proof
+  observation/read/extraction/screenshot proof retained by request admission
+  and the fixed input metrics that crossed that same commit. The transport
+  input has no public metrics accessor, so a rejected credential, capacity
+  refusal, shutdown, or pre-commit cancellation cannot be misreported as
+  disclosure. A shell may clone the observation proof
   before consuming the attempt so a future bounded continuation can compute an
   exact diff. A read receipt cannot expose an acknowledgement; only the fixed
   bound-read transport may carry forward the exact acknowledgement already in

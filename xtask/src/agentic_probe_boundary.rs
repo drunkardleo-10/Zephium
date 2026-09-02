@@ -3431,6 +3431,9 @@ fn validate_provider_input_evidence_contract(
         "AgentCommittedProviderInput",
         "AgentPreparedDiffRequest",
         "AgentProviderInputEvidence",
+        "AgentProviderInputMetrics",
+        "AgentProviderInputTokenCount",
+        "AgentProviderSemanticInputStats",
         "AgentProviderLocalInputTokenCounter",
     ] {
         if !root.contains(required) {
@@ -3450,8 +3453,31 @@ fn validate_provider_input_evidence_contract(
         "evidence:AgentProviderInputEvidence::Observation(acknowledgement)",
         "evidence:AgentProviderInputEvidence::Diff(receipt)",
         "evidence:AgentProviderInputEvidence::Read(receipt)",
+        "pubenumAgentProviderSemanticInputStats",
+        "Observation(SemanticEncodingStats)",
+        "Diff(SemanticDiffEncodingStats)",
+        "Locate(SemanticLocateEncodingStats)",
+        "Read(SemanticReadEncodingStats)",
+        "Extraction(SemanticExtractionEncodingStats)",
+        "Screenshot(SemanticScreenshotStats)",
+        "pubstructAgentProviderInputTokenCount{tokens:u32,quality:SemanticTokenCountQuality",
+        "pubstructAgentProviderInputMetrics{serialized_request_bytes:u32,semantic:AgentProviderSemanticInputStats,semantic_payload_tokens:Option<AgentProviderInputTokenCount>,structured_input_tokens:Option<AgentProviderInputTokenCount>",
+        "assert!(MAX_AGENT_PROVIDER_REQUEST_BYTES<=u32::MAXasusize)",
+        "assert!(std::mem::size_of::<AgentProviderInputMetrics>()<=64)",
         "Committed(Box<AgentCommittedProviderInput>)",
+        "pubconstfnmetrics(&self)->AgentProviderInputMetrics",
         "pubconstfninput_evidence(&self)->&AgentProviderInputEvidence",
+        "pubconstfninput_metrics(&self)->AgentProviderInputMetrics",
+        "commitment.commit(policy,input_metrics)",
+        "commitment.settle(policy,settlement,input_metrics)",
+        "AgentProviderRequestSettlement::Committed=>Ok(AgentProviderInputOutcome::Committed(",
+        "Box::new(self.commit(policy,metrics)?)",
+        "AgentProviderSemanticInputStats::Observation(self.semantic_stats)",
+        "AgentProviderSemanticInputStats::Diff(self.semantic_stats)",
+        "AgentProviderSemanticInputStats::Locate(self.semantic_stats)",
+        "AgentProviderSemanticInputStats::Read(self.semantic_stats)",
+        "AgentProviderSemanticInputStats::Extraction(self.semantic_stats)",
+        "AgentProviderSemanticInputStats::Screenshot(self.screenshot_stats)",
         "pubtraitAgentProviderLocalInputTokenCounter",
         "fncount_openai_responses_input(",
         "fncount_anthropic_messages_input(",
@@ -3466,6 +3492,39 @@ fn validate_provider_input_evidence_contract(
         if !request.contains(required) {
             return Err(format!(
                 "provider request lost exact admitted input continuation seam {required}"
+            ));
+        }
+    }
+    if request
+        .matches("pubconstfninput_metrics(&self)->AgentProviderInputMetrics")
+        .count()
+        != 1
+    {
+        return Err(
+            "provider request metrics must surface only after exact disclosure commit".to_owned(),
+        );
+    }
+    let metrics_start = request
+        .find("pubenumAgentProviderSemanticInputStats")
+        .ok_or_else(|| "provider request lost semantic metrics boundary".to_owned())?;
+    let metrics_end = request[metrics_start..]
+        .find("implAgentProviderInputEvidence")
+        .map(|offset| metrics_start + offset)
+        .ok_or_else(|| "provider request metrics boundary is unclosed".to_owned())?;
+    let metrics = &request[metrics_start..metrics_end];
+    for forbidden in [
+        "String,",
+        "Vec<",
+        "Arc<",
+        "Box<",
+        "body:",
+        "content:",
+        "Serialize",
+        "Deserialize",
+    ] {
+        if metrics.contains(forbidden) {
+            return Err(format!(
+                "provider input metrics acquired content or serialization storage {forbidden}"
             ));
         }
     }
@@ -3524,6 +3583,8 @@ fn validate_provider_input_evidence_contract(
     for required in [
         "pubconstfninput_evidence(&self)->&AgentProviderInputEvidence",
         "self.committed.input_evidence()",
+        "pubconstfninput_metrics(&self)->AgentProviderInputMetrics",
+        "self.committed.input_metrics()",
     ] {
         if !transport.contains(required) {
             return Err(format!(
@@ -5142,6 +5203,9 @@ mod tests {
                 AgentCommittedProviderInput,
                 AgentPreparedDiffRequest,
                 AgentProviderInputEvidence,
+                AgentProviderInputMetrics,
+                AgentProviderInputTokenCount,
+                AgentProviderSemanticInputStats,
                 AgentProviderLocalInputTokenCounter,
             };
         "#;
@@ -5149,14 +5213,53 @@ mod tests {
             pub enum AgentProviderInputEvidence {
                 Observation(SemanticObservationAcknowledgement),
                 Diff(SemanticDiffDeliveryReceipt),
+                Locate(SemanticLocateDeliveryReceipt),
                 Read(SemanticReadDeliveryReceipt),
+                Extraction(SemanticExtractionDeliveryReceipt),
+                Screenshot(SemanticScreenshotDeliveryReceipt),
             }
-            pub struct AgentCommittedProviderInput;
+            pub enum AgentProviderSemanticInputStats {
+                Observation(SemanticEncodingStats),
+                Diff(SemanticDiffEncodingStats),
+                Locate(SemanticLocateEncodingStats),
+                Read(SemanticReadEncodingStats),
+                Extraction(SemanticExtractionEncodingStats),
+                Screenshot(SemanticScreenshotStats),
+            }
+            pub struct AgentProviderInputTokenCount {
+                tokens: u32,
+                quality: SemanticTokenCountQuality,
+            }
+            pub struct AgentProviderInputMetrics {
+                serialized_request_bytes: u32,
+                semantic: AgentProviderSemanticInputStats,
+                semantic_payload_tokens: Option<AgentProviderInputTokenCount>,
+                structured_input_tokens: Option<AgentProviderInputTokenCount>,
+            }
+            assert!(MAX_AGENT_PROVIDER_REQUEST_BYTES <= u32::MAX as usize);
+            assert!(std::mem::size_of::<AgentProviderInputMetrics>() <= 64);
+            impl AgentProviderInputEvidence {}
+            pub struct AgentCommittedProviderInput {
+                metrics: AgentProviderInputMetrics,
+            }
             evidence: AgentProviderInputEvidence::Observation(acknowledgement),
             evidence: AgentProviderInputEvidence::Diff(receipt),
             evidence: AgentProviderInputEvidence::Read(receipt),
             Committed(Box<AgentCommittedProviderInput>),
+            pub const fn metrics(&self) -> AgentProviderInputMetrics {}
             pub const fn input_evidence(&self) -> &AgentProviderInputEvidence {}
+            pub const fn input_metrics(&self) -> AgentProviderInputMetrics {}
+            commitment.commit(policy, input_metrics);
+            commitment.settle(policy, settlement, input_metrics);
+            AgentProviderRequestSettlement::Committed => Ok(
+                AgentProviderInputOutcome::Committed(Box::new(self.commit(policy, metrics)?))
+            );
+            AgentProviderSemanticInputStats::Observation(self.semantic_stats);
+            AgentProviderSemanticInputStats::Diff(self.semantic_stats);
+            AgentProviderSemanticInputStats::Locate(self.semantic_stats);
+            AgentProviderSemanticInputStats::Read(self.semantic_stats);
+            AgentProviderSemanticInputStats::Extraction(self.semantic_stats);
+            AgentProviderSemanticInputStats::Screenshot(self.screenshot_stats);
             pub trait AgentProviderLocalInputTokenCounter {
                 fn count_openai_responses_input();
                 fn count_anthropic_messages_input();
@@ -5196,6 +5299,9 @@ mod tests {
             pub const fn input_evidence(&self) -> &AgentProviderInputEvidence {
                 self.committed.input_evidence()
             }
+            pub const fn input_metrics(&self) -> AgentProviderInputMetrics {
+                self.committed.input_metrics()
+            }
         "#;
         validate_provider_input_evidence_contract(
             root, request, provider, policy, diff_model, transport,
@@ -5230,6 +5336,27 @@ mod tests {
         .is_err());
         assert!(validate_provider_input_evidence_contract(
             root, request, provider, policy, diff_model, "",
+        )
+        .is_err());
+        assert!(validate_provider_input_evidence_contract(
+            root,
+            &request.replace(
+                "semantic_payload_tokens: Option<AgentProviderInputTokenCount>,",
+                "content: String,",
+            ),
+            provider,
+            policy,
+            diff_model,
+            transport,
+        )
+        .is_err());
+        assert!(validate_provider_input_evidence_contract(
+            root,
+            &request.replace("commitment.commit(policy, input_metrics);", ""),
+            provider,
+            policy,
+            diff_model,
+            transport,
         )
         .is_err());
     }

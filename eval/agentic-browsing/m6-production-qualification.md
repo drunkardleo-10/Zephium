@@ -49,7 +49,12 @@ and the absence of runtime clocks, serialization, or telemetry ports. A third
 gate pins the exact batch-terminal action reducer to fixed duration buckets, a
 1 KiB snapshot ceiling, manifest/node authority, batch/effect/attempt replay
 indexes, the manifest operation ceiling, and bounded preflight storage while
-forbidding telemetry, persistence serialization, and unbounded maps.
+forbidding telemetry, persistence serialization, and unbounded maps. The
+provider-input gate additionally pins the six closed semantic/screenshot stats
+variants, scalar token-quality projections, exact request-byte bound, 64-byte
+value ceiling, commit-only accessors, and propagation through the trusted HTTPS
+attempt. It rejects content allocations and serialization fields in that
+metrics value.
 
 Run the gate and its focused tests with:
 
@@ -112,6 +117,15 @@ cargo clippy --locked -p xtask --all-targets -- -D warnings
   shapes transactionally, and cannot exceed the run operation budget. Its
   snapshot is compile-capped at 1 KiB and it owns no site/page label, raw
   sample, clock, task, telemetry, persistence, or browser/native resource.
+- Exact provider disclosure now produces a copyable, at-most-64-byte input
+  metrics value joined to the same committed input authority. It reports the
+  serialized body bytes, closed observation/diff/locate/read/extraction or
+  screenshot stats, newest semantic tokens when applicable, and exact complete
+  structured-input tokens only for requests that actually ran that local
+  counter. Initial request whole-input counts and screenshot semantic-text
+  counts remain absent rather than inferred. Refused/cancelled transport has no
+  public metrics surface, and the committed HTTPS attempt delegates the same
+  value without retaining another page/image allocation.
 
 The authoritative aggregate records and exact remaining blockers are in
 `native-input-matrix-v1.json`, `semantic-runtime-macos-v1.json`, and
@@ -128,6 +142,10 @@ The authoritative aggregate records and exact remaining blockers are in
   distributions from the qualification harness (the local action reducer
   retains only fixed content-free histograms without site, device, or platform
   labels);
+- reviewed committed semantic-input size, redaction, and token distributions
+  from authorized provider/tokenizer qualification (the stable content-free
+  commit seam exists, but this repository intentionally provides no telemetry
+  sink and no live-provider result);
 - deterministic semantic/action/policy suite closure, the six-site matrix,
   concurrent production configuration, endurance, and fault-injection evidence;
 - hot-path and zero-unused-agent-overhead measurements; and

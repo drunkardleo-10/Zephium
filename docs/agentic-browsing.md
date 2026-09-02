@@ -1039,9 +1039,16 @@ capped at 1 KiB and it owns no clock, telemetry, persistence, task, or browser
 resource. The reducer is constructed and fed explicitly, so unused agentic
 browsing pays no reducer allocation or execution cost. Neither reducer retains
 raw action samples or site/platform/resource labels, so exact medians,
-percentiles, reviewed per-site distributions, semantic encoding sizes,
-native/process counts, and machine resource measures remain qualification-
-harness inputs; absence is never represented as zero.
+percentiles, reviewed per-site distributions, native/process counts, and
+machine resource measures remain qualification-harness inputs. Committed
+provider input now carries a separate fixed, content-free qualification value
+with the exact serialized request bytes, the existing closed semantic or
+screenshot encoding stats, the newest semantic-payload token count when one
+exists, and the whole structured-replay count only when the trusted local
+counter actually ran. It is inaccessible before disclosure commit, capped at
+64 bytes, and owns no content, tokenizer label, sink, clock, task, or browser
+resource. The harness may retain those samples; the in-process reducers do
+not, and absence is never represented as zero.
 
 Initial qualification gates are:
 

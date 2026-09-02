@@ -2474,25 +2474,25 @@ mod tests {
         AgentProviderKind, AgentProviderLocalInputTokenCounter, AgentProviderLocateRequestDraft,
         AgentProviderModelRevision, AgentProviderObjective,
         AgentProviderReadContinuationRequestDraft, AgentProviderRequestSettlement,
-        AgentProviderScreenshotRequestDraft, AgentProviderStreamBatch, AgentProviderStreamBudget,
-        AgentProviderStreamConclusion, AgentProviderStreamEvent, AgentProviderTextDelta,
-        AgentRunManifestId, AgentRunScope, ContextAutomationState, ContextCapabilities,
-        ContextCapability, ContextId, ContextIdentity, ContextKind, ContextOperationId,
-        ContextRegistry, ContextRunId, ContextSettlement, FrameGeneration, FrameId,
-        SemanticActionBatch, SemanticActionBatchId, SemanticActionFailure, SemanticActionIntent,
-        SemanticActionProposal, SemanticCaptureInstant, SemanticDecodeContext, SemanticDiffBudget,
-        SemanticDiffOutcome, SemanticEffectEvidence, SemanticExtractionFieldSchema,
-        SemanticExtractionSchema, SemanticExtractionSchemaId, SemanticFrameJoin,
-        SemanticFrameTrust, SemanticInvocationId, SemanticLocateBudget, SemanticLocateId,
-        SemanticLocateQuery, SemanticLocateRequest, SemanticLocateScope,
-        SemanticModelDeliverySettlement, SemanticModelEncodingBudget, SemanticObservationAssembler,
-        SemanticObservationBudget, SemanticObservationId, SemanticObservationRequest,
-        SemanticPreparedAction, SemanticReadAuthority, SemanticReadBudget,
-        SemanticReadSensitivityLimit, SemanticSettleBudget, SemanticSettleInstant,
-        SemanticSnapshot, SemanticSnapshotGeneration, SemanticState, SemanticTokenCountQuality,
-        SemanticTokenCountRequirement, SemanticTokenCounter, SemanticTokenCounterError,
-        SemanticTokenMeasurement, SemanticTokenizerRevision, SemanticVerification,
-        SemanticWaitCondition, SEMANTIC_WIRE_VERSION,
+        AgentProviderScreenshotRequestDraft, AgentProviderSemanticInputStats,
+        AgentProviderStreamBatch, AgentProviderStreamBudget, AgentProviderStreamConclusion,
+        AgentProviderStreamEvent, AgentProviderTextDelta, AgentRunManifestId, AgentRunScope,
+        ContextAutomationState, ContextCapabilities, ContextCapability, ContextId, ContextIdentity,
+        ContextKind, ContextOperationId, ContextRegistry, ContextRunId, ContextSettlement,
+        FrameGeneration, FrameId, SemanticActionBatch, SemanticActionBatchId,
+        SemanticActionFailure, SemanticActionIntent, SemanticActionProposal,
+        SemanticCaptureInstant, SemanticDecodeContext, SemanticDiffBudget, SemanticDiffOutcome,
+        SemanticEffectEvidence, SemanticExtractionFieldSchema, SemanticExtractionSchema,
+        SemanticExtractionSchemaId, SemanticFrameJoin, SemanticFrameTrust, SemanticInvocationId,
+        SemanticLocateBudget, SemanticLocateId, SemanticLocateQuery, SemanticLocateRequest,
+        SemanticLocateScope, SemanticModelDeliverySettlement, SemanticModelEncodingBudget,
+        SemanticObservationAssembler, SemanticObservationBudget, SemanticObservationId,
+        SemanticObservationRequest, SemanticPreparedAction, SemanticReadAuthority,
+        SemanticReadBudget, SemanticReadSensitivityLimit, SemanticSettleBudget,
+        SemanticSettleInstant, SemanticSnapshot, SemanticSnapshotGeneration, SemanticState,
+        SemanticTokenCountQuality, SemanticTokenCountRequirement, SemanticTokenCounter,
+        SemanticTokenCounterError, SemanticTokenMeasurement, SemanticTokenizerRevision,
+        SemanticVerification, SemanticWaitCondition, SEMANTIC_WIRE_VERSION,
     };
     use serde_json::{json, Value};
 
@@ -3825,6 +3825,8 @@ mod tests {
         assert!(!debug.contains("Submit the reviewed form"));
         assert!(!debug.contains("private marker"));
 
+        let semantic_stats = prepared.semantic_stats();
+        let serialized_request_bytes = prepared.request().byte_len() as u32;
         let transport_input = prepared.into_transport_input();
         assert_eq!(transport_input.request().call().call().get(), 1);
         let transcript_bytes = transport_input
@@ -3842,6 +3844,34 @@ mod tests {
         let committed = transport_input
             .commit(&mut fixture.policy)
             .expect("transport commit");
+        let input_metrics = committed.input_metrics();
+        assert_eq!(
+            input_metrics.serialized_request_bytes(),
+            serialized_request_bytes
+        );
+        assert_eq!(
+            input_metrics.semantic(),
+            AgentProviderSemanticInputStats::Observation(semantic_stats)
+        );
+        assert_eq!(
+            input_metrics.semantic().disclosed_bytes(),
+            semantic_stats.bytes()
+        );
+        assert_eq!(
+            input_metrics
+                .semantic_payload_tokens()
+                .expect("semantic token count")
+                .tokens(),
+            50
+        );
+        assert_eq!(
+            input_metrics
+                .semantic_payload_tokens()
+                .expect("semantic token count")
+                .quality(),
+            SemanticTokenCountQuality::ExactLocal
+        );
+        assert_eq!(input_metrics.structured_input_tokens(), None);
         assert_eq!(
             committed.continuation_transcript_bytes(),
             Some(transcript_bytes)
@@ -4034,6 +4064,8 @@ mod tests {
         assert_eq!(fixture.policy.pending_model_calls(), 1);
         assert_eq!(fixture.policy.accounting().reserved_model_tokens(), 140);
         let transcript_bytes = prepared.continuation_transcript_bytes();
+        let semantic_stats = prepared.semantic_stats();
+        let serialized_request_bytes = prepared.request().byte_len() as u32;
         let debug = format!("{prepared:?}");
         assert!(!debug.contains("private marker"));
         assert!(!debug.contains("call_diff_request_1"));
@@ -4042,6 +4074,29 @@ mod tests {
             .into_transport_input()
             .commit(&mut fixture.policy)
             .expect("diff transport commit");
+        let input_metrics = committed.input_metrics();
+        assert_eq!(
+            input_metrics.serialized_request_bytes(),
+            serialized_request_bytes
+        );
+        assert_eq!(
+            input_metrics.semantic(),
+            AgentProviderSemanticInputStats::Diff(semantic_stats)
+        );
+        assert_eq!(
+            input_metrics
+                .semantic_payload_tokens()
+                .expect("diff token count")
+                .tokens(),
+            30
+        );
+        assert_eq!(
+            input_metrics
+                .structured_input_tokens()
+                .expect("structured token count")
+                .tokens(),
+            120
+        );
         assert_eq!(
             committed.continuation_transcript_bytes(),
             Some(transcript_bytes)
@@ -4282,10 +4337,30 @@ mod tests {
         assert_eq!(prepared.structured_input_measurement().tokens(), 120);
         assert_eq!(fixture.policy.accounting().reserved_model_tokens(), 140);
         let transcript_bytes = prepared.continuation_transcript_bytes();
+        let semantic_stats = prepared.semantic_stats();
         let committed = prepared
             .into_transport_input()
             .commit(&mut fixture.policy)
             .expect("locate transport commit");
+        let input_metrics = committed.input_metrics();
+        assert_eq!(
+            input_metrics.semantic(),
+            AgentProviderSemanticInputStats::Locate(semantic_stats)
+        );
+        assert_eq!(
+            input_metrics
+                .semantic_payload_tokens()
+                .expect("locate token count")
+                .tokens(),
+            30
+        );
+        assert_eq!(
+            input_metrics
+                .structured_input_tokens()
+                .expect("structured token count")
+                .tokens(),
+            120
+        );
         assert_eq!(
             committed.continuation_transcript_bytes(),
             Some(transcript_bytes)
@@ -4460,10 +4535,30 @@ mod tests {
         assert_eq!(prepared.structured_input_measurement().tokens(), 120);
         assert_eq!(fixture.policy.accounting().reserved_model_tokens(), 140);
         let transcript_bytes = prepared.continuation_transcript_bytes();
+        let semantic_stats = prepared.semantic_stats();
         let committed = prepared
             .into_transport_input()
             .commit(&mut fixture.policy)
             .expect("read transport commit");
+        let input_metrics = committed.input_metrics();
+        assert_eq!(
+            input_metrics.semantic(),
+            AgentProviderSemanticInputStats::Read(semantic_stats)
+        );
+        assert_eq!(
+            input_metrics
+                .semantic_payload_tokens()
+                .expect("read token count")
+                .tokens(),
+            30
+        );
+        assert_eq!(
+            input_metrics
+                .structured_input_tokens()
+                .expect("structured token count")
+                .tokens(),
+            120
+        );
         assert_eq!(
             committed.continuation_transcript_bytes(),
             Some(transcript_bytes)
@@ -4646,10 +4741,30 @@ mod tests {
             )
             .expect("extraction whole-input admission");
         assert_eq!(prepared.structured_input_measurement().tokens(), 120);
+        let semantic_stats = prepared.semantic_stats();
         let (transport, output_binding) = prepared.into_transport_parts();
         let committed = transport
             .commit(&mut fixture.policy)
             .expect("extraction transport commit");
+        let input_metrics = committed.input_metrics();
+        assert_eq!(
+            input_metrics.semantic(),
+            AgentProviderSemanticInputStats::Extraction(semantic_stats)
+        );
+        assert_eq!(
+            input_metrics
+                .semantic_payload_tokens()
+                .expect("extraction token count")
+                .tokens(),
+            45
+        );
+        assert_eq!(
+            input_metrics
+                .structured_input_tokens()
+                .expect("structured token count")
+                .tokens(),
+            120
+        );
         assert!(committed.continuation_transcript_bytes().is_none());
         assert!(committed
             .input_evidence()
@@ -4904,10 +5019,33 @@ mod tests {
         assert!(!prepared_debug.contains("call_policy_screenshot_1"));
         assert!(prepared_debug.contains("[redacted]"));
 
+        let screenshot_stats = prepared.screenshot_stats();
+        let serialized_request_bytes = prepared.request().byte_len() as u32;
         let committed = prepared
             .into_transport_input()
             .commit(&mut fixture.policy)
             .expect("screenshot transport commit");
+        let input_metrics = committed.input_metrics();
+        assert_eq!(
+            input_metrics.serialized_request_bytes(),
+            serialized_request_bytes
+        );
+        assert_eq!(
+            input_metrics.semantic(),
+            AgentProviderSemanticInputStats::Screenshot(screenshot_stats)
+        );
+        assert_eq!(
+            input_metrics.semantic().disclosed_bytes(),
+            screenshot_stats.canonical_png_bytes()
+        );
+        assert_eq!(input_metrics.semantic_payload_tokens(), None);
+        assert_eq!(
+            input_metrics
+                .structured_input_tokens()
+                .expect("structured token count")
+                .tokens(),
+            120
+        );
         assert_eq!(committed.continuation_transcript_bytes(), None);
         let receipt = committed
             .input_evidence()
@@ -5095,6 +5233,8 @@ mod tests {
         )
         .expect("prepared request");
         assert_eq!(prepared.semantic_stats().items(), read.stats().items());
+        let semantic_stats = prepared.semantic_stats();
+        let serialized_request_bytes = prepared.request().byte_len() as u32;
         let AgentProviderInputOutcome::Committed(committed) = prepared
             .settle(
                 &mut fixture.policy,
@@ -5104,6 +5244,23 @@ mod tests {
         else {
             panic!("committed input");
         };
+        let input_metrics = committed.metrics();
+        assert_eq!(
+            input_metrics.serialized_request_bytes(),
+            serialized_request_bytes
+        );
+        assert_eq!(
+            input_metrics.semantic(),
+            AgentProviderSemanticInputStats::Read(semantic_stats)
+        );
+        assert_eq!(
+            input_metrics
+                .semantic_payload_tokens()
+                .expect("read token count")
+                .tokens(),
+            40
+        );
+        assert_eq!(input_metrics.structured_input_tokens(), None);
         assert!(committed
             .evidence()
             .read_receipt()
