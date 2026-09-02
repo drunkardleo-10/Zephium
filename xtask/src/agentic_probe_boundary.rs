@@ -53,6 +53,7 @@ const AGENTIC_SEMANTIC_SETTLE_COORDINATOR: &str =
 const AGENTIC_SEMANTIC_SETTLE: &str = "crates/zephium-agentic/src/semantic_settle.rs";
 const AGENTIC_SEMANTIC_VERIFY: &str = "crates/zephium-agentic/src/semantic_verify.rs";
 const AGENTIC_CONTEXT_PORT: &str = "crates/zephium-agentic/src/context_port.rs";
+const AGENTIC_CONTEXT_REGISTRY: &str = "crates/zephium-agentic/src/context_registry.rs";
 const AGENTIC_PROFILE_LEASE: &str = "crates/zephium-agentic/src/profile_lease.rs";
 const AGENTIC_SUPERVISOR: &str = "crates/zephium-agentic/src/agent_supervisor.rs";
 const AGENTIC_SUPERVISOR_PROGRESS: &str =
@@ -298,6 +299,9 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         &read(repository.join(AGENTIC_PROFILE_LEASE))?,
         &read(repository.join(AGENTIC_SUPERVISOR_CONTEXT_SCHEDULE))?,
     )?;
+    validate_context_shutdown_retention_contract(&read(
+        repository.join(AGENTIC_CONTEXT_REGISTRY),
+    )?)?;
     validate_provider_transport_manifest(&read(repository.join(PROVIDER_TRANSPORT_MANIFEST))?)?;
     let provider_transport_root = read(repository.join(PROVIDER_TRANSPORT_ROOT))?;
     validate_provider_transport_root(&provider_transport_root)?;
@@ -4558,6 +4562,78 @@ fn validate_profile_lease_release_contract(
     Ok(())
 }
 
+fn validate_context_shutdown_retention_contract(source: &str) -> Result<(), String> {
+    let source = source
+        .split_once("\n#[cfg(test)]\nmod tests")
+        .map_or(source, |(production, _)| production);
+    let source = compact(source);
+
+    let seal_start = source
+        .find("pubfnseal_for_shutdown(")
+        .ok_or_else(|| "context shutdown seal is missing".to_owned())?;
+    let seal_end = source[seal_start..]
+        .find("pubfnshutdown_targets(")
+        .map(|offset| seal_start + offset)
+        .ok_or_else(|| "context shutdown seal boundary is missing".to_owned())?;
+    let seal = &source[seal_start..seal_end];
+    for required in [
+        "self.sealed=true;",
+        "RegistryRow::Queued(queued)=>Some(queued.identity)",
+        "RegistryRow::Active(_)=>None",
+        "self.validate()?;Ok(queued)",
+    ] {
+        if !seal.contains(required) {
+            return Err(format!(
+                "context shutdown seal lost retained queued cleanup authority {required}"
+            ));
+        }
+    }
+    for forbidden in ["self.rows.remove(", "Vec::with_capacity("] {
+        if seal.contains(forbidden) {
+            return Err(format!(
+                "context shutdown seal discards queued cleanup authority {forbidden}"
+            ));
+        }
+    }
+
+    let cancel_start = source
+        .find("pubfncancel_queued(")
+        .ok_or_else(|| "queued context cancellation is missing".to_owned())?;
+    let cancel_end = source[cancel_start..]
+        .find("pubfnbegin_context(")
+        .map(|offset| cancel_start + offset)
+        .ok_or_else(|| "queued context cancellation boundary is missing".to_owned())?;
+    let cancel = &source[cancel_start..cancel_end];
+    for required in [
+        "letrow=self.rows.remove(&context).ok_or(ContextRegistryError::NotFound)?;",
+        "RegistryRow::Queued(queued)=>{self.validate()?;Ok(queued.identity)}",
+        "active@RegistryRow::Active(_)=>{self.rows.insert(context,active);Err(ContextRegistryError::NotQueued)}",
+    ] {
+        if !cancel.contains(required) {
+            return Err(format!(
+                "sealed queued context cancellation lost exact cleanup behavior {required}"
+            ));
+        }
+    }
+    if cancel.contains("self.sealed") {
+        return Err(
+            "queued context cleanup must remain available behind the shutdown admission seal"
+                .to_owned(),
+        );
+    }
+    if source.contains(
+        "RegistryRow::Queued(queued)=>{ifself.sealed||queued.capabilities.kind()!=identity.kind()",
+    ) || !source
+        .contains("RegistryRow::Queued(queued)=>{ifqueued.capabilities.kind()!=identity.kind()")
+    {
+        return Err(
+            "context registry validation must admit retained queued rows after shutdown seal"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
 fn validate_agentic_zero_idle_sources(repository: &Path) -> Result<(), String> {
     let source_directory = repository.join(AGENTIC_SOURCE_DIRECTORY);
     let mut files = Vec::new();
@@ -4991,6 +5067,31 @@ mod tests {
             assert!(
                 validate_profile_lease_release_contract(root, profile_lease, &invalid).is_err()
             );
+        }
+    }
+
+    #[test]
+    fn shutdown_seal_retains_queued_context_cleanup_authority() {
+        let registry = include_str!("../../crates/zephium-agentic/src/context_registry.rs");
+        validate_context_shutdown_retention_contract(registry)
+            .expect("retained queued shutdown authority");
+        for invalid in [
+            registry.replace("self.sealed = true;", ""),
+            registry.replacen("Some(queued.identity)", "None", 1),
+            registry.replace(
+                "self.validate()?;\n        Ok(queued)",
+                "let _ = self.rows.remove(&queued[0].id());\n        self.validate()?;\n        Ok(queued)"
+            ),
+            registry.replace(
+                "if queued.capabilities.kind() != identity.kind()",
+                "if self.sealed || queued.capabilities.kind() != identity.kind()"
+            ),
+            registry.replace(
+                "pub fn cancel_queued(\n        &mut self,\n        context: ContextId,\n    ) -> Result<ContextIdentity, ContextRegistryError> {",
+                "pub fn cancel_queued(\n        &mut self,\n        context: ContextId,\n    ) -> Result<ContextIdentity, ContextRegistryError> {\n        if self.sealed { return Err(ContextRegistryError::Sealed); }"
+            ),
+        ] {
+            assert!(validate_context_shutdown_retention_contract(&invalid).is_err());
         }
     }
 

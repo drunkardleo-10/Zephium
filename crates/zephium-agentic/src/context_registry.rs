@@ -399,24 +399,24 @@ impl ContextRegistry {
             .collect()
     }
 
-    /// Permanently seals admissions and removes all never-started rows.
+    /// Permanently seals admissions and returns all never-started obligations.
+    ///
+    /// Queued rows remain retained so the owning supervisor can cancel each
+    /// exact assignment and mint its cleanup receipt. Silently removing them
+    /// here would strand supervisor budgets and profile leases without proof.
     pub fn seal_for_shutdown(&mut self) -> Result<Vec<ContextIdentity>, ContextRegistryError> {
         self.validate()?;
         self.sealed = true;
         let queued = self
             .rows
-            .iter()
-            .filter_map(|(id, row)| matches!(row, RegistryRow::Queued(_)).then_some(*id))
+            .values()
+            .filter_map(|row| match row {
+                RegistryRow::Queued(queued) => Some(queued.identity),
+                RegistryRow::Active(_) => None,
+            })
             .collect::<Vec<_>>();
-        let mut removed = Vec::with_capacity(queued.len());
-        for id in queued {
-            let Some(RegistryRow::Queued(row)) = self.rows.remove(&id) else {
-                return Err(ContextRegistryError::Invariant);
-            };
-            removed.push(row.identity);
-        }
         self.validate()?;
-        Ok(removed)
+        Ok(queued)
     }
 
     /// Returns exact active ids that must close or release during shutdown.
@@ -925,7 +925,7 @@ impl ContextRegistry {
             }
             match row {
                 RegistryRow::Queued(queued) => {
-                    if self.sealed || queued.capabilities.kind() != identity.kind() {
+                    if queued.capabilities.kind() != identity.kind() {
                         return Err(ContextRegistryError::Invariant);
                     }
                 }
@@ -1175,14 +1175,15 @@ mod tests {
     }
 
     #[test]
-    fn shutdown_seal_drops_only_queued_rows_and_requires_terminal_reap() {
+    fn shutdown_seal_retains_queued_authority_until_exact_cancel_and_reap() {
         let mut registry = ContextRegistry::new();
         reserve(&mut registry, 1, ContextKind::Owned);
         reserve(&mut registry, 2, ContextKind::BorrowedTab);
         activate(&mut registry, 1, 1);
-        let dropped = registry.seal_for_shutdown().expect("seal");
-        assert_eq!(dropped, vec![identity(2, ContextKind::BorrowedTab)]);
+        let queued = registry.seal_for_shutdown().expect("seal");
+        assert_eq!(queued, vec![identity(2, ContextKind::BorrowedTab)]);
         assert_eq!(registry.shutdown_targets(), vec![context(1)]);
+        assert_eq!(registry.status().total(), 2);
         assert!(!registry.is_quiescent());
         assert_eq!(
             registry.reserve(
@@ -1191,6 +1192,11 @@ mod tests {
             ),
             Err(ContextRegistryError::Sealed)
         );
+        assert_eq!(
+            registry.cancel_queued(context(2)).expect("queued cleanup"),
+            identity(2, ContextKind::BorrowedTab)
+        );
+        assert_eq!(registry.status().total(), 1);
         let current = registry.join(context(1)).expect("join");
         registry.cancel_run(context(1), current).expect("cancel");
         let close = registry

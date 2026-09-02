@@ -1615,6 +1615,16 @@ mod tests {
                 context_capabilities(),
             )
             .expect("assign context");
+        assert_eq!(
+            registry.seal_for_shutdown().expect("context shutdown seal"),
+            vec![identity]
+        );
+        assert_eq!(
+            profile_leases
+                .seal_for_shutdown()
+                .expect("profile shutdown seal"),
+            vec![profile_lease]
+        );
         let batch = supervisor
             .cancel_subtree(
                 root_id,
@@ -1640,6 +1650,8 @@ mod tests {
             profile_leases.release(profile_lease, queued_release),
             Ok(identity)
         );
+        assert!(registry.is_quiescent());
+        assert!(profile_leases.is_quiescent());
         assert_eq!(supervisor.status().live(), 0);
         assert_eq!(supervisor.status().cancelled(), 1);
 
@@ -1652,8 +1664,9 @@ mod tests {
             .start(root_id, attempt(1))
             .expect("start root");
         let mut active_registry = ContextRegistry::new();
+        let mut active_profile_leases = ContextProfileLeaseRegistry::new();
         let active_identity = context_identity(21, 2, 1);
-        let active_profile_lease = profile_leases
+        let active_profile_lease = active_profile_leases
             .acquire(
                 ContextProfileLeaseId::new(2).expect("profile lease"),
                 active_identity,
@@ -1697,7 +1710,7 @@ mod tests {
             }
         );
         assert_eq!(
-            profile_leases.release(active_profile_lease, release),
+            active_profile_leases.release(active_profile_lease, release),
             Ok(active_identity)
         );
         active_supervisor

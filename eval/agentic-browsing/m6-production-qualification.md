@@ -52,7 +52,14 @@ responses, machine-local paths, or native traces.
   after queued cancellation or terminal registry reaping, rejoins the exact
   context identity, and admits only the native-resource disposition compatible
   with the immutable context kind. Mutation tests remove the receipt, identity
-  join, closed disposition, and constructor gate and prove each change fails.
+  join, closed disposition, and constructor gate and prove each change fails;
+  and
+- makes the logical context shutdown seal retain every never-started row as a
+  bounded cleanup obligation. New admission remains permanently closed, but
+  exact supervisor cancellation is still allowed to remove each queued row and
+  mint its cleanup receipt. The gate rejects seal-time removal, sealed-state
+  rejection in cleanup, or validation that treats retained queued rows as an
+  invariant failure.
 
 The same check pins the default functional core to an empty feature set and a
 closed allocation/data dependency inventory. Its non-diagnostic source is
@@ -147,6 +154,15 @@ agentic-owned Windows modules. Cross-compilation is not device behavior.
   supervisor. This closes the functional-core early-release path, not the
   remaining application actor, profile-directory, platform-store, deletion,
   concurrency, or migration qualification.
+- Context shutdown sealing no longer discards queued authority. Never-started
+  rows remain in the bounded registry after the admission seal, so the owning
+  supervisor can cancel the exact assignment, release its run/node context
+  budget, and produce the only receipt accepted by profile-lease release. The
+  integration test seals both registries first, then proves they become
+  quiescent only after supervisor cancellation and receipt-bound profile
+  release. Active contexts still require native close and terminal reaping.
+  This is functional-core shutdown ordering, not end-to-end application/native
+  shutdown qualification.
 - The Browse named-device baseline intentionally has no values. No CPU, memory,
   GPU/compositor, energy, wakeup, or input-latency budget has been inferred.
 - Checked-priced model receipts now preserve a content-free exact schedule
