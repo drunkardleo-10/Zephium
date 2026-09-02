@@ -56,11 +56,12 @@ owned/handoff resources from borrowed-tab leases. Terminal rows remain until
 the shell observes an exact `Destroyed`, `TransferredToBrowse`, or
 `ExistingBrowseRetained` disposition.
 
-The shutdown seal permanently rejects admission, drops only never-started
-rows, enumerates a bounded exact cleanup cohort, and reports quiescence only
-after every active row reaches and exposes its terminal disposition. Bounded
-run/profile indexes support cancellation and profile-erasure barriers without
-granting authority.
+The shutdown seal permanently rejects admission, returns the bounded exact
+never-started cleanup cohort without dropping those rows, and reports
+quiescence only after queued authority is explicitly cancelled and every
+active row reaches and exposes its terminal disposition. Bounded run/profile
+indexes support cancellation and profile-erasure barriers without granting
+authority.
 
 `AgentBrowserPort` is a closed imperative boundary. Its request and event
 vocabulary carries exact joins, validated web navigation targets, typed native
@@ -110,8 +111,11 @@ origins, exact current context joins and profile leases, and no cookie values.
 It is valid only for a clean owned context attested as a Windows automation
 subprofile. Post-auth handoff additionally requires an exact same-run,
 same-profile Windows human-handoff context with export capability. At most two
-transfers may be pending; each accepts at most 256 unique native-exposed
-cookies, 16 KiB per cookie, and 512 KiB total field data.
+transfers may be pending, and only when their destination profiles differ;
+distinct destination contexts on one WebView2 profile are the same physical
+cookie store and therefore cannot mutate concurrently. Each transfer accepts
+at most 256 unique native-exposed cookies, 16 KiB per cookie, and 512 KiB total
+field data.
 
 The adapter contract requires an enumerate/validate/deduplicate preflight with
 zero destination writes before application. Terminal outcomes distinguish
@@ -133,6 +137,18 @@ apply to the user-profile context, `GetCookies` is URI-scoped, and
 `IsHttpOnly` for exact preservation
 ([CookieManager](https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2cookiemanager),
 [Cookie](https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/winrt/microsoft_web_webview2_core/corewebview2cookie)).
+
+The same profile-scoped behavior exposes an unresolved native recovery
+boundary, not an implementation detail that may be hand-waved away. Destroying
+one owned WebView does not remove cookies already written to the stable
+`agent-<ProfileId>` profile, and multiple WebViews on that profile share those
+values. Before destination writes can ship, the host must own an exclusive
+automation-profile mutation transaction and a bounded cleanup/re-attestation
+receipt that removes a partial cookie cohort before the stable profile is
+usable again. `ICoreWebView2Profile8::Delete` is not an immediate recreation
+primitive: Microsoft documents that the name remains delete-pending until the
+browser process exits. This evidence therefore makes no native cookie-write or
+partial-recovery claim.
 
 For extension inventory, an empty `GetBrowserExtensions` result is accepted
 only when extension support was enabled for the inventory environment. The
@@ -368,8 +384,10 @@ capacity refusal without eviction, durable/ephemeral storage retention, stale-
 release rejection, deletion races, and shutdown quiescence.
 Cookie-transfer tests cover canonical/deduplicated origins, Windows clean-
 subprofile proof, handoff owner/profile joins, required capabilities, payload
-and HttpOnly count invariants, explicit partial application, destination
-single-flight, process concurrency, redacted debug output, and shutdown drain.
+and HttpOnly count invariants, explicit partial application, destination-
+profile single-flight (including distinct-context alias refusal), process
+concurrency across distinct profiles, redacted debug output, and shutdown
+drain.
 Handoff tests execute complete macOS shared-store and Windows cookie-bridge
 flows through the real context registry, including exclusive human control,
 temporary-context release, scoped refresh, fresh observation, incompatible
@@ -393,8 +411,9 @@ loses its hidden/profile/inventory/process/policy/cleanup checks.
    on an explicitly authorized named Windows device/runtime;
 2. add bounded redirect/page-replacement observation, presentation, and
    suspension while preserving exact context/world/frame generations;
-3. implement the bounded Windows cookie adapter and native borrowed/handoff
-   transactions without changing ordinary extension principals;
+3. implement the bounded Windows cookie adapter, exclusive automation-profile
+   mutation/partial-cleanup receipt, and native borrowed/handoff transactions
+   without changing ordinary extension principals;
 4. qualify macOS construction/storage/inventory/close and both-platform
    lifecycle, idle-resource, cancellation, recovery, and shutdown behavior on
    explicitly authorized named devices.

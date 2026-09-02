@@ -80,8 +80,11 @@ pub enum ContextCookieTransferError {
     /// The process-local transfer identity is already active.
     #[error("cookie transfer identity is already active")]
     DuplicateTransfer,
-    /// Another active transfer owns the destination context.
-    #[error("cookie transfer destination is busy")]
+    /// Another active transfer owns the destination automation profile.
+    ///
+    /// WebView2 cookie managers are profile-scoped, so distinct destination
+    /// contexts on one profile are the same physical mutation target.
+    #[error("cookie transfer destination profile is busy")]
     DestinationBusy,
     /// No active transfer has the exact identity.
     #[error("cookie transfer was not found")]
@@ -572,11 +575,9 @@ impl ContextCookieTransferRegistry {
         if self.pending.contains_key(&request.id) {
             return Err(ContextCookieTransferError::DuplicateTransfer);
         }
-        if self
-            .pending
-            .values()
-            .any(|active| active.destination.identity().id() == request.destination.identity().id())
-        {
+        if self.pending.values().any(|active| {
+            active.destination.identity().profile() == request.destination.identity().profile()
+        }) {
             return Err(ContextCookieTransferError::DestinationBusy);
         }
         if self.pending.len() >= MAX_PENDING_COOKIE_TRANSFERS {
@@ -651,7 +652,8 @@ impl ContextCookieTransferRegistry {
         }
         for (index, request) in self.pending.values().enumerate() {
             if self.pending.values().skip(index + 1).any(|candidate| {
-                candidate.destination.identity().id() == request.destination.identity().id()
+                candidate.destination.identity().profile()
+                    == request.destination.identity().profile()
             }) {
                 return Err(ContextCookieTransferError::Invariant);
             }
@@ -758,8 +760,12 @@ mod tests {
         .expect("scope")
     }
 
-    fn selected_request(value: u64, context: u128) -> ContextCookieTransferRequest {
-        let destination = ready_join(context, 50, 60, ContextKind::Owned);
+    fn selected_request_for_profile(
+        value: u64,
+        context: u128,
+        profile: u128,
+    ) -> ContextCookieTransferRequest {
+        let destination = ready_join(context, 50, profile, ContextKind::Owned);
         ContextCookieTransferRequest::selected_profile_to_owned(
             ContextCookieTransferId::new(value).expect("transfer"),
             destination,
@@ -769,6 +775,10 @@ mod tests {
             scope(),
         )
         .expect("request")
+    }
+
+    fn selected_request(value: u64, context: u128) -> ContextCookieTransferRequest {
+        selected_request_for_profile(value, context, 60)
     }
 
     fn stats(origins: u8, observed: u16, applied: u16) -> ContextCookieTransferStats {
@@ -896,7 +906,7 @@ mod tests {
     }
 
     #[test]
-    fn registry_bounds_destinations_and_exact_settlement_without_eviction() {
+    fn registry_bounds_destination_profiles_and_exact_settlement_without_eviction() {
         let mut registry = ContextCookieTransferRegistry::new();
         let first = selected_request(1, 1);
         registry.admit(first.clone()).expect("first");
@@ -912,11 +922,15 @@ mod tests {
             registry.admit(same_destination),
             Err(ContextCookieTransferError::DestinationBusy)
         );
-        registry
-            .admit(selected_request(2, 2))
-            .expect("second destination");
         assert_eq!(
-            registry.admit(selected_request(3, 3)),
+            registry.admit(selected_request(2, 2)),
+            Err(ContextCookieTransferError::DestinationBusy)
+        );
+        registry
+            .admit(selected_request_for_profile(2, 2, 61))
+            .expect("second destination profile");
+        assert_eq!(
+            registry.admit(selected_request_for_profile(3, 3, 62)),
             Err(ContextCookieTransferError::TransferLimit)
         );
         let settlement = ContextCookieTransferSettlement::try_new(
