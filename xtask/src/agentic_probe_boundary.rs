@@ -2485,6 +2485,24 @@ fn validate_windows_semantic_probe(
         "observer.observed_expected_exit()&&process.has_exited()",
         "profile.close().is_ok()",
         "server.shutdown().is_ok()",
+        "verify_first_snapshot(&first_snapshot)?;",
+        "facts.snapshots=1;facts.first_snapshot_verified=true;facts.page_world_bridge_absent=true;facts.secrets_redacted=true;",
+        "verify_replacement_snapshot(&snapshot)?;",
+        "facts.snapshots=2;facts.replacement_snapshot_verified=true;facts.replacement_stale_state_absent=true;",
+        "ifoutcome!=Err(SemanticRuntimePortFailure::Transport)||callbacks.invariant_failures.get()!=1",
+        "facts.event_flood_refused=true;",
+        "facts.recovered_after_event_flood=true;",
+        "ifoutcome!=Err(SemanticRuntimePortFailure::RendererLost)",
+        "facts.renderer_loss_observed=true;facts.renderer_lost_refused=true;",
+        "facts.suspend_callback_succeeded=true;facts.suspended_state_attested=true;facts.resume_state_attested=true;",
+        "first_snapshot_verified:facts.first_snapshot_verified",
+        "replacement_snapshot_verified:facts.replacement_snapshot_verified",
+        "event_flood_refused:facts.event_flood_refused",
+        "renderer_loss_observed:facts.renderer_loss_observed",
+        "suspend_callback_succeeded:facts.suspend_callback_succeeded",
+        "semantic_work_drained:facts.semantic_work_drained",
+        "runtime_retired:teardown.runtime_retired",
+        "work_drained:teardown.work_drained",
     ] {
         if !source.contains(required) {
             return Err(format!(
@@ -10042,6 +10060,47 @@ mod tests {
             fixture,
         )
         .is_err());
+        for (retained_join, substitution) in [
+            (
+                "facts.page_world_bridge_absent = true;",
+                "facts.page_world_bridge_absent = false;",
+            ),
+            (
+                "verify_replacement_snapshot(&snapshot)?;",
+                "let _ = &snapshot;",
+            ),
+            (
+                "outcome != Err(SemanticRuntimePortFailure::Transport)",
+                "false",
+            ),
+            (
+                "facts.renderer_lost_refused = true;",
+                "facts.renderer_lost_refused = false;",
+            ),
+            (
+                "facts.suspended_state_attested = true;",
+                "facts.suspended_state_attested = false;",
+            ),
+            (
+                "semantic_work_drained: facts.semantic_work_drained",
+                "semantic_work_drained: true",
+            ),
+            (
+                "runtime_retired: teardown.runtime_retired",
+                "runtime_retired: true",
+            ),
+        ] {
+            assert!(
+                validate_windows_semantic_probe(
+                    module,
+                    &source.replace(retained_join, substitution),
+                    binary,
+                    fixture,
+                )
+                .is_err(),
+                "producer substitution must fail: {retained_join}",
+            );
+        }
     }
 
     #[test]

@@ -196,6 +196,12 @@ agentic-owned Windows modules. Cross-compilation is not device behavior.
   fields against the claimed terminal outcome. The release boundary
   mutation-tests those joins. This strengthens future evidence admission; it is
   not physical Windows behavior evidence.
+- The physical Windows semantic source gate now binds its content-free success
+  fields to the closed snapshot verifiers, exact flood and renderer-loss
+  refusals, native suspend/readback/resume result, semantic drain audit, and
+  teardown result. Mutation tests replace each evidence class with an
+  unconditional label and prove release qualification fails. This is producer
+  integrity coverage, not physical Windows behavior evidence.
 - The functional agentic core forbids unsafe code. The agentic-owned production
   native graph currently contains exactly eight audited modules: the macOS and
   Windows owned-context, semantic-runtime, and semantic-screenshot adapters,

@@ -508,6 +508,11 @@ process, profile, fixture, and teardown facts. The runner and reviewer share
 the input qualifier's direct directory/file checks and additionally reject
 every Windows filesystem object carrying `FILE_ATTRIBUTE_REPARSE_POINT`,
 including junctions and mount points that are not ordinary symbolic links.
+The release gate also binds each reported success fact back to its closed
+producer check: first/replacement snapshot verification, exact flood and
+renderer-loss refusal, native suspend/readback/resume, semantic drain, and
+teardown cannot be replaced by unconditional evidence labels without failing
+the source audit. Mutation tests exercise each evidence class.
 Diagnostic code is optimized-build refused and the static boundary permits
 only the fixed `Page.crash` fault; it rejects generic CDP, evaluation,
 selectors, page bridges, input injection, focus mutation, arbitrary output
