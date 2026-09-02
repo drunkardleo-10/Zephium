@@ -288,6 +288,10 @@ impl AgentRunMetricClosure {
     pub const fn total_elapsed_millis(self) -> u64 {
         self.total_elapsed_millis
     }
+
+    pub(crate) fn matches_manifest_revision(&self, manifest: &AgentRunManifest) -> bool {
+        self.manifest == manifest.id() && self.manifest_guard == manifest.guard()
+    }
 }
 
 impl fmt::Debug for AgentRunMetricClosure {
@@ -471,17 +475,19 @@ mod tests {
         AgentAccountScope, AgentActiveEffect, AgentActiveModelCall, AgentAuditEventId,
         AgentAuditLedger, AgentDelegationSpec, AgentDelegationTopology, AgentEffectId,
         AgentEffectReceipt, AgentEffectScope, AgentEffectSettlement, AgentModelCallId,
-        AgentModelCallReceipt, AgentModelCallSettlement, AgentPlanLeaseId, AgentPlanNodeAuthority,
-        AgentPlanNodeId, AgentPlanNodeScope, AgentPolicyInstant, AgentProviderInputMetricReceipt,
-        AgentProviderInputMetrics, AgentProviderSemanticInputStats, AgentRunBudget, AgentRunScope,
-        AgentSupervisorAttemptId, AgentSupervisorCompletion, AgentSupervisorFailure,
-        ContextCapabilities, ContextCapability, ContextId, ContextIdentity, ContextKind,
-        ContextOperationId, ContextRegistry, ContextRunId, ContextSettlement,
-        SemanticActionAttemptId, SemanticActionBatchCompletion, SemanticActionBatchId,
-        SemanticActionBatchOutcome, SemanticActionBatchResult, SemanticActionExecutionApplied,
-        SemanticActionExecutionInstant, SemanticActionKind, SemanticActionNextState,
-        SemanticEffectClass, SemanticEffectProofKind, SemanticEncodingStats, SemanticOrigin,
-        SemanticSensitivity, SemanticSettleInstant, SemanticTokenCountQuality,
+        AgentModelCallReceipt, AgentModelCallSettlement, AgentPlanLeaseBinding, AgentPlanLeaseId,
+        AgentPlanNodeAuthority, AgentPlanNodeId, AgentPlanNodeScope, AgentPolicyInstant,
+        AgentProviderInputMetricReceipt, AgentProviderInputMetrics,
+        AgentProviderSemanticInputStats, AgentRunBudget, AgentRunPolicy,
+        AgentRunPolicySettlementError, AgentRunScope, AgentSupervisorAttemptId,
+        AgentSupervisorCompletion, AgentSupervisorFailure, ContextCapabilities, ContextCapability,
+        ContextId, ContextIdentity, ContextKind, ContextOperationId, ContextRegistry, ContextRunId,
+        ContextSettlement, SemanticActionAttemptId, SemanticActionBatchCompletion,
+        SemanticActionBatchId, SemanticActionBatchOutcome, SemanticActionBatchResult,
+        SemanticActionExecutionApplied, SemanticActionExecutionInstant, SemanticActionKind,
+        SemanticActionNextState, SemanticEffectClass, SemanticEffectProofKind,
+        SemanticEncodingStats, SemanticOrigin, SemanticSensitivity, SemanticSettleInstant,
+        SemanticTokenCountQuality,
     };
     use zephium_core::ids::ProfileId;
 
@@ -668,6 +674,7 @@ mod tests {
         actions: AgentRunActionPerformanceMetrics,
         inputs: AgentRunProviderInputMetrics,
         ledger: AgentAuditLedger,
+        policy: AgentRunPolicy,
     }
 
     impl Fixture {
@@ -676,7 +683,16 @@ mod tests {
         }
 
         fn with_operations(id: u128, operations: u32) -> Self {
+            let policy_manifest = manifest(id, operations);
             let manifest = manifest(id, operations);
+            let policy = AgentRunPolicy::try_new(
+                policy_manifest,
+                vec![AgentPlanLeaseBinding::new(
+                    AgentPlanLeaseId::from_raw(10),
+                    ROOT,
+                )],
+            )
+            .expect("policy");
             let supervisor = supervisor(&manifest, id as u64);
             let accounting =
                 AgentRunAccountingMetrics::try_new(&manifest, &supervisor).expect("accounting");
@@ -695,6 +711,7 @@ mod tests {
                 actions,
                 inputs,
                 ledger,
+                policy,
             }
         }
 
@@ -921,6 +938,101 @@ mod tests {
             wrong_attempt.close(),
             Err(AgentRunMetricClosureError::EffectCoverage)
         );
+    }
+
+    #[test]
+    fn clean_policy_settlement_consumes_mutability_after_exact_reconciliation() {
+        let mut fixture = Fixture::new(8);
+        fixture.run_success(1, 1);
+        let closure = fixture.close().expect("metric closure");
+        fixture
+            .policy
+            .set_single_lease_consumed_for_metric_settlement_test(2, 0, 0);
+
+        let settlement = fixture
+            .policy
+            .settle_metric_closure(closure, &fixture.accounting)
+            .expect("clean policy settlement");
+        assert_eq!(settlement.closure(), closure);
+        assert_eq!(settlement.accounting().consumed_operations(), 2);
+        assert_eq!(settlement.accounting().reserved_operations(), 0);
+        assert_eq!(settlement.accounting().reserved_model_tokens(), 0);
+        assert_eq!(settlement.accounting().reserved_cost_micro_usd(), 0);
+        assert!(
+            std::mem::size_of::<crate::AgentRunPolicySettlement>()
+                <= crate::MAX_AGENT_RUN_POLICY_SETTLEMENT_BYTES
+        );
+        let debug = format!("{settlement:?}");
+        assert!(debug.contains("[redacted]"));
+        assert!(debug.contains("[none]"));
+        assert!(!debug.contains("metric-closure.example.test"));
+    }
+
+    #[test]
+    fn policy_settlement_refusal_retains_complete_state_for_corrected_retry() {
+        let mut fixture = Fixture::new(9);
+        fixture.run_success(1, 1);
+        let closure = fixture.close().expect("metric closure");
+
+        let refusal = fixture
+            .policy
+            .settle_metric_closure(closure, &fixture.accounting)
+            .expect_err("missing consumed policy accounting");
+        assert_eq!(refusal.error(), AgentRunPolicySettlementError::Accounting);
+        assert_eq!(refusal.policy().accounting().consumed_operations(), 0);
+        let debug = format!("{refusal:?}");
+        assert!(debug.contains("[retained]"));
+        assert!(debug.contains("[redacted]"));
+        assert!(!debug.contains("metric-closure.example.test"));
+
+        let mut policy = refusal.into_policy();
+        policy.set_single_lease_consumed_for_metric_settlement_test(2, 0, 0);
+        let _settlement = policy
+            .settle_metric_closure(closure, &fixture.accounting)
+            .expect("corrected retry");
+    }
+
+    #[test]
+    fn sealed_or_foreign_policy_can_never_claim_clean_settlement() {
+        let mut sealed = Fixture::new(10);
+        sealed.run_success(1, 1);
+        let closure = sealed.close().expect("metric closure");
+        let fake_active = AgentActiveModelCall::for_progress_test(
+            &sealed.manifest,
+            AgentModelCallId::new(99).expect("call"),
+            AgentPlanLeaseId::from_raw(10),
+            ROOT,
+        );
+        assert_eq!(
+            sealed.policy.settle_model_call(
+                fake_active,
+                AgentModelCallSettlement::Completed,
+                0,
+                0,
+                0,
+            ),
+            Err(crate::AgentPolicyError::CallMissing)
+        );
+        let refusal = sealed
+            .policy
+            .settle_metric_closure(closure, &sealed.accounting)
+            .expect_err("sealed policy");
+        assert_eq!(refusal.error(), AgentRunPolicySettlementError::Sealed);
+        assert!(refusal.into_policy().is_sealed());
+
+        let mut exact = Fixture::with_operations(11, 8);
+        exact.run_success(1, 1);
+        let exact_closure = exact.close().expect("exact closure");
+        let mut changed = Fixture::with_operations(11, 7);
+        changed.run_success(1, 1);
+        changed
+            .policy
+            .set_single_lease_consumed_for_metric_settlement_test(2, 0, 0);
+        let refusal = changed
+            .policy
+            .settle_metric_closure(exact_closure, &exact.accounting)
+            .expect_err("foreign revision");
+        assert_eq!(refusal.error(), AgentRunPolicySettlementError::Authority);
     }
 
     #[test]

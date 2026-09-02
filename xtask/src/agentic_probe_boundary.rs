@@ -165,6 +165,12 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         &read(repository.join(AGENTIC_ACTION_METRICS))?,
         &read(repository.join(AGENTIC_INPUT_METRICS))?,
     )?;
+    validate_agent_policy_settlement_contract(
+        &read(repository.join(AGENTIC_ROOT))?,
+        &read(repository.join(AGENTIC_METRIC_CLOSURE))?,
+        &read(repository.join(AGENTIC_METRICS))?,
+        &read(repository.join(AGENTIC_POLICY))?,
+    )?;
     validate_provider_billing_contract(
         &read(repository.join(AGENTIC_PROVIDER_ROOT))?,
         &read(repository.join(AGENTIC_PROVIDER_REQUEST))?,
@@ -2311,6 +2317,131 @@ fn validate_agent_metric_closure_contract(
                     "agent metric closure lost {name} private join {required}"
                 ));
             }
+        }
+    }
+    Ok(())
+}
+
+fn validate_agent_policy_settlement_contract(
+    root: &str,
+    closure: &str,
+    accounting: &str,
+    policy: &str,
+) -> Result<(), String> {
+    let root = compact(root);
+    for required in [
+        "AgentRunPolicySettlement",
+        "AgentRunPolicySettlementError",
+        "AgentRunPolicySettlementRefusal",
+        "MAX_AGENT_RUN_POLICY_SETTLEMENT_BYTES",
+    ] {
+        if !root.contains(required) {
+            return Err(format!(
+                "clean agent policy settlement lost its default-core export {required}"
+            ));
+        }
+    }
+
+    let closure = compact(closure);
+    for required in [
+        "pub(crate)fnmatches_manifest_revision(&self,manifest:&AgentRunManifest)->bool",
+        "self.manifest==manifest.id()&&self.manifest_guard==manifest.guard()",
+    ] {
+        if !closure.contains(required) {
+            return Err(format!(
+                "clean agent policy settlement lost its private closure join {required}"
+            ));
+        }
+    }
+    for forbidden in [
+        "pubfnmatches_manifest_revision(",
+        "pubconstfnmatches_manifest_revision(",
+    ] {
+        if closure.contains(forbidden) {
+            return Err(format!(
+                "metric closure exposed its private revision join {forbidden}"
+            ));
+        }
+    }
+
+    let accounting = compact(accounting);
+    for required in [
+        "pub(crate)fnmatches_metric_scope(",
+        "self.manifest==manifest.id()",
+        "self.manifest_guard==manifest.guard()",
+        "self.supervisor==supervisor",
+        "pubfnnodes(&self)->implExactSizeIterator<Item=AgentNodeAccountingMetrics>+'_",
+    ] {
+        if !accounting.contains(required) {
+            return Err(format!(
+                "clean agent policy settlement lost its accounting join {required}"
+            ));
+        }
+    }
+
+    let policy = compact(policy);
+    for required in [
+        "pubconstMAX_AGENT_RUN_POLICY_SETTLEMENT_BYTES:usize=256;",
+        "size_of::<AgentRunPolicySettlement>()<=MAX_AGENT_RUN_POLICY_SETTLEMENT_BYTES",
+        "pubstructAgentRunPolicySettlement{closure:AgentRunMetricClosure,accounting:AgentPolicyAccounting,}",
+        "pubstructAgentRunPolicySettlementRefusal{error:AgentRunPolicySettlementError,policy:AgentRunPolicy,}",
+        "pubfninto_policy(self)->AgentRunPolicy{self.policy}",
+        "pubfnsettle_metric_closure(self,closure:AgentRunMetricClosure,metrics:&AgentRunAccountingMetrics,)->Result<AgentRunPolicySettlement,Box<AgentRunPolicySettlementRefusal>>",
+        "matchvalidate_metric_settlement(&self,closure,metrics)",
+        "policy:self",
+        "!closure.matches_manifest_revision(policy.manifest())",
+        "!metrics.matches_metric_scope(policy.manifest(),closure.supervisor())",
+        "snapshot.operations()!=closure.operations()",
+        "snapshot.model().calls()!=closure.model_calls()",
+        "snapshot.effects().attempts()!=closure.effects()",
+        "ifpolicy.is_sealed()",
+        "policy.pending_model_calls()!=0",
+        "policy.pending_effects()!=0",
+        "policy.pending_origin_writes()!=0",
+        "accounting.reserved_operations()!=0",
+        "accounting.reserved_model_tokens()!=0",
+        "accounting.reserved_cost_micro_usd()!=0",
+        ".input_tokens().checked_add(snapshot.model().output_tokens())",
+        "accounting.consumed_operations()!=snapshot.operations()",
+        "accounting.consumed_model_tokens()!=model_tokens",
+        "accounting.consumed_cost_micro_usd()!=snapshot.model().cost_micro_usd()",
+        "policy.leases.len()!=metrics.nodes().len()",
+        "for(lease,node)inpolicy.leases.iter().zip(metrics.nodes())",
+        "lease.binding.node()!=node.node()",
+        "lease_accounting.reserved_operations()!=0",
+        "lease_accounting.reserved_model_tokens()!=0",
+        "lease_accounting.reserved_cost_micro_usd()!=0",
+        "lease_accounting.consumed_operations()!=node.operations()",
+        "lease_accounting.consumed_model_tokens()!=node.model_tokens()",
+        "lease_accounting.consumed_cost_micro_usd()!=node.cost_micro_usd()",
+        "AgentRunPolicySettlementError::Authority",
+        "AgentRunPolicySettlementError::Sealed",
+        "AgentRunPolicySettlementError::Pending",
+        "AgentRunPolicySettlementError::Accounting",
+        "AgentRunPolicySettlementError::Overflow",
+        "field(\"authority\",&\"[none]\")",
+        "field(\"authority\",&\"[retained]\")",
+        "field(\"content\",&\"[redacted]\")",
+    ] {
+        if !policy.contains(required) {
+            return Err(format!(
+                "clean agent policy settlement lost required invariant {required}"
+            ));
+        }
+    }
+    for forbidden in [
+        "implAgentRunPolicySettlement{pubfnnew(",
+        "implAgentRunPolicySettlement{pubconstfnnew(",
+        "traitAgentRunPolicySettlementPort",
+        "SerializeforAgentRunPolicySettlement",
+        "DeserializeforAgentRunPolicySettlement",
+        "SerializeforAgentRunPolicySettlementRefusal",
+        "DeserializeforAgentRunPolicySettlementRefusal",
+    ] {
+        if policy.contains(forbidden) {
+            return Err(format!(
+                "clean agent policy settlement acquired forbidden authority/runtime seam {forbidden}"
+            ));
         }
     }
     Ok(())
@@ -6199,6 +6330,47 @@ mod tests {
             progress,
             actions,
             inputs,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn clean_policy_settlement_stays_move_only_and_exactly_reconciled() {
+        let root = include_str!("../../crates/zephium-agentic/src/lib.rs");
+        let closure = include_str!("../../crates/zephium-agentic/src/agent_metric_closure.rs");
+        let accounting = include_str!("../../crates/zephium-agentic/src/agent_metrics.rs");
+        let policy = include_str!("../../crates/zephium-agentic/src/agent_policy.rs");
+
+        validate_agent_policy_settlement_contract(root, closure, accounting, policy)
+            .expect("clean move-only policy settlement");
+        assert!(validate_agent_policy_settlement_contract(
+            root,
+            closure,
+            accounting,
+            &policy.replace("policy.pending_effects() != 0", "false"),
+        )
+        .is_err());
+        assert!(validate_agent_policy_settlement_contract(
+            root,
+            closure,
+            accounting,
+            &policy.replace("policy: self", "policy: AgentRunPolicy::placeholder()"),
+        )
+        .is_err());
+        assert!(validate_agent_policy_settlement_contract(
+            root,
+            &format!(
+                "{closure}\nimpl AgentRunMetricClosure {{ pub fn matches_manifest_revision() {{}} }}"
+            ),
+            accounting,
+            policy,
+        )
+        .is_err());
+        assert!(validate_agent_policy_settlement_contract(
+            root,
+            closure,
+            accounting,
+            &format!("{policy}\ntrait AgentRunPolicySettlementPort {{}}"),
         )
         .is_err());
     }

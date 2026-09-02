@@ -31,8 +31,9 @@ use crate::semantic_read_model::SemanticReadDeliveryAuthority;
 use crate::semantic_screenshot::SemanticScreenshotDeliveryAuthority;
 use crate::{
     AgentAccountScope, AgentContextAccountBinding, AgentPlanLeaseId, AgentPlanNodeId,
-    AgentPolicyInstant, AgentProviderPricedUsage, AgentProviderPricingAttribution, AgentRunBudget,
-    AgentRunManifest, AgentRunManifestId, ContextJoin, SemanticActionAttemptId, SemanticDiff,
+    AgentPolicyInstant, AgentProviderPricedUsage, AgentProviderPricingAttribution,
+    AgentRunAccountingMetrics, AgentRunBudget, AgentRunManifest, AgentRunManifestId,
+    AgentRunMetricClosure, ContextJoin, SemanticActionAttemptId, SemanticDiff,
     SemanticDiffDeliveryReceipt, SemanticDiffModelPayload, SemanticEffectClass,
     SemanticExtractionDeliveryReceipt, SemanticExtractionSchema, SemanticLocateDeliveryReceipt,
     SemanticLocateResult, SemanticModelPayload, SemanticObservation,
@@ -49,6 +50,8 @@ pub const MAX_AGENT_TAINT_COHORTS: usize = 128;
 pub const MAX_AGENT_TAINT_REFERENCES: usize = 4_096;
 /// Maximum age of an account attestation at model-input admission (30 seconds).
 pub const MAX_AGENT_ACCOUNT_ATTESTATION_AGE_MILLIS: u64 = 30_000;
+/// Maximum byte size of one copyable clean policy-settlement value.
+pub const MAX_AGENT_RUN_POLICY_SETTLEMENT_BYTES: usize = 256;
 
 /// Monotonic shell-minted identity for one exact model-input attempt.
 #[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -370,6 +373,105 @@ impl AgentPolicyAccounting {
     /// Provider/tool cost held by admitted in-flight calls.
     pub const fn reserved_cost_micro_usd(self) -> u64 {
         self.reserved_cost_micro_usd
+    }
+}
+
+/// Non-authorizing proof that a run policy was consumed without pending debt.
+///
+/// Success consumes the mutable policy, so later model/effect admission cannot
+/// reopen the settled run. This value does not prove native-resource, site,
+/// provider, device, or production qualification.
+#[derive(Clone, Copy, Eq, PartialEq)]
+#[must_use]
+pub struct AgentRunPolicySettlement {
+    closure: AgentRunMetricClosure,
+    accounting: AgentPolicyAccounting,
+}
+
+const _: () = assert!(
+    std::mem::size_of::<AgentRunPolicySettlement>() <= MAX_AGENT_RUN_POLICY_SETTLEMENT_BYTES
+);
+
+impl AgentRunPolicySettlement {
+    /// Exact terminal metric closure joined before consuming the policy.
+    pub const fn closure(self) -> AgentRunMetricClosure {
+        self.closure
+    }
+
+    /// Final consumed accounting with every reservation proven zero.
+    pub const fn accounting(self) -> AgentPolicyAccounting {
+        self.accounting
+    }
+}
+
+impl fmt::Debug for AgentRunPolicySettlement {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentRunPolicySettlement")
+            .field("closure", &self.closure)
+            .field("accounting", &self.accounting)
+            .field("authority", &"[none]")
+            .field("content", &"[redacted]")
+            .finish()
+    }
+}
+
+/// Closed reason a mutable policy could not be cleanly consumed.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum AgentRunPolicySettlementError {
+    /// Metric closure or accounting belonged to another manifest revision/run.
+    #[error("agent run policy settlement authority mismatched")]
+    Authority,
+    /// Policy was previously sealed by ambiguous or mismatched state.
+    #[error("agent run policy settlement found a sealed policy")]
+    Sealed,
+    /// Model/effect reservations or reserved accounting remain live.
+    #[error("agent run policy settlement still has pending work")]
+    Pending,
+    /// Consumed run or plan-lease accounting contradicted receipt metrics.
+    #[error("agent run policy settlement accounting mismatched")]
+    Accounting,
+    /// Checked final token arithmetic overflowed.
+    #[error("agent run policy settlement arithmetic overflowed")]
+    Overflow,
+}
+
+/// Recoverable refusal retaining the complete mutable policy for cleanup/retry.
+#[must_use]
+pub struct AgentRunPolicySettlementRefusal {
+    error: AgentRunPolicySettlementError,
+    policy: AgentRunPolicy,
+}
+
+impl AgentRunPolicySettlementRefusal {
+    /// Closed refusal reason.
+    pub const fn error(&self) -> AgentRunPolicySettlementError {
+        self.error
+    }
+
+    /// Retained policy state for inspection without extracting authority.
+    pub const fn policy(&self) -> &AgentRunPolicy {
+        &self.policy
+    }
+
+    /// Recovers the complete mutable policy for exact cleanup or corrected retry.
+    pub fn into_policy(self) -> AgentRunPolicy {
+        self.policy
+    }
+}
+
+impl fmt::Debug for AgentRunPolicySettlementRefusal {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentRunPolicySettlementRefusal")
+            .field("error", &self.error)
+            .field("manifest", &self.policy.manifest().id())
+            .field("pending_model_calls", &self.policy.pending_model_calls())
+            .field("pending_effects", &self.policy.pending_effects())
+            .field("sealed", &self.policy.is_sealed())
+            .field("authority", &"[retained]")
+            .field("content", &"[redacted]")
+            .finish()
     }
 }
 
@@ -981,6 +1083,46 @@ impl AgentRunPolicy {
             self.calls.iter().filter(|call| call.lease == lease),
             self.effects.iter().filter(|effect| effect.lease() == lease),
         ))
+    }
+
+    /// Consumes one clean terminal policy after exact metric reconciliation.
+    ///
+    /// Every refusal retains the complete policy so pending or ambiguous state
+    /// cannot be discarded as a false terminal. Success drops mutable taint and
+    /// lease state only after all reservations are zero and consumed run/node
+    /// accounting matches the already-closed receipt reducers.
+    pub fn settle_metric_closure(
+        self,
+        closure: AgentRunMetricClosure,
+        metrics: &AgentRunAccountingMetrics,
+    ) -> Result<AgentRunPolicySettlement, Box<AgentRunPolicySettlementRefusal>> {
+        match validate_metric_settlement(&self, closure, metrics) {
+            Ok(accounting) => Ok(AgentRunPolicySettlement {
+                closure,
+                accounting,
+            }),
+            Err(error) => Err(Box::new(AgentRunPolicySettlementRefusal {
+                error,
+                policy: self,
+            })),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_single_lease_consumed_for_metric_settlement_test(
+        &mut self,
+        operations: u32,
+        model_tokens: u64,
+        cost_micro_usd: u64,
+    ) {
+        assert_eq!(self.leases.len(), 1);
+        let consumed = ConsumedUsage {
+            operations,
+            model_tokens,
+            cost_micro_usd,
+        };
+        self.consumed = consumed;
+        self.leases[0].consumed = consumed;
     }
 
     /// Reserves exact observation input before any model transport receives bytes.
@@ -1696,6 +1838,69 @@ impl fmt::Debug for AgentRunPolicy {
             .field("content", &"[redacted]")
             .finish()
     }
+}
+
+fn validate_metric_settlement(
+    policy: &AgentRunPolicy,
+    closure: AgentRunMetricClosure,
+    metrics: &AgentRunAccountingMetrics,
+) -> Result<AgentPolicyAccounting, AgentRunPolicySettlementError> {
+    if !closure.matches_manifest_revision(policy.manifest())
+        || !metrics.matches_metric_scope(policy.manifest(), closure.supervisor())
+    {
+        return Err(AgentRunPolicySettlementError::Authority);
+    }
+    let snapshot = metrics.snapshot();
+    if snapshot.operations() != closure.operations()
+        || snapshot.model().calls() != closure.model_calls()
+        || snapshot.effects().attempts() != closure.effects()
+    {
+        return Err(AgentRunPolicySettlementError::Authority);
+    }
+    if policy.is_sealed() {
+        return Err(AgentRunPolicySettlementError::Sealed);
+    }
+
+    let accounting = policy.accounting();
+    if policy.pending_model_calls() != 0
+        || policy.pending_effects() != 0
+        || policy.pending_origin_writes() != 0
+        || accounting.reserved_operations() != 0
+        || accounting.reserved_model_tokens() != 0
+        || accounting.reserved_cost_micro_usd() != 0
+    {
+        return Err(AgentRunPolicySettlementError::Pending);
+    }
+
+    let model_tokens = snapshot
+        .model()
+        .input_tokens()
+        .checked_add(snapshot.model().output_tokens())
+        .ok_or(AgentRunPolicySettlementError::Overflow)?;
+    if accounting.consumed_operations() != snapshot.operations()
+        || accounting.consumed_model_tokens() != model_tokens
+        || accounting.consumed_cost_micro_usd() != snapshot.model().cost_micro_usd()
+        || policy.leases.len() != metrics.nodes().len()
+    {
+        return Err(AgentRunPolicySettlementError::Accounting);
+    }
+
+    for (lease, node) in policy.leases.iter().zip(metrics.nodes()) {
+        let lease_accounting = policy
+            .lease_accounting(lease.binding.lease())
+            .ok_or(AgentRunPolicySettlementError::Accounting)?;
+        if lease.binding.node() != node.node()
+            || lease_accounting.reserved_operations() != 0
+            || lease_accounting.reserved_model_tokens() != 0
+            || lease_accounting.reserved_cost_micro_usd() != 0
+            || lease_accounting.consumed_operations() != node.operations()
+            || lease_accounting.consumed_model_tokens() != node.model_tokens()
+            || lease_accounting.consumed_cost_micro_usd() != node.cost_micro_usd()
+        {
+            return Err(AgentRunPolicySettlementError::Accounting);
+        }
+    }
+    Ok(accounting)
 }
 
 /// Closed refusal from mutable plan-lease/model-input policy.
