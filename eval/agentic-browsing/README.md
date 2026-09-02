@@ -158,8 +158,11 @@ native seams. The visible-focused mode is separately gated by the literal
 foreground authorization. Construction and each row re-attest the exact native
 host/container/controller/document ownership, visibility, and DPI-rounded
 viewport. Hidden/background qualification samples foreground, active-window,
-and thread-focus state before, during, and after dispatch so a transient focus
-transfer fails even if it reverses before fixture settlement.
+caller-queue focus, and exact document-thread active/focus state before,
+during, and after dispatch. Each fixed input submission also has adjacent
+pre/post samples, so a transient transfer observed at those boundaries fails
+even if it reverses before fixture settlement. The document-thread projection
+uses read-only `GetGUIThreadInfo`; the runner never attaches input queues.
 
 Each runner process writes exactly one versioned, size-bounded `ProbeResponse`
 JSON record to its selected machine-evidence sink before applying its pass/fail

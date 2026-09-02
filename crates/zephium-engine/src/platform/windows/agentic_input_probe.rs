@@ -36,13 +36,14 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
-    GetForegroundWindow, GetParent, GetWindow, GetWindowThreadProcessId, IsChild, IsWindow,
-    IsWindowVisible, MsgWaitForMultipleObjectsEx, PeekMessageW, PostQuitMessage, RegisterClassW,
-    SendMessageTimeoutW, SetForegroundWindow, SetWindowPos, ShowWindow, TranslateMessage,
-    CW_USEDEFAULT, GW_CHILD, HWND_BOTTOM, MSG, MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT,
-    SMTO_ABORTIFHUNG, SMTO_BLOCK, SMTO_ERRORONEXIT, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SW_HIDE, SW_SHOW, SW_SHOWNOACTIVATE, WM_CHAR, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MOUSEMOVE, WM_QUIT, WNDCLASSW, WS_EX_TOOLWINDOW, WS_OVERLAPPEDWINDOW,
+    GetForegroundWindow, GetGUIThreadInfo, GetParent, GetWindow, GetWindowThreadProcessId, IsChild,
+    IsWindow, IsWindowVisible, MsgWaitForMultipleObjectsEx, PeekMessageW, PostQuitMessage,
+    RegisterClassW, SendMessageTimeoutW, SetForegroundWindow, SetWindowPos, ShowWindow,
+    TranslateMessage, CW_USEDEFAULT, GUITHREADINFO, GW_CHILD, HWND_BOTTOM, MSG,
+    MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT, SMTO_ABORTIFHUNG, SMTO_BLOCK, SMTO_ERRORONEXIT,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOW, SW_SHOWNOACTIVATE, WM_CHAR,
+    WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_QUIT, WNDCLASSW,
+    WS_EX_TOOLWINDOW, WS_OVERLAPPEDWINDOW,
 };
 use windows_core::{Interface, HRESULT, HSTRING, PCWSTR};
 use wry::dpi::{LogicalPosition, LogicalSize, Position, Size};
@@ -780,6 +781,7 @@ fn run_case(
         FixedProbeScript::Ready,
         permit,
         poll_control,
+        None,
         deadline,
     )
     .map_err(|error| adapter_failure(error, ProbeStage::Observe, Some(case), Some(backend)))?;
@@ -796,6 +798,7 @@ fn run_case(
         FixedProbeScript::Geometry(case),
         permit,
         poll_control,
+        None,
         deadline,
     )
     .map_err(|error| adapter_failure(error, ProbeStage::Observe, Some(case), Some(backend)))?;
@@ -811,20 +814,11 @@ fn run_case(
         .validate()
         .map_err(|error| adapter_failure(error, ProbeStage::Observe, Some(case), Some(backend)))?;
     let resources_before = live_resource_sample(environment);
-    let (foreground_before, active_before, thread_focus_before) = native_focus_sample();
-    let focus_before =
-        native_focus_owner(host, view, foreground_before, thread_focus_before, false);
+    let native_focus_before = native_focus_sample(view)
+        .map_err(|error| adapter_failure(error, ProbeStage::Observe, Some(case), Some(backend)))?;
+    let focus_before = native_focus_owner(host, view, native_focus_before, false);
     let mut focus_trace = DispatchFocusTrace::default();
-    let mut observe_focus = || {
-        focus_trace.observe(
-            host,
-            view,
-            presentation,
-            foreground_before,
-            active_before,
-            thread_focus_before,
-        );
-    };
+    let mut observe_focus = || focus_trace.observe(host, view, presentation, native_focus_before);
     let outcome_hint = execute_backend(
         view,
         core,
@@ -838,15 +832,20 @@ fn run_case(
         deadline,
     )
     .map_err(|error| adapter_failure(error, ProbeStage::Execute, Some(case), Some(backend)))?;
-    let (foreground_during, active_during, thread_focus_during) = native_focus_sample();
-    let focus_during =
-        native_focus_owner(host, view, foreground_during, thread_focus_during, false);
+    let native_focus_during = native_focus_sample(view)
+        .map_err(|error| adapter_failure(error, ProbeStage::Observe, Some(case), Some(backend)))?;
+    let focus_during = native_focus_owner(host, view, native_focus_during, false);
     pump_for(FIXTURE_SETTLE, permit, poll_control, deadline)
         .map_err(|error| adapter_failure(error, ProbeStage::Settle, Some(case), Some(backend)))?;
-    let state_json = evaluate_fixed(core, FixedProbeScript::Read, permit, poll_control, deadline)
-        .map_err(|error| {
-        adapter_failure(error, ProbeStage::Observe, Some(case), Some(backend))
-    })?;
+    let state_json = evaluate_fixed(
+        core,
+        FixedProbeScript::Read,
+        permit,
+        poll_control,
+        None,
+        deadline,
+    )
+    .map_err(|error| adapter_failure(error, ProbeStage::Observe, Some(case), Some(backend)))?;
     let state = serde_json::from_str::<FixtureState>(&state_json).map_err(|_| {
         adapter_failure(
             AdapterError::InvalidEvidence,
@@ -863,14 +862,9 @@ fn run_case(
         .events
         .iter()
         .any(|event| event.kind == InputEventKind::Focus && event.target == target);
-    let (foreground_after, active_after, thread_focus_after) = native_focus_sample();
-    let focus_after = native_focus_owner(
-        host,
-        view,
-        foreground_after,
-        thread_focus_after,
-        target_received_focus,
-    );
+    let native_focus_after = native_focus_sample(view)
+        .map_err(|error| adapter_failure(error, ProbeStage::Observe, Some(case), Some(backend)))?;
+    let focus_after = native_focus_owner(host, view, native_focus_after, target_received_focus);
     attest_native_view(host, view, presentation)
         .map_err(|error| adapter_failure(error, ProbeStage::Observe, Some(case), Some(backend)))?;
     let popup_requested = popup_requested.get();
@@ -886,19 +880,17 @@ fn run_case(
             during: focus_during,
             after: focus_after,
             probe_host_became_key: focus_trace.probe_host_became_key
-                || (foreground_before != host.hwnd
-                    && (foreground_during == host.hwnd || foreground_after == host.hwnd))
-                || (active_before != host.hwnd
-                    && (active_during == host.hwnd || active_after == host.hwnd)),
+                || (!native_focus_before.probe_host_is_key(host)
+                    && (native_focus_during.probe_host_is_key(host)
+                        || native_focus_after.probe_host_is_key(host))),
             browse_focus_was_stolen: focus_trace.browse_focus_was_stolen
                 || (presentation != PresentationState::VisibleFocused
-                    && ((foreground_before != host.hwnd
-                        && (foreground_during == host.hwnd || foreground_after == host.hwnd))
-                        || (active_before != host.hwnd
-                            && (active_during == host.hwnd || active_after == host.hwnd))
-                        || (!focus_is_owned_by_view(view, thread_focus_before)
-                            && (focus_is_owned_by_view(view, thread_focus_during)
-                                || focus_is_owned_by_view(view, thread_focus_after))))),
+                    && ((!native_focus_before.probe_host_is_key(host)
+                        && (native_focus_during.probe_host_is_key(host)
+                            || native_focus_after.probe_host_is_key(host)))
+                        || (!native_focus_before.view_has_focus(view)
+                            && (native_focus_during.view_has_focus(view)
+                                || native_focus_after.view_has_focus(view))))),
             target_received_dom_focus: target_received_focus,
         },
         activation: ActivationEvidence {
@@ -942,28 +934,73 @@ impl DispatchFocusTrace {
         host: &ProbeHostWindow,
         view: &WebView,
         presentation: PresentationState,
-        foreground_before: HWND,
-        active_before: HWND,
-        thread_focus_before: HWND,
-    ) {
-        let (foreground, active, thread_focus) = native_focus_sample();
-        let host_became_key = (foreground_before != host.hwnd && foreground == host.hwnd)
-            || (active_before != host.hwnd && active == host.hwnd);
+        before: NativeFocusSample,
+    ) -> Result<(), AdapterError> {
+        let current = native_focus_sample(view)?;
+        let host_became_key = !before.probe_host_is_key(host) && current.probe_host_is_key(host);
         self.probe_host_became_key |= host_became_key;
         self.browse_focus_was_stolen |= presentation != PresentationState::VisibleFocused
-            && (host_became_key
-                || (!focus_is_owned_by_view(view, thread_focus_before)
-                    && focus_is_owned_by_view(view, thread_focus)));
+            && (host_became_key || (!before.view_has_focus(view) && current.view_has_focus(view)));
+        Ok(())
     }
 }
 
-/// Samples the three independent Win32 focus projections at one explicit
-/// observation boundary. This is evidence of the sampled state only; it does
-/// not claim an atomic system snapshot.
-fn native_focus_sample() -> (HWND, HWND, HWND) {
-    // SAFETY: these Win32 queries take no caller pointers and return borrowed
-    // opaque values only; the adapter never dereferences returned handles.
-    unsafe { (GetForegroundWindow(), GetActiveWindow(), GetFocus()) }
+/// One sampled set of caller-queue and owned document-queue focus projections.
+/// `GetFocus` and `GetActiveWindow` report only the calling thread's attached
+/// input queue, so they cannot by themselves attest the WebView2 document
+/// thread. The read-only `GetGUIThreadInfo` sample closes that gap without
+/// attaching queues or acquiring any input authority.
+#[derive(Clone, Copy)]
+struct NativeFocusSample {
+    foreground: HWND,
+    caller_active: HWND,
+    caller_focus: HWND,
+    document_active: HWND,
+    document_focus: HWND,
+}
+
+impl NativeFocusSample {
+    fn probe_host_is_key(self, host: &ProbeHostWindow) -> bool {
+        self.foreground == host.hwnd
+            || self.caller_active == host.hwnd
+            || self.document_active == host.hwnd
+    }
+
+    fn view_has_focus(self, view: &WebView) -> bool {
+        focus_is_owned_by_view(view, self.caller_focus)
+            || focus_is_owned_by_view(view, self.document_focus)
+    }
+}
+
+/// Samples independent Win32 focus projections at one explicit observation
+/// boundary. This is evidence of the sampled state only; it does not claim an
+/// atomic system snapshot or install a system-wide event observer.
+fn native_focus_sample(view: &WebView) -> Result<NativeFocusSample, AdapterError> {
+    let target = OwnedDocumentHwnd::resolve(view)?;
+    let mut document_gui = GUITHREADINFO {
+        cbSize: u32::try_from(std::mem::size_of::<GUITHREADINFO>())
+            .map_err(|_| AdapterError::InvalidEvidence)?,
+        ..Default::default()
+    };
+    // SAFETY: the exact live document thread was resolved from the owned Wry
+    // subtree. `document_gui` advertises its initialized ABI size and remains
+    // valid writable storage only for this read-only query. The other calls
+    // return borrowed opaque HWND identities without dereferencing them.
+    let (foreground, caller_active, caller_focus) = unsafe {
+        GetGUIThreadInfo(target.owner_thread_id, &mut document_gui)
+            .map_err(|_| AdapterError::FocusPolicy)?;
+        (GetForegroundWindow(), GetActiveWindow(), GetFocus())
+    };
+    if !target.is_current() {
+        return Err(AdapterError::NativeConstruction);
+    }
+    Ok(NativeFocusSample {
+        foreground,
+        caller_active,
+        caller_focus,
+        document_active: document_gui.hwndActive,
+        document_focus: document_gui.hwndFocus,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -976,13 +1013,13 @@ fn execute_backend(
     geometry: WindowsProbeGeometry,
     permit: &ProbeRunPermit,
     poll_control: &mut impl FnMut(),
-    observe_focus: &mut impl FnMut(),
+    observe_focus: &mut impl FnMut() -> Result<(), AdapterError>,
     deadline: Instant,
 ) -> Result<Option<CaseOutcome>, AdapterError> {
     match backend {
         InputBackend::FixedDomRecipe => {
             if case == FixtureCase::ClosedShadow {
-                observe_focus();
+                observe_focus()?;
                 return Ok(Some(CaseOutcome::Unsupported));
             }
             let result = evaluate_fixed(
@@ -990,12 +1027,13 @@ fn execute_backend(
                 FixedProbeScript::DomRecipe(case),
                 permit,
                 poll_control,
+                Some(&mut *observe_focus),
                 deadline,
             )?;
             if result != "ok" {
                 return Err(AdapterError::InvalidEvidence);
             }
-            observe_focus();
+            observe_focus()?;
             Ok(None)
         }
         InputBackend::WindowsHwndInput => {
@@ -1017,23 +1055,23 @@ fn execute_backend(
             Ok(None)
         }
         InputBackend::WindowsCompositionInput => {
-            observe_focus();
+            observe_focus()?;
             Ok(Some(CaseOutcome::Unsupported))
         }
         InputBackend::HumanBaseline => {
-            observe_focus();
+            observe_focus()?;
             Ok(Some(CaseOutcome::NeedsHuman))
         }
         InputBackend::MacosFocusedOsInput if presentation == PresentationState::VisibleFocused => {
-            observe_focus();
+            observe_focus()?;
             Ok(Some(CaseOutcome::NeedsHuman))
         }
         InputBackend::MacosFocusedOsInput => {
-            observe_focus();
+            observe_focus()?;
             Ok(Some(CaseOutcome::BlockedByPolicy))
         }
         InputBackend::MacosAppKitEvent | InputBackend::MacosAccessibility => {
-            observe_focus();
+            observe_focus()?;
             Ok(Some(CaseOutcome::Unsupported))
         }
     }
@@ -1045,7 +1083,7 @@ fn dispatch_hwnd_plan(
     plan: &[WindowsInputStep],
     permit: &ProbeRunPermit,
     poll_control: &mut impl FnMut(),
-    observe_focus: &mut impl FnMut(),
+    observe_focus: &mut impl FnMut() -> Result<(), AdapterError>,
     deadline: Instant,
 ) -> Result<(), AdapterError> {
     let target = OwnedDocumentHwnd::resolve(view)?;
@@ -1061,7 +1099,7 @@ fn dispatch_hwnd_plan(
     }
     for step in plan {
         check_dispatch_control(permit, poll_control, deadline)?;
-        observe_focus();
+        observe_focus()?;
         match *step {
             WindowsInputStep::MouseMove {
                 point,
@@ -1074,6 +1112,7 @@ fn dispatch_hwnd_plan(
                     point_lparam(point),
                     permit,
                     poll_control,
+                    observe_focus,
                     deadline,
                 )?;
             }
@@ -1085,6 +1124,7 @@ fn dispatch_hwnd_plan(
                     point_lparam(point),
                     permit,
                     poll_control,
+                    observe_focus,
                     deadline,
                 )?;
             }
@@ -1096,18 +1136,33 @@ fn dispatch_hwnd_plan(
                     point_lparam(point),
                     permit,
                     poll_control,
+                    observe_focus,
                     deadline,
                 )?;
             }
-            WindowsInputStep::KeyDown(key) => {
-                send_key(target, key, true, permit, poll_control, deadline)?
+            WindowsInputStep::KeyDown(key) => send_key(
+                target,
+                key,
+                true,
+                permit,
+                poll_control,
+                observe_focus,
+                deadline,
+            )?,
+            WindowsInputStep::TextX => {
+                send_text_x(target, permit, poll_control, observe_focus, deadline)?
             }
-            WindowsInputStep::TextX => send_text_x(target, permit, poll_control, deadline)?,
-            WindowsInputStep::KeyUp(key) => {
-                send_key(target, key, false, permit, poll_control, deadline)?
-            }
+            WindowsInputStep::KeyUp(key) => send_key(
+                target,
+                key,
+                false,
+                permit,
+                poll_control,
+                observe_focus,
+                deadline,
+            )?,
         }
-        observe_focus();
+        observe_focus()?;
         check_dispatch_control(permit, poll_control, deadline)?;
     }
     Ok(())
@@ -1199,6 +1254,7 @@ impl OwnedDocumentHwnd {
             && is_child
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn send(
         self,
         message: u32,
@@ -1206,23 +1262,19 @@ impl OwnedDocumentHwnd {
         lparam: LPARAM,
         permit: &ProbeRunPermit,
         poll_control: &mut impl FnMut(),
+        observe_focus: &mut impl FnMut() -> Result<(), AdapterError>,
         deadline: Instant,
     ) -> Result<(), AdapterError> {
-        if !self.is_current() {
-            return Err(AdapterError::NativeConstruction);
-        }
         send_message(
-            self.document,
+            self,
             message,
             wparam,
             lparam,
             permit,
             poll_control,
+            observe_focus,
             deadline,
-        )?;
-        self.is_current()
-            .then_some(())
-            .ok_or(AdapterError::NativeConstruction)
+        )
     }
 }
 
@@ -1266,6 +1318,7 @@ fn send_key(
     down: bool,
     permit: &ProbeRunPermit,
     poll_control: &mut impl FnMut(),
+    observe_focus: &mut impl FnMut() -> Result<(), AdapterError>,
     deadline: Instant,
 ) -> Result<(), AdapterError> {
     let virtual_key = match key {
@@ -1290,6 +1343,7 @@ fn send_key(
         LPARAM(lparam),
         permit,
         poll_control,
+        observe_focus,
         deadline,
     )
 }
@@ -1298,6 +1352,7 @@ fn send_text_x(
     target: OwnedDocumentHwnd,
     permit: &ProbeRunPermit,
     poll_control: &mut impl FnMut(),
+    observe_focus: &mut impl FnMut() -> Result<(), AdapterError>,
     deadline: Instant,
 ) -> Result<(), AdapterError> {
     // SAFETY: the exact document-thread HKL was captured and is revalidated
@@ -1317,17 +1372,20 @@ fn send_text_x(
         LPARAM(lparam),
         permit,
         poll_control,
+        observe_focus,
         deadline,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn send_message(
-    hwnd: HWND,
+    target: OwnedDocumentHwnd,
     message: u32,
     wparam: WPARAM,
     lparam: LPARAM,
     permit: &ProbeRunPermit,
     poll_control: &mut impl FnMut(),
+    observe_focus: &mut impl FnMut() -> Result<(), AdapterError>,
     deadline: Instant,
 ) -> Result<(), AdapterError> {
     let mut result = 0_usize;
@@ -1335,6 +1393,10 @@ fn send_message(
     // it earlier would let time spent servicing control input widen the call
     // beyond the case's remaining absolute budget.
     check_dispatch_control(permit, poll_control, deadline)?;
+    observe_focus()?;
+    if !target.is_current() {
+        return Err(AdapterError::NativeConstruction);
+    }
     let timeout_ms = message_timeout_ms(deadline)?;
     if timeout_ms == 0 || timeout_ms > SEND_TIMEOUT_MS {
         return Err(AdapterError::Timeout);
@@ -1344,7 +1406,7 @@ fn send_message(
     // are message-defined values and the result pointer is valid for the call.
     let sent = unsafe {
         SendMessageTimeoutW(
-            hwnd,
+            target.document,
             message,
             wparam,
             lparam,
@@ -1353,7 +1415,13 @@ fn send_message(
             Some(&mut result),
         )
     };
-    (sent.0 != 0).then_some(()).ok_or(AdapterError::Timeout)
+    if sent.0 == 0 {
+        return Err(AdapterError::Timeout);
+    }
+    target
+        .is_current()
+        .then_some(())
+        .ok_or(AdapterError::NativeConstruction)
 }
 
 fn check_dispatch_control(
@@ -1386,7 +1454,7 @@ fn dispatch_cdp_plan(
     plan: &[WindowsInputStep],
     permit: &ProbeRunPermit,
     poll_control: &mut impl FnMut(),
-    observe_focus: &mut impl FnMut(),
+    observe_focus: &mut impl FnMut() -> Result<(), AdapterError>,
     deadline: Instant,
 ) -> Result<(), AdapterError> {
     for step in plan {
@@ -1429,17 +1497,17 @@ fn dispatch_cdp_plan(
                 cdp_key_parameters(key, false),
             ),
         };
-        observe_focus();
         let response = call_cdp(
             core,
             method,
             &parameters.to_string(),
             permit,
             poll_control,
+            Some(&mut *observe_focus),
             deadline,
         )?;
         validate_cdp_response(&response)?;
-        observe_focus();
+        observe_focus()?;
     }
     Ok(())
 }
@@ -1481,6 +1549,7 @@ fn evaluate_fixed(
     script: FixedProbeScript,
     permit: &ProbeRunPermit,
     poll_control: &mut impl FnMut(),
+    before_dispatch: Option<&mut dyn FnMut() -> Result<(), AdapterError>>,
     deadline: Instant,
 ) -> Result<String, AdapterError> {
     let source = script.source().ok_or(AdapterError::InvalidEvidence)?;
@@ -1498,6 +1567,7 @@ fn evaluate_fixed(
         &parameters,
         permit,
         poll_control,
+        before_dispatch,
         deadline,
     )?;
     validate_cdp_response(&response)?;
@@ -1518,6 +1588,7 @@ fn call_cdp(
     parameters: &str,
     permit: &ProbeRunPermit,
     poll_control: &mut impl FnMut(),
+    before_dispatch: Option<&mut dyn FnMut() -> Result<(), AdapterError>>,
     deadline: Instant,
 ) -> Result<Value, AdapterError> {
     if parameters.len() > MAX_CDP_PARAMETERS_BYTES {
@@ -1533,6 +1604,9 @@ fn call_cdp(
     let method = HSTRING::from(method.as_str());
     let parameters = HSTRING::from(parameters);
     check_dispatch_control(permit, poll_control, deadline)?;
+    if let Some(before_dispatch) = before_dispatch {
+        before_dispatch()?;
+    }
     // SAFETY: the COM interface and handler are live owned references, and
     // both HSTRING arguments remain alive until the method returns. WebView2
     // retains the handler for its asynchronous terminal callback.
@@ -1824,7 +1898,8 @@ fn expected_physical_extent(logical: i32, dpi: u32) -> Option<i32> {
 
 /// Fails before the first fixture row if constructing or presenting a
 /// supposedly hidden/background probe has already activated its native host
-/// or moved this thread's keyboard focus into the owned WebView subtree.
+/// or moved either the caller queue's or document queue's keyboard focus into
+/// the owned WebView subtree.
 /// Per-case sampling cannot discover this retrospectively because it would
 /// incorrectly treat the stolen state as the row's baseline.
 fn verify_nonactivating_presentation(
@@ -1835,8 +1910,8 @@ fn verify_nonactivating_presentation(
     if presentation == PresentationState::VisibleFocused {
         return Ok(());
     }
-    let (foreground, active, focus) = native_focus_sample();
-    if foreground == host.hwnd || active == host.hwnd || focus_is_owned_by_view(view, focus) {
+    let focus = native_focus_sample(view)?;
+    if focus.probe_host_is_key(host) || focus.view_has_focus(view) {
         return Err(AdapterError::FocusPolicy);
     }
     Ok(())
@@ -2029,16 +2104,12 @@ fn live_resource_sample(environment: &ICoreWebView2Environment) -> ResourceEvide
 fn native_focus_owner(
     host: &ProbeHostWindow,
     view: &WebView,
-    foreground: HWND,
-    thread_focus: HWND,
+    focus: NativeFocusSample,
     target_focused: bool,
 ) -> FocusOwner {
     if target_focused {
         FocusOwner::FixtureTarget
-    } else if foreground == host.hwnd
-        || thread_focus == host.hwnd
-        || focus_is_owned_by_view(view, thread_focus)
-    {
+    } else if focus.probe_host_is_key(host) || focus.view_has_focus(view) {
         FocusOwner::ProbeHost
     } else {
         FocusOwner::External

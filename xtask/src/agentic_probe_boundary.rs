@@ -2582,13 +2582,14 @@ fn validate_windows_probe_source(source: &str) -> Result<(), String> {
         "check_dispatch_control(permit,&mutpoll_control,run_deadline).map_err(|error|adapter_failure(error,ProbeStage::Admit,None,None))?;",
         "check_dispatch_control(permit,&mutpoll_control,run_deadline).map_err(|error|adapter_failure(error,ProbeStage::Construct,None,None))?;letmutwebview=builder.build_as_child(&host).ok();",
         "check_dispatch_control(permit,&mutpoll_control,run_deadline).map_err(|error|adapter_failure(error,ProbeStage::Navigate,Some(case),Some(backend)),)?;view.load_url(&url)",
-        "check_dispatch_control(permit,poll_control,deadline)?;observe_focus();match*step",
-        "if!self.is_current(){returnErr(AdapterError::NativeConstruction);}send_message(self.document,message,wparam,lparam,permit,poll_control,deadline,)?;",
-        "letmutresult=0_usize;check_dispatch_control(permit,poll_control,deadline)?;lettimeout_ms=message_timeout_ms(deadline)?;iftimeout_ms==0||timeout_ms>SEND_TIMEOUT_MS{returnErr(AdapterError::Timeout);}letsent=unsafe{SendMessageTimeoutW(",
-        "observe_focus();check_dispatch_control(permit,poll_control,deadline)?;",
-        "observe_focus();letresponse=call_cdp(",
-        "validate_cdp_response(&response)?;observe_focus();",
-        "letparameters=HSTRING::from(parameters);check_dispatch_control(permit,poll_control,deadline)?;",
+        "check_dispatch_control(permit,poll_control,deadline)?;observe_focus()?;match*step",
+        "send_message(self,message,wparam,lparam,permit,poll_control,observe_focus,deadline,)",
+        "letmutresult=0_usize;check_dispatch_control(permit,poll_control,deadline)?;observe_focus()?;if!target.is_current(){returnErr(AdapterError::NativeConstruction);}lettimeout_ms=message_timeout_ms(deadline)?;iftimeout_ms==0||timeout_ms>SEND_TIMEOUT_MS{returnErr(AdapterError::Timeout);}letsent=unsafe{SendMessageTimeoutW(target.document,",
+        "ifsent.0==0{returnErr(AdapterError::Timeout);}target.is_current().then_some(()).ok_or(AdapterError::NativeConstruction)",
+        "observe_focus()?;check_dispatch_control(permit,poll_control,deadline)?;",
+        "FixedProbeScript::DomRecipe(case),permit,poll_control,Some(&mut*observe_focus),deadline,",
+        "poll_control,Some(&mut*observe_focus),deadline,)?;validate_cdp_response(&response)?;observe_focus()?;",
+        "letparameters=HSTRING::from(parameters);check_dispatch_control(permit,poll_control,deadline)?;ifletSome(before_dispatch)=before_dispatch{before_dispatch()?;}unsafe{core.CallDevToolsProtocolMethod(",
         "check_dispatch_control(permit,poll_control,deadline)?;view.set_visible(false)",
         "check_dispatch_control(permit,poll_control,deadline)?;let_=unsafe{ShowWindow(host.hwnd,SW_HIDE)};",
         "check_dispatch_control(permit,poll_control,deadline)?;unsafe{SetWindowPos(",
@@ -2601,12 +2602,17 @@ fn validate_windows_probe_source(source: &str) -> Result<(), String> {
         "Some(target.keyboard_layout)",
         "windows_key_message_lparam(mapped_scan,down)",
         "windows_key_message_lparam(mapped_scan,true)",
-        "target.send(WM_CHAR,WPARAM(usize::from(b'x')),LPARAM(lparam),permit,poll_control,deadline,)",
+        "target.send(WM_CHAR,WPARAM(usize::from(b'x')),LPARAM(lparam),permit,poll_control,observe_focus,deadline,)",
         "verify_nonactivating_presentation(&host,view,matrix.presentation)",
-        "foreground==host.hwnd||active==host.hwnd||focus_is_owned_by_view(view,focus)",
-        "let(foreground_during,active_during,thread_focus_during)=native_focus_sample();",
-        "unsafe{(GetForegroundWindow(),GetActiveWindow(),GetFocus())}",
-        "focus_is_owned_by_view(view,thread_focus_during)",
+        "letnative_focus_before=native_focus_sample(view).map_err(",
+        "letnative_focus_during=native_focus_sample(view).map_err(",
+        "letnative_focus_after=native_focus_sample(view).map_err(",
+        "letmutdocument_gui=GUITHREADINFO{cbSize:u32::try_from(std::mem::size_of::<GUITHREADINFO>()).map_err(|_|AdapterError::InvalidEvidence)?,..Default::default()};",
+        "GetGUIThreadInfo(target.owner_thread_id,&mutdocument_gui).map_err(|_|AdapterError::FocusPolicy)?;",
+        "(GetForegroundWindow(),GetActiveWindow(),GetFocus())",
+        "document_active:document_gui.hwndActive,document_focus:document_gui.hwndFocus,",
+        "focus_is_owned_by_view(view,self.caller_focus)||focus_is_owned_by_view(view,self.document_focus)",
+        "letfocus=native_focus_sample(view)?;iffocus.probe_host_is_key(host)||focus.view_has_focus(view)",
         "ICoreWebView2CallDevToolsProtocolMethodCompletedHandler",
         "borrowed_pcwstr_bounded(response,MAX_CDP_RESPONSE_UTF16_UNITS,MAX_CDP_RESPONSE_BYTES,).ok_or(AdapterError::InvalidEvidence)",
         "method:FixedCdpMethod",
@@ -2628,6 +2634,7 @@ fn validate_windows_probe_source(source: &str) -> Result<(), String> {
         || code.matches("view.load_url(&url)").count() != 1
         || code.matches("SendMessageTimeoutW(").count() != 1
         || code.matches("core.CallDevToolsProtocolMethod(").count() != 1
+        || code.matches("GetGUIThreadInfo(").count() != 1
         || code.matches("view.set_visible(true)").count() != 2
         || code
             .matches("check_dispatch_control(permit,poll_control,deadline)?;view.set_visible(true)")
@@ -10670,14 +10677,20 @@ mod tests {
         ))
         .is_err());
         assert!(validate_windows_probe_source(&valid.replacen(
-            "        validate_cdp_response(&response)?;\n        observe_focus();",
-            "        observe_focus();",
+            "        validate_cdp_response(&response)?;\n        observe_focus()?;",
+            "        observe_focus()?;",
             1,
         ))
         .is_err());
         assert!(validate_windows_probe_source(&valid.replacen(
-            "        observe_focus();\n        let response = call_cdp(",
-            "        let response = call_cdp(",
+            "                FixedProbeScript::DomRecipe(case),\n                permit,\n                poll_control,\n                Some(&mut *observe_focus),",
+            "                FixedProbeScript::DomRecipe(case),\n                permit,\n                poll_control,\n                None,",
+            1,
+        ))
+        .is_err());
+        assert!(validate_windows_probe_source(&valid.replacen(
+            "            &parameters.to_string(),\n            permit,\n            poll_control,\n            Some(&mut *observe_focus),",
+            "            &parameters.to_string(),\n            permit,\n            poll_control,\n            None,",
             1,
         ))
         .is_err());
@@ -10708,8 +10721,14 @@ mod tests {
         ))
         .is_err());
         assert!(validate_windows_probe_source(
-            &valid.replace("focus_is_owned_by_view(view, thread_focus_during)", "false",)
+            &valid.replace("focus_is_owned_by_view(view, self.document_focus)", "false",)
         )
+        .is_err());
+        assert!(validate_windows_probe_source(&valid.replacen(
+            "        GetGUIThreadInfo(target.owner_thread_id, &mut document_gui)\n            .map_err(|_| AdapterError::FocusPolicy)?;",
+            "        let _ = target.owner_thread_id;",
+            1,
+        ))
         .is_err());
         assert!(validate_windows_probe_source(&valid.replacen(
             "    let parameters = HSTRING::from(parameters);\n    check_dispatch_control(permit, poll_control, deadline)?;",
@@ -10730,8 +10749,8 @@ mod tests {
         ))
         .is_err());
         assert!(validate_windows_probe_source(&valid.replacen(
-            "    check_dispatch_control(permit, poll_control, deadline)?;\n    let timeout_ms = message_timeout_ms(deadline)?;",
-            "    let timeout_ms = message_timeout_ms(deadline)?;\n    check_dispatch_control(permit, poll_control, deadline)?;",
+            "    check_dispatch_control(permit, poll_control, deadline)?;\n    observe_focus()?;\n    if !target.is_current() {\n        return Err(AdapterError::NativeConstruction);\n    }\n    let timeout_ms = message_timeout_ms(deadline)?;",
+            "    let timeout_ms = message_timeout_ms(deadline)?;\n    check_dispatch_control(permit, poll_control, deadline)?;\n    observe_focus()?;\n    if !target.is_current() {\n        return Err(AdapterError::NativeConstruction);\n    }",
             1,
         ))
         .is_err());

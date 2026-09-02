@@ -59,17 +59,23 @@ The HWND route never calls `SendInput`, moves the system pointer, injects a
 global keyboard event, or targets an HWND outside its owned Wry subtree.
 Hidden and visible-background presentation never call `SetForegroundWindow`
 or `SetFocus`. Before the first fixture row they also require that the probe
-host is neither foreground nor active and that this thread's keyboard focus is
-outside the owned WebView subtree; otherwise the run returns a typed focus-
-policy failure instead of treating the stolen state as its baseline. Every
-row samples foreground window, active window, and thread keyboard focus before,
-during, and after dispatch. Fixed native plans additionally sample immediately
-before and after every HWND step and after every completed CDP step, accumulating
-sticky focus/key-window facts across the plan. This detects transfers visible at
-those boundaries; it does not claim system-wide event tracing or guarantee
-detection of a focus transition and reversal entirely inside one synchronous
-window procedure. Fixture focus/blur events remain independent DOM evidence. The
-visible-focused runner mode requires the separate literal
+host is neither foreground nor active and that both the caller input queue and
+the exact owned document thread report keyboard focus outside the WebView
+subtree; otherwise the run returns a typed focus-policy failure instead of
+treating the stolen state as its baseline. Every row samples the global
+foreground window plus caller-queue and document-thread active/focus windows
+before, during, and after dispatch. `GetFocus` and `GetActiveWindow` describe
+only the caller's attached queue, so the adapter also uses read-only
+[`GetGUIThreadInfo`](https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-getguithreadinfo)
+against the revalidated document owner without ever attaching input queues.
+Failure to obtain that second projection fails the evidence row. Fixed
+candidate routes additionally sample after their final cancellation poll and
+immediately before each DOM/CDP/HWND submission, then again after completion,
+accumulating sticky focus/key-window facts across the plan. This detects
+transfers visible at those boundaries; it does not claim system-wide event
+tracing or guarantee detection of a focus transition and reversal entirely
+inside one synchronous window procedure. Fixture focus/blur events remain
+independent DOM evidence. The visible-focused runner mode requires the separate literal
 `--allow-visible-focused` process argument.
 
 Targeting Wry's container itself was rejected during pinned-code review:
@@ -110,15 +116,16 @@ key-up messages to acquire inconsistent scan metadata.
   deadline are now polled before fixture/profile/native allocation, again
   immediately before Wry controller construction, before every loopback
   navigation, and before each visibility/focus transition. Every HWND step
-  performs an early check before focus sampling and a second check after its
-  message payload and owned-document identity are ready. It then derives the
-  relative timeout from the remaining absolute case budget immediately before
-  the one bounded `SendMessageTimeoutW`, and checks again after dispatch.
-  Every fixed CDP observation or input command performs the same control poll
-  and cancellation/deadline check immediately before native submission, then
-  continues polling during its one outstanding completion. An already-revoked
-  permit therefore cannot allocate a new run, navigate, change presentation,
-  or enqueue the next HWND/CDP step.
+  performs an early check before payload preparation and a final check before
+  submission. After that final poll it samples both focus queues, rejoins the
+  exact document HWND/thread/process/layout, and derives the relative timeout
+  from the remaining absolute case budget immediately before the one bounded
+  `SendMessageTimeoutW`; the target is rejoined again after dispatch. Every
+  fixed CDP observation or input command performs the same control poll and
+  cancellation/deadline check immediately before an optional input-route focus
+  sample and native submission, then continues polling during its one
+  outstanding completion. An already-revoked permit therefore cannot allocate
+  a new run, navigate, change presentation, or enqueue the next HWND/CDP step.
 - Explicit Wry close debt is retried for 500 ms and the bounded orphan-debt
   registry is drained. A sticky cleanup-overflow marker fails teardown.
 - The adapter captures the exact browser PID and a non-reusable process HANDLE,
@@ -181,7 +188,7 @@ module to remain feature-gated, and retains independent optimized-build
 refusals in the engine and contract crates. It also locks the Windows runner's
 closed process gates, JSONL evidence path, owned-document HWND resolution,
 bounds/visibility/controller ownership attestation, during-dispatch active and
-thread-focus sampling, per-step deadline/cancellation checks, document HWND
+caller/document-thread focus sampling, per-step deadline/cancellation checks, document HWND
 thread/process/input-locale identity and non-calling-thread precondition,
 target-layout `MapVirtualKeyExW` mapping for key and character messages,
 receiver-exit failure, Windows reparse-point rejection for physical evidence,
@@ -190,9 +197,12 @@ allowlist, and absence of input-queue attachment, global `SendInput`, cursor
 movement, page IPC, host objects, or generic script calls.
 The source gate now also binds the three run/construction/navigation
 preflights, every presentation operation, and the final HWND message preflight.
-That final poll runs before the relative timeout is derived from the remaining
-absolute case budget, so servicing cancellation/control input cannot silently
-widen the subsequent `SendMessageTimeoutW` allowance. The gate rejects
+That final poll runs before the document-thread focus sample, target rejoin,
+and relative timeout derivation from the remaining absolute case budget, so
+servicing cancellation/control input cannot silently widen the subsequent
+`SendMessageTimeoutW` allowance or move target validation to the wrong side of
+the last event pump. The CDP gate likewise pins its optional pre-submit observer
+between the final poll and the sole native call. The gate rejects
 additional direct navigation, `SendMessageTimeoutW`, CDP,
 foreground, or focus call sites. Its mutation test operates on the actual
 target source and removes representative admission, navigation, presentation,
