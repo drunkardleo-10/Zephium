@@ -25,14 +25,15 @@ use windows::Wdk::System::SystemServices::RtlGetVersion;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::SystemInformation::OSVERSIONINFOW;
+use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetActiveWindow, GetFocus, MapVirtualKeyW, SetFocus, MAPVK_VK_TO_VSC_EX, VK_DOWN, VK_RETURN,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
-    GetForegroundWindow, GetParent, GetWindow, IsChild, IsWindow, IsWindowVisible,
-    MsgWaitForMultipleObjectsEx, PeekMessageW, PostQuitMessage, RegisterClassW,
+    GetForegroundWindow, GetParent, GetWindow, GetWindowThreadProcessId, IsChild, IsWindow,
+    IsWindowVisible, MsgWaitForMultipleObjectsEx, PeekMessageW, PostQuitMessage, RegisterClassW,
     SendMessageTimeoutW, SetForegroundWindow, SetWindowPos, ShowWindow, TranslateMessage,
     CW_USEDEFAULT, GW_CHILD, HWND_BOTTOM, MSG, MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT,
     SMTO_ABORTIFHUNG, SMTO_BLOCK, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOW,
@@ -785,6 +786,17 @@ fn run_case(
     let thread_focus_before = unsafe { GetFocus() };
     let focus_before =
         native_focus_owner(host, view, foreground_before, thread_focus_before, false);
+    let mut focus_trace = DispatchFocusTrace::default();
+    let mut observe_focus = || {
+        focus_trace.observe(
+            host,
+            view,
+            presentation,
+            foreground_before,
+            active_before,
+            thread_focus_before,
+        );
+    };
     let outcome_hint = execute_backend(
         view,
         core,
@@ -794,6 +806,7 @@ fn run_case(
         geometry,
         permit,
         poll_control,
+        &mut observe_focus,
         deadline,
     )
     .map_err(|error| adapter_failure(error, ProbeStage::Execute, Some(case), Some(backend)))?;
@@ -848,18 +861,20 @@ fn run_case(
             before: focus_before,
             during: focus_during,
             after: focus_after,
-            probe_host_became_key: (foreground_before != host.hwnd
-                && (foreground_during == host.hwnd || foreground_after == host.hwnd))
+            probe_host_became_key: focus_trace.probe_host_became_key
+                || (foreground_before != host.hwnd
+                    && (foreground_during == host.hwnd || foreground_after == host.hwnd))
                 || (active_before != host.hwnd
                     && (active_during == host.hwnd || active_after == host.hwnd)),
-            browse_focus_was_stolen: presentation != PresentationState::VisibleFocused
-                && ((foreground_before != host.hwnd
-                    && (foreground_during == host.hwnd || foreground_after == host.hwnd))
-                    || (active_before != host.hwnd
-                        && (active_during == host.hwnd || active_after == host.hwnd))
-                    || (!focus_is_owned_by_view(view, thread_focus_before)
-                        && (focus_is_owned_by_view(view, thread_focus_during)
-                            || focus_is_owned_by_view(view, thread_focus_after)))),
+            browse_focus_was_stolen: focus_trace.browse_focus_was_stolen
+                || (presentation != PresentationState::VisibleFocused
+                    && ((foreground_before != host.hwnd
+                        && (foreground_during == host.hwnd || foreground_after == host.hwnd))
+                        || (active_before != host.hwnd
+                            && (active_during == host.hwnd || active_after == host.hwnd))
+                        || (!focus_is_owned_by_view(view, thread_focus_before)
+                            && (focus_is_owned_by_view(view, thread_focus_during)
+                                || focus_is_owned_by_view(view, thread_focus_after))))),
             target_received_dom_focus: target_received_focus,
         },
         activation: ActivationEvidence {
@@ -888,6 +903,38 @@ const fn matrix_focus_policy(presentation: PresentationState) -> PresentationSta
     presentation
 }
 
+/// Sticky focus-transition evidence sampled between every fixed native input
+/// step. A plan-level sample alone could miss an intermediate step that entered
+/// the owned subtree before a later step restored the final state.
+#[derive(Default)]
+struct DispatchFocusTrace {
+    probe_host_became_key: bool,
+    browse_focus_was_stolen: bool,
+}
+
+impl DispatchFocusTrace {
+    fn observe(
+        &mut self,
+        host: &ProbeHostWindow,
+        view: &WebView,
+        presentation: PresentationState,
+        foreground_before: HWND,
+        active_before: HWND,
+        thread_focus_before: HWND,
+    ) {
+        let foreground = unsafe { GetForegroundWindow() };
+        let active = unsafe { GetActiveWindow() };
+        let thread_focus = unsafe { GetFocus() };
+        let host_became_key = (foreground_before != host.hwnd && foreground == host.hwnd)
+            || (active_before != host.hwnd && active == host.hwnd);
+        self.probe_host_became_key |= host_became_key;
+        self.browse_focus_was_stolen |= presentation != PresentationState::VisibleFocused
+            && (host_became_key
+                || (!focus_is_owned_by_view(view, thread_focus_before)
+                    && focus_is_owned_by_view(view, thread_focus)));
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn execute_backend(
     view: &WebView,
@@ -898,11 +945,13 @@ fn execute_backend(
     geometry: WindowsProbeGeometry,
     permit: &ProbeRunPermit,
     poll_control: &mut impl FnMut(),
+    observe_focus: &mut impl FnMut(),
     deadline: Instant,
 ) -> Result<Option<CaseOutcome>, AdapterError> {
     match backend {
         InputBackend::FixedDomRecipe => {
             if case == FixtureCase::ClosedShadow {
+                observe_focus();
                 return Ok(Some(CaseOutcome::Unsupported));
             }
             let result = evaluate_fixed(
@@ -915,25 +964,45 @@ fn execute_backend(
             if result != "ok" {
                 return Err(AdapterError::InvalidEvidence);
             }
+            observe_focus();
             Ok(None)
         }
         InputBackend::WindowsHwndInput => {
             let plan = windows_input_plan(case, geometry).ok_or(AdapterError::InvalidEvidence)?;
-            dispatch_hwnd_plan(view, geometry, &plan)?;
+            dispatch_hwnd_plan(
+                view,
+                geometry,
+                &plan,
+                permit,
+                poll_control,
+                observe_focus,
+                deadline,
+            )?;
             Ok(None)
         }
         InputBackend::WindowsCdpInput => {
             let plan = windows_input_plan(case, geometry).ok_or(AdapterError::InvalidEvidence)?;
-            dispatch_cdp_plan(core, &plan, permit, poll_control, deadline)?;
+            dispatch_cdp_plan(core, &plan, permit, poll_control, observe_focus, deadline)?;
             Ok(None)
         }
-        InputBackend::WindowsCompositionInput => Ok(Some(CaseOutcome::Unsupported)),
-        InputBackend::HumanBaseline => Ok(Some(CaseOutcome::NeedsHuman)),
-        InputBackend::MacosFocusedOsInput if presentation == PresentationState::VisibleFocused => {
+        InputBackend::WindowsCompositionInput => {
+            observe_focus();
+            Ok(Some(CaseOutcome::Unsupported))
+        }
+        InputBackend::HumanBaseline => {
+            observe_focus();
             Ok(Some(CaseOutcome::NeedsHuman))
         }
-        InputBackend::MacosFocusedOsInput => Ok(Some(CaseOutcome::BlockedByPolicy)),
+        InputBackend::MacosFocusedOsInput if presentation == PresentationState::VisibleFocused => {
+            observe_focus();
+            Ok(Some(CaseOutcome::NeedsHuman))
+        }
+        InputBackend::MacosFocusedOsInput => {
+            observe_focus();
+            Ok(Some(CaseOutcome::BlockedByPolicy))
+        }
         InputBackend::MacosAppKitEvent | InputBackend::MacosAccessibility => {
+            observe_focus();
             Ok(Some(CaseOutcome::Unsupported))
         }
     }
@@ -943,6 +1012,10 @@ fn dispatch_hwnd_plan(
     view: &WebView,
     geometry: WindowsProbeGeometry,
     plan: &[WindowsInputStep],
+    permit: &ProbeRunPermit,
+    poll_control: &mut impl FnMut(),
+    observe_focus: &mut impl FnMut(),
+    deadline: Instant,
 ) -> Result<(), AdapterError> {
     let target = OwnedDocumentHwnd::resolve(view)?;
     let mut rect = RECT::default();
@@ -954,6 +1027,9 @@ fn dispatch_hwnd_plan(
         return Err(AdapterError::InvalidEvidence);
     }
     for step in plan {
+        check_dispatch_control(permit, poll_control, deadline)?;
+        observe_focus();
+        let timeout_ms = message_timeout_ms(deadline)?;
         match *step {
             WindowsInputStep::MouseMove {
                 point,
@@ -964,22 +1040,25 @@ fn dispatch_hwnd_plan(
                     WM_MOUSEMOVE,
                     WPARAM(usize::from(primary_down)),
                     point_lparam(point),
+                    timeout_ms,
                 )?;
             }
             WindowsInputStep::PrimaryDown(point) => {
                 let point = physical_point(point, geometry.device_pixel_ratio(), width, height)?;
-                target.send(WM_LBUTTONDOWN, WPARAM(1), point_lparam(point))?;
+                target.send(WM_LBUTTONDOWN, WPARAM(1), point_lparam(point), timeout_ms)?;
             }
             WindowsInputStep::PrimaryUp(point) => {
                 let point = physical_point(point, geometry.device_pixel_ratio(), width, height)?;
-                target.send(WM_LBUTTONUP, WPARAM(0), point_lparam(point))?;
+                target.send(WM_LBUTTONUP, WPARAM(0), point_lparam(point), timeout_ms)?;
             }
-            WindowsInputStep::KeyDown(key) => send_key(target, key, true)?,
+            WindowsInputStep::KeyDown(key) => send_key(target, key, true, timeout_ms)?,
             WindowsInputStep::TextX => {
-                target.send(WM_CHAR, WPARAM(usize::from(b'x')), LPARAM(1))?
+                target.send(WM_CHAR, WPARAM(usize::from(b'x')), LPARAM(1), timeout_ms)?
             }
-            WindowsInputStep::KeyUp(key) => send_key(target, key, false)?,
+            WindowsInputStep::KeyUp(key) => send_key(target, key, false, timeout_ms)?,
         }
+        observe_focus();
+        check_dispatch_control(permit, poll_control, deadline)?;
     }
     Ok(())
 }
@@ -993,6 +1072,8 @@ fn dispatch_hwnd_plan(
 struct OwnedDocumentHwnd {
     container: HWND,
     document: HWND,
+    owner_thread_id: u32,
+    owner_process_id: u32,
 }
 
 impl OwnedDocumentHwnd {
@@ -1003,9 +1084,24 @@ impl OwnedDocumentHwnd {
         }
         let document = unsafe { GetWindow(container, GW_CHILD) }
             .map_err(|_| AdapterError::NativeConstruction)?;
+        let mut owner_process_id = 0_u32;
+        let owner_thread_id =
+            unsafe { GetWindowThreadProcessId(document, Some(&mut owner_process_id)) };
+        // Microsoft documents that SendMessageTimeoutW ignores its timeout
+        // when the target belongs to the caller's queue. The probe never
+        // attaches input queues, and it refuses the direct same-thread case so
+        // the advertised per-step ceiling cannot silently become unbounded.
+        if owner_thread_id == 0
+            || owner_process_id == 0
+            || owner_thread_id == unsafe { GetCurrentThreadId() }
+        {
+            return Err(AdapterError::NativeConstruction);
+        }
         let target = Self {
             container,
             document,
+            owner_thread_id,
+            owner_process_id,
         };
         target
             .is_current()
@@ -1014,17 +1110,29 @@ impl OwnedDocumentHwnd {
     }
 
     fn is_current(self) -> bool {
+        let mut owner_process_id = 0_u32;
+        let owner_thread_id =
+            unsafe { GetWindowThreadProcessId(self.document, Some(&mut owner_process_id)) };
         !self.document.0.is_null()
+            && owner_thread_id == self.owner_thread_id
+            && owner_process_id == self.owner_process_id
+            && owner_thread_id != unsafe { GetCurrentThreadId() }
             && unsafe { GetWindow(self.container, GW_CHILD) }.ok() == Some(self.document)
             && unsafe { GetParent(self.document) }.ok() == Some(self.container)
             && unsafe { IsChild(self.container, self.document) }.as_bool()
     }
 
-    fn send(self, message: u32, wparam: WPARAM, lparam: LPARAM) -> Result<(), AdapterError> {
+    fn send(
+        self,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        timeout_ms: u32,
+    ) -> Result<(), AdapterError> {
         if !self.is_current() {
             return Err(AdapterError::NativeConstruction);
         }
-        send_message(self.document, message, wparam, lparam)?;
+        send_message(self.document, message, wparam, lparam, timeout_ms)?;
         self.is_current()
             .then_some(())
             .ok_or(AdapterError::NativeConstruction)
@@ -1067,6 +1175,7 @@ fn send_key(
     target: OwnedDocumentHwnd,
     key: WindowsProbeKey,
     down: bool,
+    timeout_ms: u32,
 ) -> Result<(), AdapterError> {
     let virtual_key = match key {
         WindowsProbeKey::X => 0x58_u16,
@@ -1080,6 +1189,7 @@ fn send_key(
         if down { WM_KEYDOWN } else { WM_KEYUP },
         WPARAM(usize::from(virtual_key)),
         LPARAM(lparam),
+        timeout_ms,
     )
 }
 
@@ -1088,7 +1198,11 @@ fn send_message(
     message: u32,
     wparam: WPARAM,
     lparam: LPARAM,
+    timeout_ms: u32,
 ) -> Result<(), AdapterError> {
+    if timeout_ms == 0 || timeout_ms > SEND_TIMEOUT_MS {
+        return Err(AdapterError::Timeout);
+    }
     let mut result = 0_usize;
     let sent = unsafe {
         SendMessageTimeoutW(
@@ -1097,11 +1211,36 @@ fn send_message(
             wparam,
             lparam,
             SMTO_ABORTIFHUNG | SMTO_BLOCK,
-            SEND_TIMEOUT_MS,
+            timeout_ms,
             Some(&mut result),
         )
     };
     (sent.0 != 0).then_some(()).ok_or(AdapterError::Timeout)
+}
+
+fn check_dispatch_control(
+    permit: &ProbeRunPermit,
+    poll_control: &mut impl FnMut(),
+    deadline: Instant,
+) -> Result<(), AdapterError> {
+    poll_control();
+    if permit.is_cancelled() {
+        return Err(AdapterError::Cancelled);
+    }
+    if Instant::now() >= deadline {
+        return Err(AdapterError::Timeout);
+    }
+    Ok(())
+}
+
+fn message_timeout_ms(deadline: Instant) -> Result<u32, AdapterError> {
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .ok_or(AdapterError::Timeout)?;
+    u32::try_from(remaining.as_millis().min(u128::from(SEND_TIMEOUT_MS)))
+        .ok()
+        .filter(|milliseconds| *milliseconds > 0)
+        .ok_or(AdapterError::Timeout)
 }
 
 fn dispatch_cdp_plan(
@@ -1109,6 +1248,7 @@ fn dispatch_cdp_plan(
     plan: &[WindowsInputStep],
     permit: &ProbeRunPermit,
     poll_control: &mut impl FnMut(),
+    observe_focus: &mut impl FnMut(),
     deadline: Instant,
 ) -> Result<(), AdapterError> {
     for step in plan {
@@ -1160,6 +1300,7 @@ fn dispatch_cdp_plan(
             deadline,
         )?;
         validate_cdp_response(&response)?;
+        observe_focus();
     }
     Ok(())
 }
@@ -1329,7 +1470,7 @@ fn borrowed_pcwstr_bounded(
             let units = unsafe { std::slice::from_raw_parts(pointer, length) };
             let mut utf8_bytes = 0_usize;
             for character in char::decode_utf16(units.iter().copied()) {
-                let character = character.unwrap_or(char::REPLACEMENT_CHARACTER);
+                let character = character.ok()?;
                 utf8_bytes = utf8_bytes.checked_add(character.len_utf8())?;
                 if utf8_bytes > max_utf8_bytes {
                     return None;
@@ -1338,7 +1479,7 @@ fn borrowed_pcwstr_bounded(
             let mut value = String::new();
             value.try_reserve_exact(utf8_bytes).ok()?;
             for character in char::decode_utf16(units.iter().copied()) {
-                value.push(character.unwrap_or(char::REPLACEMENT_CHARACTER));
+                value.push(character.ok()?);
             }
             return Some(value);
         }

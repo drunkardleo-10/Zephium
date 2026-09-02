@@ -1781,7 +1781,15 @@ fn validate_windows_probe_source(source: &str) -> Result<(), String> {
         "GetWindow(container,GW_CHILD)",
         "GetWindow(self.container,GW_CHILD)",
         "GetParent(self.document)",
+        "GetWindowThreadProcessId(document,Some(&mutowner_process_id))",
+        "owner_thread_id==unsafe{GetCurrentThreadId()}",
+        "owner_thread_id==self.owner_thread_id",
+        "owner_process_id==self.owner_process_id",
         "SendMessageTimeoutW(",
+        "SMTO_ABORTIFHUNG|SMTO_BLOCK,timeout_ms",
+        "check_dispatch_control(permit,poll_control,deadline)?;observe_focus();lettimeout_ms=message_timeout_ms(deadline)?;",
+        "observe_focus();check_dispatch_control(permit,poll_control,deadline)?;",
+        "validate_cdp_response(&response)?;observe_focus();",
         "MAPVK_VK_TO_VSC_EX",
         "windows_key_message_lparam(mapped_scan,down)",
         "verify_nonactivating_presentation(&host,view,matrix.presentation)",
@@ -1814,6 +1822,8 @@ fn validate_windows_probe_source(source: &str) -> Result<(), String> {
         "with_ipc_handler",
         "with_initialization_script",
         "AddHostObject",
+        "AttachThreadInput(",
+        "unwrap_or(char::REPLACEMENT_CHARACTER)",
     ] {
         if source.contains(forbidden) {
             return Err(format!(
@@ -8311,7 +8321,18 @@ mod tests {
             GetWindow(container, GW_CHILD);
             GetWindow(self.container, GW_CHILD);
             GetParent(self.document);
-            SendMessageTimeoutW(hwnd);
+            GetWindowThreadProcessId(document, Some(&mut owner_process_id));
+            owner_thread_id == unsafe { GetCurrentThreadId() };
+            owner_thread_id == self.owner_thread_id;
+            owner_process_id == self.owner_process_id;
+            SendMessageTimeoutW(hwnd, SMTO_ABORTIFHUNG | SMTO_BLOCK, timeout_ms);
+            check_dispatch_control(permit, poll_control, deadline)?;
+            observe_focus();
+            let timeout_ms = message_timeout_ms(deadline)?;
+            observe_focus();
+            check_dispatch_control(permit, poll_control, deadline)?;
+            validate_cdp_response(&response)?;
+            observe_focus();
             MAPVK_VK_TO_VSC_EX;
             windows_key_message_lparam(mapped_scan, down);
             verify_nonactivating_presentation(&host, view, matrix.presentation);
@@ -8328,13 +8349,38 @@ mod tests {
             json!({ "userGesture": false });
         "#;
         validate_windows_probe_source(valid).expect("valid bounded Windows probe");
-        assert!(validate_windows_probe_source(
-            &valid.replace("SendMessageTimeoutW(hwnd);", "SendInput(payload);")
-        )
+        assert!(validate_windows_probe_source(&valid.replace(
+            "SendMessageTimeoutW(hwnd, SMTO_ABORTIFHUNG | SMTO_BLOCK, timeout_ms);",
+            "SendInput(payload);",
+        ))
+        .is_err());
+        assert!(validate_windows_probe_source(&valid.replace(
+            "owner_thread_id == unsafe { GetCurrentThreadId() };",
+            "owner_thread_id == 0;",
+        ))
+        .is_err());
+        assert!(validate_windows_probe_source(&valid.replace(
+            "let timeout_ms = message_timeout_ms(deadline)?;",
+            "let timeout_ms = 250;",
+        ))
+        .is_err());
+        assert!(validate_windows_probe_source(&valid.replacen(
+            "validate_cdp_response(&response)?;\n            observe_focus();",
+            "validate_cdp_response(&response)?;",
+            1,
+        ))
         .is_err());
         assert!(validate_windows_probe_source(&valid.replace(
             "borrowed_pcwstr_bounded(response);",
             "response.to_string();"
+        ))
+        .is_err());
+        assert!(validate_windows_probe_source(&format!(
+            "{valid} fn decode(value: Result<char, ()>) {{ let _ = value.unwrap_or(char::REPLACEMENT_CHARACTER); }}"
+        ))
+        .is_err());
+        assert!(validate_windows_probe_source(&format!(
+            "{valid} fn attach() {{ AttachThreadInput(); }}"
         ))
         .is_err());
         assert!(validate_windows_probe_source(

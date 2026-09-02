@@ -50,7 +50,7 @@ than a string.
 | Route | Implemented behavior | Qualification state |
 | --- | --- | --- |
 | Fixed DOM recipe | One compiled fixture recipe evaluated with `userGesture: false` | Cross-compiled; hidden physical result pending |
-| Ordinary child HWND | Pinned Wry's public HWND is its `WRY_WEBVIEW` container, whose procedure forwards focus to the first direct child as the WebView document. The adapter scales fixed geometry to that direct child's client area, revalidates its container/first-child/parent identity before and after every message, then issues at most sixteen `SendMessageTimeoutW` mouse/key steps under a 250 ms per-message ceiling. Keyboard messages use `MAPVK_VK_TO_VSC_EX`, reject missing/unrecognized mappings, and preserve the extended-key and up-transition flags. | Cross-compiled; hidden/background physical result pending |
+| Ordinary child HWND | Pinned Wry's public HWND is its `WRY_WEBVIEW` container, whose procedure forwards focus to the first direct child as the WebView document. The adapter scales fixed geometry to that direct child's client area, records the direct child's owning thread/process, rejects a zero or calling-thread owner, and revalidates container/first-child/parent plus owner identity before and after every message. It then issues at most sixteen `SendMessageTimeoutW` mouse/key steps. Each timeout is clamped to the lesser of the remaining case deadline and 250 ms. Keyboard messages use `MAPVK_VK_TO_VSC_EX`, reject missing/unrecognized mappings, and preserve the extended-key and up-transition flags. | Cross-compiled; hidden/background physical result pending |
 | Composition controller | No cast or call is made | `UnsupportedByIntegration`; pinned Wry creates an ordinary controller |
 | CDP input | One fixed `Input.dispatchMouseEvent` or `Input.dispatchKeyEvent` completes before the next | Diagnostics only; physical result pending |
 | Focused/human | No global input is generated | Human baseline remains explicit and visible |
@@ -63,9 +63,12 @@ host is neither foreground nor active and that this thread's keyboard focus is
 outside the owned WebView subtree; otherwise the run returns a typed focus-
 policy failure instead of treating the stolen state as its baseline. Every
 row samples foreground window, active window, and thread keyboard focus before,
-during, and after dispatch; a transient transfer into the owned subtree is
-therefore a failing focus-theft fact even if focus returns before fixture
-settlement. The
+during, and after dispatch. Fixed native plans additionally sample immediately
+before and after every HWND step and after every completed CDP step, accumulating
+sticky focus/key-window facts across the plan. This detects transfers visible at
+those boundaries; it does not claim system-wide event tracing or guarantee
+detection of a focus transition and reversal entirely inside one synchronous
+window procedure. Fixture focus/blur events remain independent DOM evidence. The
 visible-focused runner mode requires the separate literal
 `--allow-visible-focused` process argument.
 
@@ -75,6 +78,19 @@ hit-testing or redispatch to a descendant. Wry's container handles only
 `WM_SETFOCUS` specially. This correction landed before physical evidence, so
 no result is attributed to the invalid container route.
 
+Microsoft also documents that `SendMessageTimeoutW` calls the window procedure
+directly and ignores `uTimeout` when the receiving window belongs to the
+caller's queue. The candidate therefore refuses a document HWND owned by the
+calling STA thread, records and revalidates the nonzero owner thread/process,
+and the source gate forbids `AttachThreadInput`. This is a fail-closed runtime
+precondition, not physical proof that a particular WebView2 build exposes the
+expected cross-thread document child; the named-device runs must establish
+that fact before the route can qualify. See Microsoft's
+[`SendMessageTimeoutW`](https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-sendmessagetimeoutw)
+and
+[`GetWindowThreadProcessId`](https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-getwindowthreadprocessid)
+contracts.
+
 ## Bounds, cancellation, and teardown
 
 - A matrix contains at most 112 rows and one row at a time. Input plans contain
@@ -82,7 +98,9 @@ no result is attributed to the invalid container route.
   events, JSON, navigation state, and durations are bounded.
 - The run has a 90-second absolute deadline, each navigation a ten-second
   ceiling, each case a five-second ceiling, and native waits pump at most five
-  milliseconds before rechecking cancellation.
+  milliseconds before rechecking cancellation. Every HWND step polls control
+  and checks cancellation/deadline before dispatch and immediately after it;
+  the synchronous message timeout cannot exceed the remaining case deadline.
 - Explicit Wry close debt is retried for 500 ms and the bounded orphan-debt
   registry is drained. A sticky cleanup-overflow marker fails teardown.
 - The adapter captures the exact browser PID and a non-reusable process HANDLE,
@@ -130,9 +148,11 @@ module to remain feature-gated, and retains independent optimized-build
 refusals in the engine and contract crates. It also locks the Windows runner's
 closed process gates, JSONL evidence path, owned-document HWND resolution,
 bounds/visibility/controller ownership attestation, during-dispatch active and
-thread-focus sampling, bounded raw CDP completion, fixed method allowlist, and
-absence of global `SendInput`, cursor movement, page IPC, host objects, or
-generic script calls.
+thread-focus sampling, per-step deadline/cancellation checks, document HWND
+thread/process identity and non-calling-thread precondition, strict bounded raw
+CDP completion, fixed method allowlist, and absence of input-queue attachment,
+global `SendInput`, cursor movement, page IPC, host objects, or generic script
+calls.
 The production functional core may now be reached through the durable Store
 adapter.
 
