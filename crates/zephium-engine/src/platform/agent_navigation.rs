@@ -1,3 +1,5 @@
+#![deny(clippy::dbg_macro, clippy::print_stderr, clippy::print_stdout)]
+
 //! Platform-neutral native navigation gate for owned agent contexts.
 //!
 //! Wry exposes the same identity-bearing navigation event contract on WebKit

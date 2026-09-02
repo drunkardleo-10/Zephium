@@ -8,6 +8,7 @@
 
 #![deny(missing_docs)]
 #![deny(unsafe_code)]
+#![deny(clippy::dbg_macro, clippy::print_stderr, clippy::print_stdout)]
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -2596,6 +2597,19 @@ mod tests {
         let header = sensitive_header(credential.provider, &credential.secret).expect("header");
         assert!(header.is_sensitive());
         assert!(!format!("{header:?}").contains("synthetic-openai-key"));
+
+        let request = provider_request(
+            &Client::new(),
+            Url::parse(OPENAI_RESPONSES_URL).expect("fixed endpoint"),
+            credential.provider,
+            header,
+            br#"{"input":"private request body marker"}"#.to_vec(),
+        )
+        .build()
+        .expect("fixed request");
+        let request_debug = format!("{request:?}");
+        assert!(!request_debug.contains("synthetic-openai-key"));
+        assert!(!request_debug.contains("private request body marker"));
 
         let production = ProviderEndpoints::production().expect("production endpoints");
         assert!(production.https_only);

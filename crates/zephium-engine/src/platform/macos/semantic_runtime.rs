@@ -1,5 +1,6 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![deny(clippy::undocumented_unsafe_blocks)]
+#![deny(clippy::dbg_macro, clippy::print_stderr, clippy::print_stdout)]
 
 //! Private production semantic runtime registration for owned agent contexts.
 //!

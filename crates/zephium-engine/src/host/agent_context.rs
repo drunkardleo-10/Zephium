@@ -1,3 +1,5 @@
+#![deny(clippy::dbg_macro, clippy::print_stderr, clippy::print_stdout)]
+
 //! Main-thread ownership for production agent-browser native contexts.
 //!
 //! This module is deliberately a separate identity island. An owned context

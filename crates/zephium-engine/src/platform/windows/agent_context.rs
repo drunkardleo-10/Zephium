@@ -1,5 +1,6 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![deny(clippy::undocumented_unsafe_blocks)]
+#![deny(clippy::dbg_macro, clippy::print_stderr, clippy::print_stdout)]
 
 //! Extension-isolated hidden WebView2 construction for owned agent contexts.
 //!

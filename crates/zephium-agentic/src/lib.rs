@@ -10,6 +10,7 @@
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
+#![deny(clippy::dbg_macro, clippy::print_stderr, clippy::print_stdout)]
 
 #[cfg(all(feature = "probe-harness", not(debug_assertions)))]
 compile_error!("the agentic probe harness is forbidden in optimized builds");

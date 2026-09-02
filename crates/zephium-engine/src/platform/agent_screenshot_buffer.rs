@@ -1,3 +1,5 @@
+#![deny(clippy::dbg_macro, clippy::print_stderr, clippy::print_stdout)]
+
 //! Platform-neutral bounded storage for native screenshot encoders.
 //!
 //! WebView2 requires a caller-provided seekable COM stream. Keeping its byte

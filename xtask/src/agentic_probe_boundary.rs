@@ -95,10 +95,26 @@ const ENGINE_AGENTIC_NATIVE_UNSAFE_MODULES: [&str; 7] = [
     ENGINE_WINDOWS_SEMANTIC_SCREENSHOT,
     ENGINE_WINDOWS_AGENT_TIMEOUT,
 ];
+const ENGINE_AGENTIC_PRODUCTION_MODULES: [&str; 12] = [
+    ENGINE_AGENT_CONTEXT_PORT,
+    ENGINE_AGENT_CONTEXT_HOST,
+    ENGINE_AGENT_NAVIGATION,
+    ENGINE_AGENT_SCREENSHOT_BUFFER,
+    ENGINE_WINDOWS_SEMANTIC_PROTOCOL,
+    ENGINE_MACOS_AGENT_CONTEXT,
+    ENGINE_MACOS_SEMANTIC_RUNTIME,
+    ENGINE_MACOS_SEMANTIC_SCREENSHOT,
+    ENGINE_WINDOWS_AGENT_CONTEXT,
+    ENGINE_WINDOWS_SEMANTIC_RUNTIME,
+    ENGINE_WINDOWS_SEMANTIC_SCREENSHOT,
+    ENGINE_WINDOWS_AGENT_TIMEOUT,
+];
 const ENGINE_AGENTIC_NATIVE_UNSAFE_HEADER: &str = concat!(
     "#![deny(unsafe_op_in_unsafe_fn)]\n",
     "#![deny(clippy::undocumented_unsafe_blocks)]\n",
 );
+const AGENTIC_NO_DIRECT_LOGGING_ATTRIBUTE: &str =
+    "#![deny(clippy::dbg_macro,clippy::print_stderr,clippy::print_stdout)]";
 const ENGINE_WINDOWS_PROBE_MODULE: &str =
     "crates/zephium-engine/src/platform/windows/agentic_input_probe.rs";
 const ENGINE_WINDOWS_SEMANTIC_PROBE_MODULE: &str =
@@ -149,7 +165,9 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         &read(repository.join(AGENTIC_WINDOWS_SEMANTIC_REVIEW_BINARY))?,
         &read(repository.join(AGENTIC_WINDOWS_SEMANTIC_EVIDENCE))?,
     )?;
-    validate_root(&read(repository.join(AGENTIC_ROOT))?)?;
+    let agentic_root = read(repository.join(AGENTIC_ROOT))?;
+    validate_root(&agentic_root)?;
+    validate_agentic_no_direct_logging_attribute(AGENTIC_ROOT, &agentic_root)?;
     validate_agent_metrics_contract(
         &read(repository.join(AGENTIC_ROOT))?,
         &read(repository.join(AGENTIC_METRICS))?,
@@ -273,9 +291,21 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         &read(repository.join(AGENTIC_AUDIT))?,
     )?;
     validate_provider_transport_manifest(&read(repository.join(PROVIDER_TRANSPORT_MANIFEST))?)?;
-    validate_provider_transport_root(&read(repository.join(PROVIDER_TRANSPORT_ROOT))?)?;
+    let provider_transport_root = read(repository.join(PROVIDER_TRANSPORT_ROOT))?;
+    validate_provider_transport_root(&provider_transport_root)?;
+    validate_agentic_no_direct_logging_attribute(
+        PROVIDER_TRANSPORT_ROOT,
+        &provider_transport_root,
+    )?;
+    validate_agentic_no_direct_logging_calls(PROVIDER_TRANSPORT_ROOT, &provider_transport_root)?;
+    validate_provider_secret_diagnostic_contract(&provider_transport_root)?;
     validate_engine_manifest(&read(repository.join(ENGINE_MANIFEST))?)?;
     validate_engine_root(&read(repository.join(ENGINE_ROOT))?)?;
+    for path in ENGINE_AGENTIC_PRODUCTION_MODULES {
+        let source = read(repository.join(path))?;
+        validate_agentic_no_direct_logging_attribute(path, &source)?;
+        validate_agentic_no_direct_logging_calls(path, &source)?;
+    }
     for path in ENGINE_AGENTIC_NATIVE_UNSAFE_MODULES {
         validate_engine_agentic_native_unsafe_contract(path, &read(repository.join(path))?)?;
     }
@@ -349,6 +379,44 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     validate_shipping_sources(repository)?;
     let metadata = cargo_metadata(repository)?;
     validate_release_graph(&metadata)
+}
+
+fn validate_agentic_no_direct_logging_attribute(label: &str, source: &str) -> Result<(), String> {
+    if !compact(source).contains(AGENTIC_NO_DIRECT_LOGGING_ATTRIBUTE) {
+        return Err(format!(
+            "production agentic module {label} must deny stdout, stderr, and dbg macros"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_agentic_no_direct_logging_calls(label: &str, source: &str) -> Result<(), String> {
+    let source = compact(source);
+    for forbidden in [
+        "print!(",
+        "println!(",
+        "eprint!(",
+        "eprintln!(",
+        "dbg!(",
+        "tracing::",
+        "log::",
+        "slog::",
+        "diagnostic!(",
+        "std::io::stdout(",
+        "std::io::stderr(",
+        "NSLog(",
+        "os_log",
+        "OutputDebugString",
+        "EventWrite",
+        "fprintf(",
+    ] {
+        if source.contains(forbidden) {
+            return Err(format!(
+                "production agentic module {label} acquired forbidden direct diagnostic output {forbidden}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn validate_engine_agentic_native_unsafe_contract(path: &str, source: &str) -> Result<(), String> {
@@ -2762,6 +2830,96 @@ fn validate_provider_transport_root(source: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_provider_secret_diagnostic_contract(source: &str) -> Result<(), String> {
+    for declaration in [
+        "pub struct AgentProviderCredential",
+        "struct AgentProviderAttemptCredential",
+    ] {
+        let declaration_start = source
+            .find(declaration)
+            .ok_or_else(|| format!("agent provider credential owner is missing {declaration}"))?;
+        let attribute_block_start = source[..declaration_start]
+            .rfind("\n\n")
+            .map_or(0, |start| start + 2);
+        if source[attribute_block_start..declaration_start].contains("#[derive(") {
+            return Err(format!(
+                "agent provider credential owner must remain move-only and manually redacted {declaration}"
+            ));
+        }
+    }
+
+    let source = compact(source);
+    if source.matches("secret:Zeroizing<Vec<u8>>").count() != 2 {
+        return Err(
+            "both retained provider credential owners must use zeroizing byte storage".to_owned(),
+        );
+    }
+    for required in [
+        "letmutencoded=Zeroizing::new(Vec::new());",
+        "value.set_sensitive(true);",
+        ".field(\"secret\",&\"[redacted]\")",
+        ".field(\"credential\",&\"[redacted]\")",
+        "fnnetwork_failure(error:&reqwest::Error)->AgentProviderTransportOutcome",
+        "iferror.is_timeout()",
+    ] {
+        if !source.contains(required) {
+            return Err(format!(
+                "agent provider secret/diagnostic boundary lost required protection {required}"
+            ));
+        }
+    }
+    for forbidden in [
+        ".field(\"secret\",&self.secret)",
+        ".field(\"credential\",&self.credential)",
+        "error.to_string()",
+        "format!(\"{error",
+    ] {
+        if source.contains(forbidden) {
+            return Err(format!(
+                "agent provider secret/diagnostic boundary exposes forbidden value {forbidden}"
+            ));
+        }
+    }
+
+    let network_start = source
+        .find("fnnetwork_failure(error:&reqwest::Error)->AgentProviderTransportOutcome")
+        .ok_or_else(|| "agent provider network failure classifier is missing".to_owned())?;
+    let network = &source[network_start..];
+    let mut depth = 0_u32;
+    let mut opened = false;
+    let mut network_end = None;
+    for (offset, character) in network.char_indices() {
+        match character {
+            '{' => {
+                opened = true;
+                depth = depth.checked_add(1).ok_or_else(|| {
+                    "agent provider network classifier nesting overflow".to_owned()
+                })?;
+            }
+            '}' if opened => {
+                depth = depth
+                    .checked_sub(1)
+                    .ok_or_else(|| "agent provider network classifier is malformed".to_owned())?;
+                if depth == 0 {
+                    network_end = Some(offset + character.len_utf8());
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let network_end = network_end
+        .ok_or_else(|| "agent provider network failure classifier is unclosed".to_owned())?;
+    let network = &network[..network_end];
+    if network.matches("error").count() != 2 {
+        return Err(
+            "agent provider network failure must consume reqwest diagnostics only via is_timeout"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
 fn validate_semantic_diff_policy_contract(
     root: &str,
     diff: &str,
@@ -4288,6 +4446,14 @@ fn validate_agentic_zero_idle_sources(repository: &Path) -> Result<(), String> {
                 .to_string(),
             &source,
         )?;
+        validate_agentic_no_direct_logging_calls(
+            &path
+                .strip_prefix(repository)
+                .unwrap_or(&path)
+                .display()
+                .to_string(),
+            &source,
+        )?;
     }
     Ok(())
 }
@@ -4546,6 +4712,108 @@ struct CargoNode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn production_agentic_modules_refuse_direct_diagnostic_output() {
+        assert_eq!(
+            ENGINE_AGENTIC_PRODUCTION_MODULES,
+            [
+                ENGINE_AGENT_CONTEXT_PORT,
+                ENGINE_AGENT_CONTEXT_HOST,
+                ENGINE_AGENT_NAVIGATION,
+                ENGINE_AGENT_SCREENSHOT_BUFFER,
+                ENGINE_WINDOWS_SEMANTIC_PROTOCOL,
+                ENGINE_MACOS_AGENT_CONTEXT,
+                ENGINE_MACOS_SEMANTIC_RUNTIME,
+                ENGINE_MACOS_SEMANTIC_SCREENSHOT,
+                ENGINE_WINDOWS_AGENT_CONTEXT,
+                ENGINE_WINDOWS_SEMANTIC_RUNTIME,
+                ENGINE_WINDOWS_SEMANTIC_SCREENSHOT,
+                ENGINE_WINDOWS_AGENT_TIMEOUT,
+            ]
+        );
+        let valid = r#"
+            #![deny(clippy::dbg_macro, clippy::print_stderr, clippy::print_stdout)]
+            fn content_free_observation() {}
+        "#;
+        validate_agentic_no_direct_logging_attribute("fixture", valid)
+            .expect("compile-time direct-output lint");
+        validate_agentic_no_direct_logging_calls("fixture", valid)
+            .expect("content-free observation");
+        assert!(validate_agentic_no_direct_logging_attribute(
+            "fixture",
+            &valid.replace(
+                "#![deny(clippy::dbg_macro, clippy::print_stderr, clippy::print_stdout)]",
+                ""
+            )
+        )
+        .is_err());
+        for forbidden in [
+            "println!(\"page\");",
+            "tracing::info!(\"page\");",
+            "unsafe { OutputDebugStringW(message); }",
+        ] {
+            assert!(validate_agentic_no_direct_logging_calls(
+                "fixture",
+                &format!("{valid}\n{forbidden}")
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn provider_credentials_and_network_errors_remain_redacted() {
+        let valid = r#"
+            /// Credential owner.
+            #[must_use]
+            pub struct AgentProviderCredential {
+                secret: Zeroizing<Vec<u8>>,
+            }
+
+            struct AgentProviderAttemptCredential {
+                secret: Zeroizing<Vec<u8>>,
+            }
+
+            fn sensitive_header() {
+                let mut encoded = Zeroizing::new(Vec::new());
+                value.set_sensitive(true);
+            }
+
+            fn credential_debug() {
+                formatter.field("secret", &"[redacted]");
+                formatter.field("credential", &"[redacted]");
+            }
+
+            fn network_failure(error: &reqwest::Error) -> AgentProviderTransportOutcome {
+                let class = if error.is_timeout() { Timeout } else { Transport };
+                AgentProviderTransportOutcome::Failed(class)
+            }
+        "#;
+        validate_provider_secret_diagnostic_contract(valid)
+            .expect("zeroizing, redacted credential diagnostic boundary");
+        for invalid in [
+            valid.replacen("Zeroizing<Vec<u8>>", "Vec<u8>", 1),
+            valid.replace("value.set_sensitive(true);", ""),
+            valid.replace(
+                "formatter.field(\"secret\", &\"[redacted]\");",
+                "formatter.field(\"secret\", &self.secret);"
+            ),
+            valid.replace(
+                "formatter.field(\"credential\", &\"[redacted]\");",
+                "formatter.field(\"credential\", &self.credential);"
+            ),
+            valid.replace(
+                "let class = if error.is_timeout() { Timeout } else { Transport };",
+                "let detail = format!(\"{error:?}\"); let class = Transport;"
+            ),
+            valid.replace(
+                "#[must_use]\n            pub struct AgentProviderCredential",
+                "#[derive(Debug)]\n            #[must_use]\n            pub struct AgentProviderCredential"
+            ),
+        ] {
+            assert!(validate_provider_secret_diagnostic_contract(&invalid).is_err());
+        }
+    }
 
     #[test]
     fn every_production_agentic_native_module_requires_strict_unsafe_lints() {

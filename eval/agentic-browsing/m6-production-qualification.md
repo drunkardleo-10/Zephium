@@ -37,7 +37,16 @@ responses, machine-local paths, or native traces.
   native/unsafe boundaries and requires each module to deny both undocumented
   unsafe blocks and unsafe operations outside explicit unsafe blocks. A
   mutation test removes or misplaces each lint header and proves the gate
-  refuses the source.
+  refuses the source; and
+- requires the agentic functional-core crate, dormant provider transport, and
+  all 12 dedicated production engine modules to deny direct standard-output,
+  standard-error, and `dbg!` macros. Every non-diagnostic functional-core
+  source and each dedicated engine/provider source is also scanned for direct
+  Rust and native logging calls. The provider gate separately pins both
+  retained credential owners and the transient header buffer to zeroizing
+  storage, sensitive request headers, manually redacted credential/attempt
+  `Debug`, and a closed reqwest failure classifier that consumes only the
+  timeout bit. Mutation tests prove each protection is required.
 
 The same check pins the default functional core to an empty feature set and a
 closed allocation/data dependency inventory. Its non-diagnostic source is
@@ -111,6 +120,17 @@ agentic-owned Windows modules. Cross-compilation is not device behavior.
   audit. This does not qualify physical Windows behavior or claim that shared,
   extension-owned, third-party, or non-agentic platform code has completed its
   native audit.
+- The scoped agentic-owned production graph now has a mechanically enforced
+  no-direct-logging boundary: observability remains content-free through typed
+  audit, metric, and shell values rather than page/provider output. The dormant
+  provider transport owns credentials only in zeroizing buffers, marks the
+  constructed authentication header sensitive, redacts credential-bearing
+  `Debug` implementations, and maps reqwest failures to closed classes without
+  formatting the underlying error. A regression test against pinned reqwest
+  constructs a request and proves neither its credential nor request-body
+  sentinel appears in `Request` debug output. This is a scoped source and test
+  audit; it does not claim review of shared shell, extension-owned, third-party,
+  or non-agentic logging surfaces.
 - The Browse named-device baseline intentionally has no values. No CPU, memory,
   GPU/compositor, energy, wakeup, or input-latency budget has been inferred.
 - Checked-priced model receipts now preserve a content-free exact schedule
@@ -214,8 +234,8 @@ The authoritative aggregate records and exact remaining blockers are in
 - deterministic semantic/action/policy suite closure, the six-site matrix,
   concurrent production configuration, endurance, and fault-injection evidence;
 - hot-path and zero-unused-agent-overhead measurements; and
-- completion of native/unsafe review outside the seven agentic-owned production
-  modules, plus profile, secret, log, shutdown, recovery, migration, and stable
-  Work-port audits.
+- completion of native/unsafe, secret, and log review outside the scoped
+  agentic-owned production modules and dormant provider transport, plus
+  profile, shutdown, recovery, migration, and stable Work-port audits.
 
 None of these pending items is represented as zero, passing, or non-blocking.

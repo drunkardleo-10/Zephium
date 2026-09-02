@@ -1,3 +1,5 @@
+#![deny(clippy::dbg_macro, clippy::print_stderr, clippy::print_stdout)]
+
 //! Closed WebView2 CDP vocabulary for the production semantic runtime.
 //!
 //! WebView2 does not expose a supported native isolated-world script API. The
