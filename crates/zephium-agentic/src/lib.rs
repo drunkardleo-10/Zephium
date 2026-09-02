@@ -18,6 +18,7 @@ mod agent_action_metrics;
 mod agent_audit;
 mod agent_input_metrics;
 mod agent_manifest;
+mod agent_metric_closure;
 mod agent_metrics;
 mod agent_policy;
 mod agent_progress_metrics;
@@ -94,6 +95,9 @@ pub use agent_manifest::{
     MAX_AGENT_PLAN_NODES, MAX_AGENT_RUN_ACCOUNTS, MAX_AGENT_RUN_CONTEXTS,
     MAX_AGENT_RUN_COST_MICRO_USD, MAX_AGENT_RUN_LIFETIME_MILLIS, MAX_AGENT_RUN_MODEL_TOKENS,
     MAX_AGENT_RUN_OPERATIONS, MAX_AGENT_RUN_ORIGINS, MAX_AGENT_RUN_PROFILES,
+};
+pub use agent_metric_closure::{
+    AgentRunMetricClosure, AgentRunMetricClosureError, MAX_AGENT_RUN_METRIC_CLOSURE_BYTES,
 };
 pub use agent_metrics::{
     AgentEffectAccountingMetrics, AgentEffectClassMetrics, AgentMetricError,

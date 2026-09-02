@@ -622,6 +622,16 @@ impl AgentRunProgressMetrics {
             total_elapsed_millis: self.total_elapsed_millis,
         }
     }
+
+    pub(crate) fn matches_metric_scope(
+        &self,
+        manifest: &AgentRunManifest,
+        supervisor: AgentSupervisorId,
+    ) -> bool {
+        self.manifest == manifest.id()
+            && self.manifest_guard == manifest.guard()
+            && self.supervisor == supervisor
+    }
 }
 
 impl fmt::Debug for AgentRunProgressMetrics {

@@ -29,6 +29,7 @@ const AGENTIC_EFFECT_POLICY: &str = "crates/zephium-agentic/src/agent_policy/eff
 const AGENTIC_AUDIT: &str = "crates/zephium-agentic/src/agent_audit.rs";
 const AGENTIC_ACTION_METRICS: &str = "crates/zephium-agentic/src/agent_action_metrics.rs";
 const AGENTIC_INPUT_METRICS: &str = "crates/zephium-agentic/src/agent_input_metrics.rs";
+const AGENTIC_METRIC_CLOSURE: &str = "crates/zephium-agentic/src/agent_metric_closure.rs";
 const AGENTIC_METRICS: &str = "crates/zephium-agentic/src/agent_metrics.rs";
 const AGENTIC_PROGRESS_METRICS: &str = "crates/zephium-agentic/src/agent_progress_metrics.rs";
 const AGENTIC_SEMANTIC_DIFF: &str = "crates/zephium-agentic/src/semantic_diff.rs";
@@ -155,6 +156,14 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         &read(repository.join(AGENTIC_ROOT))?,
         &read(repository.join(AGENTIC_PROGRESS_METRICS))?,
         &read(repository.join(AGENTIC_AUDIT))?,
+    )?;
+    validate_agent_metric_closure_contract(
+        &read(repository.join(AGENTIC_ROOT))?,
+        &read(repository.join(AGENTIC_METRIC_CLOSURE))?,
+        &read(repository.join(AGENTIC_METRICS))?,
+        &read(repository.join(AGENTIC_PROGRESS_METRICS))?,
+        &read(repository.join(AGENTIC_ACTION_METRICS))?,
+        &read(repository.join(AGENTIC_INPUT_METRICS))?,
     )?;
     validate_provider_billing_contract(
         &read(repository.join(AGENTIC_PROVIDER_ROOT))?,
@@ -2169,6 +2178,139 @@ fn validate_agent_progress_metrics_contract(
             return Err(format!(
                 "canonical audit events lost their private revision seal {required}"
             ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_agent_metric_closure_contract(
+    root: &str,
+    closure: &str,
+    accounting: &str,
+    progress: &str,
+    actions: &str,
+    inputs: &str,
+) -> Result<(), String> {
+    let root = compact(root);
+    for required in [
+        "modagent_metric_closure;",
+        "AgentRunMetricClosure",
+        "AgentRunMetricClosureError",
+        "MAX_AGENT_RUN_METRIC_CLOSURE_BYTES",
+    ] {
+        if !root.contains(required) {
+            return Err(format!(
+                "agent metric closure lost its default-core export {required}"
+            ));
+        }
+    }
+
+    let closure = compact(closure);
+    for required in [
+        "pubconstMAX_AGENT_RUN_METRIC_CLOSURE_BYTES:usize=192;",
+        "size_of::<AgentRunMetricClosure>()<=MAX_AGENT_RUN_METRIC_CLOSURE_BYTES",
+        "pubstructAgentRunMetricClosure{manifest:AgentRunManifestId,manifest_guard:[u8;32]",
+        "manifest_guard:manifest.guard()",
+        "pubfntry_close(",
+        "!supervisor.topology().matches_manifest(manifest)",
+        "!accounting.matches_metric_scope(manifest,supervisor_id)",
+        "!progress.matches_metric_scope(manifest,supervisor_id)",
+        "!actions.matches_metric_scope(manifest,supervisor_id)",
+        "!inputs.matches_metric_scope(manifest,supervisor_id)",
+        "status.is_sealed()",
+        "status.terminal()!=status.activated()",
+        "progress_snapshot.activated_nodes()!=activated_nodes",
+        "progress_snapshot.terminal_nodes()!=terminal_nodes",
+        "accounting.model_receipt_ids()!=inputs.receipt_ids()",
+        "accounting.effect_receipt_ids()!=actions.effect_receipt_ids()",
+        "accounting.effect_attempt_ids()!=actions.effect_attempt_ids()",
+        "model_duration_samples!=model.calls()",
+        "effect_duration_samples!=effects.attempts()",
+        "AgentRunMetricClosureError::ModelCoverage",
+        "AgentRunMetricClosureError::EffectCoverage",
+        "field(\"authority\",&\"[none]\")",
+        "field(\"content\",&\"[redacted]\")",
+    ] {
+        if !closure.contains(required) {
+            return Err(format!(
+                "agent metric closure lost required terminal coverage {required}"
+            ));
+        }
+    }
+    for forbidden in [
+        "pubfnnew(",
+        "pubconstfnnew(",
+        "pubfnmanifest_guard(",
+        "pubconstfnmanifest_guard(",
+        "traitAgentRunMetricClosurePort",
+        "SerializeforAgentRunMetricClosure",
+        "DeserializeforAgentRunMetricClosure",
+        "HashMap<",
+        "BTreeMap<",
+        "std::thread",
+        "std::time",
+        "std::fs",
+        "tokio::",
+        "Mutex<",
+        "Arc<",
+        "nativehandle",
+    ] {
+        if closure.contains(forbidden) {
+            return Err(format!(
+                "agent metric closure acquired forbidden authority/runtime seam {forbidden}"
+            ));
+        }
+    }
+
+    for (name, source, required) in [
+        (
+            "accounting",
+            accounting,
+            [
+                "pub(crate)fnmatches_metric_scope(",
+                "pub(crate)fnmodel_receipt_ids(&self)->&[AgentModelCallId]",
+                "pub(crate)fneffect_receipt_ids(&self)->&[AgentEffectId]",
+                "pub(crate)fneffect_attempt_ids(&self)->&[crate::SemanticActionAttemptId]",
+            ],
+        ),
+        (
+            "action",
+            actions,
+            [
+                "pub(crate)fnmatches_metric_scope(",
+                "pub(crate)fneffect_receipt_ids(&self)->&[AgentEffectId]",
+                "pub(crate)fneffect_attempt_ids(&self)->&[SemanticActionAttemptId]",
+                "self.manifest_guard==manifest.guard()",
+            ],
+        ),
+        (
+            "provider-input",
+            inputs,
+            [
+                "pub(crate)fnmatches_metric_scope(",
+                "pub(crate)fnreceipt_ids(&self)->&[AgentModelCallId]",
+                "self.manifest_guard==manifest.guard()",
+                "self.supervisor==supervisor",
+            ],
+        ),
+        (
+            "progress",
+            progress,
+            [
+                "pub(crate)fnmatches_metric_scope(",
+                "self.manifest==manifest.id()",
+                "self.manifest_guard==manifest.guard()",
+                "self.supervisor==supervisor",
+            ],
+        ),
+    ] {
+        let source = compact(source);
+        for required in required {
+            if !source.contains(required) {
+                return Err(format!(
+                    "agent metric closure lost {name} private join {required}"
+                ));
+            }
         }
     }
     Ok(())
@@ -6014,6 +6156,51 @@ mod tests {
         )
         .is_err());
         assert!(validate_agent_progress_metrics_contract(root, metrics, "").is_err());
+    }
+
+    #[test]
+    fn terminal_metric_closure_keeps_exact_private_coverage_joins() {
+        let root = include_str!("../../crates/zephium-agentic/src/lib.rs");
+        let closure = include_str!("../../crates/zephium-agentic/src/agent_metric_closure.rs");
+        let accounting = include_str!("../../crates/zephium-agentic/src/agent_metrics.rs");
+        let progress = include_str!("../../crates/zephium-agentic/src/agent_progress_metrics.rs");
+        let actions = include_str!("../../crates/zephium-agentic/src/agent_action_metrics.rs");
+        let inputs = include_str!("../../crates/zephium-agentic/src/agent_input_metrics.rs");
+
+        validate_agent_metric_closure_contract(
+            root, closure, accounting, progress, actions, inputs,
+        )
+        .expect("exact terminal metric closure");
+        assert!(validate_agent_metric_closure_contract(
+            root,
+            &closure.replace(
+                "accounting.model_receipt_ids() != inputs.receipt_ids()",
+                "model.calls() != input_snapshot.calls()",
+            ),
+            accounting,
+            progress,
+            actions,
+            inputs,
+        )
+        .is_err());
+        assert!(validate_agent_metric_closure_contract(
+            root,
+            &closure.replace("status.is_sealed()", "false"),
+            accounting,
+            progress,
+            actions,
+            inputs,
+        )
+        .is_err());
+        assert!(validate_agent_metric_closure_contract(
+            root,
+            &format!("{closure}\ntrait AgentRunMetricClosurePort {{}}"),
+            accounting,
+            progress,
+            actions,
+            inputs,
+        )
+        .is_err());
     }
 
     #[test]

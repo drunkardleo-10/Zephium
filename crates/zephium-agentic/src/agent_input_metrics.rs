@@ -708,6 +708,20 @@ impl AgentRunProviderInputMetrics {
     pub fn nodes(&self) -> impl ExactSizeIterator<Item = AgentProviderInputNodeMetrics> + '_ {
         self.nodes.iter().map(|row| row.metrics)
     }
+
+    pub(crate) fn matches_metric_scope(
+        &self,
+        manifest: &AgentRunManifest,
+        supervisor: AgentSupervisorId,
+    ) -> bool {
+        self.manifest == manifest.id()
+            && self.manifest_guard == manifest.guard()
+            && self.supervisor == supervisor
+    }
+
+    pub(crate) fn receipt_ids(&self) -> &[AgentModelCallId] {
+        &self.receipts
+    }
 }
 
 impl fmt::Debug for AgentRunProviderInputMetrics {

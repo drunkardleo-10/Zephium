@@ -1060,6 +1060,21 @@ qualification harness must still retain reviewed samples when medians or
 percentiles are required, and an absent token measurement is never represented
 as zero.
 
+Terminal reporting may explicitly construct a separate, at-most-192-byte
+metric-closure value. It rejoins all four reducers to the exact private
+manifest revision and supervisor, requires an unsealed terminal supervisor
+with no live node, execution slot, wait, cancellation drain, or browser-context
+assignment, and matches the audit-derived root outcome and complete activated-
+node count. It then compares the exact sorted model-call identities between
+receipt accounting and committed inputs, and the exact sorted effect and
+native-attempt identities between receipt accounting and action terminals;
+model/effect duration sample counts and checked node, input-kind, action,
+settlement, backend, and fixed-histogram partitions must also agree. The value
+is point-in-time descriptive evidence only. It grants no authority, owns no
+runtime or telemetry seam, and does not by itself prove that mutable policy,
+native resources, sites, providers, devices, or qualification-harness samples
+are settled or production-qualified.
+
 Initial qualification gates are:
 
 - 100% deterministic fixture correctness;

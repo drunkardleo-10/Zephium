@@ -144,6 +144,17 @@ cargo clippy --locked -p xtask --all-targets -- -D warnings
   facts. It retains no raw sample, content, site, model/tokenizer label, clock,
   task, telemetry, persistence, or native/browser resource; exact
   distributions still belong to the qualification harness.
+- A separate optional terminal metric closure now refuses active or sealed
+  supervisors, retained scheduler/context resources, incomplete audit node
+  coverage, and root-outcome mismatch. It rejoins the private manifest
+  revision across all four reducers; compares exact sorted model-call,
+  effect-receipt, and native-attempt identities across their independent
+  inputs; and requires matching progress-duration samples plus checked
+  aggregate partitions. The copyable value is capped at 192 bytes, has no
+  constructor other than the checked join, and is explicitly non-authorizing.
+  It is not a run-settlement or production-qualification verdict: mutable
+  policy, native resources, harness samples, sites, providers, and named
+  devices remain separate required evidence.
 
 The authoritative aggregate records and exact remaining blockers are in
 `native-input-matrix-v1.json`, `semantic-runtime-macos-v1.json`, and

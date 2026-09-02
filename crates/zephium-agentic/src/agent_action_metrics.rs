@@ -599,6 +599,24 @@ impl AgentRunActionPerformanceMetrics {
         self.snapshot
     }
 
+    pub(crate) fn matches_metric_scope(
+        &self,
+        manifest: &AgentRunManifest,
+        supervisor: AgentSupervisorId,
+    ) -> bool {
+        self.manifest == manifest.id()
+            && self.manifest_guard == manifest.guard()
+            && self.supervisor == supervisor
+    }
+
+    pub(crate) fn effect_receipt_ids(&self) -> &[AgentEffectId] {
+        &self.effect_receipts
+    }
+
+    pub(crate) fn effect_attempt_ids(&self) -> &[SemanticActionAttemptId] {
+        &self.effect_attempts
+    }
+
     fn validate_receipt(
         &self,
         receipt: crate::AgentEffectReceipt,

@@ -804,6 +804,28 @@ impl AgentRunAccountingMetrics {
         self.pricing_schedules.iter().copied()
     }
 
+    pub(crate) fn matches_metric_scope(
+        &self,
+        manifest: &AgentRunManifest,
+        supervisor: AgentSupervisorId,
+    ) -> bool {
+        self.manifest == manifest.id()
+            && self.manifest_guard == manifest.guard()
+            && self.supervisor == supervisor
+    }
+
+    pub(crate) fn model_receipt_ids(&self) -> &[AgentModelCallId] {
+        &self.model_receipts
+    }
+
+    pub(crate) fn effect_receipt_ids(&self) -> &[AgentEffectId] {
+        &self.effect_receipts
+    }
+
+    pub(crate) fn effect_attempt_ids(&self) -> &[crate::SemanticActionAttemptId] {
+        &self.effect_attempts
+    }
+
     fn node_index(&self, node: AgentPlanNodeId) -> Result<usize, AgentMetricError> {
         self.nodes
             .binary_search_by_key(&node, |row| row.metrics.node())
