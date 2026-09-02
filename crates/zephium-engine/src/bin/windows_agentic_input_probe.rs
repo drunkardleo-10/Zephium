@@ -1,3 +1,8 @@
+#![cfg_attr(
+    not(test),
+    deny(clippy::panic, clippy::unreachable, clippy::unwrap_used)
+)]
+
 //! One-shot physical-Windows qualification runner for the release-excluded probe.
 
 #[cfg(any(test, target_os = "windows"))]

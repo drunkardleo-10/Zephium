@@ -1,3 +1,8 @@
+#![cfg_attr(
+    not(test),
+    deny(clippy::panic, clippy::unreachable, clippy::unwrap_used)
+)]
+
 //! One-shot physical-Windows qualifier for the production semantic adapter.
 
 #[cfg(any(test, target_os = "windows"))]

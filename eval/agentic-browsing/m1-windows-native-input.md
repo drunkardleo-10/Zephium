@@ -263,6 +263,11 @@ function and every undocumented unsafe block. The boundary checker pins both
 module-level denials, and Windows CI runs native Clippy before linking the
 physical runner so these are enforced by the target toolchain rather than
 remaining review-only attributes.
+The input runner, input adapter, semantic runner, semantic adapter, and their
+shared resource sampler also deny direct Clippy `unwrap`/`expect`, `panic`, and
+`unreachable` findings outside test builds. The source gate mutation-tests all
+five locations. This prevents explicit invariant aborts from replacing typed
+physical-run evidence; it is not a general panic-recovery guarantee.
 The production functional core may now be reached through the durable Store
 adapter.
 

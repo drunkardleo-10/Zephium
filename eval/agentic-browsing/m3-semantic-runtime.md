@@ -589,6 +589,13 @@ on supported physical Windows. No live
 isolation, timing, arbitrary-page, resource-budget, or Windows product-support
 claim is made, and the extension-owned CDP probe remains unchanged.
 
+The semantic qualifier, its binary, and the shared Windows resource sampler
+deny direct Clippy `unwrap`/`expect`, `panic`, and `unreachable` findings in
+non-test builds. Together with the same contract on the M1 input qualifier,
+the release gate mutation-tests all five physical-Windows evidence components.
+This is compile/source reliability evidence only, not device behavior or a
+general panic-recovery claim.
+
 ## Reviewed macOS native evidence
 
 On 2026-09-02, the separately authorized production-path qualifier passed on

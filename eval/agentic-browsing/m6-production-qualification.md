@@ -512,6 +512,14 @@ agentic-owned Windows modules. Cross-compilation is not device behavior.
   ceiling, constructor count, and abort refusal. This is compile/source
   evidence only; it does not qualify physical Windows behavior or establish a
   general release-panic-recovery guarantee.
+- Both release-excluded physical-Windows runners, both native qualifier
+  adapters, and their shared process/resource sampler now compile-deny direct
+  `unwrap`/`expect`, `panic`, and `unreachable` findings outside tests. The
+  boundary checker pins and mutation-tests all five attributes, while the
+  native MSVC Clippy jobs enforce them on target. This makes explicit aborts a
+  compile failure before evidence collection; it does not turn cross-target
+  compilation into Windows behavior evidence or prove recovery from every
+  possible panic source.
 - A separate optional run-local progress reducer now streams canonical semantic
   audit events and derives observed initial-queue, model, effect, human-wait,
   and root elapsed durations, closed `NeedsHuman` counts, distinct human-

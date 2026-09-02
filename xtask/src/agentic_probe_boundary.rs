@@ -2590,6 +2590,7 @@ fn validate_macos_semantic_probe(
 }
 
 fn validate_windows_probe_binary(source: &str, qualification: &str) -> Result<(), String> {
+    validate_agentic_no_invariant_panic_attribute(ENGINE_WINDOWS_PROBE_BINARY, source)?;
     let source = compact(source);
     for required in [
         "--allow-visible-focused",
@@ -2843,6 +2844,7 @@ fn validate_macos_probe_source(source: &str) -> Result<(), String> {
 fn validate_windows_probe_resource_sampler(module: &str, source: &str) -> Result<(), String> {
     validate_engine_agentic_native_unsafe_contract(ENGINE_WINDOWS_PROBE_RESOURCES, source)?;
     validate_agentic_no_direct_logging_attribute(ENGINE_WINDOWS_PROBE_RESOURCES, source)?;
+    validate_agentic_no_invariant_panic_attribute(ENGINE_WINDOWS_PROBE_RESOURCES, source)?;
     validate_agentic_no_direct_logging_calls(ENGINE_WINDOWS_PROBE_RESOURCES, source)?;
     let module = compact(module);
     for required in [
@@ -2953,6 +2955,7 @@ fn validate_windows_probe_resource_sampler(module: &str, source: &str) -> Result
 
 fn validate_windows_probe_source(source: &str) -> Result<(), String> {
     validate_engine_agentic_native_unsafe_contract(ENGINE_WINDOWS_PROBE_MODULE, source)?;
+    validate_agentic_no_invariant_panic_attribute(ENGINE_WINDOWS_PROBE_MODULE, source)?;
     let code = compact(
         &source
             .lines()
@@ -3114,6 +3117,8 @@ fn validate_windows_semantic_probe(
     fixture: &str,
 ) -> Result<(), String> {
     validate_engine_agentic_native_unsafe_contract(ENGINE_WINDOWS_SEMANTIC_PROBE_MODULE, source)?;
+    validate_agentic_no_invariant_panic_attribute(ENGINE_WINDOWS_SEMANTIC_PROBE_MODULE, source)?;
+    validate_agentic_no_invariant_panic_attribute(ENGINE_WINDOWS_SEMANTIC_PROBE_BINARY, binary)?;
     let module = compact(module);
     for required in [
         "#[cfg(feature=\"native-agentic-semantic-probe\")]modagentic_semantic_probe;",
@@ -11698,6 +11703,26 @@ mod tests {
         .is_err());
         assert!(validate_windows_semantic_probe(
             module,
+            &source.replace(
+                "deny(clippy::panic, clippy::unreachable, clippy::unwrap_used)",
+                "allow(clippy::panic, clippy::unreachable, clippy::unwrap_used)",
+            ),
+            binary,
+            fixture,
+        )
+        .is_err());
+        assert!(validate_windows_semantic_probe(
+            module,
+            source,
+            &binary.replace(
+                "deny(clippy::panic, clippy::unreachable, clippy::unwrap_used)",
+                "allow(clippy::panic, clippy::unreachable, clippy::unwrap_used)",
+            ),
+            fixture,
+        )
+        .is_err());
+        assert!(validate_windows_semantic_probe(
+            module,
             &format!("{source}\nSetForegroundWindow(host);"),
             binary,
             fixture,
@@ -11931,6 +11956,11 @@ mod tests {
             1
         ))
         .is_err());
+        assert!(validate_windows_probe_source(&valid.replace(
+            "deny(clippy::panic, clippy::unreachable, clippy::unwrap_used)",
+            "allow(clippy::panic, clippy::unreachable, clippy::unwrap_used)",
+        ))
+        .is_err());
         assert!(validate_windows_probe_source(&valid.replacen(
             "        SendMessageTimeoutW(\n",
             "        SendInput(\n",
@@ -12078,6 +12108,14 @@ mod tests {
                 "#![deny(clippy::dbg_macro, clippy::print_stderr, clippy::print_stdout)]\n",
                 "",
                 1,
+            ),
+        )
+        .is_err());
+        assert!(validate_windows_probe_resource_sampler(
+            module,
+            &valid.replace(
+                "deny(clippy::panic, clippy::unreachable, clippy::unwrap_used)",
+                "allow(clippy::panic, clippy::unreachable, clippy::unwrap_used)",
             ),
         )
         .is_err());
@@ -12243,6 +12281,10 @@ mod tests {
     #[test]
     fn windows_physical_runner_retains_exact_modes_and_jsonl_evidence() {
         let binary = r#"
+            #![cfg_attr(
+                not(test),
+                deny(clippy::panic, clippy::unreachable, clippy::unwrap_used)
+            )]
             WindowsProbeMode::from_argument;
             "--evidence-directory";
             "eval/agentic-browsing/local-results";
@@ -12313,6 +12355,14 @@ mod tests {
             };
         "#;
         validate_windows_probe_binary(binary, qualification).expect("valid physical runner");
+        assert!(validate_windows_probe_binary(
+            &binary.replace(
+                "deny(clippy::panic, clippy::unreachable, clippy::unwrap_used)",
+                "allow(clippy::panic, clippy::unreachable, clippy::unwrap_used)",
+            ),
+            qualification,
+        )
+        .is_err());
         assert!(validate_windows_probe_binary(
             &binary.replace("\"--allow-visible-focused\";", ""),
             qualification,
