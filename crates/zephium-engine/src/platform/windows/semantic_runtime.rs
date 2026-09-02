@@ -1,3 +1,6 @@
+#![deny(unsafe_op_in_unsafe_fn)]
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 //! Production WebView2 adapter for the fixed semantic isolated world.
 //!
 //! All CDP syntax lives in the platform-neutral closed protocol module. This
@@ -1073,6 +1076,9 @@ fn register_context_event(
     native: &Rc<NativeRuntime>,
 ) -> windows_core::Result<CdpEventRegistration> {
     let event_name = HSTRING::from("Runtime.executionContextCreated");
+    // SAFETY: `native.core` is a live STA-bound COM interface and `event_name`
+    // is a valid HSTRING for the duration of this synchronous getter. The
+    // returned receiver owns its COM reference.
     let receiver = unsafe { native.core.GetDevToolsProtocolEventReceiver(&event_name)? };
     let weak = Rc::downgrade(native);
     let handler = DevToolsProtocolEventReceivedEventHandler::create(Box::new(move |_, args| {
@@ -1084,6 +1090,9 @@ fn register_context_event(
             return Ok(());
         };
         let mut raw = PWSTR::null();
+        // SAFETY: WebView2 supplied a live callback-argument COM interface and
+        // `raw` is valid initialized out storage. The bounded helper consumes
+        // and releases the allocated string exactly once on every result.
         if unsafe { args.ParameterObjectAsJson(&mut raw) }.is_err() {
             native.fail_current(SemanticRuntimePortFailure::Transport, true);
             return Ok(());
@@ -1098,6 +1107,9 @@ fn register_context_event(
         Ok(())
     }));
     let mut token = 0_i64;
+    // SAFETY: receiver and handler are live reference-counted COM interfaces;
+    // `token` is exact writable out storage. The registration retains the
+    // handler until removal and returns its matching token synchronously.
     unsafe { receiver.add_DevToolsProtocolEventReceived(&handler, &mut token)? };
     Ok(CdpEventRegistration {
         receiver,
@@ -1118,6 +1130,8 @@ impl CdpEventRegistration {
             return false;
         }
         self.retired = true;
+        // SAFETY: `receiver` remains live and `token` is the exact value
+        // returned by its successful add call; retirement is single-shot.
         unsafe {
             self.receiver
                 .remove_DevToolsProtocolEventReceived(self.token)
@@ -1156,6 +1170,9 @@ fn call_cdp_async(
     .into();
     let method = HSTRING::from(command.method().as_str());
     let parameters = HSTRING::from(command.parameters());
+    // SAFETY: `core`, both HSTRING arguments, and the COM handler are live for
+    // dispatch. WebView2 retains the handler until its completion callback and
+    // all of these Rc-backed values stay on the owning STA.
     unsafe { core.CallDevToolsProtocolMethod(&method, &parameters, &handler) }
         .map_err(|_| NativeCdpFailure::Native)
 }

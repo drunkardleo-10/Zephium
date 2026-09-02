@@ -1,3 +1,6 @@
+#![deny(unsafe_op_in_unsafe_fn)]
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 //! Bounded WKWebView viewport capture and metadata-free PNG transport.
 //!
 //! WebKit paints the exact hidden owned view asynchronously. ImageIO writes
@@ -95,7 +98,10 @@ unsafe extern "C-unwind" fn put_png_bytes(
     count: usize,
 ) -> usize {
     let written = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        let Some(state) = (info as *const RefCell<BoundedPngSink>).as_ref() else {
+        // SAFETY: `encode_bounded_png` gives CoreGraphics a pointer to its
+        // live stack `RefCell`, retains it through synchronous finalization,
+        // and installs no release callback that could outlive that scope.
+        let Some(state) = (unsafe { (info as *const RefCell<BoundedPngSink>).as_ref() }) else {
             return 0;
         };
         let Ok(mut state) = state.try_borrow_mut() else {
@@ -172,8 +178,13 @@ pub(super) fn capture_viewport(
         return Err(SemanticScreenshotNativeFailure::TimedOut);
     }
 
+    // SAFETY: `mtm` proves this WebKit object is created on the main thread;
+    // objc2 retains the returned configuration for the enclosing scope.
     let configuration = unsafe { WKSnapshotConfiguration::new(mtm) };
     let width = NSNumber::new_f64(snapshot_width);
+    // SAFETY: `configuration` and `width` are live retained Objective-C
+    // objects, `bounds` came from this live WKWebView, and all calls remain on
+    // the main thread proven above.
     unsafe {
         configuration.setRect(bounds);
         configuration.setSnapshotWidth(Some(&width));
@@ -214,6 +225,9 @@ pub(super) fn capture_viewport(
             }
         });
 
+    // SAFETY: `webview`, `configuration`, and the copied block remain live for
+    // this dispatch. WebKit retains the completion block until its one reply;
+    // the call runs on the main thread and Objective-C exceptions are caught.
     let dispatched = objc2::exception::catch(AssertUnwindSafe(|| unsafe {
         webview.takeSnapshotWithConfiguration_completionHandler(Some(&configuration), &callback);
     }));
@@ -241,6 +255,8 @@ fn finish_capture(
     // SAFETY: WebKit guarantees a non-null image pointer remains valid for
     // the duration of its completion callback.
     let image = unsafe { &*image };
+    // SAFETY: `image` is live for this callback, AppKit accepts a null proposed
+    // rectangle, and no graphics context or hints are supplied or retained.
     let cg_image =
         unsafe { image.CGImageForProposedRect_context_hints(std::ptr::null_mut(), None, None) }
             .ok_or(SemanticScreenshotNativeFailure::Transport)?;
@@ -294,6 +310,9 @@ fn encode_bounded_png(
         putBytes: Some(put_png_bytes),
         releaseConsumer: None,
     };
+    // SAFETY: the callback ABI matches `CGDataConsumerPutBytesCallback`; its
+    // info pointer targets `sink`, which stays live and immovable until after
+    // the destination is finalized and both CoreGraphics owners are dropped.
     let consumer = unsafe {
         CGDataConsumer::new(
             std::ptr::from_ref(&sink).cast_mut().cast::<c_void>(),
@@ -302,6 +321,8 @@ fn encode_bounded_png(
     }
     .ok_or(SemanticScreenshotNativeFailure::Transport)?;
     let type_identifier = CFString::from_static_str(PNG_TYPE_IDENTIFIER);
+    // SAFETY: `consumer` and the UTI string are valid retained CF objects for
+    // this call, one image will be supplied, and null options is permitted.
     let destination = unsafe {
         CGImageDestinationCreateWithDataConsumer(
             Some(&consumer),
@@ -313,9 +334,13 @@ fn encode_bounded_png(
     let destination = NonNull::new(destination)
         .map(ImageDestination)
         .ok_or(SemanticScreenshotNativeFailure::Transport)?;
+    // SAFETY: `destination` is the non-null +1 ImageIO object created above,
+    // `image` is a live CGImage, and null properties selects PNG defaults.
     unsafe {
         CGImageDestinationAddImage(destination.0.as_ptr(), Some(image), std::ptr::null());
     }
+    // SAFETY: `destination` remains the sole live owner of a valid ImageIO
+    // destination and contains the promised single image.
     let finalized = unsafe { CGImageDestinationFinalize(destination.0.as_ptr()) };
     drop(destination);
     drop(consumer);
@@ -420,6 +445,8 @@ mod tests {
     fn image_io_streams_synthetic_pixels_and_refuses_before_byte_overrun() {
         let mut rgba = [0x20_u8, 0x40, 0x80, 0xff];
         let color_space = CGColorSpace::new_device_rgb().expect("color space");
+        // SAFETY: the four-byte RGBA buffer exactly covers the declared 1x1,
+        // 8-bit, four-byte-row bitmap and remains live until the context drops.
         let context = unsafe {
             CGBitmapContextCreate(
                 rgba.as_mut_ptr().cast(),

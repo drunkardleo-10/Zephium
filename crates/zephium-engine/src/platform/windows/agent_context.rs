@@ -1,3 +1,6 @@
+#![deny(unsafe_op_in_unsafe_fn)]
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 //! Extension-isolated hidden WebView2 construction for owned agent contexts.
 //!
 //! The adapter reuses one already-proven extension-enabled environment. The
@@ -258,6 +261,8 @@ fn invoke_unit_callback(callback: &dyn Fn(), callback_panicked: &dyn Fn()) {
 }
 
 fn controller_profile(core: &ICoreWebView2) -> Result<ICoreWebView2Profile7, ()> {
+    // SAFETY: `cast` yields a live, reference-counted WebView2 interface; the
+    // property getter initializes and returns its own reference-counted profile.
     core.cast::<ICoreWebView2_13>()
         .and_then(|core| unsafe { core.Profile() })
         .and_then(|profile| profile.cast::<ICoreWebView2Profile7>())
@@ -267,6 +272,9 @@ fn controller_profile(core: &ICoreWebView2) -> Result<ICoreWebView2Profile7, ()>
 fn profile_name(profile: &ICoreWebView2Profile7) -> Result<String, ()> {
     let profile = profile.cast::<ICoreWebView2Profile>().map_err(|_| ())?;
     let mut raw = PWSTR::null();
+    // SAFETY: `profile` is a live COM interface and `raw` is a valid initialized
+    // out pointer. WebView2 allocates the returned string; the bounded helper
+    // consumes and releases it exactly once, including refusal paths.
     unsafe { profile.ProfileName(&mut raw) }.map_err(|_| ())?;
     super::take_pwstr_bounded(raw, PROFILE_NAME_UTF16_LIMIT, PROFILE_NAME_UTF8_LIMIT).ok_or(())
 }
@@ -274,6 +282,8 @@ fn profile_name(profile: &ICoreWebView2Profile7) -> Result<String, ()> {
 fn profile_is_private(profile: &ICoreWebView2Profile7) -> Result<bool, ()> {
     let profile = profile.cast::<ICoreWebView2Profile>().map_err(|_| ())?;
     let mut private = windows_core::BOOL::default();
+    // SAFETY: `profile` is a live COM interface and `private` provides writable
+    // storage of the exact BOOL type required by this synchronous getter.
     unsafe { profile.IsInPrivateModeEnabled(&mut private) }.map_err(|_| ())?;
     Ok(private.as_bool())
 }
@@ -282,6 +292,8 @@ fn controller_environment_matches(
     environment: &ICoreWebView2Environment,
     core: &ICoreWebView2,
 ) -> bool {
+    // SAFETY: `cast` yields a live, reference-counted WebView2 interface; the
+    // environment getter returns a separately reference-counted COM object.
     core.cast::<ICoreWebView2_2>()
         .and_then(|core| unsafe { core.Environment() })
         .is_ok_and(|controller_environment| {
@@ -308,15 +320,22 @@ fn attest_hidden_owner(
     viewport: ContextOwnedViewport,
 ) -> Result<(), AgentOwnedViewConstructionError> {
     let container = view.hwnd();
-    if !unsafe { IsWindow(Some(expected_parent)) }.as_bool()
-        || !unsafe { IsWindow(Some(container)) }.as_bool()
-        || unsafe { GetParent(container) }.ok() != Some(expected_parent)
-    {
+    // SAFETY: these Win32 predicates accept opaque HWND values, including
+    // stale ones, without dereferencing caller memory. Successful IsWindow
+    // checks establish both handles before the parent query is trusted.
+    let hierarchy_matches = unsafe {
+        IsWindow(Some(expected_parent)).as_bool()
+            && IsWindow(Some(container)).as_bool()
+            && GetParent(container).ok() == Some(expected_parent)
+    };
+    if !hierarchy_matches {
         return Err(AgentOwnedViewConstructionError::Native);
     }
     let controller = view.controller();
     let mut controller_parent = HWND::default();
     let mut controller_visible = windows_core::BOOL::default();
+    // SAFETY: `container` was proven to identify a live window above and this
+    // query neither receives nor retains caller-owned pointers.
     let dpi = unsafe { GetDpiForWindow(container) };
     let Some(expected_width) = expected_physical_extent(viewport.width(), dpi) else {
         return Err(AgentOwnedViewConstructionError::Native);
@@ -326,13 +345,19 @@ fn attest_hidden_owner(
     };
     let mut container_bounds = RECT::default();
     let mut controller_bounds = RECT::default();
-    if unsafe { controller.ParentWindow(&mut controller_parent) }.is_err()
-        || controller_parent != container
-        || unsafe { controller.IsVisible(&mut controller_visible) }.is_err()
-        || controller_visible.as_bool()
-        || unsafe { IsWindowVisible(container) }.as_bool()
-        || unsafe { GetClientRect(container, &mut container_bounds) }.is_err()
-        || unsafe { controller.Bounds(&mut controller_bounds) }.is_err()
+    // SAFETY: `controller` is the live reference-counted controller owned by
+    // `view`; every out argument is initialized writable storage of the exact
+    // COM/Win32 type, and `container` was proven live above.
+    let native_state_matches = unsafe {
+        controller.ParentWindow(&mut controller_parent).is_ok()
+            && controller_parent == container
+            && controller.IsVisible(&mut controller_visible).is_ok()
+            && !controller_visible.as_bool()
+            && !IsWindowVisible(container).as_bool()
+            && GetClientRect(container, &mut container_bounds).is_ok()
+            && controller.Bounds(&mut controller_bounds).is_ok()
+    };
+    if !native_state_matches
         || container_bounds.left != 0
         || container_bounds.top != 0
         || container_bounds.right != expected_width
@@ -344,9 +369,14 @@ fn attest_hidden_owner(
     {
         return Err(AgentOwnedViewConstructionError::Native);
     }
-    let focus = unsafe { GetFocus() };
-    if !focus.0.is_null() && (focus == container || unsafe { IsChild(container, focus) }.as_bool())
-    {
+    // SAFETY: GetFocus returns an opaque HWND for this UI thread. `container`
+    // is live, and IsChild accepts a null or stale candidate without touching
+    // caller memory.
+    let focus_inside = unsafe {
+        let focus = GetFocus();
+        !focus.0.is_null() && (focus == container || IsChild(container, focus).as_bool())
+    };
+    if focus_inside {
         return Err(AgentOwnedViewConstructionError::Native);
     }
     Ok(())

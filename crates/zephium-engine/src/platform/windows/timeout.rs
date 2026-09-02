@@ -1,6 +1,11 @@
+#![deny(unsafe_op_in_unsafe_fn)]
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 //! Bounded UI-thread one-shot timers for native agent lifecycle deadlines.
 
 use std::cell::RefCell;
+use std::marker::PhantomData;
+use std::rc::Rc;
 use std::time::Duration;
 
 use windows::Win32::Foundation::HWND;
@@ -19,6 +24,9 @@ thread_local! {
 
 pub(crate) struct ContentPolicyTimeout {
     timer: usize,
+    // A window-less timer may only be killed by the thread that created it.
+    // Keep both the handle and its TLS callback mechanically UI-thread-bound.
+    _thread_bound: PhantomData<Rc<()>>,
 }
 
 impl ContentPolicyTimeout {
@@ -30,6 +38,8 @@ impl ContentPolicyTimeout {
 
 impl Drop for ContentPolicyTimeout {
     fn drop(&mut self) {
+        // SAFETY: this !Send handle can only drop on the creating thread and
+        // `timer` is the exact window-less identifier returned by SetTimer.
         let _ = unsafe { KillTimer(None, self.timer) };
         let _ = TIMERS.try_with(|timers| {
             let Ok(mut timers) = timers.try_borrow_mut() else {
@@ -74,9 +84,13 @@ unsafe extern "system" fn timer_proc(_: HWND, _: u32, timer: usize, _: u32) {
         // gets another UI turn without losing the retained callback.
         TimerPoll::Busy => {}
         TimerPoll::Missing => {
+            // SAFETY: Windows invoked this callback on the creating thread and
+            // supplied the exact identifier for this window-less timer.
             let _ = unsafe { KillTimer(None, timer) };
         }
         TimerPoll::Ready(callback) => {
+            // SAFETY: same callback-thread and identifier guarantees as above;
+            // killing before invocation makes this repeating timer one-shot.
             let _ = unsafe { KillTimer(None, timer) };
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback));
         }
@@ -106,6 +120,9 @@ pub(crate) fn schedule_content_policy_timeout(
     if !has_capacity {
         return None;
     }
+    // SAFETY: `timer_proc` has the exact TIMERPROC system ABI and contains all
+    // panics. A null HWND creates a timer owned by this current UI thread; the
+    // returned !Send guard ensures cancellation occurs on that same thread.
     let timer = unsafe { SetTimer(None, 0, interval, Some(timer_proc)) };
     if timer == 0 {
         return None;
@@ -133,10 +150,15 @@ pub(crate) fn schedule_content_policy_timeout(
         .flatten()
         .unwrap_or(false);
     if !inserted {
+        // SAFETY: insertion is still on the creating thread and `timer` is the
+        // exact identifier returned immediately above.
         let _ = unsafe { KillTimer(None, timer) };
         return None;
     }
-    Some(ContentPolicyTimeout { timer })
+    Some(ContentPolicyTimeout {
+        timer,
+        _thread_bound: PhantomData,
+    })
 }
 
 #[cfg(test)]

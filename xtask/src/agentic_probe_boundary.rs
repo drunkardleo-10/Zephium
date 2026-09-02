@@ -86,6 +86,19 @@ const ENGINE_WINDOWS_SEMANTIC_RUNTIME: &str =
     "crates/zephium-engine/src/platform/windows/semantic_runtime.rs";
 const ENGINE_WINDOWS_SEMANTIC_SCREENSHOT: &str =
     "crates/zephium-engine/src/platform/windows/semantic_screenshot.rs";
+const ENGINE_AGENTIC_NATIVE_UNSAFE_MODULES: [&str; 7] = [
+    ENGINE_MACOS_AGENT_CONTEXT,
+    ENGINE_MACOS_SEMANTIC_RUNTIME,
+    ENGINE_MACOS_SEMANTIC_SCREENSHOT,
+    ENGINE_WINDOWS_AGENT_CONTEXT,
+    ENGINE_WINDOWS_SEMANTIC_RUNTIME,
+    ENGINE_WINDOWS_SEMANTIC_SCREENSHOT,
+    ENGINE_WINDOWS_AGENT_TIMEOUT,
+];
+const ENGINE_AGENTIC_NATIVE_UNSAFE_HEADER: &str = concat!(
+    "#![deny(unsafe_op_in_unsafe_fn)]\n",
+    "#![deny(clippy::undocumented_unsafe_blocks)]\n",
+);
 const ENGINE_WINDOWS_PROBE_MODULE: &str =
     "crates/zephium-engine/src/platform/windows/agentic_input_probe.rs";
 const ENGINE_WINDOWS_SEMANTIC_PROBE_MODULE: &str =
@@ -263,6 +276,12 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     validate_provider_transport_root(&read(repository.join(PROVIDER_TRANSPORT_ROOT))?)?;
     validate_engine_manifest(&read(repository.join(ENGINE_MANIFEST))?)?;
     validate_engine_root(&read(repository.join(ENGINE_ROOT))?)?;
+    for path in ENGINE_AGENTIC_NATIVE_UNSAFE_MODULES {
+        validate_engine_agentic_native_unsafe_contract(path, &read(repository.join(path))?)?;
+    }
+    validate_engine_macos_agent_main_thread_contract(&read(
+        repository.join(ENGINE_MACOS_AGENT_CONTEXT),
+    )?)?;
     validate_engine_agent_context_boundary(
         &read(repository.join(ENGINE_ROOT))?,
         &read(repository.join(ENGINE_HOST_ROOT))?,
@@ -330,6 +349,32 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     validate_shipping_sources(repository)?;
     let metadata = cargo_metadata(repository)?;
     validate_release_graph(&metadata)
+}
+
+fn validate_engine_agentic_native_unsafe_contract(path: &str, source: &str) -> Result<(), String> {
+    if !source.starts_with(ENGINE_AGENTIC_NATIVE_UNSAFE_HEADER) {
+        return Err(format!(
+            "production agentic native module {path} must deny undocumented unsafe blocks and unsafe operations outside explicit blocks"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_engine_macos_agent_main_thread_contract(source: &str) -> Result<(), String> {
+    let source = compact(source);
+    if !source.contains(
+        "fnharden_owned_agent_view(view:&WebView)->Result<(),AgentOwnedViewConstructionError>",
+    ) || source
+        .matches("let_mtm=MainThreadMarker::new().ok_or(AgentOwnedViewConstructionError::Native)?;")
+        .count()
+        != 2
+    {
+        return Err(
+            "production macOS agent view must refuse off-main-thread hardening and attestation"
+                .to_owned(),
+        );
+    }
+    Ok(())
 }
 
 fn validate_engine_manifest(source: &str) -> Result<(), String> {
@@ -834,6 +879,7 @@ fn validate_engine_windows_agent_context_boundary(
         }
     }
 
+    validate_engine_windows_timeout_thread_binding(timeout)?;
     let timeout = compact(timeout);
     for required in [
         "MAX_PENDING_NATIVE_CONTEXT_TASKS",
@@ -936,6 +982,21 @@ fn validate_engine_windows_agent_context_boundary(
                     "production Windows agent-context {label} acquired forbidden surface {forbidden}"
                 ));
             }
+        }
+    }
+    Ok(())
+}
+
+fn validate_engine_windows_timeout_thread_binding(source: &str) -> Result<(), String> {
+    let source = compact(source);
+    for required in [
+        "_thread_bound:PhantomData<Rc<()>>",
+        "ContentPolicyTimeout{timer,_thread_bound:PhantomData",
+    ] {
+        if !source.contains(required) {
+            return Err(format!(
+                "production Windows UI timeout lost creating-thread confinement {required}"
+            ));
         }
     }
     Ok(())
@@ -4485,6 +4546,86 @@ struct CargoNode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_production_agentic_native_module_requires_strict_unsafe_lints() {
+        assert_eq!(
+            ENGINE_AGENTIC_NATIVE_UNSAFE_MODULES,
+            [
+                ENGINE_MACOS_AGENT_CONTEXT,
+                ENGINE_MACOS_SEMANTIC_RUNTIME,
+                ENGINE_MACOS_SEMANTIC_SCREENSHOT,
+                ENGINE_WINDOWS_AGENT_CONTEXT,
+                ENGINE_WINDOWS_SEMANTIC_RUNTIME,
+                ENGINE_WINDOWS_SEMANTIC_SCREENSHOT,
+                ENGINE_WINDOWS_AGENT_TIMEOUT,
+            ]
+        );
+        let valid = format!("{ENGINE_AGENTIC_NATIVE_UNSAFE_HEADER}\n//! audited native module\n");
+        for path in ENGINE_AGENTIC_NATIVE_UNSAFE_MODULES {
+            validate_engine_agentic_native_unsafe_contract(path, &valid)
+                .expect("strict native unsafe contract");
+            for removed in [
+                "#![deny(unsafe_op_in_unsafe_fn)]\n",
+                "#![deny(clippy::undocumented_unsafe_blocks)]\n",
+            ] {
+                assert!(validate_engine_agentic_native_unsafe_contract(
+                    path,
+                    &valid.replacen(removed, "", 1),
+                )
+                .is_err());
+            }
+            assert!(validate_engine_agentic_native_unsafe_contract(
+                path,
+                &format!("//! misplaced\n{ENGINE_AGENTIC_NATIVE_UNSAFE_HEADER}"),
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn windows_windowless_timer_guard_must_remain_non_send() {
+        let valid = r#"
+            struct ContentPolicyTimeout {
+                timer: usize,
+                _thread_bound: PhantomData<Rc<()>>,
+            }
+            fn guard(timer: usize) -> ContentPolicyTimeout {
+                ContentPolicyTimeout { timer, _thread_bound: PhantomData }
+            }
+        "#;
+        validate_engine_windows_timeout_thread_binding(valid).expect("thread-bound timer guard");
+        assert!(validate_engine_windows_timeout_thread_binding(
+            &valid.replace("_thread_bound: PhantomData<Rc<()>>", "")
+        )
+        .is_err());
+        assert!(
+            validate_engine_windows_timeout_thread_binding(&valid.replace(
+                "ContentPolicyTimeout { timer, _thread_bound: PhantomData }",
+                "ContentPolicyTimeout { timer }"
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn macos_agent_view_hardening_and_attestation_require_main_thread_proof() {
+        let marker =
+            "let _mtm = MainThreadMarker::new().ok_or(AgentOwnedViewConstructionError::Native)?;";
+        let valid = format!(
+            "fn harden_owned_agent_view(view: &WebView) -> Result<(), AgentOwnedViewConstructionError> {{ {marker} Ok(()) }} fn attest() {{ {marker} }}"
+        );
+        validate_engine_macos_agent_main_thread_contract(&valid)
+            .expect("main-thread refusing native view operations");
+        assert!(
+            validate_engine_macos_agent_main_thread_contract(&valid.replacen(marker, "", 1))
+                .is_err()
+        );
+        assert!(validate_engine_macos_agent_main_thread_contract(
+            &valid.replace("-> Result<(), AgentOwnedViewConstructionError>", "")
+        )
+        .is_err());
+    }
 
     fn metadata(desktop_dependencies: Vec<String>) -> CargoMetadata {
         CargoMetadata {

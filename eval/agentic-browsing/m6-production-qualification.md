@@ -33,6 +33,11 @@ responses, machine-local paths, or native traces.
   transport are absent from the ordinary desktop release graph; and
 - independently compile-refuses the fixed macOS semantic qualifier in
   optimized builds and proves it absent from that graph.
+- enumerates all seven agentic-owned production platform modules that contain
+  native/unsafe boundaries and requires each module to deny both undocumented
+  unsafe blocks and unsafe operations outside explicit unsafe blocks. A
+  mutation test removes or misplaces each lint header and proves the gate
+  refuses the source.
 
 The same check pins the default functional core to an empty feature set and a
 closed allocation/data dependency inventory. Its non-diagnostic source is
@@ -69,7 +74,14 @@ cargo test --locked -p xtask agentic_evidence
 cargo test --locked -p xtask agentic_probe_boundary
 cargo xtask check-agentic-probe-boundary
 cargo clippy --locked -p xtask --all-targets -- -D warnings
+cargo clippy --locked -p zephium-engine --features agentic-browser --all-targets -- -D warnings
+cargo clippy --locked -p zephium-engine --features agentic-browser --all-targets --target x86_64-pc-windows-msvc
 ```
+
+The Windows cross-target command intentionally leaves unrelated target-CFG
+dead-code warnings at their existing warning level. The module-level denies
+remain errors, so that command still rejects undocumented unsafe code in the
+agentic-owned Windows modules. Cross-compilation is not device behavior.
 
 ## Reviewed results
 
@@ -86,6 +98,19 @@ cargo clippy --locked -p xtask --all-targets -- -D warnings
   and Browse/resource claims.
 - The Windows adapter is source-guarded and cross-compiles. Cross-compilation is
   not physical-device behavioral evidence.
+- The functional agentic core forbids unsafe code. The agentic-owned production
+  native graph currently contains exactly seven audited modules: the macOS and
+  Windows owned-context, semantic-runtime, and semantic-screenshot adapters,
+  plus the Windows UI timeout adapter. Every unsafe block in those modules now
+  carries a local lifetime, thread/apartment, pointer, ownership, or ABI proof,
+  and module-level lints make both missing proofs and implicit unsafe operations
+  compile failures. The audit also made macOS view hardening/attestation refuse
+  off-main-thread calls and made the window-less Windows timer guard `!Send`, so
+  its TLS callback and `KillTimer` obligation cannot move off the creating UI
+  thread. Host Clippy and Windows MSVC cross-target Clippy passed this scoped
+  audit. This does not qualify physical Windows behavior or claim that shared,
+  extension-owned, third-party, or non-agentic platform code has completed its
+  native audit.
 - The Browse named-device baseline intentionally has no values. No CPU, memory,
   GPU/compositor, energy, wakeup, or input-latency budget has been inferred.
 - Checked-priced model receipts now preserve a content-free exact schedule
@@ -189,7 +214,8 @@ The authoritative aggregate records and exact remaining blockers are in
 - deterministic semantic/action/policy suite closure, the six-site matrix,
   concurrent production configuration, endurance, and fault-injection evidence;
 - hot-path and zero-unused-agent-overhead measurements; and
-- completed native/unsafe, profile, secret, log, shutdown, recovery, migration,
-  and stable Work-port audits.
+- completion of native/unsafe review outside the seven agentic-owned production
+  modules, plus profile, secret, log, shutdown, recovery, migration, and stable
+  Work-port audits.
 
 None of these pending items is represented as zero, passing, or non-blocking.

@@ -1,3 +1,6 @@
+#![deny(unsafe_op_in_unsafe_fn)]
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 //! Private production semantic runtime registration for owned agent contexts.
 //!
 //! WebKit's public evaluation APIs confer user activation, so this adapter
@@ -694,8 +697,13 @@ define_class!(
     #[ivars = SemanticMessageHandlerIvars]
     struct SemanticMessageHandler;
 
+    // SAFETY: `define_class!` fixes `NSObject` as this class's superclass and
+    // objc2 initializes the declared ivars before exposing an instance.
     unsafe impl NSObjectProtocol for SemanticMessageHandler {}
 
+    // SAFETY: the registered selector and Rust parameters exactly implement
+    // WebKit's generated reply-handler protocol. `MainThreadOnly` prevents the
+    // object from crossing threads, and callback state is retained in ivars.
     unsafe impl WKScriptMessageHandlerWithReply for SemanticMessageHandler {
         #[unsafe(method(userContentController:didReceiveScriptMessage:replyHandler:))]
         unsafe fn user_content_controller_did_receive_script_message_reply_handler(
@@ -707,6 +715,9 @@ define_class!(
             let ivars = self.ivars();
             let reply = reply.copy();
             let expected_view = ivars.channel.expected_view();
+            // SAFETY: WebKit supplied live protocol callback objects for this
+            // exact selector; objc2 retains each object returned by the four
+            // property messages for the duration of the checks below.
             let (world, name, webview, frame) = unsafe {
                 (
                     message.world(),
@@ -745,13 +756,19 @@ define_class!(
             let view_matches = webview
                 .as_ref()
                 .is_some_and(|view| std::ptr::from_ref(&**view).addr() == expected_view);
-            let frame_view_matches = unsafe { frame.webView() }
+            // SAFETY: `frame` is the live retained WKFrameInfo obtained from
+            // this callback message and this MainThreadOnly handler is running
+            // on WebKit's main-thread delivery path.
+            let (frame_webview, is_main_frame) = unsafe { (frame.webView(), frame.isMainFrame()) };
+            let frame_view_matches = frame_webview
                 .as_ref()
                 .is_some_and(|view| std::ptr::from_ref(&**view).addr() == expected_view);
-            if !view_matches || !frame_view_matches || !unsafe { frame.isMainFrame() } {
+            if !view_matches || !frame_view_matches || !is_main_frame {
                 ivars.channel.reject(reply, true);
                 return;
             }
+            // SAFETY: `message` remains live for this protocol callback; objc2
+            // retains its Objective-C body before the type and size checks.
             let body = unsafe { message.body() };
             let Ok(body) = body.downcast::<NSString>() else {
                 ivars.channel.reject(reply, true);
@@ -784,10 +801,14 @@ fn next_semantic_runtime_world(mtm: MainThreadMarker) -> Result<Retained<WKConte
     let name = NSString::from_str(&format!(
         "{SEMANTIC_RUNTIME_WORLD_NAME_PREFIX}{identifier:016x}"
     ));
+    // SAFETY: `mtm` proves main-thread creation and `name` is a live retained
+    // NSString. Objective-C exceptions are contained at this boundary.
     let world = objc2::exception::catch(AssertUnwindSafe(|| unsafe {
         WKContentWorld::worldWithName(&name, mtm)
     }))
     .map_err(|_| ())?;
+    // SAFETY: `world` is the retained object returned above and access remains
+    // on the main thread proven by `mtm`.
     if unsafe { world.name() }
         .as_ref()
         .is_none_or(|actual| !actual.isEqualToString(&name))
@@ -802,6 +823,12 @@ fn clear_semantic_runtime_controller(
     handler_name: &NSString,
     world: Option<&WKContentWorld>,
 ) -> bool {
+    if MainThreadMarker::new().is_none() {
+        return false;
+    }
+    // SAFETY: the marker check above proves main-thread access; controller,
+    // handler name, and optional world are live retained objects. Exceptions
+    // are caught and failure leaves the caller in fail-closed cleanup.
     let removed = objc2::exception::catch(AssertUnwindSafe(|| unsafe {
         if let Some(world) = world {
             controller.removeScriptMessageHandlerForName_contentWorld(handler_name, world);
@@ -812,6 +839,8 @@ fn clear_semantic_runtime_controller(
         controller.removeAllUserScripts();
     }))
     .is_ok();
+    // SAFETY: `controller` remains live on the verified main thread; objc2
+    // retains the returned script array for this bounded inventory check.
     removed && unsafe { controller.userScripts() }.count() == 0
 }
 
@@ -828,8 +857,13 @@ fn install_semantic_runtime_epoch(
         handler_name: handler_name.retain(),
         channel: channel.clone(),
     });
+    // SAFETY: `handler` is a freshly allocated instance of the declared class
+    // with fully initialized ivars; `init` is NSObject's designated initializer.
     let handler: Retained<SemanticMessageHandler> = unsafe { msg_send![super(handler), init] };
     let protocol_handler = objc2::runtime::ProtocolObject::from_ref(&*handler);
+    // SAFETY: `mtm` proves main-thread registration and every Objective-C
+    // argument is retained for this call. WebKit retains the protocol handler;
+    // exceptions are caught and trigger complete controller cleanup.
     let added_handler = objc2::exception::catch(AssertUnwindSafe(|| unsafe {
         controller.addScriptMessageHandlerWithReply_contentWorld_name(
             protocol_handler,
@@ -844,6 +878,9 @@ fn install_semantic_runtime_epoch(
     }
 
     let source = NSString::from_str(SEMANTIC_RUNTIME_PROGRAM.source());
+    // SAFETY: `mtm` proves main-thread allocation; source and content world are
+    // live retained values, and the fixed enum/bool arguments match WebKit's
+    // initializer contract. Objective-C exceptions are contained.
     let script = match objc2::exception::catch(AssertUnwindSafe(|| unsafe {
         WKUserScript::initWithSource_injectionTime_forMainFrameOnly_inContentWorld(
             WKUserScript::alloc(mtm),
@@ -859,6 +896,8 @@ fn install_semantic_runtime_epoch(
             return Err(());
         }
     };
+    // SAFETY: controller and script are live retained main-thread objects;
+    // WebKit retains the script and any exception is converted to refusal.
     let added = objc2::exception::catch(AssertUnwindSafe(|| unsafe {
         controller.addUserScript(&script);
     }))
@@ -895,7 +934,11 @@ impl AgentSemanticRuntimeRegistration {
         on_callback_panic: Rc<dyn Fn()>,
     ) -> Result<Self, ()> {
         let mtm = MainThreadMarker::new().ok_or(())?;
+        // SAFETY: `mtm` proves main-thread access and `configuration` is a live
+        // retained configuration supplied by the construction path. objc2
+        // retains the returned controller and script inventory.
         let controller = unsafe { configuration.userContentController() };
+        // SAFETY: the retained controller remains live on the same main thread.
         if unsafe { controller.userScripts() }.count() != 0 {
             return Err(());
         }
@@ -982,6 +1025,9 @@ impl AgentSemanticRuntimeRegistration {
         if self.retired {
             return Err(());
         }
+        let _mtm = MainThreadMarker::new().ok_or(())?;
+        // SAFETY: the marker above proves main-thread access; `configuration`
+        // is live and objc2 retains its returned content controller.
         let actual_controller = unsafe { configuration.userContentController() };
         if Retained::as_ptr(&actual_controller) != Retained::as_ptr(&self.controller) {
             return Err(());
@@ -990,19 +1036,31 @@ impl AgentSemanticRuntimeRegistration {
     }
 
     fn attest_controller(&self) -> Result<(), ()> {
+        let _mtm = MainThreadMarker::new().ok_or(())?;
         let active = self.active.as_ref().ok_or(())?;
         if self.channel.world_matches(&active.world) != Ok(true) {
             return Err(());
         }
+        // SAFETY: the marker above proves main-thread access; the retained
+        // controller remains live and objc2 retains its script inventory.
         let scripts = unsafe { self.controller.userScripts() };
         if scripts.count() != 1 {
             return Err(());
         }
         let script = scripts.objectAtIndex(0);
+        // SAFETY: the count check proves index zero exists, `script` is retained
+        // by objc2, and all WebKit property reads remain on the main thread.
+        let (source, injection_time, main_frame_only) = unsafe {
+            (
+                script.source(),
+                script.injectionTime(),
+                script.isForMainFrameOnly(),
+            )
+        };
         if Retained::as_ptr(&script) != Retained::as_ptr(&active.script)
-            || unsafe { script.source() }.to_string() != SEMANTIC_RUNTIME_PROGRAM.source()
-            || unsafe { script.injectionTime() } != WKUserScriptInjectionTime::AtDocumentStart
-            || !unsafe { script.isForMainFrameOnly() }
+            || source.to_string() != SEMANTIC_RUNTIME_PROGRAM.source()
+            || injection_time != WKUserScriptInjectionTime::AtDocumentStart
+            || !main_frame_only
         {
             return Err(());
         }

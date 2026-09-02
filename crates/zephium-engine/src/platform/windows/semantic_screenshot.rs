@@ -1,3 +1,6 @@
+#![deny(unsafe_op_in_unsafe_fn)]
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 //! Bounded WebView2 viewport capture for an exact owned document.
 //!
 //! `CapturePreview` writes directly into a custom Rust-owned `IStream`. The
@@ -384,6 +387,9 @@ pub(super) fn capture_viewport(
         callback_panicked,
     }
     .into();
+    // SAFETY: the live WebView2, stream, and completion handler belong to the
+    // same STA. WebView2 AddRefs the two COM arguments for asynchronous use;
+    // `PendingCapture` also retains the stream until the one completion.
     let dispatched = unsafe {
         view.webview().CapturePreview(
             COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG,
@@ -506,6 +512,8 @@ mod tests {
         let first = [1_u8, 2, 3, 4];
         let mut written = 0_u32;
         assert_eq!(
+            // SAFETY: `first` is readable for the declared length and `written`
+            // supplies valid ULONG out storage for the synchronous COM call.
             unsafe {
                 stream.Write(
                     first.as_ptr().cast(),
@@ -517,10 +525,13 @@ mod tests {
         );
         assert_eq!(written, 4);
         let mut position = 0_u64;
+        // SAFETY: the stream is live and `position` is exact writable ULARGE_INTEGER storage.
         unsafe { stream.Seek(1, STREAM_SEEK_SET, Some(&mut position)) }.expect("seek");
         assert_eq!(position, 1);
         let replacement = [9_u8, 8];
         assert_eq!(
+            // SAFETY: `replacement` is readable for the declared length and
+            // `written` remains valid ULONG out storage.
             unsafe {
                 stream.Write(
                     replacement.as_ptr().cast(),
@@ -531,6 +542,7 @@ mod tests {
             HRESULT(0)
         );
         let mut stat = STATSTG::default();
+        // SAFETY: `stat` is initialized writable STATSTG storage for this synchronous call.
         unsafe { stream.Stat(&mut stat, STATFLAG_NONAME) }.expect("stat");
         assert_eq!(stat.r#type, STGTY_STREAM.0 as u32);
         assert_eq!(stat.cbSize, 4);
@@ -544,6 +556,8 @@ mod tests {
         let exact = [1_u8, 2, 3, 4];
         let mut written = 0_u32;
         assert_eq!(
+            // SAFETY: `exact` is readable for the declared length and `written`
+            // supplies valid ULONG out storage for the synchronous COM call.
             unsafe {
                 stream.Write(
                     exact.as_ptr().cast(),
@@ -555,6 +569,7 @@ mod tests {
         );
         assert_eq!(written, 4);
         assert_eq!(
+            // SAFETY: `exact` remains readable and `written` remains valid out storage.
             unsafe { stream.Write(exact.as_ptr().cast(), 1, Some(&mut written)) },
             STG_E_MEDIUMFULL
         );
@@ -562,6 +577,7 @@ mod tests {
         assert_eq!(shared.failure.get(), Some(StreamFailure::ResourceExhausted));
         assert_eq!(shared.buffer.borrow().len(), 4);
         assert_eq!(
+            // SAFETY: the stream is live; this seek supplies no optional out pointer.
             unsafe { stream.Seek(0, STREAM_SEEK_SET, None) }
                 .expect_err("sticky stream failure")
                 .code(),

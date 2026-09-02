@@ -1,3 +1,6 @@
+#![deny(unsafe_op_in_unsafe_fn)]
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 //! Extension-free, hidden WKWebView construction for owned agent contexts.
 
 use std::rc::Rc;
@@ -76,16 +79,21 @@ fn new_owned_agent_configuration(
         (ContextProfileStorageClass::Durable, None) => {
             let mtm = MainThreadMarker::new().ok_or(AgentOwnedViewConstructionError::Native)?;
             let identifier = NSUUID::from_bytes(profile.bytes());
-            let store = unsafe { WKWebsiteDataStore::dataStoreForIdentifier(&identifier, mtm) };
-            if !unsafe { store.isPersistent() }
-                || unsafe { store.identifier() }.map(|value| value.as_bytes())
-                    != Some(profile.bytes())
-            {
-                return Err(AgentOwnedViewConstructionError::Storage);
-            }
-            let configuration = unsafe { WKWebViewConfiguration::new(mtm) };
-            unsafe { configuration.setWebsiteDataStore(&store) };
-            let actual_store = unsafe { configuration.websiteDataStore() };
+            // SAFETY: `mtm` proves all WebKit messages run on the main thread;
+            // the UUID and returned retained objects remain live throughout
+            // the calls, and each result is attested before use.
+            let (store, configuration, actual_store) = unsafe {
+                let store = WKWebsiteDataStore::dataStoreForIdentifier(&identifier, mtm);
+                if !store.isPersistent()
+                    || store.identifier().map(|value| value.as_bytes()) != Some(profile.bytes())
+                {
+                    return Err(AgentOwnedViewConstructionError::Storage);
+                }
+                let configuration = WKWebViewConfiguration::new(mtm);
+                configuration.setWebsiteDataStore(&store);
+                let actual_store = configuration.websiteDataStore();
+                (store, configuration, actual_store)
+            };
             if Retained::as_ptr(&actual_store) != Retained::as_ptr(&store) {
                 return Err(AgentOwnedViewConstructionError::Storage);
             }
@@ -360,7 +368,7 @@ where
     semantic
         .bind_view(&super::native_webview(&view))
         .map_err(|_| AgentOwnedViewConstructionError::Native)?;
-    harden_owned_agent_view(&view);
+    harden_owned_agent_view(&view)?;
     attest_owned_agent_view(
         &view,
         &semantic,
@@ -377,15 +385,20 @@ where
     })
 }
 
-fn harden_owned_agent_view(view: &WebView) {
+fn harden_owned_agent_view(view: &WebView) -> Result<(), AgentOwnedViewConstructionError> {
     use objc2_app_kit::{NSAutoresizingMaskOptions as Mask, NSView};
+    use objc2_foundation::MainThreadMarker;
 
+    let _mtm = MainThreadMarker::new().ok_or(AgentOwnedViewConstructionError::Native)?;
     let page = super::native_webview(view);
+    // SAFETY: the marker above proves main-thread access and `page` is the
+    // retained WKWebView owned by the live Wry handle for this call.
     unsafe { page.setInspectable(false) };
     let native_view: &NSView = &page;
     native_view.setTranslatesAutoresizingMaskIntoConstraints(true);
     native_view.setAutoresizingMask(Mask::ViewNotSizable);
     native_view.setHidden(true);
+    Ok(())
 }
 
 pub(crate) fn attest_owned_agent_view(
@@ -398,19 +411,32 @@ pub(crate) fn attest_owned_agent_view(
 ) -> Result<(), AgentOwnedViewConstructionError> {
     use objc2::rc::Retained;
     use objc2_app_kit::{NSAutoresizingMaskOptions as Mask, NSView};
+    use objc2_foundation::MainThreadMarker;
 
+    let _mtm = MainThreadMarker::new().ok_or(AgentOwnedViewConstructionError::Native)?;
     let page = super::native_webview(view);
-    let configuration = unsafe { page.configuration() };
-    if unsafe { configuration.webExtensionController() }.is_some() {
+    // SAFETY: the marker above proves main-thread access; `page` and every
+    // object returned from it are retained by objc2 for these bounded reads.
+    let (configuration, extension_controller) = unsafe {
+        let configuration = page.configuration();
+        let extension_controller = configuration.webExtensionController();
+        (configuration, extension_controller)
+    };
+    if extension_controller.is_some() {
         return Err(AgentOwnedViewConstructionError::ExtensionIsolation);
     }
     if semantic.attest_configuration(&configuration).is_err() {
         return Err(AgentOwnedViewConstructionError::ExtensionIsolation);
     }
 
-    let actual_store = unsafe { configuration.websiteDataStore() };
-    let persistent = unsafe { actual_store.isPersistent() };
-    let identifier = unsafe { actual_store.identifier() }.map(|value| value.as_bytes());
+    // SAFETY: `configuration` is the retained configuration of the live page;
+    // its retained data store remains valid for these identity reads.
+    let (actual_store, persistent, identifier) = unsafe {
+        let actual_store = configuration.websiteDataStore();
+        let persistent = actual_store.isPersistent();
+        let identifier = actual_store.identifier().map(|value| value.as_bytes());
+        (actual_store, persistent, identifier)
+    };
     let storage_valid = match storage_class {
         ContextProfileStorageClass::Durable => {
             ephemeral_store.is_none() && persistent && identifier == Some(profile.bytes())
@@ -430,6 +456,7 @@ pub(crate) fn attest_owned_agent_view(
 
     let native_view: &NSView = &page;
     let frame = native_view.frame();
+    // SAFETY: main-thread access and the live retained page were proven above.
     if unsafe { page.isInspectable() }
         || native_view.autoresizingMask() != Mask::ViewNotSizable
         || frame.size.width != f64::from(viewport.width())
