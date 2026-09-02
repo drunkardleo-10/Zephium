@@ -252,7 +252,7 @@ agentic-owned Windows modules. Cross-compilation is not device behavior.
   sides of the action. The cross-compiled adapter rejects duplicate/invalid or
   changed PID/kind cohorts, partial query-limited handle or memory queries,
   close failure, overflow, and more than 64 total processes; it holds the
-  handles through an exact post-sample Environment8 PID/total/helper rejoin.
+  handles through an exact post-sample Environment8 PID/kind/total/helper rejoin.
   WebView2 excludes crashpad from this API, so the sum is not a whole-process-
   family or resource-budget measurement. Its exact-pinned raw bindings remain
   optional behind the probe feature, and review schema v2 retains both maxima
@@ -276,7 +276,7 @@ agentic-owned Windows modules. Cross-compilation is not device behavior.
   after the semantic drain. Both Windows qualifiers share one release-excluded
   sampler: exactly one Browser kind and at least one helper are required;
   query-limited non-inheritable handles remain owned through an exact
-  PID/total/helper cohort rejoin, and any partial, changing, overflowing, or
+  PID/kind/total/helper cohort rejoin, and any partial, changing, overflowing, or
   close-failed observation is rejected. WebView2 omits crashpad, so this is not
   a whole-process-family or resource-budget measurement. Protocol and review
   schema v5 retain only the two maxima. Mutation tests replace each evidence

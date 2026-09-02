@@ -2137,7 +2137,7 @@ fn runtime_fingerprint() -> Result<RuntimeFingerprint, AdapterError> {
         engine: EvidenceLabel::new("WebView2").map_err(|_| AdapterError::InvalidEvidence)?,
         engine_version: EvidenceLabel::new(engine_version)
             .map_err(|_| AdapterError::InvalidEvidence)?,
-        adapter_revision: EvidenceLabel::new("native-input-m1-resources-v3")
+        adapter_revision: EvidenceLabel::new("native-input-m1-resources-v4")
             .map_err(|_| AdapterError::InvalidEvidence)?,
     })
 }

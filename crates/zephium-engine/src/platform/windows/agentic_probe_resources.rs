@@ -5,10 +5,10 @@
 //! Release-excluded, content-free WebView2 process resource sampler.
 //!
 //! Both physical Windows qualification adapters use this one bounded native
-//! implementation. It exposes only the Environment8 process count, its derived
-//! helper count, and aggregate resident working set; process identities and
-//! handles never cross this module. WebView2 explicitly excludes crashpad from
-//! this API cohort, so this is not a whole-process-family measurement.
+//! implementation. It exposes only the Environment8 process count and
+//! aggregate resident working set; process identities, kinds, and handles never
+//! cross this module. WebView2 explicitly excludes crashpad from this API
+//! cohort, so this is not a whole-process-family measurement.
 
 use webview2_com::Microsoft::Web::WebView2::Win32::{
     ICoreWebView2Environment, ICoreWebView2Environment8, COREWEBVIEW2_PROCESS_KIND_BROWSER,
@@ -27,6 +27,8 @@ pub(crate) struct WebView2ResourceSample {
     pub(crate) processes: u8,
     pub(crate) resident_bytes: u64,
 }
+
+type ProcessCohort = [(u32, i32); MAX_RESOURCE_WEBVIEW2_PROCESSES as usize];
 
 struct ProbeProcessHandle(HANDLE);
 
@@ -95,8 +97,8 @@ pub(crate) fn sample_webview2_resources<E>(
     let Ok(environment) = environment else {
         return Ok(None);
     };
-    let Some((process_ids, process_count, helper_processes)) =
-        webview2_process_ids(&environment, check_control)?
+    let Some((process_cohort, process_count, helper_processes)) =
+        webview2_process_cohort(&environment, check_control)?
     else {
         return Ok(None);
     };
@@ -106,13 +108,13 @@ pub(crate) fn sample_webview2_resources<E>(
     let Some(active_handles) = process_handles.get_mut(..process_count_usize) else {
         return Ok(None);
     };
-    let Some(active_process_ids) = process_ids.get(..process_count_usize) else {
+    let Some(active_process_cohort) = process_cohort.get(..process_count_usize) else {
         return Ok(None);
     };
     let mut resident_bytes = 0_u64;
     for (slot, process_id) in active_handles
         .iter_mut()
-        .zip(active_process_ids.iter().copied())
+        .zip(active_process_cohort.iter().map(|entry| entry.0))
     {
         check_control()?;
         let opened_handle = ProbeProcessHandle::open(process_id);
@@ -135,14 +137,14 @@ pub(crate) fn sample_webview2_resources<E>(
         *slot = Some(handle);
     }
 
-    let Some((rejoined_process_ids, rejoined_count, rejoined_helper_processes)) =
-        webview2_process_ids(&environment, check_control)?
+    let Some((rejoined_process_cohort, rejoined_count, rejoined_helper_processes)) =
+        webview2_process_cohort(&environment, check_control)?
     else {
         return Ok(None);
     };
     if rejoined_count != process_count
         || rejoined_helper_processes != helper_processes
-        || rejoined_process_ids.get(..process_count_usize) != Some(active_process_ids)
+        || rejoined_process_cohort.get(..process_count_usize) != Some(active_process_cohort)
     {
         return Ok(None);
     }
@@ -157,10 +159,10 @@ pub(crate) fn sample_webview2_resources<E>(
     }))
 }
 
-fn webview2_process_ids<E>(
+fn webview2_process_cohort<E>(
     environment: &ICoreWebView2Environment8,
     check_control: &mut impl FnMut() -> Result<(), E>,
-) -> Result<Option<([u32; MAX_RESOURCE_WEBVIEW2_PROCESSES as usize], u8, u8)>, E> {
+) -> Result<Option<(ProcessCohort, u8, u8)>, E> {
     check_control()?;
     // SAFETY: the live COM environment owns the returned snapshot collection
     // and transfers it through the generated smart pointer.
@@ -184,7 +186,7 @@ fn webview2_process_ids<E>(
         return Ok(None);
     };
 
-    let mut process_ids = [0_u32; MAX_RESOURCE_WEBVIEW2_PROCESSES as usize];
+    let mut process_cohort = [(0_u32, 0_i32); MAX_RESOURCE_WEBVIEW2_PROCESSES as usize];
     let mut browser_processes = 0_u8;
     for index in 0..count {
         check_control()?;
@@ -223,17 +225,20 @@ fn webview2_process_ids<E>(
         };
         let Some(slot) = usize::try_from(index)
             .ok()
-            .and_then(|index| process_ids.get_mut(index))
+            .and_then(|index| process_cohort.get_mut(index))
         else {
             return Ok(None);
         };
-        *slot = process_id;
+        *slot = (process_id, kind.0);
     }
-    let Some(active_process_ids) = process_ids.get_mut(..usize::from(process_count)) else {
+    let Some(active_process_cohort) = process_cohort.get_mut(..usize::from(process_count)) else {
         return Ok(None);
     };
-    active_process_ids.sort_unstable();
-    if active_process_ids.windows(2).any(|pair| pair[0] == pair[1]) {
+    active_process_cohort.sort_unstable();
+    if active_process_cohort
+        .windows(2)
+        .any(|pair| pair[0].0 == pair[1].0)
+    {
         return Ok(None);
     }
     if browser_processes != 1 {
@@ -245,7 +250,7 @@ fn webview2_process_ids<E>(
     else {
         return Ok(None);
     };
-    Ok(Some((process_ids, process_count, helper_processes)))
+    Ok(Some((process_cohort, process_count, helper_processes)))
 }
 
 fn close_process_handles(handles: &mut [Option<ProbeProcessHandle>]) -> bool {

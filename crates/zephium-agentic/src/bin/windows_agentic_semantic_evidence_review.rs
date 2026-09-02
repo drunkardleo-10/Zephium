@@ -251,7 +251,7 @@ mod tests {
                 engine: EvidenceLabel::new("WebView2").expect("engine label"),
                 engine_version: EvidenceLabel::new("140.0.0.0").expect("version label"),
                 adapter_revision: EvidenceLabel::new(
-                    "semantic-runtime-m3-lifecycle-m2-redirect-location-resources-v3",
+                    "semantic-runtime-m3-lifecycle-m2-redirect-location-resources-v4",
                 )
                 .expect("adapter label"),
             },

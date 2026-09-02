@@ -221,7 +221,7 @@ and aggregate resident-working-set sample before its mode-specific work and
 after semantic work drains. Qualification requires exactly one Browser kind
 and at least one helper, admits at most 64 unique nonzero process IDs, opens
 only non-inheritable query-limited handles, checked-sums under 1 TiB, and
-exactly rejoins the PID, total-count, and helper-count cohort while those
+exactly rejoins the PID/kind, total-count, and helper-count cohort while those
 handles remain owned. `GetProcessInfos` excludes crashpad, so the aggregate is
 not a whole-process-family or resource-budget measurement. Missing, partial,
 changed, overflowing, or close-failed samples reject the run; process
@@ -294,7 +294,7 @@ cargo run --locked -p zephium-agentic `
 
 The offline reviewer requires one identical Windows/WebView2/adapter
 fingerprint. Protocol v5 and the
-`semantic-runtime-m3-lifecycle-m2-redirect-location-resources-v3` adapter revision
+`semantic-runtime-m3-lifecycle-m2-redirect-location-resources-v4` adapter revision
 prevent older six-record results from mixing with this cohort. It
 also requires exact mode-specific snapshot, document-epoch, suspension,
 pressure, bounded redirect/refusal/recovery, same-document native replacement/

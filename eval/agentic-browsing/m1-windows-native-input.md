@@ -156,7 +156,7 @@ key-up messages to acquire inconsistent scan metadata.
   the release-excluded input or semantic probe feature. Both Windows physical
   qualifiers reuse this one sampler implementation. The
   producer/qualifier pair requires adapter revision
-  `native-input-m1-resources-v3`; review schema v2 retains the maximum derived
+  `native-input-m1-resources-v4`; review schema v2 retains the maximum derived
   helper-process count and API-cohort resident bytes across the four required
   runs.
 - Each physical mode writes one bounded versioned JSON response to its selected

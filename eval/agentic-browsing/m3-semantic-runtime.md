@@ -514,7 +514,7 @@ sampler as M1 to measure the exact ephemeral user-data-folder's stable WebView2
 Environment8 process cohort and checked aggregate resident working set. The
 sampler requires exactly one Browser kind and at least one helper, permits at
 most 64 unique nonzero PIDs, owns query-limited non-inheritable handles through
-an exact PID/total/helper cohort rejoin, closes them on every path, and fails
+an exact PID/kind/total/helper cohort rejoin, closes them on every path, and fails
 closed on an unavailable, partial, changed, overflowing, or close-failed
 sample. WebView2 omits crashpad from this API, so the observation is not a
 whole-process-family or resource-budget measurement. Protocol v5 and review

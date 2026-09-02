@@ -678,7 +678,7 @@ from one Environment8 process snapshot, rejects zero, duplicate, or more than
 64 total process IDs, opens only query-limited non-inheritable handles, closes
 each through an owned guard, and checked-sums `WorkingSetSize` under a 1 TiB
 evidence ceiling. It holds those handles while re-reading and exactly rejoining
-the sorted Environment8 PID, total-count, and helper-count cohort, closing the
+the sorted Environment8 PID/kind, total-count, and helper-count cohort, closing the
 process-exit/PID-reuse and kind-substitution gaps. `GetProcessInfos` excludes
 crashpad, so the resident sum covers the reported API cohort and is not a
 whole-process-family or resource-budget measurement. Any unavailable, changed,

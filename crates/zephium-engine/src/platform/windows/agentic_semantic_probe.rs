@@ -2298,7 +2298,7 @@ fn runtime_fingerprint() -> ProbeResult<RuntimeFingerprint> {
         engine_version: EvidenceLabel::new(engine_version)
             .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Construct))?,
         adapter_revision: EvidenceLabel::new(
-            "semantic-runtime-m3-lifecycle-m2-redirect-location-resources-v3",
+            "semantic-runtime-m3-lifecycle-m2-redirect-location-resources-v4",
         )
         .map_err(|_| ProbeError::verify(WindowsSemanticProbeStage::Construct))?,
     })

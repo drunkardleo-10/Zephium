@@ -2563,7 +2563,7 @@ fn validate_windows_probe_binary(source: &str, qualification: &str) -> Result<()
         "--ci-hidden-cdp",
         "--visible-background-windows-all",
         "--visible-focused-windows-all",
-        "evidence.runtime.adapter_revision.as_str()!=\"native-input-m1-resources-v3\"",
+        "evidence.runtime.adapter_revision.as_str()!=\"native-input-m1-resources-v4\"",
         "focus_sequence_matches_presentation(actual.focus,mode.presentation())",
         "focus.before==baseline&&focus.during==baseline&&focus.after==after",
         "actual.focus.target_received_dom_focus!=target_focus_event_observed(actual)",
@@ -2715,19 +2715,21 @@ fn validate_windows_probe_resource_sampler(module: &str, source: &str) -> Result
     );
     for required in [
         "pub(crate)structWebView2ResourceSample{pub(crate)processes:u8,pub(crate)resident_bytes:u64,}",
+        "typeProcessCohort=[(u32,i32);MAX_RESOURCE_WEBVIEW2_PROCESSESasusize];",
         "pub(crate)fnsample_webview2_resources<E>(environment:&ICoreWebView2Environment,check_control:&mutimplFnMut()->Result<(),E>,)->Result<Option<WebView2ResourceSample>,E>",
         "usezephium_agentic::{MAX_RESOURCE_RESIDENT_BYTES,MAX_RESOURCE_WEBVIEW2_PROCESSES};",
         "letenvironment=environment.cast::<ICoreWebView2Environment8>();check_control()?;letOk(environment)=environmentelse{returnOk(None);};",
         "letprocesses=unsafe{environment.GetProcessInfos()};check_control()?;letOk(processes)=processeselse{returnOk(None);};",
         "letcount_result=unsafe{processes.Count(&mutcount)};check_control()?;ifcount_result.is_err()",
         ".filter(|count|(1..=MAX_RESOURCE_WEBVIEW2_PROCESSES).contains(count))",
-        "letmutprocess_ids=[0_u32;MAX_RESOURCE_WEBVIEW2_PROCESSESasusize];",
+        "letmutprocess_cohort=[(0_u32,0_i32);MAX_RESOURCE_WEBVIEW2_PROCESSESasusize];",
         "letmutprocess_handles:[Option<ProbeProcessHandle>;MAX_RESOURCE_WEBVIEW2_PROCESSESasusize]",
-        "ifactive_process_ids.windows(2).any(|pair|pair[0]==pair[1])",
+        "active_process_cohort.windows(2).any(|pair|pair[0].0==pair[1].0)",
         "letprocess=unsafe{processes.GetValueAtIndex(index)};check_control()?;letOk(process)=processelse{returnOk(None);};",
         "letkind_result=unsafe{process.Kind(&mutkind)};check_control()?;ifkind_result.is_err()",
         "ifkind==COREWEBVIEW2_PROCESS_KIND_BROWSER",
         "letprocess_id_result=unsafe{process.ProcessId(&mutprocess_id)};check_control()?;ifprocess_id_result.is_err()",
+        "*slot=(process_id,kind.0);",
         "unsafe{OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,0,process_id)}",
         "(!handle.is_null()).then_some(Self(handle))",
         "usewindows_probe_sys::Win32::System::ProcessStatus::{GetProcessMemoryInfo,PROCESS_MEMORY_COUNTERS,};",
@@ -2736,9 +2738,9 @@ fn validate_windows_probe_resource_sampler(module: &str, source: &str) -> Result
         "lethandle=std::mem::replace(&mutself.0,std::ptr::null_mut());",
         "unsafe{CloseHandle(handle)!=0}",
         "all_closed&=handle.close()",
-        "letSome((process_ids,process_count,helper_processes))=webview2_process_ids(&environment,check_control)?else{returnOk(None);};",
-        "letSome((rejoined_process_ids,rejoined_count,rejoined_helper_processes))=webview2_process_ids(&environment,check_control)?else{returnOk(None);};",
-        "ifrejoined_count!=process_count||rejoined_helper_processes!=helper_processes||rejoined_process_ids.get(..process_count_usize)!=Some(active_process_ids)",
+        "letSome((process_cohort,process_count,helper_processes))=webview2_process_cohort(&environment,check_control)?else{returnOk(None);};",
+        "letSome((rejoined_process_cohort,rejoined_count,rejoined_helper_processes))=webview2_process_cohort(&environment,check_control)?else{returnOk(None);};",
+        "ifrejoined_count!=process_count||rejoined_helper_processes!=helper_processes||rejoined_process_cohort.get(..process_count_usize)!=Some(active_process_cohort)",
         "ifbrowser_processes!=1",
         "process_count.checked_sub(browser_processes).filter(|count|*count!=0)",
         "letopened_handle=ProbeProcessHandle::open(process_id);check_control()?;letSome(handle)=opened_handleelse{returnOk(None);};letprocess_resident_bytes=handle.resident_bytes();check_control()?;letSome(process_resident_bytes)=process_resident_byteselse{returnOk(None);};",
@@ -2761,7 +2763,7 @@ fn validate_windows_probe_resource_sampler(module: &str, source: &str) -> Result
         || code.matches("GetProcessMemoryInfo(").count() != 1
         || code.matches("CloseHandle(").count() != 1
         || code
-            .matches("webview2_process_ids(&environment,check_control)?")
+            .matches("webview2_process_cohort(&environment,check_control)?")
             .count()
             != 2
     {
@@ -2874,7 +2876,7 @@ fn validate_windows_probe_source(source: &str) -> Result<(), String> {
         "Self::InputDispatchKeyEvent=>\"Input.dispatchKeyEvent\"",
         "Self::RuntimeEvaluate=>\"Runtime.evaluate\"",
         "\"userGesture\":false",
-        "EvidenceLabel::new(\"native-input-m1-resources-v3\")",
+        "EvidenceLabel::new(\"native-input-m1-resources-v4\")",
         "letmutcheck_control=||check_dispatch_control(permit,poll_control,deadline);",
         "super::agentic_probe_resources::sample_webview2_resources(environment,&mutcheck_control)?",
         "helper_processes:sample.and_then(|sample|sample.processes.checked_sub(1)),resident_bytes:sample.map(|sample|sample.resident_bytes)",
@@ -3024,7 +3026,7 @@ fn validate_windows_semantic_probe(
         "view.navigation().location_state_for_audit()!=Some((false,false,false))",
         "verify_location_before_snapshot(&before)?;",
         "verify_location_after_snapshot(&after)?;",
-        "\"semantic-runtime-m3-lifecycle-m2-redirect-location-resources-v3\"",
+        "\"semantic-runtime-m3-lifecycle-m2-redirect-location-resources-v4\"",
         "facts.resources_before=Some(sample_resources(",
         "facts.resources_after=Some(sample_resources(",
         "super::agentic_probe_resources::sample_webview2_resources(environment,&mutcheck_control)?",
@@ -3447,7 +3449,7 @@ fn validate_windows_semantic_review_binary(source: &str, evidence: &str) -> Resu
         "valid_resource_sample(self.resources_after)",
         "maximum_webview2_processes",
         "maximum_resident_bytes",
-        "semantic-runtime-m3-lifecycle-m2-redirect-location-resources-v3",
+        "semantic-runtime-m3-lifecycle-m2-redirect-location-resources-v4",
     ] {
         if !evidence.contains(required) {
             return Err(format!(
@@ -11659,8 +11661,8 @@ mod tests {
         assert!(validate_windows_probe_resource_sampler(
             module,
             &valid.replacen(
-                "    let Some((rejoined_process_ids, rejoined_count, rejoined_helper_processes)) =\n        webview2_process_ids(&environment, check_control)?\n    else {\n        return Ok(None);\n    };",
-                "    let (rejoined_process_ids, rejoined_count, rejoined_helper_processes) = (process_ids, process_count, helper_processes);",
+                "    let Some((rejoined_process_cohort, rejoined_count, rejoined_helper_processes)) =\n        webview2_process_cohort(&environment, check_control)?\n    else {\n        return Ok(None);\n    };",
+                "    let (rejoined_process_cohort, rejoined_count, rejoined_helper_processes) = (process_cohort, process_count, helper_processes);",
                 1,
             ),
         )
@@ -11699,6 +11701,11 @@ mod tests {
         assert!(validate_windows_probe_resource_sampler(
             module,
             &valid.replace("if browser_processes != 1", "if false"),
+        )
+        .is_err());
+        assert!(validate_windows_probe_resource_sampler(
+            module,
+            &valid.replace("*slot = (process_id, kind.0);", "*slot = (process_id, 0);",),
         )
         .is_err());
         assert!(validate_windows_probe_resource_sampler(
@@ -11775,7 +11782,7 @@ mod tests {
             "--ci-hidden-cdp";
             "--visible-background-windows-all";
             "--visible-focused-windows-all";
-            evidence.runtime.adapter_revision.as_str() != "native-input-m1-resources-v3";
+            evidence.runtime.adapter_revision.as_str() != "native-input-m1-resources-v4";
             focus_sequence_matches_presentation(actual.focus, mode.presentation());
             focus.before == baseline && focus.during == baseline && focus.after == after;
             actual.focus.target_received_dom_focus != target_focus_event_observed(actual);
@@ -12000,7 +12007,7 @@ mod tests {
             valid_resource_sample(self.resources_after);
             maximum_webview2_processes;
             maximum_resident_bytes;
-            "semantic-runtime-m3-lifecycle-m2-redirect-location-resources-v3";
+            "semantic-runtime-m3-lifecycle-m2-redirect-location-resources-v4";
         "#;
         validate_windows_semantic_review_binary(binary, evidence).expect("closed reviewer");
         assert!(validate_windows_semantic_review_binary(
