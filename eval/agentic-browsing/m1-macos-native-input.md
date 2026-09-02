@@ -90,10 +90,15 @@ silently.
   fixed runtime samples settled activation after 50 ms and emits final evidence
   after 200 ms. Native waits check cancellation every five-millisecond run-loop
   slice.
-- Cancellation is exact, non-reusable, and polled during navigation,
-  runtime-message wait, teardown, and matrix iteration. Post-construction errors
-  and cancellation converge on explicit view close, worker shutdown, and
-  teardown observation before a result is returned.
+- Cancellation is exact and non-reusable. The adapter now polls it before
+  allocating native run resources, immediately before loopback navigation,
+  before every presentation/focus transition, before every AppKit mouse/key
+  event, and before both accessibility hit-test and press. Multi-event mouse,
+  drag, key, and select sequences therefore stop between native events rather
+  than discovering revoked authority only after the sequence. Navigation,
+  runtime-message wait, teardown, and matrix iteration retain their bounded
+  polling. Post-construction errors and cancellation converge on explicit view
+  close, worker shutdown, and teardown observation before a result is returned.
 - Evidence contains closed enums, Booleans, counters, durations, and validated
   runtime labels only. URLs, profile identifiers/paths, page text, HTML,
   screenshots, native errors, provider data, and clipboard contents are absent.
@@ -123,7 +128,15 @@ accounts, and no external site.
 The JSONL controller framing, capacity refusal, close-on-exec descriptor,
 release graph, optimized-build refusal, target/capability joins, closed fixture
 URL parser, isolated envelope parser, and fixture server fragmentation behavior
-also have deterministic tests.
+also have deterministic tests. The macOS input module now denies undocumented
+unsafe blocks and unsafe operations outside explicit blocks. A static boundary
+pins the ephemeral store, extension-free fixed content-world runtime, exact
+page/frame/URL and message-size joins, cancellation/deadline preflight adjacent
+to every native dispatch, and absence of `CGEvent`, system-wide Accessibility
+trust/prompt APIs, generic page evaluation, and generic IPC. Mutation tests
+remove each representative protection and require refusal. Native-feature host
+Clippy passes with warnings denied; this compile/source evidence does not
+replace the still-pending AppKit/accessibility device matrices.
 
 ## Blocking evidence
 

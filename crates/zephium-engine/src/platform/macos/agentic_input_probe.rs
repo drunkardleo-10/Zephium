@@ -1,3 +1,6 @@
+#![deny(unsafe_op_in_unsafe_fn)]
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 //! Release-excluded macOS native-input/isTrusted risk probe.
 
 use std::cell::{Cell, RefCell};
@@ -60,6 +63,25 @@ struct ProbeHostView {
 struct EphemeralProbeProfile {
     partition: Partition,
     store: super::WebsiteDataStore,
+}
+
+struct NativeDispatchControl<'a> {
+    permit: &'a ProbeRunPermit,
+    poll_control: &'a mut dyn FnMut(),
+    deadline: Instant,
+}
+
+impl NativeDispatchControl<'_> {
+    fn check(&mut self) -> Result<(), AdapterError> {
+        (self.poll_control)();
+        if self.permit.is_cancelled() {
+            return Err(AdapterError::Cancelled);
+        }
+        if Instant::now() >= self.deadline {
+            return Err(AdapterError::Timeout);
+        }
+        Ok(())
+    }
 }
 
 impl EphemeralProbeProfile {
@@ -356,22 +378,31 @@ impl ProbeRuntimeMailbox {
             .as_ref()
             .and_then(Weak::load)
             .ok_or(AdapterError::InvalidEvidence)?;
+        // SAFETY: WebKit supplied this live message to the main-thread-only
+        // handler, and objc2 retains the optional page result.
         let message_page = unsafe { message.webView() }.ok_or(AdapterError::InvalidEvidence)?;
         if Retained::as_ptr(&message_page).cast::<c_void>()
             != Retained::as_ptr(&expected_page).cast::<c_void>()
         {
             return Err(AdapterError::InvalidEvidence);
         }
+        // SAFETY: the live WebKit message owns valid frame metadata for the
+        // duration of this callback, and objc2 retains the returned object.
         let frame = unsafe { message.frameInfo() };
+        // SAFETY: `frame` is the retained metadata returned by this message.
         if !unsafe { frame.isMainFrame() } {
             return Err(AdapterError::InvalidEvidence);
         }
+        // SAFETY: `frame` remains retained and WebKit exposes its optional
+        // owning page through this property.
         let frame_page = unsafe { frame.webView() }.ok_or(AdapterError::InvalidEvidence)?;
         if Retained::as_ptr(&frame_page).cast::<c_void>()
             != Retained::as_ptr(&expected_page).cast::<c_void>()
         {
             return Err(AdapterError::InvalidEvidence);
         }
+        // SAFETY: `frame` remains retained; objc2 retains the request returned
+        // by WebKit before this callback can release its framework arguments.
         let request = unsafe { frame.request() };
         let frame_url = request
             .URL()
@@ -387,6 +418,8 @@ impl ProbeRuntimeMailbox {
             return Err(AdapterError::InvalidEvidence);
         }
 
+        // SAFETY: the live callback message owns its body and objc2 returns a
+        // retained Objective-C object, which is downcast before use.
         let body = unsafe { message.body() }
             .downcast::<NSString>()
             .map_err(|_| AdapterError::InvalidEvidence)?;
@@ -515,6 +548,8 @@ define_class!(
             message: &WKScriptMessage,
         ) {
             let ivars = this.ivars();
+            // SAFETY: WebKit invokes this main-thread-only callback with a live
+            // message; objc2 retains both properties before they are compared.
             let (world, name) = unsafe { (message.world(), message.name()) };
             if Retained::as_ptr(&world) != Retained::as_ptr(&ivars.world)
                 || !name.isEqualToString(&ivars.handler_name)
@@ -542,6 +577,8 @@ struct ProbeRuntimeRegistration {
 
 impl Drop for ProbeRuntimeRegistration {
     fn drop(&mut self) {
+        // SAFETY: all receiver arguments are retained fields created on the
+        // AppKit main thread. Exceptions are caught before crossing Rust Drop.
         let _ = objc2::exception::catch(std::panic::AssertUnwindSafe(|| unsafe {
             self.controller
                 .removeScriptMessageHandlerForName_contentWorld(&self.handler_name, &self.world);
@@ -555,8 +592,12 @@ fn install_probe_runtime(
     configuration: &WKWebViewConfiguration,
     mailbox: Rc<ProbeRuntimeMailbox>,
 ) -> Result<ProbeRuntimeRegistration, AdapterError> {
+    // SAFETY: `configuration` is retained and used on the main thread proven
+    // by `mtm`; objc2 retains the returned controller.
     let controller = unsafe { configuration.userContentController() };
     let world_name = NSString::from_str(MACOS_PROBE_CONTENT_WORLD_V1);
+    // SAFETY: the non-null name and main-thread marker satisfy WebKit's class
+    // method requirements; objc2 retains the returned world.
     let world = unsafe { WKContentWorld::worldWithName(&world_name, mtm) };
     let handler_name = NSString::from_str(MACOS_PROBE_HANDLER_V1);
     let handler = ProbeMessageHandler::alloc(mtm).set_ivars(ProbeMessageHandlerIvars {
@@ -564,8 +605,12 @@ fn install_probe_runtime(
         handler_name: handler_name.clone(),
         mailbox,
     });
+    // SAFETY: the allocated object has initialized ivars and `init` returns the
+    // retained subclass instance under Objective-C's initializer convention.
     let handler: Retained<ProbeMessageHandler> = unsafe { msg_send![super(handler), init] };
     let protocol_handler = ProtocolObject::from_ref(&*handler);
+    // SAFETY: controller, handler, world, and name are live retained objects on
+    // the main thread. Objective-C exceptions are contained at this boundary.
     objc2::exception::catch(std::panic::AssertUnwindSafe(|| unsafe {
         controller.addScriptMessageHandler_contentWorld_name(
             protocol_handler,
@@ -581,6 +626,8 @@ fn install_probe_runtime(
         _handler: handler,
     };
     let source = NSString::from_str(MACOS_NATIVE_INPUT_RUNTIME_V1);
+    // SAFETY: all arguments are retained Objective-C values on the main
+    // thread, and the enum/content-world values are valid WebKit inputs.
     let script = unsafe {
         WKUserScript::initWithSource_injectionTime_forMainFrameOnly_inContentWorld(
             WKUserScript::alloc(mtm),
@@ -590,6 +637,8 @@ fn install_probe_runtime(
             &world,
         )
     };
+    // SAFETY: controller and script are retained on the main thread and any
+    // Objective-C exception is caught before it reaches Rust.
     objc2::exception::catch(std::panic::AssertUnwindSafe(|| unsafe {
         controller.addUserScript(&script);
     }))
@@ -634,6 +683,14 @@ fn begin_in_autorelease_pool(
             false,
         )
     })?;
+    let mut admission_control = NativeDispatchControl {
+        permit,
+        poll_control,
+        deadline: run_deadline,
+    };
+    admission_control
+        .check()
+        .map_err(|error| adapter_failure(error, ProbeStage::Admit, None, None))?;
     let mtm = MainThreadMarker::new().ok_or_else(|| {
         failure(
             ProbeFailureCode::HarnessFailure,
@@ -648,6 +705,8 @@ fn begin_in_autorelease_pool(
     let configuration = profile
         .configuration()
         .map_err(|error| adapter_failure(error, ProbeStage::Construct, None, None))?;
+    // SAFETY: the retained configuration is confined to the AppKit main
+    // thread; this read attests that extension authority is absent.
     if unsafe { configuration.webExtensionController() }.is_some() {
         return Err(adapter_failure(
             AdapterError::NativeConstruction,
@@ -723,11 +782,16 @@ fn begin_in_autorelease_pool(
     runtime_mailbox
         .bind_page(&page)
         .map_err(|error| adapter_failure(error, ProbeStage::Construct, None, None))?;
-    let page_configuration = unsafe { page.configuration() };
-    let page_store = unsafe { page_configuration.websiteDataStore() };
-    let page_configuration_valid = !unsafe { page_store.isPersistent() }
-        && unsafe { page_store.identifier() }.is_none()
-        && unsafe { page_configuration.webExtensionController() }.is_none();
+    // SAFETY: the retained Wry page and all returned WebKit objects remain on
+    // the main thread. These property reads only attest isolation state.
+    let (page_configuration, page_store, page_configuration_valid) = unsafe {
+        let page_configuration = page.configuration();
+        let page_store = page_configuration.websiteDataStore();
+        let valid = !page_store.isPersistent()
+            && page_store.identifier().is_none()
+            && page_configuration.webExtensionController().is_none();
+        (page_configuration, page_store, valid)
+    };
     let run_loop = NSRunLoop::mainRunLoop();
     let execution = (|| -> Result<_, ProbeFailure> {
         if !page_configuration_valid {
@@ -738,8 +802,20 @@ fn begin_in_autorelease_pool(
                 None,
             ));
         }
-        apply_presentation(&app, &window, &page, &webview, matrix.presentation)
-            .map_err(|error| adapter_failure(error, ProbeStage::Construct, None, None))?;
+        let mut presentation_control = NativeDispatchControl {
+            permit,
+            poll_control,
+            deadline: run_deadline,
+        };
+        apply_presentation(
+            &app,
+            &window,
+            &page,
+            &webview,
+            matrix.presentation,
+            &mut presentation_control,
+        )
+        .map_err(|error| adapter_failure(error, ProbeStage::Construct, None, None))?;
 
         let runtime = runtime_fingerprint()
             .map_err(|error| adapter_failure(error, ProbeStage::Construct, None, None))?;
@@ -924,6 +1000,8 @@ fn new_window(mtm: MainThreadMarker) -> Result<Retained<NSWindow>, AdapterError>
             false,
         )
     };
+    // SAFETY: `window` is retained and main-thread confined by its AppKit type;
+    // disabling self-release preserves Rust's explicit ownership through close.
     unsafe { window.setReleasedWhenClosed(false) };
     window
         .contentView()
@@ -937,30 +1015,42 @@ fn apply_presentation(
     page: &WryWebView,
     webview: &wry::WebView,
     presentation: PresentationState,
+    control: &mut NativeDispatchControl<'_>,
 ) -> Result<(), AdapterError> {
     match presentation {
         PresentationState::Hidden => {
+            control.check()?;
             webview
                 .set_visible(false)
                 .map_err(|_| AdapterError::NativeConstruction)?;
+            control.check()?;
             window.orderOut(None);
         }
         PresentationState::VisibleBackground => {
+            control.check()?;
             webview
                 .set_visible(true)
                 .map_err(|_| AdapterError::NativeConstruction)?;
+            control.check()?;
             window.orderFront(None);
         }
         PresentationState::VisibleFocused => {
+            control.check()?;
             webview
                 .set_visible(true)
                 .map_err(|_| AdapterError::NativeConstruction)?;
+            control.check()?;
             app.activate();
             #[allow(deprecated)]
-            app.activateIgnoringOtherApps(true);
+            {
+                control.check()?;
+                app.activateIgnoringOtherApps(true);
+            }
+            control.check()?;
             if !window.makeFirstResponder(Some(page)) {
                 return Err(AdapterError::NativeConstruction);
             }
+            control.check()?;
             window.makeKeyAndOrderFront(None);
         }
     }
@@ -985,6 +1075,12 @@ fn load_probe_row(
         .ok_or(AdapterError::InvalidEvidence)?;
     mailbox.arm(key, url.clone())?;
     let before_generation = load_generation.get();
+    let mut control = NativeDispatchControl {
+        permit,
+        poll_control,
+        deadline: run_deadline,
+    };
+    control.check()?;
     webview
         .load_url(&url)
         .map_err(|_| AdapterError::Navigation)?;
@@ -1032,8 +1128,18 @@ fn run_case(
     let app_active_before = app.isActive();
     let key_before = window.isKeyWindow();
     let focus_before = native_focus_owner(window, false);
-    let outcome_hint = execute_backend(window, page, case, backend, presentation, geometry)
-        .map_err(|error| adapter_failure(error, ProbeStage::Execute, Some(case), Some(backend)))?;
+    let outcome_hint = execute_backend(
+        window,
+        page,
+        case,
+        backend,
+        presentation,
+        geometry,
+        permit,
+        poll_control,
+        run_deadline,
+    )
+    .map_err(|error| adapter_failure(error, ProbeStage::Execute, Some(case), Some(backend)))?;
     let focus_during = native_focus_owner(window, false);
     let state = match wait_for_runtime_result(mailbox, run_loop, permit, poll_control, run_deadline)
     {
@@ -1106,7 +1212,16 @@ fn execute_backend(
     backend: InputBackend,
     presentation: PresentationState,
     geometry: Geometry,
+    permit: &ProbeRunPermit,
+    poll_control: &mut impl FnMut(),
+    deadline: Instant,
 ) -> Result<Option<CaseOutcome>, AdapterError> {
+    let mut control = NativeDispatchControl {
+        permit,
+        poll_control,
+        deadline,
+    };
+    control.check()?;
     match backend {
         InputBackend::FixedDomRecipe => {
             if case == FixtureCase::ClosedShadow {
@@ -1115,14 +1230,14 @@ fn execute_backend(
             Ok(None)
         }
         InputBackend::MacosAppKitEvent => {
-            dispatch_appkit(window, page, case, geometry)?;
+            dispatch_appkit(window, page, case, geometry, &mut control)?;
             Ok(None)
         }
         InputBackend::MacosAccessibility => {
             if !accessibility_supported_case(case) {
                 return Ok(Some(CaseOutcome::Unsupported));
             }
-            if dispatch_accessibility(window, page, geometry)? {
+            if dispatch_accessibility(window, page, geometry, &mut control)? {
                 Ok(None)
             } else {
                 Ok(Some(CaseOutcome::Unsupported))
@@ -1170,6 +1285,7 @@ fn dispatch_appkit(
     page: &WryWebView,
     case: FixtureCase,
     geometry: Geometry,
+    control: &mut NativeDispatchControl<'_>,
 ) -> Result<(), AdapterError> {
     let point = window_point(
         page,
@@ -1182,31 +1298,33 @@ fn dispatch_appkit(
             | FixtureCase::ContentEditable
             | FixtureCase::Keyboard
             | FixtureCase::Select
-    ) && !window.makeFirstResponder(Some(page))
-    {
-        return Err(AdapterError::NativeConstruction);
+    ) {
+        control.check()?;
+        if !window.makeFirstResponder(Some(page)) {
+            return Err(AdapterError::NativeConstruction);
+        }
     }
     match case {
         FixtureCase::Drag => {
             let end_x = geometry.end_x.ok_or(AdapterError::InvalidEvidence)?;
             let end_y = geometry.end_y.ok_or(AdapterError::InvalidEvidence)?;
             let end = window_point(page, end_x, end_y)?;
-            dispatch_mouse_event(window, NSEventType::MouseMoved, point, 0.0, 0)?;
-            dispatch_mouse_event(window, NSEventType::LeftMouseDown, point, 1.0, 1)?;
-            dispatch_mouse_event(window, NSEventType::LeftMouseDragged, end, 1.0, 1)?;
-            dispatch_mouse_event(window, NSEventType::LeftMouseUp, end, 0.0, 1)?;
+            dispatch_mouse_event(window, NSEventType::MouseMoved, point, 0.0, 0, control)?;
+            dispatch_mouse_event(window, NSEventType::LeftMouseDown, point, 1.0, 1, control)?;
+            dispatch_mouse_event(window, NSEventType::LeftMouseDragged, end, 1.0, 1, control)?;
+            dispatch_mouse_event(window, NSEventType::LeftMouseUp, end, 0.0, 1, control)?;
         }
         _ => {
-            dispatch_mouse_event(window, NSEventType::MouseMoved, point, 0.0, 0)?;
-            dispatch_mouse_event(window, NSEventType::LeftMouseDown, point, 1.0, 1)?;
-            dispatch_mouse_event(window, NSEventType::LeftMouseUp, point, 0.0, 1)?;
+            dispatch_mouse_event(window, NSEventType::MouseMoved, point, 0.0, 0, control)?;
+            dispatch_mouse_event(window, NSEventType::LeftMouseDown, point, 1.0, 1, control)?;
+            dispatch_mouse_event(window, NSEventType::LeftMouseUp, point, 0.0, 1, control)?;
             match case {
                 FixtureCase::TextInput | FixtureCase::ContentEditable | FixtureCase::Keyboard => {
-                    dispatch_key(window, "x", "x", 7)?
+                    dispatch_key(window, "x", "x", 7, control)?
                 }
                 FixtureCase::Select => {
-                    dispatch_key(window, "\u{f701}", "\u{f701}", 125)?;
-                    dispatch_key(window, "\r", "\r", 36)?;
+                    dispatch_key(window, "\u{f701}", "\u{f701}", 125, control)?;
+                    dispatch_key(window, "\r", "\r", 36, control)?;
                 }
                 _ => {}
             }
@@ -1221,6 +1339,7 @@ fn dispatch_mouse_event(
     location: NSPoint,
     pressure: f32,
     click_count: isize,
+    control: &mut NativeDispatchControl<'_>,
 ) -> Result<(), AdapterError> {
     let event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
         event_type,
@@ -1234,6 +1353,7 @@ fn dispatch_mouse_event(
         pressure,
     )
     .ok_or(AdapterError::NativeConstruction)?;
+    control.check()?;
     window.sendEvent(&event);
     Ok(())
 }
@@ -1243,6 +1363,7 @@ fn dispatch_key(
     characters: &str,
     unmodified: &str,
     key_code: u16,
+    control: &mut NativeDispatchControl<'_>,
 ) -> Result<(), AdapterError> {
     let characters = NSString::from_str(characters);
     let unmodified = NSString::from_str(unmodified);
@@ -1260,6 +1381,7 @@ fn dispatch_key(
             key_code,
         )
         .ok_or(AdapterError::NativeConstruction)?;
+        control.check()?;
         window.sendEvent(&event);
     }
     Ok(())
@@ -1269,6 +1391,7 @@ fn dispatch_accessibility(
     window: &NSWindow,
     page: &WryWebView,
     geometry: Geometry,
+    control: &mut NativeDispatchControl<'_>,
 ) -> Result<bool, AdapterError> {
     let point = window_point(
         page,
@@ -1276,6 +1399,7 @@ fn dispatch_accessibility(
         geometry.y + geometry.height / 2.0,
     )?;
     let screen = window.convertPointToScreen(point);
+    control.check()?;
     let Some(element) = page.accessibilityHitTest(screen) else {
         return Ok(false);
     };
@@ -1287,10 +1411,13 @@ fn dispatch_accessibility(
     if !responds {
         return Ok(false);
     }
-    // SAFETY: selector availability was checked on this exact retained
-    // accessibility element. The Objective-C result is a scalar BOOL and no
-    // native/page object crosses the probe contract.
-    let pressed: bool = unsafe { objc2::msg_send![&*element, accessibilityPerformPress] };
+    control.check()?;
+    let pressed: bool = {
+        // SAFETY: selector availability was checked on this exact retained
+        // accessibility element. The Objective-C result is a scalar BOOL and no
+        // native/page object crosses the probe contract.
+        unsafe { objc2::msg_send![&*element, accessibilityPerformPress] }
+    };
     Ok(pressed)
 }
 
@@ -1570,6 +1697,33 @@ mod tests {
         ] {
             let _ = case.target();
         }
+    }
+
+    #[test]
+    fn native_dispatch_control_polls_and_refuses_revoked_or_expired_authority() {
+        let gate = zephium_agentic::ProbeGate::new();
+        let permit = gate.try_start(41).expect("admit probe");
+        let polls = Cell::new(0_u8);
+        let mut poll = || polls.set(polls.get().saturating_add(1));
+        let mut control = NativeDispatchControl {
+            permit: &permit,
+            poll_control: &mut poll,
+            deadline: Instant::now() + Duration::from_secs(1),
+        };
+        assert_eq!(control.check(), Ok(()));
+        assert!(gate.cancel(41));
+        assert_eq!(control.check(), Err(AdapterError::Cancelled));
+        assert_eq!(polls.get(), 2);
+
+        let gate = zephium_agentic::ProbeGate::new();
+        let permit = gate.try_start(42).expect("admit probe");
+        let mut control = NativeDispatchControl {
+            permit: &permit,
+            poll_control: &mut poll,
+            deadline: Instant::now(),
+        };
+        assert_eq!(control.check(), Err(AdapterError::Timeout));
+        assert_eq!(polls.get(), 3);
     }
 
     #[test]

@@ -119,8 +119,15 @@ Popup request and admitted-page evidence are separate. The native new-window
 policy callback records a request and synchronously denies it; an unexpectedly
 admitted page is a verification failure. Cancellation, navigation/runtime
 message deadlines, controller transport, server shutdown, and native view
-teardown are bounded. All post-construction failure paths execute the same
-explicit teardown before returning a redacted typed failure.
+teardown are bounded. One dispatch-control boundary now rechecks the exact
+permit and absolute deadline before native allocation, loopback navigation,
+every presentation/focus change, each AppKit event, and both accessibility
+operations, including between steps of a multi-event sequence. All
+post-construction failure paths execute the same explicit teardown before
+returning a redacted typed failure. Strict unsafe lints and a mutation-tested
+source gate pin those checks, the isolated runtime, and the absence of global
+input, system-wide Accessibility trust/prompt, generic evaluation, or generic
+IPC authority; this is not native-backend device evidence.
 
 CI executes only the hidden fixed-DOM matrix. It requires 14 deterministic
 terminal rows, zero trusted effect events, zero transient activation, zero

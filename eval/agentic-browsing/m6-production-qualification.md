@@ -22,6 +22,13 @@ responses, machine-local paths, or native traces.
 - binds the reviewed macOS hidden fixed-DOM aggregate to its exact command,
   platform, backend, case count, trust/focus/activation results, and teardown
   result;
+- source-gates the release-excluded macOS input qualifier itself: its ephemeral
+  data store, extension-free fixed content world, page/frame/URL and payload
+  joins, and cancellation/deadline checks immediately before navigation,
+  presentation/focus changes, each AppKit event, accessibility hit-test, and
+  accessibility press are mandatory. The gate also forbids global `CGEvent`,
+  system-wide Accessibility trust/prompt, generic page-evaluation, and generic
+  IPC authority, and mutation-tests representative removals;
 - binds the reviewed macOS production semantic aggregate to its exact command,
   OS/WebKit build, closed viewport, four snapshots across three world epochs,
   host-released mutation, stale-anchor refusal, recovery, bridge, redaction,
@@ -206,6 +213,15 @@ agentic-owned Windows modules. Cross-compilation is not device behavior.
   teardown result. Mutation tests replace each evidence class with an
   unconditional label and prove release qualification fails. This is producer
   integrity coverage, not physical Windows behavior evidence.
+- The macOS diagnostic input adapter now carries the same module-level unsafe
+  lint contract as the Windows input adapter. Every current Objective-C unsafe
+  operation has a local ownership, lifetime, thread, selector, or exception
+  boundary rationale, and host native-feature Clippy passes with warnings
+  denied. Its dispatch-control object polls the exact permit and absolute
+  deadline adjacent to every native input effect and between multi-event
+  sequences. This is compile/source evidence only: the already-reviewed hidden
+  fixed-DOM run did not exercise AppKit or accessibility, and their named-device
+  matrices remain pending.
 - The functional agentic core forbids unsafe code. The agentic-owned production
   native graph currently contains exactly eight audited modules: the macOS and
   Windows owned-context, semantic-runtime, and semantic-screenshot adapters,

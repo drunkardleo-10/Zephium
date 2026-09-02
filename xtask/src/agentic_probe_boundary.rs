@@ -144,6 +144,8 @@ const ENGINE_AGENTIC_NATIVE_UNSAFE_HEADER: &str = concat!(
 );
 const AGENTIC_NO_DIRECT_LOGGING_ATTRIBUTE: &str =
     "#![deny(clippy::dbg_macro,clippy::print_stderr,clippy::print_stdout)]";
+const ENGINE_MACOS_PROBE_MODULE: &str =
+    "crates/zephium-engine/src/platform/macos/agentic_input_probe.rs";
 const ENGINE_WINDOWS_PROBE_MODULE: &str =
     "crates/zephium-engine/src/platform/windows/agentic_input_probe.rs";
 const ENGINE_WINDOWS_SEMANTIC_PROBE_MODULE: &str =
@@ -462,6 +464,7 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         &read(repository.join(ENGINE_WINDOWS_AGENT_CONTEXT))?,
     )?;
     let _ = read(repository.join(ENGINE_MACOS_PROBE_BINARY))?;
+    validate_macos_probe_source(&read(repository.join(ENGINE_MACOS_PROBE_MODULE))?)?;
     validate_windows_probe_binary(
         &read(repository.join(ENGINE_WINDOWS_PROBE_BINARY))?,
         &read(repository.join(AGENTIC_PROBE_QUALIFICATION))?,
@@ -2339,6 +2342,84 @@ fn validate_windows_probe_ci(source: &str) -> Result<(), String> {
         if !source.contains(required) {
             return Err(format!(
                 "Windows native-input CI lost required native compile gate {required}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_macos_probe_source(source: &str) -> Result<(), String> {
+    validate_engine_agentic_native_unsafe_contract(ENGINE_MACOS_PROBE_MODULE, source)?;
+    let source = compact(source);
+    for required in [
+        "letpartition=Partition::Ephemeral(ProfileId::generate());",
+        "super::new_ephemeral_data_store()",
+        ".with_incognito(true).with_visible(false).with_webview_configuration(configuration)",
+        "ifunsafe{configuration.webExtensionController()}.is_some()",
+        "letvalid=!page_store.isPersistent()&&page_store.identifier().is_none()&&page_configuration.webExtensionController().is_none();",
+        "WKContentWorld::worldWithName(&world_name,mtm)",
+        "controller.addScriptMessageHandler_contentWorld_name(protocol_handler,&world,&handler_name,);",
+        "WKUserScript::initWithSource_injectionTime_forMainFrameOnly_inContentWorld(",
+        "letmutcontrol=NativeDispatchControl{permit,poll_control,deadline,};control.check()?;",
+        "(self.poll_control)();ifself.permit.is_cancelled(){returnErr(AdapterError::Cancelled);}ifInstant::now()>=self.deadline{returnErr(AdapterError::Timeout);}",
+        "admission_control.check().map_err(|error|adapter_failure(error,ProbeStage::Admit,None,None))?;",
+        "control.check()?;webview.load_url(&url)",
+        "control.check()?;webview.set_visible(false)",
+        "control.check()?;window.orderOut(None);",
+        "control.check()?;webview.set_visible(true)",
+        "control.check()?;window.orderFront(None);",
+        "control.check()?;app.activate();",
+        "control.check()?;app.activateIgnoringOtherApps(true);",
+        "control.check()?;if!window.makeFirstResponder(Some(page))",
+        "control.check()?;window.makeKeyAndOrderFront(None);",
+        "control.check()?;letSome(element)=page.accessibilityHitTest(screen)else",
+        "control.check()?;letpressed:bool={",
+        "ifRetained::as_ptr(&message_page).cast::<c_void>()!=Retained::as_ptr(&expected_page).cast::<c_void>()",
+        "if!unsafe{frame.isMainFrame()}",
+        "ifexpected_url.as_deref()!=Some(frame_url)",
+        "ifbody.length()>MAX_RUNTIME_MESSAGE_UTF16",
+        "ifbody.len()>MAX_RUNTIME_MESSAGE_UTF8",
+    ] {
+        if !source.contains(required) {
+            return Err(format!(
+                "macOS native-input probe lost required closed mechanism {required}"
+            ));
+        }
+    }
+    if source.matches("window.sendEvent(&event);").count() != 2
+        || source
+            .matches("control.check()?;window.sendEvent(&event);")
+            .count()
+            != 2
+        || source
+            .matches("window.makeFirstResponder(Some(page))")
+            .count()
+            != 2
+        || source
+            .matches("control.check()?;if!window.makeFirstResponder(Some(page))")
+            .count()
+            != 2
+        || source.matches("page.accessibilityHitTest(screen)").count() != 1
+        || source.matches("accessibilityPerformPress").count() != 2
+    {
+        return Err(
+            "macOS native-input probe must preflight every closed native dispatch exactly once"
+                .to_owned(),
+        );
+    }
+    for forbidden in [
+        "CGEvent",
+        "CGEventPost",
+        "CGWarpMouseCursorPosition",
+        "AXIsProcessTrusted",
+        "AXUIElementCreateSystemWide",
+        "evaluateJavaScript",
+        "with_ipc_handler",
+        "with_initialization_script",
+    ] {
+        if source.contains(forbidden) {
+            return Err(format!(
+                "macOS native-input probe contains forbidden authority {forbidden}"
             ));
         }
     }
@@ -10136,6 +10217,77 @@ mod tests {
             macos,
             &windows.replace("controller.Bounds(&mut controller_bounds)", "Ok(())"),
         )
+        .is_err());
+    }
+
+    #[test]
+    fn macos_probe_requires_isolated_runtime_and_preflighted_native_dispatch() {
+        let valid =
+            include_str!("../../crates/zephium-engine/src/platform/macos/agentic_input_probe.rs");
+        validate_macos_probe_source(valid).expect("valid bounded macOS probe");
+        assert!(validate_macos_probe_source(&valid.replacen(
+            "#![deny(unsafe_op_in_unsafe_fn)]\n",
+            "",
+            1,
+        ))
+        .is_err());
+        assert!(validate_macos_probe_source(&valid.replacen(
+            "#![deny(clippy::undocumented_unsafe_blocks)]\n",
+            "",
+            1,
+        ))
+        .is_err());
+        assert!(validate_macos_probe_source(&valid.replacen(
+            "super::new_ephemeral_data_store()",
+            "super::new_data_store()",
+            1,
+        ))
+        .is_err());
+        assert!(
+            validate_macos_probe_source(&valid.replacen("frame.isMainFrame()", "true", 1,))
+                .is_err()
+        );
+        assert!(validate_macos_probe_source(&valid.replacen(
+            "    control.check()?;\n    window.sendEvent(&event);",
+            "    window.sendEvent(&event);",
+            1,
+        ))
+        .is_err());
+        assert!(validate_macos_probe_source(&valid.replacen(
+            "    control.check()?;\n    webview\n        .load_url(&url)",
+            "    webview\n        .load_url(&url)",
+            1,
+        ))
+        .is_err());
+        assert!(validate_macos_probe_source(&valid.replacen(
+            "            control.check()?;\n            webview\n                .set_visible(false)",
+            "            webview\n                .set_visible(false)",
+            1,
+        ))
+        .is_err());
+        assert!(validate_macos_probe_source(&valid.replacen(
+            "    control.check()?;\n    let Some(element) = page.accessibilityHitTest(screen) else",
+            "    let Some(element) = page.accessibilityHitTest(screen) else",
+            1,
+        ))
+        .is_err());
+        assert!(validate_macos_probe_source(&valid.replacen(
+            "    control.check()?;\n    let pressed: bool = {",
+            "    let pressed: bool = {",
+            1,
+        ))
+        .is_err());
+        assert!(validate_macos_probe_source(&format!(
+            "{valid}\nfn global_input() {{ CGEventPost(); }}"
+        ))
+        .is_err());
+        assert!(validate_macos_probe_source(&format!(
+            "{valid}\nfn prompt() {{ AXIsProcessTrustedWithOptions(); }}"
+        ))
+        .is_err());
+        assert!(validate_macos_probe_source(&format!(
+            "{valid}\nfn widened(page: &Page) {{ page.evaluateJavaScript(\"x\"); }}"
+        ))
         .is_err());
     }
 
