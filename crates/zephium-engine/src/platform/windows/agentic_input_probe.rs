@@ -1,3 +1,6 @@
+#![deny(unsafe_op_in_unsafe_fn)]
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 //! Release-excluded WebView2 native-input/isTrusted risk probe.
 //!
 //! This adapter owns one ordinary Wry child-HWND controller. It never casts
@@ -116,9 +119,14 @@ struct ProbeHostWindow {
 
 impl ProbeHostWindow {
     fn new() -> Result<Self, AdapterError> {
+        // SAFETY: a null module name requests the current process image and
+        // carries no borrowed buffer or caller-owned lifetime.
         let module =
             unsafe { GetModuleHandleW(None) }.map_err(|_| AdapterError::NativeConstruction)?;
         let class_name = probe_window_class().ok_or(AdapterError::NativeConstruction)?;
+        // SAFETY: the registered class name has process lifetime, the module
+        // is the current executable, and all optional owner/menu/parameter
+        // pointers are intentionally null. `ProbeHostWindow` owns the result.
         let hwnd = unsafe {
             CreateWindowExW(
                 WS_EX_TOOLWINDOW,
@@ -157,6 +165,8 @@ impl HasWindowHandle for ProbeHostWindow {
 impl Drop for ProbeHostWindow {
     fn drop(&mut self) {
         if !self.hwnd.0.is_null() {
+            // SAFETY: this object uniquely owns the non-null top-level HWND;
+            // every Wry child is dropped before the host reaches `Drop`.
             let _ = unsafe { DestroyWindow(self.hwnd) };
             self.hwnd = HWND::default();
         }
@@ -171,6 +181,7 @@ fn probe_window_class() -> Option<PCWSTR> {
                 .encode_utf16()
                 .chain(std::iter::once(0))
                 .collect::<Vec<_>>();
+            // SAFETY: a null module name requests the current process image.
             let module = unsafe { GetModuleHandleW(None) }.ok()?;
             let class = WNDCLASSW {
                 lpfnWndProc: Some(probe_window_proc),
@@ -178,6 +189,8 @@ fn probe_window_class() -> Option<PCWSTR> {
                 hInstance: module.into(),
                 ..Default::default()
             };
+            // SAFETY: `name` is NUL-terminated and remains retained in the
+            // `OnceLock` on success; the callback uses the Win32 ABI.
             (unsafe { RegisterClassW(&class) } != 0).then_some(name)
         })
         .as_ref()
@@ -190,6 +203,8 @@ unsafe extern "system" fn probe_window_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    // SAFETY: Win32 supplied this exact callback tuple to the registered
+    // window procedure; unhandled messages are delegated unchanged.
     unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
 }
 
@@ -782,9 +797,7 @@ fn run_case(
         .validate()
         .map_err(|error| adapter_failure(error, ProbeStage::Observe, Some(case), Some(backend)))?;
     let resources_before = live_resource_sample(environment);
-    let foreground_before = unsafe { GetForegroundWindow() };
-    let active_before = unsafe { GetActiveWindow() };
-    let thread_focus_before = unsafe { GetFocus() };
+    let (foreground_before, active_before, thread_focus_before) = native_focus_sample();
     let focus_before =
         native_focus_owner(host, view, foreground_before, thread_focus_before, false);
     let mut focus_trace = DispatchFocusTrace::default();
@@ -811,9 +824,7 @@ fn run_case(
         deadline,
     )
     .map_err(|error| adapter_failure(error, ProbeStage::Execute, Some(case), Some(backend)))?;
-    let foreground_during = unsafe { GetForegroundWindow() };
-    let active_during = unsafe { GetActiveWindow() };
-    let thread_focus_during = unsafe { GetFocus() };
+    let (foreground_during, active_during, thread_focus_during) = native_focus_sample();
     let focus_during =
         native_focus_owner(host, view, foreground_during, thread_focus_during, false);
     pump_for(FIXTURE_SETTLE, permit, poll_control, deadline)
@@ -838,9 +849,7 @@ fn run_case(
         .events
         .iter()
         .any(|event| event.kind == InputEventKind::Focus && event.target == target);
-    let foreground_after = unsafe { GetForegroundWindow() };
-    let active_after = unsafe { GetActiveWindow() };
-    let thread_focus_after = unsafe { GetFocus() };
+    let (foreground_after, active_after, thread_focus_after) = native_focus_sample();
     let focus_after = native_focus_owner(
         host,
         view,
@@ -923,9 +932,7 @@ impl DispatchFocusTrace {
         active_before: HWND,
         thread_focus_before: HWND,
     ) {
-        let foreground = unsafe { GetForegroundWindow() };
-        let active = unsafe { GetActiveWindow() };
-        let thread_focus = unsafe { GetFocus() };
+        let (foreground, active, thread_focus) = native_focus_sample();
         let host_became_key = (foreground_before != host.hwnd && foreground == host.hwnd)
             || (active_before != host.hwnd && active == host.hwnd);
         self.probe_host_became_key |= host_became_key;
@@ -934,6 +941,15 @@ impl DispatchFocusTrace {
                 || (!focus_is_owned_by_view(view, thread_focus_before)
                     && focus_is_owned_by_view(view, thread_focus)));
     }
+}
+
+/// Samples the three independent Win32 focus projections at one explicit
+/// observation boundary. This is evidence of the sampled state only; it does
+/// not claim an atomic system snapshot.
+fn native_focus_sample() -> (HWND, HWND, HWND) {
+    // SAFETY: these Win32 queries take no caller pointers and return borrowed
+    // opaque values only; the adapter never dereferences returned handles.
+    unsafe { (GetForegroundWindow(), GetActiveWindow(), GetFocus()) }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1020,6 +1036,8 @@ fn dispatch_hwnd_plan(
 ) -> Result<(), AdapterError> {
     let target = OwnedDocumentHwnd::resolve(view)?;
     let mut rect = RECT::default();
+    // SAFETY: `target` rejoined the owned live document HWND immediately
+    // before this query, and `rect` is valid writable storage for the call.
     unsafe { GetClientRect(target.document, &mut rect) }
         .map_err(|_| AdapterError::NativeConstruction)?;
     let width = rect.right.saturating_sub(rect.left);
@@ -1082,21 +1100,28 @@ impl OwnedDocumentHwnd {
         if container.0.is_null() {
             return Err(AdapterError::NativeConstruction);
         }
+        // SAFETY: `container` is the opaque HWND exposed by the live Wry view;
+        // this query returns an opaque direct-child handle without dereference.
         let document = unsafe { GetWindow(container, GW_CHILD) }
             .map_err(|_| AdapterError::NativeConstruction)?;
         let mut owner_process_id = 0_u32;
-        let owner_thread_id =
-            unsafe { GetWindowThreadProcessId(document, Some(&mut owner_process_id)) };
+        // SAFETY: `document` is an opaque queried HWND and the optional output
+        // points to initialized writable storage retained through the call.
+        let (owner_thread_id, current_thread_id) = unsafe {
+            (
+                GetWindowThreadProcessId(document, Some(&mut owner_process_id)),
+                GetCurrentThreadId(),
+            )
+        };
         // Microsoft documents that SendMessageTimeoutW ignores its timeout
         // when the target belongs to the caller's queue. The probe never
         // attaches input queues, and it refuses the direct same-thread case so
         // the advertised per-step ceiling cannot silently become unbounded.
-        if owner_thread_id == 0
-            || owner_process_id == 0
-            || owner_thread_id == unsafe { GetCurrentThreadId() }
-        {
+        if owner_thread_id == 0 || owner_process_id == 0 || owner_thread_id == current_thread_id {
             return Err(AdapterError::NativeConstruction);
         }
+        // SAFETY: the preceding nonzero identity query proved a live owning
+        // thread for this HWND; the returned HKL is opaque and not dereferenced.
         let keyboard_layout = unsafe { GetKeyboardLayout(owner_thread_id) };
         if keyboard_layout.is_invalid() {
             return Err(AdapterError::NativeConstruction);
@@ -1116,16 +1141,29 @@ impl OwnedDocumentHwnd {
 
     fn is_current(self) -> bool {
         let mut owner_process_id = 0_u32;
-        let owner_thread_id =
-            unsafe { GetWindowThreadProcessId(self.document, Some(&mut owner_process_id)) };
+        // SAFETY: every call is a read-only identity/relationship query over
+        // opaque HWND/thread values retained by this target. The sole pointer
+        // names initialized writable storage for the process-id result.
+        let (owner_thread_id, current_thread_id, keyboard_layout, child, parent, is_child) = unsafe {
+            let owner_thread_id =
+                GetWindowThreadProcessId(self.document, Some(&mut owner_process_id));
+            (
+                owner_thread_id,
+                GetCurrentThreadId(),
+                GetKeyboardLayout(owner_thread_id),
+                GetWindow(self.container, GW_CHILD).ok(),
+                GetParent(self.document).ok(),
+                IsChild(self.container, self.document).as_bool(),
+            )
+        };
         !self.document.0.is_null()
             && owner_thread_id == self.owner_thread_id
             && owner_process_id == self.owner_process_id
-            && owner_thread_id != unsafe { GetCurrentThreadId() }
-            && unsafe { GetKeyboardLayout(owner_thread_id) } == self.keyboard_layout
-            && unsafe { GetWindow(self.container, GW_CHILD) }.ok() == Some(self.document)
-            && unsafe { GetParent(self.document) }.ok() == Some(self.container)
-            && unsafe { IsChild(self.container, self.document) }.as_bool()
+            && owner_thread_id != current_thread_id
+            && keyboard_layout == self.keyboard_layout
+            && child == Some(self.document)
+            && parent == Some(self.container)
+            && is_child
     }
 
     fn send(
@@ -1147,6 +1185,8 @@ impl OwnedDocumentHwnd {
 
 fn focus_is_owned_by_view(view: &WebView, focus: HWND) -> bool {
     let container = view.hwnd();
+    // SAFETY: both values are opaque HWND identities. `IsChild` performs the
+    // relationship query without transferring or dereferencing either handle.
     !focus.0.is_null() && (focus == container || unsafe { IsChild(container, focus) }.as_bool())
 }
 
@@ -1188,6 +1228,8 @@ fn send_key(
         WindowsProbeKey::ArrowDown => VK_DOWN.0,
         WindowsProbeKey::Enter => VK_RETURN.0,
     };
+    // SAFETY: the exact document-thread HKL was captured and is revalidated
+    // around every send; this pure mapping call owns no returned pointer.
     let mapped_scan = unsafe {
         MapVirtualKeyExW(
             u32::from(virtual_key),
@@ -1206,6 +1248,8 @@ fn send_key(
 }
 
 fn send_text_x(target: OwnedDocumentHwnd, timeout_ms: u32) -> Result<(), AdapterError> {
+    // SAFETY: the exact document-thread HKL was captured and is revalidated
+    // around every send; this pure mapping call owns no returned pointer.
     let mapped_scan = unsafe {
         MapVirtualKeyExW(
             u32::from(b'X'),
@@ -1234,6 +1278,9 @@ fn send_message(
         return Err(AdapterError::Timeout);
     }
     let mut result = 0_usize;
+    // SAFETY: the caller revalidates the owned descendant HWND immediately
+    // before and after this bounded synchronous message. All scalar payloads
+    // are message-defined values and the result pointer is valid for the call.
     let sent = unsafe {
         SendMessageTimeoutW(
             hwnd,
@@ -1423,6 +1470,9 @@ fn call_cdp(
     .into();
     let method = HSTRING::from(method.as_str());
     let parameters = HSTRING::from(parameters);
+    // SAFETY: the COM interface and handler are live owned references, and
+    // both HSTRING arguments remain alive until the method returns. WebView2
+    // retains the handler for its asynchronous terminal callback.
     unsafe { core.CallDevToolsProtocolMethod(&method, &parameters, &handler) }
         .map_err(|_| AdapterError::NativeConstruction)?;
     loop {
@@ -1555,9 +1605,13 @@ fn apply_presentation(
         PresentationState::Hidden => {
             view.set_visible(false)
                 .map_err(|_| AdapterError::NativeConstruction)?;
+            // SAFETY: `host` uniquely owns this live HWND; hiding it neither
+            // transfers ownership nor accesses caller memory.
             let _ = unsafe { ShowWindow(host.hwnd, SW_HIDE) };
         }
         PresentationState::VisibleBackground => {
+            // SAFETY: `host` uniquely owns this live HWND. The flags suppress
+            // activation and make the zero position/size arguments unused.
             unsafe {
                 SetWindowPos(
                     host.hwnd,
@@ -1570,17 +1624,25 @@ fn apply_presentation(
                 )
             }
             .map_err(|_| AdapterError::NativeConstruction)?;
+            // SAFETY: `host` uniquely owns this live HWND and
+            // `SW_SHOWNOACTIVATE` preserves the background focus policy.
             let _ = unsafe { ShowWindow(host.hwnd, SW_SHOWNOACTIVATE) };
             view.set_visible(true)
                 .map_err(|_| AdapterError::NativeConstruction)?;
         }
         PresentationState::VisibleFocused => {
+            // SAFETY: this branch is reachable only through the separately
+            // authorized focused mode and `host` owns the live HWND.
             let _ = unsafe { ShowWindow(host.hwnd, SW_SHOW) };
             view.set_visible(true)
                 .map_err(|_| AdapterError::NativeConstruction)?;
+            // SAFETY: the separately authorized mode permits foregrounding
+            // only this adapter-owned top-level window.
             if !unsafe { SetForegroundWindow(host.hwnd) }.as_bool() {
                 return Err(AdapterError::NativeConstruction);
             }
+            // SAFETY: Wry exposes this live child HWND and the focused mode
+            // explicitly permits focus within the adapter-owned subtree.
             unsafe { SetFocus(Some(view.hwnd())) }.map_err(|_| AdapterError::NativeConstruction)?;
         }
     }
@@ -1596,14 +1658,22 @@ fn attest_native_view(
     presentation: PresentationState,
 ) -> Result<(), AdapterError> {
     let container = view.hwnd();
-    if !unsafe { IsWindow(Some(host.hwnd)) }.as_bool()
-        || !unsafe { IsWindow(Some(container)) }.as_bool()
-        || unsafe { GetParent(container) }.ok() != Some(host.hwnd)
-    {
+    // SAFETY: these are read-only validity/relationship queries over opaque
+    // HWNDs owned by the live host and Wry view.
+    let (host_live, container_live, container_parent) = unsafe {
+        (
+            IsWindow(Some(host.hwnd)).as_bool(),
+            IsWindow(Some(container)).as_bool(),
+            GetParent(container).ok(),
+        )
+    };
+    if !host_live || !container_live || container_parent != Some(host.hwnd) {
         return Err(AdapterError::NativeConstruction);
     }
 
     let document = OwnedDocumentHwnd::resolve(view)?;
+    // SAFETY: the resolver just rejoined this opaque direct-child HWND to the
+    // live owned Wry subtree.
     if !unsafe { IsWindow(Some(document.document)) }.as_bool() {
         return Err(AdapterError::NativeConstruction);
     }
@@ -1613,6 +1683,8 @@ fn attest_native_view(
     let mut controller_visible = windows_core::BOOL::default();
     let mut container_bounds = RECT::default();
     let mut controller_bounds = RECT::default();
+    // SAFETY: `container` is the revalidated live Wry child HWND; this query
+    // returns a scalar and does not retain the handle.
     let dpi = unsafe { GetDpiForWindow(container) };
     let Some(expected_width) = expected_physical_extent(PROBE_WIDTH, dpi) else {
         return Err(AdapterError::NativeConstruction);
@@ -1621,14 +1693,34 @@ fn attest_native_view(
         return Err(AdapterError::NativeConstruction);
     };
     let expected_visible = presentation != PresentationState::Hidden;
-    if unsafe { controller.ParentWindow(&mut controller_parent) }.is_err()
+    // SAFETY: the live controller and HWNDs were revalidated above. Every COM
+    // or Win32 output pointer names initialized writable stack storage and no
+    // callee retains it beyond the call.
+    let (
+        parent_result,
+        visibility_result,
+        host_visible,
+        container_visible,
+        container_bounds_result,
+        controller_bounds_result,
+    ) = unsafe {
+        (
+            controller.ParentWindow(&mut controller_parent),
+            controller.IsVisible(&mut controller_visible),
+            IsWindowVisible(host.hwnd).as_bool(),
+            IsWindowVisible(container).as_bool(),
+            GetClientRect(container, &mut container_bounds),
+            controller.Bounds(&mut controller_bounds),
+        )
+    };
+    if parent_result.is_err()
         || controller_parent != container
-        || unsafe { controller.IsVisible(&mut controller_visible) }.is_err()
+        || visibility_result.is_err()
         || controller_visible.as_bool() != expected_visible
-        || unsafe { IsWindowVisible(host.hwnd) }.as_bool() != expected_visible
-        || unsafe { IsWindowVisible(container) }.as_bool() != expected_visible
-        || unsafe { GetClientRect(container, &mut container_bounds) }.is_err()
-        || unsafe { controller.Bounds(&mut controller_bounds) }.is_err()
+        || host_visible != expected_visible
+        || container_visible != expected_visible
+        || container_bounds_result.is_err()
+        || controller_bounds_result.is_err()
         || container_bounds.left != 0
         || container_bounds.top != 0
         || container_bounds.right != expected_width
@@ -1668,9 +1760,7 @@ fn verify_nonactivating_presentation(
     if presentation == PresentationState::VisibleFocused {
         return Ok(());
     }
-    let foreground = unsafe { GetForegroundWindow() };
-    let active = unsafe { GetActiveWindow() };
-    let focus = unsafe { GetFocus() };
+    let (foreground, active, focus) = native_focus_sample();
     if foreground == host.hwnd || active == host.hwnd || focus_is_owned_by_view(view, focus) {
         return Err(AdapterError::FocusPolicy);
     }
@@ -1740,6 +1830,8 @@ fn pump_once(deadline: Instant) -> Result<(), AdapterError> {
         return Ok(());
     }
     let wait_ms = remaining.as_millis().clamp(1, PUMP_SLICE.as_millis()) as u32;
+    // SAFETY: the adapter owns this STA message loop. The MSG buffer is valid
+    // for each call, and every message is dispatched unchanged on this thread.
     unsafe {
         let _ = MsgWaitForMultipleObjectsEx(None, wait_ms, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
         for _ in 0..256 {
@@ -1839,9 +1931,15 @@ fn live_resource_sample(environment: &ICoreWebView2Environment) -> ResourceEvide
     let helper_processes = environment
         .cast::<ICoreWebView2Environment8>()
         .ok()
-        .and_then(|environment| unsafe { environment.GetProcessInfos() }.ok())
+        .and_then(|environment| {
+            // SAFETY: the live COM environment owns the returned process-info
+            // collection and transfers it through the generated smart pointer.
+            unsafe { environment.GetProcessInfos() }.ok()
+        })
         .and_then(|processes| {
             let mut count = 0_u32;
+            // SAFETY: `count` is valid writable storage and the live COM
+            // collection retains no pointer to it after returning.
             unsafe { processes.Count(&mut count) }.ok()?;
             u8::try_from(count).ok()
         });
@@ -1877,6 +1975,8 @@ fn runtime_fingerprint() -> Result<RuntimeFingerprint, AdapterError> {
         dwOSVersionInfoSize: std::mem::size_of::<OSVERSIONINFOW>() as u32,
         ..Default::default()
     };
+    // SAFETY: the initialized structure advertises its exact size and remains
+    // valid writable storage for the duration of the system query.
     let status = unsafe { RtlGetVersion(&mut version) };
     if status.0 < 0 {
         return Err(AdapterError::NativeConstruction);

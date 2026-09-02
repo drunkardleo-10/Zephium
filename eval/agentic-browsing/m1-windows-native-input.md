@@ -150,6 +150,9 @@ The following host-independent gate succeeds for the pinned MSVC target:
 cargo check --locked --target x86_64-pc-windows-msvc \
   -p zephium-engine --features native-agentic-input-probe \
   --bin windows-agentic-input-probe
+cargo clippy --locked --target x86_64-pc-windows-msvc \
+  -p zephium-engine --features native-agentic-input-probe \
+  --bin windows-agentic-input-probe
 ```
 
 The boundary checker requires both platform binaries and both platform modules
@@ -167,6 +170,11 @@ receiver-exit failure, Windows reparse-point rejection for physical evidence,
 strict bounded raw CDP completion, fixed method
 allowlist, and absence of input-queue attachment, global `SendInput`, cursor
 movement, page IPC, host objects, or generic script calls.
+The Windows input module also denies unsafe operations hidden inside an unsafe
+function and every undocumented unsafe block. The boundary checker pins both
+module-level denials, and Windows CI runs native Clippy before linking the
+physical runner so these are enforced by the target toolchain rather than
+remaining review-only attributes.
 The production functional core may now be reached through the durable Store
 adapter.
 

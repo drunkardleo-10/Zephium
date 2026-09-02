@@ -154,6 +154,7 @@ const ENGINE_WINDOWS_PROBE_BINARY: &str =
     "crates/zephium-engine/src/bin/windows_agentic_input_probe.rs";
 const ENGINE_WINDOWS_SEMANTIC_PROBE_BINARY: &str =
     "crates/zephium-engine/src/bin/windows_agentic_semantic_probe.rs";
+const CI_WORKFLOW: &str = ".github/workflows/ci.yml";
 const AGENTIC_SOURCE_DIRECTORY: &str = "crates/zephium-agentic/src";
 const AGENTIC_DIAGNOSTIC_MODULES: [&str; 11] = [
     "contract.rs",
@@ -458,6 +459,7 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         &read(repository.join(ENGINE_WINDOWS_PROBE_BINARY))?,
         &read(repository.join(AGENTIC_PROBE_QUALIFICATION))?,
     )?;
+    validate_windows_probe_ci(&read(repository.join(CI_WORKFLOW))?)?;
     validate_windows_probe_source(&read(repository.join(ENGINE_WINDOWS_PROBE_MODULE))?)?;
     validate_agentic_zero_idle_sources(repository)?;
     validate_shipping_sources(repository)?;
@@ -2312,7 +2314,23 @@ fn validate_windows_probe_binary(source: &str, qualification: &str) -> Result<()
     Ok(())
 }
 
+fn validate_windows_probe_ci(source: &str) -> Result<(), String> {
+    let source = compact(source).replace('\\', "");
+    for required in [
+        "cargoclippy--locked-pzephium-engine--featuresnative-agentic-input-probe--binwindows-agentic-input-probe",
+        "cargobuild--locked-pzephium-engine--featuresnative-agentic-input-probe--binwindows-agentic-input-probe",
+    ] {
+        if !source.contains(required) {
+            return Err(format!(
+                "Windows native-input CI lost required native compile gate {required}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_windows_probe_source(source: &str) -> Result<(), String> {
+    validate_engine_agentic_native_unsafe_contract(ENGINE_WINDOWS_PROBE_MODULE, source)?;
     let source = compact(source);
     for required in [
         "attest_native_view(&host,view,matrix.presentation)",
@@ -2328,12 +2346,13 @@ fn validate_windows_probe_source(source: &str) -> Result<(), String> {
         "GetWindow(self.container,GW_CHILD)",
         "GetParent(self.document)",
         "GetWindowThreadProcessId(document,Some(&mutowner_process_id))",
-        "owner_thread_id==unsafe{GetCurrentThreadId()}",
+        "GetCurrentThreadId()",
+        "owner_thread_id==current_thread_id",
         "owner_thread_id==self.owner_thread_id",
         "owner_process_id==self.owner_process_id",
         "letkeyboard_layout=unsafe{GetKeyboardLayout(owner_thread_id)};",
         "keyboard_layout.is_invalid()",
-        "GetKeyboardLayout(owner_thread_id)}==self.keyboard_layout",
+        "keyboard_layout==self.keyboard_layout",
         "SendMessageTimeoutW(",
         "SMTO_ABORTIFHUNG|SMTO_BLOCK|SMTO_ERRORONEXIT,timeout_ms",
         "check_dispatch_control(permit,poll_control,deadline)?;observe_focus();lettimeout_ms=message_timeout_ms(deadline)?;",
@@ -2347,8 +2366,8 @@ fn validate_windows_probe_source(source: &str) -> Result<(), String> {
         "target.send(WM_CHAR,WPARAM(usize::from(b'x')),LPARAM(lparam),timeout_ms,)",
         "verify_nonactivating_presentation(&host,view,matrix.presentation)",
         "foreground==host.hwnd||active==host.hwnd||focus_is_owned_by_view(view,focus)",
-        "letthread_focus_during=unsafe{GetFocus()};",
-        "letactive_during=unsafe{GetActiveWindow()};",
+        "let(foreground_during,active_during,thread_focus_during)=native_focus_sample();",
+        "unsafe{(GetForegroundWindow(),GetActiveWindow(),GetFocus())}",
         "focus_is_owned_by_view(view,thread_focus_during)",
         "ICoreWebView2CallDevToolsProtocolMethodCompletedHandler",
         "borrowed_pcwstr_bounded(",
@@ -9694,7 +9713,9 @@ mod tests {
 
     #[test]
     fn windows_probe_requires_closed_scoped_input_and_bounded_cdp() {
-        let valid = r#"
+        let valid = format!(
+            "{ENGINE_AGENTIC_NATIVE_UNSAFE_HEADER}{}",
+            r#"
             attest_native_view(&host, view, matrix.presentation);
             IsWindow(Some(host.hwnd));
             GetParent(container);
@@ -9708,12 +9729,13 @@ mod tests {
             GetWindow(self.container, GW_CHILD);
             GetParent(self.document);
             GetWindowThreadProcessId(document, Some(&mut owner_process_id));
-            owner_thread_id == unsafe { GetCurrentThreadId() };
+            GetCurrentThreadId();
+            owner_thread_id == current_thread_id;
             owner_thread_id == self.owner_thread_id;
             owner_process_id == self.owner_process_id;
             let keyboard_layout = unsafe { GetKeyboardLayout(owner_thread_id) };
             keyboard_layout.is_invalid();
-            unsafe { GetKeyboardLayout(owner_thread_id) } == self.keyboard_layout;
+            keyboard_layout == self.keyboard_layout;
             SendMessageTimeoutW(hwnd, SMTO_ABORTIFHUNG | SMTO_BLOCK | SMTO_ERRORONEXIT, timeout_ms);
             check_dispatch_control(permit, poll_control, deadline)?;
             observe_focus();
@@ -9734,8 +9756,8 @@ mod tests {
             );
             verify_nonactivating_presentation(&host, view, matrix.presentation);
             foreground == host.hwnd || active == host.hwnd || focus_is_owned_by_view(view, focus);
-            let thread_focus_during = unsafe { GetFocus() };
-            let active_during = unsafe { GetActiveWindow() };
+            let (foreground_during, active_during, thread_focus_during) = native_focus_sample();
+            unsafe { (GetForegroundWindow(), GetActiveWindow(), GetFocus()) };
             focus_is_owned_by_view(view, thread_focus_during);
             ICoreWebView2CallDevToolsProtocolMethodCompletedHandler;
             borrowed_pcwstr_bounded(response);
@@ -9744,15 +9766,28 @@ mod tests {
             Self::InputDispatchKeyEvent => "Input.dispatchKeyEvent";
             Self::RuntimeEvaluate => "Runtime.evaluate";
             json!({ "userGesture": false });
-        "#;
-        validate_windows_probe_source(valid).expect("valid bounded Windows probe");
+        "#
+        );
+        validate_windows_probe_source(&valid).expect("valid bounded Windows probe");
+        assert!(validate_windows_probe_source(&valid.replacen(
+            "#![deny(unsafe_op_in_unsafe_fn)]\n",
+            "",
+            1
+        ))
+        .is_err());
+        assert!(validate_windows_probe_source(&valid.replacen(
+            "#![deny(clippy::undocumented_unsafe_blocks)]\n",
+            "",
+            1
+        ))
+        .is_err());
         assert!(validate_windows_probe_source(&valid.replace(
             "SendMessageTimeoutW(hwnd, SMTO_ABORTIFHUNG | SMTO_BLOCK | SMTO_ERRORONEXIT, timeout_ms);",
             "SendInput(payload);",
         ))
         .is_err());
         assert!(validate_windows_probe_source(&valid.replace(
-            "owner_thread_id == unsafe { GetCurrentThreadId() };",
+            "owner_thread_id == current_thread_id;",
             "owner_thread_id == 0;",
         ))
         .is_err());
@@ -9761,10 +9796,9 @@ mod tests {
             "MapVirtualKeyW(code, MAPVK_VK_TO_VSC_EX);",
         ))
         .is_err());
-        assert!(validate_windows_probe_source(&valid.replace(
-            "unsafe { GetKeyboardLayout(owner_thread_id) } == self.keyboard_layout;",
-            "true;",
-        ))
+        assert!(validate_windows_probe_source(
+            &valid.replace("keyboard_layout == self.keyboard_layout;", "true;",)
+        )
         .is_err());
         assert!(validate_windows_probe_source(&valid.replace(
             "let timeout_ms = message_timeout_ms(deadline)?;",
@@ -9794,6 +9828,21 @@ mod tests {
             &valid.replace("focus_is_owned_by_view(view, thread_focus_during);", "")
         )
         .is_err());
+    }
+
+    #[test]
+    fn windows_probe_ci_requires_native_clippy_and_link_gates() {
+        let valid = r#"
+            cargo clippy --locked -p zephium-engine \
+              --features native-agentic-input-probe \
+              --bin windows-agentic-input-probe
+            cargo build --locked -p zephium-engine \
+              --features native-agentic-input-probe \
+              --bin windows-agentic-input-probe
+        "#;
+        validate_windows_probe_ci(valid).expect("native audit and link gates");
+        assert!(validate_windows_probe_ci(&valid.replacen("clippy", "check", 1)).is_err());
+        assert!(validate_windows_probe_ci(&valid.replacen("build", "check", 1)).is_err());
     }
 
     #[test]

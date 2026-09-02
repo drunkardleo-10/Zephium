@@ -431,12 +431,18 @@ jobs:
 
       # Compile and link the release-excluded physical-device runner on its
       # native toolchain without treating a hosted CI VM as behavioral proof.
-      - name: Build the Windows native-input qualification runner
+      - name: Audit and build the Windows native-input qualification runner
         if: runner.os == 'Windows'
-        run: >-
-          cargo build --locked -p zephium-engine
-          --features native-agentic-input-probe
-          --bin windows-agentic-input-probe
+        run: |
+          # The probe module itself denies undocumented unsafe blocks and
+          # unsafe operations in unsafe functions. Keep this native Clippy
+          # compile in addition to the final linker check below.
+          cargo clippy --locked -p zephium-engine \
+            --features native-agentic-input-probe \
+            --bin windows-agentic-input-probe
+          cargo build --locked -p zephium-engine \
+            --features native-agentic-input-probe \
+            --bin windows-agentic-input-probe
 
       - name: cargo nextest (macOS)
         if: runner.os == 'macOS'

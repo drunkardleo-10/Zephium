@@ -37,6 +37,9 @@ cargo check --locked -p zephium-engine \
 cargo check --locked --target x86_64-pc-windows-msvc \
   -p zephium-engine --features native-agentic-input-probe \
   --bin windows-agentic-input-probe
+cargo clippy --locked --target x86_64-pc-windows-msvc \
+  -p zephium-engine --features native-agentic-input-probe \
+  --bin windows-agentic-input-probe
 cargo check --locked --target x86_64-pc-windows-msvc \
   -p zephium-engine --features agentic-browser
 cargo check --locked --target x86_64-pc-windows-msvc \
