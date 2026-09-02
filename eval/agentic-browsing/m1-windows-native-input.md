@@ -111,9 +111,9 @@ key-up messages to acquire inconsistent scan metadata.
   immediately before Wry controller construction, before every loopback
   navigation, and before each visibility/focus transition. Every HWND step
   performs an early check before focus sampling and a second check after its
-  message payload, timeout, and owned-document identity are ready, immediately
-  before the one bounded `SendMessageTimeoutW`; it checks again after dispatch.
-  The synchronous message timeout cannot exceed the remaining case deadline.
+  message payload and owned-document identity are ready. It then derives the
+  relative timeout from the remaining absolute case budget immediately before
+  the one bounded `SendMessageTimeoutW`, and checks again after dispatch.
   Every fixed CDP observation or input command performs the same control poll
   and cancellation/deadline check immediately before native submission, then
   continues polling during its one outstanding completion. An already-revoked
@@ -189,8 +189,11 @@ strict bounded raw CDP completion, fixed method
 allowlist, and absence of input-queue attachment, global `SendInput`, cursor
 movement, page IPC, host objects, or generic script calls.
 The source gate now also binds the three run/construction/navigation
-preflights, every presentation operation, and the final HWND message preflight;
-it rejects additional direct navigation, `SendMessageTimeoutW`, CDP,
+preflights, every presentation operation, and the final HWND message preflight.
+That final poll runs before the relative timeout is derived from the remaining
+absolute case budget, so servicing cancellation/control input cannot silently
+widen the subsequent `SendMessageTimeoutW` allowance. The gate rejects
+additional direct navigation, `SendMessageTimeoutW`, CDP,
 foreground, or focus call sites. Its mutation test operates on the actual
 target source and removes representative admission, navigation, presentation,
 HWND, CDP, identity, and bounded-response protections.

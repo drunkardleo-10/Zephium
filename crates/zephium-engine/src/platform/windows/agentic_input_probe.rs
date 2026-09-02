@@ -1330,12 +1330,15 @@ fn send_message(
     poll_control: &mut impl FnMut(),
     deadline: Instant,
 ) -> Result<(), AdapterError> {
+    let mut result = 0_usize;
+    // Poll cancellation before deriving the relative native timeout. Computing
+    // it earlier would let time spent servicing control input widen the call
+    // beyond the case's remaining absolute budget.
+    check_dispatch_control(permit, poll_control, deadline)?;
     let timeout_ms = message_timeout_ms(deadline)?;
     if timeout_ms == 0 || timeout_ms > SEND_TIMEOUT_MS {
         return Err(AdapterError::Timeout);
     }
-    let mut result = 0_usize;
-    check_dispatch_control(permit, poll_control, deadline)?;
     // SAFETY: the caller revalidates the owned descendant HWND immediately
     // before and after this bounded synchronous message. All scalar payloads
     // are message-defined values and the result pointer is valid for the call.

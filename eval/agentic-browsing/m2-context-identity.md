@@ -657,7 +657,7 @@ navigation is stopped and never becomes an accepted context result
 The loopback fixture now contains a fixed relative two-hop redirect chain and
 a fixed two-node loop, with no caller-selected `Location` value. Unit tests
 and the release-boundary mutation gate cover the contract. The release-excluded
-Windows semantic/lifecycle qualifier now has a sixth create-new hidden mode
+Windows semantic/lifecycle qualifier has a dedicated create-new hidden mode
 that must prove the production gate's exact eight-hop refusal, subsequent
 recovery, two-hop authoritative final commit, fresh semantic observation,
 focus invariants, and full resource teardown. Neither native adapter has yet

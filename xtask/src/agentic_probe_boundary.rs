@@ -2584,7 +2584,7 @@ fn validate_windows_probe_source(source: &str) -> Result<(), String> {
         "check_dispatch_control(permit,&mutpoll_control,run_deadline).map_err(|error|adapter_failure(error,ProbeStage::Navigate,Some(case),Some(backend)),)?;view.load_url(&url)",
         "check_dispatch_control(permit,poll_control,deadline)?;observe_focus();match*step",
         "if!self.is_current(){returnErr(AdapterError::NativeConstruction);}send_message(self.document,message,wparam,lparam,permit,poll_control,deadline,)?;",
-        "lettimeout_ms=message_timeout_ms(deadline)?;iftimeout_ms==0||timeout_ms>SEND_TIMEOUT_MS{returnErr(AdapterError::Timeout);}letmutresult=0_usize;check_dispatch_control(permit,poll_control,deadline)?;letsent=unsafe{SendMessageTimeoutW(",
+        "letmutresult=0_usize;check_dispatch_control(permit,poll_control,deadline)?;lettimeout_ms=message_timeout_ms(deadline)?;iftimeout_ms==0||timeout_ms>SEND_TIMEOUT_MS{returnErr(AdapterError::Timeout);}letsent=unsafe{SendMessageTimeoutW(",
         "observe_focus();check_dispatch_control(permit,poll_control,deadline)?;",
         "validate_cdp_response(&response)?;observe_focus();",
         "letparameters=HSTRING::from(parameters);check_dispatch_control(permit,poll_control,deadline)?;",
@@ -10694,8 +10694,8 @@ mod tests {
         ))
         .is_err());
         assert!(validate_windows_probe_source(&valid.replacen(
-            "    let mut result = 0_usize;\n    check_dispatch_control(permit, poll_control, deadline)?;",
-            "    let mut result = 0_usize;",
+            "    check_dispatch_control(permit, poll_control, deadline)?;\n    let timeout_ms = message_timeout_ms(deadline)?;",
+            "    let timeout_ms = message_timeout_ms(deadline)?;\n    check_dispatch_control(permit, poll_control, deadline)?;",
             1,
         ))
         .is_err());
