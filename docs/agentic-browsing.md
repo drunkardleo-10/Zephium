@@ -671,10 +671,18 @@ as non-dispatching must retain no event, target, focus, activation, navigation,
 popup, or clipboard effect. Popup and clipboard results additionally rejoin
 their dedicated native request and closed gate fields; a generic `Unsupported`
 label cannot stand in for evidence that the intended control was reached. A
-qualified Windows row also requires nonzero bounded WebView2 helper-process
-counts before and after the action and refuses the resident-memory field until
-that adapter implements it, so absent or silently dropped measurements cannot
-be presented as resource evidence.
+qualified Windows row also requires a joint nonzero bounded WebView2
+helper-process count and aggregate resident-working-set sample before and after
+the action. The adapter obtains each count from one Environment8 process
+snapshot, rejects zero, duplicate, or more than 64 process IDs, opens only
+query-limited non-inheritable handles, closes each through an owned guard, and
+checked-sums `WorkingSetSize` under a 1 TiB evidence ceiling. It holds those
+handles while re-reading and exactly rejoining the sorted Environment8 PID
+snapshot, closing the process-exit/PID-reuse gap. Any unavailable, changed, or
+partial sample rejects the row; the content-free review aggregate retains both
+maxima without emitting process IDs. The required raw Win32 bindings are
+an exact-pinned optional dependency activated only by the release-excluded
+probe feature.
 
 No conclusion is generalized from `isTrusted` alone. Real sites may reject
 automation through many mechanisms. The spike determines which backends are
@@ -1408,6 +1416,12 @@ sources rather than copying another browser agent's architecture:
   defines supported cookie transfer primitives.
 - [WebView2 frame APIs](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/frames)
   define platform frame observation constraints.
+- [WebView2 `ICoreWebView2Environment8::GetProcessInfos`](https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2environment8#getprocessinfos)
+  defines the user-data-folder process snapshot and process-ID surface used by
+  the Windows probe's bounded resource sample.
+- [Win32 `GetProcessMemoryInfo`](https://learn.microsoft.com/en-us/windows/win32/api/psapi/nf-psapi-getprocessmemoryinfo)
+  defines the query-limited process-handle and working-set measurement used for
+  aggregate resident bytes. Partial or inaccessible samples fail qualification.
 - [WebView2 `CallDevToolsProtocolMethod`](https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2#calldevtoolsprotocolmethod)
   documents asynchronous completion and the fact that dispatched methods may
   be processed out of order; the M1 adapter therefore permits one in-flight

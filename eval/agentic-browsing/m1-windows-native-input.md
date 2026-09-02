@@ -137,10 +137,22 @@ key-up messages to acquire inconsistent scan metadata.
   validated runtime labels. Paths, handles, PIDs, URLs, profile data, page
   content, native errors, and CDP responses are not emitted.
 - Qualification requires the WebView2 Environment8 process inventory to yield
-  a nonzero bounded helper-process count both before and after every row. The
-  adapter does not implement a resident-memory sampler yet, so a record that
-  supplies that otherwise ignored optional field is refused instead of silently
-  projecting an unimplemented measurement into a qualified result.
+  a nonzero bounded helper-process count and aggregate resident working set both
+  before and after every row. One snapshot may contain at most 64 unique,
+  nonzero PIDs. The adapter opens each through a non-inheritable
+  `PROCESS_QUERY_LIMITED_INFORMATION` handle, reads `WorkingSetSize`, and
+  checked-sums under the 1 TiB evidence ceiling. An owned guard closes every
+  successfully opened handle on all return paths and requires explicit close
+  success for an accepted sample. The adapter holds all handles while it
+  re-reads and exactly rejoins the sorted Environment8 PID set, preventing
+  process churn or PID reuse from becoming accepted evidence. A missing,
+  changed, partial, duplicate, zero, overflowing, inaccessible, or close-failed
+  sample fails qualification; no PID or handle enters evidence. The
+  exact-pinned raw Win32 binding dependency is optional and activated only by
+  `native-agentic-input-probe`. The
+  producer/qualifier pair requires adapter revision
+  `native-input-m1-resources-v2`; review schema v2 retains the maximum process
+  count and resident bytes across the four required runs.
 - Each physical mode writes one bounded versioned JSON response to its selected
   machine-evidence sink before qualification. A failed behavioral gate
   therefore retains redacted case evidence instead of collapsing to a generic
@@ -175,8 +187,9 @@ key-up messages to acquire inconsistent scan metadata.
   host; the serialized target-focus bit must exactly match a retained focus
   event on the intended target before it may change the final owner to the
   fixture target. A contradictory record fails even if its focus-theft Booleans
-  were cleared. Its exact `--write-summary` option creates
-  the fixed UTF-8 summary file and refuses to replace an existing result.
+  were cleared. Its exact `--write-summary` option creates the fixed UTF-8
+  `windows-review-summary-v2.json` file and refuses to replace an existing
+  result.
   Directory, input-record, and output preflights reject every Windows reparse
   point rather than relying on `FileType::is_symlink`, which is insufficient
   for NTFS junctions.
@@ -226,8 +239,10 @@ activation message paths are forbidden so they cannot bypass the one audited
 `SendMessageTimeoutW` site or the closed CDP method vocabulary.
 The same gate mutation-tests the event/target/trust join, target-focus event
 join, exact native routes that require trust, exact native-view/queue/helper
-process/resident-memory shape, empty non-dispatch rows, link/clipboard effect
-fields, and popup-request/outcome correspondence used by the offline reviewer.
+process/resident-memory shape and aggregate maxima, the query-only process
+handle plus checked working-set sampler, empty non-dispatch rows,
+link/clipboard effect fields, and popup-request/outcome correspondence used by
+the offline reviewer.
 The Windows input module also denies unsafe operations hidden inside an unsafe
 function and every undocumented unsafe block. The boundary checker pins both
 module-level denials, and Windows CI runs native Clippy before linking the

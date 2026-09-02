@@ -196,7 +196,8 @@ pub struct WindowsProbeAggregate {
     activation_rows: u16,
     popup_request_rows: u16,
     focus_theft_rows: u16,
-    maximum_helper_processes: Option<u8>,
+    maximum_helper_processes: u8,
+    maximum_resident_bytes: u64,
     maximum_case_elapsed_ms: u32,
     run_elapsed_ms: u64,
     cleanup_ms: u32,
@@ -263,7 +264,7 @@ pub fn qualify_windows_probe_evidence(
     evidence.validate()?;
     if evidence.runtime.platform != Platform::Windows
         || evidence.runtime.engine.as_str() != "WebView2"
-        || evidence.runtime.adapter_revision.as_str() != "native-input-m1"
+        || evidence.runtime.adapter_revision.as_str() != "native-input-m1-resources-v2"
     {
         return Err(WindowsProbeQualificationError::Runtime);
     }
@@ -319,8 +320,14 @@ pub fn qualify_windows_probe_evidence(
                 .resources_after
                 .helper_processes
                 .is_none_or(|count| count == 0)
-            || actual.resources_before.resident_bytes.is_some()
-            || actual.resources_after.resident_bytes.is_some()
+            || actual
+                .resources_before
+                .resident_bytes
+                .is_none_or(|bytes| bytes == 0)
+            || actual
+                .resources_after
+                .resident_bytes
+                .is_none_or(|bytes| bytes == 0)
         {
             return Err(WindowsProbeQualificationError::Resources);
         }
@@ -403,6 +410,31 @@ pub fn qualify_windows_probe_evidence(
         return Err(WindowsProbeQualificationError::FixedDomTrust);
     }
 
+    let maximum_helper_processes = evidence
+        .cases
+        .iter()
+        .flat_map(|case| {
+            [
+                case.resources_before.helper_processes,
+                case.resources_after.helper_processes,
+            ]
+        })
+        .flatten()
+        .max()
+        .ok_or(WindowsProbeQualificationError::Resources)?;
+    let maximum_resident_bytes = evidence
+        .cases
+        .iter()
+        .flat_map(|case| {
+            [
+                case.resources_before.resident_bytes,
+                case.resources_after.resident_bytes,
+            ]
+        })
+        .flatten()
+        .max()
+        .ok_or(WindowsProbeQualificationError::Resources)?;
+
     Ok(WindowsProbeAggregate {
         mode,
         presentation: mode.presentation(),
@@ -450,17 +482,8 @@ pub fn qualify_windows_probe_evidence(
                 .count(),
         )?,
         focus_theft_rows: 0,
-        maximum_helper_processes: evidence
-            .cases
-            .iter()
-            .flat_map(|case| {
-                [
-                    case.resources_before.helper_processes,
-                    case.resources_after.helper_processes,
-                ]
-            })
-            .flatten()
-            .max(),
+        maximum_helper_processes,
+        maximum_resident_bytes,
         maximum_case_elapsed_ms: evidence
             .cases
             .iter()
@@ -590,7 +613,7 @@ fn tests_fixture(mode: WindowsProbeMode) -> RunEvidence {
             native_views: 1,
             queued_actions: 0,
             helper_processes: Some(4),
-            resident_bytes: None,
+            resident_bytes: Some(256 * 1_024 * 1_024),
         }
     }
 
@@ -674,7 +697,7 @@ fn tests_fixture(mode: WindowsProbeMode) -> RunEvidence {
             os_version: label("10.0.26100"),
             engine: label("WebView2"),
             engine_version: label("140.0.0.0"),
-            adapter_revision: label("native-input-m1"),
+            adapter_revision: label("native-input-m1-resources-v2"),
         },
         capabilities: WINDOWS_PROBE_CAPABILITIES.to_vec(),
         peak_queue_depth: 1,
@@ -708,6 +731,8 @@ mod tests {
             let aggregate = qualify_windows_probe_evidence(mode, &evidence).expect("qualified");
             assert_eq!(aggregate.mode(), mode);
             assert_eq!(usize::from(aggregate.rows()), evidence.cases.len());
+            assert_eq!(aggregate.maximum_helper_processes, 4);
+            assert_eq!(aggregate.maximum_resident_bytes, 256 * 1_024 * 1_024);
             assert_eq!(WindowsProbeMode::from_argument(mode.argument()), Some(mode));
         }
     }
@@ -797,7 +822,14 @@ mod tests {
         );
 
         let mut evidence = tests_fixture(mode);
-        evidence.cases[0].resources_before.resident_bytes = Some(4_096);
+        evidence.cases[0].resources_before.resident_bytes = None;
+        assert_eq!(
+            qualify_windows_probe_evidence(mode, &evidence),
+            Err(WindowsProbeQualificationError::Resources)
+        );
+
+        let mut evidence = tests_fixture(mode);
+        evidence.cases[0].resources_after.resident_bytes = Some(0);
         assert_eq!(
             qualify_windows_probe_evidence(mode, &evidence),
             Err(WindowsProbeQualificationError::Resources)

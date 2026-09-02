@@ -247,9 +247,13 @@ agentic-owned Windows modules. Cross-compilation is not device behavior.
   rejoins the serialized target DOM-focus bit to a retained focus event on the
   exact intended target; clearing the summary theft Booleans cannot hide a
   contradictory serialized focus sequence. Qualified rows additionally require
-  nonzero bounded WebView2 helper-process samples on both sides of the action
-  and reject the not-yet-implemented resident-memory field rather than silently
-  dropping it. After the
+  a joint nonzero bounded WebView2 helper-process and aggregate resident-working-
+  set sample on both sides of the action. The cross-compiled adapter rejects
+  duplicate/invalid or changed PID sets, partial query-limited handle or memory
+  queries, close failure, overflow, and more than 64 processes; it holds the
+  handles through an exact post-sample Environment8 PID rejoin. Its exact-pinned
+  raw bindings remain optional behind the probe feature, and review schema v2
+  retains both maxima without emitting identity. After the
   final HWND control poll, the adapter samples both queues, rejoins document
   HWND/thread/process/layout, and only then derives the bounded window-message
   timeout. CDP uses the same final-poll/sample/submission order. The source gate

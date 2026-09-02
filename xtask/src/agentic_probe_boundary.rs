@@ -559,6 +559,12 @@ fn validate_engine_macos_agent_main_thread_contract(source: &str) -> Result<(), 
 }
 
 fn validate_engine_manifest(source: &str) -> Result<(), String> {
+    if source.matches("\"Win32_System_ProcessStatus\"").count() != 1 {
+        return Err(
+            "engine Windows probe must retain the process-memory binding feature exactly once"
+                .to_owned(),
+        );
+    }
     let manifest: toml::Value = toml::from_str(source)
         .map_err(|error| format!("cannot parse {ENGINE_MANIFEST}: {error}"))?;
     let feature = manifest
@@ -573,6 +579,7 @@ fn validate_engine_manifest(source: &str) -> Result<(), String> {
     let expected = [
         "dep:serde",
         "dep:tempfile",
+        "dep:windows-probe-sys",
         "dep:zephium-agentic",
         "zephium-agentic/probe-harness",
     ]
@@ -580,6 +587,61 @@ fn validate_engine_manifest(source: &str) -> Result<(), String> {
     .collect::<BTreeSet<_>>();
     if actual != expected || actual.len() != feature.len() {
         return Err("engine native-agentic-input-probe feature graph drifted".to_owned());
+    }
+    let windows_dependencies = manifest
+        .get("target")
+        .and_then(|targets| targets.get("cfg(target_os = \"windows\")"))
+        .and_then(|target| target.get("dependencies"))
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| "engine Windows target dependency table is missing".to_owned())?;
+    let process_bindings = windows_dependencies
+        .get("windows-probe-sys")
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| "engine probe-only process bindings are missing".to_owned())?;
+    let process_binding_features = process_bindings
+        .get("features")
+        .and_then(toml::Value::as_array)
+        .ok_or_else(|| "engine probe-only process binding features are missing".to_owned())?
+        .iter()
+        .filter_map(toml::Value::as_str)
+        .collect::<BTreeSet<_>>();
+    let expected_process_binding_features = [
+        "Win32_Foundation",
+        "Win32_System_ProcessStatus",
+        "Win32_System_Threading",
+    ]
+    .into_iter()
+    .collect::<BTreeSet<_>>();
+    if process_bindings
+        .get("package")
+        .and_then(toml::Value::as_str)
+        != Some("windows-sys")
+        || process_bindings
+            .get("version")
+            .and_then(toml::Value::as_str)
+            != Some("=0.61.2")
+        || process_bindings
+            .get("optional")
+            .and_then(toml::Value::as_bool)
+            != Some(true)
+        || process_binding_features != expected_process_binding_features
+    {
+        return Err("engine process-memory bindings must remain exact and probe-only".to_owned());
+    }
+    if windows_dependencies
+        .get("windows")
+        .and_then(|dependency| dependency.get("features"))
+        .and_then(toml::Value::as_array)
+        .is_some_and(|features| {
+            features
+                .iter()
+                .any(|feature| feature.as_str() == Some("Win32_System_ProcessStatus"))
+        })
+    {
+        return Err(
+            "ordinary engine Windows bindings acquired probe-only process-memory authority"
+                .to_owned(),
+        );
     }
     let production_feature = manifest
         .get("features")
@@ -2494,6 +2556,7 @@ fn validate_windows_probe_binary(source: &str, qualification: &str) -> Result<()
         "--ci-hidden-cdp",
         "--visible-background-windows-all",
         "--visible-focused-windows-all",
+        "evidence.runtime.adapter_revision.as_str()!=\"native-input-m1-resources-v2\"",
         "focus_sequence_matches_presentation(actual.focus,mode.presentation())",
         "focus.before==baseline&&focus.during==baseline&&focus.after==after",
         "actual.focus.target_received_dom_focus!=target_focus_event_observed(actual)",
@@ -2509,8 +2572,10 @@ fn validate_windows_probe_binary(source: &str, qualification: &str) -> Result<()
         "actual.resources_after.queued_actions!=0",
         "actual.resources_before.helper_processes.is_none_or(|count|count==0)",
         "actual.resources_after.helper_processes.is_none_or(|count|count==0)",
-        "actual.resources_before.resident_bytes.is_some()",
-        "actual.resources_after.resident_bytes.is_some()",
+        "actual.resources_before.resident_bytes.is_none_or(|bytes|bytes==0)",
+        "actual.resources_after.resident_bytes.is_none_or(|bytes|bytes==0)",
+        "maximum_helper_processes",
+        "maximum_resident_bytes",
         "fnno_dispatch_evidence_is_empty(evidence:&CaseEvidence)->bool",
         "actual.target.navigation_observed!=(case==FixtureCase::Link&&!does_not_dispatch)",
         "GateOutcome::Denied|GateOutcome::Indeterminate",
@@ -2693,6 +2758,31 @@ fn validate_windows_probe_source(source: &str) -> Result<(), String> {
         "Self::InputDispatchKeyEvent=>\"Input.dispatchKeyEvent\"",
         "Self::RuntimeEvaluate=>\"Runtime.evaluate\"",
         "\"userGesture\":false",
+        "EvidenceLabel::new(\"native-input-m1-resources-v2\")",
+        "letsample=sample_webview2_processes(environment,permit,poll_control,deadline)?",
+        "letenvironment=environment.cast::<ICoreWebView2Environment8>();check_dispatch_control(permit,poll_control,deadline)?;letOk(environment)=environmentelse{returnOk(None);};",
+        "letprocesses=unsafe{environment.GetProcessInfos()};check_dispatch_control(permit,poll_control,deadline)?;letOk(processes)=processeselse{returnOk(None);};",
+        "letcount_result=unsafe{processes.Count(&mutcount)};check_dispatch_control(permit,poll_control,deadline)?;ifcount_result.is_err()",
+        "ifactive_process_ids.windows(2).any(|pair|pair[0]==pair[1])",
+        "letprocess=unsafe{processes.GetValueAtIndex(index)};check_dispatch_control(permit,poll_control,deadline)?;letOk(process)=processelse{returnOk(None);};",
+        "letprocess_id_result=unsafe{process.ProcessId(&mutprocess_id)};check_dispatch_control(permit,poll_control,deadline)?;ifprocess_id_result.is_err()",
+        "unsafe{OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,0,process_id)}",
+        "(!handle.is_null()).then_some(Self(handle))",
+        "usewindows_probe_sys::Win32::System::ProcessStatus::{GetProcessMemoryInfo,PROCESS_MEMORY_COUNTERS,};",
+        "letmutcounters=PROCESS_MEMORY_COUNTERS::default();letcounter_bytes=u32::try_from(std::mem::size_of::<PROCESS_MEMORY_COUNTERS>()).ok()?;counters.cb=counter_bytes;",
+        "ifunsafe{GetProcessMemoryInfo(self.raw(),&mutcounters,counter_bytes)}==0",
+        "lethandle=std::mem::replace(&mutself.0,std::ptr::null_mut());",
+        "unsafe{CloseHandle(handle)!=0}",
+        "all_closed&=handle.close()",
+        "letSome((process_ids,helper_processes))=webview2_process_ids(&environment,permit,poll_control,deadline)?else{returnOk(None);};",
+        "letSome((rejoined_process_ids,rejoined_count))=webview2_process_ids(&environment,permit,poll_control,deadline)?else{returnOk(None);};",
+        "ifrejoined_count!=helper_processes||rejoined_process_ids.get(..process_count)!=Some(active_process_ids)",
+        "letopened_handle=ProbeProcessHandle::open(process_id);check_dispatch_control(permit,poll_control,deadline)?;letSome(handle)=opened_handleelse{returnOk(None);};letprocess_resident_bytes=handle.resident_bytes();check_dispatch_control(permit,poll_control,deadline)?;letSome(process_resident_bytes)=process_resident_byteselse{returnOk(None);};",
+        "resident_bytes.checked_add(process_resident_bytes)",
+        "ifresident_bytes>MAX_RESOURCE_RESIDENT_BYTES",
+        "letall_handles_closed=close_process_handles(active_handles);check_dispatch_control(permit,poll_control,deadline)?;if!all_handles_closed",
+        "resources_before:unavailable_resource_sample(),resources_after:unavailable_resource_sample()",
+        "(resident_bytes!=0).then_some(WebView2ProcessSample{",
     ] {
         if !code.contains(required) {
             return Err(format!(
@@ -2717,9 +2807,14 @@ fn validate_windows_probe_source(source: &str) -> Result<(), String> {
         || code.matches("SetWindowPos(").count() != 1
         || code.matches("SetForegroundWindow(host.hwnd)").count() != 1
         || code.matches("SetFocus(Some(view.hwnd()))").count() != 1
+        || code.matches("environment.GetProcessInfos()").count() != 1
+        || code.matches("processes.GetValueAtIndex(index)").count() != 1
+        || code.matches("OpenProcess(").count() != 1
+        || code.matches("GetProcessMemoryInfo(").count() != 1
+        || code.matches("CloseHandle(").count() != 1
     {
         return Err(
-            "Windows native-input probe must preflight every construction, navigation, and presentation effect exactly once"
+            "Windows native-input probe must retain exact effect and process-sampling call sites"
                 .to_owned(),
         );
     }
@@ -3151,7 +3246,8 @@ fn validate_windows_review_binary(source: &str, qualification: &str) -> Result<(
         "output.len()>MAX_PROTOCOL_OUTPUT_BYTES",
         "stdout.write_all(&output)",
         "--write-summary",
-        "windows-review-summary-v1.json",
+        "constREVIEW_SCHEMA_VERSION:u16=2",
+        "windows-review-summary-v2.json",
         ".create_new(true)",
         "write_new_record(&directory,REVIEW_SUMMARY_FILENAME,&output)",
     ] {
@@ -10173,6 +10269,7 @@ mod tests {
             native-agentic-input-probe = [
               "dep:serde",
               "dep:tempfile",
+              "dep:windows-probe-sys",
               "dep:zephium-agentic",
               "zephium-agentic/probe-harness",
             ]
@@ -10201,6 +10298,13 @@ mod tests {
             [dependencies]
             zephium-agentic = { optional = true }
             zeroize = { version = "=1.9.0", optional = true }
+            [target.'cfg(target_os = "windows")'.dependencies]
+            windows = { version = "0.61", features = ["Win32_System_Threading"] }
+            windows-probe-sys = { package = "windows-sys", version = "=0.61.2", optional = true, features = [
+              "Win32_Foundation",
+              "Win32_System_ProcessStatus",
+              "Win32_System_Threading",
+            ] }
         "#;
         validate_engine_manifest(valid).expect("valid engine probe gate");
         assert!(
@@ -10217,6 +10321,11 @@ mod tests {
         ))
         .is_err());
         assert!(validate_engine_manifest(&valid.replace("=1.9.0", "=1.9.1")).is_err());
+        assert!(validate_engine_manifest(&valid.replace(
+            "\"Win32_System_ProcessStatus\"",
+            "\"Win32_System_Threading\""
+        ))
+        .is_err());
     }
 
     #[test]
@@ -11363,6 +11472,45 @@ mod tests {
             1,
         ))
         .is_err());
+        assert!(validate_windows_probe_source(&valid.replace(
+            "OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id)",
+            "OpenProcess(PROCESS_ALL_ACCESS, 0, process_id)",
+        ))
+        .is_err());
+        assert!(validate_windows_probe_source(&valid.replacen(
+            "        let Some(total_resident_bytes) = resident_bytes.checked_add(process_resident_bytes) else {\n            return Ok(None);\n        };\n        resident_bytes = total_resident_bytes;",
+            "        resident_bytes = process_resident_bytes;",
+            1,
+        ))
+        .is_err());
+        assert!(validate_windows_probe_source(&valid.replacen(
+            "    let Some((rejoined_process_ids, rejoined_count)) =\n        webview2_process_ids(&environment, permit, poll_control, deadline)?\n    else {\n        return Ok(None);\n    };",
+            "    let (rejoined_process_ids, rejoined_count) = (process_ids, helper_processes);",
+            1,
+        ))
+        .is_err());
+        assert!(validate_windows_probe_source(&valid.replacen(
+            "        let opened_handle = ProbeProcessHandle::open(process_id);\n        check_dispatch_control(permit, poll_control, deadline)?;\n        let Some(handle) = opened_handle else {",
+            "        let opened_handle = ProbeProcessHandle::open(process_id);\n        let Some(handle) = opened_handle else {",
+            1,
+        ))
+        .is_err());
+        assert!(validate_windows_probe_source(&valid.replacen(
+            "    let processes = unsafe { environment.GetProcessInfos() };\n    check_dispatch_control(permit, poll_control, deadline)?;\n    let Ok(processes) = processes else {",
+            "    let processes = unsafe { environment.GetProcessInfos() };\n    let Ok(processes) = processes else {",
+            1,
+        ))
+        .is_err());
+        assert!(validate_windows_probe_source(&valid.replacen(
+            "        resources_before: unavailable_resource_sample(),",
+            "        resources_before: ResourceEvidence { native_views: 1, queued_actions: 0, helper_processes: None, resident_bytes: None },",
+            1,
+        ))
+        .is_err());
+        assert!(validate_windows_probe_source(
+            &valid.replace("unsafe { CloseHandle(handle) != 0 }", "true",)
+        )
+        .is_err());
     }
 
     #[test]
@@ -11432,6 +11580,7 @@ mod tests {
             "--ci-hidden-cdp";
             "--visible-background-windows-all";
             "--visible-focused-windows-all";
+            evidence.runtime.adapter_revision.as_str() != "native-input-m1-resources-v2";
             focus_sequence_matches_presentation(actual.focus, mode.presentation());
             focus.before == baseline && focus.during == baseline && focus.after == after;
             actual.focus.target_received_dom_focus != target_focus_event_observed(actual);
@@ -11468,8 +11617,10 @@ mod tests {
             actual.resources_after.queued_actions != 0;
             actual.resources_before.helper_processes.is_none_or(|count| count == 0);
             actual.resources_after.helper_processes.is_none_or(|count| count == 0);
-            actual.resources_before.resident_bytes.is_some();
-            actual.resources_after.resident_bytes.is_some();
+            actual.resources_before.resident_bytes.is_none_or(|bytes| bytes == 0);
+            actual.resources_after.resident_bytes.is_none_or(|bytes| bytes == 0);
+            maximum_helper_processes;
+            maximum_resident_bytes;
             fn no_dispatch_evidence_is_empty(evidence: &CaseEvidence) -> bool { true }
             actual.target.navigation_observed != (case == FixtureCase::Link && !does_not_dispatch);
             GateOutcome::Denied | GateOutcome::Indeterminate;
@@ -11543,7 +11694,10 @@ mod tests {
         .is_err());
         assert!(validate_windows_probe_binary(
             binary,
-            &qualification.replace("actual.resources_after.resident_bytes.is_some();", "false;",),
+            &qualification.replace(
+                "actual.resources_after.resident_bytes.is_none_or(|bytes| bytes == 0);",
+                "false;",
+            ),
         )
         .is_err());
         assert!(validate_windows_probe_binary(
@@ -11567,6 +11721,7 @@ mod tests {
     #[test]
     fn windows_physical_reviewer_is_closed_and_content_free() {
         let binary = r#"
+            const REVIEW_SCHEMA_VERSION: u16 = 2;
             WINDOWS_PHYSICAL_REVIEW_MODES;
             symlink_metadata(&directory);
             evidence_metadata_is_direct_directory(&metadata);
@@ -11577,7 +11732,7 @@ mod tests {
             if output.len() > MAX_PROTOCOL_OUTPUT_BYTES {}
             stdout.write_all(&output);
             "--write-summary";
-            "windows-review-summary-v1.json";
+            "windows-review-summary-v2.json";
             OpenOptions::new().create_new(true);
             write_new_record(&directory, REVIEW_SUMMARY_FILENAME, &output);
         "#;

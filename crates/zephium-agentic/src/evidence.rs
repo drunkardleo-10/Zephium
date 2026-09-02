@@ -16,11 +16,14 @@ use crate::{
 pub const MAX_CASE_EVIDENCE: usize = 128;
 /// Maximum recorded DOM events for one interaction.
 pub const MAX_EVENT_EVIDENCE: usize = 64;
+/// Maximum browser-helper processes retained in one resource sample.
+pub const MAX_RESOURCE_HELPER_PROCESSES: u8 = 64;
+/// Maximum aggregate resident bytes retained in one resource sample.
+pub const MAX_RESOURCE_RESIDENT_BYTES: u64 = 1 << 40;
 const MAX_CAPABILITIES: usize = 8;
 const MAX_LABEL_BYTES: usize = 96;
 const MAX_CASE_DURATION_MS: u32 = 60_000;
 const MAX_RUN_DURATION_MS: u64 = 10 * 60_000;
-const MAX_RETAINED_BYTES: u64 = 1 << 40;
 
 /// Supported native platform in a result fingerprint.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -367,10 +370,12 @@ fn validate_resource(resource: ResourceEvidence) -> Result<(), EvidenceValidatio
     if resource.native_views > 48 || resource.queued_actions as usize > MAX_CASE_EVIDENCE {
         return Err(EvidenceValidationError::ResourceCeilingExceeded);
     }
-    if resource.helper_processes.is_some_and(|count| count > 64)
+    if resource
+        .helper_processes
+        .is_some_and(|count| count > MAX_RESOURCE_HELPER_PROCESSES)
         || resource
             .resident_bytes
-            .is_some_and(|bytes| bytes > MAX_RETAINED_BYTES)
+            .is_some_and(|bytes| bytes > MAX_RESOURCE_RESIDENT_BYTES)
     {
         return Err(EvidenceValidationError::ResourceCeilingExceeded);
     }
@@ -651,6 +656,29 @@ mod tests {
         assert_eq!(
             undrained.validate().unwrap_err(),
             EvidenceValidationError::InvalidTeardown
+        );
+    }
+
+    #[test]
+    fn resource_samples_enforce_process_and_resident_ceilings() {
+        let mut maximum = evidence();
+        maximum.cases[0].resources_before.helper_processes = Some(MAX_RESOURCE_HELPER_PROCESSES);
+        maximum.cases[0].resources_before.resident_bytes = Some(MAX_RESOURCE_RESIDENT_BYTES);
+        maximum.validate().expect("inclusive resource ceilings");
+
+        let mut processes = evidence();
+        processes.cases[0].resources_after.helper_processes =
+            Some(MAX_RESOURCE_HELPER_PROCESSES + 1);
+        assert_eq!(
+            processes.validate(),
+            Err(EvidenceValidationError::ResourceCeilingExceeded)
+        );
+
+        let mut resident = evidence();
+        resident.cases[0].resources_after.resident_bytes = Some(MAX_RESOURCE_RESIDENT_BYTES + 1);
+        assert_eq!(
+            resident.validate(),
+            Err(EvidenceValidationError::ResourceCeilingExceeded)
         );
     }
 

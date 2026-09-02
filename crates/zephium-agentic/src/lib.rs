@@ -260,6 +260,7 @@ pub use evidence::{
     EvidenceLabel, EvidenceValidationError, FocusEvidence, InputEventEvidence, Platform,
     ProbeFailure, ProbeFailureCode, ProbeStage, ResourceEvidence, RunEvidence, RuntimeFingerprint,
     TargetEvidence, TeardownEvidence, MAX_CASE_EVIDENCE, MAX_EVENT_EVIDENCE,
+    MAX_RESOURCE_HELPER_PROCESSES, MAX_RESOURCE_RESIDENT_BYTES,
 };
 #[cfg(feature = "probe-harness")]
 pub use fixture_server::{FixtureRoute, FixtureServer, FixtureServerError};

@@ -50,6 +50,7 @@ windows-cdp-spike = []
 native-agentic-input-probe = [
     "dep:serde",
     "dep:tempfile",
+    "dep:windows-probe-sys",
     "dep:zephium-agentic",
     "zephium-agentic/probe-harness",
 ]
@@ -160,6 +161,11 @@ windows = { version = "0.61", features = [
     "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
+] }
+windows-probe-sys = { package = "windows-sys", version = "=0.61.2", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
 ] }
 windows-core = "0.61"
 

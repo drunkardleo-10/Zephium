@@ -11,8 +11,8 @@ use zephium_agentic::{
     WindowsProbeAggregate, MAX_PROTOCOL_OUTPUT_BYTES, WINDOWS_PHYSICAL_REVIEW_MODES,
 };
 
-const REVIEW_SCHEMA_VERSION: u16 = 1;
-const REVIEW_SUMMARY_FILENAME: &str = "windows-review-summary-v1.json";
+const REVIEW_SCHEMA_VERSION: u16 = 2;
+const REVIEW_SUMMARY_FILENAME: &str = "windows-review-summary-v2.json";
 
 #[derive(Serialize)]
 #[serde(deny_unknown_fields)]
@@ -256,7 +256,7 @@ mod tests {
     #[test]
     fn summary_writer_is_create_new_and_byte_exact() {
         let directory = TestDirectory::new();
-        let bytes = b"{\"schema_version\":1}\n";
+        let bytes = b"{\"schema_version\":2}\n";
         write_new_record(&directory.0, REVIEW_SUMMARY_FILENAME, bytes).expect("write summary");
         assert_eq!(
             std::fs::read(directory.0.join(REVIEW_SUMMARY_FILENAME)).expect("read summary"),

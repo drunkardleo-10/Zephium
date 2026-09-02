@@ -196,8 +196,10 @@ sole stdout record is a bounded content-free aggregate suitable for human
 review; a typed rejection, partial matrix, runtime substitution, focus theft,
 or failed fixture makes the review command nonzero. The exact
 `--write-summary` form instead writes those same validated UTF-8 aggregate
-bytes to the fixed create-new summary filename. The aggregate remains ignored
-until reviewed into the committed manifest.
+bytes to the fixed create-new `windows-review-summary-v2.json` filename. Review
+schema v2 includes maximum WebView2 process count and aggregate resident
+working-set bytes; individual process identities remain absent. The aggregate
+remains ignored until reviewed into the committed manifest.
 
 The production Windows semantic adapter has a separate seven-process physical
 qualification. It is fully hidden and uses no OS-wide pointer or keyboard
