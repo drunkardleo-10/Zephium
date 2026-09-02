@@ -1470,6 +1470,7 @@ fn call_cdp(
     .into();
     let method = HSTRING::from(method.as_str());
     let parameters = HSTRING::from(parameters);
+    check_dispatch_control(permit, poll_control, deadline)?;
     // SAFETY: the COM interface and handler are live owned references, and
     // both HSTRING arguments remain alive until the method returns. WebView2
     // retains the handler for its asynchronous terminal callback.

@@ -2374,6 +2374,7 @@ fn validate_windows_probe_source(source: &str) -> Result<(), String> {
         "check_dispatch_control(permit,poll_control,deadline)?;observe_focus();lettimeout_ms=message_timeout_ms(deadline)?;",
         "observe_focus();check_dispatch_control(permit,poll_control,deadline)?;",
         "validate_cdp_response(&response)?;observe_focus();",
+        "letparameters=HSTRING::from(parameters);check_dispatch_control(permit,poll_control,deadline)?;",
         "MAPVK_VK_TO_VSC_EX",
         "MapVirtualKeyExW(",
         "Some(target.keyboard_layout)",
@@ -10186,6 +10187,8 @@ mod tests {
             let (foreground_during, active_during, thread_focus_during) = native_focus_sample();
             unsafe { (GetForegroundWindow(), GetActiveWindow(), GetFocus()) };
             focus_is_owned_by_view(view, thread_focus_during);
+            let parameters = HSTRING::from(parameters);
+            check_dispatch_control(permit, poll_control, deadline)?;
             ICoreWebView2CallDevToolsProtocolMethodCompletedHandler;
             borrowed_pcwstr_bounded(response);
             fn call(method: FixedCdpMethod) {}
@@ -10254,6 +10257,12 @@ mod tests {
         assert!(validate_windows_probe_source(
             &valid.replace("focus_is_owned_by_view(view, thread_focus_during);", "")
         )
+        .is_err());
+        assert!(validate_windows_probe_source(&valid.replacen(
+            "let parameters = HSTRING::from(parameters);\n            check_dispatch_control(permit, poll_control, deadline)?;",
+            "let parameters = HSTRING::from(parameters);",
+            1,
+        ))
         .is_err());
     }
 

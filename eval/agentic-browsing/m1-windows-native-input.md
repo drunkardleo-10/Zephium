@@ -109,6 +109,10 @@ key-up messages to acquire inconsistent scan metadata.
   milliseconds before rechecking cancellation. Every HWND step polls control
   and checks cancellation/deadline before dispatch and immediately after it;
   the synchronous message timeout cannot exceed the remaining case deadline.
+  Every fixed CDP observation or input command performs the same control poll
+  and cancellation/deadline check immediately before native submission, then
+  continues polling during its one outstanding completion. An already-revoked
+  permit therefore cannot enqueue the next CDP step.
 - Explicit Wry close debt is retried for 500 ms and the bounded orphan-debt
   registry is drained. A sticky cleanup-overflow marker fails teardown.
 - The adapter captures the exact browser PID and a non-reusable process HANDLE,
