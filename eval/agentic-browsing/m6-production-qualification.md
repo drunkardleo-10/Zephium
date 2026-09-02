@@ -71,6 +71,12 @@ responses, machine-local paths, or native traces.
   non-canonical, or exact-call-over-budget `Content-Length` before streaming,
   while allowing omission for SSE. Exact-limit/over-limit tests and source-order
   mutations make the accepted response boundary explicit; and
+- pins HTTP/2 receive pressure rather than inheriting mutable library defaults:
+  both the initial stream and connection flow-control windows are 65,535 bytes,
+  adaptive growth is disabled, and the maximum accepted frame is 16,384 bytes.
+  Source mutations prove that each setting and exact value is required. These
+  are protocol-level ingress bounds, not a TLS, socket, HTTP/1, or process-memory
+  qualification; and
 - distinguishes an observationally idle provider transport from shutdown
   quiescence, which requires both its sticky cancellation/admission seal and
   exactly zero active slots. The gate pins constructor closure, open-admission
@@ -332,6 +338,12 @@ agentic-owned Windows modules. Cross-compilation is not device behavior.
   declared successful-response body now also fails before streaming if its
   `Content-Length` is duplicated, non-canonical, or above the per-call SSE wire
   ceiling.
+- Provider HTTP/2 receive windows and frame size no longer float with reqwest
+  defaults: initial stream and connection credit are each pinned to 65,535
+  bytes, adaptive growth is off, and accepted frames are capped at 16,384
+  bytes. Static mutation coverage protects each exact setting. This bounds
+  protocol-level outstanding ingress while preserving the separate, honest
+  exclusions for TLS/socket allocation and pinned Hyper's HTTP/1 receive buffer.
 - Profile retention can no longer end from a copied lease alone. The bounded
   profile registry requires the exact supervisor cleanup receipt for that
   context. A never-started row must be registry-cancelled; an owned context must

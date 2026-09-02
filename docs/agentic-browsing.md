@@ -772,12 +772,18 @@ gate before becoming sticky, and admission holds both gates only across policy
 commit and transport-slot commitment. A cancellation that wins cannot race a
 later disclosure; a commit that wins is already post-commit authority and must
 be terminally settled. A poisoned gate becomes sticky cancellation in
-unwind-capable builds. The HTTP client applies a 64 KiB HTTP/2 header-list
+unwind-capable builds. HTTP/2 ingress uses explicit protocol-standard
+65,535-byte initial stream and connection receive windows with adaptive growth
+disabled, plus a 16,384-byte maximum frame. These are flow-control and frame
+bounds, not a claim about TLS, socket, or whole-process allocation. The HTTP
+client applies a 64 KiB HTTP/2 header-list
 limit before decode and rechecks the decoded field list with checked
 name/value/per-field-overhead accounting before status, retry-hint,
 content-type, or body processing. That second protocol-neutral check also
 covers an HTTP/1 fallback, whose receive-buffer ceiling is not exposed by the
-pinned reqwest builder. Before streaming a successful response, the transport
+pinned reqwest builder; pinned Hyper can allocate up to its larger internal
+HTTP/1 receive ceiling before the decoded check. Before streaming a successful
+response, the transport
 also rejects a duplicate, non-canonical, or over-budget `Content-Length`;
 absence remains valid for SSE, and incremental decoding still enforces the
 same exact per-call wire ceiling. The HTTP client disables even library-default

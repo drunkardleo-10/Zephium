@@ -363,6 +363,7 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         &read(repository.join(AGENTIC_PROVIDER_ROOT))?,
     )?;
     validate_provider_transport_response_header_boundary(&provider_transport_root)?;
+    validate_provider_transport_http2_ingress_boundary(&provider_transport_root)?;
     validate_provider_transport_shutdown_contract(&provider_transport_root)?;
     validate_agentic_no_direct_logging_attribute(
         PROVIDER_TRANSPORT_ROOT,
@@ -4308,6 +4309,36 @@ fn validate_provider_transport_response_header_boundary(source: &str) -> Result<
             "provider response headers and declared body must be bounded before body processing"
                 .to_owned(),
         );
+    }
+    Ok(())
+}
+
+fn validate_provider_transport_http2_ingress_boundary(source: &str) -> Result<(), String> {
+    let production = source
+        .split_once("\n#[cfg(test)]\nmod tests")
+        .map_or(source, |(production, _)| production);
+    let source = compact(
+        &production
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<String>(),
+    );
+    for required in [
+        "pubconstAGENT_PROVIDER_HTTP2_INITIAL_RECEIVE_WINDOW_BYTES:u32=65_535;",
+        "pubconstMAX_AGENT_PROVIDER_HTTP2_FRAME_BYTES:u32=16*1_024;",
+        ".http2_initial_stream_window_size(AGENT_PROVIDER_HTTP2_INITIAL_RECEIVE_WINDOW_BYTES)",
+        ".http2_initial_connection_window_size(AGENT_PROVIDER_HTTP2_INITIAL_RECEIVE_WINDOW_BYTES)",
+        ".http2_adaptive_window(false)",
+        ".http2_max_frame_size(MAX_AGENT_PROVIDER_HTTP2_FRAME_BYTES)",
+    ] {
+        if !source.contains(required) {
+            return Err(format!(
+                "agent provider transport lost bounded HTTP/2 ingress rule {required}"
+            ));
+        }
+    }
+    if source.contains(".http2_adaptive_window(true)") {
+        return Err("agent provider transport enabled adaptive HTTP/2 receive windows".to_owned());
     }
     Ok(())
 }
@@ -9921,6 +9952,48 @@ mod tests {
             ),
         ] {
             assert!(validate_provider_transport_response_header_boundary(&invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn provider_transport_pins_http2_ingress_flow_control_and_frames() {
+        let root = include_str!("../../crates/zephium-agent-provider-transport/src/lib.rs");
+        validate_provider_transport_http2_ingress_boundary(root)
+            .expect("provider transport HTTP/2 ingress boundary");
+
+        for invalid in [
+            root.replacen(
+                "pub const AGENT_PROVIDER_HTTP2_INITIAL_RECEIVE_WINDOW_BYTES: u32 = 65_535;",
+                "pub const AGENT_PROVIDER_HTTP2_INITIAL_RECEIVE_WINDOW_BYTES: u32 = 1_048_576;",
+                1,
+            ),
+            root.replacen(
+                "pub const MAX_AGENT_PROVIDER_HTTP2_FRAME_BYTES: u32 = 16 * 1_024;",
+                "pub const MAX_AGENT_PROVIDER_HTTP2_FRAME_BYTES: u32 = 64 * 1_024;",
+                1,
+            ),
+            root.replacen(
+                ".http2_adaptive_window(false)",
+                ".http2_adaptive_window(true)",
+                1,
+            ),
+            root.replacen(
+                "            .http2_initial_stream_window_size(AGENT_PROVIDER_HTTP2_INITIAL_RECEIVE_WINDOW_BYTES)",
+                "",
+                1,
+            ),
+            root.replacen(
+                "            .http2_initial_connection_window_size(AGENT_PROVIDER_HTTP2_INITIAL_RECEIVE_WINDOW_BYTES)",
+                "",
+                1,
+            ),
+            root.replacen(
+                ".http2_max_frame_size(MAX_AGENT_PROVIDER_HTTP2_FRAME_BYTES)",
+                ".http2_max_frame_size(65_535)",
+                1,
+            ),
+        ] {
+            assert!(validate_provider_transport_http2_ingress_boundary(&invalid).is_err());
         }
     }
 

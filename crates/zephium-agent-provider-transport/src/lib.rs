@@ -49,6 +49,10 @@ pub const MAX_AGENT_PROVIDER_CONNECT_TIMEOUT_MILLIS: u64 = 30 * 1_000;
 pub const MAX_AGENT_PROVIDER_READ_TIMEOUT_MILLIS: u64 = 2 * 60 * 1_000;
 /// Maximum decoded response-header list bytes accepted from a provider.
 pub const MAX_AGENT_PROVIDER_RESPONSE_HEADER_BYTES: u32 = 64 * 1_024;
+/// Initial per-stream and per-connection HTTP/2 receive credit.
+pub const AGENT_PROVIDER_HTTP2_INITIAL_RECEIVE_WINDOW_BYTES: u32 = 65_535;
+/// Maximum HTTP/2 frame size accepted by the provider client.
+pub const MAX_AGENT_PROVIDER_HTTP2_FRAME_BYTES: u32 = 16 * 1_024;
 /// Per-field accounting overhead from the HTTP/2 header-list size definition.
 const HTTP_HEADER_FIELD_OVERHEAD_BYTES: usize = 32;
 /// Maximum byte width of one provider-transport shutdown proof.
@@ -562,6 +566,10 @@ impl AgentProviderTransport {
             .timeout(config.request_timeout)
             .connect_timeout(config.connect_timeout)
             .read_timeout(config.read_timeout)
+            .http2_initial_stream_window_size(AGENT_PROVIDER_HTTP2_INITIAL_RECEIVE_WINDOW_BYTES)
+            .http2_initial_connection_window_size(AGENT_PROVIDER_HTTP2_INITIAL_RECEIVE_WINDOW_BYTES)
+            .http2_adaptive_window(false)
+            .http2_max_frame_size(MAX_AGENT_PROVIDER_HTTP2_FRAME_BYTES)
             .http2_max_header_list_size(MAX_AGENT_PROVIDER_RESPONSE_HEADER_BYTES)
             .pool_max_idle_per_host(0)
             .tcp_nodelay(true)
