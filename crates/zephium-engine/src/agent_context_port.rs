@@ -9,7 +9,8 @@ use zephium_agentic::{
     AgentBrowserPort, ContextCancellationSettlement, ContextConstructionSettlement,
     ContextCookieTransferFailure, ContextCookieTransferOutcome, ContextCookieTransferRequest,
     ContextCookieTransferSettlement, ContextDispatch, ContextNativeEvent, ContextNativeRequest,
-    ContextPortFailure, ContextResourceAuditId, ContextResourceAuditSettlement,
+    ContextNativeResourceSnapshot, ContextPortFailure, ContextResourceAuditId,
+    ContextResourceAuditSettlement, ContextShutdownAuditSettlement, ContextShutdownDispatch,
     SemanticActionNativeCompletion, SemanticActionNativeRequest, SemanticRuntimeCorrelation,
     SemanticRuntimeInvocation, SemanticRuntimePortFailure, SemanticRuntimeSettlement,
     SemanticScreenshotNativeCompletion, SemanticScreenshotNativeRequest,
@@ -131,6 +132,62 @@ impl AgentPortAdmission {
         if state.sealed || state.invariant_failed {
             return Err(ContextPortFailure::Shutdown);
         }
+        if state.pending >= MAX_PENDING_NATIVE_CONTEXT_TASKS {
+            return Err(ContextPortFailure::ResourceExhausted);
+        }
+        state.pending += 1;
+        Ok(AgentTaskPermit {
+            admission: Arc::clone(self),
+            released: false,
+        })
+    }
+
+    /// Reserves a read-only audit without reopening mutation admission.
+    fn reserve_audit(self: &Arc<Self>) -> Result<AgentTaskPermit, ContextPortFailure> {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => {
+                let mut state = poisoned.into_inner();
+                state.invariant_failed = true;
+                state.sealed = true;
+                drop(state);
+                self.report_fatal_once();
+                return Err(ContextPortFailure::Shutdown);
+            }
+        };
+        if state.invariant_failed {
+            return Err(ContextPortFailure::Shutdown);
+        }
+        if state.pending >= MAX_PENDING_NATIVE_CONTEXT_TASKS {
+            return Err(ContextPortFailure::ResourceExhausted);
+        }
+        state.pending += 1;
+        Ok(AgentTaskPermit {
+            admission: Arc::clone(self),
+            released: false,
+        })
+    }
+
+    /// Linearizes the permanent mutation seal with one shutdown-audit slot.
+    fn reserve_shutdown_audit(self: &Arc<Self>) -> Result<AgentTaskPermit, ContextPortFailure> {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => {
+                let mut state = poisoned.into_inner();
+                state.invariant_failed = true;
+                state.sealed = true;
+                drop(state);
+                self.report_fatal_once();
+                return Err(ContextPortFailure::Shutdown);
+            }
+        };
+        if state.sealed || state.invariant_failed {
+            return Err(ContextPortFailure::Shutdown);
+        }
+        // Seal before checking capacity: even a full queue must not leave a
+        // post-barrier mutation race. A later bounded ordinary audit may
+        // observe drain once one retained task releases its permit.
+        state.sealed = true;
         if state.pending >= MAX_PENDING_NATIVE_CONTEXT_TASKS {
             return Err(ContextPortFailure::ResourceExhausted);
         }
@@ -329,6 +386,7 @@ enum AgentPendingRequest {
     Native(ContextNativeRequest),
     Cookie(ContextCookieTransferRequest),
     Audit(ContextResourceAuditId),
+    ShutdownAudit(ContextResourceAuditId),
     Semantic(AgentPendingSemantic),
 }
 
@@ -462,8 +520,33 @@ impl AgentContextTask {
 
     pub(crate) fn audit(&self) -> Option<ContextResourceAuditId> {
         match self.request.as_ref() {
-            Some(AgentPendingRequest::Audit(audit)) => Some(*audit),
+            Some(AgentPendingRequest::Audit(audit) | AgentPendingRequest::ShutdownAudit(audit)) => {
+                Some(*audit)
+            }
             _ => None,
+        }
+    }
+
+    pub(crate) fn complete_audit(
+        self,
+        outcome: Result<ContextNativeResourceSnapshot, ContextPortFailure>,
+    ) {
+        let event = match self.request.as_ref() {
+            Some(AgentPendingRequest::Audit(audit)) => {
+                Some(ContextNativeEvent::ResourceAuditSettled(
+                    ContextResourceAuditSettlement::new(*audit, outcome),
+                ))
+            }
+            Some(AgentPendingRequest::ShutdownAudit(audit)) => {
+                Some(ContextNativeEvent::ShutdownAuditSettled(
+                    ContextShutdownAuditSettlement::new(*audit, outcome),
+                ))
+            }
+            _ => None,
+        };
+        match event {
+            Some(event) => self.complete(event),
+            None => self.refuse(ContextPortFailure::NativeRefused),
         }
     }
 
@@ -555,6 +638,10 @@ impl AgentContextTask {
                 ContextNativeEvent::ResourceAuditSettled(settlement),
             ) => *audit == settlement.audit(),
             (
+                Some(AgentPendingRequest::ShutdownAudit(audit)),
+                ContextNativeEvent::ShutdownAuditSettled(settlement),
+            ) => *audit == settlement.audit(),
+            (
                 Some(AgentPendingRequest::Semantic(request)),
                 ContextNativeEvent::SemanticRuntimeSettled(settlement),
             ) => &request.correlation == settlement.correlation(),
@@ -637,6 +724,11 @@ fn refusal_event(
         AgentPendingRequest::Audit(audit) => Some(ContextNativeEvent::ResourceAuditSettled(
             ContextResourceAuditSettlement::new(audit, Err(failure)),
         )),
+        AgentPendingRequest::ShutdownAudit(audit) => {
+            Some(ContextNativeEvent::ShutdownAuditSettled(
+                ContextShutdownAuditSettlement::new(audit, Err(failure)),
+            ))
+        }
         AgentPendingRequest::Semantic(request) => SemanticRuntimeSettlement::try_new(
             request.correlation,
             Err(map_context_failure_to_semantic(failure)),
@@ -751,6 +843,22 @@ impl EngineAgentBrowserPort {
             Ok(permit) => permit,
             Err(failure) => return ContextDispatch::Rejected(failure),
         };
+        self.schedule_reserved(request, permit)
+    }
+
+    fn schedule_audit(&self, request: AgentPendingRequest) -> ContextDispatch {
+        let permit = match self.admission.reserve_audit() {
+            Ok(permit) => permit,
+            Err(failure) => return ContextDispatch::Rejected(failure),
+        };
+        self.schedule_reserved(request, permit)
+    }
+
+    fn schedule_reserved(
+        &self,
+        request: AgentPendingRequest,
+        permit: AgentTaskPermit,
+    ) -> ContextDispatch {
         let task = AgentContextTask::new(request, permit, self.sink.clone());
         let slot = Arc::new(Mutex::new(Some(task)));
         let for_dispatch = slot.clone();
@@ -836,7 +944,24 @@ impl AgentBrowserPort for EngineAgentBrowserPort {
     }
 
     fn audit_resources(&self, audit: ContextResourceAuditId) -> ContextDispatch {
-        self.schedule(AgentPendingRequest::Audit(audit))
+        self.schedule_audit(AgentPendingRequest::Audit(audit))
+    }
+
+    fn seal_for_shutdown(&self, audit: ContextResourceAuditId) -> ContextShutdownDispatch {
+        let permit = match self.admission.reserve_shutdown_audit() {
+            Ok(permit) => permit,
+            Err(failure) => return ContextShutdownDispatch::SealedWithoutAudit(failure),
+        };
+        match self.schedule_reserved(AgentPendingRequest::ShutdownAudit(audit), permit) {
+            ContextDispatch::Scheduled => ContextShutdownDispatch::AuditScheduled,
+            ContextDispatch::Rejected(failure) => {
+                ContextShutdownDispatch::SealedWithoutAudit(failure)
+            }
+            ContextDispatch::Unsupported => {
+                self.admission.fail_invariant();
+                ContextShutdownDispatch::SealedWithoutAudit(ContextPortFailure::Shutdown)
+            }
+        }
     }
 
     fn invoke_semantic(&self, invocation: SemanticRuntimeInvocation) -> ContextDispatch {
@@ -1312,6 +1437,171 @@ mod tests {
             [ContextNativeEvent::ResourceAuditSettled(settlement)]
                 if settlement.outcome() == Err(ContextPortFailure::Shutdown)
         ));
+    }
+
+    #[test]
+    fn shutdown_barrier_is_distinct_exact_once_and_keeps_only_audits_open() {
+        crate::host::make_unavailable_for_test();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = events.clone();
+        let slot = AgentContextPortSlot::new(
+            Arc::new(|task| {
+                task();
+                true
+            }),
+            Arc::new(|_| {}),
+        );
+        let port = slot
+            .take(Arc::new(move |event| {
+                captured.lock().expect("events").push(event);
+            }))
+            .expect("port");
+
+        assert_eq!(
+            port.seal_for_shutdown(ContextResourceAuditId::new(41).expect("shutdown audit")),
+            ContextShutdownDispatch::AuditScheduled
+        );
+        assert_eq!(
+            port.seal_for_shutdown(ContextResourceAuditId::new(42).expect("repeat audit")),
+            ContextShutdownDispatch::SealedWithoutAudit(ContextPortFailure::Shutdown)
+        );
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        assert_eq!(
+            port.dispatch(construction_request()),
+            ContextDispatch::Rejected(ContextPortFailure::Shutdown)
+        );
+        assert_eq!(
+            port.audit_resources(ContextResourceAuditId::new(43).expect("drain audit")),
+            ContextDispatch::Scheduled
+        );
+
+        let events = events.lock().expect("events");
+        assert!(matches!(
+            events.as_slice(),
+            [
+                ContextNativeEvent::ShutdownAuditSettled(shutdown),
+                ContextNativeEvent::ResourceAuditSettled(drain),
+            ] if shutdown.audit().get() == 41
+                && shutdown.outcome() == Err(ContextPortFailure::Shutdown)
+                && drain.audit().get() == 43
+                && drain.outcome() == Err(ContextPortFailure::Shutdown)
+        ));
+    }
+
+    #[test]
+    fn queue_full_shutdown_still_seals_and_post_seal_audit_can_observe_drain() {
+        let pending = Arc::new(Mutex::new(Vec::new()));
+        let retained = pending.clone();
+        let dispatches = Arc::new(AtomicUsize::new(0));
+        let counted = dispatches.clone();
+        let slot = AgentContextPortSlot::new(
+            Arc::new(move |task| {
+                counted.fetch_add(1, Ordering::Relaxed);
+                retained.lock().expect("pending tasks").push(task);
+                true
+            }),
+            Arc::new(|_| {}),
+        );
+        let port = slot.take(Arc::new(|_| {})).expect("port");
+        for raw in 1..=MAX_PENDING_NATIVE_CONTEXT_TASKS {
+            assert_eq!(
+                port.audit_resources(ContextResourceAuditId::new(raw as u64).expect("audit")),
+                ContextDispatch::Scheduled
+            );
+        }
+
+        assert_eq!(
+            port.seal_for_shutdown(ContextResourceAuditId::new(100).expect("shutdown audit")),
+            ContextShutdownDispatch::SealedWithoutAudit(ContextPortFailure::ResourceExhausted)
+        );
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        assert_eq!(
+            port.dispatch(construction_request()),
+            ContextDispatch::Rejected(ContextPortFailure::Shutdown)
+        );
+        assert_eq!(
+            dispatches.load(Ordering::Relaxed),
+            MAX_PENDING_NATIVE_CONTEXT_TASKS
+        );
+
+        pending.lock().expect("pending tasks").pop();
+        assert_eq!(
+            port.audit_resources(ContextResourceAuditId::new(101).expect("drain audit")),
+            ContextDispatch::Scheduled
+        );
+        assert_eq!(
+            dispatches.load(Ordering::Relaxed),
+            MAX_PENDING_NATIVE_CONTEXT_TASKS + 1
+        );
+        assert_eq!(
+            port.seal_for_shutdown(ContextResourceAuditId::new(102).expect("repeat audit")),
+            ContextShutdownDispatch::SealedWithoutAudit(ContextPortFailure::Shutdown)
+        );
+    }
+
+    #[test]
+    fn rejected_shutdown_audit_dispatch_retains_the_permanent_seal() {
+        let dispatches = Arc::new(AtomicUsize::new(0));
+        let counted = dispatches.clone();
+        let slot = AgentContextPortSlot::new(
+            Arc::new(move |_| {
+                counted.fetch_add(1, Ordering::Relaxed);
+                false
+            }),
+            Arc::new(|_| {}),
+        );
+        let port = slot.take(Arc::new(|_| {})).expect("port");
+        assert_eq!(
+            port.seal_for_shutdown(ContextResourceAuditId::new(1).expect("shutdown audit")),
+            ContextShutdownDispatch::SealedWithoutAudit(ContextPortFailure::Shutdown)
+        );
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        assert_eq!(
+            port.dispatch(construction_request()),
+            ContextDispatch::Rejected(ContextPortFailure::Shutdown)
+        );
+        assert_eq!(
+            port.audit_resources(ContextResourceAuditId::new(2).expect("drain audit")),
+            ContextDispatch::Rejected(ContextPortFailure::Shutdown)
+        );
+        assert_eq!(dispatches.load(Ordering::Relaxed), 2);
+        let state = slot.state.lock().expect("state");
+        let admission = state.admission.as_ref().expect("admission");
+        assert!(admission.state.lock().expect("admission state").sealed);
+        assert_eq!(admission.pending(), Some(0));
+    }
+
+    #[test]
+    fn shutdown_seal_linearizes_against_racing_mutation_admission() {
+        for _ in 0..64 {
+            let admission = Arc::new(AgentPortAdmission::new(Arc::new(|_| {})));
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+            let racing_admission = admission.clone();
+            let racing_barrier = barrier.clone();
+            let mutation = std::thread::spawn(move || {
+                racing_barrier.wait();
+                racing_admission.reserve()
+            });
+
+            barrier.wait();
+            let shutdown = admission
+                .reserve_shutdown_audit()
+                .expect("shutdown audit reservation");
+            let mutation = mutation.join().expect("mutation race");
+            match mutation {
+                Ok(permit) => drop(permit),
+                Err(ContextPortFailure::Shutdown) => {}
+                Err(failure) => panic!("unexpected mutation refusal: {failure:?}"),
+            }
+            assert!(matches!(
+                admission.reserve(),
+                Err(ContextPortFailure::Shutdown)
+            ));
+            drop(shutdown);
+            let audit = admission.reserve_audit().expect("post-seal audit");
+            drop(audit);
+            assert_eq!(admission.pending(), Some(0));
+        }
     }
 
     #[test]

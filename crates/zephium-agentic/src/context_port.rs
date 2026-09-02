@@ -486,6 +486,22 @@ pub enum ContextDispatch {
     Unsupported,
 }
 
+/// Synchronous result of the atomic native shutdown seal and audit admission.
+///
+/// Unlike [`ContextDispatch`], every variant means that non-audit admission is
+/// permanently sealed. A scheduled audit owns one exact terminal
+/// [`ContextNativeEvent::ShutdownAuditSettled`] obligation. If audit admission
+/// or outer dispatch fails, callers may issue a bounded read-only
+/// [`AgentBrowserPort::audit_resources`] request after retained work drains.
+#[must_use]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ContextShutdownDispatch {
+    /// The adapter was sealed and the exact shutdown audit entered its executor.
+    AuditScheduled,
+    /// The adapter was sealed but no terminal shutdown-audit event is owed.
+    SealedWithoutAudit(ContextPortFailure),
+}
+
 /// Exact asynchronous settlement of initial native construction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ContextConstructionSettlement {
@@ -740,6 +756,36 @@ pub struct ContextResourceAuditSettlement {
     outcome: Result<ContextNativeResourceSnapshot, ContextPortFailure>,
 }
 
+/// Exact asynchronous response to the audit that atomically sealed admission.
+///
+/// This separate type prevents an earlier ordinary audit from being mistaken
+/// for the shutdown linearization point.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ContextShutdownAuditSettlement {
+    audit: ContextResourceAuditId,
+    outcome: Result<ContextNativeResourceSnapshot, ContextPortFailure>,
+}
+
+impl ContextShutdownAuditSettlement {
+    /// Binds one validated snapshot or refusal to the exact shutdown audit.
+    pub const fn new(
+        audit: ContextResourceAuditId,
+        outcome: Result<ContextNativeResourceSnapshot, ContextPortFailure>,
+    ) -> Self {
+        Self { audit, outcome }
+    }
+
+    /// Exact shutdown-audit correlation identity.
+    pub const fn audit(self) -> ContextResourceAuditId {
+        self.audit
+    }
+
+    /// Validated count cohort or closed refusal.
+    pub const fn outcome(self) -> Result<ContextNativeResourceSnapshot, ContextPortFailure> {
+        self.outcome
+    }
+}
+
 impl ContextResourceAuditSettlement {
     /// Binds one validated snapshot or refusal to the exact audit request.
     pub const fn new(
@@ -779,6 +825,8 @@ pub enum ContextNativeEvent {
     CookieTransferSettled(Box<ContextCookieTransferSettlement>),
     /// One bounded native resource audit settled.
     ResourceAuditSettled(ContextResourceAuditSettlement),
+    /// The audit admitted at the atomic native shutdown seal settled.
+    ShutdownAuditSettled(ContextShutdownAuditSettlement),
     /// One fixed isolated-world semantic invocation reached a terminal result.
     SemanticRuntimeSettled(Box<SemanticRuntimeSettlement>),
 }
@@ -816,7 +864,19 @@ pub trait AgentBrowserPort: Send + Sync {
     fn transfer_cookies(&self, request: ContextCookieTransferRequest) -> ContextDispatch;
 
     /// Attempts to admit one privacy-preserving native resource audit.
+    ///
+    /// Read-only audits remain bounded and may be admitted after shutdown is
+    /// sealed so an owner can verify asynchronous drain. No other request
+    /// class may reopen behind that seal.
     fn audit_resources(&self, audit: ContextResourceAuditId) -> ContextDispatch;
+
+    /// Atomically seals non-audit admission and attempts one resource audit.
+    ///
+    /// Every return value means the seal is permanent. `AuditScheduled`
+    /// transfers exactly one `ShutdownAuditSettled` event obligation; a
+    /// `SealedWithoutAudit` result transfers none. A repeated call is closed as
+    /// `SealedWithoutAudit(Shutdown)` and cannot create another barrier event.
+    fn seal_for_shutdown(&self, audit: ContextResourceAuditId) -> ContextShutdownDispatch;
 
     /// Attempts to admit one already-encoded fixed semantic-runtime invocation.
     fn invoke_semantic(&self, invocation: SemanticRuntimeInvocation) -> ContextDispatch;
@@ -1168,6 +1228,10 @@ mod tests {
                 ContextDispatch::Scheduled
             }
 
+            fn seal_for_shutdown(&self, _audit: ContextResourceAuditId) -> ContextShutdownDispatch {
+                ContextShutdownDispatch::AuditScheduled
+            }
+
             fn invoke_semantic(
                 &self,
                 _invocation: crate::SemanticRuntimeInvocation,
@@ -1208,6 +1272,10 @@ mod tests {
         assert_eq!(
             port.audit_resources(ContextResourceAuditId::new(1).expect("audit")),
             ContextDispatch::Scheduled
+        );
+        assert_eq!(
+            port.seal_for_shutdown(ContextResourceAuditId::new(2).expect("shutdown audit")),
+            ContextShutdownDispatch::AuditScheduled
         );
     }
 }

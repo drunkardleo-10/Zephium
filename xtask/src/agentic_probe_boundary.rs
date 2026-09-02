@@ -332,6 +332,11 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         &read(repository.join(ENGINE_MACOS_AGENT_CONTEXT))?,
         &read(repository.join(ENGINE_AGENT_NAVIGATION))?,
     )?;
+    validate_agent_context_shutdown_barrier_contract(
+        &read(repository.join(AGENTIC_CONTEXT_PORT))?,
+        &read(repository.join(ENGINE_AGENT_CONTEXT_PORT))?,
+        &read(repository.join(ENGINE_AGENT_CONTEXT_HOST))?,
+    )?;
     validate_engine_semantic_runtime_boundary(&read(
         repository.join(ENGINE_MACOS_SEMANTIC_RUNTIME),
     )?)?;
@@ -4634,6 +4639,115 @@ fn validate_context_shutdown_retention_contract(source: &str) -> Result<(), Stri
     Ok(())
 }
 
+fn validate_agent_context_shutdown_barrier_contract(
+    domain: &str,
+    port: &str,
+    host: &str,
+) -> Result<(), String> {
+    fn production(source: &str) -> &str {
+        source
+            .split_once("\n#[cfg(test)]\nmod tests")
+            .map_or(source, |(production, _)| production)
+    }
+    let domain = compact(production(domain));
+    for required in [
+        "pubenumContextShutdownDispatch{",
+        "AuditScheduled,",
+        "SealedWithoutAudit(ContextPortFailure),",
+        "pubstructContextShutdownAuditSettlement{audit:ContextResourceAuditId,outcome:Result<ContextNativeResourceSnapshot,ContextPortFailure>,}",
+        "ShutdownAuditSettled(ContextShutdownAuditSettlement)",
+        "fnseal_for_shutdown(&self,audit:ContextResourceAuditId)->ContextShutdownDispatch;",
+    ] {
+        if !domain.contains(required) {
+            return Err(format!(
+                "agent context shutdown vocabulary lost distinct barrier contract {required}"
+            ));
+        }
+    }
+
+    let port = compact(production(port));
+    let ordinary_start = port
+        .find("fnreserve_audit(")
+        .ok_or_else(|| "post-seal resource-audit admission is missing".to_owned())?;
+    let shutdown_start = port[ordinary_start..]
+        .find("fnreserve_shutdown_audit(")
+        .map(|offset| ordinary_start + offset)
+        .ok_or_else(|| "atomic shutdown-audit admission is missing".to_owned())?;
+    let ordinary = &port[ordinary_start..shutdown_start];
+    for required in [
+        "ifstate.invariant_failed{returnErr(ContextPortFailure::Shutdown);}",
+        "ifstate.pending>=MAX_PENDING_NATIVE_CONTEXT_TASKS{returnErr(ContextPortFailure::ResourceExhausted);}",
+        "state.pending+=1;",
+    ] {
+        if !ordinary.contains(required) {
+            return Err(format!(
+                "post-seal resource audit lost bounded admission rule {required}"
+            ));
+        }
+    }
+    if ordinary.contains("ifstate.sealed") || ordinary.contains("state.sealed||") {
+        return Err("read-only resource audits cannot be closed by the mutation seal".to_owned());
+    }
+
+    let shutdown_end = port[shutdown_start..]
+        .find("fnreserve_screenshot(")
+        .map(|offset| shutdown_start + offset)
+        .ok_or_else(|| "shutdown-audit admission boundary is missing".to_owned())?;
+    let shutdown = &port[shutdown_start..shutdown_end];
+    let closed = shutdown
+        .find("ifstate.sealed||state.invariant_failed")
+        .ok_or_else(|| "shutdown audit no longer rejects a prior seal".to_owned())?;
+    let seal = shutdown[closed..]
+        .find("state.sealed=true;")
+        .map(|offset| closed + offset)
+        .ok_or_else(|| "shutdown audit no longer seals mutation admission".to_owned())?;
+    let capacity = shutdown[closed..]
+        .find("ifstate.pending>=MAX_PENDING_NATIVE_CONTEXT_TASKS")
+        .map(|offset| closed + offset)
+        .ok_or_else(|| "shutdown audit lost the global queue ceiling".to_owned())?;
+    let reserve = shutdown[closed..]
+        .find("state.pending+=1;")
+        .map(|offset| closed + offset)
+        .ok_or_else(|| "shutdown audit lost its exact pending reservation".to_owned())?;
+    if !(closed < seal && seal < capacity && capacity < reserve) {
+        return Err(
+            "shutdown mutation seal must linearize before capacity refusal and reservation"
+                .to_owned(),
+        );
+    }
+
+    for required in [
+        "Audit(ContextResourceAuditId),ShutdownAudit(ContextResourceAuditId),",
+        "pub(crate)fncomplete_audit(self,outcome:Result<ContextNativeResourceSnapshot,ContextPortFailure>,)",
+        "Some(AgentPendingRequest::ShutdownAudit(audit))=>{",
+        "ContextNativeEvent::ShutdownAuditSettled(",
+        "ContextShutdownAuditSettlement::new(audit,Err(failure))",
+        "fnaudit_resources(&self,audit:ContextResourceAuditId)->ContextDispatch{self.schedule_audit(AgentPendingRequest::Audit(audit))}",
+        "fnseal_for_shutdown(&self,audit:ContextResourceAuditId)->ContextShutdownDispatch",
+        "self.admission.reserve_shutdown_audit()",
+        "self.schedule_reserved(AgentPendingRequest::ShutdownAudit(audit),permit)",
+        "ContextDispatch::Scheduled=>ContextShutdownDispatch::AuditScheduled",
+        "ContextShutdownDispatch::SealedWithoutAudit(failure)",
+    ] {
+        if !port.contains(required) {
+            return Err(format!(
+                "engine shutdown barrier lost exact bounded routing {required}"
+            ));
+        }
+    }
+
+    let host = compact(production(host));
+    if !host.contains("task.complete_audit(outcome);")
+        || host.contains("ContextResourceAuditSettlement::new(audit,outcome)")
+    {
+        return Err(
+            "native host must return audited counts through the task's distinct barrier route"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
 fn validate_agentic_zero_idle_sources(repository: &Path) -> Result<(), String> {
     let source_directory = repository.join(AGENTIC_SOURCE_DIRECTORY);
     let mut files = Vec::new();
@@ -5093,6 +5207,61 @@ mod tests {
         ] {
             assert!(validate_context_shutdown_retention_contract(&invalid).is_err());
         }
+    }
+
+    #[test]
+    fn native_shutdown_barrier_is_atomic_distinct_and_drain_auditable() {
+        let domain = include_str!("../../crates/zephium-agentic/src/context_port.rs");
+        let port = include_str!("../../crates/zephium-engine/src/agent_context_port.rs");
+        let host = include_str!("../../crates/zephium-engine/src/host/agent_context.rs");
+        validate_agent_context_shutdown_barrier_contract(domain, port, host)
+            .expect("atomic native shutdown barrier");
+
+        for invalid in [
+            domain.replace(
+                "fn seal_for_shutdown(&self, audit: ContextResourceAuditId) -> ContextShutdownDispatch;",
+                "",
+            ),
+            domain.replace(
+                "ShutdownAuditSettled(ContextShutdownAuditSettlement)",
+                "ResourceAuditSettled(ContextResourceAuditSettlement)",
+            ),
+        ] {
+            assert!(
+                validate_agent_context_shutdown_barrier_contract(&invalid, port, host).is_err()
+            );
+        }
+        for invalid in [
+            port.replace(
+                "if state.invariant_failed {",
+                "if state.sealed || state.invariant_failed {",
+            ),
+            port.replace(
+                "state.sealed = true;\n        if state.pending >= MAX_PENDING_NATIVE_CONTEXT_TASKS",
+                "if state.pending >= MAX_PENDING_NATIVE_CONTEXT_TASKS",
+            ),
+            port.replace(
+                "self.schedule_audit(AgentPendingRequest::Audit(audit))",
+                "self.schedule(AgentPendingRequest::Audit(audit))",
+            ),
+            port.replace(
+                "self.schedule_reserved(AgentPendingRequest::ShutdownAudit(audit), permit)",
+                "self.schedule_reserved(AgentPendingRequest::Audit(audit), permit)",
+            ),
+        ] {
+            assert!(
+                validate_agent_context_shutdown_barrier_contract(domain, &invalid, host).is_err()
+            );
+        }
+        assert!(validate_agent_context_shutdown_barrier_contract(
+            domain,
+            port,
+            &host.replace(
+                "task.complete_audit(outcome);",
+                "task.refuse(ContextPortFailure::Shutdown);"
+            )
+        )
+        .is_err());
     }
 
     #[test]

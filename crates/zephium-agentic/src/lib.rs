@@ -208,9 +208,9 @@ pub use context_port::{
     ContextNativeResourceSnapshot, ContextNavigationReplacement, ContextNavigationRequest,
     ContextNavigationSettlement, ContextNavigationTarget, ContextOwnedViewport,
     ContextPortContractError, ContextPortFailure, ContextRendererLoss, ContextResourceAuditId,
-    ContextResourceAuditSettlement, ContextTransitionRequest, ContextTransitionSettlement,
-    SemanticActionNativeCompletion, SemanticScreenshotNativeCompletion,
-    MAX_PENDING_NATIVE_CONTEXT_TASKS,
+    ContextResourceAuditSettlement, ContextShutdownAuditSettlement, ContextShutdownDispatch,
+    ContextTransitionRequest, ContextTransitionSettlement, SemanticActionNativeCompletion,
+    SemanticScreenshotNativeCompletion, MAX_PENDING_NATIVE_CONTEXT_TASKS,
 };
 pub use context_registry::{
     ContextRegistry, ContextRegistryEntry, ContextRegistryEntryState, ContextRegistryError,

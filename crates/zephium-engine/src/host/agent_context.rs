@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use zephium_agentic::{
     ContextNativeEvent, ContextNativeResourceCounts, ContextNativeResourceSnapshot,
-    ContextPortFailure, ContextResourceAuditSettlement,
+    ContextPortFailure,
 };
 
 #[cfg(target_os = "macos")]
@@ -674,7 +674,7 @@ impl EngineHost {
     fn settle_agent_context_audit(
         &mut self,
         task: AgentContextTask,
-        audit: zephium_agentic::ContextResourceAuditId,
+        _audit: zephium_agentic::ContextResourceAuditId,
     ) {
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         let binding_count = u8::try_from(self.agent_contexts.len()).ok();
@@ -771,9 +771,7 @@ impl EngineHost {
             }
             _ => Err(ContextPortFailure::NativeRefused),
         };
-        task.complete(ContextNativeEvent::ResourceAuditSettled(
-            ContextResourceAuditSettlement::new(audit, outcome),
-        ));
+        task.complete_audit(outcome);
     }
 
     #[cfg(target_os = "macos")]

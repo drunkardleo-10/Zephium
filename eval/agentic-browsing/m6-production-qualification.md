@@ -59,7 +59,15 @@ responses, machine-local paths, or native traces.
   exact supervisor cancellation is still allowed to remove each queued row and
   mint its cleanup receipt. The gate rejects seal-time removal, sealed-state
   rejection in cleanup, or validation that treats retained queued rows as an
-  invariant failure.
+  invariant failure; and
+- gives the stable native browser port an atomic shutdown barrier. Its one
+  mutex acquisition seals every mutation, semantic, action, and capture route
+  before reserving the final audit; a full queue or rejected outer dispatcher
+  cannot reopen admission. The shutdown audit has a distinct event type and
+  exact correlation, while ordinary resource audits alone remain boundedly
+  admissible after the seal for asynchronous drain checks. The gate rejects a
+  reordered seal, a reopened mutation route, a seal-blocked audit, ordinary-
+  audit substitution, or host settlement that bypasses the task-owned route.
 
 The same check pins the default functional core to an empty feature set and a
 closed allocation/data dependency inventory. Its non-diagnostic source is
@@ -163,6 +171,16 @@ agentic-owned Windows modules. Cross-compilation is not device behavior.
   release. Active contexts still require native close and terminal reaping.
   This is functional-core shutdown ordering, not end-to-end application/native
   shutdown qualification.
+- The stable native `AgentBrowserPort` can now linearize shutdown admission
+  with a privacy-preserving resource audit. Tests race the seal against normal
+  admission, fill the complete 16-task queue, reject outer dispatch,
+  distinguish the shutdown settlement from ordinary audit settlements, and
+  prove only bounded audits remain admissible for drain verification. The host
+  reuses its validated native-resource accounting and the port adds no queue,
+  worker, timer, page, or native object until it is taken. This closes the
+  stable port race only; the application actor still must order logical
+  cancellation, native close, repeated zero-resource audit, engine teardown,
+  and durable terminal reporting in an end-to-end shutdown suite.
 - The Browse named-device baseline intentionally has no values. No CPU, memory,
   GPU/compositor, energy, wakeup, or input-latency budget has been inferred.
 - Checked-priced model receipts now preserve a content-free exact schedule
@@ -268,7 +286,8 @@ The authoritative aggregate records and exact remaining blockers are in
 - hot-path and zero-unused-agent-overhead measurements; and
 - completion of native/unsafe, secret, and log review outside the scoped
   agentic-owned production modules and dormant provider transport, plus
-  application/platform profile integration, shutdown, recovery, migration, and
-  stable Work-port audits.
+  application/platform profile integration, shutdown orchestration and
+  zero-resource settlement, recovery, migration, and stable Work-port audits
+  beyond the bounded native-context shutdown seam.
 
 None of these pending items is represented as zero, passing, or non-blocking.
