@@ -2700,11 +2700,16 @@ fn validate_windows_physical_workflow(source: &str) -> Result<(), String> {
         "if($recordedRevision-cne$sourceRevision)",
         "Assert-ExactDirectoryEntries-Directory$evidenceDirectory-ExpectedNames$expectedBeforeReview",
         "Assert-ExactDirectoryEntries-Directory$evidenceDirectory-ExpectedNames$expectedAfterReview",
+        "Invoke-Cargo-Arguments@(\"xtask\",\"check-agentic-probe-boundary\")",
+        "Invoke-Cargo-Arguments@(\"test\",\"--locked\",\"-p\",\"zephium-agentic\",\"--features\",\"probe-harness\")",
+        "Invoke-Cargo-Arguments@(\"test\",\"--locked\",\"-p\",\"zephium-engine\",\"--features\",\"agentic-browser\",\"--lib\")",
         "Invoke-Cargo-Arguments@(\"check\",\"--locked\",\"-p\",\"zephium-engine\",\"--features\",\"agentic-browser\")",
         "Invoke-Cargo-Arguments@(\"clippy\",\"--locked\",\"-p\",\"zephium-engine\",\"--features\",\"native-agentic-input-probe\",\"--bin\",\"windows-agentic-input-probe\")",
         "Invoke-Cargo-Arguments@(\"build\",\"--locked\",\"-p\",\"zephium-engine\",\"--features\",\"native-agentic-input-probe\",\"--bin\",\"windows-agentic-input-probe\")",
         "Invoke-Cargo-Arguments@(\"clippy\",\"--locked\",\"-p\",\"zephium-engine\",\"--features\",\"native-agentic-semantic-probe\",\"--bin\",\"windows-agentic-semantic-probe\")",
         "Invoke-Cargo-Arguments@(\"build\",\"--locked\",\"-p\",\"zephium-engine\",\"--features\",\"native-agentic-semantic-probe\",\"--bin\",\"windows-agentic-semantic-probe\")",
+        "$preflightRevision=Get-SourceRevision-Repository$repository",
+        "if($preflightRevision-cne$sourceRevision)",
         "\"--ci-hidden-debugger-coexistence--evidence-directoryeval/agentic-browsing/local-results\"",
     ] {
         if !compact.contains(required) {
@@ -2747,9 +2752,47 @@ fn validate_windows_physical_workflow(source: &str) -> Result<(), String> {
         }
     }
 
-    if source.matches("Invoke-Cargo -Arguments").count() != 18 {
+    if source.matches("Invoke-Cargo -Arguments").count() != 21 {
         return Err(
             "physical Windows qualification workflow changed its exact command inventory"
+                .to_owned(),
+        );
+    }
+    if source
+        .matches("Assert-CleanCheckout -Repository $repository")
+        .count()
+        != 2
+    {
+        return Err(
+            "physical Windows qualification must recheck source cleanliness after preflight"
+                .to_owned(),
+        );
+    }
+    if source
+        .matches("Assert-ExactDirectoryEntries -Directory $evidenceDirectory -ExpectedNames @()")
+        .count()
+        != 2
+    {
+        return Err(
+            "physical Windows qualification must recheck the empty evidence directory after preflight"
+                .to_owned(),
+        );
+    }
+    let preflight = compact
+        .find("Invoke-Cargo-Arguments@(\"xtask\",\"check-agentic-probe-boundary\")")
+        .ok_or_else(|| "physical Windows qualification preflight is missing".to_owned())?;
+    let clean_recheck = compact
+        .rfind("Assert-CleanCheckout-Repository$repository")
+        .ok_or_else(|| "physical Windows qualification clean recheck is missing".to_owned())?;
+    let stamp = compact
+        .find("Write-SourceStamp-Path(Join-Path$evidenceDirectory$sourceStampName)")
+        .ok_or_else(|| "physical Windows qualification source stamp is missing".to_owned())?;
+    let first_native_run = compact
+        .find("Invoke-Cargo-Arguments@(\"run\",\"--locked\",\"-p\",\"zephium-engine\",\"--features\",\"native-agentic-input-probe\",\"--bin\",\"windows-agentic-input-probe\",\"--\",\"--ci-hidden-fixed-dom\"")
+        .ok_or_else(|| "physical Windows qualification native run is missing".to_owned())?;
+    if !(preflight < clean_recheck && clean_recheck < stamp && stamp < first_native_run) {
+        return Err(
+            "physical Windows qualification must preflight, recheck source, stamp, then run"
                 .to_owned(),
         );
     }
@@ -12449,6 +12492,29 @@ mod tests {
             1,
         ))
         .is_err());
+        assert!(validate_windows_physical_workflow(&source.replacen(
+            "Invoke-Cargo -Arguments @(\"xtask\", \"check-agentic-probe-boundary\")",
+            "Write-Host unchecked",
+            1,
+        ))
+        .is_err());
+        assert!(validate_windows_physical_workflow(&source.replacen(
+            "        Assert-CleanCheckout -Repository $repository\n        $preflightRevision",
+            "        $preflightRevision",
+            1,
+        ))
+        .is_err());
+        let stamped_before_preflight = source
+            .replacen(
+                "        Write-SourceStamp -Path (Join-Path $evidenceDirectory $sourceStampName) -Revision $sourceRevision",
+                "        Write-Host stamp-moved",
+                1,
+            )
+            .replace(
+                "        Invoke-Cargo -Arguments @(\"xtask\", \"check-agentic-probe-boundary\")",
+                "        Write-SourceStamp -Path (Join-Path $evidenceDirectory $sourceStampName) -Revision $sourceRevision\n        Invoke-Cargo -Arguments @(\"xtask\", \"check-agentic-probe-boundary\")",
+            );
+        assert!(validate_windows_physical_workflow(&stamped_before_preflight).is_err());
     }
 
     #[test]

@@ -11,10 +11,15 @@ The preferred physical path is now the source-gated two-phase
 `scripts/qualification/windows-agentic.ps1` workflow. Its collection phase
 requires an explicitly acknowledged authorized Windows device, a clean exact
 source revision on the x86-64 MSVC host toolchain, an initially empty fixed
-ignored directory, the four non-focused create-new input records, input review,
-and the six non-debugger semantic records. It contains no focused-input command
-and leaves the seventh debugger-attached semantic run to a separately
-authorized manual launch.
+ignored directory, the repository boundary gate, the complete offline probe
+harness tests, the production engine's agentic library tests, and both native
+Clippy/link builds before evidence collection. It then rechecks the clean
+revision and empty directory, creates the source stamp, captures the four
+non-focused create-new input records, performs input review, and captures the
+six non-debugger semantic records. A failed preflight leaves no stamp or result
+to confuse a retry. The workflow contains no focused-input command and leaves
+the seventh debugger-attached semantic run to a separately authorized manual
+launch.
 
 ## Construction and authority
 

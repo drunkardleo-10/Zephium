@@ -190,13 +190,27 @@ try {
         }
         Assert-DirectDirectory -Path $evidenceDirectory -Create $true
         Assert-ExactDirectoryEntries -Directory $evidenceDirectory -ExpectedNames @()
-        Write-SourceStamp -Path (Join-Path $evidenceDirectory $sourceStampName) -Revision $sourceRevision
 
+        Invoke-Cargo -Arguments @("xtask", "check-agentic-probe-boundary")
+        Invoke-Cargo -Arguments @("test", "--locked", "-p", "zephium-agentic", "--features", "probe-harness")
+        Invoke-Cargo -Arguments @("test", "--locked", "-p", "zephium-engine", "--features", "agentic-browser", "--lib")
         Invoke-Cargo -Arguments @("check", "--locked", "-p", "zephium-engine", "--features", "agentic-browser")
         Invoke-Cargo -Arguments @("clippy", "--locked", "-p", "zephium-engine", "--features", "native-agentic-input-probe", "--bin", "windows-agentic-input-probe")
         Invoke-Cargo -Arguments @("build", "--locked", "-p", "zephium-engine", "--features", "native-agentic-input-probe", "--bin", "windows-agentic-input-probe")
         Invoke-Cargo -Arguments @("clippy", "--locked", "-p", "zephium-engine", "--features", "native-agentic-semantic-probe", "--bin", "windows-agentic-semantic-probe")
         Invoke-Cargo -Arguments @("build", "--locked", "-p", "zephium-engine", "--features", "native-agentic-semantic-probe", "--bin", "windows-agentic-semantic-probe")
+
+        # Tests/build scripts must not alter the qualified source or pre-create
+        # a result. Bind the stamp only after every offline/native preflight is
+        # green so a failed compile also leaves the create-new evidence path
+        # reusable without manual cleanup.
+        Assert-CleanCheckout -Repository $repository
+        $preflightRevision = Get-SourceRevision -Repository $repository
+        if ($preflightRevision -cne $sourceRevision) {
+            throw "the qualification source changed during preflight"
+        }
+        Assert-ExactDirectoryEntries -Directory $evidenceDirectory -ExpectedNames @()
+        Write-SourceStamp -Path (Join-Path $evidenceDirectory $sourceStampName) -Revision $sourceRevision
 
         Invoke-Cargo -Arguments @("run", "--locked", "-p", "zephium-engine", "--features", "native-agentic-input-probe", "--bin", "windows-agentic-input-probe", "--", "--ci-hidden-fixed-dom", "--evidence-directory", "eval/agentic-browsing/local-results")
         Invoke-Cargo -Arguments @("run", "--locked", "-p", "zephium-engine", "--features", "native-agentic-input-probe", "--bin", "windows-agentic-input-probe", "--", "--ci-hidden-hwnd", "--evidence-directory", "eval/agentic-browsing/local-results")

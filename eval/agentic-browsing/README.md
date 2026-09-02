@@ -131,15 +131,20 @@ The acknowledgement is not authorization by itself; use it only after the
 physical device and this exact run have been approved. The script refuses a
 non-Windows or non-x86-64-MSVC host, a dirty or different checkout, a
 reparse-point evidence directory, and any pre-existing directory entry. It
-records the exact clean Git revision in a create-new ignored source stamp, runs
-the native compile/link gates, captures the four non-focused input modes and
-six non-debugger semantic modes, reviews the input cohort, and rebuilds the
-exact debugger target. It has no focused-input invocation and cannot launch
-the debugger-only mode.
+first runs the repository boundary gate, the complete offline probe-harness
+tests, the production engine's agentic library tests, and the native
+compile/link gates. It then rechecks source cleanliness, revision identity, and
+the still-empty result directory before recording the exact revision in a
+create-new ignored source stamp. Only then does it capture the four non-focused
+input modes and six non-debugger semantic modes, review the input cohort, and
+rebuild the exact debugger target. A failed preflight therefore cannot leave a
+stamp that resembles collected evidence. The workflow has no focused-input
+invocation and cannot launch the debugger-only mode.
 
-The equivalent transparent commands follow. They remain the command-level
-review authority and may be run manually when the same clean-checkout,
-create-new, and source-continuity conditions are independently enforced. Create
+The individual transparent mode commands follow for review. They are not a
+substitute for the source-bound orchestrator unless its full offline/native
+preflight, post-preflight clean-revision check, create-new stamp, directory
+inventory, and source-continuity conditions are independently enforced. Create
 the ignored local evidence directory and run these exact closed modes in order:
 
 ```powershell
@@ -189,8 +194,8 @@ JSON record to its selected machine-evidence sink before applying its pass/fail
 qualification whenever the native matrix returns evidence or a typed
 rejection. Build progress and the aggregate pass/fail summary remain on stderr,
 so a nonzero exit may still leave the redacted evidence needed to diagnose a
-rejected backend. The ignored local
-records contain only the closed evidence schema; review must still reject any
+rejected backend. The ignored local records contain only the closed evidence
+schema; review must still reject any
 unexpected file before extracting aggregate fields into committed evidence.
 For the required physical workflow, `--evidence-directory` is accepted only
 with the literal ignored directory and four required non-focused modes. It

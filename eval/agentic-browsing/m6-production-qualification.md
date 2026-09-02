@@ -304,6 +304,14 @@ agentic-owned Windows modules. Cross-compilation is not device behavior.
   controller input paths around the sole audited HWND/CDP sites. This
   strengthens future evidence admission and cancellation; it is not physical
   Windows behavior evidence.
+- The preferred physical-Windows orchestrator now runs the repository boundary
+  gate, complete offline probe-harness tests, production agentic engine tests,
+  and both native Clippy/link builds before creating its source stamp. It then
+  rechecks the clean exact revision and empty create-new evidence directory
+  before any native run. A failed or source-mutating preflight therefore cannot
+  be mistaken for a partial evidence cohort. The static gate pins the command
+  inventory and preflight→recheck→stamp→run order; no Windows behavior is
+  inferred until the separately authorized physical records pass review.
 - The physical Windows semantic source gate now binds its content-free success
   fields to the closed snapshot verifiers, exact flood and renderer-loss
   refusals, native suspend/readback/resume result, semantic drain audit, and
