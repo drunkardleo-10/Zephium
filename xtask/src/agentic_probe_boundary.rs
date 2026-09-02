@@ -76,6 +76,9 @@ const APP_API: &str = "crates/zephium-app/src/api.rs";
 const APP_ACTOR: &str = "crates/zephium-app/src/actor/mod.rs";
 const APP_SHELL: &str = "crates/zephium-app/src/shell/mod.rs";
 const DESKTOP_MANIFEST: &str = "desktop/Cargo.toml";
+const STORE_ACTOR: &str = "crates/zephium-store/src/actor.rs";
+const STORE_AGENT_AUDIT_ACTOR: &str = "crates/zephium-store/src/actor/agent_audit.rs";
+const STORE_AGENT_AUDIT_HUB: &str = "crates/zephium-store/src/hub/agent_audit.rs";
 const PROVIDER_TRANSPORT_MANIFEST: &str = "crates/zephium-agent-provider-transport/Cargo.toml";
 const PROVIDER_TRANSPORT_ROOT: &str = "crates/zephium-agent-provider-transport/src/lib.rs";
 const ENGINE_MANIFEST: &str = "crates/zephium-engine/Cargo.toml";
@@ -372,6 +375,11 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         &read(repository.join(APP_ACTOR))?,
         &read(repository.join(APP_SHELL))?,
         &read(repository.join(DESKTOP_MANIFEST))?,
+    )?;
+    validate_store_agent_audit_boundary(
+        &read(repository.join(STORE_ACTOR))?,
+        &read(repository.join(STORE_AGENT_AUDIT_ACTOR))?,
+        &read(repository.join(STORE_AGENT_AUDIT_HUB))?,
     )?;
     validate_provider_transport_manifest(&read(repository.join(PROVIDER_TRANSPORT_MANIFEST))?)?;
     let provider_transport_root = read(repository.join(PROVIDER_TRANSPORT_ROOT))?;
@@ -7274,6 +7282,124 @@ fn validate_agent_app_lifecycle(
     Ok(())
 }
 
+fn validate_store_agent_audit_boundary(
+    actor_root: &str,
+    actor: &str,
+    hub: &str,
+) -> Result<(), String> {
+    for (path, source) in [
+        (STORE_AGENT_AUDIT_ACTOR, actor),
+        (STORE_AGENT_AUDIT_HUB, hub),
+    ] {
+        if !compact(source).contains("#![deny(unsafe_code)]") {
+            return Err(format!(
+                "durable agent audit module {path} must deny unsafe code"
+            ));
+        }
+        validate_agentic_no_direct_logging_attribute(path, source)?;
+        validate_agentic_no_invariant_panic_attribute(path, source)?;
+        validate_agentic_no_direct_logging_calls(path, source)?;
+    }
+
+    let actor_root = compact(actor_root);
+    for required in [
+        "modagent_audit;",
+        "useagent_audit::AgentAuditDeliveryPermit;",
+        "agent_audit_delivery_admission:OnceLock<Arc<AtomicUsize>>",
+        "agent_audit_delivery_admission:OnceLock::new()",
+        "AppendAgentAudit(AgentAuditDelivery,AgentAuditDeliveryPermit,AgentAuditCompletion,)",
+        "agent_audit::append_and_settle(&muthub,delivery,completion).diagnostic()",
+        "eprintln!(\"{message}\")",
+    ] {
+        if !actor_root.contains(required) {
+            return Err(format!(
+                "Store actor lost isolated durable agent audit integration {required}"
+            ));
+        }
+    }
+    for forbidden in [
+        "implAgentAuditPortforSqliteStore",
+        "fncomplete_agent_audit(",
+        "eprintln!(\"store:agentaudit",
+    ] {
+        if actor_root.contains(forbidden) {
+            return Err(format!(
+                "general Store actor reacquired agent audit authority {forbidden}"
+            ));
+        }
+    }
+
+    let actor = compact(
+        &actor
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<String>(),
+    );
+    for required in [
+        "pub(super)constMAX_PENDING_AGENT_AUDIT_DELIVERIES:usize=8;",
+        "admission:&OnceLock<Arc<AtomicUsize>>",
+        "get_or_init(||Arc::new(AtomicUsize::new(0)))",
+        "pending.checked_add(1).filter(|next|*next<=MAX_PENDING_AGENT_AUDIT_DELIVERIES)",
+        "pending.checked_sub(1)",
+        "self.admission.store(usize::MAX,Ordering::Release)",
+        "implAgentAuditPortforSqliteStore",
+        "self.lifecycle.try_lock()",
+        "Err(TryLockError::WouldBlock)=>",
+        "lifecycle.terminal_admitted||self.shutdown_clean.load(Ordering::Acquire)",
+        "AgentAuditDeliveryPermit::acquire(&self.agent_audit_delivery_admission)",
+        ".try_send(Cmd::AppendAgentAudit(delivery,permit,completion))",
+        "Err(error)=>refuse_queued(error,proof)",
+        "mpsc::TrySendError::Full(_)=>AgentAuditSinkFailure::Capacity",
+        "mpsc::TrySendError::Disconnected(_)=>AgentAuditSinkFailure::Shutdown",
+        "ifletCmd::AppendAgentAudit(_delivery,_permit,completion)=command{discard_callback(completion);}",
+        "AgentAuditDispatch::Refused(proof.settle(AgentAuditDeliveryOutcome::Refused(failure)))",
+        "hub::AgentAuditAppendOutcome::Committed=>{proof.settle(AgentAuditDeliveryOutcome::Committed)}",
+        "hub::AgentAuditAppendOutcome::Refused(failure)=>{proof.settle(AgentAuditDeliveryOutcome::Refused(failure))}",
+        "hub::AgentAuditAppendOutcome::Uncertain=>{discard_callback(completion);returnAgentAuditActorResult::Uncertain;}",
+        "std::panic::catch_unwind(std::panic::AssertUnwindSafe(||completion(settlement))).is_ok()",
+        "std::panic::catch_unwind(std::panic::AssertUnwindSafe(||drop(completion)))",
+        "Self::Uncertain=>Some(\"store:agentauditappendoutcomeisuncertain\")",
+        "Self::CompletionPanicked=>Some(\"store:agentauditcompletioncallbackpanicked\")",
+    ] {
+        if !actor.contains(required) {
+            return Err(format!(
+                "isolated Store agent audit actor lost bounded authority rule {required}"
+            ));
+        }
+    }
+    for forbidden in [
+        ".send(Cmd::AppendAgentAudit",
+        "self.lifecycle.lock()",
+        "Serialize",
+        "Deserialize",
+        "serde::",
+        "std::thread",
+        "tokio::",
+        "std::fs",
+        "std::net",
+    ] {
+        if actor.contains(forbidden) {
+            return Err(format!(
+                "isolated Store agent audit actor acquired forbidden surface {forbidden}"
+            ));
+        }
+    }
+
+    let uncertain = actor
+        .find("hub::AgentAuditAppendOutcome::Uncertain=>")
+        .ok_or_else(|| "durable audit uncertain settlement is missing".to_owned())?;
+    let callback = actor
+        .find("ifcomplete(completion,settlement)")
+        .ok_or_else(|| "durable audit callback settlement is missing".to_owned())?;
+    if uncertain >= callback {
+        return Err(
+            "an uncertain durable audit append must retain settlement by dropping its callback"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
 fn validate_agent_context_shutdown_barrier_contract(
     domain: &str,
     port: &str,
@@ -8152,6 +8278,71 @@ mod tests {
             validate_agent_app_lifecycle(manifest, root, api, actor, shell, &invalid_desktop)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn durable_agent_audit_actor_is_isolated_bounded_and_abort_free() {
+        let actor_root = include_str!("../../crates/zephium-store/src/actor.rs");
+        let actor = include_str!("../../crates/zephium-store/src/actor/agent_audit.rs");
+        let hub = include_str!("../../crates/zephium-store/src/hub/agent_audit.rs");
+        validate_store_agent_audit_boundary(actor_root, actor, hub)
+            .expect("isolated durable agent audit actor");
+
+        for (index, invalid) in [
+            actor.replace(
+                "MAX_PENDING_AGENT_AUDIT_DELIVERIES: usize = 8",
+                "MAX_PENDING_AGENT_AUDIT_DELIVERIES: usize = 9",
+            ),
+            actor.replace("self.lifecycle.try_lock()", "self.lifecycle.lock()"),
+            actor.replace(
+                ".try_send(Cmd::AppendAgentAudit",
+                ".send(Cmd::AppendAgentAudit",
+            ),
+            actor.replace(
+                "pending.checked_sub(1)",
+                "Some(pending.wrapping_sub(1))",
+            ),
+            actor.replace(
+                "std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| completion(settlement))).is_ok()",
+                "completion(settlement); true",
+            ),
+            actor.replacen(
+                "            discard_callback(completion);\n            return AgentAuditActorResult::Uncertain;",
+                "            return AgentAuditActorResult::Uncertain;",
+                1,
+            ),
+            actor.replace(
+                "deny(clippy::panic, clippy::unreachable, clippy::unwrap_used)",
+                "allow(clippy::panic, clippy::unreachable, clippy::unwrap_used)",
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(
+                validate_store_agent_audit_boundary(actor_root, &invalid, hub).is_err(),
+                "agent audit actor mutation {index} was not rejected"
+            );
+        }
+
+        assert!(validate_store_agent_audit_boundary(
+            &actor_root.replace(
+                "agent_audit::append_and_settle(&mut hub, delivery, completion)",
+                "hub.append_agent_audit(&delivery)",
+            ),
+            actor,
+            hub,
+        )
+        .is_err());
+        assert!(validate_store_agent_audit_boundary(
+            actor_root,
+            actor,
+            &hub.replace(
+                "deny(clippy::dbg_macro, clippy::print_stderr, clippy::print_stdout)",
+                "allow(clippy::dbg_macro, clippy::print_stderr, clippy::print_stdout)",
+            ),
+        )
+        .is_err());
     }
 
     #[test]

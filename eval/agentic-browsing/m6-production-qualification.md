@@ -182,6 +182,18 @@ separately authorized run and human aggregate review occur.
   extension, terminal Store, and engine teardown; `Clean` joins the proof,
   while unclean results and panics still run every later barrier. The same
   consuming cleanup is mandatory on unexpected actor exit.
+- pins the durable audit Store boundary to two isolated, unsafe-free modules:
+  the actor authority/settlement adapter and transactional SQLite adapter.
+  Both compile-deny direct diagnostics and invariant-abort macros outside
+  tests. The source gate mutation-tests the lazy eight-batch permit, checked
+  fail-closed release, nonblocking shutdown join, bounded Store-mailbox send,
+  exact pre-admission refusal proofs, uncertain-commit callback non-invocation
+  and ledger replay retention, callback-panic containment, and the only two
+  fixed content-free diagnostics. Caller-owned callback destructors are also
+  panic-contained on every refusal or ambiguous discard path; this is an
+  unwind-build boundary and not a claim of recovery after a release abort.
+  This adds no task, connection, timer, allocation, or queue while agents are
+  unused and does not by itself compose the full application runtime.
 
 The same check pins the default functional core to an empty feature set and a
 closed allocation/data dependency inventory. Its non-diagnostic source is

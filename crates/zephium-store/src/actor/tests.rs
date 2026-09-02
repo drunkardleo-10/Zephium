@@ -8467,6 +8467,28 @@ fn agent_audit_actor_admission_is_independently_bounded_and_releases_commands() 
             AgentAuditSinkFailure::Capacity,
         )))
     );
+    struct PanicOnDrop;
+    impl Drop for PanicOnDrop {
+        fn drop(&mut self) {
+            panic!("integration callback destructor");
+        }
+    }
+    let callback_capture = PanicOnDrop;
+    let discard = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        store.append(
+            ledger.current_delivery().unwrap().unwrap(),
+            Box::new(move |_| {
+                let _retained_until_drop = &callback_capture;
+            }),
+        )
+    }))
+    .expect("capacity refusal contains callback destructor panic");
+    assert_eq!(
+        discard,
+        AgentAuditDispatch::Refused(proof.settle(AgentAuditDeliveryOutcome::Refused(
+            AgentAuditSinkFailure::Capacity,
+        )))
+    );
     drop(rx);
     assert_eq!(
         store

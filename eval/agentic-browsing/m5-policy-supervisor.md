@@ -365,10 +365,23 @@ browser action, model call, tool call, data transfer, cost, or native resource.
   admits at most eight audit batches independently of the 256-command Store
   mailbox, uses nonblocking admission, rejects work once terminal shutdown is
   admitted, and serializes accepted appends before a later Store shutdown
-  barrier. Completion callback panics are contained after the durable result so
-  they cannot terminate the Store actor. Its admission counter allocates
-  lazily; no agent task, worker, timer, connection, or queue exists while
-  unused.
+  barrier. Completion callback panics are contained after the durable result,
+  and a panicking destructor on caller-owned callback state is contained on
+  every pre-admission, mailbox-refusal, or commit-ambiguous discard path, so
+  neither can unwind across the Store boundary. Its admission counter
+  allocates lazily; no agent task, worker, timer, connection, or queue exists
+  while unused.
+- The complete agent-owned Store actor seam is isolated from the general Store
+  implementation in one private module. That module and the transactional hub
+  adapter deny unsafe code, direct stdout/stderr diagnostics, and direct
+  `unwrap`/`expect`, `panic`, or `unreachable` findings outside tests. The
+  general actor may emit only one of two fixed content-free diagnostics
+  returned by a closed result enum; delivery data and SQLite errors never
+  cross that boundary. A repository mutation gate pins this isolation, lazy
+  admission, checked poison-on-drift release, nonblocking lifecycle check,
+  bounded mailbox send, exact proof settlement, callback containment, and
+  uncertain-result replay behavior. These unwind-build containment checks do
+  not claim recovery after an optimized process-level abort.
 - META migration 16 stores app-global audit rows because one run may span
   profiles and the delivery intentionally contains no profile or page content.
   Each event is a canonical 128-byte version-one record of opaque identities,

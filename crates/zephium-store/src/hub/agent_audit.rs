@@ -1,5 +1,12 @@
 //! Transactional idempotent persistence for content-free agent audit batches.
 
+#![deny(unsafe_code)]
+#![deny(clippy::dbg_macro, clippy::print_stderr, clippy::print_stdout)]
+#![cfg_attr(
+    not(test),
+    deny(clippy::panic, clippy::unreachable, clippy::unwrap_used)
+)]
+
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use zephium_agentic::{
     AgentAuditDelivery, AgentAuditSinkFailure, AGENT_AUDIT_RECORD_V1_BYTES,
