@@ -2664,6 +2664,14 @@ fn validate_windows_probe_binary(source: &str, qualification: &str) -> Result<()
 fn validate_windows_probe_ci(source: &str) -> Result<(), String> {
     let source = compact(source).replace('\\', "");
     for required in [
+        "name:ParsetheWindowsagenticqualificationworkflow",
+        "if:runner.os=='Windows'",
+        "shell:pwsh",
+        "$scriptPath=Join-Path$env:GITHUB_WORKSPACE\"scriptsqualificationwindows-agentic.ps1\"",
+        "[void][System.Management.Automation.Language.Parser]::ParseFile(",
+        "[ref]$tokens,[ref]$parseErrors",
+        "if($parseErrors.Count-ne0)",
+        "throw\"physicalWindowsagenticorchestratordidnotparse\"",
         "cargoclippy--locked-pzephium-engine--featuresnative-agentic-input-probe--binwindows-agentic-input-probe",
         "cargobuild--locked-pzephium-engine--featuresnative-agentic-input-probe--binwindows-agentic-input-probe",
         "cargoclippy--locked-pzephium-engine--featuresnative-agentic-semantic-probe--binwindows-agentic-semantic-probe",
@@ -12523,8 +12531,23 @@ mod tests {
     }
 
     #[test]
-    fn windows_probe_ci_requires_native_clippy_and_link_gates() {
+    fn windows_probe_ci_requires_powershell_parse_native_clippy_and_link_gates() {
         let valid = r#"
+            - name: Parse the Windows agentic qualification workflow
+              if: runner.os == 'Windows'
+              shell: pwsh
+              run: |
+                $tokens = $null
+                $parseErrors = $null
+                $scriptPath = Join-Path $env:GITHUB_WORKSPACE "scripts\qualification\windows-agentic.ps1"
+                [void][System.Management.Automation.Language.Parser]::ParseFile(
+                  $scriptPath,
+                  [ref]$tokens,
+                  [ref]$parseErrors
+                )
+                if ($parseErrors.Count -ne 0) {
+                  throw "physical Windows agentic orchestrator did not parse"
+                }
             cargo clippy --locked -p zephium-engine \
               --features native-agentic-input-probe \
               --bin windows-agentic-input-probe
@@ -12539,6 +12562,7 @@ mod tests {
               --bin windows-agentic-semantic-probe
         "#;
         validate_windows_probe_ci(valid).expect("native audit and link gates");
+        assert!(validate_windows_probe_ci(&valid.replacen("ParseFile", "Tokenize", 1)).is_err());
         assert!(validate_windows_probe_ci(&valid.replacen("clippy", "check", 1)).is_err());
         assert!(validate_windows_probe_ci(&valid.replacen("build", "check", 1)).is_err());
         assert!(validate_windows_probe_ci(&valid.replacen(

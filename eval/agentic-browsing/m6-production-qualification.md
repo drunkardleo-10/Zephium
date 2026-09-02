@@ -317,6 +317,10 @@ agentic-owned Windows modules. Cross-compilation is not device behavior.
   The wrapper and locked metadata lookup force Cargo offline throughout both
   phases; a missing local dependency fails before collection can create the
   source stamp.
+  The existing Windows CI job parses the complete PowerShell source through
+  the native language parser without executing a phase; the release gate pins
+  that parse step beside the native Clippy/link jobs. This is syntax evidence,
+  not physical behavior evidence.
 - The manual debugger handoff no longer assumes Cargo's default target
   directory or trusts any compatible probe executable. The orchestrator
   resolves the active target directory from locked Cargo metadata, verifies

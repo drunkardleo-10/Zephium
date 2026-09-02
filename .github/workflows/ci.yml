@@ -429,6 +429,24 @@ jobs:
         # process locking, legacy bounding, and privacy-expiry behavior.
         run: cargo test --locked --manifest-path desktop/windows-log-tests/Cargo.toml
 
+      # Parse the source-gated physical workflow on the native PowerShell host
+      # without executing either phase or granting device authority.
+      - name: Parse the Windows agentic qualification workflow
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $parseErrors = $null
+          $scriptPath = Join-Path $env:GITHUB_WORKSPACE "scripts\qualification\windows-agentic.ps1"
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+            $scriptPath,
+            [ref]$tokens,
+            [ref]$parseErrors
+          )
+          if ($parseErrors.Count -ne 0) {
+            throw "physical Windows agentic orchestrator did not parse"
+          }
+
       # Compile and link the release-excluded physical-device runner on its
       # native toolchain without treating a hosted CI VM as behavioral proof.
       - name: Audit and build the Windows agentic qualification runners

@@ -27,6 +27,11 @@ leaves no stamp or result to confuse a retry. The workflow contains no
 focused-input command and cannot launch the separately authorized debugger
 mode.
 
+The Windows CI job parses the orchestrator with PowerShell's native language
+parser without executing it, then separately Clippy-checks and links both
+probe binaries. This catches script syntax drift but remains compile/static
+evidence, not device behavior.
+
 ## Construction and authority
 
 - A run owns one top-level probe HWND and one ordinary Wry child-HWND WebView2

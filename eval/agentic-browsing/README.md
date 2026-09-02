@@ -149,6 +149,10 @@ debugger record. A failed preflight therefore cannot leave a stamp that
 resembles collected evidence. The workflow has no focused-input invocation and
 cannot launch the debugger-only mode.
 
+The existing Windows CI job parses this PowerShell file through the native
+PowerShell language parser without invoking either phase. That check is syntax
+evidence only; the CI VM is not treated as a physical behavior run.
+
 The individual transparent mode commands follow for review. They are not a
 substitute for the source-bound orchestrator unless its full offline/native
 preflight, post-preflight clean-revision check, create-new stamp, directory
