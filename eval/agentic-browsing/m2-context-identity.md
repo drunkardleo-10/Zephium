@@ -258,6 +258,17 @@ either rejoins the main-thread host and emits one request-correlated terminal
 event or emits one closed native-refusal result when its retained owner is
 dropped. Poisoned admission is sticky, closes the port, and invokes the
 mandatory fatal callback once rather than deadlocking.
+Both the outer main-loop dispatcher and the later queued callback are unwind
+boundaries for context and screenshot tasks. In unwind-capable development and
+evaluation builds, a dispatcher panic before execution releases every logical
+and physical permit without inventing a callback; a panic after synchronous
+execution preserves the already-owed terminal classification. A panic in
+queued host dispatch is caught on that executor, terminally drops the move-only
+task, and seals admission. Fatal reporting is also caught and exactly once. A
+poisoned outer slot recovers its retained admission only to apply the same
+sticky shutdown seal; it cannot leave an already-taken port open after engine
+teardown. Optimized desktop builds use workspace-wide `panic = "abort"`, so
+panics remain process-terminal and cannot unwind through either boundary.
 
 The first macOS adapter accepts owned construction, one exact shell-requested
 navigation at a time, exact renderer recovery, exact close, post-revocation

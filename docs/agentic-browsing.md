@@ -1052,6 +1052,17 @@ addition to, not instead of, run cancellation, durable audit drain, policy
 settlement, and the application shutdown barrier. A failed proof may not skip
 best-effort engine cleanup, but that path is terminally unclean.
 
+The native port treats both outer main-loop dispatch and later execution of
+each queued context or screenshot task as unwind boundaries. In unwind-capable
+development and evaluation builds, a panic is caught, permanently seals
+admission, reports only one content-free fatal invariant, and releases the
+exact logical and physical permits. If synchronous dispatch already executed
+the task, its scheduled terminal obligation remains authoritative. A poisoned
+outer slot is recovered only to apply that same permanent seal. Optimized
+desktop builds retain the workspace-wide `panic = "abort"` policy, so a panic
+is process-terminal and cannot unwind through native callback or shutdown
+code; the recoverable path is not claimed for release binaries.
+
 The reusable imperative driver for this terminal native phase consumes the
 coordinator only after its lossless admission has accepted the sealed cohort;
 the caller retains every logical owner when admission refuses. The driver also

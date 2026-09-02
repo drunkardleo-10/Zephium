@@ -297,6 +297,17 @@ agentic-owned Windows modules. Cross-compilation is not device behavior.
   reuses its validated native-resource accounting and the port adds no queue,
   worker, timer, page, or native object until it is taken. This closes the
   stable port race only.
+- In unwind-capable development and evaluation builds, native-port ingress now
+  catches panics at both the outer main-loop dispatch call and the later queued
+  context/screenshot callback, seals admission, and reports one content-free
+  fatal invariant. Tests distinguish pre-execution refusal (no terminal
+  callback, both screenshot permits released) from a dispatcher panic after
+  synchronous execution (the already-scheduled terminal remains exact). The
+  release boundary mutation-tests both catch sites, their fail-stop
+  transitions, and the poisoned-slot shutdown path that seals an already-taken
+  port. Optimized desktop builds retain the workspace-wide `panic = "abort"`
+  policy; this evidence does not claim recoverable teardown after a release
+  panic.
 - The functional core now consumes its sealed, empty context, profile-lease,
   cookie-transfer, action-execution, action-settlement, and screenshot owners
   before allowing the atomic port seal. The screenshot coordinator closes new

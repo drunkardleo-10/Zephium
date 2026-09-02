@@ -385,6 +385,9 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         &read(repository.join(ENGINE_MACOS_AGENT_CONTEXT))?,
         &read(repository.join(ENGINE_AGENT_NAVIGATION))?,
     )?;
+    validate_engine_agent_context_panic_boundary(&read(
+        repository.join(ENGINE_AGENT_CONTEXT_PORT),
+    )?)?;
     validate_engine_agent_redirect_contract(
         &read(repository.join(AGENTIC_CONTEXT_PORT))?,
         &read(repository.join(ENGINE_AGENT_CONTEXT_HOST))?,
@@ -880,6 +883,54 @@ fn validate_engine_agent_context_boundary(
                 ));
             }
         }
+    }
+    Ok(())
+}
+
+fn validate_engine_agent_context_panic_boundary(source: &str) -> Result<(), String> {
+    let source = compact(
+        &source
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<String>(),
+    );
+    for required in [
+        "let_=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||{(self.fatal)(\"agent-contextportslotinvariantfailed\");}));",
+        "fncontain_agent_port_panic<T>(admission:&AgentPortAdmission,operation:implFnOnce()->T,)->Option<T>",
+        "matchstd::panic::catch_unwind(std::panic::AssertUnwindSafe(operation))",
+        "Err(_)=>{admission.fail_invariant();None}",
+        "letmutstate=poisoned.into_inner();state.sealed=true;ifletSome(admission)=&state.admission{admission.seal();}drop(state);self.report_fatal_once();",
+        "letaccepted=contain_agent_port_panic(&self.admission,||{dispatch(Box::new(move||{",
+        "let_=contain_agent_port_panic(&callback_admission,||{",
+        ".unwrap_or(false);",
+    ] {
+        if !source.contains(required) {
+            return Err(format!(
+                "production agent-context dispatch lost panic containment {required}"
+            ));
+        }
+    }
+    if source
+        .matches("letaccepted=contain_agent_port_panic")
+        .count()
+        != 2
+        || source
+            .matches("let_=contain_agent_port_panic(&callback_admission")
+            .count()
+            != 2
+        || source
+            .matches("matchstd::panic::catch_unwind(std::panic::AssertUnwindSafe(operation))")
+            .count()
+            != 1
+        || source
+            .matches("letmutstate=poisoned.into_inner();state.sealed=true;ifletSome(admission)=&state.admission{admission.seal();}drop(state);self.report_fatal_once();")
+            .count()
+            != 2
+    {
+        return Err(
+            "production agent-context dispatch must contain both context and screenshot panic boundaries exactly once"
+                .to_owned(),
+        );
     }
     Ok(())
 }
@@ -10153,6 +10204,47 @@ mod tests {
             navigation,
         )
         .is_err());
+    }
+
+    #[test]
+    fn production_agent_context_dispatch_is_panic_contained_and_fail_stopped() {
+        let port = include_str!("../../crates/zephium-engine/src/agent_context_port.rs");
+        validate_engine_agent_context_panic_boundary(port).expect("agent-context panic boundary");
+
+        for invalid in [
+            port.replacen(
+                "let accepted = contain_agent_port_panic",
+                "let accepted = uncontained_dispatch",
+                1,
+            ),
+            port.replacen(
+                "let _ = contain_agent_port_panic(&callback_admission",
+                "let _ = uncontained_callback(&callback_admission",
+                1,
+            ),
+            port.replacen(
+                "            admission.fail_invariant();\n            None",
+                "            None",
+                1,
+            ),
+            port.replacen(
+                "match std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation))",
+                "match uncontained_operation(operation)",
+                1,
+            ),
+            port.replacen(
+                "                state.sealed = true;\n                if let Some(admission) = &state.admission {\n                    admission.seal();\n                }\n                drop(state);\n                self.report_fatal_once();",
+                "                drop(state);\n                self.report_fatal_once();",
+                1,
+            ),
+            port.replacen(
+                "            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {\n                (self.fatal)(\"agent-context port slot invariant failed\");\n            }));",
+                "            (self.fatal)(\"agent-context port slot invariant failed\");",
+                1,
+            ),
+        ] {
+            assert!(validate_engine_agent_context_panic_boundary(&invalid).is_err());
+        }
     }
 
     #[test]

@@ -704,6 +704,27 @@ fn emit_event(
     }
 }
 
+/// Contains an external dispatcher/host panic in unwind-capable builds and
+/// makes the port fail-stop.
+///
+/// This helper is used on both sides of `MainThreadDispatch`: once while the
+/// composition root accepts the closure, and again when the event loop later
+/// executes it. `None` never means success; admission is already sealed. The
+/// optimized desktop retains the workspace's process-terminal `panic=abort`
+/// policy and therefore cannot unwind into or out of this boundary.
+fn contain_agent_port_panic<T>(
+    admission: &AgentPortAdmission,
+    operation: impl FnOnce() -> T,
+) -> Option<T> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation)) {
+        Ok(value) => Some(value),
+        Err(_) => {
+            admission.fail_invariant();
+            None
+        }
+    }
+}
+
 fn refusal_event(
     request: AgentPendingRequest,
     failure: ContextPortFailure,
@@ -817,7 +838,13 @@ impl AgentContextPortSlot {
     pub(crate) fn take(&self, sink: AgentContextEventSink) -> Option<Arc<dyn AgentBrowserPort>> {
         let mut state = match self.state.lock() {
             Ok(state) => state,
-            Err(_) => {
+            Err(poisoned) => {
+                let mut state = poisoned.into_inner();
+                state.sealed = true;
+                if let Some(admission) = &state.admission {
+                    admission.seal();
+                }
+                drop(state);
                 self.report_fatal_once();
                 return None;
             }
@@ -843,13 +870,27 @@ impl AgentContextPortSlot {
                     admission.seal();
                 }
             }
-            Err(_) => self.report_fatal_once(),
+            Err(poisoned) => {
+                let mut state = poisoned.into_inner();
+                state.sealed = true;
+                if let Some(admission) = &state.admission {
+                    admission.seal();
+                }
+                drop(state);
+                self.report_fatal_once();
+            }
         }
     }
 
     fn report_fatal_once(&self) {
         if !self.fatal_reported.swap(true, Ordering::AcqRel) {
-            (self.fatal)("agent-context port slot invariant failed");
+            // Slot poisoning can be observed from process teardown in an
+            // unwind-capable build. Contain a consumer panic there; optimized
+            // desktop builds retain the workspace's process-terminal abort
+            // policy and cannot unwind across this callback.
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                (self.fatal)("agent-context port slot invariant failed");
+            }));
         }
     }
 
@@ -894,16 +935,23 @@ impl EngineAgentBrowserPort {
         let for_dispatch = slot.clone();
         let executed = Arc::new(AtomicBool::new(false));
         let executed_in_dispatch = executed.clone();
-        let accepted = (self.dispatch)(Box::new(move || {
-            executed_in_dispatch.store(true, Ordering::Release);
-            let task = for_dispatch
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take();
-            if let Some(task) = task {
-                dispatch_to_host(task);
-            }
-        }));
+        let callback_admission = self.admission.clone();
+        let dispatch = self.dispatch.clone();
+        let accepted = contain_agent_port_panic(&self.admission, || {
+            dispatch(Box::new(move || {
+                executed_in_dispatch.store(true, Ordering::Release);
+                let _ = contain_agent_port_panic(&callback_admission, || {
+                    let task = for_dispatch
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .take();
+                    if let Some(task) = task {
+                        dispatch_to_host(task);
+                    }
+                });
+            }))
+        })
+        .unwrap_or(false);
         if accepted || executed.load(Ordering::Acquire) {
             ContextDispatch::Scheduled
         } else {
@@ -933,16 +981,23 @@ impl EngineAgentBrowserPort {
         let for_dispatch = slot.clone();
         let executed = Arc::new(AtomicBool::new(false));
         let executed_in_dispatch = executed.clone();
-        let accepted = (self.dispatch)(Box::new(move || {
-            executed_in_dispatch.store(true, Ordering::Release);
-            let task = for_dispatch
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take();
-            if let Some(task) = task {
-                dispatch_screenshot_to_host(task);
-            }
-        }));
+        let callback_admission = self.admission.clone();
+        let dispatch = self.dispatch.clone();
+        let accepted = contain_agent_port_panic(&self.admission, || {
+            dispatch(Box::new(move || {
+                executed_in_dispatch.store(true, Ordering::Release);
+                let _ = contain_agent_port_panic(&callback_admission, || {
+                    let task = for_dispatch
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .take();
+                    if let Some(task) = task {
+                        dispatch_screenshot_to_host(task);
+                    }
+                });
+            }))
+        })
+        .unwrap_or(false);
         if accepted || executed.load(Ordering::Acquire) {
             ContextDispatch::Scheduled
         } else {
@@ -1498,6 +1553,62 @@ mod tests {
     }
 
     #[test]
+    fn panicking_slot_fatal_reporter_is_contained_and_runs_once() {
+        let reports = Arc::new(AtomicUsize::new(0));
+        let counted = reports.clone();
+        let slot = AgentContextPortSlot::new(
+            Arc::new(|_| false),
+            Arc::new(move |_| {
+                counted.fetch_add(1, Ordering::Relaxed);
+                panic!("external slot fatal reporter panicked");
+            }),
+        );
+
+        slot.report_fatal_once();
+        slot.report_fatal_once();
+        assert_eq!(reports.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn poisoned_slot_shutdown_still_seals_the_taken_port() {
+        let reports = Arc::new(AtomicUsize::new(0));
+        let counted = reports.clone();
+        let dispatches = Arc::new(AtomicUsize::new(0));
+        let counted_dispatches = dispatches.clone();
+        let slot = AgentContextPortSlot::new(
+            Arc::new(move |_| {
+                counted_dispatches.fetch_add(1, Ordering::Relaxed);
+                false
+            }),
+            Arc::new(move |_| {
+                counted.fetch_add(1, Ordering::Relaxed);
+            }),
+        );
+        let port = slot.take(Arc::new(|_| {})).expect("port");
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _state = slot.state.lock().expect("slot state");
+            panic!("poison slot state");
+        }));
+
+        slot.seal();
+        assert_eq!(reports.load(Ordering::Relaxed), 1);
+        let state = match slot.state.lock() {
+            Ok(_) => panic!("slot must remain poison-marked"),
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let admission = state.admission.as_ref().expect("taken admission");
+        assert!(matches!(
+            admission.reserve(),
+            Err(ContextPortFailure::Shutdown)
+        ));
+        drop(state);
+        drop(port);
+        assert_eq!(dispatches.load(Ordering::Relaxed), 0);
+        assert!(slot.take(Arc::new(|_| {})).is_none());
+        assert_eq!(reports.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
     fn cookie_task_retains_exact_request_and_post_admission_native_anchor() {
         let request = cookie_request();
         let events = Arc::new(Mutex::new(Vec::new()));
@@ -1550,6 +1661,82 @@ mod tests {
                 .as_ref()
                 .and_then(|admission| admission.pending()),
             Some(0)
+        );
+    }
+
+    #[test]
+    fn panicking_outer_dispatch_is_rejected_and_fail_stopped_without_unwinding() {
+        let events = Arc::new(AtomicUsize::new(0));
+        let counted_events = events.clone();
+        let fatals = Arc::new(AtomicUsize::new(0));
+        let counted_fatals = fatals.clone();
+        let slot = AgentContextPortSlot::new(
+            Arc::new(|_| panic!("external main-thread dispatcher panicked")),
+            Arc::new(move |_| {
+                counted_fatals.fetch_add(1, Ordering::Relaxed);
+            }),
+        );
+        let port = slot
+            .take(Arc::new(move |_| {
+                counted_events.fetch_add(1, Ordering::Relaxed);
+            }))
+            .expect("port");
+
+        assert_eq!(
+            port.audit_resources(ContextResourceAuditId::new(1).expect("audit")),
+            ContextDispatch::Rejected(ContextPortFailure::Shutdown)
+        );
+        assert_eq!(events.load(Ordering::Relaxed), 0);
+        assert_eq!(fatals.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            port.audit_resources(ContextResourceAuditId::new(2).expect("audit")),
+            ContextDispatch::Rejected(ContextPortFailure::Shutdown)
+        );
+        let state = slot.state.lock().expect("state");
+        let admission = state.admission.as_ref().expect("admission");
+        let admission_state = admission.state.lock().expect("admission state");
+        assert_eq!(admission_state.pending, 0);
+        assert!(admission_state.sealed);
+        assert!(admission_state.invariant_failed);
+    }
+
+    #[test]
+    fn post_execution_dispatch_panic_preserves_scheduled_terminal_and_seals() {
+        crate::host::make_unavailable_for_test();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = events.clone();
+        let fatals = Arc::new(AtomicUsize::new(0));
+        let counted = fatals.clone();
+        let slot = AgentContextPortSlot::new(
+            Arc::new(|task| {
+                task();
+                panic!("external dispatcher panicked after synchronous execution");
+            }),
+            Arc::new(move |_| {
+                counted.fetch_add(1, Ordering::Relaxed);
+            }),
+        );
+        let port = slot
+            .take(Arc::new(move |event| {
+                captured.lock().expect("events").push(event);
+            }))
+            .expect("port");
+
+        assert_eq!(
+            port.audit_resources(ContextResourceAuditId::new(1).expect("audit")),
+            ContextDispatch::Scheduled
+        );
+        assert_eq!(fatals.load(Ordering::Relaxed), 1);
+        let events = events.lock().expect("events");
+        assert!(matches!(
+            events.as_slice(),
+            [ContextNativeEvent::ResourceAuditSettled(settlement)]
+                if settlement.outcome() == Err(ContextPortFailure::Shutdown)
+        ));
+        drop(events);
+        assert_eq!(
+            port.audit_resources(ContextResourceAuditId::new(2).expect("audit")),
+            ContextDispatch::Rejected(ContextPortFailure::Shutdown)
         );
     }
 
@@ -1809,6 +1996,41 @@ mod tests {
                 .and_then(|admission| admission.counts()),
             Some((0, 0))
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn panicking_screenshot_dispatch_releases_both_slots_without_callback() {
+        let callbacks = Arc::new(AtomicUsize::new(0));
+        let counted_callbacks = callbacks.clone();
+        let fatals = Arc::new(AtomicUsize::new(0));
+        let counted_fatals = fatals.clone();
+        let slot = AgentContextPortSlot::new(
+            Arc::new(|_| panic!("external screenshot dispatcher panicked")),
+            Arc::new(move |_| {
+                counted_fatals.fetch_add(1, Ordering::Relaxed);
+            }),
+        );
+        let port = slot.take(Arc::new(|_| {})).expect("port");
+
+        assert_eq!(
+            port.capture_semantic_screenshot(
+                screenshot_native_request(250),
+                Box::new(move |_| {
+                    counted_callbacks.fetch_add(1, Ordering::Relaxed);
+                }),
+            ),
+            ContextDispatch::Rejected(ContextPortFailure::Shutdown)
+        );
+        assert_eq!(callbacks.load(Ordering::Relaxed), 0);
+        assert_eq!(fatals.load(Ordering::Relaxed), 1);
+        let state = slot.state.lock().expect("state");
+        let admission = state.admission.as_ref().expect("admission");
+        let admission_state = admission.state.lock().expect("admission state");
+        assert_eq!(admission_state.pending, 0);
+        assert_eq!(admission_state.physical_screenshots, 0);
+        assert!(admission_state.sealed);
+        assert!(admission_state.invariant_failed);
     }
 
     #[cfg(target_os = "macos")]
