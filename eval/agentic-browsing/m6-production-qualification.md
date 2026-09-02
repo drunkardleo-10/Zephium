@@ -228,9 +228,11 @@ agentic-owned Windows modules. Cross-compilation is not device behavior.
   resource-audit refusal while physical state is ambiguous. macOS remains
   unsupported at this port. No suspend/resume device or resource claim is made.
 - The physical Windows M1 reviewer now refuses a success label without the
-  case-specific effect event on the exact intended target, refuses any retained
-  effect for a non-dispatch route, and cross-checks link, clipboard, and popup
-  fields against the claimed terminal outcome. The release boundary
+  case-specific effect event on the exact intended target. HWND and CDP rows
+  must carry `isTrusted` on that exact qualifying event, so an untrusted effect
+  plus an unrelated trusted event cannot promote a candidate route. It refuses
+  any retained effect for a non-dispatch route and cross-checks link, clipboard,
+  and popup fields against the claimed terminal outcome. The release boundary
   mutation-tests those joins. The Windows CDP candidate additionally polls
   control and rejects cancellation/deadline immediately before every fixed
   native submission, rather than first discovering revoked authority after the
@@ -241,9 +243,10 @@ agentic-owned Windows modules. Cross-compilation is not device behavior.
   caller's attached queue, the adapter also samples the revalidated owned
   document thread through read-only `GetGUIThreadInfo`; failure to obtain that
   projection rejects the evidence. The offline qualifier now also requires the
-  three coarse focus-owner samples to match the selected presentation and the
-  independently observed target DOM-focus bit; clearing the summary theft
-  Booleans cannot hide a contradictory serialized focus sequence. After the
+  three coarse focus-owner samples to match the selected presentation, and
+  rejoins the serialized target DOM-focus bit to a retained focus event on the
+  exact intended target; clearing the summary theft Booleans cannot hide a
+  contradictory serialized focus sequence. After the
   final HWND control poll, the adapter samples both queues, rejoins document
   HWND/thread/process/layout, and only then derives the bounded window-message
   timeout. CDP uses the same final-poll/sample/submission order. The source gate

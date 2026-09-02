@@ -662,11 +662,15 @@ sequence, focus, activation lifetime, target verification, focus theft, and
 background/hidden behavior.
 
 Qualification rejoins each claimed effect to a case-specific event on the
-exact intended fixture target. A backend classified as non-dispatching must
-retain no event, target, focus, activation, navigation, popup, or clipboard
-effect. Popup and clipboard results additionally rejoin their dedicated native
-request and closed gate fields; a generic `Unsupported` label cannot stand in
-for evidence that the intended control was reached.
+exact intended fixture target. A Windows HWND or diagnostics-only CDP route
+can qualify only when that exact effect event is browser-reported as trusted;
+an aggregate trusted-event count or an unrelated trusted event cannot promote
+the route. The serialized target-focus bit must equal the retained target focus
+event before it can refine the coarse native focus owner. A backend classified
+as non-dispatching must retain no event, target, focus, activation, navigation,
+popup, or clipboard effect. Popup and clipboard results additionally rejoin
+their dedicated native request and closed gate fields; a generic `Unsupported`
+label cannot stand in for evidence that the intended control was reached.
 
 No conclusion is generalized from `isTrusted` alone. Real sites may reject
 automation through many mechanisms. The spike determines which backends are

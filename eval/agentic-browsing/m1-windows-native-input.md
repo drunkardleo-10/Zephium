@@ -143,12 +143,14 @@ key-up messages to acquire inconsistent scan metadata.
   are gitignored.
 - The shared offline qualifier independently rejoins every accepted dispatched
   row to the case-specific effect event on the exact intended fixture target.
-  It requires link, clipboard, and popup fields to agree with that event and
-  terminal outcome. A composition, human-baseline, or closed-shadow fixed-DOM
-  row classified as non-dispatching must carry no event, target, focus,
-  activation, navigation, popup, or clipboard effect. This prevents a bare
-  `target_verified` or generic `Unsupported` value from promoting incomplete
-  machine evidence.
+  HWND and diagnostics-only CDP candidates additionally require that exact
+  qualifying event—not merely some event in the run—to carry the browser's
+  `isTrusted` bit. It requires link, clipboard, and popup fields to agree with
+  that event and terminal outcome. A composition, human-baseline, or
+  closed-shadow fixed-DOM row classified as non-dispatching must carry no
+  event, target, focus, activation, navigation, popup, or clipboard effect.
+  This prevents a bare `target_verified`, unrelated trusted event, or generic
+  `Unsupported` value from promoting incomplete machine evidence.
 - The required device workflow uses the runner's closed
   `--evidence-directory eval/agentic-browsing/local-results` option instead of
   shell redirection. Only the four required non-focused modes map to fixed
@@ -165,9 +167,10 @@ key-up messages to acquire inconsistent scan metadata.
   or paths. The qualifier also rejoins all three coarse focus-owner samples to
   the exact presentation: hidden/background rows must begin and remain external,
   while an explicitly authorized focused row must begin and remain in the probe
-  host; only an independently observed target DOM-focus event may change the
-  final owner to the fixture target. A contradictory record fails even if its
-  focus-theft Booleans were cleared. Its exact `--write-summary` option creates
+  host; the serialized target-focus bit must exactly match a retained focus
+  event on the intended target before it may change the final owner to the
+  fixture target. A contradictory record fails even if its focus-theft Booleans
+  were cleared. Its exact `--write-summary` option creates
   the fixed UTF-8 summary file and refuses to replace an existing result.
   Directory, input-record, and output preflights reject every Windows reparse
   point rather than relying on `FileType::is_symlink`, which is insufficient
@@ -216,7 +219,8 @@ HWND, CDP, identity, and bounded-response protections. Alternate asynchronous,
 callback, broadcast, composition-controller, synthetic-injector, capture, and
 activation message paths are forbidden so they cannot bypass the one audited
 `SendMessageTimeoutW` site or the closed CDP method vocabulary.
-The same gate mutation-tests the event/target join, empty non-dispatch rows,
+The same gate mutation-tests the event/target/trust join, target-focus event
+join, exact native routes that require trust, empty non-dispatch rows,
 link/clipboard effect fields, and popup-request/outcome correspondence used by
 the offline reviewer.
 The Windows input module also denies unsafe operations hidden inside an unsafe

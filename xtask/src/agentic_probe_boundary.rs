@@ -2496,9 +2496,13 @@ fn validate_windows_probe_binary(source: &str, qualification: &str) -> Result<()
         "--visible-focused-windows-all",
         "focus_sequence_matches_presentation(actual.focus,mode.presentation())",
         "focus.before==baseline&&focus.during==baseline&&focus.after==after",
+        "actual.focus.target_received_dom_focus!=target_focus_event_observed(actual)",
         "if!no_dispatch_evidence_is_empty(actual)",
-        "elseif!actual.target.target_verified||!has_qualifying_event(actual)",
-        "event.kind==required&&event.target==evidence.target.intended",
+        "elseif!actual.target.target_verified||!has_qualifying_event(actual)||(backend_requires_trusted_qualifying_event(backend)&&!has_trusted_qualifying_event(actual))",
+        "fnhas_qualifying_event(evidence:&CaseEvidence)->bool{letrequired=qualifying_event_kind(evidence.case);evidence.events.iter().any(|event|event.kind==required&&event.target==evidence.target.intended)}",
+        "fnhas_trusted_qualifying_event(evidence:&CaseEvidence)->bool{letrequired=qualifying_event_kind(evidence.case);evidence.events.iter().any(|event|{event.is_trusted&&event.kind==required&&event.target==evidence.target.intended})}",
+        "fntarget_focus_event_observed(evidence:&CaseEvidence)->bool{evidence.events.iter().any(|event|{event.kind==InputEventKind::Focus&&event.target==evidence.target.intended})}",
+        "constfnbackend_requires_trusted_qualifying_event(backend:InputBackend)->bool{matches!(backend,InputBackend::WindowsHwndInput|InputBackend::WindowsCdpInput)}",
         "fnno_dispatch_evidence_is_empty(evidence:&CaseEvidence)->bool",
         "actual.target.navigation_observed!=(case==FixtureCase::Link&&!does_not_dispatch)",
         "GateOutcome::Denied|GateOutcome::Indeterminate",
@@ -11422,9 +11426,34 @@ mod tests {
             "--visible-focused-windows-all";
             focus_sequence_matches_presentation(actual.focus, mode.presentation());
             focus.before == baseline && focus.during == baseline && focus.after == after;
+            actual.focus.target_received_dom_focus != target_focus_event_observed(actual);
             if !no_dispatch_evidence_is_empty(actual) {}
-            else if !actual.target.target_verified || !has_qualifying_event(actual) {}
-            event.kind == required && event.target == evidence.target.intended;
+            else if !actual.target.target_verified
+                || !has_qualifying_event(actual)
+                || (backend_requires_trusted_qualifying_event(backend)
+                    && !has_trusted_qualifying_event(actual)) {}
+            fn has_qualifying_event(evidence: &CaseEvidence) -> bool {
+                let required = qualifying_event_kind(evidence.case);
+                evidence.events.iter().any(|event|
+                    event.kind == required && event.target == evidence.target.intended)
+            }
+            fn has_trusted_qualifying_event(evidence: &CaseEvidence) -> bool {
+                let required = qualifying_event_kind(evidence.case);
+                evidence.events.iter().any(|event| {
+                    event.is_trusted
+                        && event.kind == required
+                        && event.target == evidence.target.intended
+                })
+            }
+            fn target_focus_event_observed(evidence: &CaseEvidence) -> bool {
+                evidence.events.iter().any(|event| {
+                    event.kind == InputEventKind::Focus
+                        && event.target == evidence.target.intended
+                })
+            }
+            const fn backend_requires_trusted_qualifying_event(backend: InputBackend) -> bool {
+                matches!(backend, InputBackend::WindowsHwndInput | InputBackend::WindowsCdpInput)
+            }
             fn no_dispatch_evidence_is_empty(evidence: &CaseEvidence) -> bool { true }
             actual.target.navigation_observed != (case == FixtureCase::Link && !does_not_dispatch);
             GateOutcome::Denied | GateOutcome::Indeterminate;
@@ -11455,9 +11484,36 @@ mod tests {
         .is_err());
         assert!(validate_windows_probe_binary(
             binary,
+            &qualification.replace("fn has_qualifying_event", "fn removed_qualifying_event"),
+        )
+        .is_err());
+        assert!(validate_windows_probe_binary(
+            binary,
             &qualification.replace(
-                "event.kind == required && event.target == evidence.target.intended;",
-                "true;",
+                "event.is_trusted
+                        && event.kind == required",
+                "event.kind == required",
+            ),
+        )
+        .is_err());
+        assert!(validate_windows_probe_binary(
+            binary,
+            &qualification.replace(
+                "actual.focus.target_received_dom_focus != target_focus_event_observed(actual);",
+                "false;",
+            ),
+        )
+        .is_err());
+        assert!(validate_windows_probe_binary(
+            binary,
+            &qualification.replace("InputEventKind::Focus", "InputEventKind::Blur"),
+        )
+        .is_err());
+        assert!(validate_windows_probe_binary(
+            binary,
+            &qualification.replace(
+                "InputBackend::WindowsHwndInput | InputBackend::WindowsCdpInput",
+                "InputBackend::FixedDomRecipe",
             ),
         )
         .is_err());

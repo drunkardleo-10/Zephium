@@ -302,6 +302,7 @@ pub fn qualify_windows_probe_evidence(
         }
         if actual.focus.browse_focus_was_stolen
             || actual.focus.probe_host_became_key
+            || actual.focus.target_received_dom_focus != target_focus_event_observed(actual)
             || !focus_sequence_matches_presentation(actual.focus, mode.presentation())
         {
             return Err(WindowsProbeQualificationError::Focus);
@@ -318,7 +319,11 @@ pub fn qualify_windows_probe_evidence(
             if !no_dispatch_evidence_is_empty(actual) {
                 return Err(WindowsProbeQualificationError::Interaction);
             }
-        } else if !actual.target.target_verified || !has_qualifying_event(actual) {
+        } else if !actual.target.target_verified
+            || !has_qualifying_event(actual)
+            || (backend_requires_trusted_qualifying_event(backend)
+                && !has_trusted_qualifying_event(actual))
+        {
             return Err(WindowsProbeQualificationError::Interaction);
         }
         if actual.target.navigation_observed != (case == FixtureCase::Link && !does_not_dispatch)
@@ -494,6 +499,26 @@ fn has_qualifying_event(evidence: &CaseEvidence) -> bool {
         .events
         .iter()
         .any(|event| event.kind == required && event.target == evidence.target.intended)
+}
+
+fn has_trusted_qualifying_event(evidence: &CaseEvidence) -> bool {
+    let required = qualifying_event_kind(evidence.case);
+    evidence.events.iter().any(|event| {
+        event.is_trusted && event.kind == required && event.target == evidence.target.intended
+    })
+}
+
+fn target_focus_event_observed(evidence: &CaseEvidence) -> bool {
+    evidence.events.iter().any(|event| {
+        event.kind == InputEventKind::Focus && event.target == evidence.target.intended
+    })
+}
+
+const fn backend_requires_trusted_qualifying_event(backend: InputBackend) -> bool {
+    matches!(
+        backend,
+        InputBackend::WindowsHwndInput | InputBackend::WindowsCdpInput
+    )
 }
 
 const fn qualifying_event_kind(case: FixtureCase) -> InputEventKind {
@@ -708,7 +733,29 @@ mod tests {
             Err(WindowsProbeQualificationError::Focus)
         );
         evidence.cases[0].focus.after = FocusOwner::FixtureTarget;
+        assert_eq!(
+            qualify_windows_probe_evidence(mode, &evidence),
+            Err(WindowsProbeQualificationError::Focus)
+        );
+        let intended = evidence.cases[0].target.intended;
+        evidence.cases[0].events.push(InputEventEvidence {
+            kind: InputEventKind::Focus,
+            is_trusted: false,
+            target: intended,
+        });
         assert!(qualify_windows_probe_evidence(mode, &evidence).is_ok());
+
+        let mut evidence = tests_fixture(mode);
+        let intended = evidence.cases[0].target.intended;
+        evidence.cases[0].events.push(InputEventEvidence {
+            kind: InputEventKind::Focus,
+            is_trusted: false,
+            target: intended,
+        });
+        assert_eq!(
+            qualify_windows_probe_evidence(mode, &evidence),
+            Err(WindowsProbeQualificationError::Focus)
+        );
 
         let focused_mode = WindowsProbeMode::VisibleFocusedAll;
         let mut focused = tests_fixture(focused_mode);
@@ -772,9 +819,33 @@ mod tests {
             FixtureCase::Button,
             InputBackend::WindowsHwndInput,
         );
-        button.events[0].kind = InputEventKind::Focus;
+        button.events[0].kind = InputEventKind::Input;
         assert_eq!(
             qualify_windows_probe_evidence(mode, &wrong_event),
+            Err(WindowsProbeQualificationError::Interaction)
+        );
+
+        let mut untrusted_native_event = tests_fixture(mode);
+        let button = case_mut(
+            &mut untrusted_native_event,
+            FixtureCase::Button,
+            InputBackend::WindowsHwndInput,
+        );
+        button.events[0].is_trusted = false;
+        assert_eq!(
+            qualify_windows_probe_evidence(mode, &untrusted_native_event),
+            Err(WindowsProbeQualificationError::Interaction)
+        );
+
+        let mut untrusted_cdp_event = tests_fixture(mode);
+        let button = case_mut(
+            &mut untrusted_cdp_event,
+            FixtureCase::Button,
+            InputBackend::WindowsCdpInput,
+        );
+        button.events[0].is_trusted = false;
+        assert_eq!(
+            qualify_windows_probe_evidence(mode, &untrusted_cdp_event),
             Err(WindowsProbeQualificationError::Interaction)
         );
 
