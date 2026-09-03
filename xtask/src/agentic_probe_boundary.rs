@@ -4776,7 +4776,7 @@ fn validate_provider_transport_root(source: &str) -> Result<(), String> {
         ".header(ACCEPT_ENCODING,HeaderValue::from_static(\"identity\"))",
         "value.set_sensitive(true)",
         "pubenumAgentProviderUsageKnowledge",
-        "ExactZeroBeforeDispatch",
+        "ExactZeroBeforeModelDispatch",
         "UnknownAfterDispatch",
         "pubfninto_policy_settlement(self)->AgentProviderPolicySettlement",
         "ifself.cancellation.is_cancelled()||self.shutdown.is_cancelled()",
@@ -4884,7 +4884,7 @@ fn validate_provider_consumer_panic_boundary(
     for required in [
         "fnfail_stop(&self){self.shared.shutdown.cancel();matchself.shared.state.lock(){Ok(mutstate)=>state.sealed=true,Err(poisoned)=>poisoned.into_inner().sealed=true,}}",
         "matchstd::panic::catch_unwind(std::panic::AssertUnwindSafe(||consume(batch)))",
-        "Err(_)=>{ifletSome(slot)=&slot{slot.fail_stop();}returnfinish_attempt(active,config,integration_failure(),AgentProviderDispatchEvidence::MayHaveDispatched,continuation,slot,);}",
+        "Err(_)=>{ifletSome(slot)=&slot{slot.fail_stop();}returnfinish_attempt(active,config,integration_failure(),AgentProviderDisclosureStage::ModelRequestMayHaveDispatched,continuation,slot,);}",
         "fnintegration_failure()->AgentProviderTransportOutcome",
         "AgentProviderFailureClass::Integration",
     ] {
@@ -4945,16 +4945,48 @@ fn validate_provider_transport_response_header_boundary(source: &str) -> Result<
             ));
         }
     }
-    let header_check = source
+    let count_start = source
+        .find("pubasyncfncount_openai_input_tokens")
+        .ok_or_else(|| "provider input-token count phase is missing".to_owned())?;
+    let model_start = source
+        .find("asyncfnexecute_model")
+        .ok_or_else(|| "provider model execution phase is missing".to_owned())?;
+    if count_start >= model_start {
+        return Err("provider input counting must precede model dispatch".to_owned());
+    }
+    let count = &source[count_start..model_start];
+    let model = &source[model_start..];
+    let count_header_check = count
+        .find("!response_headers_admitted(response.headers())")
+        .ok_or_else(|| "provider count response-header admission is missing".to_owned())?;
+    let count_content_length = count
+        .find("!response_content_length_admitted(response.headers(),MAX_OPENAI_INPUT_TOKEN_RESPONSE_BYTESasu32,)")
+        .ok_or_else(|| "provider count response content-length admission is missing".to_owned())?;
+    let count_status = count
+        .find("ifresponse.status()!=StatusCode::OK")
+        .ok_or_else(|| "provider count response status handling is missing".to_owned())?;
+    let count_body = count
+        .find("letmutstream=response.bytes_stream()")
+        .ok_or_else(|| "provider count response body stream is missing".to_owned())?;
+    if !(count_header_check < count_content_length
+        && count_content_length < count_status
+        && count_status < count_body)
+    {
+        return Err(
+            "provider count headers and declared body must be bounded before body processing"
+                .to_owned(),
+        );
+    }
+    let header_check = model
         .find("if!response_headers_admitted(response.headers())")
         .ok_or_else(|| "provider response-header admission is missing".to_owned())?;
-    let status = source
+    let status = model
         .find("ifresponse.status()!=StatusCode::OK")
         .ok_or_else(|| "provider response status handling is missing".to_owned())?;
-    let body = source
+    let body = model
         .find("letmutstream=response.bytes_stream()")
         .ok_or_else(|| "provider response body stream is missing".to_owned())?;
-    let content_length = source
+    let content_length = model
         .find("if!response_content_length_admitted(response.headers(),config.stream_budget().max_wire_bytes(),)")
         .ok_or_else(|| "provider response content-length admission is missing".to_owned())?;
     if !(header_check < status && status < content_length && content_length < body) {
@@ -10797,7 +10829,7 @@ mod tests {
             request.header(ACCEPT_ENCODING, HeaderValue::from_static("identity"));
             value.set_sensitive(true);
             pub enum AgentProviderUsageKnowledge {
-                ExactZeroBeforeDispatch,
+                ExactZeroBeforeModelDispatch,
                 UnknownAfterDispatch,
             }
             pub fn into_policy_settlement(self) -> AgentProviderPolicySettlement {}

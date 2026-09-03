@@ -13,6 +13,7 @@ use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
 use serde::Serialize;
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::agent_policy::{AgentModelCallExpectation, AgentProviderExtractionInput};
@@ -247,6 +248,97 @@ pub struct AgentProviderRequest {
     body: Vec<u8>,
 }
 
+/// Content-free binding to one exact immutable serialized provider request.
+///
+/// The digest is intentionally opaque outside this module. It can prove that
+/// authenticated provider-side token accounting belongs to the request later
+/// dispatched, but it must not be used as a durable content identifier.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct AgentProviderRequestDigest([u8; 32]);
+
+impl fmt::Debug for AgentProviderRequestDigest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("AgentProviderRequestDigest([redacted])")
+    }
+}
+
+/// Exact canonical input-token projection bound to its main Responses request.
+#[must_use]
+pub struct AgentProviderInputTokenRequest {
+    call: AgentProviderCallIdentity,
+    request: AgentProviderRequestDigest,
+    projection: AgentProviderRequestDigest,
+    body: Vec<u8>,
+}
+
+/// Copyable content-free binding retained while count bytes are transmitted.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct AgentProviderInputTokenBinding {
+    call: AgentProviderCallIdentity,
+    request: AgentProviderRequestDigest,
+    projection: AgentProviderRequestDigest,
+}
+
+impl fmt::Debug for AgentProviderInputTokenBinding {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentProviderInputTokenBinding")
+            .field("call", &self.call)
+            .field("request", &self.request)
+            .field("projection", &self.projection)
+            .finish()
+    }
+}
+
+impl AgentProviderInputTokenRequest {
+    /// Exact call correlation shared with the main request.
+    pub const fn call(&self) -> AgentProviderCallIdentity {
+        self.call
+    }
+
+    /// Original immutable main-request binding.
+    pub const fn request_digest(&self) -> AgentProviderRequestDigest {
+        self.request
+    }
+
+    /// Canonical token-relevant projection binding.
+    pub const fn projection_digest(&self) -> AgentProviderRequestDigest {
+        self.projection
+    }
+
+    /// Exact input-token request bytes for the trusted OpenAI transport.
+    pub fn body(&self) -> &[u8] {
+        &self.body
+    }
+
+    /// Retains exact content-free correlation while moving body bytes to HTTP.
+    pub const fn binding(&self) -> AgentProviderInputTokenBinding {
+        AgentProviderInputTokenBinding {
+            call: self.call,
+            request: self.request,
+            projection: self.projection,
+        }
+    }
+
+    /// Moves the sensitive projection bytes without another full-size copy.
+    pub fn into_body(self) -> Vec<u8> {
+        self.body
+    }
+}
+
+impl fmt::Debug for AgentProviderInputTokenRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentProviderInputTokenRequest")
+            .field("call", &self.call)
+            .field("request", &self.request)
+            .field("projection", &self.projection)
+            .field("body_bytes", &self.body.len())
+            .field("body", &"[redacted]")
+            .finish()
+    }
+}
+
 impl AgentProviderRequest {
     /// Content-free call correlation.
     pub const fn call(&self) -> AgentProviderCallIdentity {
@@ -276,6 +368,75 @@ impl AgentProviderRequest {
         self.body.len()
     }
 
+    /// Computes a domain-separated digest over the exact immutable request.
+    pub fn digest(&self) -> AgentProviderRequestDigest {
+        let mut hasher = Sha256::new();
+        hasher.update(b"ZEPHIUM-AGENT-PROVIDER-REQUEST-1\0");
+        hasher.update((self.endpoint as u8).to_be_bytes());
+        hasher.update(self.body.len().to_be_bytes());
+        hasher.update(&self.body);
+        AgentProviderRequestDigest(hasher.finalize().into())
+    }
+
+    /// Builds the fixed OpenAI input-token request from this exact request.
+    ///
+    /// The count endpoint accepts input-shaping fields but not response-only
+    /// transport/generation fields. This routine parses only Zephium's own
+    /// already-bounded codec output, validates its complete top-level grammar,
+    /// removes that fixed response-only set, and reserializes once. Returned
+    /// bytes contain disclosed page content and must never be logged or stored.
+    pub fn openai_input_token_request(
+        &self,
+    ) -> Result<AgentProviderInputTokenRequest, AgentProviderRequestError> {
+        if self.endpoint != AgentProviderEndpoint::OpenAiResponses {
+            return Err(AgentProviderRequestError::Encoding);
+        }
+        let Value::Object(mut object) = serde_json::from_slice::<Value>(&self.body)
+            .map_err(|_| AgentProviderRequestError::Encoding)?
+        else {
+            return Err(AgentProviderRequestError::Encoding);
+        };
+        const COUNT_FIELDS: &[&str] = &[
+            "model",
+            "instructions",
+            "input",
+            "tools",
+            "tool_choice",
+            "parallel_tool_calls",
+            "text",
+            "truncation",
+        ];
+        const RESPONSE_ONLY_FIELDS: &[&str] =
+            &["max_output_tokens", "service_tier", "stream", "store"];
+        if object.keys().any(|key| {
+            !COUNT_FIELDS.contains(&key.as_str()) && !RESPONSE_ONLY_FIELDS.contains(&key.as_str())
+        }) || object.get("model").is_none()
+            || object.get("input").is_none()
+            || RESPONSE_ONLY_FIELDS
+                .iter()
+                .any(|field| object.get(*field).is_none())
+        {
+            return Err(AgentProviderRequestError::Encoding);
+        }
+        for field in RESPONSE_ONLY_FIELDS {
+            object.remove(*field);
+        }
+        let body = serde_json::to_vec(&object).map_err(|_| AgentProviderRequestError::Encoding)?;
+        if body.is_empty() || body.len() > MAX_AGENT_PROVIDER_REQUEST_BYTES {
+            return Err(AgentProviderRequestError::Encoding);
+        }
+        let mut hasher = Sha256::new();
+        hasher.update(b"ZEPHIUM-OPENAI-INPUT-TOKEN-PROJECTION-1\0");
+        hasher.update(body.len().to_be_bytes());
+        hasher.update(&body);
+        Ok(AgentProviderInputTokenRequest {
+            call: self.call,
+            request: self.digest(),
+            projection: AgentProviderRequestDigest(hasher.finalize().into()),
+            body,
+        })
+    }
+
     /// Moves the exact request into the trusted transport without copying its body.
     pub fn into_transport_parts(
         self,
@@ -286,6 +447,60 @@ impl AgentProviderRequest {
         Vec<u8>,
     ) {
         (self.call, self.config, self.endpoint, self.body)
+    }
+}
+
+/// Authenticated provider-exact count bound to one immutable request.
+#[derive(Clone, Eq, PartialEq)]
+pub struct AgentProviderExactInputCount {
+    call: AgentProviderCallIdentity,
+    request: AgentProviderRequestDigest,
+    projection: AgentProviderRequestDigest,
+    measurement: SemanticTokenMeasurement,
+}
+
+impl AgentProviderExactInputCount {
+    /// Binds one OpenAI count response to the exact request sent for counting.
+    pub fn try_new(
+        request: &AgentProviderRequest,
+        projection: AgentProviderInputTokenBinding,
+        tokens: u32,
+    ) -> Result<Self, AgentProviderRequestError> {
+        if request.endpoint() != AgentProviderEndpoint::OpenAiResponses
+            || projection.call != request.call()
+            || projection.request != request.digest()
+        {
+            return Err(AgentProviderRequestError::ProviderInputCount);
+        }
+        let measurement = SemanticTokenMeasurement::try_new(
+            request.config().tokenizer().clone(),
+            tokens,
+            SemanticTokenCountQuality::ProviderExact,
+        )
+        .map_err(|_| AgentProviderRequestError::ProviderInputCount)?;
+        Ok(Self {
+            call: request.call(),
+            request: request.digest(),
+            projection: projection.projection,
+            measurement,
+        })
+    }
+
+    /// Exact provider-counted complete structured input.
+    pub const fn measurement(&self) -> &SemanticTokenMeasurement {
+        &self.measurement
+    }
+}
+
+impl fmt::Debug for AgentProviderExactInputCount {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentProviderExactInputCount")
+            .field("call", &self.call)
+            .field("request", &self.request)
+            .field("projection", &self.projection)
+            .field("measurement", &self.measurement)
+            .finish()
     }
 }
 
@@ -662,6 +877,7 @@ pub struct AgentCommittedProviderInput {
     active: AgentActiveModelCall,
     evidence: AgentProviderInputEvidence,
     metrics: AgentProviderInputMetrics,
+    input_token_limit: u64,
 }
 
 impl AgentCommittedProviderInput {
@@ -691,6 +907,28 @@ impl AgentCommittedProviderInput {
     /// consuming this owner; dropping metrics never drops settlement authority.
     pub fn into_parts(self) -> (AgentActiveModelCall, AgentProviderInputEvidence) {
         (self.active, self.evidence)
+    }
+
+    fn bind_provider_exact_input_count(
+        &mut self,
+        count: &AgentProviderExactInputCount,
+    ) -> Result<(), AgentProviderRequestError> {
+        let measurement = count.measurement();
+        if u64::from(measurement.tokens()) > self.input_token_limit {
+            return Err(AgentProviderRequestError::ProviderInputBudget);
+        }
+        if let Some(existing) = self.metrics.structured_input_tokens {
+            if matches!(
+                existing.quality(),
+                SemanticTokenCountQuality::ExactLocal | SemanticTokenCountQuality::ProviderExact
+            ) && existing.tokens() != measurement.tokens()
+            {
+                return Err(AgentProviderRequestError::ProviderInputCountMismatch);
+            }
+        }
+        self.metrics.structured_input_tokens =
+            Some(AgentProviderInputTokenCount::from_measurement(measurement));
+        Ok(())
     }
 }
 
@@ -770,72 +1008,84 @@ impl AgentProviderInputCommitment {
                 admission,
                 delivery,
             } => {
+                let input_token_limit = admission.input_token_limit();
                 let acknowledgement = delivery.commit();
                 let active = policy.commit_observation_input(admission, &acknowledgement)?;
                 Ok(AgentCommittedProviderInput {
                     active,
                     evidence: AgentProviderInputEvidence::Observation(acknowledgement),
                     metrics,
+                    input_token_limit,
                 })
             }
             Self::Diff {
                 admission,
                 delivery,
             } => {
+                let input_token_limit = admission.input_token_limit();
                 let receipt = delivery.commit();
                 let active = policy.commit_diff_input(admission, &receipt)?;
                 Ok(AgentCommittedProviderInput {
                     active,
                     evidence: AgentProviderInputEvidence::Diff(receipt),
                     metrics,
+                    input_token_limit,
                 })
             }
             Self::Locate {
                 admission,
                 delivery,
             } => {
+                let input_token_limit = admission.input_token_limit();
                 let receipt = delivery.commit();
                 let active = policy.commit_locate_input(admission, &receipt)?;
                 Ok(AgentCommittedProviderInput {
                     active,
                     evidence: AgentProviderInputEvidence::Locate(receipt),
                     metrics,
+                    input_token_limit,
                 })
             }
             Self::Read {
                 admission,
                 delivery,
             } => {
+                let input_token_limit = admission.input_token_limit();
                 let receipt = delivery.commit();
                 let active = policy.commit_read_input(admission, &receipt)?;
                 Ok(AgentCommittedProviderInput {
                     active,
                     evidence: AgentProviderInputEvidence::Read(receipt),
                     metrics,
+                    input_token_limit,
                 })
             }
             Self::Extraction {
                 admission,
                 delivery,
             } => {
+                let input_token_limit = admission.input_token_limit();
                 let receipt = delivery.commit();
                 let active = policy.commit_extraction_input(admission, &receipt)?;
                 Ok(AgentCommittedProviderInput {
                     active,
                     evidence: AgentProviderInputEvidence::Extraction(receipt),
                     metrics,
+                    input_token_limit,
                 })
             }
             Self::Screenshot {
                 admission,
                 delivery,
             } => {
+                let input_token_limit = admission.input_token_limit();
                 let receipt = delivery.commit();
                 let active = policy.commit_screenshot_input(admission, &receipt)?;
                 Ok(AgentCommittedProviderInput {
                     active,
                     evidence: AgentProviderInputEvidence::Screenshot(receipt),
                     metrics,
+                    input_token_limit,
                 })
             }
         }
@@ -1036,6 +1286,27 @@ impl AgentCommittedProviderRequest {
     /// Copyable exact identity and metrics proof for run-local qualification.
     pub fn input_metric_receipt(&self) -> AgentProviderInputMetricReceipt {
         self.input.metric_receipt()
+    }
+
+    /// Attaches an authenticated provider-exact count to this exact request.
+    ///
+    /// The count must match the immutable call, request digest, tokenizer, and
+    /// original policy reservation. An existing exact-local count must agree;
+    /// disagreement is a version/integration failure rather than a metric
+    /// overwrite.
+    pub fn bind_provider_exact_input_count(
+        &mut self,
+        count: AgentProviderExactInputCount,
+    ) -> Result<(), AgentProviderRequestError> {
+        let projection = self.request.openai_input_token_request()?;
+        if count.call != self.request.call()
+            || count.request != self.request.digest()
+            || count.projection != projection.projection_digest()
+            || count.measurement.revision() != self.request.config().tokenizer()
+        {
+            return Err(AgentProviderRequestError::ProviderInputCountMismatch);
+        }
+        self.input.bind_provider_exact_input_count(&count)
     }
 
     /// Optional private transcript bytes retained for a tool-only terminal.
@@ -1486,6 +1757,41 @@ impl AgentProviderDiffRequestDraft {
             continuation_transcript: self.continuation_transcript,
         })
     }
+
+    /// Conservatively reserves this OpenAI request for authenticated exact counting.
+    ///
+    /// No network I/O occurs here. The complete policy-authorized input ceiling
+    /// is reserved and recorded as `Conservative`; transport replaces it with
+    /// `ProviderExact` only after the bound count endpoint succeeds.
+    pub fn try_prepare_for_provider_exact_count(
+        self,
+        policy: &mut AgentRunPolicy,
+        call_request: AgentModelCallRequest,
+        diff: &SemanticDiff,
+    ) -> Result<AgentPreparedDiffRequest, AgentProviderRequestError> {
+        let structured_input = provider_count_preflight(
+            self.request.config(),
+            call_request,
+            Some(self.delivery.token_measurement()),
+        )?;
+        let call = self.request.call();
+        let admission = policy.prepare_provider_diff_input(
+            call_request,
+            AgentModelCallExpectation::new(call.manifest(), call.call(), call.lease(), call.node()),
+            diff,
+            &self.delivery,
+            u64::from(structured_input.tokens()),
+        )?;
+        debug_assert_eq!(call, AgentProviderCallIdentity::from_admission(&admission));
+        Ok(AgentPreparedDiffRequest {
+            request: self.request,
+            admission,
+            delivery: self.delivery,
+            semantic_stats: self.semantic_stats,
+            structured_input,
+            continuation_transcript: self.continuation_transcript,
+        })
+    }
 }
 
 impl fmt::Debug for AgentProviderDiffRequestDraft {
@@ -1526,7 +1832,7 @@ impl AgentPreparedDiffRequest {
         self.semantic_stats
     }
 
-    /// Exact local count over the complete provider-structured replay.
+    /// Complete structured-input reservation; exact locally or conservative pre-count.
     pub const fn structured_input_measurement(&self) -> &SemanticTokenMeasurement {
         &self.structured_input
     }
@@ -1707,6 +2013,39 @@ impl AgentProviderReadContinuationRequestDraft {
             continuation_transcript: self.continuation_transcript,
         })
     }
+
+    /// Conservatively reserves this OpenAI read continuation for exact counting.
+    pub fn try_prepare_for_provider_exact_count(
+        self,
+        policy: &mut AgentRunPolicy,
+        call_request: AgentModelCallRequest,
+        read: &SemanticReadResult<'_>,
+    ) -> Result<AgentPreparedReadContinuationRequest, AgentProviderRequestError> {
+        let structured_input = provider_count_preflight(
+            self.request.config(),
+            call_request,
+            Some(self.delivery.token_measurement()),
+        )?;
+        let call = self.request.call();
+        let admission = policy.prepare_provider_read_input(
+            call_request,
+            AgentModelCallExpectation::new(call.manifest(), call.call(), call.lease(), call.node()),
+            &self.baseline,
+            read,
+            &self.delivery,
+            u64::from(structured_input.tokens()),
+        )?;
+        debug_assert_eq!(call, AgentProviderCallIdentity::from_admission(&admission));
+        Ok(AgentPreparedReadContinuationRequest {
+            request: self.request,
+            admission,
+            baseline: self.baseline,
+            delivery: self.delivery,
+            semantic_stats: self.semantic_stats,
+            structured_input,
+            continuation_transcript: self.continuation_transcript,
+        })
+    }
 }
 
 impl fmt::Debug for AgentProviderReadContinuationRequestDraft {
@@ -1749,7 +2088,7 @@ impl AgentPreparedReadContinuationRequest {
         self.semantic_stats
     }
 
-    /// Exact local count over the complete provider-structured replay.
+    /// Complete structured-input reservation; exact locally or conservative pre-count.
     pub const fn structured_input_measurement(&self) -> &SemanticTokenMeasurement {
         &self.structured_input
     }
@@ -1941,6 +2280,47 @@ impl AgentProviderExtractionRequestDraft {
             output,
         })
     }
+
+    /// Conservatively reserves this OpenAI extraction request for exact counting.
+    pub fn try_prepare_for_provider_exact_count(
+        self,
+        policy: &mut AgentRunPolicy,
+        call_request: AgentModelCallRequest,
+        schema: &SemanticExtractionSchema,
+        read: &SemanticReadResult<'_>,
+    ) -> Result<AgentPreparedExtractionRequest, AgentProviderRequestError> {
+        if schema.id() != self.schema {
+            return Err(AgentProviderRequestError::Encoding);
+        }
+        let structured_input = provider_count_preflight(
+            self.request.config(),
+            call_request,
+            Some(self.delivery.token_measurement()),
+        )?;
+        let call = self.request.call();
+        let admission = policy.prepare_provider_extraction_input(
+            call_request,
+            AgentModelCallExpectation::new(call.manifest(), call.call(), call.lease(), call.node()),
+            AgentProviderExtractionInput::new(
+                &self.baseline,
+                schema,
+                read,
+                &self.delivery,
+                u64::from(structured_input.tokens()),
+            ),
+        )?;
+        debug_assert_eq!(call, AgentProviderCallIdentity::from_admission(&admission));
+        let output =
+            AgentProviderExtractionOutputBinding::new(call, self.schema, self.delivery.guard());
+        Ok(AgentPreparedExtractionRequest {
+            request: self.request,
+            admission,
+            delivery: self.delivery,
+            semantic_stats: self.semantic_stats,
+            structured_input,
+            output,
+        })
+    }
 }
 
 impl fmt::Debug for AgentProviderExtractionRequestDraft {
@@ -1983,7 +2363,7 @@ impl AgentPreparedExtractionRequest {
         self.semantic_stats
     }
 
-    /// Exact local count over the complete constrained provider request.
+    /// Complete structured-input reservation; exact locally or conservative pre-count.
     pub const fn structured_input_measurement(&self) -> &SemanticTokenMeasurement {
         &self.structured_input
     }
@@ -2166,6 +2546,37 @@ impl AgentProviderLocateRequestDraft {
             continuation_transcript: self.continuation_transcript,
         })
     }
+
+    /// Conservatively reserves this OpenAI locate continuation for exact counting.
+    pub fn try_prepare_for_provider_exact_count(
+        self,
+        policy: &mut AgentRunPolicy,
+        call_request: AgentModelCallRequest,
+        result: &SemanticLocateResult,
+    ) -> Result<AgentPreparedLocateRequest, AgentProviderRequestError> {
+        let structured_input = provider_count_preflight(
+            self.request.config(),
+            call_request,
+            Some(self.delivery.token_measurement()),
+        )?;
+        let call = self.request.call();
+        let admission = policy.prepare_provider_locate_input(
+            call_request,
+            AgentModelCallExpectation::new(call.manifest(), call.call(), call.lease(), call.node()),
+            result,
+            &self.delivery,
+            u64::from(structured_input.tokens()),
+        )?;
+        debug_assert_eq!(call, AgentProviderCallIdentity::from_admission(&admission));
+        Ok(AgentPreparedLocateRequest {
+            request: self.request,
+            admission,
+            delivery: self.delivery,
+            semantic_stats: self.semantic_stats,
+            structured_input,
+            continuation_transcript: self.continuation_transcript,
+        })
+    }
 }
 
 impl fmt::Debug for AgentProviderLocateRequestDraft {
@@ -2206,7 +2617,7 @@ impl AgentPreparedLocateRequest {
         self.semantic_stats
     }
 
-    /// Exact local count over the complete provider-structured replay.
+    /// Complete structured-input reservation; exact locally or conservative pre-count.
     pub const fn structured_input_measurement(&self) -> &SemanticTokenMeasurement {
         &self.structured_input
     }
@@ -2387,6 +2798,33 @@ impl AgentProviderScreenshotRequestDraft {
             transcript_bytes: self.transcript_bytes,
         })
     }
+
+    /// Conservatively reserves this OpenAI visual continuation for exact counting.
+    pub fn try_prepare_for_provider_exact_count(
+        self,
+        policy: &mut AgentRunPolicy,
+        call_request: AgentModelCallRequest,
+        observation: &SemanticObservation,
+    ) -> Result<AgentPreparedScreenshotRequest, AgentProviderRequestError> {
+        let structured_input = provider_count_preflight(self.request.config(), call_request, None)?;
+        let call = self.request.call();
+        let admission = policy.prepare_provider_screenshot_input(
+            call_request,
+            AgentModelCallExpectation::new(call.manifest(), call.call(), call.lease(), call.node()),
+            observation,
+            &self.delivery,
+            u64::from(structured_input.tokens()),
+        )?;
+        debug_assert_eq!(call, AgentProviderCallIdentity::from_admission(&admission));
+        Ok(AgentPreparedScreenshotRequest {
+            request: self.request,
+            admission,
+            delivery: self.delivery,
+            screenshot_stats: self.screenshot_stats,
+            structured_input,
+            transcript_bytes: self.transcript_bytes,
+        })
+    }
 }
 
 impl fmt::Debug for AgentProviderScreenshotRequestDraft {
@@ -2424,7 +2862,7 @@ impl AgentPreparedScreenshotRequest {
         self.screenshot_stats
     }
 
-    /// Exact local count over the complete multimodal provider request.
+    /// Complete structured-input reservation; exact locally or conservative pre-count.
     pub const fn structured_input_measurement(&self) -> &SemanticTokenMeasurement {
         &self.structured_input
     }
@@ -2491,6 +2929,15 @@ pub enum AgentProviderRequestError {
     /// Exact local whole-input counter refused or failed.
     #[error("agent provider structured input token counter failed")]
     InputTokenCounter(#[source] SemanticTokenCounterError),
+    /// Provider-exact counting could not be represented by the fixed contract.
+    #[error("agent provider exact input token count is invalid")]
+    ProviderInputCount,
+    /// Provider-exact input exceeded the original policy reservation.
+    #[error("agent provider exact input token count exceeds its reservation")]
+    ProviderInputBudget,
+    /// Provider-exact evidence did not match the immutable counted request.
+    #[error("agent provider exact input token evidence does not match")]
+    ProviderInputCountMismatch,
     /// Fixed request serialization failed or exceeded its hard byte ceiling.
     #[error("agent provider request encoding failed")]
     Encoding,
@@ -4031,6 +4478,37 @@ fn invalid_provider_text_character(character: char) -> bool {
         )
 }
 
+fn provider_count_preflight(
+    config: &AgentProviderCallConfig,
+    request: AgentModelCallRequest,
+    newest_semantic: Option<&SemanticTokenMeasurement>,
+) -> Result<SemanticTokenMeasurement, AgentProviderRequestError> {
+    if config.provider() != AgentProviderKind::OpenAiResponses
+        || newest_semantic.is_some_and(|measurement| measurement.revision() != config.tokenizer())
+        || u64::from(config.fixed_input_tokens())
+            > u64::from(request.budget().additional_input_tokens())
+        || u64::from(config.max_output_tokens()) > u64::from(request.budget().output_tokens())
+    {
+        return Err(AgentProviderContractError::AdmissionBudget.into());
+    }
+    let semantic_tokens =
+        newest_semantic.map_or(0_u64, |measurement| u64::from(measurement.tokens()));
+    let reserved = semantic_tokens
+        .checked_add(u64::from(request.budget().additional_input_tokens()))
+        .ok_or(AgentProviderContractError::AdmissionBudget)?;
+    if reserved == 0 || reserved > config.pricing_profile().max_input_tokens() {
+        return Err(AgentProviderContractError::AdmissionBudget.into());
+    }
+    let tokens =
+        u32::try_from(reserved).map_err(|_| AgentProviderContractError::AdmissionBudget)?;
+    SemanticTokenMeasurement::try_new(
+        config.tokenizer().clone(),
+        tokens,
+        SemanticTokenCountQuality::Conservative,
+    )
+    .map_err(|_| AgentProviderContractError::AdmissionBudget.into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4059,6 +4537,33 @@ mod tests {
         SemanticTokenizerRevision::try_new(value.to_owned()).unwrap_or_else(
             |SemanticTokenizerRevisionError::Invalid| panic!("invalid test revision"),
         )
+    }
+
+    fn openai_config(max_output_tokens: u32) -> AgentProviderCallConfig {
+        AgentProviderCallConfig::try_new(
+            AgentProviderKind::OpenAiResponses,
+            super::super::AgentProviderModelRevision::try_new("gpt-5.6-terra".to_owned())
+                .expect("model"),
+            revision("openai:gpt-5.6-terra:v1"),
+            super::super::AgentProviderPricingProfile::try_new(
+                super::super::AgentProviderPricingRevision::new(1).expect("pricing revision"),
+                16_384,
+            )
+            .expect("pricing profile"),
+            512,
+            max_output_tokens,
+            super::super::AgentProviderStreamBudget::STANDARD,
+        )
+        .expect("OpenAI config")
+    }
+
+    fn provider_call_identity() -> AgentProviderCallIdentity {
+        AgentProviderCallIdentity {
+            manifest: crate::AgentRunManifestId::from_raw(1),
+            call: crate::AgentModelCallId::new(1).expect("call"),
+            lease: crate::AgentPlanLeaseId::from_raw(1),
+            node: crate::AgentPlanNodeId::from_raw(1),
+        }
     }
 
     #[test]
@@ -4144,6 +4649,94 @@ mod tests {
             ),
             Err(AgentProviderObjectiveError::TokenLimit)
         ));
+    }
+
+    #[test]
+    fn openai_input_count_projection_is_canonical_minimal_and_request_bound() {
+        let body = encode_openai_body(
+            &openai_config(1_024),
+            "Compare the documented architectures",
+            "ZSEM1\ncontent=hostile page marker",
+        )
+        .expect("OpenAI body");
+        let request = AgentProviderRequest {
+            call: provider_call_identity(),
+            config: openai_config(1_024),
+            endpoint: AgentProviderEndpoint::OpenAiResponses,
+            body,
+        };
+        let projection = request
+            .openai_input_token_request()
+            .expect("count projection");
+        let projected: Value = serde_json::from_slice(projection.body()).expect("projection JSON");
+        let projected = projected.as_object().expect("projection object");
+        for required in [
+            "model",
+            "instructions",
+            "input",
+            "tools",
+            "tool_choice",
+            "parallel_tool_calls",
+            "truncation",
+        ] {
+            assert!(
+                projected.contains_key(required),
+                "missing token-relevant field"
+            );
+        }
+        for excluded in ["max_output_tokens", "service_tier", "stream", "store"] {
+            assert!(
+                !projected.contains_key(excluded),
+                "response-only field leaked"
+            );
+        }
+        assert_eq!(projection.request_digest(), request.digest());
+        assert!(!format!("{request:?}").contains("hostile page marker"));
+        assert!(!format!("{projection:?}").contains("hostile page marker"));
+
+        let generation_variant = AgentProviderRequest {
+            call: provider_call_identity(),
+            config: openai_config(2_048),
+            endpoint: AgentProviderEndpoint::OpenAiResponses,
+            body: encode_openai_body(
+                &openai_config(2_048),
+                "Compare the documented architectures",
+                "ZSEM1\ncontent=hostile page marker",
+            )
+            .expect("variant body"),
+        };
+        let generation_projection = generation_variant
+            .openai_input_token_request()
+            .expect("variant projection");
+        assert_ne!(request.digest(), generation_variant.digest());
+        assert_eq!(
+            projection.projection_digest(),
+            generation_projection.projection_digest()
+        );
+        assert_eq!(projection.body(), generation_projection.body());
+        assert!(matches!(
+            AgentProviderExactInputCount::try_new(&generation_variant, projection.binding(), 17),
+            Err(AgentProviderRequestError::ProviderInputCount)
+        ));
+
+        let input_variant = AgentProviderRequest {
+            call: provider_call_identity(),
+            config: openai_config(1_024),
+            endpoint: AgentProviderEndpoint::OpenAiResponses,
+            body: encode_openai_body(
+                &openai_config(1_024),
+                "Compare a different architecture",
+                "ZSEM1\ncontent=hostile page marker",
+            )
+            .expect("input variant body"),
+        };
+        assert_ne!(
+            projection.projection_digest(),
+            input_variant
+                .openai_input_token_request()
+                .expect("input variant projection")
+                .projection_digest()
+        );
     }
 
     #[test]
