@@ -2727,14 +2727,14 @@ mod tests {
         AgentProviderInputKind, AgentProviderInputOutcome, AgentProviderKind,
         AgentProviderLocalInputTokenCounter, AgentProviderLocateRequestDraft,
         AgentProviderModelRevision, AgentProviderObjective,
-        AgentProviderReadContinuationRequestDraft, AgentProviderRequestSettlement,
-        AgentProviderScreenshotRequestDraft, AgentProviderSemanticInputStats,
-        AgentProviderStreamBatch, AgentProviderStreamBudget, AgentProviderStreamConclusion,
-        AgentProviderStreamEvent, AgentProviderTextDelta, AgentRunManifestId,
-        AgentRunProviderInputMetrics, AgentRunScope, AgentRunSupervisor, AgentSupervisorId,
-        ContextAutomationState, ContextCapabilities, ContextCapability, ContextId, ContextIdentity,
-        ContextKind, ContextOperationId, ContextRegistry, ContextRunId, ContextSettlement,
-        FrameGeneration, FrameId, SemanticActionBatch, SemanticActionBatchId,
+        AgentProviderReadContinuationRequestDraft, AgentProviderReasoningEffort,
+        AgentProviderRequestSettlement, AgentProviderScreenshotRequestDraft,
+        AgentProviderSemanticInputStats, AgentProviderStreamBatch, AgentProviderStreamBudget,
+        AgentProviderStreamConclusion, AgentProviderStreamEvent, AgentProviderTextDelta,
+        AgentRunManifestId, AgentRunProviderInputMetrics, AgentRunScope, AgentRunSupervisor,
+        AgentSupervisorId, ContextAutomationState, ContextCapabilities, ContextCapability,
+        ContextId, ContextIdentity, ContextKind, ContextOperationId, ContextRegistry, ContextRunId,
+        ContextSettlement, FrameGeneration, FrameId, SemanticActionBatch, SemanticActionBatchId,
         SemanticActionFailure, SemanticActionIntent, SemanticActionProposal,
         SemanticCaptureInstant, SemanticDecodeContext, SemanticDiffBudget, SemanticDiffOutcome,
         SemanticEffectEvidence, SemanticExtractionFieldSchema, SemanticExtractionSchema,
@@ -3160,7 +3160,7 @@ mod tests {
             tokenizer: &SemanticTokenizerRevision,
             request_body: &[u8],
         ) -> Result<SemanticTokenMeasurement, SemanticTokenCounterError> {
-            if model.as_str() != "gpt-5.6-sol" {
+            if model.as_str() != "gpt-5.6-terra" {
                 return Err(SemanticTokenCounterError::Unavailable);
             }
             self.measurement(tokenizer, request_body)
@@ -3278,7 +3278,8 @@ mod tests {
     ) -> AgentProviderCallConfig {
         AgentProviderCallConfig::try_new(
             AgentProviderKind::OpenAiResponses,
-            AgentProviderModelRevision::try_new("gpt-5.6-sol".to_owned()).expect("model"),
+            AgentProviderModelRevision::try_new("gpt-5.6-terra".to_owned()).expect("model"),
+            AgentProviderReasoningEffort::Medium,
             tokenizer,
             crate::AgentProviderPricingProfile::try_new(
                 crate::AgentProviderPricingRevision::new(1).expect("pricing revision"),
@@ -3300,6 +3301,7 @@ mod tests {
         AgentProviderCallConfig::try_new(
             AgentProviderKind::AnthropicMessages,
             AgentProviderModelRevision::try_new("claude-opus-5".to_owned()).expect("model"),
+            AgentProviderReasoningEffort::None,
             tokenizer,
             crate::AgentProviderPricingProfile::try_new(
                 crate::AgentProviderPricingRevision::new(1).expect("pricing revision"),
@@ -4070,16 +4072,20 @@ mod tests {
         );
         assert!(prepared.request().byte_len() < crate::MAX_AGENT_PROVIDER_REQUEST_BYTES);
         let wire: Value = serde_json::from_slice(prepared.request().body()).expect("request JSON");
-        assert_eq!(wire["model"], "gpt-5.6-sol");
+        assert_eq!(wire["model"], "gpt-5.6-terra");
         assert_eq!(wire["store"], false);
         assert_eq!(wire["stream"], true);
         assert_eq!(wire["parallel_tool_calls"], false);
         assert_eq!(wire["truncation"], "disabled");
         assert_eq!(wire["service_tier"], "default");
-        assert_eq!(wire.as_object().expect("request object").len(), 11);
+        assert_eq!(wire["reasoning"]["effort"], "medium");
+        assert_eq!(
+            wire["include"],
+            serde_json::json!(["reasoning.encrypted_content"])
+        );
+        assert_eq!(wire.as_object().expect("request object").len(), 13);
         assert!(wire.get("previous_response_id").is_none());
         assert!(wire.get("metadata").is_none());
-        assert!(wire.get("include").is_none());
         assert_eq!(wire["input"].as_array().expect("input").len(), 2);
         assert_eq!(wire["tools"].as_array().expect("tools").len(), 13);
         assert!(wire["tools"]

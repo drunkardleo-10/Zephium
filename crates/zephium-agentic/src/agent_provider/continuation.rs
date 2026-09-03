@@ -108,11 +108,7 @@ impl AgentProviderTranscript {
             return Err(AgentProviderContinuationError::TranscriptLimit);
         }
         let turn_bytes = correlation
-            .id
-            .as_str()
-            .len()
-            .checked_add(correlation.provider_item_id.as_ref().map_or(0, String::len))
-            .and_then(|bytes| bytes.checked_add(correlation.arguments.len()))
+            .retained_bytes()
             .and_then(|bytes| bytes.checked_add(tool_result.len()))
             .ok_or(AgentProviderContinuationError::TranscriptLimit)?;
         let retained_bytes = self
@@ -329,8 +325,12 @@ impl AgentProviderContinuationSeed {
             return Err(AgentProviderContinuationError::Terminal);
         }
         let provider_shape_matches = match self.config.provider() {
-            AgentProviderKind::OpenAiResponses => correlation.provider_item_id.is_some(),
-            AgentProviderKind::AnthropicMessages => correlation.provider_item_id.is_none(),
+            AgentProviderKind::OpenAiResponses => {
+                correlation.provider_item_id.is_some() && correlation.openai_replay.is_some()
+            }
+            AgentProviderKind::AnthropicMessages => {
+                correlation.provider_item_id.is_none() && correlation.openai_replay.is_none()
+            }
         };
         if !provider_shape_matches {
             return Err(AgentProviderContinuationError::ProviderShape);
@@ -1581,9 +1581,18 @@ mod tests {
             AgentProviderKind::OpenAiResponses => "gpt-test-v1",
             AgentProviderKind::AnthropicMessages => "claude-test-v1",
         };
+        let reasoning_effort = match provider {
+            AgentProviderKind::OpenAiResponses => {
+                super::super::AgentProviderReasoningEffort::Medium
+            }
+            AgentProviderKind::AnthropicMessages => {
+                super::super::AgentProviderReasoningEffort::None
+            }
+        };
         AgentProviderCallConfig::try_new(
             provider,
             super::super::AgentProviderModelRevision::try_new(model.to_owned()).expect("model"),
+            reasoning_effort,
             SemanticTokenizerRevision::try_new(format!("{model}:tokenizer-v1")).expect("tokenizer"),
             super::super::AgentProviderPricingProfile::try_new(
                 super::super::AgentProviderPricingRevision::new(1).expect("revision"),
@@ -1928,9 +1937,13 @@ mod tests {
         assert_eq!(wire["parallel_tool_calls"], false);
         assert_eq!(wire["truncation"], "disabled");
         assert_eq!(wire["service_tier"], "default");
+        assert_eq!(wire["reasoning"]["effort"], "medium");
+        assert_eq!(
+            wire["include"],
+            serde_json::json!(["reasoning.encrypted_content"])
+        );
         assert!(wire.get("previous_response_id").is_none());
         assert!(wire.get("metadata").is_none());
-        assert!(wire.get("reasoning").is_none());
         let input = wire["input"].as_array().expect("OpenAI input");
         assert_eq!(input.len(), 4);
         assert_eq!(input[0]["role"], "user");
@@ -2365,6 +2378,11 @@ mod tests {
                     assert_eq!(wire["store"], false);
                     assert_eq!(wire["stream"], true);
                     assert_eq!(wire["truncation"], "disabled");
+                    assert_eq!(wire["reasoning"]["effort"], "medium");
+                    assert_eq!(
+                        wire["include"],
+                        serde_json::json!(["reasoning.encrypted_content"])
+                    );
                     assert_eq!(wire["text"]["format"]["type"], "json_schema");
                     assert_eq!(wire["text"]["format"]["strict"], true);
                     assert_eq!(
@@ -2381,6 +2399,8 @@ mod tests {
                 }
                 AgentProviderKind::AnthropicMessages => {
                     assert_eq!(wire["stream"], true);
+                    assert!(wire.get("reasoning").is_none());
+                    assert!(wire.get("include").is_none());
                     assert_eq!(wire["service_tier"], "standard_only");
                     assert_eq!(wire["inference_geo"], "global");
                     assert_eq!(wire["output_config"]["format"]["type"], "json_schema");
@@ -2704,6 +2724,11 @@ mod tests {
         assert_eq!(wire["parallel_tool_calls"], false);
         assert_eq!(wire["truncation"], "disabled");
         assert_eq!(wire["service_tier"], "default");
+        assert_eq!(wire["reasoning"]["effort"], "medium");
+        assert_eq!(
+            wire["include"],
+            serde_json::json!(["reasoning.encrypted_content"])
+        );
         assert!(wire.get("previous_response_id").is_none());
         let input = wire["input"].as_array().expect("OpenAI input");
         assert_eq!(input.len(), 4);

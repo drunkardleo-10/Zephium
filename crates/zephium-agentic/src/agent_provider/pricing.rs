@@ -464,7 +464,9 @@ pub enum AgentProviderPricingError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AgentProviderStreamBudget, SemanticTokenizerRevision};
+    use crate::{
+        AgentProviderReasoningEffort, AgentProviderStreamBudget, SemanticTokenizerRevision,
+    };
 
     fn profile(max_input_tokens: u64) -> AgentProviderPricingProfile {
         AgentProviderPricingProfile::try_new(
@@ -482,6 +484,7 @@ mod tests {
         AgentProviderCallConfig::try_new(
             provider,
             AgentProviderModelRevision::try_new(model.to_owned()).expect("model"),
+            AgentProviderReasoningEffort::None,
             SemanticTokenizerRevision::try_new("tokenizer-v1".to_owned()).expect("tokenizer"),
             profile(max_input_tokens),
             32,

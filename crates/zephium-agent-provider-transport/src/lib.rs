@@ -1108,6 +1108,13 @@ pub enum AgentProviderBatchDisposition {
 }
 
 /// Terminal network/decoder outcome for one committed provider request.
+///
+/// The stream variant intentionally remains inline for this intermediate
+/// contract: its fixed-capacity response identity avoids provider model-string
+/// allocation and accidental diagnostic leakage while the result is `Copy`.
+/// The planned EOF-coupled move-only terminal contract removes this envelope;
+/// adding a short-lived heap allocation here would only be throwaway overhead.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentProviderTransportOutcome {
     /// The fixed provider decoder produced one normalized terminal result.
@@ -2567,11 +2574,11 @@ mod tests {
         AgentProviderDiffRequestDraft, AgentProviderExtractionRequestDraft,
         AgentProviderLocalInputTokenCounter, AgentProviderModelRevision, AgentProviderObjective,
         AgentProviderPricingError, AgentProviderPricingProfile, AgentProviderPricingRevision,
-        AgentProviderPricingSchedule, AgentProviderStopReason, AgentProviderStreamBudget,
-        AgentProviderTokenRates, AgentRunBudget, AgentRunManifest, AgentRunManifestId,
-        AgentRunScope, ContextCapabilities, ContextCapability, ContextId, ContextIdentity,
-        ContextKind, ContextOperationId, ContextRegistry, ContextRunId, ContextSettlement,
-        FrameGeneration, FrameId, SemanticCaptureInstant, SemanticDecodeContext,
+        AgentProviderPricingSchedule, AgentProviderReasoningEffort, AgentProviderStopReason,
+        AgentProviderStreamBudget, AgentProviderTokenRates, AgentRunBudget, AgentRunManifest,
+        AgentRunManifestId, AgentRunScope, ContextCapabilities, ContextCapability, ContextId,
+        ContextIdentity, ContextKind, ContextOperationId, ContextRegistry, ContextRunId,
+        ContextSettlement, FrameGeneration, FrameId, SemanticCaptureInstant, SemanticDecodeContext,
         SemanticDiffBudget, SemanticDiffOutcome, SemanticEffectClass,
         SemanticExtractionFieldSchema, SemanticExtractionSchema, SemanticExtractionSchemaId,
         SemanticFrameJoin, SemanticFrameTrust, SemanticInvocationId, SemanticModelEncodingBudget,
@@ -2641,7 +2648,7 @@ mod tests {
             tokenizer: &SemanticTokenizerRevision,
             request_body: &[u8],
         ) -> Result<SemanticTokenMeasurement, SemanticTokenCounterError> {
-            if model.as_str() != "gpt-5.6-sol" {
+            if model.as_str() != "gpt-5.6-terra" {
                 return Err(SemanticTokenCounterError::Unavailable);
             }
             self.count(tokenizer, request_body)
@@ -2824,12 +2831,16 @@ mod tests {
             provider,
             AgentProviderModelRevision::try_new(
                 match provider {
-                    AgentProviderKind::OpenAiResponses => "gpt-5.6-sol",
+                    AgentProviderKind::OpenAiResponses => "gpt-5.6-terra",
                     AgentProviderKind::AnthropicMessages => "claude-opus-5",
                 }
                 .to_owned(),
             )
             .expect("model"),
+            match provider {
+                AgentProviderKind::OpenAiResponses => AgentProviderReasoningEffort::Medium,
+                AgentProviderKind::AnthropicMessages => AgentProviderReasoningEffort::None,
+            },
             tokenizer,
             zephium_agentic::AgentProviderPricingProfile::try_new(
                 zephium_agentic::AgentProviderPricingRevision::new(1).expect("pricing revision"),
@@ -3265,10 +3276,12 @@ mod tests {
 
     fn openai_success_stream() -> Vec<u8> {
         [
-            "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"status\":\"in_progress\",\"model\":\"gpt-5.6-sol\",\"service_tier\":\"default\"}}\n\n",
+            "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"status\":\"in_progress\",\"model\":\"gpt-5.6-terra\",\"service_tier\":\"default\"}}\n\n",
+            "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"msg_1\",\"status\":\"in_progress\",\"role\":\"assistant\"}}\n\n",
             "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n",
             "event: response.output_text.done\ndata: {\"type\":\"response.output_text.done\",\"text\":\"hello\"}\n\n",
-            "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\":\"completed\",\"model\":\"gpt-5.6-sol\",\"service_tier\":\"default\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\"}]}],\"usage\":{\"input_tokens\":17,\"output_tokens\":3,\"total_tokens\":20,\"input_tokens_details\":{\"cached_tokens\":0},\"output_tokens_details\":{\"reasoning_tokens\":0}}}}\n\n",
+            "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"msg_1\",\"status\":\"completed\",\"role\":\"assistant\"}}\n\n",
+            "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\":\"completed\",\"model\":\"gpt-5.6-terra\",\"service_tier\":\"default\",\"output\":[{\"type\":\"message\",\"id\":\"msg_1\",\"status\":\"completed\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\"}]}],\"usage\":{\"input_tokens\":17,\"output_tokens\":3,\"total_tokens\":20,\"input_tokens_details\":{\"cached_tokens\":0},\"output_tokens_details\":{\"reasoning_tokens\":0}}}}\n\n",
             "data: [DONE]\n\n",
         ]
         .concat()
@@ -3277,12 +3290,12 @@ mod tests {
 
     fn openai_tool_stream() -> Vec<u8> {
         [
-            "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_tool_1\",\"status\":\"in_progress\",\"model\":\"gpt-5.6-sol\",\"service_tier\":\"default\"}}\n\n",
-            "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_tool_1\",\"call_id\":\"call_tool_1\",\"name\":\"back\",\"arguments\":\"\",\"status\":\"in_progress\"}}\n\n",
+            "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_tool_1\",\"status\":\"in_progress\",\"model\":\"gpt-5.6-terra\",\"service_tier\":\"default\"}}\n\n",
+            "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"fc_tool_1\",\"call_id\":\"call_tool_1\",\"name\":\"back\",\"arguments\":\"\",\"status\":\"in_progress\"}}\n\n",
             "event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_tool_1\",\"delta\":\"{}\"}\n\n",
             "event: response.function_call_arguments.done\ndata: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_tool_1\",\"name\":\"back\",\"arguments\":\"{}\"}\n\n",
-            "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_tool_1\",\"call_id\":\"call_tool_1\",\"name\":\"back\",\"arguments\":\"{}\",\"status\":\"completed\"}}\n\n",
-            "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_tool_1\",\"status\":\"completed\",\"model\":\"gpt-5.6-sol\",\"service_tier\":\"default\",\"output\":[{\"type\":\"function_call\",\"id\":\"fc_tool_1\",\"call_id\":\"call_tool_1\",\"name\":\"back\",\"arguments\":\"{}\",\"status\":\"completed\"}],\"usage\":{\"input_tokens\":17,\"output_tokens\":3,\"total_tokens\":20,\"input_tokens_details\":{\"cached_tokens\":0},\"output_tokens_details\":{\"reasoning_tokens\":0}}}}\n\n",
+            "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"fc_tool_1\",\"call_id\":\"call_tool_1\",\"name\":\"back\",\"arguments\":\"{}\",\"status\":\"completed\"}}\n\n",
+            "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_tool_1\",\"status\":\"completed\",\"model\":\"gpt-5.6-terra\",\"service_tier\":\"default\",\"output\":[{\"type\":\"function_call\",\"id\":\"fc_tool_1\",\"call_id\":\"call_tool_1\",\"name\":\"back\",\"arguments\":\"{}\",\"status\":\"completed\"}],\"usage\":{\"input_tokens\":17,\"output_tokens\":3,\"total_tokens\":20,\"input_tokens_details\":{\"cached_tokens\":0},\"output_tokens_details\":{\"reasoning_tokens\":0}}}}\n\n",
             "data: [DONE]\n\n",
         ]
         .concat()
@@ -3322,12 +3335,12 @@ mod tests {
                 "response.created",
                 json!({"type":"response.created","response":{
                     "id":"resp_extract_tool_1","status":"in_progress",
-                    "model":"gpt-5.6-sol","service_tier":"default"
+                    "model":"gpt-5.6-terra","service_tier":"default"
                 }}),
             ),
             sse_json(
                 "response.output_item.added",
-                json!({"type":"response.output_item.added","item":{
+                json!({"type":"response.output_item.added","output_index":0,"item":{
                     "type":"function_call","id":"fc_extract_tool_1",
                     "call_id":"call_extract_tool_1","name":"extract",
                     "arguments":"","status":"in_progress"
@@ -3346,7 +3359,7 @@ mod tests {
             ),
             sse_json(
                 "response.output_item.done",
-                json!({"type":"response.output_item.done","item":{
+                json!({"type":"response.output_item.done","output_index":0,"item":{
                     "type":"function_call","id":"fc_extract_tool_1",
                     "call_id":"call_extract_tool_1","name":"extract",
                     "arguments":arguments,"status":"completed"
@@ -3356,7 +3369,7 @@ mod tests {
                 "response.completed",
                 json!({"type":"response.completed","response":{
                     "id":"resp_extract_tool_1","status":"completed",
-                    "model":"gpt-5.6-sol","service_tier":"default",
+                    "model":"gpt-5.6-terra","service_tier":"default",
                     "output":[{"type":"function_call","id":"fc_extract_tool_1",
                         "call_id":"call_extract_tool_1","name":"extract",
                         "arguments":arguments,"status":"completed"}],
@@ -3425,7 +3438,14 @@ mod tests {
                 "response.created",
                 json!({"type":"response.created","response":{
                     "id":"resp_extract_output_1","status":"in_progress",
-                    "model":"gpt-5.6-sol","service_tier":"default"
+                    "model":"gpt-5.6-terra","service_tier":"default"
+                }}),
+            ),
+            sse_json(
+                "response.output_item.added",
+                json!({"type":"response.output_item.added","output_index":0,"item":{
+                    "type":"message","id":"msg_extract_output_1",
+                    "status":"in_progress","role":"assistant"
                 }}),
             ),
             sse_json(
@@ -3437,11 +3457,20 @@ mod tests {
                 json!({"type":"response.output_text.done","text":output}),
             ),
             sse_json(
+                "response.output_item.done",
+                json!({"type":"response.output_item.done","output_index":0,"item":{
+                    "type":"message","id":"msg_extract_output_1",
+                    "status":"completed","role":"assistant"
+                }}),
+            ),
+            sse_json(
                 "response.completed",
                 json!({"type":"response.completed","response":{
                     "id":"resp_extract_output_1","status":"completed",
-                    "model":"gpt-5.6-sol","service_tier":"default",
-                    "output":[{"type":"message","content":[{"type":"output_text"}]}],
+                    "model":"gpt-5.6-terra","service_tier":"default",
+                    "output":[{"type":"message","id":"msg_extract_output_1",
+                        "status":"completed","role":"assistant",
+                        "content":[{"type":"output_text"}]}],
                     "usage":{"input_tokens":input_tokens,"output_tokens":3,
                         "total_tokens":input_tokens + 3,
                         "input_tokens_details":{"cached_tokens":0},
@@ -3509,14 +3538,16 @@ mod tests {
 
     fn openai_mixed_tool_stream() -> Vec<u8> {
         [
-            "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_mixed_1\",\"status\":\"in_progress\",\"model\":\"gpt-5.6-sol\",\"service_tier\":\"default\"}}\n\n",
+            "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_mixed_1\",\"status\":\"in_progress\",\"model\":\"gpt-5.6-terra\",\"service_tier\":\"default\"}}\n\n",
+            "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"msg_mixed_1\",\"status\":\"in_progress\",\"role\":\"assistant\"}}\n\n",
             "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"working\"}\n\n",
             "event: response.output_text.done\ndata: {\"type\":\"response.output_text.done\",\"text\":\"working\"}\n\n",
-            "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_mixed_1\",\"call_id\":\"call_mixed_1\",\"name\":\"back\",\"arguments\":\"\",\"status\":\"in_progress\"}}\n\n",
+            "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"msg_mixed_1\",\"status\":\"completed\",\"role\":\"assistant\"}}\n\n",
+            "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"function_call\",\"id\":\"fc_mixed_1\",\"call_id\":\"call_mixed_1\",\"name\":\"back\",\"arguments\":\"\",\"status\":\"in_progress\"}}\n\n",
             "event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_mixed_1\",\"delta\":\"{}\"}\n\n",
             "event: response.function_call_arguments.done\ndata: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_mixed_1\",\"name\":\"back\",\"arguments\":\"{}\"}\n\n",
-            "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_mixed_1\",\"call_id\":\"call_mixed_1\",\"name\":\"back\",\"arguments\":\"{}\",\"status\":\"completed\"}}\n\n",
-            "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_mixed_1\",\"status\":\"completed\",\"model\":\"gpt-5.6-sol\",\"service_tier\":\"default\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\"}]},{\"type\":\"function_call\",\"id\":\"fc_mixed_1\",\"call_id\":\"call_mixed_1\",\"name\":\"back\",\"arguments\":\"{}\",\"status\":\"completed\"}],\"usage\":{\"input_tokens\":17,\"output_tokens\":3,\"total_tokens\":20,\"input_tokens_details\":{\"cached_tokens\":0},\"output_tokens_details\":{\"reasoning_tokens\":0}}}}\n\n",
+            "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"function_call\",\"id\":\"fc_mixed_1\",\"call_id\":\"call_mixed_1\",\"name\":\"back\",\"arguments\":\"{}\",\"status\":\"completed\"}}\n\n",
+            "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_mixed_1\",\"status\":\"completed\",\"model\":\"gpt-5.6-terra\",\"service_tier\":\"default\",\"output\":[{\"type\":\"message\",\"id\":\"msg_mixed_1\",\"status\":\"completed\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\"}]},{\"type\":\"function_call\",\"id\":\"fc_mixed_1\",\"call_id\":\"call_mixed_1\",\"name\":\"back\",\"arguments\":\"{}\",\"status\":\"completed\"}],\"usage\":{\"input_tokens\":17,\"output_tokens\":3,\"total_tokens\":20,\"input_tokens_details\":{\"cached_tokens\":0},\"output_tokens_details\":{\"reasoning_tokens\":0}}}}\n\n",
             "data: [DONE]\n\n",
         ]
         .concat()
@@ -4086,11 +4117,11 @@ mod tests {
             settlement.config().provider(),
             AgentProviderKind::OpenAiResponses
         );
-        assert_eq!(settlement.config().model().as_str(), "gpt-5.6-sol");
+        assert_eq!(settlement.config().model().as_str(), "gpt-5.6-terra");
         assert_eq!(settlement.usage(), completion.usage());
         assert_eq!(settlement.settlement(), AgentModelCallSettlement::Completed);
         let settlement_debug = format!("{settlement:?}");
-        assert!(!settlement_debug.contains("gpt-5.6-sol"));
+        assert!(!settlement_debug.contains("gpt-5.6-terra"));
         assert!(!settlement_debug.contains("transport-test-v1"));
         assert_eq!(policy.pending_model_calls(), 1);
         let wrong_profile = AgentProviderPricingProfile::try_new(
@@ -4753,7 +4784,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn mixed_assistant_text_and_tool_terminal_destroys_continuation_seed() {
+    async fn mixed_assistant_text_and_tool_terminal_fails_closed_without_continuation() {
         let server = OneShotServer::spawn(
             "200 OK",
             &[
@@ -4779,26 +4810,33 @@ mod tests {
             .expect("admission")
             .execute(|_| AgentProviderBatchDisposition::Continue)
             .await;
-        let AgentProviderTransportOutcome::Stream(AgentProviderStreamConclusion::Completed(
-            completion,
-        )) = result.outcome()
-        else {
-            panic!("mixed completion expected")
-        };
-        assert_eq!(completion.stop(), AgentProviderStopReason::ToolCalls);
-        assert_eq!(completion.stats().output_text_bytes(), 7);
-        assert!(!completion.tool_only_output());
+        assert!(matches!(
+            result.outcome(),
+            AgentProviderTransportOutcome::Failed(failure)
+                if failure.class() == AgentProviderFailureClass::Protocol
+        ));
+        assert_eq!(
+            result.disclosure_stage(),
+            AgentProviderDisclosureStage::ModelRequestMayHaveDispatched
+        );
+        assert_eq!(
+            result.usage_knowledge(),
+            AgentProviderUsageKnowledge::UnknownAfterDispatch
+        );
         assert!(!result.has_continuation_seed());
 
         let (settlement, seed) = result.into_policy_settlement_with_continuation();
         assert!(seed.is_none());
-        let AgentProviderPolicySettlement::PricingRequired(settlement) = settlement else {
-            panic!("reported mixed-output usage must be priced")
+        let AgentProviderPolicySettlement::Immediate(settlement) = settlement else {
+            panic!("untrusted mixed output must settle conservatively")
         };
-        let schedule = pricing_schedule(settlement.config());
+        assert_eq!(
+            settlement.usage_accounting(),
+            AgentModelUsageAccounting::ReservationCeiling
+        );
         settlement
-            .settle(&mut policy, &schedule)
-            .expect("mixed-output settlement");
+            .settle(&mut policy)
+            .expect("conservative mixed-output settlement");
         assert_eq!(policy.pending_model_calls(), 0);
         assert!(transport.snapshot().expect("snapshot").is_idle());
         server.finish();

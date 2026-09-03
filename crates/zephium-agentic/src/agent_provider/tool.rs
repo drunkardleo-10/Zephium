@@ -30,6 +30,117 @@ pub const MAX_AGENT_PROVIDER_TOOL_CALL_ID_BYTES: usize = 128;
 /// Maximum UTF-8 bytes in one semantic locate query.
 pub const MAX_AGENT_BROWSER_SEMANTIC_QUERY_BYTES: usize = MAX_SEMANTIC_LOCATE_QUERY_BYTES;
 const MAX_AGENT_BROWSER_TOOL_JSON_DEPTH: u8 = 16;
+pub(super) const MAX_OPENAI_ENCRYPTED_REASONING_ITEM_BYTES: usize = 128 * 1024;
+pub(super) const MAX_OPENAI_ENCRYPTED_REASONING_AGGREGATE_BYTES: usize = 192 * 1024;
+const MAX_OPENAI_REPLAY_ITEMS: usize = 16;
+
+/// Private exact-order output item retained only for OpenAI stateless replay.
+#[derive(Eq, PartialEq)]
+pub(super) enum OpenAiResponseReplayItem {
+    Reasoning {
+        id: String,
+        encrypted_content: String,
+    },
+    FunctionCall,
+}
+
+/// Bounded opaque OpenAI output retained only until its tool-result replay.
+#[derive(Eq, PartialEq)]
+pub(super) struct OpenAiResponseReplay {
+    items: Vec<OpenAiResponseReplayItem>,
+    encrypted_bytes: usize,
+    retained_bytes: usize,
+}
+
+impl OpenAiResponseReplay {
+    #[cfg(test)]
+    pub(super) fn function_call_only() -> Self {
+        Self {
+            items: vec![OpenAiResponseReplayItem::FunctionCall],
+            encrypted_bytes: 0,
+            retained_bytes: 0,
+        }
+    }
+
+    pub(super) fn try_new(items: Vec<OpenAiResponseReplayItem>) -> Option<Self> {
+        if items.is_empty() || items.len() > MAX_OPENAI_REPLAY_ITEMS {
+            return None;
+        }
+        let function_calls = items
+            .iter()
+            .filter(|item| matches!(item, OpenAiResponseReplayItem::FunctionCall))
+            .count();
+        if function_calls != 1 {
+            return None;
+        }
+        let mut encrypted_bytes = 0_usize;
+        let mut retained_bytes = 0_usize;
+        let mut reasoning_ids: Vec<&str> = Vec::new();
+        let mut encrypted_items: Vec<&str> = Vec::new();
+        for item in &items {
+            let OpenAiResponseReplayItem::Reasoning {
+                id,
+                encrypted_content,
+            } = item
+            else {
+                continue;
+            };
+            if !valid_provider_item_id(id)
+                || encrypted_content.is_empty()
+                || encrypted_content.len() > MAX_OPENAI_ENCRYPTED_REASONING_ITEM_BYTES
+                || !encrypted_content
+                    .bytes()
+                    .all(|byte| byte.is_ascii_graphic())
+                || reasoning_ids.contains(&id.as_str())
+                || encrypted_items.contains(&encrypted_content.as_str())
+            {
+                return None;
+            }
+            encrypted_bytes = encrypted_bytes.checked_add(encrypted_content.len())?;
+            retained_bytes = retained_bytes
+                .checked_add(id.len())?
+                .checked_add(encrypted_content.len())?;
+            if encrypted_bytes > MAX_OPENAI_ENCRYPTED_REASONING_AGGREGATE_BYTES {
+                return None;
+            }
+            reasoning_ids.push(id.as_str());
+            encrypted_items.push(encrypted_content.as_str());
+        }
+        Some(Self {
+            items,
+            encrypted_bytes,
+            retained_bytes,
+        })
+    }
+
+    pub(super) fn items(&self) -> &[OpenAiResponseReplayItem] {
+        &self.items
+    }
+
+    pub(super) const fn retained_bytes(&self) -> usize {
+        self.retained_bytes
+    }
+}
+
+impl fmt::Debug for OpenAiResponseReplay {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OpenAiResponseReplay")
+            .field("items", &self.items.len())
+            .field("encrypted_bytes", &self.encrypted_bytes)
+            .field("retained_bytes", &self.retained_bytes)
+            .field("content", &"[redacted]")
+            .finish()
+    }
+}
+
+fn valid_provider_item_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_AGENT_PROVIDER_TOOL_CALL_ID_BYTES
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
 
 /// Closed model-facing browser tool names.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -483,9 +594,10 @@ impl fmt::Debug for AgentBrowserToolProposal {
 pub struct AgentBrowserToolCall {
     source_call: AgentProviderCallIdentity,
     id: AgentBrowserToolCallId,
-    proposal: AgentBrowserToolProposal,
+    proposal: Box<AgentBrowserToolProposal>,
     provider_item_id: Option<String>,
     arguments: String,
+    openai_replay: Option<Box<OpenAiResponseReplay>>,
 }
 
 impl AgentBrowserToolCall {
@@ -495,9 +607,10 @@ impl AgentBrowserToolCall {
         name: &str,
         arguments: String,
     ) -> Result<Self, AgentBrowserToolContractError> {
-        Self::decode_inner(source_call, None, id, name, arguments)
+        Self::decode_inner(source_call, None, id, name, arguments, None)
     }
 
+    #[cfg(test)]
     pub(crate) fn decode_openai(
         source_call: AgentProviderCallIdentity,
         provider_item_id: String,
@@ -505,15 +618,42 @@ impl AgentBrowserToolCall {
         name: &str,
         arguments: String,
     ) -> Result<Self, AgentBrowserToolContractError> {
-        if provider_item_id.is_empty()
-            || provider_item_id.len() > MAX_AGENT_PROVIDER_TOOL_CALL_ID_BYTES
-            || !provider_item_id
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-        {
+        if !valid_provider_item_id(&provider_item_id) {
             return Err(AgentBrowserToolContractError::CallId);
         }
-        Self::decode_inner(source_call, Some(provider_item_id), id, name, arguments)
+        Self::decode_inner(
+            source_call,
+            Some(provider_item_id),
+            id,
+            name,
+            arguments,
+            Some(OpenAiResponseReplay::function_call_only()),
+        )
+    }
+
+    pub(super) fn decode_openai_with_replay(
+        source_call: AgentProviderCallIdentity,
+        provider_item_id: String,
+        id: String,
+        name: &str,
+        arguments: String,
+        replay: Option<OpenAiResponseReplay>,
+    ) -> Result<Self, AgentBrowserToolContractError> {
+        if !valid_provider_item_id(&provider_item_id) {
+            return Err(AgentBrowserToolContractError::CallId);
+        }
+        Self::decode_inner(
+            source_call,
+            Some(provider_item_id),
+            id,
+            name,
+            arguments,
+            replay,
+        )
+    }
+
+    pub(super) fn attach_openai_replay(&mut self, replay: OpenAiResponseReplay) {
+        self.openai_replay = Some(Box::new(replay));
     }
 
     fn decode_inner(
@@ -522,15 +662,17 @@ impl AgentBrowserToolCall {
         id: String,
         name: &str,
         arguments: String,
+        openai_replay: Option<OpenAiResponseReplay>,
     ) -> Result<Self, AgentBrowserToolContractError> {
         let id = AgentBrowserToolCallId::try_new(id)?;
-        let proposal = decode_proposal(name, &arguments)?;
+        let proposal = Box::new(decode_proposal(name, &arguments)?);
         Ok(Self {
             source_call,
             id,
             proposal,
             provider_item_id,
             arguments,
+            openai_replay: openai_replay.map(Box::new),
         })
     }
 
@@ -540,13 +682,13 @@ impl AgentBrowserToolCall {
     }
 
     /// Closed pre-policy browser proposal.
-    pub const fn proposal(&self) -> &AgentBrowserToolProposal {
-        &self.proposal
+    pub fn proposal(&self) -> &AgentBrowserToolProposal {
+        self.proposal.as_ref()
     }
 
     /// Consumes the call without copying model-authored text.
     pub fn into_parts(self) -> (AgentBrowserToolCallId, AgentBrowserToolProposal) {
-        (self.id, self.proposal)
+        (self.id, *self.proposal)
     }
 
     /// Splits the proposal from its exact one-shot provider-result correlation.
@@ -557,7 +699,7 @@ impl AgentBrowserToolCall {
     pub fn into_continuation_parts(
         self,
     ) -> (AgentProviderToolCallCorrelation, AgentBrowserToolProposal) {
-        let extraction_schema = match &self.proposal {
+        let extraction_schema = match self.proposal.as_ref() {
             AgentBrowserToolProposal::Extract { schema, .. } => Some(*schema),
             _ => None,
         };
@@ -569,8 +711,9 @@ impl AgentBrowserToolCall {
                 extraction_schema,
                 provider_item_id: self.provider_item_id,
                 arguments: self.arguments,
+                openai_replay: self.openai_replay,
             },
-            self.proposal,
+            *self.proposal,
         )
     }
 }
@@ -598,6 +741,7 @@ pub struct AgentProviderToolCallCorrelation {
     pub(super) extraction_schema: Option<SemanticExtractionSchemaId>,
     pub(super) provider_item_id: Option<String>,
     pub(super) arguments: String,
+    pub(super) openai_replay: Option<Box<OpenAiResponseReplay>>,
 }
 
 impl AgentProviderToolCallCorrelation {
@@ -615,6 +759,19 @@ impl AgentProviderToolCallCorrelation {
     pub fn argument_bytes(&self) -> usize {
         self.arguments.len()
     }
+
+    pub(super) fn retained_bytes(&self) -> Option<usize> {
+        self.id
+            .as_str()
+            .len()
+            .checked_add(self.provider_item_id.as_ref().map_or(0, String::len))?
+            .checked_add(self.arguments.len())?
+            .checked_add(
+                self.openai_replay
+                    .as_ref()
+                    .map_or(0, |replay| replay.retained_bytes()),
+            )
+    }
 }
 
 impl fmt::Debug for AgentProviderToolCallCorrelation {
@@ -630,6 +787,7 @@ impl fmt::Debug for AgentProviderToolCallCorrelation {
                 &self.provider_item_id.as_ref().map(|_| "[redacted]"),
             )
             .field("argument_bytes", &self.arguments.len())
+            .field("openai_replay", &self.openai_replay)
             .field("arguments", &"[redacted]")
             .finish()
     }
@@ -1693,5 +1851,68 @@ mod tests {
             assert!(!correlation_debug.contains(private));
         }
         assert!(correlation_debug.contains("[redacted]"));
+    }
+
+    #[test]
+    fn encrypted_replay_caps_order_and_diagnostics_are_fail_closed() {
+        let encrypted = "a".repeat(MAX_OPENAI_ENCRYPTED_REASONING_ITEM_BYTES);
+        let replay = OpenAiResponseReplay::try_new(vec![
+            OpenAiResponseReplayItem::Reasoning {
+                id: "rs_private_1".to_owned(),
+                encrypted_content: encrypted.clone(),
+            },
+            OpenAiResponseReplayItem::FunctionCall,
+        ])
+        .expect("bounded replay");
+        let debug = format!("{replay:?}");
+        assert!(!debug.contains(&encrypted));
+        assert_eq!(replay.items().len(), 2);
+
+        assert!(OpenAiResponseReplay::try_new(vec![
+            OpenAiResponseReplayItem::Reasoning {
+                id: "rs_private_1".to_owned(),
+                encrypted_content: "opaque_duplicate".to_owned(),
+            },
+            OpenAiResponseReplayItem::Reasoning {
+                id: "rs_private_2".to_owned(),
+                encrypted_content: "opaque_duplicate".to_owned(),
+            },
+            OpenAiResponseReplayItem::FunctionCall,
+        ])
+        .is_none());
+
+        let aggregate_piece = "a".repeat(
+            MAX_OPENAI_ENCRYPTED_REASONING_AGGREGATE_BYTES
+                .checked_div(2)
+                .expect("nonzero aggregate")
+                + 1,
+        );
+        assert!(aggregate_piece.len() <= MAX_OPENAI_ENCRYPTED_REASONING_ITEM_BYTES);
+        assert!(OpenAiResponseReplay::try_new(vec![
+            OpenAiResponseReplayItem::Reasoning {
+                id: "rs_private_1".to_owned(),
+                encrypted_content: aggregate_piece.clone(),
+            },
+            OpenAiResponseReplayItem::Reasoning {
+                id: "rs_private_2".to_owned(),
+                encrypted_content: aggregate_piece,
+            },
+            OpenAiResponseReplayItem::FunctionCall,
+        ])
+        .is_none());
+
+        assert!(OpenAiResponseReplay::try_new(vec![
+            OpenAiResponseReplayItem::Reasoning {
+                id: "rs_private_1".to_owned(),
+                encrypted_content: "contains whitespace".to_owned(),
+            },
+            OpenAiResponseReplayItem::FunctionCall,
+        ])
+        .is_none());
+        assert!(OpenAiResponseReplay::try_new(vec![
+            OpenAiResponseReplayItem::FunctionCall,
+            OpenAiResponseReplayItem::FunctionCall,
+        ])
+        .is_none());
     }
 }

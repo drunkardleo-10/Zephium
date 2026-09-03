@@ -832,7 +832,8 @@ mod tests {
     use super::*;
     use crate::{
         AgentModelCallId, AgentPlanLeaseId, AgentPlanNodeId, AgentProviderPricingProfile,
-        AgentProviderPricingRevision, AgentRunManifestId, SemanticTokenizerRevision,
+        AgentProviderPricingRevision, AgentProviderReasoningEffort, AgentRunManifestId,
+        SemanticTokenizerRevision,
     };
 
     fn call() -> AgentProviderCallIdentity {
@@ -848,6 +849,7 @@ mod tests {
         AgentProviderCallConfig::try_new(
             AgentProviderKind::AnthropicMessages,
             AgentProviderModelRevision::try_new("claude-opus-5".to_owned()).expect("model"),
+            AgentProviderReasoningEffort::None,
             SemanticTokenizerRevision::try_new("anthropic:claude-opus-5:v1".to_owned())
                 .expect("tokenizer"),
             AgentProviderPricingProfile::try_new(

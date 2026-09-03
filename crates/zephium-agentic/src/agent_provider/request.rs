@@ -37,15 +37,15 @@ use crate::{
 };
 
 use super::continuation::{AgentProviderBoundTranscript, AgentProviderTranscript};
-use super::tool::AgentBrowserToolKind;
+use super::tool::{AgentBrowserToolKind, OpenAiResponseReplayItem};
 use super::{
     AgentProviderBoundDiffContinuation, AgentProviderBoundExtractionContinuation,
     AgentProviderBoundLocateContinuation, AgentProviderBoundReadContinuation,
     AgentProviderBoundScreenshotContinuation, AgentProviderCallConfig, AgentProviderCallIdentity,
     AgentProviderContinuationSeed, AgentProviderContractError,
     AgentProviderExtractionOutputBinding, AgentProviderKind, AgentProviderModelRevision,
-    ANTHROPIC_GLOBAL_INFERENCE_GEO, ANTHROPIC_STANDARD_SERVICE_TIER_REQUEST,
-    OPENAI_STANDARD_SERVICE_TIER,
+    AgentProviderToolCallCorrelation, ANTHROPIC_GLOBAL_INFERENCE_GEO,
+    ANTHROPIC_STANDARD_SERVICE_TIER_REQUEST, OPENAI_STANDARD_SERVICE_TIER,
 };
 
 /// Maximum UTF-8 bytes in one approved browser objective.
@@ -406,8 +406,14 @@ impl AgentProviderRequest {
             "text",
             "truncation",
         ];
-        const RESPONSE_ONLY_FIELDS: &[&str] =
-            &["max_output_tokens", "service_tier", "stream", "store"];
+        const RESPONSE_ONLY_FIELDS: &[&str] = &[
+            "include",
+            "max_output_tokens",
+            "reasoning",
+            "service_tier",
+            "stream",
+            "store",
+        ];
         if object.keys().any(|key| {
             !COUNT_FIELDS.contains(&key.as_str()) && !RESPONSE_ONLY_FIELDS.contains(&key.as_str())
         }) || object.get("model").is_none()
@@ -2957,6 +2963,8 @@ struct OpenAiRequestWire<'a> {
     max_output_tokens: u32,
     truncation: &'static str,
     service_tier: &'static str,
+    reasoning: OpenAiReasoningWire,
+    include: [&'static str; 1],
     stream: bool,
     store: bool,
 }
@@ -2972,6 +2980,8 @@ struct OpenAiContinuationRequestWire<'a> {
     max_output_tokens: u32,
     truncation: &'static str,
     service_tier: &'static str,
+    reasoning: OpenAiReasoningWire,
+    include: [&'static str; 1],
     stream: bool,
     store: bool,
 }
@@ -2985,6 +2995,8 @@ struct OpenAiExtractionRequestWire<'a> {
     max_output_tokens: u32,
     truncation: &'static str,
     service_tier: &'static str,
+    reasoning: OpenAiReasoningWire,
+    include: [&'static str; 1],
     stream: bool,
     store: bool,
 }
@@ -3006,9 +3018,24 @@ struct OpenAiExtractionFormatWire<'a> {
 #[serde(untagged)]
 enum OpenAiContinuationInputWire<'a> {
     Message(OpenAiInputMessageWire<'a>),
+    Reasoning(OpenAiReasoningReplayWire<'a>),
     FunctionCall(OpenAiFunctionCallWire<'a>),
     FunctionCallOutput(OpenAiFunctionCallOutputWire<'a>),
     FunctionCallImageOutput(OpenAiFunctionCallImageOutputWire<'a>),
+}
+
+#[derive(Serialize)]
+struct OpenAiReasoningWire {
+    effort: &'static str,
+}
+
+#[derive(Serialize)]
+struct OpenAiReasoningReplayWire<'a> {
+    r#type: &'static str,
+    id: &'a str,
+    summary: [(); 0],
+    encrypted_content: &'a str,
+    status: &'static str,
 }
 
 #[derive(Serialize)]
@@ -3194,6 +3221,60 @@ struct AnthropicToolChoiceWire {
     disable_parallel_tool_use: bool,
 }
 
+fn openai_turn_input_items(
+    correlation: &AgentProviderToolCallCorrelation,
+) -> Result<usize, AgentProviderRequestError> {
+    correlation
+        .openai_replay
+        .as_ref()
+        .map(|replay| replay.items().len())
+        .and_then(|items| items.checked_add(1))
+        .ok_or(AgentProviderRequestError::Encoding)
+}
+
+fn push_openai_replay_items<'a>(
+    input: &mut Vec<OpenAiContinuationInputWire<'a>>,
+    correlation: &'a AgentProviderToolCallCorrelation,
+) -> Result<(), AgentProviderRequestError> {
+    let replay = correlation
+        .openai_replay
+        .as_ref()
+        .ok_or(AgentProviderRequestError::Encoding)?;
+    let provider_item_id = correlation
+        .provider_item_id
+        .as_deref()
+        .ok_or(AgentProviderRequestError::Encoding)?;
+    for item in replay.items() {
+        match item {
+            OpenAiResponseReplayItem::Reasoning {
+                id,
+                encrypted_content,
+            } => input.push(OpenAiContinuationInputWire::Reasoning(
+                OpenAiReasoningReplayWire {
+                    r#type: "reasoning",
+                    id,
+                    summary: [],
+                    encrypted_content,
+                    status: "completed",
+                },
+            )),
+            OpenAiResponseReplayItem::FunctionCall => {
+                input.push(OpenAiContinuationInputWire::FunctionCall(
+                    OpenAiFunctionCallWire {
+                        r#type: "function_call",
+                        id: provider_item_id,
+                        call_id: correlation.id.as_str(),
+                        name: correlation.kind.as_str(),
+                        arguments: &correlation.arguments,
+                        status: "completed",
+                    },
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn encode_openai_body(
     config: &AgentProviderCallConfig,
     objective: &str,
@@ -3237,6 +3318,10 @@ fn encode_openai_body(
         max_output_tokens: config.max_output_tokens(),
         truncation: "disabled",
         service_tier: OPENAI_STANDARD_SERVICE_TIER,
+        reasoning: OpenAiReasoningWire {
+            effort: config.reasoning_effort().as_openai_str(),
+        },
+        include: ["reasoning.encrypted_content"],
         stream: true,
         store: false,
     };
@@ -3250,14 +3335,11 @@ fn encode_openai_continuation_body(
     if config.provider() != AgentProviderKind::OpenAiResponses {
         return Err(AgentProviderContractError::ProviderKind.into());
     }
-    let input_items = 2_usize
-        .checked_add(
-            transcript
-                .turn_count()
-                .checked_mul(2)
-                .ok_or(AgentProviderRequestError::Encoding)?,
-        )
-        .ok_or(AgentProviderRequestError::Encoding)?;
+    let input_items = transcript.turns().try_fold(2_usize, |total, turn| {
+        total
+            .checked_add(openai_turn_input_items(turn.correlation())?)
+            .ok_or(AgentProviderRequestError::Encoding)
+    })?;
     let mut input = Vec::new();
     input
         .try_reserve_exact(input_items)
@@ -3282,20 +3364,7 @@ fn encode_openai_continuation_body(
     ));
     for turn in transcript.turns() {
         let correlation = turn.correlation();
-        let provider_item_id = correlation
-            .provider_item_id
-            .as_deref()
-            .ok_or(AgentProviderRequestError::Encoding)?;
-        input.push(OpenAiContinuationInputWire::FunctionCall(
-            OpenAiFunctionCallWire {
-                r#type: "function_call",
-                id: provider_item_id,
-                call_id: correlation.id.as_str(),
-                name: correlation.kind.as_str(),
-                arguments: &correlation.arguments,
-                status: "completed",
-            },
-        ));
+        push_openai_replay_items(&mut input, correlation)?;
         input.push(OpenAiContinuationInputWire::FunctionCallOutput(
             OpenAiFunctionCallOutputWire {
                 r#type: "function_call_output",
@@ -3325,6 +3394,10 @@ fn encode_openai_continuation_body(
         max_output_tokens: config.max_output_tokens(),
         truncation: "disabled",
         service_tier: OPENAI_STANDARD_SERVICE_TIER,
+        reasoning: OpenAiReasoningWire {
+            effort: config.reasoning_effort().as_openai_str(),
+        },
+        include: ["reasoning.encrypted_content"],
         stream: true,
         store: false,
     };
@@ -3340,14 +3413,11 @@ fn encode_openai_extraction_body(
     {
         return Err(AgentProviderRequestError::Encoding);
     }
-    let input_items = 2_usize
-        .checked_add(
-            transcript
-                .turn_count()
-                .checked_mul(2)
-                .ok_or(AgentProviderRequestError::Encoding)?,
-        )
-        .ok_or(AgentProviderRequestError::Encoding)?;
+    let input_items = transcript.turns().try_fold(2_usize, |total, turn| {
+        total
+            .checked_add(openai_turn_input_items(turn.correlation())?)
+            .ok_or(AgentProviderRequestError::Encoding)
+    })?;
     let mut input = Vec::new();
     input
         .try_reserve_exact(input_items)
@@ -3372,20 +3442,7 @@ fn encode_openai_extraction_body(
     ));
     for turn in transcript.turns() {
         let correlation = turn.correlation();
-        let provider_item_id = correlation
-            .provider_item_id
-            .as_deref()
-            .ok_or(AgentProviderRequestError::Encoding)?;
-        input.push(OpenAiContinuationInputWire::FunctionCall(
-            OpenAiFunctionCallWire {
-                r#type: "function_call",
-                id: provider_item_id,
-                call_id: correlation.id.as_str(),
-                name: correlation.kind.as_str(),
-                arguments: &correlation.arguments,
-                status: "completed",
-            },
-        ));
+        push_openai_replay_items(&mut input, correlation)?;
         input.push(OpenAiContinuationInputWire::FunctionCallOutput(
             OpenAiFunctionCallOutputWire {
                 r#type: "function_call_output",
@@ -3410,6 +3467,10 @@ fn encode_openai_extraction_body(
         max_output_tokens: config.max_output_tokens(),
         truncation: "disabled",
         service_tier: OPENAI_STANDARD_SERVICE_TIER,
+        reasoning: OpenAiReasoningWire {
+            effort: config.reasoning_effort().as_openai_str(),
+        },
+        include: ["reasoning.encrypted_content"],
         stream: true,
         store: false,
     };
@@ -3424,14 +3485,13 @@ fn encode_openai_screenshot_continuation_body(
         return Err(AgentProviderContractError::ProviderKind.into());
     }
     let transcript = continuation.transcript();
-    let input_items = 4_usize
-        .checked_add(
-            transcript
-                .turns()
-                .len()
-                .checked_mul(2)
-                .ok_or(AgentProviderRequestError::Encoding)?,
-        )
+    let prior_input_items = transcript.turns().iter().try_fold(2_usize, |total, turn| {
+        total
+            .checked_add(openai_turn_input_items(turn.correlation())?)
+            .ok_or(AgentProviderRequestError::Encoding)
+    })?;
+    let input_items = prior_input_items
+        .checked_add(openai_turn_input_items(continuation.correlation())?)
         .ok_or(AgentProviderRequestError::Encoding)?;
     let mut input = Vec::new();
     input
@@ -3457,20 +3517,7 @@ fn encode_openai_screenshot_continuation_body(
     ));
     for turn in transcript.turns() {
         let correlation = turn.correlation();
-        let provider_item_id = correlation
-            .provider_item_id
-            .as_deref()
-            .ok_or(AgentProviderRequestError::Encoding)?;
-        input.push(OpenAiContinuationInputWire::FunctionCall(
-            OpenAiFunctionCallWire {
-                r#type: "function_call",
-                id: provider_item_id,
-                call_id: correlation.id.as_str(),
-                name: correlation.kind.as_str(),
-                arguments: &correlation.arguments,
-                status: "completed",
-            },
-        ));
+        push_openai_replay_items(&mut input, correlation)?;
         input.push(OpenAiContinuationInputWire::FunctionCallOutput(
             OpenAiFunctionCallOutputWire {
                 r#type: "function_call_output",
@@ -3480,20 +3527,7 @@ fn encode_openai_screenshot_continuation_body(
         ));
     }
     let correlation = continuation.correlation();
-    let provider_item_id = correlation
-        .provider_item_id
-        .as_deref()
-        .ok_or(AgentProviderRequestError::Encoding)?;
-    input.push(OpenAiContinuationInputWire::FunctionCall(
-        OpenAiFunctionCallWire {
-            r#type: "function_call",
-            id: provider_item_id,
-            call_id: correlation.id.as_str(),
-            name: correlation.kind.as_str(),
-            arguments: &correlation.arguments,
-            status: "completed",
-        },
-    ));
+    push_openai_replay_items(&mut input, correlation)?;
     let image_url = encode_png_data_url(continuation.png())?;
     input.push(OpenAiContinuationInputWire::FunctionCallImageOutput(
         OpenAiFunctionCallImageOutputWire {
@@ -3527,6 +3561,10 @@ fn encode_openai_screenshot_continuation_body(
         max_output_tokens: config.max_output_tokens(),
         truncation: "disabled",
         service_tier: OPENAI_STANDARD_SERVICE_TIER,
+        reasoning: OpenAiReasoningWire {
+            effort: config.reasoning_effort().as_openai_str(),
+        },
+        include: ["reasoning.encrypted_content"],
         stream: true,
         store: false,
     };
@@ -4544,6 +4582,7 @@ mod tests {
             AgentProviderKind::OpenAiResponses,
             super::super::AgentProviderModelRevision::try_new("gpt-5.6-terra".to_owned())
                 .expect("model"),
+            super::super::AgentProviderReasoningEffort::Medium,
             revision("openai:gpt-5.6-terra:v1"),
             super::super::AgentProviderPricingProfile::try_new(
                 super::super::AgentProviderPricingRevision::new(1).expect("pricing revision"),
@@ -4665,6 +4704,14 @@ mod tests {
             endpoint: AgentProviderEndpoint::OpenAiResponses,
             body,
         };
+        let response_wire: Value =
+            serde_json::from_slice(request.body()).expect("Responses request JSON");
+        assert_eq!(response_wire["reasoning"]["effort"], "medium");
+        assert_eq!(
+            response_wire["include"],
+            serde_json::json!(["reasoning.encrypted_content"])
+        );
+        assert_eq!(response_wire["store"], false);
         let projection = request
             .openai_input_token_request()
             .expect("count projection");
@@ -4684,7 +4731,14 @@ mod tests {
                 "missing token-relevant field"
             );
         }
-        for excluded in ["max_output_tokens", "service_tier", "stream", "store"] {
+        for excluded in [
+            "include",
+            "max_output_tokens",
+            "reasoning",
+            "service_tier",
+            "stream",
+            "store",
+        ] {
             assert!(
                 !projected.contains_key(excluded),
                 "response-only field leaked"
@@ -4737,6 +4791,62 @@ mod tests {
                 .expect("input variant projection")
                 .projection_digest()
         );
+    }
+
+    #[test]
+    fn openai_stateless_replay_preserves_opaque_output_item_order() {
+        let encrypted_before = "opaque_reasoning_before_AQID";
+        let encrypted_after = "opaque_reasoning_after_BAUG";
+        let replay = super::super::tool::OpenAiResponseReplay::try_new(vec![
+            OpenAiResponseReplayItem::Reasoning {
+                id: "rs_before_1".to_owned(),
+                encrypted_content: encrypted_before.to_owned(),
+            },
+            OpenAiResponseReplayItem::FunctionCall,
+            OpenAiResponseReplayItem::Reasoning {
+                id: "rs_after_1".to_owned(),
+                encrypted_content: encrypted_after.to_owned(),
+            },
+        ])
+        .expect("bounded replay");
+        let tool = super::super::AgentBrowserToolCall::decode_openai_with_replay(
+            provider_call_identity(),
+            "fc_replay_order_1".to_owned(),
+            "call_replay_order_1".to_owned(),
+            "back",
+            "{}".to_owned(),
+            Some(replay),
+        )
+        .expect("tool correlation");
+        let correlation = tool.into_continuation_parts().0;
+        let mut input = Vec::new();
+        push_openai_replay_items(&mut input, &correlation).expect("replay items");
+        input.push(OpenAiContinuationInputWire::FunctionCallOutput(
+            OpenAiFunctionCallOutputWire {
+                r#type: "function_call_output",
+                call_id: correlation.id.as_str(),
+                output: "bounded tool result",
+            },
+        ));
+        let wire = serde_json::to_value(&input).expect("replay JSON");
+        let items = wire.as_array().expect("replay array");
+        assert_eq!(items.len(), 4);
+        assert_eq!(items[0]["type"], "reasoning");
+        assert_eq!(items[0]["id"], "rs_before_1");
+        assert_eq!(items[0]["summary"], serde_json::json!([]));
+        assert_eq!(items[0]["encrypted_content"], encrypted_before);
+        assert_eq!(items[0]["status"], "completed");
+        assert_eq!(items[1]["type"], "function_call");
+        assert_eq!(items[1]["id"], "fc_replay_order_1");
+        assert_eq!(items[1]["call_id"], "call_replay_order_1");
+        assert_eq!(items[2]["type"], "reasoning");
+        assert_eq!(items[2]["id"], "rs_after_1");
+        assert_eq!(items[2]["encrypted_content"], encrypted_after);
+        assert_eq!(items[3]["type"], "function_call_output");
+        assert_eq!(items[3]["call_id"], "call_replay_order_1");
+        assert_eq!(items[3]["output"], "bounded tool result");
+        assert!(!format!("{correlation:?}").contains(encrypted_before));
+        assert!(!format!("{correlation:?}").contains(encrypted_after));
     }
 
     #[test]
@@ -4853,6 +4963,7 @@ mod tests {
             AgentProviderKind::AnthropicMessages,
             super::super::AgentProviderModelRevision::try_new("claude-opus-5".to_owned())
                 .expect("model"),
+            super::super::AgentProviderReasoningEffort::None,
             revision("anthropic:claude-opus-5:v1"),
             super::super::AgentProviderPricingProfile::try_new(
                 super::super::AgentProviderPricingRevision::new(1).expect("pricing revision"),

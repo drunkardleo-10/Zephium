@@ -955,9 +955,10 @@ mod tests {
         AgentAccountScope, AgentDelegationSpec, AgentDelegationTopology, AgentEffectScope,
         AgentPlanLeaseId, AgentPlanNodeAuthority, AgentPlanNodeScope, AgentPolicyInstant,
         AgentProviderCallConfig, AgentProviderModelRevision, AgentProviderPricingProfile,
-        AgentProviderPricingSchedule, AgentProviderStreamBudget, AgentProviderTokenRates,
-        AgentProviderUsage, AgentRunBudget, AgentRunScope, AgentSupervisorAttemptId, ContextRunId,
-        SemanticOrigin, SemanticSensitivity, SemanticTokenizerRevision,
+        AgentProviderPricingSchedule, AgentProviderReasoningEffort, AgentProviderStreamBudget,
+        AgentProviderTokenRates, AgentProviderUsage, AgentRunBudget, AgentRunScope,
+        AgentSupervisorAttemptId, ContextRunId, SemanticOrigin, SemanticSensitivity,
+        SemanticTokenizerRevision,
     };
     use zephium_core::ids::ProfileId;
 
@@ -1087,6 +1088,7 @@ mod tests {
         let config = AgentProviderCallConfig::try_new(
             provider,
             model.clone(),
+            AgentProviderReasoningEffort::None,
             tokenizer.clone(),
             profile,
             1,

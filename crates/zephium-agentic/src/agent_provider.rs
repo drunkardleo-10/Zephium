@@ -74,6 +74,8 @@ pub use tool::{
 
 /// Maximum bytes in one pinned provider model revision.
 pub const MAX_AGENT_PROVIDER_MODEL_REVISION_BYTES: usize = 96;
+/// Maximum bytes in one provider-attested service-tier identity.
+pub const MAX_AGENT_PROVIDER_SERVICE_TIER_BYTES: usize = 32;
 /// Maximum decoded UTF-8 bytes in one SSE line.
 pub const MAX_AGENT_PROVIDER_SSE_LINE_BYTES: usize = 512 * 1024;
 /// Maximum decoded UTF-8 bytes in one complete SSE event payload.
@@ -95,6 +97,39 @@ pub(crate) const OPENAI_STANDARD_SERVICE_TIER: &str = "default";
 pub(crate) const ANTHROPIC_STANDARD_SERVICE_TIER_REQUEST: &str = "standard_only";
 pub(crate) const ANTHROPIC_STANDARD_SERVICE_TIER_RESPONSE: &str = "standard";
 pub(crate) const ANTHROPIC_GLOBAL_INFERENCE_GEO: &str = "global";
+
+/// Explicit immutable reasoning effort selected for one model call.
+///
+/// Provider defaults are deliberately forbidden: changing a provider-side
+/// default must not silently change Zephium's execution or cost identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgentProviderReasoningEffort {
+    /// Disable model reasoning where the selected model supports it.
+    None,
+    /// Low reasoning effort.
+    Low,
+    /// Medium reasoning effort.
+    Medium,
+    /// High reasoning effort.
+    High,
+    /// Extra-high reasoning effort.
+    XHigh,
+    /// Maximum reasoning effort where the selected model supports it.
+    Max,
+}
+
+impl AgentProviderReasoningEffort {
+    pub(crate) const fn as_openai_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+}
 
 /// First provider protocols qualified through the shared adapter contract.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -137,8 +172,8 @@ pub struct AgentProviderStreamDecoder {
 }
 
 enum AgentProviderStreamDecoderInner {
-    OpenAi(OpenAiResponsesStreamDecoder),
-    Anthropic(AnthropicMessagesStreamDecoder),
+    OpenAi(Box<OpenAiResponsesStreamDecoder>),
+    Anthropic(Box<AnthropicMessagesStreamDecoder>),
 }
 
 impl AgentProviderStreamDecoder {
@@ -149,10 +184,10 @@ impl AgentProviderStreamDecoder {
     ) -> Result<Self, AgentProviderProtocolError> {
         let inner = match config.provider() {
             AgentProviderKind::OpenAiResponses => AgentProviderStreamDecoderInner::OpenAi(
-                OpenAiResponsesStreamDecoder::try_new(call, config)?,
+                Box::new(OpenAiResponsesStreamDecoder::try_new(call, config)?),
             ),
             AgentProviderKind::AnthropicMessages => AgentProviderStreamDecoderInner::Anthropic(
-                AnthropicMessagesStreamDecoder::try_new(call, config)?,
+                Box::new(AnthropicMessagesStreamDecoder::try_new(call, config)?),
             ),
         };
         Ok(Self { inner })
@@ -172,8 +207,8 @@ impl AgentProviderStreamDecoder {
     /// Requires complete framing and one unambiguous terminal provider event.
     pub fn finish(self) -> Result<AgentProviderStreamConclusion, AgentProviderProtocolError> {
         match self.inner {
-            AgentProviderStreamDecoderInner::OpenAi(decoder) => decoder.finish(),
-            AgentProviderStreamDecoderInner::Anthropic(decoder) => decoder.finish(),
+            AgentProviderStreamDecoderInner::OpenAi(decoder) => (*decoder).finish(),
+            AgentProviderStreamDecoderInner::Anthropic(decoder) => (*decoder).finish(),
         }
     }
 }
@@ -198,13 +233,7 @@ pub struct AgentProviderModelRevision(String);
 impl AgentProviderModelRevision {
     /// Accepts an ASCII model revision rather than a URL, path, or free text.
     pub fn try_new(value: String) -> Result<Self, AgentProviderContractError> {
-        if value.is_empty()
-            || value.len() > MAX_AGENT_PROVIDER_MODEL_REVISION_BYTES
-            || value.contains("://")
-            || !value.bytes().all(|byte| {
-                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':')
-            })
-        {
+        if !valid_model_revision(&value) {
             return Err(AgentProviderContractError::ModelRevision);
         }
         Ok(Self(value))
@@ -224,6 +253,125 @@ impl fmt::Debug for AgentProviderModelRevision {
             .field("value", &"[redacted]")
             .finish()
     }
+}
+
+/// Provider-attested response execution identity for one exact call.
+///
+/// The requested model remains distinct from the effective model returned by
+/// the provider. This value is attestation only: a different effective model
+/// is not thereby catalog-approved, tokenizer-compatible, or priceable.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct AgentProviderResponseIdentity {
+    requested_model: [u8; MAX_AGENT_PROVIDER_MODEL_REVISION_BYTES],
+    requested_model_len: u8,
+    effective_model: [u8; MAX_AGENT_PROVIDER_MODEL_REVISION_BYTES],
+    effective_model_len: u8,
+    effective_service_tier: [u8; MAX_AGENT_PROVIDER_SERVICE_TIER_BYTES],
+    effective_service_tier_len: u8,
+    reasoning_effort: AgentProviderReasoningEffort,
+}
+
+impl AgentProviderResponseIdentity {
+    pub(crate) fn try_openai(
+        requested_model: &AgentProviderModelRevision,
+        reasoning_effort: AgentProviderReasoningEffort,
+        effective_model: &str,
+        effective_service_tier: &str,
+    ) -> Result<Self, AgentProviderProtocolError> {
+        if !valid_model_revision(effective_model)
+            || effective_service_tier.is_empty()
+            || effective_service_tier.len() > MAX_AGENT_PROVIDER_SERVICE_TIER_BYTES
+            || !effective_service_tier
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+        {
+            return Err(AgentProviderProtocolError::Event);
+        }
+        let (requested_model, requested_model_len) =
+            copy_identity::<MAX_AGENT_PROVIDER_MODEL_REVISION_BYTES>(requested_model.as_str())
+                .ok_or(AgentProviderProtocolError::Event)?;
+        let (effective_model, effective_model_len) =
+            copy_identity::<MAX_AGENT_PROVIDER_MODEL_REVISION_BYTES>(effective_model)
+                .ok_or(AgentProviderProtocolError::Event)?;
+        let (effective_service_tier, effective_service_tier_len) =
+            copy_identity::<MAX_AGENT_PROVIDER_SERVICE_TIER_BYTES>(effective_service_tier)
+                .ok_or(AgentProviderProtocolError::Event)?;
+        Ok(Self {
+            requested_model,
+            requested_model_len,
+            effective_model,
+            effective_model_len,
+            effective_service_tier,
+            effective_service_tier_len,
+            reasoning_effort,
+        })
+    }
+
+    /// Exact bounded model identity sent in the immutable request.
+    pub fn requested_model(&self) -> &str {
+        bounded_identity_str(&self.requested_model, self.requested_model_len)
+    }
+
+    /// Exact bounded model identity attested by the provider response.
+    pub fn effective_model(&self) -> &str {
+        bounded_identity_str(&self.effective_model, self.effective_model_len)
+    }
+
+    /// Exact bounded service tier attested by the provider response.
+    pub fn effective_service_tier(&self) -> &str {
+        bounded_identity_str(
+            &self.effective_service_tier,
+            self.effective_service_tier_len,
+        )
+    }
+
+    /// Explicit requested reasoning effort used by this response.
+    pub const fn reasoning_effort(self) -> AgentProviderReasoningEffort {
+        self.reasoning_effort
+    }
+
+    pub(crate) fn matches_attestation(self, model: &str, service_tier: &str) -> bool {
+        self.effective_model() == model && self.effective_service_tier() == service_tier
+    }
+}
+
+impl fmt::Debug for AgentProviderResponseIdentity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgentProviderResponseIdentity")
+            .field("requested_model_bytes", &self.requested_model_len)
+            .field("effective_model_bytes", &self.effective_model_len)
+            .field(
+                "effective_service_tier_bytes",
+                &self.effective_service_tier_len,
+            )
+            .field("reasoning_effort", &self.reasoning_effort)
+            .field("identity", &"[redacted]")
+            .finish()
+    }
+}
+
+fn valid_model_revision(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_AGENT_PROVIDER_MODEL_REVISION_BYTES
+        && !value.contains("://")
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+}
+
+fn copy_identity<const N: usize>(value: &str) -> Option<([u8; N], u8)> {
+    let len = u8::try_from(value.len()).ok()?;
+    if value.len() > N {
+        return None;
+    }
+    let mut bytes = [0_u8; N];
+    bytes[..value.len()].copy_from_slice(value.as_bytes());
+    Some((bytes, len))
+}
+
+fn bounded_identity_str(bytes: &[u8], len: u8) -> &str {
+    std::str::from_utf8(&bytes[..usize::from(len)]).unwrap_or_default()
 }
 
 /// Content-free correlation copied from one exact policy authority.
@@ -379,6 +527,7 @@ impl AgentProviderStreamBudget {
 pub struct AgentProviderCallConfig {
     provider: AgentProviderKind,
     model: AgentProviderModelRevision,
+    reasoning_effort: AgentProviderReasoningEffort,
     tokenizer: SemanticTokenizerRevision,
     pricing: AgentProviderPricingProfile,
     fixed_input_tokens: u32,
@@ -387,16 +536,23 @@ pub struct AgentProviderCallConfig {
 }
 
 impl AgentProviderCallConfig {
-    /// Binds provider/model/tokenizer/pricing identity to response limits.
+    /// Binds explicit provider/model/reasoning/tokenizer/pricing identity to response limits.
+    #[allow(clippy::too_many_arguments)]
     pub fn try_new(
         provider: AgentProviderKind,
         model: AgentProviderModelRevision,
+        reasoning_effort: AgentProviderReasoningEffort,
         tokenizer: SemanticTokenizerRevision,
         pricing: AgentProviderPricingProfile,
         fixed_input_tokens: u32,
         max_output_tokens: u32,
         stream: AgentProviderStreamBudget,
     ) -> Result<Self, AgentProviderContractError> {
+        if provider == AgentProviderKind::AnthropicMessages
+            && reasoning_effort != AgentProviderReasoningEffort::None
+        {
+            return Err(AgentProviderContractError::ReasoningEffort);
+        }
         if fixed_input_tokens == 0 || u64::from(fixed_input_tokens) > MAX_AGENT_RUN_MODEL_TOKENS {
             return Err(AgentProviderContractError::InputTokens);
         }
@@ -406,6 +562,7 @@ impl AgentProviderCallConfig {
         Ok(Self {
             provider,
             model,
+            reasoning_effort,
             tokenizer,
             pricing,
             fixed_input_tokens,
@@ -427,6 +584,11 @@ impl AgentProviderCallConfig {
     /// Exact selected provider model revision.
     pub const fn model(&self) -> &AgentProviderModelRevision {
         &self.model
+    }
+
+    /// Explicit reasoning effort encoded for this exact call.
+    pub const fn reasoning_effort(&self) -> AgentProviderReasoningEffort {
+        self.reasoning_effort
     }
 
     /// Exact tokenizer/counting revision used for input admission.
@@ -739,6 +901,7 @@ pub struct AgentProviderCompletion {
     usage: AgentProviderUsage,
     stats: AgentProviderStreamStats,
     tool_only_output: bool,
+    response_identity: Option<AgentProviderResponseIdentity>,
 }
 
 impl AgentProviderCompletion {
@@ -755,6 +918,25 @@ impl AgentProviderCompletion {
             usage,
             stats,
             tool_only_output,
+            response_identity: None,
+        }
+    }
+
+    pub(crate) const fn new_with_response_identity(
+        call: AgentProviderCallIdentity,
+        stop: AgentProviderStopReason,
+        usage: AgentProviderUsage,
+        stats: AgentProviderStreamStats,
+        tool_only_output: bool,
+        response_identity: AgentProviderResponseIdentity,
+    ) -> Self {
+        Self {
+            call,
+            stop,
+            usage,
+            stats,
+            tool_only_output,
+            response_identity: Some(response_identity),
         }
     }
 
@@ -780,11 +962,19 @@ impl AgentProviderCompletion {
 
     /// Whether the assistant output contained only decoded client tool calls.
     ///
-    /// Text, refusal, reasoning, thinking, and provider-owned tool blocks make
-    /// this false because a fixed stateless continuation would need to retain
-    /// and replay more than the closed client-tool correlation.
+    /// Text, refusal, and provider-owned tool blocks make this false. Bounded
+    /// encrypted OpenAI reasoning replay remains opaque inside the correlation
+    /// and therefore does not make an otherwise tool-only response mixed.
     pub const fn tool_only_output(self) -> bool {
         self.tool_only_output
+    }
+
+    /// Provider-attested response identity when supplied by the adapter.
+    ///
+    /// A differing effective model remains unpriced until a trusted catalog
+    /// explicitly joins it to the request's tokenizer and pricing identity.
+    pub const fn response_identity(self) -> Option<AgentProviderResponseIdentity> {
+        self.response_identity
     }
 }
 
@@ -795,6 +985,7 @@ pub struct AgentProviderTerminalFailure {
     failure: AgentProviderFailure,
     usage: Option<AgentProviderUsage>,
     stats: AgentProviderStreamStats,
+    response_identity: Option<AgentProviderResponseIdentity>,
 }
 
 impl AgentProviderTerminalFailure {
@@ -809,6 +1000,23 @@ impl AgentProviderTerminalFailure {
             failure,
             usage,
             stats,
+            response_identity: None,
+        }
+    }
+
+    pub(crate) const fn new_with_response_identity(
+        call: AgentProviderCallIdentity,
+        failure: AgentProviderFailure,
+        usage: Option<AgentProviderUsage>,
+        stats: AgentProviderStreamStats,
+        response_identity: AgentProviderResponseIdentity,
+    ) -> Self {
+        Self {
+            call,
+            failure,
+            usage,
+            stats,
+            response_identity: Some(response_identity),
         }
     }
 
@@ -830,6 +1038,11 @@ impl AgentProviderTerminalFailure {
     /// Content-free bounded stream counters.
     pub const fn stats(self) -> AgentProviderStreamStats {
         self.stats
+    }
+
+    /// Provider-attested response identity established before this failure.
+    pub const fn response_identity(self) -> Option<AgentProviderResponseIdentity> {
+        self.response_identity
     }
 }
 
@@ -1063,6 +1276,9 @@ pub enum AgentProviderContractError {
     /// Model revision was empty, oversized, URL/path-like, or unsafe ASCII.
     #[error("agent provider model revision is invalid")]
     ModelRevision,
+    /// Reasoning effort was incompatible with the selected provider protocol.
+    #[error("agent provider reasoning effort is invalid")]
+    ReasoningEffort,
     /// Fixed request-envelope input tokens were zero or exceeded the hard limit.
     #[error("agent provider fixed input-token count is invalid")]
     InputTokens,
@@ -1128,14 +1344,15 @@ mod tests {
 
     #[test]
     fn provider_configuration_and_diagnostics_are_bounded() {
-        let model =
-            AgentProviderModelRevision::try_new("gpt-5.6-sol".to_owned()).expect("valid revision");
-        assert_eq!(model.as_str(), "gpt-5.6-sol");
-        assert!(!format!("{model:?}").contains("gpt-5.6-sol"));
+        let model = AgentProviderModelRevision::try_new("gpt-5.6-terra".to_owned())
+            .expect("valid revision");
+        assert_eq!(model.as_str(), "gpt-5.6-terra");
+        assert!(!format!("{model:?}").contains("gpt-5.6-terra"));
         let config = AgentProviderCallConfig::try_new(
             AgentProviderKind::OpenAiResponses,
             model,
-            tokenizer("openai:gpt-5.6-sol:v1"),
+            AgentProviderReasoningEffort::High,
+            tokenizer("openai:gpt-5.6-terra:v1"),
             AgentProviderPricingProfile::try_new(
                 AgentProviderPricingRevision::new(1).expect("pricing revision"),
                 16_384,
@@ -1151,10 +1368,23 @@ mod tests {
             AgentProviderBillingClass::OpenAiDefault
         );
         assert_eq!(config.fixed_input_tokens(), 512);
+        assert_eq!(
+            config.reasoning_effort(),
+            AgentProviderReasoningEffort::High
+        );
         assert_eq!(config.max_output_tokens(), 4_096);
         assert_eq!(config.stream_budget().max_tool_calls(), 8);
         assert_eq!(config.pricing_profile().revision().value(), 1);
         assert_eq!(config.pricing_profile().max_input_tokens(), 16_384);
+        assert_eq!(AgentProviderReasoningEffort::None.as_openai_str(), "none");
+        assert_eq!(AgentProviderReasoningEffort::Low.as_openai_str(), "low");
+        assert_eq!(
+            AgentProviderReasoningEffort::Medium.as_openai_str(),
+            "medium"
+        );
+        assert_eq!(AgentProviderReasoningEffort::High.as_openai_str(), "high");
+        assert_eq!(AgentProviderReasoningEffort::XHigh.as_openai_str(), "xhigh");
+        assert_eq!(AgentProviderReasoningEffort::Max.as_openai_str(), "max");
 
         for invalid in ["", "../model", "https://model", "model name", "model/alias"] {
             assert_eq!(
@@ -1171,6 +1401,7 @@ mod tests {
                 AgentProviderKind::AnthropicMessages,
                 AgentProviderModelRevision::try_new("claude-opus-5".to_owned())
                     .expect("valid revision"),
+                AgentProviderReasoningEffort::None,
                 tokenizer("anthropic:claude-opus-5:v1"),
                 AgentProviderPricingProfile::try_new(
                     AgentProviderPricingRevision::new(1).expect("pricing revision"),
@@ -1182,6 +1413,24 @@ mod tests {
                 AgentProviderStreamBudget::STANDARD,
             ),
             Err(AgentProviderContractError::OutputTokens)
+        );
+        assert_eq!(
+            AgentProviderCallConfig::try_new(
+                AgentProviderKind::AnthropicMessages,
+                AgentProviderModelRevision::try_new("claude-opus-5".to_owned())
+                    .expect("valid revision"),
+                AgentProviderReasoningEffort::Low,
+                tokenizer("anthropic:claude-opus-5:v1"),
+                AgentProviderPricingProfile::try_new(
+                    AgentProviderPricingRevision::new(1).expect("pricing revision"),
+                    16_384,
+                )
+                .expect("pricing profile"),
+                512,
+                1_024,
+                AgentProviderStreamBudget::STANDARD,
+            ),
+            Err(AgentProviderContractError::ReasoningEffort)
         );
     }
 
