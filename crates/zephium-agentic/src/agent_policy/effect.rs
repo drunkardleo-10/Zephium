@@ -515,22 +515,30 @@ impl AgentActiveEffect {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn for_execution_test(
+    #[cfg(any(test, feature = "probe-harness"))]
+    pub(crate) fn for_execution_qualification(
         action: &SemanticPreparedAction,
         attempt: SemanticActionAttemptId,
     ) -> Self {
         Self {
-            manifest: AgentRunManifestId::from_raw(801),
+            manifest: AgentRunManifestId::generate(),
             manifest_guard: [0x81; 32],
             id: AgentEffectId::new(attempt.get()).expect("test effect identity"),
-            lease: AgentPlanLeaseId::from_raw(803),
-            node: AgentPlanNodeId::from_raw(804),
+            lease: AgentPlanLeaseId::generate(),
+            node: AgentPlanNodeId::generate(),
             effect: action.effect(),
             attempt,
             action_guard: action.verification_guard(),
             guard: [0x82; 32],
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_execution_test(
+        action: &SemanticPreparedAction,
+        attempt: SemanticActionAttemptId,
+    ) -> Self {
+        Self::for_execution_qualification(action, attempt)
     }
 }
 
@@ -867,7 +875,7 @@ impl AgentFailedSemanticEffect {
         attempt: SemanticActionAttemptId,
         failure: SemanticActionFailure,
     ) -> Self {
-        let active = AgentActiveEffect::for_execution_test(action, attempt);
+        let active = AgentActiveEffect::for_execution_qualification(action, attempt);
         Self {
             receipt: AgentEffectReceipt {
                 manifest: active.manifest,

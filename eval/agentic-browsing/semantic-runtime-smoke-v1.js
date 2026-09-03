@@ -25,6 +25,15 @@ class Node {
   get ownerDocument() { return this._owner; }
   get isConnected() { return this === globalThis.document || this._owner === globalThis.document; }
   get childNodes() { return this._children; }
+  contains(candidate) {
+    const stack = [this];
+    while (stack.length !== 0) {
+      const current = stack.pop();
+      if (current === candidate) return true;
+      for (const child of current._children.values) stack.push(child);
+    }
+    return false;
+  }
   append(child) {
     child._parent = this;
     child._owner = this instanceof Document ? this : this._owner;
@@ -60,6 +69,7 @@ class Element extends Node {
   }
   hasAttribute(name) { return Object.prototype.hasOwnProperty.call(this.attributes, name); }
   getBoundingClientRect() { return this.rect; }
+  click() { this._fixedClickCount = (this._fixedClickCount || 0) + 1; }
 }
 
 class ShadowRoot extends Node {
@@ -99,6 +109,7 @@ class Document extends Node {
     this._root = null;
     this._active = null;
     this._ready = "complete";
+    this._hit = null;
   }
   get documentElement() { return this._root; }
   get activeElement() { return this._active; }
@@ -112,6 +123,7 @@ class Document extends Node {
     }
     return null;
   }
+  elementFromPoint() { return this._hit; }
 }
 
 Object.assign(globalThis, {
@@ -119,6 +131,7 @@ Object.assign(globalThis, {
   Node,
   CharacterData,
   Element,
+  HTMLElement: Element,
   ShadowRoot,
   HTMLInputElement,
   HTMLTextAreaElement,
@@ -130,6 +143,12 @@ Object.assign(globalThis, {
   getComputedStyle() {
     return { display: "block", visibility: "visible", contentVisibility: "visible" };
   }
+});
+Object.defineProperty(globalThis, "crypto", {
+  value: Object.freeze({}),
+  configurable: true,
+  enumerable: false,
+  writable: false
 });
 
 const document = new Document();
@@ -193,6 +212,7 @@ body.append(main);
 html.append(body);
 document._root = html;
 document.append(html);
+document._hit = button;
 
 // Own-property poisoning must not replace the captured document-start methods.
 button.getAttribute = () => "poisoned";
@@ -257,6 +277,14 @@ assert(Buffer.byteLength(wireLimited) <= 1024, "wire ceiling exceeded");
 assert(JSON.parse(wireLimited).c === "wire_limit", "wire limit not truthful");
 
 assert(runtime.invoke("{}") === "E1:invalid_request", "invalid request accepted");
+for (const primitive of ["null", "true", "1", '"text"', "[]"]) {
+  assert(runtime.invoke(primitive) === "E1:invalid_request", `primitive request accepted: ${primitive}`);
+}
+assert(
+  runtime.invoke('{"o":"action_execute"}') === "E1:invalid_request",
+  "malformed action request accepted"
+);
+assert(runtime.invoke("{") === "E1:invalid_request", "malformed JSON request accepted");
 document._ready = "loading";
 assert(invoke(12, 6, { k: "initial" }) === "E1:document_loading", "loading document accepted");
 document._ready = "complete";
@@ -295,6 +323,88 @@ async function finish() {
   );
   assert(nativeTransportPulls === 2, "native transport did not hold one dormant pull");
   assert(typeof stopNativeTransport === "function", "native transport did not retain its pull");
+
+  const saveNode = transported.n.find((node) => node.r === "button" && node.n === "Save");
+  assert(saveNode && saveNode.o === 9, "action target missing");
+  const saveDescriptor = Object.freeze({
+    r: 7, o: 9, q: 1, s: 0, n: "Save", vk: 0, vt: null, vo: 0, vb: false
+  });
+  assert(
+    JSON.stringify(saveDescriptor) ===
+      '{"r":7,"o":9,"q":1,"s":0,"n":"Save","vk":0,"vt":null,"vo":0,"vb":false}',
+    "cross-language action descriptor golden drifted"
+  );
+  const actionRequest = (attempt) => JSON.stringify({
+    v: 1,
+    o: "action_execute",
+    a: attempt,
+    i: 101,
+    g: 101,
+    t: saveNode.k,
+    r: "button",
+    k: "click",
+    e: { x: 10, y: 10, w: 160, h: 32 },
+    p: 0,
+    f: saveDescriptor,
+    of: null
+  });
+
+  const actionSuccess = JSON.parse(runtime.invoke(actionRequest(1)));
+  assert(
+    actionSuccess.a === 1 && actionSuccess.i === 101 && actionSuccess.g === 101 &&
+      actionSuccess.r === "visible" && actionSuccess.px === 90 && actionSuccess.py === 26 &&
+      actionSuccess.b === "fixed_semantic_recipe" && button._fixedClickCount === 1,
+    "fixed action execution evidence mismatch"
+  );
+
+  const unrelated = new Element("p");
+  unrelated.append(new CharacterData("Unrelated live region mutation"));
+  main.append(unrelated);
+  setOwner(unrelated, document);
+  const unrelatedMutation = JSON.parse(runtime.invoke(actionRequest(2)));
+  assert(
+    unrelatedMutation.a === 2 && unrelatedMutation.r === "visible" &&
+      unrelatedMutation.b === "fixed_semantic_recipe" && button._fixedClickCount === 2,
+    "unrelated mutation blocked fixed action"
+  );
+
+  button.attributes["aria-label"] = "Delete";
+  assert(
+    runtime.invoke(actionRequest(3)) === "E2:target_changed",
+    "same-node semantic repurposing was accepted"
+  );
+  button.attributes["aria-label"] = "Save";
+
+  document._hit = paragraph;
+  assert(
+    runtime.invoke(actionRequest(4)) === "E2:target_occluded",
+    "occluded action target was accepted"
+  );
+  document._hit = button;
+
+  button.rect = { x: 240, y: 10, width: 160, height: 32 };
+  assert(
+    runtime.invoke(actionRequest(5)) === "E2:target_changed",
+    "incompatible target geometry was accepted"
+  );
+  button.rect = { x: 10, y: 10, width: 160, height: 32 };
+
+  const escapedDescriptor = JSON.parse(actionRequest(6));
+  escapedDescriptor.f = { ...saveDescriptor, n: 'Save"\\\u2028Ω' };
+  assert(
+    runtime.invoke(JSON.stringify(escapedDescriptor)) === "E2:target_changed",
+    "escaped private descriptor bypassed exact comparison"
+  );
+  const savedButtonChildren = button._children;
+  button._children = new NodeList();
+  for (let index = 0; index < 2050; index += 1) button.append(new Element("span"));
+  assert(
+    runtime.invoke(actionRequest(7)) === "E2:target_changed",
+    "oversized action target subtree escaped descriptor budget"
+  );
+  button._children = savedButtonChildren;
+  assert(runtime.invoke(`{"padding":"${"x".repeat(17000)}"}`) === "E1:invalid_request", "oversize action request accepted");
+
   stopNativeTransport("S1");
   await new Promise((resolve) => setImmediate(resolve));
 
@@ -311,6 +421,15 @@ async function finish() {
     reattached_identity_preserved: true,
     native_transport_settled: true,
     native_transport_dormant_pull: true,
+    action_descriptor_golden: true,
+    no_webcrypto_required: true,
+    fixed_action_execution: true,
+    same_node_repurpose_rejected: true,
+    unrelated_mutation_allowed: true,
+    occlusion_rejected: true,
+    geometry_change_rejected: true,
+    malformed_request_rejected: true,
+    oversized_action_subtree_rejected: true,
     immutable: true
   })}\n`);
 }

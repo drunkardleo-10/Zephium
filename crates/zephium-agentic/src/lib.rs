@@ -309,6 +309,7 @@ pub use semantic::{
     MAX_SEMANTIC_NAME_BYTES, MAX_SEMANTIC_NODES, MAX_SEMANTIC_TEXT_BYTES,
     MAX_SEMANTIC_TOTAL_TEXT_BYTES, MAX_SEMANTIC_VALUE_BYTES,
 };
+pub(crate) use semantic_action::SemanticActionRuntimeDescriptor;
 pub use semantic_action::{
     SemanticActionBatch, SemanticActionBatchId, SemanticActionBindingError,
     SemanticActionContractError, SemanticActionIntent, SemanticActionKind,
@@ -363,6 +364,10 @@ pub use semantic_execute_coordinator::{
     SemanticActionExecutionCoordinatorRefusal, SemanticActionExecutionCoordinatorStatus,
     SemanticActionExecutionDispatch, SemanticActionExecutionReservation,
     MAX_PENDING_SEMANTIC_ACTION_EXECUTIONS,
+};
+#[cfg(feature = "probe-harness")]
+pub use semantic_execute_coordinator::{
+    SemanticClickQualificationError, SemanticClickQualificationExecution,
 };
 pub use semantic_extract::{
     extract_delivered_semantic_read, extract_semantic_read, SemanticExtractedBoolean,
@@ -428,18 +433,22 @@ pub use semantic_read_model::{
     SemanticReadEncodingStats, SemanticReadModelPayload, SEMANTIC_READ_MODEL_SCHEMA_VERSION,
 };
 pub use semantic_runtime::{
-    encode_semantic_runtime_invocation, SemanticRuntimeBudget, SemanticRuntimeBudgetError,
-    SemanticRuntimeCorrelation, SemanticRuntimeFault, SemanticRuntimeInvocation,
-    SemanticRuntimeInvocationError, SemanticRuntimePortFailure, SemanticRuntimeProgram,
-    SemanticRuntimeResultError, SemanticRuntimeScopeClass, SemanticRuntimeSettlement,
-    SemanticRuntimeSettlementError, MAX_SEMANTIC_RUNTIME_CHANNEL_RESULT_BYTES,
-    MAX_SEMANTIC_RUNTIME_DOCUMENT_INVOCATIONS, MAX_SEMANTIC_RUNTIME_REQUEST_BYTES,
-    MAX_SEMANTIC_RUNTIME_SAFE_INTEGER, MAX_SEMANTIC_RUNTIME_SOURCE_BYTES,
-    MAX_SEMANTIC_RUNTIME_VISITED_NODES, MIN_SEMANTIC_RUNTIME_WIRE_BYTES,
-    SEMANTIC_RUNTIME_CHANNEL_ACK, SEMANTIC_RUNTIME_CHANNEL_EXHAUSTED,
-    SEMANTIC_RUNTIME_CHANNEL_NAME, SEMANTIC_RUNTIME_CHANNEL_PULL,
-    SEMANTIC_RUNTIME_CHANNEL_RESULT_PREFIX, SEMANTIC_RUNTIME_CHANNEL_STOP,
-    SEMANTIC_RUNTIME_GLOBAL_NAME, SEMANTIC_RUNTIME_PROGRAM, SEMANTIC_RUNTIME_PROTOCOL_VERSION,
+    encode_semantic_action_runtime_invocation, encode_semantic_runtime_invocation,
+    SemanticActionRuntimeEvidence, SemanticActionRuntimeFault, SemanticActionRuntimeInvocation,
+    SemanticActionRuntimeInvocationError, SemanticActionRuntimeResultError, SemanticRuntimeBudget,
+    SemanticRuntimeBudgetError, SemanticRuntimeCorrelation, SemanticRuntimeFault,
+    SemanticRuntimeInvocation, SemanticRuntimeInvocationError, SemanticRuntimePortFailure,
+    SemanticRuntimeProgram, SemanticRuntimeResultError, SemanticRuntimeScopeClass,
+    SemanticRuntimeSettlement, SemanticRuntimeSettlementError,
+    MAX_SEMANTIC_ACTION_RUNTIME_REQUEST_BYTES, MAX_SEMANTIC_ACTION_RUNTIME_RESULT_BYTES,
+    MAX_SEMANTIC_RUNTIME_CHANNEL_RESULT_BYTES, MAX_SEMANTIC_RUNTIME_DOCUMENT_INVOCATIONS,
+    MAX_SEMANTIC_RUNTIME_REQUEST_BYTES, MAX_SEMANTIC_RUNTIME_SAFE_INTEGER,
+    MAX_SEMANTIC_RUNTIME_SOURCE_BYTES, MAX_SEMANTIC_RUNTIME_VISITED_NODES,
+    MIN_SEMANTIC_RUNTIME_WIRE_BYTES, SEMANTIC_RUNTIME_CHANNEL_ACK,
+    SEMANTIC_RUNTIME_CHANNEL_EXHAUSTED, SEMANTIC_RUNTIME_CHANNEL_NAME,
+    SEMANTIC_RUNTIME_CHANNEL_PULL, SEMANTIC_RUNTIME_CHANNEL_RESULT_PREFIX,
+    SEMANTIC_RUNTIME_CHANNEL_STOP, SEMANTIC_RUNTIME_GLOBAL_NAME, SEMANTIC_RUNTIME_PROGRAM,
+    SEMANTIC_RUNTIME_PROTOCOL_VERSION,
 };
 pub use semantic_screenshot::{
     prepare_semantic_screenshot, SemanticScreenshot, SemanticScreenshotBudget,

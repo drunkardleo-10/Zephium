@@ -996,7 +996,9 @@ const SEMANTIC_RUNTIME_HTML: &str = r###"<!doctype html>
 <main aria-label="First semantic epoch">
   <h1>First semantic epoch</h1>
   <p id="bridge-status">Page bridge unresolved</p>
-  <button type="button" aria-label="Primary semantic action">Run</button>
+  <button id="primary-semantic-action" type="button" aria-label="Primary semantic action" aria-expanded="false">Run</button>
+  <p id="primary-action-activation" aria-label="Primary action activation pending"></p>
+  <p id="primary-action-settled" aria-label="Primary action settle pending"></p>
   <input type="password" aria-label="Password field" value="fixture-password-value">
   <input type="text" aria-label="Token field" value="Bearer abcdefghijklmnop">
   <div id="open-shadow-host"></div>
@@ -1006,6 +1008,38 @@ const SEMANTIC_RUNTIME_HTML: &str = r###"<!doctype html>
 <script>
 (() => {
   'use strict';
+  const primaryAction = document.getElementById('primary-semantic-action');
+  const activation = document.getElementById('primary-action-activation');
+  const settled = document.getElementById('primary-action-settled');
+  primaryAction.addEventListener('click', (event) => {
+    const userActivation = navigator.userActivation;
+    const trusted = event.isTrusted;
+    const activeDuring = !!userActivation?.isActive;
+    const stickyDuring = !!userActivation?.hasBeenActive;
+    const popup = window.open('/semantic-popup-denied-v1.html', '_blank');
+    const popupDenied = popup === null;
+    primaryAction.setAttribute('aria-expanded', 'true');
+    primaryAction.setAttribute(
+      'aria-label',
+      event.isTrusted ? 'Primary semantic action applied trusted' : 'Primary semantic action applied untrusted'
+    );
+    activation.setAttribute(
+      'aria-label',
+      `Primary action activation during ${userActivation?.isActive ? 'active' : 'inactive'} sticky ${userActivation?.hasBeenActive ? 'active' : 'inactive'} popup ${popup === null ? 'denied' : 'admitted'}`
+    );
+    setTimeout(() => {
+      const activeAfterSettle = !!userActivation?.isActive;
+      const stickyAfterSettle = !!userActivation?.hasBeenActive;
+      settled.setAttribute(
+        'aria-label',
+        `Primary action settle ${activeAfterSettle ? 'active' : 'inactive'} sticky ${stickyAfterSettle ? 'active' : 'inactive'}`
+      );
+      primaryAction.setAttribute(
+        'aria-label',
+        `Primary semantic action applied ${trusted ? 'trusted' : 'untrusted'} activation during ${activeDuring ? 'active' : 'inactive'} sticky ${stickyDuring ? 'active' : 'inactive'} popup ${popupDenied ? 'denied' : 'admitted'} settle ${activeAfterSettle ? 'active' : 'inactive'} sticky ${stickyAfterSettle ? 'active' : 'inactive'}`
+      );
+    }, 75);
+  });
   const openRoot = document.getElementById('open-shadow-host').attachShadow({mode: 'open'});
   const openButton = document.createElement('button');
   openButton.type = 'button';

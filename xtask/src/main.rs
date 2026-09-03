@@ -953,6 +953,18 @@ fn check_agentic_probe_boundary() {
         eprintln!("agentic diagnostic release boundary failed: {error}");
         exit(1);
     }
+    let runtime = repository.join("crates/zephium-agentic/assets/semantic-runtime-v1.js");
+    let runtime = runtime.to_str().unwrap_or_else(|| {
+        eprintln!("semantic runtime asset path is not valid UTF-8");
+        exit(1);
+    });
+    run("node", &["--check", runtime]);
+    let smoke = repository.join("eval/agentic-browsing/semantic-runtime-smoke-v1.js");
+    let smoke = smoke.to_str().unwrap_or_else(|| {
+        eprintln!("semantic runtime smoke path is not valid UTF-8");
+        exit(1);
+    });
+    run("node", &[smoke, runtime]);
 }
 
 #[cfg(target_os = "macos")]

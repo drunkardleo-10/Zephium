@@ -14,10 +14,10 @@ use thiserror::Error;
 
 use crate::{
     AgentActiveEffect, AgentEffectId, ContextIdentity, SemanticActionAttemptId,
-    SemanticActionFailure, SemanticActionKind, SemanticActionText, SemanticFrameJoin,
-    SemanticInvocationId, SemanticPreparedAction, SemanticPressKey, SemanticRect, SemanticRole,
-    SemanticScrollAmount, SemanticScrollDirection, SemanticSettleError, SemanticSettleInstant,
-    SemanticSettleTracker, SemanticSnapshotGeneration,
+    SemanticActionFailure, SemanticActionKind, SemanticActionRuntimeDescriptor, SemanticActionText,
+    SemanticFrameJoin, SemanticInvocationId, SemanticPreparedAction, SemanticPressKey,
+    SemanticRect, SemanticRole, SemanticScrollAmount, SemanticScrollDirection, SemanticSettleError,
+    SemanticSettleInstant, SemanticSettleTracker, SemanticSnapshotGeneration,
 };
 
 /// Maximum time between final policy dispatch and one native backend terminal.
@@ -299,6 +299,8 @@ pub struct SemanticActionNativeRequest {
     correlation: NativeCorrelation,
     role: SemanticRole,
     expected_geometry: SemanticRect,
+    target_runtime_descriptor: SemanticActionRuntimeDescriptor,
+    option_runtime_descriptor: Option<SemanticActionRuntimeDescriptor>,
     recipe: NativeRecipe,
 }
 
@@ -338,6 +340,20 @@ impl SemanticActionNativeRequest {
         self.expected_geometry
     }
 
+    /// Private checkpoint descriptor for isolated-runtime target revalidation.
+    ///
+    /// This value must never enter a model, diagnostic, trace, or persistence.
+    pub(crate) const fn target_runtime_descriptor(&self) -> &SemanticActionRuntimeDescriptor {
+        &self.target_runtime_descriptor
+    }
+
+    /// Private checkpoint descriptor for a select option, when present.
+    pub(crate) const fn option_runtime_descriptor(
+        &self,
+    ) -> Option<&SemanticActionRuntimeDescriptor> {
+        self.option_runtime_descriptor.as_ref()
+    }
+
     /// Closed action class.
     pub const fn kind(&self) -> SemanticActionKind {
         self.recipe.kind()
@@ -373,6 +389,11 @@ impl SemanticActionNativeRequest {
             NativeRecipe::Scroll(direction, amount) => Some((direction, amount)),
             _ => None,
         }
+    }
+
+    /// Monotonic admission instant from which the native deadline is measured.
+    pub const fn requested_at(&self) -> SemanticActionExecutionInstant {
+        self.correlation.requested_at
     }
 
     /// Native execution deadline including queue and backend work.
@@ -1016,6 +1037,8 @@ pub(crate) fn prepare_semantic_action_execution(
             correlation,
             role: action.bound_action().target_role(),
             expected_geometry,
+            target_runtime_descriptor: action.target_runtime_descriptor().clone(),
+            option_runtime_descriptor: action.option_runtime_descriptor().cloned(),
             recipe,
         },
     ))

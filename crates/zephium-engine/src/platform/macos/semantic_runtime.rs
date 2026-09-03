@@ -28,12 +28,13 @@ use objc2_web_kit::{
     WKUserScript, WKUserScriptInjectionTime, WKWebView, WKWebViewConfiguration,
 };
 use zephium_agentic::{
-    SemanticRuntimeInvocation, SemanticRuntimeResultError, SemanticSnapshot,
-    MAX_SEMANTIC_RUNTIME_CHANNEL_RESULT_BYTES, MAX_SEMANTIC_RUNTIME_DOCUMENT_INVOCATIONS,
-    SEMANTIC_RUNTIME_CHANNEL_ACK, SEMANTIC_RUNTIME_CHANNEL_EXHAUSTED,
-    SEMANTIC_RUNTIME_CHANNEL_NAME, SEMANTIC_RUNTIME_CHANNEL_PULL,
-    SEMANTIC_RUNTIME_CHANNEL_RESULT_PREFIX, SEMANTIC_RUNTIME_CHANNEL_STOP,
-    SEMANTIC_RUNTIME_PROGRAM,
+    SemanticActionAttemptId, SemanticActionRuntimeEvidence, SemanticActionRuntimeInvocation,
+    SemanticActionRuntimeResultError, SemanticRuntimeInvocation, SemanticRuntimeResultError,
+    SemanticSnapshot, MAX_SEMANTIC_RUNTIME_CHANNEL_RESULT_BYTES,
+    MAX_SEMANTIC_RUNTIME_DOCUMENT_INVOCATIONS, SEMANTIC_RUNTIME_CHANNEL_ACK,
+    SEMANTIC_RUNTIME_CHANNEL_EXHAUSTED, SEMANTIC_RUNTIME_CHANNEL_NAME,
+    SEMANTIC_RUNTIME_CHANNEL_PULL, SEMANTIC_RUNTIME_CHANNEL_RESULT_PREFIX,
+    SEMANTIC_RUNTIME_CHANNEL_STOP, SEMANTIC_RUNTIME_PROGRAM,
 };
 
 const SEMANTIC_RUNTIME_WORLD_NAME_PREFIX: &str = "zephium-semantic-runtime-v1-";
@@ -42,6 +43,8 @@ static NEXT_SEMANTIC_RUNTIME_WORLD: AtomicU64 = AtomicU64::new(1);
 
 type ReplyBlock = RcBlock<dyn Fn(*mut AnyObject, *mut NSString)>;
 type SemanticCompletion = Box<dyn FnOnce(Result<SemanticSnapshot, AgentSemanticRuntimeFailure>)>;
+type SemanticActionCompletion =
+    Box<dyn FnOnce(Result<SemanticActionRuntimeEvidence, AgentSemanticActionRuntimeFailure>)>;
 
 /// Synchronous refusal before one exact invocation enters the native channel.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -65,6 +68,53 @@ pub(crate) enum AgentSemanticRuntimeFailure {
     Result(SemanticRuntimeResultError),
 }
 
+/// Closed terminal failure for one action-target revalidation invocation.
+#[derive(Debug)]
+pub(crate) enum AgentSemanticActionRuntimeFailure {
+    Dispatch(AgentSemanticRuntimeDispatchError),
+    Cancelled,
+    DocumentReplaced,
+    RendererLost,
+    TimedOut,
+    Retired,
+    Transport,
+    Result(SemanticActionRuntimeResultError),
+}
+
+#[derive(Clone, Copy)]
+enum RuntimeChannelFailure {
+    Cancelled,
+    DocumentReplaced,
+    RendererLost,
+    TimedOut,
+    Retired,
+    Transport,
+}
+
+impl RuntimeChannelFailure {
+    const fn observation(self) -> AgentSemanticRuntimeFailure {
+        match self {
+            Self::Cancelled => AgentSemanticRuntimeFailure::Cancelled,
+            Self::DocumentReplaced => AgentSemanticRuntimeFailure::DocumentReplaced,
+            Self::RendererLost => AgentSemanticRuntimeFailure::RendererLost,
+            Self::TimedOut => AgentSemanticRuntimeFailure::TimedOut,
+            Self::Retired => AgentSemanticRuntimeFailure::Retired,
+            Self::Transport => AgentSemanticRuntimeFailure::Transport,
+        }
+    }
+
+    const fn action(self) -> AgentSemanticActionRuntimeFailure {
+        match self {
+            Self::Cancelled => AgentSemanticActionRuntimeFailure::Cancelled,
+            Self::DocumentReplaced => AgentSemanticActionRuntimeFailure::DocumentReplaced,
+            Self::RendererLost => AgentSemanticActionRuntimeFailure::RendererLost,
+            Self::TimedOut => AgentSemanticActionRuntimeFailure::TimedOut,
+            Self::Retired => AgentSemanticActionRuntimeFailure::Retired,
+            Self::Transport => AgentSemanticActionRuntimeFailure::Transport,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DocumentPhase {
     Loading,
@@ -76,9 +126,32 @@ enum DocumentPhase {
     Retired,
 }
 
-struct PendingInvocation {
-    invocation: SemanticRuntimeInvocation,
-    completion: SemanticCompletion,
+enum PendingInvocation {
+    Observation {
+        invocation: SemanticRuntimeInvocation,
+        completion: SemanticCompletion,
+    },
+    Action {
+        invocation: SemanticActionRuntimeInvocation,
+        completion: SemanticActionCompletion,
+    },
+}
+
+impl PendingInvocation {
+    fn as_str(&self) -> &str {
+        match self {
+            Self::Observation { invocation, .. } => invocation.as_str(),
+            Self::Action { invocation, .. } => invocation.as_str(),
+        }
+    }
+
+    fn matches_observation(&self, invocation: zephium_agentic::SemanticInvocationId) -> bool {
+        matches!(self, Self::Observation { invocation: current, .. } if current.invocation() == invocation)
+    }
+
+    fn matches_action(&self, attempt: SemanticActionAttemptId) -> bool {
+        matches!(self, Self::Action { invocation, .. } if invocation.attempt() == attempt)
+    }
 }
 
 enum ReplyValue {
@@ -107,9 +180,25 @@ impl ReplyAction {
     }
 }
 
-struct CompletionAction {
-    completion: SemanticCompletion,
-    outcome: Result<SemanticSnapshot, AgentSemanticRuntimeFailure>,
+enum CompletionAction {
+    Observation {
+        completion: SemanticCompletion,
+        outcome: Result<Box<SemanticSnapshot>, AgentSemanticRuntimeFailure>,
+    },
+    Action {
+        completion: SemanticActionCompletion,
+        outcome: Result<SemanticActionRuntimeEvidence, AgentSemanticActionRuntimeFailure>,
+    },
+}
+
+#[cfg(test)]
+impl CompletionAction {
+    fn observation_outcome(self) -> Result<SemanticSnapshot, AgentSemanticRuntimeFailure> {
+        match self {
+            Self::Observation { outcome, .. } => outcome.map(|snapshot| *snapshot),
+            Self::Action { .. } => panic!("expected observation completion"),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -181,38 +270,60 @@ impl SemanticRuntimeChannelState {
         }
     }
 
-    fn dispatch(
+    fn dispatch_observation(
         &mut self,
         invocation: SemanticRuntimeInvocation,
         completion: SemanticCompletion,
     ) -> Result<ChannelActions, (AgentSemanticRuntimeDispatchError, SemanticCompletion)> {
-        if self.expected_view.is_none() {
-            return Err((AgentSemanticRuntimeDispatchError::NotReady, completion));
+        if let Some(failure) = self.admission_failure() {
+            return Err((failure, completion));
         }
-        match self.phase {
-            DocumentPhase::Ready => {}
-            DocumentPhase::Loading => {
-                return Err((AgentSemanticRuntimeDispatchError::NotReady, completion));
-            }
-            DocumentPhase::ExhaustionNoticePending | DocumentPhase::Exhausted => {
-                return Err((AgentSemanticRuntimeDispatchError::Exhausted, completion));
-            }
-            DocumentPhase::RendererLost | DocumentPhase::Failed | DocumentPhase::Retired => {
-                return Err((AgentSemanticRuntimeDispatchError::Retired, completion));
-            }
-        }
-        if self.pending.is_some() || self.awaiting_result {
-            return Err((AgentSemanticRuntimeDispatchError::Busy, completion));
-        }
-        if self.completed_invocations >= MAX_SEMANTIC_RUNTIME_DOCUMENT_INVOCATIONS {
-            self.phase = DocumentPhase::Exhausted;
-            return Err((AgentSemanticRuntimeDispatchError::Exhausted, completion));
-        }
-        self.pending = Some(PendingInvocation {
+        self.pending = Some(PendingInvocation::Observation {
             invocation,
             completion,
         });
         Ok(self.prepare_pump())
+    }
+
+    fn dispatch_action(
+        &mut self,
+        invocation: SemanticActionRuntimeInvocation,
+        completion: SemanticActionCompletion,
+    ) -> Result<ChannelActions, (AgentSemanticRuntimeDispatchError, SemanticActionCompletion)> {
+        if let Some(failure) = self.admission_failure() {
+            return Err((failure, completion));
+        }
+        self.pending = Some(PendingInvocation::Action {
+            invocation,
+            completion,
+        });
+        Ok(self.prepare_pump())
+    }
+
+    fn admission_failure(&mut self) -> Option<AgentSemanticRuntimeDispatchError> {
+        if self.expected_view.is_none() {
+            return Some(AgentSemanticRuntimeDispatchError::NotReady);
+        }
+        match self.phase {
+            DocumentPhase::Ready => {}
+            DocumentPhase::Loading => {
+                return Some(AgentSemanticRuntimeDispatchError::NotReady);
+            }
+            DocumentPhase::ExhaustionNoticePending | DocumentPhase::Exhausted => {
+                return Some(AgentSemanticRuntimeDispatchError::Exhausted);
+            }
+            DocumentPhase::RendererLost | DocumentPhase::Failed | DocumentPhase::Retired => {
+                return Some(AgentSemanticRuntimeDispatchError::Retired);
+            }
+        }
+        if self.pending.is_some() || self.awaiting_result {
+            return Some(AgentSemanticRuntimeDispatchError::Busy);
+        }
+        if self.completed_invocations >= MAX_SEMANTIC_RUNTIME_DOCUMENT_INVOCATIONS {
+            self.phase = DocumentPhase::Exhausted;
+            return Some(AgentSemanticRuntimeDispatchError::Exhausted);
+        }
+        None
     }
 
     fn document_committed(&mut self) -> ChannelActions {
@@ -220,7 +331,7 @@ impl SemanticRuntimeChannelState {
         if self.phase == DocumentPhase::Loading {
             self.phase = DocumentPhase::Ready;
         } else {
-            actions = self.invalidate_current(AgentSemanticRuntimeFailure::DocumentReplaced);
+            actions = self.invalidate_current(RuntimeChannelFailure::DocumentReplaced);
             actions.invariant_failed = true;
             if self.phase != DocumentPhase::Retired {
                 self.phase = DocumentPhase::Failed;
@@ -234,7 +345,7 @@ impl SemanticRuntimeChannelState {
     }
 
     fn begin_document_load(&mut self) -> ChannelActions {
-        let actions = self.invalidate_current(AgentSemanticRuntimeFailure::DocumentReplaced);
+        let actions = self.invalidate_current(RuntimeChannelFailure::DocumentReplaced);
         if self.phase != DocumentPhase::Retired {
             self.phase = DocumentPhase::Loading;
             self.completed_invocations = 0;
@@ -244,7 +355,7 @@ impl SemanticRuntimeChannelState {
     }
 
     fn registration_failed(&mut self) -> ChannelActions {
-        let mut actions = self.invalidate_current(AgentSemanticRuntimeFailure::Transport);
+        let mut actions = self.invalidate_current(RuntimeChannelFailure::Transport);
         self.active_world = None;
         self.phase = DocumentPhase::Failed;
         actions.invariant_failed = true;
@@ -252,7 +363,7 @@ impl SemanticRuntimeChannelState {
     }
 
     fn renderer_lost(&mut self) -> ChannelActions {
-        let actions = self.invalidate_current(AgentSemanticRuntimeFailure::RendererLost);
+        let actions = self.invalidate_current(RuntimeChannelFailure::RendererLost);
         if self.phase != DocumentPhase::Retired {
             self.phase = DocumentPhase::RendererLost;
         }
@@ -260,7 +371,7 @@ impl SemanticRuntimeChannelState {
     }
 
     fn cancel(&mut self) -> ChannelActions {
-        let actions = self.invalidate_current(AgentSemanticRuntimeFailure::Cancelled);
+        let actions = self.invalidate_current(RuntimeChannelFailure::Cancelled);
         if self.phase != DocumentPhase::Retired {
             self.phase = DocumentPhase::Failed;
         }
@@ -274,11 +385,26 @@ impl SemanticRuntimeChannelState {
         if self
             .pending
             .as_ref()
-            .is_none_or(|pending| pending.invocation.invocation() != invocation)
+            .is_none_or(|pending| !pending.matches_observation(invocation))
         {
             return (ChannelActions::default(), false);
         }
-        let actions = self.invalidate_current(AgentSemanticRuntimeFailure::TimedOut);
+        let actions = self.invalidate_current(RuntimeChannelFailure::TimedOut);
+        if self.phase != DocumentPhase::Retired {
+            self.phase = DocumentPhase::Failed;
+        }
+        (actions, true)
+    }
+
+    fn timeout_action(&mut self, attempt: SemanticActionAttemptId) -> (ChannelActions, bool) {
+        if self
+            .pending
+            .as_ref()
+            .is_none_or(|pending| !pending.matches_action(attempt))
+        {
+            return (ChannelActions::default(), false);
+        }
+        let actions = self.invalidate_current(RuntimeChannelFailure::TimedOut);
         if self.phase != DocumentPhase::Retired {
             self.phase = DocumentPhase::Failed;
         }
@@ -286,14 +412,14 @@ impl SemanticRuntimeChannelState {
     }
 
     fn retire(&mut self) -> ChannelActions {
-        let actions = self.invalidate_current(AgentSemanticRuntimeFailure::Retired);
+        let actions = self.invalidate_current(RuntimeChannelFailure::Retired);
         self.active_world = None;
         self.phase = DocumentPhase::Retired;
         actions
     }
 
     fn fail_transport(&mut self, current: Option<ReplyBlock>) -> ChannelActions {
-        let mut actions = self.invalidate_current(AgentSemanticRuntimeFailure::Transport);
+        let mut actions = self.invalidate_current(RuntimeChannelFailure::Transport);
         if let Some(reply) = current {
             actions.push_reply(ReplyAction::error(reply));
         }
@@ -302,16 +428,24 @@ impl SemanticRuntimeChannelState {
         actions
     }
 
-    fn invalidate_current(&mut self, failure: AgentSemanticRuntimeFailure) -> ChannelActions {
+    fn invalidate_current(&mut self, failure: RuntimeChannelFailure) -> ChannelActions {
         let mut actions = ChannelActions::default();
         if let Some(pull) = self.pull.take() {
             actions.push_reply(ReplyAction::success(pull, SEMANTIC_RUNTIME_CHANNEL_STOP));
         }
         self.awaiting_result = false;
         if let Some(pending) = self.pending.take() {
-            actions.completion = Some(CompletionAction {
-                completion: pending.completion,
-                outcome: Err(failure),
+            actions.completion = Some(match pending {
+                PendingInvocation::Observation { completion, .. } => {
+                    CompletionAction::Observation {
+                        completion,
+                        outcome: Err(failure.observation()),
+                    }
+                }
+                PendingInvocation::Action { completion, .. } => CompletionAction::Action {
+                    completion,
+                    outcome: Err(failure.action()),
+                },
             });
         }
         actions
@@ -360,9 +494,17 @@ impl SemanticRuntimeChannelState {
         self.awaiting_result = false;
         let Some(completed) = self.completed_invocations.checked_add(1) else {
             let mut actions = self.fail_transport(Some(reply));
-            actions.completion = Some(CompletionAction {
-                completion: pending.completion,
-                outcome: Err(AgentSemanticRuntimeFailure::Transport),
+            actions.completion = Some(match pending {
+                PendingInvocation::Observation { completion, .. } => {
+                    CompletionAction::Observation {
+                        completion,
+                        outcome: Err(AgentSemanticRuntimeFailure::Transport),
+                    }
+                }
+                PendingInvocation::Action { completion, .. } => CompletionAction::Action {
+                    completion,
+                    outcome: Err(AgentSemanticActionRuntimeFailure::Transport),
+                },
             });
             return actions;
         };
@@ -371,17 +513,53 @@ impl SemanticRuntimeChannelState {
             self.phase = DocumentPhase::ExhaustionNoticePending;
         }
 
-        let outcome = pending
-            .invocation
-            .decode_result(bytes)
-            .map_err(AgentSemanticRuntimeFailure::Result);
-        let recoverable = matches!(
-            &outcome,
-            Ok(_)
-                | Err(AgentSemanticRuntimeFailure::Result(
-                    SemanticRuntimeResultError::Runtime(_)
-                ))
-        );
+        let (completion, recoverable) = match pending {
+            PendingInvocation::Observation {
+                invocation,
+                completion,
+            } => {
+                let outcome = invocation
+                    .decode_result(bytes)
+                    .map(Box::new)
+                    .map_err(AgentSemanticRuntimeFailure::Result);
+                let recoverable = matches!(
+                    &outcome,
+                    Ok(_)
+                        | Err(AgentSemanticRuntimeFailure::Result(
+                            SemanticRuntimeResultError::Runtime(_)
+                        ))
+                );
+                (
+                    CompletionAction::Observation {
+                        completion,
+                        outcome,
+                    },
+                    recoverable,
+                )
+            }
+            PendingInvocation::Action {
+                invocation,
+                completion,
+            } => {
+                let outcome = invocation
+                    .decode_result(bytes)
+                    .map_err(AgentSemanticActionRuntimeFailure::Result);
+                let recoverable = matches!(
+                    &outcome,
+                    Ok(_)
+                        | Err(AgentSemanticActionRuntimeFailure::Result(
+                            SemanticActionRuntimeResultError::Runtime(_)
+                        ))
+                );
+                (
+                    CompletionAction::Action {
+                        completion,
+                        outcome,
+                    },
+                    recoverable,
+                )
+            }
+        };
         let mut actions = ChannelActions::default();
         actions.push_reply(ReplyAction::success(
             reply,
@@ -391,10 +569,7 @@ impl SemanticRuntimeChannelState {
                 SEMANTIC_RUNTIME_CHANNEL_STOP
             },
         ));
-        actions.completion = Some(CompletionAction {
-            completion: pending.completion,
-            outcome,
-        });
+        actions.completion = Some(completion);
         if !recoverable {
             self.phase = DocumentPhase::Failed;
             actions.invariant_failed = true;
@@ -429,7 +604,7 @@ impl SemanticRuntimeChannelState {
         let request = self
             .pending
             .as_ref()
-            .map(|pending| pending.invocation.as_str().to_owned().into_boxed_str());
+            .map(|pending| pending.as_str().to_owned().into_boxed_str());
         let Some(request) = request else {
             actions.invariant_failed = true;
             return actions;
@@ -486,7 +661,7 @@ impl AgentSemanticRuntimeController {
     ) -> Result<(), AgentSemanticRuntimeDispatchError> {
         let completion: SemanticCompletion = Box::new(completion);
         let dispatched = match self.state.try_borrow_mut() {
-            Ok(mut state) => state.dispatch(invocation, completion),
+            Ok(mut state) => state.dispatch_observation(invocation, completion),
             Err(_) => Err((AgentSemanticRuntimeDispatchError::Busy, completion)),
         };
         match dispatched {
@@ -496,9 +671,38 @@ impl AgentSemanticRuntimeController {
             }
             Err((failure, completion)) => {
                 invoke_completion(
-                    CompletionAction {
+                    CompletionAction::Observation {
                         completion,
                         outcome: Err(AgentSemanticRuntimeFailure::Dispatch(failure)),
+                    },
+                    self.on_callback_panic.as_ref(),
+                );
+                Err(failure)
+            }
+        }
+    }
+
+    pub(crate) fn dispatch_action(
+        &self,
+        invocation: SemanticActionRuntimeInvocation,
+        completion: impl FnOnce(Result<SemanticActionRuntimeEvidence, AgentSemanticActionRuntimeFailure>)
+            + 'static,
+    ) -> Result<(), AgentSemanticRuntimeDispatchError> {
+        let completion: SemanticActionCompletion = Box::new(completion);
+        let dispatched = match self.state.try_borrow_mut() {
+            Ok(mut state) => state.dispatch_action(invocation, completion),
+            Err(_) => Err((AgentSemanticRuntimeDispatchError::Busy, completion)),
+        };
+        match dispatched {
+            Ok(actions) => {
+                self.execute(actions);
+                Ok(())
+            }
+            Err((failure, completion)) => {
+                invoke_completion(
+                    CompletionAction::Action {
+                        completion,
+                        outcome: Err(AgentSemanticActionRuntimeFailure::Dispatch(failure)),
                     },
                     self.on_callback_panic.as_ref(),
                 );
@@ -535,6 +739,21 @@ impl AgentSemanticRuntimeController {
     pub(crate) fn timeout(&self, invocation: zephium_agentic::SemanticInvocationId) -> bool {
         let (actions, matched) = match self.state.try_borrow_mut() {
             Ok(mut state) => state.timeout(invocation),
+            Err(_) => (
+                ChannelActions {
+                    invariant_failed: true,
+                    ..ChannelActions::default()
+                },
+                false,
+            ),
+        };
+        self.execute(actions);
+        matched
+    }
+
+    pub(crate) fn timeout_action(&self, attempt: SemanticActionAttemptId) -> bool {
+        let (actions, matched) = match self.state.try_borrow_mut() {
+            Ok(mut state) => state.timeout_action(attempt),
             Err(_) => (
                 ChannelActions {
                     invariant_failed: true,
@@ -658,8 +877,15 @@ impl AgentSemanticRuntimeController {
 }
 
 fn invoke_completion(completion: CompletionAction, on_panic: &dyn Fn()) {
-    if std::panic::catch_unwind(AssertUnwindSafe(|| {
-        (completion.completion)(completion.outcome);
+    if std::panic::catch_unwind(AssertUnwindSafe(|| match completion {
+        CompletionAction::Observation {
+            completion,
+            outcome,
+        } => completion(outcome.map(|snapshot| *snapshot)),
+        CompletionAction::Action {
+            completion,
+            outcome,
+        } => completion(outcome),
     }))
     .is_err()
     {
@@ -1182,7 +1408,7 @@ mod tests {
             ..SemanticRuntimeChannelState::default()
         };
         assert!(matches!(
-            state.dispatch(
+            state.dispatch_observation(
                 invocation(10, SemanticSnapshotGeneration::INITIAL),
                 Box::new(|_| {}),
             ),
@@ -1200,7 +1426,7 @@ mod tests {
         let invocation = invocation(11, SemanticSnapshotGeneration::INITIAL);
         let encoded = invocation.as_str().to_owned();
         let actions = state
-            .dispatch(invocation, Box::new(|_| {}))
+            .dispatch_observation(invocation, Box::new(|_| {}))
             .unwrap_or_else(|_| panic!("dispatch"));
         assert_eq!(
             success_value(actions.first_reply.expect("request reply")).as_ref(),
@@ -1215,7 +1441,10 @@ mod tests {
             SEMANTIC_RUNTIME_CHANNEL_ACK
         );
         assert!(matches!(
-            actions.completion.expect("completion").outcome,
+            actions
+                .completion
+                .expect("completion")
+                .observation_outcome(),
             Err(AgentSemanticRuntimeFailure::Result(
                 SemanticRuntimeResultError::Runtime(SemanticRuntimeFault::Busy)
             ))
@@ -1235,7 +1464,7 @@ mod tests {
         assert!(!actions.invariant_failed);
         assert_eq!(state.phase, DocumentPhase::Ready);
         assert!(matches!(
-            state.dispatch(
+            state.dispatch_observation(
                 invocation(10, SemanticSnapshotGeneration::INITIAL),
                 Box::new(|_| {}),
             ),
@@ -1253,13 +1482,16 @@ mod tests {
         };
         let invocation = invocation(12, SemanticSnapshotGeneration::INITIAL);
         assert!(state
-            .dispatch(invocation, Box::new(|_| {}))
+            .dispatch_observation(invocation, Box::new(|_| {}))
             .unwrap_or_else(|_| panic!("dispatch"))
             .first_reply
             .is_none());
         let actions = state.begin_document_load();
         assert!(matches!(
-            actions.completion.expect("replacement").outcome,
+            actions
+                .completion
+                .expect("replacement")
+                .observation_outcome(),
             Err(AgentSemanticRuntimeFailure::DocumentReplaced)
         ));
         assert_eq!(state.phase, DocumentPhase::Loading);
@@ -1296,7 +1528,7 @@ mod tests {
             ..SemanticRuntimeChannelState::default()
         };
         assert!(matches!(
-            state.dispatch(
+            state.dispatch_observation(
                 invocation(13, SemanticSnapshotGeneration::INITIAL),
                 Box::new(|_| {}),
             ),
@@ -1347,7 +1579,7 @@ mod tests {
         };
         let invocation_id = SemanticInvocationId::new(22).expect("invocation");
         state
-            .dispatch(
+            .dispatch_observation(
                 invocation(22, SemanticSnapshotGeneration::INITIAL),
                 Box::new(|_| {}),
             )
@@ -1361,13 +1593,16 @@ mod tests {
         let (actions, matched) = state.timeout(invocation_id);
         assert!(matched);
         assert!(matches!(
-            actions.completion.expect("timeout completion").outcome,
+            actions
+                .completion
+                .expect("timeout completion")
+                .observation_outcome(),
             Err(AgentSemanticRuntimeFailure::TimedOut)
         ));
         assert_eq!(state.phase, DocumentPhase::Failed);
         assert!(state.pending.is_none());
         assert!(state
-            .dispatch(
+            .dispatch_observation(
                 invocation(23, SemanticSnapshotGeneration::INITIAL),
                 Box::new(|_| {}),
             )

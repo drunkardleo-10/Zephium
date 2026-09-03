@@ -15,7 +15,8 @@ use zephium_agentic::{
     ContextCookieTransferSettlement, ContextDispatch, ContextNativeEvent, ContextNativeRequest,
     ContextNativeResourceSnapshot, ContextPortFailure, ContextResourceAuditId,
     ContextResourceAuditSettlement, ContextShutdownAuditSettlement, ContextShutdownDispatch,
-    SemanticActionNativeCompletion, SemanticActionNativeRequest, SemanticRuntimeCorrelation,
+    SemanticActionExecutionInstant, SemanticActionNativeCompletion, SemanticActionNativeFailure,
+    SemanticActionNativeRequest, SemanticActionNativeSettlement, SemanticRuntimeCorrelation,
     SemanticRuntimeInvocation, SemanticRuntimePortFailure, SemanticRuntimeSettlement,
     SemanticScreenshotNativeCompletion, SemanticScreenshotNativeRequest,
     MAX_PENDING_NATIVE_CONTEXT_TASKS, MAX_PENDING_SEMANTIC_SCREENSHOTS,
@@ -435,6 +436,124 @@ pub(crate) struct AgentScreenshotTask {
     physical: Option<AgentScreenshotPhysicalPermit>,
     admitted_at: std::time::Instant,
     permit: AgentTaskPermit,
+}
+
+/// Move-only semantic action task sharing the context port's global admission.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) struct AgentActionTask {
+    request: Option<SemanticActionNativeRequest>,
+    completion: Option<SemanticActionNativeCompletion>,
+    admitted_at: std::time::Instant,
+    permit: AgentTaskPermit,
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl AgentActionTask {
+    fn new(
+        request: SemanticActionNativeRequest,
+        completion: SemanticActionNativeCompletion,
+        permit: AgentTaskPermit,
+    ) -> Self {
+        Self {
+            request: Some(request),
+            completion: Some(completion),
+            admitted_at: std::time::Instant::now(),
+            permit,
+        }
+    }
+
+    pub(crate) fn request(&self) -> Option<&SemanticActionNativeRequest> {
+        self.request.as_ref()
+    }
+
+    pub(crate) fn take_request(&mut self) -> Option<SemanticActionNativeRequest> {
+        self.request.take()
+    }
+
+    pub(crate) const fn admitted_at(&self) -> std::time::Instant {
+        self.admitted_at
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn callback_guard(&self) -> AgentScreenshotCallbackGuard {
+        AgentScreenshotCallbackGuard {
+            admission: self.permit.admission.clone(),
+        }
+    }
+
+    pub(crate) fn complete(mut self, settlement: SemanticActionNativeSettlement) {
+        self.request = None;
+        self.permit.release();
+        self.invoke_completion(settlement);
+    }
+
+    pub(crate) fn refuse(self, failure: SemanticActionNativeFailure) {
+        let completed_at = self.failure_instant(failure);
+        let mut task = self;
+        let Some(request) = task.request.take() else {
+            task.completion = None;
+            task.permit.release();
+            task.permit.admission.fail_invariant();
+            return;
+        };
+        let settlement = request.fail(failure, completed_at);
+        task.permit.release();
+        task.invoke_completion(settlement);
+    }
+
+    fn failure_instant(
+        &self,
+        failure: SemanticActionNativeFailure,
+    ) -> SemanticActionExecutionInstant {
+        let Some(request) = self.request.as_ref() else {
+            return SemanticActionExecutionInstant::from_millis(0);
+        };
+        if failure == SemanticActionNativeFailure::TimedOut {
+            return request.deadline();
+        }
+        let elapsed = u64::try_from(self.admitted_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        SemanticActionExecutionInstant::from_millis(
+            request.requested_at().millis().saturating_add(elapsed),
+        )
+    }
+
+    fn cancel_without_completion(mut self) {
+        self.request = None;
+        self.completion = None;
+        self.permit.release();
+    }
+
+    fn invoke_completion(&mut self, settlement: SemanticActionNativeSettlement) {
+        let Some(completion) = self.completion.take() else {
+            self.permit.admission.fail_invariant();
+            return;
+        };
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| completion(settlement)))
+            .is_err()
+        {
+            self.permit.admission.fail_invariant();
+        }
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl Drop for AgentActionTask {
+    fn drop(&mut self) {
+        let Some(request) = self.request.take() else {
+            if self.completion.take().is_some() {
+                self.permit.release();
+                self.permit.admission.fail_invariant();
+            }
+            return;
+        };
+        let elapsed = u64::try_from(self.admitted_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let completed_at = SemanticActionExecutionInstant::from_millis(
+            request.requested_at().millis().saturating_add(elapsed),
+        );
+        let settlement = request.fail(SemanticActionNativeFailure::Transport, completed_at);
+        self.permit.release();
+        self.invoke_completion(settlement);
+    }
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -1015,6 +1134,52 @@ impl EngineAgentBrowserPort {
             ContextDispatch::Rejected(ContextPortFailure::Shutdown)
         }
     }
+
+    #[cfg(target_os = "macos")]
+    fn schedule_action(
+        &self,
+        request: SemanticActionNativeRequest,
+        completion: SemanticActionNativeCompletion,
+    ) -> ContextDispatch {
+        let permit = match self.admission.reserve() {
+            Ok(permit) => permit,
+            Err(failure) => return ContextDispatch::Rejected(failure),
+        };
+        let task = AgentActionTask::new(request, completion, permit);
+        let slot = Arc::new(Mutex::new(Some(task)));
+        let for_dispatch = slot.clone();
+        let executed = Arc::new(AtomicBool::new(false));
+        let executed_in_dispatch = executed.clone();
+        let callback_admission = self.admission.clone();
+        let dispatch = self.dispatch.clone();
+        let accepted = contain_agent_port_panic(&self.admission, || {
+            dispatch(Box::new(move || {
+                executed_in_dispatch.store(true, Ordering::Release);
+                let _ = contain_agent_port_panic(&callback_admission, || {
+                    let task = for_dispatch
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .take();
+                    if let Some(task) = task {
+                        dispatch_action_to_host(task);
+                    }
+                });
+            }))
+        })
+        .unwrap_or(false);
+        if accepted || executed.load(Ordering::Acquire) {
+            ContextDispatch::Scheduled
+        } else {
+            if let Some(task) = slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            {
+                task.cancel_without_completion();
+            }
+            ContextDispatch::Rejected(ContextPortFailure::Shutdown)
+        }
+    }
 }
 
 impl AgentBrowserPort for EngineAgentBrowserPort {
@@ -1069,10 +1234,23 @@ impl AgentBrowserPort for EngineAgentBrowserPort {
         request: SemanticActionNativeRequest,
         completion: SemanticActionNativeCompletion,
     ) -> ContextDispatch {
-        // M1 device qualification owns backend selection. Retain a real port
-        // seam now, but admit no action until one fixed route is qualified.
-        let _ = (request, completion);
-        ContextDispatch::Unsupported
+        #[cfg(target_os = "macos")]
+        {
+            if request.kind() != zephium_agentic::SemanticActionKind::Click
+                || request.frame().frame() != zephium_agentic::FrameId::MAIN
+                || request.frame().trust() != zephium_agentic::SemanticFrameTrust::SameOrigin
+                || request.frame().context().identity().kind()
+                    != zephium_agentic::ContextKind::Owned
+            {
+                return ContextDispatch::Unsupported;
+            }
+            self.schedule_action(request, completion)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (request, completion);
+            ContextDispatch::Unsupported
+        }
     }
 
     fn capture_semantic_screenshot(
@@ -1136,6 +1314,29 @@ fn dispatch_screenshot_to_host(task: AgentScreenshotTask) {
             .take()
         {
             task.refuse(SemanticScreenshotNativeFailure::Shutdown);
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn dispatch_action_to_host(task: AgentActionTask) {
+    let slot = Arc::new(Mutex::new(Some(task)));
+    let for_host = slot.clone();
+    if !crate::host::try_with_agent_context(move |host| {
+        let task = for_host
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(task) = task {
+            host.handle_agent_action_task(task);
+        }
+    }) {
+        if let Some(task) = slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            task.refuse(SemanticActionNativeFailure::Shutdown);
         }
     }
 }

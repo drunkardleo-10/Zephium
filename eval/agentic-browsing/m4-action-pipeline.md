@@ -12,20 +12,23 @@ bounded semantic read/transport, closed
 structured extraction admission, exact tool-result/constrained-output
 extraction transport, and the one-shot viewport screenshot contract are
 implemented.
-Policy permits, platform execution,
-visibility/occlusion checks, native observation adapters and physical timer installation,
-installed visual token counters, and live action/screenshot/provider
-qualification remain pending. Exact one-shot visual policy and fixed OpenAI /
+General native input, physical timer installation, installed visual token
+counters, and live screenshot/provider qualification remain pending. Exact
+one-shot visual policy and fixed OpenAI /
 Anthropic tool-result wiring are implemented. Production macOS and Windows owned-context
-viewport adapters are implemented and mechanically bounded, but neither was
-executed in this evidence pass and therefore neither carries a live-pixel or
-platform qualification claim. The Windows host keeps screenshot dispatch
+viewport adapters are implemented and mechanically bounded. The macOS hidden
+semantic runtime and compatible fixed ref-bound click recipe have now passed a
+named-device production-adapter qualifier with exact visibility/occlusion,
+zero page activation, popup denial, fresh `Expanded`-state verification through
+the existing settlement/verifier core, and teardown; this is not a real policy
+assessment, full host/controller qualifier, general native-input, or real-site
+claim. The Windows host keeps screenshot dispatch
 unsupported until its physical semantic-runtime qualifier promotes exact
 snapshot-generation lifecycle support.
 
-This evidence describes a functional-core seam. It does not claim that an
-action can currently reach a native view or page, that model-declared effects
-are trusted, or that M4 is complete.
+This evidence describes a functional-core seam plus one qualified macOS fixed
+click route. It does not claim that model-declared effects are trusted, that
+trusted native input is production-admitted, or that M4 is complete.
 
 ## Implemented boundary
 

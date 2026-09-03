@@ -1,13 +1,13 @@
 {
-  "schema_version": 2,
-  "reviewed_on": "2026-09-02",
-  "scope": "authorized_hidden_fixed_dom_semantic_runtime_v2",
+  "schema_version": 3,
+  "reviewed_on": "2026-09-03",
+  "scope": "authorized_hidden_fixed_semantic_runtime_v3",
   "command": "cargo run --locked -p zephium-engine --features native-agentic-semantic-probe --bin macos-agentic-semantic-probe -- --ci-hidden-fixed-dom",
   "platform": "macos",
-  "os_version": "27.0",
-  "os_build": "26A5421a",
+  "os_version": "27.0.0",
+  "os_build": "26A5425a",
   "engine": "WebKit",
-  "engine_version": "22625.1.29.11.25",
+  "engine_version": "22625.1.29.11.26",
   "profile": "ephemeral",
   "extensions": "absent",
   "presentation": "hidden",
@@ -17,8 +17,15 @@
     "unit": "logical_css_pixels"
   },
   "fixture": "loopback_only_fixed_documents_and_host_gated_mutation",
-  "snapshots": 4,
+  "snapshots": 5,
   "world_epochs": 3,
+  "fixed_action_backend": "fixed_semantic_recipe",
+  "fixed_click": "verified",
+  "verified_postcondition": "expanded",
+  "event_trust": "untrusted",
+  "transient_user_activation": 0,
+  "sticky_user_activation": 0,
+  "popup_admitted": 0,
   "mutation_gate": "host_released",
   "stale_anchor": "refused",
   "mutation_recovery": "verified",
@@ -33,6 +40,8 @@
     "windows_behavior",
     "provider_token_budget",
     "browse_or_agent_resource_baseline",
-    "arbitrary_mutation_compatibility"
+    "arbitrary_mutation_compatibility",
+    "trusted_native_input",
+    "full_policy_host_controller_path"
   ]
 }

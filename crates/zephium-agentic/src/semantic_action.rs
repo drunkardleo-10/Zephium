@@ -8,6 +8,7 @@
 use std::fmt;
 use std::num::{NonZeroU32, NonZeroU64};
 
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -871,6 +872,19 @@ impl SemanticBoundAction {
         let target_value = target.value().cloned();
         let target_states = target.states();
         let target_geometry = target.geometry();
+        let target_runtime_descriptor = runtime_descriptor(target);
+        let option_runtime_descriptor = match &self.intent {
+            BoundActionIntent::Select { option, .. } => Some(runtime_descriptor(
+                current
+                    .nodes()
+                    .iter()
+                    .find(|node| node.key() == option.node_key)
+                    .ok_or(SemanticActionPreparationError::Revalidation(
+                        SemanticActionRevalidationError::SelectionTarget,
+                    ))?,
+            )),
+            _ => None,
+        };
         let checkpoint_invocation = current.invocation();
         let checkpoint_snapshot = current.generation();
         let guard = prepared_guard(
@@ -889,6 +903,8 @@ impl SemanticBoundAction {
             target_states,
             target_geometry,
             option_states,
+            target_runtime_descriptor,
+            option_runtime_descriptor,
             guard,
         })
     }
@@ -948,6 +964,8 @@ pub struct SemanticPreparedAction {
     target_states: SemanticStates,
     target_geometry: Option<SemanticRect>,
     option_states: Option<SemanticStates>,
+    target_runtime_descriptor: SemanticActionRuntimeDescriptor,
+    option_runtime_descriptor: Option<SemanticActionRuntimeDescriptor>,
     guard: [u8; 32],
 }
 
@@ -1064,6 +1082,16 @@ impl SemanticPreparedAction {
 
     pub(crate) const fn target_states(&self) -> SemanticStates {
         self.target_states
+    }
+
+    pub(crate) const fn target_runtime_descriptor(&self) -> &SemanticActionRuntimeDescriptor {
+        &self.target_runtime_descriptor
+    }
+
+    pub(crate) const fn option_runtime_descriptor(
+        &self,
+    ) -> Option<&SemanticActionRuntimeDescriptor> {
+        self.option_runtime_descriptor.as_ref()
     }
 
     pub(crate) fn verification_target<'a>(
@@ -1698,6 +1726,49 @@ fn structural_digest(node: &crate::SemanticNode, parent_key: Option<u64>) -> [u8
     hasher.finalize().into()
 }
 
+fn runtime_descriptor(node: &crate::SemanticNode) -> SemanticActionRuntimeDescriptor {
+    let (value_kind, value_text, value_ordinal, value_boolean) = match node.value() {
+        None => (0, None, 0, false),
+        Some(SemanticValueSummary::Text(value)) => (1, Some(value.as_str()), 0, false),
+        Some(SemanticValueSummary::Redacted) => (2, None, 0, false),
+        Some(SemanticValueSummary::Boolean(value)) => (3, None, 0, *value),
+        Some(SemanticValueSummary::Ordinal(value)) => (4, None, *value, false),
+    };
+    SemanticActionRuntimeDescriptor {
+        role: role_code(node.role()),
+        operations: node.operations().bits(),
+        sensitivity: sensitivity_code(node.sensitivity()),
+        states: node.states().bits(),
+        name: node.name().map(|value| value.as_str().to_owned()),
+        value_kind,
+        value_text: value_text.map(str::to_owned),
+        value_ordinal,
+        value_boolean,
+    }
+}
+
+#[derive(Clone, Eq, PartialEq, Serialize)]
+pub(crate) struct SemanticActionRuntimeDescriptor {
+    #[serde(rename = "r")]
+    role: u8,
+    #[serde(rename = "o")]
+    operations: u8,
+    #[serde(rename = "q")]
+    sensitivity: u8,
+    #[serde(rename = "s")]
+    states: u8,
+    #[serde(rename = "n")]
+    name: Option<String>,
+    #[serde(rename = "vk")]
+    value_kind: u8,
+    #[serde(rename = "vt")]
+    value_text: Option<String>,
+    #[serde(rename = "vo")]
+    value_ordinal: u16,
+    #[serde(rename = "vb")]
+    value_boolean: bool,
+}
+
 fn hash_frame(hasher: &mut Sha256, frame: &SemanticFrameJoin) {
     let context = frame.context();
     let identity = context.identity();
@@ -2149,6 +2220,31 @@ mod tests {
             SemanticSettleBudget::try_new(250).expect("budget"),
         )
         .expect("proposal")
+    }
+
+    #[test]
+    fn runtime_descriptor_matches_the_cross_language_action_golden() {
+        let wire = SemanticActionRuntimeDescriptor {
+            role: role_code(SemanticRole::Button),
+            operations: SemanticOperations::try_new(&[
+                SemanticOperationClass::Click,
+                SemanticOperationClass::Press,
+            ])
+            .expect("operations")
+            .bits(),
+            sensitivity: sensitivity_code(SemanticSensitivity::Public),
+            states: SemanticStates::NONE.bits(),
+            name: Some("Save".to_owned()),
+            value_kind: 0,
+            value_text: None,
+            value_ordinal: 0,
+            value_boolean: false,
+        };
+        let encoded = serde_json::to_vec(&wire).expect("descriptor wire");
+        assert_eq!(
+            encoded,
+            br#"{"r":7,"o":9,"q":1,"s":0,"n":"Save","vk":0,"vt":null,"vo":0,"vb":false}"#
+        );
     }
 
     #[test]

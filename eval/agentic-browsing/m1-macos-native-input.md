@@ -1,7 +1,8 @@
 # M1 macOS native-input probe
 
-Status: adapter and authorized hidden fixed-DOM safety gate qualified;
-native-backend named-device qualification pending.
+Status: authorized hidden fixed-DOM safety gate and production-adapter fixed
+semantic click qualified; activation-granting native responder input remains
+excluded.
 
 This evidence describes the release-excluded native-input risk spike. It does
 not authorize a product backend, claim real-site compatibility, or complete
@@ -64,7 +65,8 @@ values, timers, or popup state from one row becoming evidence for another.
 | Route | Implemented behavior | Qualification state |
 | --- | --- | --- |
 | Fixed DOM recipe | Fixed per-case recipe in the dedicated immutable client runtime | Authorized hidden gate passed; effect events remain untrusted and the route does not activate/focus the process |
-| AppKit event | Geometry-bound `NSEvent` mouse/key delivery to the owned window/WKWebView | Device run pending for each presentation state |
+| AppKit window event | Geometry-bound `NSEvent` mouse/key delivery through the owned window | Named-device Button runs produced no page effect in hidden, visible-background, or explicitly visible-focused presentation; not production-admitted |
+| Direct WKWebView responder event | Release-excluded delivery to the exact retained WKWebView without global input | Trusted Button effect observed only while AppKit-presentable; grants page user activation and is not production-admitted |
 | AppKit accessibility | In-process accessibility hit-test followed by `accessibilityPerformPress` on supported public controls | Device run pending; dispatch Boolean is never treated as effect success |
 | Focused OS input | No global event is posted | `NeedsHuman` in visible focus; otherwise `BlockedByPolicy` |
 | Human baseline | No synthesized action | Always `NeedsHuman` |
@@ -138,12 +140,50 @@ remove each representative protection and require refusal. Native-feature host
 Clippy passes with warnings denied; this compile/source evidence does not
 replace the still-pending AppKit/accessibility device matrices.
 
+## 2026-09-03 production-action follow-up
+
+The production semantic runtime now provides the safe default for compatible
+ordinary clicks. It resolves only the private stable reference minted by the
+exact prior snapshot, directly compares the bounded private target descriptor,
+rechecks current operation/sensitivity/value state, geometry, visibility and
+hit testing, then invokes the captured fixed `HTMLElement.click` recipe in the
+isolated world. The model cannot choose this backend or provide a selector or
+program. A successful runtime terminal reports `FixedSemanticRecipe` and is
+still provisional until a fresh semantic snapshot proves the separately bound
+postcondition.
+
+The exact production qualifier completed on macOS 27.0.0 / WebKit
+22625.1.29.11.26 with one hidden extension-free ephemeral view. The fixed click
+changed the intended fixture target, produced an untrusted DOM click, granted
+neither transient nor sticky `navigator.userActivation`, admitted no popup,
+changed no application/window/first-responder state, and drained all native
+owners. Same-node semantic repurposing, unrelated DOM churn, occlusion,
+incompatible geometry, hostile descriptor escaping, oversized action input,
+and operation/result correlation have deterministic coverage. Run it with:
+
+```sh
+cargo run --locked -p zephium-engine --features native-agentic-semantic-probe --bin macos-agentic-semantic-probe -- --ci-hidden-fixed-dom
+```
+
+Separate named-device experiments closed two native-input assumptions rather
+than silently promoting them. `NSWindow::sendEvent` produced no Button effect
+for hidden, visible-background, or explicitly visible-focused presentation.
+Direct public `NSResponder` delivery to the exact WKWebView produced a trusted
+effect only when the child remained AppKit-presentable (an offscreen, non-key
+host was sufficient); hidden-view delivery was absent or unreliable. That
+trusted effect granted transient and sticky page user activation. The owner
+denied the popup attempt and native focus state did not change, but user
+activation is itself a capability boundary. The responder route therefore
+remains release-excluded and absent from production admission until Zephium has
+an explicit capability authority, activation-taint lifecycle, honest
+presentation owner, and denial proofs for activation-gated surfaces.
+
 ## Blocking evidence
 
 The following remain intentionally absent rather than inferred:
 
-1. named macOS hardware/OS/WebKit results for AppKit and accessibility across
-   focused, visible-background, and hidden states;
+1. named macOS accessibility results and any future capability-authorized
+   responder route across its admitted presentation states;
 2. an explicitly authorized visible focused-OS/human baseline;
 3. the physical Windows HWND/composition/CDP feasibility matrix;
 4. one authorized difficult real-site slice per platform;

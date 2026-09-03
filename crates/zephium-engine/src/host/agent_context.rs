@@ -44,10 +44,10 @@ use zephium_agentic::{
     ContextNavigationRequest, ContextNavigationSettlement, ContextNavigationTarget,
     ContextOperationJoin, ContextOperationKind, ContextOwnedViewport, ContextProfileLease,
     ContextProfileLeasePurpose, ContextProfileStorageClass, ContextTransitionRequest,
-    ContextTransitionSettlement, FrameId, SemanticFrameTrust, SemanticInvocationId,
-    SemanticRuntimePortFailure, SemanticRuntimeSettlement, SemanticScreenshotNativeCapture,
-    SemanticScreenshotNativeFailure, SemanticScreenshotRequestId, SemanticSnapshotGeneration,
-    MAX_LIVE_CONTEXTS,
+    ContextTransitionSettlement, FrameId, SemanticActionKind, SemanticActionNativeFailure,
+    SemanticFrameTrust, SemanticInvocationId, SemanticRuntimePortFailure,
+    SemanticRuntimeSettlement, SemanticScreenshotNativeCapture, SemanticScreenshotNativeFailure,
+    SemanticScreenshotRequestId, SemanticSnapshotGeneration, MAX_LIVE_CONTEXTS,
 };
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use zephium_core::ports::engine::Partition;
@@ -61,6 +61,8 @@ use super::profiles::{
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use super::resources::{NativeResourceClass, NativeResourceLease};
 use super::EngineHost;
+#[cfg(target_os = "macos")]
+use crate::agent_context_port::AgentActionTask;
 use crate::agent_context_port::AgentContextTask;
 #[cfg(target_os = "macos")]
 use crate::agent_context_port::AgentScreenshotTask;
@@ -1042,6 +1044,11 @@ impl EngineHost {
         self.start_owned_agent_screenshot(task);
     }
 
+    #[cfg(target_os = "macos")]
+    pub(crate) fn handle_agent_action_task(&mut self, task: AgentActionTask) {
+        self.start_owned_agent_action(task);
+    }
+
     fn settle_agent_context_audit(
         &mut self,
         task: AgentContextTask,
@@ -1516,6 +1523,176 @@ impl EngineHost {
         if dispatched.is_ok() {
             binding.last_semantic_invocation = Some(invocation_id);
             binding.semantic_snapshot_generation = Some(snapshot_generation);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn start_owned_agent_action(&mut self, mut task: AgentActionTask) {
+        let Some(request) = task.request() else {
+            self.fail_agent_context_invariant("agent-context action task lost its exact request");
+            task.refuse(SemanticActionNativeFailure::Transport);
+            return;
+        };
+        let frame = request.frame().clone();
+        let context = frame.context();
+        let id = context.identity().id();
+        let attempt = request.attempt();
+        let admitted_at = task.admitted_at();
+        let Some(execution_millis) = request
+            .deadline()
+            .millis()
+            .checked_sub(request.requested_at().millis())
+        else {
+            task.refuse(SemanticActionNativeFailure::TimedOut);
+            return;
+        };
+        let execution_window = Duration::from_millis(execution_millis);
+        let elapsed = Instant::now().saturating_duration_since(admitted_at);
+        if execution_window.is_zero() || elapsed >= execution_window {
+            task.refuse(SemanticActionNativeFailure::TimedOut);
+            return;
+        }
+        if request.kind() != SemanticActionKind::Click {
+            task.refuse(SemanticActionNativeFailure::UnsupportedInteraction);
+            return;
+        }
+
+        let rejoin = self
+            .agent_contexts
+            .get_mut(&id)
+            .ok_or(ContextPortFailure::Stale)
+            .and_then(|binding| {
+                binding.rejoin_navigation_replacement(context, AgentReplacementAdvance::Direct)
+            });
+        match rejoin {
+            Ok(AgentReplacementRejoin::NotPending | AgentReplacementRejoin::Ready) => {}
+            Ok(AgentReplacementRejoin::DeferredLocation) => {
+                task.refuse(SemanticActionNativeFailure::StaleReference);
+                self.retry_deferred_owned_agent_location_check(id);
+                return;
+            }
+            Ok(AgentReplacementRejoin::DeferredRendererLoss) => {
+                let emitter = self
+                    .agent_contexts
+                    .get(&id)
+                    .map(|binding| binding.event_emitter.clone());
+                task.refuse(SemanticActionNativeFailure::StaleReference);
+                if let Some(emitter) = emitter {
+                    emitter.emit_renderer_lost(context);
+                } else {
+                    self.fail_agent_context_invariant(
+                        "agent-context action rejoin lost deferred renderer owner",
+                    );
+                }
+                return;
+            }
+            Err(failure) => {
+                task.refuse(map_context_failure_to_action(failure));
+                return;
+            }
+        }
+
+        let failure = match self.agent_contexts.get(&id) {
+            None => Some(SemanticActionNativeFailure::StaleReference),
+            Some(binding) if binding.join != context => {
+                Some(SemanticActionNativeFailure::StaleReference)
+            }
+            Some(binding) if binding.renderer_lost => {
+                Some(SemanticActionNativeFailure::RendererLost)
+            }
+            Some(binding)
+                if binding.pending_navigation.is_some()
+                    || binding.pending_recovery.is_some()
+                    || binding.pending_screenshot.is_some() =>
+            {
+                Some(SemanticActionNativeFailure::ResourceExhausted)
+            }
+            Some(binding)
+                if !binding
+                    .capabilities
+                    .contains(zephium_agentic::ContextCapability::Act) =>
+            {
+                Some(SemanticActionNativeFailure::UnsupportedInteraction)
+            }
+            Some(binding)
+                if frame.frame() != FrameId::MAIN
+                    || frame.trust() != SemanticFrameTrust::SameOrigin
+                    || binding.committed_target.is_none()
+                    || binding.last_semantic_invocation
+                        != Some(request.checkpoint_invocation())
+                    || binding.semantic_snapshot_generation
+                        != Some(request.checkpoint_snapshot()) =>
+            {
+                Some(SemanticActionNativeFailure::StaleReference)
+            }
+            Some(binding) if binding.view.semantic_pending_for_audit() != Some(false) => {
+                Some(SemanticActionNativeFailure::ResourceExhausted)
+            }
+            Some(_) => None,
+        };
+        if let Some(failure) = failure {
+            task.refuse(failure);
+            return;
+        }
+
+        let timeout_guard = task.callback_guard();
+        let Some(watchdog) = crate::platform::imp::schedule_content_policy_timeout(
+            execution_window.saturating_sub(elapsed),
+            move || {
+                let rejected = timeout_guard.clone();
+                if !crate::host::try_with_agent_context_terminal(move |host| {
+                    host.timeout_owned_agent_action(id, attempt);
+                }) {
+                    rejected.callback_dispatch_rejected();
+                }
+            },
+        ) else {
+            task.refuse(SemanticActionNativeFailure::Transport);
+            return;
+        };
+        let Some(binding) = self.agent_contexts.get(&id) else {
+            drop(watchdog);
+            task.refuse(SemanticActionNativeFailure::StaleReference);
+            return;
+        };
+        let callback_guard = task.callback_guard();
+        let Some(request) = task.take_request() else {
+            drop(watchdog);
+            self.fail_agent_context_invariant(
+                "agent-context action request changed during admission",
+            );
+            task.refuse(SemanticActionNativeFailure::Transport);
+            return;
+        };
+        binding
+            .view
+            .dispatch_semantic_action(request, admitted_at, move |settlement| {
+                drop(watchdog);
+                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    task.complete(settlement);
+                }))
+                .is_err()
+                {
+                    callback_guard.callback_dispatch_rejected();
+                }
+            });
+    }
+
+    #[cfg(target_os = "macos")]
+    fn timeout_owned_agent_action(
+        &mut self,
+        id: ContextId,
+        attempt: zephium_agentic::SemanticActionAttemptId,
+    ) {
+        let matched = self
+            .agent_contexts
+            .get(&id)
+            .and_then(|binding| binding.view.semantic())
+            .is_some_and(|semantic| semantic.timeout_action(attempt));
+        if !matched {
+            self.fail_agent_context_invariant(
+                "agent-context action timeout lost its exact pending invocation",
+            );
         }
     }
 
@@ -4592,6 +4769,23 @@ const fn map_context_failure_to_screenshot(
         | ContextPortFailure::ExtensionIsolationUnproven
         | ContextPortFailure::CookieTransferFailed
         | ContextPortFailure::NativeRefused => SemanticScreenshotNativeFailure::Transport,
+    }
+}
+
+#[cfg(target_os = "macos")]
+const fn map_context_failure_to_action(failure: ContextPortFailure) -> SemanticActionNativeFailure {
+    match failure {
+        ContextPortFailure::Unsupported => SemanticActionNativeFailure::UnsupportedInteraction,
+        ContextPortFailure::ResourceExhausted => SemanticActionNativeFailure::ResourceExhausted,
+        ContextPortFailure::Cancelled => SemanticActionNativeFailure::Cancelled,
+        ContextPortFailure::TimedOut => SemanticActionNativeFailure::TimedOut,
+        ContextPortFailure::Stale => SemanticActionNativeFailure::StaleReference,
+        ContextPortFailure::Shutdown => SemanticActionNativeFailure::Shutdown,
+        ContextPortFailure::ProfileUnavailable
+        | ContextPortFailure::ProfileBusy
+        | ContextPortFailure::ExtensionIsolationUnproven
+        | ContextPortFailure::CookieTransferFailed
+        | ContextPortFailure::NativeRefused => SemanticActionNativeFailure::Transport,
     }
 }
 

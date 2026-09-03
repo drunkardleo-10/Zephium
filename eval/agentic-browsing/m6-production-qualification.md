@@ -24,7 +24,7 @@ must finish before collection authority is exercised.
 `cargo xtask check-agentic-probe-boundary` is part of ordinary CI and now:
 
 - decodes `browse-baseline-v1.json`, `native-input-matrix-v1.json`,
-  `semantic-runtime-macos-v2.json`, and `capabilities-v1.json` with closed
+  `semantic-runtime-macos-v3.json`, and `capabilities-v1.json` with closed
   schemas and file-size ceilings;
 - rejects unknown fields, machine-local paths, and high-confidence secret or
   raw-content fields;
@@ -252,12 +252,17 @@ agentic-owned Windows modules. Cross-compilation is not device behavior.
   events, zero activation rows, zero focus-theft rows, and zero retained native
   views. This qualifies only that deterministic safety route.
 - The separately authorized production semantic adapter qualifier passed on
-  macOS 27.0 build 26A5421a / WebKit 22625.1.29.11.25. One hidden,
-  extension-free, ephemeral 1280-by-800 logical view produced two checked
-  snapshots across two isolated-world epochs; page-world bridge exposure and
-  focus theft remained absent and all retained native owners drained. The
-  closed manifest explicitly excludes arbitrary-site, Windows, provider-token,
-  and Browse/resource claims.
+  macOS 27.0.0 / WebKit 22625.1.29.11.26. One hidden, extension-free,
+  ephemeral 1280-by-800 logical view produced five checked snapshots across
+  three isolated-world epochs. A private-ref fixed semantic click changed only
+  the intended fixture's declared `Expanded` state from false to true, remained
+  untrusted page input, granted zero transient/sticky user activation, admitted
+  no popup, and passed the existing settlement and independent fresh-snapshot
+  verification cores. Page-world bridge exposure and focus
+  theft remained absent and all retained native owners drained. This qualifies
+  the compatible fixed recipe and adapter path, not actual policy assessment,
+  the full host/controller path, general trusted/native input, arbitrary sites,
+  Windows, provider-token flow, or Browse/resource behavior.
 - The Windows adapter is source-guarded and cross-compiles. Cross-compilation is
   not physical-device behavioral evidence. Its owned-context port now admits
   hidden suspend/resume through WebView2 only, with a ten-second UI-thread
@@ -622,7 +627,7 @@ agentic-owned Windows modules. Cross-compilation is not device behavior.
   remain separate blockers.
 
 The authoritative aggregate records and exact remaining blockers are in
-`native-input-matrix-v1.json`, `semantic-runtime-macos-v2.json`, and
+`native-input-matrix-v1.json`, `semantic-runtime-macos-v3.json`, and
 `browse-baseline-v1.json`.
 
 ## Remaining release blockers

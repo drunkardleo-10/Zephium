@@ -598,8 +598,8 @@ general panic-recovery claim.
 
 ## Reviewed macOS native evidence
 
-On 2026-09-02, the separately authorized production-path qualifier passed on
-macOS 27.0 build 26A5421a with WebKit 22625.1.29.11.25 using this exact command:
+On 2026-09-03, the separately authorized adapter-path qualifier passed on
+macOS 27.0 build 26A5425a with WebKit 22625.1.29.11.26 using this exact command:
 
 ```sh
 cargo run --locked -p zephium-engine \
@@ -609,17 +609,23 @@ cargo run --locked -p zephium-engine \
 
 The content-free aggregate proves one ephemeral, extension-free, hidden
 1280-by-800 logical owned view across three fixed loopback documents and three
-fresh isolated-world epochs. Four successful snapshots passed fixed semantic
-and redaction checks. A closed deferred-script response held one same-document
-mutation behind an exact host gate while the production runtime captured its
-initial references. After release, an anchored request for the removed node was
-refused as `AnchorMissing`, then a fresh snapshot verified the changed stable
-node and absence of the removed reference. The page-world bridge remained
-absent, focus theft remained zero, and the page, data store, window, fixture
-listener, and semantic handler drained. The closed machine-readable result is
-`semantic-runtime-macos-v2.json`; the ordinary evidence gate rejects field
-widening, retained views, unrecognized fields, raw content, credentials,
-machine-local paths, and claims beyond this fixed fixture.
+fresh isolated-world epochs. Five successful snapshots passed fixed semantic
+and redaction checks, including a ref-bound fixed semantic click whose fresh
+snapshot changed the declared `Expanded` postcondition from false to true and
+passed the existing settlement and independent verification cores. The
+resulting DOM event was untrusted and produced neither user activation nor
+popup admission. A closed
+deferred-script response held one same-document mutation behind an exact host
+gate while the production runtime captured its initial references. After
+release, an anchored request for the removed node was refused as
+`AnchorMissing`, then a fresh snapshot verified the changed stable node and
+absence of the removed reference. The page-world bridge remained absent, focus
+theft remained zero, and the page, data store, window, fixture listener, and
+semantic handler drained. This qualifies the fixed runtime and macOS adapter on
+the closed fixture, not the full policy/host/controller path. The closed
+machine-readable result is `semantic-runtime-macos-v3.json`; the ordinary
+evidence gate rejects field widening, retained views, unrecognized fields, raw
+content, credentials, machine-local paths, and claims beyond this fixed fixture.
 
 The first authorized execution exposed that toolkit defaults had produced a
 200-by-200 macOS viewport while Windows used a 1-by-1 placeholder. Production

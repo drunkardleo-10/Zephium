@@ -20,7 +20,8 @@ use wry::{
     WebViewBuilderExtMacos as _,
 };
 use zephium_agentic::{
-    ContextOwnedViewport, ContextProfileStorageClass, SemanticRuntimeInvocation,
+    ContextOwnedViewport, ContextProfileStorageClass, SemanticActionNativeFailure,
+    SemanticActionNativeRequest, SemanticActionNativeSettlement, SemanticRuntimeInvocation,
     SemanticRuntimePortFailure, SemanticScreenshotNativeCapture, SemanticScreenshotNativeFailure,
     SemanticScreenshotNativeRequest, SemanticSnapshot,
 };
@@ -178,6 +179,20 @@ impl AgentOwnedView {
             completion,
             callback_panicked,
         )
+    }
+
+    pub(crate) fn dispatch_semantic_action(
+        &self,
+        request: SemanticActionNativeRequest,
+        admitted_at: Instant,
+        completion: impl FnOnce(SemanticActionNativeSettlement) + 'static,
+    ) {
+        let Some(semantic) = self.semantic() else {
+            let completed_at = request.requested_at();
+            completion(request.fail(SemanticActionNativeFailure::Shutdown, completed_at));
+            return;
+        };
+        super::semantic_action::dispatch(&self.view, semantic, request, admitted_at, completion);
     }
 
     pub(crate) fn semantic_pending_for_audit(&self) -> Option<bool> {

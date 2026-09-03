@@ -8,7 +8,7 @@ use serde::Deserialize;
 const BASELINE_PATH: &str = "eval/agentic-browsing/browse-baseline-v1.json";
 const NATIVE_MATRIX_PATH: &str = "eval/agentic-browsing/native-input-matrix-v1.json";
 const CAPABILITIES_PATH: &str = "eval/agentic-browsing/capabilities-v1.json";
-const MACOS_SEMANTIC_RUNTIME_PATH: &str = "eval/agentic-browsing/semantic-runtime-macos-v2.json";
+const MACOS_SEMANTIC_RUNTIME_PATH: &str = "eval/agentic-browsing/semantic-runtime-macos-v3.json";
 const MAX_BASELINE_BYTES: usize = 32 * 1024;
 const MAX_NATIVE_MATRIX_BYTES: usize = 64 * 1024;
 const MAX_CAPABILITIES_BYTES: usize = 64 * 1024;
@@ -55,6 +55,13 @@ struct MacOsSemanticRuntimeEvidence {
     fixture: String,
     snapshots: u32,
     world_epochs: u32,
+    fixed_action_backend: String,
+    fixed_click: String,
+    verified_postcondition: String,
+    event_trust: String,
+    transient_user_activation: u32,
+    sticky_user_activation: u32,
+    popup_admitted: u32,
     mutation_gate: String,
     stale_anchor: String,
     mutation_recovery: String,
@@ -77,16 +84,16 @@ struct SemanticViewportEvidence {
 
 fn validate_macos_semantic_runtime(evidence: MacOsSemanticRuntimeEvidence) -> Result<(), String> {
     validate_date("macOS semantic-runtime reviewed_on", &evidence.reviewed_on)?;
-    if evidence.schema_version != 2
-        || evidence.reviewed_on != "2026-09-02"
-        || evidence.scope != "authorized_hidden_fixed_dom_semantic_runtime_v2"
+    if evidence.schema_version != 3
+        || evidence.reviewed_on != "2026-09-03"
+        || evidence.scope != "authorized_hidden_fixed_semantic_runtime_v3"
         || evidence.command
             != "cargo run --locked -p zephium-engine --features native-agentic-semantic-probe --bin macos-agentic-semantic-probe -- --ci-hidden-fixed-dom"
         || evidence.platform != "macos"
-        || evidence.os_version != "27.0"
-        || evidence.os_build != "26A5421a"
+        || evidence.os_version != "27.0.0"
+        || evidence.os_build != "26A5425a"
         || evidence.engine != "WebKit"
-        || evidence.engine_version != "22625.1.29.11.25"
+        || evidence.engine_version != "22625.1.29.11.26"
         || evidence.profile != "ephemeral"
         || evidence.extensions != "absent"
         || evidence.presentation != "hidden"
@@ -94,8 +101,15 @@ fn validate_macos_semantic_runtime(evidence: MacOsSemanticRuntimeEvidence) -> Re
         || evidence.viewport.height != 800
         || evidence.viewport.unit != "logical_css_pixels"
         || evidence.fixture != "loopback_only_fixed_documents_and_host_gated_mutation"
-        || evidence.snapshots != 4
+        || evidence.snapshots != 5
         || evidence.world_epochs != 3
+        || evidence.fixed_action_backend != "fixed_semantic_recipe"
+        || evidence.fixed_click != "verified"
+        || evidence.verified_postcondition != "expanded"
+        || evidence.event_trust != "untrusted"
+        || evidence.transient_user_activation != 0
+        || evidence.sticky_user_activation != 0
+        || evidence.popup_admitted != 0
         || evidence.mutation_gate != "host_released"
         || evidence.stale_anchor != "refused"
         || evidence.mutation_recovery != "verified"
@@ -117,6 +131,8 @@ fn validate_macos_semantic_runtime(evidence: MacOsSemanticRuntimeEvidence) -> Re
             "provider_token_budget",
             "browse_or_agent_resource_baseline",
             "arbitrary_mutation_compatibility",
+            "trusted_native_input",
+            "full_policy_host_controller_path",
         ],
     )
 }
@@ -659,14 +675,20 @@ fn validate_capability_rows(rows: &[Capability]) -> Result<(), String> {
         (
             "macos",
             "immutable_isolated_world_runtime",
-            "implemented_in_release_excluded_m1_adapter",
-            "hidden_fixed_dom_qualified_other_routes_pending",
+            "implemented_in_feature_gated_production_adapter",
+            "hidden_semantic_runtime_and_fixed_click_qualified",
         ),
         (
             "macos",
             "appkit_window_event_routing",
             "implemented_in_release_excluded_m1_adapter",
-            "pending_device_capture",
+            "named_device_no_effect_hidden_background_or_focused",
+        ),
+        (
+            "macos",
+            "direct_owned_wkwebview_nsresponder_input",
+            "release_excluded_experiment_only",
+            "trusted_effect_with_activation_boundary_not_qualified",
         ),
         (
             "macos",
@@ -850,7 +872,7 @@ mod tests {
     const NATIVE_MATRIX: &str =
         include_str!("../../eval/agentic-browsing/native-input-matrix-v1.json");
     const MACOS_SEMANTIC_RUNTIME: &str =
-        include_str!("../../eval/agentic-browsing/semantic-runtime-macos-v2.json");
+        include_str!("../../eval/agentic-browsing/semantic-runtime-macos-v3.json");
     const CAPABILITIES: &str = include_str!("../../eval/agentic-browsing/capabilities-v1.json");
 
     fn repository() -> &'static Path {

@@ -7,6 +7,8 @@ mod agentic_semantic_probe;
 mod content_filter;
 mod credentials;
 #[cfg(feature = "agentic-browser")]
+mod semantic_action;
+#[cfg(feature = "agentic-browser")]
 mod semantic_runtime;
 #[cfg(feature = "agentic-browser")]
 mod semantic_screenshot;

@@ -4,7 +4,7 @@
   const GLOBAL_NAME = "__zephiumSemanticRuntimeV1";
   const PROTOCOL_VERSION = 1;
   const WIRE_VERSION = 1;
-  const MAX_REQUEST_BYTES = 2048;
+  const MAX_REQUEST_BYTES = 16384;
   const MAX_SAFE_INTEGER = 9007199254740991;
   const MAX_NODES = 512;
   const MAX_TEXT_BYTES = 131072;
@@ -18,6 +18,10 @@
   const MAX_SURROUNDING_BYTES = 8192;
   const MAX_TRACKED_IDENTITIES = 2048;
   const MAX_DOCUMENT_INVOCATIONS = 4096;
+  const MAX_ACTION_DESCRIPTOR_NODES = 128;
+  const MAX_ACTION_DESCRIPTOR_TEXT_BYTES = 4096;
+  const MAX_ACTION_DESCRIPTOR_WIRE_BYTES = 16384;
+  const MAX_ACTION_DESCRIPTOR_VISITED_NODES = 2048;
   const CHANNEL_PULL = "P1";
   const CHANNEL_RESULT_PREFIX = "R1:";
   const CHANNEL_ACK = "A1";
@@ -36,6 +40,7 @@
   const numberIsFinite = Number.isFinite;
   const numberIsSafeInteger = Number.isSafeInteger;
   const mathRound = Math.round;
+  const mathAbs = Math.abs;
   const mathMin = Math.min;
   const mathMax = Math.max;
   const stringToLowerCase = String.prototype.toLowerCase;
@@ -61,6 +66,7 @@
   const nodeParentGetter = getter(Node.prototype, "parentNode");
   const nodeOwnerDocumentGetter = getter(Node.prototype, "ownerDocument");
   const nodeConnectedGetter = getter(Node.prototype, "isConnected");
+  const nodeContains = Node.prototype.contains;
   const characterDataGetter = getter(CharacterData.prototype, "data");
   const elementTagGetter = getter(Element.prototype, "tagName");
   const elementShadowGetter = getter(Element.prototype, "shadowRoot");
@@ -75,7 +81,10 @@
   const hasAttribute = Element.prototype.hasAttribute;
   const getBoundingClientRect = Element.prototype.getBoundingClientRect;
   const documentGetElementById = Document.prototype.getElementById;
+  const documentElementFromPoint = Document.prototype.elementFromPoint;
   const getComputedStyleFixed = globalThis.getComputedStyle;
+  const htmlElementClick =
+    typeof HTMLElement === "function" ? HTMLElement.prototype.click : null;
   const weakMapGet = WeakMap.prototype.get;
   const weakMapSet = WeakMap.prototype.set;
 
@@ -105,11 +114,15 @@
     typeof HTMLOptionElement === "function"
       ? getter(HTMLOptionElement.prototype, "selected")
       : null;
+  const shadowHostGetter =
+    typeof ShadowRoot === "function" ? getter(ShadowRoot.prototype, "host") : null;
 
   const nodeKeys = new WeakMap();
   const keyNodes = new Map();
   let nextNodeKey = 1;
   let busy = false;
+  let lastObservationInvocation = 0;
+  let lastObservationGeneration = 0;
 
   const IDENTITY_EXHAUSTED = objectFreeze({});
 
@@ -134,11 +147,11 @@
   }
 
   function parseRequest(encoded) {
-    if (typeof encoded !== "string" || encoded.length === 0 || encoded.length > MAX_REQUEST_BYTES) {
+    if (
+      typeof encoded !== "string" || encoded.length === 0 ||
+      utf8Length(encoded, MAX_REQUEST_BYTES + 1) > MAX_REQUEST_BYTES
+    ) {
       return null;
-    }
-    for (let index = 0; index < encoded.length; index += 1) {
-      if (encoded.charCodeAt(index) > 127) return null;
     }
 
     let request;
@@ -147,6 +160,8 @@
     } catch (_) {
       return null;
     }
+    if (!isPlainObject(request)) return null;
+    if (objectHasOwn(request, "o")) return parseActionRequest(request);
     if (!hasExactKeys(request, ["v", "i", "g", "s", "b"])) return null;
     if (
       request.v !== PROTOCOL_VERSION ||
@@ -206,6 +221,80 @@
       return null;
     }
     return request;
+  }
+
+  function parseActionRequest(request) {
+    if (!hasExactKeys(request, ["v", "o", "a", "i", "g", "t", "r", "k", "e", "p", "f", "of"])) {
+      return null;
+    }
+    if (
+      request.v !== PROTOCOL_VERSION ||
+      request.o !== "action_execute" ||
+      !isPositiveSafeInteger(request.a) ||
+      !isPositiveSafeInteger(request.i) ||
+      !isPositiveSafeInteger(request.g) ||
+      !isPositiveSafeInteger(request.t) ||
+      typeof request.r !== "string" ||
+      typeof request.k !== "string" ||
+      !validRuntimeDescriptor(request.f) ||
+      !numberIsSafeInteger(request.p) ||
+      request.p < 0 ||
+      request.p > MAX_SAFE_INTEGER
+    ) {
+      return null;
+    }
+    const roles = [
+      "group", "document", "landmark", "heading", "paragraph", "link", "button",
+      "textbox", "password", "searchbox", "checkbox", "radio", "combobox", "listbox",
+      "option", "spinbutton", "slider", "tab", "menu_item", "dialog", "list",
+      "list_item", "table", "row", "cell_header", "cell", "image", "progress", "status",
+      "frame_boundary"
+    ];
+    if (!roles.includes(request.r) || !["click", "fill", "select", "press", "scroll"].includes(request.k)) {
+      return null;
+    }
+    if ((request.k === "select") !== (request.p > 0)) return null;
+    if (request.k === "select") {
+      if (!validRuntimeDescriptor(request.of)) return null;
+    } else if (request.of !== null) {
+      return null;
+    }
+    const expected = request.e;
+    if (
+      !hasExactKeys(expected, ["x", "y", "w", "h"]) ||
+      !numberIsSafeInteger(expected.x) ||
+      mathAbs(expected.x) > 1000000 ||
+      !numberIsSafeInteger(expected.y) ||
+      mathAbs(expected.y) > 1000000 ||
+      !numberIsSafeInteger(expected.w) ||
+      expected.w < 1 ||
+      expected.w > 1000000 ||
+      !numberIsSafeInteger(expected.h) ||
+      expected.h < 1 ||
+      expected.h > 1000000
+    ) {
+      return null;
+    }
+    return request;
+  }
+
+  function validRuntimeDescriptor(value) {
+    if (!hasExactKeys(value, ["r", "o", "q", "s", "n", "vk", "vt", "vo", "vb"])) return false;
+    if (
+      !numberIsSafeInteger(value.r) || value.r < 1 || value.r > 30 ||
+      !numberIsSafeInteger(value.o) || value.o < 0 || value.o > 31 ||
+      !numberIsSafeInteger(value.q) || value.q < 1 || value.q > 3 ||
+      !numberIsSafeInteger(value.s) || value.s < 0 || value.s > 127 ||
+      (value.n !== null && (typeof value.n !== "string" || value.n.length > 2048)) ||
+      !numberIsSafeInteger(value.vk) || value.vk < 0 || value.vk > 4 ||
+      !numberIsSafeInteger(value.vo) || value.vo < 0 || value.vo > 65535 ||
+      typeof value.vb !== "boolean"
+    ) return false;
+    if (value.vk === 1) return typeof value.vt === "string" && value.vt.length <= 4096 && value.vo === 0 && !value.vb;
+    if (value.vt !== null) return false;
+    if (value.vk === 3) return value.vo === 0;
+    if (value.vk === 4) return !value.vb;
+    return value.vo === 0 && !value.vb;
   }
 
   function utf8Length(value, ceiling) {
@@ -432,6 +521,12 @@
       return null;
     }
     return entry.node;
+  }
+
+  function resolveKeyAtGeneration(key, generation) {
+    const entry = keyNodes.get(key);
+    if (entry === undefined || entry.generation !== generation) return null;
+    return resolveKey(key);
   }
 
   const ariaRoles = objectFreeze({
@@ -1352,6 +1447,314 @@
     return encoded.value;
   }
 
+  function actionFault(code) {
+    return `E2:${code}`;
+  }
+
+  function actionOperationBit(kind) {
+    if (kind === "click") return 1;
+    if (kind === "fill") return 2;
+    if (kind === "select") return 4;
+    if (kind === "press") return 8;
+    if (kind === "scroll") return 16;
+    return 0;
+  }
+
+  function composedContains(target, candidate) {
+    let current = candidate;
+    for (let depth = 0; depth <= MAX_TREE_DEPTH && current !== null; depth += 1) {
+      if (current === target) return true;
+      let parent = read(nodeParentGetter, current);
+      if (parent !== null && nodeType(parent) === 11 && shadowHostGetter !== null) {
+        const host = read(shadowHostGetter, parent);
+        if (host !== null && host !== undefined) parent = host;
+      }
+      current = parent;
+    }
+    try {
+      return apply(nodeContains, target, [candidate]) === true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function boundedViewport() {
+    const width = mathRound(Number(globalThis.innerWidth));
+    const height = mathRound(Number(globalThis.innerHeight));
+    if (
+      !numberIsSafeInteger(width) ||
+      !numberIsSafeInteger(height) ||
+      width < 1 ||
+      height < 1 ||
+      width > 32768 ||
+      height > 32768
+    ) {
+      return null;
+    }
+    return { width, height };
+  }
+
+  function actionPoint(target, rect, viewport) {
+    const left = mathMax(0, rect.x);
+    const top = mathMax(0, rect.y);
+    const right = mathMin(viewport.width, rect.x + rect.width);
+    const bottom = mathMin(viewport.height, rect.y + rect.height);
+    if (right <= left || bottom <= top) return null;
+    const insetX = mathMin(4, mathMax(1, (right - left) / 4));
+    const insetY = mathMin(4, mathMax(1, (bottom - top) / 4));
+    const candidates = [
+      [(left + right) / 2, (top + bottom) / 2],
+      [left + insetX, top + insetY],
+      [right - insetX, top + insetY],
+      [left + insetX, bottom - insetY],
+      [right - insetX, bottom - insetY]
+    ];
+    for (const candidate of candidates) {
+      const x = mathMax(0, mathMin(viewport.width - 1, mathRound(candidate[0])));
+      const y = mathMax(0, mathMin(viewport.height - 1, mathRound(candidate[1])));
+      let hit;
+      try {
+        hit = apply(documentElementFromPoint, document, [x, y]);
+      } catch (_) {
+        return null;
+      }
+      if (hit !== null && composedContains(target, hit)) return { x, y };
+    }
+    return null;
+  }
+
+  function geometryCompatible(expected, actual) {
+    const xTolerance = mathMax(8, mathMin(64, mathRound(expected.w / 2)));
+    const yTolerance = mathMax(8, mathMin(64, mathRound(expected.h / 2)));
+    const widthTolerance = mathMax(4, mathRound(expected.w / 4));
+    const heightTolerance = mathMax(4, mathRound(expected.h / 4));
+    return (
+      mathAbs(mathRound(actual.x) - expected.x) <= xTolerance &&
+      mathAbs(mathRound(actual.y) - expected.y) <= yTolerance &&
+      mathAbs(mathRound(actual.width) - expected.w) <= widthTolerance &&
+      mathAbs(mathRound(actual.height) - expected.h) <= heightTolerance
+    );
+  }
+
+  function selectDelta(target, option) {
+    const descriptor = classify(option);
+    if (descriptor === null || descriptor.role !== "option") return null;
+    let owner = read(nodeParentGetter, option);
+    for (let depth = 0; depth <= 2 && owner !== null && owner !== target; depth += 1) {
+      owner = read(nodeParentGetter, owner);
+    }
+    if (owner !== target) return null;
+    let selected;
+    let desired;
+    try {
+      selected = read(selectIndexGetter, target);
+      desired = read(optionIndexGetter, option);
+    } catch (_) {
+      return null;
+    }
+    if (
+      !numberIsSafeInteger(selected) ||
+      !numberIsSafeInteger(desired) ||
+      selected < -1 ||
+      desired < 0 ||
+      desired > 65535
+    ) {
+      return null;
+    }
+    const delta = desired - mathMax(0, selected);
+    return mathAbs(delta) <= 65535 ? delta : null;
+  }
+
+  function descriptorRoleCode(role) {
+    const roles = {
+      group: 1, document: 2, landmark: 3, heading: 4, paragraph: 5, link: 6,
+      button: 7, textbox: 8, password: 9, searchbox: 10, checkbox: 11, radio: 12,
+      combobox: 13, listbox: 14, option: 15, spinbutton: 16, slider: 17, tab: 18,
+      menu_item: 19, dialog: 20, list: 21, list_item: 22, table: 23, row: 24,
+      cell_header: 25, cell: 26, image: 27, progress: 28, status: 29, frame_boundary: 30
+    };
+    return objectHasOwn(roles, role) ? roles[role] : 0;
+  }
+
+  function descriptorSensitivityCode(sensitivity) {
+    if (sensitivity === "public" || sensitivity === undefined) return 1;
+    if (sensitivity === "sensitive") return 2;
+    if (sensitivity === "secret") return 3;
+    return 0;
+  }
+
+  function descriptorValue(value) {
+    if (value === undefined) return { kind: 0, text: null, ordinal: 0, boolean: false };
+    if (!isPlainObject(value) || typeof value.k !== "string") return null;
+    if (value.k === "text" && typeof value.value === "string") {
+      return { kind: 1, text: value.value, ordinal: 0, boolean: false };
+    }
+    if (value.k === "redacted") return { kind: 2, text: null, ordinal: 0, boolean: false };
+    if (value.k === "boolean" && typeof value.value === "boolean") {
+      return { kind: 3, text: null, ordinal: 0, boolean: value.value };
+    }
+    if (value.k === "ordinal" && numberIsSafeInteger(value.value) && value.value >= 0 && value.value <= 65535) {
+      return { kind: 4, text: null, ordinal: value.value, boolean: false };
+    }
+    return null;
+  }
+
+  function runtimeDescriptor(element, generation) {
+    const state = {
+      request: {
+        g: generation,
+        b: {
+          n: MAX_ACTION_DESCRIPTOR_NODES,
+          t: MAX_ACTION_DESCRIPTOR_TEXT_BYTES,
+          w: MAX_ACTION_DESCRIPTOR_WIRE_BYTES,
+          x: MAX_ACTION_DESCRIPTOR_VISITED_NODES,
+          geo: true
+        }
+      },
+      visited: 0,
+      textBytes: 0,
+      completeness: "complete",
+      stopped: false
+    };
+    const records = traverse(element, state, true);
+    if (records.length === 0 || records[0].element !== element || state.completeness !== "complete") {
+      return null;
+    }
+    const wire = records[0].wire;
+    const value = descriptorValue(wire.v);
+    const role = descriptorRoleCode(wire.r);
+    const sensitivity = descriptorSensitivityCode(wire.q);
+    if (value === null || role === 0 || sensitivity === 0) return null;
+    return {
+      r: role,
+      o: wire.o || 0,
+      q: sensitivity,
+      s: wire.s || 0,
+      n: wire.n === undefined ? null : wire.n,
+      vk: value.kind,
+      vt: value.text,
+      vo: value.ordinal,
+      vb: value.boolean
+    };
+  }
+
+  function descriptorMatches(expected, actual) {
+    if (!validRuntimeDescriptor(expected) || !validRuntimeDescriptor(actual)) return false;
+    return (
+      expected.r === actual.r && expected.o === actual.o && expected.q === actual.q &&
+      expected.s === actual.s && expected.n === actual.n && expected.vk === actual.vk &&
+      expected.vt === actual.vt && expected.vo === actual.vo && expected.vb === actual.vb
+    );
+  }
+
+  function runAction(request) {
+    let readyState;
+    try {
+      readyState = read(documentReadyStateGetter, document);
+    } catch (_) {
+      return actionFault("document_loading");
+    }
+    if (readyState !== "interactive" && readyState !== "complete") {
+      return actionFault("document_loading");
+    }
+    if (
+      lastObservationInvocation !== request.i ||
+      lastObservationGeneration !== request.g
+    ) {
+      return actionFault("target_changed");
+    }
+    sweepIdentities(request.g);
+    const target = resolveKeyAtGeneration(request.t, request.g);
+    if (target === null || nodeType(target) !== 1) return actionFault("stale_reference");
+    const descriptor = classify(target);
+    if (descriptor === null || descriptor.role !== request.r) return actionFault("target_changed");
+    const disabled = disabledState(target, false);
+    const readonly = has(target, "readonly") || lower(attribute(target, "aria-readonly", 16) || "") === "true";
+    if (disabled || ((request.k === "fill" || request.k === "select") && readonly)) {
+      return actionFault("target_disabled");
+    }
+    const credential = credentialField(target, descriptor, attribute(target, "aria-label", 512) || "");
+    if (credential || descriptor.role === "password") return actionFault("credential_boundary");
+    const required = actionOperationBit(request.k);
+    if (required === 0 || (operationBits(descriptor, disabled, readonly) & required) === 0) {
+      return actionFault("unsupported_interaction");
+    }
+    const targetDescriptor = runtimeDescriptor(target, request.g);
+    if (!descriptorMatches(request.f, targetDescriptor)) {
+      return actionFault("target_changed");
+    }
+    let delta = 0;
+    let selectedOption = null;
+    if (request.k === "select") {
+      const option = resolveKeyAtGeneration(request.p, request.g);
+      if (option === null) return actionFault("stale_reference");
+      selectedOption = option;
+      const optionDescriptor = runtimeDescriptor(option, request.g);
+      if (!descriptorMatches(request.of, optionDescriptor)) {
+        return actionFault("target_changed");
+      }
+      const computed = selectDelta(target, option);
+      if (computed === null) return actionFault("target_changed");
+      delta = computed;
+    }
+
+    const finalTargetDescriptor = runtimeDescriptor(target, request.g);
+    const finalOptionDescriptor = selectedOption === null
+      ? null
+      : runtimeDescriptor(selectedOption, request.g);
+    if (
+      !descriptorMatches(request.f, finalTargetDescriptor) ||
+      (selectedOption !== null && !descriptorMatches(request.of, finalOptionDescriptor)) ||
+      (selectedOption !== null && resolveKeyAtGeneration(request.p, request.g) !== selectedOption) ||
+      resolveKeyAtGeneration(request.t, request.g) !== target
+    ) {
+      return actionFault("target_changed");
+    }
+    if (!styleIsVisible(target)) return actionFault("target_occluded");
+    const rect = elementRect(target);
+    if (rect === null) return actionFault("target_occluded");
+    if (!geometryCompatible(request.e, rect)) return actionFault("target_changed");
+    const viewport = boundedViewport();
+    if (viewport === null) return actionFault("internal");
+
+    let point;
+    let readiness;
+    if (request.k === "scroll") {
+      point = { x: mathRound(viewport.width / 2), y: mathRound(viewport.height / 2) };
+      readiness = "scroll";
+    } else {
+      point = actionPoint(target, rect, viewport);
+      if (point === null) return actionFault("target_occluded");
+      readiness = "visible";
+    }
+    const geometry = wireRect(rect);
+    if (request.k !== "click" || typeof htmlElementClick !== "function") {
+      return actionFault("unsupported_interaction");
+    }
+    try {
+      apply(htmlElementClick, target, []);
+    } catch (_) {
+      return actionFault("unsupported_interaction");
+    }
+    return apply(jsonStringify, JSON, [{
+      v: PROTOCOL_VERSION,
+      a: request.a,
+      i: request.i,
+      g: request.g,
+      r: readiness,
+      x: geometry.x,
+      y: geometry.y,
+      w: geometry.w,
+      h: geometry.h,
+      vw: viewport.width,
+      vh: viewport.height,
+      px: point.x,
+      py: point.y,
+      d: delta,
+      b: "fixed_semantic_recipe"
+    }]);
+  }
+
   function run(request) {
     let readyState;
     try {
@@ -1400,8 +1803,22 @@
     const request = parseRequest(encoded);
     if (request === null) return fault("invalid_request");
     busy = true;
+    if (request.o === "action_execute") {
+      try {
+        return runAction(request);
+      } catch (_) {
+        return actionFault("internal");
+      } finally {
+        busy = false;
+      }
+    }
     try {
-      return run(request);
+      const result = run(request);
+      if (typeof result === "string" && !result.startsWith("E1:")) {
+        lastObservationInvocation = request.i;
+        lastObservationGeneration = request.g;
+      }
+      return result;
     } catch (error) {
       if (error === IDENTITY_EXHAUSTED) return fault("identity_exhausted");
       return fault("internal");

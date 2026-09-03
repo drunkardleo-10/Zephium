@@ -93,6 +93,8 @@ const ENGINE_MACOS_AGENT_CONTEXT: &str =
     "crates/zephium-engine/src/platform/macos/agent_context.rs";
 const ENGINE_MACOS_SEMANTIC_RUNTIME: &str =
     "crates/zephium-engine/src/platform/macos/semantic_runtime.rs";
+const ENGINE_MACOS_SEMANTIC_ACTION: &str =
+    "crates/zephium-engine/src/platform/macos/semantic_action.rs";
 const ENGINE_MACOS_SEMANTIC_SCREENSHOT: &str =
     "crates/zephium-engine/src/platform/macos/semantic_screenshot.rs";
 const ENGINE_MACOS_SEMANTIC_PROBE: &str =
@@ -116,9 +118,10 @@ const ENGINE_WINDOWS_SEMANTIC_RUNTIME: &str =
 const ENGINE_WINDOWS_SEMANTIC_SCREENSHOT: &str =
     "crates/zephium-engine/src/platform/windows/semantic_screenshot.rs";
 const ENGINE_HOST_CONTENT_RULES: &str = "crates/zephium-engine/src/host/content_rules.rs";
-const ENGINE_AGENTIC_NATIVE_UNSAFE_MODULES: [&str; 8] = [
+const ENGINE_AGENTIC_NATIVE_UNSAFE_MODULES: [&str; 9] = [
     ENGINE_MACOS_AGENT_CONTEXT,
     ENGINE_MACOS_SEMANTIC_RUNTIME,
+    ENGINE_MACOS_SEMANTIC_ACTION,
     ENGINE_MACOS_SEMANTIC_SCREENSHOT,
     ENGINE_WINDOWS_AGENT_CONTEXT,
     ENGINE_WINDOWS_COOKIE_TRANSFER,
@@ -126,7 +129,7 @@ const ENGINE_AGENTIC_NATIVE_UNSAFE_MODULES: [&str; 8] = [
     ENGINE_WINDOWS_SEMANTIC_SCREENSHOT,
     ENGINE_WINDOWS_AGENT_TIMEOUT,
 ];
-const ENGINE_AGENTIC_PRODUCTION_MODULES: [&str; 16] = [
+const ENGINE_AGENTIC_PRODUCTION_MODULES: [&str; 17] = [
     ENGINE_AGENT_CONTEXT_PORT,
     ENGINE_AGENT_CONTEXT_HOST,
     ENGINE_AGENT_COOKIE_SOURCE,
@@ -137,6 +140,7 @@ const ENGINE_AGENTIC_PRODUCTION_MODULES: [&str; 16] = [
     ENGINE_WINDOWS_SEMANTIC_PROTOCOL,
     ENGINE_MACOS_AGENT_CONTEXT,
     ENGINE_MACOS_SEMANTIC_RUNTIME,
+    ENGINE_MACOS_SEMANTIC_ACTION,
     ENGINE_MACOS_SEMANTIC_SCREENSHOT,
     ENGINE_WINDOWS_AGENT_CONTEXT,
     ENGINE_WINDOWS_COOKIE_TRANSFER,
@@ -313,7 +317,10 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         &read(repository.join(AGENTIC_SEMANTIC_EXECUTE))?,
         &read(repository.join(AGENTIC_SEMANTIC_EXECUTE_COORDINATOR))?,
         &read(repository.join(AGENTIC_CONTEXT_PORT))?,
-        &read(repository.join(ENGINE_AGENT_CONTEXT_PORT))?,
+        (
+            &read(repository.join(ENGINE_AGENT_CONTEXT_PORT))?,
+            &read(repository.join(ENGINE_MACOS_SEMANTIC_ACTION))?,
+        ),
     )?;
     validate_semantic_settle_wake(&read(repository.join(AGENTIC_SEMANTIC_SETTLE))?)?;
     validate_semantic_settlement_coordinator(
@@ -1032,11 +1039,11 @@ fn validate_engine_agent_context_panic_boundary(source: &str) -> Result<(), Stri
     if source
         .matches("letaccepted=contain_agent_port_panic")
         .count()
-        != 2
+        != 3
         || source
             .matches("let_=contain_agent_port_panic(&callback_admission")
             .count()
-            != 2
+            != 3
         || source
             .matches("matchstd::panic::catch_unwind(std::panic::AssertUnwindSafe(operation))")
             .count()
@@ -1047,7 +1054,7 @@ fn validate_engine_agent_context_panic_boundary(source: &str) -> Result<(), Stri
             != 2
     {
         return Err(
-            "production agent-context dispatch must contain both context and screenshot panic boundaries exactly once"
+            "production agent-context dispatch must contain context, screenshot, and action panic boundaries exactly once"
                 .to_owned(),
         );
     }
@@ -2418,7 +2425,9 @@ fn validate_engine_semantic_runtime_boundary(source: &str) -> Result<(), String>
         "fnrenderer_lost",
         "fncancel",
         "fnretire",
-        "DocumentPhase::Loading=>{returnErr((AgentSemanticRuntimeDispatchError::NotReady,completion));}",
+        "fnadmission_failure(&mutself)->Option<AgentSemanticRuntimeDispatchError>",
+        "DocumentPhase::Loading=>{returnSome(AgentSemanticRuntimeDispatchError::NotReady);}",
+        "ifself.pending.is_some()||self.awaiting_result{returnSome(AgentSemanticRuntimeDispatchError::Busy);}",
     ] {
         if !source.contains(required) {
             return Err(format!(
@@ -2497,6 +2506,9 @@ fn validate_macos_semantic_probe(
         "returnErr(\"focus_baseline\")",
         "view.prepare_semantic_document_load()",
         "view.dispatch_semantic(",
+        "ContextCapability::Act",
+        "verify_primary_click_execution(",
+        ".settle_and_verify(pending.settlement,snapshot,observed_at)",
         "SemanticObservationAssembler::new(",
         "SemanticFrameUnsupported::PlatformIsolationUnavailable",
         "SemanticRuntimeFault::AnchorMissing",
@@ -2549,8 +2561,13 @@ fn validate_macos_semantic_probe(
         "profile=ephemeral",
         "viewport=1280x800-logical",
         "fixture=loopback-only",
-        "snapshots=4",
+        "snapshots=5",
         "world_epochs=3",
+        "fixed_click=verified",
+        "postcondition=expanded",
+        "event_trust=untrusted",
+        "user_activation=0",
+        "popup_admitted=0",
         "mutation_gate=host-released",
         "stale_anchor=refused",
         "mutation_recovery=verified",
@@ -2587,6 +2604,8 @@ fn validate_macos_semantic_probe(
         "connect-src'none'",
         "form-action'none'",
         "frame-src'self'",
+        "aria-expanded=\"false\"",
+        "primaryAction.setAttribute('aria-expanded','true')",
     ] {
         if !fixture.contains(required) {
             return Err(format!(
@@ -5142,10 +5161,15 @@ fn validate_provider_secret_diagnostic_contract(source: &str) -> Result<(), Stri
     }
 
     let source = compact(source);
-    if source.matches("secret:Zeroizing<Vec<u8>>").count() != 2 {
-        return Err(
-            "both retained provider credential owners must use zeroizing byte storage".to_owned(),
-        );
+    for owner in [
+        "pubstructAgentProviderCredential{provider:AgentProviderKind,secret:Zeroizing<Vec<u8>>,}",
+        "structAgentProviderAttemptCredential{secret:Zeroizing<Vec<u8>>,}",
+    ] {
+        if !source.contains(owner) {
+            return Err(format!(
+                "retained provider credential owner lost zeroizing byte storage {owner}"
+            ));
+        }
     }
     for required in [
         "letmutencoded=Zeroizing::new(Vec::new());",
@@ -5169,7 +5193,7 @@ fn validate_provider_secret_diagnostic_contract(source: &str) -> Result<(), Stri
         .find("fntry_from_credential(")
         .ok_or_else(|| "agent provider bounded attempt credential copy is missing".to_owned())?;
     let attempt_copy_end = source[attempt_copy_start..]
-        .find("fninto_sensitive_header(")
+        .find("fnsensitive_header(")
         .map(|offset| attempt_copy_start + offset)
         .ok_or_else(|| "agent provider dispatch-time header conversion is missing".to_owned())?;
     let attempt_copy = &source[attempt_copy_start..attempt_copy_end];
@@ -5265,13 +5289,15 @@ fn validate_provider_revocation_before_secret_materialization(source: &str) -> R
     let decoder = execute
         .find("letmutdecoder=matchAgentProviderStreamDecoder::try_new")
         .ok_or_else(|| "agent provider stream decoder construction is missing".to_owned())?;
-    let header = execute
-        .find("letcredential=matchself.credential.into_sensitive_header(self.provider)")
+    let header = execute[decoder..]
+        .find("letcredential=matchself.credential.sensitive_header(self.provider)")
+        .map(|offset| decoder + offset)
         .ok_or_else(|| {
             "agent provider dispatch-time authentication header is missing".to_owned()
         })?;
-    let request = execute
+    let request = execute[header..]
         .find("letrequest=provider_request(")
+        .map(|offset| header + offset)
         .ok_or_else(|| "agent provider fixed request construction is missing".to_owned())?;
     if !(checks[0] < decoder && decoder < header && header < request && request < checks[1]) {
         return Err(
@@ -5866,8 +5892,9 @@ fn validate_semantic_execution_contract(
     execution: &str,
     coordinator: &str,
     context_port: &str,
-    engine_port: &str,
+    native: (&str, &str),
 ) -> Result<(), String> {
+    let (engine_port, macos_action) = native;
     let root = compact(root);
     for required in [
         "modsemantic_execute;",
@@ -6011,6 +6038,14 @@ fn validate_semantic_execution_contract(
         "SemanticActionExecutionCoordinatorError::ContextBusy|SemanticActionExecutionCoordinatorError::Capacity=>{SemanticActionFailure::ResourceExhausted}",
         "pub(crate)fninto_parts(self",
         "(AgentActiveEffect,SemanticActionExecutionCoordinatorError)",
+        "SemanticEffectClass::LocalWrite",
+        "SemanticWaitCondition::TargetState{state:crate::SemanticState::Expanded,present:true,}",
+        "AgentActiveEffect::for_execution_qualification(&action,attempt)",
+        "pubfnsettle_and_verify(",
+        "crate::begin_semantic_action_settlement(outcome,&self.action)",
+        "crate::SemanticActionSettlementCoordinator::new()",
+        ".observe_snapshot(reservation,observed_at,snapshot)",
+        "crate::verify_semantic_action_terminal(*terminal,&self.action,evidence)",
     ] {
         if !coordinator.contains(required) {
             return Err(format!(
@@ -6066,23 +6101,69 @@ fn validate_semantic_execution_contract(
         .map(|offset| start + offset)
         .ok_or_else(|| "engine action port lost bounded method boundary".to_owned())?;
     let action_method = &engine_port[start..end];
-    for required in ["let_=(request,completion);ContextDispatch::Unsupported"] {
+    for required in [
+        "#[cfg(target_os=\"macos\")]",
+        "request.kind()!=zephium_agentic::SemanticActionKind::Click",
+        "request.frame().frame()!=zephium_agentic::FrameId::MAIN",
+        "request.frame().trust()!=zephium_agentic::SemanticFrameTrust::SameOrigin",
+        "request.frame().context().identity().kind()!=zephium_agentic::ContextKind::Owned",
+        "self.schedule_action(request,completion)",
+        "#[cfg(not(target_os=\"macos\"))]",
+        "let_=(request,completion);ContextDispatch::Unsupported",
+    ] {
         if !action_method.contains(required) {
             return Err(format!(
-                "engine action port stopped failing closed before M1 qualification {required}"
+                "engine action port lost its exact macOS fixed-click boundary {required}"
             ));
         }
     }
     for forbidden in [
         "ContextDispatch::Scheduled",
         "ContextDispatch::Rejected",
-        "self.schedule",
         "dispatch_to_host",
         "platform::",
     ] {
         if action_method.contains(forbidden) {
             return Err(format!(
-                "engine action port admitted an unqualified M1 backend {forbidden}"
+                "engine action port bypassed its fixed action scheduler {forbidden}"
+            ));
+        }
+    }
+
+    let macos_action = compact(macos_action);
+    for required in [
+        "request.kind()!=SemanticActionKind::Click",
+        "encode_semantic_action_runtime_invocation(&request)",
+        "semantic.dispatch_action(invocation,move|outcome|",
+        "Ok(evidence)=>complete_fixed_recipe(request,evidence,admitted_at)",
+        "request.complete(evidence.backend(),evidence.readiness(),evidence.viewport(),evidence.geometry(),completed_at,completed_at,)",
+    ] {
+        if !macos_action.contains(required) {
+            return Err(format!(
+                "macOS semantic action adapter lost a required fixed-click invariant {required}"
+            ));
+        }
+    }
+    for forbidden in [
+        "querySelector",
+        "evaluateJavaScript",
+        "callAsyncJavaScript",
+        "CGEvent",
+        "NSEvent",
+        "NSResponder",
+        "EngineNativeInput",
+        "InProcessAccessibility",
+        "setHidden",
+        "set_visible",
+        "orderFront",
+        "postEvent",
+        "sendEvent",
+        "activateIgnoringOtherApps",
+        "makeKeyAndOrderFront",
+    ] {
+        if macos_action.contains(forbidden) {
+            return Err(format!(
+                "macOS semantic action adapter acquired forbidden authority {forbidden}"
             ));
         }
     }
@@ -8005,6 +8086,7 @@ mod tests {
                 ENGINE_WINDOWS_SEMANTIC_PROTOCOL,
                 ENGINE_MACOS_AGENT_CONTEXT,
                 ENGINE_MACOS_SEMANTIC_RUNTIME,
+                ENGINE_MACOS_SEMANTIC_ACTION,
                 ENGINE_MACOS_SEMANTIC_SCREENSHOT,
                 ENGINE_WINDOWS_AGENT_CONTEXT,
                 ENGINE_WINDOWS_COOKIE_TRANSFER,
@@ -8062,6 +8144,7 @@ mod tests {
             /// Credential owner.
             #[must_use]
             pub struct AgentProviderCredential {
+                provider: AgentProviderKind,
                 secret: Zeroizing<Vec<u8>>,
             }
 
@@ -8076,7 +8159,7 @@ mod tests {
                     secret.extend_from_slice(&credential.secret);
                 }
 
-                fn into_sensitive_header(self, provider: AgentProviderKind) {
+                fn sensitive_header(self, provider: AgentProviderKind) {
                     sensitive_header(provider, &self.secret);
                 }
             }
@@ -8134,7 +8217,7 @@ mod tests {
                     return finish_attempt();
                 }
                 let mut decoder = match AgentProviderStreamDecoder::try_new() {};
-                let credential = match self.credential.into_sensitive_header(self.provider) {};
+                let credential = match self.credential.sensitive_header(self.provider) {};
                 let request = provider_request();
                 if self.cancellation.is_cancelled() || self.shutdown.is_cancelled() {
                     return finish_attempt();
@@ -8167,8 +8250,8 @@ mod tests {
         );
         assert!(validate_provider_revocation_before_secret_materialization(
             &valid.replace(
-                "let mut decoder = match AgentProviderStreamDecoder::try_new() {};",
-                "let credential = match self.credential.into_sensitive_header(self.provider) {};\n                let mut decoder = match AgentProviderStreamDecoder::try_new() {};"
+                "let mut decoder = match AgentProviderStreamDecoder::try_new() {};\n                let credential = match self.credential.sensitive_header(self.provider) {};",
+                "let credential = match self.credential.sensitive_header(self.provider) {};\n                let mut decoder = match AgentProviderStreamDecoder::try_new() {};"
             )
         )
         .is_err());
@@ -8585,6 +8668,7 @@ mod tests {
             [
                 ENGINE_MACOS_AGENT_CONTEXT,
                 ENGINE_MACOS_SEMANTIC_RUNTIME,
+                ENGINE_MACOS_SEMANTIC_ACTION,
                 ENGINE_MACOS_SEMANTIC_SCREENSHOT,
                 ENGINE_WINDOWS_AGENT_CONTEXT,
                 ENGINE_WINDOWS_COOKIE_TRANSFER,
@@ -9269,6 +9353,18 @@ mod tests {
                     self,
                 ) -> (AgentActiveEffect, SemanticActionExecutionCoordinatorError) {}
             }
+            SemanticEffectClass::LocalWrite;
+            SemanticWaitCondition::TargetState {
+                state: crate::SemanticState::Expanded,
+                present: true,
+            };
+            AgentActiveEffect::for_execution_qualification(&action, attempt);
+            pub fn settle_and_verify() {
+                crate::begin_semantic_action_settlement(outcome, &self.action);
+                crate::SemanticActionSettlementCoordinator::new();
+                coordinator.observe_snapshot(reservation, observed_at, snapshot);
+                crate::verify_semantic_action_terminal(*terminal, &self.action, evidence);
+            }
         "#;
         let settle = r#"
             pub(crate) fn begin() {}
@@ -9296,10 +9392,43 @@ mod tests {
                 request: SemanticActionNativeRequest,
                 completion: SemanticActionNativeCompletion,
             ) -> ContextDispatch {
-                let _ = (request, completion);
-                ContextDispatch::Unsupported
+                #[cfg(target_os = "macos")]
+                {
+                    if request.kind() != zephium_agentic::SemanticActionKind::Click
+                        || request.frame().frame() != zephium_agentic::FrameId::MAIN
+                        || request.frame().trust() != zephium_agentic::SemanticFrameTrust::SameOrigin
+                        || request.frame().context().identity().kind()
+                            != zephium_agentic::ContextKind::Owned
+                    {
+                        return ContextDispatch::Unsupported;
+                    }
+                    self.schedule_action(request, completion)
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    let _ = (request, completion);
+                    ContextDispatch::Unsupported
+                }
             }
             fn capture_semantic_screenshot(&self) {}
+        "#;
+        let macos_action = r#"
+            if request.kind() != SemanticActionKind::Click {}
+            encode_semantic_action_runtime_invocation(&request);
+            semantic.dispatch_action(invocation, move |outcome| {
+                match outcome {
+                    Ok(evidence) => complete_fixed_recipe(request, evidence, admitted_at),
+                    Err(_) => unreachable!(),
+                }
+            });
+            request.complete(
+                evidence.backend(),
+                evidence.readiness(),
+                evidence.viewport(),
+                evidence.geometry(),
+                completed_at,
+                completed_at,
+            );
         "#;
         validate_semantic_execution_contract(
             root,
@@ -9308,7 +9437,7 @@ mod tests {
             execution,
             coordinator,
             context_port,
-            engine_port,
+            (engine_port, macos_action),
         )
         .expect("closed semantic execution handoff");
         assert!(validate_semantic_execution_contract(
@@ -9318,7 +9447,7 @@ mod tests {
             &format!("{execution}\nquerySelector(target);"),
             coordinator,
             context_port,
-            engine_port,
+            (engine_port, macos_action),
         )
         .is_err());
         assert!(validate_semantic_execution_contract(
@@ -9331,7 +9460,7 @@ mod tests {
             ),
             coordinator,
             context_port,
-            engine_port,
+            (engine_port, macos_action),
         )
         .is_err());
         assert!(validate_semantic_execution_contract(
@@ -9341,7 +9470,7 @@ mod tests {
             execution,
             coordinator,
             context_port,
-            engine_port,
+            (engine_port, macos_action),
         )
         .is_err());
         assert!(validate_semantic_execution_contract(
@@ -9351,7 +9480,7 @@ mod tests {
             &execution.replace("let (active, disposition) = outcome.into_parts();", ""),
             coordinator,
             context_port,
-            engine_port,
+            (engine_port, macos_action),
         )
         .is_err());
         assert!(validate_semantic_execution_contract(
@@ -9361,7 +9490,7 @@ mod tests {
             &execution.replace("if !active.matches_action(action) {}", ""),
             coordinator,
             context_port,
-            engine_port,
+            (engine_port, macos_action),
         )
         .is_err());
         assert!(validate_semantic_execution_contract(
@@ -9371,9 +9500,12 @@ mod tests {
             execution,
             coordinator,
             context_port,
-            &engine_port.replace(
-                "let _ = (request, completion);",
-                "if qualify() { return ContextDispatch::Scheduled; }\nlet _ = (request, completion);",
+            (
+                &engine_port.replace(
+                    "let _ = (request, completion);",
+                    "if qualify() { return ContextDispatch::Scheduled; }\nlet _ = (request, completion);",
+                ),
+                macos_action,
             ),
         )
         .is_err());
@@ -9384,7 +9516,7 @@ mod tests {
             &execution.replace("if applied.completed_at > deadline {}", ""),
             coordinator,
             context_port,
-            engine_port,
+            (engine_port, macos_action),
         )
         .is_err());
         assert!(validate_semantic_execution_contract(
@@ -9394,7 +9526,20 @@ mod tests {
             execution,
             &coordinator.replace("self.sealed = true;", ""),
             context_port,
-            engine_port,
+            (engine_port, macos_action),
+        )
+        .is_err());
+        assert!(validate_semantic_execution_contract(
+            root,
+            effect,
+            action,
+            execution,
+            &coordinator.replace(
+                "SemanticEffectClass::LocalWrite",
+                "SemanticEffectClass::Read",
+            ),
+            context_port,
+            (engine_port, macos_action),
         )
         .is_err());
         assert!(validate_semantic_execution_contract(
@@ -9407,7 +9552,7 @@ mod tests {
             ),
             coordinator,
             context_port,
-            engine_port,
+            (engine_port, macos_action),
         )
         .is_err());
         assert!(validate_semantic_execution_contract(
@@ -9417,7 +9562,7 @@ mod tests {
             execution,
             &coordinator.replace("pub(crate) fn into_parts(", "pub fn into_parts(",),
             context_port,
-            engine_port,
+            (engine_port, macos_action),
         )
         .is_err());
         validate_semantic_settle_wake(settle).expect("exact no-poll wake plan");
@@ -9432,7 +9577,10 @@ mod tests {
             execution,
             coordinator,
             context_port,
-            &engine_port.replace("ContextDispatch::Unsupported", "ContextDispatch::Scheduled"),
+            (
+                &engine_port.replace("ContextDispatch::Unsupported", "ContextDispatch::Scheduled"),
+                macos_action,
+            ),
         )
         .is_err());
     }
@@ -11292,6 +11440,9 @@ mod tests {
             return Err("focus_baseline");
             view.prepare_semantic_document_load();
             view.dispatch_semantic();
+            ContextCapability::Act;
+            verify_primary_click_execution();
+            execution.settle_and_verify(pending.settlement, snapshot, observed_at);
             SemanticObservationAssembler::new();
             SemanticFrameUnsupported::PlatformIsolationUnavailable;
             SemanticRuntimeFault::AnchorMissing;
@@ -11313,7 +11464,7 @@ mod tests {
         let semantic_binary = r#"
             if arguments.as_slice() != ["--ci-hidden-fixed-dom"] {}
             run_macos_agentic_semantic_probe();
-            "profile=ephemeral viewport=1280x800-logical fixture=loopback-only snapshots=4 world_epochs=3 mutation_gate=host-released stale_anchor=refused mutation_recovery=verified page_world_bridge=absent focus_theft=0 retained_views=0";
+            "profile=ephemeral viewport=1280x800-logical fixture=loopback-only snapshots=5 world_epochs=3 fixed_click=verified postcondition=expanded event_trust=untrusted user_activation=0 popup_admitted=0 mutation_gate=host-released stale_anchor=refused mutation_recovery=verified page_world_bridge=absent focus_theft=0 retained_views=0";
         "#;
         let semantic_fixture = r#"
             TcpListener::bind((Ipv4Addr::LOCALHOST, 0));
@@ -11333,6 +11484,8 @@ mod tests {
             "<script defer src="/semantic-runtime-mutation-trigger-v1.js"></script>";
             FixtureScriptPolicy::SameOrigin;
             "connect-src 'none'; form-action 'none'; frame-src 'self'";
+            aria-expanded="false";
+            primaryAction.setAttribute('aria-expanded', 'true');
         "#;
         validate_macos_semantic_probe(
             &semantic_module,
@@ -11359,6 +11512,27 @@ mod tests {
             &semantic_module,
             semantic_source,
             &semantic_binary.replace("mutation_recovery=verified", ""),
+            semantic_fixture,
+        )
+        .is_err());
+        assert!(validate_macos_semantic_probe(
+            &semantic_module,
+            semantic_source,
+            &semantic_binary.replace("fixed_click=verified", ""),
+            semantic_fixture,
+        )
+        .is_err());
+        assert!(validate_macos_semantic_probe(
+            &semantic_module,
+            semantic_source,
+            &semantic_binary.replace("postcondition=expanded", ""),
+            semantic_fixture,
+        )
+        .is_err());
+        assert!(validate_macos_semantic_probe(
+            &semantic_module,
+            semantic_source,
+            &semantic_binary.replace("user_activation=0", ""),
             semantic_fixture,
         )
         .is_err());
@@ -11505,8 +11679,17 @@ mod tests {
             fn renderer_lost() {}
             fn cancel() {}
             fn retire() {}
-            DocumentPhase::Loading => {
-                return Err((AgentSemanticRuntimeDispatchError::NotReady, completion));
+            fn admission_failure(&mut self) -> Option<AgentSemanticRuntimeDispatchError> {
+                match self.phase {
+                    DocumentPhase::Loading => {
+                        return Some(AgentSemanticRuntimeDispatchError::NotReady);
+                    }
+                    _ => {}
+                }
+                if self.pending.is_some() || self.awaiting_result {
+                    return Some(AgentSemanticRuntimeDispatchError::Busy);
+                }
+                None
             }
         "#;
         validate_engine_semantic_runtime_boundary(runtime).expect("closed semantic runtime");
@@ -11519,7 +11702,7 @@ mod tests {
         )
         .is_err());
         assert!(validate_engine_semantic_runtime_boundary(&runtime.replace(
-            "return Err((AgentSemanticRuntimeDispatchError::NotReady, completion));",
+            "return Some(AgentSemanticRuntimeDispatchError::NotReady);",
             "unreachable!();",
         ))
         .is_err());

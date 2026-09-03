@@ -28,13 +28,14 @@ use zephium_agentic::{
     ContextIdentity, ContextKind, ContextNavigationTarget, ContextOperationId,
     ContextOwnedViewport, ContextProfileStorageClass, ContextRegistry, ContextRunId,
     ContextSettlement, FixtureRoute, FixtureServer, FixtureServerError, FrameId,
-    SemanticCompleteness, SemanticExpansionKind, SemanticFrameJoin, SemanticFrameTrust,
-    SemanticFrameUnsupported, SemanticInvocationId, SemanticNode, SemanticObservationAssembler,
-    SemanticObservationBudget, SemanticObservationId, SemanticObservationRequest,
-    SemanticOperationClass, SemanticOrigin, SemanticRole, SemanticRuntimeBudget,
-    SemanticRuntimeFault, SemanticRuntimeInvocation, SemanticRuntimePortFailure,
-    SemanticRuntimeResultError, SemanticSensitivity, SemanticSnapshot, SemanticSnapshotGeneration,
-    SemanticValueSummary,
+    SemanticActionExecutionBackend, SemanticActionExecutionInstant, SemanticActionNativeReadiness,
+    SemanticActionNativeSettlement, SemanticClickQualificationExecution, SemanticCompleteness,
+    SemanticExpansionKind, SemanticFrameJoin, SemanticFrameTrust, SemanticFrameUnsupported,
+    SemanticInvocationId, SemanticNode, SemanticObservationAssembler, SemanticObservationBudget,
+    SemanticObservationId, SemanticObservationRequest, SemanticOperationClass, SemanticOrigin,
+    SemanticRole, SemanticRuntimeBudget, SemanticRuntimeFault, SemanticRuntimeInvocation,
+    SemanticRuntimePortFailure, SemanticRuntimeResultError, SemanticSensitivity,
+    SemanticSettleInstant, SemanticSnapshot, SemanticSnapshotGeneration, SemanticValueSummary,
 };
 use zephium_core::ids::ProfileId;
 
@@ -45,6 +46,7 @@ use super::{
 
 const NAVIGATION_TIMEOUT: Duration = Duration::from_secs(10);
 const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(5);
+const ACTION_SECURITY_SETTLE: Duration = Duration::from_millis(125);
 const MUTATION_GATE_TIMEOUT: Duration = Duration::from_secs(5);
 const MUTATION_APPLY_SETTLE: Duration = Duration::from_millis(250);
 const TEARDOWN_TIMEOUT: Duration = Duration::from_secs(2);
@@ -53,6 +55,12 @@ const MAX_DOCUMENT_LOADING_RETRIES: u16 = 512;
 
 struct ProbeHostView {
     view: Retained<NSView>,
+}
+
+struct PendingPrimaryClick {
+    execution: SemanticClickQualificationExecution,
+    settlement: SemanticActionNativeSettlement,
+    admitted_at: Instant,
 }
 
 impl HasWindowHandle for ProbeHostView {
@@ -83,6 +91,8 @@ struct NativeStateGuard<'a> {
     app: &'a NSApplication,
     window: &'a NSWindow,
     page: &'a WKWebView,
+    window_main: bool,
+    first_responder: Option<usize>,
     failed: Cell<bool>,
 }
 
@@ -90,8 +100,14 @@ impl NativeStateGuard<'_> {
     fn sample(&self) {
         if self.window.isVisible()
             || self.window.isKeyWindow()
+            || self.window.isMainWindow() != self.window_main
             || !self.page.isHidden()
             || self.app.isActive()
+            || self
+                .window
+                .firstResponder()
+                .map(|responder| Retained::as_ptr(&responder).addr())
+                != self.first_responder
         {
             self.failed.set(true);
         }
@@ -152,9 +168,13 @@ fn begin() -> Result<PendingTeardown, &'static str> {
     app.finishLaunching();
 
     let window = new_window(mtm)?;
-    let host = ProbeHostView {
-        view: window.contentView().ok_or("window_construct")?,
-    };
+    let content = window.contentView().ok_or("window_construct")?;
+    let nested = NSView::initWithFrame(
+        NSView::alloc(mtm),
+        NSRect::new(NSPoint::new(37.0, 29.0), NSSize::new(680.0, 560.0)),
+    );
+    content.addSubview(&nested);
+    let host = ProbeHostView { view: nested };
     let callbacks = Rc::new(CallbackState::default());
     let navigation_callbacks = Rc::clone(&callbacks);
     let renderer_callbacks = Rc::clone(&callbacks);
@@ -170,7 +190,11 @@ fn begin() -> Result<PendingTeardown, &'static str> {
     );
     let capabilities = ContextCapabilities::try_new(
         ContextKind::Owned,
-        &[ContextCapability::Observe, ContextCapability::Navigate],
+        &[
+            ContextCapability::Observe,
+            ContextCapability::Navigate,
+            ContextCapability::Act,
+        ],
     )
     .map_err(|_| "context_construct")?;
     registry
@@ -225,6 +249,10 @@ fn begin() -> Result<PendingTeardown, &'static str> {
         app: &app,
         window: &window,
         page: &page,
+        window_main: window.isMainWindow(),
+        first_responder: window
+            .firstResponder()
+            .map(|responder| Retained::as_ptr(&responder).addr()),
         failed: Cell::new(false),
     };
     native_guard.sample();
@@ -254,6 +282,28 @@ fn begin() -> Result<PendingTeardown, &'static str> {
             &runtime,
         )?;
         verify_first_snapshot(&first_capture.snapshot)?;
+        let first_generation = first_capture.snapshot.generation();
+        let first_observation = assemble_observation(first_capture)?;
+        let pending_click = execute_primary_click(&view, &first_observation, &runtime)?;
+        let action_settle_deadline = Instant::now()
+            .checked_add(ACTION_SECURITY_SETTLE)
+            .ok_or("action_settle")?;
+        while !runtime.failed() && Instant::now() < action_settle_deadline {
+            runtime.pump();
+        }
+        if runtime.failed() {
+            return Err("action_native_state");
+        }
+        let after_click = capture_snapshot(
+            &view,
+            first,
+            &first_url,
+            first_generation.next().ok_or("action_identity")?,
+            &mut next_invocation,
+            &runtime,
+        )?;
+        verify_primary_click_execution(pending_click, &after_click.snapshot)?;
+        verify_primary_click(&after_click.snapshot)?;
         registry
             .acknowledge_observation(identity.id(), first)
             .map_err(|_| "first_observation")?;
@@ -382,16 +432,26 @@ fn begin() -> Result<PendingTeardown, &'static str> {
             .acknowledge_observation(identity.id(), replacement)
             .map_err(|_| "replacement_observation")?;
 
-        if callbacks.failed()
-            || native_guard.failed()
-            || view.semantic_pending_for_audit() != Some(false)
-            || view
-                .attest(profile, ContextProfileStorageClass::Ephemeral, Some(&store))
-                .is_err()
-            || !server.semantic_mutation_completed()
-            || !server.is_healthy()
+        if callbacks.failed() {
+            return Err("callback_verification");
+        }
+        if native_guard.failed() {
+            return Err("native_state_verification");
+        }
+        if view.semantic_pending_for_audit() != Some(false) {
+            return Err("semantic_pending_verification");
+        }
+        if view
+            .attest(profile, ContextProfileStorageClass::Ephemeral, Some(&store))
+            .is_err()
         {
-            return Err("verification");
+            return Err("view_attestation_verification");
+        }
+        if !server.semantic_mutation_completed() {
+            return Err("mutation_verification");
+        }
+        if !server.is_healthy() {
+            return Err("fixture_verification");
         }
         Ok(())
     })();
@@ -410,6 +470,7 @@ fn begin() -> Result<PendingTeardown, &'static str> {
     drop(view);
     window.close();
     drop(host);
+    drop(content);
     drop(window);
     drop(store);
     drop(run_loop);
@@ -542,6 +603,107 @@ fn navigate(
         return Err("navigation_terminal");
     }
     registry.join(id).map_err(|_| "navigation_settle")
+}
+
+fn assemble_observation(
+    capture: CapturedSnapshot,
+) -> Result<zephium_agentic::SemanticObservation, &'static str> {
+    let boundaries = capture
+        .snapshot
+        .nodes()
+        .iter()
+        .filter(|node| node.role() == SemanticRole::FrameBoundary)
+        .map(SemanticNode::reference)
+        .collect::<Vec<_>>();
+    let mut assembler = SemanticObservationAssembler::new(capture.request, capture.snapshot)
+        .map_err(|_| "action_observation")?;
+    for boundary in boundaries {
+        assembler
+            .mark_frame_unsupported(
+                FrameId::MAIN,
+                boundary,
+                SemanticFrameUnsupported::PlatformIsolationUnavailable,
+            )
+            .map_err(|_| "action_observation")?;
+    }
+    assembler.finish().map_err(|_| "action_observation")
+}
+
+fn execute_primary_click(
+    view: &AgentOwnedView,
+    observation: &zephium_agentic::SemanticObservation,
+    runtime: &ProbeRuntime<'_, '_>,
+) -> Result<PendingPrimaryClick, &'static str> {
+    let target = observation
+        .frames()
+        .iter()
+        .flat_map(|snapshot| snapshot.nodes())
+        .find(|node| node_name_is(node, "Primary semantic action"))
+        .map(SemanticNode::reference)
+        .ok_or("action_target")?;
+    let requested_at = SemanticActionExecutionInstant::from_millis(10_000);
+    let mut execution =
+        SemanticClickQualificationExecution::prepare(observation, target, 1, 1, requested_at)
+            .map_err(|_| "action_prepare")?;
+    let request = execution
+        .take_native_request()
+        .map_err(|_| "action_prepare")?;
+    let admitted_at = Instant::now();
+    let result = Rc::new(RefCell::new(None));
+    let completion = Rc::clone(&result);
+    view.dispatch_semantic_action(request, admitted_at, move |settlement| {
+        if let Ok(mut slot) = completion.try_borrow_mut() {
+            if slot.is_none() {
+                *slot = Some(settlement);
+            }
+        }
+    });
+    let deadline = Instant::now()
+        .checked_add(SNAPSHOT_TIMEOUT)
+        .ok_or("action_timeout")?;
+    while result.borrow().is_none() && !runtime.failed() && Instant::now() < deadline {
+        runtime.pump();
+    }
+    if runtime.failed() {
+        return Err("action_native_state");
+    }
+    let settlement = result
+        .try_borrow_mut()
+        .map_err(|_| "action_state")?
+        .take()
+        .ok_or("action_timeout")?;
+    runtime.native_guard.sample();
+    if runtime.failed() {
+        return Err("action_native_state");
+    }
+    Ok(PendingPrimaryClick {
+        execution,
+        settlement,
+        admitted_at,
+    })
+}
+
+fn verify_primary_click_execution(
+    pending: PendingPrimaryClick,
+    snapshot: &SemanticSnapshot,
+) -> Result<(), &'static str> {
+    let elapsed = u64::try_from(pending.admitted_at.elapsed().as_millis())
+        .map_err(|_| "action_verification_clock")?;
+    let observed_at = 10_000_u64
+        .checked_add(elapsed)
+        .map(SemanticSettleInstant::from_millis)
+        .ok_or("action_verification_clock")?;
+    let applied = pending
+        .execution
+        .settle_and_verify(pending.settlement, snapshot, observed_at)
+        .map_err(|_| "action_verification")?;
+    if applied.backend() != SemanticActionExecutionBackend::FixedSemanticRecipe
+        || applied.readiness() != SemanticActionNativeReadiness::ExactVisibleUnoccludedTarget
+        || applied.completed_at() > SemanticActionExecutionInstant::from_millis(11_000)
+    {
+        return Err("action_evidence");
+    }
+    Ok(())
 }
 
 fn capture_snapshot(
@@ -776,6 +938,34 @@ fn verify_first_snapshot(snapshot: &SemanticSnapshot) -> Result<(), &'static str
         .any(|node| node.role() == SemanticRole::FrameBoundary)
     {
         return Err("first_frame_boundary_missing");
+    }
+    Ok(())
+}
+
+fn verify_primary_click(snapshot: &SemanticSnapshot) -> Result<(), &'static str> {
+    if snapshot_contains(snapshot, "Primary semantic action applied trusted") {
+        return Err("action_unexpected_trusted_input");
+    }
+    if !snapshot_contains(snapshot, "Primary semantic action applied untrusted") {
+        return Err("action_effect_missing");
+    }
+    if snapshot_contains(snapshot, "popup admitted") {
+        return Err("action_popup_admitted");
+    }
+    if !snapshot_contains(snapshot, "popup denied") {
+        return Err("action_popup_evidence_missing");
+    }
+    if snapshot_contains(snapshot, "activation during active")
+        || snapshot_contains(snapshot, "settle active")
+        || snapshot_contains(snapshot, "sticky active")
+    {
+        return Err("action_user_activation");
+    }
+    if !snapshot_contains(
+        snapshot,
+        "Primary semantic action applied untrusted activation during inactive sticky inactive popup denied settle inactive sticky inactive",
+    ) {
+        return Err("action_security_evidence_missing");
     }
     Ok(())
 }
