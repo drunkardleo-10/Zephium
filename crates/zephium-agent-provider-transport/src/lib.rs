@@ -67,6 +67,13 @@ const ANTHROPIC_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const PRODUCT_USER_AGENT: &str = "Zephium-Agent-Browser/0.1";
 
+/// Login-Keychain service holding the development OpenAI provider credential.
+#[cfg(target_os = "macos")]
+pub const MACOS_OPENAI_KEYCHAIN_SERVICE: &str = "app.zephium.agent-provider.openai";
+/// Login-Keychain account holding the development OpenAI provider credential.
+#[cfg(target_os = "macos")]
+pub const MACOS_OPENAI_KEYCHAIN_ACCOUNT: &str = "development";
+
 /// Bounded deadlines for the shared provider client.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AgentProviderTransportConfig {
@@ -150,7 +157,20 @@ impl AgentProviderCredential {
         provider: AgentProviderKind,
         secret: String,
     ) -> Result<Self, AgentProviderCredentialError> {
-        let secret = Zeroizing::new(secret.into_bytes());
+        Self::try_from_bytes(provider, secret.into_bytes())
+    }
+
+    fn try_from_bytes(
+        provider: AgentProviderKind,
+        secret: Vec<u8>,
+    ) -> Result<Self, AgentProviderCredentialError> {
+        Self::try_from_zeroizing(provider, Zeroizing::new(secret))
+    }
+
+    fn try_from_zeroizing(
+        provider: AgentProviderKind,
+        secret: Zeroizing<Vec<u8>>,
+    ) -> Result<Self, AgentProviderCredentialError> {
         if secret.is_empty()
             || secret.len() > MAX_AGENT_PROVIDER_CREDENTIAL_BYTES
             || !secret.iter().all(|byte| matches!(byte, 0x21..=0x7e))
@@ -169,6 +189,62 @@ impl AgentProviderCredential {
     pub fn byte_len(&self) -> usize {
         self.secret.len()
     }
+}
+
+/// Content-free failure while loading one provider credential from macOS Keychain.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum MacosAgentProviderCredentialError {
+    /// No exact generic-password item exists for the fixed service and account.
+    #[error("agent provider credential is missing from macOS Keychain")]
+    Missing,
+    /// Keychain access was denied, unavailable, or otherwise failed closed.
+    #[error("agent provider credential is inaccessible in macOS Keychain")]
+    Inaccessible,
+    /// The stored secret failed the provider credential content contract.
+    #[error("agent provider credential stored in macOS Keychain is invalid")]
+    Invalid,
+    /// A bounded zeroizing credential copy could not be allocated.
+    #[error("agent provider credential memory is unavailable")]
+    Capacity,
+}
+
+/// Loads the exact development OpenAI key into a move-only zeroizing credential.
+///
+/// The Keychain lookup uses a fixed generic-password service and account. It
+/// never enumerates items, converts secret bytes through UTF-8, accepts a
+/// caller-selected label, or exposes the secret through an error or diagnostic.
+/// The Security.framework-owned password buffer is released immediately after
+/// one bounded copy enters [`AgentProviderCredential`].
+#[cfg(target_os = "macos")]
+pub fn load_macos_development_openai_credential(
+) -> Result<AgentProviderCredential, MacosAgentProviderCredentialError> {
+    use security_framework::os::macos::passwords::find_generic_password;
+    use security_framework_sys::base::errSecItemNotFound;
+
+    let (password, _item) = find_generic_password(
+        None,
+        MACOS_OPENAI_KEYCHAIN_SERVICE,
+        MACOS_OPENAI_KEYCHAIN_ACCOUNT,
+    )
+    .map_err(|error| {
+        if error.code() == errSecItemNotFound {
+            MacosAgentProviderCredentialError::Missing
+        } else {
+            MacosAgentProviderCredentialError::Inaccessible
+        }
+    })?;
+    let mut secret = Zeroizing::new(Vec::new());
+    secret
+        .try_reserve_exact(password.len())
+        .map_err(|_| MacosAgentProviderCredentialError::Capacity)?;
+    secret.extend_from_slice(password.as_ref());
+    AgentProviderCredential::try_from_zeroizing(AgentProviderKind::OpenAiResponses, secret).map_err(
+        |error| match error {
+            AgentProviderCredentialError::Content => MacosAgentProviderCredentialError::Invalid,
+            AgentProviderCredentialError::Capacity => MacosAgentProviderCredentialError::Capacity,
+        },
+    )
 }
 
 impl fmt::Debug for AgentProviderCredential {
