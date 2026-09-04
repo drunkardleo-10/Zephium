@@ -119,6 +119,13 @@ impl ProbeFailure {
             Self::Keychain => "keychain",
             Self::Authority => "authority",
             Self::Provider(TerraProbeProviderError::Authority) => "provider_authority",
+            Self::Provider(TerraProbeProviderError::Cancelled) => "controller_cancelled",
+            Self::Provider(TerraProbeProviderError::ActionPending) => "controller_action_pending",
+            Self::Provider(TerraProbeProviderError::ActionLimit) => "controller_action_limit",
+            Self::Provider(TerraProbeProviderError::Action(_)) => "controller_action_refused",
+            Self::Provider(TerraProbeProviderError::UnsupportedTool(_)) => {
+                "controller_tool_unsupported"
+            }
             Self::Provider(TerraProbeProviderError::Catalog) => "provider_catalog",
             Self::Provider(TerraProbeProviderError::Clock) => "provider_clock",
             Self::Provider(TerraProbeProviderError::Deadline) => "provider_deadline",

@@ -10,7 +10,7 @@ use zephium_agentic::{
     compute_semantic_diff, AgentBrowserToolProposal, AgentProviderContinuation,
     AgentProviderSettledToolTurn, SemanticActionExecutionApplied, SemanticActionExecutionInstant,
     SemanticActionNativeRequest, SemanticActionNativeSettlement, SemanticActionProposal,
-    SemanticActionQualificationError, SemanticDiff, SemanticDiffBudget, SemanticDiffOutcome,
+    SemanticActionQualificationError, SemanticDiffBudget, SemanticDiffOutcome,
     SemanticModelActionQualificationExecution, SemanticObservation, SemanticSettleInstant,
     SemanticSnapshot,
 };
@@ -160,27 +160,7 @@ fn prepare_action(
 /// Fields remain private so callers cannot pair a continuation with a
 /// different diff or manufacture a successful tool result without passing the
 /// native verification bridge.
-#[must_use]
-pub struct TerraProbeVerifiedTransition {
-    continuation: AgentProviderContinuation,
-    diff: Box<SemanticDiff>,
-}
-
-impl TerraProbeVerifiedTransition {
-    pub(crate) fn into_parts(self) -> (AgentProviderContinuation, Box<SemanticDiff>) {
-        (self.continuation, self.diff)
-    }
-}
-
-impl std::fmt::Debug for TerraProbeVerifiedTransition {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("TerraProbeVerifiedTransition")
-            .field("diff_stats", &self.diff.stats())
-            .field("content", &"[redacted]")
-            .finish()
-    }
-}
+pub type TerraProbeVerifiedTransition = crate::AgentBrowserVerifiedTransition;
 
 impl std::fmt::Debug for TerraProbeActionBridge {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

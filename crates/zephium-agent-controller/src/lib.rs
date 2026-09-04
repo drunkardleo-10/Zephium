@@ -1,8 +1,9 @@
-//! One deterministic, text-only Terra controller turn.
+//! Bounded provider and policy-authorized semantic browser controllers.
 //!
-//! This crate composes existing bounded agent contracts on the sole runtime
-//! worker. It does not expose browser, provider, ledger, or policy internals,
-//! and it does not retain model or page content after the one turn completes.
+//! The shipping text-only runtime controller and the reusable locate/act session
+//! share existing functional-core authorities. The session does not by itself
+//! prove durable audit or application/native lifecycle closure. Its host must
+//! retain terminal/recovery ownership until those independent duties settle.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -17,6 +18,21 @@ compile_error!("the agent controller probe harness is forbidden in optimized bui
 
 #[cfg(feature = "provider-transport")]
 mod terra;
+
+#[cfg(feature = "provider-transport")]
+mod action;
+
+#[cfg(feature = "provider-transport")]
+pub use action::{
+    AgentBrowserAction, AgentBrowserActionError, AgentBrowserActionFinalizationRefusal,
+    AgentBrowserActionProposal, AgentBrowserVerifiedTransition,
+};
+
+#[cfg(feature = "provider-transport")]
+pub use terra::{
+    AgentBrowserModel, AgentBrowserProviderError, AgentBrowserProviderTurn, AgentBrowserRetention,
+    AgentBrowserSession, AgentBrowserSessionFinishRefusal, AgentBrowserSessionTerminal,
+};
 
 #[cfg(feature = "probe-harness")]
 mod probe;
@@ -37,6 +53,8 @@ pub use probe::{
 
 #[cfg(feature = "probe-harness")]
 pub use terra::{
-    run_initial_terra_probe, AgenticProbeModel, AgenticProbeRetention, TerraProbeProviderError,
-    TerraProbeProviderTurn, TerraProbeSession,
+    run_initial_terra_probe, AgentBrowserModel as AgenticProbeModel,
+    AgentBrowserProviderError as TerraProbeProviderError,
+    AgentBrowserProviderTurn as TerraProbeProviderTurn,
+    AgentBrowserRetention as AgenticProbeRetention, AgentBrowserSession as TerraProbeSession,
 };

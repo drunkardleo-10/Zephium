@@ -9,6 +9,7 @@ const MANIFEST: &str = "crates/zephium-agent-controller/Cargo.toml";
 const ROOT: &str = "crates/zephium-agent-controller/src/lib.rs";
 const PROBE: &str = "crates/zephium-agent-controller/src/probe.rs";
 const TERRA: &str = "crates/zephium-agent-controller/src/terra.rs";
+const ACTION: &str = "crates/zephium-agent-controller/src/action.rs";
 const ALLOWED_DEPENDENCIES: [&str; 6] = [
     "thiserror",
     "tokio",
@@ -40,10 +41,12 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     let root = read(repository.join(ROOT))?;
     let probe = read(repository.join(PROBE))?;
     let terra = read(repository.join(TERRA))?;
+    let action = read(repository.join(ACTION))?;
     validate_manifest(&manifest)?;
     validate_root(&root)?;
     validate_probe(&probe)?;
     validate_terra(&terra)?;
+    validate_action(&action)?;
     validate_inventory(&repository.join("crates/zephium-agent-controller"))?;
     Ok(())
 }
@@ -190,7 +193,12 @@ fn validate_terra(source: &str) -> Result<(), String> {
         "drop(state.credential.take())",
         "attempt.abort(AgentProviderAbortReason::ControllerFault)",
         "state.transport.seal();",
-        "const MAX_TERRA_PROBE_MODEL_TURNS: u8 = 3;",
+        "const MAX_BROWSER_MODEL_TURNS: u8 = 8;",
+        "restrict_to_locate_and_act()",
+        "pub async fn start_initial(",
+        "pub fn try_finish(",
+        "AgentBrowserSessionFinishRefusal",
+        "self.policy.accounting().reserved_model_tokens() != 0",
         "continue_after_verified_action",
         "continue_after_locate",
         "locate_semantic_observation",
@@ -242,6 +250,7 @@ fn validate_inventory(crate_root: &Path) -> Result<(), String> {
         .collect::<BTreeSet<_>>();
     if names
         != BTreeSet::from([
+            "action.rs".to_owned(),
             "lib.rs".to_owned(),
             "probe.rs".to_owned(),
             "terra.rs".to_owned(),
@@ -254,12 +263,15 @@ fn validate_inventory(crate_root: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_manifest, validate_probe, validate_root, validate_terra};
+    use super::{
+        validate_action, validate_manifest, validate_probe, validate_root, validate_terra,
+    };
 
     const MANIFEST: &str = include_str!("../../crates/zephium-agent-controller/Cargo.toml");
     const ROOT: &str = include_str!("../../crates/zephium-agent-controller/src/lib.rs");
     const PROBE: &str = include_str!("../../crates/zephium-agent-controller/src/probe.rs");
     const TERRA: &str = include_str!("../../crates/zephium-agent-controller/src/terra.rs");
+    const ACTION: &str = include_str!("../../crates/zephium-agent-controller/src/action.rs");
 
     #[test]
     fn current_controller_boundary_is_valid() {
@@ -267,6 +279,7 @@ mod tests {
         validate_root(ROOT).expect("controller root");
         validate_probe(PROBE).expect("controller probe");
         validate_terra(TERRA).expect("controller Terra path");
+        validate_action(ACTION).expect("controller native action path");
     }
 
     #[test]
@@ -277,4 +290,56 @@ mod tests {
         .is_err());
         assert!(validate_terra(&format!("{TERRA}\nlet _ = delta.as_str();")).is_err());
     }
+
+    #[test]
+    fn mutation_cannot_bypass_action_authority_or_drop_pending_ownership() {
+        for boundary in [
+            "authorize_semantic_effect",
+            "dispatch_semantic_effect",
+            "verify_semantic_action_terminal",
+            "settle_verified_semantic_terminal",
+            "finalize_accounted_semantic_action_result",
+            "self.pending = Some",
+        ] {
+            assert!(
+                validate_action(&ACTION.replace(boundary, "removed_boundary")).is_err(),
+                "{boundary}"
+            );
+        }
+        assert!(validate_action(&format!(
+            "{ACTION}\nSemanticModelActionQualificationExecution"
+        ))
+        .is_err());
+    }
+}
+
+fn validate_action(source: &str) -> Result<(), String> {
+    for required in [
+        "SemanticActionBatch::bind",
+        "authorize_semantic_effect",
+        "dispatch_semantic_effect",
+        "SemanticActionExecutionCoordinator::new",
+        "SemanticActionSettlementCoordinator::new",
+        "verify_semantic_action_terminal",
+        "settle_verified_semantic_terminal",
+        "finalize_accounted_semantic_action_result",
+        "self.pending = Some",
+        "self.terminal = Some",
+        "AgentBrowserActionFinalizationRefusal",
+    ] {
+        if !source.contains(required) {
+            return Err(format!("controller action lost boundary: {required}"));
+        }
+    }
+    for forbidden in FORBIDDEN_TERRA_TOKENS.into_iter().chain([
+        "SemanticModelActionQualificationExecution",
+        "for_execution_qualification",
+    ]) {
+        if source.contains(forbidden) {
+            return Err(format!(
+                "controller action contains forbidden authority: {forbidden}"
+            ));
+        }
+    }
+    Ok(())
 }
