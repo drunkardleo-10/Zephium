@@ -22,24 +22,28 @@ use zephium_agent_runtime::{
     MAX_AGENT_RUNTIME_SIGNAL_CAPACITY, MAX_AGENT_RUNTIME_TERMINAL_CAPACITY,
 };
 use zephium_agentic::{
-    encode_semantic_observation, encode_semantic_runtime_invocation, AgentAuditDeliveryId,
-    AgentAuditDispatch, AgentAuditEventId, AgentAuditLedger, AgentAuditPort,
+    encode_semantic_diff, encode_semantic_observation, encode_semantic_runtime_invocation,
+    AgentAuditDeliveryId, AgentAuditDispatch, AgentAuditEventId, AgentAuditLedger, AgentAuditPort,
     AgentContextAccountBinding, AgentDelegationSpec, AgentDelegationTopology, AgentModelCallBudget,
     AgentModelCallId, AgentModelCallReceipt, AgentModelCallRequest, AgentModelCallSettlement,
     AgentNodeExecution, AgentPlanLeaseBinding, AgentPolicyInstant, AgentPreparedObservationRequest,
-    AgentProviderBatchDisposition, AgentProviderCancellation, AgentProviderDisclosureStage,
-    AgentProviderFailureClass, AgentProviderImmediateSettlement, AgentProviderObjective,
-    AgentProviderPolicySettlement, AgentProviderProtocolError, AgentProviderProtocolEvent,
-    AgentProviderRequestSettlement, AgentProviderStopReason, AgentProviderStreamConclusion,
+    AgentProviderBatchDisposition, AgentProviderCallConfig, AgentProviderCancellation,
+    AgentProviderDiffRequestDraft, AgentProviderDisclosureStage, AgentProviderFailureClass,
+    AgentProviderImmediateSettlement, AgentProviderObjective, AgentProviderPolicySettlement,
+    AgentProviderProtocolError, AgentProviderProtocolEvent, AgentProviderRequestSettlement,
+    AgentProviderStopReason, AgentProviderStreamConclusion, AgentProviderTransportInput,
     AgentProviderTransportOutcome, AgentProviderTransportResult, AgentRunAccountingMetrics,
     AgentRunActionPerformanceMetrics, AgentRunMetricClosure, AgentRunPolicy,
     AgentRunProgressMetrics, AgentRunProviderInputMetrics, AgentRunSupervisor,
     AgentSupervisorAttemptId, AgentSupervisorCancellationId, AgentSupervisorCancellationReason,
     AgentSupervisorCompletion, AgentSupervisorFailure, AgentSupervisorId, ContextDispatch,
     ContextNativeEvent, SemanticInvocationId, SemanticModelEncodingBudget,
-    SemanticObservationAssembler, SemanticObservationRequest, SemanticRuntimeBudget,
-    SemanticSnapshotGeneration, MAX_AGENT_AUDIT_DELIVERY_EVENTS,
+    SemanticModelEncodingError, SemanticObservationAssembler, SemanticObservationRequest,
+    SemanticRuntimeBudget, SemanticSnapshotGeneration, MAX_AGENT_AUDIT_DELIVERY_EVENTS,
 };
+
+#[cfg(feature = "probe-harness")]
+use crate::probe::TerraProbeVerifiedTransition;
 
 /// This text-only/discarding vertical never needs Terra's catalog-wide 128k
 /// output ceiling. Keeping its own 8k ceiling bounds wasted generation and
@@ -51,6 +55,8 @@ const TERRA_PROVIDER_EXACT_RESERVATION_COST_MICRO_USD: u64 = 778_304;
 const MAX_TERRA_CONTROLLER_HARD_DEADLINE: Duration = Duration::from_secs(10 * 60);
 const MAX_DEFERRED_RUNTIME_EVENTS: usize =
     MAX_AGENT_RUNTIME_TERMINAL_CAPACITY + MAX_AGENT_RUNTIME_SIGNAL_CAPACITY;
+#[cfg(feature = "probe-harness")]
+const MAX_TERRA_PROBE_MODEL_TURNS: u8 = 2;
 
 const _: () = {
     assert!(TERRA_CONTROLLER_MAX_OUTPUT_TOKENS < TERRA_MAX_OUTPUT_TOKENS);
@@ -1784,81 +1790,176 @@ impl fmt::Debug for TerraControllerRecovery {
     }
 }
 
-/// Runs one release-excluded provider-exact Terra proposal turn.
+/// Release-excluded owner for one bounded Terra continuation session.
 ///
-/// This deliberately stops after the first settled tool proposal. It is used
-/// only by the hidden macOS qualification fixture; product orchestration must
-/// continue through the controller and policy actor.
+/// The session retains one policy, credential, and transport across the exact
+/// initial observation and at most one verified diff continuation. It is not
+/// product orchestration: native effects still pass through the dedicated
+/// probe qualifier rather than the shipping policy actor.
 #[cfg(feature = "probe-harness")]
-pub async fn run_initial_terra_probe(
-    input: TerraControllerRunInput,
-    transport_config: AgentProviderTransportConfig,
+#[must_use]
+pub struct TerraProbeSession {
+    policy: AgentRunPolicy,
+    transport: AgentProviderTransport,
     credential: AgentProviderCredential,
-    observation: &zephium_agentic::SemanticObservation,
-) -> Result<TerraProbeProviderTurn, TerraProbeProviderError> {
-    let TerraControllerRunInput {
-        manifest,
-        lease,
-        account,
-        objective,
-        ids,
-        clock,
-        deadline,
-        ..
-    } = input;
-    if Instant::now() >= deadline {
-        return Err(TerraProbeProviderError::Deadline);
-    }
-    let now = clock.now().map_err(|_| TerraProbeProviderError::Clock)?;
-    let config = try_terra_provider_exact_call_config(TERRA_CONTROLLER_MAX_OUTPUT_TOKENS)
-        .map_err(|_| TerraProbeProviderError::Catalog)?;
-    let input_ceiling = u32::try_from(TERRA_STANDARD_RATE_MAX_INPUT_TOKENS)
-        .map_err(|_| TerraProbeProviderError::Catalog)?;
-    let budget = AgentModelCallBudget::try_new(
-        input_ceiling,
-        TERRA_CONTROLLER_MAX_OUTPUT_TOKENS,
-        TERRA_PROVIDER_EXACT_RESERVATION_COST_MICRO_USD,
-    )
-    .map_err(|_| TerraProbeProviderError::Catalog)?;
-    let call = AgentModelCallRequest::new(ids.model_call(), lease.lease(), account, budget, now);
-    let payload = encode_semantic_observation(
-        observation,
-        SemanticModelEncodingBudget::INITIAL_PROVIDER_EXACT_CONSERVATIVE,
-    )
-    .and_then(|encoded| encoded.admit_conservative_utf8(config.tokenizer()))
-    .map_err(|_| TerraProbeProviderError::Encoding)?;
-    let mut policy = AgentRunPolicy::try_new(manifest, vec![lease])
-        .map_err(|_| TerraProbeProviderError::Authority)?;
-    let prepared = AgentPreparedObservationRequest::try_openai_for_provider_exact_count(
-        &mut policy,
-        call,
-        observation,
-        payload,
-        &objective,
-        config,
-    )
-    .map_err(|_| TerraProbeProviderError::Authority)?;
-    let transport = AgentProviderTransport::try_new(transport_config)
-        .map_err(|_| TerraProbeProviderError::Transport)?;
-    let cancellation = AgentProviderCancellation::new();
-    let mut attempt = transport
-        .try_admit(
-            prepared.into_transport_input(),
-            &mut policy,
-            &credential,
-            cancellation,
+    config: AgentProviderCallConfig,
+    lease: AgentPlanLeaseBinding,
+    account: AgentContextAccountBinding,
+    next_call: u64,
+    next_policy_millis: u64,
+    deadline: Instant,
+    turns: u8,
+    finished: bool,
+}
+
+#[cfg(feature = "probe-harness")]
+impl TerraProbeSession {
+    /// Starts one session and returns its first settled tool proposal.
+    pub async fn start(
+        input: TerraControllerRunInput,
+        transport_config: AgentProviderTransportConfig,
+        credential: AgentProviderCredential,
+        observation: &zephium_agentic::SemanticObservation,
+    ) -> Result<(Self, TerraProbeProviderTurn), TerraProbeProviderError> {
+        let TerraControllerRunInput {
+            manifest,
+            lease,
+            account,
+            objective,
+            ids,
+            clock,
+            deadline,
+            ..
+        } = input;
+        if Instant::now() >= deadline {
+            return Err(TerraProbeProviderError::Deadline);
+        }
+        let now = clock.now().map_err(|_| TerraProbeProviderError::Clock)?;
+        let config = try_terra_provider_exact_call_config(TERRA_CONTROLLER_MAX_OUTPUT_TOKENS)
+            .map_err(|_| TerraProbeProviderError::Catalog)?;
+        let budget = terra_probe_call_budget()?;
+        let call =
+            AgentModelCallRequest::new(ids.model_call(), lease.lease(), account, budget, now);
+        let payload = encode_semantic_observation(
+            observation,
+            SemanticModelEncodingBudget::INITIAL_PROVIDER_EXACT_CONSERVATIVE,
         )
-        .map_err(|_| TerraProbeProviderError::Transport)?;
-    drop(credential);
-    let counted = tokio::time::timeout_at(
-        tokio::time::Instant::from_std(deadline),
-        attempt.count_openai_input_tokens(),
-    )
-    .await;
-    let result = match counted {
-        Ok(zephium_agent_provider_transport::AgentProviderExactCountOutcome::Counted(counted)) => {
-            match tokio::time::timeout_at(
-                tokio::time::Instant::from_std(deadline),
+        .and_then(|encoded| encoded.admit_conservative_utf8(config.tokenizer()))
+        .map_err(TerraProbeProviderError::InitialEncoding)?;
+        let mut policy = AgentRunPolicy::try_new(manifest, vec![lease])
+            .map_err(|_| TerraProbeProviderError::Authority)?;
+        let prepared = AgentPreparedObservationRequest::try_openai_for_provider_exact_count(
+            &mut policy,
+            call,
+            observation,
+            payload,
+            &objective,
+            config.clone(),
+        )
+        .map_err(|_| TerraProbeProviderError::Authority)?;
+        let transport = AgentProviderTransport::try_new(transport_config)
+            .map_err(|_| TerraProbeProviderError::Transport)?;
+        let next_call = ids
+            .model_call()
+            .get()
+            .checked_add(1)
+            .ok_or(TerraProbeProviderError::Authority)?;
+        let next_policy_millis = now
+            .millis()
+            .checked_add(1)
+            .ok_or(TerraProbeProviderError::Clock)?;
+        let mut session = Self {
+            policy,
+            transport,
+            credential,
+            config,
+            lease,
+            account,
+            next_call,
+            next_policy_millis,
+            deadline,
+            turns: 0,
+            finished: false,
+        };
+        let turn = match session.drive(prepared.into_transport_input()).await {
+            Ok(turn) => turn,
+            Err(error) => {
+                let _ = session.finish();
+                return Err(error);
+            }
+        };
+        Ok((session, turn))
+    }
+
+    /// Sends one independently verified action diff as the exact tool result.
+    pub async fn continue_after_verified_action(
+        &mut self,
+        transition: TerraProbeVerifiedTransition,
+    ) -> Result<TerraProbeProviderTurn, TerraProbeProviderError> {
+        if self.finished || self.turns >= MAX_TERRA_PROBE_MODEL_TURNS {
+            return Err(TerraProbeProviderError::TurnLimit);
+        }
+        if Instant::now() >= self.deadline {
+            return Err(TerraProbeProviderError::Deadline);
+        }
+        let call_id =
+            AgentModelCallId::new(self.next_call).ok_or(TerraProbeProviderError::Authority)?;
+        self.next_call = self
+            .next_call
+            .checked_add(1)
+            .ok_or(TerraProbeProviderError::Authority)?;
+        let now = AgentPolicyInstant::from_millis(self.next_policy_millis);
+        self.next_policy_millis = self
+            .next_policy_millis
+            .checked_add(1)
+            .ok_or(TerraProbeProviderError::Clock)?;
+        let request = AgentModelCallRequest::new(
+            call_id,
+            self.lease.lease(),
+            self.account,
+            terra_probe_call_budget()?,
+            now,
+        );
+        let (continuation, diff) = transition.into_parts();
+        let payload = encode_semantic_diff(
+            &diff,
+            SemanticModelEncodingBudget::ACTION_DIFF_PROVIDER_EXACT_CONSERVATIVE,
+        )
+        .and_then(|encoded| encoded.admit_conservative_utf8(self.config.tokenizer()))
+        .map_err(TerraProbeProviderError::DiffEncoding)?;
+        let bound = continuation
+            .bind_diff_request(request, &self.config, &diff, payload)
+            .map_err(|_| TerraProbeProviderError::Continuation)?;
+        let draft = AgentProviderDiffRequestDraft::try_new(bound)
+            .map_err(|_| TerraProbeProviderError::Continuation)?;
+        let prepared = draft
+            .try_prepare_for_provider_exact_count(&mut self.policy, request, &diff)
+            .map_err(|_| TerraProbeProviderError::Authority)?;
+        self.drive(prepared.into_transport_input()).await
+    }
+
+    async fn drive(
+        &mut self,
+        input: AgentProviderTransportInput,
+    ) -> Result<TerraProbeProviderTurn, TerraProbeProviderError> {
+        if self.finished || self.turns >= MAX_TERRA_PROBE_MODEL_TURNS {
+            return Err(TerraProbeProviderError::TurnLimit);
+        }
+        let cancellation = AgentProviderCancellation::new();
+        let mut attempt = self
+            .transport
+            .try_admit(input, &mut self.policy, &self.credential, cancellation)
+            .map_err(|_| TerraProbeProviderError::Transport)?;
+        let counted = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(self.deadline),
+            attempt.count_openai_input_tokens(),
+        )
+        .await;
+        let result = match counted {
+            Ok(zephium_agent_provider_transport::AgentProviderExactCountOutcome::Counted(
+                counted,
+            )) => match tokio::time::timeout_at(
+                tokio::time::Instant::from_std(self.deadline),
                 counted.execute(|_| AgentProviderBatchDisposition::Continue),
             )
             .await
@@ -1867,26 +1968,79 @@ pub async fn run_initial_terra_probe(
                 Ok(Err(_)) | Err(_) => attempt
                     .abort(AgentProviderAbortReason::HostDeadline)
                     .map_err(|_| TerraProbeProviderError::Transport)?,
-            }
-        }
-        Ok(zephium_agent_provider_transport::AgentProviderExactCountOutcome::Failed(result)) => {
-            result
-        }
-        Ok(zephium_agent_provider_transport::AgentProviderExactCountOutcome::Unavailable(_)) => {
-            attempt
+            },
+            Ok(zephium_agent_provider_transport::AgentProviderExactCountOutcome::Failed(
+                result,
+            )) => result,
+            Ok(zephium_agent_provider_transport::AgentProviderExactCountOutcome::Unavailable(
+                _,
+            )) => attempt
                 .abort(AgentProviderAbortReason::ControllerFault)
-                .map_err(|_| TerraProbeProviderError::Transport)?
-        }
-        Err(_) => attempt
-            .abort(AgentProviderAbortReason::HostDeadline)
-            .map_err(|_| TerraProbeProviderError::Transport)?,
-    };
-    let input = result.input_metric_receipt();
-    let disclosure = result.disclosure_stage();
-    transport.seal();
-    let _shutdown = transport
-        .try_prove_shutdown()
-        .map_err(|_| TerraProbeProviderError::Transport)?;
+                .map_err(|_| TerraProbeProviderError::Transport)?,
+            Err(_) => attempt
+                .abort(AgentProviderAbortReason::HostDeadline)
+                .map_err(|_| TerraProbeProviderError::Transport)?,
+        };
+        let input = result.input_metric_receipt();
+        let disclosure = result.disclosure_stage();
+        let turn = settle_terra_probe_result(result, disclosure, input, &mut self.policy)?;
+        self.turns = self
+            .turns
+            .checked_add(1)
+            .ok_or(TerraProbeProviderError::TurnLimit)?;
+        Ok(turn)
+    }
+
+    /// Seals the shared transport and proves every admitted call has drained.
+    pub fn finish(mut self) -> Result<(), TerraProbeProviderError> {
+        self.transport.seal();
+        let _shutdown = self
+            .transport
+            .try_prove_shutdown()
+            .map_err(|_| TerraProbeProviderError::Transport)?;
+        self.finished = true;
+        Ok(())
+    }
+}
+
+#[cfg(feature = "probe-harness")]
+impl Drop for TerraProbeSession {
+    fn drop(&mut self) {
+        self.transport.seal();
+    }
+}
+
+#[cfg(feature = "probe-harness")]
+impl fmt::Debug for TerraProbeSession {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TerraProbeSession")
+            .field("turns", &self.turns)
+            .field("finished", &self.finished)
+            .field("content", &"[redacted]")
+            .finish()
+    }
+}
+
+#[cfg(feature = "probe-harness")]
+fn terra_probe_call_budget() -> Result<AgentModelCallBudget, TerraProbeProviderError> {
+    let input_ceiling = u32::try_from(TERRA_STANDARD_RATE_MAX_INPUT_TOKENS)
+        .map_err(|_| TerraProbeProviderError::Catalog)?;
+    AgentModelCallBudget::try_new(
+        input_ceiling,
+        TERRA_CONTROLLER_MAX_OUTPUT_TOKENS,
+        TERRA_PROVIDER_EXACT_RESERVATION_COST_MICRO_USD,
+    )
+    .map_err(|_| TerraProbeProviderError::Catalog)
+}
+
+#[cfg(feature = "probe-harness")]
+fn settle_terra_probe_result(
+    result: AgentProviderTransportResult,
+    disclosure: AgentProviderDisclosureStage,
+    input: zephium_agentic::AgentProviderInputMetricReceipt,
+    policy: &mut AgentRunPolicy,
+) -> Result<TerraProbeProviderTurn, TerraProbeProviderError> {
     match result.into_policy_settlement() {
         AgentProviderPolicySettlement::Immediate(settlement) => {
             let terminal_failure = match settlement.outcome() {
@@ -1899,7 +2053,7 @@ pub async fn run_initial_terra_probe(
                 ) => None,
             };
             let _receipt = settlement
-                .settle(&mut policy)
+                .settle(policy)
                 .map_err(|_| TerraProbeProviderError::Settlement)?;
             Err(match terminal_failure {
                 Some(failure) => match disclosure {
@@ -1923,7 +2077,7 @@ pub async fn run_initial_terra_probe(
             })
         }
         AgentProviderPolicySettlement::PricingRequired(settlement) => {
-            match settle_terra_provider_terminal(*settlement, &mut policy)
+            match settle_terra_provider_terminal(*settlement, policy)
                 .map_err(|_| TerraProbeProviderError::Settlement)?
             {
                 TerraProviderTerminalSettlement::Priced(terminal) => {
@@ -1943,6 +2097,20 @@ pub async fn run_initial_terra_probe(
             }
         }
     }
+}
+
+/// Runs one release-excluded provider-exact Terra proposal turn.
+#[cfg(feature = "probe-harness")]
+pub async fn run_initial_terra_probe(
+    input: TerraControllerRunInput,
+    transport_config: AgentProviderTransportConfig,
+    credential: AgentProviderCredential,
+    observation: &zephium_agentic::SemanticObservation,
+) -> Result<TerraProbeProviderTurn, TerraProbeProviderError> {
+    let (session, turn) =
+        TerraProbeSession::start(input, transport_config, credential, observation).await?;
+    session.finish()?;
+    Ok(turn)
 }
 
 /// One settled, exactly-priced tool proposal and content-free receipts.
@@ -1997,9 +2165,12 @@ pub enum TerraProbeProviderError {
     /// The one-turn absolute deadline elapsed.
     #[error("Terra probe deadline elapsed")]
     Deadline,
-    /// The trusted semantic observation could not be encoded.
-    #[error("Terra probe encoding failed")]
-    Encoding,
+    /// The trusted initial semantic observation could not be encoded.
+    #[error("Terra probe initial observation encoding failed")]
+    InitialEncoding(SemanticModelEncodingError),
+    /// The verified semantic action diff could not be encoded.
+    #[error("Terra probe action diff encoding failed")]
+    DiffEncoding(SemanticModelEncodingError),
     /// Exact-count or streaming provider transport failed.
     #[error("Terra probe transport failed")]
     Transport,
@@ -2024,6 +2195,12 @@ pub enum TerraProbeProviderError {
     /// The settled terminal did not release one tool proposal.
     #[error("Terra probe did not return exactly one tool proposal")]
     Proposal,
+    /// The verified result could not bind to the exact prior provider turn.
+    #[error("Terra probe continuation did not match the prior turn")]
+    Continuation,
+    /// The fixed qualification session exceeded its model-turn ceiling.
+    #[error("Terra probe model-turn ceiling was exhausted")]
+    TurnLimit,
 }
 
 #[cfg(test)]

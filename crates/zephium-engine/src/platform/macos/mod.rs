@@ -63,6 +63,8 @@ pub(crate) use agentic_semantic_probe::run as run_agentic_semantic_probe;
 #[cfg(feature = "native-agentic-semantic-probe")]
 pub(crate) use agentic_semantic_probe::run_model_click as run_agentic_semantic_model_click_probe;
 #[cfg(feature = "native-agentic-semantic-probe")]
+pub(crate) use agentic_semantic_probe::run_model_two_action as run_agentic_semantic_model_two_action_probe;
+#[cfg(feature = "native-agentic-semantic-probe")]
 pub use agentic_semantic_probe::{
     MacosAgenticSemanticModelClickTerminal, MacosAgenticSemanticProbeAuthority,
 };

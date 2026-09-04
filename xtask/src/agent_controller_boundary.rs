@@ -1,4 +1,4 @@
-//! Mechanical architecture checks for the one-turn Terra controller crate.
+//! Mechanical architecture checks for the bounded Terra controller crate.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -156,9 +156,12 @@ fn validate_probe(source: &str) -> Result<(), String> {
     for required in [
         "AgentProviderSettledToolTurn",
         "AgentBrowserToolProposal::Act",
-        "SemanticModelClickQualificationExecution",
+        "SemanticModelActionQualificationExecution",
         "into_actions()",
         "drop(self.continuation)",
+        "settle_for_continuation",
+        "compute_semantic_diff",
+        "TerraProbeVerifiedTransition",
     ] {
         if !source.contains(required) {
             return Err(format!("controller probe lost required bridge: {required}"));
@@ -187,6 +190,11 @@ fn validate_terra(source: &str) -> Result<(), String> {
         "drop(state.credential.take())",
         "attempt.abort(AgentProviderAbortReason::ControllerFault)",
         "state.transport.seal();",
+        "const MAX_TERRA_PROBE_MODEL_TURNS: u8 = 2;",
+        "continue_after_verified_action",
+        ".bind_diff_request(request, &self.config, &diff, payload)",
+        ".try_prepare_for_provider_exact_count(&mut self.policy, request, &diff)",
+        ".try_prove_shutdown()",
     ] {
         if !source.contains(required) {
             return Err(format!(

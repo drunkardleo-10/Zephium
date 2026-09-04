@@ -75,14 +75,16 @@ struct PendingPrimaryClick {
     admitted_at: Instant,
 }
 
-struct PendingModelClick {
+struct PendingModelAction {
     settlement: SemanticActionNativeSettlement,
     admitted_at: Instant,
+    wait: zephium_agentic::SemanticWaitCondition,
+    settle_millis: u32,
 }
 
 enum PendingInitialClick {
     Fixed(Box<PendingPrimaryClick>),
-    Model(Box<PendingModelClick>),
+    Model(Box<PendingModelAction>),
 }
 
 struct PendingPrimaryFill {
@@ -167,14 +169,34 @@ struct CapturedSnapshot {
     snapshot: SemanticSnapshot,
 }
 
+type ModelInitialCallback<'a> = dyn FnMut(
+        &zephium_agentic::SemanticObservation,
+        MacosAgenticSemanticProbeAuthority,
+    ) -> Result<zephium_agentic::SemanticActionNativeRequest, ()>
+    + 'a;
+type ModelContinuationCallback<'a> = dyn FnMut(
+        &zephium_agentic::SemanticObservation,
+        zephium_agentic::SemanticActionNativeSettlement,
+        &zephium_agentic::SemanticObservation,
+        zephium_agentic::SemanticSettleInstant,
+    ) -> Result<zephium_agentic::SemanticActionNativeRequest, ()>
+    + 'a;
+type ModelFinishCallback<'a> = dyn FnMut(
+        &zephium_agentic::SemanticObservation,
+        zephium_agentic::SemanticActionNativeSettlement,
+        &zephium_agentic::SemanticObservation,
+        zephium_agentic::SemanticSettleInstant,
+    ) -> Result<(), ()>
+    + 'a;
+
 enum ProbeMode<'a> {
     Full,
-    ModelClick(
-        &'a mut dyn FnMut(
-            &zephium_agentic::SemanticObservation,
-            MacosAgenticSemanticProbeAuthority,
-        ) -> Result<zephium_agentic::SemanticActionNativeRequest, ()>,
-    ),
+    ModelClick(&'a mut ModelInitialCallback<'a>),
+    ModelTwoAction {
+        prepare_initial: &'a mut ModelInitialCallback<'a>,
+        prepare_continuation: &'a mut ModelContinuationCallback<'a>,
+        finish: &'a mut ModelFinishCallback<'a>,
+    },
 }
 
 /// Fixed run authority bound to the live release-excluded semantic fixture.
@@ -274,6 +296,38 @@ pub(crate) fn run_model_click(
 ) -> Result<MacosAgenticSemanticModelClickTerminal, &'static str> {
     let pending = objc2::rc::autoreleasepool(|_| begin(ProbeMode::ModelClick(&mut prepare)))?;
     finish(pending)?.ok_or("missing_model_terminal")
+}
+
+pub(crate) fn run_model_two_action(
+    mut prepare_initial: impl FnMut(
+        &zephium_agentic::SemanticObservation,
+        MacosAgenticSemanticProbeAuthority,
+    ) -> Result<zephium_agentic::SemanticActionNativeRequest, ()>,
+    mut prepare_continuation: impl FnMut(
+        &zephium_agentic::SemanticObservation,
+        zephium_agentic::SemanticActionNativeSettlement,
+        &zephium_agentic::SemanticObservation,
+        zephium_agentic::SemanticSettleInstant,
+    )
+        -> Result<zephium_agentic::SemanticActionNativeRequest, ()>,
+    mut verify_final: impl FnMut(
+        &zephium_agentic::SemanticObservation,
+        zephium_agentic::SemanticActionNativeSettlement,
+        &zephium_agentic::SemanticObservation,
+        zephium_agentic::SemanticSettleInstant,
+    ) -> Result<(), ()>,
+) -> Result<(), &'static str> {
+    let pending = objc2::rc::autoreleasepool(|_| {
+        begin(ProbeMode::ModelTwoAction {
+            prepare_initial: &mut prepare_initial,
+            prepare_continuation: &mut prepare_continuation,
+            finish: &mut verify_final,
+        })
+    })?;
+    match finish(pending)? {
+        None => Ok(()),
+        Some(_) => Err("unexpected_model_terminal"),
+    }
 }
 
 fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
@@ -434,18 +488,34 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
                 let authority = model_probe_authority(&first_observation)?;
                 let request =
                     prepare(&first_observation, authority).map_err(|()| "model_action_prepare")?;
-                PendingInitialClick::Model(Box::new(execute_model_click(&view, request, &runtime)?))
+                PendingInitialClick::Model(Box::new(execute_model_action(
+                    &view,
+                    request,
+                    Some(zephium_agentic::SemanticActionKind::Click),
+                    &runtime,
+                )?))
+            }
+            ProbeMode::ModelTwoAction {
+                prepare_initial, ..
+            } => {
+                let authority = model_probe_authority(&first_observation)?;
+                let request = prepare_initial(&first_observation, authority)
+                    .map_err(|()| "model_action_prepare")?;
+                PendingInitialClick::Model(Box::new(execute_model_action(
+                    &view,
+                    request,
+                    Some(zephium_agentic::SemanticActionKind::Click),
+                    &runtime,
+                )?))
             }
         };
-        let action_settle_deadline = Instant::now()
-            .checked_add(ACTION_SECURITY_SETTLE)
-            .ok_or("action_settle")?;
-        while !runtime.failed() && Instant::now() < action_settle_deadline {
-            runtime.pump();
-        }
-        if runtime.failed() {
-            return Err("action_native_state");
-        }
+        let initial_settle_delay = match &pending_click {
+            PendingInitialClick::Fixed(_) => ACTION_SECURITY_SETTLE,
+            PendingInitialClick::Model(pending) => {
+                model_action_settle_delay(pending.wait, pending.settle_millis)?
+            }
+        };
+        wait_for_action_security_settle(&runtime, initial_settle_delay)?;
         let after_click = capture_snapshot(
             &view,
             first,
@@ -463,11 +533,60 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
             PendingInitialClick::Model(pending) => {
                 verify_primary_click(&after_click.snapshot)?;
                 let observed_at = action_observed_at(pending.admitted_at)?;
-                return Ok(Some(MacosAgenticSemanticModelClickTerminal {
-                    settlement: pending.settlement,
-                    snapshot: after_click.snapshot,
-                    observed_at,
-                }));
+                match &mut mode {
+                    ProbeMode::ModelClick(_) => {
+                        return Ok(Some(MacosAgenticSemanticModelClickTerminal {
+                            settlement: pending.settlement,
+                            snapshot: after_click.snapshot,
+                            observed_at,
+                        }));
+                    }
+                    ProbeMode::ModelTwoAction {
+                        prepare_continuation,
+                        finish,
+                        ..
+                    } => {
+                        let current_generation = after_click.snapshot.generation();
+                        let current_observation = assemble_observation(after_click)?;
+                        let request = prepare_continuation(
+                            &first_observation,
+                            pending.settlement,
+                            &current_observation,
+                            observed_at,
+                        )
+                        .map_err(|()| "model_continuation_prepare")?;
+                        let pending = execute_model_action(
+                            &view,
+                            request,
+                            Some(zephium_agentic::SemanticActionKind::Fill),
+                            &runtime,
+                        )?;
+                        wait_for_action_security_settle(
+                            &runtime,
+                            model_action_settle_delay(pending.wait, pending.settle_millis)?,
+                        )?;
+                        let after_second = capture_snapshot(
+                            &view,
+                            first,
+                            &first_url,
+                            current_generation.next().ok_or("model_action_identity")?,
+                            &mut next_invocation,
+                            &mut successful_snapshots,
+                            &runtime,
+                        )?;
+                        let final_observed_at = action_observed_at(pending.admitted_at)?;
+                        let final_observation = assemble_observation(after_second)?;
+                        finish(
+                            &current_observation,
+                            pending.settlement,
+                            &final_observation,
+                            final_observed_at,
+                        )
+                        .map_err(|()| "model_final_verify")?;
+                        return Ok(None);
+                    }
+                    ProbeMode::Full => return Err("model_mode_state"),
+                }
             }
         }
 
@@ -1148,14 +1267,17 @@ fn execute_primary_click(
     })
 }
 
-fn execute_model_click(
+fn execute_model_action(
     view: &AgentOwnedView,
     request: zephium_agentic::SemanticActionNativeRequest,
+    expected_kind: Option<zephium_agentic::SemanticActionKind>,
     runtime: &ProbeRuntime<'_, '_>,
-) -> Result<PendingModelClick, &'static str> {
-    if request.kind() != zephium_agentic::SemanticActionKind::Click {
+) -> Result<PendingModelAction, &'static str> {
+    if expected_kind.is_some_and(|kind| request.kind() != kind) {
         return Err("model_action_kind");
     }
+    let wait = request.wait();
+    let settle_millis = request.settle_budget().millis();
     let admitted_at = Instant::now();
     let result = Rc::new(RefCell::new(None));
     let completion = Rc::clone(&result);
@@ -1184,10 +1306,28 @@ fn execute_model_click(
     if runtime.failed() {
         return Err("model_action_native_state");
     }
-    Ok(PendingModelClick {
+    Ok(PendingModelAction {
         settlement,
         admitted_at,
+        wait,
+        settle_millis,
     })
+}
+
+fn model_action_settle_delay(
+    wait: zephium_agentic::SemanticWaitCondition,
+    settle_millis: u32,
+) -> Result<Duration, &'static str> {
+    let millis = match wait {
+        zephium_agentic::SemanticWaitCondition::MutationQuiet(quiet) => quiet.millis(),
+        _ => {
+            u32::try_from(ACTION_SECURITY_SETTLE.as_millis()).map_err(|_| "model_action_settle")?
+        }
+    };
+    if millis > settle_millis {
+        return Err("model_action_settle_contract");
+    }
+    Ok(Duration::from_millis(u64::from(millis)))
 }
 
 fn execute_primary_fill(

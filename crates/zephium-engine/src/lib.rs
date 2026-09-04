@@ -74,6 +74,41 @@ pub fn run_macos_agentic_semantic_model_click_probe(
     platform::macos::run_agentic_semantic_model_click_probe(prepare)
 }
 
+/// Runs one fixed-fixture two-action model continuation session.
+///
+/// The first callback receives the initial observation and run authority. The
+/// second receives the exact first native terminal plus its adjacent fresh
+/// observation and must return another already-bound request. The final
+/// callback consumes the second terminal for independent verification before
+/// the hidden engine context is destroyed. This release-excluded API exposes
+/// no page-world bridge, selector, or arbitrary evaluation capability.
+#[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+#[doc(hidden)]
+pub fn run_macos_agentic_semantic_model_two_action_probe(
+    prepare_initial: impl FnMut(
+        &zephium_agentic::SemanticObservation,
+        MacosAgenticSemanticProbeAuthority,
+    ) -> Result<zephium_agentic::SemanticActionNativeRequest, ()>,
+    prepare_continuation: impl FnMut(
+        &zephium_agentic::SemanticObservation,
+        zephium_agentic::SemanticActionNativeSettlement,
+        &zephium_agentic::SemanticObservation,
+        zephium_agentic::SemanticSettleInstant,
+    ) -> Result<zephium_agentic::SemanticActionNativeRequest, ()>,
+    verify_final: impl FnMut(
+        &zephium_agentic::SemanticObservation,
+        zephium_agentic::SemanticActionNativeSettlement,
+        &zephium_agentic::SemanticObservation,
+        zephium_agentic::SemanticSettleInstant,
+    ) -> Result<(), ()>,
+) -> Result<(), &'static str> {
+    platform::macos::run_agentic_semantic_model_two_action_probe(
+        prepare_initial,
+        prepare_continuation,
+        verify_final,
+    )
+}
+
 #[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
 #[doc(hidden)]
 pub use platform::macos::MacosAgenticSemanticModelClickTerminal;

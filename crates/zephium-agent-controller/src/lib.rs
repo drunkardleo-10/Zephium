@@ -30,7 +30,12 @@ pub use terra::{
 };
 
 #[cfg(feature = "probe-harness")]
-pub use probe::{TerraProbeActionBridge, TerraProbeActionBridgeError, TerraProbeActionReport};
+pub use probe::{
+    TerraProbeActionBridge, TerraProbeActionBridgeError, TerraProbeActionReport,
+    TerraProbeVerifiedTransition,
+};
 
 #[cfg(feature = "probe-harness")]
-pub use terra::{run_initial_terra_probe, TerraProbeProviderError, TerraProbeProviderTurn};
+pub use terra::{
+    run_initial_terra_probe, TerraProbeProviderError, TerraProbeProviderTurn, TerraProbeSession,
+};
