@@ -23,7 +23,9 @@ pub const MAX_SEMANTIC_NAME_BYTES: usize = 512;
 /// Maximum UTF-8 bytes in one visible-text segment.
 pub const MAX_SEMANTIC_TEXT_BYTES: usize = 4 * 1024;
 /// Maximum UTF-8 bytes in one safe value summary.
-pub const MAX_SEMANTIC_VALUE_BYTES: usize = 1024;
+pub const MAX_SEMANTIC_VALUE_BYTES: usize = 4 * 1024;
+/// Maximum exact UTF-8 prefix of one value exposed to a model-facing sink.
+pub const MAX_SEMANTIC_VALUE_PREVIEW_BYTES: usize = 1024;
 /// Maximum total page-derived UTF-8 bytes in one frame snapshot.
 pub const MAX_SEMANTIC_TOTAL_TEXT_BYTES: usize = 128 * 1024;
 /// Maximum supported frame snapshots in one complete observation.
@@ -526,11 +528,134 @@ impl fmt::Debug for SemanticText {
     }
 }
 
+/// Exact bounded text retained for one native form-control value.
+///
+/// Unlike display text, value text preserves spaces, tabs, and line feeds so
+/// an independently observed fill postcondition can be compared byte-for-byte.
+/// Other control and invisible-directional characters remain forbidden.
+#[derive(Clone, Eq, PartialEq)]
+pub struct SemanticValueText(String);
+
+impl SemanticValueText {
+    /// Returns exact page-derived value text only to crate-internal verification.
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Builds the single deterministic projection permitted at public/model boundaries.
+    pub fn preview(&self) -> SemanticValuePreview<'_> {
+        let mut end = self.0.len().min(MAX_SEMANTIC_VALUE_PREVIEW_BYTES);
+        while !self.0.is_char_boundary(end) {
+            end -= 1;
+        }
+        SemanticValuePreview {
+            text: &self.0[..end],
+            source_bytes: self.0.len(),
+            truncated: end != self.0.len(),
+        }
+    }
+
+    /// Exact UTF-8 byte length of the retained value.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Reports whether the exact value is empty.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub(crate) fn try_new(value: String, limit: usize) -> Result<Self, SemanticContractError> {
+        if value.len() > limit || value.chars().any(invalid_semantic_value_char) {
+            return Err(SemanticContractError::InvalidText);
+        }
+        Ok(Self(value))
+    }
+}
+
+/// UTF-8-safe, explicitly truncation-aware projection of an exact form value.
+///
+/// Secret scanning occurs before an exact value can exist, so this type cannot
+/// turn a redacted/secret value into model-visible text.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct SemanticValuePreview<'a> {
+    text: &'a str,
+    source_bytes: usize,
+    truncated: bool,
+}
+
+impl<'a> SemanticValuePreview<'a> {
+    /// Model-visible UTF-8 prefix, never larger than 1 KiB.
+    pub const fn text(self) -> &'a str {
+        self.text
+    }
+
+    /// Exact byte length of the private source value.
+    pub const fn source_bytes(self) -> usize {
+        self.source_bytes
+    }
+
+    /// Whether bytes were withheld after the exposed prefix.
+    pub const fn truncated(self) -> bool {
+        self.truncated
+    }
+
+    /// UTF-8 byte length of the exposed prefix.
+    pub const fn len(self) -> usize {
+        self.text.len()
+    }
+
+    /// Whether the exposed prefix is empty.
+    pub const fn is_empty(self) -> bool {
+        self.text.is_empty()
+    }
+}
+
+impl fmt::Debug for SemanticValuePreview<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SemanticValuePreview")
+            .field("bytes", &self.text.len())
+            .field("source_bytes", &self.source_bytes)
+            .field("truncated", &self.truncated)
+            .field("content", &"[redacted]")
+            .finish()
+    }
+}
+
+fn invalid_semantic_value_char(character: char) -> bool {
+    (character.is_control() && !matches!(character, '\t' | '\n'))
+        || matches!(
+            character,
+            '\u{00ad}'
+                | '\u{061c}'
+                | '\u{180e}'
+                | '\u{200b}'..='\u{200f}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2060}'..='\u{2064}'
+                | '\u{2066}'..='\u{206f}'
+                | '\u{feff}'
+                | '\u{fff9}'..='\u{fffb}'
+                | '\u{e0001}'
+                | '\u{e0020}'..='\u{e007f}'
+        )
+}
+
+impl fmt::Debug for SemanticValueText {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SemanticValueText")
+            .field("bytes", &self.0.len())
+            .field("content", &"[redacted]")
+            .finish()
+    }
+}
+
 /// Safe, bounded value summary for a semantic node.
 #[derive(Clone, Eq, PartialEq)]
 pub enum SemanticValueSummary {
-    /// Safe text retained after secret scanning.
-    Text(SemanticText),
+    /// Exact safe form-control text retained after secret scanning.
+    Text(SemanticValueText),
     /// Value exists but is mechanically hidden.
     Redacted,
     /// Boolean form state.
@@ -1402,5 +1527,25 @@ mod tests {
             SemanticText::try_new("x".repeat(11), 10),
             Err(SemanticContractError::InvalidText)
         );
+    }
+
+    #[test]
+    fn value_preview_is_utf8_safe_explicit_and_never_exceeds_one_kibibyte() {
+        for source_bytes in [1024, 1025, 4096] {
+            let value =
+                SemanticValueText::try_new("x".repeat(source_bytes), 4096).expect("bounded value");
+            let preview = value.preview();
+            assert_eq!(preview.len(), source_bytes.min(1024));
+            assert_eq!(preview.source_bytes(), source_bytes);
+            assert_eq!(preview.truncated(), source_bytes > 1024);
+        }
+
+        let value = SemanticValueText::try_new(format!("{}€tail", "x".repeat(1023)), 4096)
+            .expect("multibyte value");
+        let preview = value.preview();
+        assert_eq!(preview.len(), 1023);
+        assert!(preview.truncated());
+        assert_eq!(preview.source_bytes(), 1030);
+        assert!(!format!("{preview:?}").contains("tail"));
     }
 }

@@ -513,13 +513,14 @@ mod tests {
         ContextCapability, ContextId, ContextIdentity, ContextKind, ContextOperationId,
         ContextRegistry, ContextRunId, ContextSettlement, FrameGeneration, FrameId,
         SemanticActionBatch, SemanticActionBatchId, SemanticActionExecutionBackend,
-        SemanticActionExecutionInstant, SemanticActionIntent, SemanticActionNativeReadiness,
-        SemanticActionNativeViewport, SemanticActionProposal, SemanticActionText,
-        SemanticDecodeContext, SemanticEffectClass, SemanticFrameTrust, SemanticInvocationId,
-        SemanticMutationQuietPeriod, SemanticObservation, SemanticObservationAssembler,
-        SemanticObservationBudget, SemanticObservationId, SemanticOrigin, SemanticPreparedAction,
-        SemanticReferenceId, SemanticSettleBudget, SemanticSnapshotGeneration, SemanticState,
-        SemanticVerification, SemanticWaitCondition, SEMANTIC_WIRE_VERSION,
+        SemanticActionExecutionInstant, SemanticActionIntent, SemanticActionKind,
+        SemanticActionNativeReadiness, SemanticActionNativeViewport, SemanticActionProposal,
+        SemanticActionText, SemanticDecodeContext, SemanticEffectClass, SemanticFrameTrust,
+        SemanticInvocationId, SemanticMutationQuietPeriod, SemanticObservation,
+        SemanticObservationAssembler, SemanticObservationBudget, SemanticObservationId,
+        SemanticOrigin, SemanticPreparedAction, SemanticReferenceId, SemanticSettleBudget,
+        SemanticSnapshotGeneration, SemanticState, SemanticVerification, SemanticWaitCondition,
+        SEMANTIC_WIRE_VERSION,
     };
     use serde_json::json;
     use zephium_core::ids::ProfileId;
@@ -710,11 +711,22 @@ mod tests {
         )
         .expect("execution");
         let actual_geometry = native.expected_geometry();
+        let (backend, readiness) = if action.kind() == SemanticActionKind::Fill {
+            (
+                SemanticActionExecutionBackend::PageWorldCompatibilityFill,
+                SemanticActionNativeReadiness::ExactConnectedWritableFormTarget,
+            )
+        } else {
+            (
+                SemanticActionExecutionBackend::FixedSemanticRecipe,
+                SemanticActionNativeReadiness::ExactVisibleUnoccludedTarget,
+            )
+        };
         let outcome = pending.settle(
             action.frame(),
             native.complete(
-                SemanticActionExecutionBackend::FixedSemanticRecipe,
-                SemanticActionNativeReadiness::ExactVisibleUnoccludedTarget,
+                backend,
+                readiness,
                 SemanticActionNativeViewport::try_new(800, 600).expect("viewport"),
                 actual_geometry,
                 SemanticActionExecutionInstant::from_millis(completed_at - 10),

@@ -65,6 +65,10 @@ pub enum FixtureRoute {
     SameOriginFrame,
     /// First fixed document for production semantic-runtime qualification.
     SemanticRuntime,
+    /// Controlled-input document for the release-excluded page-world relay proof.
+    SemanticRuntimeRelay,
+    /// Real-WebKit adversarial page-world relay qualification document.
+    SemanticRuntimeRelayHostile,
     /// Replacement document proving semantic world-epoch rotation.
     SemanticRuntimeReplacement,
     /// Bounded same-origin context pressure proving native event ceilings.
@@ -92,6 +96,8 @@ impl FixtureRoute {
             Self::HostilePage => "/hostile-v1.html",
             Self::SameOriginFrame => "/frame-v1.html",
             Self::SemanticRuntime => "/semantic-runtime-v1.html",
+            Self::SemanticRuntimeRelay => "/semantic-runtime-relay-v1.html",
+            Self::SemanticRuntimeRelayHostile => "/semantic-runtime-relay-hostile-v1.html",
             Self::SemanticRuntimeReplacement => "/semantic-runtime-replacement-v1.html",
             Self::SemanticRuntimeEventFlood => "/semantic-runtime-event-flood-v1.html",
             Self::SemanticRuntimeMutation => "/semantic-runtime-mutation-v1.html",
@@ -516,6 +522,20 @@ fn handle(
             FixtureScriptPolicy::InlineOnly,
         ),
         b"GET /semantic-runtime-v1.html HTTP/1.1" | b"GET /semantic-runtime-v1.html HTTP/1.0" => (
+            200,
+            "text/html; charset=utf-8",
+            SEMANTIC_RUNTIME_HTML.as_bytes(),
+            FixtureScriptPolicy::InlineOnly,
+        ),
+        b"GET /semantic-runtime-relay-v1.html HTTP/1.1"
+        | b"GET /semantic-runtime-relay-v1.html HTTP/1.0" => (
+            200,
+            "text/html; charset=utf-8",
+            SEMANTIC_RUNTIME_HTML.as_bytes(),
+            FixtureScriptPolicy::InlineOnly,
+        ),
+        b"GET /semantic-runtime-relay-hostile-v1.html HTTP/1.1"
+        | b"GET /semantic-runtime-relay-hostile-v1.html HTTP/1.0" => (
             200,
             "text/html; charset=utf-8",
             SEMANTIC_RUNTIME_HTML.as_bytes(),
@@ -999,6 +1019,21 @@ const SEMANTIC_RUNTIME_HTML: &str = r###"<!doctype html>
   <button id="primary-semantic-action" type="button" aria-label="Primary semantic action" aria-expanded="false">Run</button>
   <p id="primary-action-activation" aria-label="Primary action activation pending"></p>
   <p id="primary-action-settled" aria-label="Primary action settle pending"></p>
+  <input id="semantic-fill-text" type="text" aria-label="Semantic fill text" value="fixture text">
+  <h3 id="semantic-fill-text-status">Semantic fill text pending</h3>
+  <input id="semantic-fill-search" type="search" aria-label="Semantic fill search" value="fixture search">
+  <h3 id="semantic-fill-search-status">Semantic fill search pending</h3>
+  <textarea id="semantic-fill-textarea" aria-label="Semantic fill textarea">fixture textarea</textarea>
+  <h3 id="semantic-fill-textarea-status">Semantic fill textarea pending</h3>
+  <input id="semantic-hostile-fill" type="text" aria-label="Semantic hostile fill" value="hostile-before">
+  <input id="semantic-hostile-recovery" type="text" aria-label="Semantic hostile recovery" value="recovery-before">
+  <h3 id="semantic-hostile-recovery-status">Semantic hostile recovery pending</h3>
+  <h3 id="semantic-hostile-status">Semantic hostile relay pending</h3>
+  <div id="semantic-hostile-quarantine"></div>
+  <input id="semantic-hostile-credential-fill" type="text" aria-label="Semantic hostile credential fill" value="credential-before">
+  <span id="semantic-hostile-credential-label" hidden>API key</span>
+  <h3 id="semantic-hostile-credential-status">Semantic hostile credential pending</h3>
+  <h3 id="semantic-hostile-credential-recovery-status">Semantic hostile credential recovery pending</h3>
   <input type="password" aria-label="Password field" value="fixture-password-value">
   <input type="text" aria-label="Token field" value="Bearer abcdefghijklmnop">
   <div id="open-shadow-host"></div>
@@ -1040,6 +1075,135 @@ const SEMANTIC_RUNTIME_HTML: &str = r###"<!doctype html>
       );
     }, 75);
   });
+  const installFillProbe = (targetId, statusId, expected) => {
+    const target = document.getElementById(targetId);
+    const status = document.getElementById(statusId);
+    const valueGetter = Object.getOwnPropertyDescriptor(
+      target instanceof HTMLTextAreaElement
+        ? HTMLTextAreaElement.prototype
+        : HTMLInputElement.prototype,
+      'value'
+    ).get;
+    const counts = {beforeinput: 0, input: 0, change: 0};
+    const countClass = (count) => count === 0 ? '0' : count === 1 ? '1' : 'many';
+    const publishCounts = (eventClass) => {
+      status.textContent =
+        `Semantic fill events ${eventClass} before ${countClass(counts.beforeinput)} input ${countClass(counts.input)} change ${countClass(counts.change)}`;
+    };
+    target.addEventListener('beforeinput', () => {
+      counts.beforeinput += 1;
+      publishCounts('beforeinput observed');
+    });
+    target.addEventListener('change', () => {
+      counts.change += 1;
+      publishCounts('change observed');
+    });
+    target.addEventListener('input', (event) => {
+      counts.input += 1;
+      publishCounts('input observed');
+      const activation = navigator.userActivation;
+      const trusted = event.isTrusted;
+      const replacement = event.inputType === 'insertReplacementText';
+      const exactData = event.data === expected;
+      const exactProjection = Reflect.apply(valueGetter, target, []) === expected;
+      const activeDuring = !!activation?.isActive;
+      const stickyDuring = !!activation?.hasBeenActive;
+      const popup = window.open('/semantic-popup-denied-v1.html', '_blank');
+      const popupDenied = popup === null;
+      if (popup) setTimeout(() => popup.close(), 0);
+      setTimeout(() => {
+        const activeAfterSettle = !!activation?.isActive;
+        const stickyAfterSettle = !!activation?.hasBeenActive;
+        status.textContent =
+          `Semantic fill observed input ${trusted ? 'trusted' : 'untrusted'} replacement ${replacement ? 'yes' : 'no'} data ${exactData ? 'exact' : 'mismatch'} projection ${exactProjection ? 'exact' : 'mismatch'} before ${countClass(counts.beforeinput)} input ${countClass(counts.input)} change ${countClass(counts.change)} popup ${popupDenied ? 'denied' : 'admitted'} activation during ${activeDuring ? 'active' : 'inactive'} sticky ${stickyDuring ? 'active' : 'inactive'} settle ${activeAfterSettle ? 'active' : 'inactive'} sticky ${stickyAfterSettle ? 'active' : 'inactive'}`;
+      }, 75);
+    });
+  };
+  installFillProbe('semantic-fill-text', 'semantic-fill-text-status', 'Zephium fixed text');
+  installFillProbe('semantic-fill-search', 'semantic-fill-search-status', 'Zephium fixed search');
+  installFillProbe(
+    'semantic-fill-textarea',
+    'semantic-fill-textarea-status',
+    '  Zephium  fixed textarea\nline two  '
+  );
+  installFillProbe(
+    'semantic-hostile-recovery',
+    'semantic-hostile-recovery-status',
+    'Zephium hostile recovery'
+  );
+  if (window.location.pathname === '/semantic-runtime-relay-hostile-v1.html') {
+    const hostile = document.getElementById('semantic-hostile-fill');
+    const recovery = document.getElementById('semantic-hostile-recovery');
+    const hostileStatus = document.getElementById('semantic-hostile-status');
+    const quarantine = document.getElementById('semantic-hostile-quarantine');
+    const credential = document.getElementById('semantic-hostile-credential-fill');
+    const credentialStatus = document.getElementById('semantic-hostile-credential-status');
+    const credentialRecoveryStatus = document.getElementById('semantic-hostile-credential-recovery-status');
+    const main = hostile.parentNode;
+    const hostileNextSibling = hostile.nextSibling;
+    const relayTerminal = 'data-zephium-fill-relay-terminal-v1';
+    const valueGetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').get;
+    let armed = true;
+    hostile.setAttribute(relayTerminal, '1|5|ok');
+    hostile.addEventListener('beforeinput', (event) => {
+      if (!armed) return;
+      armed = false;
+      const activation = navigator.userActivation;
+      const activeDuring = !!activation?.isActive;
+      const stickyDuring = !!activation?.hasBeenActive;
+      const popup = window.open('/semantic-popup-denied-v1.html', '_blank');
+      const popupDenied = popup === null;
+      if (popup) setTimeout(() => popup.close(), 0);
+      hostile.setAttribute(relayTerminal, '1|5|ok');
+      recovery.setAttribute(relayTerminal, '1|6|ok');
+      quarantine.append(hostile);
+      hostile.type = 'password';
+      Promise.resolve().then(() => {
+        hostile.type = 'text';
+        main.insertBefore(hostile, hostileNextSibling);
+        setTimeout(() => {
+          const targetUnchanged = Reflect.apply(valueGetter, hostile, []) === 'hostile-before';
+          const recoveryUnchanged = Reflect.apply(valueGetter, recovery, []) === 'recovery-before';
+          hostileStatus.textContent =
+            `Semantic hostile relay refused ${event.isTrusted ? 'trusted' : 'untrusted'} target ${targetUnchanged ? 'unchanged' : 'changed'} recovery ${recoveryUnchanged ? 'unchanged' : 'changed'} type ${hostile.type === 'text' ? 'restored' : 'changed'} target-marker ${hostile.hasAttribute(relayTerminal) ? 'present' : 'clear'} recovery-marker ${recovery.hasAttribute(relayTerminal) ? 'forged' : 'missing'} popup ${popupDenied ? 'denied' : 'admitted'} activation during ${activeDuring ? 'active' : 'inactive'} sticky ${stickyDuring ? 'active' : 'inactive'} settle ${activation?.isActive ? 'active' : 'inactive'} sticky ${activation?.hasBeenActive ? 'active' : 'inactive'}`;
+        }, 75);
+      });
+    });
+    recovery.addEventListener('input', () => {
+      setTimeout(() => {
+        hostileStatus.textContent =
+          `Semantic hostile relay recovered target-marker ${hostile.hasAttribute(relayTerminal) ? 'present' : 'clear'} recovery-marker ${recovery.hasAttribute(relayTerminal) ? 'present' : 'clear'}`;
+      }, 75);
+    });
+    let credentialArmed = true;
+    credential.addEventListener('beforeinput', (event) => {
+      if (!credentialArmed) return;
+      credentialArmed = false;
+      const activation = navigator.userActivation;
+      const activeDuring = !!activation?.isActive;
+      const stickyDuring = !!activation?.hasBeenActive;
+      const popup = window.open('/semantic-popup-denied-v1.html', '_blank');
+      const popupDenied = popup === null;
+      if (popup) setTimeout(() => popup.close(), 0);
+      credential.setAttribute(relayTerminal, '1|7|ok');
+      credential.setAttribute('aria-labelledby', 'semantic-hostile-credential-label');
+      Promise.resolve().then(() => {
+        credential.removeAttribute('aria-labelledby');
+        setTimeout(() => {
+          const unchanged = Reflect.apply(valueGetter, credential, []) === 'credential-before';
+          credentialStatus.textContent =
+            `Semantic hostile credential refused ${event.isTrusted ? 'trusted' : 'untrusted'} target ${unchanged ? 'unchanged' : 'changed'} credential-marker ${credential.hasAttribute('aria-labelledby') ? 'present' : 'clear'} target-marker ${credential.hasAttribute(relayTerminal) ? 'present' : 'clear'} popup ${popupDenied ? 'denied' : 'admitted'} activation during ${activeDuring ? 'active' : 'inactive'} sticky ${stickyDuring ? 'active' : 'inactive'} settle ${activation?.isActive ? 'active' : 'inactive'} sticky ${activation?.hasBeenActive ? 'active' : 'inactive'}`;
+        }, 75);
+      });
+    });
+    credential.addEventListener('input', (event) => {
+      setTimeout(() => {
+        const exact = Reflect.apply(valueGetter, credential, []) === 'Zephium credential recovery';
+        credentialRecoveryStatus.textContent =
+          `Semantic hostile credential recovered input ${event.isTrusted ? 'trusted' : 'untrusted'} value ${exact ? 'exact' : 'mismatch'} credential-marker ${credential.hasAttribute('aria-labelledby') ? 'present' : 'clear'} target-marker ${credential.hasAttribute(relayTerminal) ? 'present' : 'clear'}`;
+      }, 75);
+    });
+  }
   const openRoot = document.getElementById('open-shadow-host').attachShadow({mode: 'open'});
   const openButton = document.createElement('button');
   openButton.type = 'button';
@@ -1065,10 +1229,33 @@ const SEMANTIC_RUNTIME_HTML: &str = r###"<!doctype html>
   document.getElementById('bridge-status').textContent =
     bridgeVisible ? 'Page bridge present' : 'Page bridge absent';
 
-  Object.defineProperty(Element.prototype, 'getAttribute', {
-    value() { throw new Error('page-world prototype poison'); },
-    configurable: true, writable: true
-  });
+  if (window.location.pathname !== '/semantic-runtime-relay-v1.html') {
+    Object.defineProperty(Element.prototype, 'getAttribute', {
+      value() { throw new Error('page-world prototype poison'); },
+      configurable: true, writable: true
+    });
+    Object.defineProperty(HTMLInputElement.prototype, 'value', {
+      get() { throw new Error('page-world input getter poison'); },
+      set() { throw new Error('page-world input setter poison'); },
+      configurable: true
+    });
+    Object.defineProperty(HTMLTextAreaElement.prototype, 'value', {
+      get() { throw new Error('page-world textarea getter poison'); },
+      set() { throw new Error('page-world textarea setter poison'); },
+      configurable: true
+    });
+    Object.defineProperty(EventTarget.prototype, 'dispatchEvent', {
+      value() { throw new Error('page-world event dispatch poison'); },
+      configurable: true, writable: true
+    });
+    try {
+      window.InputEvent = function PoisonedInputEvent() {
+        throw new Error('page-world input event poison');
+      };
+    } catch (_) {
+      // Some WebKit builds expose the constructor as non-writable.
+    }
+  }
   document.documentElement.dataset.fixtureReady = 'semantic-runtime-v1';
 })();
 </script>
@@ -1288,6 +1475,15 @@ mod tests {
         assert!(semantic.contains("Page bridge absent"));
         assert!(semantic.contains("page-world prototype poison"));
         assert!(semantic.contains("connect-src 'none'"));
+        let semantic_relay = fetch(&server, FixtureRoute::SemanticRuntimeRelay);
+        assert!(semantic_relay.starts_with("HTTP/1.1 200 OK"));
+        assert!(semantic_relay
+            .contains("<h3 id=\"semantic-fill-text-status\">Semantic fill text pending</h3>"));
+        let semantic_relay_hostile = fetch(&server, FixtureRoute::SemanticRuntimeRelayHostile);
+        assert!(semantic_relay_hostile.starts_with("HTTP/1.1 200 OK"));
+        assert!(semantic_relay_hostile.contains("Semantic hostile fill"));
+        assert!(semantic_relay_hostile.contains("Semantic hostile credential fill"));
+        assert!(semantic_relay_hostile.contains("semantic-hostile-credential-label"));
         let replacement = fetch(&server, FixtureRoute::SemanticRuntimeReplacement);
         assert!(replacement.starts_with("HTTP/1.1 200 OK"));
         assert!(replacement.contains("Replacement semantic epoch"));

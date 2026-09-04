@@ -269,10 +269,145 @@ impl SemanticActionExecutionCoordinator {
 #[cfg(feature = "probe-harness")]
 #[must_use]
 pub struct SemanticClickQualificationExecution {
+    execution: SemanticActionQualificationExecution,
+}
+
+#[cfg(feature = "probe-harness")]
+#[must_use]
+struct SemanticActionQualificationExecution {
     coordinator: SemanticActionExecutionCoordinator,
     reservation: SemanticActionExecutionReservation,
     action: SemanticPreparedAction,
     native: Option<SemanticActionNativeRequest>,
+}
+
+#[cfg(feature = "probe-harness")]
+impl SemanticActionQualificationExecution {
+    fn prepare(
+        observation: &crate::SemanticObservation,
+        proposal: crate::SemanticActionProposal,
+        batch: u64,
+        attempt: u64,
+        requested_at: SemanticActionExecutionInstant,
+    ) -> Result<Self, SemanticActionQualificationError> {
+        let frames = observation
+            .frames()
+            .iter()
+            .map(|snapshot| snapshot.frame().clone())
+            .collect::<Vec<_>>();
+        let batch = crate::SemanticActionBatch::bind(
+            crate::SemanticActionBatchId::new(batch)
+                .ok_or(SemanticActionQualificationError::Identity)?,
+            observation,
+            &frames,
+            vec![proposal],
+        )
+        .map_err(|_| SemanticActionQualificationError::Preparation)?;
+        let action = batch
+            .actions()
+            .first()
+            .ok_or(SemanticActionQualificationError::Preparation)?
+            .prepare(
+                observation
+                    .frames()
+                    .first()
+                    .ok_or(SemanticActionQualificationError::Preparation)?,
+            )
+            .map_err(|_| SemanticActionQualificationError::Preparation)?;
+        let attempt = crate::SemanticActionAttemptId::new(attempt)
+            .ok_or(SemanticActionQualificationError::Identity)?;
+        let active = AgentActiveEffect::for_execution_qualification(&action, attempt);
+        let mut coordinator = SemanticActionExecutionCoordinator::new();
+        let (reservation, native) = coordinator
+            .begin(active, &action, requested_at)
+            .map_err(|_| SemanticActionQualificationError::Preparation)?;
+        Ok(Self {
+            coordinator,
+            reservation,
+            action,
+            native: Some(native),
+        })
+    }
+
+    fn take_native_request(
+        &mut self,
+    ) -> Result<SemanticActionNativeRequest, SemanticActionQualificationError> {
+        self.native
+            .take()
+            .ok_or(SemanticActionQualificationError::RequestAlreadyTaken)
+    }
+
+    fn settle_and_verify(
+        mut self,
+        settlement: SemanticActionNativeSettlement,
+        snapshot: &crate::SemanticSnapshot,
+        observed_at: crate::SemanticSettleInstant,
+        expected_proof: crate::SemanticEffectProofKind,
+    ) -> Result<crate::SemanticActionExecutionApplied, SemanticActionQualificationError> {
+        if self.native.is_some() || self.coordinator.status().pending() != 1 {
+            return Err(SemanticActionQualificationError::Terminal);
+        }
+        let outcome = self
+            .coordinator
+            .settle(self.action.frame(), settlement)
+            .map_err(|_| SemanticActionQualificationError::Terminal)?;
+        if self.coordinator.status().pending() != 0
+            || outcome.active().attempt() != self.reservation.attempt()
+        {
+            return Err(SemanticActionQualificationError::Terminal);
+        }
+        let start = crate::begin_semantic_action_settlement(outcome, &self.action)
+            .map_err(|_| SemanticActionQualificationError::Settlement)?;
+        let mut coordinator = crate::SemanticActionSettlementCoordinator::new();
+        let update = coordinator
+            .begin(start)
+            .map_err(|_| SemanticActionQualificationError::Settlement)?;
+        let terminal = match update {
+            crate::SemanticActionSettlementUpdate::Pending(reservation) => {
+                match coordinator
+                    .observe_snapshot(reservation, observed_at, snapshot)
+                    .map_err(|_| SemanticActionQualificationError::Settlement)?
+                {
+                    crate::SemanticActionSettlementUpdate::Terminal(terminal) => terminal,
+                    crate::SemanticActionSettlementUpdate::Pending(_) => {
+                        return Err(SemanticActionQualificationError::Settlement);
+                    }
+                }
+            }
+            crate::SemanticActionSettlementUpdate::Terminal(terminal) => terminal,
+        };
+        if coordinator.status().pending() != 0 {
+            return Err(SemanticActionQualificationError::Settlement);
+        }
+        let evidence = match expected_proof {
+            crate::SemanticEffectProofKind::ExactTargetValue => {
+                let (before, after) = self
+                    .action
+                    .verification_fill_values(snapshot)
+                    .map_err(|_| SemanticActionQualificationError::Verification)?;
+                crate::SemanticEffectEvidence::exact_target_value(
+                    self.reservation.attempt(),
+                    observed_at,
+                    snapshot,
+                    before,
+                    after,
+                )
+            }
+            _ => crate::SemanticEffectEvidence::snapshot(
+                self.reservation.attempt(),
+                observed_at,
+                snapshot,
+            ),
+        };
+        let verified = crate::verify_semantic_action_terminal(*terminal, &self.action, evidence)
+            .map_err(|_| SemanticActionQualificationError::Verification)?;
+        if !verified.verified().matches_action(&self.action)
+            || verified.verified().proof() != expected_proof
+        {
+            return Err(SemanticActionQualificationError::Verification);
+        }
+        Ok(verified.execution())
+    }
 }
 
 #[cfg(feature = "probe-harness")]
@@ -284,7 +419,7 @@ impl SemanticClickQualificationExecution {
         batch: u64,
         attempt: u64,
         requested_at: SemanticActionExecutionInstant,
-    ) -> Result<Self, SemanticClickQualificationError> {
+    ) -> Result<Self, SemanticActionQualificationError> {
         let proposal = crate::SemanticActionProposal::try_new(
             crate::SemanticActionIntent::Click { target },
             crate::SemanticEffectClass::LocalWrite,
@@ -297,133 +432,138 @@ impl SemanticClickQualificationExecution {
                 present: true,
             },
             crate::SemanticSettleBudget::try_new(1_000)
-                .map_err(|_| SemanticClickQualificationError::Preparation)?,
+                .map_err(|_| SemanticActionQualificationError::Preparation)?,
         )
-        .map_err(|_| SemanticClickQualificationError::Preparation)?;
-        let frames = observation
-            .frames()
-            .iter()
-            .map(|snapshot| snapshot.frame().clone())
-            .collect::<Vec<_>>();
-        let batch = crate::SemanticActionBatch::bind(
-            crate::SemanticActionBatchId::new(batch)
-                .ok_or(SemanticClickQualificationError::Identity)?,
-            observation,
-            &frames,
-            vec![proposal],
-        )
-        .map_err(|_| SemanticClickQualificationError::Preparation)?;
-        let action = batch
-            .actions()
-            .first()
-            .ok_or(SemanticClickQualificationError::Preparation)?
-            .prepare(
-                observation
-                    .frames()
-                    .first()
-                    .ok_or(SemanticClickQualificationError::Preparation)?,
-            )
-            .map_err(|_| SemanticClickQualificationError::Preparation)?;
-        let attempt = crate::SemanticActionAttemptId::new(attempt)
-            .ok_or(SemanticClickQualificationError::Identity)?;
-        let active = AgentActiveEffect::for_execution_qualification(&action, attempt);
-        let mut coordinator = SemanticActionExecutionCoordinator::new();
-        let (reservation, native) = coordinator
-            .begin(active, &action, requested_at)
-            .map_err(|_| SemanticClickQualificationError::Preparation)?;
+        .map_err(|_| SemanticActionQualificationError::Preparation)?;
         Ok(Self {
-            coordinator,
-            reservation,
-            action,
-            native: Some(native),
+            execution: SemanticActionQualificationExecution::prepare(
+                observation,
+                proposal,
+                batch,
+                attempt,
+                requested_at,
+            )?,
         })
     }
 
     /// Moves the exact production native request to the platform adapter once.
     pub fn take_native_request(
         &mut self,
-    ) -> Result<SemanticActionNativeRequest, SemanticClickQualificationError> {
-        self.native
-            .take()
-            .ok_or(SemanticClickQualificationError::RequestAlreadyTaken)
+    ) -> Result<SemanticActionNativeRequest, SemanticActionQualificationError> {
+        self.execution.take_native_request()
     }
 
     /// Rejoins, settles, and verifies one exact adjacent semantic snapshot.
     pub fn settle_and_verify(
-        mut self,
+        self,
         settlement: SemanticActionNativeSettlement,
         snapshot: &crate::SemanticSnapshot,
         observed_at: crate::SemanticSettleInstant,
-    ) -> Result<crate::SemanticActionExecutionApplied, SemanticClickQualificationError> {
-        if self.native.is_some() || self.coordinator.status().pending() != 1 {
-            return Err(SemanticClickQualificationError::Terminal);
-        }
-        let outcome = self
-            .coordinator
-            .settle(self.action.frame(), settlement)
-            .map_err(|_| SemanticClickQualificationError::Terminal)?;
-        if self.coordinator.status().pending() != 0
-            || outcome.active().attempt() != self.reservation.attempt()
-        {
-            return Err(SemanticClickQualificationError::Terminal);
-        }
-        let start = crate::begin_semantic_action_settlement(outcome, &self.action)
-            .map_err(|_| SemanticClickQualificationError::Settlement)?;
-        let mut coordinator = crate::SemanticActionSettlementCoordinator::new();
-        let update = coordinator
-            .begin(start)
-            .map_err(|_| SemanticClickQualificationError::Settlement)?;
-        let crate::SemanticActionSettlementUpdate::Pending(reservation) = update else {
-            return Err(SemanticClickQualificationError::Settlement);
-        };
-        let update = coordinator
-            .observe_snapshot(reservation, observed_at, snapshot)
-            .map_err(|_| SemanticClickQualificationError::Settlement)?;
-        let crate::SemanticActionSettlementUpdate::Terminal(terminal) = update else {
-            return Err(SemanticClickQualificationError::Settlement);
-        };
-        if coordinator.status().pending() != 0 {
-            return Err(SemanticClickQualificationError::Settlement);
-        }
-        let evidence = crate::SemanticEffectEvidence::snapshot(
-            self.reservation.attempt(),
-            observed_at,
+    ) -> Result<crate::SemanticActionExecutionApplied, SemanticActionQualificationError> {
+        self.execution.settle_and_verify(
+            settlement,
             snapshot,
-        );
-        let verified = crate::verify_semantic_action_terminal(*terminal, &self.action, evidence)
-            .map_err(|_| SemanticClickQualificationError::Verification)?;
-        if !verified.verified().matches_action(&self.action)
-            || verified.verified().proof() != crate::SemanticEffectProofKind::TargetState
-        {
-            return Err(SemanticClickQualificationError::Verification);
-        }
-        Ok(verified.execution())
+            observed_at,
+            crate::SemanticEffectProofKind::TargetState,
+        )
     }
 }
 
-/// Content-free refusal from the release-excluded semantic click qualifier.
+/// Release-excluded owner used to qualify the real semantic fill pipeline.
+#[cfg(feature = "probe-harness")]
+#[must_use]
+pub struct SemanticFillQualificationExecution {
+    execution: SemanticActionQualificationExecution,
+}
+
+#[cfg(feature = "probe-harness")]
+impl SemanticFillQualificationExecution {
+    /// Binds one observed opaque text-control reference through the production core.
+    pub fn prepare(
+        observation: &crate::SemanticObservation,
+        target: crate::SemanticReferenceId,
+        value: crate::SemanticActionText,
+        batch: u64,
+        attempt: u64,
+        requested_at: SemanticActionExecutionInstant,
+    ) -> Result<Self, SemanticActionQualificationError> {
+        let proposal = crate::SemanticActionProposal::try_new(
+            crate::SemanticActionIntent::Fill { target, value },
+            crate::SemanticEffectClass::LocalWrite,
+            crate::SemanticWaitCondition::MutationQuiet(
+                crate::SemanticMutationQuietPeriod::try_new(100)
+                    .map_err(|_| SemanticActionQualificationError::Preparation)?,
+            ),
+            crate::SemanticVerification::TargetValueMatchesInput,
+            crate::SemanticSettleBudget::try_new(1_000)
+                .map_err(|_| SemanticActionQualificationError::Preparation)?,
+        )
+        .map_err(|_| SemanticActionQualificationError::Preparation)?;
+        Ok(Self {
+            execution: SemanticActionQualificationExecution::prepare(
+                observation,
+                proposal,
+                batch,
+                attempt,
+                requested_at,
+            )?,
+        })
+    }
+
+    /// Moves the exact production native request to the platform adapter once.
+    pub fn take_native_request(
+        &mut self,
+    ) -> Result<SemanticActionNativeRequest, SemanticActionQualificationError> {
+        self.execution.take_native_request()
+    }
+
+    /// Rejoins, settles, and verifies one exact adjacent semantic snapshot.
+    pub fn settle_and_verify(
+        self,
+        settlement: SemanticActionNativeSettlement,
+        snapshot: &crate::SemanticSnapshot,
+        observed_at: crate::SemanticSettleInstant,
+    ) -> Result<crate::SemanticActionExecutionApplied, SemanticActionQualificationError> {
+        self.execution.settle_and_verify(
+            settlement,
+            snapshot,
+            observed_at,
+            crate::SemanticEffectProofKind::ExactTargetValue,
+        )
+    }
+}
+
+/// Content-free refusal from a release-excluded semantic action qualifier.
 #[cfg(feature = "probe-harness")]
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
-pub enum SemanticClickQualificationError {
+pub enum SemanticActionQualificationError {
     /// A nonzero fixed qualification identity was invalid.
-    #[error("semantic click qualification identity is invalid")]
+    #[error("semantic action qualification identity is invalid")]
     Identity,
     /// Production observation binding or policy preparation refused the action.
-    #[error("semantic click qualification preparation failed")]
+    #[error("semantic action qualification preparation failed")]
     Preparation,
     /// The move-only native request was requested twice.
-    #[error("semantic click qualification request was already taken")]
+    #[error("semantic action qualification request was already taken")]
     RequestAlreadyTaken,
     /// The exact production terminal failed or did not rejoin.
-    #[error("semantic click qualification terminal failed")]
+    #[error("semantic action qualification terminal failed")]
     Terminal,
     /// Production settlement refused the adjacent post-action snapshot.
-    #[error("semantic click qualification settlement failed")]
+    #[error("semantic action qualification settlement failed")]
     Settlement,
     /// Independent production postcondition verification failed.
-    #[error("semantic click qualification verification failed")]
+    #[error("semantic action qualification verification failed")]
     Verification,
 }
+
+/// Compatibility name for the click qualifier's shared refusal vocabulary.
+#[cfg(feature = "probe-harness")]
+pub type SemanticClickQualificationError = SemanticActionQualificationError;
+
+/// Compatibility name for the fill qualifier's shared refusal vocabulary.
+#[cfg(feature = "probe-harness")]
+pub type SemanticFillQualificationError = SemanticActionQualificationError;
 
 /// Exhaustive fail-closed mapping from the shared native dispatch vocabulary.
 pub(crate) const fn semantic_action_dispatch_failure(

@@ -2050,7 +2050,7 @@ fn snapshot_contains(snapshot: &SemanticSnapshot, needle: &str) -> bool {
                 .is_some_and(|value| value.as_str().contains(needle))
             || matches!(
                 node.value(),
-                Some(SemanticValueSummary::Text(value)) if value.as_str().contains(needle)
+                Some(SemanticValueSummary::Text(value)) if value.preview().text().contains(needle)
             )
     })
 }

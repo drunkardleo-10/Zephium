@@ -1552,7 +1552,10 @@ impl EngineHost {
             task.refuse(SemanticActionNativeFailure::TimedOut);
             return;
         }
-        if request.kind() != SemanticActionKind::Click {
+        if !matches!(
+            request.kind(),
+            SemanticActionKind::Click | SemanticActionKind::Fill
+        ) {
             task.refuse(SemanticActionNativeFailure::UnsupportedInteraction);
             return;
         }

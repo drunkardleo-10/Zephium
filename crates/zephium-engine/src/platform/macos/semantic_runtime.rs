@@ -39,6 +39,472 @@ use zephium_agentic::{
 
 const SEMANTIC_RUNTIME_WORLD_NAME_PREFIX: &str = "zephium-semantic-runtime-v1-";
 const SEMANTIC_RUNTIME_FIXED_ERROR: &str = "zephium semantic channel refused";
+/// Immutable page-world compatibility shim installed only by the owned-agent
+/// view constructor. Its attributes are untrusted transport hints: they can
+/// never authorize success. The shim has no native bridge, selectors,
+/// arbitrary script input, activation route, or cross-document authority.
+/// Main-frame scope is provided and attested by native `forMainFrameOnly`.
+const PAGE_WORLD_COMPATIBILITY_FILL_PROGRAM: &str = r#"(() => {
+  'use strict';
+  const READY = 'data-zephium-fill-relay-ready-v1';
+  const COMMAND = 'data-zephium-fill-relay-command-v1';
+  const TERMINAL = 'data-zephium-fill-relay-terminal-v1';
+  const MAX_TEXT_BYTES = 4096;
+  const MAX_COMMAND_BYTES = 16384;
+  const MAX_ATTRIBUTE_BYTES = 512;
+  const MAX_METADATA_ID_BYTES = 1024;
+  const MAX_LABEL_NODES = 128;
+  const MAX_LABELS = 4;
+  const MAX_RECORDS = 64;
+  const MAX_BOOTSTRAP_RECORDS = 16;
+  const MAX_SAFE_INTEGER = 9007199254740991;
+  const mainGlobal = globalThis;
+  const mainDocument = document;
+  const apply = Reflect.apply;
+  const getOwnDescriptor = Object.getOwnPropertyDescriptor;
+  const getPrototypeOf = Object.getPrototypeOf;
+  const objectKeys = Object.keys;
+  const jsonParse = JSON.parse;
+  const numberIsSafeInteger = Number.isSafeInteger;
+  const stringCharCodeAt = String.prototype.charCodeAt;
+  const stringIncludes = String.prototype.includes;
+  const stringSplit = String.prototype.split;
+  const stringToLowerCase = String.prototype.toLowerCase;
+  const getAttribute = Element.prototype.getAttribute;
+  const setAttribute = Element.prototype.setAttribute;
+  const removeAttribute = Element.prototype.removeAttribute;
+  const addEventListener = EventTarget.prototype.addEventListener;
+  const removeEventListener = EventTarget.prototype.removeEventListener;
+  const dispatchEvent = EventTarget.prototype.dispatchEvent;
+  const NativeMutationObserver = MutationObserver;
+  const observerObserve = MutationObserver.prototype.observe;
+  const observerDisconnect = MutationObserver.prototype.disconnect;
+  const mutationRecordTargetGet = getOwnDescriptor(MutationRecord.prototype, 'target')?.get;
+  const mutationRecordAttributeNameGet = getOwnDescriptor(MutationRecord.prototype, 'attributeName')?.get;
+  const documentElementGet = getOwnDescriptor(Document.prototype, 'documentElement')?.get;
+  const documentDefaultViewGet = getOwnDescriptor(Document.prototype, 'defaultView')?.get;
+  const documentGetElementById = Document.prototype.getElementById;
+  // Main-frame scope is native authority: WebKit installs this fixed script
+  // with forMainFrameOnly=true and Rust attests its exact source/inventory.
+  // Window.prototype does not own frameElement in this measured WebKit realm,
+  // and a dynamic property read would be page-forgeable. Keep only the exact
+  // Document.defaultView identity check here.
+  const inputPrototype = HTMLInputElement.prototype;
+  const inputValueDescriptor = getOwnDescriptor(inputPrototype, 'value');
+  const inputTypeDescriptor = getOwnDescriptor(inputPrototype, 'type');
+  const inputDisabledDescriptor = getOwnDescriptor(inputPrototype, 'disabled');
+  const inputReadOnlyDescriptor = getOwnDescriptor(inputPrototype, 'readOnly');
+  const inputValueSet = inputValueDescriptor && inputValueDescriptor.set;
+  const inputTypeGet = inputTypeDescriptor && inputTypeDescriptor.get;
+  const inputDisabledGet = inputDisabledDescriptor && inputDisabledDescriptor.get;
+  const inputReadOnlyGet = inputReadOnlyDescriptor && inputReadOnlyDescriptor.get;
+  const inputLabelsGet = getOwnDescriptor(inputPrototype, 'labels')?.get;
+  const textareaPrototype = HTMLTextAreaElement.prototype;
+  const textareaValueDescriptor = getOwnDescriptor(textareaPrototype, 'value');
+  const textareaDisabledDescriptor = getOwnDescriptor(textareaPrototype, 'disabled');
+  const textareaReadOnlyDescriptor = getOwnDescriptor(textareaPrototype, 'readOnly');
+  const textareaValueSet = textareaValueDescriptor && textareaValueDescriptor.set;
+  const textareaDisabledGet = textareaDisabledDescriptor && textareaDisabledDescriptor.get;
+  const textareaReadOnlyGet = textareaReadOnlyDescriptor && textareaReadOnlyDescriptor.get;
+  const textareaLabelsGet = getOwnDescriptor(textareaPrototype, 'labels')?.get;
+  const nodeTypeGet = getOwnDescriptor(Node.prototype, 'nodeType')?.get;
+  const nodeOwnerDocumentGet = getOwnDescriptor(Node.prototype, 'ownerDocument')?.get;
+  const nodeChildNodesGet = getOwnDescriptor(Node.prototype, 'childNodes')?.get;
+  const nodeConnectedDescriptor = getOwnDescriptor(Node.prototype, 'isConnected');
+  const nodeRoot = Node.prototype.getRootNode;
+  const nodeConnectedGet = nodeConnectedDescriptor && nodeConnectedDescriptor.get;
+  const characterDataGet = getOwnDescriptor(CharacterData.prototype, 'data')?.get;
+  const nodeListLengthGet = getOwnDescriptor(NodeList.prototype, 'length')?.get;
+  const nodeListItem = NodeList.prototype.item;
+  const NativeInputEvent = InputEvent;
+
+  const read = (getter, receiver) => apply(getter, receiver, []);
+  const attr = (target, name) => apply(getAttribute, target, [name]);
+  const setAttr = (target, name, value) => apply(setAttribute, target, [name, value]);
+  const removeAttr = (target, name) => apply(removeAttribute, target, [name]);
+  const contains = (value, needle) => apply(stringIncludes, value, [needle]);
+  const lowerText = (value) => apply(stringToLowerCase, value, []);
+  const utf8Length = (value, ceiling) => {
+    let bytes = 0;
+    for (let index = 0; index < value.length; index += 1) {
+      const first = apply(stringCharCodeAt, value, [index]);
+      let point = first;
+      if (first >= 0xd800 && first <= 0xdbff) {
+        if (index + 1 >= value.length) return ceiling + 1;
+        const second = apply(stringCharCodeAt, value, [index + 1]);
+        if (second < 0xdc00 || second > 0xdfff) return ceiling + 1;
+        point = 0x10000 + ((first - 0xd800) << 10) + second - 0xdc00;
+        index += 1;
+      } else if (first >= 0xdc00 && first <= 0xdfff) {
+        return ceiling + 1;
+      }
+      bytes += point <= 0x7f ? 1 : point <= 0x7ff ? 2 : point <= 0xffff ? 3 : 4;
+      if (bytes > ceiling) return bytes;
+    }
+    return bytes;
+  };
+  const forbiddenPoint = (point) =>
+    point < 0x20 || (point >= 0x7f && point <= 0x9f) ||
+    point === 0xad || point === 0x61c || point === 0x180e ||
+    (point >= 0x200b && point <= 0x200f) ||
+    (point >= 0x202a && point <= 0x202e) ||
+    (point >= 0x2060 && point <= 0x2064) ||
+    (point >= 0x2066 && point <= 0x206f) || point === 0xfeff ||
+    (point >= 0xfff9 && point <= 0xfffb) || point === 0xe0001 ||
+    (point >= 0xe0020 && point <= 0xe007f);
+  const validText = (value, multiline) => {
+    if (typeof value !== 'string' || utf8Length(value, MAX_TEXT_BYTES + 1) > MAX_TEXT_BYTES) {
+      return false;
+    }
+    for (let index = 0; index < value.length; index += 1) {
+      const first = apply(stringCharCodeAt, value, [index]);
+      let point = first;
+      if (first >= 0xd800 && first <= 0xdbff) {
+        const second = apply(stringCharCodeAt, value, [index + 1]);
+        point = 0x10000 + ((first - 0xd800) << 10) + second - 0xdc00;
+        index += 1;
+      }
+      if (point === 0x0d || (!multiline && (point === 0x09 || point === 0x0a))) return false;
+      if (point !== 0x09 && point !== 0x0a && forbiddenPoint(point)) return false;
+    }
+    return true;
+  };
+  const boundedMetadata = (raw, limit) => {
+    if (typeof raw !== 'string' || utf8Length(raw, limit + 1) > limit) return null;
+    for (let index = 0; index < raw.length; index += 1) {
+      const first = apply(stringCharCodeAt, raw, [index]);
+      let point = first;
+      if (first >= 0xd800 && first <= 0xdbff) {
+        if (index + 1 >= raw.length) return null;
+        const second = apply(stringCharCodeAt, raw, [index + 1]);
+        if (second < 0xdc00 || second > 0xdfff) return null;
+        point = 0x10000 + ((first - 0xd800) << 10) + second - 0xdc00;
+        index += 1;
+      } else if (first >= 0xdc00 && first <= 0xdfff) {
+        return null;
+      }
+      if (
+        point === 0x0d ||
+        (point !== 0x09 && point !== 0x0a && forbiddenPoint(point))
+      ) return null;
+    }
+    return raw;
+  };
+  const listLength = (list) => {
+    const length = read(nodeListLengthGet, list);
+    return numberIsSafeInteger(length) && length >= 0 ? length : -1;
+  };
+  const listItem = (list, index) => apply(nodeListItem, list, [index]);
+  const boundedLabelText = (root) => {
+    const stack = [root];
+    let stackLength = 1;
+    let text = '';
+    let visited = 0;
+    while (stackLength !== 0) {
+      if (visited >= MAX_LABEL_NODES) return null;
+      visited += 1;
+      stackLength -= 1;
+      const current = stack[stackLength];
+      const type = read(nodeTypeGet, current);
+      if (type === 3) {
+        const raw = read(characterDataGet, current);
+        if (typeof raw !== 'string') return null;
+        const separator = text === '' || raw === '' ? '' : ' ';
+        const used = utf8Length(text, MAX_ATTRIBUTE_BYTES + 1);
+        if (used > MAX_ATTRIBUTE_BYTES || used + separator.length > MAX_ATTRIBUTE_BYTES) return null;
+        const bounded = boundedMetadata(raw, MAX_ATTRIBUTE_BYTES - used - separator.length);
+        if (bounded === null) return null;
+        if (bounded !== '') text += separator + bounded;
+        continue;
+      }
+      if (type !== 1 && type !== 9 && type !== 11) return null;
+      const children = read(nodeChildNodesGet, current);
+      const length = listLength(children);
+      if (length < 0 || length + stackLength + visited > MAX_LABEL_NODES) return null;
+      for (let index = length - 1; index >= 0; index -= 1) {
+        const child = listItem(children, index);
+        if (child === null) return null;
+        stack[stackLength] = child;
+        stackLength += 1;
+      }
+    }
+    return text;
+  };
+  const credentialLike = (target, isInput) => {
+    let joined = '';
+    const addMetadata = (raw, limit) => {
+      if (raw === null || raw === '') return true;
+      const bounded = boundedMetadata(raw, limit);
+      if (bounded === null) return false;
+      joined += ' ' + lowerText(bounded);
+      return true;
+    };
+    const names = ['autocomplete', 'name', 'id', 'aria-label', 'placeholder', 'title'];
+    const limits = [256, 256, 256, MAX_ATTRIBUTE_BYTES, MAX_ATTRIBUTE_BYTES, MAX_ATTRIBUTE_BYTES];
+    for (let index = 0; index < names.length; index += 1) {
+      let raw;
+      try { raw = attr(target, names[index]); } catch (_) { return null; }
+      if (raw !== null && typeof raw !== 'string') return null;
+      if (!addMetadata(raw, limits[index])) return null;
+    }
+    let labelledBy;
+    try { labelledBy = attr(target, 'aria-labelledby'); } catch (_) { return null; }
+    if (labelledBy !== null) {
+      if (!addMetadata(labelledBy, MAX_METADATA_ID_BYTES)) return null;
+      const identifiers = apply(stringSplit, labelledBy, [/\s+/]);
+      let identifierCount = 0;
+      for (let index = 0; index < identifiers.length; index += 1) {
+        const identifier = identifiers[index];
+        if (identifier === '') continue;
+        identifierCount += 1;
+        if (identifierCount > 8 || identifier.length > 128) return null;
+        const label = apply(documentGetElementById, mainDocument, [identifier]);
+        if (label !== null) {
+          const text = boundedLabelText(label);
+          if (text === null || !addMetadata(text, MAX_ATTRIBUTE_BYTES)) return null;
+        }
+      }
+    }
+    let labels;
+    try { labels = read(isInput ? inputLabelsGet : textareaLabelsGet, target); } catch (_) {
+      return null;
+    }
+    if (labels !== null && labels !== undefined) {
+      const length = listLength(labels);
+      if (length < 0 || length > MAX_LABELS) return null;
+      for (let index = 0; index < length; index += 1) {
+        const label = listItem(labels, index);
+        if (label === null) return null;
+        const text = boundedLabelText(label);
+        if (text === null || !addMetadata(text, MAX_ATTRIBUTE_BYTES)) return null;
+      }
+    }
+    return (
+      contains(joined, 'password') || contains(joined, 'passcode') ||
+      contains(joined, 'one-time-code') || contains(joined, 'verification code') ||
+      contains(joined, 'security code') || contains(joined, 'api key') ||
+      contains(joined, 'access token') || contains(joined, 'secret key') ||
+      contains(joined, 'private key') || contains(joined, 'cc-number') ||
+      contains(joined, 'cc-csc') || contains(joined, 'card number') ||
+      contains(joined, 'cvv') || contains(joined, 'cvc')
+    );
+  };
+  const terminal = (target, attempt, status) => {
+    removeAttr(target, COMMAND);
+    setAttr(target, TERMINAL, `1|${attempt}|${status}`);
+  };
+  const observer = new NativeMutationObserver((records) => {
+    if (!numberIsSafeInteger(records.length) || records.length < 1 || records.length > MAX_RECORDS) {
+      return;
+    }
+    let candidateTarget = null;
+    let candidateRaw = null;
+    let candidateCount = 0;
+    for (let index = 0; index < records.length; index += 1) {
+      const record = records[index];
+      let attributeName;
+      let target;
+      try {
+        attributeName = read(mutationRecordAttributeNameGet, record);
+        target = read(mutationRecordTargetGet, record);
+      } catch (_) {
+        return;
+      }
+      if (attributeName !== COMMAND || read(nodeTypeGet, target) !== 1) continue;
+      const raw = attr(target, COMMAND);
+      if (raw === null) continue;
+      candidateCount += 1;
+      if (candidateCount === 1) {
+        candidateTarget = target;
+        candidateRaw = raw;
+      }
+      if (candidateCount > 1) break;
+    }
+    if (candidateCount === 0) return;
+    if (candidateCount !== 1) {
+      terminal(candidateTarget, 0, 'duplicate');
+      return;
+    }
+    const target = candidateTarget;
+    const raw = candidateRaw;
+    removeAttr(target, COMMAND);
+    if (typeof raw !== 'string' || utf8Length(raw, MAX_COMMAND_BYTES + 1) > MAX_COMMAND_BYTES) {
+      terminal(target, 0, 'invalid');
+      return;
+    }
+    let command;
+    try { command = apply(jsonParse, JSON, [raw]); } catch (_) {
+      terminal(target, 0, 'invalid');
+      return;
+    }
+    const keys = command !== null && typeof command === 'object' ? apply(objectKeys, Object, [command]) : [];
+    const attempt = command !== null && typeof command === 'object' &&
+      numberIsSafeInteger(command.a) && command.a > 0 && command.a <= MAX_SAFE_INTEGER
+      ? command.a : 0;
+    if (
+      keys.length !== 3 || keys[0] !== 'v' || keys[1] !== 'a' || keys[2] !== 'z' ||
+      command.v !== 1 || attempt === 0 ||
+      typeof command.z !== 'string'
+    ) {
+      terminal(target, attempt, 'refused-command');
+      return;
+    }
+    const prototype = getPrototypeOf(target);
+    const isInput = prototype === inputPrototype;
+    const isTextarea = prototype === textareaPrototype;
+    if (
+      (!isInput && !isTextarea) ||
+      read(nodeOwnerDocumentGet, target) !== mainDocument ||
+      read(nodeConnectedGet, target) !== true || apply(nodeRoot, target, []) !== mainDocument
+    ) {
+      terminal(target, attempt, 'refused-identity');
+      return;
+    }
+    if (isInput && read(inputTypeGet, target) !== 'text' && read(inputTypeGet, target) !== 'search') {
+      terminal(target, attempt, 'refused-type');
+      return;
+    }
+    if (!validText(command.z, isTextarea)) {
+      terminal(target, attempt, 'refused-command');
+      return;
+    }
+    const disabledGet = isInput ? inputDisabledGet : textareaDisabledGet;
+    const readOnlyGet = isInput ? inputReadOnlyGet : textareaReadOnlyGet;
+    const valueSet = isInput ? inputValueSet : textareaValueSet;
+    let credential;
+    try { credential = credentialLike(target, isInput); } catch (_) { credential = null; }
+    if (read(disabledGet, target) === true || read(readOnlyGet, target) === true) {
+      terminal(target, attempt, 'refused-state');
+      return;
+    }
+    if (credential !== false) {
+      terminal(target, attempt, 'refused-credential');
+      return;
+    }
+    let beforeEvent;
+    let inputEvent;
+    try {
+      beforeEvent = new NativeInputEvent('beforeinput', {
+        bubbles: true, cancelable: true, composed: true, data: command.z,
+        inputType: 'insertReplacementText', isComposing: false
+      });
+      inputEvent = new NativeInputEvent('input', {
+        bubbles: true, cancelable: false, composed: true, data: command.z,
+        inputType: 'insertReplacementText', isComposing: false
+      });
+    } catch (_) {
+      terminal(target, attempt, 'refused-construct');
+      return;
+    }
+    try {
+      if (apply(dispatchEvent, target, [beforeEvent]) !== true) {
+        // The page observed `beforeinput` and may have produced effects even
+        // when it cancelled the edit. Native must never classify this as a
+        // clean retryable refusal.
+        terminal(target, attempt, 'indeterminate');
+        return;
+      }
+      if (
+        getPrototypeOf(target) !== prototype ||
+        read(nodeOwnerDocumentGet, target) !== mainDocument ||
+        read(nodeConnectedGet, target) !== true || apply(nodeRoot, target, []) !== mainDocument ||
+        (isInput && read(inputTypeGet, target) !== 'text' && read(inputTypeGet, target) !== 'search') ||
+        read(disabledGet, target) === true || read(readOnlyGet, target) === true ||
+        credentialLike(target, isInput) !== false || !validText(command.z, isTextarea)
+      ) {
+        terminal(target, attempt, 'indeterminate');
+        return;
+      }
+    } catch (_) {
+      terminal(target, attempt, 'indeterminate');
+      return;
+    }
+    // Once the setter is entered the page may have changed even if WebKit
+    // throws. Every subsequent failure is therefore indeterminate.
+    try {
+      apply(valueSet, target, [command.z]);
+      apply(dispatchEvent, target, [inputEvent]);
+      terminal(target, attempt, 'ok');
+    } catch (_) {
+      terminal(target, attempt, 'indeterminate');
+    }
+  });
+  if (
+    typeof mutationRecordTargetGet !== 'function' ||
+    typeof mutationRecordAttributeNameGet !== 'function' ||
+    typeof NativeMutationObserver !== 'function' || typeof observerObserve !== 'function' ||
+    typeof observerDisconnect !== 'function' ||
+    typeof documentElementGet !== 'function' ||
+    typeof documentDefaultViewGet !== 'function' ||
+    typeof documentGetElementById !== 'function' || typeof stringSplit !== 'function' ||
+    typeof nodeTypeGet !== 'function' || typeof nodeOwnerDocumentGet !== 'function' ||
+    typeof nodeChildNodesGet !== 'function' || typeof characterDataGet !== 'function' ||
+    typeof nodeListLengthGet !== 'function' || typeof nodeListItem !== 'function' ||
+    typeof nodeConnectedGet !== 'function' || typeof nodeRoot !== 'function' ||
+    typeof inputValueSet !== 'function' ||
+    typeof inputTypeGet !== 'function' || typeof inputDisabledGet !== 'function' ||
+    typeof inputReadOnlyGet !== 'function' || typeof inputLabelsGet !== 'function' ||
+    typeof NativeInputEvent !== 'function' ||
+    typeof textareaValueSet !== 'function' || typeof textareaDisabledGet !== 'function' ||
+    typeof textareaReadOnlyGet !== 'function' || typeof textareaLabelsGet !== 'function' ||
+    typeof addEventListener !== 'function' || typeof removeEventListener !== 'function' ||
+    read(documentDefaultViewGet, mainDocument) !== mainGlobal
+  ) return;
+  apply(observerObserve, observer, [mainDocument, {
+    attributes: true, subtree: true, attributeFilter: [COMMAND]
+  }]);
+  let bootstrapObserver = null;
+  let bootstrapListening = false;
+  let bootstrapStopped = false;
+  const stopBootstrap = () => {
+    if (bootstrapStopped) return;
+    bootstrapStopped = true;
+    const currentObserver = bootstrapObserver;
+    bootstrapObserver = null;
+    if (currentObserver !== null) {
+      try { apply(observerDisconnect, currentObserver, []); } catch (_) {}
+    }
+    if (bootstrapListening) {
+      bootstrapListening = false;
+      try {
+        apply(removeEventListener, mainDocument, ['readystatechange', markReady]);
+      } catch (_) {}
+    }
+  };
+  const markReady = () => {
+    if (bootstrapStopped) return;
+    let root;
+    try { root = read(documentElementGet, mainDocument); } catch (_) {
+      stopBootstrap();
+      return;
+    }
+    if (root === null) return;
+    try { setAttr(root, READY, '1'); } catch (_) {
+      stopBootstrap();
+      return;
+    }
+    stopBootstrap();
+  };
+  markReady();
+  if (!bootstrapStopped) {
+    bootstrapObserver = new NativeMutationObserver((records) => {
+      if (bootstrapStopped) return;
+      if (
+        !numberIsSafeInteger(records.length) ||
+        records.length < 1 || records.length > MAX_BOOTSTRAP_RECORDS
+      ) {
+        stopBootstrap();
+        return;
+      }
+      markReady();
+    });
+    apply(observerObserve, bootstrapObserver, [mainDocument, { childList: true }]);
+    bootstrapListening = true;
+    apply(addEventListener, mainDocument, ['readystatechange', markReady]);
+    // Close the gap between the first root read and observer registration.
+    markReady();
+  }
+})();"#;
 static NEXT_SEMANTIC_RUNTIME_WORLD: AtomicU64 = AtomicU64::new(1);
 
 type ReplyBlock = RcBlock<dyn Fn(*mut AnyObject, *mut NSString)>;
@@ -1022,6 +1488,8 @@ define_class!(
 struct SemanticRuntimeEpochRegistration {
     world: Retained<WKContentWorld>,
     script: Retained<WKUserScript>,
+    page_relay_world: Retained<WKContentWorld>,
+    page_relay_script: Retained<WKUserScript>,
     handler: Retained<SemanticMessageHandler>,
 }
 
@@ -1135,13 +1603,49 @@ fn install_semantic_runtime_epoch(
         controller.addUserScript(&script);
     }))
     .is_ok();
-    if !added || channel.bind_world(&world).is_err() {
+    if !added {
+        let _ = clear_semantic_runtime_controller(controller, handler_name, Some(&world));
+        return Err(());
+    }
+    // This registration is reachable only from the owned-agent-view
+    // constructor. Installing the page-world compatibility shim is part of
+    // that type's construction invariant, never an environment-selected
+    // capability. Browse and borrowed tab configurations do not use this
+    // registration at all.
+    // SAFETY: `mtm` proves main-thread access; WebKit's page-world singleton,
+    // fixed source, initializer arguments, and controller are live native
+    // values. The controller retains the script, and Objective-C exceptions
+    // are contained and fail the complete paired installation.
+    let (page_relay_world, page_relay_script) =
+        match objc2::exception::catch(AssertUnwindSafe(|| unsafe {
+            let relay_world = WKContentWorld::pageWorld(mtm);
+            let relay_source = NSString::from_str(PAGE_WORLD_COMPATIBILITY_FILL_PROGRAM);
+            let relay_script =
+                WKUserScript::initWithSource_injectionTime_forMainFrameOnly_inContentWorld(
+                    WKUserScript::alloc(mtm),
+                    &relay_source,
+                    WKUserScriptInjectionTime::AtDocumentStart,
+                    true,
+                    &relay_world,
+                );
+            controller.addUserScript(&relay_script);
+            (relay_world, relay_script)
+        })) {
+            Ok(installed) => installed,
+            Err(_) => {
+                let _ = clear_semantic_runtime_controller(controller, handler_name, Some(&world));
+                return Err(());
+            }
+        };
+    if channel.bind_world(&world).is_err() {
         let _ = clear_semantic_runtime_controller(controller, handler_name, Some(&world));
         return Err(());
     }
     Ok(SemanticRuntimeEpochRegistration {
         world,
         script,
+        page_relay_world,
+        page_relay_script,
         handler,
     })
 }
@@ -1277,7 +1781,7 @@ impl AgentSemanticRuntimeRegistration {
         // SAFETY: the marker above proves main-thread access; the retained
         // controller remains live and objc2 retains its script inventory.
         let scripts = unsafe { self.controller.userScripts() };
-        if scripts.count() != 1 {
+        if scripts.count() != 2 {
             return Err(());
         }
         let script = scripts.objectAtIndex(0);
@@ -1292,6 +1796,27 @@ impl AgentSemanticRuntimeRegistration {
         };
         if Retained::as_ptr(&script) != Retained::as_ptr(&active.script)
             || source.to_string() != SEMANTIC_RUNTIME_PROGRAM.source()
+            || injection_time != WKUserScriptInjectionTime::AtDocumentStart
+            || !main_frame_only
+        {
+            return Err(());
+        }
+        let relay = scripts.objectAtIndex(1);
+        // SAFETY: the exact inventory count proves index one exists.
+        let (source, injection_time, main_frame_only) = unsafe {
+            (
+                relay.source(),
+                relay.injectionTime(),
+                relay.isForMainFrameOnly(),
+            )
+        };
+        // SAFETY: this stays on the main thread and returns WebKit's retained
+        // public page-world singleton for exact world identity checking.
+        let actual_page_world =
+            unsafe { WKContentWorld::pageWorld(MainThreadMarker::new().ok_or(())?) };
+        if Retained::as_ptr(&relay) != Retained::as_ptr(&active.page_relay_script)
+            || Retained::as_ptr(&active.page_relay_world) != Retained::as_ptr(&actual_page_world)
+            || source.to_string() != PAGE_WORLD_COMPATIBILITY_FILL_PROGRAM
             || injection_time != WKUserScriptInjectionTime::AtDocumentStart
             || !main_frame_only
         {
@@ -1339,6 +1864,64 @@ mod tests {
         SemanticObservationBudget, SemanticObservationId, SemanticObservationRequest,
         SemanticOrigin, SemanticRuntimeBudget, SemanticRuntimeFault, SemanticSnapshotGeneration,
     };
+
+    #[test]
+    fn owned_view_fill_shim_is_fixed_bounded_and_has_no_native_authority() {
+        let source = PAGE_WORLD_COMPATIBILITY_FILL_PROGRAM;
+        assert!(source.len() <= 32 * 1024);
+        assert!(source.contains("HTMLInputElement.prototype"));
+        assert!(source.contains("HTMLTextAreaElement.prototype"));
+        assert!(source.contains("MutationRecord.prototype"));
+        assert!(source.contains("read(mutationRecordTargetGet, record)"));
+        assert!(source.contains("Document.prototype.getElementById"));
+        assert!(source.contains("getOwnDescriptor(inputPrototype, 'labels')"));
+        assert!(source.contains("getOwnDescriptor(textareaPrototype, 'labels')"));
+        assert!(source.contains("'aria-label', 'placeholder', 'title'"));
+        assert!(source.contains("[256, 256, 256, MAX_ATTRIBUTE_BYTES"));
+        assert!(source.contains("attr(target, 'aria-labelledby')"));
+        assert!(source.contains("contains(joined, 'verification code')"));
+        assert!(source.contains("contains(joined, 'access token')"));
+        assert!(source.contains("contains(joined, 'card number')"));
+        assert!(source.contains("credentialLike(target, isInput) !== false"));
+        assert_eq!(source.matches("credentialLike(target, isInput)").count(), 2);
+        assert!(source.contains("MAX_METADATA_ID_BYTES = 1024"));
+        assert!(source.contains("MAX_LABEL_NODES = 128"));
+        assert!(source.contains("MAX_LABELS = 4"));
+        assert!(source.contains("beforeinput"));
+        assert!(source.contains("insertReplacementText"));
+        for forbidden in [
+            "querySelector",
+            "eval(",
+            "new Function",
+            "webkit.messageHandlers",
+            "fetch(",
+            "XMLHttpRequest",
+            "WebSocket",
+            "localStorage",
+            "sessionStorage",
+            ".click(",
+            ".focus(",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "forbidden fill shim surface: {forbidden}"
+            );
+        }
+        assert_eq!(
+            source.matches("data-zephium-fill-relay-command-v1").count(),
+            1
+        );
+        assert_eq!(
+            source
+                .matches("data-zephium-fill-relay-terminal-v1")
+                .count(),
+            1
+        );
+        assert_eq!(
+            source.matches("data-zephium-fill-relay-ready-v1").count(),
+            1
+        );
+    }
     use zephium_core::ids::ProfileId;
 
     fn reply() -> ReplyBlock {

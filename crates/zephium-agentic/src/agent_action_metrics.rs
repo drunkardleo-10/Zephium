@@ -142,12 +142,12 @@ impl AgentActionSettleEventMetrics {
 /// Fixed backend attribution for applied action terminals.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AgentActionBackendMetrics {
-    counts: [u32; 3],
+    counts: [u32; 4],
 }
 
 impl AgentActionBackendMetrics {
     const fn empty() -> Self {
-        Self { counts: [0; 3] }
+        Self { counts: [0; 4] }
     }
 
     /// Applied actions attributed to one closed backend class.
@@ -809,8 +809,9 @@ fn add_u32(left: u32, right: u32) -> Result<u32, AgentActionMetricError> {
 const fn backend_index(backend: SemanticActionExecutionBackend) -> usize {
     match backend {
         SemanticActionExecutionBackend::FixedSemanticRecipe => 0,
-        SemanticActionExecutionBackend::EngineNativeInput => 1,
-        SemanticActionExecutionBackend::InProcessAccessibility => 2,
+        SemanticActionExecutionBackend::PageWorldCompatibilityFill => 1,
+        SemanticActionExecutionBackend::EngineNativeInput => 2,
+        SemanticActionExecutionBackend::InProcessAccessibility => 3,
     }
 }
 
@@ -1150,6 +1151,12 @@ mod tests {
                 .backends()
                 .count(SemanticActionExecutionBackend::FixedSemanticRecipe),
             2
+        );
+        assert_eq!(
+            snapshot
+                .backends()
+                .count(SemanticActionExecutionBackend::PageWorldCompatibilityFill),
+            0
         );
         assert_eq!(
             snapshot

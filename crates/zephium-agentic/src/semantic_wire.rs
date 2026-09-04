@@ -348,7 +348,7 @@ fn decode_value(
             if role == SemanticRole::Password || looks_like_secret_value(&value) {
                 (SemanticValueSummary::Redacted, true)
             } else {
-                let value = SemanticText::try_new(value, MAX_SEMANTIC_VALUE_BYTES)
+                let value = crate::SemanticValueText::try_new(value, MAX_SEMANTIC_VALUE_BYTES)
                     .map_err(|_| SemanticDecodeError::NodeContract)?;
                 (SemanticValueSummary::Text(value), false)
             }
@@ -873,6 +873,20 @@ mod tests {
                 "k": 3,
                 "r": "button",
                 "n": "ghp_private-name-value"
+            },
+            {
+                "k": 4,
+                "r": "textbox",
+                "n": "Ordinary field",
+                "v": {"k": "text", "value": format!("{} sk-super-secret-value", "x".repeat(1024))},
+                "o": 2
+            },
+            {
+                "k": 5,
+                "r": "textbox",
+                "n": format!("{} api key", "x".repeat(500)),
+                "v": {"k": "text", "value": "must-not-cross"},
+                "o": 2
             }
         ]));
         let snapshot = decode_semantic_snapshot(decode_context(), &bytes).expect("snapshot");
@@ -893,10 +907,26 @@ mod tests {
             "[redacted]"
         );
         assert_eq!(
+            snapshot.nodes()[3].value(),
+            Some(&SemanticValueSummary::Redacted),
+            "secret beyond the model preview boundary was exposed"
+        );
+        assert_eq!(
+            snapshot.nodes()[4].value(),
+            Some(&SemanticValueSummary::Redacted)
+        );
+        assert_eq!(
+            snapshot.nodes()[4].sensitivity(),
+            SemanticSensitivity::Secret
+        );
+        assert_eq!(
             snapshot.nodes()[2].sensitivity(),
             SemanticSensitivity::Secret
         );
-        assert_eq!(snapshot.total_text_bytes(), "API key".len() as u32);
+        assert_eq!(
+            snapshot.total_text_bytes(),
+            ("API key".len() + "Ordinary field".len() + 500 + " api key".len()) as u32
+        );
         let debug = format!("{snapshot:?} {:?}", snapshot.nodes());
         assert!(!debug.contains("sk-super"));
         assert!(!debug.contains("eyJheader"));
@@ -1006,6 +1036,46 @@ mod tests {
                 }])),
             ),
             Err(SemanticDecodeError::TextLimit)
+        );
+        assert_eq!(
+            decode_semantic_snapshot(
+                decode_context(),
+                &payload(json!([{
+                    "k": 1,
+                    "r": "textbox",
+                    "v": {
+                        "k": "text",
+                        "value": format!(
+                            "{} sk-super-secret-value",
+                            "x".repeat(MAX_SEMANTIC_VALUE_BYTES + 1)
+                        )
+                    },
+                    "o": 10
+                }])),
+            ),
+            Err(SemanticDecodeError::TextLimit),
+            "Rust must not accept an over-limit raw value that bypassed runtime redaction"
+        );
+        for invalid in ["safe\0suffix", "safe\rsuffix", "safe\u{202e}suffix"] {
+            assert_eq!(
+                decode_semantic_snapshot(
+                    decode_context(),
+                    &payload(json!([{
+                        "k": 1,
+                        "r": "textbox",
+                        "v": {"k": "text", "value": invalid},
+                        "o": 10
+                    }])),
+                ),
+                Err(SemanticDecodeError::NodeContract),
+                "invalid exact value crossed the Rust boundary"
+            );
+        }
+        let unpaired_surrogate = br#"{"v":1,"i":7,"g":9,"c":"complete","n":[{"k":1,"r":"textbox","v":{"k":"text","value":"safe\ud800suffix"},"o":10}]}"#;
+        assert_eq!(
+            decode_semantic_snapshot(decode_context(), unpaired_surrogate),
+            Err(SemanticDecodeError::Malformed),
+            "unpaired surrogate crossed the Rust boundary"
         );
         let nodes = (0..=MAX_SEMANTIC_NODES)
             .map(|index| json!({"k": index + 1, "r": "group"}))

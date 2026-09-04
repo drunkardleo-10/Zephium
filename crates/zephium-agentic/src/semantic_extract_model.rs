@@ -1,7 +1,7 @@
 //! Deterministic, token-admitted extraction mapping input.
 //!
 //! Trusted Rust code serializes one closed extraction schema beside an exact
-//! bounded `ZREAD1` projection. The resulting payload is purpose-bound to that
+//! bounded `ZREAD2` projection. The resulting payload is purpose-bound to that
 //! schema and read; committing it proves only model disclosure, never browser
 //! authority or browser-attested truth.
 
@@ -386,7 +386,7 @@ impl fmt::Debug for SemanticExtractionDeliveryReceipt {
     }
 }
 
-/// Encodes one trusted closed schema beside one exact bounded `ZREAD1` input.
+/// Encodes one trusted closed schema beside one exact bounded `ZREAD2` input.
 pub fn encode_semantic_extraction_request(
     schema: &SemanticExtractionSchema,
     read: &SemanticReadResult<'_>,

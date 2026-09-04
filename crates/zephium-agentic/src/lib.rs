@@ -305,9 +305,10 @@ pub use semantic::{
     SemanticOperations, SemanticOrigin, SemanticRect, SemanticReference, SemanticReferenceError,
     SemanticReferenceId, SemanticRole, SemanticSensitivity, SemanticSnapshot,
     SemanticSnapshotGeneration, SemanticState, SemanticStates, SemanticText, SemanticTruncation,
-    SemanticTrust, SemanticValueSummary, MAX_SEMANTIC_DEPTH, MAX_SEMANTIC_FRAMES,
-    MAX_SEMANTIC_NAME_BYTES, MAX_SEMANTIC_NODES, MAX_SEMANTIC_TEXT_BYTES,
-    MAX_SEMANTIC_TOTAL_TEXT_BYTES, MAX_SEMANTIC_VALUE_BYTES,
+    SemanticTrust, SemanticValuePreview, SemanticValueSummary, SemanticValueText,
+    MAX_SEMANTIC_DEPTH, MAX_SEMANTIC_FRAMES, MAX_SEMANTIC_NAME_BYTES, MAX_SEMANTIC_NODES,
+    MAX_SEMANTIC_TEXT_BYTES, MAX_SEMANTIC_TOTAL_TEXT_BYTES, MAX_SEMANTIC_VALUE_BYTES,
+    MAX_SEMANTIC_VALUE_PREVIEW_BYTES,
 };
 pub(crate) use semantic_action::SemanticActionRuntimeDescriptor;
 pub use semantic_action::{
@@ -367,7 +368,9 @@ pub use semantic_execute_coordinator::{
 };
 #[cfg(feature = "probe-harness")]
 pub use semantic_execute_coordinator::{
-    SemanticClickQualificationError, SemanticClickQualificationExecution,
+    SemanticActionQualificationError, SemanticClickQualificationError,
+    SemanticClickQualificationExecution, SemanticFillQualificationError,
+    SemanticFillQualificationExecution,
 };
 pub use semantic_extract::{
     extract_delivered_semantic_read, extract_semantic_read, SemanticExtractedBoolean,

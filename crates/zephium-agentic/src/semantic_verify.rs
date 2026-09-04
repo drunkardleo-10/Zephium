@@ -582,7 +582,12 @@ pub(crate) fn verify_semantic_action(
                     after,
                 },
             ) => {
-                let _ = verification_target(action, snapshot)?;
+                if snapshot.completeness() != SemanticCompleteness::Complete {
+                    return Err(SemanticVerificationError::IncompleteSnapshot);
+                }
+                let (observed_before, observed_after) = action
+                    .verification_fill_values(snapshot)
+                    .map_err(map_target_error)?;
                 let expected = action
                     .fill_text()
                     .ok_or(SemanticVerificationError::ActionMismatch)?;
@@ -591,7 +596,11 @@ pub(crate) fn verify_semantic_action(
                 {
                     return Err(SemanticVerificationError::EvidenceLimit);
                 }
-                if before == expected.as_str() || after != expected.as_str() {
+                if before != observed_before
+                    || after != observed_after
+                    || before == expected.as_str()
+                    || after != expected.as_str()
+                {
                     return Err(SemanticVerificationError::OutcomeNotObserved);
                 }
                 (
@@ -924,11 +933,22 @@ mod tests {
         )
         .expect("execution");
         let actual_geometry = native.expected_geometry();
+        let (backend, readiness) = if action.kind() == crate::SemanticActionKind::Fill {
+            (
+                crate::SemanticActionExecutionBackend::PageWorldCompatibilityFill,
+                crate::SemanticActionNativeReadiness::ExactConnectedWritableFormTarget,
+            )
+        } else {
+            (
+                crate::SemanticActionExecutionBackend::FixedSemanticRecipe,
+                crate::SemanticActionNativeReadiness::ExactVisibleUnoccludedTarget,
+            )
+        };
         let outcome = pending.settle(
             action.frame(),
             native.complete(
-                crate::SemanticActionExecutionBackend::FixedSemanticRecipe,
-                crate::SemanticActionNativeReadiness::ExactVisibleUnoccludedTarget,
+                backend,
+                readiness,
                 crate::SemanticActionNativeViewport::try_new(800, 600).expect("viewport"),
                 actual_geometry,
                 crate::SemanticActionExecutionInstant::from_millis(90),
@@ -985,7 +1005,7 @@ mod tests {
         assert_eq!(success.active().attempt().get(), 21);
         assert_eq!(
             success.execution().backend(),
-            crate::SemanticActionExecutionBackend::FixedSemanticRecipe
+            crate::SemanticActionExecutionBackend::PageWorldCompatibilityFill
         );
         assert_eq!(
             success.settlement().status(),
@@ -1087,6 +1107,32 @@ mod tests {
             ]),
         );
 
+        let incomplete_snapshot = snapshot_for_frame(
+            observation.frames()[0].frame().clone(),
+            3,
+            2,
+            "node_limit",
+            json!([
+                {"k": 1, "r": "document", "o": 16},
+                {"k": 3, "p": 0, "r": "textbox", "n": "Private title",
+                 "v": {"k": "text", "value": "new private title"}, "o": 10}
+            ]),
+        );
+        assert_eq!(
+            verify_semantic_action(
+                &tracker,
+                action,
+                SemanticEffectEvidence::exact_target_value(
+                    attempt,
+                    SemanticSettleInstant::from_millis(101),
+                    &incomplete_snapshot,
+                    "old",
+                    "new private title",
+                ),
+            ),
+            Err(SemanticVerificationError::IncompleteSnapshot)
+        );
+
         assert_eq!(
             verify_semantic_action(
                 &tracker,
@@ -1097,6 +1143,28 @@ mod tests {
                     &snapshot,
                     "old",
                     "wrong private title",
+                ),
+            ),
+            Err(SemanticVerificationError::OutcomeNotObserved)
+        );
+        let substituted_snapshot = current(
+            &observation,
+            json!([
+                {"k": 1, "r": "document", "o": 16},
+                {"k": 3, "p": 0, "r": "textbox", "n": "Private title",
+                 "v": {"k": "text", "value": "substituted private title"}, "o": 10}
+            ]),
+        );
+        assert_eq!(
+            verify_semantic_action(
+                &tracker,
+                action,
+                SemanticEffectEvidence::exact_target_value(
+                    attempt,
+                    SemanticSettleInstant::from_millis(101),
+                    &substituted_snapshot,
+                    "old",
+                    "new private title",
                 ),
             ),
             Err(SemanticVerificationError::OutcomeNotObserved)

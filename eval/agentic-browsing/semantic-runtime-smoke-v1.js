@@ -13,8 +13,50 @@ class NodeList {
   item(index) { return this.values[index] || null; }
 }
 
-class Node {
+class Event {
+  constructor(type, init = {}) {
+    this.type = type;
+    this.bubbles = init.bubbles === true;
+    this.cancelable = init.cancelable === true;
+    this.composed = init.composed === true;
+    this.defaultPrevented = false;
+    this.isTrusted = false;
+    this.target = null;
+    this.currentTarget = null;
+  }
+  preventDefault() {
+    if (this.cancelable) this.defaultPrevented = true;
+  }
+}
+
+class InputEvent extends Event {
+  constructor(type, init = {}) {
+    super(type, init);
+    this.data = init.data === undefined ? null : init.data;
+    this.inputType = init.inputType || "";
+    this.isComposing = init.isComposing === true;
+  }
+}
+
+class EventTarget {
+  constructor() { this._listeners = new Map(); }
+  addEventListener(type, listener) {
+    const listeners = this._listeners.get(type) || [];
+    listeners.push(listener);
+    this._listeners.set(type, listeners);
+  }
+  dispatchEvent(event) {
+    if (this._nativeDispatchThrows) throw new Error("native dispatch failure");
+    event.target = this;
+    event.currentTarget = this;
+    for (const listener of this._listeners.get(event.type) || []) listener.call(this, event);
+    return !event.defaultPrevented;
+  }
+}
+
+class Node extends EventTarget {
   constructor(type) {
+    super();
     this._type = type;
     this._parent = null;
     this._owner = null;
@@ -68,6 +110,13 @@ class Element extends Node {
     return Object.prototype.hasOwnProperty.call(this.attributes, name) ? this.attributes[name] : null;
   }
   hasAttribute(name) { return Object.prototype.hasOwnProperty.call(this.attributes, name); }
+  setAttribute(name, value) {
+    this.attributes[name] = String(value);
+    if (typeof globalThis.__semanticRelayMutation === "function") {
+      globalThis.__semanticRelayMutation(this, name);
+    }
+  }
+  removeAttribute(name) { delete this.attributes[name]; }
   getBoundingClientRect() { return this.rect; }
   click() { this._fixedClickCount = (this._fixedClickCount || 0) + 1; }
 }
@@ -82,14 +131,21 @@ class HTMLInputElement extends Element {
     super("input", attributes);
     this._value = value;
     this._checked = false;
+    this._labels = new NodeList();
   }
   get value() { return this._value; }
+  set value(value) { this._value = String(value); }
   get checked() { return this._checked; }
-  get labels() { return new NodeList(); }
+  get labels() { return this._labels; }
 }
 
 class HTMLTextAreaElement extends Element {
-  get value() { return ""; }
+  constructor(attributes = {}, value = "") {
+    super("textarea", attributes);
+    this._value = value;
+  }
+  get value() { return this._value; }
+  set value(value) { this._value = String(value).replace(/\r\n?/g, "\n"); }
   get labels() { return new NodeList(); }
 }
 
@@ -127,6 +183,9 @@ class Document extends Node {
 }
 
 Object.assign(globalThis, {
+  Event,
+  InputEvent,
+  EventTarget,
   NodeList,
   Node,
   CharacterData,
@@ -159,10 +218,68 @@ const main = new Element("main", { "aria-label": "Account" });
 const heading = new Element("h1");
 heading.append(new CharacterData("Dashboard"));
 const button = new Element("button", { "aria-label": "Save" });
+const textInput = new HTMLInputElement(
+  { type: "text", "aria-label": "Account name" },
+  "fixture text"
+);
+const searchInput = new HTMLInputElement(
+  { type: "search", "aria-label": "Account search" },
+  "fixture search"
+);
+const textarea = new HTMLTextAreaElement(
+  { "aria-label": "Account notes" },
+  "fixture notes"
+);
+const contentEditable = new Element("div", {
+  contenteditable: "true",
+  role: "textbox",
+  "aria-label": "Rich account notes"
+});
 const password = new HTMLInputElement(
   { type: "password", "aria-label": "Password" },
   "never-cross-bridge"
 );
+const lateSecretInput = new HTMLInputElement(
+  { type: "text", "aria-label": "Large ordinary field" },
+  `${"x".repeat(3900)} sk-super-secret-value`
+);
+const oversizedValueInput = new HTMLInputElement(
+  { type: "text", "aria-label": "Oversized ordinary field" },
+  "x".repeat(65537)
+);
+const invalidValueInputs = [
+  ["NUL value field", "safe\u0000suffix"],
+  ["CR value field", "safe\rsuffix"],
+  ["Bidi value field", "safe\u202esuffix"],
+  ["Surrogate value field", "safe\ud800suffix"]
+].map(([name, value]) => new HTMLInputElement(
+  { type: "text", "aria-label": name },
+  value
+));
+const metadataOverflowValues = [
+  "attribute-overflow-value-must-not-cross",
+  "aria-overflow-value-must-not-cross",
+  "label-overflow-value-must-not-cross"
+];
+const attributeOverflowInput = new HTMLInputElement(
+  {
+    type: "text",
+    "aria-label": "Attribute overflow field",
+    name: `${"x".repeat(250)}api key`
+  },
+  metadataOverflowValues[0]
+);
+const ariaOverflowInput = new HTMLInputElement(
+  { type: "text", "aria-label": `${"x".repeat(506)}api key` },
+  metadataOverflowValues[1]
+);
+const labelOverflowInput = new HTMLInputElement(
+  { type: "text", "aria-label": "Associated label overflow field" },
+  metadataOverflowValues[2]
+);
+const overflowingLabel = new Element("label");
+overflowingLabel.append(new CharacterData(`${"x".repeat(506)}api key`));
+labelOverflowInput._labels = new NodeList([overflowingLabel]);
 const paragraph = new Element("p");
 paragraph.append(new CharacterData("Normal private workspace text"));
 
@@ -171,6 +288,85 @@ openHost._shadow = new ShadowRoot();
 openHost._shadow.append(new Element("button", { "aria-label": "Open shadow action" }));
 const closedHost = new Element("div");
 closedHost._closedInternal = new Element("button", { "aria-label": "Closed shadow secret" });
+
+const fillEvents = new Map();
+for (const target of [textInput, searchInput, textarea]) {
+  const events = [];
+  fillEvents.set(target, events);
+  target.addEventListener("beforeinput", (event) => {
+    events.push(event);
+    if (target._cancelBeforeInput) event.preventDefault();
+    if (target._repurposeAfterBeforeInput) target.attributes.type = "password";
+  });
+  target.addEventListener("input", (event) => {
+    events.push(event);
+    if (target._rewriteAfterInput) target._value = "page rewrite";
+    if (target._repurposeAfterInput) target.attributes["aria-label"] = "Password replacement";
+  });
+  target.addEventListener("change", (event) => events.push(event));
+}
+
+const relayReady = "data-zephium-fill-relay-ready-v1";
+const relayCommand = "data-zephium-fill-relay-command-v1";
+const relayTerminal = "data-zephium-fill-relay-terminal-v1";
+let relayMode = "normal";
+html.attributes[relayReady] = "1";
+const relayDispatch = EventTarget.prototype.dispatchEvent;
+const relayInputValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value");
+const relayTextareaValue = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value");
+globalThis.__semanticRelayMutation = (target, name) => {
+  if (name !== relayCommand || relayMode === "absent") return;
+  const raw = target.getAttribute(relayCommand);
+  if (raw === null) return;
+  target.removeAttribute(relayCommand);
+  if (relayMode === "duplicate") {
+    target.setAttribute(relayTerminal, "1|0|duplicate");
+    return;
+  }
+  if (relayMode === "flood") return;
+  let command;
+  try { command = JSON.parse(raw); } catch (_) {
+    target.setAttribute(relayTerminal, "1|0|invalid");
+    return;
+  }
+  const input = Object.getPrototypeOf(target) === HTMLInputElement.prototype;
+  const textarea = Object.getPrototypeOf(target) === HTMLTextAreaElement.prototype;
+  if ((!input && !textarea) ||
+      (input && target.getAttribute("type") !== "text" && target.getAttribute("type") !== "search")) {
+    target.setAttribute(relayTerminal, `1|${command.a}|refused`);
+    return;
+  }
+  try {
+    const before = new InputEvent("beforeinput", {
+      bubbles: true, cancelable: true, composed: true, data: command.z,
+      inputType: "insertReplacementText", isComposing: false
+    });
+    if (!Reflect.apply(relayDispatch, target, [before])) {
+      target.setAttribute(relayTerminal, `1|${command.a}|indeterminate`);
+      return;
+    }
+    if (
+      Object.getPrototypeOf(target) !== (input ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype) ||
+      (input && target.getAttribute("type") !== "text" && target.getAttribute("type") !== "search") ||
+      target.hasAttribute("disabled") || target.hasAttribute("readonly")
+    ) {
+      target.setAttribute(relayTerminal, `1|${command.a}|indeterminate`);
+      return;
+    }
+    const valueDescriptor = input ? relayInputValue : relayTextareaValue;
+    Reflect.apply(valueDescriptor.set, target, [command.z]);
+    Reflect.apply(relayDispatch, target, [new InputEvent("input", {
+      bubbles: true, cancelable: false, composed: true, data: command.z,
+      inputType: "insertReplacementText", isComposing: false
+    })]);
+    target.setAttribute(
+      relayTerminal,
+      `1|${command.a}|${Reflect.apply(valueDescriptor.get, target, []) === command.z ? "ok" : "indeterminate"}`
+    );
+  } catch (_) {
+    target.setAttribute(relayTerminal, `1|${command.a}|indeterminate`);
+  }
+};
 
 const nativeTransportResults = [];
 let nativeTransportPulls = 0;
@@ -187,7 +383,7 @@ globalThis.webkit = {
               i: 101,
               g: 101,
               s: { k: "initial" },
-              b: { n: 8, t: 2048, w: 8192, x: 256, geo: false }
+              b: { n: 128, t: 16384, w: 65536, x: 512, geo: false }
             }));
           }
           return new Promise((resolve) => { stopNativeTransport = resolve; });
@@ -204,7 +400,17 @@ globalThis.webkit = {
 
 main.append(heading);
 main.append(button);
+main.append(textInput);
+main.append(searchInput);
+main.append(textarea);
+main.append(contentEditable);
 main.append(password);
+main.append(lateSecretInput);
+main.append(oversizedValueInput);
+for (const invalidValueInput of invalidValueInputs) main.append(invalidValueInput);
+main.append(attributeOverflowInput);
+main.append(labelOverflowInput);
+main.append(overflowingLabel);
 main.append(paragraph);
 main.append(openHost);
 main.append(closedHost);
@@ -224,6 +430,22 @@ const sourcePath = path.resolve(
 const source = fs.readFileSync(sourcePath, "utf8");
 vm.runInThisContext(source, { filename: sourcePath });
 globalThis.getComputedStyle = () => { throw new Error("late global poisoning"); };
+Object.defineProperty(textInput, "value", {
+  get() { throw new Error("own input getter poison"); },
+  set() { throw new Error("own input setter poison"); },
+  configurable: true
+});
+Object.defineProperty(HTMLTextAreaElement.prototype, "value", {
+  get() { throw new Error("prototype textarea getter poison"); },
+  set() { throw new Error("prototype textarea setter poison"); },
+  configurable: true
+});
+EventTarget.prototype.dispatchEvent = function poisonedDispatch() {
+  throw new Error("prototype dispatch poison");
+};
+globalThis.InputEvent = function PoisonedInputEvent() {
+  throw new Error("global InputEvent poison");
+};
 
 const runtime = globalThis.__zephiumSemanticRuntimeV1;
 assert(runtime && typeof runtime.invoke === "function", "runtime missing");
@@ -253,6 +475,38 @@ assert(initial.n.some((node) => node.n === "Open shadow action"), "open shadow r
 assert(initial.n.some((node) => node.n === "Save"), "captured element methods were poisoned");
 const passwordNode = initial.n.find((node) => node.r === "password");
 assert(passwordNode && passwordNode.v.k === "redacted", "password not redacted");
+const lateSecretNode = initial.n.find((node) => node.n === "Large ordinary field");
+assert(
+  lateSecretNode && lateSecretNode.v.k === "redacted" && lateSecretNode.q === "secret",
+  "secret after the model-preview ceiling was exposed"
+);
+assert(!initialWire.includes("sk-super-secret-value"), "late secret crossed the wire");
+const oversizedValueNode = initial.n.find((node) => node.n === "Oversized ordinary field");
+assert(
+  oversizedValueNode && oversizedValueNode.v.k === "redacted" && oversizedValueNode.q === "secret",
+  "value beyond the exact-value ceiling was not conservatively redacted"
+);
+for (const [name] of [
+  ["NUL value field"],
+  ["CR value field"],
+  ["Bidi value field"],
+  ["Surrogate value field"]
+]) {
+  const invalidValueNode = initial.n.find((node) => node.n === name);
+  assert(
+    invalidValueNode && invalidValueNode.v.k === "redacted" && invalidValueNode.q === "secret",
+    `${name} crossed the exact-value boundary`
+  );
+}
+for (const privateValue of metadataOverflowValues) {
+  assert(!initialWire.includes(privateValue), "credential-metadata overflow exposed its value");
+}
+assert(
+  initial.n.filter((node) =>
+    node.r === "textbox" && node.v && node.v.k === "redacted" && node.q === "secret"
+  ).length >= 8,
+  "overflow or late-marker credential metadata was not marked secret"
+);
 const mainNode = initial.n.find((node) => node.r === "landmark");
 assert(mainNode, "landmark missing");
 
@@ -345,6 +599,7 @@ async function finish() {
     k: "click",
     e: { x: 10, y: 10, w: 160, h: 32 },
     p: 0,
+    z: null,
     f: saveDescriptor,
     of: null
   });
@@ -403,7 +658,273 @@ async function finish() {
     "oversized action target subtree escaped descriptor budget"
   );
   button._children = savedButtonChildren;
-  assert(runtime.invoke(`{"padding":"${"x".repeat(17000)}"}`) === "E1:invalid_request", "oversize action request accepted");
+  assert(runtime.invoke(`{"padding":"${"x".repeat(17800)}"}`) === "E1:invalid_request", "oversize action request accepted");
+
+  const roleCodes = Object.freeze({textbox: 8, searchbox: 10});
+  const descriptorFor = (node) => ({
+    r: roleCodes[node.r],
+    o: node.o || 0,
+    q: node.q === "sensitive" ? 2 : node.q === "secret" ? 3 : 1,
+    s: node.s || 0,
+    n: node.n === undefined ? null : node.n,
+    vk: node.v && node.v.k === "text" ? 1 : node.v && node.v.k === "redacted" ? 2 : 0,
+    vt: node.v && node.v.k === "text" ? node.v.value : null,
+    vo: 0,
+    vb: false
+  });
+  const actionNode = (name) => transported.n.find((node) => node.n === name);
+  const fillRequest = (targetNode, value, attempt) => JSON.stringify({
+    v: 1,
+    o: "action_execute",
+    a: attempt,
+    i: 101,
+    g: 101,
+    t: targetNode.k,
+    r: targetNode.r,
+    k: "fill",
+    e: { x: 10, y: 10, w: 160, h: 32 },
+    p: 0,
+    z: value,
+    f: descriptorFor(targetNode),
+    of: null
+  });
+  const assertInputEvent = (target, expected) => {
+    const events = fillEvents.get(target);
+    assert(
+      events.length === 2 && events[0].type === "beforeinput" && events[1].type === "input",
+      "fill emitted an unexpected event sequence"
+    );
+    assert(
+      events[0].isTrusted === false && events[0].cancelable === true &&
+        events[1].isTrusted === false && events[1].bubbles === true &&
+        events[1].composed === true && events[1].cancelable === false &&
+        events[1].data === expected && events[1].inputType === "insertReplacementText" &&
+        events[1].isComposing === false,
+      "fill input event contract drifted"
+    );
+  };
+
+  const textNode = actionNode("Account name");
+  const searchNode = actionNode("Account search");
+  const textareaNode = actionNode("Account notes");
+  const editableNode = actionNode("Rich account notes");
+  assert(
+    textNode && searchNode && textareaNode && editableNode,
+    `fill targets missing: ${transported.n.map((node) => `${node.r}:${node.n || ""}`).join("|")}`
+  );
+
+  document._hit = textInput;
+  const textFill = JSON.parse(await runtime.invoke(fillRequest(textNode, "Zephium fixed text", 8)));
+  assert(
+    textFill.a === 8 && textFill.b === "page_world_compatibility_fill" && textFill.r === "form" &&
+      textInput._value === "Zephium fixed text",
+    "captured native text-input fill failed"
+  );
+  assertInputEvent(textInput, "Zephium fixed text");
+
+  document._hit = searchInput;
+  const searchFill = JSON.parse(await runtime.invoke(fillRequest(searchNode, "", 9)));
+  assert(
+    searchFill.a === 9 && searchFill.b === "page_world_compatibility_fill" &&
+      searchFill.r === "form" && searchInput._value === "",
+    "empty search-input fill failed"
+  );
+  assertInputEvent(searchInput, "");
+
+  document._hit = textarea;
+  const textareaValue = "  Zephium  fixed textarea\nline two  ";
+  const textareaFill = JSON.parse(await runtime.invoke(fillRequest(textareaNode, textareaValue, 10)));
+  assert(
+    textareaFill.a === 10 && textareaFill.b === "page_world_compatibility_fill" &&
+      textareaFill.r === "form" && textarea._value === textareaValue,
+    "captured native textarea fill failed"
+  );
+  assertInputEvent(textarea, textareaValue);
+
+  document._hit = contentEditable;
+  assert(
+    runtime.invoke(fillRequest(editableNode, "unsupported rich edit", 11)) ===
+      "E2:unsupported_interaction",
+    "contenteditable entered the fixed fill route"
+  );
+
+  textInput._value = "fixture text";
+  fillEvents.get(textInput).length = 0;
+  document._hit = textInput;
+  textInput.attributes.type = "password";
+  assert(
+    runtime.invoke(fillRequest(textNode, "credential refusal", 12)) === "E2:credential_boundary",
+    "credential transition entered the fixed fill route"
+  );
+  assert(textInput._value === "fixture text" && fillEvents.get(textInput).length === 0, "credential refusal mutated target");
+  textInput.attributes.type = "text";
+
+  textInput.attributes.readonly = "";
+  assert(
+    runtime.invoke(fillRequest(textNode, "readonly refusal", 13)) === "E2:target_disabled",
+    "readonly target entered the fixed fill route"
+  );
+  assert(textInput._value === "fixture text" && fillEvents.get(textInput).length === 0, "readonly refusal mutated target");
+  delete textInput.attributes.readonly;
+
+  textInput._value = "descriptor drift";
+  assert(
+    runtime.invoke(fillRequest(textNode, "drift refusal", 14)) === "E2:target_changed",
+    "pre-fill value drift escaped exact descriptor revalidation"
+  );
+  textInput._value = "fixture text";
+
+  textInput._nativeDispatchThrows = true;
+  assert(
+    await runtime.invoke(fillRequest(textNode, "dispatch refusal", 15)) === "E2:applied_unverified",
+    "possibly page-observed dispatch exception remained retryable"
+  );
+  assert(textInput._value === "fixture text", "failed event dispatch did not restore native value");
+  textInput._nativeDispatchThrows = false;
+
+  textInput._rewriteAfterInput = true;
+  assert(
+    await runtime.invoke(fillRequest(textNode, "synchronous rewrite", 16)) === "E2:applied_unverified",
+    "synchronous page rewrite escaped the native getter check"
+  );
+  assert(textInput._value === "page rewrite", "rewrite fixture did not execute");
+  textInput._rewriteAfterInput = false;
+  textInput._value = "fixture text";
+
+  textInput._repurposeAfterInput = true;
+  assert(
+    await runtime.invoke(fillRequest(textNode, "semantic repurpose", 17)) === "E2:applied_unverified",
+    "post-event credential repurposing was accepted"
+  );
+  textInput._repurposeAfterInput = false;
+  textInput.attributes["aria-label"] = "Account name";
+  textInput._value = "fixture text";
+
+  assert(
+    runtime.invoke(fillRequest(textNode, "x".repeat(4097), 18)) === "E1:invalid_request",
+    "unverifiable fill value exceeded the semantic projection ceiling"
+  );
+  assert(textInput._value === "fixture text", "oversized fill mutated target");
+  assert(
+    runtime.invoke(fillRequest(textNode, "line one\nline two", 19)) === "E2:unsupported_interaction",
+    "single-line input accepted a line feed"
+  );
+  assert(textInput._value === "fixture text", "line-feed refusal mutated input");
+  const invalidFill = JSON.parse(fillRequest(textNode, "valid", 20));
+  invalidFill.z = "forbidden\u0000control";
+  assert(runtime.invoke(JSON.stringify(invalidFill)) === "E1:invalid_request", "forbidden fill text was accepted");
+  const invalidClickText = JSON.parse(actionRequest(21));
+  invalidClickText.z = "unexpected";
+  assert(runtime.invoke(JSON.stringify(invalidClickText)) === "E1:invalid_request", "click accepted fill text");
+
+  textInput._value = "fixture text";
+  fillEvents.get(textInput).length = 0;
+  document._hit = textInput;
+  delete html.attributes[relayReady];
+  assert(
+    runtime.invoke(fillRequest(textNode, "relay absent", 22)) === "E2:page_relay_not_ready",
+    "fill proceeded without a READY page-world relay"
+  );
+  assert(textInput._value === "fixture text", "relay-absent refusal mutated target");
+  html.attributes[relayReady] = "1";
+  relayMode = "duplicate";
+  assert(
+    await runtime.invoke(fillRequest(textNode, "duplicate marker", 23)) === "E2:target_occluded",
+    "duplicate relay marker was accepted"
+  );
+  assert(textInput._value === "fixture text", "duplicate relay refusal mutated target");
+  assert(
+    !textInput.hasAttribute(relayCommand) && !textInput.hasAttribute(relayTerminal),
+    "duplicate relay refusal retained transport markers"
+  );
+  relayMode = "normal";
+
+  textInput.setAttribute(relayTerminal, "1|24|ok");
+  fillEvents.get(textInput).length = 0;
+  const forgedTerminalFill = JSON.parse(
+    await runtime.invoke(fillRequest(textNode, "forged terminal replaced", 24))
+  );
+  assert(
+    forgedTerminalFill.a === 24 && textInput._value === "forged terminal replaced",
+    "preexisting forged terminal substituted correlated relay evidence"
+  );
+  assertInputEvent(textInput, "forged terminal replaced");
+  assert(
+    !textInput.hasAttribute(relayCommand) && !textInput.hasAttribute(relayTerminal),
+    "successful relay retained transport markers"
+  );
+  textInput._value = "fixture text";
+
+  fillEvents.get(textInput).length = 0;
+  textInput._cancelBeforeInput = true;
+  assert(
+    await runtime.invoke(fillRequest(textNode, "cancelled edit", 25)) === "E2:applied_unverified",
+    "page-observed beforeinput cancellation remained retryable"
+  );
+  assert(
+    textInput._value === "fixture text" && fillEvents.get(textInput).length === 1 &&
+      fillEvents.get(textInput)[0].type === "beforeinput",
+    "beforeinput cancellation evidence drifted"
+  );
+  textInput._cancelBeforeInput = false;
+  assert(
+    !textInput.hasAttribute(relayCommand) && !textInput.hasAttribute(relayTerminal),
+    "cancelled relay retained transport markers"
+  );
+
+  fillEvents.get(textInput).length = 0;
+  textInput._repurposeAfterBeforeInput = true;
+  assert(
+    await runtime.invoke(fillRequest(textNode, "repurposed edit", 26)) === "E2:applied_unverified",
+    "post-beforeinput target repurposing remained retryable"
+  );
+  assert(
+    textInput._value === "fixture text" && textInput.attributes.type === "password" &&
+      fillEvents.get(textInput).length === 1,
+    "post-beforeinput repurposing evidence drifted"
+  );
+  textInput._repurposeAfterBeforeInput = false;
+  textInput.attributes.type = "text";
+  assert(
+    !textInput.hasAttribute(relayCommand) && !textInput.hasAttribute(relayTerminal),
+    "repurposed relay retained transport markers"
+  );
+
+  fillEvents.get(textInput).length = 0;
+  relayMode = "flood";
+  assert(
+    await runtime.invoke(fillRequest(textNode, "flood refusal", 27)) === "E2:applied_unverified",
+    "missing terminal after bounded record refusal remained retryable"
+  );
+  assert(
+    textInput._value === "fixture text" && fillEvents.get(textInput).length === 0,
+    "bounded record refusal mutated target"
+  );
+  assert(
+    !textInput.hasAttribute(relayCommand) && !textInput.hasAttribute(relayTerminal),
+    "bounded record refusal retained transport markers"
+  );
+  relayMode = "normal";
+
+  const carriageReturnFill = JSON.parse(fillRequest(textNode, "valid", 28));
+  carriageReturnFill.z = "carriage\rreturn";
+  assert(
+    runtime.invoke(JSON.stringify(carriageReturnFill)) === "E1:invalid_request",
+    "carriage-return fill text crossed the runtime boundary"
+  );
+
+  main.append(ariaOverflowInput);
+  setOwner(main, document);
+  const metadataOverflowWire = invoke(102, 102, { k: "initial" });
+  const metadataOverflowSnapshot = JSON.parse(metadataOverflowWire);
+  assert(
+    metadataOverflowSnapshot.c === "text_limit" &&
+      metadataOverflowSnapshot.n.filter((node) =>
+        node.r === "textbox" && node.v && node.v.k === "redacted" && node.q === "secret"
+      ).length >= 9 &&
+      !metadataOverflowWire.includes(metadataOverflowValues[1]),
+    "513-byte accessible-name overflow did not fail closed"
+  );
 
   stopNativeTransport("S1");
   await new Promise((resolve) => setImmediate(resolve));
@@ -424,6 +945,13 @@ async function finish() {
     action_descriptor_golden: true,
     no_webcrypto_required: true,
     fixed_action_execution: true,
+    fixed_fill_execution: true,
+    fill_native_primitives_captured: true,
+    fill_input_event_contract: true,
+    fill_contenteditable_excluded: true,
+    fill_hostile_transitions_rejected: true,
+    fill_observed_refusals_nonretryable: true,
+    fill_forged_and_flood_terminals_rejected: true,
     same_node_repurpose_rejected: true,
     unrelated_mutation_allowed: true,
     occlusion_rejected: true,

@@ -4,7 +4,7 @@
   const GLOBAL_NAME = "__zephiumSemanticRuntimeV1";
   const PROTOCOL_VERSION = 1;
   const WIRE_VERSION = 1;
-  const MAX_REQUEST_BYTES = 16384;
+  const MAX_REQUEST_BYTES = 17701;
   const MAX_SAFE_INTEGER = 9007199254740991;
   const MAX_NODES = 512;
   const MAX_TEXT_BYTES = 131072;
@@ -14,7 +14,7 @@
   const MAX_TREE_DEPTH = 32;
   const MAX_NAME_BYTES = 512;
   const MAX_NODE_TEXT_BYTES = 4096;
-  const MAX_VALUE_BYTES = 1024;
+  const MAX_VALUE_BYTES = 4096;
   const MAX_SURROUNDING_BYTES = 8192;
   const MAX_TRACKED_IDENTITIES = 2048;
   const MAX_DOCUMENT_INVOCATIONS = 4096;
@@ -22,11 +22,18 @@
   const MAX_ACTION_DESCRIPTOR_TEXT_BYTES = 4096;
   const MAX_ACTION_DESCRIPTOR_WIRE_BYTES = 16384;
   const MAX_ACTION_DESCRIPTOR_VISITED_NODES = 2048;
+  const MAX_ACTION_TEXT_BYTES = 4096;
+  // Independently bounded page-world transport: fixed command grammar plus
+  // worst-case two-byte JSON expansion of one legal 4-KiB replacement.
+  const MAX_PAGE_RELAY_COMMAND_BYTES = 8320;
   const CHANNEL_PULL = "P1";
   const CHANNEL_RESULT_PREFIX = "R1:";
   const CHANNEL_ACK = "A1";
   const CHANNEL_STOP = "S1";
   const CHANNEL_EXHAUSTED = "X1";
+  const PAGE_RELAY_READY = "data-zephium-fill-relay-ready-v1";
+  const PAGE_RELAY_COMMAND = "data-zephium-fill-relay-command-v1";
+  const PAGE_RELAY_TERMINAL = "data-zephium-fill-relay-terminal-v1";
 
   const objectDefineProperty = Object.defineProperty;
   const objectFreeze = Object.freeze;
@@ -44,6 +51,7 @@
   const mathMin = Math.min;
   const mathMax = Math.max;
   const stringToLowerCase = String.prototype.toLowerCase;
+  const stringCharCodeAt = String.prototype.charCodeAt;
   const stringSlice = String.prototype.slice;
   const stringSplit = String.prototype.split;
   const stringTrim = String.prototype.trim;
@@ -66,6 +74,7 @@
   const nodeParentGetter = getter(Node.prototype, "parentNode");
   const nodeOwnerDocumentGetter = getter(Node.prototype, "ownerDocument");
   const nodeConnectedGetter = getter(Node.prototype, "isConnected");
+  const nodeChildNodesGetter = getter(Node.prototype, "childNodes");
   const nodeContains = Node.prototype.contains;
   const characterDataGetter = getter(CharacterData.prototype, "data");
   const elementTagGetter = getter(Element.prototype, "tagName");
@@ -79,12 +88,17 @@
   const nodeListItem = NodeList.prototype.item;
   const getAttribute = Element.prototype.getAttribute;
   const hasAttribute = Element.prototype.hasAttribute;
+  const setAttribute = Element.prototype.setAttribute;
+  const removeAttribute = Element.prototype.removeAttribute;
   const getBoundingClientRect = Element.prototype.getBoundingClientRect;
   const documentGetElementById = Document.prototype.getElementById;
   const documentElementFromPoint = Document.prototype.elementFromPoint;
   const getComputedStyleFixed = globalThis.getComputedStyle;
   const htmlElementClick =
     typeof HTMLElement === "function" ? HTMLElement.prototype.click : null;
+  const nativePromise = Promise;
+  const promiseResolve = Promise.resolve;
+  const promiseThen = Promise.prototype.then;
   const weakMapGet = WeakMap.prototype.get;
   const weakMapSet = WeakMap.prototype.set;
 
@@ -224,7 +238,7 @@
   }
 
   function parseActionRequest(request) {
-    if (!hasExactKeys(request, ["v", "o", "a", "i", "g", "t", "r", "k", "e", "p", "f", "of"])) {
+    if (!hasExactKeys(request, ["v", "o", "a", "i", "g", "t", "r", "k", "e", "p", "z", "f", "of"])) {
       return null;
     }
     if (
@@ -259,6 +273,11 @@
     } else if (request.of !== null) {
       return null;
     }
+    if (request.k === "fill") {
+      if (!validActionText(request.z)) return null;
+    } else if (request.z !== null) {
+      return null;
+    }
     const expected = request.e;
     if (
       !hasExactKeys(expected, ["x", "y", "w", "h"]) ||
@@ -278,6 +297,29 @@
     return request;
   }
 
+  function validActionText(value) {
+    if (typeof value !== "string" || utf8Length(value, MAX_ACTION_TEXT_BYTES + 1) > MAX_ACTION_TEXT_BYTES) {
+      return false;
+    }
+    for (const character of value) {
+      const point = character.codePointAt(0);
+      if (
+        (point < 0x20 && point !== 0x09 && point !== 0x0a) ||
+        (point >= 0x7f && point <= 0x9f) ||
+        point === 0xad || point === 0x61c || point === 0x180e ||
+        (point >= 0x200b && point <= 0x200f) ||
+        (point >= 0x202a && point <= 0x202e) ||
+        (point >= 0x2060 && point <= 0x2064) ||
+        (point >= 0x2066 && point <= 0x206f) ||
+        point === 0xfeff || (point >= 0xfff9 && point <= 0xfffb) ||
+        point === 0xe0001 || (point >= 0xe0020 && point <= 0xe007f)
+      ) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   function validRuntimeDescriptor(value) {
     if (!hasExactKeys(value, ["r", "o", "q", "s", "n", "vk", "vt", "vo", "vb"])) return false;
     if (
@@ -290,7 +332,11 @@
       !numberIsSafeInteger(value.vo) || value.vo < 0 || value.vo > 65535 ||
       typeof value.vb !== "boolean"
     ) return false;
-    if (value.vk === 1) return typeof value.vt === "string" && value.vt.length <= 4096 && value.vo === 0 && !value.vb;
+    if (value.vk === 1) {
+      return typeof value.vt === "string" &&
+        utf8Length(value.vt, MAX_VALUE_BYTES + 1) <= MAX_VALUE_BYTES &&
+        value.vo === 0 && !value.vb;
+    }
     if (value.vt !== null) return false;
     if (value.vk === 3) return value.vo === 0;
     if (value.vk === 4) return !value.vb;
@@ -384,6 +430,40 @@
     return { value, bytes, truncated };
   }
 
+  function exactValueText(raw, byteLimit) {
+    if (typeof raw !== "string" || byteLimit <= 0) {
+      return { value: "", bytes: 0, truncated: typeof raw === "string" && raw.length > 0 };
+    }
+    let value = "";
+    let bytes = 0;
+    let inspected = 0;
+    let truncated = false;
+    const scanLimit = byteLimit * 8 + 256;
+    for (const character of raw) {
+      inspected += 1;
+      if (inspected > scanLimit) {
+        truncated = true;
+        break;
+      }
+      const point = character.codePointAt(0);
+      if (
+        (isForbiddenTextPoint(point) && point !== 0x09 && point !== 0x0a) ||
+        point === 0x0d
+      ) {
+        truncated = true;
+        break;
+      }
+      const characterBytes = point <= 0x7f ? 1 : point <= 0x7ff ? 2 : point <= 0xffff ? 3 : 4;
+      if (bytes + characterBytes > byteLimit) {
+        truncated = true;
+        break;
+      }
+      value += character;
+      bytes += characterBytes;
+    }
+    return { value, bytes, truncated };
+  }
+
   function looksLikeSecret(value) {
     const trimmed = apply(stringTrim, value, []);
     if (trimmed.length < 8) return false;
@@ -431,6 +511,32 @@
       }
     }
     return false;
+  }
+
+  function classifyLiveValue(value) {
+    let bytes = 0;
+    for (let index = 0; index < value.length; index += 1) {
+      const first = apply(stringCharCodeAt, value, [index]);
+      let point = first;
+      if (first >= 0xd800 && first <= 0xdbff) {
+        if (index + 1 >= value.length) return 0;
+        const second = apply(stringCharCodeAt, value, [index + 1]);
+        if (second < 0xdc00 || second > 0xdfff) return 0;
+        point = 0x10000 + ((first - 0xd800) << 10) + (second - 0xdc00);
+        index += 1;
+      } else if (first >= 0xdc00 && first <= 0xdfff) {
+        return 0;
+      }
+      if (
+        (isForbiddenTextPoint(point) && point !== 0x09 && point !== 0x0a) ||
+        point === 0x0d
+      ) {
+        return 0;
+      }
+      bytes += point <= 0x7f ? 1 : point <= 0x7ff ? 2 : point <= 0xffff ? 3 : 4;
+      if (bytes > MAX_VALUE_BYTES) return 1;
+    }
+    return 2;
   }
 
   function lower(value) {
@@ -988,13 +1094,74 @@
   }
 
   function credentialField(element, descriptor, accessibleName) {
-    if (descriptor.role === "password") return true;
-    const metadata = [
-      attribute(element, "autocomplete", 256) || "",
-      attribute(element, "name", 256) || "",
-      attribute(element, "id", 256) || "",
-      accessibleName || ""
-    ];
+    if (descriptor.role === "password") return 1;
+    const metadata = [];
+    const addMetadata = (raw, limit) => {
+      if (raw === null || raw === "") return true;
+      const bounded = boundedCredentialMetadata(raw, limit);
+      if (bounded === null) return false;
+      metadata.push(bounded);
+      return true;
+    };
+    for (const [name, limit] of [
+      ["autocomplete", 256], ["name", 256], ["id", 256],
+      ["aria-label", MAX_NAME_BYTES], ["placeholder", MAX_NAME_BYTES],
+      ["title", MAX_NAME_BYTES]
+    ]) {
+      let raw;
+      try {
+        raw = apply(getAttribute, element, [name]);
+      } catch (_) {
+        return 2;
+      }
+      if (raw !== null && typeof raw !== "string") return 2;
+      if (!addMetadata(raw, limit)) return 2;
+    }
+    if (!addMetadata(accessibleName || "", MAX_NAME_BYTES)) return 2;
+
+    let labelledBy;
+    try {
+      labelledBy = apply(getAttribute, element, ["aria-labelledby"]);
+    } catch (_) {
+      return 2;
+    }
+    if (labelledBy !== null) {
+      if (typeof labelledBy !== "string" || !addMetadata(labelledBy, 1024)) return 2;
+      const identifiers = apply(stringSplit, labelledBy, [/\s+/]).filter((value) => value !== "");
+      if (identifiers.length > 8) return 2;
+      for (const identifier of identifiers) {
+        if (identifier.length > 128) return 2;
+        const label = apply(documentGetElementById, document, [identifier]);
+        if (label !== null) {
+          const text = boundedCredentialLabelText(label);
+          if (text === null || !addMetadata(text, MAX_NAME_BYTES)) return 2;
+        }
+      }
+    }
+
+    let labelsGetter = null;
+    if (descriptor.tag === "input") labelsGetter = inputLabelsGetter;
+    if (descriptor.tag === "textarea") labelsGetter = textareaLabelsGetter;
+    if (descriptor.tag === "select") labelsGetter = selectLabelsGetter;
+    if (labelsGetter !== null) {
+      let labels;
+      try {
+        labels = read(labelsGetter, element);
+      } catch (_) {
+        return 2;
+      }
+      if (labels !== null && labels !== undefined) {
+        const length = listLength(labels);
+        if (length > 4) return 2;
+        for (let index = 0; index < length; index += 1) {
+          const label = listItem(labels, index);
+          if (label === null) return 2;
+          const text = boundedCredentialLabelText(label);
+          if (text === null || !addMetadata(text, MAX_NAME_BYTES)) return 2;
+        }
+      }
+    }
+
     const joined = lower(metadata.join(" "));
     return (
       joined.includes("password") ||
@@ -1011,7 +1178,75 @@
       joined.includes("card number") ||
       joined.includes("cvv") ||
       joined.includes("cvc")
-    );
+    ) ? 1 : 0;
+  }
+
+  function boundedCredentialMetadata(raw, limit) {
+    if (typeof raw !== "string") return null;
+    let bytes = 0;
+    for (let index = 0; index < raw.length; index += 1) {
+      const first = apply(stringCharCodeAt, raw, [index]);
+      let point = first;
+      if (first >= 0xd800 && first <= 0xdbff) {
+        if (index + 1 >= raw.length) return null;
+        const second = apply(stringCharCodeAt, raw, [index + 1]);
+        if (second < 0xdc00 || second > 0xdfff) return null;
+        point = 0x10000 + ((first - 0xd800) << 10) + (second - 0xdc00);
+        index += 1;
+      } else if (first >= 0xdc00 && first <= 0xdfff) {
+        return null;
+      }
+      if (
+        (isForbiddenTextPoint(point) && point !== 0x09 && point !== 0x0a) ||
+        point === 0x0d
+      ) {
+        return null;
+      }
+      bytes += point <= 0x7f ? 1 : point <= 0x7ff ? 2 : point <= 0xffff ? 3 : 4;
+      if (bytes > limit) return null;
+    }
+    return raw;
+  }
+
+  function boundedCredentialLabelText(root) {
+    const stack = [root];
+    const chunks = [];
+    let bytes = 0;
+    let visited = 0;
+    while (stack.length !== 0) {
+      if (visited >= 128) return null;
+      visited += 1;
+      const current = stack.pop();
+      const type = nodeType(current);
+      if (type === 3) {
+        const raw = read(characterDataGetter, current);
+        if (typeof raw !== "string") return null;
+        const separator = chunks.length === 0 || raw.length === 0 ? 0 : 1;
+        if (bytes + separator > MAX_NAME_BYTES) return null;
+        const bounded = boundedCredentialMetadata(raw, MAX_NAME_BYTES - bytes - separator);
+        if (bounded === null) return null;
+        if (bounded !== "") {
+          if (separator !== 0) {
+            chunks.push(" ");
+            bytes += 1;
+          }
+          chunks.push(bounded);
+          bytes += utf8Length(bounded, MAX_NAME_BYTES + 1);
+        }
+        continue;
+      }
+      if (type !== 1 && type !== 9 && type !== 11) return null;
+      const children = read(nodeChildNodesGetter, current);
+      if (children === null || children === undefined) return null;
+      const length = listLength(children);
+      if (length + stack.length + visited > 128) return null;
+      for (let index = length - 1; index >= 0; index -= 1) {
+        const child = listItem(children, index);
+        if (child === null) return null;
+        stack.push(child);
+      }
+    }
+    return chunks.join("");
   }
 
   function consumeField(raw, fieldLimit, state) {
@@ -1035,6 +1270,27 @@
     return { value, bytes, secret };
   }
 
+  function consumeValueField(raw, state) {
+    const remaining = mathMax(0, state.request.b.t - state.textBytes);
+    // Bound hostile-page work before trim/lower/split can allocate. Oversized
+    // live values are conservatively redacted; only a complete <=4-KiB value
+    // reaches secret classification and the exact verification projection.
+    const valueClass = classifyLiveValue(raw);
+    if (valueClass !== 2 || (raw !== "" && looksLikeSecret(raw))) {
+      const redactedBytes = 10;
+      if (redactedBytes > remaining) {
+        mark(state, "text_limit");
+        return { value: "", bytes: 0, secret: true };
+      }
+      state.textBytes += redactedBytes;
+      return { value: "[redacted]", bytes: redactedBytes, secret: true };
+    }
+    const exact = exactValueText(raw, mathMin(MAX_VALUE_BYTES, remaining));
+    state.textBytes += exact.bytes;
+    if (exact.truncated || (raw.length !== 0 && remaining === 0)) mark(state, "text_limit");
+    return { value: exact.value, bytes: exact.bytes, secret: false };
+  }
+
   function setSensitivity(record, sensitivity) {
     if (sensitivity === "secret" || (sensitivity === "sensitive" && record.sensitivity === "public")) {
       record.sensitivity = sensitivity;
@@ -1050,7 +1306,7 @@
   }
 
   function addValue(record, raw, state) {
-    const field = consumeField(raw, MAX_VALUE_BYTES, state);
+    const field = consumeValueField(raw, state);
     if (field.value !== "") record.wire.v = { k: field.secret ? "redacted" : "text", value: field.value };
     if (field.secret) {
       record.wire.v = { k: "redacted" };
@@ -1187,6 +1443,7 @@
       ) {
         if (credentialField(element, descriptor, wire.n || "")) {
           wire.v = { k: "redacted" };
+          setSensitivity(record, "secret");
         } else if (descriptor.contentEditable !== true) {
           let value = null;
           try {
@@ -1647,6 +1904,136 @@
     );
   }
 
+  function descriptorMatchesFilledValue(expected, actual, value) {
+    if (!validRuntimeDescriptor(expected) || !validRuntimeDescriptor(actual)) return false;
+    const valueMatches = value === ""
+      ? actual.vk === 0 && actual.vt === null && actual.vo === 0 && !actual.vb
+      : actual.vk === 1 && actual.vt === value && actual.vo === 0 && !actual.vb;
+    return (
+      expected.r === actual.r && expected.o === actual.o && expected.q === actual.q &&
+      expected.s === actual.s && expected.n === actual.n && valueMatches
+    );
+  }
+
+  function fillControlKind(descriptor, value) {
+    if (descriptor.tag === "input") {
+      if (
+        (descriptor.inputType !== "text" && descriptor.inputType !== "search") ||
+        (descriptor.role !== "textbox" && descriptor.role !== "searchbox")
+      ) {
+        return 0;
+      }
+      for (const character of value) {
+        const point = character.codePointAt(0);
+        if (point === 0x09 || point === 0x0a || point === 0x0d) return 0;
+      }
+      return 1;
+    }
+    if (descriptor.tag === "textarea" && descriptor.role === "textbox") {
+      return 2;
+    }
+    return 0;
+  }
+
+  function pageRelayAttribute(target, name) {
+    try {
+      return apply(getAttribute, target, [name]);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function clearPageRelayAttributes(target) {
+    try {
+      apply(removeAttribute, target, [PAGE_RELAY_COMMAND]);
+      apply(removeAttribute, target, [PAGE_RELAY_TERMINAL]);
+    } catch (_) {
+      // A replaced document or target is handled as closed transport failure.
+    }
+  }
+
+  function runPageRelayFill(target, descriptor, value, attempt) {
+    const projected = exactValueText(value, MAX_VALUE_BYTES);
+    if (
+      projected.truncated || projected.value !== value ||
+      utf8Length(value, MAX_VALUE_BYTES + 1) > MAX_VALUE_BYTES
+    ) {
+      return "unsupported_interaction";
+    }
+    const control = fillControlKind(descriptor, value);
+    if (control === 0) {
+      return "unsupported_interaction";
+    }
+
+    let root;
+    let command;
+    try {
+      root = read(documentElementGetter, document);
+      if (root === null || pageRelayAttribute(root, PAGE_RELAY_READY) !== "1") {
+        return "page_relay_not_ready";
+      }
+      if (pageRelayAttribute(target, PAGE_RELAY_COMMAND) !== null) {
+        clearPageRelayAttributes(target);
+        return "stale_reference";
+      }
+      apply(removeAttribute, target, [PAGE_RELAY_TERMINAL]);
+      command = apply(jsonStringify, JSON, [{ v: 1, a: attempt, z: value }]);
+      if (
+        typeof command !== "string" ||
+        utf8Length(command, MAX_PAGE_RELAY_COMMAND_BYTES + 1) > MAX_PAGE_RELAY_COMMAND_BYTES
+      ) {
+        return "unsupported_interaction";
+      }
+      apply(setAttribute, target, [PAGE_RELAY_COMMAND, command]);
+    } catch (_) {
+      return "unsupported_interaction";
+    }
+
+    const checkpoint = apply(promiseResolve, nativePromise, []);
+    try {
+      return apply(promiseThen, checkpoint, [() => {
+        const terminal = pageRelayAttribute(target, PAGE_RELAY_TERMINAL);
+        clearPageRelayAttributes(target);
+        if (terminal === `1|${attempt}|ok`) return "ok";
+        if (terminal === `1|${attempt}|refused-command`) return "invalid_request";
+        if (terminal === `1|${attempt}|refused-identity`) return "stale_reference";
+        if (terminal === `1|${attempt}|refused-type`) return "unsupported_interaction";
+        if (terminal === `1|${attempt}|refused-state`) return "target_disabled";
+        if (terminal === `1|${attempt}|refused-credential`) return "credential_boundary";
+        if (terminal === `1|${attempt}|refused-construct`) return "unsupported_interaction";
+        if (terminal === `1|${attempt}|indeterminate`) return "applied_unverified";
+        if (terminal === `1|0|duplicate`) return "target_occluded";
+        if (terminal === `1|0|invalid`) return "internal";
+        // The page-world recipe may already have called the native setter.
+        // This must never be surfaced as a clean retryable refusal.
+        return "applied_unverified";
+      }]);
+    } catch (_) {
+      clearPageRelayAttributes(target);
+      return "applied_unverified";
+    }
+  }
+
+  function encodeActionEvidence(request, backend, readiness, geometry, viewport, point, delta) {
+    return apply(jsonStringify, JSON, [{
+      v: PROTOCOL_VERSION,
+      a: request.a,
+      i: request.i,
+      g: request.g,
+      r: readiness,
+      x: geometry.x,
+      y: geometry.y,
+      w: geometry.w,
+      h: geometry.h,
+      vw: viewport.width,
+      vh: viewport.height,
+      px: point.x,
+      py: point.y,
+      d: delta,
+      b: backend
+    }]);
+  }
+
   function runAction(request) {
     let readyState;
     try {
@@ -1667,14 +2054,15 @@
     const target = resolveKeyAtGeneration(request.t, request.g);
     if (target === null || nodeType(target) !== 1) return actionFault("stale_reference");
     const descriptor = classify(target);
-    if (descriptor === null || descriptor.role !== request.r) return actionFault("target_changed");
+    if (descriptor === null) return actionFault("target_changed");
+    const credential = credentialField(target, descriptor, attribute(target, "aria-label", 512) || "");
+    if (credential || descriptor.role === "password") return actionFault("credential_boundary");
+    if (descriptor.role !== request.r) return actionFault("target_changed");
     const disabled = disabledState(target, false);
     const readonly = has(target, "readonly") || lower(attribute(target, "aria-readonly", 16) || "") === "true";
     if (disabled || ((request.k === "fill" || request.k === "select") && readonly)) {
       return actionFault("target_disabled");
     }
-    const credential = credentialField(target, descriptor, attribute(target, "aria-label", 512) || "");
-    if (credential || descriptor.role === "password") return actionFault("credential_boundary");
     const required = actionOperationBit(request.k);
     if (required === 0 || (operationBits(descriptor, disabled, readonly) & required) === 0) {
       return actionFault("unsupported_interaction");
@@ -1728,31 +2116,59 @@
       readiness = "visible";
     }
     const geometry = wireRect(rect);
-    if (request.k !== "click" || typeof htmlElementClick !== "function") {
+    if (request.k === "click") {
+      if (typeof htmlElementClick !== "function") return actionFault("unsupported_interaction");
+      try {
+        apply(htmlElementClick, target, []);
+      } catch (_) {
+        return actionFault("unsupported_interaction");
+      }
+      return encodeActionEvidence(request, "fixed_semantic_recipe", readiness, geometry, viewport, point, delta);
+    } else if (request.k === "fill") {
+      const finishFill = (result) => {
+        if (result !== "ok") {
+          return actionFault(result);
+        }
+        const finalTarget = resolveKeyAtGeneration(request.t, request.g);
+        const finalDescriptor = finalTarget === target ? classify(target) : null;
+        // The page-world setter has run once an `ok` terminal is observed.
+        // Every later mismatch is indeterminate, never a retryable target fault.
+        if (finalDescriptor === null || finalDescriptor.role !== request.r) {
+          return actionFault("applied_unverified");
+        }
+        const finalDisabled = disabledState(target, false);
+        const finalReadonly = has(target, "readonly") || lower(attribute(target, "aria-readonly", 16) || "") === "true";
+        if (finalDisabled || finalReadonly) return actionFault("applied_unverified");
+        if (
+          credentialField(target, finalDescriptor, attribute(target, "aria-label", 512) || "") ||
+          finalDescriptor.role === "password" || fillControlKind(finalDescriptor, request.z) === 0
+        ) {
+          return actionFault("applied_unverified");
+        }
+        const filledDescriptor = runtimeDescriptor(target, request.g);
+        if (!descriptorMatchesFilledValue(request.f, filledDescriptor, request.z)) {
+          return actionFault("applied_unverified");
+        }
+        return encodeActionEvidence(
+          request,
+          "page_world_compatibility_fill",
+          "form",
+          geometry,
+          viewport,
+          point,
+          delta
+        );
+      };
+      const result = runPageRelayFill(target, descriptor, request.z, request.a);
+      if (typeof result === "string") return finishFill(result);
+      try {
+        return apply(promiseThen, result, [finishFill, () => actionFault("applied_unverified")]);
+      } catch (_) {
+        return actionFault("applied_unverified");
+      }
+    } else {
       return actionFault("unsupported_interaction");
     }
-    try {
-      apply(htmlElementClick, target, []);
-    } catch (_) {
-      return actionFault("unsupported_interaction");
-    }
-    return apply(jsonStringify, JSON, [{
-      v: PROTOCOL_VERSION,
-      a: request.a,
-      i: request.i,
-      g: request.g,
-      r: readiness,
-      x: geometry.x,
-      y: geometry.y,
-      w: geometry.w,
-      h: geometry.h,
-      vw: viewport.width,
-      vh: viewport.height,
-      px: point.x,
-      py: point.y,
-      d: delta,
-      b: "fixed_semantic_recipe"
-    }]);
   }
 
   function run(request) {
@@ -1804,12 +2220,31 @@
     if (request === null) return fault("invalid_request");
     busy = true;
     if (request.o === "action_execute") {
+      let result;
       try {
-        return runAction(request);
+        result = runAction(request);
       } catch (_) {
-        return actionFault("internal");
-      } finally {
         busy = false;
+        return actionFault("internal");
+      }
+      if (typeof result === "string") {
+        busy = false;
+        return result;
+      }
+      try {
+        return apply(promiseThen, result, [
+          (value) => {
+            busy = false;
+            return typeof value === "string" ? value : actionFault("internal");
+          },
+          () => {
+            busy = false;
+            return actionFault("internal");
+          }
+        ]);
+      } catch (_) {
+        busy = false;
+        return actionFault("internal");
       }
     }
     try {
@@ -1837,7 +2272,8 @@
       }
       if (encoded === CHANNEL_STOP) return;
 
-      const result = invoke(encoded);
+      const invoked = invoke(encoded);
+      const result = typeof invoked === "string" ? invoked : await invoked;
       let acknowledgement;
       try {
         acknowledgement = await apply(post, channel, [`${CHANNEL_RESULT_PREFIX}${result}`]);

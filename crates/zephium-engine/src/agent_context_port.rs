@@ -1236,8 +1236,11 @@ impl AgentBrowserPort for EngineAgentBrowserPort {
     ) -> ContextDispatch {
         #[cfg(target_os = "macos")]
         {
-            if request.kind() != zephium_agentic::SemanticActionKind::Click
-                || request.frame().frame() != zephium_agentic::FrameId::MAIN
+            if !matches!(
+                request.kind(),
+                zephium_agentic::SemanticActionKind::Click
+                    | zephium_agentic::SemanticActionKind::Fill
+            ) || request.frame().frame() != zephium_agentic::FrameId::MAIN
                 || request.frame().trust() != zephium_agentic::SemanticFrameTrust::SameOrigin
                 || request.frame().context().identity().kind()
                     != zephium_agentic::ContextKind::Owned

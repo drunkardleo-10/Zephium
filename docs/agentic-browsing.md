@@ -268,7 +268,25 @@ world. The M1 fixture runtime uses one-way ready/result messages and no reply;
 the production fixed-recipe invocation mechanism remains evidence-driven and
 must not rely on private WebKit SPI. Its native state machine returns the typed
 `NotReady` refusal for a loading document; it does not encode that ordinary
-lifecycle state as an invariant abort. On Windows, isolated CDP worlds may be an
+lifecycle state as an invariant abort.
+
+The macOS owned-agent-view constructor additionally installs one immutable,
+main-frame-only page-world compatibility shim for bounded Fill operations on
+text/search inputs and textareas. This is a narrow compatibility exception,
+not a general page-world execution surface: it is never installed in Browse or
+borrowed tabs, has no native bridge, selectors, arbitrary code input, user
+activation route, storage/network authority, or cross-document authority. The
+shim's command and terminal attributes are untrusted transport hints and can
+never authorize success. The isolated runtime first binds the exact target and
+private input, the shim independently revalidates connected control identity,
+writability, supported type, and bounded credential metadata before and after
+`beforeinput`, and only a complete adjacent isolated-world snapshot proving the
+exact post-value can authorize success. Once `beforeinput` has been observed,
+any cancellation, mutation, ambiguous terminal, or later exception is treated
+as applied-but-unverified and requires human judgment; it is never blindly
+retried.
+
+On Windows, isolated CDP worlds may be an
 internal adapter mechanism, but CDP remains absent from domain and model
 contracts. Do not use a named
 `Page.addScriptToEvaluateOnNewDocument` world: current Blink creates that world
@@ -387,7 +405,7 @@ later bounded turn. Refusal or pre-commit cancellation releases the reservation.
 carry bounded page strings. A read result records the exact full-observation
 fingerprint in addition to its context, generation, capture time, provenance,
 omissions, and content guard. Only the matching prior tool-only `read` stop may
-bind its token-admitted `ZREAD1` bytes to a newer same-plan call. The full
+bind its token-admitted `ZREAD2` bytes to a newer same-plan call. The full
 OpenAI or Anthropic replay must receive an `ExactLocal` latest-result count and
 whole-input count before policy mutation; provider-backed counting is rejected
 because it would itself disclose the result. Policy proves the exact committed
@@ -407,7 +425,7 @@ cancellation release the reservation.
 turn. Only the exact prior tool-only `extract` correlation selecting the same
 trusted schema ID may bind a strictly newer same-plan call. Deterministic
 `ZEXTRACT1` input carries trusted, closed schema field declarations followed by
-the exact hostile `ZREAD1` evidence; one guard binds the full schema definition,
+the exact hostile `ZREAD2` evidence; one guard binds the full schema definition,
 read, observation fingerprint, context, generation, and capture time. The
 complete immutable replay must receive an `ExactLocal` provider/model/tokenizer
 count before policy reserves it, then policy rejoins the unchanged committed

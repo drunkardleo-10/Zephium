@@ -29,13 +29,15 @@ use zephium_agentic::{
     ContextOwnedViewport, ContextProfileStorageClass, ContextRegistry, ContextRunId,
     ContextSettlement, FixtureRoute, FixtureServer, FixtureServerError, FrameId,
     SemanticActionExecutionBackend, SemanticActionExecutionInstant, SemanticActionNativeReadiness,
-    SemanticActionNativeSettlement, SemanticClickQualificationExecution, SemanticCompleteness,
-    SemanticExpansionKind, SemanticFrameJoin, SemanticFrameTrust, SemanticFrameUnsupported,
-    SemanticInvocationId, SemanticNode, SemanticObservationAssembler, SemanticObservationBudget,
-    SemanticObservationId, SemanticObservationRequest, SemanticOperationClass, SemanticOrigin,
-    SemanticRole, SemanticRuntimeBudget, SemanticRuntimeFault, SemanticRuntimeInvocation,
-    SemanticRuntimePortFailure, SemanticRuntimeResultError, SemanticSensitivity,
-    SemanticSettleInstant, SemanticSnapshot, SemanticSnapshotGeneration, SemanticValueSummary,
+    SemanticActionNativeSettlement, SemanticActionQualificationError, SemanticActionText,
+    SemanticClickQualificationExecution, SemanticCompleteness, SemanticExpansionKind,
+    SemanticFillQualificationExecution, SemanticFrameJoin, SemanticFrameTrust,
+    SemanticFrameUnsupported, SemanticInvocationId, SemanticNode, SemanticObservationAssembler,
+    SemanticObservationBudget, SemanticObservationId, SemanticObservationRequest,
+    SemanticOperationClass, SemanticOrigin, SemanticRole, SemanticRuntimeBudget,
+    SemanticRuntimeFault, SemanticRuntimeInvocation, SemanticRuntimePortFailure,
+    SemanticRuntimeResultError, SemanticSensitivity, SemanticSettleInstant, SemanticSnapshot,
+    SemanticSnapshotGeneration, SemanticState, SemanticValueSummary,
 };
 use zephium_core::ids::ProfileId;
 
@@ -52,6 +54,8 @@ const MUTATION_APPLY_SETTLE: Duration = Duration::from_millis(250);
 const TEARDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const RUN_LOOP_SLICE: Duration = Duration::from_millis(5);
 const MAX_DOCUMENT_LOADING_RETRIES: u16 = 512;
+const PAGE_WORLD_FILL_RELAY_PROBE_ENV: &str = "ZEPHIUM_PAGE_WORLD_FILL_RELAY_PROBE";
+const PAGE_WORLD_FILL_RELAY_HOSTILE_PROBE_ENV: &str = "ZEPHIUM_PAGE_WORLD_FILL_RELAY_HOSTILE_PROBE";
 
 struct ProbeHostView {
     view: Retained<NSView>,
@@ -59,6 +63,12 @@ struct ProbeHostView {
 
 struct PendingPrimaryClick {
     execution: SemanticClickQualificationExecution,
+    settlement: SemanticActionNativeSettlement,
+    admitted_at: Instant,
+}
+
+struct PendingPrimaryFill {
+    execution: SemanticFillQualificationExecution,
     settlement: SemanticActionNativeSettlement,
     admitted_at: Instant,
 }
@@ -153,6 +163,11 @@ pub(crate) fn run() -> Result<(), &'static str> {
 }
 
 fn begin() -> Result<PendingTeardown, &'static str> {
+    let page_relay_probe = page_world_fill_relay_probe_enabled();
+    let hostile_relay_probe = page_world_fill_relay_hostile_probe_enabled();
+    if hostile_relay_probe && !page_relay_probe {
+        return Err("relay_hostile_requires_page_relay");
+    }
     let mtm = MainThreadMarker::new().ok_or("main_thread")?;
     let server = FixtureServer::start().map_err(|_| "fixture_start")?;
     let profile = ProfileId::generate();
@@ -263,8 +278,17 @@ fn begin() -> Result<PendingTeardown, &'static str> {
         native_guard: &native_guard,
     };
     let mut next_invocation = 1_u64;
+    let mut successful_snapshots = 0_u8;
     let execution = (|| {
-        let first_url = server.url(FixtureRoute::SemanticRuntime);
+        let first_url = server.url(if page_relay_probe {
+            if hostile_relay_probe {
+                FixtureRoute::SemanticRuntimeRelayHostile
+            } else {
+                FixtureRoute::SemanticRuntimeRelay
+            }
+        } else {
+            FixtureRoute::SemanticRuntime
+        });
         let first = navigate(
             &mut view,
             &mut registry,
@@ -279,6 +303,7 @@ fn begin() -> Result<PendingTeardown, &'static str> {
             &first_url,
             SemanticSnapshotGeneration::INITIAL,
             &mut next_invocation,
+            &mut successful_snapshots,
             &runtime,
         )?;
         verify_first_snapshot(&first_capture.snapshot)?;
@@ -300,10 +325,166 @@ fn begin() -> Result<PendingTeardown, &'static str> {
             &first_url,
             first_generation.next().ok_or("action_identity")?,
             &mut next_invocation,
+            &mut successful_snapshots,
             &runtime,
         )?;
         verify_primary_click_execution(pending_click, &after_click.snapshot)?;
         verify_primary_click(&after_click.snapshot)?;
+
+        let mut prior_capture = after_click;
+        for (name, value, role, batch, attempt, completed) in [
+            (
+                "Semantic fill text",
+                "Zephium fixed text",
+                SemanticRole::Textbox,
+                2,
+                2,
+                1,
+            ),
+            (
+                "Semantic fill search",
+                "Zephium fixed search",
+                SemanticRole::Searchbox,
+                3,
+                3,
+                2,
+            ),
+            (
+                "Semantic fill textarea",
+                "  Zephium  fixed textarea\nline two  ",
+                SemanticRole::Textbox,
+                4,
+                4,
+                3,
+            ),
+        ] {
+            let prior_generation = prior_capture.snapshot.generation();
+            let observation = assemble_observation(prior_capture)?;
+            let pending_fill =
+                execute_primary_fill(&view, &observation, &runtime, name, value, batch, attempt)?;
+            wait_for_action_security_settle(&runtime, ACTION_SECURITY_SETTLE)?;
+            let after_fill = capture_snapshot(
+                &view,
+                first,
+                &first_url,
+                prior_generation.next().ok_or("action_identity")?,
+                &mut next_invocation,
+                &mut successful_snapshots,
+                &runtime,
+            )?;
+            verify_primary_fill_execution(pending_fill, &after_fill.snapshot)?;
+            verify_primary_fill(&after_fill.snapshot, name, value, role, completed)?;
+            prior_capture = after_fill;
+        }
+        if hostile_relay_probe {
+            let prior_generation = prior_capture.snapshot.generation();
+            let observation = assemble_observation(prior_capture)?;
+            let hostile = execute_primary_fill(
+                &view,
+                &observation,
+                &runtime,
+                "Semantic hostile fill",
+                "Zephium hostile attempt",
+                5,
+                5,
+            )?;
+            wait_for_action_security_settle(&runtime, ACTION_SECURITY_SETTLE)?;
+            let after_hostile = capture_snapshot(
+                &view,
+                first,
+                &first_url,
+                prior_generation.next().ok_or("action_identity")?,
+                &mut next_invocation,
+                &mut successful_snapshots,
+                &runtime,
+            )?;
+            verify_hostile_fill_refusal(hostile, &after_hostile.snapshot)?;
+
+            let recovery_generation = after_hostile.snapshot.generation();
+            let observation = assemble_observation(after_hostile)?;
+            let recovery = execute_primary_fill(
+                &view,
+                &observation,
+                &runtime,
+                "Semantic hostile recovery",
+                "Zephium hostile recovery",
+                6,
+                6,
+            )?;
+            wait_for_action_security_settle(&runtime, ACTION_SECURITY_SETTLE)?;
+            let after_recovery = capture_snapshot(
+                &view,
+                first,
+                &first_url,
+                recovery_generation.next().ok_or("action_identity")?,
+                &mut next_invocation,
+                &mut successful_snapshots,
+                &runtime,
+            )?;
+            verify_primary_fill_execution(recovery, &after_recovery.snapshot)?;
+            verify_primary_fill(
+                &after_recovery.snapshot,
+                "Semantic hostile recovery",
+                "Zephium hostile recovery",
+                SemanticRole::Textbox,
+                4,
+            )?;
+            verify_hostile_fill_recovery(&after_recovery.snapshot)?;
+
+            let credential_generation = after_recovery.snapshot.generation();
+            let observation = assemble_observation(after_recovery)?;
+            let credential = execute_primary_fill(
+                &view,
+                &observation,
+                &runtime,
+                "Semantic hostile credential fill",
+                "Zephium credential blocked",
+                7,
+                7,
+            )?;
+            wait_for_action_security_settle(&runtime, ACTION_SECURITY_SETTLE)?;
+            let after_credential = capture_snapshot(
+                &view,
+                first,
+                &first_url,
+                credential_generation.next().ok_or("action_identity")?,
+                &mut next_invocation,
+                &mut successful_snapshots,
+                &runtime,
+            )?;
+            verify_hostile_credential_refusal(credential, &after_credential.snapshot)?;
+
+            let credential_recovery_generation = after_credential.snapshot.generation();
+            let observation = assemble_observation(after_credential)?;
+            let credential_recovery = execute_primary_fill(
+                &view,
+                &observation,
+                &runtime,
+                "Semantic hostile credential fill",
+                "Zephium credential recovery",
+                8,
+                8,
+            )?;
+            wait_for_action_security_settle(&runtime, ACTION_SECURITY_SETTLE)?;
+            let after_credential_recovery = capture_snapshot(
+                &view,
+                first,
+                &first_url,
+                credential_recovery_generation
+                    .next()
+                    .ok_or("action_identity")?,
+                &mut next_invocation,
+                &mut successful_snapshots,
+                &runtime,
+            )?;
+            verify_primary_fill_execution(
+                credential_recovery,
+                &after_credential_recovery.snapshot,
+            )?;
+            verify_hostile_credential_recovery(&after_credential_recovery.snapshot)?;
+            prior_capture = after_credential_recovery;
+        }
+        drop(prior_capture);
         registry
             .acknowledge_observation(identity.id(), first)
             .map_err(|_| "first_observation")?;
@@ -323,6 +504,7 @@ fn begin() -> Result<PendingTeardown, &'static str> {
             &mutation_url,
             SemanticSnapshotGeneration::INITIAL,
             &mut next_invocation,
+            &mut successful_snapshots,
             &runtime,
         )?;
         verify_mutation_before(&mutation_capture.snapshot)?;
@@ -403,6 +585,7 @@ fn begin() -> Result<PendingTeardown, &'static str> {
             &mutation_url,
             post_mutation_generation,
             &mut next_invocation,
+            &mut successful_snapshots,
             &runtime,
         )?;
         verify_mutation_after(&post_mutation.snapshot)?;
@@ -425,12 +608,66 @@ fn begin() -> Result<PendingTeardown, &'static str> {
             &replacement_url,
             SemanticSnapshotGeneration::INITIAL,
             &mut next_invocation,
+            &mut successful_snapshots,
             &runtime,
         )?;
         verify_replacement_snapshot(&replacement_capture.snapshot)?;
         registry
             .acknowledge_observation(identity.id(), replacement)
             .map_err(|_| "replacement_observation")?;
+
+        // A fourth native navigation epoch must reinstall and re-attest both
+        // immutable worlds before Fill can execute in the replacement epoch.
+        let rotated = navigate(
+            &mut view,
+            &mut registry,
+            identity.id(),
+            5,
+            &first_url,
+            &runtime,
+        )?;
+        let rotated_capture = capture_snapshot(
+            &view,
+            rotated,
+            &first_url,
+            SemanticSnapshotGeneration::INITIAL,
+            &mut next_invocation,
+            &mut successful_snapshots,
+            &runtime,
+        )?;
+        verify_first_snapshot(&rotated_capture.snapshot)?;
+        let rotated_generation = rotated_capture.snapshot.generation();
+        let rotated_observation = assemble_observation(rotated_capture)?;
+        let rotated_fill = execute_primary_fill(
+            &view,
+            &rotated_observation,
+            &runtime,
+            "Semantic fill text",
+            "Zephium fixed text",
+            5,
+            5,
+        )?;
+        wait_for_action_security_settle(&runtime, ACTION_SECURITY_SETTLE)?;
+        let rotated_after = capture_snapshot(
+            &view,
+            rotated,
+            &first_url,
+            rotated_generation.next().ok_or("action_identity")?,
+            &mut next_invocation,
+            &mut successful_snapshots,
+            &runtime,
+        )?;
+        verify_primary_fill_execution(rotated_fill, &rotated_after.snapshot)?;
+        verify_primary_fill(
+            &rotated_after.snapshot,
+            "Semantic fill text",
+            "Zephium fixed text",
+            SemanticRole::Textbox,
+            1,
+        )?;
+        registry
+            .acknowledge_observation(identity.id(), rotated)
+            .map_err(|_| "rotated_observation")?;
 
         if callbacks.failed() {
             return Err("callback_verification");
@@ -452,6 +689,10 @@ fn begin() -> Result<PendingTeardown, &'static str> {
         }
         if !server.is_healthy() {
             return Err("fixture_verification");
+        }
+        let expected_snapshots = if hostile_relay_probe { 14 } else { 10 };
+        if successful_snapshots != expected_snapshots {
+            return Err("snapshot_count_verification");
         }
         Ok(())
     })();
@@ -683,6 +924,71 @@ fn execute_primary_click(
     })
 }
 
+fn execute_primary_fill(
+    view: &AgentOwnedView,
+    observation: &zephium_agentic::SemanticObservation,
+    runtime: &ProbeRuntime<'_, '_>,
+    target_name: &str,
+    value: &str,
+    batch: u64,
+    attempt: u64,
+) -> Result<PendingPrimaryFill, &'static str> {
+    let target = observation
+        .frames()
+        .iter()
+        .flat_map(|snapshot| snapshot.nodes())
+        .find(|node| node_name_is(node, target_name))
+        .map(SemanticNode::reference)
+        .ok_or("fill_target")?;
+    let value = SemanticActionText::try_new(value.to_owned()).map_err(|_| "fill_value")?;
+    let requested_at = SemanticActionExecutionInstant::from_millis(10_000);
+    let mut execution = SemanticFillQualificationExecution::prepare(
+        observation,
+        target,
+        value,
+        batch,
+        attempt,
+        requested_at,
+    )
+    .map_err(|_| "fill_prepare")?;
+    let request = execution
+        .take_native_request()
+        .map_err(|_| "fill_prepare")?;
+    let admitted_at = Instant::now();
+    let result = Rc::new(RefCell::new(None));
+    let completion = Rc::clone(&result);
+    view.dispatch_semantic_action(request, admitted_at, move |settlement| {
+        if let Ok(mut slot) = completion.try_borrow_mut() {
+            if slot.is_none() {
+                *slot = Some(settlement);
+            }
+        }
+    });
+    let deadline = Instant::now()
+        .checked_add(SNAPSHOT_TIMEOUT)
+        .ok_or("fill_timeout")?;
+    while result.borrow().is_none() && !runtime.failed() && Instant::now() < deadline {
+        runtime.pump();
+    }
+    if runtime.failed() {
+        return Err("fill_native_state");
+    }
+    let settlement = result
+        .try_borrow_mut()
+        .map_err(|_| "fill_state")?
+        .take()
+        .ok_or("fill_timeout")?;
+    runtime.native_guard.sample();
+    if runtime.failed() {
+        return Err("fill_native_state");
+    }
+    Ok(PendingPrimaryFill {
+        execution,
+        settlement,
+        admitted_at,
+    })
+}
+
 fn verify_primary_click_execution(
     pending: PendingPrimaryClick,
     snapshot: &SemanticSnapshot,
@@ -706,12 +1012,224 @@ fn verify_primary_click_execution(
     Ok(())
 }
 
+fn verify_primary_fill_execution(
+    pending: PendingPrimaryFill,
+    snapshot: &SemanticSnapshot,
+) -> Result<(), &'static str> {
+    if snapshot.completeness() != SemanticCompleteness::Complete {
+        return Err("fill_verification_incomplete_snapshot");
+    }
+    if let Some(failure) = pending.settlement.qualification_failure() {
+        return Err(match failure {
+            zephium_agentic::SemanticActionNativeFailure::StaleReference => {
+                "fill_native_stale_reference"
+            }
+            zephium_agentic::SemanticActionNativeFailure::TargetChanged => {
+                "fill_native_target_changed"
+            }
+            zephium_agentic::SemanticActionNativeFailure::TargetDisabled => {
+                "fill_native_target_disabled"
+            }
+            zephium_agentic::SemanticActionNativeFailure::CredentialBoundary => {
+                "fill_native_credential_boundary"
+            }
+            zephium_agentic::SemanticActionNativeFailure::TargetOccluded => {
+                "fill_native_target_occluded"
+            }
+            zephium_agentic::SemanticActionNativeFailure::UnsupportedInteraction => {
+                "fill_native_unsupported"
+            }
+            zephium_agentic::SemanticActionNativeFailure::NeedsHuman => "fill_native_needs_human",
+            zephium_agentic::SemanticActionNativeFailure::AppliedUnverified => {
+                "fill_native_applied_unverified"
+            }
+            zephium_agentic::SemanticActionNativeFailure::RendererLost => {
+                "fill_native_renderer_lost"
+            }
+            zephium_agentic::SemanticActionNativeFailure::TimedOut => "fill_native_timed_out",
+            zephium_agentic::SemanticActionNativeFailure::Cancelled => "fill_native_cancelled",
+            zephium_agentic::SemanticActionNativeFailure::ResourceExhausted => {
+                "fill_native_resource_exhausted"
+            }
+            zephium_agentic::SemanticActionNativeFailure::Transport => "fill_native_transport",
+            zephium_agentic::SemanticActionNativeFailure::Shutdown => "fill_native_shutdown",
+        });
+    }
+    let elapsed = u64::try_from(pending.admitted_at.elapsed().as_millis())
+        .map_err(|_| "fill_verification_clock")?;
+    let observed_at = 10_000_u64
+        .checked_add(elapsed)
+        .map(SemanticSettleInstant::from_millis)
+        .ok_or("fill_verification_clock")?;
+    let applied = pending
+        .execution
+        .settle_and_verify(pending.settlement, snapshot, observed_at)
+        .map_err(|failure| match failure {
+            SemanticActionQualificationError::Identity => "fill_verification_identity",
+            SemanticActionQualificationError::Preparation => "fill_verification_preparation",
+            SemanticActionQualificationError::RequestAlreadyTaken => "fill_verification_request",
+            SemanticActionQualificationError::Terminal => "fill_verification_terminal",
+            SemanticActionQualificationError::Settlement => "fill_verification_settlement",
+            SemanticActionQualificationError::Verification => "fill_verification_effect",
+        })?;
+    if applied.backend() != SemanticActionExecutionBackend::PageWorldCompatibilityFill
+        || applied.readiness() != SemanticActionNativeReadiness::ExactConnectedWritableFormTarget
+        || applied.completed_at() > SemanticActionExecutionInstant::from_millis(11_000)
+    {
+        return Err("fill_evidence");
+    }
+    Ok(())
+}
+
+fn verify_hostile_fill_refusal(
+    pending: PendingPrimaryFill,
+    snapshot: &SemanticSnapshot,
+) -> Result<(), &'static str> {
+    if snapshot.completeness() != SemanticCompleteness::Complete {
+        return Err("hostile_fill_incomplete_snapshot");
+    }
+    if pending.settlement.qualification_failure()
+        != Some(zephium_agentic::SemanticActionNativeFailure::AppliedUnverified)
+    {
+        return Err("hostile_fill_not_indeterminate");
+    }
+    let elapsed = u64::try_from(pending.admitted_at.elapsed().as_millis())
+        .map_err(|_| "hostile_fill_clock")?;
+    let observed_at = 10_000_u64
+        .checked_add(elapsed)
+        .map(SemanticSettleInstant::from_millis)
+        .ok_or("hostile_fill_clock")?;
+    if !matches!(
+        pending
+            .execution
+            .settle_and_verify(pending.settlement, snapshot, observed_at),
+        Err(SemanticActionQualificationError::Settlement)
+    ) {
+        return Err("hostile_fill_retryable_terminal");
+    }
+    let expected = "Semantic hostile relay refused untrusted target unchanged recovery unchanged type restored target-marker clear recovery-marker forged popup denied activation during inactive sticky inactive settle inactive sticky inactive";
+    if !snapshot_contains(snapshot, expected) {
+        return Err("hostile_fill_security_evidence");
+    }
+    if !snapshot_value_is(snapshot, "Semantic hostile fill", "hostile-before") {
+        return Err("hostile_fill_target_mutated");
+    }
+    if !snapshot_value_is(snapshot, "Semantic hostile recovery", "recovery-before") {
+        return Err("hostile_fill_cross_node_mutated");
+    }
+    Ok(())
+}
+
+fn verify_hostile_fill_recovery(snapshot: &SemanticSnapshot) -> Result<(), &'static str> {
+    if !snapshot_value_is(snapshot, "Semantic hostile fill", "hostile-before")
+        || !snapshot_contains(
+            snapshot,
+            "Semantic hostile relay recovered target-marker clear recovery-marker clear",
+        )
+    {
+        return Err("hostile_fill_recovery_evidence");
+    }
+    Ok(())
+}
+
+fn verify_hostile_credential_refusal(
+    pending: PendingPrimaryFill,
+    snapshot: &SemanticSnapshot,
+) -> Result<(), &'static str> {
+    if snapshot.completeness() != SemanticCompleteness::Complete {
+        return Err("hostile_credential_incomplete_snapshot");
+    }
+    if pending.settlement.qualification_failure()
+        != Some(zephium_agentic::SemanticActionNativeFailure::AppliedUnverified)
+    {
+        return Err("hostile_credential_not_indeterminate");
+    }
+    let elapsed = u64::try_from(pending.admitted_at.elapsed().as_millis())
+        .map_err(|_| "hostile_credential_clock")?;
+    let observed_at = 10_000_u64
+        .checked_add(elapsed)
+        .map(SemanticSettleInstant::from_millis)
+        .ok_or("hostile_credential_clock")?;
+    if !matches!(
+        pending
+            .execution
+            .settle_and_verify(pending.settlement, snapshot, observed_at),
+        Err(SemanticActionQualificationError::Settlement)
+    ) {
+        return Err("hostile_credential_retryable_terminal");
+    }
+    if !snapshot_value_is(
+        snapshot,
+        "Semantic hostile credential fill",
+        "credential-before",
+    ) {
+        return Err("hostile_credential_value_mutated");
+    }
+    if !snapshot_contains(snapshot, "Semantic hostile credential recovery pending") {
+        return Err("hostile_credential_input_observed");
+    }
+    let expected = "Semantic hostile credential refused untrusted target unchanged credential-marker clear target-marker clear popup denied activation during inactive sticky inactive settle inactive sticky inactive";
+    if !snapshot_contains(snapshot, expected) {
+        return Err("hostile_credential_security_evidence");
+    }
+    Ok(())
+}
+
+fn verify_hostile_credential_recovery(snapshot: &SemanticSnapshot) -> Result<(), &'static str> {
+    if !snapshot_value_is(
+        snapshot,
+        "Semantic hostile credential fill",
+        "Zephium credential recovery",
+    ) || !snapshot_contains(
+        snapshot,
+        "Semantic hostile credential recovered input untrusted value exact credential-marker clear target-marker clear",
+    ) {
+        return Err("hostile_credential_recovery_evidence");
+    }
+    Ok(())
+}
+
+fn snapshot_value_is(snapshot: &SemanticSnapshot, name: &str, expected: &str) -> bool {
+    snapshot
+        .nodes()
+        .iter()
+        .find(|node| node_name_is(node, name))
+        .and_then(SemanticNode::value)
+        .is_some_and(|value| match value {
+            SemanticValueSummary::Text(value) => {
+                let preview = value.preview();
+                !preview.truncated()
+                    && preview.source_bytes() == expected.len()
+                    && preview.text() == expected
+            }
+            _ => false,
+        })
+}
+
+fn wait_for_action_security_settle(
+    runtime: &ProbeRuntime<'_, '_>,
+    duration: Duration,
+) -> Result<(), &'static str> {
+    let deadline = Instant::now()
+        .checked_add(duration)
+        .ok_or("action_settle")?;
+    while !runtime.failed() && Instant::now() < deadline {
+        runtime.pump();
+    }
+    if runtime.failed() {
+        Err("action_native_state")
+    } else {
+        Ok(())
+    }
+}
+
 fn capture_snapshot(
     view: &AgentOwnedView,
     context: zephium_agentic::ContextJoin,
     url: &str,
     first_generation: SemanticSnapshotGeneration,
     next_invocation: &mut u64,
+    successful_snapshots: &mut u8,
     runtime: &ProbeRuntime<'_, '_>,
 ) -> Result<CapturedSnapshot, &'static str> {
     let origin = SemanticOrigin::parse(url).map_err(|_| "snapshot_origin")?;
@@ -752,7 +1270,12 @@ fn capture_snapshot(
         .map_err(|_| "snapshot_encode")?;
         let outcome = dispatch_invocation(view, invocation, runtime, deadline)?;
         match outcome {
-            Ok(snapshot) => return Ok(CapturedSnapshot { request, snapshot }),
+            Ok(snapshot) => {
+                *successful_snapshots = successful_snapshots
+                    .checked_add(1)
+                    .ok_or("snapshot_count")?;
+                return Ok(CapturedSnapshot { request, snapshot });
+            }
             Err(SemanticRuntimePortFailure::Result(SemanticRuntimeResultError::Runtime(
                 SemanticRuntimeFault::DocumentLoading,
             ))) => runtime.pump(),
@@ -932,6 +1455,26 @@ fn verify_first_snapshot(snapshot: &SemanticSnapshot) -> Result<(), &'static str
     }) {
         return Err("first_click_operation_missing");
     }
+    for (name, role) in [
+        ("Semantic fill text", SemanticRole::Textbox),
+        ("Semantic fill search", SemanticRole::Searchbox),
+        ("Semantic fill textarea", SemanticRole::Textbox),
+        ("Semantic hostile fill", SemanticRole::Textbox),
+        ("Semantic hostile recovery", SemanticRole::Textbox),
+        ("Semantic hostile credential fill", SemanticRole::Textbox),
+    ] {
+        let target = snapshot
+            .nodes()
+            .iter()
+            .find(|node| node_name_is(node, name))
+            .ok_or("first_fill_target_missing")?;
+        if target.role() != role
+            || !target.operations().contains(SemanticOperationClass::Fill)
+            || target.sensitivity() == SemanticSensitivity::Secret
+        {
+            return Err("first_fill_operation_missing");
+        }
+    }
     if !snapshot
         .nodes()
         .iter()
@@ -968,6 +1511,97 @@ fn verify_primary_click(snapshot: &SemanticSnapshot) -> Result<(), &'static str>
         return Err("action_security_evidence_missing");
     }
     Ok(())
+}
+
+fn verify_primary_fill(
+    snapshot: &SemanticSnapshot,
+    target_name: &str,
+    expected_value: &str,
+    expected_role: SemanticRole,
+    completed: usize,
+) -> Result<(), &'static str> {
+    let target = snapshot
+        .nodes()
+        .iter()
+        .find(|node| node_name_is(node, target_name))
+        .ok_or("fill_target_missing")?;
+    if target.role() != expected_role
+        || !target.operations().contains(SemanticOperationClass::Fill)
+        || target.states().contains(SemanticState::Focused)
+        || target.sensitivity() == SemanticSensitivity::Secret
+    {
+        return Err("fill_target_authority");
+    }
+    let observed = match target.value() {
+        Some(SemanticValueSummary::Text(value))
+            if !value.preview().truncated()
+                && value.preview().source_bytes() == value.preview().len() =>
+        {
+            value.preview().text()
+        }
+        None if expected_value.is_empty() => "",
+        _ => return Err("fill_value_evidence"),
+    };
+    if observed != expected_value {
+        return Err("fill_value_evidence");
+    }
+    let expected_status = "Semantic fill observed input untrusted replacement yes data exact projection exact before 1 input 1 change 0 popup denied activation during inactive sticky inactive settle inactive sticky inactive";
+    if snapshot
+        .nodes()
+        .iter()
+        .filter(|node| node_name_is(node, expected_status))
+        .count()
+        != completed
+    {
+        for (needle, stage) in [
+            ("Semantic fill observed input trusted", "fill_event_trusted"),
+            ("replacement no", "fill_event_input_type"),
+            ("data mismatch", "fill_event_data"),
+            ("projection mismatch", "fill_event_projection"),
+            ("before 0", "fill_event_beforeinput"),
+            ("change 1", "fill_event_change"),
+            ("popup admitted", "fill_event_popup"),
+            ("activation during active", "fill_event_activation"),
+            ("settle active", "fill_event_settle_activation"),
+        ] {
+            if snapshot_contains(snapshot, needle) {
+                return Err(stage);
+            }
+        }
+        if !snapshot_contains(snapshot, "Semantic fill observed input") {
+            return Err("fill_event_missing");
+        }
+        return Err(match completed {
+            1 => "fill_text_event_evidence",
+            2 => "fill_search_event_evidence",
+            3 => "fill_textarea_event_evidence",
+            _ => "fill_event_evidence",
+        });
+    }
+    for forbidden in [
+        "Semantic fill observed input trusted",
+        "data mismatch",
+        "before 0",
+        "change 1",
+        "popup admitted",
+        "activation during active",
+        "settle active",
+        "sticky active",
+    ] {
+        if snapshot_contains(snapshot, forbidden) {
+            return Err("fill_security_evidence");
+        }
+    }
+    Ok(())
+}
+
+fn page_world_fill_relay_probe_enabled() -> bool {
+    std::env::var_os(PAGE_WORLD_FILL_RELAY_PROBE_ENV).as_deref() == Some(std::ffi::OsStr::new("1"))
+}
+
+fn page_world_fill_relay_hostile_probe_enabled() -> bool {
+    std::env::var_os(PAGE_WORLD_FILL_RELAY_HOSTILE_PROBE_ENV).as_deref()
+        == Some(std::ffi::OsStr::new("1"))
 }
 
 fn verify_mutation_before(snapshot: &SemanticSnapshot) -> Result<(), &'static str> {
@@ -1081,7 +1715,7 @@ fn snapshot_contains(snapshot: &SemanticSnapshot, needle: &str) -> bool {
                 .is_some_and(|value| value.as_str().contains(needle))
             || matches!(
                 node.value(),
-                Some(SemanticValueSummary::Text(value)) if value.as_str().contains(needle)
+                Some(SemanticValueSummary::Text(value)) if value.preview().text().contains(needle)
             )
     })
 }

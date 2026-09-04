@@ -772,7 +772,7 @@ fn match_node(
         text_phrase = contains_normalized_phrase(scratch, &query.normalized);
     }
     if let Some(SemanticValueSummary::Text(value)) = node.value() {
-        normalize_into(scratch, value.as_str());
+        normalize_into(scratch, value.preview().text());
         across |= term_bits(scratch, &query.terms);
         exact_value = scratch == &query.normalized;
     }
@@ -1338,6 +1338,67 @@ mod tests {
         assert_eq!(
             selected.matches()[0].quality(),
             SemanticLocateMatchQuality::AllTermsAcrossSemantics
+        );
+    }
+
+    #[test]
+    fn locate_matches_only_the_shared_model_value_preview() {
+        let context = context(550);
+        let prefix = "preview anchor ";
+        let tail = " hidden tail marker";
+        let value = format!(
+            "{prefix}{}{tail}",
+            "x".repeat(crate::MAX_SEMANTIC_VALUE_BYTES - prefix.len() - tail.len())
+        );
+        assert_eq!(value.len(), crate::MAX_SEMANTIC_VALUE_BYTES);
+        let snapshot = snapshot(
+            context,
+            FrameId::MAIN,
+            context.frame_generation(),
+            "https://locate.example.test/path",
+            1,
+            1,
+            json!([
+                {"k": 1, "r": "document", "o": 16},
+                {"k": 2, "p": 0, "r": "textbox", "n": "Ordinary field",
+                 "v": {"k": "text", "value": value}, "o": 10}
+            ]),
+        );
+        let observation = SemanticObservationAssembler::new(
+            SemanticObservationRequest::initial(
+                SemanticObservationId::new(570).expect("observation"),
+                context,
+                SemanticObservationBudget::try_new(8, 16 * 1024, 1).expect("budget"),
+            ),
+            snapshot,
+        )
+        .expect("assembler")
+        .finish()
+        .expect("observation");
+
+        let prefix_match = locate(
+            &observation,
+            1,
+            "preview anchor",
+            SemanticLocateScope::Initial,
+            8,
+        );
+        assert_eq!(prefix_match.matches().len(), 1);
+        assert_eq!(
+            prefix_match.matches()[0].quality(),
+            SemanticLocateMatchQuality::AllTermsAcrossSemantics
+        );
+
+        let tail_match = locate(
+            &observation,
+            2,
+            "hidden tail marker",
+            SemanticLocateScope::Initial,
+            8,
+        );
+        assert!(
+            tail_match.matches().is_empty(),
+            "locate leaked a match from beyond the shared model preview"
         );
     }
 

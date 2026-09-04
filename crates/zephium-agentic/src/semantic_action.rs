@@ -114,7 +114,7 @@ impl fmt::Debug for SemanticActionText {
 }
 
 fn invalid_action_character(character: char) -> bool {
-    (character.is_control() && !matches!(character, '\t' | '\n' | '\r'))
+    (character.is_control() && !matches!(character, '\t' | '\n'))
         || matches!(
             character,
             '\u{00ad}'
@@ -1105,6 +1105,38 @@ impl SemanticPreparedAction {
         )
     }
 
+    /// Returns the exact private form value before and after one fill.
+    ///
+    /// Absence is interpreted as the empty string only after both the prepared
+    /// action and the adjacent target have been proven to be eligible fill
+    /// controls. This keeps the wire's compact empty-value representation from
+    /// becoming a generic value coercion.
+    pub(crate) fn verification_fill_values<'action, 'snapshot>(
+        &'action self,
+        current: &'snapshot SemanticSnapshot,
+    ) -> Result<(&'action str, &'snapshot str), SemanticActionRevalidationError> {
+        if self.kind() != SemanticActionKind::Fill
+            || !matches!(
+                self.bound_action().target_role(),
+                SemanticRole::Textbox | SemanticRole::Searchbox
+            )
+            || self.target_sensitivity() == SemanticSensitivity::Secret
+        {
+            return Err(SemanticActionRevalidationError::OperationDenied);
+        }
+        let (_, target) = self.verification_target(current)?;
+        if !matches!(
+            target.role(),
+            SemanticRole::Textbox | SemanticRole::Searchbox
+        ) || !target.operations().contains(SemanticOperationClass::Fill)
+        {
+            return Err(SemanticActionRevalidationError::OperationDenied);
+        }
+        let before = exact_fill_value(self.target_value())?;
+        let after = exact_fill_value(target.value())?;
+        Ok((before, after))
+    }
+
     pub(crate) fn verification_option<'a>(
         &self,
         current: &'a SemanticSnapshot,
@@ -1125,6 +1157,21 @@ impl SemanticPreparedAction {
 
     pub(crate) const fn verification_guard(&self) -> [u8; 32] {
         self.guard
+    }
+}
+
+fn exact_fill_value(
+    value: Option<&SemanticValueSummary>,
+) -> Result<&str, SemanticActionRevalidationError> {
+    match value {
+        Some(SemanticValueSummary::Text(value)) => Ok(value.as_str()),
+        None => Ok(""),
+        Some(SemanticValueSummary::Redacted) => {
+            Err(SemanticActionRevalidationError::CredentialBoundary)
+        }
+        Some(SemanticValueSummary::Boolean(_) | SemanticValueSummary::Ordinal(_)) => {
+            Err(SemanticActionRevalidationError::TargetChanged)
+        }
     }
 }
 
@@ -1769,6 +1816,23 @@ pub(crate) struct SemanticActionRuntimeDescriptor {
     value_boolean: bool,
 }
 
+#[cfg(test)]
+impl SemanticActionRuntimeDescriptor {
+    pub(crate) fn maximum_text_wire_witness(name: String, value: String) -> Self {
+        Self {
+            role: 16,
+            operations: 11,
+            sensitivity: 2,
+            states: 112,
+            name: Some(name),
+            value_kind: 1,
+            value_text: Some(value),
+            value_ordinal: 0,
+            value_boolean: false,
+        }
+    }
+}
+
 fn hash_frame(hasher: &mut Sha256, frame: &SemanticFrameJoin) {
     let context = frame.context();
     let identity = context.identity();
@@ -2151,6 +2215,8 @@ mod tests {
                 {"k": 5, "p": 0, "r": "combobox", "n": "Priority", "v": {"k": "ordinal", "value": 0}, "o": 13},
                 {"k": 6, "p": 4, "r": "option", "n": "High", "v": {"k": "ordinal", "value": 1}, "o": 9},
                 {"k": 7, "p": 0, "r": "option", "n": "Detached option", "v": {"k": "ordinal", "value": 2}, "o": 9}
+                ,{"k": 8, "p": 0, "r": "spinbutton", "n": "Count", "v": {"k": "text", "value": "1"}, "o": 11,
+                 "b": {"x": 10, "y": 90, "w": 120, "h": 30}}
             ]
         }))
         .expect("wire");
@@ -2343,6 +2409,29 @@ mod tests {
     }
 
     #[test]
+    fn binds_core_legal_spinbutton_fill_before_platform_compatibility_filtering() {
+        let observation = observation();
+        let current = frames(&observation);
+        let batch = SemanticActionBatch::bind(
+            SemanticActionBatchId::new(1).expect("batch"),
+            &observation,
+            &current,
+            vec![proposal(
+                SemanticActionIntent::Fill {
+                    target: SemanticReferenceId::new(8).expect("spinbutton reference"),
+                    value: SemanticActionText::try_new("2".to_owned()).expect("fill text"),
+                },
+                SemanticEffectClass::LocalWrite,
+                SemanticVerification::TargetValueMatchesInput,
+            )],
+        )
+        .expect("spinbutton Fill is legal in the core action contract");
+
+        assert_eq!(batch.actions()[0].kind(), SemanticActionKind::Fill);
+        assert_eq!(batch.actions()[0].target_role(), SemanticRole::Spinbutton);
+    }
+
+    #[test]
     fn prepares_sequential_actions_from_the_rolling_complete_checkpoint() {
         let observation = observation();
         let batch = SemanticActionBatch::bind(
@@ -2425,6 +2514,11 @@ mod tests {
             SemanticActionText::try_new("unsafe\u{202e}text".to_owned()),
             Err(SemanticActionTextError::InvalidCharacter)
         );
+        assert_eq!(
+            SemanticActionText::try_new("carriage\rreturn".to_owned()),
+            Err(SemanticActionTextError::InvalidCharacter)
+        );
+        assert!(SemanticActionText::try_new("tab\tand\nline".to_owned()).is_ok());
         assert_eq!(
             SemanticActionText::try_new("x".repeat(MAX_SEMANTIC_ACTION_TEXT_BYTES + 1)),
             Err(SemanticActionTextError::Limit)

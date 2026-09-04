@@ -373,6 +373,9 @@ fn require_action_sample_count(
             .count(SemanticActionExecutionBackend::FixedSemanticRecipe),
         snapshot
             .backends()
+            .count(SemanticActionExecutionBackend::PageWorldCompatibilityFill),
+        snapshot
+            .backends()
             .count(SemanticActionExecutionBackend::EngineNativeInput),
         snapshot
             .backends()

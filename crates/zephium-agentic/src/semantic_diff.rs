@@ -949,7 +949,7 @@ fn changed_fields(previous: &SemanticNode, current: &SemanticNode) -> SemanticNo
         (previous.name() != current.name(), SemanticNodeChange::Name),
         (previous.text() != current.text(), SemanticNodeChange::Text),
         (
-            previous.value() != current.value(),
+            !model_values_equal(previous.value(), current.value()),
             SemanticNodeChange::Value,
         ),
         (
@@ -982,6 +982,18 @@ fn changed_fields(previous: &SemanticNode, current: &SemanticNode) -> SemanticNo
         }
     }
     changes
+}
+
+fn model_values_equal(
+    previous: Option<&SemanticValueSummary>,
+    current: Option<&SemanticValueSummary>,
+) -> bool {
+    match (previous, current) {
+        (Some(SemanticValueSummary::Text(previous)), Some(SemanticValueSummary::Text(current))) => {
+            previous.preview() == current.preview()
+        }
+        _ => previous == current,
+    }
 }
 
 fn at_record_limit(
@@ -1789,6 +1801,57 @@ mod tests {
         };
         assert!(diff.entries().is_empty());
         assert_eq!(diff.stats().entries(), 0);
+    }
+
+    #[test]
+    fn hidden_value_tail_changes_do_not_cross_the_model_diff_boundary() {
+        let context = context(7);
+        let prefix = "p".repeat(crate::MAX_SEMANTIC_VALUE_PREVIEW_BYTES);
+        let tail_bytes = crate::MAX_SEMANTIC_VALUE_BYTES - prefix.len();
+        let previous_value = format!("{prefix}{}", "a".repeat(tail_bytes));
+        let current_value = format!("{prefix}{}", "b".repeat(tail_bytes));
+        let previous = observation(
+            context,
+            70,
+            700,
+            71,
+            "complete",
+            json!([
+                {"k": 1, "r": "document"},
+                {"k": 2, "p": 0, "r": "textbox", "n": "Ordinary field",
+                 "v": {"k": "text", "value": previous_value}, "o": 10}
+            ]),
+        );
+        let acknowledgement = acknowledge(&previous);
+        let current = observation(
+            context,
+            71,
+            701,
+            72,
+            "complete",
+            json!([
+                {"k": 1, "r": "document"},
+                {"k": 2, "p": 0, "r": "textbox", "n": "Ordinary field",
+                 "v": {"k": "text", "value": current_value}, "o": 10}
+            ]),
+        );
+
+        assert_ne!(
+            previous.frames()[0].nodes()[1].value(),
+            current.frames()[0].nodes()[1].value()
+        );
+        let SemanticDiffOutcome::Diff(diff) = compute_semantic_diff(
+            &previous,
+            &acknowledgement,
+            &current,
+            SemanticDiffBudget::ACTION,
+        ) else {
+            panic!("expected projected diff");
+        };
+        assert!(
+            diff.entries().is_empty(),
+            "bytes beyond the shared value preview changed the model-visible diff"
+        );
     }
 
     #[test]

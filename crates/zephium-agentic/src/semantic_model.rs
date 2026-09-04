@@ -15,11 +15,11 @@ use crate::{
     SemanticCompleteness, SemanticFrameBoundaryStatus, SemanticFrameDeferral, SemanticFrameTrust,
     SemanticFrameUnsupported, SemanticObservation, SemanticOperationClass, SemanticRole,
     SemanticScope, SemanticSensitivity, SemanticState, SemanticTruncation, SemanticTrust,
-    SemanticValueSummary,
+    SemanticValuePreview, SemanticValueSummary,
 };
 
 /// Version of the compact semantic model-input grammar.
-pub const SEMANTIC_MODEL_SCHEMA_VERSION: u16 = 1;
+pub const SEMANTIC_MODEL_SCHEMA_VERSION: u16 = 2;
 /// Absolute encoded semantic payload byte ceiling.
 pub const MAX_SEMANTIC_MODEL_BYTES: u32 = 512 * 1024;
 /// Absolute admitted semantic payload token ceiling.
@@ -517,7 +517,7 @@ pub enum SemanticModelDeliveryError {
     Cancelled,
 }
 
-/// Encodes one complete observation into deterministic compact `ZSEM1` lines.
+/// Encodes one complete observation into deterministic compact `ZSEM2` lines.
 pub fn encode_semantic_observation(
     observation: &SemanticObservation,
     budget: SemanticModelEncodingBudget,
@@ -739,11 +739,26 @@ pub(crate) fn write_value(
     value: &SemanticValueSummary,
 ) -> Result<(), SemanticModelEncodingError> {
     match value {
-        SemanticValueSummary::Text(text) => write_quoted(output, text.as_str()),
+        SemanticValueSummary::Text(text) => write_value_preview(output, text.preview()),
         SemanticValueSummary::Redacted => output.push("[redacted]"),
         SemanticValueSummary::Boolean(value) => output.push(if *value { "true" } else { "false" }),
         SemanticValueSummary::Ordinal(value) => checked_write(output, format_args!("{value}")),
     }
+}
+
+pub(crate) fn write_value_preview(
+    output: &mut BoundedModelBuffer,
+    preview: SemanticValuePreview<'_>,
+) -> Result<(), SemanticModelEncodingError> {
+    write_quoted(output, preview.text())?;
+    checked_write(
+        output,
+        format_args!(
+            " source_bytes={} truncated={}",
+            preview.source_bytes(),
+            preview.truncated()
+        ),
+    )
 }
 
 fn write_frame_boundary(
@@ -1037,6 +1052,42 @@ mod tests {
             .expect("observation")
     }
 
+    fn observation_with_text_value(value: &str) -> SemanticObservation {
+        let baseline = observation();
+        let frame = baseline.frames()[0].frame().clone();
+        let context = baseline.request().context();
+        let wire = serde_json::to_vec(&json!({
+            "v": SEMANTIC_WIRE_VERSION,
+            "i": 12,
+            "g": 12,
+            "c": "complete",
+            "n": [
+                {"k": 9101, "r": "document", "o": 16},
+                {"k": 9102, "p": 0, "r": "textbox", "n": "Long value",
+                 "v": {"k": "text", "value": value}, "o": 11}
+            ]
+        }))
+        .expect("wire");
+        let snapshot = decode_semantic_snapshot(
+            SemanticDecodeContext::new(
+                SemanticInvocationId::new(12).expect("invocation"),
+                frame,
+                SemanticSnapshotGeneration::new(12).expect("generation"),
+            ),
+            &wire,
+        )
+        .expect("snapshot");
+        let request = SemanticObservationRequest::initial(
+            SemanticObservationId::new(2).expect("observation id"),
+            context,
+            SemanticObservationBudget::try_new(8, 8192, 1).expect("budget"),
+        );
+        SemanticObservationAssembler::new(request, snapshot)
+            .expect("assembler")
+            .finish()
+            .expect("observation")
+    }
+
     struct FixedCounter {
         revision: SemanticTokenizerRevision,
         tokens: u32,
@@ -1081,7 +1132,7 @@ mod tests {
         assert_eq!(first.content, second.content);
         assert!(first
             .content
-            .starts_with("ZSEM1 content=untrusted scope=initial generation=1 frames=1 nodes=4\n"));
+            .starts_with("ZSEM2 content=untrusted scope=initial generation=1 frames=1 nodes=4\n"));
         assert!(first.content.contains(
             "r=heading q=public src=page level=1 name=\"Repo \\\"settings\\\"\\\\path\\u2028tail\""
         ));
@@ -1103,6 +1154,28 @@ mod tests {
         assert!(!debug.contains("Repo"));
         assert!(!debug.contains("example.test"));
         assert!(debug.contains("[redacted]"));
+    }
+
+    #[test]
+    fn initial_snapshot_projects_only_the_shared_bounded_value_preview() {
+        let value = "x".repeat(crate::MAX_SEMANTIC_VALUE_BYTES);
+        let observation = observation_with_text_value(&value);
+        let encoded = encode_semantic_observation(
+            &observation,
+            budget(8192, 1000, SemanticTokenCountRequirement::Exact),
+        )
+        .expect("encode long value");
+        let expected = format!(
+            "value=\"{}\" source_bytes={} truncated=true",
+            "x".repeat(crate::MAX_SEMANTIC_VALUE_PREVIEW_BYTES),
+            crate::MAX_SEMANTIC_VALUE_BYTES
+        );
+
+        assert!(encoded.content.contains(&expected));
+        assert!(!encoded.content.contains(&format!(
+            "\"{}",
+            "x".repeat(crate::MAX_SEMANTIC_VALUE_PREVIEW_BYTES + 1)
+        )));
     }
 
     #[test]
@@ -1223,7 +1296,7 @@ mod tests {
             .expect("admit");
         assert_eq!(payload.token_measurement().tokens(), 19);
         assert_eq!(payload.token_measurement().revision(), &expected);
-        assert!(payload.as_str().starts_with("ZSEM1"));
+        assert!(payload.as_str().starts_with("ZSEM2"));
         let debug = format!("{payload:?}");
         assert!(!debug.contains("Repo"));
         assert!(!debug.contains("example.test"));

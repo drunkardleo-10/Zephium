@@ -86,6 +86,11 @@ impl fmt::Debug for SemanticActionNativeTargetId {
 pub enum SemanticActionExecutionBackend {
     /// One fixed semantic recipe in Zephium's immutable isolated runtime.
     FixedSemanticRecipe,
+    /// Fixed owned-view page-world compatibility recipe for form value updates.
+    ///
+    /// Page attributes are untrusted transport hints; this provenance is only
+    /// accepted with independent isolated-world target and effect proof.
+    PageWorldCompatibilityFill,
     /// A supported engine-native input route scoped to the owned view.
     EngineNativeInput,
     /// An in-process accessibility action scoped to the owned view.
@@ -97,6 +102,9 @@ pub enum SemanticActionExecutionBackend {
 pub enum SemanticActionNativeReadiness {
     /// The exact target was connected, visible, and the unoccluded hit target.
     ExactVisibleUnoccludedTarget,
+    /// The exact target remained connected, same-document, supported,
+    /// non-credential, enabled, and writable after `beforeinput` returned.
+    ExactConnectedWritableFormTarget,
     /// The exact scroll target was connected and structurally revalidated.
     ExactConnectedScrollTarget,
 }
@@ -491,6 +499,9 @@ pub enum SemanticActionNativeFailure {
     /// This interaction requires explicit human control.
     #[error("native semantic action requires human control")]
     NeedsHuman,
+    /// The page may have observed or applied the action, but verification failed.
+    #[error("native semantic action may have applied without exact verification")]
+    AppliedUnverified,
     /// The renderer disappeared before terminal settlement.
     #[error("native semantic action renderer was lost")]
     RendererLost,
@@ -555,6 +566,15 @@ impl fmt::Debug for SemanticActionNativeSettlement {
 impl SemanticActionNativeSettlement {
     pub(crate) const fn coordinator_key(&self) -> SemanticActionCoordinatorKey {
         self.correlation.coordinator_key()
+    }
+
+    /// Content-free native refusal visible only to release-excluded qualifiers.
+    #[cfg(feature = "probe-harness")]
+    pub const fn qualification_failure(&self) -> Option<SemanticActionNativeFailure> {
+        match self.outcome {
+            NativeOutcome::Applied(_) => None,
+            NativeOutcome::Failed { failure, .. } => Some(failure),
+        }
     }
 }
 
@@ -1108,16 +1128,25 @@ fn admit_native_outcome(
                     SemanticActionExecutionContractError::InvalidGeometry,
                 );
             }
-            let readiness_matches = match (applied.kind, applied.readiness) {
+            let readiness_matches = match (applied.kind, applied.backend, applied.readiness) {
                 (
-                    SemanticActionKind::Click
-                    | SemanticActionKind::Fill
-                    | SemanticActionKind::Select
-                    | SemanticActionKind::Press,
+                    SemanticActionKind::Click,
+                    SemanticActionExecutionBackend::FixedSemanticRecipe,
+                    SemanticActionNativeReadiness::ExactVisibleUnoccludedTarget,
+                ) => rect_intersects_viewport(applied.actual_geometry, applied.viewport),
+                (
+                    SemanticActionKind::Fill,
+                    SemanticActionExecutionBackend::PageWorldCompatibilityFill,
+                    SemanticActionNativeReadiness::ExactConnectedWritableFormTarget,
+                ) => true,
+                (
+                    SemanticActionKind::Select | SemanticActionKind::Press,
+                    SemanticActionExecutionBackend::FixedSemanticRecipe,
                     SemanticActionNativeReadiness::ExactVisibleUnoccludedTarget,
                 ) => rect_intersects_viewport(applied.actual_geometry, applied.viewport),
                 (
                     SemanticActionKind::Scroll,
+                    SemanticActionExecutionBackend::FixedSemanticRecipe,
                     SemanticActionNativeReadiness::ExactConnectedScrollTarget,
                 ) => true,
                 _ => {
@@ -1171,6 +1200,7 @@ const fn map_native_failure(failure: SemanticActionNativeFailure) -> SemanticAct
             SemanticActionFailure::UnsupportedInteraction
         }
         SemanticActionNativeFailure::NeedsHuman => SemanticActionFailure::NeedsHuman,
+        SemanticActionNativeFailure::AppliedUnverified => SemanticActionFailure::NeedsHuman,
         SemanticActionNativeFailure::RendererLost => SemanticActionFailure::RendererLost,
         SemanticActionNativeFailure::TimedOut => SemanticActionFailure::Timeout,
         SemanticActionNativeFailure::Cancelled => SemanticActionFailure::Cancelled,
@@ -1695,6 +1725,29 @@ mod tests {
             )
         );
 
+        let (pending, native) = prepare_semantic_action_execution(
+            active(&action, 47),
+            &action,
+            SemanticActionExecutionInstant::from_millis(1_000),
+        )
+        .expect("execution");
+        let fill_backend_substitution = native.complete(
+            SemanticActionExecutionBackend::PageWorldCompatibilityFill,
+            SemanticActionNativeReadiness::ExactConnectedWritableFormTarget,
+            viewport(),
+            rect(10, 20, 100, 30),
+            SemanticActionExecutionInstant::from_millis(1_010),
+            SemanticActionExecutionInstant::from_millis(1_020),
+        );
+        assert_eq!(
+            pending
+                .settle(action.frame(), fill_backend_substitution)
+                .disposition(),
+            SemanticActionExecutionDisposition::ContractViolation(
+                SemanticActionExecutionContractError::ReadinessMismatch
+            )
+        );
+
         let same_context_wrong_frame = SemanticFrameJoin::try_new(
             action.frame().context(),
             FrameId::new(77).expect("child frame"),
@@ -1875,7 +1928,7 @@ mod tests {
         .expect("click");
         assert_eq!(click_native.kind(), SemanticActionKind::Click);
 
-        let (_, fill_native) = prepare_semantic_action_execution(
+        let (fill_pending, fill_native) = prepare_semantic_action_execution(
             active(&fill, 62),
             &fill,
             SemanticActionExecutionInstant::from_millis(1),
@@ -1885,10 +1938,41 @@ mod tests {
             fill_native.fill_text().map(SemanticActionText::as_str),
             Some("private replacement")
         );
+        let fill_invocation = crate::encode_semantic_action_runtime_invocation(&fill_native)
+            .expect("fill runtime invocation");
+        let fill_wire: serde_json::Value =
+            serde_json::from_str(fill_invocation.as_str()).expect("fill wire");
+        assert_eq!(
+            fill_wire.get("k").and_then(serde_json::Value::as_str),
+            Some("fill")
+        );
+        assert_eq!(
+            fill_wire.get("z").and_then(serde_json::Value::as_str),
+            Some("private replacement")
+        );
         let debug = format!("{fill_native:?}");
         assert!(!debug.contains("private replacement"));
         assert!(!debug.contains("Private title"));
         assert!(!debug.contains("native-execution-private"));
+        let invocation_debug = format!("{fill_invocation:?}");
+        assert!(invocation_debug.contains("[redacted]"));
+        assert!(!invocation_debug.contains("private replacement"));
+        assert!(!invocation_debug.contains("Private title"));
+        let fill_settlement = fill_native.complete(
+            SemanticActionExecutionBackend::PageWorldCompatibilityFill,
+            SemanticActionNativeReadiness::ExactConnectedWritableFormTarget,
+            viewport(),
+            rect(10, 50, 200, 30),
+            SemanticActionExecutionInstant::from_millis(2),
+            SemanticActionExecutionInstant::from_millis(3),
+        );
+        assert!(matches!(
+            fill_pending.settle(fill.frame(), fill_settlement).disposition(),
+            SemanticActionExecutionDisposition::Applied(applied)
+                if applied.backend() == SemanticActionExecutionBackend::PageWorldCompatibilityFill
+                    && applied.readiness()
+                        == SemanticActionNativeReadiness::ExactConnectedWritableFormTarget
+        ));
 
         let (_, select_native) = prepare_semantic_action_execution(
             active(&select, 63),

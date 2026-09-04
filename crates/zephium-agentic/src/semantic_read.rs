@@ -16,7 +16,8 @@ use crate::{
     ContextJoin, SemanticCompleteness, SemanticFrameJoin, SemanticInvocationId, SemanticNode,
     SemanticObservation, SemanticObservationAcknowledgement, SemanticObservationGeneration,
     SemanticObservationId, SemanticOrigin, SemanticReferenceId, SemanticRole, SemanticSensitivity,
-    SemanticSnapshotGeneration, SemanticText, SemanticTrust, SemanticValueSummary,
+    SemanticSnapshotGeneration, SemanticText, SemanticTrust, SemanticValuePreview,
+    SemanticValueSummary,
 };
 
 /// Process-wide maximum readable fields retained in one result.
@@ -147,6 +148,8 @@ pub enum SemanticReadOmission {
     ItemLimit,
     /// Retained page-content byte ceiling was reached.
     ByteLimit,
+    /// An exact safe value was represented by its bounded model-facing prefix.
+    ValuePreviewLimit,
 }
 
 impl SemanticReadOmission {
@@ -250,6 +253,8 @@ impl fmt::Debug for SemanticReadFragmentId {
 pub enum SemanticReadContent<'a> {
     /// Bounded text retained by Rust-side secret scanning.
     Text(&'a SemanticText),
+    /// Bounded truncation-aware form value projection after secret scanning.
+    ValuePreview(SemanticValuePreview<'a>),
     /// Primitive Boolean value.
     Boolean(bool),
     /// Bounded primitive ordinal.
@@ -261,7 +266,15 @@ impl<'a> SemanticReadContent<'a> {
     pub const fn text(self) -> Option<&'a SemanticText> {
         match self {
             Self::Text(text) => Some(text),
-            Self::Boolean(_) | Self::Ordinal(_) => None,
+            Self::ValuePreview(_) | Self::Boolean(_) | Self::Ordinal(_) => None,
+        }
+    }
+
+    /// Model-safe form-value preview, when present.
+    pub const fn value_preview(self) -> Option<SemanticValuePreview<'a>> {
+        match self {
+            Self::ValuePreview(preview) => Some(preview),
+            Self::Text(_) | Self::Boolean(_) | Self::Ordinal(_) => None,
         }
     }
 
@@ -269,7 +282,7 @@ impl<'a> SemanticReadContent<'a> {
     pub const fn boolean(self) -> Option<bool> {
         match self {
             Self::Boolean(value) => Some(value),
-            Self::Text(_) | Self::Ordinal(_) => None,
+            Self::Text(_) | Self::ValuePreview(_) | Self::Ordinal(_) => None,
         }
     }
 
@@ -277,13 +290,14 @@ impl<'a> SemanticReadContent<'a> {
     pub const fn ordinal(self) -> Option<u16> {
         match self {
             Self::Ordinal(value) => Some(value),
-            Self::Text(_) | Self::Boolean(_) => None,
+            Self::Text(_) | Self::ValuePreview(_) | Self::Boolean(_) => None,
         }
     }
 
     fn retained_bytes(self) -> u32 {
         match self {
             Self::Text(text) => u32::try_from(text.len()).unwrap_or(u32::MAX),
+            Self::ValuePreview(preview) => u32::try_from(preview.len()).unwrap_or(u32::MAX),
             // Fixed conservative textual rendering ceiling: `false` or `65535`.
             Self::Boolean(_) | Self::Ordinal(_) => 5,
         }
@@ -297,6 +311,10 @@ impl fmt::Debug for SemanticReadContent<'_> {
                 .debug_struct("Text")
                 .field("bytes", &text.len())
                 .field("content", &"[redacted]")
+                .finish(),
+            Self::ValuePreview(preview) => formatter
+                .debug_tuple("ValuePreview")
+                .field(preview)
                 .finish(),
             Self::Boolean(_) => formatter.write_str("Boolean([redacted])"),
             Self::Ordinal(_) => formatter.write_str("Ordinal([redacted])"),
@@ -749,12 +767,19 @@ impl<'a> SemanticReadBuilder<'a> {
             );
         }
         match node.value() {
-            Some(SemanticValueSummary::Text(value)) if !value.is_empty() => self.admit(
-                snapshot,
-                node,
-                SemanticReadField::TextValue,
-                SemanticReadContent::Text(value),
-            ),
+            Some(SemanticValueSummary::Text(value)) if !value.is_empty() => {
+                let preview = value.preview();
+                if preview.truncated() {
+                    self.omissions
+                        .insert(SemanticReadOmission::ValuePreviewLimit);
+                }
+                self.admit(
+                    snapshot,
+                    node,
+                    SemanticReadField::TextValue,
+                    SemanticReadContent::ValuePreview(preview),
+                );
+            }
             Some(SemanticValueSummary::Boolean(value)) => self.admit(
                 snapshot,
                 node,
@@ -916,6 +941,13 @@ fn read_guard(
                 hasher.update([1]);
                 hasher.update((text.len() as u64).to_be_bytes());
                 hasher.update(text.as_str().as_bytes());
+            }
+            SemanticReadContent::ValuePreview(preview) => {
+                hasher.update([1]);
+                hasher.update((preview.len() as u64).to_be_bytes());
+                hasher.update(preview.text().as_bytes());
+                hasher.update((preview.source_bytes() as u64).to_be_bytes());
+                hasher.update([u8::from(preview.truncated())]);
             }
             SemanticReadContent::Boolean(value) => hasher.update([2, u8::from(value)]),
             SemanticReadContent::Ordinal(value) => {

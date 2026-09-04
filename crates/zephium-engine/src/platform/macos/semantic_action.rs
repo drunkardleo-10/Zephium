@@ -6,14 +6,16 @@
     deny(clippy::panic, clippy::unreachable, clippy::unwrap_used)
 )]
 
-//! Fixed macOS semantic-action adapter.
+//! Closed macOS semantic-action adapter.
 //!
-//! Exact target revalidation and the closed click recipe both execute inside
-//! the immutable isolated runtime. The result remains provisional until the
-//! core's fresh semantic postcondition verification succeeds. Engine-native
-//! responder delivery is intentionally not admitted here: physical evidence
-//! shows that it grants page user activation and therefore needs a separate
-//! capability-boundary and presentation authority.
+//! Exact target revalidation and action dispatch start inside the immutable
+//! isolated runtime. Click remains a fixed isolated-world recipe; Fill uses
+//! the separately attested page-world compatibility shim and returns only a
+//! correlated provisional terminal. Neither result succeeds until the core's
+//! fresh semantic postcondition verification. Engine-native responder
+//! delivery remains excluded because physical evidence shows that it grants
+//! page user activation and therefore needs separate capability and
+//! presentation authority.
 
 use std::time::Instant;
 
@@ -35,7 +37,10 @@ pub(super) fn dispatch(
     admitted_at: Instant,
     completion: impl FnOnce(SemanticActionNativeSettlement) + 'static,
 ) {
-    if request.kind() != SemanticActionKind::Click {
+    if !matches!(
+        request.kind(),
+        SemanticActionKind::Click | SemanticActionKind::Fill
+    ) {
         let completed_at = failure_instant(
             &request,
             admitted_at,
@@ -61,7 +66,7 @@ pub(super) fn dispatch(
     };
     let _ = semantic.dispatch_action(invocation, move |outcome| {
         let settlement = match outcome {
-            Ok(evidence) => complete_fixed_recipe(request, evidence, admitted_at),
+            Ok(evidence) => complete_runtime_recipe(request, evidence, admitted_at),
             Err(failure) => {
                 let native = map_runtime_failure(failure);
                 let completed_at = failure_instant(&request, admitted_at, native);
@@ -72,7 +77,7 @@ pub(super) fn dispatch(
     });
 }
 
-fn complete_fixed_recipe(
+fn complete_runtime_recipe(
     request: SemanticActionNativeRequest,
     evidence: zephium_agentic::SemanticActionRuntimeEvidence,
     admitted_at: Instant,
@@ -180,8 +185,14 @@ const fn map_runtime_fault(fault: SemanticActionRuntimeFault) -> SemanticActionN
         SemanticActionRuntimeFault::UnsupportedInteraction => {
             SemanticActionNativeFailure::UnsupportedInteraction
         }
+        SemanticActionRuntimeFault::AppliedUnverified => {
+            SemanticActionNativeFailure::AppliedUnverified
+        }
         SemanticActionRuntimeFault::Busy => SemanticActionNativeFailure::ResourceExhausted,
-        SemanticActionRuntimeFault::DocumentLoading => SemanticActionNativeFailure::TargetChanged,
+        SemanticActionRuntimeFault::DocumentLoading
+        | SemanticActionRuntimeFault::PageRelayNotReady => {
+            SemanticActionNativeFailure::TargetChanged
+        }
         SemanticActionRuntimeFault::InvalidRequest | SemanticActionRuntimeFault::Internal => {
             SemanticActionNativeFailure::Transport
         }

@@ -2416,6 +2416,17 @@ fn validate_engine_semantic_runtime_boundary(source: &str) -> Result<(), String>
         "MAX_SEMANTIC_RUNTIME_CHANNEL_RESULT_BYTES",
         "MAX_SEMANTIC_RUNTIME_DOCUMENT_INVOCATIONS",
         "SEMANTIC_RUNTIME_PROGRAM.source()",
+        "PAGE_WORLD_COMPATIBILITY_FILL_PROGRAM",
+        "Document.prototype.getElementById",
+        "getOwnDescriptor(inputPrototype,'labels')",
+        "getOwnDescriptor(textareaPrototype,'labels')",
+        "attr(target,'aria-labelledby')",
+        "credentialLike(target,isInput)!==false",
+        "WKContentWorld::pageWorld",
+        "scripts.count()!=2",
+        "scripts.objectAtIndex(1)",
+        "Retained::as_ptr(&active.page_relay_world)!=Retained::as_ptr(&actual_page_world)",
+        "source.to_string()!=PAGE_WORLD_COMPATIBILITY_FILL_PROGRAM",
         "removeScriptMessageHandlerForName_contentWorld",
         "controller.removeAllScriptMessageHandlers()",
         "controller.removeAllUserScripts()",
@@ -2440,7 +2451,8 @@ fn validate_engine_semantic_runtime_boundary(source: &str) -> Result<(), String>
         "callAsyncJavaScript",
         "evaluate_script",
         "with_ipc_handler",
-        "WKContentWorld::pageWorld",
+        "std::env",
+        "ZEPHIUM_PAGE_WORLD_FILL_RELAY_PROBE",
         "native-agentic-input-probe",
         "native-agentic-semantic-probe",
         "unreachable!",
@@ -2450,6 +2462,12 @@ fn validate_engine_semantic_runtime_boundary(source: &str) -> Result<(), String>
                 "production macOS semantic runtime acquired forbidden surface {forbidden}"
             ));
         }
+    }
+    if source.matches("WKContentWorld::pageWorld").count() != 2 {
+        return Err(
+            "production macOS semantic runtime must install and attest one exact page world"
+                .to_owned(),
+        );
     }
     Ok(())
 }
@@ -2508,6 +2526,8 @@ fn validate_macos_semantic_probe(
         "view.dispatch_semantic(",
         "ContextCapability::Act",
         "verify_primary_click_execution(",
+        "verify_hostile_fill_refusal(",
+        "SemanticActionNativeFailure::AppliedUnverified",
         ".settle_and_verify(pending.settlement,snapshot,observed_at)",
         "SemanticObservationAssembler::new(",
         "SemanticFrameUnsupported::PlatformIsolationUnavailable",
@@ -2561,19 +2581,29 @@ fn validate_macos_semantic_probe(
         "profile=ephemeral",
         "viewport=1280x800-logical",
         "fixture=loopback-only",
-        "snapshots=5",
-        "world_epochs=3",
+        "snapshots=10",
+        "snapshots=14",
+        "world_epochs=4",
         "fixed_click=verified",
-        "postcondition=expanded",
+        "click_postcondition=expanded",
+        "page_world_compatibility_fill=verified",
+        "controls=text-input,search-input,textarea",
+        "fill_postcondition=exact-value",
         "event_trust=untrusted",
         "user_activation=0",
         "popup_admitted=0",
         "mutation_gate=host-released",
         "stale_anchor=refused",
         "mutation_recovery=verified",
-        "page_world_bridge=absent",
+        "epoch_rotation_fill=verified",
         "focus_theft=0",
         "retained_views=0",
+        "hostile_terminal_spoof=refused",
+        "hostile_cross_node_terminal=refused",
+        "hostile_reparent_type_repurpose=applied-unverified",
+        "hostile_reparent_recovery=verified",
+        "hostile_credential_relabel=applied-unverified",
+        "hostile_credential_recovery=verified",
     ] {
         if !binary.contains(required) {
             return Err(format!(
@@ -2588,6 +2618,7 @@ fn validate_macos_semantic_probe(
         "if!address.ip().is_loopback()",
         "format!(\"http://127.0.0.1:{}{}\"",
         "Self::SemanticRuntime=>\"/semantic-runtime-v1.html\"",
+        "Self::SemanticRuntimeRelayHostile=>\"/semantic-runtime-relay-hostile-v1.html\"",
         "Self::SemanticRuntimeMutation=>\"/semantic-runtime-mutation-v1.html\"",
         "Self::SemanticRuntimeReplacement=>\"/semantic-runtime-replacement-v1.html\"",
         "constSEMANTIC_MUTATION_GATE_TIMEOUT:Duration=Duration::from_secs(15);",
@@ -2606,6 +2637,13 @@ fn validate_macos_semantic_probe(
         "frame-src'self'",
         "aria-expanded=\"false\"",
         "primaryAction.setAttribute('aria-expanded','true')",
+        "Semantichostilefill",
+        "Semantichostilerecovery",
+        "Semantichostilecredentialfill",
+        "semantic-hostile-credential-label",
+        "credential.setAttribute('aria-labelledby','semantic-hostile-credential-label')",
+        "credential.removeAttribute('aria-labelledby')",
+        "main.insertBefore(hostile,hostileNextSibling)",
     ] {
         if !fixture.contains(required) {
             return Err(format!(
@@ -6103,7 +6141,7 @@ fn validate_semantic_execution_contract(
     let action_method = &engine_port[start..end];
     for required in [
         "#[cfg(target_os=\"macos\")]",
-        "request.kind()!=zephium_agentic::SemanticActionKind::Click",
+        "!matches!(request.kind(),zephium_agentic::SemanticActionKind::Click|zephium_agentic::SemanticActionKind::Fill)",
         "request.frame().frame()!=zephium_agentic::FrameId::MAIN",
         "request.frame().trust()!=zephium_agentic::SemanticFrameTrust::SameOrigin",
         "request.frame().context().identity().kind()!=zephium_agentic::ContextKind::Owned",
@@ -6113,7 +6151,7 @@ fn validate_semantic_execution_contract(
     ] {
         if !action_method.contains(required) {
             return Err(format!(
-                "engine action port lost its exact macOS fixed-click boundary {required}"
+                "engine action port lost its exact macOS closed-action boundary {required}"
             ));
         }
     }
@@ -6132,15 +6170,15 @@ fn validate_semantic_execution_contract(
 
     let macos_action = compact(macos_action);
     for required in [
-        "request.kind()!=SemanticActionKind::Click",
+        "!matches!(request.kind(),SemanticActionKind::Click|SemanticActionKind::Fill)",
         "encode_semantic_action_runtime_invocation(&request)",
         "semantic.dispatch_action(invocation,move|outcome|",
-        "Ok(evidence)=>complete_fixed_recipe(request,evidence,admitted_at)",
+        "Ok(evidence)=>complete_runtime_recipe(request,evidence,admitted_at)",
         "request.complete(evidence.backend(),evidence.readiness(),evidence.viewport(),evidence.geometry(),completed_at,completed_at,)",
     ] {
         if !macos_action.contains(required) {
             return Err(format!(
-                "macOS semantic action adapter lost a required fixed-click invariant {required}"
+                "macOS semantic action adapter lost a required closed-action invariant {required}"
             ));
         }
     }
@@ -9394,8 +9432,11 @@ mod tests {
             ) -> ContextDispatch {
                 #[cfg(target_os = "macos")]
                 {
-                    if request.kind() != zephium_agentic::SemanticActionKind::Click
-                        || request.frame().frame() != zephium_agentic::FrameId::MAIN
+                    if !matches!(
+                        request.kind(),
+                        zephium_agentic::SemanticActionKind::Click
+                            | zephium_agentic::SemanticActionKind::Fill
+                    ) || request.frame().frame() != zephium_agentic::FrameId::MAIN
                         || request.frame().trust() != zephium_agentic::SemanticFrameTrust::SameOrigin
                         || request.frame().context().identity().kind()
                             != zephium_agentic::ContextKind::Owned
@@ -9413,11 +9454,14 @@ mod tests {
             fn capture_semantic_screenshot(&self) {}
         "#;
         let macos_action = r#"
-            if request.kind() != SemanticActionKind::Click {}
+            if !matches!(
+                request.kind(),
+                SemanticActionKind::Click | SemanticActionKind::Fill
+            ) {}
             encode_semantic_action_runtime_invocation(&request);
             semantic.dispatch_action(invocation, move |outcome| {
                 match outcome {
-                    Ok(evidence) => complete_fixed_recipe(request, evidence, admitted_at),
+                    Ok(evidence) => complete_runtime_recipe(request, evidence, admitted_at),
                     Err(_) => unreachable!(),
                 }
             });
@@ -11442,6 +11486,8 @@ mod tests {
             view.dispatch_semantic();
             ContextCapability::Act;
             verify_primary_click_execution();
+            verify_hostile_fill_refusal();
+            SemanticActionNativeFailure::AppliedUnverified;
             execution.settle_and_verify(pending.settlement, snapshot, observed_at);
             SemanticObservationAssembler::new();
             SemanticFrameUnsupported::PlatformIsolationUnavailable;
@@ -11464,13 +11510,14 @@ mod tests {
         let semantic_binary = r#"
             if arguments.as_slice() != ["--ci-hidden-fixed-dom"] {}
             run_macos_agentic_semantic_probe();
-            "profile=ephemeral viewport=1280x800-logical fixture=loopback-only snapshots=5 world_epochs=3 fixed_click=verified postcondition=expanded event_trust=untrusted user_activation=0 popup_admitted=0 mutation_gate=host-released stale_anchor=refused mutation_recovery=verified page_world_bridge=absent focus_theft=0 retained_views=0";
+            "profile=ephemeral viewport=1280x800-logical fixture=loopback-only snapshots=10 snapshots=14 world_epochs=4 fixed_click=verified click_postcondition=expanded page_world_compatibility_fill=verified controls=text-input,search-input,textarea fill_postcondition=exact-value event_trust=untrusted user_activation=0 popup_admitted=0 mutation_gate=host-released stale_anchor=refused mutation_recovery=verified epoch_rotation_fill=verified focus_theft=0 retained_views=0 hostile_terminal_spoof=refused hostile_cross_node_terminal=refused hostile_reparent_type_repurpose=applied-unverified hostile_reparent_recovery=verified hostile_credential_relabel=applied-unverified hostile_credential_recovery=verified";
         "#;
         let semantic_fixture = r#"
             TcpListener::bind((Ipv4Addr::LOCALHOST, 0));
             if !address.ip().is_loopback() {}
             format!("http://127.0.0.1:{}{}", port, path);
             Self::SemanticRuntime => "/semantic-runtime-v1.html";
+            Self::SemanticRuntimeRelayHostile => "/semantic-runtime-relay-hostile-v1.html";
             Self::SemanticRuntimeMutation => "/semantic-runtime-mutation-v1.html";
             Self::SemanticRuntimeReplacement => "/semantic-runtime-replacement-v1.html";
             const SEMANTIC_MUTATION_GATE_TIMEOUT: Duration = Duration::from_secs(15);
@@ -11486,6 +11533,13 @@ mod tests {
             "connect-src 'none'; form-action 'none'; frame-src 'self'";
             aria-expanded="false";
             primaryAction.setAttribute('aria-expanded', 'true');
+            "Semantic hostile fill";
+            "Semantic hostile recovery";
+            "Semantic hostile credential fill";
+            "semantic-hostile-credential-label";
+            credential.setAttribute('aria-labelledby', 'semantic-hostile-credential-label');
+            credential.removeAttribute('aria-labelledby');
+            main.insertBefore(hostile, hostileNextSibling);
         "#;
         validate_macos_semantic_probe(
             &semantic_module,
@@ -11670,6 +11724,19 @@ mod tests {
             MAX_SEMANTIC_RUNTIME_CHANNEL_RESULT_BYTES;
             MAX_SEMANTIC_RUNTIME_DOCUMENT_INVOCATIONS;
             SEMANTIC_RUNTIME_PROGRAM.source();
+            PAGE_WORLD_COMPATIBILITY_FILL_PROGRAM;
+            Document.prototype.getElementById;
+            getOwnDescriptor(inputPrototype, 'labels');
+            getOwnDescriptor(textareaPrototype, 'labels');
+            attr(target, 'aria-labelledby');
+            credentialLike(target, isInput) !== false;
+            WKContentWorld::pageWorld();
+            if scripts.count() != 2 {}
+            scripts.objectAtIndex(1);
+            let actual_page_world = WKContentWorld::pageWorld();
+            Retained::as_ptr(&active.page_relay_world)
+                != Retained::as_ptr(&actual_page_world);
+            source.to_string() != PAGE_WORLD_COMPATIBILITY_FILL_PROGRAM;
             removeScriptMessageHandlerForName_contentWorld();
             controller.removeAllScriptMessageHandlers();
             controller.removeAllUserScripts();

@@ -23,7 +23,7 @@ use crate::{
 };
 
 /// Version of the compact semantic-diff model-input grammar.
-pub const SEMANTIC_DIFF_MODEL_SCHEMA_VERSION: u16 = 1;
+pub const SEMANTIC_DIFF_MODEL_SCHEMA_VERSION: u16 = 2;
 
 /// Content-free deterministic compact-diff metrics.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -317,7 +317,7 @@ impl fmt::Debug for SemanticDiffModelPayload {
     }
 }
 
-/// Encodes one complete semantic delta into deterministic compact `ZDIFF1` lines.
+/// Encodes one complete semantic delta into deterministic compact `ZDIFF2` lines.
 pub fn encode_semantic_diff(
     diff: &SemanticDiff,
     budget: SemanticModelEncodingBudget,
@@ -962,6 +962,44 @@ mod tests {
         }
     }
 
+    fn value_diff(value: &str) -> Box<SemanticDiff> {
+        let context = context();
+        let previous = observation(
+            context,
+            20,
+            41,
+            51,
+            json!([
+                {"k": 2001, "r": "document"},
+                {"k": 2002, "p": 0, "r": "textbox", "n": "Long value",
+                 "v": {"k": "text", "value": "old"}, "o": 11}
+            ]),
+        );
+        let current = observation(
+            context,
+            21,
+            42,
+            52,
+            json!([
+                {"k": 2001, "r": "document"},
+                {"k": 2002, "p": 0, "r": "textbox", "n": "Long value",
+                 "v": {"k": "text", "value": value}, "o": 11}
+            ]),
+        );
+        let acknowledgement = acknowledge(&previous);
+        match compute_semantic_diff(
+            &previous,
+            &acknowledgement,
+            &current,
+            SemanticDiffBudget::ACTION,
+        ) {
+            SemanticDiffOutcome::Diff(diff) => diff,
+            SemanticDiffOutcome::FreshSnapshot(reason) => {
+                panic!("unexpected value fresh snapshot: {reason:?}")
+            }
+        }
+    }
+
     #[test]
     fn compact_diff_is_deterministic_delimited_and_stable_key_free() {
         let diff = changed_diff();
@@ -972,7 +1010,7 @@ mod tests {
         let second = encode_semantic_diff(&diff, budget).expect("encode");
         assert_eq!(first.content, second.content);
         assert!(first.content.starts_with(
-            "ZDIFF1 content=untrusted from_generation=1 to_generation=1 entries=4 rebases=0\n"
+            "ZDIFF2 content=untrusted from_generation=1 to_generation=1 entries=4 rebases=0\n"
         ));
         assert!(first
             .content
@@ -1002,6 +1040,29 @@ mod tests {
         assert!(!debug.contains("Private"));
         assert!(!debug.contains("encoded-private"));
         assert!(debug.contains("[redacted]"));
+    }
+
+    #[test]
+    fn diff_projects_only_the_shared_bounded_value_preview() {
+        let value = "x".repeat(crate::MAX_SEMANTIC_VALUE_BYTES);
+        let diff = value_diff(&value);
+        let encoded = encode_semantic_diff(
+            &diff,
+            SemanticModelEncodingBudget::try_new(8192, 1000, SemanticTokenCountRequirement::Exact)
+                .expect("budget"),
+        )
+        .expect("encode long value diff");
+        let expected = format!(
+            "value=\"{}\" source_bytes={} truncated=true",
+            "x".repeat(crate::MAX_SEMANTIC_VALUE_PREVIEW_BYTES),
+            crate::MAX_SEMANTIC_VALUE_BYTES
+        );
+
+        assert!(encoded.content.contains(&expected));
+        assert!(!encoded.content.contains(&format!(
+            "\"{}",
+            "x".repeat(crate::MAX_SEMANTIC_VALUE_PREVIEW_BYTES + 1)
+        )));
     }
 
     #[test]
@@ -1084,7 +1145,7 @@ mod tests {
         assert!(!alternate_payload.matches_diff(&exact_diff));
 
         let (content, stats, delivery) = exact_payload.into_provider_parts();
-        assert!(content.starts_with("ZDIFF1"));
+        assert!(content.starts_with("ZDIFF2"));
         assert_eq!(
             usize::try_from(stats.bytes()).expect("bytes"),
             content.len()
@@ -1138,7 +1199,7 @@ mod tests {
         .admit(&estimated, &expected)
         .expect("admit");
         assert_eq!(payload.token_measurement().tokens(), 190);
-        assert!(payload.as_str().starts_with("ZDIFF1"));
+        assert!(payload.as_str().starts_with("ZDIFF2"));
         let debug = format!("{payload:?}");
         assert!(!debug.contains("Private"));
         assert!(!debug.contains("encoded-private"));

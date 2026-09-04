@@ -2,10 +2,12 @@
 //!
 //! The payload contains only a fixed operation vocabulary, trusted invocation
 //! and snapshot generations, private stable-key anchors, and hard resource
-//! ceilings. It cannot carry JavaScript, selectors, property paths, URLs,
-//! page text, model output, native handles, or provider data. Diagnostics are
-//! content-redacted because anchored requests necessarily contain an internal
-//! node key that must never reach a model or log.
+//! ceilings. Observation requests cannot carry JavaScript, selectors, property
+//! paths, URLs, page text, model output, native handles, or provider data. A
+//! private action request intentionally carries its bounded Fill replacement and
+//! exact prior value for revalidation; neither reaches a model, log, or arbitrary
+//! page script. Page-world compatibility receives only the replacement through
+//! its fixed, closed relay protocol. Diagnostics remain content-redacted.
 
 use std::fmt;
 
@@ -17,7 +19,8 @@ use crate::{
     SemanticActionNativeReadiness, SemanticActionNativeRequest, SemanticActionNativeViewport,
     SemanticDecodeContext, SemanticDecodeError, SemanticFrameJoin, SemanticInvocationId,
     SemanticObservationRequest, SemanticRect, SemanticRole, SemanticScope, SemanticSnapshot,
-    SemanticSnapshotGeneration, MAX_SEMANTIC_NODES, MAX_SEMANTIC_TOTAL_TEXT_BYTES,
+    SemanticSnapshotGeneration, MAX_SEMANTIC_ACTION_TEXT_BYTES, MAX_SEMANTIC_NAME_BYTES,
+    MAX_SEMANTIC_NODES, MAX_SEMANTIC_TOTAL_TEXT_BYTES, MAX_SEMANTIC_VALUE_BYTES,
     MAX_SEMANTIC_WIRE_BYTES,
 };
 
@@ -25,8 +28,23 @@ use crate::{
 pub const SEMANTIC_RUNTIME_PROTOCOL_VERSION: u16 = 1;
 /// Maximum serialized invocation request bytes.
 pub const MAX_SEMANTIC_RUNTIME_REQUEST_BYTES: usize = 2 * 1024;
-/// Maximum private target-revalidation request passed only to isolated runtime.
-pub const MAX_SEMANTIC_ACTION_RUNTIME_REQUEST_BYTES: usize = 16 * 1024;
+// Maximum compact action wire outside its three simultaneously legal
+// page-derived strings. A core-legal Spinbutton Fill with the maximum safe
+// numeric fields reaches this bound exactly; platform execution may still
+// refuse an unsupported concrete number control.
+const SEMANTIC_ACTION_RUNTIME_FIXED_WIRE_UPPER_BOUND_BYTES: usize = 293;
+// Every legal character either remains one UTF-8 byte or JSON-expands to at
+// most two bytes (`\"`, `\\`, `\t`, or `\n`). Control and bidi characters
+// with longer JSON escapes are rejected before encoding.
+const SEMANTIC_ACTION_RUNTIME_JSON_EXPANSION: usize = 2;
+/// Exact worst-case private action invocation ceiling. This admits a legal
+/// 4-KiB replacement, 4-KiB exact prior value, and 512-byte accessible name
+/// in one descriptor without turning either independent public bound into a
+/// transport failure.
+pub const MAX_SEMANTIC_ACTION_RUNTIME_REQUEST_BYTES: usize =
+    SEMANTIC_ACTION_RUNTIME_FIXED_WIRE_UPPER_BOUND_BYTES
+        + SEMANTIC_ACTION_RUNTIME_JSON_EXPANSION
+            * (MAX_SEMANTIC_ACTION_TEXT_BYTES + MAX_SEMANTIC_VALUE_BYTES + MAX_SEMANTIC_NAME_BYTES);
 /// Maximum content-free result bytes for one fixed semantic action execution.
 pub const MAX_SEMANTIC_ACTION_RUNTIME_RESULT_BYTES: usize = 512;
 /// Minimum useful response-wire budget.
@@ -36,7 +54,11 @@ pub const MAX_SEMANTIC_RUNTIME_VISITED_NODES: u32 = 32 * 1024;
 /// Largest integer represented exactly by every supported JavaScript runtime.
 pub const MAX_SEMANTIC_RUNTIME_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 /// Maximum immutable production runtime source bytes installed per document.
-pub const MAX_SEMANTIC_RUNTIME_SOURCE_BYTES: usize = 72 * 1024;
+///
+/// The fixed 84 KiB ceiling covers the digest-pinned semantic runtime including
+/// the production Fill protocol while preserving a small, explicit installation
+/// and validation bound on every platform.
+pub const MAX_SEMANTIC_RUNTIME_SOURCE_BYTES: usize = 84 * 1024;
 /// Sole fixed isolated-world global installed by the production runtime.
 pub const SEMANTIC_RUNTIME_GLOBAL_NAME: &str = "__zephiumSemanticRuntimeV1";
 /// Sole fixed native message handler visible in the production isolated world.
@@ -59,8 +81,8 @@ pub const MAX_SEMANTIC_RUNTIME_CHANNEL_RESULT_BYTES: usize =
 
 const SEMANTIC_RUNTIME_SOURCE: &str = include_str!("../assets/semantic-runtime-v1.js");
 const SEMANTIC_RUNTIME_SOURCE_SHA256: [u8; 32] = [
-    0x06, 0xf7, 0xb1, 0x0d, 0x5d, 0xde, 0x57, 0x45, 0x3b, 0x6e, 0xf3, 0xbf, 0x9c, 0x85, 0xbd, 0x60,
-    0xe9, 0x01, 0x2e, 0x30, 0xa5, 0x37, 0xc1, 0x3a, 0x10, 0xe0, 0x5a, 0x77, 0xff, 0x35, 0x56, 0x85,
+    0x18, 0xed, 0xbd, 0xf4, 0x3d, 0x2f, 0x52, 0x40, 0x5f, 0xab, 0xbc, 0xb9, 0xa4, 0x46, 0xe4, 0x51,
+    0xf4, 0x9a, 0x1f, 0x83, 0x62, 0x07, 0x27, 0xe3, 0x7c, 0x8b, 0xc6, 0x00, 0x0c, 0x1d, 0x80, 0x2d,
 ];
 
 /// Immutable production program passed only to a trusted isolated-world adapter.
@@ -215,8 +237,10 @@ pub struct SemanticRuntimeInvocation {
 /// Opaque closed request that executes one fixed policy-authorized action.
 ///
 /// This request is intentionally distinct from an observation. It contains no
-/// fill value, selector, script, page text, URL, or model-controlled property
-/// path. A successful result proves that the immutable isolated runtime both
+/// selector, script, URL, or model-controlled property path. Fill requests carry
+/// one bounded replacement and the exact private prior value solely for isolated
+/// revalidation; they never reach model output, diagnostics, or arbitrary page
+/// code. A successful result proves that the immutable isolated runtime both
 /// revalidated the exact checkpointed target and invoked its fixed recipe. It
 /// does not claim the page effect succeeded; fresh semantic verification owns
 /// that decision.
@@ -282,11 +306,16 @@ impl SemanticActionRuntimeInvocation {
         {
             return Err(SemanticActionRuntimeResultError::Correlation);
         }
-        if wire.backend != "fixed_semantic_recipe" {
-            return Err(SemanticActionRuntimeResultError::InvalidEncoding);
-        }
+        let backend = match wire.backend.as_str() {
+            "fixed_semantic_recipe" => crate::SemanticActionExecutionBackend::FixedSemanticRecipe,
+            "page_world_compatibility_fill" => {
+                crate::SemanticActionExecutionBackend::PageWorldCompatibilityFill
+            }
+            _ => return Err(SemanticActionRuntimeResultError::InvalidEncoding),
+        };
         let readiness = match wire.readiness.as_str() {
             "visible" => SemanticActionNativeReadiness::ExactVisibleUnoccludedTarget,
+            "form" => SemanticActionNativeReadiness::ExactConnectedWritableFormTarget,
             "scroll" => SemanticActionNativeReadiness::ExactConnectedScrollTarget,
             _ => return Err(SemanticActionRuntimeResultError::InvalidEncoding),
         };
@@ -310,7 +339,7 @@ impl SemanticActionRuntimeInvocation {
             return Err(SemanticActionRuntimeResultError::InvalidGeometry);
         }
         Ok(SemanticActionRuntimeEvidence {
-            backend: crate::SemanticActionExecutionBackend::FixedSemanticRecipe,
+            backend,
             readiness,
             viewport,
             geometry,
@@ -597,6 +626,14 @@ pub fn encode_semantic_action_runtime_invocation(
         (_, None) => None,
         (_, Some(_)) => return Err(SemanticActionRuntimeInvocationError::Recipe),
     };
+    let fill_text = match (request.kind(), request.fill_text()) {
+        (SemanticActionKind::Fill, Some(value)) => Some(value.as_str()),
+        (SemanticActionKind::Fill, None) => {
+            return Err(SemanticActionRuntimeInvocationError::Recipe)
+        }
+        (_, None) => None,
+        (_, Some(_)) => return Err(SemanticActionRuntimeInvocationError::Recipe),
+    };
     let wire = SemanticActionRuntimeInvocationWire {
         version: SEMANTIC_RUNTIME_PROTOCOL_VERSION,
         operation: "action_execute",
@@ -613,6 +650,7 @@ pub fn encode_semantic_action_runtime_invocation(
             height: expected.height(),
         },
         option,
+        fill_text,
         target_descriptor: request.target_runtime_descriptor(),
         option_descriptor,
     };
@@ -699,6 +737,8 @@ pub enum SemanticActionRuntimeFault {
     InvalidRequest,
     /// The exact document is not ready for interaction.
     DocumentLoading,
+    /// The fixed page-world relay did not publish readiness for this document.
+    PageRelayNotReady,
     /// Another invocation held the document-local single-flight permit.
     Busy,
     /// The stable target no longer resolves in the exact document.
@@ -713,6 +753,8 @@ pub enum SemanticActionRuntimeFault {
     TargetOccluded,
     /// The exact action cannot use the fixed native route.
     UnsupportedInteraction,
+    /// The page may have observed or applied the action, but exact proof failed.
+    AppliedUnverified,
     /// Runtime hit a closed internal invariant.
     Internal,
 }
@@ -722,6 +764,7 @@ impl SemanticActionRuntimeFault {
         match value {
             "invalid_request" => Some(Self::InvalidRequest),
             "document_loading" => Some(Self::DocumentLoading),
+            "page_relay_not_ready" => Some(Self::PageRelayNotReady),
             "busy" => Some(Self::Busy),
             "stale_reference" => Some(Self::StaleReference),
             "target_changed" => Some(Self::TargetChanged),
@@ -729,6 +772,7 @@ impl SemanticActionRuntimeFault {
             "credential_boundary" => Some(Self::CredentialBoundary),
             "target_occluded" => Some(Self::TargetOccluded),
             "unsupported_interaction" => Some(Self::UnsupportedInteraction),
+            "applied_unverified" => Some(Self::AppliedUnverified),
             "internal" => Some(Self::Internal),
             _ => None,
         }
@@ -1064,6 +1108,8 @@ struct SemanticActionRuntimeInvocationWire<'a> {
     expected: SemanticActionRuntimeRectWire,
     #[serde(rename = "p")]
     option: u64,
+    #[serde(rename = "z")]
+    fill_text: Option<&'a str>,
     #[serde(rename = "f")]
     target_descriptor: &'a crate::SemanticActionRuntimeDescriptor,
     #[serde(rename = "of")]
@@ -1291,7 +1337,7 @@ mod tests {
             "setInterval",
             "requestAnimationFrame",
             "addEventListener",
-            "dispatchEvent",
+            ".dispatchEvent(",
             ".click(",
             ".focus(",
             "console.",
@@ -1309,7 +1355,6 @@ mod tests {
             "FileReader",
             "URL.createObjectURL",
             "createElement",
-            "setAttribute",
             "appendChild",
             "replaceChildren",
         ] {
@@ -1318,6 +1363,14 @@ mod tests {
                 "forbidden runtime surface: {forbidden}"
             );
         }
+        assert_eq!(
+            source
+                .matches("EventTarget.prototype.dispatchEvent")
+                .count(),
+            0
+        );
+        assert_eq!(source.matches("Element.prototype.setAttribute").count(), 1);
+        assert!(!source.contains(".setAttribute("));
         assert!(source.contains("const nodeKeys = new WeakMap()"));
         assert!(source.contains("keyNodes.set(key, { node, generation })"));
         assert!(source.contains("sweepIdentities(request.g);"));
@@ -1602,6 +1655,17 @@ mod tests {
         );
         assert_eq!((evidence.action_x(), evidence.action_y()), (50, 35));
 
+        let fill = br#"{"v":1,"a":31,"i":41,"g":51,"r":"form","x":10,"y":20,"w":80,"h":30,"vw":800,"vh":600,"px":50,"py":35,"d":0,"b":"page_world_compatibility_fill"}"#;
+        let fill = invocation.decode_result(fill).expect("fill evidence");
+        assert_eq!(
+            fill.backend(),
+            crate::SemanticActionExecutionBackend::PageWorldCompatibilityFill
+        );
+        assert_eq!(
+            fill.readiness(),
+            SemanticActionNativeReadiness::ExactConnectedWritableFormTarget
+        );
+
         for invalid in [
             br#"{"v":1,"a":32,"i":41,"g":51,"r":"visible","x":10,"y":20,"w":80,"h":30,"vw":800,"vh":600,"px":50,"py":35,"d":0,"b":"fixed_semantic_recipe"}"#.as_slice(),
             br#"{"v":1,"a":31,"i":41,"g":51,"r":"visible","x":10,"y":20,"w":0,"h":30,"vw":800,"vh":600,"px":50,"py":35,"d":0,"b":"fixed_semantic_recipe"}"#.as_slice(),
@@ -1617,10 +1681,99 @@ mod tests {
             ))
         );
         assert_eq!(
+            invocation.decode_result(b"E2:applied_unverified"),
+            Err(SemanticActionRuntimeResultError::Runtime(
+                SemanticActionRuntimeFault::AppliedUnverified
+            ))
+        );
+        assert_eq!(
             invocation.decode_result(b"E2:page-controlled-detail"),
             Err(SemanticActionRuntimeResultError::InvalidFault)
         );
         assert!(format!("{invocation:?}").contains("[redacted]"));
         assert!(!format!("{invocation:?}").contains("private-action-request"));
+    }
+
+    #[test]
+    fn maximum_legal_fill_strings_fit_the_exact_combined_invocation_ceiling() {
+        let name = "\\\"".repeat(MAX_SEMANTIC_NAME_BYTES / 2);
+        let prior_value = "\t\n\\\"".repeat(MAX_SEMANTIC_VALUE_BYTES / 4);
+        let replacement = "\"\\\n\t".repeat(MAX_SEMANTIC_ACTION_TEXT_BYTES / 4);
+        assert_eq!(name.len(), MAX_SEMANTIC_NAME_BYTES);
+        assert_eq!(prior_value.len(), MAX_SEMANTIC_VALUE_BYTES);
+        assert_eq!(replacement.len(), MAX_SEMANTIC_ACTION_TEXT_BYTES);
+        let descriptor =
+            crate::SemanticActionRuntimeDescriptor::maximum_text_wire_witness(name, prior_value);
+        let wire = SemanticActionRuntimeInvocationWire {
+            version: SEMANTIC_RUNTIME_PROTOCOL_VERSION,
+            operation: "action_execute",
+            attempt: MAX_SEMANTIC_RUNTIME_SAFE_INTEGER,
+            checkpoint_invocation: MAX_SEMANTIC_RUNTIME_SAFE_INTEGER,
+            checkpoint_snapshot: MAX_SEMANTIC_RUNTIME_SAFE_INTEGER,
+            target: MAX_SEMANTIC_RUNTIME_SAFE_INTEGER,
+            role: "spinbutton",
+            kind: "fill",
+            expected: SemanticActionRuntimeRectWire {
+                x: -1_000_000,
+                y: -1_000_000,
+                width: 1_000_000,
+                height: 1_000_000,
+            },
+            option: 0,
+            fill_text: Some(&replacement),
+            target_descriptor: &descriptor,
+            option_descriptor: None,
+        };
+        let encoded = serde_json::to_string(&wire).expect("maximum legal fill wire");
+        assert_eq!(encoded.len(), 17_701);
+        assert_eq!(encoded.len(), MAX_SEMANTIC_ACTION_RUNTIME_REQUEST_BYTES);
+
+        for value in [
+            "\\".repeat(MAX_SEMANTIC_ACTION_TEXT_BYTES),
+            "\"".repeat(MAX_SEMANTIC_ACTION_TEXT_BYTES),
+            "\t\n".repeat(MAX_SEMANTIC_ACTION_TEXT_BYTES / 2),
+            "€".repeat(MAX_SEMANTIC_ACTION_TEXT_BYTES / 3),
+        ] {
+            assert!(value.len() <= MAX_SEMANTIC_ACTION_TEXT_BYTES);
+            let encoded = serde_json::to_string(&value).expect("legal JSON string");
+            assert!(encoded.len() <= 2 + SEMANTIC_ACTION_RUNTIME_JSON_EXPANSION * value.len());
+        }
+
+        for name_unit in ["x", "\\", "\"", "€"] {
+            for prior_unit in ["x", "\\", "\"", "\t\n"] {
+                for replacement_unit in ["x", "\\", "\"", "\t\n"] {
+                    let name = name_unit.repeat(MAX_SEMANTIC_NAME_BYTES / name_unit.len());
+                    let prior = prior_unit.repeat(MAX_SEMANTIC_VALUE_BYTES / prior_unit.len());
+                    let replacement = replacement_unit
+                        .repeat(MAX_SEMANTIC_ACTION_TEXT_BYTES / replacement_unit.len());
+                    let descriptor =
+                        crate::SemanticActionRuntimeDescriptor::maximum_text_wire_witness(
+                            name, prior,
+                        );
+                    let wire = SemanticActionRuntimeInvocationWire {
+                        version: SEMANTIC_RUNTIME_PROTOCOL_VERSION,
+                        operation: "action_execute",
+                        attempt: MAX_SEMANTIC_RUNTIME_SAFE_INTEGER,
+                        checkpoint_invocation: MAX_SEMANTIC_RUNTIME_SAFE_INTEGER,
+                        checkpoint_snapshot: MAX_SEMANTIC_RUNTIME_SAFE_INTEGER,
+                        target: MAX_SEMANTIC_RUNTIME_SAFE_INTEGER,
+                        role: "spinbutton",
+                        kind: "fill",
+                        expected: SemanticActionRuntimeRectWire {
+                            x: -1_000_000,
+                            y: -1_000_000,
+                            width: 1_000_000,
+                            height: 1_000_000,
+                        },
+                        option: 0,
+                        fill_text: Some(&replacement),
+                        target_descriptor: &descriptor,
+                        option_descriptor: None,
+                    };
+                    let encoded = serde_json::to_string(&wire).expect("legal fill variant");
+                    assert!(encoded.len() <= MAX_SEMANTIC_ACTION_RUNTIME_REQUEST_BYTES);
+                }
+            }
+        }
     }
 }

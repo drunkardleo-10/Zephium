@@ -1,7 +1,7 @@
 //! Deterministic token-admitted model encoding for bounded semantic reads.
 //!
 //! Read content stays private until the selected tokenizer port admits the
-//! exact `ZREAD1` bytes. Committed transport acknowledges only the exact read
+//! exact `ZREAD2` bytes. Committed transport acknowledges only the exact read
 //! projection; refused or cancelled transport consumes the payload without
 //! creating authority.
 
@@ -9,7 +9,7 @@ use std::fmt;
 
 use crate::semantic_model::{
     checked_write, frame_trust_label, role_label, sensitivity_label, source_label,
-    validate_semantic_token_measurement, write_quoted, BoundedModelBuffer,
+    validate_semantic_token_measurement, write_quoted, write_value_preview, BoundedModelBuffer,
 };
 use crate::{
     ContextJoin, SemanticCaptureInstant, SemanticFrameJoin, SemanticModelDeliveryError,
@@ -20,7 +20,7 @@ use crate::{
 };
 
 /// Version of the compact semantic-read model-input grammar.
-pub const SEMANTIC_READ_MODEL_SCHEMA_VERSION: u16 = 1;
+pub const SEMANTIC_READ_MODEL_SCHEMA_VERSION: u16 = 2;
 
 /// Content-free deterministic semantic-read encoding metrics.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -390,7 +390,7 @@ impl fmt::Debug for SemanticReadDeliveryReceipt {
     }
 }
 
-/// Encodes one bounded semantic read into deterministic compact `ZREAD1` lines.
+/// Encodes one bounded semantic read into deterministic compact `ZREAD2` lines.
 pub fn encode_semantic_read(
     read: &SemanticReadResult<'_>,
     budget: SemanticModelEncodingBudget,
@@ -455,6 +455,9 @@ pub fn encode_semantic_read(
         )?;
         match fragment.content() {
             SemanticReadContent::Text(text) => write_quoted(&mut output, text.as_str())?,
+            SemanticReadContent::ValuePreview(preview) => {
+                write_value_preview(&mut output, preview)?;
+            }
             SemanticReadContent::Boolean(value) => checked_write(
                 &mut output,
                 format_args!("{}", if value { "true" } else { "false" }),
@@ -532,6 +535,10 @@ fn write_omissions(
         (SemanticReadOmission::Secret, "secret"),
         (SemanticReadOmission::ItemLimit, "item_limit"),
         (SemanticReadOmission::ByteLimit, "byte_limit"),
+        (
+            SemanticReadOmission::ValuePreviewLimit,
+            "value_preview_limit",
+        ),
     ] {
         if read.omissions().contains(omission) {
             if wrote {
@@ -561,10 +568,11 @@ const fn field_matches_content(field: SemanticReadField, content: SemanticReadCo
     matches!(
         (field, content),
         (
-            SemanticReadField::AccessibleName
-                | SemanticReadField::VisibleText
-                | SemanticReadField::TextValue,
+            SemanticReadField::AccessibleName | SemanticReadField::VisibleText,
             SemanticReadContent::Text(_)
+        ) | (
+            SemanticReadField::TextValue,
+            SemanticReadContent::ValuePreview(_)
         ) | (
             SemanticReadField::BooleanValue,
             SemanticReadContent::Boolean(_)
@@ -662,6 +670,42 @@ mod tests {
             .expect("observation")
     }
 
+    fn observation_with_text_value(value: &str) -> SemanticObservation {
+        let baseline = observation();
+        let frame = baseline.frames()[0].frame().clone();
+        let context = baseline.request().context();
+        let wire = serde_json::to_vec(&json!({
+            "v": SEMANTIC_WIRE_VERSION,
+            "i": 8,
+            "g": 10,
+            "c": "complete",
+            "n": [
+                {"k": 11, "r": "document", "o": 16},
+                {"k": 12, "p": 0, "r": "textbox", "n": "Long value",
+                 "v": {"k": "text", "value": value}, "o": 11}
+            ]
+        }))
+        .expect("wire");
+        let snapshot = decode_semantic_snapshot(
+            SemanticDecodeContext::new(
+                SemanticInvocationId::new(8).expect("invocation"),
+                frame,
+                SemanticSnapshotGeneration::new(10).expect("generation"),
+            ),
+            &wire,
+        )
+        .expect("snapshot");
+        let request = crate::SemanticObservationRequest::initial(
+            SemanticObservationId::new(2).expect("observation"),
+            context,
+            SemanticObservationBudget::try_new(8, 8192, 1).expect("budget"),
+        );
+        SemanticObservationAssembler::new(request, snapshot)
+            .expect("assembler")
+            .finish()
+            .expect("observation")
+    }
+
     struct FixedCounter {
         revision: SemanticTokenizerRevision,
         tokens: u32,
@@ -710,7 +754,7 @@ mod tests {
 
         assert_eq!(first.content, second.content);
         assert!(first.content.starts_with(
-            "ZREAD1 content=untrusted observation_generation=1 captured_at_ms=42 items=4 omitted=2 omissions=secret\n"
+            "ZREAD2 content=untrusted observation_generation=1 captured_at_ms=42 items=4 omitted=2 omissions=secret\n"
         ));
         assert!(first.content.contains(
             "F f1 origin=\"https://read-model.example.test/\" trust=same invocation=7 snapshot=9\n"
@@ -731,6 +775,36 @@ mod tests {
         let debug = format!("{first:?} {:?}", read.fragments()[0].id());
         assert!(!debug.contains("Public \"quoted\""));
         assert!(!debug.contains("Private customer note"));
+    }
+
+    #[test]
+    fn read_projects_only_the_shared_bounded_value_preview_without_omitting_an_item() {
+        let value = "x".repeat(crate::MAX_SEMANTIC_VALUE_BYTES);
+        let observation = observation_with_text_value(&value);
+        let read = read_semantic_observation(
+            &observation,
+            SemanticReadAuthority::Initial,
+            SemanticCaptureInstant::from_millis(43),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::STANDARD,
+        )
+        .expect("read long value");
+        let encoded = encode_semantic_read(&read, budget(8192, 1000)).expect("encode long value");
+        let expected = format!(
+            "value=\"{}\" source_bytes={} truncated=true",
+            "x".repeat(crate::MAX_SEMANTIC_VALUE_PREVIEW_BYTES),
+            crate::MAX_SEMANTIC_VALUE_BYTES
+        );
+
+        assert!(encoded
+            .content
+            .contains("omitted=0 omissions=value_preview_limit"));
+        assert!(encoded.content.contains(&expected));
+        assert_eq!(read.stats().omitted_items(), 0);
+        assert!(!encoded.content.contains(&format!(
+            "\"{}",
+            "x".repeat(crate::MAX_SEMANTIC_VALUE_PREVIEW_BYTES + 1)
+        )));
     }
 
     #[test]
@@ -755,7 +829,7 @@ mod tests {
             .admit(&counter, &selected)
             .expect("admit");
         assert_eq!(payload.token_measurement().tokens(), 50);
-        assert!(payload.as_str().starts_with("ZREAD1 content=untrusted"));
+        assert!(payload.as_str().starts_with("ZREAD2 content=untrusted"));
         let debug = format!("{payload:?}");
         assert!(!debug.contains("Private customer note"));
         let receipt = payload
