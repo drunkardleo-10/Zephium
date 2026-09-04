@@ -226,14 +226,14 @@ pub use provider_transport::{
 };
 #[cfg(feature = "provider-transport")]
 pub use provider_transport::{
-    AgentProviderAdmissionError, AgentProviderAttempt, AgentProviderBatchDisposition,
-    AgentProviderCancellation, AgentProviderCountedAttempt, AgentProviderCredential,
-    AgentProviderCredentialError, AgentProviderDisclosureStage, AgentProviderExactCountOutcome,
-    AgentProviderImmediateSettlement, AgentProviderPolicySettlement, AgentProviderTransport,
-    AgentProviderTransportConfig, AgentProviderTransportConfigError, AgentProviderTransportOutcome,
-    AgentProviderTransportResult, AgentProviderTransportShutdownError,
-    AgentProviderTransportShutdownProof, AgentProviderTransportSnapshot,
-    AgentProviderTransportStateError, AgentProviderUsageKnowledge,
+    AgentProviderAbortReason, AgentProviderAdmissionError, AgentProviderAttempt,
+    AgentProviderAttemptStateError, AgentProviderBatchDisposition, AgentProviderCancellation,
+    AgentProviderCountedAttempt, AgentProviderCredential, AgentProviderCredentialError,
+    AgentProviderDisclosureStage, AgentProviderExactCountOutcome, AgentProviderImmediateSettlement,
+    AgentProviderPolicySettlement, AgentProviderTransport, AgentProviderTransportConfig,
+    AgentProviderTransportConfigError, AgentProviderTransportOutcome, AgentProviderTransportResult,
+    AgentProviderTransportShutdownError, AgentProviderTransportShutdownProof,
+    AgentProviderTransportSnapshot, AgentProviderTransportStateError, AgentProviderUsageKnowledge,
     AGENT_PROVIDER_HTTP2_INITIAL_RECEIVE_WINDOW_BYTES, MAX_AGENT_PROVIDER_CONNECT_TIMEOUT_MILLIS,
     MAX_AGENT_PROVIDER_CREDENTIAL_BYTES, MAX_AGENT_PROVIDER_HTTP2_FRAME_BYTES,
     MAX_AGENT_PROVIDER_READ_TIMEOUT_MILLIS, MAX_AGENT_PROVIDER_REQUEST_TIMEOUT_MILLIS,

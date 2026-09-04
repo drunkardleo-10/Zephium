@@ -400,6 +400,7 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     let provider_transport_root = read(repository.join(PROVIDER_TRANSPORT_ROOT))?;
     validate_provider_transport_root(&provider_transport_root)?;
     validate_provider_transport_commit_boundary(&provider_transport_root)?;
+    validate_abortable_provider_operation_contract(&provider_transport_root)?;
     validate_provider_consumer_panic_boundary(
         &provider_transport_root,
         &read(repository.join(AGENTIC_PROVIDER_ROOT))?,
@@ -592,6 +593,7 @@ fn validate_agentic_no_direct_logging_calls(label: &str, source: &str) -> Result
             ));
         }
     }
+
     Ok(())
 }
 
@@ -4173,8 +4175,9 @@ fn validate_agent_input_metrics_contract(
         "input_metric_receipt:AgentProviderInputMetricReceipt",
         "pubconstfninput_metric_receipt(&self)->AgentProviderInputMetricReceipt",
         "pubfninput_metric_receipt(&self)->Option<AgentProviderInputMetricReceipt>",
-        "self.committed.input_metric_receipt()",
-        "self.attempt.committed.sealed_input_metric_receipt()",
+        "Some(AgentProviderAttemptCore::PreDispatch{committed,..})=>{committed.input_metric_receipt()}",
+        "terminal.input.sealed_metric_receipt()",
+        "pubfninput_metric_receipt(&self)->AgentProviderInputMetricReceipt{self.input_metric_receipt}",
     ] {
         if !transport.contains(required) {
             return Err(format!(
@@ -4191,7 +4194,7 @@ fn validate_agent_input_metrics_contract(
             .count()
             != 1
         || transport
-            .matches("pubfninput_metric_receipt(&self)->AgentProviderInputMetricReceipt")
+            .matches("pubfninput_metric_receipt(&self)->AgentProviderInputMetricReceipt{self.input_metric_receipt}")
             .count()
             != 1
     {
@@ -4857,6 +4860,8 @@ fn validate_provider_transport_facade(manifest: &str, root: &str) -> Result<(), 
         "#[cfg(all(feature=\"probe-harness\",not(debug_assertions)))]compile_error!(\"theprovidertransportprobeharnessisforbiddeninoptimizedbuilds\");",
         "#[cfg(feature=\"provider-transport\")]pubusezephium_agentic::{",
         "#[cfg(feature=\"probe-harness\")]pubusezephium_agentic::{exact_loopback_url,ProviderEndpoints};",
+        "AgentProviderAbortReason,",
+        "AgentProviderAttemptStateError,",
         "AgentProviderTransport,",
         "AgentProviderPolicySettlement,",
         "AgentProviderSettledTerminal,",
@@ -5145,6 +5150,117 @@ fn validate_provider_transport_commit_boundary(source: &str) -> Result<(), Strin
     Ok(())
 }
 
+fn validate_abortable_provider_operation_contract(source: &str) -> Result<(), String> {
+    let production = source
+        .split_once("\n#[cfg(test)]\nmod tests")
+        .map_or(source, |(production, _)| production);
+    let source = compact(
+        &production
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<String>(),
+    );
+    for required in [
+        "pubstructAgentProviderAttempt{",
+        "core:Option<AgentProviderAttemptCore>,",
+        "phase:AgentProviderAttemptPhase,",
+        "credential:Option<AgentProviderAttemptCredential>,",
+        "enumAgentProviderAttemptCore{PreDispatch{committed:Box<AgentCommittedProviderRequest>,slot:Option<AgentProviderSlot>,},Generation(Box<AgentProviderTerminalCore>),}",
+        "enumAgentProviderAttemptPhase{Ready,CountDriving,Counted(AgentProviderExactInputCount),GenerationDriving,Terminal,}",
+        "pubasyncfncount_openai_input_tokens(&mutself)->AgentProviderExactCountOutcome<'_>",
+        "self.phase=AgentProviderAttemptPhase::CountDriving;",
+        "self.mark_input_count_disclosed();",
+        "pubasyncfnexecute_anthropic<F>(&mutself,",
+        "pubasyncfnexecute_openai_exact_local<F>(&mutself,",
+        "self.phase=AgentProviderAttemptPhase::GenerationDriving;",
+        "self.mark_model_may_have_dispatched();",
+        "pubfnabort(mutself,reason:AgentProviderAbortReason,)->Result<AgentProviderTransportResult,AgentProviderAttemptStateError>",
+        "self.finish_terminal(outcome)",
+        "implDropforAgentProviderAttempt{fndrop(&mutself){ifself.core.is_some(){self.fail_stop();self.phase=AgentProviderAttemptPhase::Terminal;}}}",
+    ] {
+        if !source.contains(required) {
+            return Err(format!(
+                "agent provider abortable operation lost required ownership rule {required}"
+            ));
+        }
+    }
+    for forbidden in [
+        "pubasyncfncount_openai_input_tokens(self",
+        "pubasyncfnexecute_anthropic<F>(self",
+        "pubasyncfnexecute_openai_exact_local<F>(self",
+        "#[cfg(any())]",
+    ] {
+        if source.contains(forbidden) {
+            return Err(format!(
+                "agent provider abortable operation regained consuming or dormant drive {forbidden}"
+            ));
+        }
+    }
+
+    let count_start = source
+        .find("pubasyncfncount_openai_input_tokens")
+        .ok_or_else(|| "agent provider abortable count drive is missing".to_owned())?;
+    let abort_start = source[count_start..]
+        .find("pubfnabort(mutself")
+        .map(|offset| count_start + offset)
+        .ok_or_else(|| "agent provider abortable terminal recovery is missing".to_owned())?;
+    let count = &source[count_start..abort_start];
+    let count_driving = count
+        .find("self.mark_count_drive_started()")
+        .ok_or_else(|| "count drive no longer publishes its exclusive phase".to_owned())?;
+    let count_disclosure = count
+        .find("self.mark_input_count_disclosed()")
+        .ok_or_else(|| "count drive no longer publishes disclosure before send".to_owned())?;
+    let count_send = count
+        .find("response=request.send()=>response")
+        .ok_or_else(|| "count drive send boundary is missing".to_owned())?;
+    if !(count_driving < count_disclosure && count_disclosure < count_send) {
+        return Err(
+            "count drive must publish phase then disclosure before its first send poll".to_owned(),
+        );
+    }
+
+    let generation_start = source
+        .find("asyncfnexecute_model<F>")
+        .ok_or_else(|| "agent provider abortable generation drive is missing".to_owned())?;
+    let generation_end = source[generation_start..]
+        .find("implDropforAgentProviderAttempt")
+        .map(|offset| generation_start + offset)
+        .ok_or_else(|| "agent provider abortable generation drive is unclosed".to_owned())?;
+    let generation = &source[generation_start..generation_end];
+    let generation_begin = generation
+        .find("=self.begin_generation_drive()?")
+        .ok_or_else(|| "generation drive no longer moves its body before polling".to_owned())?;
+    let generation_disclosure = generation
+        .find("self.mark_model_may_have_dispatched()")
+        .ok_or_else(|| "generation drive no longer publishes dispatch before send".to_owned())?;
+    let generation_send = generation
+        .find("response=request.send()=>response")
+        .ok_or_else(|| "generation drive send boundary is missing".to_owned())?;
+    if !(generation_begin < generation_disclosure && generation_disclosure < generation_send) {
+        return Err(
+            "generation drive must move authority then publish dispatch before its first send poll"
+                .to_owned(),
+        );
+    }
+
+    let abort_end = source[abort_start..]
+        .find("pubfncancel_without_dispatch")
+        .map(|offset| abort_start + offset)
+        .ok_or_else(|| "agent provider abortable recovery is unclosed".to_owned())?;
+    let abort = &source[abort_start..abort_end];
+    if abort.contains("prior_disclosure_stage=")
+        || abort.contains("mark_input_count_disclosed()")
+        || abort.contains("mark_model_may_have_dispatched()")
+    {
+        return Err(
+            "abort must preserve private disclosure evidence rather than rewrite accounting"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
 fn validate_provider_consumer_panic_boundary(
     transport: &str,
     provider_contract: &str,
@@ -5161,7 +5277,8 @@ fn validate_provider_consumer_panic_boundary(
     for required in [
         "fnfail_stop(&self){self.shared.shutdown.cancel();matchself.shared.state.lock(){Ok(mutstate)=>state.sealed=true,Err(poisoned)=>poisoned.into_inner().sealed=true,}}",
         "matchstd::panic::catch_unwind(std::panic::AssertUnwindSafe(||consume(batch)))",
-        "Err(_)=>{ifletSome(slot)=&slot{slot.fail_stop();}returnfinish_attempt(active,config,integration_failure(),AgentProviderDisclosureStage::ModelRequestMayHaveDispatched,continuation,input_metric_receipt,slot,);}",
+        "fnfail_stop(&self){ifletSome(slot)=self.slot(){slot.fail_stop();}else{self.cancellation.cancel();self.shutdown.cancel();}}",
+        "Err(_)=>{self.fail_stop();returnself.finish_terminal(integration_failure());}",
         "fnintegration_failure()->AgentProviderTransportOutcome",
         "AgentProviderFailureClass::Integration",
     ] {
@@ -5210,7 +5327,7 @@ fn validate_provider_transport_response_header_boundary(source: &str) -> Result<
         ".checked_add(value.as_bytes().len())?",
         ".checked_add(HTTP_HEADER_FIELD_OVERHEAD_BYTES)",
         "usize::try_from(MAX_AGENT_PROVIDER_RESPONSE_HEADER_BYTES)",
-        "if!response_headers_admitted(response.headers())",
+        "!response_headers_admitted(response.headers())",
         "fnresponse_content_length_admitted(headers:&HeaderMap,max_wire_bytes:u32)->bool",
         "headers.get_all(CONTENT_LENGTH).iter()",
         "declared<=u64::from(max_wire_bytes)",
@@ -5255,7 +5372,7 @@ fn validate_provider_transport_response_header_boundary(source: &str) -> Result<
         );
     }
     let header_check = model
-        .find("if!response_headers_admitted(response.headers())")
+        .find("!response_headers_admitted(response.headers())")
         .ok_or_else(|| "provider response-header admission is missing".to_owned())?;
     let status = model
         .find("ifresponse.status()!=StatusCode::OK")
@@ -5525,7 +5642,7 @@ fn validate_provider_revocation_before_secret_materialization(source: &str) -> R
             .collect::<String>(),
     );
     let execute_start = source
-        .find("pubasyncfnexecute<F>")
+        .find("asyncfnexecute_model<F>")
         .ok_or_else(|| "agent provider attempt execution boundary is missing".to_owned())?;
     let execute_end = source[execute_start..]
         .find("implfmt::DebugforAgentProviderAttempt")
@@ -5533,7 +5650,7 @@ fn validate_provider_revocation_before_secret_materialization(source: &str) -> R
         .ok_or_else(|| "agent provider attempt execution boundary is unclosed".to_owned())?;
     let execute = &source[execute_start..execute_end];
     let cancellation =
-        "ifself.cancellation.is_cancelled()||self.shutdown.is_cancelled(){returnfinish_attempt(";
+        "ifself.cancellation.is_cancelled()||self.shutdown.is_cancelled(){returnself.finish_terminal(";
     let checks = execute
         .match_indices(cancellation)
         .map(|(offset, _)| offset)
@@ -5548,7 +5665,7 @@ fn validate_provider_revocation_before_secret_materialization(source: &str) -> R
         .find("letmutdecoder=matchAgentProviderStreamDecoder::try_new")
         .ok_or_else(|| "agent provider stream decoder construction is missing".to_owned())?;
     let header = execute[decoder..]
-        .find("letcredential=matchself.credential.sensitive_header(self.provider)")
+        .find("letcredential=matchself.credential.as_ref()")
         .map(|offset| decoder + offset)
         .ok_or_else(|| {
             "agent provider dispatch-time authentication header is missing".to_owned()
@@ -7013,10 +7130,12 @@ fn validate_provider_input_evidence_contract(
 
     let transport = compact(transport);
     for required in [
-        "pubconstfninput_evidence(&self)->&AgentProviderInputEvidence",
-        "self.committed.input_evidence()",
-        "pubconstfninput_metrics(&self)->AgentProviderInputMetrics",
-        "self.committed.input_metrics()",
+        "pubfninput_evidence(&self)->Option<&AgentProviderInputEvidence>",
+        "Some(AgentProviderAttemptCore::PreDispatch{committed,..})=>{Some(committed.input_evidence())}",
+        "Some(AgentProviderAttemptCore::Generation(terminal))=>Some(terminal.input.evidence())",
+        "pubfninput_metrics(&self)->Option<AgentProviderInputMetrics>",
+        "Some(AgentProviderAttemptCore::PreDispatch{committed,..})=>{Some(committed.input_metrics())}",
+        "Some(AgentProviderAttemptCore::Generation(terminal))=>Some(terminal.input.metrics())",
     ] {
         if !transport.contains(required) {
             return Err(format!(
@@ -8481,15 +8600,15 @@ mod tests {
     #[test]
     fn provider_revocation_precedes_authentication_materialization() {
         let valid = r#"
-            pub async fn execute<F>() {
+            async fn execute_model<F>() {
                 if self.cancellation.is_cancelled() || self.shutdown.is_cancelled() {
-                    return finish_attempt();
+                    return self.finish_terminal();
                 }
                 let mut decoder = match AgentProviderStreamDecoder::try_new() {};
-                let credential = match self.credential.sensitive_header(self.provider) {};
+                let credential = match self.credential.as_ref() {};
                 let request = provider_request();
                 if self.cancellation.is_cancelled() || self.shutdown.is_cancelled() {
-                    return finish_attempt();
+                    return self.finish_terminal();
                 }
             }
             impl fmt::Debug for AgentProviderAttempt {}
@@ -8499,7 +8618,7 @@ mod tests {
 
         let cancellation = r#"
                 if self.cancellation.is_cancelled() || self.shutdown.is_cancelled() {
-                    return finish_attempt();
+                    return self.finish_terminal();
                 }
         "#;
         assert!(
@@ -8519,8 +8638,8 @@ mod tests {
         );
         assert!(validate_provider_revocation_before_secret_materialization(
             &valid.replace(
-                "let mut decoder = match AgentProviderStreamDecoder::try_new() {};\n                let credential = match self.credential.sensitive_header(self.provider) {};",
-                "let credential = match self.credential.sensitive_header(self.provider) {};\n                let mut decoder = match AgentProviderStreamDecoder::try_new() {};"
+                "let mut decoder = match AgentProviderStreamDecoder::try_new() {};\n                let credential = match self.credential.as_ref() {};",
+                "let credential = match self.credential.as_ref() {};\n                let mut decoder = match AgentProviderStreamDecoder::try_new() {};"
             )
         )
         .is_err());
@@ -9997,6 +10116,8 @@ mod tests {
                 SemanticActionVerifiedTerminal,
                 AgentFailedSemanticEffect,
                 AgentVerifiedSemanticEffect,
+                SemanticSnapshotEvidenceError,
+                prepare_semantic_action_snapshot_evidence,
             };
             #[cfg(test)]
             pub(crate) use semantic_verify::verify_semantic_action;
@@ -10030,6 +10151,11 @@ mod tests {
             pub(crate) fn verify_semantic_action(
                 settlement: &SemanticSettleTracker,
             ) {}
+            pub(crate) const fn exact_target_value() {}
+            pub enum SemanticSnapshotEvidenceError {
+                NonSnapshotEvidenceRequired,
+            }
+            pub fn prepare_semantic_action_snapshot_evidence() {}
         "#;
         let policy = r#"
             pub struct AgentVerifiedSemanticEffect {
@@ -10433,11 +10559,32 @@ mod tests {
             measurement: self.measurement;
         "#;
         let transport = r#"
-            pub const fn input_evidence(&self) -> &AgentProviderInputEvidence {
-                self.committed.input_evidence()
+            enum AgentProviderAttemptCore {
+                PreDispatch { committed: AgentCommittedProviderRequest },
+                Generation(AgentProviderTerminalCore),
             }
-            pub const fn input_metrics(&self) -> AgentProviderInputMetrics {
-                self.committed.input_metrics()
+            struct AgentProviderTerminalCore {
+                input: AgentCommittedProviderInput,
+            }
+            impl AgentProviderAttempt {
+                pub fn input_evidence(&self) -> Option<&AgentProviderInputEvidence> {
+                    match self.core.as_ref() {
+                        Some(AgentProviderAttemptCore::PreDispatch { committed, .. }) => {
+                            Some(committed.input_evidence())
+                        }
+                        Some(AgentProviderAttemptCore::Generation(terminal)) => Some(terminal.input.evidence()),
+                        None => None,
+                    }
+                }
+                pub fn input_metrics(&self) -> Option<AgentProviderInputMetrics> {
+                    match self.core.as_ref() {
+                        Some(AgentProviderAttemptCore::PreDispatch { committed, .. }) => {
+                            Some(committed.input_metrics())
+                        }
+                        Some(AgentProviderAttemptCore::Generation(terminal)) => Some(terminal.input.metrics()),
+                        None => None,
+                    }
+                }
             }
         "#;
         validate_provider_input_evidence_contract(
@@ -10870,12 +11017,27 @@ mod tests {
             }
             impl AgentProviderCountedAttempt {
                 pub fn input_metric_receipt(&self) -> AgentProviderInputMetricReceipt {
-                    self.attempt.committed.sealed_input_metric_receipt()
+                    self.input_metric_receipt
                 }
+            }
+            enum AgentProviderAttemptCore {
+                PreDispatch { committed: AgentCommittedProviderRequest },
+                Generation(AgentProviderTerminalCore),
+            }
+            struct AgentProviderTerminalCore {
+                input: AgentCommittedProviderInput,
             }
             impl AgentProviderAttempt {
                 pub fn input_metric_receipt(&self) -> Option<AgentProviderInputMetricReceipt> {
-                self.committed.input_metric_receipt()
+                    match self.core.as_ref() {
+                        Some(AgentProviderAttemptCore::PreDispatch { committed, .. }) => {
+                            committed.input_metric_receipt()
+                        }
+                        Some(AgentProviderAttemptCore::Generation(terminal)) => {
+                            terminal.input.sealed_metric_receipt()
+                        }
+                        None => None,
+                    }
                 }
             }
         "#;
@@ -11395,6 +11557,12 @@ mod tests {
 
         for invalid_root in [
             root.replacen("AgentProviderTransport,", "AgentProviderTransportInput,", 1),
+            root.replacen("AgentProviderAbortReason,", "AgentProviderAbortClass,", 1),
+            root.replacen(
+                "AgentProviderAttemptStateError,",
+                "AgentProviderAttemptState,",
+                1,
+            ),
             format!("{root}\npub use reqwest::Client;"),
             format!("{root}\npub fn finish() {{}}"),
         ] {
@@ -11446,6 +11614,79 @@ mod tests {
     }
 
     #[test]
+    fn provider_operation_retains_terminal_authority_across_dropped_drives() {
+        let transport = include_str!("../../crates/zephium-agentic/src/provider_transport.rs");
+        validate_abortable_provider_operation_contract(transport)
+            .expect("abortable provider operation boundary");
+
+        for (index, invalid) in [
+            transport.replacen(
+                "        self.phase = AgentProviderAttemptPhase::CountDriving;",
+                "        self.phase = AgentProviderAttemptPhase::Ready;",
+                1,
+            ),
+            transport.replacen(
+                "        self.mark_input_count_disclosed();",
+                "        // missing count disclosure",
+                1,
+            ),
+            transport.replacen(
+                "        self.mark_model_may_have_dispatched();",
+                "        // missing model disclosure",
+                1,
+            ),
+            transport
+                .replacen("self.mark_count_drive_started()", "__COUNT_PHASE__", 1)
+                .replacen(
+                    "self.mark_input_count_disclosed()",
+                    "self.mark_count_drive_started()",
+                    1,
+                )
+                .replacen("__COUNT_PHASE__", "self.mark_input_count_disclosed()", 1),
+            transport
+                .replacen("self.begin_generation_drive()?", "__GENERATION_BEGIN__", 1)
+                .replacen(
+                    "self.mark_model_may_have_dispatched()",
+                    "self.begin_generation_drive()?",
+                    1,
+                )
+                .replacen(
+                    "__GENERATION_BEGIN__",
+                    "self.mark_model_may_have_dispatched()",
+                    1,
+                ),
+            transport.replacen(
+                "    pub fn abort(\n        mut self,",
+                "    pub fn abort(\n        &mut self,",
+                1,
+            ),
+            transport.replacen(
+                "        let outcome = match reason {",
+                "        self.prior_disclosure_stage = AgentProviderDisclosureStage::NotDispatched;\n        let outcome = match reason {",
+                1,
+            ),
+            transport.replacen(
+                "            self.fail_stop();\n            self.phase = AgentProviderAttemptPhase::Terminal;",
+                "            // missing fail stop\n            self.phase = AgentProviderAttemptPhase::Terminal;",
+                1,
+            ),
+            transport.replacen(
+                "\n#[cfg(test)]\nmod tests",
+                "\n#[cfg(any())]\nfn dormant_provider_drive() {}\n\n#[cfg(test)]\nmod tests",
+                1,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(
+                validate_abortable_provider_operation_contract(&invalid).is_err(),
+                "abortable operation mutation {index} unexpectedly passed"
+            );
+        }
+    }
+
+    #[test]
     fn provider_batch_consumer_panic_is_contained_and_fail_stopped() {
         let transport = include_str!("../../crates/zephium-agentic/src/provider_transport.rs");
         let provider = include_str!("../../crates/zephium-agentic/src/agent_provider.rs");
@@ -11454,7 +11695,7 @@ mod tests {
 
         for invalid in [
             transport.replacen("std::panic::catch_unwind", "Ok", 1),
-            transport.replacen("                            slot.fail_stop();", "", 1),
+            transport.replacen("                            self.fail_stop();", "", 1),
             transport.replace("        self.shared.shutdown.cancel();", ""),
             transport.replacen(
                 "AgentProviderFailureClass::Integration",
@@ -11479,8 +11720,8 @@ mod tests {
 
         for invalid in [
             root.replacen(
-                "        if !response_headers_admitted(response.headers()) {",
-                "        if false {",
+                "            || !response_headers_admitted(response.headers())",
+                "            || false",
                 1,
             ),
             root.replacen(
@@ -11499,13 +11740,13 @@ mod tests {
                 1,
             ),
             root.replacen(
-                "        if !response_headers_admitted(response.headers()) {",
+                "        if response.url() != &self.endpoint || !response_headers_admitted(response.headers()) {",
                 "        if response.status() != StatusCode::OK {",
                 1,
             ),
             root.replacen(
-                "        if response.status() != StatusCode::OK {",
-                "        if !response_headers_admitted(response.headers()) {",
+                "        if response.url() != &self.endpoint || !response_headers_admitted(response.headers()) {",
+                "        if false {",
                 1,
             ),
             root.replacen(

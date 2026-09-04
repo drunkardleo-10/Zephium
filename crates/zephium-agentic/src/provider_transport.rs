@@ -22,16 +22,16 @@ use std::time::{Duration, Instant};
 #[cfg(test)]
 use crate::AgentProviderPricingSettlementError;
 use crate::{
-    AgentActiveModelCall, AgentCommittedProviderRequest, AgentModelCallReceipt,
-    AgentModelCallSettlement, AgentModelCallUnaccountedSettlement, AgentModelUsageAccounting,
-    AgentPolicyError, AgentProviderCallConfig, AgentProviderCallIdentity,
-    AgentProviderContinuationSeed, AgentProviderEndpoint, AgentProviderExactInputCount,
-    AgentProviderFailure, AgentProviderFailureClass, AgentProviderFinishedStream,
-    AgentProviderInputEvidence, AgentProviderInputMetricReceipt, AgentProviderInputMetrics,
-    AgentProviderKind, AgentProviderPricingSettlement, AgentProviderRequestError,
-    AgentProviderRetryAfter, AgentProviderStopReason, AgentProviderStreamBatch,
-    AgentProviderStreamConclusion, AgentProviderStreamDecoder, AgentProviderTransportInput,
-    AgentProviderUsage, AgentRunPolicy,
+    AgentActiveModelCall, AgentCommittedProviderInput, AgentCommittedProviderRequest,
+    AgentModelCallReceipt, AgentModelCallSettlement, AgentModelCallUnaccountedSettlement,
+    AgentModelUsageAccounting, AgentPolicyError, AgentProviderCallConfig,
+    AgentProviderCallIdentity, AgentProviderContinuationSeed, AgentProviderEndpoint,
+    AgentProviderExactInputCount, AgentProviderFailure, AgentProviderFailureClass,
+    AgentProviderFinishedStream, AgentProviderInputEvidence, AgentProviderInputMetricReceipt,
+    AgentProviderInputMetrics, AgentProviderKind, AgentProviderPricingSettlement,
+    AgentProviderRequestError, AgentProviderRetryAfter, AgentProviderStopReason,
+    AgentProviderStreamBatch, AgentProviderStreamConclusion, AgentProviderStreamDecoder,
+    AgentProviderTransportInput, AgentProviderUsage, AgentRunPolicy,
 };
 use futures_util::TryStreamExt;
 use reqwest::header::{
@@ -985,12 +985,15 @@ impl AgentProviderTransport {
                 .then(|| self.endpoints.openai_input_tokens.clone()),
             provider,
             prior_disclosure_stage: AgentProviderDisclosureStage::NotDispatched,
-            credential,
-            committed: Box::new(committed),
+            credential: Some(credential),
+            core: Some(AgentProviderAttemptCore::PreDispatch {
+                committed: Box::new(committed),
+                slot: Some(slot),
+            }),
+            phase: AgentProviderAttemptPhase::Ready,
             cancellation,
             shutdown: self.shared.shutdown.clone(),
             deadline,
-            slot: Some(slot),
         })
     }
 
@@ -1496,7 +1499,13 @@ impl fmt::Debug for AgentProviderImmediateSettlement {
     }
 }
 
-/// One admitted and committed request that has not started network I/O.
+/// One admitted, abortable provider operation.
+///
+/// The operation owns every terminal policy and slot authority. Its count and
+/// generation drives borrow this value instead of consuming it, so dropping a
+/// drive future at a stronger host deadline leaves [`Self::abort`] able to
+/// return the exact terminal settlement owner. Ordinary cancellation should
+/// still let the borrowed drive finish and return its normal terminal.
 #[must_use]
 pub struct AgentProviderAttempt {
     client: Client,
@@ -1504,86 +1513,230 @@ pub struct AgentProviderAttempt {
     input_token_endpoint: Option<Url>,
     provider: AgentProviderKind,
     prior_disclosure_stage: AgentProviderDisclosureStage,
-    credential: AgentProviderAttemptCredential,
-    committed: Box<AgentCommittedProviderRequest>,
+    credential: Option<AgentProviderAttemptCredential>,
+    core: Option<AgentProviderAttemptCore>,
+    phase: AgentProviderAttemptPhase,
     cancellation: AgentProviderCancellation,
     shutdown: AgentProviderCancellation,
     deadline: Instant,
+}
+
+/// Terminal authority that never enters a droppable network-drive future.
+struct AgentProviderTerminalCore {
+    input: AgentCommittedProviderInput,
+    config: AgentProviderCallConfig,
+    continuation: Option<AgentProviderContinuationSeed>,
     slot: Option<AgentProviderSlot>,
+}
+
+/// One phase of an admitted abortable operation.
+enum AgentProviderAttemptCore {
+    /// Counting has not yet moved the request body into a generation drive.
+    PreDispatch {
+        committed: Box<AgentCommittedProviderRequest>,
+        slot: Option<AgentProviderSlot>,
+    },
+    /// A generation drive owns only request/body/decoder temporaries.
+    Generation(Box<AgentProviderTerminalCore>),
+}
+
+/// Exclusive public phase of one abortable operation owner.
+enum AgentProviderAttemptPhase {
+    Ready,
+    CountDriving,
+    Counted(AgentProviderExactInputCount),
+    GenerationDriving,
+    Terminal,
+}
+
+/// Content-free reason the controller had to abort a borrowed provider drive.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgentProviderAbortReason {
+    /// The runtime's absolute cooperative-drain deadline elapsed.
+    HostDeadline,
+    /// The trusted controller detected an unrecoverable integration fault.
+    ControllerFault,
+}
+
+/// Content-free refusal from an already-terminal or interrupted operation.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum AgentProviderAttemptStateError {
+    /// A prior drive or abort already consumed the terminal authority.
+    #[error("agent provider operation is already terminal")]
+    Terminal,
+    /// A dropped count drive may have disclosed input and must be aborted.
+    #[error("agent provider count drive requires terminal recovery")]
+    CountRecoveryRequired,
+    /// A dropped generation drive may have dispatched the model and must abort.
+    #[error("agent provider generation drive requires terminal recovery")]
+    GenerationRecoveryRequired,
 }
 
 /// Result of the authenticated OpenAI input-token phase.
 #[must_use]
-pub enum AgentProviderExactCountOutcome {
+pub enum AgentProviderExactCountOutcome<'operation> {
     /// Exact accounting was bound and the model request remains undispatched.
-    Counted(AgentProviderCountedAttempt),
+    Counted(AgentProviderCountedAttempt<'operation>),
     /// Counting or its gates failed; terminal policy authority is retained.
     Failed(AgentProviderTransportResult),
+    /// No live count drive could be started without risking duplicate disclosure.
+    Unavailable(AgentProviderAttemptStateError),
 }
 
-impl fmt::Debug for AgentProviderExactCountOutcome {
+impl fmt::Debug for AgentProviderExactCountOutcome<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Counted(counted) => formatter.debug_tuple("Counted").field(counted).finish(),
             Self::Failed(result) => formatter.debug_tuple("Failed").field(result).finish(),
+            Self::Unavailable(error) => formatter.debug_tuple("Unavailable").field(error).finish(),
         }
     }
 }
 
-/// One OpenAI attempt with provider-exact accounting bound before generation.
+/// Borrowed OpenAI provider-exact operation after authenticated counting.
 #[must_use]
-pub struct AgentProviderCountedAttempt {
-    // Provider-exact counting is an optional two-request path. Boxing its
-    // retained dispatch authority keeps the public outcome bounded without a
-    // failure-path allocation or a permanently oversized enum stack slot.
-    attempt: Box<AgentProviderAttempt>,
+pub struct AgentProviderCountedAttempt<'operation> {
+    operation: &'operation mut AgentProviderAttempt,
     count: AgentProviderExactInputCount,
+    input_metrics: AgentProviderInputMetrics,
+    input_metric_receipt: AgentProviderInputMetricReceipt,
 }
 
-impl AgentProviderCountedAttempt {
+impl AgentProviderCountedAttempt<'_> {
     /// Exact authenticated count bound to this attempt's immutable request.
-    pub const fn count(&self) -> &AgentProviderExactInputCount {
+    pub fn count(&self) -> &AgentProviderExactInputCount {
         &self.count
     }
 
     /// Updated input metrics carrying `ProviderExact` structured accounting.
-    pub const fn input_metrics(&self) -> AgentProviderInputMetrics {
-        self.attempt.input_metrics()
+    pub fn input_metrics(&self) -> AgentProviderInputMetrics {
+        self.input_metrics
     }
 
     /// Final ProviderExact input metrics bound before generation dispatch.
     pub fn input_metric_receipt(&self) -> AgentProviderInputMetricReceipt {
-        self.attempt.committed.sealed_input_metric_receipt()
+        self.input_metric_receipt
     }
 
     /// Cancels before generation while preserving count-disclosure evidence.
-    pub fn cancel_without_model_dispatch(self) -> AgentProviderTransportResult {
-        (*self.attempt).cancel_without_dispatch()
+    pub fn cancel_without_model_dispatch(
+        self,
+    ) -> Result<AgentProviderTransportResult, AgentProviderAttemptStateError> {
+        self.operation.cancel_without_dispatch()
     }
 
     /// Dispatches the single model request after exact input accounting.
-    pub async fn execute<F>(self, consume: F) -> AgentProviderTransportResult
+    pub async fn execute<F>(
+        self,
+        consume: F,
+    ) -> Result<AgentProviderTransportResult, AgentProviderAttemptStateError>
     where
         F: FnMut(AgentProviderStreamBatch) -> AgentProviderBatchDisposition,
     {
-        (*self.attempt).execute_model(consume).await
+        self.operation.execute_model(consume).await
     }
 }
 
-impl fmt::Debug for AgentProviderCountedAttempt {
+impl fmt::Debug for AgentProviderCountedAttempt<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("AgentProviderCountedAttempt")
-            .field("attempt", &self.attempt)
+            .field("operation", &self.operation)
             .field("count", &self.count)
             .finish()
     }
 }
 
 impl AgentProviderAttempt {
-    /// Exact non-authorizing call correlation.
-    pub fn call(&self) -> AgentProviderCallIdentity {
-        self.committed.request().call()
+    fn pre_dispatch(
+        &self,
+    ) -> Result<&AgentCommittedProviderRequest, AgentProviderAttemptStateError> {
+        match (&self.phase, self.core.as_ref()) {
+            (
+                AgentProviderAttemptPhase::Ready,
+                Some(AgentProviderAttemptCore::PreDispatch { committed, .. }),
+            )
+            | (
+                AgentProviderAttemptPhase::Counted(_),
+                Some(AgentProviderAttemptCore::PreDispatch { committed, .. }),
+            ) => Ok(committed),
+            (AgentProviderAttemptPhase::CountDriving, _) => {
+                Err(AgentProviderAttemptStateError::CountRecoveryRequired)
+            }
+            (AgentProviderAttemptPhase::GenerationDriving, _) => {
+                Err(AgentProviderAttemptStateError::GenerationRecoveryRequired)
+            }
+            _ => Err(AgentProviderAttemptStateError::Terminal),
+        }
+    }
+
+    fn mark_count_drive_started(&mut self) -> Result<(), AgentProviderAttemptStateError> {
+        match (&self.phase, self.core.as_ref()) {
+            (
+                AgentProviderAttemptPhase::Ready,
+                Some(AgentProviderAttemptCore::PreDispatch { .. }),
+            ) => {
+                self.phase = AgentProviderAttemptPhase::CountDriving;
+                Ok(())
+            }
+            (AgentProviderAttemptPhase::CountDriving, _) => {
+                Err(AgentProviderAttemptStateError::CountRecoveryRequired)
+            }
+            (AgentProviderAttemptPhase::GenerationDriving, _) => {
+                Err(AgentProviderAttemptStateError::GenerationRecoveryRequired)
+            }
+            _ => Err(AgentProviderAttemptStateError::Terminal),
+        }
+    }
+
+    fn count(&self) -> Result<&AgentProviderExactInputCount, AgentProviderAttemptStateError> {
+        match &self.phase {
+            AgentProviderAttemptPhase::Counted(count) => Ok(count),
+            AgentProviderAttemptPhase::CountDriving => {
+                Err(AgentProviderAttemptStateError::CountRecoveryRequired)
+            }
+            AgentProviderAttemptPhase::GenerationDriving => {
+                Err(AgentProviderAttemptStateError::GenerationRecoveryRequired)
+            }
+            AgentProviderAttemptPhase::Ready | AgentProviderAttemptPhase::Terminal => {
+                Err(AgentProviderAttemptStateError::Terminal)
+            }
+        }
+    }
+
+    fn count_driving_committed(
+        &self,
+    ) -> Result<&AgentCommittedProviderRequest, AgentProviderAttemptStateError> {
+        match (&self.phase, self.core.as_ref()) {
+            (
+                AgentProviderAttemptPhase::CountDriving,
+                Some(AgentProviderAttemptCore::PreDispatch { committed, .. }),
+            ) => Ok(committed),
+            _ => Err(self.state_error()),
+        }
+    }
+
+    fn mark_input_count_disclosed(&mut self) {
+        if self.prior_disclosure_stage == AgentProviderDisclosureStage::NotDispatched {
+            self.prior_disclosure_stage = AgentProviderDisclosureStage::InputTokenCountDisclosed;
+        }
+    }
+
+    fn mark_model_may_have_dispatched(&mut self) {
+        self.prior_disclosure_stage = AgentProviderDisclosureStage::ModelRequestMayHaveDispatched;
+    }
+
+    /// Exact non-authorizing call correlation while terminal authority remains.
+    pub fn call(&self) -> Option<AgentProviderCallIdentity> {
+        match self.core.as_ref() {
+            Some(AgentProviderAttemptCore::PreDispatch { committed, .. }) => {
+                Some(committed.request().call())
+            }
+            Some(AgentProviderAttemptCore::Generation(terminal)) => Some(
+                AgentProviderCallIdentity::from_active(terminal.input.active()),
+            ),
+            None => None,
+        }
     }
 
     /// Exact content-free semantic input proof committed at admission.
@@ -1591,13 +1744,25 @@ impl AgentProviderAttempt {
     /// Clone an observation proof before consuming the attempt when a future
     /// bounded continuation protocol needs an exact baseline. Losing this
     /// optional proof grants no authority and requires a fresh snapshot.
-    pub const fn input_evidence(&self) -> &AgentProviderInputEvidence {
-        self.committed.input_evidence()
+    pub fn input_evidence(&self) -> Option<&AgentProviderInputEvidence> {
+        match self.core.as_ref() {
+            Some(AgentProviderAttemptCore::PreDispatch { committed, .. }) => {
+                Some(committed.input_evidence())
+            }
+            Some(AgentProviderAttemptCore::Generation(terminal)) => Some(terminal.input.evidence()),
+            None => None,
+        }
     }
 
     /// Content-free metrics for the exact input that crossed disclosure commit.
-    pub const fn input_metrics(&self) -> AgentProviderInputMetrics {
-        self.committed.input_metrics()
+    pub fn input_metrics(&self) -> Option<AgentProviderInputMetrics> {
+        match self.core.as_ref() {
+            Some(AgentProviderAttemptCore::PreDispatch { committed, .. }) => {
+                Some(committed.input_metrics())
+            }
+            Some(AgentProviderAttemptCore::Generation(terminal)) => Some(terminal.input.metrics()),
+            None => None,
+        }
     }
 
     /// Final input metrics when no provider count can still replace them.
@@ -1606,59 +1771,230 @@ impl AgentProviderAttempt {
     /// attempts return `None`; their receipt becomes available only through
     /// [`AgentProviderCountedAttempt`] or a terminal transport result.
     pub fn input_metric_receipt(&self) -> Option<AgentProviderInputMetricReceipt> {
-        self.committed.input_metric_receipt()
+        match self.core.as_ref() {
+            Some(AgentProviderAttemptCore::PreDispatch { committed, .. }) => {
+                committed.input_metric_receipt()
+            }
+            Some(AgentProviderAttemptCore::Generation(terminal)) => terminal.input.metric_receipt(),
+            None => None,
+        }
+    }
+}
+
+impl AgentProviderAttempt {
+    const fn phase_label(&self) -> &'static str {
+        match self.phase {
+            AgentProviderAttemptPhase::Ready => "ready",
+            AgentProviderAttemptPhase::CountDriving => "count-driving",
+            AgentProviderAttemptPhase::Counted(_) => "counted",
+            AgentProviderAttemptPhase::GenerationDriving => "generation-driving",
+            AgentProviderAttemptPhase::Terminal => "terminal",
+        }
+    }
+
+    fn state_error(&self) -> AgentProviderAttemptStateError {
+        match self.phase {
+            AgentProviderAttemptPhase::CountDriving => {
+                AgentProviderAttemptStateError::CountRecoveryRequired
+            }
+            AgentProviderAttemptPhase::GenerationDriving => {
+                AgentProviderAttemptStateError::GenerationRecoveryRequired
+            }
+            AgentProviderAttemptPhase::Ready
+            | AgentProviderAttemptPhase::Counted(_)
+            | AgentProviderAttemptPhase::Terminal => AgentProviderAttemptStateError::Terminal,
+        }
+    }
+
+    fn slot(&self) -> Option<&AgentProviderSlot> {
+        match self.core.as_ref() {
+            Some(AgentProviderAttemptCore::PreDispatch { slot, .. }) => slot.as_ref(),
+            Some(AgentProviderAttemptCore::Generation(terminal)) => terminal.slot.as_ref(),
+            None => None,
+        }
+    }
+
+    fn fail_stop(&self) {
+        if let Some(slot) = self.slot() {
+            slot.fail_stop();
+        } else {
+            self.cancellation.cancel();
+            self.shutdown.cancel();
+        }
+    }
+
+    fn finish_terminal(
+        &mut self,
+        outcome: AgentProviderTransportOutcomeOwned,
+    ) -> Result<AgentProviderTransportResult, AgentProviderAttemptStateError> {
+        let core = self
+            .core
+            .take()
+            .ok_or(AgentProviderAttemptStateError::Terminal)?;
+        drop(self.credential.take());
+        self.phase = AgentProviderAttemptPhase::Terminal;
+        let result = match core {
+            AgentProviderAttemptCore::PreDispatch { committed, slot } => {
+                let input_metric_receipt = committed.sealed_input_metric_receipt();
+                let (request, input, continuation) = (*committed).into_parts();
+                let (active, _) = input.into_parts();
+                let (_, config, _, _) = request.into_transport_parts();
+                finish_attempt(
+                    active,
+                    config,
+                    outcome,
+                    self.prior_disclosure_stage,
+                    continuation,
+                    input_metric_receipt,
+                    slot,
+                )
+            }
+            AgentProviderAttemptCore::Generation(terminal) => {
+                let input_metric_receipt = terminal.input.sealed_metric_receipt();
+                let (active, _) = terminal.input.into_parts();
+                finish_attempt(
+                    active,
+                    terminal.config,
+                    outcome,
+                    self.prior_disclosure_stage,
+                    terminal.continuation,
+                    input_metric_receipt,
+                    terminal.slot,
+                )
+            }
+        };
+        Ok(result)
+    }
+
+    fn counted_failure(
+        &mut self,
+        outcome: AgentProviderTransportOutcomeOwned,
+    ) -> AgentProviderExactCountOutcome<'_> {
+        match self.finish_terminal(outcome) {
+            Ok(result) => AgentProviderExactCountOutcome::Failed(result),
+            Err(error) => AgentProviderExactCountOutcome::Unavailable(error),
+        }
+    }
+
+    fn counted_handle(
+        &mut self,
+    ) -> Result<AgentProviderCountedAttempt<'_>, AgentProviderAttemptStateError> {
+        let count = self.count()?.clone();
+        let input_metrics = self
+            .input_metrics()
+            .ok_or(AgentProviderAttemptStateError::Terminal)?;
+        let input_metric_receipt = self
+            .input_metric_receipt()
+            .ok_or(AgentProviderAttemptStateError::Terminal)?;
+        Ok(AgentProviderCountedAttempt {
+            operation: self,
+            count,
+            input_metrics,
+            input_metric_receipt,
+        })
+    }
+
+    fn begin_generation_drive(
+        &mut self,
+    ) -> Result<
+        (
+            AgentProviderCallIdentity,
+            AgentProviderCallConfig,
+            AgentProviderEndpoint,
+            Vec<u8>,
+        ),
+        AgentProviderAttemptStateError,
+    > {
+        match self.phase {
+            AgentProviderAttemptPhase::Ready | AgentProviderAttemptPhase::Counted(_) => {}
+            _ => return Err(self.state_error()),
+        }
+        let Some(core) = self.core.take() else {
+            return Err(AgentProviderAttemptStateError::Terminal);
+        };
+        let AgentProviderAttemptCore::PreDispatch { committed, slot } = core else {
+            self.core = Some(core);
+            return Err(AgentProviderAttemptStateError::GenerationRecoveryRequired);
+        };
+        let (request, input, continuation) = (*committed).into_parts();
+        let (call, config, endpoint_class, body) = request.into_transport_parts();
+        self.core = Some(AgentProviderAttemptCore::Generation(Box::new(
+            AgentProviderTerminalCore {
+                input,
+                config: config.clone(),
+                continuation,
+                slot,
+            },
+        )));
+        // Persist ownership transfer before the borrowed drive can reach an
+        // await point. A dropped drive is now abort-only, never replayable.
+        self.phase = AgentProviderAttemptPhase::GenerationDriving;
+        Ok((call, config, endpoint_class, body))
+    }
+
+    fn generation_matches(&self, call: AgentProviderCallIdentity) -> bool {
+        matches!(
+            self.core.as_ref(),
+            Some(AgentProviderAttemptCore::Generation(terminal))
+                if call.matches_active(terminal.input.active())
+        )
     }
 
     /// Calls OpenAI's authenticated exact input-token endpoint once.
     ///
-    /// Semantic disclosure is already committed by transport admission. This
-    /// phase sends only the canonical token-relevant projection bound to both
-    /// that projection and the exact main request. It shares the production
-    /// client, TLS, redirect, timeout, cancellation, and concurrency slot and
-    /// accepts at most a tiny fixed non-stream JSON response. The model request
-    /// is never polled unless this phase succeeds and its count fits the
-    /// original policy reservation.
-    pub async fn count_openai_input_tokens(mut self) -> AgentProviderExactCountOutcome {
-        let prior_disclosure_stage = self.prior_disclosure_stage;
-        let Some(endpoint) = self.input_token_endpoint.clone() else {
-            return AgentProviderExactCountOutcome::Failed(
-                self.finish_without_model(protocol_failure(), prior_disclosure_stage),
-            );
-        };
-        if self.provider != AgentProviderKind::OpenAiResponses
-            || self.committed.request().config().input_accounting_mode()
-                != crate::AgentProviderInputAccountingMode::ProviderExactAfterConservativeReservation
-            || self.cancellation.is_cancelled()
-            || self.shutdown.is_cancelled()
-            || Instant::now() >= self.deadline
-        {
-            let failure = if self.cancellation.is_cancelled() || self.shutdown.is_cancelled() {
-                cancelled_failure()
-            } else if Instant::now() >= self.deadline {
-                timeout_failure()
-            } else {
-                protocol_failure()
+    /// This borrows the operation. Dropping its future after it reaches the
+    /// send point preserves the terminal authority for [`Self::abort`].
+    pub async fn count_openai_input_tokens(&mut self) -> AgentProviderExactCountOutcome<'_> {
+        if matches!(self.phase, AgentProviderAttemptPhase::Counted(_)) {
+            return match self.counted_handle() {
+                Ok(counted) => AgentProviderExactCountOutcome::Counted(counted),
+                Err(error) => AgentProviderExactCountOutcome::Unavailable(error),
             };
-            return AgentProviderExactCountOutcome::Failed(
-                self.finish_without_model(failure, prior_disclosure_stage),
-            );
         }
-        let projection = match self.committed.request().openai_input_token_request() {
+        if !matches!(self.phase, AgentProviderAttemptPhase::Ready) {
+            return AgentProviderExactCountOutcome::Unavailable(self.state_error());
+        }
+        let Some(endpoint) = self.input_token_endpoint.clone() else {
+            return self.counted_failure(protocol_failure());
+        };
+        let valid_count = self.provider == AgentProviderKind::OpenAiResponses
+            && self
+                .pre_dispatch()
+                .map(|committed| {
+                    committed.request().config().input_accounting_mode()
+                        == crate::AgentProviderInputAccountingMode::ProviderExactAfterConservativeReservation
+                })
+                .unwrap_or(false);
+        if !valid_count {
+            return self.counted_failure(protocol_failure());
+        }
+        if self.cancellation.is_cancelled() || self.shutdown.is_cancelled() {
+            return self.counted_failure(cancelled_failure());
+        }
+        if Instant::now() >= self.deadline {
+            return self.counted_failure(timeout_failure());
+        }
+        let projection = match self.pre_dispatch().and_then(|committed| {
+            committed
+                .request()
+                .openai_input_token_request()
+                .map_err(|_| AgentProviderAttemptStateError::Terminal)
+        }) {
             Ok(projection) => projection,
-            Err(_) => {
-                return AgentProviderExactCountOutcome::Failed(
-                    self.finish_without_model(protocol_failure(), prior_disclosure_stage),
-                );
-            }
+            Err(_) => return self.counted_failure(protocol_failure()),
         };
         let binding = projection.binding();
-        let credential = match self.credential.sensitive_header(self.provider) {
+        let credential = match self
+            .credential
+            .as_ref()
+            .ok_or(AgentProviderAttemptStateError::Terminal)
+            .and_then(|credential| {
+                credential
+                    .sensitive_header(self.provider)
+                    .map_err(|_| AgentProviderAttemptStateError::Terminal)
+            }) {
             Ok(credential) => credential,
-            Err(_) => {
-                return AgentProviderExactCountOutcome::Failed(
-                    self.finish_without_model(protocol_failure(), prior_disclosure_stage),
-                );
-            }
+            Err(_) => return self.counted_failure(protocol_failure()),
         };
         let request = openai_input_token_request(
             &self.client,
@@ -1667,47 +2003,29 @@ impl AgentProviderAttempt {
             projection.into_body(),
         );
         if self.cancellation.is_cancelled() || self.shutdown.is_cancelled() {
-            return AgentProviderExactCountOutcome::Failed(
-                self.finish_without_model(cancelled_failure(), prior_disclosure_stage),
-            );
+            return self.counted_failure(cancelled_failure());
         }
         if Instant::now() >= self.deadline {
-            return AgentProviderExactCountOutcome::Failed(
-                self.finish_without_model(timeout_failure(), prior_disclosure_stage),
-            );
+            return self.counted_failure(timeout_failure());
         }
+        if self.mark_count_drive_started().is_err() {
+            return AgentProviderExactCountOutcome::Unavailable(self.state_error());
+        }
+        // This is immediately before the first possible request.send() poll.
+        // Count disclosure is monotonic but still proves zero model dispatch.
+        self.mark_input_count_disclosed();
         let deadline = tokio::time::sleep_until(tokio::time::Instant::from_std(self.deadline));
         tokio::pin!(deadline);
         let response = tokio::select! {
             biased;
-            () = self.cancellation.cancelled() => {
-                return AgentProviderExactCountOutcome::Failed(self.finish_without_model(
-                    cancelled_failure(),
-                    AgentProviderDisclosureStage::InputTokenCountDisclosed,
-                ));
-            }
-            () = self.shutdown.cancelled() => {
-                return AgentProviderExactCountOutcome::Failed(self.finish_without_model(
-                    cancelled_failure(),
-                    AgentProviderDisclosureStage::InputTokenCountDisclosed,
-                ));
-            }
-            () = &mut deadline => {
-                return AgentProviderExactCountOutcome::Failed(self.finish_without_model(
-                    timeout_failure(),
-                    AgentProviderDisclosureStage::InputTokenCountDisclosed,
-                ));
-            }
+            () = self.cancellation.cancelled() => return self.counted_failure(cancelled_failure()),
+            () = self.shutdown.cancelled() => return self.counted_failure(cancelled_failure()),
+            () = &mut deadline => return self.counted_failure(timeout_failure()),
             response = request.send() => response,
         };
         let response = match response {
             Ok(response) => response,
-            Err(error) => {
-                return AgentProviderExactCountOutcome::Failed(self.finish_without_model(
-                    network_failure(&error),
-                    AgentProviderDisclosureStage::InputTokenCountDisclosed,
-                ));
-            }
+            Err(error) => return self.counted_failure(network_failure(&error)),
         };
         if response.url() != &endpoint
             || !response_headers_admitted(response.headers())
@@ -1717,270 +2035,198 @@ impl AgentProviderAttempt {
             )
             || !response_encoding_admitted(response.headers())
         {
-            return AgentProviderExactCountOutcome::Failed(self.finish_without_model(
-                protocol_failure(),
-                AgentProviderDisclosureStage::InputTokenCountDisclosed,
-            ));
+            return self.counted_failure(protocol_failure());
         }
         if response.status() != StatusCode::OK {
             let failure = status_failure(response.status(), response.headers());
-            return AgentProviderExactCountOutcome::Failed(self.finish_without_model(
-                AgentProviderTransportOutcomeOwned::Failed(failure),
-                AgentProviderDisclosureStage::InputTokenCountDisclosed,
-            ));
+            return self.counted_failure(AgentProviderTransportOutcomeOwned::Failed(failure));
         }
         if !response_json_content_type_admitted(response.headers()) {
-            return AgentProviderExactCountOutcome::Failed(self.finish_without_model(
-                protocol_failure(),
-                AgentProviderDisclosureStage::InputTokenCountDisclosed,
-            ));
+            return self.counted_failure(protocol_failure());
         }
-
         let mut body = Vec::new();
         if body
             .try_reserve_exact(MAX_OPENAI_INPUT_TOKEN_RESPONSE_BYTES)
             .is_err()
         {
-            return AgentProviderExactCountOutcome::Failed(self.finish_without_model(
-                protocol_failure(),
-                AgentProviderDisclosureStage::InputTokenCountDisclosed,
-            ));
+            return self.counted_failure(protocol_failure());
         }
         let mut stream = response.bytes_stream();
         loop {
             let next = tokio::select! {
                 biased;
-                () = self.cancellation.cancelled() => {
-                    return AgentProviderExactCountOutcome::Failed(self.finish_without_model(
-                        cancelled_failure(),
-                        AgentProviderDisclosureStage::InputTokenCountDisclosed,
-                    ));
-                }
-                () = self.shutdown.cancelled() => {
-                    return AgentProviderExactCountOutcome::Failed(self.finish_without_model(
-                        cancelled_failure(),
-                        AgentProviderDisclosureStage::InputTokenCountDisclosed,
-                    ));
-                }
-                () = &mut deadline => {
-                    return AgentProviderExactCountOutcome::Failed(self.finish_without_model(
-                        timeout_failure(),
-                        AgentProviderDisclosureStage::InputTokenCountDisclosed,
-                    ));
-                }
+                () = self.cancellation.cancelled() => return self.counted_failure(cancelled_failure()),
+                () = self.shutdown.cancelled() => return self.counted_failure(cancelled_failure()),
+                () = &mut deadline => return self.counted_failure(timeout_failure()),
                 next = stream.try_next() => next,
             };
             let chunk = match next {
                 Ok(Some(chunk)) => chunk,
                 Ok(None) => break,
-                Err(error) => {
-                    return AgentProviderExactCountOutcome::Failed(self.finish_without_model(
-                        network_failure(&error),
-                        AgentProviderDisclosureStage::InputTokenCountDisclosed,
-                    ));
-                }
+                Err(error) => return self.counted_failure(network_failure(&error)),
             };
             let Some(next_len) = body.len().checked_add(chunk.len()) else {
-                return AgentProviderExactCountOutcome::Failed(self.finish_without_model(
-                    protocol_failure(),
-                    AgentProviderDisclosureStage::InputTokenCountDisclosed,
-                ));
+                return self.counted_failure(protocol_failure());
             };
             if next_len > MAX_OPENAI_INPUT_TOKEN_RESPONSE_BYTES {
-                return AgentProviderExactCountOutcome::Failed(self.finish_without_model(
-                    protocol_failure(),
-                    AgentProviderDisclosureStage::InputTokenCountDisclosed,
-                ));
+                return self.counted_failure(protocol_failure());
             }
             body.extend_from_slice(&chunk);
         }
         let tokens = match decode_openai_input_token_count(&body) {
             Some(tokens) => tokens,
-            None => {
-                return AgentProviderExactCountOutcome::Failed(self.finish_without_model(
-                    protocol_failure(),
-                    AgentProviderDisclosureStage::InputTokenCountDisclosed,
-                ));
-            }
+            None => return self.counted_failure(protocol_failure()),
         };
-        let count = match AgentProviderExactInputCount::try_new(
-            self.committed.request(),
-            binding,
-            tokens,
-        ) {
+        let count = match self.count_driving_committed().and_then(|committed| {
+            AgentProviderExactInputCount::try_new(committed.request(), binding, tokens)
+                .map_err(|_| AgentProviderAttemptStateError::Terminal)
+        }) {
             Ok(count) => count,
-            Err(_) => {
-                return AgentProviderExactCountOutcome::Failed(self.finish_without_model(
-                    protocol_failure(),
-                    AgentProviderDisclosureStage::InputTokenCountDisclosed,
-                ));
-            }
+            Err(_) => return self.counted_failure(protocol_failure()),
         };
-        if self
-            .committed
-            .bind_provider_exact_input_count(count.clone())
-            .is_err()
-        {
-            return AgentProviderExactCountOutcome::Failed(self.finish_without_model(
-                protocol_failure(),
-                AgentProviderDisclosureStage::InputTokenCountDisclosed,
-            ));
+        let bound = match self.core.as_mut() {
+            Some(AgentProviderAttemptCore::PreDispatch { committed, .. }) => {
+                committed.bind_provider_exact_input_count(count.clone())
+            }
+            _ => return AgentProviderExactCountOutcome::Unavailable(self.state_error()),
+        };
+        if bound.is_err() {
+            return self.counted_failure(protocol_failure());
         }
-        self.prior_disclosure_stage = AgentProviderDisclosureStage::InputTokenCountDisclosed;
-        AgentProviderExactCountOutcome::Counted(AgentProviderCountedAttempt {
-            attempt: Box::new(self),
-            count,
-        })
+        self.phase = AgentProviderAttemptPhase::Counted(count);
+        match self.counted_handle() {
+            Ok(counted) => AgentProviderExactCountOutcome::Counted(counted),
+            Err(error) => AgentProviderExactCountOutcome::Unavailable(error),
+        }
     }
 
-    /// Cancels after commitment without polling another HTTP request.
+    /// Consumes the retained terminal authority after a host-forced drive drop.
     ///
-    /// Model usage and cost are provably zero. The returned disclosure stage
-    /// still records whether authenticated counting already sent the canonical
-    /// input projection, while policy taint remains committed from admission.
-    pub fn cancel_without_dispatch(mut self) -> AgentProviderTransportResult {
-        let slot = self.slot.take();
-        let input_metric_receipt = self.committed.sealed_input_metric_receipt();
-        let (request, input, _) = (*self.committed).into_parts();
-        let (active, _) = input.into_parts();
-        let (_, config, _, _) = request.into_transport_parts();
-        finish_attempt(
-            active,
-            config,
-            cancelled_failure(),
-            self.prior_disclosure_stage,
-            None,
-            input_metric_receipt,
-            slot,
-        )
+    /// The public reason only classifies the content-free failure. Exact-zero
+    /// versus reservation-ceiling accounting derives exclusively from the
+    /// private monotonic disclosure stage persisted by the drive.
+    pub fn abort(
+        mut self,
+        reason: AgentProviderAbortReason,
+    ) -> Result<AgentProviderTransportResult, AgentProviderAttemptStateError> {
+        let outcome = match reason {
+            AgentProviderAbortReason::HostDeadline => timeout_failure(),
+            AgentProviderAbortReason::ControllerFault => integration_failure(),
+        };
+        self.finish_terminal(outcome)
     }
 
-    /// Dispatches an Anthropic request without an OpenAI accounting phase.
-    ///
-    /// OpenAI attempts cannot use this entry point. Provider-exact OpenAI calls
-    /// become dispatchable only through [`Self::count_openai_input_tokens`] and
-    /// [`AgentProviderCountedAttempt`]; pinned exact-local OpenAI calls use
-    /// [`Self::execute_openai_exact_local`].
-    pub async fn execute_anthropic<F>(self, consume: F) -> AgentProviderTransportResult
+    /// Cancels before a generation request can have been dispatched.
+    pub fn cancel_without_dispatch(
+        &mut self,
+    ) -> Result<AgentProviderTransportResult, AgentProviderAttemptStateError> {
+        if matches!(self.phase, AgentProviderAttemptPhase::GenerationDriving) {
+            return Err(AgentProviderAttemptStateError::GenerationRecoveryRequired);
+        }
+        if matches!(self.phase, AgentProviderAttemptPhase::Terminal) {
+            return Err(AgentProviderAttemptStateError::Terminal);
+        }
+        self.finish_terminal(cancelled_failure())
+    }
+
+    /// Drives one Anthropic request while retaining all terminal authority.
+    pub async fn execute_anthropic<F>(
+        &mut self,
+        consume: F,
+    ) -> Result<AgentProviderTransportResult, AgentProviderAttemptStateError>
     where
         F: FnMut(AgentProviderStreamBatch) -> AgentProviderBatchDisposition,
     {
+        if matches!(
+            self.phase,
+            AgentProviderAttemptPhase::CountDriving
+                | AgentProviderAttemptPhase::GenerationDriving
+                | AgentProviderAttemptPhase::Terminal
+        ) {
+            return Err(self.state_error());
+        }
         if self.provider != AgentProviderKind::AnthropicMessages {
-            let disclosure_stage = self.prior_disclosure_stage;
-            return self.finish_without_model(protocol_failure(), disclosure_stage);
+            return self.finish_terminal(protocol_failure());
         }
         self.execute_model(consume).await
     }
 
-    /// Dispatches an OpenAI request admitted by pinned exact-local accounting.
-    ///
-    /// Provider-exact attempts cannot use this path; they remain typestate-gated
-    /// behind the authenticated count phase.
-    pub async fn execute_openai_exact_local<F>(self, consume: F) -> AgentProviderTransportResult
+    /// Drives an OpenAI request admitted by pinned exact-local accounting.
+    pub async fn execute_openai_exact_local<F>(
+        &mut self,
+        consume: F,
+    ) -> Result<AgentProviderTransportResult, AgentProviderAttemptStateError>
     where
         F: FnMut(AgentProviderStreamBatch) -> AgentProviderBatchDisposition,
     {
-        if self.provider != AgentProviderKind::OpenAiResponses
-            || !matches!(
-                self.committed.request().config().input_accounting_mode(),
-                crate::AgentProviderInputAccountingMode::ExactLocal { .. }
-            )
-        {
-            let disclosure_stage = self.prior_disclosure_stage;
-            return self.finish_without_model(protocol_failure(), disclosure_stage);
+        if matches!(
+            self.phase,
+            AgentProviderAttemptPhase::CountDriving
+                | AgentProviderAttemptPhase::GenerationDriving
+                | AgentProviderAttemptPhase::Terminal
+        ) {
+            return Err(self.state_error());
+        }
+        let exact_local = self.provider == AgentProviderKind::OpenAiResponses
+            && self
+                .pre_dispatch()
+                .map(|committed| {
+                    matches!(
+                        committed.request().config().input_accounting_mode(),
+                        crate::AgentProviderInputAccountingMode::ExactLocal { .. }
+                    )
+                })
+                .unwrap_or(false);
+        if !exact_local {
+            return self.finish_terminal(protocol_failure());
         }
         self.execute_model(consume).await
     }
 
     #[cfg(test)]
-    async fn execute<F>(self, consume: F) -> AgentProviderTransportResult
+    async fn execute<F>(&mut self, consume: F) -> AgentProviderTransportResult
     where
         F: FnMut(AgentProviderStreamBatch) -> AgentProviderBatchDisposition,
     {
-        self.execute_model(consume).await
+        self.execute_model(consume)
+            .await
+            .expect("test operation state")
     }
 
-    /// Transmits once, decodes bounded SSE, and returns terminal policy authority.
-    ///
-    /// The callback sees only normalized nonempty batches. Returning `Cancel`
-    /// wins before another body chunk is polled. The client has both redirects
-    /// and automatic retries disabled, so this future can issue at most one POST.
-    async fn execute_model<F>(mut self, mut consume: F) -> AgentProviderTransportResult
+    async fn execute_model<F>(
+        &mut self,
+        mut consume: F,
+    ) -> Result<AgentProviderTransportResult, AgentProviderAttemptStateError>
     where
         F: FnMut(AgentProviderStreamBatch) -> AgentProviderBatchDisposition,
     {
-        let prior_disclosure_stage = self.prior_disclosure_stage;
-        let slot = self.slot.take();
-        let input_metric_receipt = self.committed.sealed_input_metric_receipt();
-        let (request, input, continuation) = (*self.committed).into_parts();
-        let (active, _) = input.into_parts();
-        let (call, config, endpoint_class, body) = request.into_transport_parts();
-        if !call.matches_active(&active)
+        let (call, config, endpoint_class, body) = self.begin_generation_drive()?;
+        if !self.generation_matches(call)
             || !provider_endpoint_matches(self.provider, endpoint_class)
         {
-            return finish_attempt(
-                active,
-                config,
-                protocol_failure(),
-                prior_disclosure_stage,
-                continuation,
-                input_metric_receipt,
-                slot,
-            );
+            return self.finish_terminal(protocol_failure());
         }
         if Instant::now() >= self.deadline {
-            return finish_attempt(
-                active,
-                config,
-                timeout_failure(),
-                prior_disclosure_stage,
-                continuation,
-                input_metric_receipt,
-                slot,
-            );
+            return self.finish_terminal(timeout_failure());
         }
-        // Avoid materializing an authentication header or request for an
-        // attempt whose sticky cancellation was already observable when this
-        // future began. The later check remains required to close the window
-        // after request construction and before the send future is polled.
         if self.cancellation.is_cancelled() || self.shutdown.is_cancelled() {
-            return finish_attempt(
-                active,
-                config,
-                cancelled_failure(),
-                prior_disclosure_stage,
-                continuation,
-                input_metric_receipt,
-                slot,
-            );
+            return self.finish_terminal(cancelled_failure());
         }
         let mut decoder = match AgentProviderStreamDecoder::try_new(call, &config) {
             Ok(decoder) => decoder,
-            Err(_) => {
-                return finish_attempt(
-                    active,
-                    config,
-                    protocol_failure(),
-                    prior_disclosure_stage,
-                    continuation,
-                    input_metric_receipt,
-                    slot,
-                );
-            }
+            Err(_) => return self.finish_terminal(protocol_failure()),
         };
-        let credential = match self.credential.sensitive_header(self.provider) {
+        let credential = match self
+            .credential
+            .as_ref()
+            .ok_or(AgentProviderAttemptStateError::Terminal)
+            .and_then(|credential| {
+                credential
+                    .sensitive_header(self.provider)
+                    .map_err(|_| AgentProviderAttemptStateError::Terminal)
+            }) {
             Ok(credential) => credential,
-            Err(_) => {
-                return finish_attempt(
-                    active,
-                    config,
-                    protocol_failure(),
-                    prior_disclosure_stage,
-                    continuation,
-                    input_metric_receipt,
-                    slot,
-                );
-            }
+            Err(_) => return self.finish_terminal(protocol_failure()),
         };
         let request = provider_request(
             &self.client,
@@ -1990,114 +2236,32 @@ impl AgentProviderAttempt {
             body,
         );
         if self.cancellation.is_cancelled() || self.shutdown.is_cancelled() {
-            return finish_attempt(
-                active,
-                config,
-                cancelled_failure(),
-                prior_disclosure_stage,
-                continuation,
-                input_metric_receipt,
-                slot,
-            );
+            return self.finish_terminal(cancelled_failure());
         }
         if Instant::now() >= self.deadline {
-            return finish_attempt(
-                active,
-                config,
-                timeout_failure(),
-                prior_disclosure_stage,
-                continuation,
-                input_metric_receipt,
-                slot,
-            );
+            return self.finish_terminal(timeout_failure());
         }
+        // This is immediately before the first possible generation send poll.
+        self.mark_model_may_have_dispatched();
         let deadline = tokio::time::sleep_until(tokio::time::Instant::from_std(self.deadline));
         tokio::pin!(deadline);
         let response = tokio::select! {
             biased;
-            () = self.cancellation.cancelled() => {
-                return finish_attempt(
-                    active,
-                    config,
-                    cancelled_failure(),
-                    AgentProviderDisclosureStage::ModelRequestMayHaveDispatched,
-                    continuation,
-                    input_metric_receipt,
-                    slot,
-                );
-            }
-            () = self.shutdown.cancelled() => {
-                return finish_attempt(
-                    active,
-                    config,
-                    cancelled_failure(),
-                    AgentProviderDisclosureStage::ModelRequestMayHaveDispatched,
-                    continuation,
-                    input_metric_receipt,
-                    slot,
-                );
-            }
-            () = &mut deadline => {
-                return finish_attempt(
-                    active,
-                    config,
-                    timeout_failure(),
-                    AgentProviderDisclosureStage::ModelRequestMayHaveDispatched,
-                    continuation,
-                    input_metric_receipt,
-                    slot,
-                );
-            }
+            () = self.cancellation.cancelled() => return self.finish_terminal(cancelled_failure()),
+            () = self.shutdown.cancelled() => return self.finish_terminal(cancelled_failure()),
+            () = &mut deadline => return self.finish_terminal(timeout_failure()),
             response = request.send() => response,
         };
         let response = match response {
             Ok(response) => response,
-            Err(error) => {
-                let outcome = network_failure(&error);
-                return finish_attempt(
-                    active,
-                    config,
-                    outcome,
-                    AgentProviderDisclosureStage::ModelRequestMayHaveDispatched,
-                    continuation,
-                    input_metric_receipt,
-                    slot,
-                );
-            }
+            Err(error) => return self.finish_terminal(network_failure(&error)),
         };
-        if response.url() != &self.endpoint {
-            return finish_attempt(
-                active,
-                config,
-                protocol_failure(),
-                AgentProviderDisclosureStage::ModelRequestMayHaveDispatched,
-                continuation,
-                input_metric_receipt,
-                slot,
-            );
-        }
-        if !response_headers_admitted(response.headers()) {
-            return finish_attempt(
-                active,
-                config,
-                protocol_failure(),
-                AgentProviderDisclosureStage::ModelRequestMayHaveDispatched,
-                continuation,
-                input_metric_receipt,
-                slot,
-            );
+        if response.url() != &self.endpoint || !response_headers_admitted(response.headers()) {
+            return self.finish_terminal(protocol_failure());
         }
         if response.status() != StatusCode::OK {
             let failure = status_failure(response.status(), response.headers());
-            return finish_attempt(
-                active,
-                config,
-                AgentProviderTransportOutcomeOwned::Failed(failure),
-                AgentProviderDisclosureStage::ModelRequestMayHaveDispatched,
-                continuation,
-                input_metric_receipt,
-                slot,
-            );
+            return self.finish_terminal(AgentProviderTransportOutcomeOwned::Failed(failure));
         }
         if !response_content_length_admitted(
             response.headers(),
@@ -2105,159 +2269,61 @@ impl AgentProviderAttempt {
         ) || !response_encoding_admitted(response.headers())
             || !response_content_type_admitted(response.headers())
         {
-            return finish_attempt(
-                active,
-                config,
-                protocol_failure(),
-                AgentProviderDisclosureStage::ModelRequestMayHaveDispatched,
-                continuation,
-                input_metric_receipt,
-                slot,
-            );
+            return self.finish_terminal(protocol_failure());
         }
-
         let mut stream = response.bytes_stream();
         loop {
             let next = tokio::select! {
                 biased;
-                () = self.cancellation.cancelled() => {
-                    return finish_attempt(
-                        active,
-                        config,
-                        cancelled_failure(),
-                        AgentProviderDisclosureStage::ModelRequestMayHaveDispatched,
-                        continuation,
-                        input_metric_receipt,
-                        slot,
-                    );
-                }
-                () = self.shutdown.cancelled() => {
-                    return finish_attempt(
-                        active,
-                        config,
-                        cancelled_failure(),
-                        AgentProviderDisclosureStage::ModelRequestMayHaveDispatched,
-                        continuation,
-                        input_metric_receipt,
-                        slot,
-                    );
-                }
-                () = &mut deadline => {
-                    return finish_attempt(
-                        active,
-                        config,
-                        timeout_failure(),
-                        AgentProviderDisclosureStage::ModelRequestMayHaveDispatched,
-                        continuation,
-                        input_metric_receipt,
-                        slot,
-                    );
-                }
+                () = self.cancellation.cancelled() => return self.finish_terminal(cancelled_failure()),
+                () = self.shutdown.cancelled() => return self.finish_terminal(cancelled_failure()),
+                () = &mut deadline => return self.finish_terminal(timeout_failure()),
                 next = stream.try_next() => next,
             };
             let chunk = match next {
                 Ok(Some(chunk)) => chunk,
                 Ok(None) => break,
-                Err(error) => {
-                    let outcome = network_failure(&error);
-                    return finish_attempt(
-                        active,
-                        config,
-                        outcome,
-                        AgentProviderDisclosureStage::ModelRequestMayHaveDispatched,
-                        continuation,
-                        input_metric_receipt,
-                        slot,
-                    );
-                }
+                Err(error) => return self.finish_terminal(network_failure(&error)),
             };
             let batch = match decoder.push(&chunk) {
                 Ok(batch) => batch,
-                Err(_) => {
-                    return finish_attempt(
-                        active,
-                        config,
-                        protocol_failure(),
-                        AgentProviderDisclosureStage::ModelRequestMayHaveDispatched,
-                        continuation,
-                        input_metric_receipt,
-                        slot,
-                    );
-                }
+                Err(_) => return self.finish_terminal(protocol_failure()),
             };
-            let disposition = if batch.deltas().is_empty() {
-                AgentProviderBatchDisposition::Continue
-            } else {
-                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| consume(batch))) {
-                    Ok(disposition) => disposition,
-                    Err(_) => {
-                        if let Some(slot) = &slot {
-                            slot.fail_stop();
+            if !batch.deltas().is_empty() {
+                let disposition =
+                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| consume(batch)))
+                    {
+                        Ok(disposition) => disposition,
+                        Err(_) => {
+                            self.fail_stop();
+                            return self.finish_terminal(integration_failure());
                         }
-                        return finish_attempt(
-                            active,
-                            config,
-                            integration_failure(),
-                            AgentProviderDisclosureStage::ModelRequestMayHaveDispatched,
-                            continuation,
-                            input_metric_receipt,
-                            slot,
-                        );
-                    }
+                    };
+                if disposition == AgentProviderBatchDisposition::Cancel {
+                    return self.finish_terminal(cancelled_failure());
                 }
-            };
-            if disposition == AgentProviderBatchDisposition::Cancel {
-                return finish_attempt(
-                    active,
-                    config,
-                    cancelled_failure(),
-                    AgentProviderDisclosureStage::ModelRequestMayHaveDispatched,
-                    continuation,
-                    input_metric_receipt,
-                    slot,
-                );
             }
         }
         // Transport-observed body EOF is the completion linearization point.
         // Cancellation wins while another body item is pending; once EOF wins,
-        // a later cancellation cannot retroactively erase the terminal. Tool
-        // authority still remains sealed until exact pricing/policy settlement,
-        // and the controller independently revalidates policy and page state
-        // before any proposal can become a native effect.
+        // later cancellation cannot erase the terminal. Pricing and controller
+        // policy checks remain required before any native effect can occur.
         let outcome = match decoder.finish() {
             Ok(finished) => AgentProviderTransportOutcomeOwned::Stream(Box::new(finished)),
             Err(_) => protocol_failure(),
         };
-        finish_attempt(
-            active,
-            config,
-            outcome,
-            AgentProviderDisclosureStage::ModelRequestMayHaveDispatched,
-            continuation,
-            input_metric_receipt,
-            slot,
-        )
+        self.finish_terminal(outcome)
     }
+}
 
-    fn finish_without_model(
-        mut self,
-        outcome: AgentProviderTransportOutcomeOwned,
-        disclosure_stage: AgentProviderDisclosureStage,
-    ) -> AgentProviderTransportResult {
-        let slot = self.slot.take();
-        let input_metric_receipt = self.committed.sealed_input_metric_receipt();
-        let (request, input, continuation) = (*self.committed).into_parts();
-        let (active, _) = input.into_parts();
-        let (_, config, _, _) = request.into_transport_parts();
-        finish_attempt(
-            active,
-            config,
-            outcome,
-            disclosure_stage,
-            continuation,
-            input_metric_receipt,
-            slot,
-        )
+impl Drop for AgentProviderAttempt {
+    fn drop(&mut self) {
+        if self.core.is_some() {
+            // An abandoned operation cannot look clean: seal the shared slot
+            // before its move-only policy authority is dropped.
+            self.fail_stop();
+            self.phase = AgentProviderAttemptPhase::Terminal;
+        }
     }
 }
 
@@ -2269,7 +2335,7 @@ impl fmt::Debug for AgentProviderAttempt {
             .field("provider", &self.provider)
             .field("endpoint", &"[fixed]")
             .field("credential", &"[redacted]")
-            .field("request_bytes", &self.committed.request().byte_len())
+            .field("phase", &self.phase_label())
             .field("cancelled", &self.cancellation.is_cancelled())
             .finish()
     }
@@ -2625,6 +2691,44 @@ mod tests {
 
     const NOW: u64 = 2_000;
     const EXPIRES_AT: u64 = 100_000;
+
+    trait TestTransportResultExt {
+        fn disclosure_stage(&self) -> AgentProviderDisclosureStage;
+        fn input_metric_receipt(&self) -> AgentProviderInputMetricReceipt;
+        fn outcome(&self) -> AgentProviderTransportOutcome<'_>;
+        fn usage_knowledge(&self) -> AgentProviderUsageKnowledge;
+        fn into_policy_settlement(self) -> AgentProviderPolicySettlement;
+    }
+
+    impl TestTransportResultExt
+        for Result<AgentProviderTransportResult, AgentProviderAttemptStateError>
+    {
+        fn disclosure_stage(&self) -> AgentProviderDisclosureStage {
+            self.as_ref()
+                .expect("test operation state")
+                .disclosure_stage()
+        }
+
+        fn input_metric_receipt(&self) -> AgentProviderInputMetricReceipt {
+            self.as_ref()
+                .expect("test operation state")
+                .input_metric_receipt()
+        }
+
+        fn outcome(&self) -> AgentProviderTransportOutcome<'_> {
+            self.as_ref().expect("test operation state").outcome()
+        }
+
+        fn usage_knowledge(&self) -> AgentProviderUsageKnowledge {
+            self.as_ref()
+                .expect("test operation state")
+                .usage_knowledge()
+        }
+
+        fn into_policy_settlement(self) -> AgentProviderPolicySettlement {
+            self.expect("test operation state").into_policy_settlement()
+        }
+    }
 
     struct FixedCounter {
         revision: SemanticTokenizerRevision,
@@ -3202,6 +3306,16 @@ mod tests {
                 .expect("terminal bytes sent");
         }
 
+        fn terminal_observed(&self) -> bool {
+            match self.terminal_sent.try_recv() {
+                Ok(()) => true,
+                Err(mpsc::TryRecvError::Empty) => false,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    panic!("terminal-observation server disconnected")
+                }
+            }
+        }
+
         fn release_eof(&self) {
             self.release.send(()).expect("release EOF");
         }
@@ -3262,6 +3376,16 @@ mod tests {
             self.ready
                 .recv_timeout(Duration::from_secs(3))
                 .expect("request dispatch");
+        }
+
+        fn request_observed(&self) -> bool {
+            match self.ready.try_recv() {
+                Ok(()) => true,
+                Err(mpsc::TryRecvError::Empty) => false,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    panic!("request-observation server disconnected")
+                }
+            }
         }
 
         fn finish(mut self) -> CapturedRequest {
@@ -4065,7 +4189,7 @@ mod tests {
         let (mut policy, input) = provider_exact_fixture();
         let mut input_reducer = provider_input_metrics(&policy, 41_001);
         let reserved_before_count = policy.accounting().reserved_model_tokens();
-        let attempt = transport
+        let mut attempt = transport
             .try_admit(
                 input,
                 &mut policy,
@@ -4078,8 +4202,8 @@ mod tests {
             None,
             "provisional conservative accounting must not be recordable"
         );
-        let admitted_call = attempt.call();
-        let admitted_metrics = attempt.input_metrics();
+        let admitted_call = attempt.call().expect("live call");
+        let admitted_metrics = attempt.input_metrics().expect("live input metrics");
         assert_eq!(
             admitted_metrics
                 .semantic_payload_tokens()
@@ -4101,6 +4225,9 @@ mod tests {
         let counted = match attempt.count_openai_input_tokens().await {
             AgentProviderExactCountOutcome::Counted(counted) => counted,
             AgentProviderExactCountOutcome::Failed(_) => panic!("exact count expected"),
+            AgentProviderExactCountOutcome::Unavailable(error) => {
+                panic!("count drive unavailable: {error:?}")
+            }
         };
         let counted_metric_receipt = counted.input_metric_receipt();
         assert_eq!(counted_metric_receipt.call(), admitted_call.call());
@@ -4210,7 +4337,7 @@ mod tests {
         )
         .expect("credential");
         let (mut policy, input) = provider_exact_fixture();
-        let attempt = transport
+        let mut attempt = transport
             .try_admit(
                 input,
                 &mut policy,
@@ -4221,6 +4348,9 @@ mod tests {
         let counted = match attempt.count_openai_input_tokens().await {
             AgentProviderExactCountOutcome::Counted(counted) => counted,
             AgentProviderExactCountOutcome::Failed(_) => panic!("count phase expected"),
+            AgentProviderExactCountOutcome::Unavailable(error) => {
+                panic!("count drive unavailable: {error:?}")
+            }
         };
         let result = counted
             .execute(|_| AgentProviderBatchDisposition::Continue)
@@ -4291,6 +4421,9 @@ mod tests {
         {
             AgentProviderExactCountOutcome::Counted(_) => panic!("oversized response accepted"),
             AgentProviderExactCountOutcome::Failed(result) => result,
+            AgentProviderExactCountOutcome::Unavailable(error) => {
+                panic!("count drive unavailable: {error:?}")
+            }
         };
         let terminal_metric_receipt = result.input_metric_receipt();
         assert_eq!(
@@ -4372,6 +4505,9 @@ mod tests {
         {
             AgentProviderExactCountOutcome::Counted(_) => panic!("over-budget count accepted"),
             AgentProviderExactCountOutcome::Failed(result) => result,
+            AgentProviderExactCountOutcome::Unavailable(error) => {
+                panic!("count drive unavailable: {error:?}")
+            }
         };
         assert_eq!(
             result.disclosure_stage(),
@@ -4435,6 +4571,9 @@ mod tests {
                 panic!("below-range input count reached generation typestate")
             }
             AgentProviderExactCountOutcome::Failed(result) => result,
+            AgentProviderExactCountOutcome::Unavailable(error) => {
+                panic!("count drive unavailable: {error:?}")
+            }
         };
         assert_eq!(
             result.disclosure_stage(),
@@ -4546,6 +4685,9 @@ mod tests {
                 panic!("exact-local input reached provider counting")
             }
             AgentProviderExactCountOutcome::Failed(result) => result,
+            AgentProviderExactCountOutcome::Unavailable(error) => {
+                panic!("count drive unavailable: {error:?}")
+            }
         };
         assert_eq!(
             exact_result.disclosure_stage(),
@@ -4612,7 +4754,7 @@ mod tests {
         )
         .expect("credential");
         let (mut policy, input) = provider_fixture(AgentProviderKind::OpenAiResponses);
-        let attempt = transport
+        let mut attempt = transport
             .try_admit(
                 input,
                 &mut policy,
@@ -4623,12 +4765,12 @@ mod tests {
         let attempt_debug = format!("{attempt:?}");
         assert!(!attempt_debug.contains("synthetic-openai-key"));
         assert!(!attempt_debug.contains("synthetic fixture marker"));
-        let continuation = attempt.input_evidence().clone();
-        let input_metrics = attempt.input_metrics();
+        let continuation = attempt.input_evidence().expect("input evidence").clone();
+        let input_metrics = attempt.input_metrics().expect("input metrics");
         let metric_receipt = attempt
             .input_metric_receipt()
             .expect("exact-local input metrics are final before dispatch");
-        assert_eq!(metric_receipt.call(), attempt.call().call());
+        assert_eq!(metric_receipt.call(), attempt.call().expect("call").call());
         assert_eq!(metric_receipt.metrics(), input_metrics);
         assert!(input_metrics.serialized_request_bytes() > 0);
         let AgentProviderSemanticInputStats::Observation(semantic_stats) = input_metrics.semantic()
@@ -4789,7 +4931,7 @@ mod tests {
         )
         .expect("credential");
         let (mut policy, input) = provider_fixture(AgentProviderKind::OpenAiResponses);
-        let attempt = transport
+        let mut attempt = transport
             .try_admit(
                 input,
                 &mut policy,
@@ -5057,7 +5199,7 @@ mod tests {
         )
         .expect("credential");
         let (mut policy, input) = provider_fixture(provider);
-        let attempt = transport
+        let mut attempt = transport
             .try_admit(
                 input,
                 &mut policy,
@@ -5445,7 +5587,7 @@ mod tests {
             vec![provider_tool_stream(provider)],
         );
         let diff_transport = test_transport(&diff_server);
-        let diff_attempt = diff_transport
+        let mut diff_attempt = diff_transport
             .try_admit(
                 prepared.into_transport_input(),
                 &mut fixture.policy,
@@ -5455,6 +5597,7 @@ mod tests {
             .expect("diff transport admission");
         let committed_acknowledgement = diff_attempt
             .input_evidence()
+            .expect("diff evidence")
             .diff_receipt()
             .expect("committed diff receipt")
             .acknowledgement()
@@ -5474,6 +5617,7 @@ mod tests {
         assert_eq!(
             diff_attempt
                 .input_evidence()
+                .expect("diff evidence")
                 .observation_acknowledgement()
                 .expect("diff acknowledgement"),
             &committed_acknowledgement
@@ -5593,7 +5737,7 @@ mod tests {
             initial_server.anthropic.as_str(),
         )
         .expect("initial transport");
-        let initial_attempt = initial_transport
+        let mut initial_attempt = initial_transport
             .try_admit(
                 fixture.input,
                 &mut fixture.policy,
@@ -5606,6 +5750,9 @@ mod tests {
             AgentProviderExactCountOutcome::Counted(counted) => counted,
             AgentProviderExactCountOutcome::Failed(result) => {
                 panic!("initial count failed: {result:?}")
+            }
+            AgentProviderExactCountOutcome::Unavailable(error) => {
+                panic!("initial count unavailable: {error:?}")
             }
         };
         let initial_metric_receipt = initial_counted.input_metric_receipt();
@@ -5702,7 +5849,7 @@ mod tests {
             diff_server.anthropic.as_str(),
         )
         .expect("diff transport");
-        let diff_attempt = diff_transport
+        let mut diff_attempt = diff_transport
             .try_admit(
                 prepared.into_transport_input(),
                 &mut fixture.policy,
@@ -5715,6 +5862,9 @@ mod tests {
             AgentProviderExactCountOutcome::Counted(counted) => counted,
             AgentProviderExactCountOutcome::Failed(result) => {
                 panic!("diff count failed: {result:?}")
+            }
+            AgentProviderExactCountOutcome::Unavailable(error) => {
+                panic!("diff count unavailable: {error:?}")
             }
         };
         let diff_metric_receipt = diff_counted.input_metric_receipt();
@@ -5904,7 +6054,7 @@ mod tests {
             )],
         );
         let output_transport = test_transport(&output_server);
-        let attempt = output_transport
+        let mut attempt = output_transport
             .try_admit(
                 input,
                 &mut fixture.policy,
@@ -5914,10 +6064,11 @@ mod tests {
             .expect("extraction transport admission");
         assert!(attempt
             .input_evidence()
+            .expect("extraction evidence")
             .extraction_receipt()
             .is_some_and(|receipt| receipt.matches(&schema, &read)));
         let mut collector = output_binding
-            .start(attempt.input_evidence())
+            .start(attempt.input_evidence().expect("extraction evidence"))
             .expect("bind committed extraction input");
         let output_result = attempt
             .execute(|batch| {
@@ -6075,7 +6226,7 @@ mod tests {
         )
         .expect("credential");
         let (mut policy, input) = provider_fixture(AgentProviderKind::AnthropicMessages);
-        let attempt = transport
+        let mut attempt = transport
             .try_admit(
                 input,
                 &mut policy,
@@ -6155,7 +6306,7 @@ mod tests {
         )
         .expect("credential");
         let (mut policy, input) = provider_fixture(AgentProviderKind::AnthropicMessages);
-        let attempt = transport
+        let mut attempt = transport
             .try_admit(
                 input,
                 &mut policy,
@@ -6208,7 +6359,7 @@ mod tests {
         )
         .expect("credential");
         let (mut policy, input) = provider_fixture(AgentProviderKind::AnthropicMessages);
-        let attempt = transport
+        let mut attempt = transport
             .try_admit(
                 input,
                 &mut policy,
@@ -6285,7 +6436,7 @@ mod tests {
         )
         .expect("credential");
         let (mut policy, input) = provider_fixture(AgentProviderKind::OpenAiResponses);
-        let attempt = transport
+        let mut attempt = transport
             .try_admit(
                 input,
                 &mut policy,
@@ -6332,7 +6483,7 @@ mod tests {
         )
         .expect("credential");
         let (mut policy, input) = provider_fixture(AgentProviderKind::OpenAiResponses);
-        let attempt = transport
+        let mut attempt = transport
             .try_admit(
                 input,
                 &mut policy,
@@ -6410,7 +6561,7 @@ mod tests {
         assert_eq!(transport.snapshot().expect("snapshot").active_attempts(), 4);
 
         assert!(matches!(
-            transport.reserve(admitted[0].0.call()),
+            transport.reserve(admitted[0].0.call().expect("live call")),
             Err(ReserveError::Duplicate)
         ));
 
@@ -6427,7 +6578,7 @@ mod tests {
         ));
         assert_eq!(excess_policy.pending_model_calls(), 0);
 
-        for (attempt, mut policy) in admitted {
+        for (mut attempt, mut policy) in admitted {
             let result = attempt.cancel_without_dispatch();
             assert_eq!(
                 result.usage_knowledge(),
@@ -6535,7 +6686,7 @@ mod tests {
         )
         .expect("credential");
         let (mut policy, input) = provider_fixture(AgentProviderKind::OpenAiResponses);
-        let attempt = transport
+        let mut attempt = transport
             .try_admit(
                 input,
                 &mut policy,
@@ -6577,7 +6728,7 @@ mod tests {
         )
         .expect("credential");
         let (mut policy, input) = provider_fixture(AgentProviderKind::OpenAiResponses);
-        let attempt = transport
+        let mut attempt = transport
             .try_admit(
                 input,
                 &mut policy,
@@ -6648,7 +6799,7 @@ mod tests {
         )
         .expect("credential");
         let (mut policy, input) = provider_fixture(AgentProviderKind::OpenAiResponses);
-        let attempt = transport
+        let mut attempt = transport
             .try_admit(
                 input,
                 &mut policy,
@@ -6744,7 +6895,8 @@ mod tests {
 
         let settle_attempts = async move {
             tokio::task::yield_now().await;
-            for (attempt, policy) in [(first, &mut first_policy), (second, &mut second_policy)] {
+            for (mut attempt, policy) in [(first, &mut first_policy), (second, &mut second_policy)]
+            {
                 let result = attempt.cancel_without_dispatch();
                 let AgentProviderPolicySettlement::Immediate(settlement) =
                     result.into_policy_settlement()
@@ -6770,7 +6922,7 @@ mod tests {
         .expect("pending transport");
         let (mut pending_policy, pending_input) =
             provider_fixture(AgentProviderKind::OpenAiResponses);
-        let pending_attempt = pending
+        let mut pending_attempt = pending
             .try_admit(
                 pending_input,
                 &mut pending_policy,
@@ -6813,7 +6965,7 @@ mod tests {
 
         let cancellation = AgentProviderCancellation::new();
         let (mut policy, input) = provider_fixture(AgentProviderKind::OpenAiResponses);
-        let attempt = transport
+        let mut attempt = transport
             .try_admit(input, &mut policy, &credential, cancellation.clone())
             .expect("admission");
         cancellation.cancel();
@@ -6843,7 +6995,7 @@ mod tests {
 
         let (mut shutdown_policy, shutdown_input) =
             provider_fixture(AgentProviderKind::OpenAiResponses);
-        let attempt = transport
+        let mut attempt = transport
             .try_admit(
                 shutdown_input,
                 &mut shutdown_policy,
@@ -6897,7 +7049,7 @@ mod tests {
         .expect("credential");
         let cancellation = AgentProviderCancellation::new();
         let (mut policy, input) = provider_fixture(AgentProviderKind::OpenAiResponses);
-        let attempt = transport
+        let mut attempt = transport
             .try_admit(input, &mut policy, &credential, cancellation.clone())
             .expect("admission");
         let task = tokio::spawn(async move {
@@ -6940,6 +7092,409 @@ mod tests {
         assert!(head.starts_with("POST /v1/responses HTTP/1.1\r\n"));
     }
 
+    #[test]
+    fn abort_before_a_drive_settles_exact_zero_and_releases_the_slot() {
+        let transport = AgentProviderTransport::try_new_loopback(
+            AgentProviderTransportConfig::STANDARD,
+            "http://127.0.0.1:9/v1/responses",
+            "http://127.0.0.1:9/v1/messages",
+        )
+        .expect("transport");
+        let credential = AgentProviderCredential::try_new(
+            AgentProviderKind::OpenAiResponses,
+            "synthetic-openai-key".to_owned(),
+        )
+        .expect("credential");
+        let (mut policy, input) = provider_fixture(AgentProviderKind::OpenAiResponses);
+        let mut attempt = transport
+            .try_admit(
+                input,
+                &mut policy,
+                &credential,
+                AgentProviderCancellation::new(),
+            )
+            .expect("admission");
+        {
+            let unpolled =
+                attempt.execute_openai_exact_local(|_| AgentProviderBatchDisposition::Continue);
+            drop(unpolled);
+        }
+        transport.seal();
+        let result = attempt
+            .abort(AgentProviderAbortReason::HostDeadline)
+            .expect("ready operation abort");
+        assert_eq!(
+            result.disclosure_stage(),
+            AgentProviderDisclosureStage::NotDispatched
+        );
+        assert_eq!(
+            result.usage_knowledge(),
+            AgentProviderUsageKnowledge::ExactZeroBeforeModelDispatch
+        );
+        let AgentProviderPolicySettlement::Immediate(settlement) = result.into_policy_settlement()
+        else {
+            panic!("undispatched abort must settle immediately")
+        };
+        assert_eq!(
+            settlement.usage_accounting(),
+            AgentModelUsageAccounting::Exact
+        );
+        let receipt = settlement
+            .settle(&mut policy)
+            .expect("exact abort settlement");
+        assert_eq!(receipt.input_tokens(), 0);
+        assert!(transport
+            .try_prove_shutdown()
+            .expect("abort releases sealed transport")
+            .snapshot()
+            .is_quiescent());
+    }
+
+    #[test]
+    fn terminal_operation_shell_redacts_and_releases_credential_material() {
+        let transport = AgentProviderTransport::try_new_loopback(
+            AgentProviderTransportConfig::STANDARD,
+            "http://127.0.0.1:9/v1/responses",
+            "http://127.0.0.1:9/v1/messages",
+        )
+        .expect("transport");
+        let credential = AgentProviderCredential::try_new(
+            AgentProviderKind::OpenAiResponses,
+            "synthetic-openai-key".to_owned(),
+        )
+        .expect("credential");
+        let (mut policy, input) = provider_fixture(AgentProviderKind::OpenAiResponses);
+        let mut attempt = transport
+            .try_admit(
+                input,
+                &mut policy,
+                &credential,
+                AgentProviderCancellation::new(),
+            )
+            .expect("admission");
+        let result = attempt
+            .cancel_without_dispatch()
+            .expect("terminal cancellation");
+        let shell_debug = format!("{attempt:?}");
+        assert!(!shell_debug.contains("synthetic-openai-key"));
+        assert!(attempt.credential.is_none());
+        assert_eq!(attempt.call(), None);
+        assert_eq!(attempt.input_evidence(), None);
+        assert_eq!(attempt.input_metrics(), None);
+        let AgentProviderPolicySettlement::Immediate(settlement) = result.into_policy_settlement()
+        else {
+            panic!("undispatched cancellation must settle immediately")
+        };
+        settlement.settle(&mut policy).expect("terminal settlement");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dropped_count_drive_can_only_abort_with_exact_zero_accounting() {
+        let server = StalledResponseServer::spawn();
+        let transport = AgentProviderTransport::try_new_loopback(
+            AgentProviderTransportConfig::STANDARD,
+            server.openai.as_str(),
+            server.anthropic.as_str(),
+        )
+        .expect("transport");
+        let credential = AgentProviderCredential::try_new(
+            AgentProviderKind::OpenAiResponses,
+            "synthetic-openai-key".to_owned(),
+        )
+        .expect("credential");
+        let (mut policy, input) = provider_exact_fixture();
+        let mut attempt = transport
+            .try_admit(
+                input,
+                &mut policy,
+                &credential,
+                AgentProviderCancellation::new(),
+            )
+            .expect("admission");
+        {
+            let drive = attempt.count_openai_input_tokens();
+            tokio::pin!(drive);
+            let observation_deadline = Instant::now()
+                .checked_add(Duration::from_secs(1))
+                .expect("observation deadline");
+            while !server.request_observed() {
+                assert!(
+                    Instant::now() < observation_deadline,
+                    "count request not observed"
+                );
+                tokio::select! {
+                    result = &mut drive => panic!("stalled count completed: {result:?}"),
+                    () = tokio::time::sleep(Duration::from_millis(1)) => {}
+                }
+            }
+        }
+        assert!(matches!(
+            attempt.count_openai_input_tokens().await,
+            AgentProviderExactCountOutcome::Unavailable(
+                AgentProviderAttemptStateError::CountRecoveryRequired
+            )
+        ));
+        transport.seal();
+        let result = attempt
+            .abort(AgentProviderAbortReason::HostDeadline)
+            .expect("dropped count abort");
+        assert_eq!(
+            result.disclosure_stage(),
+            AgentProviderDisclosureStage::InputTokenCountDisclosed
+        );
+        assert_eq!(
+            result.usage_knowledge(),
+            AgentProviderUsageKnowledge::ExactZeroBeforeModelDispatch
+        );
+        let receipt_before_settlement = result.input_metric_receipt();
+        let AgentProviderPolicySettlement::Immediate(settlement) = result.into_policy_settlement()
+        else {
+            panic!("count abort must settle immediately")
+        };
+        assert_eq!(
+            settlement.usage_accounting(),
+            AgentModelUsageAccounting::Exact
+        );
+        let receipt = settlement
+            .settle(&mut policy)
+            .expect("exact count abort settlement");
+        assert_eq!(receipt.input_tokens(), 0);
+        assert_eq!(receipt_before_settlement.call(), receipt.id());
+        assert_eq!(policy.pending_model_calls(), 0);
+        assert!(transport
+            .try_prove_shutdown()
+            .expect("count abort releases slot")
+            .snapshot()
+            .is_quiescent());
+        let captured = server.finish();
+        let head = std::str::from_utf8(&captured.head).expect("count request head");
+        assert!(head.starts_with("POST /v1/responses/input_tokens HTTP/1.1\r\n"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dropped_generation_drive_aborts_at_reservation_ceiling() {
+        let server = StalledResponseServer::spawn();
+        let transport = AgentProviderTransport::try_new_loopback(
+            AgentProviderTransportConfig::STANDARD,
+            server.openai.as_str(),
+            server.anthropic.as_str(),
+        )
+        .expect("transport");
+        let credential = AgentProviderCredential::try_new(
+            AgentProviderKind::OpenAiResponses,
+            "synthetic-openai-key".to_owned(),
+        )
+        .expect("credential");
+        let (mut policy, input) = provider_fixture(AgentProviderKind::OpenAiResponses);
+        let mut attempt = transport
+            .try_admit(
+                input,
+                &mut policy,
+                &credential,
+                AgentProviderCancellation::new(),
+            )
+            .expect("admission");
+        {
+            let drive =
+                attempt.execute_openai_exact_local(|_| AgentProviderBatchDisposition::Continue);
+            tokio::pin!(drive);
+            let observation_deadline = Instant::now()
+                .checked_add(Duration::from_secs(1))
+                .expect("observation deadline");
+            while !server.request_observed() {
+                assert!(
+                    Instant::now() < observation_deadline,
+                    "generation request not observed"
+                );
+                tokio::select! {
+                    result = &mut drive => panic!("stalled generation completed: {result:?}"),
+                    () = tokio::time::sleep(Duration::from_millis(1)) => {}
+                }
+            }
+        }
+        assert_eq!(
+            attempt
+                .execute_openai_exact_local(|_| AgentProviderBatchDisposition::Continue)
+                .await
+                .expect_err("dropped drive must be abort-only"),
+            AgentProviderAttemptStateError::GenerationRecoveryRequired
+        );
+        transport.seal();
+        let result = attempt
+            .abort(AgentProviderAbortReason::HostDeadline)
+            .expect("dropped generation abort");
+        assert_eq!(
+            result.disclosure_stage(),
+            AgentProviderDisclosureStage::ModelRequestMayHaveDispatched
+        );
+        assert_eq!(
+            result.usage_knowledge(),
+            AgentProviderUsageKnowledge::UnknownAfterDispatch
+        );
+        let AgentProviderPolicySettlement::Immediate(settlement) = result.into_policy_settlement()
+        else {
+            panic!("generation abort must settle immediately")
+        };
+        assert_eq!(
+            settlement.usage_accounting(),
+            AgentModelUsageAccounting::ReservationCeiling
+        );
+        let receipt = settlement
+            .settle(&mut policy)
+            .expect("ceiling generation abort settlement");
+        assert_eq!(receipt.input_tokens(), 18);
+        assert_eq!(policy.pending_model_calls(), 0);
+        assert!(transport
+            .try_prove_shutdown()
+            .expect("generation abort releases slot")
+            .snapshot()
+            .is_quiescent());
+        let captured = server.finish();
+        let head = std::str::from_utf8(&captured.head).expect("generation request head");
+        assert!(head.starts_with("POST /v1/responses HTTP/1.1\r\n"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dropped_generation_drive_before_eof_aborts_at_reservation_ceiling() {
+        let server = HeldEofServer::spawn(openai_success_stream());
+        let transport = AgentProviderTransport::try_new_loopback(
+            AgentProviderTransportConfig::STANDARD,
+            server.openai.as_str(),
+            server.anthropic.as_str(),
+        )
+        .expect("transport");
+        let credential = AgentProviderCredential::try_new(
+            AgentProviderKind::OpenAiResponses,
+            "synthetic-openai-key".to_owned(),
+        )
+        .expect("credential");
+        let (mut policy, input) = provider_fixture(AgentProviderKind::OpenAiResponses);
+        let mut attempt = transport
+            .try_admit(
+                input,
+                &mut policy,
+                &credential,
+                AgentProviderCancellation::new(),
+            )
+            .expect("admission");
+        {
+            let drive =
+                attempt.execute_openai_exact_local(|_| AgentProviderBatchDisposition::Continue);
+            tokio::pin!(drive);
+            let observation_deadline = Instant::now()
+                .checked_add(Duration::from_secs(1))
+                .expect("observation deadline");
+            while !server.terminal_observed() {
+                assert!(
+                    Instant::now() < observation_deadline,
+                    "terminal body was not observed"
+                );
+                tokio::select! {
+                    result = &mut drive => panic!("held EOF drive completed: {result:?}"),
+                    () = tokio::time::sleep(Duration::from_millis(1)) => {}
+                }
+            }
+        }
+        transport.seal();
+        let result = attempt
+            .abort(AgentProviderAbortReason::HostDeadline)
+            .expect("held EOF abort");
+        assert_eq!(
+            result.usage_knowledge(),
+            AgentProviderUsageKnowledge::UnknownAfterDispatch
+        );
+        let AgentProviderPolicySettlement::Immediate(settlement) = result.into_policy_settlement()
+        else {
+            panic!("held EOF abort must settle immediately")
+        };
+        assert_eq!(
+            settlement.usage_accounting(),
+            AgentModelUsageAccounting::ReservationCeiling
+        );
+        let receipt = settlement
+            .settle(&mut policy)
+            .expect("held EOF ceiling settlement");
+        assert_eq!(receipt.input_tokens(), 18);
+        assert!(transport
+            .try_prove_shutdown()
+            .expect("held EOF abort releases slot")
+            .snapshot()
+            .is_quiescent());
+        server.release_eof();
+        let captured = server.finish();
+        let head = std::str::from_utf8(&captured.head).expect("generation request head");
+        assert!(head.starts_with("POST /v1/responses HTTP/1.1\r\n"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn counted_operation_abort_preserves_exact_input_receipt_without_generation() {
+        let server = OneShotServer::spawn(
+            "200 OK",
+            &[
+                ("Content-Type", "application/json"),
+                ("Content-Encoding", "identity"),
+            ],
+            vec![br#"{"object":"response.input_tokens","input_tokens":17}"#.to_vec()],
+        );
+        let transport = test_transport(&server);
+        let credential = AgentProviderCredential::try_new(
+            AgentProviderKind::OpenAiResponses,
+            "synthetic-openai-key".to_owned(),
+        )
+        .expect("credential");
+        let (mut policy, input) = provider_exact_fixture();
+        let mut attempt = transport
+            .try_admit(
+                input,
+                &mut policy,
+                &credential,
+                AgentProviderCancellation::new(),
+            )
+            .expect("admission");
+        let counted = match attempt.count_openai_input_tokens().await {
+            AgentProviderExactCountOutcome::Counted(counted) => counted,
+            AgentProviderExactCountOutcome::Failed(result) => {
+                panic!("count terminalized unexpectedly: {result:?}")
+            }
+            AgentProviderExactCountOutcome::Unavailable(error) => {
+                panic!("count unavailable: {error:?}")
+            }
+        };
+        let counted_receipt = counted.input_metric_receipt();
+        drop(counted);
+        transport.seal();
+        let result = attempt
+            .abort(AgentProviderAbortReason::ControllerFault)
+            .expect("counted abort");
+        assert_eq!(result.input_metric_receipt(), counted_receipt);
+        assert_eq!(
+            result.usage_knowledge(),
+            AgentProviderUsageKnowledge::ExactZeroBeforeModelDispatch
+        );
+        let AgentProviderPolicySettlement::Immediate(settlement) = result.into_policy_settlement()
+        else {
+            panic!("counted abort must settle immediately")
+        };
+        assert_eq!(
+            settlement.usage_accounting(),
+            AgentModelUsageAccounting::Exact
+        );
+        let receipt = settlement
+            .settle(&mut policy)
+            .expect("counted abort settlement");
+        assert_eq!(receipt.id(), counted_receipt.call());
+        assert_eq!(receipt.input_tokens(), 0);
+        assert_eq!(policy.pending_model_calls(), 0);
+        assert!(transport
+            .try_prove_shutdown()
+            .expect("counted abort releases slot")
+            .snapshot()
+            .is_quiescent());
+        let captured = server.finish();
+        let head = std::str::from_utf8(&captured.head).expect("count request head");
+        assert!(head.starts_with("POST /v1/responses/input_tokens HTTP/1.1\r\n"));
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn panicking_batch_consumer_returns_authority_and_fail_stops_transport() {
         let server = OneShotServer::spawn(
@@ -6957,7 +7512,7 @@ mod tests {
         )
         .expect("credential");
         let (mut policy, input) = provider_fixture(AgentProviderKind::OpenAiResponses);
-        let attempt = transport
+        let mut attempt = transport
             .try_admit(
                 input,
                 &mut policy,
