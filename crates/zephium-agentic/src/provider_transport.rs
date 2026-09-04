@@ -427,8 +427,12 @@ impl fmt::Debug for AgentProviderCancellation {
     }
 }
 
+/// Exact provider endpoint set.
+///
+/// Production construction remains private. Diagnostic loopback construction
+/// is exported only by the release-forbidden `probe-harness` feature.
 #[derive(Clone)]
-struct ProviderEndpoints {
+pub struct ProviderEndpoints {
     openai: Url,
     openai_input_tokens: Url,
     anthropic: Url,
@@ -468,14 +472,25 @@ impl ProviderEndpoints {
         }
     }
 
-    #[cfg(test)]
-    fn loopback(openai: Url, anthropic: Url) -> Result<Self, AgentProviderTransportConfigError> {
-        if !exact_loopback_url(&openai) || !exact_loopback_url(&anthropic) {
-            return Err(AgentProviderTransportConfigError::Endpoint);
-        }
+    /// Builds diagnostic endpoints from exact IPv4 loopback URLs.
+    ///
+    /// The OpenAI input-count endpoint is derived from `openai`; callers can
+    /// never supply a separate count URL.
+    #[cfg(any(test, feature = "probe-harness"))]
+    pub fn loopback(
+        openai: &str,
+        anthropic: &str,
+    ) -> Result<Self, AgentProviderTransportConfigError> {
+        let openai =
+            parse_exact_loopback_url(openai).ok_or(AgentProviderTransportConfigError::Endpoint)?;
+        let anthropic = parse_exact_loopback_url(anthropic)
+            .ok_or(AgentProviderTransportConfigError::Endpoint)?;
         let mut openai_input_tokens = openai.clone();
-        let input_token_path = format!("{}/input_tokens", openai.path().trim_end_matches('/'));
-        openai_input_tokens.set_path(&input_token_path);
+        openai_input_tokens
+            .path_segments_mut()
+            .map_err(|_| AgentProviderTransportConfigError::Endpoint)?
+            .pop_if_empty()
+            .push("input_tokens");
         Ok(Self {
             openai_input_tokens,
             openai,
@@ -496,16 +511,49 @@ fn exact_production_url(url: &Url, host: &str, path: &str) -> bool {
         && url.fragment().is_none()
 }
 
-#[cfg(test)]
-fn exact_loopback_url(url: &Url) -> bool {
-    url.scheme() == "http"
+/// Whether a diagnostic endpoint string is an exact explicit-port IPv4
+/// loopback URL.
+///
+/// This helper is absent from shipping builds and does not authorize a
+/// connection by itself. The entire source spelling must already equal the
+/// canonical URL serialization, and its path must contain nonempty
+/// ASCII-unreserved segments only. Percent escapes, dot segments, empty
+/// segments, and trailing slashes are rejected before the source spelling can
+/// be lost to URL normalization.
+#[cfg(any(test, feature = "probe-harness"))]
+pub fn exact_loopback_url(url: &str) -> bool {
+    parse_exact_loopback_url(url).is_some()
+}
+
+#[cfg(any(test, feature = "probe-harness"))]
+fn parse_exact_loopback_url(source: &str) -> Option<Url> {
+    let url = Url::parse(source).ok()?;
+    (url.as_str() == source
+        && url.scheme() == "http"
         && url.host_str() == Some("127.0.0.1")
-        && url.port().is_some()
+        && url.port().is_some_and(|port| port != 0)
         && url.username().is_empty()
         && url.password().is_none()
-        && url.path().starts_with('/')
+        && exact_loopback_path(url.path())
         && url.query().is_none()
-        && url.fragment().is_none()
+        && url.fragment().is_none())
+    .then_some(url)
+}
+
+#[cfg(any(test, feature = "probe-harness"))]
+fn exact_loopback_path(path: &str) -> bool {
+    let Some(path) = path.strip_prefix('/') else {
+        return false;
+    };
+    !path.is_empty()
+        && path.split('/').all(|segment| {
+            !segment.is_empty()
+                && segment != "."
+                && segment != ".."
+                && segment.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~')
+                })
+        })
 }
 
 struct TransportState {
@@ -673,7 +721,7 @@ impl AgentProviderTransport {
             .pool_max_idle_per_host(0)
             .tcp_nodelay(true)
             .user_agent(HeaderValue::from_static(PRODUCT_USER_AGENT));
-        #[cfg(test)]
+        #[cfg(any(test, feature = "probe-harness"))]
         let builder = if endpoints.https_only {
             builder
         } else {
@@ -698,11 +746,16 @@ impl AgentProviderTransport {
         })
     }
 
-    #[cfg(test)]
-    fn try_new_loopback(
+    /// Builds a redirect-free diagnostic client for exact loopback endpoints.
+    ///
+    /// This constructor is available only to tests and the release-forbidden
+    /// `probe-harness` feature. The OpenAI count endpoint is always derived
+    /// from `openai`, never accepted as independent caller input.
+    #[cfg(any(test, feature = "probe-harness"))]
+    pub fn try_new_loopback(
         config: AgentProviderTransportConfig,
-        openai: Url,
-        anthropic: Url,
+        openai: &str,
+        anthropic: &str,
     ) -> Result<Self, AgentProviderTransportConfigError> {
         Self::try_new_with_endpoints(config, ProviderEndpoints::loopback(openai, anthropic)?)
     }
@@ -3458,8 +3511,8 @@ mod tests {
                 Duration::from_secs(2),
             )
             .expect("config"),
-            server.openai.clone(),
-            server.anthropic.clone(),
+            server.openai.as_str(),
+            server.anthropic.as_str(),
         )
         .expect("transport")
     }
@@ -3836,6 +3889,101 @@ mod tests {
         assert_eq!(production.openai.as_str(), OPENAI_RESPONSES_URL);
         assert_eq!(production.anthropic.as_str(), ANTHROPIC_MESSAGES_URL);
 
+        let loopback_openai = Url::parse("http://127.0.0.1:43123/custom/responses-v1_0~probe")
+            .expect("loopback OpenAI");
+        let loopback_anthropic =
+            Url::parse("http://127.0.0.1:43123/custom/messages").expect("loopback Anthropic");
+        assert!(exact_loopback_url(loopback_openai.as_str()));
+        assert!(exact_loopback_url(loopback_anthropic.as_str()));
+        let loopback =
+            ProviderEndpoints::loopback(loopback_openai.as_str(), loopback_anthropic.as_str())
+                .expect("exact diagnostic endpoints");
+        assert!(!loopback.https_only);
+        assert_eq!(loopback.openai, loopback_openai);
+        assert_eq!(loopback.anthropic, loopback_anthropic);
+        assert_eq!(
+            loopback.openai_input_tokens.as_str(),
+            "http://127.0.0.1:43123/custom/responses-v1_0~probe/input_tokens"
+        );
+
+        for ambiguous_path in [
+            "/v1/%2e/responses",
+            "/v1/%2E/responses",
+            "/v1/%2f/responses",
+            "/v1/%2F/responses",
+            "/v1/%5c/responses",
+            "/v1/%5C/responses",
+            "/v1/%00/responses",
+            "/v1/%1f/responses",
+            "/v1/%20/responses",
+            "/v1/./responses",
+            "/v1/../responses",
+            "/v1//responses",
+            "/v1/responses/",
+        ] {
+            assert!(
+                !exact_loopback_path(ambiguous_path),
+                "accepted ambiguous path {ambiguous_path}"
+            );
+        }
+
+        for invalid in [
+            "http://127.0.0.1/response",
+            "http://127.0.0.1:80/response",
+            "http://127.0.0.1:0/response",
+            "https://127.0.0.1:43123/response",
+            "http://localhost:43123/response",
+            "http://[::1]:43123/response",
+            "http://user@127.0.0.1:43123/response",
+            "http://user:pass@127.0.0.1:43123/response",
+            "http://127.0.0.1:43123",
+            "http://127.0.0.1:43123//",
+            "http://127.0.0.1:43123/v1//responses",
+            "http://127.0.0.1:43123/v1/responses/",
+            "http://127.0.0.1:43123/v1/%2f/responses",
+            "http://127.0.0.1:43123/v1/%2F/responses",
+            "http://127.0.0.1:43123/v1/%5c/responses",
+            "http://127.0.0.1:43123/v1/%5C/responses",
+            "http://127.0.0.1:43123/v1/%00/responses",
+            "http://127.0.0.1:43123/v1/%1f/responses",
+            "http://127.0.0.1:43123/v1/%20/responses",
+            "http://127.0.0.1:43123/v1/./responses",
+            "http://127.0.0.1:43123/v1/../responses",
+            "http://127.0.0.1:43123/?count=other",
+            "http://127.0.0.1:43123/response?count=other",
+            "http://127.0.0.1:43123/response#fragment",
+        ] {
+            assert!(!exact_loopback_url(invalid), "accepted {invalid}");
+            assert_eq!(
+                ProviderEndpoints::loopback(invalid, loopback_anthropic.as_str()).err(),
+                Some(AgentProviderTransportConfigError::Endpoint)
+            );
+        }
+
+        // `url::Url` would erase these spellings via the WHATWG dot-segment
+        // algorithm. Admission intentionally takes the source string and
+        // rejects it before that normalization can make it indistinguishable
+        // from the permitted canonical route.
+        for normalized in [
+            "http://127.0.0.1:43123/v1/./responses",
+            "http://127.0.0.1:43123/v1/%2e/responses",
+            "http://127.0.0.1:43123/v1/%2E/responses",
+            "http://127.0.0.1:43123/v1/segment/../responses",
+        ] {
+            let parsed = Url::parse(normalized).expect("normalizable loopback URL");
+            assert_eq!(parsed.path(), "/v1/responses");
+            assert_ne!(parsed.as_str(), normalized);
+            assert!(!exact_loopback_url(normalized));
+        }
+
+        let canonical_openai = "http://127.0.0.1:43123/v1/responses";
+        let canonical = ProviderEndpoints::loopback(canonical_openai, loopback_anthropic.as_str())
+            .expect("canonical loopback URL");
+        assert_eq!(
+            canonical.openai_input_tokens.as_str(),
+            "http://127.0.0.1:43123/v1/responses/input_tokens"
+        );
+
         let mut headers = HeaderMap::new();
         headers.insert(
             CONTENT_TYPE,
@@ -4052,8 +4200,8 @@ mod tests {
                 Duration::from_millis(200),
             )
             .expect("config"),
-            server.openai.clone(),
-            server.anthropic.clone(),
+            server.openai.as_str(),
+            server.anthropic.as_str(),
         )
         .expect("transport");
         let credential = AgentProviderCredential::try_new(
@@ -4330,8 +4478,8 @@ mod tests {
         let anthropic = Url::parse("http://127.0.0.1:9/v1/messages").expect("anthropic URL");
         let transport = AgentProviderTransport::try_new_loopback(
             AgentProviderTransportConfig::STANDARD,
-            openai,
-            anthropic,
+            openai.as_str(),
+            anthropic.as_str(),
         )
         .expect("transport");
         let credential = AgentProviderCredential::try_new(
@@ -4372,8 +4520,8 @@ mod tests {
         let anthropic = Url::parse("http://127.0.0.1:9/v1/messages").expect("anthropic URL");
         let transport = AgentProviderTransport::try_new_loopback(
             AgentProviderTransportConfig::STANDARD,
-            openai,
-            anthropic,
+            openai.as_str(),
+            anthropic.as_str(),
         )
         .expect("transport");
         let credential = AgentProviderCredential::try_new(
@@ -4895,8 +5043,8 @@ mod tests {
                 Duration::from_secs(2),
             )
             .expect("config"),
-            server.openai.clone(),
-            server.anthropic.clone(),
+            server.openai.as_str(),
+            server.anthropic.as_str(),
         )
         .expect("transport");
         let credential = AgentProviderCredential::try_new(
@@ -5441,8 +5589,8 @@ mod tests {
         ]);
         let initial_transport = AgentProviderTransport::try_new_loopback(
             AgentProviderTransportConfig::STANDARD,
-            initial_server.openai.clone(),
-            initial_server.anthropic.clone(),
+            initial_server.openai.as_str(),
+            initial_server.anthropic.as_str(),
         )
         .expect("initial transport");
         let initial_attempt = initial_transport
@@ -5550,8 +5698,8 @@ mod tests {
         ]);
         let diff_transport = AgentProviderTransport::try_new_loopback(
             AgentProviderTransportConfig::STANDARD,
-            diff_server.openai.clone(),
-            diff_server.anthropic.clone(),
+            diff_server.openai.as_str(),
+            diff_server.anthropic.as_str(),
         )
         .expect("diff transport");
         let diff_attempt = diff_transport
@@ -6127,8 +6275,8 @@ mod tests {
                 Duration::from_secs(1),
             )
             .expect("config"),
-            server.openai.clone(),
-            server.anthropic.clone(),
+            server.openai.as_str(),
+            server.anthropic.as_str(),
         )
         .expect("transport");
         let credential = AgentProviderCredential::try_new(
@@ -6221,8 +6369,8 @@ mod tests {
         let anthropic = Url::parse("http://127.0.0.1:9/v1/messages").expect("anthropic URL");
         let transport = AgentProviderTransport::try_new_loopback(
             AgentProviderTransportConfig::STANDARD,
-            openai,
-            anthropic,
+            openai.as_str(),
+            anthropic.as_str(),
         )
         .expect("transport");
         let credential = AgentProviderCredential::try_new(
@@ -6377,8 +6525,8 @@ mod tests {
     fn shared_run_and_shutdown_authority_cannot_self_deadlock() {
         let transport = AgentProviderTransport::try_new_loopback(
             AgentProviderTransportConfig::STANDARD,
-            Url::parse("http://127.0.0.1:9/v1/responses").expect("openai URL"),
-            Url::parse("http://127.0.0.1:9/v1/messages").expect("anthropic URL"),
+            "http://127.0.0.1:9/v1/responses",
+            "http://127.0.0.1:9/v1/messages",
         )
         .expect("transport");
         let credential = AgentProviderCredential::try_new(
@@ -6408,8 +6556,8 @@ mod tests {
     fn shutdown_proof_distinguishes_open_idle_from_sealed_drain() {
         let transport = AgentProviderTransport::try_new_loopback(
             AgentProviderTransportConfig::STANDARD,
-            Url::parse("http://127.0.0.1:9/v1/responses").expect("openai URL"),
-            Url::parse("http://127.0.0.1:9/v1/messages").expect("anthropic URL"),
+            "http://127.0.0.1:9/v1/responses",
+            "http://127.0.0.1:9/v1/messages",
         )
         .expect("transport");
         let shared_clone = transport.clone();
@@ -6490,8 +6638,8 @@ mod tests {
     fn shutdown_wait_seals_before_its_future_is_polled_or_retained() {
         let transport = AgentProviderTransport::try_new_loopback(
             AgentProviderTransportConfig::STANDARD,
-            Url::parse("http://127.0.0.1:9/v1/responses").expect("openai URL"),
-            Url::parse("http://127.0.0.1:9/v1/messages").expect("anthropic URL"),
+            "http://127.0.0.1:9/v1/responses",
+            "http://127.0.0.1:9/v1/messages",
         )
         .expect("transport");
         let credential = AgentProviderCredential::try_new(
@@ -6558,8 +6706,8 @@ mod tests {
     async fn shutdown_wait_wakes_on_last_slot_and_deadline_refuses_pending_drain() {
         let transport = AgentProviderTransport::try_new_loopback(
             AgentProviderTransportConfig::STANDARD,
-            Url::parse("http://127.0.0.1:9/v1/responses").expect("openai URL"),
-            Url::parse("http://127.0.0.1:9/v1/messages").expect("anthropic URL"),
+            "http://127.0.0.1:9/v1/responses",
+            "http://127.0.0.1:9/v1/messages",
         )
         .expect("transport");
         let credential = AgentProviderCredential::try_new(
@@ -6616,8 +6764,8 @@ mod tests {
 
         let pending = AgentProviderTransport::try_new_loopback(
             AgentProviderTransportConfig::STANDARD,
-            Url::parse("http://127.0.0.1:9/v1/responses").expect("openai URL"),
-            Url::parse("http://127.0.0.1:9/v1/messages").expect("anthropic URL"),
+            "http://127.0.0.1:9/v1/responses",
+            "http://127.0.0.1:9/v1/messages",
         )
         .expect("pending transport");
         let (mut pending_policy, pending_input) =
@@ -6653,8 +6801,8 @@ mod tests {
     async fn post_commit_run_and_shutdown_cancellation_win_before_dispatch() {
         let transport = AgentProviderTransport::try_new_loopback(
             AgentProviderTransportConfig::STANDARD,
-            Url::parse("http://127.0.0.1:9/v1/responses").expect("openai URL"),
-            Url::parse("http://127.0.0.1:9/v1/messages").expect("anthropic URL"),
+            "http://127.0.0.1:9/v1/responses",
+            "http://127.0.0.1:9/v1/messages",
         )
         .expect("transport");
         let credential = AgentProviderCredential::try_new(
@@ -6738,8 +6886,8 @@ mod tests {
                 Duration::from_secs(2),
             )
             .expect("config"),
-            server.openai.clone(),
-            server.anthropic.clone(),
+            server.openai.as_str(),
+            server.anthropic.as_str(),
         )
         .expect("transport");
         let credential = AgentProviderCredential::try_new(
@@ -6880,8 +7028,8 @@ mod tests {
     fn abandoned_committed_attempt_fail_stops_the_shared_transport() {
         let transport = AgentProviderTransport::try_new_loopback(
             AgentProviderTransportConfig::STANDARD,
-            Url::parse("http://127.0.0.1:9/v1/responses").expect("openai URL"),
-            Url::parse("http://127.0.0.1:9/v1/messages").expect("anthropic URL"),
+            "http://127.0.0.1:9/v1/responses",
+            "http://127.0.0.1:9/v1/messages",
         )
         .expect("transport");
         let credential = AgentProviderCredential::try_new(

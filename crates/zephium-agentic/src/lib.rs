@@ -217,6 +217,8 @@ pub use agent_supervisor::{
     AgentSupervisorWait, MAX_AGENT_DELEGATION_DEPTH, MAX_AGENT_EXECUTING_SUPERVISOR_NODES,
     MAX_AGENT_LIVE_SUPERVISOR_NODES,
 };
+#[cfg(all(feature = "provider-transport", feature = "probe-harness"))]
+pub use provider_transport::{exact_loopback_url, ProviderEndpoints};
 #[cfg(all(feature = "provider-transport", target_os = "macos"))]
 pub use provider_transport::{
     load_macos_development_openai_credential, MacosAgentProviderCredentialError,

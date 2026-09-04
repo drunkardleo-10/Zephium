@@ -3715,6 +3715,14 @@ fn validate_root(source: &str) -> Result<(), String> {
             "zephium-agentic provider transport must remain behind its optional feature".to_owned(),
         );
     }
+    if !source.contains(
+        "#[cfg(all(feature=\"provider-transport\",feature=\"probe-harness\"))]pubuseprovider_transport::{exact_loopback_url,ProviderEndpoints};",
+    ) {
+        return Err(
+            "agentic loopback endpoints must remain behind provider-transport plus probe-harness"
+                .to_owned(),
+        );
+    }
     for module in [
         "contract",
         "control",
@@ -4814,6 +4822,17 @@ fn validate_provider_transport_facade(manifest: &str, root: &str) -> Result<(), 
                         "zephium-agentic/provider-transport".to_owned(),
                     )]
             })
+        || features
+            .get("probe-harness")
+            .and_then(toml::Value::as_array)
+            .is_none_or(|feature| {
+                feature.as_slice()
+                    != [
+                        toml::Value::String("provider-transport".to_owned()),
+                        toml::Value::String("zephium-agentic/probe-harness".to_owned()),
+                    ]
+            })
+        || features.len() != 3
     {
         return Err(
             "agent provider transport façade must preserve its opt-in feature graph".to_owned(),
@@ -4835,7 +4854,9 @@ fn validate_provider_transport_facade(manifest: &str, root: &str) -> Result<(), 
 
     let root = compact(root);
     for required in [
+        "#[cfg(all(feature=\"probe-harness\",not(debug_assertions)))]compile_error!(\"theprovidertransportprobeharnessisforbiddeninoptimizedbuilds\");",
         "#[cfg(feature=\"provider-transport\")]pubusezephium_agentic::{",
+        "#[cfg(feature=\"probe-harness\")]pubusezephium_agentic::{exact_loopback_url,ProviderEndpoints};",
         "AgentProviderTransport,",
         "AgentProviderPolicySettlement,",
         "AgentProviderSettledTerminal,",
@@ -5009,8 +5030,20 @@ fn validate_provider_transport_root(source: &str) -> Result<(), String> {
         "constOPENAI_RESPONSES_URL:&str=\"https://api.openai.com/v1/responses\";",
         "constANTHROPIC_MESSAGES_URL:&str=\"https://api.anthropic.com/v1/messages\";",
         "fnexact_production_url(url:&Url,host:&str,path:&str)->bool",
-        "#[cfg(test)]fnexact_loopback_url(url:&Url)->bool",
-        "#[cfg(test)]fntry_new_loopback(",
+        "pubstructProviderEndpoints{",
+        "#[cfg(any(test,feature=\"probe-harness\"))]pubfnloopback(",
+        "openai:&str,anthropic:&str",
+        "openai_input_tokens.path_segments_mut().map_err(|_|AgentProviderTransportConfigError::Endpoint)?.pop_if_empty().push(\"input_tokens\");",
+        "#[cfg(any(test,feature=\"probe-harness\"))]pubfnexact_loopback_url(url:&str)->bool",
+        "fnparse_exact_loopback_url(source:&str)->Option<Url>",
+        "url.as_str()==source",
+        "fnexact_loopback_path(path:&str)->bool",
+        "path.split('/').all(|segment|",
+        "url.scheme()==\"http\"&&url.host_str()==Some(\"127.0.0.1\")&&url.port().is_some_and(|port|port!=0)",
+        "byte.is_ascii_alphanumeric()||matches!(byte,b'-'|b'.'|b'_'|b'~')",
+        "#[cfg(any(test,feature=\"probe-harness\"))]pubfntry_new_loopback(",
+        "Self::try_new_with_endpoints(config,ProviderEndpoints::loopback(openai,anthropic)?)",
+        "#[cfg(any(test,feature=\"probe-harness\"))]letbuilder=ifendpoints.https_only{builder}else{builder.no_proxy()};",
         ".https_only(endpoints.https_only)",
         ".redirect(Policy::none())",
         ".referer(false)",
@@ -5034,8 +5067,9 @@ fn validate_provider_transport_root(source: &str) -> Result<(), String> {
         "danger_accept_invalid_certs",
         "danger_accept_invalid_hostnames",
         "pubfntry_new_with_endpoints",
-        "pubfntry_new_loopback",
         "pubfninto_parts",
+        "pubfnexact_loopback_url(url:&Url)",
+        "pubfnloopback(openai:Url,anthropic:Url)",
     ] {
         if source.contains(forbidden) {
             return Err(format!(
@@ -9094,6 +9128,8 @@ mod tests {
             compile_error!("the agentic probe harness is forbidden in optimized builds");
             #[cfg(feature = "provider-transport")]
             mod provider_transport;
+            #[cfg(all(feature = "provider-transport", feature = "probe-harness"))]
+            pub use provider_transport::{exact_loopback_url, ProviderEndpoints};
             #[cfg(feature = "probe-harness")]
             mod contract;
             #[cfg(feature = "probe-harness")]
@@ -10806,9 +10842,7 @@ mod tests {
                 pub fn input_metric_receipt(&self) -> Option<AgentProviderInputMetricReceipt> {
                     self.input.metric_receipt()
                 }
-                pub(crate) fn sealed_input_metric_receipt(
-                    &self,
-                ) -> AgentProviderInputMetricReceipt {
+                pub(crate) fn sealed_input_metric_receipt(&self) -> AgentProviderInputMetricReceipt {
                     self.input.sealed_metric_receipt()
                 }
             }
@@ -11251,17 +11285,50 @@ mod tests {
         let root = r#"
             const OPENAI_RESPONSES_URL: &str = "https://api.openai.com/v1/responses";
             const ANTHROPIC_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
+            pub struct ProviderEndpoints {}
+            impl ProviderEndpoints {
+                #[cfg(any(test, feature = "probe-harness"))]
+                pub fn loopback(openai: &str, anthropic: &str) {
+                    openai_input_tokens
+                        .path_segments_mut()
+                        .map_err(|_| AgentProviderTransportConfigError::Endpoint)?
+                        .pop_if_empty()
+                        .push("input_tokens");
+                }
+            }
             fn exact_production_url(url: &Url, host: &str, path: &str) -> bool {}
-            #[cfg(test)]
-            fn exact_loopback_url(url: &Url) -> bool {}
-            #[cfg(test)]
-            fn try_new_loopback() {}
+            #[cfg(any(test, feature = "probe-harness"))]
+            pub fn exact_loopback_url(url: &str) -> bool {
+                parse_exact_loopback_url(url).is_some()
+            }
+            #[cfg(any(test, feature = "probe-harness"))]
+            fn parse_exact_loopback_url(source: &str) -> Option<Url> {
+                let url = Url::parse(source).ok()?;
+                (url.as_str() == source
+                    && url.scheme() == "http"
+                    && url.host_str() == Some("127.0.0.1")
+                    && url.port().is_some_and(|port| port != 0)
+                    && exact_loopback_path(url.path()))
+                .then_some(url)
+            }
+            #[cfg(any(test, feature = "probe-harness"))]
+            fn exact_loopback_path(path: &str) -> bool {
+                path.split('/').all(|segment| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~')
+                })
+            }
+            #[cfg(any(test, feature = "probe-harness"))]
+            pub fn try_new_loopback(config: Config, openai: &str, anthropic: &str) {
+                Self::try_new_with_endpoints(config, ProviderEndpoints::loopback(openai, anthropic)?)
+            }
             builder
                 .https_only(endpoints.https_only)
                 .redirect(Policy::none())
                 .referer(false)
                 .retry(reqwest::retry::never())
                 .pool_max_idle_per_host(0);
+            #[cfg(any(test, feature = "probe-harness"))]
+            let builder = if endpoints.https_only { builder } else { builder.no_proxy() };
             request.header(ACCEPT_ENCODING, HeaderValue::from_static("identity"));
             value.set_sensitive(true);
             pub enum AgentProviderUsageKnowledge {
@@ -11273,7 +11340,7 @@ mod tests {
         "#;
         validate_provider_transport_root(root).expect("valid transport boundary");
         assert!(validate_provider_transport_root(&root.replace(
-            "#[cfg(test)]\n            fn try_new_loopback",
+            "#[cfg(any(test, feature = \"probe-harness\"))]\n            pub fn try_new_loopback",
             "pub fn try_new_loopback"
         ))
         .is_err());
@@ -11298,6 +11365,16 @@ mod tests {
             manifest.replacen(
                 "provider-transport = [\"zephium-agentic/provider-transport\"]",
                 "provider-transport = []",
+                1,
+            ),
+            manifest.replacen(
+                "provider-transport = [\"zephium-agentic/provider-transport\"]",
+                "provider-transport = [\"zephium-agentic/provider-transport\", \"zephium-agentic/probe-harness\"]",
+                1,
+            ),
+            manifest.replacen(
+                "probe-harness = [\"provider-transport\", \"zephium-agentic/probe-harness\"]",
+                "probe-harness = [\"zephium-agentic/probe-harness\"]",
                 1,
             ),
             manifest.replacen(

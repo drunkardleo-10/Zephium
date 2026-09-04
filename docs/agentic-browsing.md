@@ -841,8 +841,21 @@ it offers a qualifying exact authenticated contract.
 
 The BYOK HTTPS shell uses private exact provider endpoints, provider-bound
 zeroizing credential owners, redirect refusal, identity-only response content
-encoding, bounded deadlines, and at most four simultaneous attempts. The sole
-library-owned authentication `HeaderValue` is constructed only at dispatch and
+encoding, bounded deadlines, and at most four simultaneous attempts. The only
+non-production endpoint seam is diagnostic: it exists only when provider
+transport is combined with the release-forbidden `probe-harness` feature, and
+optimized builds refuse that feature graph. It accepts only explicit nonzero-
+port `http://127.0.0.1` source strings whose serialization is already
+canonical, whose path contains only nonempty ASCII-unreserved segments, and
+which have no percent escapes, dot segments, duplicate/trailing slashes, user
+information, query, or fragment. Validation happens before URL parsing can
+erase an ambiguous source spelling. The OpenAI input-count path is derived
+from the admitted Responses path, so a probe cannot redirect counting to
+separate authority.
+The agentic `probe-harness` feature remains dependency-free and does not enable
+provider transport by itself; the optional transport façade provides the
+explicit combined diagnostic feature. The library-owned authentication
+`HeaderValue` is constructed only at dispatch and
 marked sensitive. Pinned `http` copies that value into ordinary `Bytes` and
 does not zeroize it on drop, so the zeroization guarantee applies to
 Zephium-owned credential and construction buffers, not unavoidable HTTP-stack

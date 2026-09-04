@@ -8,6 +8,7 @@ publish = false
 [features]
 default = []
 provider-transport = ["zephium-agentic/provider-transport"]
+probe-harness = ["provider-transport", "zephium-agentic/probe-harness"]
 
 [dependencies]
 zephium-agentic.workspace = true
