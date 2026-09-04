@@ -122,6 +122,55 @@ fn terra_terminal_settlement_surface_is_closed_and_schedule_free() {
         TerraProviderTerminalOwner::settle_with_exact_policy;
 }
 
+#[test]
+fn luna_schedule_is_exact_static_and_uses_reviewed_prices() {
+    let first = luna_pricing_schedule().expect("Luna schedule");
+    let second = luna_pricing_schedule().expect("Luna schedule");
+
+    assert!(std::ptr::eq(first, second));
+    assert_eq!(first.provider(), AgentProviderKind::OpenAiResponses);
+    assert_eq!(first.requested_model().as_str(), LUNA_MODEL_REVISION);
+    assert_eq!(first.tokenizer().as_str(), LUNA_TOKENIZER_REVISION);
+    assert_eq!(first.allowed_effective_models(), 1);
+    assert!(first.allows_effective_model(LUNA_MODEL_REVISION));
+    assert_eq!(
+        first.profile().revision(),
+        AgentProviderPricingRevision::new(LUNA_PRICING_CATALOG_REVISION).expect("nonzero revision")
+    );
+    assert_eq!(
+        first.profile().max_input_tokens(),
+        MAX_AGENT_PROVIDER_EXACT_COUNTED_INPUT_TOKENS
+    );
+    assert_eq!(
+        first.accounting_guard(),
+        independently_constructed_luna_guard()
+    );
+}
+
+#[test]
+fn luna_provider_factory_and_terminal_surface_are_closed() {
+    let config = try_luna_provider_exact_call_config(4_096).expect("Luna config");
+    assert_eq!(config.model().as_str(), LUNA_MODEL_REVISION);
+    assert_eq!(config.tokenizer().as_str(), LUNA_TOKENIZER_REVISION);
+    assert_eq!(
+        config.input_accounting_mode(),
+        AgentProviderInputAccountingMode::ProviderExactAfterConservativeReservation
+    );
+    assert_eq!(
+        try_luna_provider_exact_call_config(0),
+        Err(LunaModelCatalogError::OutputTokens)
+    );
+    assert_eq!(
+        try_luna_provider_exact_call_config(LUNA_MAX_OUTPUT_TOKENS + 1),
+        Err(LunaModelCatalogError::OutputTokens)
+    );
+    let _: fn(
+        AgentProviderPricingSettlement,
+        &mut AgentRunPolicy,
+    ) -> Result<LunaProviderTerminalSettlement, LunaProviderTerminalSettlementError> =
+        settle_luna_provider_terminal;
+}
+
 fn independently_constructed_guard() -> [u8; 32] {
     let model =
         AgentProviderModelRevision::try_new("gpt-5.6-terra".to_owned()).expect("reviewed model");
@@ -136,6 +185,35 @@ fn independently_constructed_guard() -> [u8; 32] {
     )
     .expect("reviewed range");
     let rates = AgentProviderTokenRates::try_new(2_000_000, 200_000, 2_500_000, 12_000_000)
+        .expect("reviewed rates");
+    AgentProviderPricingSchedule::try_new(
+        AgentProviderKind::OpenAiResponses,
+        model,
+        vec![allowed_model],
+        AgentProviderResponseRoute::OpenAiDefault,
+        AgentProviderReasoningEffort::Medium,
+        tokenizer,
+        profile,
+        rates,
+    )
+    .expect("reviewed schedule")
+    .accounting_guard()
+}
+
+fn independently_constructed_luna_guard() -> [u8; 32] {
+    let model =
+        AgentProviderModelRevision::try_new("gpt-5.6-luna".to_owned()).expect("reviewed model");
+    let allowed_model = AgentProviderModelRevision::try_new("gpt-5.6-luna".to_owned())
+        .expect("reviewed effective model");
+    let tokenizer = SemanticTokenizerRevision::try_new("openai:gpt-5.6-luna:v1".to_owned())
+        .expect("reviewed tokenizer");
+    let profile = AgentProviderPricingProfile::try_for_input_range(
+        AgentProviderPricingRevision::new(20_260_904).expect("reviewed revision"),
+        1,
+        272_000,
+    )
+    .expect("reviewed range");
+    let rates = AgentProviderTokenRates::try_new(200_000, 20_000, 250_000, 1_200_000)
         .expect("reviewed rates");
     AgentProviderPricingSchedule::try_new(
         AgentProviderKind::OpenAiResponses,

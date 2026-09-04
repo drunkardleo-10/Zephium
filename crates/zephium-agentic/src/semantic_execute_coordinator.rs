@@ -330,25 +330,28 @@ impl SemanticActionQualificationExecution {
             &frames,
             vec![proposal],
         )
-        .map_err(|_| SemanticActionQualificationError::Preparation)?;
+        .map_err(SemanticActionQualificationError::Binding)?;
         let action = batch
             .actions()
             .first()
-            .ok_or(SemanticActionQualificationError::Preparation)?
+            .ok_or(SemanticActionQualificationError::Contract)?
             .prepare(
                 observation
                     .frames()
                     .first()
-                    .ok_or(SemanticActionQualificationError::Preparation)?,
+                    .ok_or(SemanticActionQualificationError::Contract)?,
             )
-            .map_err(|_| SemanticActionQualificationError::Preparation)?;
+            .map_err(SemanticActionQualificationError::Checkpoint)?;
         let attempt = crate::SemanticActionAttemptId::new(attempt)
             .ok_or(SemanticActionQualificationError::Identity)?;
         let active = AgentActiveEffect::for_execution_qualification(&action, attempt);
         let mut coordinator = SemanticActionExecutionCoordinator::new();
-        let (reservation, native) = coordinator
-            .begin(active, &action, requested_at)
-            .map_err(|_| SemanticActionQualificationError::Preparation)?;
+        let (reservation, native) =
+            coordinator
+                .begin(active, &action, requested_at)
+                .map_err(|refusal| {
+                    SemanticActionQualificationError::NativeAdmission(refusal.error())
+                })?;
         Ok(Self {
             coordinator,
             reservation,
@@ -460,9 +463,9 @@ impl SemanticClickQualificationExecution {
                 present: true,
             },
             crate::SemanticSettleBudget::try_new(1_000)
-                .map_err(|_| SemanticActionQualificationError::Preparation)?,
+                .map_err(|_| SemanticActionQualificationError::Contract)?,
         )
-        .map_err(|_| SemanticActionQualificationError::Preparation)?;
+        .map_err(|_| SemanticActionQualificationError::Contract)?;
         Ok(Self {
             execution: SemanticActionQualificationExecution::prepare(
                 observation,
@@ -519,7 +522,7 @@ impl SemanticModelClickQualificationExecution {
                 crate::SemanticVerification::TargetState { .. }
             )
         {
-            return Err(SemanticActionQualificationError::Preparation);
+            return Err(SemanticActionQualificationError::Contract);
         }
         Ok(Self {
             execution: SemanticActionQualificationExecution::prepare(
@@ -573,7 +576,7 @@ impl SemanticModelActionQualificationExecution {
                     | crate::SemanticWaitCondition::TargetState { .. }
             )
         {
-            return Err(SemanticActionQualificationError::Preparation);
+            return Err(SemanticActionQualificationError::Contract);
         }
         let expected_proof = match proposal.verification() {
             crate::SemanticVerification::TargetState { .. } => {
@@ -594,7 +597,7 @@ impl SemanticModelActionQualificationExecution {
             crate::SemanticVerification::NavigationCommitted
             | crate::SemanticVerification::Dialog(_)
             | crate::SemanticVerification::ScrollPositionChanged => {
-                return Err(SemanticActionQualificationError::Preparation);
+                return Err(SemanticActionQualificationError::Contract);
             }
         };
         Ok(Self {
@@ -661,13 +664,13 @@ impl SemanticFillQualificationExecution {
             crate::SemanticEffectClass::LocalWrite,
             crate::SemanticWaitCondition::MutationQuiet(
                 crate::SemanticMutationQuietPeriod::try_new(100)
-                    .map_err(|_| SemanticActionQualificationError::Preparation)?,
+                    .map_err(|_| SemanticActionQualificationError::Contract)?,
             ),
             crate::SemanticVerification::TargetValueMatchesInput,
             crate::SemanticSettleBudget::try_new(1_000)
-                .map_err(|_| SemanticActionQualificationError::Preparation)?,
+                .map_err(|_| SemanticActionQualificationError::Contract)?,
         )
-        .map_err(|_| SemanticActionQualificationError::Preparation)?;
+        .map_err(|_| SemanticActionQualificationError::Contract)?;
         Ok(Self {
             execution: SemanticActionQualificationExecution::prepare(
                 observation,
@@ -709,9 +712,18 @@ pub enum SemanticActionQualificationError {
     /// A nonzero fixed qualification identity was invalid.
     #[error("semantic action qualification identity is invalid")]
     Identity,
-    /// Production observation binding or policy preparation refused the action.
-    #[error("semantic action qualification preparation failed")]
-    Preparation,
+    /// The release-excluded qualification contract rejected the proposal shape.
+    #[error("semantic action qualification contract failed")]
+    Contract,
+    /// Production observation binding refused the proposal.
+    #[error("semantic action qualification binding failed: {0}")]
+    Binding(crate::SemanticActionBindingError),
+    /// Production pre-execution checkpointing refused the bound action.
+    #[error("semantic action qualification checkpoint failed: {0}")]
+    Checkpoint(crate::SemanticActionPreparationError),
+    /// Production native admission refused the prepared action.
+    #[error("semantic action qualification native admission failed: {0}")]
+    NativeAdmission(SemanticActionExecutionCoordinatorError),
     /// The move-only native request was requested twice.
     #[error("semantic action qualification request was already taken")]
     RequestAlreadyTaken,
@@ -724,6 +736,118 @@ pub enum SemanticActionQualificationError {
     /// Independent production postcondition verification failed.
     #[error("semantic action qualification verification failed")]
     Verification,
+}
+
+#[cfg(feature = "probe-harness")]
+impl SemanticActionQualificationError {
+    /// Stable content-free reason code for release-excluded qualification evidence.
+    pub const fn diagnostic_code(self) -> &'static str {
+        match self {
+            Self::Identity => "identity",
+            Self::Contract => "contract",
+            Self::Binding(error) => match error {
+                crate::SemanticActionBindingError::Empty => "binding_empty",
+                crate::SemanticActionBindingError::ActionLimit => "binding_action_limit",
+                crate::SemanticActionBindingError::CurrentFrameCohort => {
+                    "binding_current_frame_cohort"
+                }
+                crate::SemanticActionBindingError::CurrentFrameMissing => {
+                    "binding_current_frame_missing"
+                }
+                crate::SemanticActionBindingError::Reference(
+                    crate::SemanticReferenceError::Unknown,
+                ) => "binding_reference_unknown",
+                crate::SemanticActionBindingError::Reference(
+                    crate::SemanticReferenceError::Stale,
+                ) => "binding_reference_stale",
+                crate::SemanticActionBindingError::Reference(
+                    crate::SemanticReferenceError::OperationDenied,
+                ) => "binding_reference_operation_denied",
+                crate::SemanticActionBindingError::CredentialBoundary => {
+                    "binding_credential_boundary"
+                }
+                crate::SemanticActionBindingError::SelectionTarget => "binding_selection_target",
+                crate::SemanticActionBindingError::OutcomeAlreadySatisfied => {
+                    "binding_outcome_already_satisfied"
+                }
+                crate::SemanticActionBindingError::OutcomeContract => "binding_outcome_contract",
+                crate::SemanticActionBindingError::TextLimit => "binding_text_limit",
+                crate::SemanticActionBindingError::SettleLimit => "binding_settle_limit",
+                crate::SemanticActionBindingError::MixedEffectBoundary => {
+                    "binding_mixed_effect_boundary"
+                }
+                crate::SemanticActionBindingError::EffectBatchLimit => "binding_effect_batch_limit",
+            },
+            Self::Checkpoint(error) => match error {
+                crate::SemanticActionPreparationError::IncompleteSnapshot => {
+                    "checkpoint_incomplete_snapshot"
+                }
+                crate::SemanticActionPreparationError::Revalidation(error) => match error {
+                    crate::SemanticActionRevalidationError::StaleAuthority => {
+                        "checkpoint_stale_authority"
+                    }
+                    crate::SemanticActionRevalidationError::TargetMissing => {
+                        "checkpoint_target_missing"
+                    }
+                    crate::SemanticActionRevalidationError::TargetChanged => {
+                        "checkpoint_target_changed"
+                    }
+                    crate::SemanticActionRevalidationError::OperationDenied => {
+                        "checkpoint_operation_denied"
+                    }
+                    crate::SemanticActionRevalidationError::TargetDisabled => {
+                        "checkpoint_target_disabled"
+                    }
+                    crate::SemanticActionRevalidationError::CredentialBoundary => {
+                        "checkpoint_credential_boundary"
+                    }
+                    crate::SemanticActionRevalidationError::SelectionTarget => {
+                        "checkpoint_selection_target"
+                    }
+                },
+                crate::SemanticActionPreparationError::OutcomeAlreadySatisfied => {
+                    "checkpoint_outcome_already_satisfied"
+                }
+            },
+            Self::NativeAdmission(error) => match error {
+                SemanticActionExecutionCoordinatorError::Preparation(error) => match error {
+                    crate::SemanticActionExecutionPreparationError::AuthorityMismatch => {
+                        "native_admission_authority_mismatch"
+                    }
+                    crate::SemanticActionExecutionPreparationError::InvalidGeometry => {
+                        "native_admission_invalid_geometry"
+                    }
+                    crate::SemanticActionExecutionPreparationError::DeadlineOverflow => {
+                        "native_admission_deadline_overflow"
+                    }
+                    crate::SemanticActionExecutionPreparationError::Invariant => {
+                        "native_admission_invariant"
+                    }
+                },
+                SemanticActionExecutionCoordinatorError::DuplicateRequest => {
+                    "native_admission_duplicate_request"
+                }
+                SemanticActionExecutionCoordinatorError::ContextBusy => {
+                    "native_admission_context_busy"
+                }
+                SemanticActionExecutionCoordinatorError::Capacity => "native_admission_capacity",
+                SemanticActionExecutionCoordinatorError::Shutdown => "native_admission_shutdown",
+                SemanticActionExecutionCoordinatorError::UnknownRequest => {
+                    "native_admission_unknown_request"
+                }
+                SemanticActionExecutionCoordinatorError::RequestMismatch => {
+                    "native_admission_request_mismatch"
+                }
+                SemanticActionExecutionCoordinatorError::PrematureTimeout => {
+                    "native_admission_premature_timeout"
+                }
+            },
+            Self::RequestAlreadyTaken => "request_already_taken",
+            Self::Terminal => "terminal",
+            Self::Settlement => "settlement",
+            Self::Verification => "verification",
+        }
+    }
 }
 
 /// Compatibility name for the click qualifier's shared refusal vocabulary.

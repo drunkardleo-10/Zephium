@@ -20,14 +20,33 @@ fn main() {
     let result = match arguments.as_slice() {
         [argument] if argument == "--live-fixed-click" => run_fixed_click(),
         [argument] if argument == "--live-public-wikipedia-fill" => run_public_wikipedia_fill(),
-        [argument] if argument == "--live-two-action" => {
-            run_two_action(TwoActionScenario::FixedClickFill)
-        }
-        [argument] if argument == "--live-public-wikipedia-form" => {
-            run_two_action(TwoActionScenario::PublicFillSelect)
-        }
-        [argument] if argument == "--live-public-wikipedia-form-locate" => {
-            run_two_action(TwoActionScenario::PublicFillLocateSelect)
+        [argument] if argument == "--live-two-action" => run_two_action(
+            TwoActionScenario::FixedClickFill,
+            ProbeModel::Terra,
+            ProbeRetention::Stateless,
+        ),
+        [argument] if argument == "--live-public-wikipedia-form" => run_two_action(
+            TwoActionScenario::PublicFillSelect,
+            ProbeModel::Terra,
+            ProbeRetention::Stateless,
+        ),
+        [argument] if argument == "--live-public-wikipedia-form-locate" => run_two_action(
+            TwoActionScenario::PublicFillLocateSelect,
+            ProbeModel::Terra,
+            ProbeRetention::Stateless,
+        ),
+        [argument] if argument == "--live-public-luna-form-inspectable" => run_two_action(
+            TwoActionScenario::PublicFillSelect,
+            ProbeModel::Luna,
+            ProbeRetention::InspectablePublicData,
+        ),
+        [argument] if argument == "--live-public-luna-form-locate-inspectable" => run_two_action(
+            TwoActionScenario::PublicFillLocateSelect,
+            ProbeModel::Luna,
+            ProbeRetention::InspectablePublicData,
+        ),
+        [argument] if argument == "--live-public-luna-suite-inspectable" => {
+            run_luna_inspectable_suite()
         }
         _ => std::process::exit(2),
     };
@@ -53,9 +72,17 @@ fn main() {
 }
 
 #[cfg(target_os = "macos")]
+type ProbeModel = zephium_agent_controller::AgenticProbeModel;
+
+#[cfg(target_os = "macos")]
+type ProbeRetention = zephium_agent_controller::AgenticProbeRetention;
+
+#[cfg(target_os = "macos")]
 #[derive(Clone, Copy)]
 enum ProbeFailure {
     Runtime,
+    SuiteLaunch,
+    SuiteChild,
     Keychain,
     Authority,
     Provider(zephium_agent_controller::TerraProbeProviderError),
@@ -87,6 +114,8 @@ impl ProbeFailure {
 
         match self {
             Self::Runtime => "runtime",
+            Self::SuiteLaunch => "suite_launch",
+            Self::SuiteChild => "suite_child",
             Self::Keychain => "keychain",
             Self::Authority => "authority",
             Self::Provider(TerraProbeProviderError::Authority) => "provider_authority",
@@ -251,8 +280,6 @@ impl ProbeFailure {
 
     const fn verification_reason_label(self) -> &'static str {
         use zephium_agent_controller::TerraProbeActionBridgeError;
-        use zephium_agentic::SemanticActionQualificationError;
-
         let error = match self {
             Self::Proposal {
                 error: Some(error), ..
@@ -265,24 +292,7 @@ impl ProbeFailure {
             TerraProbeActionBridgeError::UnexpectedTool(_) => "unexpected_tool",
             TerraProbeActionBridgeError::ActionCount => "action_count",
             TerraProbeActionBridgeError::StateUpdate => "state_update",
-            TerraProbeActionBridgeError::Qualification(
-                SemanticActionQualificationError::Identity,
-            ) => "identity",
-            TerraProbeActionBridgeError::Qualification(
-                SemanticActionQualificationError::Preparation,
-            ) => "preparation",
-            TerraProbeActionBridgeError::Qualification(
-                SemanticActionQualificationError::RequestAlreadyTaken,
-            ) => "request_already_taken",
-            TerraProbeActionBridgeError::Qualification(
-                SemanticActionQualificationError::Terminal,
-            ) => "terminal",
-            TerraProbeActionBridgeError::Qualification(
-                SemanticActionQualificationError::Settlement,
-            ) => "settlement",
-            TerraProbeActionBridgeError::Qualification(
-                SemanticActionQualificationError::Verification,
-            ) => "verification",
+            TerraProbeActionBridgeError::Qualification(error) => error.diagnostic_code(),
         }
     }
 
@@ -457,7 +467,7 @@ fn run_fixed_click() -> Result<(), ProbeFailure> {
         TerraControllerTurnInput, TerraProbeActionBridge,
     };
     use zephium_agent_provider_transport::{
-        load_macos_development_openai_credential, AgentProviderTransportConfig,
+        load_macos_probe_openai_credential, AgentProviderTransportConfig,
     };
     use zephium_agentic::{AgentPolicyInstant, SemanticActionExecutionInstant};
 
@@ -476,7 +486,7 @@ fn run_fixed_click() -> Result<(), ProbeFailure> {
         .build()
         .map_err(|_| ProbeFailure::Runtime)?;
     let mut credential =
-        Some(load_macos_development_openai_credential().map_err(|_| ProbeFailure::Keychain)?);
+        Some(load_macos_probe_openai_credential().map_err(|_| ProbeFailure::Keychain)?);
     let mut bridge = None;
     let mut metrics = None;
     let mut callback_failure = None;
@@ -620,7 +630,7 @@ fn run_public_wikipedia_fill() -> Result<(), ProbeFailure> {
         TerraControllerTurnInput, TerraProbeActionBridge,
     };
     use zephium_agent_provider_transport::{
-        load_macos_development_openai_credential, AgentProviderTransportConfig,
+        load_macos_probe_openai_credential, AgentProviderTransportConfig,
     };
     use zephium_agentic::{AgentPolicyInstant, SemanticActionExecutionInstant};
 
@@ -640,7 +650,7 @@ fn run_public_wikipedia_fill() -> Result<(), ProbeFailure> {
         .build()
         .map_err(|_| ProbeFailure::Runtime)?;
     let mut credential =
-        Some(load_macos_development_openai_credential().map_err(|_| ProbeFailure::Keychain)?);
+        Some(load_macos_probe_openai_credential().map_err(|_| ProbeFailure::Keychain)?);
     let mut bridge = None;
     let mut metrics = None;
     let mut callback_failure = None;
@@ -817,7 +827,37 @@ impl TwoActionScenario {
 }
 
 #[cfg(target_os = "macos")]
-fn run_two_action(scenario: TwoActionScenario) -> Result<(), ProbeFailure> {
+fn run_luna_inspectable_suite() -> Result<(), ProbeFailure> {
+    // AppKit has process-global launch and activation state. Each qualification
+    // run therefore gets a fresh process, matching how the standalone probe is
+    // invoked while avoiding false failures from attempting to relaunch the
+    // same NSApplication during a repeatability sweep.
+    let executable = std::env::current_exe().map_err(|_| ProbeFailure::SuiteLaunch)?;
+    for argument in [
+        "--live-public-luna-form-inspectable",
+        "--live-public-luna-form-inspectable",
+        "--live-public-luna-form-inspectable",
+        "--live-public-luna-form-locate-inspectable",
+        "--live-public-luna-form-locate-inspectable",
+        "--live-public-luna-form-locate-inspectable",
+    ] {
+        let status = std::process::Command::new(&executable)
+            .arg(argument)
+            .status()
+            .map_err(|_| ProbeFailure::SuiteLaunch)?;
+        if !status.success() {
+            return Err(ProbeFailure::SuiteChild);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn run_two_action(
+    scenario: TwoActionScenario,
+    model: ProbeModel,
+    retention: ProbeRetention,
+) -> Result<(), ProbeFailure> {
     use std::cell::{Cell, RefCell};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
@@ -826,8 +866,7 @@ fn run_two_action(scenario: TwoActionScenario) -> Result<(), ProbeFailure> {
         TerraProbeActionBridge, TerraProbeSession,
     };
     use zephium_agent_provider_transport::{
-        load_macos_development_openai_credential, AgentProviderCredential,
-        AgentProviderTransportConfig,
+        load_macos_probe_openai_credential, AgentProviderCredential, AgentProviderTransportConfig,
     };
     use zephium_agentic::{
         AgentModelCallReceipt, AgentPolicyInstant, AgentProviderInputMetricReceipt,
@@ -864,9 +903,7 @@ fn run_two_action(scenario: TwoActionScenario) -> Result<(), ProbeFailure> {
         .build()
         .map_err(|_| ProbeFailure::Runtime)?;
     let state = RefCell::new(WorkflowState {
-        credential: Some(
-            load_macos_development_openai_credential().map_err(|_| ProbeFailure::Keychain)?,
-        ),
+        credential: Some(load_macos_probe_openai_credential().map_err(|_| ProbeFailure::Keychain)?),
         session: None,
         bridge: None,
         metrics: Vec::with_capacity(3),
@@ -893,7 +930,7 @@ fn run_two_action(scenario: TwoActionScenario) -> Result<(), ProbeFailure> {
             .map_err(|_| {
                 callback_failure.set(Some(ProbeFailure::Authority));
             })?;
-            let input = TerraControllerRunInput::try_new(
+            let input = TerraControllerRunInput::try_new_for_probe_model(
                 manifest,
                 lease,
                 turn,
@@ -906,6 +943,7 @@ fn run_two_action(scenario: TwoActionScenario) -> Result<(), ProbeFailure> {
                     .ok_or_else(|| {
                         callback_failure.set(Some(ProbeFailure::Authority));
                     })?,
+                model,
             )
             .map_err(|_| {
                 callback_failure.set(Some(ProbeFailure::Authority));
@@ -915,11 +953,13 @@ fn run_two_action(scenario: TwoActionScenario) -> Result<(), ProbeFailure> {
             })?;
             let provider_started = Instant::now();
             let (session, provider_turn) = runtime
-                .block_on(TerraProbeSession::start(
+                .block_on(TerraProbeSession::start_with_model(
                     input,
                     AgentProviderTransportConfig::STANDARD,
                     credential,
                     observation,
+                    model,
+                    retention,
                 ))
                 .map_err(|error| {
                     callback_failure.set(Some(ProbeFailure::Provider(error)));
@@ -1115,7 +1155,29 @@ fn run_two_action(scenario: TwoActionScenario) -> Result<(), ProbeFailure> {
     let mut request_bytes = 0_u64;
     let mut semantic_bytes = 0_u64;
     let mut provider_elapsed_ms = 0_u128;
+    let mut turn_input_tokens = Vec::with_capacity(model_turns);
+    let mut turn_cached_input_tokens = Vec::with_capacity(model_turns);
+    let mut turn_output_tokens = Vec::with_capacity(model_turns);
+    let mut turn_reasoning_output_tokens = Vec::with_capacity(model_turns);
+    let mut turn_request_bytes = Vec::with_capacity(model_turns);
+    let mut turn_semantic_bytes = Vec::with_capacity(model_turns);
+    let mut turn_semantic_token_measurements = Vec::with_capacity(model_turns);
+    let mut turn_structured_input_measurements = Vec::with_capacity(model_turns);
+    let mut turn_provider_elapsed_ms = Vec::with_capacity(model_turns);
     for metric in state.metrics {
+        let attribution = metric.receipt.pricing_attribution();
+        turn_input_tokens.push(metric.receipt.input_tokens());
+        turn_cached_input_tokens.push(
+            attribution
+                .map(|attribution| attribution.cached_input_tokens())
+                .unwrap_or(0),
+        );
+        turn_output_tokens.push(metric.receipt.output_tokens());
+        turn_reasoning_output_tokens.push(
+            attribution
+                .map(|attribution| attribution.reasoning_output_tokens())
+                .unwrap_or(0),
+        );
         input_tokens = input_tokens
             .checked_add(metric.receipt.input_tokens())
             .ok_or(ProbeFailure::Metrics)?;
@@ -1126,6 +1188,11 @@ fn run_two_action(scenario: TwoActionScenario) -> Result<(), ProbeFailure> {
             .checked_add(metric.receipt.cost_micro_usd())
             .ok_or(ProbeFailure::Metrics)?;
         let input = metric.input.metrics();
+        turn_request_bytes.push(input.serialized_request_bytes());
+        turn_semantic_bytes.push(input.semantic().disclosed_bytes());
+        turn_semantic_token_measurements.push(input.semantic_payload_tokens());
+        turn_structured_input_measurements.push(input.structured_input_tokens());
+        turn_provider_elapsed_ms.push(metric.provider_elapsed.as_millis());
         request_bytes = request_bytes
             .checked_add(u64::from(input.serialized_request_bytes()))
             .ok_or(ProbeFailure::Metrics)?;
@@ -1141,10 +1208,15 @@ fn run_two_action(scenario: TwoActionScenario) -> Result<(), ProbeFailure> {
         .ok_or(ProbeFailure::Metrics)?;
     let elapsed_ms = started.elapsed().as_millis();
     let workflow = scenario.workflow_label();
+    let model_revision = model.revision();
+    let provider_storage = match retention {
+        ProbeRetention::Stateless => "stateless",
+        ProbeRetention::InspectablePublicData => "retained-public-probe",
+    };
     use std::io::Write as _;
     writeln!(
         std::io::stdout().lock(),
-        "macos-terra-agentic-probe: passed; workflow={workflow}; model=gpt-5.6-terra; turns={model_turns}; verified_actions=2; first_backend={first_backend}; second_backend={second_backend}; input_tokens={input_tokens}; output_tokens={output_tokens}; total_tokens={total_tokens}; request_bytes={request_bytes}; semantic_bytes={semantic_bytes}; charged_micro_usd={charged_micro_usd}; provider_elapsed_ms={provider_elapsed_ms}; elapsed_ms={elapsed_ms}; content=redacted",
+        "macos-terra-agentic-probe: passed; workflow={workflow}; model={model_revision}; provider_storage={provider_storage}; turns={model_turns}; verified_actions=2; first_backend={first_backend}; second_backend={second_backend}; input_tokens={input_tokens}; output_tokens={output_tokens}; total_tokens={total_tokens}; request_bytes={request_bytes}; semantic_bytes={semantic_bytes}; charged_micro_usd={charged_micro_usd}; provider_elapsed_ms={provider_elapsed_ms}; elapsed_ms={elapsed_ms}; turn_input_tokens={turn_input_tokens:?}; turn_cached_input_tokens={turn_cached_input_tokens:?}; turn_output_tokens={turn_output_tokens:?}; turn_reasoning_output_tokens={turn_reasoning_output_tokens:?}; turn_request_bytes={turn_request_bytes:?}; turn_semantic_bytes={turn_semantic_bytes:?}; turn_semantic_token_measurements={turn_semantic_token_measurements:?}; turn_structured_input_measurements={turn_structured_input_measurements:?}; turn_provider_elapsed_ms={turn_provider_elapsed_ms:?}; content=redacted",
     )
     .map_err(|_| ProbeFailure::Output)?;
     Ok(())

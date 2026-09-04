@@ -722,6 +722,7 @@ pub struct AgentProviderCallConfig {
     input_accounting: AgentProviderInputAccountingMode,
     max_output_tokens: u32,
     stream: AgentProviderStreamBudget,
+    store_response: bool,
 }
 
 impl AgentProviderCallConfig {
@@ -756,7 +757,19 @@ impl AgentProviderCallConfig {
             input_accounting,
             max_output_tokens,
             stream,
+            store_response: false,
         })
+    }
+
+    /// Enables provider-side response retention for an inspectable public-data probe.
+    ///
+    /// This switch does not exist in release builds. Production and ordinary
+    /// BYOK calls remain unconditionally stateless; the diagnostic harness must
+    /// opt in explicitly before it serializes any request.
+    #[cfg(feature = "probe-harness")]
+    pub fn retain_response_for_inspectable_probe(mut self) -> Self {
+        self.store_response = true;
+        self
     }
 
     #[cfg(test)]
@@ -843,6 +856,10 @@ impl AgentProviderCallConfig {
     /// Hard per-call stream ceilings.
     pub const fn stream_budget(&self) -> AgentProviderStreamBudget {
         self.stream
+    }
+
+    pub(crate) const fn stores_response(&self) -> bool {
+        self.store_response
     }
 
     pub(crate) fn validate_request(

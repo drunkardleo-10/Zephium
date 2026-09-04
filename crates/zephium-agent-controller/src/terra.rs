@@ -5,6 +5,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use thiserror::Error;
+#[cfg(feature = "probe-harness")]
+use zephium_agent_model_catalog::{
+    settle_luna_provider_terminal, try_luna_provider_exact_call_config,
+    LunaProviderTerminalSettlement, LUNA_CACHE_WRITE_MICRO_USD_PER_MILLION_TOKENS,
+    LUNA_MAX_OUTPUT_TOKENS, LUNA_MODEL_REVISION, LUNA_OUTPUT_MICRO_USD_PER_MILLION_TOKENS,
+    LUNA_STANDARD_RATE_MAX_INPUT_TOKENS, TERRA_MODEL_REVISION,
+};
 use zephium_agent_model_catalog::{
     settle_terra_provider_terminal, try_terra_provider_exact_call_config,
     TerraProviderTerminalOwner, TerraProviderTerminalSettlement,
@@ -59,6 +66,8 @@ const MAX_DEFERRED_RUNTIME_EVENTS: usize =
     MAX_AGENT_RUNTIME_TERMINAL_CAPACITY + MAX_AGENT_RUNTIME_SIGNAL_CAPACITY;
 #[cfg(feature = "probe-harness")]
 const MAX_TERRA_PROBE_MODEL_TURNS: u8 = 3;
+#[cfg(feature = "probe-harness")]
+const LUNA_PROVIDER_EXACT_RESERVATION_COST_MICRO_USD: u64 = 77_830;
 
 const _: () = {
     assert!(TERRA_CONTROLLER_MAX_OUTPUT_TOKENS < TERRA_MAX_OUTPUT_TOKENS);
@@ -71,7 +80,51 @@ const _: () = {
                     * TERRA_OUTPUT_MICRO_USD_PER_MILLION_TOKENS
                     / 1_000_000
     );
+    #[cfg(feature = "probe-harness")]
+    {
+        assert!(TERRA_CONTROLLER_MAX_OUTPUT_TOKENS < LUNA_MAX_OUTPUT_TOKENS);
+        assert!(
+            LUNA_PROVIDER_EXACT_RESERVATION_COST_MICRO_USD
+                == LUNA_STANDARD_RATE_MAX_INPUT_TOKENS
+                    * LUNA_CACHE_WRITE_MICRO_USD_PER_MILLION_TOKENS
+                    / 1_000_000
+                    + (TERRA_CONTROLLER_MAX_OUTPUT_TOKENS as u64)
+                        * LUNA_OUTPUT_MICRO_USD_PER_MILLION_TOKENS
+                        / 1_000_000
+        );
+    }
 };
+
+/// Closed OpenAI model selection admitted by the release-excluded live probe.
+#[cfg(feature = "probe-harness")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgenticProbeModel {
+    /// Balanced-intelligence GPT-5.6 Terra qualification baseline.
+    Terra,
+    /// Cost-sensitive GPT-5.6 Luna qualification target.
+    Luna,
+}
+
+#[cfg(feature = "probe-harness")]
+impl AgenticProbeModel {
+    /// Exact provider model alias used by this qualification.
+    pub const fn revision(self) -> &'static str {
+        match self {
+            Self::Terra => TERRA_MODEL_REVISION,
+            Self::Luna => LUNA_MODEL_REVISION,
+        }
+    }
+}
+
+/// Provider-retention policy for a release-excluded live probe.
+#[cfg(feature = "probe-harness")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgenticProbeRetention {
+    /// Preserve the production stateless `store:false` request contract.
+    Stateless,
+    /// Retain an explicitly public qualification request for dashboard review.
+    InspectablePublicData,
+}
 
 /// Exact shell-minted identifiers for one deterministic controller turn.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -229,6 +282,44 @@ impl TerraControllerRunInput {
         clock: Arc<dyn TerraControllerClock>,
         deadline: Instant,
     ) -> Result<Self, TerraControllerConstructionError> {
+        let config = try_terra_provider_exact_call_config(TERRA_CONTROLLER_MAX_OUTPUT_TOKENS)
+            .map_err(|_| TerraControllerConstructionError::Catalog)?;
+        Self::try_new_with_config(manifest, lease, turn, ids, clock, deadline, &config)
+    }
+
+    /// Builds one release-excluded run input for an explicitly selected probe model.
+    #[cfg(feature = "probe-harness")]
+    pub fn try_new_for_probe_model(
+        manifest: zephium_agentic::AgentRunManifest,
+        lease: AgentPlanLeaseBinding,
+        turn: TerraControllerTurnInput,
+        ids: TerraControllerIds,
+        clock: Arc<dyn TerraControllerClock>,
+        deadline: Instant,
+        model: AgenticProbeModel,
+    ) -> Result<Self, TerraControllerConstructionError> {
+        let config = match model {
+            AgenticProbeModel::Terra => {
+                try_terra_provider_exact_call_config(TERRA_CONTROLLER_MAX_OUTPUT_TOKENS)
+                    .map_err(|_| TerraControllerConstructionError::Catalog)?
+            }
+            AgenticProbeModel::Luna => {
+                try_luna_provider_exact_call_config(TERRA_CONTROLLER_MAX_OUTPUT_TOKENS)
+                    .map_err(|_| TerraControllerConstructionError::Catalog)?
+            }
+        };
+        Self::try_new_with_config(manifest, lease, turn, ids, clock, deadline, &config)
+    }
+
+    fn try_new_with_config(
+        manifest: zephium_agentic::AgentRunManifest,
+        lease: AgentPlanLeaseBinding,
+        turn: TerraControllerTurnInput,
+        ids: TerraControllerIds,
+        clock: Arc<dyn TerraControllerClock>,
+        deadline: Instant,
+        config: &AgentProviderCallConfig,
+    ) -> Result<Self, TerraControllerConstructionError> {
         let now = Instant::now();
         let Some(horizon) = deadline.checked_duration_since(now) else {
             return Err(TerraControllerConstructionError::Deadline);
@@ -250,8 +341,6 @@ impl TerraControllerRunInput {
             snapshot_generation,
             objective,
         } = turn;
-        let config = try_terra_provider_exact_call_config(TERRA_CONTROLLER_MAX_OUTPUT_TOKENS)
-            .map_err(|_| TerraControllerConstructionError::Catalog)?;
         let objective =
             AgentProviderObjective::try_admit_conservative_utf8(objective, config.tokenizer())
                 .map_err(|_| TerraControllerConstructionError::Objective)?;
@@ -1805,6 +1894,7 @@ pub struct TerraProbeSession {
     transport: AgentProviderTransport,
     credential: AgentProviderCredential,
     config: AgentProviderCallConfig,
+    model: AgenticProbeModel,
     lease: AgentPlanLeaseBinding,
     account: AgentContextAccountBinding,
     next_call: u64,
@@ -1823,6 +1913,26 @@ impl TerraProbeSession {
         credential: AgentProviderCredential,
         observation: &zephium_agentic::SemanticObservation,
     ) -> Result<(Self, TerraProbeProviderTurn), TerraProbeProviderError> {
+        Self::start_with_model(
+            input,
+            transport_config,
+            credential,
+            observation,
+            AgenticProbeModel::Terra,
+            AgenticProbeRetention::Stateless,
+        )
+        .await
+    }
+
+    /// Starts one explicitly selected release-excluded OpenAI probe session.
+    pub async fn start_with_model(
+        input: TerraControllerRunInput,
+        transport_config: AgentProviderTransportConfig,
+        credential: AgentProviderCredential,
+        observation: &zephium_agentic::SemanticObservation,
+        model: AgenticProbeModel,
+        retention: AgenticProbeRetention,
+    ) -> Result<(Self, TerraProbeProviderTurn), TerraProbeProviderError> {
         let TerraControllerRunInput {
             manifest,
             lease,
@@ -1837,9 +1947,23 @@ impl TerraProbeSession {
             return Err(TerraProbeProviderError::Deadline);
         }
         let now = clock.now().map_err(|_| TerraProbeProviderError::Clock)?;
-        let config = try_terra_provider_exact_call_config(TERRA_CONTROLLER_MAX_OUTPUT_TOKENS)
-            .map_err(|_| TerraProbeProviderError::Catalog)?;
-        let budget = terra_probe_call_budget()?;
+        let config = match model {
+            AgenticProbeModel::Terra => {
+                try_terra_provider_exact_call_config(TERRA_CONTROLLER_MAX_OUTPUT_TOKENS)
+                    .map_err(|_| TerraProbeProviderError::Catalog)?
+            }
+            AgenticProbeModel::Luna => {
+                try_luna_provider_exact_call_config(TERRA_CONTROLLER_MAX_OUTPUT_TOKENS)
+                    .map_err(|_| TerraProbeProviderError::Catalog)?
+            }
+        };
+        let config = match retention {
+            AgenticProbeRetention::Stateless => config,
+            AgenticProbeRetention::InspectablePublicData => {
+                config.retain_response_for_inspectable_probe()
+            }
+        };
+        let budget = probe_call_budget(model)?;
         let call =
             AgentModelCallRequest::new(ids.model_call(), lease.lease(), account, budget, now);
         let payload = encode_semantic_observation(
@@ -1875,6 +1999,7 @@ impl TerraProbeSession {
             transport,
             credential,
             config,
+            model,
             lease,
             account,
             next_call,
@@ -2011,7 +2136,7 @@ impl TerraProbeSession {
             call_id,
             self.lease.lease(),
             self.account,
-            terra_probe_call_budget()?,
+            probe_call_budget(self.model)?,
             now,
         ))
     }
@@ -2061,7 +2186,7 @@ impl TerraProbeSession {
         };
         let input = result.input_metric_receipt();
         let disclosure = result.disclosure_stage();
-        let turn = settle_terra_probe_result(result, disclosure, input, &mut self.policy)?;
+        let turn = settle_probe_result(result, disclosure, input, self.model, &mut self.policy)?;
         self.turns = self
             .turns
             .checked_add(1)
@@ -2101,22 +2226,35 @@ impl fmt::Debug for TerraProbeSession {
 }
 
 #[cfg(feature = "probe-harness")]
-fn terra_probe_call_budget() -> Result<AgentModelCallBudget, TerraProbeProviderError> {
-    let input_ceiling = u32::try_from(TERRA_STANDARD_RATE_MAX_INPUT_TOKENS)
-        .map_err(|_| TerraProbeProviderError::Catalog)?;
+fn probe_call_budget(
+    model: AgenticProbeModel,
+) -> Result<AgentModelCallBudget, TerraProbeProviderError> {
+    let (input_ceiling, reservation) = match model {
+        AgenticProbeModel::Terra => (
+            TERRA_STANDARD_RATE_MAX_INPUT_TOKENS,
+            TERRA_PROVIDER_EXACT_RESERVATION_COST_MICRO_USD,
+        ),
+        AgenticProbeModel::Luna => (
+            LUNA_STANDARD_RATE_MAX_INPUT_TOKENS,
+            LUNA_PROVIDER_EXACT_RESERVATION_COST_MICRO_USD,
+        ),
+    };
+    let input_ceiling =
+        u32::try_from(input_ceiling).map_err(|_| TerraProbeProviderError::Catalog)?;
     AgentModelCallBudget::try_new(
         input_ceiling,
         TERRA_CONTROLLER_MAX_OUTPUT_TOKENS,
-        TERRA_PROVIDER_EXACT_RESERVATION_COST_MICRO_USD,
+        reservation,
     )
     .map_err(|_| TerraProbeProviderError::Catalog)
 }
 
 #[cfg(feature = "probe-harness")]
-fn settle_terra_probe_result(
+fn settle_probe_result(
     result: AgentProviderTransportResult,
     disclosure: AgentProviderDisclosureStage,
     input: zephium_agentic::AgentProviderInputMetricReceipt,
+    model: AgenticProbeModel,
     policy: &mut AgentRunPolicy,
 ) -> Result<TerraProbeProviderTurn, TerraProbeProviderError> {
     match result.into_policy_settlement() {
@@ -2155,24 +2293,37 @@ fn settle_terra_probe_result(
             })
         }
         AgentProviderPolicySettlement::PricingRequired(settlement) => {
-            match settle_terra_provider_terminal(*settlement, policy)
-                .map_err(|_| TerraProbeProviderError::Settlement)?
-            {
-                TerraProviderTerminalSettlement::Priced(terminal) => {
-                    let receipt = terminal.receipt();
-                    let Some(turn) = terminal.into_tool_turn() else {
-                        return Err(TerraProbeProviderError::Proposal);
-                    };
-                    Ok(TerraProbeProviderTurn {
-                        receipt,
-                        input,
-                        turn,
-                    })
+            let terminal = match model {
+                AgenticProbeModel::Terra => {
+                    match settle_terra_provider_terminal(*settlement, policy)
+                        .map_err(|_| TerraProbeProviderError::Settlement)?
+                    {
+                        TerraProviderTerminalSettlement::Priced(terminal) => terminal,
+                        TerraProviderTerminalSettlement::ReservationCeiling(_) => {
+                            return Err(TerraProbeProviderError::Settlement);
+                        }
+                    }
                 }
-                TerraProviderTerminalSettlement::ReservationCeiling(_) => {
-                    Err(TerraProbeProviderError::Settlement)
+                AgenticProbeModel::Luna => {
+                    match settle_luna_provider_terminal(*settlement, policy)
+                        .map_err(|_| TerraProbeProviderError::Settlement)?
+                    {
+                        LunaProviderTerminalSettlement::Priced(terminal) => terminal,
+                        LunaProviderTerminalSettlement::ReservationCeiling(_) => {
+                            return Err(TerraProbeProviderError::Settlement);
+                        }
+                    }
                 }
-            }
+            };
+            let receipt = terminal.receipt();
+            let Some(turn) = terminal.into_tool_turn() else {
+                return Err(TerraProbeProviderError::Proposal);
+            };
+            Ok(TerraProbeProviderTurn {
+                receipt,
+                input,
+                turn,
+            })
         }
     }
 }

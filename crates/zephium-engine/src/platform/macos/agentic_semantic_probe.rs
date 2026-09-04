@@ -1600,7 +1600,12 @@ fn verify_primary_fill_execution(
         .settle_and_verify(pending.settlement, snapshot, observed_at)
         .map_err(|failure| match failure {
             SemanticActionQualificationError::Identity => "fill_verification_identity",
-            SemanticActionQualificationError::Preparation => "fill_verification_preparation",
+            SemanticActionQualificationError::Contract => "fill_verification_contract",
+            SemanticActionQualificationError::Binding(_) => "fill_verification_binding",
+            SemanticActionQualificationError::Checkpoint(_) => "fill_verification_checkpoint",
+            SemanticActionQualificationError::NativeAdmission(_) => {
+                "fill_verification_native_admission"
+            }
             SemanticActionQualificationError::RequestAlreadyTaken => "fill_verification_request",
             SemanticActionQualificationError::Terminal => "fill_verification_terminal",
             SemanticActionQualificationError::Settlement => "fill_verification_settlement",

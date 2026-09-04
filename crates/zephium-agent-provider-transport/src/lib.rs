@@ -42,6 +42,9 @@ pub use zephium_agentic::{
 #[cfg(feature = "probe-harness")]
 pub use zephium_agentic::{exact_loopback_url, ProviderEndpoints};
 
+#[cfg(all(feature = "probe-harness", target_os = "macos"))]
+pub use zephium_agentic::load_macos_probe_openai_credential;
+
 #[cfg(all(feature = "provider-transport", target_os = "macos"))]
 pub use zephium_agentic::{
     load_macos_development_openai_credential, MacosAgentProviderCredentialError,

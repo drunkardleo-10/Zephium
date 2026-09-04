@@ -1,6 +1,6 @@
 //! Product-owned immutable model and pricing catalog entries.
 //!
-//! This crate owns the reviewed Terra entry only. It retains no account
+//! This crate owns the reviewed Terra and Luna entries only. It retains no account
 //! material and performs no I/O, calls, or operating-system integration.
 
 #![forbid(unsafe_code)]
@@ -46,9 +46,72 @@ pub const TERRA_CACHE_WRITE_MICRO_USD_PER_MILLION_TOKENS: u64 = 2_500_000;
 /// Terra output price in micro-USD per million tokens.
 pub const TERRA_OUTPUT_MICRO_USD_PER_MILLION_TOKENS: u64 = 12_000_000;
 
+/// Exact OpenAI alias requested and accepted by the Luna catalog entry.
+pub const LUNA_MODEL_REVISION: &str = "gpt-5.6-luna";
+/// Pinned tokenizer/counting implementation revision for the Luna entry.
+pub const LUNA_TOKENIZER_REVISION: &str = "openai:gpt-5.6-luna:v1";
+/// Reproducible catalog revision effective with Luna's 2026-09-04 pricing.
+pub const LUNA_PRICING_CATALOG_REVISION: u64 = 20_260_904;
+/// Inclusive lower edge of the ordinary Luna rate tier.
+pub const LUNA_STANDARD_RATE_MIN_INPUT_TOKENS: u64 = 1;
+/// Inclusive upper edge before GPT-5.6 long-context pricing applies.
+pub const LUNA_STANDARD_RATE_MAX_INPUT_TOKENS: u64 = 272_000;
+/// Hard maximum output tokens accepted by the Luna provider entry.
+pub const LUNA_MAX_OUTPUT_TOKENS: u32 = 128_000;
+/// Luna uncached-input price in micro-USD per million tokens.
+pub const LUNA_UNCACHED_INPUT_MICRO_USD_PER_MILLION_TOKENS: u64 = 200_000;
+/// Luna cached-input price in micro-USD per million tokens.
+pub const LUNA_CACHED_INPUT_MICRO_USD_PER_MILLION_TOKENS: u64 = 20_000;
+/// Luna cache-write price using the GPT-5.6 family 1.25x input multiplier.
+pub const LUNA_CACHE_WRITE_MICRO_USD_PER_MILLION_TOKENS: u64 = 250_000;
+/// Luna output price in micro-USD per million tokens.
+pub const LUNA_OUTPUT_MICRO_USD_PER_MILLION_TOKENS: u64 = 1_200_000;
+
 static TERRA_PRICING_SCHEDULE: OnceLock<
     Result<AgentProviderPricingSchedule, TerraModelCatalogError>,
 > = OnceLock::new();
+
+static LUNA_PRICING_SCHEDULE: OnceLock<
+    Result<AgentProviderPricingSchedule, LunaModelCatalogError>,
+> = OnceLock::new();
+
+/// Fallible failure while constructing the fixed Luna entry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LunaModelCatalogError {
+    /// The fixed model label stopped satisfying the shared model contract.
+    ModelRevision,
+    /// The fixed tokenizer label stopped satisfying the shared tokenizer contract.
+    TokenizerRevision,
+    /// The date-derived pricing revision was not representable as nonzero.
+    PricingRevision,
+    /// The fixed standard-rate input range stopped satisfying the shared contract.
+    PricingProfile,
+    /// One fixed Luna price stopped satisfying the shared arithmetic contract.
+    TokenRates,
+    /// The fixed Luna provider/model identity stopped satisfying the shared contract.
+    PricingSchedule,
+    /// The requested output-token ceiling is zero or exceeds the Luna limit.
+    OutputTokens,
+    /// A caller selected an invalid output or stream limit for the fixed entry.
+    CallConfig(AgentProviderContractError),
+}
+
+impl fmt::Display for LunaModelCatalogError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ModelRevision => formatter.write_str("Luna model revision is invalid"),
+            Self::TokenizerRevision => formatter.write_str("Luna tokenizer revision is invalid"),
+            Self::PricingRevision => formatter.write_str("Luna pricing revision is invalid"),
+            Self::PricingProfile => formatter.write_str("Luna pricing profile is invalid"),
+            Self::TokenRates => formatter.write_str("Luna token rates are invalid"),
+            Self::PricingSchedule => formatter.write_str("Luna pricing schedule is invalid"),
+            Self::OutputTokens => formatter.write_str("Luna output-token ceiling is invalid"),
+            Self::CallConfig(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl Error for LunaModelCatalogError {}
 
 /// Fallible failure while constructing the fixed Terra entry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -214,6 +277,119 @@ impl fmt::Debug for TerraProviderTerminalOwner {
     }
 }
 
+/// Completed Luna terminal whose policy authority was settled exactly once.
+#[must_use]
+pub enum LunaProviderTerminalSettlement {
+    /// Exact provider usage was priced by the fixed Luna schedule.
+    Priced(Box<AgentProviderSettledTerminal>),
+    /// Exact pricing was unavailable, so policy charged the committed ceiling.
+    ReservationCeiling(Box<AgentModelCallReceipt>),
+}
+
+impl fmt::Debug for LunaProviderTerminalSettlement {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Priced(_) => formatter.write_str("LunaProviderTerminalSettlement::Priced"),
+            Self::ReservationCeiling(_) => {
+                formatter.write_str("LunaProviderTerminalSettlement::ReservationCeiling")
+            }
+        }
+    }
+}
+
+/// Content-free refusal while settling one Luna provider EOF terminal.
+#[must_use]
+pub enum LunaProviderTerminalSettlementError {
+    /// The supplied policy was sealed or did not own the exact live terminal.
+    PolicyPrecondition {
+        /// Closed policy refusal.
+        error: AgentPolicyError,
+        /// Opaque terminal retained for its proper policy owner.
+        retained: LunaProviderTerminalOwner,
+    },
+    /// Policy consumed the terminal transition and failed stopped.
+    Policy(AgentPolicyError),
+    /// An impossible fallback refusal retained its exact terminal owner.
+    Fallback {
+        /// Exact terminal retained for conservative reconciliation.
+        retained: LunaProviderTerminalOwner,
+    },
+}
+
+impl LunaProviderTerminalSettlementError {
+    /// Returns the content-free policy refusal, when present.
+    pub const fn policy_error(&self) -> Option<AgentPolicyError> {
+        match self {
+            Self::PolicyPrecondition { error, .. } | Self::Policy(error) => Some(*error),
+            Self::Fallback { .. } => None,
+        }
+    }
+
+    /// Recovers an opaque terminal only for exact policy reconciliation.
+    pub fn into_retained(self) -> Option<LunaProviderTerminalOwner> {
+        match self {
+            Self::PolicyPrecondition { retained, .. } | Self::Fallback { retained } => {
+                Some(retained)
+            }
+            Self::Policy(_) => None,
+        }
+    }
+}
+
+impl fmt::Debug for LunaProviderTerminalSettlementError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PolicyPrecondition { error, .. } => formatter
+                .debug_struct("LunaProviderTerminalSettlementError::PolicyPrecondition")
+                .field("error", error)
+                .field("terminal", &"[redacted]")
+                .finish(),
+            Self::Policy(error) => formatter
+                .debug_tuple("LunaProviderTerminalSettlementError::Policy")
+                .field(error)
+                .finish(),
+            Self::Fallback { .. } => formatter
+                .debug_struct("LunaProviderTerminalSettlementError::Fallback")
+                .field("terminal", &"[redacted]")
+                .finish(),
+        }
+    }
+}
+
+impl fmt::Display for LunaProviderTerminalSettlementError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PolicyPrecondition { .. } => {
+                formatter.write_str("Luna terminal policy precondition failed")
+            }
+            Self::Policy(_) => formatter.write_str("Luna terminal policy settlement failed"),
+            Self::Fallback { .. } => formatter.write_str("Luna terminal fallback is unavailable"),
+        }
+    }
+}
+
+impl Error for LunaProviderTerminalSettlementError {}
+
+/// Opaque Luna EOF terminal retained after a pre-consumption refusal.
+#[must_use]
+pub struct LunaProviderTerminalOwner(Box<AgentProviderPricingSettlement>);
+
+impl LunaProviderTerminalOwner {
+    /// Retries this retained terminal with the sole approved Luna policy path.
+    pub fn settle_with_exact_policy(
+        self,
+        policy: &mut AgentRunPolicy,
+    ) -> Result<LunaProviderTerminalSettlement, LunaProviderTerminalSettlementError> {
+        settle_luna_provider_terminal(*self.0, policy)
+    }
+}
+
+impl fmt::Debug for LunaProviderTerminalOwner {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("LunaProviderTerminalOwner([redacted])")
+    }
+}
+
 /// Returns the process-static schedule for the sole approved Terra entry.
 ///
 /// Construction is deferred and remains fallible so a future shared-contract
@@ -335,6 +511,117 @@ fn build_terra_pricing_schedule() -> Result<AgentProviderPricingSchedule, TerraM
         rates,
     )
     .map_err(|_: AgentProviderPricingContractError| TerraModelCatalogError::PricingSchedule)
+}
+
+fn luna_pricing_schedule() -> Result<&'static AgentProviderPricingSchedule, LunaModelCatalogError> {
+    match LUNA_PRICING_SCHEDULE.get_or_init(build_luna_pricing_schedule) {
+        Ok(schedule) => Ok(schedule),
+        Err(error) => Err(*error),
+    }
+}
+
+/// Creates a provider-exact configuration for the fixed Luna schedule.
+///
+/// The caller may select only the output ceiling; response-stream bounds remain
+/// the shared standard budget and no caller input can alter catalog identity.
+pub fn try_luna_provider_exact_call_config(
+    max_output_tokens: u32,
+) -> Result<AgentProviderCallConfig, LunaModelCatalogError> {
+    if max_output_tokens == 0 || max_output_tokens > LUNA_MAX_OUTPUT_TOKENS {
+        return Err(LunaModelCatalogError::OutputTokens);
+    }
+    luna_pricing_schedule()?
+        .try_provider_exact_call_config(max_output_tokens, AgentProviderStreamBudget::STANDARD)
+        .map_err(LunaModelCatalogError::CallConfig)
+}
+
+/// Prices and settles one exact Luna provider EOF terminal.
+pub fn settle_luna_provider_terminal(
+    settlement: AgentProviderPricingSettlement,
+    policy: &mut AgentRunPolicy,
+) -> Result<LunaProviderTerminalSettlement, LunaProviderTerminalSettlementError> {
+    let schedule = match luna_pricing_schedule() {
+        Ok(schedule) => schedule,
+        Err(_) => return settle_luna_at_reservation_ceiling(settlement, policy),
+    };
+    match settlement.settle(policy, schedule) {
+        Ok(terminal) => Ok(LunaProviderTerminalSettlement::Priced(Box::new(terminal))),
+        Err(AgentProviderPricingSettlementError::Schedule { unsettled })
+        | Err(AgentProviderPricingSettlementError::TerminalPricing { unsettled, .. }) => {
+            settle_luna_at_reservation_ceiling(*unsettled, policy)
+        }
+        Err(AgentProviderPricingSettlementError::PolicyPrecondition { error, unsettled }) => {
+            Err(LunaProviderTerminalSettlementError::PolicyPrecondition {
+                error,
+                retained: LunaProviderTerminalOwner(unsettled),
+            })
+        }
+        Err(AgentProviderPricingSettlementError::Policy(error)) => {
+            Err(LunaProviderTerminalSettlementError::Policy(error))
+        }
+    }
+}
+
+fn settle_luna_at_reservation_ceiling(
+    settlement: AgentProviderPricingSettlement,
+    policy: &mut AgentRunPolicy,
+) -> Result<LunaProviderTerminalSettlement, LunaProviderTerminalSettlementError> {
+    match settlement.settle_at_reservation_ceiling(policy) {
+        Ok(receipt) => Ok(LunaProviderTerminalSettlement::ReservationCeiling(
+            Box::new(receipt),
+        )),
+        Err(AgentProviderPricingSettlementError::PolicyPrecondition { error, unsettled }) => {
+            Err(LunaProviderTerminalSettlementError::PolicyPrecondition {
+                error,
+                retained: LunaProviderTerminalOwner(unsettled),
+            })
+        }
+        Err(AgentProviderPricingSettlementError::Policy(error)) => {
+            Err(LunaProviderTerminalSettlementError::Policy(error))
+        }
+        Err(AgentProviderPricingSettlementError::Schedule { unsettled })
+        | Err(AgentProviderPricingSettlementError::TerminalPricing { unsettled, .. }) => {
+            Err(LunaProviderTerminalSettlementError::Fallback {
+                retained: LunaProviderTerminalOwner(unsettled),
+            })
+        }
+    }
+}
+
+fn build_luna_pricing_schedule() -> Result<AgentProviderPricingSchedule, LunaModelCatalogError> {
+    let requested_model = AgentProviderModelRevision::try_new(LUNA_MODEL_REVISION.to_owned())
+        .map_err(|_: AgentProviderContractError| LunaModelCatalogError::ModelRevision)?;
+    let allowed_effective_model =
+        AgentProviderModelRevision::try_new(LUNA_MODEL_REVISION.to_owned())
+            .map_err(|_: AgentProviderContractError| LunaModelCatalogError::ModelRevision)?;
+    let tokenizer = SemanticTokenizerRevision::try_new(LUNA_TOKENIZER_REVISION.to_owned())
+        .map_err(|_: SemanticTokenizerRevisionError| LunaModelCatalogError::TokenizerRevision)?;
+    let revision = AgentProviderPricingRevision::new(LUNA_PRICING_CATALOG_REVISION)
+        .ok_or(LunaModelCatalogError::PricingRevision)?;
+    let profile = AgentProviderPricingProfile::try_for_input_range(
+        revision,
+        LUNA_STANDARD_RATE_MIN_INPUT_TOKENS,
+        LUNA_STANDARD_RATE_MAX_INPUT_TOKENS,
+    )
+    .map_err(|_: AgentProviderPricingContractError| LunaModelCatalogError::PricingProfile)?;
+    let rates = AgentProviderTokenRates::try_new(
+        LUNA_UNCACHED_INPUT_MICRO_USD_PER_MILLION_TOKENS,
+        LUNA_CACHED_INPUT_MICRO_USD_PER_MILLION_TOKENS,
+        LUNA_CACHE_WRITE_MICRO_USD_PER_MILLION_TOKENS,
+        LUNA_OUTPUT_MICRO_USD_PER_MILLION_TOKENS,
+    )
+    .map_err(|_: AgentProviderPricingContractError| LunaModelCatalogError::TokenRates)?;
+    AgentProviderPricingSchedule::try_new(
+        AgentProviderKind::OpenAiResponses,
+        requested_model,
+        vec![allowed_effective_model],
+        AgentProviderResponseRoute::OpenAiDefault,
+        AgentProviderReasoningEffort::Medium,
+        tokenizer,
+        profile,
+        rates,
+    )
+    .map_err(|_: AgentProviderPricingContractError| LunaModelCatalogError::PricingSchedule)
 }
 
 #[cfg(test)]

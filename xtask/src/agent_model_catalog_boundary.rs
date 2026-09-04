@@ -379,16 +379,59 @@ fn validate_root(source: &str) -> Result<(), String> {
             1,
         ),
         (
+            "pubconstLUNA_MODEL_REVISION:&str=\"gpt-5.6-luna\";",
+            1,
+        ),
+        (
+            "pubconstLUNA_TOKENIZER_REVISION:&str=\"openai:gpt-5.6-luna:v1\";",
+            1,
+        ),
+        ("pubconstLUNA_PRICING_CATALOG_REVISION:u64=20_260_904;", 1),
+        ("pubconstLUNA_STANDARD_RATE_MIN_INPUT_TOKENS:u64=1;", 1),
+        (
+            "pubconstLUNA_STANDARD_RATE_MAX_INPUT_TOKENS:u64=272_000;",
+            1,
+        ),
+        ("pubconstLUNA_MAX_OUTPUT_TOKENS:u32=128_000;", 1),
+        (
+            "pubconstLUNA_UNCACHED_INPUT_MICRO_USD_PER_MILLION_TOKENS:u64=200_000;",
+            1,
+        ),
+        (
+            "pubconstLUNA_CACHED_INPUT_MICRO_USD_PER_MILLION_TOKENS:u64=20_000;",
+            1,
+        ),
+        (
+            "pubconstLUNA_CACHE_WRITE_MICRO_USD_PER_MILLION_TOKENS:u64=250_000;",
+            1,
+        ),
+        (
+            "pubconstLUNA_OUTPUT_MICRO_USD_PER_MILLION_TOKENS:u64=1_200_000;",
+            1,
+        ),
+        (
             "staticTERRA_PRICING_SCHEDULE:OnceLock<Result<AgentProviderPricingSchedule,TerraModelCatalogError>,>=OnceLock::new();",
             1,
         ),
-        ("AgentProviderPricingSchedule", 5),
+        (
+            "staticLUNA_PRICING_SCHEDULE:OnceLock<Result<AgentProviderPricingSchedule,LunaModelCatalogError>,>=OnceLock::new();",
+            1,
+        ),
+        ("AgentProviderPricingSchedule", 9),
         (
             "AgentProviderModelRevision::try_new(TERRA_MODEL_REVISION.to_owned())",
             2,
         ),
         (
             "AgentProviderPricingRevision::new(TERRA_PRICING_CATALOG_REVISION)",
+            1,
+        ),
+        (
+            "AgentProviderModelRevision::try_new(LUNA_MODEL_REVISION.to_owned())",
+            2,
+        ),
+        (
+            "AgentProviderPricingRevision::new(LUNA_PRICING_CATALOG_REVISION)",
             1,
         ),
         (
@@ -399,39 +442,68 @@ fn validate_root(source: &str) -> Result<(), String> {
             "AgentProviderTokenRates::try_new(TERRA_UNCACHED_INPUT_MICRO_USD_PER_MILLION_TOKENS,TERRA_CACHED_INPUT_MICRO_USD_PER_MILLION_TOKENS,TERRA_CACHE_WRITE_MICRO_USD_PER_MILLION_TOKENS,TERRA_OUTPUT_MICRO_USD_PER_MILLION_TOKENS,)",
             1,
         ),
-        ("AgentProviderPricingSchedule::try_new(", 1),
-        ("AgentProviderKind::OpenAiResponses,", 1),
-        ("vec![allowed_effective_model],", 1),
-        ("AgentProviderResponseRoute::OpenAiDefault,", 1),
-        ("AgentProviderReasoningEffort::Medium,", 1),
+        (
+            "AgentProviderPricingProfile::try_for_input_range(revision,LUNA_STANDARD_RATE_MIN_INPUT_TOKENS,LUNA_STANDARD_RATE_MAX_INPUT_TOKENS,)",
+            1,
+        ),
+        (
+            "AgentProviderTokenRates::try_new(LUNA_UNCACHED_INPUT_MICRO_USD_PER_MILLION_TOKENS,LUNA_CACHED_INPUT_MICRO_USD_PER_MILLION_TOKENS,LUNA_CACHE_WRITE_MICRO_USD_PER_MILLION_TOKENS,LUNA_OUTPUT_MICRO_USD_PER_MILLION_TOKENS,)",
+            1,
+        ),
+        ("AgentProviderPricingSchedule::try_new(", 2),
+        ("AgentProviderKind::OpenAiResponses,", 2),
+        ("vec![allowed_effective_model],", 2),
+        ("AgentProviderResponseRoute::OpenAiDefault,", 2),
+        ("AgentProviderReasoningEffort::Medium,", 2),
         (
             ".try_provider_exact_call_config(max_output_tokens,AgentProviderStreamBudget::STANDARD)",
-            1,
+            2,
         ),
         (
             "ifmax_output_tokens==0||max_output_tokens>TERRA_MAX_OUTPUT_TOKENS",
             1,
         ),
         ("pubfntry_terra_provider_exact_call_config(", 1),
+        (
+            "ifmax_output_tokens==0||max_output_tokens>LUNA_MAX_OUTPUT_TOKENS",
+            1,
+        ),
+        ("pubfntry_luna_provider_exact_call_config(", 1),
         ("pubenumTerraProviderTerminalSettlement{", 1),
-        ("Priced(Box<AgentProviderSettledTerminal>)", 1),
-        ("ReservationCeiling(Box<AgentModelCallReceipt>)", 1),
+        ("pubenumLunaProviderTerminalSettlement{", 1),
+        ("Priced(Box<AgentProviderSettledTerminal>)", 2),
+        ("ReservationCeiling(Box<AgentModelCallReceipt>)", 2),
         ("pubenumTerraProviderTerminalSettlementError{", 1),
+        ("pubenumLunaProviderTerminalSettlementError{", 1),
         (
             "pubstructTerraProviderTerminalOwner(Box<AgentProviderPricingSettlement>);",
             1,
         ),
-        ("pubfnsettle_with_exact_policy(", 1),
+        (
+            "pubstructLunaProviderTerminalOwner(Box<AgentProviderPricingSettlement>);",
+            1,
+        ),
+        ("pubfnsettle_with_exact_policy(", 2),
         ("pubfnsettle_terra_provider_terminal(", 1),
-        ("matchsettlement.settle(policy,schedule){", 1),
+        ("pubfnsettle_luna_provider_terminal(", 1),
+        ("matchsettlement.settle(policy,schedule){", 2),
         ("fnsettle_terra_at_reservation_ceiling(", 1),
-        (".settle_at_reservation_ceiling(policy)", 1),
+        ("fnsettle_luna_at_reservation_ceiling(", 1),
+        (".settle_at_reservation_ceiling(policy)", 2),
         (
             "TerraProviderTerminalSettlement::ReservationCeiling(Box::new(receipt),)",
             1,
         ),
         (
+            "LunaProviderTerminalSettlement::ReservationCeiling(Box::new(receipt),)",
+            1,
+        ),
+        (
             "fnterra_pricing_schedule()->Result<&'staticAgentProviderPricingSchedule,TerraModelCatalogError>",
+            1,
+        ),
+        (
+            "fnluna_pricing_schedule()->Result<&'staticAgentProviderPricingSchedule,LunaModelCatalogError>",
             1,
         ),
     ] {
@@ -443,8 +515,11 @@ fn validate_root(source: &str) -> Result<(), String> {
     }
     for forbidden in [
         "pubfnterra_pricing_schedule(",
+        "pubfnluna_pricing_schedule(",
         "pubfnsettle_terra_at_reservation_ceiling(",
+        "pubfnsettle_luna_at_reservation_ceiling(",
         "pubstructTerraProviderTerminalOwner(pubBox<AgentProviderPricingSettlement>)",
+        "pubstructLunaProviderTerminalOwner(pubBox<AgentProviderPricingSettlement>)",
         ".try_call_config(",
     ] {
         if compact.contains(forbidden) {
@@ -453,9 +528,9 @@ fn validate_root(source: &str) -> Result<(), String> {
             ));
         }
     }
-    if production.matches("gpt-").count() != 2 {
+    if production.matches("gpt-").count() != 4 {
         return Err(
-            "Terra catalog must contain exactly the reviewed model and tokenizer GPT labels"
+            "model catalog must contain exactly the reviewed Terra/Luna model and tokenizer labels"
                 .to_owned(),
         );
     }

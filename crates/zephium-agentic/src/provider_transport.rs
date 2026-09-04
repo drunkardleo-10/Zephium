@@ -33,6 +33,7 @@ use crate::{
     AgentProviderStreamBatch, AgentProviderStreamConclusion, AgentProviderStreamDecoder,
     AgentProviderTransportInput, AgentProviderUsage, AgentRunPolicy,
 };
+use base64::Engine as _;
 use futures_util::TryStreamExt;
 use reqwest::header::{
     HeaderMap, HeaderName, HeaderValue, ACCEPT, ACCEPT_ENCODING, AUTHORIZATION, CACHE_CONTROL,
@@ -40,6 +41,7 @@ use reqwest::header::{
 };
 use reqwest::redirect::Policy;
 use reqwest::{Client, StatusCode, Url};
+use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 use tokio::sync::Notify;
 use zeroize::Zeroizing;
@@ -72,6 +74,8 @@ const OPENAI_INPUT_TOKENS_URL: &str = "https://api.openai.com/v1/responses/input
 const ANTHROPIC_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const PRODUCT_USER_AGENT: &str = "Zephium-Agent-Browser/0.1";
+const OPENAI_CLIENT_REQUEST_ID_HEADER: &str = "x-client-request-id";
+const OPENAI_CLIENT_REQUEST_ID_DOMAIN: &[u8] = b"ZEPHIUM-OPENAI-CLIENT-REQUEST-ID-1\0";
 
 /// Login-Keychain service holding the development OpenAI provider credential.
 #[cfg(target_os = "macos")]
@@ -245,6 +249,55 @@ pub fn load_macos_development_openai_credential(
         .try_reserve_exact(password.len())
         .map_err(|_| MacosAgentProviderCredentialError::Capacity)?;
     secret.extend_from_slice(password.as_ref());
+    AgentProviderCredential::try_from_zeroizing(AgentProviderKind::OpenAiResponses, secret).map_err(
+        |error| match error {
+            AgentProviderCredentialError::Content => MacosAgentProviderCredentialError::Invalid,
+            AgentProviderCredentialError::Capacity => MacosAgentProviderCredentialError::Capacity,
+        },
+    )
+}
+
+/// Loads the development OpenAI key through Apple's fixed `security` tool.
+///
+/// This release-forbidden probe path is useful for repeatedly rebuilt Cargo
+/// binaries: the Keychain item was created by `/usr/bin/security`, so access is
+/// evaluated against that stable Apple-signed executable instead of each new
+/// ad-hoc probe binary. Standard input and stderr are closed, the environment
+/// is cleared, the secret is accepted only from the child's private stdout
+/// pipe, and those bytes enter zeroizing storage before validation.
+#[cfg(all(target_os = "macos", feature = "probe-harness"))]
+pub fn load_macos_probe_openai_credential(
+) -> Result<AgentProviderCredential, MacosAgentProviderCredentialError> {
+    use std::process::{Command, Stdio};
+
+    let output = Command::new("/usr/bin/security")
+        .args([
+            "find-generic-password",
+            "-s",
+            MACOS_OPENAI_KEYCHAIN_SERVICE,
+            "-a",
+            MACOS_OPENAI_KEYCHAIN_ACCOUNT,
+            "-w",
+        ])
+        .env_clear()
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .map_err(|_| MacosAgentProviderCredentialError::Inaccessible)?;
+    if !output.status.success() {
+        return Err(if output.status.code() == Some(44) {
+            MacosAgentProviderCredentialError::Missing
+        } else {
+            MacosAgentProviderCredentialError::Inaccessible
+        });
+    }
+    let mut secret = Zeroizing::new(output.stdout);
+    if secret.last() == Some(&b'\n') {
+        secret.pop();
+        if secret.last() == Some(&b'\r') {
+            secret.pop();
+        }
+    }
     AgentProviderCredential::try_from_zeroizing(AgentProviderKind::OpenAiResponses, secret).map_err(
         |error| match error {
             AgentProviderCredentialError::Content => MacosAgentProviderCredentialError::Invalid,
@@ -2034,6 +2087,7 @@ impl AgentProviderAttempt {
             Ok(projection) => projection,
             Err(_) => return self.counted_failure(protocol_failure()),
         };
+        let call = projection.call();
         let binding = projection.binding();
         let credential = match self
             .credential
@@ -2047,12 +2101,15 @@ impl AgentProviderAttempt {
             Ok(credential) => credential,
             Err(_) => return self.counted_failure(protocol_failure()),
         };
-        let request = openai_input_token_request(
+        let Some(request) = openai_input_token_request(
             &self.client,
             endpoint.clone(),
+            call,
             credential,
             projection.into_body(),
-        );
+        ) else {
+            return self.counted_failure(protocol_failure());
+        };
         if self.cancellation.is_cancelled() || self.shutdown.is_cancelled() {
             return self.counted_failure(cancelled_failure());
         }
@@ -2279,13 +2336,16 @@ impl AgentProviderAttempt {
             Ok(credential) => credential,
             Err(_) => return self.finish_terminal(protocol_failure()),
         };
-        let request = provider_request(
+        let Some(request) = provider_request(
             &self.client,
             self.endpoint.clone(),
             self.provider,
+            call,
             credential,
             body,
-        );
+        ) else {
+            return self.finish_terminal(protocol_failure());
+        };
         if self.cancellation.is_cancelled() || self.shutdown.is_cancelled() {
             return self.finish_terminal(cancelled_failure());
         }
@@ -2396,13 +2456,43 @@ impl fmt::Debug for AgentProviderAttempt {
     }
 }
 
+#[derive(Clone, Copy)]
+enum ProviderRequestPhase {
+    InputTokens,
+    Generation,
+}
+
+impl ProviderRequestPhase {
+    const fn tag(self) -> u8 {
+        match self {
+            Self::InputTokens => 1,
+            Self::Generation => 2,
+        }
+    }
+}
+
+fn openai_client_request_id(
+    call: AgentProviderCallIdentity,
+    phase: ProviderRequestPhase,
+) -> Option<HeaderValue> {
+    let mut hasher = Sha256::new();
+    hasher.update(OPENAI_CLIENT_REQUEST_ID_DOMAIN);
+    hasher.update(call.manifest().bytes());
+    hasher.update(call.call().get().to_be_bytes());
+    hasher.update([phase.tag()]);
+    let digest: [u8; 32] = hasher.finalize().into();
+    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest);
+    HeaderValue::from_str(&format!("zephium-v1-{encoded}")).ok()
+}
+
 fn provider_request(
     client: &Client,
     endpoint: Url,
     provider: AgentProviderKind,
+    call: AgentProviderCallIdentity,
     credential: HeaderValue,
     body: Vec<u8>,
-) -> reqwest::RequestBuilder {
+) -> Option<reqwest::RequestBuilder> {
     let request = client
         .post(endpoint)
         .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
@@ -2411,30 +2501,44 @@ fn provider_request(
         .header(CACHE_CONTROL, HeaderValue::from_static("no-store"))
         .body(body);
     match provider {
-        AgentProviderKind::OpenAiResponses => request.header(AUTHORIZATION, credential),
-        AgentProviderKind::AnthropicMessages => request
-            .header(HeaderName::from_static("x-api-key"), credential)
-            .header(
-                HeaderName::from_static("anthropic-version"),
-                HeaderValue::from_static(ANTHROPIC_VERSION),
-            ),
+        AgentProviderKind::OpenAiResponses => {
+            Some(request.header(AUTHORIZATION, credential).header(
+                HeaderName::from_static(OPENAI_CLIENT_REQUEST_ID_HEADER),
+                openai_client_request_id(call, ProviderRequestPhase::Generation)?,
+            ))
+        }
+        AgentProviderKind::AnthropicMessages => Some(
+            request
+                .header(HeaderName::from_static("x-api-key"), credential)
+                .header(
+                    HeaderName::from_static("anthropic-version"),
+                    HeaderValue::from_static(ANTHROPIC_VERSION),
+                ),
+        ),
     }
 }
 
 fn openai_input_token_request(
     client: &Client,
     endpoint: Url,
+    call: AgentProviderCallIdentity,
     credential: HeaderValue,
     body: Vec<u8>,
-) -> reqwest::RequestBuilder {
-    client
-        .post(endpoint)
-        .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
-        .header(ACCEPT, HeaderValue::from_static("application/json"))
-        .header(ACCEPT_ENCODING, HeaderValue::from_static("identity"))
-        .header(CACHE_CONTROL, HeaderValue::from_static("no-store"))
-        .header(AUTHORIZATION, credential)
-        .body(body)
+) -> Option<reqwest::RequestBuilder> {
+    Some(
+        client
+            .post(endpoint)
+            .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
+            .header(ACCEPT, HeaderValue::from_static("application/json"))
+            .header(ACCEPT_ENCODING, HeaderValue::from_static("identity"))
+            .header(CACHE_CONTROL, HeaderValue::from_static("no-store"))
+            .header(AUTHORIZATION, credential)
+            .header(
+                HeaderName::from_static(OPENAI_CLIENT_REQUEST_ID_HEADER),
+                openai_client_request_id(call, ProviderRequestPhase::InputTokens)?,
+            )
+            .body(body),
+    )
 }
 
 fn decode_openai_input_token_count(bytes: &[u8]) -> Option<u32> {
@@ -4056,16 +4160,30 @@ mod tests {
         let header = sensitive_header(credential.provider, &credential.secret).expect("header");
         assert!(header.is_sensitive());
         assert!(!format!("{header:?}").contains("synthetic-openai-key"));
+        let (_, input) = provider_fixture(AgentProviderKind::OpenAiResponses);
+        let call = input.request().call();
 
         let request = provider_request(
             &Client::new(),
             Url::parse(OPENAI_RESPONSES_URL).expect("fixed endpoint"),
             credential.provider,
+            call,
             header,
             br#"{"input":"private request body marker"}"#.to_vec(),
         )
+        .expect("client request identity")
         .build()
         .expect("fixed request");
+        let request_id = request
+            .headers()
+            .get(OPENAI_CLIENT_REQUEST_ID_HEADER)
+            .expect("client request id");
+        assert_eq!(request_id.as_bytes().len(), 54);
+        assert_ne!(
+            request_id,
+            &openai_client_request_id(call, ProviderRequestPhase::InputTokens)
+                .expect("input-token request id")
+        );
         let request_debug = format!("{request:?}");
         assert!(!request_debug.contains("synthetic-openai-key"));
         assert!(!request_debug.contains("private request body marker"));

@@ -37,5 +37,6 @@ pub use probe::{
 
 #[cfg(feature = "probe-harness")]
 pub use terra::{
-    run_initial_terra_probe, TerraProbeProviderError, TerraProbeProviderTurn, TerraProbeSession,
+    run_initial_terra_probe, AgenticProbeModel, AgenticProbeRetention, TerraProbeProviderError,
+    TerraProbeProviderTurn, TerraProbeSession,
 };

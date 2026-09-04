@@ -4,7 +4,9 @@
 //! existing semantic observation/read or bound tool-result payload. The provider body is generated
 //! from an immutable instruction and the same closed tool vocabulary decoded
 //! locally. It has no arbitrary instructions, provider-native browser tools,
-//! selectors, JavaScript, DOM/HTML, prior-response state, metadata, or secret.
+//! selectors, JavaScript, DOM/HTML, prior-response state, or secrets. Normal
+//! requests carry no metadata; release-excluded retained public-page probes
+//! may carry only fixed non-user metadata labels.
 
 use std::fmt;
 use std::sync::{Arc, LazyLock};
@@ -441,8 +443,11 @@ impl AgentProviderRequest {
             "stream",
             "store",
         ];
+        const OPTIONAL_RESPONSE_ONLY_FIELDS: &[&str] = &["metadata"];
         if object.keys().any(|key| {
-            !COUNT_FIELDS.contains(&key.as_str()) && !RESPONSE_ONLY_FIELDS.contains(&key.as_str())
+            !COUNT_FIELDS.contains(&key.as_str())
+                && !RESPONSE_ONLY_FIELDS.contains(&key.as_str())
+                && !OPTIONAL_RESPONSE_ONLY_FIELDS.contains(&key.as_str())
         }) || object.get("model").is_none()
             || object.get("input").is_none()
             || RESPONSE_ONLY_FIELDS
@@ -452,6 +457,9 @@ impl AgentProviderRequest {
             return Err(AgentProviderRequestError::Encoding);
         }
         for field in RESPONSE_ONLY_FIELDS {
+            object.remove(*field);
+        }
+        for field in OPTIONAL_RESPONSE_ONLY_FIELDS {
             object.remove(*field);
         }
         let body = serde_json::to_vec(&object).map_err(|_| AgentProviderRequestError::Encoding)?;
@@ -3132,6 +3140,8 @@ struct OpenAiRequestWire<'a> {
     include: [&'static str; 1],
     stream: bool,
     store: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metadata: Option<OpenAiInspectableProbeMetadataWire>,
 }
 
 #[derive(Serialize)]
@@ -3149,6 +3159,8 @@ struct OpenAiContinuationRequestWire<'a> {
     include: [&'static str; 1],
     stream: bool,
     store: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metadata: Option<OpenAiInspectableProbeMetadataWire>,
 }
 
 #[derive(Serialize)]
@@ -3164,6 +3176,25 @@ struct OpenAiExtractionRequestWire<'a> {
     include: [&'static str; 1],
     stream: bool,
     store: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metadata: Option<OpenAiInspectableProbeMetadataWire>,
+}
+
+#[derive(Clone, Copy, Serialize)]
+struct OpenAiInspectableProbeMetadataWire {
+    zephium_mode: &'static str,
+    data_class: &'static str,
+}
+
+fn openai_inspectable_probe_metadata(
+    config: &AgentProviderCallConfig,
+) -> Option<OpenAiInspectableProbeMetadataWire> {
+    config
+        .stores_response()
+        .then_some(OpenAiInspectableProbeMetadataWire {
+            zephium_mode: "agentic_browser_qualification",
+            data_class: "public_test_page",
+        })
 }
 
 #[derive(Serialize)]
@@ -3486,7 +3517,8 @@ fn encode_openai_body(
         },
         include: ["reasoning.encrypted_content"],
         stream: true,
-        store: false,
+        store: config.stores_response(),
+        metadata: openai_inspectable_probe_metadata(config),
     };
     encode_bounded_provider_body(&wire)
 }
@@ -3562,7 +3594,8 @@ fn encode_openai_continuation_body(
         },
         include: ["reasoning.encrypted_content"],
         stream: true,
-        store: false,
+        store: config.stores_response(),
+        metadata: openai_inspectable_probe_metadata(config),
     };
     encode_bounded_provider_body(&wire)
 }
@@ -3635,7 +3668,8 @@ fn encode_openai_extraction_body(
         },
         include: ["reasoning.encrypted_content"],
         stream: true,
-        store: false,
+        store: config.stores_response(),
+        metadata: openai_inspectable_probe_metadata(config),
     };
     encode_bounded_provider_body(&wire)
 }
@@ -3729,7 +3763,8 @@ fn encode_openai_screenshot_continuation_body(
         },
         include: ["reasoning.encrypted_content"],
         stream: true,
-        store: false,
+        store: config.stores_response(),
+        metadata: openai_inspectable_probe_metadata(config),
     };
     encode_bounded_provider_body(&wire)
 }
@@ -4996,6 +5031,33 @@ mod tests {
                 .expect("input variant projection")
                 .projection_digest()
         );
+    }
+
+    #[cfg(feature = "probe-harness")]
+    #[test]
+    fn inspectable_probe_storage_is_explicit_and_excluded_from_token_projection() {
+        let config = openai_config(1_024).retain_response_for_inspectable_probe();
+        let request = AgentProviderRequest {
+            call: provider_call_identity(),
+            config: config.clone(),
+            endpoint: AgentProviderEndpoint::OpenAiResponses,
+            body: encode_openai_body(&config, "Public probe", "ZSEM1\npublic fixture")
+                .expect("inspectable request"),
+        };
+        let wire: Value = serde_json::from_slice(request.body()).expect("request JSON");
+        assert_eq!(wire["store"], true);
+        assert_eq!(
+            wire["metadata"]["zephium_mode"],
+            "agentic_browser_qualification"
+        );
+        assert_eq!(wire["metadata"]["data_class"], "public_test_page");
+
+        let projection = request
+            .openai_input_token_request()
+            .expect("count projection");
+        let projected: Value = serde_json::from_slice(projection.body()).expect("projection JSON");
+        assert!(projected.get("store").is_none());
+        assert!(projected.get("metadata").is_none());
     }
 
     #[test]

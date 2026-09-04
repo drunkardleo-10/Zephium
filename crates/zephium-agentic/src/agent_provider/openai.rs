@@ -341,6 +341,7 @@ impl OpenAiResponsesStreamDecoder {
         }
     }
 
+    #[cfg(feature = "provider-transport")]
     pub(super) const fn protocol_event(&self) -> Option<AgentProviderProtocolEvent> {
         self.protocol_event
     }
