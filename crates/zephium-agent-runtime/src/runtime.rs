@@ -1,7 +1,12 @@
 //! Suspended runtime-worker ownership and fail-closed lifecycle shell.
 
 use std::fmt;
+use std::future::Future;
+use std::marker::PhantomData;
 use std::num::NonZeroU64;
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::pin::Pin;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
@@ -10,10 +15,18 @@ use std::time::Instant;
 use crossbeam_queue::ArrayQueue;
 use thiserror::Error;
 use tokio::sync::Notify;
-use zephium_agentic::{AgentBrowserLifecycle, AgentBrowserPort, AgentBrowserShutdownOutcome};
+use zephium_agentic::{
+    AgentAuditCompletion, AgentAuditDeliverySettlement, AgentBrowserLifecycle, AgentBrowserPort,
+    AgentBrowserShutdownOutcome, ContextCookieTransferRequest, ContextDispatch, ContextNativeEvent,
+    ContextNativeRequest, ContextNavigationReplacement, ContextRendererLoss,
+    ContextResourceAuditId, ContextShutdownDispatch, SemanticActionNativeCompletion,
+    SemanticActionNativeRequest, SemanticActionNativeSettlement, SemanticRuntimeInvocation,
+    SemanticScreenshotNativeCompletion, SemanticScreenshotNativeRequest,
+};
 
 use crate::mailbox::{
-    AgentAuditSink, AgentRuntimeMailbox, AgentRuntimeMailboxWake, SemanticActionSink,
+    AgentAuditSink, AgentRuntimeMailbox, AgentRuntimeMailboxItem, AgentRuntimeMailboxWake,
+    SemanticActionSink,
 };
 use crate::{AgentRuntimeMailboxConfig, AgentRuntimeMailboxFault, NativeEventSink};
 
@@ -207,6 +220,280 @@ impl AgentRunStatus {
     }
 }
 
+/// One controller future, constructed and polled only by the named runtime worker.
+///
+/// This intentionally has no `Send` bound. The controller and its future never
+/// cross to another task or executor after construction: the runtime owns one
+/// current-thread Tokio worker for its complete lifetime.
+pub type AgentRuntimeControllerFuture = Pin<Box<dyn Future<Output = ()> + 'static>>;
+
+/// Affine browser capability owned by one runtime controller.
+///
+/// This wrapper is deliberately neither cloneable nor transferable to another
+/// thread. It exposes the existing closed browser operations without exposing
+/// the reference-counted port, so lifecycle shutdown can drop the controller
+/// future and release the browser on the named worker before its permit is
+/// released. It is useful only to the controller future receiving it from
+/// [`AgentRuntimeController::run`].
+pub struct AgentRuntimeBrowser {
+    port: Arc<dyn AgentBrowserPort>,
+    not_send: PhantomData<Rc<()>>,
+}
+
+impl AgentRuntimeBrowser {
+    fn new(port: Arc<dyn AgentBrowserPort>) -> Self {
+        Self {
+            port,
+            not_send: PhantomData,
+        }
+    }
+
+    /// Attempts to admit one exact lifecycle request to the bound browser.
+    pub fn dispatch(&self, request: ContextNativeRequest) -> ContextDispatch {
+        self.port.dispatch(request)
+    }
+
+    /// Attempts one bounded native-only cookie transfer.
+    pub fn transfer_cookies(&self, request: ContextCookieTransferRequest) -> ContextDispatch {
+        self.port.transfer_cookies(request)
+    }
+
+    /// Attempts one privacy-preserving native resource audit.
+    pub fn audit_resources(&self, audit: ContextResourceAuditId) -> ContextDispatch {
+        self.port.audit_resources(audit)
+    }
+
+    /// Permanently seals native admission and attempts the exact shutdown audit.
+    pub fn seal_for_shutdown(&self, audit: ContextResourceAuditId) -> ContextShutdownDispatch {
+        self.port.seal_for_shutdown(audit)
+    }
+
+    /// Attempts one already-encoded fixed semantic-runtime invocation.
+    pub fn invoke_semantic(&self, invocation: SemanticRuntimeInvocation) -> ContextDispatch {
+        self.port.invoke_semantic(invocation)
+    }
+
+    /// Attempts one already-authorized closed semantic action recipe.
+    pub fn execute_semantic_action(
+        &self,
+        request: SemanticActionNativeRequest,
+        completion: SemanticActionNativeCompletion,
+    ) -> ContextDispatch {
+        self.port.execute_semantic_action(request, completion)
+    }
+
+    /// Attempts one bounded viewport capture outside the cloneable event bus.
+    pub fn capture_semantic_screenshot(
+        &self,
+        request: SemanticScreenshotNativeRequest,
+        completion: SemanticScreenshotNativeCompletion,
+    ) -> ContextDispatch {
+        self.port.capture_semantic_screenshot(request, completion)
+    }
+}
+
+impl fmt::Debug for AgentRuntimeBrowser {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("AgentRuntimeBrowser([capability, redacted])")
+    }
+}
+
+/// Narrow controller seam for the one process-scoped agent runtime run.
+///
+/// A controller receives no runtime internals. It can wait for closed native
+/// event vocabulary through [`AgentRuntimeWorker`] and use the affine bound
+/// browser capability only through its existing closed operations. Returning
+/// from this future, or unwinding while constructing or polling it, fail-closes
+/// the one run and produces only an unclean lifecycle outcome.
+///
+/// This is deliberately not an application orchestration API and does not
+/// offer multi-run reuse. One runtime owns exactly one process-scoped run; all
+/// cancellation permanently seals further admission.
+pub trait AgentRuntimeController: Send + 'static {
+    /// Constructs the controller future on the runtime's named worker.
+    fn run(
+        self: Box<Self>,
+        worker: AgentRuntimeWorker,
+        browser: AgentRuntimeBrowser,
+    ) -> AgentRuntimeControllerFuture;
+}
+
+/// Closed event vocabulary delivered to one runtime controller.
+///
+/// Control and cancellation/shutdown observations take priority over all
+/// native work. Terminal callback settlements take priority over unsolicited
+/// signals. The values remain in their existing typed contracts; this enum
+/// does not provide string, queue, handle, or platform escape hatches.
+pub enum AgentRuntimeEvent {
+    /// The sole run admission that was queued for this runtime.
+    RunStarted(AgentRunTicket),
+    /// A terminal lifecycle or semantic-runtime settlement from the native port.
+    NativeTerminal(ContextNativeEvent),
+    /// A terminal settlement from an exact semantic native action callback.
+    SemanticActionTerminal(SemanticActionNativeSettlement),
+    /// A terminal settlement from an exact durable audit callback.
+    AuditTerminal(AgentAuditDeliverySettlement),
+    /// A page-initiated or otherwise unsolicited navigation replacement.
+    NavigationReplaced(ContextNavigationReplacement),
+    /// A native renderer-loss signal.
+    RendererLost(ContextRendererLoss),
+    /// Cancellation permanently sealed the sole process-scoped run.
+    CancellationRequested,
+    /// Lifecycle shutdown closed callback intake and sealed the run.
+    ShutdownRequested,
+}
+
+impl fmt::Debug for AgentRuntimeEvent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let label = match self {
+            Self::RunStarted(_) => "RunStarted",
+            Self::NativeTerminal(_) => "NativeTerminal",
+            Self::SemanticActionTerminal(_) => "SemanticActionTerminal",
+            Self::AuditTerminal(_) => "AuditTerminal",
+            Self::NavigationReplaced(_) => "NavigationReplaced",
+            Self::RendererLost(_) => "RendererLost",
+            Self::CancellationRequested => "CancellationRequested",
+            Self::ShutdownRequested => "ShutdownRequested",
+        };
+        formatter.write_str(label)
+    }
+}
+
+/// Content-free fatal mailbox condition observed by a controller capability.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum AgentRuntimeWorkerFault {
+    /// A native callback lane could no longer safely retain its obligations.
+    #[error("agent runtime worker callback intake failed")]
+    Mailbox(AgentRuntimeMailboxFault),
+}
+
+/// Move-only capability for the one controller running on the named worker.
+///
+/// It intentionally exposes neither worker queues nor scheduler primitives,
+/// runtime state ownership, platform handles, provider/store ports, nor
+/// content-string APIs. It is useful only to the controller future receiving
+/// it from [`AgentRuntimeController::run`].
+pub struct AgentRuntimeWorker {
+    inner: Arc<RuntimeInner>,
+    cancellation_delivered: bool,
+    shutdown_delivered: bool,
+    // A controller future is intentionally affine to the one current-thread
+    // Tokio worker. This marker prevents moving the capability into a spawned
+    // task or another executor even though its private bookkeeping is Arc'd.
+    not_send: PhantomData<Rc<()>>,
+}
+
+impl AgentRuntimeWorker {
+    /// Waits without a lost-wake race for the next closed controller event.
+    ///
+    /// Shutdown and cancellation win over every other event once, then a
+    /// queued run admission, then terminal callbacks, and finally unsolicited
+    /// signals. Their sticky state remains visible through [`Self::status`]
+    /// without repeatedly hiding already-obligated terminal debt. A sticky
+    /// mailbox fault seals the runtime before it is returned so the outer
+    /// worker will drain and exit fail-closed when the controller returns.
+    pub async fn next_event(&mut self) -> Result<AgentRuntimeEvent, AgentRuntimeWorkerFault> {
+        loop {
+            let mut notified = std::pin::pin!(self.inner.control_wake.notified());
+            notified.as_mut().enable();
+
+            if self.inner.shutdown_requested.load(Ordering::Acquire) && !self.shutdown_delivered {
+                self.shutdown_delivered = true;
+                return Ok(AgentRuntimeEvent::ShutdownRequested);
+            }
+            if self.inner.cancelled.load(Ordering::Acquire)
+                && !self.cancellation_delivered
+                && !self.shutdown_delivered
+            {
+                // `request_shutdown` publishes this flag before cancellation,
+                // so a controller that observes cancellation from lifecycle
+                // teardown must re-check and receive the stronger one-shot
+                // shutdown event instead.
+                if self.inner.shutdown_requested.load(Ordering::Acquire) {
+                    continue;
+                }
+                self.cancellation_delivered = true;
+                return Ok(AgentRuntimeEvent::CancellationRequested);
+            }
+            if !self.inner.cancelled.load(Ordering::Acquire)
+                && !self.inner.shutdown_requested.load(Ordering::Acquire)
+            {
+                if let Some(command) = self.inner.commands.pop() {
+                    let WorkerCommand::Start(ticket) = command;
+                    return Ok(AgentRuntimeEvent::RunStarted(ticket));
+                }
+            }
+            if let Some(item) = self.inner.mailbox.try_pop_terminal() {
+                return Ok(controller_event_from_mailbox(item));
+            }
+            if let Some(fault) = self.inner.mailbox.fault() {
+                self.inner.request_shutdown();
+                return Err(AgentRuntimeWorkerFault::Mailbox(fault));
+            }
+            if let Some(item) = self.inner.mailbox.try_pop_signal() {
+                return Ok(controller_event_from_mailbox(item));
+            }
+
+            let mailbox_wait = self.inner.mailbox.wait_for_work();
+            tokio::pin!(mailbox_wait);
+            tokio::select! {
+                biased;
+                _ = &mut notified => {}
+                _ = &mut mailbox_wait => {}
+            }
+        }
+    }
+
+    /// Returns the exact ticket for the sole admitted run, if one exists.
+    pub fn current_run_ticket(&self) -> Option<AgentRunTicket> {
+        NonZeroU64::new(self.inner.current_ticket.load(Ordering::Acquire)).map(AgentRunTicket)
+    }
+
+    /// Returns the content-free current process-scoped run status.
+    pub fn status(&self) -> AgentRunStatus {
+        self.inner.status()
+    }
+
+    /// Creates one exact move-only semantic-action completion callback.
+    pub fn semantic_action_completion(&self) -> SemanticActionNativeCompletion {
+        self.inner.mailbox.semantic_action_sink().completion()
+    }
+
+    /// Creates one exact move-only durable-audit completion callback.
+    pub fn audit_completion(&self) -> AgentAuditCompletion {
+        self.inner.mailbox.audit_sink().completion()
+    }
+}
+
+impl fmt::Debug for AgentRuntimeWorker {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("AgentRuntimeWorker([capability, redacted])")
+    }
+}
+
+fn controller_event_from_mailbox(item: AgentRuntimeMailboxItem) -> AgentRuntimeEvent {
+    match item {
+        AgentRuntimeMailboxItem::NativeTerminal(event) => AgentRuntimeEvent::NativeTerminal(event),
+        AgentRuntimeMailboxItem::SemanticActionTerminal(settlement) => {
+            AgentRuntimeEvent::SemanticActionTerminal(settlement)
+        }
+        AgentRuntimeMailboxItem::AuditTerminal(settlement) => {
+            AgentRuntimeEvent::AuditTerminal(settlement)
+        }
+        AgentRuntimeMailboxItem::NavigationReplaced(replacement) => {
+            AgentRuntimeEvent::NavigationReplaced(replacement)
+        }
+        AgentRuntimeMailboxItem::RendererLost(loss) => AgentRuntimeEvent::RendererLost(loss),
+        #[cfg(test)]
+        AgentRuntimeMailboxItem::TestTerminal | AgentRuntimeMailboxItem::TestSignal => {
+            // The public controller vocabulary deliberately has no test-only
+            // variants. Test-only mailbox markers are consumed only by the
+            // mailbox's own unit tests and cannot reach a production host.
+            unreachable!("test-only mailbox marker cannot enter controller host")
+        }
+    }
+}
+
 enum WorkerCommand {
     Start(AgentRunTicket),
 }
@@ -312,6 +599,7 @@ struct RuntimeInner {
     control_wake: Notify,
     run_state: AtomicU8,
     next_ticket: AtomicU64,
+    current_ticket: AtomicU64,
     cancelled: AtomicBool,
     shutdown_requested: AtomicBool,
     staged_stop_reason: AtomicU8,
@@ -339,8 +627,9 @@ impl RuntimeInner {
     }
 
     fn request_shutdown(&self) {
-        self.seal_and_cancel();
+        self.run_state.store(RUN_SEALED, Ordering::Release);
         self.shutdown_requested.store(true, Ordering::Release);
+        self.cancelled.store(true, Ordering::Release);
         self.mailbox.close();
         self.control_wake.notify_waiters();
     }
@@ -404,6 +693,9 @@ impl AgentRuntimeHandle {
                 return Err(AgentRunAdmissionRefusal::TicketExhausted);
             }
         };
+        self.inner
+            .current_ticket
+            .store(ticket.get(), Ordering::Release);
         if self
             .inner
             .commands
@@ -416,6 +708,7 @@ impl AgentRuntimeHandle {
                 Ordering::AcqRel,
                 Ordering::Acquire,
             );
+            self.inner.current_ticket.store(0, Ordering::Release);
             return Err(AgentRunAdmissionRefusal::Capacity);
         }
         self.inner.control_wake.notify_one();
@@ -459,12 +752,33 @@ pub struct PendingAgentRuntime {
 impl PendingAgentRuntime {
     /// Starts one named current-thread Tokio worker behind a startup gate.
     pub fn spawn_suspended(config: AgentRuntimeConfig) -> Result<Self, RuntimeSpawnError> {
+        Self::spawn_suspended_inner(config, None)
+    }
+
+    /// Starts the suspended worker with one controller moved to that worker.
+    ///
+    /// The controller is not constructed or polled until
+    /// [`Self::bind_browser_port`] transfers the exact browser port and opens
+    /// the startup gate. The ordinary [`Self::spawn_suspended`] constructor
+    /// remains the safe staged default.
+    pub fn spawn_suspended_with_controller(
+        config: AgentRuntimeConfig,
+        controller: Box<dyn AgentRuntimeController>,
+    ) -> Result<Self, RuntimeSpawnError> {
+        Self::spawn_suspended_inner(config, Some(controller))
+    }
+
+    fn spawn_suspended_inner(
+        config: AgentRuntimeConfig,
+        controller: Option<Box<dyn AgentRuntimeController>>,
+    ) -> Result<Self, RuntimeSpawnError> {
         let inner = Arc::new(RuntimeInner {
             mailbox: AgentRuntimeMailbox::new(config.mailbox),
             commands: ArrayQueue::new(config.command_capacity),
             control_wake: Notify::new(),
             run_state: AtomicU8::new(RUN_IDLE),
             next_ticket: AtomicU64::new(1),
+            current_ticket: AtomicU64::new(0),
             cancelled: AtomicBool::new(false),
             shutdown_requested: AtomicBool::new(false),
             staged_stop_reason: AtomicU8::new(STAGED_STOP_NONE),
@@ -478,7 +792,15 @@ impl PendingAgentRuntime {
         let worker_permit = Arc::clone(&permit);
         let worker = thread::Builder::new()
             .name("zephium-agent-runtime".to_owned())
-            .spawn(move || worker_main(worker_inner, worker_gate, startup_sender, worker_permit))
+            .spawn(move || {
+                worker_main(
+                    worker_inner,
+                    worker_gate,
+                    startup_sender,
+                    worker_permit,
+                    controller,
+                )
+            })
             .map_err(|_| RuntimeSpawnError::WorkerUnavailable)?;
         match startup_receiver.recv() {
             Ok(Ok(())) => Ok(Self {
@@ -660,11 +982,25 @@ pub fn spawn_suspended(
     PendingAgentRuntime::spawn_suspended(config)
 }
 
+/// Starts a suspended runtime whose controller is moved to its named worker.
+///
+/// The controller remains dormant until [`PendingAgentRuntime::bind_browser_port`]
+/// transfers the browser port. This runtime still owns exactly one
+/// process-scoped run and permanently seals admission after cancellation;
+/// it is not a multi-run controller pool.
+pub fn spawn_suspended_with_controller(
+    config: AgentRuntimeConfig,
+    controller: Box<dyn AgentRuntimeController>,
+) -> Result<PendingAgentRuntime, RuntimeSpawnError> {
+    PendingAgentRuntime::spawn_suspended_with_controller(config, controller)
+}
+
 fn worker_main(
     inner: Arc<RuntimeInner>,
     gate: Arc<StartupGate>,
     startup_sender: mpsc::SyncSender<Result<(), ()>>,
     permit: Arc<WorkerPermit>,
+    controller: Option<Box<dyn AgentRuntimeController>>,
 ) {
     // This is intentionally scoped across every actual worker operation,
     // including startup failure and post-loop thread teardown. The permit
@@ -683,14 +1019,18 @@ fn worker_main(
         }
     };
     let _ = startup_sender.send(Ok(()));
-    runtime.block_on(worker_loop(inner, gate));
+    runtime.block_on(worker_loop(inner, gate, controller));
 }
 
-async fn worker_loop(inner: Arc<RuntimeInner>, gate: Arc<StartupGate>) {
+async fn worker_loop(
+    inner: Arc<RuntimeInner>,
+    gate: Arc<StartupGate>,
+    mut controller: Option<Box<dyn AgentRuntimeController>>,
+) {
     // Keeping the move-only browser authority in this one worker is the
-    // ownership seam. The controller added in the next stage performs every
-    // port operation. Until then, every callback is unexpected and forces a
-    // recorded fail-stop after the mailbox has consumed its retained authority.
+    // ownership seam. The optional controller performs every port operation.
+    // Without it, this remains the conservative staged shell: every callback
+    // is unexpected and forces a recorded fail-stop.
     let mut browser: Option<Arc<dyn AgentBrowserPort>> = None;
     loop {
         let mut notified = std::pin::pin!(inner.control_wake.notified());
@@ -699,10 +1039,20 @@ async fn worker_loop(inner: Arc<RuntimeInner>, gate: Arc<StartupGate>) {
             inner.mailbox.close_and_drain().await;
             break;
         }
-        while let Some(command) = inner.commands.pop() {
-            match command {
-                WorkerCommand::Start(ticket) => {
-                    let _ticket = ticket;
+        if inner.cancelled.load(Ordering::Acquire) {
+            inner.request_shutdown();
+            inner.mailbox.close_and_drain().await;
+            break;
+        }
+        // A controller-owned start must remain queued until it is bound so the
+        // controller observes that one exact admission. The staged shell has
+        // no controller and deliberately consumes it as a no-op.
+        if controller.is_none() {
+            while let Some(command) = inner.commands.pop() {
+                match command {
+                    WorkerCommand::Start(ticket) => {
+                        let _ticket = ticket;
+                    }
                 }
             }
         }
@@ -710,28 +1060,66 @@ async fn worker_loop(inner: Arc<RuntimeInner>, gate: Arc<StartupGate>) {
             inner.mailbox.close_and_drain().await;
             break;
         }
-        let mailbox_wait = inner.mailbox.wait_for_work();
-        tokio::pin!(mailbox_wait);
         if browser.is_none() {
             let startup_wait = gate.wait();
             tokio::pin!(startup_wait);
-            tokio::select! {
-                biased;
-                _ = &mut notified => {}
-                wake = &mut mailbox_wait => {
-                    fail_staged_mailbox_wake(&inner, wake).await;
-                    break;
+            if controller.is_some() {
+                tokio::select! {
+                    biased;
+                    _ = &mut notified => {}
+                    startup = &mut startup_wait => match startup {
+                        Some(port) => {
+                            if let Some(controller) = controller.take() {
+                                run_controller_no_unwind(
+                                    &inner,
+                                    controller,
+                                    AgentRuntimeWorker {
+                                        inner: Arc::clone(&inner),
+                                        cancellation_delivered: false,
+                                        shutdown_delivered: false,
+                                        not_send: PhantomData,
+                                    },
+                                    AgentRuntimeBrowser::new(port),
+                                )
+                                .await;
+                                // A controller return or unwind never grants
+                                // an implicit clean outcome. Seal, drain, and
+                                // release the browser only on this worker.
+                                inner.request_shutdown();
+                                inner.mailbox.close_and_drain().await;
+                                break;
+                            }
+                        }
+                        None => {
+                            inner.request_shutdown();
+                            inner.mailbox.close_and_drain().await;
+                            break;
+                        }
+                    },
                 }
-                startup = &mut startup_wait => match startup {
-                    Some(port) => browser = Some(port),
-                    None => {
-                        inner.request_shutdown();
-                        inner.mailbox.close_and_drain().await;
+            } else {
+                let mailbox_wait = inner.mailbox.wait_for_work();
+                tokio::pin!(mailbox_wait);
+                tokio::select! {
+                    biased;
+                    _ = &mut notified => {}
+                    wake = &mut mailbox_wait => {
+                        fail_staged_mailbox_wake(&inner, wake).await;
                         break;
                     }
-                },
+                    startup = &mut startup_wait => match startup {
+                        Some(port) => browser = Some(port),
+                        None => {
+                            inner.request_shutdown();
+                            inner.mailbox.close_and_drain().await;
+                            break;
+                        }
+                    }
+                }
             }
         } else {
+            let mailbox_wait = inner.mailbox.wait_for_work();
+            tokio::pin!(mailbox_wait);
             tokio::select! {
                 biased;
                 _ = &mut notified => {}
@@ -746,6 +1134,65 @@ async fn worker_loop(inner: Arc<RuntimeInner>, gate: Arc<StartupGate>) {
     #[cfg(test)]
     WORKER_EXIT_GATE.wait();
     inner.completion.mark_stopped();
+}
+
+async fn run_controller_no_unwind(
+    inner: &RuntimeInner,
+    controller: Box<dyn AgentRuntimeController>,
+    worker: AgentRuntimeWorker,
+    browser: AgentRuntimeBrowser,
+) {
+    let mut future = match catch_unwind(AssertUnwindSafe(|| controller.run(worker, browser))) {
+        Ok(future) => future,
+        Err(_) => return,
+    };
+    // Lifecycle shutdown is stronger than controller cooperation. A controller
+    // may intentionally await its own work or even drop the worker capability;
+    // the consuming lifecycle must still be able to close this one worker,
+    // release the bound browser, and free the process-wide permit. Cancelling a
+    // run remains an event for controller-owned reconciliation, but lifecycle
+    // shutdown forcibly drops a non-cooperative future and remains Unclean.
+    {
+        let controller_done = poll_controller_without_unwind(future.as_mut());
+        tokio::pin!(controller_done);
+        let shutdown = wait_for_lifecycle_shutdown(inner);
+        tokio::pin!(shutdown);
+        let mailbox_fault = inner.mailbox.wait_for_fault();
+        tokio::pin!(mailbox_fault);
+        tokio::select! {
+            biased;
+            _ = &mut shutdown => {}
+            _ = &mut mailbox_fault => inner.request_shutdown(),
+            _ = &mut controller_done => {}
+        }
+    }
+    // A malicious or faulty controller may also panic while its future is
+    // being dropped. Treat that exactly like a polling panic: the caller below
+    // still seals and drains this runtime on the same worker.
+    let _ = catch_unwind(AssertUnwindSafe(|| drop(future)));
+}
+
+fn poll_controller_without_unwind<'future>(
+    mut future: Pin<&'future mut (dyn Future<Output = ()> + 'static)>,
+) -> impl Future<Output = bool> + 'future {
+    std::future::poll_fn(move |context| {
+        match catch_unwind(AssertUnwindSafe(|| future.as_mut().poll(context))) {
+            Ok(std::task::Poll::Ready(())) => std::task::Poll::Ready(true),
+            Ok(std::task::Poll::Pending) => std::task::Poll::Pending,
+            Err(_) => std::task::Poll::Ready(false),
+        }
+    })
+}
+
+async fn wait_for_lifecycle_shutdown(inner: &RuntimeInner) {
+    loop {
+        let mut notified = std::pin::pin!(inner.control_wake.notified());
+        notified.as_mut().enable();
+        if inner.shutdown_requested.load(Ordering::Acquire) {
+            return;
+        }
+        notified.await;
+    }
 }
 
 async fn fail_staged_mailbox_wake(inner: &RuntimeInner, wake: AgentRuntimeMailboxWake) {
@@ -886,12 +1333,15 @@ fn acquire_worker_permit() -> Result<Arc<WorkerPermit>, RuntimeSpawnError> {
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc;
     use std::time::Duration;
 
     use crate::{MIN_AGENT_RUNTIME_SIGNAL_CAPACITY, MIN_AGENT_RUNTIME_TERMINAL_CAPACITY};
     use zephium_agentic::{
-        ContextCookieTransferRequest, ContextDispatch, ContextNativeEvent, ContextNativeRequest,
-        ContextPortFailure, ContextResourceAuditId, ContextResourceAuditSettlement,
+        ContextCapabilities, ContextCapability, ContextCookieTransferRequest, ContextDispatch,
+        ContextId, ContextIdentity, ContextKind, ContextNativeEvent, ContextNativeRequest,
+        ContextOperationId, ContextPortFailure, ContextRegistry, ContextRendererLoss,
+        ContextResourceAuditId, ContextResourceAuditSettlement, ContextRunId, ContextSettlement,
         ContextShutdownDispatch, SemanticActionNativeCompletion, SemanticActionNativeRequest,
         SemanticRuntimeInvocation, SemanticScreenshotNativeCompletion,
         SemanticScreenshotNativeRequest,
@@ -960,6 +1410,197 @@ mod tests {
         recover_lock(&RUNTIME_TEST_SERIALIZER)
     }
 
+    struct ControllerReport {
+        worker_name: Option<String>,
+        current_ticket: Option<u64>,
+        admitted: bool,
+        events: Vec<&'static str>,
+    }
+
+    struct RecordingController {
+        sender: mpsc::Sender<ControllerReport>,
+        expected_events: usize,
+    }
+
+    impl AgentRuntimeController for RecordingController {
+        fn run(
+            self: Box<Self>,
+            mut worker: AgentRuntimeWorker,
+            _browser: AgentRuntimeBrowser,
+        ) -> AgentRuntimeControllerFuture {
+            let sender = self.sender.clone();
+            let expected_events = self.expected_events;
+            let worker_name = std::thread::current().name().map(str::to_owned);
+            let current_ticket = worker.current_run_ticket().map(AgentRunTicket::get);
+            let admitted = worker.status().admitted();
+            Box::pin(async move {
+                let mut events = Vec::with_capacity(expected_events);
+                for _ in 0..expected_events {
+                    let label = match worker.next_event().await {
+                        Ok(AgentRuntimeEvent::RunStarted(_)) => "RunStarted",
+                        Ok(AgentRuntimeEvent::NativeTerminal(_)) => "NativeTerminal",
+                        Ok(AgentRuntimeEvent::SemanticActionTerminal(_)) => {
+                            "SemanticActionTerminal"
+                        }
+                        Ok(AgentRuntimeEvent::AuditTerminal(_)) => "AuditTerminal",
+                        Ok(AgentRuntimeEvent::NavigationReplaced(_)) => "NavigationReplaced",
+                        Ok(AgentRuntimeEvent::RendererLost(_)) => "RendererLost",
+                        Ok(AgentRuntimeEvent::CancellationRequested) => "CancellationRequested",
+                        Ok(AgentRuntimeEvent::ShutdownRequested) => "ShutdownRequested",
+                        Err(AgentRuntimeWorkerFault::Mailbox(_)) => "MailboxFault",
+                    };
+                    events.push(label);
+                }
+                let _ = sender.send(ControllerReport {
+                    worker_name,
+                    current_ticket,
+                    admitted,
+                    events,
+                });
+            })
+        }
+    }
+
+    struct EarlyExitController;
+
+    impl AgentRuntimeController for EarlyExitController {
+        fn run(
+            self: Box<Self>,
+            _worker: AgentRuntimeWorker,
+            _browser: AgentRuntimeBrowser,
+        ) -> AgentRuntimeControllerFuture {
+            Box::pin(async {})
+        }
+    }
+
+    struct PanicController;
+
+    impl AgentRuntimeController for PanicController {
+        fn run(
+            self: Box<Self>,
+            _worker: AgentRuntimeWorker,
+            _browser: AgentRuntimeBrowser,
+        ) -> AgentRuntimeControllerFuture {
+            Box::pin(async {
+                panic!("controller test panic");
+            })
+        }
+    }
+
+    struct NeverController;
+
+    impl AgentRuntimeController for NeverController {
+        fn run(
+            self: Box<Self>,
+            worker: AgentRuntimeWorker,
+            browser: AgentRuntimeBrowser,
+        ) -> AgentRuntimeControllerFuture {
+            Box::pin(async move {
+                let _retained_outside_capability_loop = (worker, browser);
+                std::future::pending::<()>().await;
+            })
+        }
+    }
+
+    struct FaultIgnoringController {
+        started: mpsc::Sender<()>,
+    }
+
+    impl AgentRuntimeController for FaultIgnoringController {
+        fn run(
+            self: Box<Self>,
+            worker: AgentRuntimeWorker,
+            browser: AgentRuntimeBrowser,
+        ) -> AgentRuntimeControllerFuture {
+            let _ = self.started.send(());
+            Box::pin(async move {
+                let _retained_outside_capability_loop = (worker, browser);
+                std::future::pending::<()>().await;
+            })
+        }
+    }
+
+    struct EventWaitingController {
+        ready: mpsc::Sender<()>,
+        settled: mpsc::Sender<()>,
+    }
+
+    impl AgentRuntimeController for EventWaitingController {
+        fn run(
+            self: Box<Self>,
+            mut worker: AgentRuntimeWorker,
+            _browser: AgentRuntimeBrowser,
+        ) -> AgentRuntimeControllerFuture {
+            let ready = self.ready.clone();
+            let settled = self.settled.clone();
+            Box::pin(async move {
+                let _ = ready.send(());
+                if matches!(
+                    worker.next_event().await,
+                    Ok(AgentRuntimeEvent::NativeTerminal(
+                        ContextNativeEvent::ResourceAuditSettled(_)
+                    ))
+                ) {
+                    let _ = settled.send(());
+                }
+            })
+        }
+    }
+
+    fn controller_test_inner() -> Arc<RuntimeInner> {
+        Arc::new(RuntimeInner {
+            mailbox: AgentRuntimeMailbox::new(AgentRuntimeMailboxConfig::STANDARD),
+            commands: ArrayQueue::new(MIN_AGENT_RUNTIME_COMMAND_CAPACITY),
+            control_wake: Notify::new(),
+            run_state: AtomicU8::new(RUN_IDLE),
+            next_ticket: AtomicU64::new(1),
+            current_ticket: AtomicU64::new(0),
+            cancelled: AtomicBool::new(false),
+            shutdown_requested: AtomicBool::new(false),
+            staged_stop_reason: AtomicU8::new(STAGED_STOP_NONE),
+            completion: CompletionState::new(),
+        })
+    }
+
+    fn controller_test_worker(inner: Arc<RuntimeInner>) -> AgentRuntimeWorker {
+        AgentRuntimeWorker {
+            inner,
+            cancellation_delivered: false,
+            shutdown_delivered: false,
+            not_send: PhantomData,
+        }
+    }
+
+    fn controller_test_context() -> zephium_agentic::ContextJoin {
+        let identity = ContextIdentity::new(
+            ContextId::generate(),
+            ContextRunId::generate(),
+            31_u128.into(),
+            ContextKind::Owned,
+        );
+        let capabilities = ContextCapabilities::try_new(
+            ContextKind::Owned,
+            &[ContextCapability::Observe, ContextCapability::Act],
+        )
+        .expect("controller test capabilities");
+        let mut registry = ContextRegistry::new();
+        registry
+            .reserve(identity, capabilities)
+            .expect("controller test reserve");
+        let construction = registry
+            .begin_context(
+                identity.id(),
+                ContextOperationId::new(1).expect("controller test operation"),
+            )
+            .expect("controller test construction");
+        registry
+            .settle_construction(identity.id(), construction, ContextSettlement::Applied)
+            .expect("controller test settlement");
+        registry
+            .join(identity.id())
+            .expect("controller test current join")
+    }
+
     struct ForcedReaperSpawnFailure;
 
     impl ForcedReaperSpawnFailure {
@@ -1017,6 +1658,347 @@ mod tests {
             }
         }
         panic!("worker permit did not release after the worker exited")
+    }
+
+    #[test]
+    fn controller_starts_on_the_named_worker_after_bind_and_receives_queued_start_once() {
+        let _guard = runtime_test_guard();
+        let (sender, receiver) = mpsc::channel();
+        let pending = spawn_suspended_with_controller(
+            AgentRuntimeConfig::STANDARD,
+            Box::new(RecordingController {
+                sender,
+                expected_events: 1,
+            }),
+        )
+        .expect("controller worker starts");
+        let handle_before_bind = AgentRuntimeHandle {
+            inner: Arc::clone(&pending.inner),
+        };
+        let ticket = handle_before_bind.start_run().expect("one queued start");
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+
+        let port = Arc::new(RecordingPort {
+            calls: AtomicUsize::new(0),
+        });
+        let composition = pending.bind_browser_port(port as Arc<dyn AgentBrowserPort>);
+        let (handle, completion, lifecycle) = composition.into_parts();
+        let report = receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("controller starts after bind");
+        assert_eq!(report.worker_name.as_deref(), Some("zephium-agent-runtime"));
+        assert_eq!(report.current_ticket, Some(ticket.get()));
+        assert!(report.admitted);
+        assert_eq!(report.events, ["RunStarted"]);
+        wait_stopped(&completion);
+        assert!(handle.status().cancelled());
+        assert!(handle.status().sealed());
+        assert!(matches!(
+            lifecycle.shutdown_until(Instant::now() + Duration::from_secs(1)),
+            AgentBrowserShutdownOutcome::Unclean
+        ));
+        let next = spawn_after_true_worker_exit();
+        drop(next);
+    }
+
+    #[test]
+    fn controller_events_are_closed_real_and_terminal_first() {
+        let inner = controller_test_inner();
+        let sink = inner.mailbox.native_event_sink();
+        let audit = ContextResourceAuditId::new(1).expect("controller test audit identity");
+        // Intentionally enqueue the unsolicited signal first: controller
+        // delivery must drain the separate terminal lane before it.
+        assert!(sink
+            .publish(ContextNativeEvent::RendererLost(ContextRendererLoss::new(
+                controller_test_context(),
+            )))
+            .is_ok());
+        assert!(sink
+            .publish(ContextNativeEvent::ResourceAuditSettled(
+                ContextResourceAuditSettlement::new(audit, Err(ContextPortFailure::Shutdown)),
+            ))
+            .is_ok());
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("controller test runtime");
+        runtime.block_on(async {
+            let mut worker = controller_test_worker(Arc::clone(&inner));
+            assert!(matches!(
+                worker.next_event().await,
+                Ok(AgentRuntimeEvent::NativeTerminal(
+                    ContextNativeEvent::ResourceAuditSettled(_)
+                ))
+            ));
+            assert!(matches!(
+                worker.next_event().await,
+                Ok(AgentRuntimeEvent::RendererLost(_))
+            ));
+        });
+    }
+
+    #[test]
+    fn cancellation_is_one_shot_and_leaves_terminal_debt_observable() {
+        let inner = controller_test_inner();
+        let audit = ContextResourceAuditId::new(1).expect("controller test audit identity");
+        assert!(inner
+            .mailbox
+            .native_event_sink()
+            .publish(ContextNativeEvent::ResourceAuditSettled(
+                ContextResourceAuditSettlement::new(audit, Err(ContextPortFailure::Cancelled)),
+            ))
+            .is_ok());
+        inner.seal_and_cancel();
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("controller test runtime");
+        runtime.block_on(async {
+            let mut worker = controller_test_worker(Arc::clone(&inner));
+            assert!(matches!(
+                worker.next_event().await,
+                Ok(AgentRuntimeEvent::CancellationRequested)
+            ));
+            assert!(matches!(
+                worker.next_event().await,
+                Ok(AgentRuntimeEvent::NativeTerminal(
+                    ContextNativeEvent::ResourceAuditSettled(_)
+                ))
+            ));
+            assert!(worker.status().cancelled());
+            assert!(worker.status().sealed());
+        });
+    }
+
+    #[test]
+    fn lifecycle_shutdown_event_is_not_downgraded_to_cancellation() {
+        let inner = controller_test_inner();
+        inner.request_shutdown();
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("controller test runtime");
+        runtime.block_on(async {
+            let mut worker = controller_test_worker(Arc::clone(&inner));
+            assert!(matches!(
+                worker.next_event().await,
+                Ok(AgentRuntimeEvent::ShutdownRequested)
+            ));
+            assert!(worker.status().cancelled());
+            assert!(worker.status().sealed());
+        });
+    }
+
+    #[test]
+    fn controller_wait_has_no_lost_wake_when_callback_races_registration() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("controller test runtime");
+        runtime.block_on(async {
+            for value in 1..=16 {
+                let inner = controller_test_inner();
+                let sink = inner.mailbox.native_event_sink();
+                let mut worker = controller_test_worker(inner);
+                let producer = tokio::spawn(async move {
+                    tokio::task::yield_now().await;
+                    let audit =
+                        ContextResourceAuditId::new(value).expect("controller test audit identity");
+                    sink.publish(ContextNativeEvent::ResourceAuditSettled(
+                        ContextResourceAuditSettlement::new(
+                            audit,
+                            Err(ContextPortFailure::Shutdown),
+                        ),
+                    ))
+                });
+                let event = tokio::time::timeout(Duration::from_millis(100), worker.next_event())
+                    .await
+                    .expect("controller wait must not lose a callback");
+                assert!(matches!(
+                    event,
+                    Ok(AgentRuntimeEvent::NativeTerminal(
+                        ContextNativeEvent::ResourceAuditSettled(_)
+                    ))
+                ));
+                assert!(producer.await.expect("producer joins").is_ok());
+            }
+        });
+    }
+
+    #[test]
+    fn controller_event_wait_is_not_starved_by_the_fault_monitor() {
+        let _guard = runtime_test_guard();
+        let (ready_sender, ready_receiver) = mpsc::channel();
+        let (settled_sender, settled_receiver) = mpsc::channel();
+        let pending = spawn_suspended_with_controller(
+            AgentRuntimeConfig::STANDARD,
+            Box::new(EventWaitingController {
+                ready: ready_sender,
+                settled: settled_sender,
+            }),
+        )
+        .expect("controller worker starts");
+        let sink = pending.native_event_sink();
+        let port = Arc::new(RecordingPort {
+            calls: AtomicUsize::new(0),
+        });
+        let composition = pending.bind_browser_port(port as Arc<dyn AgentBrowserPort>);
+        let (_handle, completion, lifecycle) = composition.into_parts();
+        ready_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("controller has begun waiting for an event");
+
+        let audit = ContextResourceAuditId::new(1).expect("event test audit identity is nonzero");
+        assert!(sink
+            .publish(ContextNativeEvent::ResourceAuditSettled(
+                ContextResourceAuditSettlement::new(audit, Err(ContextPortFailure::Shutdown)),
+            ))
+            .is_ok());
+        settled_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("event wait must wake despite the fault monitor");
+        wait_stopped(&completion);
+        assert!(matches!(
+            lifecycle.shutdown_until(Instant::now() + Duration::from_secs(1)),
+            AgentBrowserShutdownOutcome::Unclean
+        ));
+        let next = spawn_after_true_worker_exit();
+        drop(next);
+    }
+
+    #[test]
+    fn controller_exit_and_panic_release_browser_and_worker_permit() {
+        let _guard = runtime_test_guard();
+        for controller in [
+            Box::new(EarlyExitController) as Box<dyn AgentRuntimeController>,
+            Box::new(PanicController) as Box<dyn AgentRuntimeController>,
+        ] {
+            let pending = spawn_suspended_with_controller(AgentRuntimeConfig::STANDARD, controller)
+                .expect("controller worker starts");
+            let port = Arc::new(RecordingPort {
+                calls: AtomicUsize::new(0),
+            });
+            let weak_port = Arc::downgrade(&port);
+            let composition = pending.bind_browser_port(port as Arc<dyn AgentBrowserPort>);
+            let (handle, completion, lifecycle) = composition.into_parts();
+            wait_stopped(&completion);
+            assert!(handle.status().cancelled());
+            assert!(handle.status().sealed());
+            assert!(weak_port.upgrade().is_none());
+            assert!(matches!(
+                lifecycle.shutdown_until(Instant::now() + Duration::from_secs(1)),
+                AgentBrowserShutdownOutcome::Unclean
+            ));
+            let next = spawn_after_true_worker_exit();
+            drop(next);
+        }
+    }
+
+    #[test]
+    fn lifecycle_shutdown_forcibly_drops_noncooperative_controller() {
+        let _guard = runtime_test_guard();
+        let pending = spawn_suspended_with_controller(
+            AgentRuntimeConfig::STANDARD,
+            Box::new(NeverController),
+        )
+        .expect("controller worker starts");
+        let sink = pending.native_event_sink();
+        let audit = ContextResourceAuditId::new(1).expect("controller test audit identity");
+        assert!(sink
+            .publish(ContextNativeEvent::ResourceAuditSettled(
+                ContextResourceAuditSettlement::new(audit, Err(ContextPortFailure::Shutdown)),
+            ))
+            .is_ok());
+        let port = Arc::new(RecordingPort {
+            calls: AtomicUsize::new(0),
+        });
+        let weak_port = Arc::downgrade(&port);
+        let composition = pending.bind_browser_port(port as Arc<dyn AgentBrowserPort>);
+        let (handle, completion, lifecycle) = composition.into_parts();
+        let outcome = lifecycle.shutdown_until(Instant::now() + Duration::from_secs(1));
+        assert!(matches!(outcome, AgentBrowserShutdownOutcome::Unclean));
+        assert!(completion.is_stopped());
+        assert!(handle.status().sealed());
+        assert_eq!(
+            handle.status().mailbox_fault(),
+            Some(AgentRuntimeMailboxFault::Closed)
+        );
+        assert!(weak_port.upgrade().is_none());
+        let next = spawn_after_true_worker_exit();
+        drop(next);
+    }
+
+    #[test]
+    fn mailbox_fault_forcibly_drops_a_controller_that_never_polls_events() {
+        let _guard = runtime_test_guard();
+        let mailbox = AgentRuntimeMailboxConfig::try_new(
+            MIN_AGENT_RUNTIME_TERMINAL_CAPACITY,
+            MIN_AGENT_RUNTIME_SIGNAL_CAPACITY,
+        )
+        .expect("published test capacities are valid");
+        let config = AgentRuntimeConfig::try_new(mailbox, MIN_AGENT_RUNTIME_COMMAND_CAPACITY)
+            .expect("published command capacity is valid");
+        let (started_sender, started_receiver) = mpsc::channel();
+        let pending = spawn_suspended_with_controller(
+            config,
+            Box::new(FaultIgnoringController {
+                started: started_sender,
+            }),
+        )
+        .expect("controller worker starts");
+        let sink = pending.native_event_sink();
+        let port = Arc::new(RecordingPort {
+            calls: AtomicUsize::new(0),
+        });
+        let weak_port = Arc::downgrade(&port);
+        let composition = pending.bind_browser_port(port as Arc<dyn AgentBrowserPort>);
+        let (handle, completion, lifecycle) = composition.into_parts();
+        started_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("controller has begun waiting outside next_event");
+
+        for value in 1..=MIN_AGENT_RUNTIME_TERMINAL_CAPACITY {
+            let audit = ContextResourceAuditId::new(value as u64)
+                .expect("terminal test audit identity is nonzero");
+            assert!(sink
+                .publish(ContextNativeEvent::ResourceAuditSettled(
+                    ContextResourceAuditSettlement::new(audit, Err(ContextPortFailure::Shutdown),),
+                ))
+                .is_ok());
+        }
+        let overflow_audit =
+            ContextResourceAuditId::new((MIN_AGENT_RUNTIME_TERMINAL_CAPACITY + 1) as u64)
+                .expect("overflow test audit identity is nonzero");
+        assert_eq!(
+            sink.publish(ContextNativeEvent::ResourceAuditSettled(
+                ContextResourceAuditSettlement::new(
+                    overflow_audit,
+                    Err(ContextPortFailure::Shutdown),
+                ),
+            )),
+            Err(AgentRuntimeMailboxFault::TerminalOverflow)
+        );
+
+        wait_stopped(&completion);
+        assert!(handle.status().cancelled());
+        assert!(handle.status().sealed());
+        assert_eq!(
+            handle.status().mailbox_fault(),
+            Some(AgentRuntimeMailboxFault::TerminalOverflow)
+        );
+        assert!(weak_port.upgrade().is_none());
+        assert!(matches!(
+            lifecycle.shutdown_until(Instant::now() + Duration::from_secs(1)),
+            AgentBrowserShutdownOutcome::Unclean
+        ));
+        let next = spawn_after_true_worker_exit();
+        drop(next);
     }
 
     #[test]
@@ -1170,6 +2152,7 @@ mod tests {
             control_wake: Notify::new(),
             run_state: AtomicU8::new(RUN_IDLE),
             next_ticket: AtomicU64::new(1),
+            current_ticket: AtomicU64::new(0),
             cancelled: AtomicBool::new(false),
             shutdown_requested: AtomicBool::new(false),
             staged_stop_reason: AtomicU8::new(STAGED_STOP_NONE),

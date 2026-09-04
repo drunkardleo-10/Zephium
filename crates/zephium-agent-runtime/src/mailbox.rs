@@ -257,6 +257,15 @@ impl AgentRuntimeMailbox {
 
     /// Removes exactly one item, always draining terminal work before signals.
     pub(crate) fn try_pop(&self) -> Option<AgentRuntimeMailboxItem> {
+        self.try_pop_terminal().or_else(|| self.try_pop_signal())
+    }
+
+    /// Removes one terminal callback settlement, if present.
+    ///
+    /// The controller host uses this narrower primitive to make a sticky
+    /// intake fault win before an unsolicited signal while still delivering
+    /// terminal callback debt first.
+    pub(crate) fn try_pop_terminal(&self) -> Option<AgentRuntimeMailboxItem> {
         if let Some(item) = self.inner.terminal.pop() {
             return Some(match item {
                 TerminalItem::Native(event) => AgentRuntimeMailboxItem::NativeTerminal(event),
@@ -270,6 +279,11 @@ impl AgentRuntimeMailbox {
                 TerminalItem::Test => AgentRuntimeMailboxItem::TestTerminal,
             });
         }
+        None
+    }
+
+    /// Removes one unsolicited native signal, if no terminal priority applies.
+    pub(crate) fn try_pop_signal(&self) -> Option<AgentRuntimeMailboxItem> {
         self.inner.signals.pop().map(|item| match item {
             SignalItem::NavigationReplaced(replacement) => {
                 AgentRuntimeMailboxItem::NavigationReplaced(replacement)
@@ -302,6 +316,23 @@ impl AgentRuntimeMailbox {
         }
     }
 
+    /// Waits without a lost-wake race for a sticky intake failure.
+    ///
+    /// Unlike [`Self::wait_for_work`], retained callback work does not mask a
+    /// fault here. The controller host uses this while a controller awaits
+    /// unrelated work, so an overflow still forcibly tears down the one run
+    /// rather than relying on the controller to call back into the mailbox.
+    pub(crate) async fn wait_for_fault(&self) -> AgentRuntimeMailboxFault {
+        loop {
+            let mut notified = std::pin::pin!(self.inner.wake.notified());
+            notified.as_mut().enable();
+            if let Some(fault) = self.fault() {
+                return fault;
+            }
+            notified.await;
+        }
+    }
+
     fn publish_terminal(&self, item: TerminalItem) -> Result<(), AgentRuntimeMailboxFault> {
         self.publish(item, true)
     }
@@ -324,7 +355,11 @@ impl AgentRuntimeMailbox {
         drop(reservation);
         match result {
             Ok(()) => {
-                self.inner.wake.notify_one();
+                // The controller's event wait and its independent fatal-fault
+                // monitor can both be registered. Waking only one could let
+                // the monitor consume a normal-work wake while the event
+                // waiter sleeps beside an already-queued settlement.
+                self.inner.wake.notify_waiters();
                 match self.fault() {
                     Some(fault) => Err(fault),
                     None => Ok(()),

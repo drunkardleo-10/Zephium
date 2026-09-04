@@ -22,8 +22,10 @@ pub use mailbox::{
     MIN_AGENT_RUNTIME_SIGNAL_CAPACITY, MIN_AGENT_RUNTIME_TERMINAL_CAPACITY,
 };
 pub use runtime::{
-    spawn_suspended, AgentRunAdmissionRefusal, AgentRunStatus, AgentRunTicket,
-    AgentRuntimeCompletion, AgentRuntimeComposition, AgentRuntimeConfig, AgentRuntimeHandle,
-    AgentRuntimeStagedStopReason, PendingAgentRuntime, RuntimeSpawnError,
-    MAX_AGENT_RUNTIME_COMMAND_CAPACITY, MIN_AGENT_RUNTIME_COMMAND_CAPACITY,
+    spawn_suspended, spawn_suspended_with_controller, AgentRunAdmissionRefusal, AgentRunStatus,
+    AgentRunTicket, AgentRuntimeBrowser, AgentRuntimeCompletion, AgentRuntimeComposition,
+    AgentRuntimeConfig, AgentRuntimeController, AgentRuntimeControllerFuture, AgentRuntimeEvent,
+    AgentRuntimeHandle, AgentRuntimeStagedStopReason, AgentRuntimeWorker, AgentRuntimeWorkerFault,
+    PendingAgentRuntime, RuntimeSpawnError, MAX_AGENT_RUNTIME_COMMAND_CAPACITY,
+    MIN_AGENT_RUNTIME_COMMAND_CAPACITY,
 };
