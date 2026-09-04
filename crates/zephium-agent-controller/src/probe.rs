@@ -37,15 +37,16 @@ impl TerraProbeActionBridge {
         requested_at: SemanticActionExecutionInstant,
     ) -> Result<Self, TerraProbeActionBridgeError> {
         let (proposal, continuation) = turn.into_parts();
+        let kind = proposal.kind();
         let AgentBrowserToolProposal::Act(actions) = proposal else {
-            return Err(TerraProbeActionBridgeError::Proposal);
+            return Err(TerraProbeActionBridgeError::UnexpectedTool(kind));
         };
         let mut actions = actions.into_actions();
         if actions.len() != 1 {
-            return Err(TerraProbeActionBridgeError::Proposal);
+            return Err(TerraProbeActionBridgeError::ActionCount);
         }
         let Some(action) = actions.pop() else {
-            return Err(TerraProbeActionBridgeError::Proposal);
+            return Err(TerraProbeActionBridgeError::ActionCount);
         };
         let execution = prepare_action(observation, action, batch, attempt, requested_at)?;
         Ok(Self {
@@ -206,9 +207,12 @@ impl TerraProbeActionReport {
 /// Closed refusal from the qualification tool-action bridge.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum TerraProbeActionBridgeError {
-    /// The settled turn was not exactly one allowed action proposal.
-    #[error("Terra probe action proposal is not the qualification contract")]
-    Proposal,
+    /// The settled turn requested another bounded browser tool.
+    #[error("Terra probe turn requested a non-action browser tool")]
+    UnexpectedTool(zephium_agentic::AgentBrowserToolKind),
+    /// The action tool did not contain exactly one action.
+    #[error("Terra probe action count is not the qualification contract")]
+    ActionCount,
     /// Exact observation binding, native terminal rejoin, or verification failed.
     #[error("Terra probe action qualification failed")]
     Qualification(SemanticActionQualificationError),

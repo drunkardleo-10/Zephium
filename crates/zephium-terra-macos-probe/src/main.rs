@@ -20,19 +20,32 @@ fn main() {
     let result = match arguments.as_slice() {
         [argument] if argument == "--live-fixed-click" => run_fixed_click(),
         [argument] if argument == "--live-public-wikipedia-fill" => run_public_wikipedia_fill(),
-        [argument] if argument == "--live-two-action" => run_two_action(),
+        [argument] if argument == "--live-two-action" => {
+            run_two_action(TwoActionScenario::FixedClickFill)
+        }
+        [argument] if argument == "--live-public-wikipedia-form" => {
+            run_two_action(TwoActionScenario::PublicFillSelect)
+        }
+        [argument] if argument == "--live-public-wikipedia-form-locate" => {
+            run_two_action(TwoActionScenario::PublicFillLocateSelect)
+        }
         _ => std::process::exit(2),
     };
     if let Err(error) = result {
         let _ = writeln!(
             std::io::stderr().lock(),
-            "macos-terra-agentic-probe: failed; stage={}; engine_reason={}; encoding_reason={}; verification_reason={}; wait={}; settle_millis={}; protocol_event={}; content=redacted",
+            "macos-terra-agentic-probe: failed; stage={}; action_step={}; tool_kind={}; engine_reason={}; encoding_reason={}; verification_reason={}; wait={}; settle_millis={}; locate_query_bytes={}; locate_query_terms={}; locate_scanned_nodes={}; protocol_event={}; content=redacted",
             error.label(),
+            error.action_step(),
+            error.tool_kind_label(),
             error.engine_reason_label(),
             error.encoding_reason_label(),
             error.verification_reason_label(),
             error.wait_label(),
             error.settle_millis(),
+            error.locate_query_bytes(),
+            error.locate_query_terms(),
+            error.locate_scanned_nodes(),
             error.protocol_event_label()
         );
         std::process::exit(1);
@@ -46,15 +59,18 @@ enum ProbeFailure {
     Keychain,
     Authority,
     Provider(zephium_agent_controller::TerraProbeProviderError),
-    Proposal,
+    Proposal {
+        step: u8,
+        error: Option<zephium_agent_controller::TerraProbeActionBridgeError>,
+    },
     Engine(&'static str),
     Verification,
-    PostClickVerification {
+    PostFirstActionVerification {
         error: zephium_agent_controller::TerraProbeActionBridgeError,
         wait: zephium_agentic::SemanticWaitCondition,
         settle_millis: u32,
     },
-    PostFillVerification {
+    PostSecondActionVerification {
         error: zephium_agent_controller::TerraProbeActionBridgeError,
         wait: zephium_agentic::SemanticWaitCondition,
         settle_millis: u32,
@@ -81,6 +97,14 @@ impl ProbeFailure {
                 "provider_initial_encoding"
             }
             Self::Provider(TerraProbeProviderError::DiffEncoding(_)) => "provider_diff_encoding",
+            Self::Provider(TerraProbeProviderError::LocateTool) => "provider_locate_tool",
+            Self::Provider(TerraProbeProviderError::Locate) => "provider_locate",
+            Self::Provider(TerraProbeProviderError::LocateNoMatches { .. }) => {
+                "provider_locate_no_matches"
+            }
+            Self::Provider(TerraProbeProviderError::LocateEncoding(_)) => {
+                "provider_locate_encoding"
+            }
             Self::Provider(TerraProbeProviderError::Transport) => "provider_transport",
             Self::Provider(TerraProbeProviderError::PreDispatchTerminal(_)) => {
                 "provider_pre_dispatch_terminal"
@@ -199,11 +223,11 @@ impl ProbeFailure {
             Self::Provider(TerraProbeProviderError::Proposal) => "provider_proposal",
             Self::Provider(TerraProbeProviderError::Continuation) => "provider_continuation",
             Self::Provider(TerraProbeProviderError::TurnLimit) => "provider_turn_limit",
-            Self::Proposal => "proposal_contract",
+            Self::Proposal { .. } => "proposal_contract",
             Self::Engine(_) => "native_engine",
             Self::Verification => "fresh_snapshot_verification",
-            Self::PostClickVerification { .. } => "post_click_verification",
-            Self::PostFillVerification { .. } => "post_fill_verification",
+            Self::PostFirstActionVerification { .. } => "post_first_action_verification",
+            Self::PostSecondActionVerification { .. } => "post_second_action_verification",
             Self::Metrics => "metrics",
             Self::Output => "output",
         }
@@ -216,17 +240,30 @@ impl ProbeFailure {
         }
     }
 
+    const fn action_step(self) -> u8 {
+        match self {
+            Self::Proposal { step, .. } => step,
+            Self::PostFirstActionVerification { .. } => 1,
+            Self::PostSecondActionVerification { .. } => 2,
+            _ => 0,
+        }
+    }
+
     const fn verification_reason_label(self) -> &'static str {
         use zephium_agent_controller::TerraProbeActionBridgeError;
         use zephium_agentic::SemanticActionQualificationError;
 
         let error = match self {
-            Self::PostClickVerification { error, .. }
-            | Self::PostFillVerification { error, .. } => error,
+            Self::Proposal {
+                error: Some(error), ..
+            }
+            | Self::PostFirstActionVerification { error, .. }
+            | Self::PostSecondActionVerification { error, .. } => error,
             _ => return "not_applicable",
         };
         match error {
-            TerraProbeActionBridgeError::Proposal => "proposal",
+            TerraProbeActionBridgeError::UnexpectedTool(_) => "unexpected_tool",
+            TerraProbeActionBridgeError::ActionCount => "action_count",
             TerraProbeActionBridgeError::StateUpdate => "state_update",
             TerraProbeActionBridgeError::Qualification(
                 SemanticActionQualificationError::Identity,
@@ -249,13 +286,40 @@ impl ProbeFailure {
         }
     }
 
+    const fn tool_kind_label(self) -> &'static str {
+        use zephium_agent_controller::TerraProbeActionBridgeError;
+        use zephium_agentic::AgentBrowserToolKind;
+
+        let Self::Proposal {
+            error: Some(TerraProbeActionBridgeError::UnexpectedTool(kind)),
+            ..
+        } = self
+        else {
+            return "not_applicable";
+        };
+        match kind {
+            AgentBrowserToolKind::Navigate => "navigate",
+            AgentBrowserToolKind::Back => "back",
+            AgentBrowserToolKind::Forward => "forward",
+            AgentBrowserToolKind::Reload => "reload",
+            AgentBrowserToolKind::Snapshot => "snapshot",
+            AgentBrowserToolKind::Locate => "locate",
+            AgentBrowserToolKind::Act => "act",
+            AgentBrowserToolKind::Wait => "wait",
+            AgentBrowserToolKind::Read => "read",
+            AgentBrowserToolKind::Extract => "extract",
+            AgentBrowserToolKind::Screenshot => "screenshot",
+            AgentBrowserToolKind::ShowForHuman => "show_for_human",
+            AgentBrowserToolKind::ResumeAfterHuman => "resume_after_human",
+        }
+    }
+
     const fn wait_label(self) -> &'static str {
         use zephium_agentic::SemanticWaitCondition;
 
         let wait = match self {
-            Self::PostClickVerification { wait, .. } | Self::PostFillVerification { wait, .. } => {
-                wait
-            }
+            Self::PostFirstActionVerification { wait, .. }
+            | Self::PostSecondActionVerification { wait, .. } => wait,
             _ => return "not_applicable",
         };
         match wait {
@@ -274,8 +338,44 @@ impl ProbeFailure {
 
     const fn settle_millis(self) -> u32 {
         match self {
-            Self::PostClickVerification { settle_millis, .. }
-            | Self::PostFillVerification { settle_millis, .. } => settle_millis,
+            Self::PostFirstActionVerification { settle_millis, .. }
+            | Self::PostSecondActionVerification { settle_millis, .. } => settle_millis,
+            _ => 0,
+        }
+    }
+
+    const fn locate_query_bytes(self) -> u16 {
+        match self {
+            Self::Provider(
+                zephium_agent_controller::TerraProbeProviderError::LocateNoMatches {
+                    query_bytes,
+                    ..
+                },
+            ) => query_bytes,
+            _ => 0,
+        }
+    }
+
+    const fn locate_query_terms(self) -> u8 {
+        match self {
+            Self::Provider(
+                zephium_agent_controller::TerraProbeProviderError::LocateNoMatches {
+                    query_terms,
+                    ..
+                },
+            ) => query_terms,
+            _ => 0,
+        }
+    }
+
+    const fn locate_scanned_nodes(self) -> u16 {
+        match self {
+            Self::Provider(
+                zephium_agent_controller::TerraProbeProviderError::LocateNoMatches {
+                    scanned_nodes,
+                    ..
+                },
+            ) => scanned_nodes,
             _ => 0,
         }
     }
@@ -286,7 +386,8 @@ impl ProbeFailure {
 
         let error = match self {
             Self::Provider(TerraProbeProviderError::InitialEncoding(error))
-            | Self::Provider(TerraProbeProviderError::DiffEncoding(error)) => error,
+            | Self::Provider(TerraProbeProviderError::DiffEncoding(error))
+            | Self::Provider(TerraProbeProviderError::LocateEncoding(error)) => error,
             _ => return "not_applicable",
         };
         match error {
@@ -438,11 +539,17 @@ fn run_fixed_click() -> Result<(), ProbeFailure> {
                 1,
                 SemanticActionExecutionInstant::from_millis(10_000),
             )
-            .map_err(|_| {
-                callback_failure = Some(ProbeFailure::Proposal);
+            .map_err(|error| {
+                callback_failure = Some(ProbeFailure::Proposal {
+                    step: 1,
+                    error: Some(error),
+                });
             })?;
-            let request = action.take_native_request().map_err(|_| {
-                callback_failure = Some(ProbeFailure::Proposal);
+            let request = action.take_native_request().map_err(|error| {
+                callback_failure = Some(ProbeFailure::Proposal {
+                    step: 1,
+                    error: Some(error),
+                });
             })?;
             bridge = Some(action);
             metrics = Some((receipt, input, provider_elapsed));
@@ -453,7 +560,10 @@ fn run_fixed_click() -> Result<(), ProbeFailure> {
         terminal_result.map_err(|error| callback_failure.unwrap_or(ProbeFailure::Engine(error)))?;
     let (settlement, snapshot, observed_at) = terminal.into_parts();
     let report = bridge
-        .ok_or(ProbeFailure::Proposal)?
+        .ok_or(ProbeFailure::Proposal {
+            step: 1,
+            error: None,
+        })?
         .settle_and_verify(settlement, &snapshot, observed_at)
         .map_err(|_| ProbeFailure::Verification)?;
     let _ = report.applied();
@@ -592,11 +702,17 @@ fn run_public_wikipedia_fill() -> Result<(), ProbeFailure> {
                 1,
                 SemanticActionExecutionInstant::from_millis(10_000),
             )
-            .map_err(|_| {
-                callback_failure = Some(ProbeFailure::Proposal);
+            .map_err(|error| {
+                callback_failure = Some(ProbeFailure::Proposal {
+                    step: 1,
+                    error: Some(error),
+                });
             })?;
-            let request = action.take_native_request().map_err(|_| {
-                callback_failure = Some(ProbeFailure::Proposal);
+            let request = action.take_native_request().map_err(|error| {
+                callback_failure = Some(ProbeFailure::Proposal {
+                    step: 1,
+                    error: Some(error),
+                });
             })?;
             bridge = Some(action);
             metrics = Some((receipt, input, provider_elapsed));
@@ -606,12 +722,15 @@ fn run_public_wikipedia_fill() -> Result<(), ProbeFailure> {
     let terminal =
         terminal_result.map_err(|error| callback_failure.unwrap_or(ProbeFailure::Engine(error)))?;
     let (settlement, snapshot, observed_at) = terminal.into_parts();
-    let action = bridge.ok_or(ProbeFailure::Proposal)?;
+    let action = bridge.ok_or(ProbeFailure::Proposal {
+        step: 1,
+        error: None,
+    })?;
     let wait = action.wait();
     let settle_millis = action.settle_millis();
     let report = action
         .settle_and_verify(settlement, &snapshot, observed_at)
-        .map_err(|error| ProbeFailure::PostFillVerification {
+        .map_err(|error| ProbeFailure::PostFirstActionVerification {
             error,
             wait,
             settle_millis,
@@ -639,7 +758,66 @@ fn run_public_wikipedia_fill() -> Result<(), ProbeFailure> {
 }
 
 #[cfg(target_os = "macos")]
-fn run_two_action() -> Result<(), ProbeFailure> {
+#[derive(Clone, Copy)]
+enum TwoActionScenario {
+    FixedClickFill,
+    PublicFillSelect,
+    PublicFillLocateSelect,
+}
+
+#[cfg(target_os = "macos")]
+impl TwoActionScenario {
+    const fn objective(self) -> &'static str {
+        match self {
+            Self::FixedClickFill => {
+                "Complete exactly two local actions in order. First click Primary semantic action with target_state expanded true verification. After the verified tool result, fill Semantic fill text with Zephium model continuation using target_value_matches_input verification. Return exactly one act action per turn and use bounded settle budgets."
+            }
+            Self::PublicFillSelect => {
+                "On the current Wikipedia public discovery page, complete exactly two local actions in order without submitting or navigating. First fill its search input with exactly Zephium browser using wait=mutation_quiet 100 ms, verification=target_value_matches_input, and settle_budget=1000 ms. After the verified tool result, select the Deutsch option in the language selector using wait=mutation_quiet 100 ms, verification=target_selection_matches_option, and settle_budget=1000 ms. Return exactly one act action per turn with effect=local_write."
+            }
+            Self::PublicFillLocateSelect => {
+                "On the current Wikipedia public discovery page, complete exactly two local actions in order without submitting or navigating. First fill its search input with exactly Zephium browser using wait=mutation_quiet 100 ms, verification=target_value_matches_input, and settle_budget=1000 ms. After the verified tool result, call locate exactly once with query Deutsch and scope all before selecting the returned exact option ref in the language selector using wait=mutation_quiet 100 ms, verification=target_selection_matches_option, and settle_budget=1000 ms. Return exactly one act action per action turn with effect=local_write."
+            }
+        }
+    }
+
+    const fn engine_scenario(self) -> zephium_engine::MacosAgenticSemanticTwoActionScenario {
+        match self {
+            Self::FixedClickFill => {
+                zephium_engine::MacosAgenticSemanticTwoActionScenario::FixedClickFill
+            }
+            Self::PublicFillSelect => {
+                zephium_engine::MacosAgenticSemanticTwoActionScenario::PublicFillSelect
+            }
+            Self::PublicFillLocateSelect => {
+                zephium_engine::MacosAgenticSemanticTwoActionScenario::PublicFillSelect
+            }
+        }
+    }
+
+    const fn workflow_label(self) -> &'static str {
+        match self {
+            Self::FixedClickFill => "verified-click-then-fill",
+            Self::PublicFillSelect => "public-wikipedia-fill-then-select",
+            Self::PublicFillLocateSelect => "public-wikipedia-fill-locate-then-select",
+        }
+    }
+
+    const fn accepts_model_turns(self, turns: usize) -> bool {
+        match self {
+            Self::FixedClickFill => turns == 2,
+            Self::PublicFillSelect => turns == 2 || turns == 3,
+            Self::PublicFillLocateSelect => turns == 3,
+        }
+    }
+
+    const fn permits_locate(self) -> bool {
+        matches!(self, Self::PublicFillSelect | Self::PublicFillLocateSelect)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn run_two_action(scenario: TwoActionScenario) -> Result<(), ProbeFailure> {
     use std::cell::{Cell, RefCell};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
@@ -677,6 +855,7 @@ fn run_two_action() -> Result<(), ProbeFailure> {
         session: Option<TerraProbeSession>,
         bridge: Option<TerraProbeActionBridge>,
         metrics: Vec<TurnMetric>,
+        backends: Vec<zephium_agentic::SemanticActionExecutionBackend>,
     }
 
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -690,11 +869,13 @@ fn run_two_action() -> Result<(), ProbeFailure> {
         ),
         session: None,
         bridge: None,
-        metrics: Vec::with_capacity(2),
+        metrics: Vec::with_capacity(3),
+        backends: Vec::with_capacity(2),
     });
     let callback_failure = Cell::new(None);
     let started = Instant::now();
     let result = zephium_engine::run_macos_agentic_semantic_model_two_action_probe(
+        scenario.engine_scenario(),
         |observation, authority| {
             let mut state = state.try_borrow_mut().map_err(|_| {
                 callback_failure.set(Some(ProbeFailure::Authority));
@@ -707,8 +888,7 @@ fn run_two_action() -> Result<(), ProbeFailure> {
                 frame,
                 invocation,
                 generation,
-                "Complete exactly two local actions in order. First click Primary semantic action with target_state expanded true verification. After the verified tool result, fill Semantic fill text with Zephium model continuation using target_value_matches_input verification. Return exactly one act action per turn and use bounded settle budgets."
-                    .to_owned(),
+                scenario.objective().to_owned(),
             )
             .map_err(|_| {
                 callback_failure.set(Some(ProbeFailure::Authority));
@@ -754,11 +934,17 @@ fn run_two_action() -> Result<(), ProbeFailure> {
                 1,
                 SemanticActionExecutionInstant::from_millis(10_000),
             )
-            .map_err(|_| {
-                callback_failure.set(Some(ProbeFailure::Proposal));
+            .map_err(|error| {
+                callback_failure.set(Some(ProbeFailure::Proposal {
+                    step: 1,
+                    error: Some(error),
+                }));
             })?;
-            let request = bridge.take_native_request().map_err(|_| {
-                callback_failure.set(Some(ProbeFailure::Proposal));
+            let request = bridge.take_native_request().map_err(|error| {
+                callback_failure.set(Some(ProbeFailure::Proposal {
+                    step: 1,
+                    error: Some(error),
+                }));
             })?;
             state.session = Some(session);
             state.bridge = Some(bridge);
@@ -774,19 +960,23 @@ fn run_two_action() -> Result<(), ProbeFailure> {
                 callback_failure.set(Some(ProbeFailure::Authority));
             })?;
             let bridge = state.bridge.take().ok_or_else(|| {
-                callback_failure.set(Some(ProbeFailure::Proposal));
+                callback_failure.set(Some(ProbeFailure::Proposal {
+                    step: 1,
+                    error: None,
+                }));
             })?;
             let wait = bridge.wait();
             let settle_millis = bridge.settle_millis();
-            let (_, transition) = bridge
+            let (report, transition) = bridge
                 .settle_for_continuation(settlement, baseline, current, observed_at)
                 .map_err(|error| {
-                    callback_failure.set(Some(ProbeFailure::PostClickVerification {
+                    callback_failure.set(Some(ProbeFailure::PostFirstActionVerification {
                         error,
                         wait,
                         settle_millis,
                     }));
                 })?;
+            state.backends.push(report.applied().backend());
             let provider_started = Instant::now();
             let provider_turn = runtime
                 .block_on(
@@ -804,25 +994,61 @@ fn run_two_action() -> Result<(), ProbeFailure> {
             let provider_elapsed = provider_started.elapsed();
             let receipt = provider_turn.receipt();
             let input = provider_turn.input();
-            let mut bridge = TerraProbeActionBridge::try_prepare(
-                provider_turn.into_tool_turn(),
-                current,
-                2,
-                2,
-                SemanticActionExecutionInstant::from_millis(10_000),
-            )
-            .map_err(|_| {
-                callback_failure.set(Some(ProbeFailure::Proposal));
-            })?;
-            let request = bridge.take_native_request().map_err(|_| {
-                callback_failure.set(Some(ProbeFailure::Proposal));
-            })?;
-            state.bridge = Some(bridge);
+            let tool_turn = provider_turn.into_tool_turn();
             state.metrics.push(TurnMetric {
                 receipt,
                 input,
                 provider_elapsed,
             });
+            let tool_turn = if scenario.permits_locate()
+                && tool_turn.proposal().kind() == zephium_agentic::AgentBrowserToolKind::Locate
+            {
+                let provider_started = Instant::now();
+                let provider_turn = runtime
+                    .block_on(
+                        state
+                            .session
+                            .as_mut()
+                            .ok_or_else(|| {
+                                callback_failure.set(Some(ProbeFailure::Authority));
+                            })?
+                            .continue_after_locate(tool_turn, current, 1),
+                    )
+                    .map_err(|error| {
+                        callback_failure.set(Some(ProbeFailure::Provider(error)));
+                    })?;
+                let provider_elapsed = provider_started.elapsed();
+                let receipt = provider_turn.receipt();
+                let input = provider_turn.input();
+                state.metrics.push(TurnMetric {
+                    receipt,
+                    input,
+                    provider_elapsed,
+                });
+                provider_turn.into_tool_turn()
+            } else {
+                tool_turn
+            };
+            let mut bridge = TerraProbeActionBridge::try_prepare(
+                tool_turn,
+                current,
+                2,
+                2,
+                SemanticActionExecutionInstant::from_millis(10_000),
+            )
+            .map_err(|error| {
+                callback_failure.set(Some(ProbeFailure::Proposal {
+                    step: 2,
+                    error: Some(error),
+                }));
+            })?;
+            let request = bridge.take_native_request().map_err(|error| {
+                callback_failure.set(Some(ProbeFailure::Proposal {
+                    step: 2,
+                    error: Some(error),
+                }));
+            })?;
+            state.bridge = Some(bridge);
             Ok(request)
         },
         |_baseline, settlement, current, observed_at| {
@@ -833,20 +1059,23 @@ fn run_two_action() -> Result<(), ProbeFailure> {
                 callback_failure.set(Some(ProbeFailure::Verification));
             })?;
             let bridge = state.bridge.take().ok_or_else(|| {
-                callback_failure.set(Some(ProbeFailure::Proposal));
+                callback_failure.set(Some(ProbeFailure::Proposal {
+                    step: 2,
+                    error: None,
+                }));
             })?;
             let wait = bridge.wait();
             let settle_millis = bridge.settle_millis();
             let report = bridge
                 .settle_and_verify(settlement, snapshot, observed_at)
                 .map_err(|error| {
-                    callback_failure.set(Some(ProbeFailure::PostFillVerification {
+                    callback_failure.set(Some(ProbeFailure::PostSecondActionVerification {
                         error,
                         wait,
                         settle_millis,
                     }));
                 })?;
-            let _ = report.applied();
+            state.backends.push(report.applied().backend());
             state
                 .session
                 .take()
@@ -869,10 +1098,17 @@ fn run_two_action() -> Result<(), ProbeFailure> {
     if state.credential.is_some()
         || state.session.is_some()
         || state.bridge.is_some()
-        || state.metrics.len() != 2
+        || !scenario.accepts_model_turns(state.metrics.len())
+        || state.backends.len() != 2
     {
         return Err(ProbeFailure::Metrics);
     }
+    let [first_backend, second_backend] = state.backends.as_slice() else {
+        return Err(ProbeFailure::Metrics);
+    };
+    let first_backend = action_backend_label(*first_backend);
+    let second_backend = action_backend_label(*second_backend);
+    let model_turns = state.metrics.len();
     let mut input_tokens = 0_u64;
     let mut output_tokens = 0_u64;
     let mut charged_micro_usd = 0_u64;
@@ -904,10 +1140,11 @@ fn run_two_action() -> Result<(), ProbeFailure> {
         .checked_add(output_tokens)
         .ok_or(ProbeFailure::Metrics)?;
     let elapsed_ms = started.elapsed().as_millis();
+    let workflow = scenario.workflow_label();
     use std::io::Write as _;
     writeln!(
         std::io::stdout().lock(),
-        "macos-terra-agentic-probe: passed; workflow=verified-click-then-fill; model=gpt-5.6-terra; turns=2; verified_actions=2; input_tokens={input_tokens}; output_tokens={output_tokens}; total_tokens={total_tokens}; request_bytes={request_bytes}; semantic_bytes={semantic_bytes}; charged_micro_usd={charged_micro_usd}; provider_elapsed_ms={provider_elapsed_ms}; elapsed_ms={elapsed_ms}; content=redacted",
+        "macos-terra-agentic-probe: passed; workflow={workflow}; model=gpt-5.6-terra; turns={model_turns}; verified_actions=2; first_backend={first_backend}; second_backend={second_backend}; input_tokens={input_tokens}; output_tokens={output_tokens}; total_tokens={total_tokens}; request_bytes={request_bytes}; semantic_bytes={semantic_bytes}; charged_micro_usd={charged_micro_usd}; provider_elapsed_ms={provider_elapsed_ms}; elapsed_ms={elapsed_ms}; content=redacted",
     )
     .map_err(|_| ProbeFailure::Output)?;
     Ok(())

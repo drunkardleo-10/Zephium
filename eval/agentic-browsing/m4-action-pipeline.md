@@ -24,9 +24,16 @@ zero page activation, popup denial, fresh `Expanded`-state verification through
 the existing settlement/verifier core, and teardown. A real Terra session also
 passed a deterministic two-turn click/diff/fill workflow, and a separate fixed-
 origin Wikipedia slice passed three live model-selected fills with exact value
-verification and drained teardown. These are bounded qualification slices, not
-a full policy assessment, difficult-site matrix, general native-input claim,
-or shipping-controller integration. The Windows host keeps screenshot dispatch
+verification and drained teardown. The public slice now also includes three of
+three two-action runs in which Terra filled the search control and selected the
+exact observed `Deutsch` option. Each run used two model turns, the fill and
+selection were independently verified from fresh snapshots, and every native
+owner drained. A separate three-of-three run forced the bounded semantic
+`locate` fallback between those actions; the Rust matcher returned the observed
+option, the provider continued from that exact tool result, and the same final
+postcondition verified. These are bounded qualification slices, not a full
+policy assessment, difficult-site matrix, general native-input claim, or
+shipping-controller integration. The Windows host keeps screenshot dispatch
 unsupported until its physical semantic-runtime qualifier promotes exact
 snapshot-generation lifecycle support.
 
@@ -133,9 +140,13 @@ trusted native input is production-admitted, or that M4 is complete.
   contradictory geometry are distinct fail-stop contract violations.
 - Backend class is content-free diagnostic attribution only: fixed semantic
   recipe, engine-native input, or in-process accessibility. The enum grants no
-  selection authority and no production backend has been selected or wired.
-  An applied terminal is explicitly not effect proof; it only returns the exact
-  active policy authority and a same-clock start instant for the existing
+  selection authority. The macOS owned-context adapter now admits only Click,
+  Fill, and Select: compatible native selects use a captured, fixed
+  `selectedIndex` recipe, while compatible text controls use the separately
+  attested page-world fill shim. Select does not synthesize page `input` or
+  `change` events, so reactive framework compatibility remains explicitly
+  unqualified. An applied terminal is not effect proof; it only returns the
+  exact active policy authority and a same-clock start instant for the existing
   settle/independent-verification core. Typed backend failures and contract
   violations likewise return that authority for one charged terminal policy
   settlement, with no blind retry path.
@@ -216,20 +227,22 @@ trusted native input is production-admitted, or that M4 is complete.
 - `AgentBrowserPort` has a move-only semantic-action callback contract: a
   `Scheduled` native request owes exactly one settlement created by consuming
   that request, while synchronous `Rejected` or `Unsupported` results owe no
-  callback. The production engine currently returns `Unsupported` before task
-  admission on every platform, so this seam adds no queue, task, native object,
-  timer, or idle cost and cannot silently select a backend before M1 physical
-  qualification. Coordinator-owned dispatch reconciliation retains scheduled
-  debt and exhaustively maps every synchronous shared-port refusal into one
-  typed semantic failure before releasing it, avoiding caller-specific charging
-  or leaked authority. A static gate locks the fail-closed engine result, this
-  mapping, and the coordinator bounds.
-- Revalidation is deliberately not an execution proof. The future native
-  adapter must still re-resolve connectedness and current geometry, prove
-  visibility/occlusion and backend compatibility, hold an exact policy permit,
-  execute one fixed recipe, observe under cancellation and one absolute
-  deadline, verify the declared effect independently, and compute an admitted
-  bounded diff before reporting success or continuing a batch.
+  callback. The production macOS engine admits only Click, Fill, or Select for
+  an owned, main-frame, same-origin semantic join; all other action kinds and
+  Windows remain synchronously unsupported. Admission allocates only for an
+  invoked action and therefore preserves zero idle work. Coordinator-owned
+  dispatch reconciliation retains scheduled debt and exhaustively maps every
+  synchronous shared-port refusal into one typed semantic failure before
+  releasing it, avoiding caller-specific charging or leaked authority. A
+  static gate locks the closed engine allowlist, this mapping, and the
+  coordinator bounds.
+- Revalidation is deliberately not an execution proof. The macOS adapter
+  separately re-resolves connectedness and current geometry, proves
+  visibility/occlusion and backend compatibility, executes only its fixed
+  recipe, then returns a provisional terminal under one absolute deadline. The
+  core still verifies the declared effect independently and computes an
+  admitted bounded diff before reporting success or continuing. Any future
+  Windows action adapter must satisfy the same separation.
 - Settlement starts only after the imperative executor claims one backend
   request terminally applied. One nonzero action-attempt identity, exact
   prepared frame/stable target, rolling checkpoint generation, monotonic
@@ -709,4 +722,6 @@ generic script/CDP calls, OS input, and focus changes. The Windows adapter is
 cross-compiled only; no native capture or live page is exercised by these
 tests.
 
-No platform action backend or live page is exercised by these tests.
+The functional-core tests summarized immediately above do not themselves
+exercise a platform action backend or live page; the separately recorded macOS
+qualifiers provide that evidence.

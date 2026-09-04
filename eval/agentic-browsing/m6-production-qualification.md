@@ -22,11 +22,18 @@ must finish before collection authority is exercised.
 The first allowlisted public-site slice is now recorded in
 `native-input-matrix-v1.json`: three of three hidden macOS/WebKit runs used
 Terra to select and fill Wikipedia's live search control, then independently
-verified the exact value and drained every native owner. The page's autofocus
-changed only the responder inside its hidden non-key window; application
-activation, visibility, key/main-window state, and user focus remained strict
-failure conditions. This does not clear the difficult-site, authenticated,
-navigation, extension, concurrency, Windows, or shipping-policy blockers.
+verified the exact value and drained every native owner. A second three-of-
+three slice exercised a complete continuation workflow: Terra filled the
+search control, consumed the verified result, and selected the exact observed
+`Deutsch` option. Every run completed in two model turns and both effects were
+verified from fresh semantic snapshots. The page's autofocus changed only the
+responder inside its hidden non-key window; application activation, visibility,
+key/main-window state, and user focus remained strict failure conditions. A
+third three-of-three slice forced the bounded semantic `locate` continuation
+between the two actions and verified the same final selection. This does not
+qualify native-select `input`/`change` event compatibility, difficult sites,
+authentication, navigation, extensions, Browse concurrency, Windows, or the
+shipping policy actor.
 
 ## Mechanically enforced evidence
 
@@ -50,7 +57,7 @@ navigation, extension, concurrency, Windows, or shipping-policy blockers.
   system-wide Accessibility trust/prompt, generic page-evaluation, and generic
   IPC authority, and mutation-tests representative removals;
 - binds the reviewed macOS production semantic aggregate to its exact command,
-  OS/WebKit build, closed viewport, four snapshots across three world epochs,
+  OS/WebKit build, closed viewport, five snapshots across three world epochs,
   host-released mutation, stale-anchor refusal, recovery, bridge, redaction,
   focus, teardown, and explicit non-claims;
 - prevents the cross-compiled Windows runner from being represented as
@@ -272,6 +279,20 @@ agentic-owned Windows modules. Cross-compilation is not device behavior.
   the compatible fixed recipe and adapter path, not actual policy assessment,
   the full host/controller path, general trusted/native input, arbitrary sites,
   Windows, provider-token flow, or Browse/resource behavior.
+- The allowlisted Wikipedia workflow completed three of three independent
+  hidden macOS/WebKit runs with GPT-5.6 Terra. Each run used two model turns,
+  applied one exact-value fill and one fixed native-select recipe, independently
+  verified both effects, stole no application focus, and drained teardown. This
+  qualifies that static public native-select slice only; it does not establish
+  framework-event, navigation, authenticated, difficult-site, extension,
+  concurrency, Windows, or shipping-policy compatibility.
+- The same public workflow completed three of three additional runs through
+  the explicit semantic-locate continuation. Each run used three provider
+  turns; the middle turn produced a bounded text query, Zephium's fixed Rust
+  matcher returned the exact observed option projection, and the final action
+  again passed fresh-snapshot selection verification. This qualifies the
+  controller/provider locate handoff for that exact public slice, not general
+  fuzzy retrieval or arbitrary-site coverage.
 - The Windows adapter is source-guarded and cross-compiles. Cross-compilation is
   not physical-device behavioral evidence. Its owned-context port now admits
   hidden suspend/resume through WebView2 only, with a ten-second UI-thread

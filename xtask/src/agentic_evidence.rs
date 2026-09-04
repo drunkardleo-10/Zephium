@@ -355,8 +355,10 @@ struct RealSiteRun {
     backend: String,
     runs: u32,
     successful_runs: u32,
+    model_turns_per_run: Vec<u32>,
     verified_actions: u32,
     exact_value_verifications: u32,
+    exact_selection_verifications: u32,
     input_tokens_per_run: Vec<u64>,
     output_tokens_per_run: Vec<u64>,
     serialized_request_bytes_per_run: Vec<u32>,
@@ -372,7 +374,7 @@ struct RealSiteRun {
 }
 
 fn validate_native_matrix(evidence: NativeMatrix) -> Result<(), String> {
-    if evidence.schema_version != 1 || evidence.protocol_version != 2 {
+    if evidence.schema_version != 2 || evidence.protocol_version != 2 {
         return Err("native-input evidence schema/protocol version drifted".to_owned());
     }
     validate_date("native-input reviewed_on", &evidence.reviewed_on)?;
@@ -580,12 +582,40 @@ fn validate_native_results(results: &[NativeResult], reviewed_on: &str) -> Resul
 }
 
 fn validate_real_site_runs(results: &[RealSiteRun]) -> Result<(), String> {
-    if results.len() != 1 {
+    if results.len() != 3 {
         return Err(
-            "committed real-site evidence must contain one reviewed early slice".to_owned(),
+            "committed real-site evidence must contain all three reviewed early slices".to_owned(),
         );
     }
-    let result = &results[0];
+    let results = results
+        .iter()
+        .map(|result| (result.scope.as_str(), result))
+        .collect::<BTreeMap<_, _>>();
+    if results.len() != 3 {
+        return Err("committed real-site evidence scopes must be unique".to_owned());
+    }
+    validate_public_fill(
+        results
+            .get("allowlisted_public_discovery_fill")
+            .ok_or_else(|| "committed real-site evidence lost the public fill slice".to_owned())?,
+    )?;
+    validate_public_two_action(
+        results
+            .get("allowlisted_public_discovery_two_action_workflow")
+            .ok_or_else(|| {
+                "committed real-site evidence lost the public two-action slice".to_owned()
+            })?,
+    )?;
+    validate_public_locate_continuation(
+        results
+            .get("allowlisted_public_discovery_locate_continuation")
+            .ok_or_else(|| {
+                "committed real-site evidence lost the locate-continuation slice".to_owned()
+            })?,
+    )
+}
+
+fn validate_public_fill(result: &RealSiteRun) -> Result<(), String> {
     validate_date("real-site result reviewed_on", &result.reviewed_on)?;
     if result.reviewed_on != "2026-09-04"
         || result.scope != "allowlisted_public_discovery_fill"
@@ -605,8 +635,10 @@ fn validate_real_site_runs(results: &[RealSiteRun]) -> Result<(), String> {
         || result.backend != "page_world_compatibility_fill"
         || result.runs != 3
         || result.successful_runs != 3
+        || result.model_turns_per_run != [1, 1, 1]
         || result.verified_actions != 3
         || result.exact_value_verifications != 3
+        || result.exact_selection_verifications != 0
         || result.input_tokens_per_run != [5081, 5081, 5081]
         || result.output_tokens_per_run != [92, 93, 95]
         || result.serialized_request_bytes_per_run != [33217, 33217, 33217]
@@ -622,7 +654,7 @@ fn validate_real_site_runs(results: &[RealSiteRun]) -> Result<(), String> {
         return Err("reviewed macOS real-site aggregate drifted".to_owned());
     }
     exact_strings(
-        "real-site non-claims",
+        "public fill real-site non-claims",
         &result.non_claims,
         &[
             "difficult_real_site_qualification",
@@ -633,6 +665,122 @@ fn validate_real_site_runs(results: &[RealSiteRun]) -> Result<(), String> {
             "windows_behavior",
             "browse_concurrency",
             "shipping_policy_actor_integration",
+        ],
+    )
+}
+
+fn validate_public_two_action(result: &RealSiteRun) -> Result<(), String> {
+    validate_date(
+        "two-action real-site result reviewed_on",
+        &result.reviewed_on,
+    )?;
+    if result.reviewed_on != "2026-09-04"
+        || result.scope != "allowlisted_public_discovery_two_action_workflow"
+        || result.site != "Wikipedia"
+        || result.task != "fill_search_then_select_language_without_submission"
+        || result.command
+            != "cargo run --quiet --locked -p zephium-terra-macos-probe --features live-probe -- --live-public-wikipedia-form"
+        || result.platform != "macos"
+        || result.os_version != "27.0"
+        || result.os_build != "26A5425a"
+        || result.engine != "WebKit"
+        || result.engine_version != "22625.1.29.11.26"
+        || result.model != "gpt-5.6-terra"
+        || result.profile != "ephemeral"
+        || result.extensions != "absent"
+        || result.presentation != "hidden"
+        || result.backend != "page_world_compatibility_fill_then_fixed_semantic_recipe"
+        || result.runs != 3
+        || result.successful_runs != 3
+        || result.model_turns_per_run != [2, 2, 2]
+        || result.verified_actions != 6
+        || result.exact_value_verifications != 3
+        || result.exact_selection_verifications != 3
+        || result.input_tokens_per_run != [15_444, 15_420, 15_444]
+        || result.output_tokens_per_run != [189, 152, 194]
+        || result.serialized_request_bytes_per_run != [83_067, 81_633, 83_043]
+        || result.semantic_bytes_per_run != [10_663, 10_663, 10_663]
+        || result.charged_micro_usd_per_run != [14_879, 5_306, 5_870]
+        || result.provider_elapsed_ms_per_run != [12_808, 7_235, 8_066]
+        || result.elapsed_ms_per_run != [13_923, 8_405, 9_113]
+        || result.focus_theft_rows != 0
+        || result.hidden_page_autofocus != "internal_responder_change_only"
+        || result.native_teardown != "drained_each_run"
+        || result.status != "passed"
+    {
+        return Err("reviewed macOS two-action real-site aggregate drifted".to_owned());
+    }
+    exact_strings(
+        "public two-action real-site non-claims",
+        &result.non_claims,
+        &[
+            "difficult_real_site_qualification",
+            "navigation_or_submission",
+            "authenticated_profile_behavior",
+            "extension_interaction",
+            "multi_site_compatibility",
+            "windows_behavior",
+            "browse_concurrency",
+            "shipping_policy_actor_integration",
+            "reactive_select_event_compatibility",
+        ],
+    )
+}
+
+fn validate_public_locate_continuation(result: &RealSiteRun) -> Result<(), String> {
+    validate_date(
+        "locate-continuation real-site result reviewed_on",
+        &result.reviewed_on,
+    )?;
+    if result.reviewed_on != "2026-09-04"
+        || result.scope != "allowlisted_public_discovery_locate_continuation"
+        || result.site != "Wikipedia"
+        || result.task != "fill_search_locate_language_then_select_without_submission"
+        || result.command
+            != "cargo run --quiet --locked -p zephium-terra-macos-probe --features live-probe -- --live-public-wikipedia-form-locate"
+        || result.platform != "macos"
+        || result.os_version != "27.0"
+        || result.os_build != "26A5425a"
+        || result.engine != "WebKit"
+        || result.engine_version != "22625.1.29.11.26"
+        || result.model != "gpt-5.6-terra"
+        || result.profile != "ephemeral"
+        || result.extensions != "absent"
+        || result.presentation != "hidden"
+        || result.backend != "page_world_compatibility_fill_then_fixed_semantic_recipe"
+        || result.runs != 3
+        || result.successful_runs != 3
+        || result.model_turns_per_run != [3, 3, 3]
+        || result.verified_actions != 6
+        || result.exact_value_verifications != 3
+        || result.exact_selection_verifications != 3
+        || result.input_tokens_per_run != [23_436, 23_431, 23_434]
+        || result.output_tokens_per_run != [245, 228, 241]
+        || result.serialized_request_bytes_per_run != [128_025, 127_965, 128_025]
+        || result.semantic_bytes_per_run != [10_950, 10_950, 10_950]
+        || result.charged_micro_usd_per_run != [17_491, 8_178, 8_339]
+        || result.provider_elapsed_ms_per_run != [12_815, 11_441, 12_739]
+        || result.elapsed_ms_per_run != [13_979, 12_512, 13_842]
+        || result.focus_theft_rows != 0
+        || result.hidden_page_autofocus != "internal_responder_change_only"
+        || result.native_teardown != "drained_each_run"
+        || result.status != "passed"
+    {
+        return Err("reviewed macOS locate-continuation aggregate drifted".to_owned());
+    }
+    exact_strings(
+        "public locate-continuation real-site non-claims",
+        &result.non_claims,
+        &[
+            "difficult_real_site_qualification",
+            "navigation_or_submission",
+            "authenticated_profile_behavior",
+            "extension_interaction",
+            "multi_site_compatibility",
+            "windows_behavior",
+            "browse_concurrency",
+            "shipping_policy_actor_integration",
+            "reactive_select_event_compatibility",
         ],
     )
 }
