@@ -119,7 +119,7 @@ impl<'a> SemanticEffectEvidence<'a> {
     ///
     /// Values remain borrowed, are never exposed by this type, and are
     /// compared only against the already bounded fill input.
-    pub const fn exact_target_value(
+    pub(crate) const fn exact_target_value(
         attempt: SemanticActionAttemptId,
         observed_at: SemanticSettleInstant,
         snapshot: &'a SemanticSnapshot,
@@ -202,6 +202,17 @@ impl<'a> SemanticEffectEvidence<'a> {
     }
 }
 
+/// Refusal while deriving opaque verification evidence from a fresh snapshot.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum SemanticSnapshotEvidenceError {
+    /// The fresh snapshot did not rejoin the exact prepared action.
+    #[error(transparent)]
+    Revalidation(#[from] SemanticActionRevalidationError),
+    /// This verification contract requires a distinct native evidence source.
+    #[error("semantic verification requires non-snapshot evidence")]
+    NonSnapshotEvidenceRequired,
+}
+
 impl fmt::Debug for SemanticEffectEvidence<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let kind = match self.kind {
@@ -218,6 +229,50 @@ impl fmt::Debug for SemanticEffectEvidence<'_> {
             .field("kind", &kind)
             .field("content", &"[redacted]")
             .finish()
+    }
+}
+
+/// Prepares privacy-preserving snapshot evidence for one exact action attempt.
+///
+/// Most semantic postconditions consume the fresh snapshot directly. Fill is
+/// deliberately different: its verifier needs the exact adjacent before/after
+/// values, but those values must never become public runtime data. This helper
+/// selects and borrows them inside the agentic core, returning only the opaque
+/// evidence envelope. Navigation, dialog, and scroll postconditions require
+/// separately sampled non-snapshot evidence and therefore fail closed here.
+pub fn prepare_semantic_action_snapshot_evidence<'a>(
+    action: &'a SemanticPreparedAction,
+    attempt: SemanticActionAttemptId,
+    observed_at: SemanticSettleInstant,
+    snapshot: &'a SemanticSnapshot,
+) -> Result<SemanticEffectEvidence<'a>, SemanticSnapshotEvidenceError> {
+    match action.verification() {
+        SemanticVerification::TargetValueMatchesInput => {
+            let (before, after) = action.verification_fill_values(snapshot)?;
+            Ok(SemanticEffectEvidence::exact_target_value(
+                attempt,
+                observed_at,
+                snapshot,
+                before,
+                after,
+            ))
+        }
+        SemanticVerification::TargetState { .. }
+        | SemanticVerification::TargetValueChanged
+        | SemanticVerification::TargetSelectionMatchesOption
+        | SemanticVerification::TargetSelectionChanged => {
+            let _ = action.verification_target(snapshot)?;
+            Ok(SemanticEffectEvidence::snapshot(
+                attempt,
+                observed_at,
+                snapshot,
+            ))
+        }
+        SemanticVerification::NavigationCommitted
+        | SemanticVerification::Dialog(_)
+        | SemanticVerification::ScrollPositionChanged => {
+            Err(SemanticSnapshotEvidenceError::NonSnapshotEvidenceRequired)
+        }
     }
 }
 
@@ -963,6 +1018,178 @@ mod tests {
             panic!("immediate settlement was pending");
         };
         *terminal
+    }
+
+    #[test]
+    fn snapshot_evidence_helper_keeps_fill_values_private_and_rejects_other_evidence_classes() {
+        let (observation, _) = observation();
+        let fill_batch = bind(
+            &observation,
+            SemanticActionIntent::Fill {
+                target: SemanticReferenceId::new(3).expect("target"),
+                value: SemanticActionText::try_new("new private title".to_owned()).expect("text"),
+            },
+            SemanticWaitCondition::Immediate,
+            SemanticVerification::TargetValueMatchesInput,
+        )
+        .expect("fill batch");
+        let fill = fill_batch.actions()[0]
+            .prepare(&observation.frames()[0])
+            .expect("fill prepare");
+        let fill_snapshot = current(
+            &observation,
+            json!([
+                {"k": 1, "r": "document", "o": 16},
+                {"k": 2, "p": 0, "r": "button", "n": "Private submit", "o": 1},
+                {"k": 3, "p": 0, "r": "textbox", "n": "Private title",
+                 "v": {"k": "text", "value": "new private title"}, "o": 10},
+                {"k": 4, "p": 0, "r": "checkbox", "n": "Private toggle", "s": 1, "o": 1},
+                {"k": 5, "p": 0, "r": "combobox", "n": "Private priority",
+                 "v": {"k": "ordinal", "value": 1}, "o": 12},
+                {"k": 6, "p": 4, "r": "option", "n": "Private high", "s": 2, "o": 1}
+            ]),
+        );
+        let evidence = prepare_semantic_action_snapshot_evidence(
+            &fill,
+            SemanticActionAttemptId::new(41).expect("attempt"),
+            SemanticSettleInstant::from_millis(101),
+            &fill_snapshot,
+        )
+        .expect("opaque fill evidence");
+        assert!(matches!(
+            evidence.kind,
+            SemanticEffectEvidenceKind::ExactTargetValue { .. }
+        ));
+        let debug = format!("{evidence:?}");
+        assert!(!debug.contains("old"));
+        assert!(!debug.contains("new private title"));
+
+        let snapshot_cases = [
+            (
+                SemanticActionIntent::Click {
+                    target: SemanticReferenceId::new(4).expect("target"),
+                },
+                SemanticVerification::TargetState {
+                    state: SemanticState::Checked,
+                    present: true,
+                },
+            ),
+            (
+                SemanticActionIntent::Press {
+                    target: SemanticReferenceId::new(3).expect("target"),
+                    key: SemanticPressKey::Backspace,
+                },
+                SemanticVerification::TargetValueChanged,
+            ),
+            (
+                SemanticActionIntent::Press {
+                    target: SemanticReferenceId::new(5).expect("target"),
+                    key: SemanticPressKey::ArrowDown,
+                },
+                SemanticVerification::TargetSelectionChanged,
+            ),
+            (
+                SemanticActionIntent::Select {
+                    target: SemanticReferenceId::new(5).expect("target"),
+                    option: SemanticReferenceId::new(6).expect("option"),
+                },
+                SemanticVerification::TargetSelectionMatchesOption,
+            ),
+        ];
+        for (intent, verification) in snapshot_cases {
+            let batch = bind(
+                &observation,
+                intent,
+                SemanticWaitCondition::Immediate,
+                verification,
+            )
+            .expect("snapshot batch");
+            let action = batch.actions()[0]
+                .prepare(&observation.frames()[0])
+                .expect("snapshot prepare");
+            let evidence = prepare_semantic_action_snapshot_evidence(
+                &action,
+                SemanticActionAttemptId::new(42).expect("attempt"),
+                SemanticSettleInstant::from_millis(101),
+                &fill_snapshot,
+            )
+            .expect("snapshot evidence");
+            assert!(matches!(
+                evidence.kind,
+                SemanticEffectEvidenceKind::Snapshot(_)
+            ));
+        }
+
+        let unsupported = [
+            (
+                SemanticWaitCondition::NavigationCommitted,
+                SemanticVerification::NavigationCommitted,
+            ),
+            (
+                SemanticWaitCondition::Dialog(SemanticDialogState::Present),
+                SemanticVerification::Dialog(SemanticDialogState::Present),
+            ),
+            (
+                SemanticWaitCondition::ScrollPositionChanged,
+                SemanticVerification::ScrollPositionChanged,
+            ),
+        ];
+        for (wait, verification) in unsupported {
+            let intent = if verification == SemanticVerification::ScrollPositionChanged {
+                SemanticActionIntent::Scroll {
+                    target: SemanticReferenceId::new(1).expect("target"),
+                    direction: SemanticScrollDirection::Down,
+                    amount: SemanticScrollAmount::Page,
+                }
+            } else {
+                SemanticActionIntent::Click {
+                    target: SemanticReferenceId::new(2).expect("target"),
+                }
+            };
+            let batch = bind(&observation, intent, wait, verification).expect("batch");
+            let action = batch.actions()[0]
+                .prepare(&observation.frames()[0])
+                .expect("prepare");
+            assert_eq!(
+                prepare_semantic_action_snapshot_evidence(
+                    &action,
+                    SemanticActionAttemptId::new(43).expect("attempt"),
+                    SemanticSettleInstant::from_millis(101),
+                    &fill_snapshot,
+                )
+                .expect_err("requires separate evidence"),
+                SemanticSnapshotEvidenceError::NonSnapshotEvidenceRequired
+            );
+        }
+
+        let missing_target = current(&observation, json!([{ "k": 1, "r": "document", "o": 16 }]));
+        let state_batch = bind(
+            &observation,
+            SemanticActionIntent::Click {
+                target: SemanticReferenceId::new(4).expect("target"),
+            },
+            SemanticWaitCondition::Immediate,
+            SemanticVerification::TargetState {
+                state: SemanticState::Checked,
+                present: true,
+            },
+        )
+        .expect("state batch");
+        let state = state_batch.actions()[0]
+            .prepare(&observation.frames()[0])
+            .expect("state prepare");
+        assert_eq!(
+            prepare_semantic_action_snapshot_evidence(
+                &state,
+                SemanticActionAttemptId::new(44).expect("attempt"),
+                SemanticSettleInstant::from_millis(101),
+                &missing_target,
+            )
+            .expect_err("missing target"),
+            SemanticSnapshotEvidenceError::Revalidation(
+                SemanticActionRevalidationError::TargetMissing
+            )
+        );
     }
 
     #[test]

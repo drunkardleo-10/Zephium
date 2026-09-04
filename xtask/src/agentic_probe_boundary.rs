@@ -6560,6 +6560,8 @@ fn validate_semantic_terminal_verification(
         "verify_semantic_action_terminal",
         "SemanticActionVerificationRefusal",
         "SemanticActionVerifiedTerminal",
+        "SemanticSnapshotEvidenceError",
+        "prepare_semantic_action_snapshot_evidence",
         "AgentFailedSemanticEffect",
         "AgentVerifiedSemanticEffect",
         "#[cfg(test)]pub(crate)usesemantic_verify::verify_semantic_action;",
@@ -6587,6 +6589,10 @@ fn validate_semantic_terminal_verification(
         "letverified=matchverify_semantic_action(terminal.tracker(),action,evidence)",
         "let(active,execution,settlement)=terminal.into_parts();",
         "pub(crate)fnverify_semantic_action(",
+        "pub(crate)constfnexact_target_value(",
+        "pubenumSemanticSnapshotEvidenceError{",
+        "NonSnapshotEvidenceRequired",
+        "pubfnprepare_semantic_action_snapshot_evidence",
     ] {
         if !verification.contains(required) {
             return Err(format!(
@@ -6596,6 +6602,7 @@ fn validate_semantic_terminal_verification(
     }
     for forbidden in [
         "pubfnverify_semantic_action(",
+        "pubconstfnexact_target_value(",
         "pubfninto_parts(",
         "into_terminal(",
         "evaluateJavaScript",

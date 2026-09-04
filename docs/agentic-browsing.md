@@ -613,6 +613,14 @@ flows through batch terminalization so qualification can measure failed proof
 attempts without inventing a completion time. Neither path retains borrowed
 evidence or creates a verification retry.
 
+Snapshot-derived evidence crosses sibling-crate composition only through the
+agentic core's opaque preparation helper. Exact form values used to verify a
+fill remain borrowed behind that envelope; their constructor is crate-private.
+Navigation, dialog, and scroll contracts return a distinct content-free
+`NonSnapshotEvidenceRequired` refusal so the controller must obtain the
+appropriate independently sampled native evidence rather than misclassifying
+the request as an action-policy denial or substituting a semantic snapshot.
+
 Policy accounting then consumes the joined verified or refused terminal rather
 than accepting separately supplied authority and proof. A verified charge
 returns the immutable effect receipt still joined to execution attribution,
