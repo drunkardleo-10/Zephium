@@ -407,6 +407,7 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     validate_provider_transport_root(&provider_transport_root)?;
     validate_provider_transport_commit_boundary(&provider_transport_root)?;
     validate_abortable_provider_operation_contract(&provider_transport_root)?;
+    validate_immediate_provider_settlement_recovery_contract(&provider_transport_root)?;
     validate_provider_consumer_panic_boundary(
         &provider_transport_root,
         &read(repository.join(AGENTIC_PROVIDER_ROOT))?,
@@ -4870,6 +4871,7 @@ fn validate_provider_transport_facade(manifest: &str, root: &str) -> Result<(), 
         "AgentProviderAttemptStateError,",
         "AgentProviderTransport,",
         "AgentProviderPolicySettlement,",
+        "AgentProviderImmediateSettlementError,",
         "AgentProviderSettledTerminal,",
     ] {
         if !root.contains(required) {
@@ -5263,6 +5265,69 @@ fn validate_abortable_provider_operation_contract(source: &str) -> Result<(), St
             "abort must preserve private disclosure evidence rather than rewrite accounting"
                 .to_owned(),
         );
+    }
+    Ok(())
+}
+
+fn validate_immediate_provider_settlement_recovery_contract(source: &str) -> Result<(), String> {
+    let production = source
+        .split_once("\n#[cfg(test)]\nmod tests")
+        .map_or(source, |(production, _)| production);
+    let source = compact(
+        &production
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<String>(),
+    );
+    for required in [
+        "pubstructAgentProviderImmediateSettlement{",
+        "pubfnsettle(self,policy:&mutAgentRunPolicy,)->Result<AgentModelCallReceipt,AgentProviderImmediateSettlementError>{",
+        "ifletErr(error)=policy.prevalidate_active_model_call(&self.active){returnErr(AgentProviderImmediateSettlementError::PolicyPrecondition{error,unsettled:Box::new(self),});}",
+        "letSelf{active,accounting,..}=self;",
+        ".map_err(AgentProviderImmediateSettlementError::Policy)",
+        "pubenumAgentProviderImmediateSettlementError{",
+        "PolicyPrecondition{error:AgentPolicyError,unsettled:Box<AgentProviderImmediateSettlement>,}",
+        "Policy(#[source]AgentPolicyError),",
+        "pubconstfnpolicy_precondition_error(&self)->Option<AgentPolicyError>",
+        "pubfninto_unsettled(self)->Option<AgentProviderImmediateSettlement>",
+    ] {
+        if !source.contains(required) {
+            return Err(format!(
+                "agent provider immediate settlement lost recoverable policy boundary {required}"
+            ));
+        }
+    }
+    let settle_start = source
+        .find("pubfnsettle(self,policy:&mutAgentRunPolicy,)->Result<AgentModelCallReceipt,AgentProviderImmediateSettlementError>")
+        .ok_or_else(|| "immediate settlement entry point is missing".to_owned())?;
+    let error_start = source
+        .find("pubenumAgentProviderImmediateSettlementError")
+        .ok_or_else(|| "immediate settlement error is missing".to_owned())?;
+    let settle = &source[settle_start..error_start];
+    let prevalidate = settle
+        .find("policy.prevalidate_active_model_call(&self.active)")
+        .ok_or_else(|| "immediate settlement prevalidation is missing".to_owned())?;
+    let destructure = settle
+        .find("letSelf{active,accounting,..}=self;")
+        .ok_or_else(|| "immediate settlement destructures before validation".to_owned())?;
+    let policy = settle
+        .find(".map_err(AgentProviderImmediateSettlementError::Policy)")
+        .ok_or_else(|| "immediate settlement lost terminal policy mapping".to_owned())?;
+    if !(prevalidate < destructure && destructure < policy) {
+        return Err(
+            "immediate settlement must retain the owner until policy prevalidation succeeds"
+                .to_owned(),
+        );
+    }
+    let error_derive_start = source[..error_start]
+        .rfind("#[derive(")
+        .ok_or_else(|| "immediate settlement error derive is missing".to_owned())?;
+    let error_end = source[error_start..]
+        .find("implAgentProviderImmediateSettlementError")
+        .map(|offset| error_start + offset)
+        .ok_or_else(|| "immediate settlement error implementation is missing".to_owned())?;
+    if source[error_derive_start..error_end].contains("Clone") {
+        return Err("immediate settlement recovery error must remain move-only".to_owned());
     }
     Ok(())
 }
@@ -11742,6 +11807,11 @@ mod tests {
                 "AgentProviderAttemptState,",
                 1,
             ),
+            root.replacen(
+                "AgentProviderImmediateSettlementError,",
+                "AgentProviderImmediateSettlementFailure,",
+                1,
+            ),
             format!("{root}\npub use reqwest::Client;"),
             format!("{root}\npub fn finish() {{}}"),
         ] {
@@ -11861,6 +11931,54 @@ mod tests {
             assert!(
                 validate_abortable_provider_operation_contract(&invalid).is_err(),
                 "abortable operation mutation {index} unexpectedly passed"
+            );
+        }
+    }
+
+    #[test]
+    fn immediate_provider_settlement_retains_authority_before_policy_use() {
+        let transport = include_str!("../../crates/zephium-agentic/src/provider_transport.rs");
+        validate_immediate_provider_settlement_recovery_contract(transport)
+            .expect("immediate settlement recovery boundary");
+
+        for (index, invalid) in [
+            transport.replacen(
+                "AgentProviderImmediateSettlementError::PolicyPrecondition",
+                "AgentProviderImmediateSettlementError::Policy",
+                1,
+            ),
+            transport.replacen(
+                "unsettled: Box::new(self),",
+                "unsettled: Box::new(terminal),",
+                1,
+            ),
+            transport.replacen(
+                "#[error(\"agent provider immediate policy settlement failed\")]\n    Policy(#[source] AgentPolicyError)",
+                "#[error(\"agent provider immediate policy settlement failed\")]\n    Policy(AgentPolicyError)",
+                1,
+            ),
+            transport.replacen(
+                "pub const fn policy_precondition_error",
+                "pub const fn policy_error",
+                1,
+            ),
+            transport.replacen(
+                "pub fn into_unsettled(self) -> Option<AgentProviderImmediateSettlement>",
+                "pub(crate) fn into_unsettled(self) -> Option<AgentProviderImmediateSettlement>",
+                1,
+            ),
+            transport.replacen(
+                "#[derive(Debug, Error)]\npub enum AgentProviderImmediateSettlementError",
+                "#[derive(Clone, Debug, Error)]\npub enum AgentProviderImmediateSettlementError",
+                1,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(
+                validate_immediate_provider_settlement_recovery_contract(&invalid).is_err(),
+                "immediate settlement mutation {index} unexpectedly passed"
             );
         }
     }

@@ -1472,18 +1472,31 @@ impl AgentProviderImmediateSettlement {
     }
 
     /// Consumes the exact active authority in the selected safe policy path.
+    ///
+    /// A wrong or sealed policy is rejected before this owner is destructured,
+    /// returning the complete settlement through the recoverable error.
     pub fn settle(
         self,
         policy: &mut AgentRunPolicy,
-    ) -> Result<AgentModelCallReceipt, AgentPolicyError> {
-        match self.accounting {
+    ) -> Result<AgentModelCallReceipt, AgentProviderImmediateSettlementError> {
+        if let Err(error) = policy.prevalidate_active_model_call(&self.active) {
+            return Err(AgentProviderImmediateSettlementError::PolicyPrecondition {
+                error,
+                unsettled: Box::new(self),
+            });
+        }
+        let Self {
+            active, accounting, ..
+        } = self;
+        match accounting {
             AgentProviderImmediateAccounting::ExactZero(settlement) => {
-                policy.settle_model_call(self.active, settlement, 0, 0, 0)
+                policy.settle_model_call(active, settlement, 0, 0, 0)
             }
             AgentProviderImmediateAccounting::ReservationCeiling(settlement) => {
-                policy.settle_model_call_unaccounted(self.active, settlement)
+                policy.settle_model_call_unaccounted(active, settlement)
             }
         }
+        .map_err(AgentProviderImmediateSettlementError::Policy)
     }
 }
 
@@ -1496,6 +1509,44 @@ impl fmt::Debug for AgentProviderImmediateSettlement {
             .field("settlement", &self.settlement())
             .field("usage_accounting", &self.usage_accounting())
             .finish()
+    }
+}
+
+/// Failure while settling terminal transport evidence without a pricing lookup.
+///
+/// A policy precondition refusal retains the complete move-only terminal owner,
+/// because policy state was not changed. A post-prevalidation policy failure has
+/// consumed the terminal transition and is therefore fail-stopped.
+#[derive(Debug, Error)]
+pub enum AgentProviderImmediateSettlementError {
+    /// The supplied policy was sealed or did not own this exact active call.
+    #[error("agent provider immediate settlement policy precondition failed")]
+    PolicyPrecondition {
+        /// Content-free policy refusal.
+        error: AgentPolicyError,
+        /// Complete authority retained for the exact live policy.
+        unsettled: Box<AgentProviderImmediateSettlement>,
+    },
+    /// Policy consumed the terminal transition and failed stopped.
+    #[error("agent provider immediate policy settlement failed")]
+    Policy(#[source] AgentPolicyError),
+}
+
+impl AgentProviderImmediateSettlementError {
+    /// Content-free policy refusal when the settlement owner was retained.
+    pub const fn policy_precondition_error(&self) -> Option<AgentPolicyError> {
+        match self {
+            Self::PolicyPrecondition { error, .. } => Some(*error),
+            Self::Policy(_) => None,
+        }
+    }
+
+    /// Recovers exact authority only when policy refused before policy use.
+    pub fn into_unsettled(self) -> Option<AgentProviderImmediateSettlement> {
+        match self {
+            Self::PolicyPrecondition { unsettled, .. } => Some(*unsettled),
+            Self::Policy(_) => None,
+        }
     }
 }
 
@@ -5082,6 +5133,161 @@ mod tests {
             .settle(&mut policy, &schedule)
             .expect("original live policy settles exact terminal");
         assert!(terminal.has_tool_turn());
+        assert_eq!(policy.pending_model_calls(), 0);
+        assert!(transport.snapshot().expect("snapshot").is_idle());
+        server.finish();
+    }
+
+    #[test]
+    fn immediate_policy_precondition_refusal_retains_terminal_authority() {
+        let transport = AgentProviderTransport::try_new(
+            AgentProviderTransportConfig::try_new(
+                Duration::from_secs(5),
+                Duration::from_secs(2),
+                Duration::from_secs(2),
+            )
+            .expect("config"),
+        )
+        .expect("transport");
+        let credential = AgentProviderCredential::try_new(
+            AgentProviderKind::OpenAiResponses,
+            "synthetic-openai-key".to_owned(),
+        )
+        .expect("credential");
+        let (mut policy, input) = provider_fixture(AgentProviderKind::OpenAiResponses);
+        let mut attempt = transport
+            .try_admit(
+                input,
+                &mut policy,
+                &credential,
+                AgentProviderCancellation::new(),
+            )
+            .expect("admission");
+        let AgentProviderPolicySettlement::Immediate(settlement) = attempt
+            .cancel_without_dispatch()
+            .expect("pre-dispatch cancellation")
+            .into_policy_settlement()
+        else {
+            panic!("pre-dispatch cancellation must settle immediately")
+        };
+
+        let (mut wrong_policy, _) = provider_fixture(AgentProviderKind::OpenAiResponses);
+        let refusal = settlement
+            .settle(&mut wrong_policy)
+            .expect_err("foreign policy must retain immediate terminal authority");
+        assert_eq!(
+            refusal.policy_precondition_error(),
+            Some(AgentPolicyError::AdmissionMismatch)
+        );
+        assert_eq!(wrong_policy.pending_model_calls(), 1);
+        let debug = format!("{refusal:?}");
+        assert!(!debug.contains("synthetic-openai-key"));
+        assert!(!debug.contains("synthetic fixture marker"));
+        let settlement = refusal
+            .into_unsettled()
+            .expect("prevalidation refusal retains immediate owner");
+
+        let (mut sealed_policy, _) = provider_fixture(AgentProviderKind::OpenAiResponses);
+        sealed_policy.seal_for_test();
+        let refusal = settlement
+            .settle(&mut sealed_policy)
+            .expect_err("sealed policy must retain immediate terminal authority");
+        assert_eq!(
+            refusal.policy_precondition_error(),
+            Some(AgentPolicyError::Sealed)
+        );
+        assert_eq!(sealed_policy.pending_model_calls(), 1);
+        let settlement = refusal
+            .into_unsettled()
+            .expect("sealed prevalidation refusal retains immediate owner");
+
+        let receipt = settlement
+            .settle(&mut policy)
+            .expect("original live policy settles recovered immediate terminal");
+        assert_eq!(receipt.usage_accounting(), AgentModelUsageAccounting::Exact);
+        assert_eq!(receipt.input_tokens(), 0);
+        assert_eq!(receipt.output_tokens(), 0);
+        assert_eq!(policy.pending_model_calls(), 0);
+        assert!(transport.snapshot().expect("snapshot").is_idle());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn immediate_reservation_ceiling_precondition_refusal_retains_full_authority() {
+        let server = OneShotServer::spawn(
+            "429 Too Many Requests",
+            &[("Content-Type", "application/json"), ("Retry-After", "2")],
+            vec![b"provider-authored-error-must-not-escape".to_vec()],
+        );
+        let transport = test_transport(&server);
+        let credential = AgentProviderCredential::try_new(
+            AgentProviderKind::OpenAiResponses,
+            "synthetic-openai-key".to_owned(),
+        )
+        .expect("credential");
+        let (mut policy, input) = provider_fixture(AgentProviderKind::OpenAiResponses);
+        let mut attempt = transport
+            .try_admit(
+                input,
+                &mut policy,
+                &credential,
+                AgentProviderCancellation::new(),
+            )
+            .expect("admission");
+        let reserved = policy.accounting();
+        let result = attempt
+            .execute(|_| AgentProviderBatchDisposition::Continue)
+            .await;
+        let AgentProviderPolicySettlement::Immediate(settlement) = result.into_policy_settlement()
+        else {
+            panic!("unknown post-dispatch usage must settle immediately")
+        };
+        assert_eq!(
+            settlement.usage_accounting(),
+            AgentModelUsageAccounting::ReservationCeiling
+        );
+
+        let (mut wrong_policy, _) = provider_fixture(AgentProviderKind::OpenAiResponses);
+        let wrong_before = wrong_policy.accounting();
+        let refusal = settlement
+            .settle(&mut wrong_policy)
+            .expect_err("foreign policy must retain reservation-ceiling authority");
+        assert_eq!(
+            refusal.policy_precondition_error(),
+            Some(AgentPolicyError::AdmissionMismatch)
+        );
+        assert!(!wrong_policy.is_sealed());
+        assert_eq!(wrong_policy.accounting(), wrong_before);
+        let settlement = refusal
+            .into_unsettled()
+            .expect("foreign prevalidation refusal retains immediate owner");
+
+        let (mut sealed_policy, _) = provider_fixture(AgentProviderKind::OpenAiResponses);
+        sealed_policy.seal_for_test();
+        let refusal = settlement
+            .settle(&mut sealed_policy)
+            .expect_err("sealed policy must retain reservation-ceiling authority");
+        assert_eq!(
+            refusal.policy_precondition_error(),
+            Some(AgentPolicyError::Sealed)
+        );
+        let settlement = refusal
+            .into_unsettled()
+            .expect("sealed prevalidation refusal retains immediate owner");
+
+        let receipt = settlement
+            .settle(&mut policy)
+            .expect("original live policy settles recovered reservation ceiling");
+        assert_eq!(
+            receipt.usage_accounting(),
+            AgentModelUsageAccounting::ReservationCeiling
+        );
+        assert_eq!(receipt.input_tokens(), 18);
+        assert_eq!(receipt.output_tokens(), 20);
+        assert_eq!(receipt.cost_micro_usd(), reserved.reserved_cost_micro_usd());
+        assert_eq!(
+            receipt.input_tokens() + receipt.output_tokens(),
+            reserved.reserved_model_tokens()
+        );
         assert_eq!(policy.pending_model_calls(), 0);
         assert!(transport.snapshot().expect("snapshot").is_idle());
         server.finish();
