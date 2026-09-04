@@ -1,7 +1,7 @@
 use super::*;
 use zephium_agentic::{
-    AgentProviderInputAccountingMode, AgentProviderPricingRevision,
-    MAX_AGENT_PROVIDER_EXACT_COUNTED_INPUT_TOKENS,
+    AgentProviderInputAccountingMode, AgentProviderPricingRevision, AgentProviderPricingSettlement,
+    AgentRunPolicy, MAX_AGENT_PROVIDER_EXACT_COUNTED_INPUT_TOKENS,
 };
 
 #[test]
@@ -104,6 +104,22 @@ fn provider_exact_factory_preserves_identity_and_refuses_invalid_output_limits()
         try_terra_provider_exact_call_config(TERRA_MAX_OUTPUT_TOKENS + 1),
         Err(TerraModelCatalogError::OutputTokens)
     );
+}
+
+#[test]
+fn terra_terminal_settlement_surface_is_closed_and_schedule_free() {
+    let _: fn(
+        AgentProviderPricingSettlement,
+        &mut AgentRunPolicy,
+    )
+        -> Result<TerraProviderTerminalSettlement, TerraProviderTerminalSettlementError> =
+        settle_terra_provider_terminal;
+    let _: fn(
+        TerraProviderTerminalOwner,
+        &mut AgentRunPolicy,
+    )
+        -> Result<TerraProviderTerminalSettlement, TerraProviderTerminalSettlementError> =
+        TerraProviderTerminalOwner::settle_with_exact_policy;
 }
 
 fn independently_constructed_guard() -> [u8; 32] {

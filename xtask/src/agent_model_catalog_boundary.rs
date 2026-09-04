@@ -382,6 +382,7 @@ fn validate_root(source: &str) -> Result<(), String> {
             "staticTERRA_PRICING_SCHEDULE:OnceLock<Result<AgentProviderPricingSchedule,TerraModelCatalogError>,>=OnceLock::new();",
             1,
         ),
+        ("AgentProviderPricingSchedule", 5),
         (
             "AgentProviderModelRevision::try_new(TERRA_MODEL_REVISION.to_owned())",
             2,
@@ -412,6 +413,23 @@ fn validate_root(source: &str) -> Result<(), String> {
             1,
         ),
         ("pubfntry_terra_provider_exact_call_config(", 1),
+        ("pubenumTerraProviderTerminalSettlement{", 1),
+        ("Priced(Box<AgentProviderSettledTerminal>)", 1),
+        ("ReservationCeiling(Box<AgentModelCallReceipt>)", 1),
+        ("pubenumTerraProviderTerminalSettlementError{", 1),
+        (
+            "pubstructTerraProviderTerminalOwner(Box<AgentProviderPricingSettlement>);",
+            1,
+        ),
+        ("pubfnsettle_with_exact_policy(", 1),
+        ("pubfnsettle_terra_provider_terminal(", 1),
+        ("matchsettlement.settle(policy,schedule){", 1),
+        ("fnsettle_terra_at_reservation_ceiling(", 1),
+        (".settle_at_reservation_ceiling(policy)", 1),
+        (
+            "TerraProviderTerminalSettlement::ReservationCeiling(Box::new(receipt),)",
+            1,
+        ),
         (
             "fnterra_pricing_schedule()->Result<&'staticAgentProviderPricingSchedule,TerraModelCatalogError>",
             1,
@@ -423,7 +441,12 @@ fn validate_root(source: &str) -> Result<(), String> {
             ));
         }
     }
-    for forbidden in ["pubfnterra_pricing_schedule(", ".try_call_config("] {
+    for forbidden in [
+        "pubfnterra_pricing_schedule(",
+        "pubfnsettle_terra_at_reservation_ceiling(",
+        "pubstructTerraProviderTerminalOwner(pubBox<AgentProviderPricingSettlement>)",
+        ".try_call_config(",
+    ] {
         if compact.contains(forbidden) {
             return Err(format!(
                 "Terra catalog production surface exposes forbidden generic schedule capability {forbidden}"
@@ -448,6 +471,11 @@ mod tests {
     const CATALOG_MANIFEST: &str =
         include_str!("../../crates/zephium-agent-model-catalog/Cargo.toml");
     const WORKSPACE_SOURCE: &str = include_str!("../../Cargo.toml");
+
+    #[test]
+    fn accepts_the_reviewed_catalog_source() {
+        assert!(validate_root(CATALOG_SOURCE).is_ok());
+    }
 
     #[test]
     fn rejects_dependency_or_target_drift() {
@@ -491,6 +519,34 @@ mod tests {
             1,
         );
         assert!(validate_root(&source).is_err());
+    }
+
+    #[test]
+    fn rejects_generic_schedule_or_terminal_fallback_surface_drift() {
+        let public_schedule = CATALOG_SOURCE.replacen(
+            "fn terra_pricing_schedule()",
+            "pub fn terra_pricing_schedule()",
+            1,
+        );
+        let exposed_schedule = CATALOG_SOURCE.replacen(
+            "pub fn try_terra_provider_exact_call_config(",
+            "pub fn exposed_schedule() -> AgentProviderPricingSchedule { unreachable!() }\n\npub fn try_terra_provider_exact_call_config(",
+            1,
+        );
+        let public_owner = CATALOG_SOURCE.replacen(
+            "pub struct TerraProviderTerminalOwner(Box<AgentProviderPricingSettlement>);",
+            "pub struct TerraProviderTerminalOwner(pub Box<AgentProviderPricingSettlement>);",
+            1,
+        );
+        let missing_fallback = CATALOG_SOURCE.replacen(
+            ".settle_at_reservation_ceiling(policy)",
+            ".settle_at_reservation_ceiling_forbidden(policy)",
+            1,
+        );
+        assert!(validate_root(&public_schedule).is_err());
+        assert!(validate_root(&exposed_schedule).is_err());
+        assert!(validate_root(&public_owner).is_err());
+        assert!(validate_root(&missing_fallback).is_err());
     }
 
     #[test]

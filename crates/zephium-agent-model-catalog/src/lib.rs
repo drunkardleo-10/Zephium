@@ -16,18 +16,20 @@ use std::fmt;
 use std::sync::OnceLock;
 
 use zephium_agentic::{
-    AgentProviderCallConfig, AgentProviderContractError, AgentProviderKind,
-    AgentProviderModelRevision, AgentProviderPricingContractError, AgentProviderPricingProfile,
-    AgentProviderPricingRevision, AgentProviderPricingSchedule, AgentProviderReasoningEffort,
-    AgentProviderResponseRoute, AgentProviderStreamBudget, AgentProviderTokenRates,
-    SemanticTokenizerRevision, SemanticTokenizerRevisionError,
+    AgentModelCallReceipt, AgentPolicyError, AgentProviderCallConfig, AgentProviderContractError,
+    AgentProviderKind, AgentProviderModelRevision, AgentProviderPricingContractError,
+    AgentProviderPricingProfile, AgentProviderPricingRevision, AgentProviderPricingSchedule,
+    AgentProviderPricingSettlement, AgentProviderPricingSettlementError,
+    AgentProviderReasoningEffort, AgentProviderResponseRoute, AgentProviderSettledTerminal,
+    AgentProviderStreamBudget, AgentProviderTokenRates, AgentRunPolicy, SemanticTokenizerRevision,
+    SemanticTokenizerRevisionError,
 };
 
 /// Exact OpenAI alias requested and accepted by the Terra catalog entry.
 pub const TERRA_MODEL_REVISION: &str = "gpt-5.6-terra";
 /// Pinned tokenizer/counting implementation revision for the Terra entry.
 pub const TERRA_TOKENIZER_REVISION: &str = "openai:gpt-5.6-terra:v1";
-/// Reproducible catalog revision for OpenAI's 2026-07-30 Terra rate change.
+/// Reproducible catalog revision effective with Terra's 2026-07-30 pricing.
 pub const TERRA_PRICING_CATALOG_REVISION: u64 = 20_260_730;
 /// Inclusive lower edge of the ordinary Terra rate tier.
 pub const TERRA_STANDARD_RATE_MIN_INPUT_TOKENS: u64 = 1;
@@ -39,7 +41,7 @@ pub const TERRA_MAX_OUTPUT_TOKENS: u32 = 128_000;
 pub const TERRA_UNCACHED_INPUT_MICRO_USD_PER_MILLION_TOKENS: u64 = 2_000_000;
 /// Terra cached-input price in micro-USD per million tokens.
 pub const TERRA_CACHED_INPUT_MICRO_USD_PER_MILLION_TOKENS: u64 = 200_000;
-/// Terra cache-write price in micro-USD per million tokens.
+/// Terra cache-write price using the GPT-5.6 family 1.25x input multiplier.
 pub const TERRA_CACHE_WRITE_MICRO_USD_PER_MILLION_TOKENS: u64 = 2_500_000;
 /// Terra output price in micro-USD per million tokens.
 pub const TERRA_OUTPUT_MICRO_USD_PER_MILLION_TOKENS: u64 = 12_000_000;
@@ -86,6 +88,132 @@ impl fmt::Display for TerraModelCatalogError {
 
 impl Error for TerraModelCatalogError {}
 
+/// Completed Terra terminal whose policy authority was settled exactly once.
+///
+/// The catalog returns this closed result instead of exposing its generic
+/// pricing schedule. A terminal that cannot be represented by the fixed Terra
+/// schedule is conservatively charged at its reservation ceiling and has no
+/// provider-authored continuation or output authority left to release.
+#[must_use]
+pub enum TerraProviderTerminalSettlement {
+    /// Exact provider usage was priced by the fixed Terra schedule.
+    Priced(Box<AgentProviderSettledTerminal>),
+    /// Exact pricing was unavailable, so policy charged the committed ceiling.
+    ReservationCeiling(Box<AgentModelCallReceipt>),
+}
+
+impl fmt::Debug for TerraProviderTerminalSettlement {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Priced(_) => formatter.write_str("TerraProviderTerminalSettlement::Priced"),
+            Self::ReservationCeiling(_) => {
+                formatter.write_str("TerraProviderTerminalSettlement::ReservationCeiling")
+            }
+        }
+    }
+}
+
+/// Content-free refusal while settling one Terra provider EOF terminal.
+///
+/// Policy-precondition failures retain the move-only terminal so its exact
+/// owning policy can resolve it. No variant exposes the catalog schedule,
+/// request configuration, model strings, usage, or provider output.
+#[must_use]
+pub enum TerraProviderTerminalSettlementError {
+    /// The supplied policy was sealed or did not own the exact live terminal.
+    PolicyPrecondition {
+        /// Closed policy refusal.
+        error: AgentPolicyError,
+        /// Opaque terminal retained for its proper policy owner.
+        retained: TerraProviderTerminalOwner,
+    },
+    /// Policy consumed the terminal transition and failed stopped.
+    Policy(AgentPolicyError),
+    /// An impossible fallback refusal retained its exact terminal owner.
+    Fallback {
+        /// Exact terminal retained for conservative reconciliation.
+        retained: TerraProviderTerminalOwner,
+    },
+}
+
+impl TerraProviderTerminalSettlementError {
+    /// Returns the content-free policy refusal, when present.
+    pub const fn policy_error(&self) -> Option<AgentPolicyError> {
+        match self {
+            Self::PolicyPrecondition { error, .. } | Self::Policy(error) => Some(*error),
+            Self::Fallback { .. } => None,
+        }
+    }
+
+    /// Recovers an opaque terminal only for exact policy reconciliation.
+    pub fn into_retained(self) -> Option<TerraProviderTerminalOwner> {
+        match self {
+            Self::PolicyPrecondition { retained, .. } | Self::Fallback { retained } => {
+                Some(retained)
+            }
+            Self::Policy(_) => None,
+        }
+    }
+}
+
+impl fmt::Debug for TerraProviderTerminalSettlementError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PolicyPrecondition { error, .. } => formatter
+                .debug_struct("TerraProviderTerminalSettlementError::PolicyPrecondition")
+                .field("error", error)
+                .field("terminal", &"[redacted]")
+                .finish(),
+            Self::Policy(error) => formatter
+                .debug_tuple("TerraProviderTerminalSettlementError::Policy")
+                .field(error)
+                .finish(),
+            Self::Fallback { .. } => formatter
+                .debug_struct("TerraProviderTerminalSettlementError::Fallback")
+                .field("terminal", &"[redacted]")
+                .finish(),
+        }
+    }
+}
+
+impl fmt::Display for TerraProviderTerminalSettlementError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PolicyPrecondition { .. } => {
+                formatter.write_str("Terra terminal policy precondition failed")
+            }
+            Self::Policy(_) => formatter.write_str("Terra terminal policy settlement failed"),
+            Self::Fallback { .. } => formatter.write_str("Terra terminal fallback is unavailable"),
+        }
+    }
+}
+
+impl Error for TerraProviderTerminalSettlementError {}
+
+/// Opaque Terra EOF terminal retained after a pre-consumption refusal.
+///
+/// This owner intentionally exposes neither generic pricing nor provider
+/// terminal details. It can only be retried with the exact Terra catalog and
+/// a policy that owns the live active call.
+#[must_use]
+pub struct TerraProviderTerminalOwner(Box<AgentProviderPricingSettlement>);
+
+impl TerraProviderTerminalOwner {
+    /// Retries this retained terminal with the sole approved Terra policy path.
+    pub fn settle_with_exact_policy(
+        self,
+        policy: &mut AgentRunPolicy,
+    ) -> Result<TerraProviderTerminalSettlement, TerraProviderTerminalSettlementError> {
+        settle_terra_provider_terminal(*self.0, policy)
+    }
+}
+
+impl fmt::Debug for TerraProviderTerminalOwner {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("TerraProviderTerminalOwner([redacted])")
+    }
+}
+
 /// Returns the process-static schedule for the sole approved Terra entry.
 ///
 /// Construction is deferred and remains fallible so a future shared-contract
@@ -111,6 +239,66 @@ pub fn try_terra_provider_exact_call_config(
     terra_pricing_schedule()?
         .try_provider_exact_call_config(max_output_tokens, AgentProviderStreamBudget::STANDARD)
         .map_err(TerraModelCatalogError::CallConfig)
+}
+
+/// Prices and settles one exact Terra provider EOF terminal.
+///
+/// This is the only catalog API which joins a terminal to Terra pricing. It
+/// keeps the generic schedule private and never exposes model/request or raw
+/// provider content. Any schedule construction, identity, or terminal-pricing
+/// refusal consumes the terminal at the policy reservation ceiling when
+/// supplied the exact live policy, exactly as the shared typestate requires
+/// for unpriceable post-disclosure work.
+pub fn settle_terra_provider_terminal(
+    settlement: AgentProviderPricingSettlement,
+    policy: &mut AgentRunPolicy,
+) -> Result<TerraProviderTerminalSettlement, TerraProviderTerminalSettlementError> {
+    let schedule = match terra_pricing_schedule() {
+        Ok(schedule) => schedule,
+        Err(_) => return settle_terra_at_reservation_ceiling(settlement, policy),
+    };
+    match settlement.settle(policy, schedule) {
+        Ok(terminal) => Ok(TerraProviderTerminalSettlement::Priced(Box::new(terminal))),
+        Err(AgentProviderPricingSettlementError::Schedule { unsettled })
+        | Err(AgentProviderPricingSettlementError::TerminalPricing { unsettled, .. }) => {
+            settle_terra_at_reservation_ceiling(*unsettled, policy)
+        }
+        Err(AgentProviderPricingSettlementError::PolicyPrecondition { error, unsettled }) => {
+            Err(TerraProviderTerminalSettlementError::PolicyPrecondition {
+                error,
+                retained: TerraProviderTerminalOwner(unsettled),
+            })
+        }
+        Err(AgentProviderPricingSettlementError::Policy(error)) => {
+            Err(TerraProviderTerminalSettlementError::Policy(error))
+        }
+    }
+}
+
+fn settle_terra_at_reservation_ceiling(
+    settlement: AgentProviderPricingSettlement,
+    policy: &mut AgentRunPolicy,
+) -> Result<TerraProviderTerminalSettlement, TerraProviderTerminalSettlementError> {
+    match settlement.settle_at_reservation_ceiling(policy) {
+        Ok(receipt) => Ok(TerraProviderTerminalSettlement::ReservationCeiling(
+            Box::new(receipt),
+        )),
+        Err(AgentProviderPricingSettlementError::PolicyPrecondition { error, unsettled }) => {
+            Err(TerraProviderTerminalSettlementError::PolicyPrecondition {
+                error,
+                retained: TerraProviderTerminalOwner(unsettled),
+            })
+        }
+        Err(AgentProviderPricingSettlementError::Policy(error)) => {
+            Err(TerraProviderTerminalSettlementError::Policy(error))
+        }
+        Err(AgentProviderPricingSettlementError::Schedule { unsettled })
+        | Err(AgentProviderPricingSettlementError::TerminalPricing { unsettled, .. }) => {
+            Err(TerraProviderTerminalSettlementError::Fallback {
+                retained: TerraProviderTerminalOwner(unsettled),
+            })
+        }
+    }
 }
 
 fn build_terra_pricing_schedule() -> Result<AgentProviderPricingSchedule, TerraModelCatalogError> {
