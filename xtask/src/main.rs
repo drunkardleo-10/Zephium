@@ -1,6 +1,7 @@
 //! Single deterministic entrypoint for the workspace gate: `cargo xtask ci`.
 
 mod adblock_provenance;
+mod agent_model_catalog_boundary;
 mod agent_runtime_boundary;
 mod agentic_evidence;
 mod agentic_probe_boundary;
@@ -56,6 +57,7 @@ fn main() {
         Some("check-engine-floors") => check_engine_floors(),
         Some("check-release-engine-security") => check_release_engine_security(),
         Some("check-agentic-probe-boundary") => check_agentic_probe_boundary(),
+        Some("check-agent-model-catalog-boundary") => check_agent_model_catalog_boundary(),
         Some("check-agent-runtime-boundary") => check_agent_runtime_boundary(),
         Some("check-advisory-exceptions") => check_advisory_exceptions(),
         Some("check-security-fork-locks") | Some("check-native-adapter-locks") => {
@@ -874,6 +876,7 @@ fn ci() {
     reject_ambient_internal_repository_cfg();
     share_workspace_target_dir();
     check_agentic_probe_boundary();
+    check_agent_model_catalog_boundary();
     check_agent_runtime_boundary();
     check_extension_runtime_host_assembler_call_sites();
     check_extension_runtime_acquisition_boundary();
@@ -968,6 +971,14 @@ fn check_agentic_probe_boundary() {
         exit(1);
     });
     run("node", &[smoke, runtime]);
+}
+
+fn check_agent_model_catalog_boundary() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    if let Err(error) = agent_model_catalog_boundary::check(&repository) {
+        eprintln!("agent model catalog architecture boundary failed: {error}");
+        exit(1);
+    }
 }
 
 fn check_agent_runtime_boundary() {

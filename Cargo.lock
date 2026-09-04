@@ -6168,6 +6168,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "zephium-agent-model-catalog"
+version = "0.1.0"
+dependencies = [
+ "zephium-agentic",
+]
+
+[[package]]
 name = "zephium-agent-provider-transport"
 version = "0.1.0"
 dependencies = [

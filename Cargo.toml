@@ -17,6 +17,7 @@ repository = "https://github.com/zephium/zephium"
 
 [workspace.dependencies]
 zephium-agentic = { path = "crates/zephium-agentic", version = "=0.1.0" }
+zephium-agent-model-catalog = { path = "crates/zephium-agent-model-catalog", version = "=0.1.0" }
 zephium-agent-runtime = { path = "crates/zephium-agent-runtime", version = "=0.1.0" }
 zephium-agent-provider-transport = { path = "crates/zephium-agent-provider-transport", version = "=0.1.0" }
 zephium-blocker = { path = "crates/zephium-blocker", version = "=0.1.0", default-features = false }
