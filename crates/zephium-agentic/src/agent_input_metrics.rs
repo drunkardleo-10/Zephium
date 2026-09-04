@@ -1,9 +1,12 @@
 //! Run-scoped, content-free accounting for committed provider inputs.
 //!
-//! This optional functional core consumes only exact metric receipts minted at
-//! provider disclosure commit. It owns no telemetry, persistence, clock, task,
-//! channel, provider, browser context, or native resource. A run that does not
-//! explicitly construct it pays no allocation or execution cost.
+//! This optional functional core consumes only finalized metric receipts. An
+//! exact-local receipt can be minted at provider disclosure commit; a provider-
+//! exact receipt remains unavailable until authenticated counting succeeds or
+//! transport terminally seals its conservative disclosure. The reducer owns no
+//! telemetry, persistence, clock, task, channel, provider, browser context, or
+//! native resource. A run that does not explicitly construct it pays no
+//! allocation or execution cost.
 
 use std::fmt;
 
@@ -641,7 +644,7 @@ impl AgentRunProviderInputMetrics {
         })
     }
 
-    /// Accounts one exact committed input in arbitrary call-settlement order.
+    /// Accounts one finalized committed input in arbitrary call-settlement order.
     pub fn record(
         &mut self,
         receipt: AgentProviderInputMetricReceipt,
@@ -761,9 +764,34 @@ fn validate_input_metrics(
     }
     let semantic_tokens = metrics.semantic_payload_tokens().is_some();
     let structured_tokens = metrics.structured_input_tokens().is_some();
+    let accounting_shape = match (
+        metrics.semantic_payload_tokens(),
+        metrics.structured_input_tokens(),
+    ) {
+        (Some(semantic), None) => matches!(
+            semantic.quality(),
+            SemanticTokenCountQuality::ExactLocal | SemanticTokenCountQuality::ProviderExact
+        ),
+        (semantic, Some(structured)) => {
+            structured.quality() != SemanticTokenCountQuality::ProviderEstimate
+                && semantic.is_none_or(|count| {
+                    count.quality() != SemanticTokenCountQuality::ProviderEstimate
+                        && (structured.quality() != SemanticTokenCountQuality::ExactLocal
+                            || matches!(
+                                count.quality(),
+                                SemanticTokenCountQuality::ExactLocal
+                                    | SemanticTokenCountQuality::ProviderExact
+                            ))
+                })
+        }
+        (None, None) => false,
+    };
+    if !accounting_shape {
+        return Err(AgentProviderInputMetricError::Invariant);
+    }
     match metrics.semantic() {
         AgentProviderSemanticInputStats::Observation(stats)
-            if semantic_tokens && !structured_tokens && stats.secret_nodes() <= stats.nodes() =>
+            if semantic_tokens && stats.secret_nodes() <= stats.nodes() =>
         {
             Ok((
                 AgentProviderInputKind::Observation,
@@ -1115,6 +1143,187 @@ mod tests {
         assert!(debug.contains("[redacted]"));
         assert!(!debug.contains("input-metrics.example.test"));
         assert!(!debug.contains("secret=x"));
+    }
+
+    #[test]
+    fn provider_exact_observation_and_continuation_finality_shapes_are_closed() {
+        let manifest = make_manifest(11, 9);
+        let supervisor = supervisor(&manifest, 11);
+        let mut reducer =
+            AgentRunProviderInputMetrics::try_new(&manifest, &supervisor).expect("reducer");
+        let observation = AgentProviderSemanticInputStats::Observation(
+            SemanticEncodingStats::for_input_metrics_test(100, 8, 2, 7, 2),
+        );
+        let diff = AgentProviderSemanticInputStats::Diff(
+            SemanticDiffEncodingStats::for_input_metrics_test(50, 5, 2, 4, 1, 1),
+        );
+        let locate = AgentProviderSemanticInputStats::Locate(
+            SemanticLocateEncodingStats::for_input_metrics_test(30, 3, 2, 1, 3, 12, 2, true),
+        );
+        let read_stats = SemanticReadEncodingStats::for_input_metrics_test(40, 4, 1, 3, 1, 2);
+        let read = AgentProviderSemanticInputStats::Read(read_stats);
+        let extraction = AgentProviderSemanticInputStats::Extraction(
+            SemanticExtractionEncodingStats::for_input_metrics_test(60, 6, 2, read_stats),
+        );
+        let screenshot = AgentProviderSemanticInputStats::Screenshot(
+            SemanticScreenshotStats::for_input_metrics_test(
+                10,
+                20,
+                200,
+                240,
+                200,
+                5,
+                4,
+                1,
+                40,
+                SemanticScreenshotPixelLayout::Rgba8,
+            ),
+        );
+        reducer
+            .record(receipt(
+                &manifest,
+                1,
+                1_000,
+                observation,
+                Some((100, SemanticTokenCountQuality::Conservative)),
+                Some((1_000, SemanticTokenCountQuality::Conservative)),
+            ))
+            .expect("terminal count failure seals conservative observation");
+        reducer
+            .record(receipt(
+                &manifest,
+                2,
+                1_000,
+                observation,
+                Some((100, SemanticTokenCountQuality::Conservative)),
+                Some((80, SemanticTokenCountQuality::ProviderExact)),
+            ))
+            .expect("counted observation");
+        reducer
+            .record(receipt(
+                &manifest,
+                3,
+                900,
+                diff,
+                Some((50, SemanticTokenCountQuality::Conservative)),
+                Some((70, SemanticTokenCountQuality::ProviderExact)),
+            ))
+            .expect("counted continuation");
+        reducer
+            .record(receipt(
+                &manifest,
+                4,
+                1_200,
+                screenshot,
+                None,
+                Some((1_200, SemanticTokenCountQuality::Conservative)),
+            ))
+            .expect("terminal count failure seals conservative screenshot");
+        reducer
+            .record(receipt(
+                &manifest,
+                5,
+                1_200,
+                screenshot,
+                None,
+                Some((90, SemanticTokenCountQuality::ProviderExact)),
+            ))
+            .expect("counted screenshot");
+        reducer
+            .record(receipt(
+                &manifest,
+                6,
+                700,
+                locate,
+                Some((30, SemanticTokenCountQuality::Conservative)),
+                Some((50, SemanticTokenCountQuality::ProviderExact)),
+            ))
+            .expect("counted provider-exact locate");
+        reducer
+            .record(receipt(
+                &manifest,
+                7,
+                600,
+                read,
+                Some((40, SemanticTokenCountQuality::Conservative)),
+                Some((60, SemanticTokenCountQuality::ProviderExact)),
+            ))
+            .expect("counted provider-exact read");
+        reducer
+            .record(receipt(
+                &manifest,
+                8,
+                900,
+                extraction,
+                Some((60, SemanticTokenCountQuality::Conservative)),
+                Some((70, SemanticTokenCountQuality::ProviderExact)),
+            ))
+            .expect("counted provider-exact extraction");
+
+        let snapshot = reducer.snapshot();
+        let observations = snapshot.kind(AgentProviderInputKind::Observation);
+        assert_eq!(observations.calls(), 2);
+        assert_eq!(observations.structured_input_token_samples(), 2);
+        assert_eq!(
+            observations.structured_input_quality(SemanticTokenCountQuality::Conservative),
+            1
+        );
+        assert_eq!(
+            observations.structured_input_quality(SemanticTokenCountQuality::ProviderExact),
+            1
+        );
+        assert_eq!(
+            snapshot
+                .kind(AgentProviderInputKind::Diff)
+                .structured_input_quality(SemanticTokenCountQuality::ProviderExact),
+            1
+        );
+        let screenshots = snapshot.kind(AgentProviderInputKind::Screenshot);
+        assert_eq!(screenshots.calls(), 2);
+        assert_eq!(screenshots.semantic_payload_token_samples(), 0);
+        assert_eq!(
+            screenshots.structured_input_quality(SemanticTokenCountQuality::Conservative),
+            1
+        );
+        assert_eq!(
+            screenshots.structured_input_quality(SemanticTokenCountQuality::ProviderExact),
+            1
+        );
+        for kind in [
+            AgentProviderInputKind::Locate,
+            AgentProviderInputKind::Read,
+            AgentProviderInputKind::Extraction,
+        ] {
+            assert_eq!(
+                snapshot
+                    .kind(kind)
+                    .semantic_payload_quality(SemanticTokenCountQuality::Conservative),
+                1
+            );
+            assert_eq!(
+                snapshot
+                    .kind(kind)
+                    .structured_input_quality(SemanticTokenCountQuality::ProviderExact),
+                1
+            );
+        }
+
+        let before = reducer.snapshot();
+        let estimate = receipt(
+            &manifest,
+            9,
+            1_000,
+            observation,
+            Some((100, SemanticTokenCountQuality::Conservative)),
+            Some((80, SemanticTokenCountQuality::ProviderEstimate)),
+        );
+        assert_eq!(
+            reducer
+                .record(estimate)
+                .expect_err("estimate is never final"),
+            AgentProviderInputMetricError::Invariant
+        );
+        assert_eq!(reducer.snapshot(), before);
     }
 
     #[test]

@@ -9,9 +9,9 @@ use std::fmt;
 
 use crate::semantic_diff::SemanticObservationFingerprint;
 use crate::semantic_model::{
-    checked_write, frame_trust_label, role_label, sensitivity_label, source_label,
-    validate_semantic_token_measurement, write_operations, write_quoted, write_states, write_value,
-    BoundedModelBuffer,
+    checked_write, conservative_utf8_measurement, frame_trust_label, role_label, sensitivity_label,
+    source_label, validate_semantic_token_measurement, write_operations, write_quoted,
+    write_states, write_value, BoundedModelBuffer,
 };
 use crate::{
     SemanticDiff, SemanticDiffEntry, SemanticDiffEntryKind, SemanticDiffFrame, SemanticFrameJoin,
@@ -122,6 +122,22 @@ impl SemanticEncodedDiff {
         expected_revision: &SemanticTokenizerRevision,
     ) -> Result<SemanticDiffModelPayload, SemanticModelEncodingError> {
         let measurement = self.measure(counter, expected_revision)?;
+        Ok(SemanticDiffModelPayload {
+            content: self.content,
+            stats: self.stats,
+            measurement,
+            current_fingerprint: self.current_fingerprint,
+            diff_guard: self.diff_guard,
+        })
+    }
+
+    /// Admits UTF-8 byte length as a conservative bound before provider counting.
+    pub fn admit_conservative_utf8(
+        self,
+        revision: &SemanticTokenizerRevision,
+    ) -> Result<SemanticDiffModelPayload, SemanticModelEncodingError> {
+        let measurement = conservative_utf8_measurement(&self.content, revision)?;
+        validate_semantic_token_measurement(&self.budget, &measurement, revision)?;
         Ok(SemanticDiffModelPayload {
             content: self.content,
             stats: self.stats,
@@ -1173,12 +1189,12 @@ mod tests {
         let expected = revision();
 
         let oversized = exact_counter(201);
-        assert_eq!(
+        assert!(matches!(
             encode_semantic_diff(&diff, SemanticModelEncodingBudget::ACTION_DIFF_EXACT)
                 .expect("encode")
                 .measure(&oversized, &expected),
             Err(SemanticModelEncodingError::TokenLimit)
-        );
+        ));
 
         let estimated = FixedCounter {
             revision: expected.clone(),
@@ -1214,12 +1230,74 @@ mod tests {
             tokens: 100,
             quality: SemanticTokenCountQuality::ExactLocal,
         };
-        assert_eq!(
+        assert!(matches!(
             encode_semantic_diff(&diff, SemanticModelEncodingBudget::ACTION_DIFF_EXACT)
                 .expect("encode")
                 .measure(&wrong_revision, &expected),
             Err(SemanticModelEncodingError::TokenizerRevisionMismatch)
+        ));
+    }
+
+    #[test]
+    fn action_diff_conservative_utf8_is_byte_exact_revision_bound_and_redacted() {
+        let selected =
+            SemanticTokenizerRevision::try_new("openai:responses-input-count:v1".to_owned())
+                .expect("revision");
+        let diff = value_diff("żółw");
+        assert_eq!(
+            SemanticModelEncodingBudget::ACTION_DIFF_CONSERVATIVE.max_tokens(),
+            crate::ACTION_SEMANTIC_DIFF_TOKEN_TARGET
         );
+        let conservative_budget = SemanticModelEncodingBudget::try_new(
+            16 * 1024,
+            1_000,
+            SemanticTokenCountRequirement::ConservativeAllowed,
+        )
+        .expect("test conservative budget");
+        let encoded =
+            encode_semantic_diff(&diff, conservative_budget).expect("conservative diff encoding");
+        let bytes = encoded.stats().bytes();
+        assert!(encoded.content.len() > encoded.content.chars().count());
+        let payload = encoded
+            .admit_conservative_utf8(&selected)
+            .expect("conservative diff admission");
+        assert_eq!(payload.token_measurement().tokens(), bytes);
+        assert_eq!(
+            payload.token_measurement().quality(),
+            SemanticTokenCountQuality::Conservative
+        );
+        assert_eq!(payload.token_measurement().revision(), &selected);
+        let debug = format!("{payload:?}");
+        assert!(!debug.contains("żółw"));
+        assert!(!debug.contains("encoded-private"));
+        assert!(debug.contains("[redacted]"));
+
+        assert!(matches!(
+            encode_semantic_diff(&diff, SemanticModelEncodingBudget::ACTION_DIFF_CONSERVATIVE)
+                .expect("target encoding")
+                .admit_conservative_utf8(&selected),
+            Err(SemanticModelEncodingError::TokenLimit)
+        ));
+
+        assert!(matches!(
+            encode_semantic_diff(&diff, SemanticModelEncodingBudget::ACTION_DIFF_EXACT)
+                .expect("exact encoding")
+                .admit_conservative_utf8(&selected),
+            Err(SemanticModelEncodingError::TokenQuality)
+        ));
+
+        let too_small = SemanticModelEncodingBudget::try_new(
+            bytes,
+            bytes - 1,
+            SemanticTokenCountRequirement::ConservativeAllowed,
+        )
+        .expect("tight budget");
+        assert!(matches!(
+            encode_semantic_diff(&diff, too_small)
+                .expect("byte-fitting encoding")
+                .admit_conservative_utf8(&selected),
+            Err(SemanticModelEncodingError::TokenLimit)
+        ));
     }
 
     #[test]

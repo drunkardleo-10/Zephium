@@ -488,9 +488,9 @@ mod tests {
         ContextSettlement, SemanticActionAttemptId, SemanticActionBatchCompletion,
         SemanticActionBatchId, SemanticActionBatchOutcome, SemanticActionBatchResult,
         SemanticActionExecutionApplied, SemanticActionExecutionInstant, SemanticActionKind,
-        SemanticActionNextState, SemanticEffectClass, SemanticEffectProofKind,
-        SemanticEncodingStats, SemanticOrigin, SemanticSensitivity, SemanticSettleInstant,
-        SemanticTokenCountQuality,
+        SemanticActionNextState, SemanticDiffEncodingStats, SemanticEffectClass,
+        SemanticEffectProofKind, SemanticEncodingStats, SemanticOrigin, SemanticSensitivity,
+        SemanticSettleInstant, SemanticTokenCountQuality,
     };
     use zephium_core::ids::ProfileId;
 
@@ -602,6 +602,50 @@ mod tests {
                 ),
                 Some((20, SemanticTokenCountQuality::ExactLocal)),
                 None,
+            ),
+        )
+    }
+
+    fn provider_exact_input_receipt(
+        manifest: &AgentRunManifest,
+        call: u64,
+        semantic: AgentProviderSemanticInputStats,
+        request_bytes: u32,
+        semantic_tokens: u32,
+        structured_tokens: u32,
+    ) -> AgentProviderInputMetricReceipt {
+        AgentProviderInputMetricReceipt::for_reducer_test(
+            manifest,
+            AgentModelCallId::new(call).expect("call"),
+            AgentPlanLeaseId::from_raw(10),
+            ROOT,
+            AgentProviderInputMetrics::for_reducer_test(
+                request_bytes,
+                semantic,
+                Some((semantic_tokens, SemanticTokenCountQuality::Conservative)),
+                Some((structured_tokens, SemanticTokenCountQuality::ProviderExact)),
+            ),
+        )
+    }
+
+    fn exact_local_provider_semantic_input_receipt(
+        manifest: &AgentRunManifest,
+        call: u64,
+        semantic: AgentProviderSemanticInputStats,
+        request_bytes: u32,
+        semantic_tokens: u32,
+        structured_tokens: Option<u32>,
+    ) -> AgentProviderInputMetricReceipt {
+        AgentProviderInputMetricReceipt::for_reducer_test(
+            manifest,
+            AgentModelCallId::new(call).expect("call"),
+            AgentPlanLeaseId::from_raw(10),
+            ROOT,
+            AgentProviderInputMetrics::for_reducer_test(
+                request_bytes,
+                semantic,
+                Some((semantic_tokens, SemanticTokenCountQuality::ProviderExact)),
+                structured_tokens.map(|tokens| (tokens, SemanticTokenCountQuality::ExactLocal)),
             ),
         )
     }
@@ -836,6 +880,124 @@ mod tests {
             );
         }
 
+        fn run_two_models_success(&mut self, input_receipts: [AgentProviderInputMetricReceipt; 2]) {
+            record(
+                &mut self.ledger,
+                &mut self.progress,
+                &self.supervisor,
+                1,
+                100,
+            );
+            let execution = self.supervisor.start(ROOT, attempt(1)).expect("start");
+            record(
+                &mut self.ledger,
+                &mut self.progress,
+                &self.supervisor,
+                2,
+                110,
+            );
+
+            for (call, active_at, terminal_at) in [(1_u64, 120_u64, 130_u64), (2, 140, 150)] {
+                let active_model = AgentActiveModelCall::for_progress_test(
+                    &self.manifest,
+                    AgentModelCallId::new(call).expect("model"),
+                    AgentPlanLeaseId::from_raw(10),
+                    ROOT,
+                );
+                self.supervisor
+                    .record_active_model_call(&execution, &active_model)
+                    .expect("active model");
+                record(
+                    &mut self.ledger,
+                    &mut self.progress,
+                    &self.supervisor,
+                    call * 2 + 1,
+                    active_at,
+                );
+                let model = model_receipt(&self.manifest, call);
+                self.supervisor
+                    .record_model_call_result(&execution, model)
+                    .expect("model result");
+                record(
+                    &mut self.ledger,
+                    &mut self.progress,
+                    &self.supervisor,
+                    call * 2 + 2,
+                    terminal_at,
+                );
+                self.accounting
+                    .record_model_receipt(model)
+                    .expect("model accounting");
+            }
+
+            for receipt in input_receipts {
+                self.inputs.record(receipt).expect("provider input");
+            }
+
+            self.supervisor
+                .complete(execution, AgentSupervisorCompletion::Succeeded)
+                .expect("complete");
+            record(
+                &mut self.ledger,
+                &mut self.progress,
+                &self.supervisor,
+                7,
+                160,
+            );
+        }
+
+        fn run_two_provider_exact_models_success(&mut self) {
+            let receipts = [
+                provider_exact_input_receipt(
+                    &self.manifest,
+                    1,
+                    AgentProviderSemanticInputStats::Observation(
+                        SemanticEncodingStats::for_input_metrics_test(100, 8, 2, 7, 2),
+                    ),
+                    1_000,
+                    100,
+                    80,
+                ),
+                provider_exact_input_receipt(
+                    &self.manifest,
+                    2,
+                    AgentProviderSemanticInputStats::Diff(
+                        SemanticDiffEncodingStats::for_input_metrics_test(50, 5, 2, 4, 1, 1),
+                    ),
+                    900,
+                    50,
+                    70,
+                ),
+            ];
+            self.run_two_models_success(receipts);
+        }
+
+        fn run_two_exact_local_provider_semantic_models_success(&mut self) {
+            let receipts = [
+                exact_local_provider_semantic_input_receipt(
+                    &self.manifest,
+                    1,
+                    AgentProviderSemanticInputStats::Observation(
+                        SemanticEncodingStats::for_input_metrics_test(100, 8, 2, 7, 2),
+                    ),
+                    1_000,
+                    100,
+                    None,
+                ),
+                exact_local_provider_semantic_input_receipt(
+                    &self.manifest,
+                    2,
+                    AgentProviderSemanticInputStats::Diff(
+                        SemanticDiffEncodingStats::for_input_metrics_test(50, 5, 2, 4, 1, 1),
+                    ),
+                    900,
+                    50,
+                    Some(70),
+                ),
+            ];
+            self.run_two_models_success(receipts);
+        }
+
         fn close(&self) -> Result<AgentRunMetricClosure, AgentRunMetricClosureError> {
             AgentRunMetricClosure::try_close(
                 &self.manifest,
@@ -876,6 +1038,63 @@ mod tests {
         assert!(!debug.contains("metric-closure.example.test"));
         assert!(!debug.contains("credential"));
         assert!(!debug.contains("hidden"));
+    }
+
+    #[test]
+    fn provider_exact_initial_and_continuation_metrics_close_successfully() {
+        let mut fixture = Fixture::new(12);
+        fixture.run_two_provider_exact_models_success();
+        let closure = fixture.close().expect("provider-exact metric closure");
+
+        assert_eq!(closure.model_calls(), 2);
+        assert_eq!(closure.provider_inputs(), 2);
+        assert_eq!(closure.effects(), 0);
+        assert_eq!(closure.actions(), 0);
+        assert_eq!(closure.operations(), 2);
+        assert_eq!(closure.outcome(), AgentRunProgressOutcome::Succeeded);
+        let input_snapshot = fixture.inputs.snapshot();
+        assert_eq!(
+            input_snapshot
+                .kind(AgentProviderInputKind::Observation)
+                .structured_input_quality(SemanticTokenCountQuality::ProviderExact),
+            1
+        );
+        assert_eq!(
+            input_snapshot
+                .kind(AgentProviderInputKind::Diff)
+                .structured_input_quality(SemanticTokenCountQuality::ProviderExact),
+            1
+        );
+    }
+
+    #[test]
+    fn exact_local_calls_with_provider_exact_semantics_close_successfully() {
+        let mut fixture = Fixture::new(13);
+        fixture.run_two_exact_local_provider_semantic_models_success();
+        let closure = fixture.close().expect("exact-local metric closure");
+
+        assert_eq!(closure.model_calls(), 2);
+        assert_eq!(closure.provider_inputs(), 2);
+        assert_eq!(closure.operations(), 2);
+        assert_eq!(closure.outcome(), AgentRunProgressOutcome::Succeeded);
+        let input_snapshot = fixture.inputs.snapshot();
+        for kind in [
+            AgentProviderInputKind::Observation,
+            AgentProviderInputKind::Diff,
+        ] {
+            assert_eq!(
+                input_snapshot
+                    .kind(kind)
+                    .semantic_payload_quality(SemanticTokenCountQuality::ProviderExact),
+                1
+            );
+        }
+        assert_eq!(
+            input_snapshot
+                .kind(AgentProviderInputKind::Diff)
+                .structured_input_quality(SemanticTokenCountQuality::ExactLocal),
+            1
+        );
     }
 
     #[test]

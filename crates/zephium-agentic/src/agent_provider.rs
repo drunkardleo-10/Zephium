@@ -48,7 +48,8 @@ pub(crate) use pricing::AgentProviderPricedUsage;
 pub use pricing::{
     AgentProviderPricingAttribution, AgentProviderPricingContractError, AgentProviderPricingError,
     AgentProviderPricingProfile, AgentProviderPricingRevision, AgentProviderPricingSchedule,
-    AgentProviderTokenRates, MAX_AGENT_PROVIDER_RATE_MICRO_USD_PER_MILLION_TOKENS,
+    AgentProviderTokenRates, MAX_AGENT_PROVIDER_EXACT_COUNTED_INPUT_TOKENS,
+    MAX_AGENT_PROVIDER_RATE_MICRO_USD_PER_MILLION_TOKENS,
 };
 pub use settlement::{
     AgentProviderPricingSettlement, AgentProviderPricingSettlementError,
@@ -665,10 +666,34 @@ impl AgentProviderStreamBudget {
 }
 
 /// Fixed provider, pricing identity, and response bounds for one admitted call.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgentProviderInputAccountingMode {
+    /// A pinned local counter supplies exact semantic counts and this exact
+    /// non-payload envelope count before policy admission.
+    ExactLocal {
+        /// Exact pinned envelope/tool-schema tokens beyond semantic content.
+        fixed_input_tokens: u32,
+    },
+    /// The full serialized OpenAI request is first reserved using UTF-8 bytes,
+    /// then replaced by an authenticated `/responses/input_tokens` count before
+    /// model generation.
+    ProviderExactAfterConservativeReservation,
+}
+
+impl AgentProviderInputAccountingMode {
+    const fn fixed_input_tokens(self) -> Option<u32> {
+        match self {
+            Self::ExactLocal { fixed_input_tokens } => Some(fixed_input_tokens),
+            Self::ProviderExactAfterConservativeReservation => None,
+        }
+    }
+}
+
+/// Fixed provider, accounting mode, pricing identity, and response bounds.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentProviderCallConfig {
     catalog: Arc<AgentProviderCatalogBinding>,
-    fixed_input_tokens: u32,
+    input_accounting: AgentProviderInputAccountingMode,
     max_output_tokens: u32,
     stream: AgentProviderStreamBudget,
 }
@@ -676,19 +701,33 @@ pub struct AgentProviderCallConfig {
 impl AgentProviderCallConfig {
     pub(in crate::agent_provider) fn from_catalog(
         catalog: Arc<AgentProviderCatalogBinding>,
-        fixed_input_tokens: u32,
+        input_accounting: AgentProviderInputAccountingMode,
         max_output_tokens: u32,
         stream: AgentProviderStreamBudget,
     ) -> Result<Self, AgentProviderContractError> {
-        if fixed_input_tokens == 0 || u64::from(fixed_input_tokens) > MAX_AGENT_RUN_MODEL_TOKENS {
-            return Err(AgentProviderContractError::InputTokens);
+        match input_accounting {
+            AgentProviderInputAccountingMode::ExactLocal { fixed_input_tokens }
+                if fixed_input_tokens == 0
+                    || u64::from(fixed_input_tokens) > MAX_AGENT_RUN_MODEL_TOKENS =>
+            {
+                return Err(AgentProviderContractError::InputTokens);
+            }
+            AgentProviderInputAccountingMode::ProviderExactAfterConservativeReservation
+                if catalog.provider() != AgentProviderKind::OpenAiResponses
+                    || catalog.pricing_profile().max_input_tokens()
+                        > pricing::MAX_AGENT_PROVIDER_EXACT_COUNTED_INPUT_TOKENS =>
+            {
+                return Err(AgentProviderContractError::InputAccountingMode);
+            }
+            AgentProviderInputAccountingMode::ExactLocal { .. }
+            | AgentProviderInputAccountingMode::ProviderExactAfterConservativeReservation => {}
         }
         if max_output_tokens == 0 || u64::from(max_output_tokens) > MAX_AGENT_RUN_MODEL_TOKENS {
             return Err(AgentProviderContractError::OutputTokens);
         }
         Ok(Self {
             catalog,
-            fixed_input_tokens,
+            input_accounting,
             max_output_tokens,
             stream,
         })
@@ -765,9 +804,9 @@ impl AgentProviderCallConfig {
         self.catalog.accounting_guard()
     }
 
-    /// Exact pinned envelope/tool-schema token count reserved beyond payload.
-    pub const fn fixed_input_tokens(&self) -> u32 {
-        self.fixed_input_tokens
+    /// Pre-dispatch input-accounting contract selected by the trusted schedule.
+    pub const fn input_accounting_mode(&self) -> AgentProviderInputAccountingMode {
+        self.input_accounting
     }
 
     /// Hard requested provider output-token ceiling.
@@ -789,8 +828,22 @@ impl AgentProviderCallConfig {
         if payload.revision() != self.tokenizer() || objective.revision() != self.tokenizer() {
             return Err(AgentProviderContractError::TokenizerRevision);
         }
+        let Some(fixed_input_tokens) = self.input_accounting.fixed_input_tokens() else {
+            return Err(AgentProviderContractError::InputAccountingMode);
+        };
+        if !matches!(
+            payload.quality(),
+            crate::SemanticTokenCountQuality::ExactLocal
+                | crate::SemanticTokenCountQuality::ProviderExact
+        ) || !matches!(
+            objective.quality(),
+            crate::SemanticTokenCountQuality::ExactLocal
+                | crate::SemanticTokenCountQuality::ProviderExact
+        ) {
+            return Err(AgentProviderContractError::InputTokenQuality);
+        }
         let additional_input_tokens = u64::from(objective.tokens())
-            .checked_add(u64::from(self.fixed_input_tokens))
+            .checked_add(u64::from(fixed_input_tokens))
             .ok_or(AgentProviderContractError::AdmissionBudget)?;
         let total_input_tokens = u64::from(payload.tokens())
             .checked_add(additional_input_tokens)
@@ -813,19 +866,96 @@ impl AgentProviderCallConfig {
         if diff.revision() != self.tokenizer() || structured_input.revision() != self.tokenizer() {
             return Err(AgentProviderContractError::TokenizerRevision);
         }
+        let Some(fixed_input_tokens) = self.input_accounting.fixed_input_tokens() else {
+            return Err(AgentProviderContractError::InputAccountingMode);
+        };
+        if !matches!(
+            diff.quality(),
+            crate::SemanticTokenCountQuality::ExactLocal
+                | crate::SemanticTokenCountQuality::ProviderExact
+        ) {
+            return Err(AgentProviderContractError::InputTokenQuality);
+        }
         if structured_input.quality() != crate::SemanticTokenCountQuality::ExactLocal {
             return Err(AgentProviderContractError::InputTokenQuality);
         }
         let allowed_input_tokens = u64::from(diff.tokens())
             .checked_add(u64::from(request.budget().additional_input_tokens()))
             .ok_or(AgentProviderContractError::AdmissionBudget)?;
-        if u64::from(self.fixed_input_tokens)
-            > u64::from(request.budget().additional_input_tokens())
+        if u64::from(fixed_input_tokens) > u64::from(request.budget().additional_input_tokens())
             || u64::from(structured_input.tokens()) > allowed_input_tokens
             || u64::from(self.max_output_tokens) > u64::from(request.budget().output_tokens())
             || !self
                 .pricing_profile()
                 .contains(u64::from(structured_input.tokens()))
+        {
+            return Err(AgentProviderContractError::AdmissionBudget);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_provider_exact_initial_request(
+        &self,
+        request: AgentModelCallRequest,
+        payload: &SemanticTokenMeasurement,
+        objective: &SemanticTokenMeasurement,
+        structured_input: &SemanticTokenMeasurement,
+    ) -> Result<(), AgentProviderContractError> {
+        if payload.quality() != crate::SemanticTokenCountQuality::Conservative
+            || objective.quality() != crate::SemanticTokenCountQuality::Conservative
+        {
+            return Err(AgentProviderContractError::InputTokenQuality);
+        }
+        self.validate_provider_exact_structured_request(
+            request,
+            [Some(payload), Some(objective)],
+            structured_input,
+        )
+    }
+
+    pub(crate) fn validate_provider_exact_continuation_request(
+        &self,
+        request: AgentModelCallRequest,
+        newest_semantic: Option<&SemanticTokenMeasurement>,
+        structured_input: &SemanticTokenMeasurement,
+    ) -> Result<(), AgentProviderContractError> {
+        self.validate_provider_exact_structured_request(
+            request,
+            [newest_semantic, None],
+            structured_input,
+        )
+    }
+
+    fn validate_provider_exact_structured_request(
+        &self,
+        request: AgentModelCallRequest,
+        semantic_inputs: [Option<&SemanticTokenMeasurement>; 2],
+        structured_input: &SemanticTokenMeasurement,
+    ) -> Result<(), AgentProviderContractError> {
+        if self.input_accounting
+            != AgentProviderInputAccountingMode::ProviderExactAfterConservativeReservation
+            || self.provider() != AgentProviderKind::OpenAiResponses
+        {
+            return Err(AgentProviderContractError::InputAccountingMode);
+        }
+        if structured_input.revision() != self.tokenizer() {
+            return Err(AgentProviderContractError::TokenizerRevision);
+        }
+        if structured_input.quality() != crate::SemanticTokenCountQuality::Conservative {
+            return Err(AgentProviderContractError::InputTokenQuality);
+        }
+        for measurement in semantic_inputs.into_iter().flatten() {
+            if measurement.revision() != self.tokenizer() {
+                return Err(AgentProviderContractError::TokenizerRevision);
+            }
+            if measurement.quality() == crate::SemanticTokenCountQuality::ProviderEstimate {
+                return Err(AgentProviderContractError::InputTokenQuality);
+            }
+        }
+        let structured_tokens = u64::from(structured_input.tokens());
+        if structured_tokens > u64::from(request.budget().additional_input_tokens())
+            || u64::from(self.max_output_tokens) > u64::from(request.budget().output_tokens())
+            || !self.pricing_profile().contains(structured_tokens)
         {
             return Err(AgentProviderContractError::AdmissionBudget);
         }
@@ -880,7 +1010,10 @@ impl AgentProviderCallConfig {
             return Err(AgentProviderContractError::InputTokenQuality);
         }
         let authorized_input_tokens = u64::from(request.budget().additional_input_tokens());
-        if u64::from(self.fixed_input_tokens) > authorized_input_tokens
+        let Some(fixed_input_tokens) = self.input_accounting.fixed_input_tokens() else {
+            return Err(AgentProviderContractError::InputAccountingMode);
+        };
+        if u64::from(fixed_input_tokens) > authorized_input_tokens
             || u64::from(structured_input.tokens()) > authorized_input_tokens
             || u64::from(self.max_output_tokens) > u64::from(request.budget().output_tokens())
             || !self
@@ -1549,6 +1682,9 @@ pub enum AgentProviderContractError {
     /// Fixed request-envelope input tokens were zero or exceeded the hard limit.
     #[error("agent provider fixed input-token count is invalid")]
     InputTokens,
+    /// Requested input accounting is incompatible with the provider or catalog range.
+    #[error("agent provider input-accounting mode is invalid")]
+    InputAccountingMode,
     /// Requested output-token ceiling was zero or exceeded the hard limit.
     #[error("agent provider output-token ceiling is invalid")]
     OutputTokens,
@@ -1634,7 +1770,12 @@ mod tests {
             config.billing_class(),
             AgentProviderBillingClass::OpenAiDefault
         );
-        assert_eq!(config.fixed_input_tokens(), 512);
+        assert_eq!(
+            config.input_accounting_mode(),
+            AgentProviderInputAccountingMode::ExactLocal {
+                fixed_input_tokens: 512
+            }
+        );
         assert_eq!(
             config.reasoning_effort(),
             AgentProviderReasoningEffort::High

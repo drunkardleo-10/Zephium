@@ -1203,6 +1203,40 @@ impl AgentRunPolicy {
         )
     }
 
+    /// Reserves one conservatively bounded complete provider request.
+    ///
+    /// This is the initial-observation counterpart to the provider continuation
+    /// paths below. The payload still supplies the exact observation binding and
+    /// taint projection, while the already-serialized request's UTF-8 byte length
+    /// is reserved as one complete input ceiling with no additional allowance.
+    /// Exact provider counting must replace that structured metric before model
+    /// generation.
+    pub(crate) fn prepare_provider_observation_input(
+        &mut self,
+        request: AgentModelCallRequest,
+        observation: &SemanticObservation,
+        payload: &SemanticModelPayload,
+        structured_input_tokens: u64,
+    ) -> Result<AgentModelCallAdmission, AgentPolicyError> {
+        if !payload.matches_observation(observation) {
+            return Err(AgentPolicyError::PayloadMismatch);
+        }
+        let context = observation.request().context();
+        let candidates = observation_taints(observation, request.account())?;
+        let source_guard = SemanticObservationFingerprint::from_observation(observation).digest();
+        self.prepare_model_input(
+            request,
+            context,
+            ModelInputKind::Observation,
+            source_guard,
+            candidates,
+            ModelInputTokenReservation {
+                measured: structured_input_tokens,
+                additional: 0,
+            },
+        )
+    }
+
     /// Reserves exact semantic-diff input before any model transport receives bytes.
     ///
     /// The diff must extend an exact baseline already committed to this policy.
@@ -1237,11 +1271,12 @@ impl AgentRunPolicy {
         )
     }
 
-    /// Reserves one exact whole-provider-input measurement for a bound diff draft.
+    /// Reserves one complete whole-provider-input measurement for a bound diff draft.
     ///
     /// This crate-private path is used only after the fixed provider codec and
-    /// an exact local structured-input counter have both succeeded. Expected
-    /// call coordinates prevent a provisional continuation identity from being
+    /// either a trusted local exact count or a conservative full-body preflight.
+    /// The latter remains provisional until authenticated provider counting.
+    /// Expected call coordinates prevent a continuation identity from being
     /// rebound to a different policy, lease, or plan node.
     pub(crate) fn prepare_provider_diff_input(
         &mut self,
@@ -1283,7 +1318,7 @@ impl AgentRunPolicy {
         )
     }
 
-    /// Reserves one exact whole-provider-input measurement for a locate result.
+    /// Reserves one complete whole-provider-input measurement for a locate result.
     ///
     /// The locate result must be bound to an observation already committed to
     /// this policy. Candidate taint is copied only from that exact baseline, so
@@ -1324,7 +1359,7 @@ impl AgentRunPolicy {
         )
     }
 
-    /// Reserves one exact whole-provider-input measurement for a read result.
+    /// Reserves one complete whole-provider-input measurement for a read result.
     ///
     /// The result must come from the exact observation already present in the
     /// retained provider transcript. Rejoining that committed baseline keeps
@@ -1367,7 +1402,7 @@ impl AgentRunPolicy {
         )
     }
 
-    /// Reserves one exact whole-provider-input measurement for extraction mapping.
+    /// Reserves one complete whole-provider-input measurement for extraction mapping.
     ///
     /// The schema and bounded read must match the exact move-only delivery
     /// authority, and the read must still derive from the committed provider
@@ -1437,7 +1472,7 @@ impl AgentRunPolicy {
         )
     }
 
-    /// Reserves one exact whole-provider-input measurement for a visual result.
+    /// Reserves one complete whole-provider-input measurement for a visual result.
     ///
     /// This crate-private path accepts only a fixed provider draft holding the
     /// exact move-only screenshot delivery authority. The original semantic
@@ -3185,6 +3220,25 @@ mod tests {
         }
     }
 
+    struct FixedQualityCounter {
+        revision: SemanticTokenizerRevision,
+        tokens: u32,
+        quality: SemanticTokenCountQuality,
+    }
+
+    impl SemanticTokenCounter for FixedQualityCounter {
+        fn count_tokens(
+            &self,
+            input: &str,
+        ) -> Result<SemanticTokenMeasurement, SemanticTokenCounterError> {
+            if input.is_empty() {
+                return Err(SemanticTokenCounterError::InvalidResult);
+            }
+            SemanticTokenMeasurement::try_new(self.revision.clone(), self.tokens, self.quality)
+                .map_err(|_| SemanticTokenCounterError::InvalidResult)
+        }
+    }
+
     struct FixedProviderInputCounter {
         revision: SemanticTokenizerRevision,
         tokens: u32,
@@ -3233,6 +3287,14 @@ mod tests {
     }
 
     fn observation_payload(observation: &SemanticObservation, tokens: u32) -> SemanticModelPayload {
+        observation_payload_with_quality(observation, tokens, SemanticTokenCountQuality::ExactLocal)
+    }
+
+    fn observation_payload_with_quality(
+        observation: &SemanticObservation,
+        tokens: u32,
+        quality: SemanticTokenCountQuality,
+    ) -> SemanticModelPayload {
         let revision = tokenizer();
         encode_semantic_observation(
             observation,
@@ -3245,9 +3307,10 @@ mod tests {
         )
         .expect("encode")
         .admit(
-            &FixedCounter {
+            &FixedQualityCounter {
                 revision: revision.clone(),
                 tokens,
+                quality,
             },
             &revision,
         )
@@ -3297,13 +3360,22 @@ mod tests {
     }
 
     fn diff_payload(diff: &SemanticDiff, tokens: u32) -> SemanticDiffModelPayload {
+        diff_payload_with_quality(diff, tokens, SemanticTokenCountQuality::ExactLocal)
+    }
+
+    fn diff_payload_with_quality(
+        diff: &SemanticDiff,
+        tokens: u32,
+        quality: SemanticTokenCountQuality,
+    ) -> SemanticDiffModelPayload {
         let revision = tokenizer();
         encode_semantic_diff(diff, SemanticModelEncodingBudget::ACTION_DIFF_EXACT)
             .expect("encode diff")
             .admit(
-                &FixedCounter {
+                &FixedQualityCounter {
                     revision: revision.clone(),
                     tokens,
+                    quality,
                 },
                 &revision,
             )
@@ -3343,6 +3415,28 @@ mod tests {
             AgentProviderStreamBudget::STANDARD,
         )
         .expect("provider config")
+    }
+
+    fn provider_exact_config(
+        tokenizer: SemanticTokenizerRevision,
+        max_output_tokens: u32,
+        max_priced_input_tokens: u64,
+    ) -> AgentProviderCallConfig {
+        crate::AgentProviderPricingSchedule::try_for_test(
+            AgentProviderKind::OpenAiResponses,
+            AgentProviderModelRevision::try_new("gpt-5.6-terra".to_owned()).expect("model"),
+            AgentProviderReasoningEffort::Medium,
+            tokenizer,
+            crate::AgentProviderPricingProfile::try_new(
+                crate::AgentProviderPricingRevision::new(1).expect("pricing revision"),
+                max_priced_input_tokens,
+            )
+            .expect("pricing profile"),
+            crate::AgentProviderTokenRates::try_new(1, 1, 1, 1).expect("rates"),
+        )
+        .expect("provider schedule")
+        .try_provider_exact_call_config(max_output_tokens, AgentProviderStreamBudget::STANDARD)
+        .expect("provider-exact config")
     }
 
     fn anthropic_provider_config(
@@ -4111,7 +4205,11 @@ mod tests {
             &mut fixture.policy,
             call_request(1, fixture.lease, account(context, NOW), 15, 20, 100, NOW),
             &observation,
-            observation_payload(&observation, 50),
+            observation_payload_with_quality(
+                &observation,
+                50,
+                SemanticTokenCountQuality::ProviderExact,
+            ),
             &objective,
             provider_config(selected.clone(), 10, 20),
         )
@@ -4169,7 +4267,9 @@ mod tests {
             .commit(&mut fixture.policy)
             .expect("transport commit");
         let input_metrics = committed.input_metrics();
-        let metric_receipt = committed.input_metric_receipt();
+        let metric_receipt = committed
+            .input_metric_receipt()
+            .expect("exact-local input metrics are final at commit");
         assert_eq!(metric_receipt.manifest(), committed.active().manifest());
         assert_eq!(metric_receipt.call(), committed.active().id());
         assert_eq!(metric_receipt.lease(), committed.active().lease());
@@ -4214,7 +4314,7 @@ mod tests {
                 .semantic_payload_tokens()
                 .expect("semantic token count")
                 .quality(),
-            SemanticTokenCountQuality::ExactLocal
+            SemanticTokenCountQuality::ProviderExact
         );
         assert_eq!(input_metrics.structured_input_tokens(), None);
         let metric_debug = format!("{metric_receipt:?}");
@@ -4277,6 +4377,442 @@ mod tests {
     }
 
     #[test]
+    fn provider_exact_initial_observation_reserves_whole_body_conservatively() {
+        let source = origin("provider-exact");
+        let context = make_context(29_007, 29_008, 29_009);
+        let observation = observation(
+            context,
+            source.clone(),
+            1,
+            vec![
+                json!({"k": 1, "r": "document", "o": 16}),
+                json!({"k": 2, "p": 0, "r": "paragraph", "t": "private provider-exact marker"}),
+            ],
+        );
+        let selected = tokenizer();
+        let payload = encode_semantic_observation(
+            &observation,
+            SemanticModelEncodingBudget::INITIAL_CONSERVATIVE,
+        )
+        .expect("encode")
+        .admit_conservative_utf8(&selected)
+        .expect("conservative payload");
+        let objective = AgentProviderObjective::try_admit_conservative_utf8(
+            "Complete the reviewed workflow".to_owned(),
+            &selected,
+        )
+        .expect("conservative objective");
+        let config = provider_exact_config(selected.clone(), 128, 64_000);
+        let mut fixture = policy_fixture(
+            29_007,
+            29_008,
+            source,
+            SemanticSensitivity::Sensitive,
+            &[SemanticEffectClass::Read],
+            run_budget(10, 100_000, 100_000),
+        );
+        let request = call_request(
+            1,
+            fixture.lease,
+            account(context, NOW),
+            64_000,
+            128,
+            100_000,
+            NOW,
+        );
+
+        assert!(matches!(
+            AgentPreparedObservationRequest::try_openai(
+                &mut fixture.policy,
+                request,
+                &observation,
+                payload,
+                &objective,
+                config.clone(),
+            ),
+            Err(crate::AgentProviderRequestError::Contract(
+                AgentProviderContractError::InputAccountingMode
+            ))
+        ));
+        assert_eq!(fixture.policy.pending_model_calls(), 0);
+
+        for exact_provider in [
+            provider_config(selected.clone(), 10, 128),
+            anthropic_provider_config(selected.clone(), 10, 128),
+        ] {
+            let payload = encode_semantic_observation(
+                &observation,
+                SemanticModelEncodingBudget::INITIAL_CONSERVATIVE,
+            )
+            .expect("encode exact-provider refusal")
+            .admit_conservative_utf8(&selected)
+            .expect("conservative refusal payload");
+            let result = match exact_provider.provider() {
+                AgentProviderKind::OpenAiResponses => AgentPreparedObservationRequest::try_openai(
+                    &mut fixture.policy,
+                    request,
+                    &observation,
+                    payload,
+                    &objective,
+                    exact_provider,
+                ),
+                AgentProviderKind::AnthropicMessages => {
+                    AgentPreparedObservationRequest::try_anthropic(
+                        &mut fixture.policy,
+                        request,
+                        &observation,
+                        payload,
+                        &objective,
+                        exact_provider,
+                    )
+                }
+            };
+            assert!(matches!(
+                result,
+                Err(crate::AgentProviderRequestError::Contract(
+                    AgentProviderContractError::InputTokenQuality
+                ))
+            ));
+            assert_eq!(fixture.policy.pending_model_calls(), 0);
+        }
+
+        let payload = encode_semantic_observation(
+            &observation,
+            SemanticModelEncodingBudget::INITIAL_CONSERVATIVE,
+        )
+        .expect("encode again")
+        .admit_conservative_utf8(&selected)
+        .expect("conservative payload");
+        let prepared = AgentPreparedObservationRequest::try_openai_for_provider_exact_count(
+            &mut fixture.policy,
+            request,
+            &observation,
+            payload,
+            &objective,
+            config,
+        )
+        .expect("provider-exact prepared request");
+        let body_bytes = u32::try_from(prepared.request().byte_len()).expect("bounded body");
+        assert!(body_bytes > 0);
+        assert_eq!(
+            fixture.policy.accounting().reserved_model_tokens(),
+            u64::from(body_bytes) + 128
+        );
+
+        let committed = prepared
+            .into_transport_input()
+            .commit(&mut fixture.policy)
+            .expect("commit");
+        let metrics = committed.input_metrics();
+        assert_eq!(metrics.serialized_request_bytes(), body_bytes);
+        assert_eq!(
+            metrics
+                .semantic_payload_tokens()
+                .expect("semantic measurement")
+                .quality(),
+            SemanticTokenCountQuality::Conservative
+        );
+        let structured = metrics
+            .structured_input_tokens()
+            .expect("structured reservation");
+        assert_eq!(structured.tokens(), body_bytes);
+        assert_eq!(
+            structured.quality(),
+            SemanticTokenCountQuality::Conservative
+        );
+        let debug = format!("{committed:?}");
+        assert!(!debug.contains("private provider-exact marker"));
+        assert!(!debug.contains("reviewed workflow"));
+        let (_, input, _) = committed.into_parts();
+        let (active, _) = input.into_parts();
+        fixture
+            .policy
+            .settle_model_call(active, AgentModelCallSettlement::Cancelled, 0, 0, 0)
+            .expect("settle");
+    }
+
+    #[test]
+    fn provider_exact_continuation_validation_is_mode_revision_quality_and_ceiling_exact() {
+        let selected = tokenizer();
+        let config = provider_exact_config(selected.clone(), 128, 64_000);
+        let context = make_context(29_107, 29_108, 29_109);
+        let request = call_request(
+            1,
+            AgentPlanLeaseId::generate(),
+            account(context, NOW),
+            1_000,
+            128,
+            100_000,
+            NOW,
+        );
+        let conservative_request = SemanticTokenMeasurement::try_new(
+            selected.clone(),
+            1_000,
+            SemanticTokenCountQuality::Conservative,
+        )
+        .expect("conservative whole request");
+
+        for quality in [
+            SemanticTokenCountQuality::Conservative,
+            SemanticTokenCountQuality::ExactLocal,
+            SemanticTokenCountQuality::ProviderExact,
+        ] {
+            let semantic = SemanticTokenMeasurement::try_new(selected.clone(), 30, quality)
+                .expect("semantic measurement");
+            config
+                .validate_provider_exact_continuation_request(
+                    request,
+                    Some(&semantic),
+                    &conservative_request,
+                )
+                .expect("admissible semantic quality");
+        }
+        config
+            .validate_provider_exact_continuation_request(request, None, &conservative_request)
+            .expect("screenshot-like request without semantic payload");
+
+        let estimate = SemanticTokenMeasurement::try_new(
+            selected.clone(),
+            30,
+            SemanticTokenCountQuality::ProviderEstimate,
+        )
+        .expect("provider estimate");
+        assert_eq!(
+            config
+                .validate_provider_exact_continuation_request(
+                    request,
+                    Some(&estimate),
+                    &conservative_request,
+                )
+                .expect_err("estimate cannot reserve a continuation"),
+            AgentProviderContractError::InputTokenQuality
+        );
+        let wrong_revision = SemanticTokenMeasurement::try_new(
+            SemanticTokenizerRevision::try_new("other-counting-contract-v1".to_owned())
+                .expect("other revision"),
+            30,
+            SemanticTokenCountQuality::ExactLocal,
+        )
+        .expect("wrong-revision semantic input");
+        assert_eq!(
+            config
+                .validate_provider_exact_continuation_request(
+                    request,
+                    Some(&wrong_revision),
+                    &conservative_request,
+                )
+                .expect_err("delivery revision drift"),
+            AgentProviderContractError::TokenizerRevision
+        );
+        let exact_structured = SemanticTokenMeasurement::try_new(
+            selected.clone(),
+            1_000,
+            SemanticTokenCountQuality::ExactLocal,
+        )
+        .expect("exact structured count");
+        assert_eq!(
+            config
+                .validate_provider_exact_continuation_request(request, None, &exact_structured,)
+                .expect_err("preflight must retain conservative quality"),
+            AgentProviderContractError::InputTokenQuality
+        );
+        let over_call_ceiling = SemanticTokenMeasurement::try_new(
+            selected.clone(),
+            1_001,
+            SemanticTokenCountQuality::Conservative,
+        )
+        .expect("over-ceiling request");
+        assert_eq!(
+            config
+                .validate_provider_exact_continuation_request(request, None, &over_call_ceiling)
+                .expect_err("whole request exceeds call ceiling"),
+            AgentProviderContractError::AdmissionBudget
+        );
+        let exact_config = provider_config(selected, 10, 128);
+        assert_eq!(
+            exact_config
+                .validate_provider_exact_continuation_request(request, None, &conservative_request,)
+                .expect_err("exact-local config cannot enter provider count"),
+            AgentProviderContractError::InputAccountingMode
+        );
+    }
+
+    #[test]
+    fn provider_exact_diff_reserves_the_complete_serialized_replay_request() {
+        let source = origin("provider-exact-diff");
+        let context = make_context(29_207, 29_208, 29_209);
+        let previous = actionable_observation(context, source.clone(), 1);
+        let current = observation(
+            context,
+            source.clone(),
+            2,
+            vec![
+                json!({"k": 1, "r": "document", "o": 16}),
+                json!({"k": 3, "p": 0, "r": "paragraph", "t": "new private marker"}),
+                json!({"k": 2, "p": 0, "r": "button", "n": "Save draft", "o": 9,
+                       "b": {"x": 10, "y": 10, "w": 100, "h": 30}}),
+            ],
+        );
+        let diff = diff_between(&previous, &current);
+        let selected = tokenizer();
+        let config = provider_exact_config(selected.clone(), 128, 272_000);
+        let objective = AgentProviderObjective::try_admit_conservative_utf8(
+            "Review the changed page state".to_owned(),
+            &selected,
+        )
+        .expect("conservative objective");
+        let mut fixture = policy_fixture(
+            29_207,
+            29_208,
+            source,
+            SemanticSensitivity::Sensitive,
+            &[SemanticEffectClass::Read],
+            run_budget(10, 1_000_000, 1_000_000),
+        );
+        let binding = account(context, NOW - 1);
+        let initial_request = call_request(1, fixture.lease, binding, 272_000, 128, 100_000, NOW);
+        let initial_payload = encode_semantic_observation(
+            &previous,
+            SemanticModelEncodingBudget::INITIAL_CONSERVATIVE,
+        )
+        .expect("encode initial observation")
+        .admit_conservative_utf8(&selected)
+        .expect("admit initial observation");
+        let mut committed = AgentPreparedObservationRequest::try_openai_for_provider_exact_count(
+            &mut fixture.policy,
+            initial_request,
+            &previous,
+            initial_payload,
+            &objective,
+            config.clone(),
+        )
+        .expect("prepare provider-exact initial request")
+        .into_transport_input()
+        .commit(&mut fixture.policy)
+        .expect("commit initial request");
+        assert!(
+            committed.input_metric_receipt().is_none(),
+            "pre-count conservative metrics are not final"
+        );
+        let count_projection = committed
+            .request()
+            .openai_input_token_request()
+            .expect("count projection");
+        let exact_count = crate::AgentProviderExactInputCount::try_new(
+            committed.request(),
+            count_projection.binding(),
+            100,
+        )
+        .expect("bound provider-exact input count");
+        committed
+            .bind_provider_exact_input_count(exact_count)
+            .expect("attach provider-exact count before modeled generation");
+        let initial_metric_receipt = committed
+            .input_metric_receipt()
+            .expect("authenticated count finalizes input metrics");
+        assert_eq!(
+            initial_metric_receipt
+                .metrics()
+                .structured_input_tokens()
+                .expect("provider-exact structured metric")
+                .quality(),
+            SemanticTokenCountQuality::ProviderExact
+        );
+        let (request, input, continuation) = committed.into_parts();
+        let (active, evidence) = input.into_parts();
+        assert!(evidence
+            .observation_acknowledgement()
+            .is_some_and(|acknowledgement| acknowledgement.matches(&previous)));
+        fixture
+            .policy
+            .settle_model_call(active, AgentModelCallSettlement::Completed, 100, 4, 10)
+            .expect("settle initial request");
+        let tool = crate::AgentBrowserToolCall::decode_openai(
+            request.call(),
+            "fc_provider_exact_diff_1".to_owned(),
+            "call_provider_exact_diff_1".to_owned(),
+            "back",
+            "{}".to_owned(),
+        )
+        .expect("tool call");
+        let completion = crate::AgentProviderCompletion::new(
+            request.call(),
+            crate::AgentProviderStopReason::ToolCalls,
+            crate::AgentProviderUsage::try_new(100, 4, 0, 0, 0).expect("usage"),
+            crate::AgentProviderStreamStats::new(200, 8, 0, 1, 2),
+            true,
+        );
+        let continuation = continuation
+            .expect("continuation seed")
+            .join_terminal_tool_for_test(completion, tool.into_continuation_parts_for_test().0)
+            .expect("terminal tool join");
+
+        let diff_budget = SemanticModelEncodingBudget::try_new(
+            16 * 1024,
+            1_000,
+            SemanticTokenCountRequirement::ConservativeAllowed,
+        )
+        .expect("bounded conservative diff budget");
+        let diff_payload = encode_semantic_diff(&diff, diff_budget)
+            .expect("encode diff")
+            .admit_conservative_utf8(&selected)
+            .expect("admit conservative diff");
+        let next_request = call_request(2, fixture.lease, binding, 272_000, 128, 100_000, NOW);
+        let draft = AgentProviderDiffRequestDraft::try_new(
+            continuation
+                .bind_diff_request(next_request, &config, &diff, diff_payload)
+                .expect("bind provider-exact diff"),
+        )
+        .expect("encode provider-exact replay request");
+        let serialized_request_bytes =
+            u32::try_from(draft.request().byte_len()).expect("bounded replay request");
+        let prepared = draft
+            .try_prepare_for_provider_exact_count(&mut fixture.policy, next_request, &diff)
+            .expect("reserve provider-exact replay request");
+        assert_eq!(
+            prepared.structured_input_measurement().tokens(),
+            serialized_request_bytes
+        );
+        assert_eq!(
+            prepared.structured_input_measurement().quality(),
+            SemanticTokenCountQuality::Conservative
+        );
+        assert_eq!(
+            fixture.policy.accounting().reserved_model_tokens(),
+            u64::from(serialized_request_bytes) + 128
+        );
+        let committed = prepared
+            .into_transport_input()
+            .commit(&mut fixture.policy)
+            .expect("commit provider-exact diff");
+        assert!(committed.input_metric_receipt().is_none());
+        let metrics = committed.input_metrics();
+        assert_eq!(
+            metrics
+                .semantic_payload_tokens()
+                .expect("diff semantic metric")
+                .quality(),
+            SemanticTokenCountQuality::Conservative
+        );
+        assert_eq!(
+            metrics
+                .structured_input_tokens()
+                .expect("whole-request metric")
+                .tokens(),
+            metrics.serialized_request_bytes()
+        );
+        assert!(!format!("{committed:?}").contains("new private marker"));
+        let (_, input, continuation) = committed.into_parts();
+        assert!(continuation.is_some());
+        let (active, evidence) = input.into_parts();
+        assert!(matches!(evidence, AgentProviderInputEvidence::Diff(_)));
+        fixture
+            .policy
+            .settle_model_call(active, AgentModelCallSettlement::Cancelled, 0, 0, 0)
+            .expect("settle diff reservation");
+    }
+
+    #[test]
     fn stateless_diff_counts_whole_input_before_exact_policy_and_transport_commit() {
         let source = origin("provider-diff-request");
         let context = make_context(9_207, 9_208, 9_209);
@@ -4312,6 +4848,17 @@ mod tests {
             &[SemanticEffectClass::Read],
             run_budget(10, 5_000, 10_000),
         );
+        let supervisor = AgentRunSupervisor::new(
+            AgentSupervisorId::new(2).expect("supervisor"),
+            AgentDelegationTopology::try_new(
+                fixture.policy.manifest(),
+                vec![AgentDelegationSpec::new(AgentPlanNodeId::from_raw(1), None)],
+            )
+            .expect("topology"),
+        );
+        let mut input_reducer =
+            AgentRunProviderInputMetrics::try_new(fixture.policy.manifest(), &supervisor)
+                .expect("input metrics reducer");
         let binding = account(context, NOW - 1);
         let prepared = AgentPreparedObservationRequest::try_openai(
             &mut fixture.policy,
@@ -4326,6 +4873,13 @@ mod tests {
             .into_transport_input()
             .commit(&mut fixture.policy)
             .expect("initial commit");
+        input_reducer
+            .record(
+                committed
+                    .input_metric_receipt()
+                    .expect("exact-local initial receipt"),
+            )
+            .expect("record exact-local initial input");
         let (initial_request, input, continuation) = committed.into_parts();
         let (active, evidence) = input.into_parts();
         assert!(evidence
@@ -4389,7 +4943,12 @@ mod tests {
         );
         assert_eq!(fixture.policy.pending_model_calls(), 0);
         let bound = continuation
-            .bind_diff_request(diff_request, &config, &diff, diff_payload(&diff, 30))
+            .bind_diff_request(
+                diff_request,
+                &config,
+                &diff,
+                diff_payload_with_quality(&diff, 30, SemanticTokenCountQuality::ProviderExact),
+            )
             .expect("bound diff request");
         let draft = AgentProviderDiffRequestDraft::try_new(bound).expect("fixed diff draft");
         assert_eq!(fixture.policy.pending_model_calls(), 0);
@@ -4424,6 +4983,13 @@ mod tests {
             .commit(&mut fixture.policy)
             .expect("diff transport commit");
         let input_metrics = committed.input_metrics();
+        input_reducer
+            .record(
+                committed
+                    .input_metric_receipt()
+                    .expect("exact-local diff receipt with exact provider semantic count"),
+            )
+            .expect("record exact-local diff input");
         assert_eq!(
             input_metrics.serialized_request_bytes(),
             serialized_request_bytes
@@ -4438,6 +5004,13 @@ mod tests {
                 .expect("diff token count")
                 .tokens(),
             30
+        );
+        assert_eq!(
+            input_metrics
+                .semantic_payload_tokens()
+                .expect("diff token count")
+                .quality(),
+            SemanticTokenCountQuality::ProviderExact
         );
         assert_eq!(
             input_metrics
@@ -4459,6 +5032,25 @@ mod tests {
             .observation_acknowledgement()
             .is_some_and(|acknowledgement| acknowledgement.matches(&current)));
         assert!(committed.input_evidence().read_receipt().is_none());
+        let input_snapshot = input_reducer.snapshot();
+        assert_eq!(
+            input_snapshot
+                .kind(AgentProviderInputKind::Observation)
+                .semantic_payload_quality(SemanticTokenCountQuality::ExactLocal),
+            1
+        );
+        assert_eq!(
+            input_snapshot
+                .kind(AgentProviderInputKind::Diff)
+                .semantic_payload_quality(SemanticTokenCountQuality::ProviderExact),
+            1
+        );
+        assert_eq!(
+            input_snapshot
+                .kind(AgentProviderInputKind::Diff)
+                .structured_input_quality(SemanticTokenCountQuality::ExactLocal),
+            1
+        );
         let (request, input, continuation) = committed.into_parts();
         assert_eq!(request.endpoint(), AgentProviderEndpoint::OpenAiResponses);
         let second_call = request.call();

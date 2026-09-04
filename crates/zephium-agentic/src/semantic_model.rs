@@ -22,8 +22,12 @@ use crate::{
 pub const SEMANTIC_MODEL_SCHEMA_VERSION: u16 = 2;
 /// Absolute encoded semantic payload byte ceiling.
 pub const MAX_SEMANTIC_MODEL_BYTES: u32 = 512 * 1024;
-/// Absolute admitted semantic payload token ceiling.
-pub const MAX_SEMANTIC_MODEL_TOKENS: u32 = 128 * 1024;
+/// Absolute admitted semantic or provider-structured input accounting ceiling.
+///
+/// Individual semantic encoders retain much smaller task-specific budgets. The
+/// larger process ceiling also has to represent a provider-authenticated whole
+/// request count without pretending that serialized UTF-8 bytes are tokens.
+pub const MAX_SEMANTIC_MODEL_TOKENS: u32 = 272_000;
 /// Initial-snapshot token target from the product qualification contract.
 pub const INITIAL_SEMANTIC_MODEL_TOKEN_TARGET: u32 = 2_000;
 /// Normal action-diff token target from the product qualification contract.
@@ -53,6 +57,13 @@ pub struct SemanticModelEncodingBudget {
 }
 
 impl SemanticModelEncodingBudget {
+    /// Initial snapshot budget using UTF-8 bytes as a conservative token bound.
+    pub const INITIAL_CONSERVATIVE: Self = Self {
+        max_bytes: 32 * 1024,
+        max_tokens: INITIAL_SEMANTIC_MODEL_TOKEN_TARGET,
+        token_requirement: SemanticTokenCountRequirement::ConservativeAllowed,
+    };
+
     /// Initial snapshot budget for a provider with an exact counting path.
     pub const INITIAL_EXACT: Self = Self {
         max_bytes: 32 * 1024,
@@ -72,6 +83,13 @@ impl SemanticModelEncodingBudget {
         max_bytes: 16 * 1024,
         max_tokens: ACTION_SEMANTIC_DIFF_TOKEN_TARGET,
         token_requirement: SemanticTokenCountRequirement::Exact,
+    };
+
+    /// Normal action-diff budget using UTF-8 bytes as a conservative token bound.
+    pub const ACTION_DIFF_CONSERVATIVE: Self = Self {
+        max_bytes: 16 * 1024,
+        max_tokens: ACTION_SEMANTIC_DIFF_TOKEN_TARGET,
+        token_requirement: SemanticTokenCountRequirement::ConservativeAllowed,
     };
 
     /// Normal action-diff budget for an explicitly estimated provider count.
@@ -124,7 +142,12 @@ impl SemanticModelEncodingBudget {
     }
 }
 
-/// Bounded provider/model/tokenizer revision identity.
+/// Bounded tokenizer or provider counting-contract revision identity.
+///
+/// Exact-local revisions identify the pinned tokenizer implementation. A
+/// provider-exact revision instead identifies the complete immutable request
+/// projection and authenticated counting-endpoint contract. It must never be a
+/// guessed tokenizer alias or imply that serialized JSON bytes are tokens.
 #[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
 pub struct SemanticTokenizerRevision(String);
 
@@ -379,6 +402,38 @@ impl SemanticEncodedObservation {
             fingerprint: self.fingerprint,
         })
     }
+
+    /// Admits using UTF-8 byte length as a conservative, never-exact token bound.
+    ///
+    /// This path is valid only for a budget that explicitly allows conservative
+    /// admission. The provider must later count the complete immutable request
+    /// exactly before model generation can begin.
+    pub fn admit_conservative_utf8(
+        self,
+        revision: &SemanticTokenizerRevision,
+    ) -> Result<SemanticModelPayload, SemanticModelEncodingError> {
+        let measurement = conservative_utf8_measurement(&self.content, revision)?;
+        validate_semantic_token_measurement(&self.budget, &measurement, revision)?;
+        Ok(SemanticModelPayload {
+            content: self.content,
+            stats: self.stats,
+            measurement,
+            fingerprint: self.fingerprint,
+        })
+    }
+}
+
+pub(crate) fn conservative_utf8_measurement(
+    content: &str,
+    revision: &SemanticTokenizerRevision,
+) -> Result<SemanticTokenMeasurement, SemanticModelEncodingError> {
+    let bytes = u32::try_from(content.len()).map_err(|_| SemanticModelEncodingError::Budget)?;
+    SemanticTokenMeasurement::try_new(
+        revision.clone(),
+        bytes,
+        SemanticTokenCountQuality::Conservative,
+    )
+    .map_err(|_| SemanticModelEncodingError::Budget)
 }
 
 pub(crate) fn validate_semantic_token_measurement(
@@ -1300,6 +1355,66 @@ mod tests {
         let debug = format!("{payload:?}");
         assert!(!debug.contains("Repo"));
         assert!(!debug.contains("example.test"));
+    }
+
+    #[test]
+    fn conservative_utf8_admission_counts_bytes_without_claiming_exactness() {
+        let selected = revision("openai:responses-input-count:v1");
+        for value in ["ascii", "żółw"] {
+            let encoded = encode_semantic_observation(
+                &observation_with_text_value(value),
+                SemanticModelEncodingBudget::INITIAL_CONSERVATIVE,
+            )
+            .expect("conservative encoding");
+            let encoded_bytes = encoded.stats().bytes();
+            let payload = encoded
+                .admit_conservative_utf8(&selected)
+                .expect("conservative admission");
+            assert_eq!(payload.token_measurement().tokens(), encoded_bytes);
+            assert_eq!(
+                payload.token_measurement().quality(),
+                SemanticTokenCountQuality::Conservative
+            );
+            assert_eq!(payload.token_measurement().revision(), &selected);
+            let debug = format!("{payload:?}");
+            assert!(!debug.contains(value));
+            assert!(debug.contains("[redacted]"));
+        }
+
+        let encoded = encode_semantic_observation(
+            &observation_with_text_value("żółw"),
+            SemanticModelEncodingBudget::INITIAL_CONSERVATIVE,
+        )
+        .expect("multibyte encoding");
+        assert!(encoded.content.len() > encoded.content.chars().count());
+
+        assert!(matches!(
+            encode_semantic_observation(
+                &observation(),
+                SemanticModelEncodingBudget::INITIAL_EXACT,
+            )
+            .expect("exact encoding")
+            .admit_conservative_utf8(&selected),
+            Err(SemanticModelEncodingError::TokenQuality)
+        ));
+
+        let encoded = encode_semantic_observation(
+            &observation(),
+            SemanticModelEncodingBudget::INITIAL_CONSERVATIVE,
+        )
+        .expect("sized encoding");
+        let too_small = SemanticModelEncodingBudget::try_new(
+            encoded.stats().bytes(),
+            encoded.stats().bytes() - 1,
+            SemanticTokenCountRequirement::ConservativeAllowed,
+        )
+        .expect("tight budget");
+        assert!(matches!(
+            encode_semantic_observation(&observation(), too_small)
+                .expect("byte-fitting encoding")
+                .admit_conservative_utf8(&selected),
+            Err(SemanticModelEncodingError::TokenLimit)
+        ));
     }
 
     #[test]

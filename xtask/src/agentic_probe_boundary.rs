@@ -4096,10 +4096,13 @@ fn validate_agent_input_metrics_contract(
         "manifest_guard:input.active.manifest_guard_for_metrics()",
         "pub(crate)fnmatches_manifest_revision(",
         "self.manifest==manifest&&self.manifest_guard==manifest_guard",
-        "pubfnmetric_receipt(&self)->AgentProviderInputMetricReceipt",
+        "pubfnmetric_receipt(&self)->Option<AgentProviderInputMetricReceipt>",
+        "self.metrics.accounting_is_final()",
         "AgentProviderInputMetricReceipt::from_committed(self)",
-        "pubfninput_metric_receipt(&self)->AgentProviderInputMetricReceipt",
+        "pubfninput_metric_receipt(&self)->Option<AgentProviderInputMetricReceipt>",
         "self.input.metric_receipt()",
+        "pub(crate)fnsealed_input_metric_receipt(&self)->AgentProviderInputMetricReceipt",
+        "self.input.sealed_metric_receipt()",
     ] {
         if !request.contains(required) {
             return Err(format!(
@@ -4134,16 +4137,16 @@ fn validate_agent_input_metrics_contract(
         }
     }
     if request
-        .matches("pubfnmetric_receipt(&self)->AgentProviderInputMetricReceipt")
+        .matches("pubfnmetric_receipt(&self)->Option<AgentProviderInputMetricReceipt>")
         .count()
         != 1
         || request
-            .matches("pubfninput_metric_receipt(&self)->AgentProviderInputMetricReceipt")
+            .matches("pubfninput_metric_receipt(&self)->Option<AgentProviderInputMetricReceipt>")
             .count()
             != 1
     {
         return Err(
-            "provider input metric receipt must surface only after exact disclosure commit"
+            "provider input metric receipt must distinguish provisional from finalized accounting"
                 .to_owned(),
         );
     }
@@ -4159,8 +4162,11 @@ fn validate_agent_input_metrics_contract(
 
     let transport = compact(transport);
     for required in [
-        "pubfninput_metric_receipt(&self)->AgentProviderInputMetricReceipt",
+        "input_metric_receipt:AgentProviderInputMetricReceipt",
+        "pubconstfninput_metric_receipt(&self)->AgentProviderInputMetricReceipt",
+        "pubfninput_metric_receipt(&self)->Option<AgentProviderInputMetricReceipt>",
         "self.committed.input_metric_receipt()",
+        "self.attempt.committed.sealed_input_metric_receipt()",
     ] {
         if !transport.contains(required) {
             return Err(format!(
@@ -4169,12 +4175,20 @@ fn validate_agent_input_metrics_contract(
         }
     }
     if transport
-        .matches("pubfninput_metric_receipt(&self)->AgentProviderInputMetricReceipt")
+        .matches("pubfninput_metric_receipt(&self)->Option<AgentProviderInputMetricReceipt>")
         .count()
         != 1
+        || transport
+            .matches("pubconstfninput_metric_receipt(&self)->AgentProviderInputMetricReceipt")
+            .count()
+            != 1
+        || transport
+            .matches("pubfninput_metric_receipt(&self)->AgentProviderInputMetricReceipt")
+            .count()
+            != 1
     {
         return Err(
-            "provider transport must expose the input metric receipt only on committed attempts"
+            "provider transport must keep provisional receipts optional and expose final receipts only on counted attempts and terminals"
                 .to_owned(),
         );
     }
@@ -4909,7 +4923,9 @@ fn validate_provider_billing_contract(
     }
 
     let anthropic = compact(anthropic);
-    for required in ["AgentProviderResponseIdentity::try_attested(&self.config,event.message.model,event.message.usage.service_tier,Some(event.message.usage.inference_geo),)"] {
+    for required in [
+        "AgentProviderResponseIdentity::try_attested(&self.config,event.message.model,event.message.usage.service_tier,Some(event.message.usage.inference_geo),)",
+    ] {
         if !anthropic.contains(required) {
             return Err(format!(
                 "Anthropic decoder lost catalog-bound response attestation {required}"
@@ -5111,7 +5127,7 @@ fn validate_provider_consumer_panic_boundary(
     for required in [
         "fnfail_stop(&self){self.shared.shutdown.cancel();matchself.shared.state.lock(){Ok(mutstate)=>state.sealed=true,Err(poisoned)=>poisoned.into_inner().sealed=true,}}",
         "matchstd::panic::catch_unwind(std::panic::AssertUnwindSafe(||consume(batch)))",
-        "Err(_)=>{ifletSome(slot)=&slot{slot.fail_stop();}returnfinish_attempt(active,config,integration_failure(),AgentProviderDisclosureStage::ModelRequestMayHaveDispatched,continuation,slot,);}",
+        "Err(_)=>{ifletSome(slot)=&slot{slot.fail_stop();}returnfinish_attempt(active,config,integration_failure(),AgentProviderDisclosureStage::ModelRequestMayHaveDispatched,continuation,input_metric_receipt,slot,);}",
         "fnintegration_failure()->AgentProviderTransportOutcome",
         "AgentProviderFailureClass::Integration",
     ] {
@@ -10781,13 +10797,19 @@ mod tests {
             }
             impl AgentProviderInputEvidence {}
             impl AgentCommittedProviderInput {
-                pub fn metric_receipt(&self) -> AgentProviderInputMetricReceipt {
-                    AgentProviderInputMetricReceipt::from_committed(self)
+                pub fn metric_receipt(&self) -> Option<AgentProviderInputMetricReceipt> {
+                    self.metrics.accounting_is_final();
+                    Some(AgentProviderInputMetricReceipt::from_committed(self))
                 }
             }
             impl AgentCommittedProviderRequest {
-                pub fn input_metric_receipt(&self) -> AgentProviderInputMetricReceipt {
+                pub fn input_metric_receipt(&self) -> Option<AgentProviderInputMetricReceipt> {
                     self.input.metric_receipt()
+                }
+                pub(crate) fn sealed_input_metric_receipt(
+                    &self,
+                ) -> AgentProviderInputMetricReceipt {
+                    self.input.sealed_metric_receipt()
                 }
             }
         "#;
@@ -10797,8 +10819,23 @@ mod tests {
             }
         "#;
         let transport = r#"
-            pub fn input_metric_receipt(&self) -> AgentProviderInputMetricReceipt {
+            pub struct AgentProviderTransportResult {
+                input_metric_receipt: AgentProviderInputMetricReceipt,
+            }
+            impl AgentProviderTransportResult {
+                pub const fn input_metric_receipt(&self) -> AgentProviderInputMetricReceipt {
+                    self.input_metric_receipt
+                }
+            }
+            impl AgentProviderCountedAttempt {
+                pub fn input_metric_receipt(&self) -> AgentProviderInputMetricReceipt {
+                    self.attempt.committed.sealed_input_metric_receipt()
+                }
+            }
+            impl AgentProviderAttempt {
+                pub fn input_metric_receipt(&self) -> Option<AgentProviderInputMetricReceipt> {
                 self.committed.input_metric_receipt()
+                }
             }
         "#;
 

@@ -15,13 +15,20 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::{
-    AgentProviderBillingClass, AgentProviderCallConfig, AgentProviderKind,
-    AgentProviderModelRevision, AgentProviderReasoningEffort, AgentProviderResponseIdentity,
-    AgentProviderResponseRoute, AgentProviderUsage, MAX_AGENT_PROVIDER_ALLOWED_EFFECTIVE_MODELS,
+    AgentProviderBillingClass, AgentProviderCallConfig, AgentProviderInputAccountingMode,
+    AgentProviderKind, AgentProviderModelRevision, AgentProviderReasoningEffort,
+    AgentProviderResponseIdentity, AgentProviderResponseRoute, AgentProviderUsage,
+    MAX_AGENT_PROVIDER_ALLOWED_EFFECTIVE_MODELS,
 };
 use crate::{SemanticTokenizerRevision, MAX_AGENT_RUN_COST_MICRO_USD, MAX_AGENT_RUN_MODEL_TOKENS};
 
 const TOKENS_PER_RATE_UNIT: u128 = 1_000_000;
+
+/// Highest standard-rate input range supported by provider-exact reservation.
+///
+/// Long-context pricing needs a separate representable schedule tier before a
+/// catalog entry may raise this bound.
+pub const MAX_AGENT_PROVIDER_EXACT_COUNTED_INPUT_TOKENS: u64 = 272_000;
 
 /// Hard ceiling for one token-class rate in micro-USD per million tokens.
 ///
@@ -347,7 +354,30 @@ impl AgentProviderPricingSchedule {
     ) -> Result<AgentProviderCallConfig, super::AgentProviderContractError> {
         AgentProviderCallConfig::from_catalog(
             Arc::clone(&self.binding),
-            fixed_input_tokens,
+            AgentProviderInputAccountingMode::ExactLocal { fixed_input_tokens },
+            max_output_tokens,
+            stream,
+        )
+    }
+
+    /// Derives an OpenAI call that must be provider-counted before generation.
+    ///
+    /// The trusted schedule must remain entirely within the standard pricing
+    /// range. No placeholder local token count is manufactured.
+    pub fn try_provider_exact_call_config(
+        &self,
+        max_output_tokens: u32,
+        stream: super::AgentProviderStreamBudget,
+    ) -> Result<AgentProviderCallConfig, super::AgentProviderContractError> {
+        if self.provider() != AgentProviderKind::OpenAiResponses
+            || self.response_route() != AgentProviderResponseRoute::OpenAiDefault
+            || self.profile().max_input_tokens() > MAX_AGENT_PROVIDER_EXACT_COUNTED_INPUT_TOKENS
+        {
+            return Err(super::AgentProviderContractError::InputAccountingMode);
+        }
+        AgentProviderCallConfig::from_catalog(
+            Arc::clone(&self.binding),
+            AgentProviderInputAccountingMode::ProviderExactAfterConservativeReservation,
             max_output_tokens,
             stream,
         )
@@ -756,6 +786,55 @@ mod tests {
         schedule
             .try_call_config(32, 64, AgentProviderStreamBudget::STANDARD)
             .expect("config")
+    }
+
+    #[test]
+    fn provider_exact_config_is_schedule_bound_openai_only_and_has_no_token_sentinel() {
+        let openai = provider_schedule(
+            AgentProviderKind::OpenAiResponses,
+            "gpt-fixed",
+            MAX_AGENT_PROVIDER_EXACT_COUNTED_INPUT_TOKENS,
+            rates(),
+        );
+        let provider_exact = openai
+            .try_provider_exact_call_config(64, AgentProviderStreamBudget::STANDARD)
+            .expect("provider-exact config");
+        assert_eq!(
+            provider_exact.input_accounting_mode(),
+            AgentProviderInputAccountingMode::ProviderExactAfterConservativeReservation
+        );
+        assert_eq!(provider_exact.accounting_guard(), openai.accounting_guard());
+
+        let exact = call_config(&openai);
+        assert_eq!(
+            exact.input_accounting_mode(),
+            AgentProviderInputAccountingMode::ExactLocal {
+                fixed_input_tokens: 32
+            }
+        );
+        assert_ne!(provider_exact, exact);
+
+        let anthropic = provider_schedule(
+            AgentProviderKind::AnthropicMessages,
+            "claude-fixed",
+            100,
+            rates(),
+        );
+        assert!(matches!(
+            anthropic.try_provider_exact_call_config(64, AgentProviderStreamBudget::STANDARD),
+            Err(super::super::AgentProviderContractError::InputAccountingMode)
+        ));
+
+        let long_context = provider_schedule(
+            AgentProviderKind::OpenAiResponses,
+            "gpt-fixed",
+            MAX_AGENT_PROVIDER_EXACT_COUNTED_INPUT_TOKENS + 1,
+            rates(),
+        );
+        assert!(matches!(
+            long_context.try_provider_exact_call_config(64, AgentProviderStreamBudget::STANDARD),
+            Err(super::super::AgentProviderContractError::InputAccountingMode)
+        ));
     }
 
     fn response_identity(config: &AgentProviderCallConfig) -> AgentProviderResponseIdentity {

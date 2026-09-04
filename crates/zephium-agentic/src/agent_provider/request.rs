@@ -20,6 +20,7 @@ use crate::agent_policy::{AgentModelCallExpectation, AgentProviderExtractionInpu
 use crate::semantic_diff_model::SemanticDiffDeliveryAuthority;
 use crate::semantic_extract_model::SemanticExtractionDeliveryAuthority;
 use crate::semantic_locate_model::SemanticLocateDeliveryAuthority;
+use crate::semantic_model::conservative_utf8_measurement;
 use crate::semantic_wire::looks_like_secret_value;
 use crate::{
     AgentActiveModelCall, AgentModelCallAdmission, AgentModelCallRequest,
@@ -122,15 +123,7 @@ impl AgentProviderObjective {
         counter: &dyn SemanticTokenCounter,
         expected_revision: &SemanticTokenizerRevision,
     ) -> Result<Self, AgentProviderObjectiveError> {
-        if content.is_empty()
-            || content.len() > MAX_AGENT_PROVIDER_OBJECTIVE_BYTES
-            || content.chars().any(invalid_provider_text_character)
-        {
-            return Err(AgentProviderObjectiveError::Content);
-        }
-        if looks_like_secret_value(&content) {
-            return Err(AgentProviderObjectiveError::Secret);
-        }
+        validate_objective_content(&content)?;
         let measurement = counter
             .count_tokens(&content)
             .map_err(AgentProviderObjectiveError::TokenCounter)?;
@@ -143,6 +136,27 @@ impl AgentProviderObjective {
         ) {
             return Err(AgentProviderObjectiveError::TokenQuality);
         }
+        if measurement.tokens() > MAX_AGENT_PROVIDER_OBJECTIVE_TOKENS {
+            return Err(AgentProviderObjectiveError::TokenLimit);
+        }
+        Ok(Self {
+            content: Arc::from(content),
+            measurement,
+        })
+    }
+
+    /// Admits UTF-8 bytes as a conservative bound for provider-exact counting.
+    ///
+    /// This never claims local tokenizer exactness. The complete immutable
+    /// OpenAI request must later receive an authenticated exact count before
+    /// model generation.
+    pub fn try_admit_conservative_utf8(
+        content: String,
+        counting_revision: &SemanticTokenizerRevision,
+    ) -> Result<Self, AgentProviderObjectiveError> {
+        validate_objective_content(&content)?;
+        let measurement = conservative_utf8_measurement(&content, counting_revision)
+            .map_err(|_| AgentProviderObjectiveError::TokenLimit)?;
         if measurement.tokens() > MAX_AGENT_PROVIDER_OBJECTIVE_TOKENS {
             return Err(AgentProviderObjectiveError::TokenLimit);
         }
@@ -169,6 +183,19 @@ impl AgentProviderObjective {
     fn shared_content(&self) -> Arc<str> {
         self.content.clone()
     }
+}
+
+fn validate_objective_content(content: &str) -> Result<(), AgentProviderObjectiveError> {
+    if content.is_empty()
+        || content.len() > MAX_AGENT_PROVIDER_OBJECTIVE_BYTES
+        || content.chars().any(invalid_provider_text_character)
+    {
+        return Err(AgentProviderObjectiveError::Content);
+    }
+    if looks_like_secret_value(content) {
+        return Err(AgentProviderObjectiveError::Secret);
+    }
+    Ok(())
 }
 
 impl fmt::Debug for AgentProviderObjective {
@@ -472,9 +499,14 @@ impl AgentProviderExactInputCount {
         projection: AgentProviderInputTokenBinding,
         tokens: u32,
     ) -> Result<Self, AgentProviderRequestError> {
+        let pricing_profile = request.config().pricing_profile();
         if request.endpoint() != AgentProviderEndpoint::OpenAiResponses
+            || request.config().input_accounting_mode()
+                != super::AgentProviderInputAccountingMode::ProviderExactAfterConservativeReservation
             || projection.call != request.call()
             || projection.request != request.digest()
+            || u64::from(tokens) < pricing_profile.min_input_tokens()
+            || u64::from(tokens) > pricing_profile.max_input_tokens()
         {
             return Err(AgentProviderRequestError::ProviderInputCount);
         }
@@ -624,10 +656,12 @@ impl AgentProviderInputTokenCount {
 ///
 /// `semantic_payload_tokens` measures only the newest compact semantic
 /// projection. `structured_input_tokens` measures the complete provider replay
-/// and envelope when an exact local structured-input counter ran. Initial
-/// stateless requests have no such whole-request count, while screenshots have
-/// no text-semantic payload count. Absence is preserved as `None` and is never
-/// estimated from serialized byte length.
+/// and envelope. It is either exact from a pinned local counter, or a
+/// conservative UTF-8 byte reservation that transport may replace with an
+/// authenticated provider-exact count. Exact-local initial stateless requests
+/// have no separate whole-request count, while screenshots have no text-
+/// semantic payload count. Absence is preserved as `None`; serialized bytes are
+/// never labeled exact tokens.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AgentProviderInputMetrics {
     serialized_request_bytes: u32,
@@ -672,6 +706,40 @@ impl AgentProviderInputMetrics {
         self.structured_input_tokens
     }
 
+    /// Whether all token accounting carried by this sample is final already.
+    ///
+    /// A conservative whole-request measurement is intentionally provisional:
+    /// it cannot produce a recordable receipt while provider-exact counting is
+    /// still possible. Once the attempt terminates, transport explicitly seals
+    /// that same conservative disclosure as final failure accounting.
+    fn accounting_is_final(self) -> bool {
+        match (self.semantic_payload_tokens, self.structured_input_tokens) {
+            (_, Some(count))
+                if matches!(
+                    count.quality(),
+                    SemanticTokenCountQuality::Conservative
+                        | SemanticTokenCountQuality::ProviderEstimate
+                ) =>
+            {
+                false
+            }
+            (semantic, Some(structured)) => semantic.is_none_or(|count| {
+                count.quality() != SemanticTokenCountQuality::ProviderEstimate
+                    && (structured.quality() != SemanticTokenCountQuality::ExactLocal
+                        || matches!(
+                            count.quality(),
+                            SemanticTokenCountQuality::ExactLocal
+                                | SemanticTokenCountQuality::ProviderExact
+                        ))
+            }),
+            (Some(count), None) => matches!(
+                count.quality(),
+                SemanticTokenCountQuality::ExactLocal | SemanticTokenCountQuality::ProviderExact
+            ),
+            (None, None) => false,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) const fn for_reducer_test(
         serialized_request_bytes: u32,
@@ -694,7 +762,7 @@ impl AgentProviderInputMetrics {
     }
 }
 
-/// Copyable content-free proof of one exact committed provider input sample.
+/// Copyable content-free proof of one finalized committed provider input sample.
 ///
 /// The private manifest-revision guard prevents a reused public run identity
 /// from accepting a sample from a different canonical scope. This receipt has
@@ -741,7 +809,7 @@ impl AgentProviderInputMetricReceipt {
         self.node
     }
 
-    /// Fixed content-free input metrics committed with this call.
+    /// Fixed content-free input metrics finalized for this call.
     pub const fn metrics(self) -> AgentProviderInputMetrics {
         self.metrics
     }
@@ -902,8 +970,25 @@ impl AgentCommittedProviderInput {
         self.metrics
     }
 
-    /// Copyable exact identity and metrics proof for run-local qualification.
-    pub fn metric_receipt(&self) -> AgentProviderInputMetricReceipt {
+    /// Copyable identity and finalized metrics proof for run-local qualification.
+    ///
+    /// Returns `None` while a provider-exact call carries only its conservative
+    /// pre-count reservation. This prevents a stale sample from consuming the
+    /// call identity in the replay-protected reducer before the authenticated
+    /// count can replace it. Terminal transport failure separately finalizes
+    /// that conservative disclosure because no later count can exist.
+    pub fn metric_receipt(&self) -> Option<AgentProviderInputMetricReceipt> {
+        self.metrics
+            .accounting_is_final()
+            .then(|| AgentProviderInputMetricReceipt::from_committed(self))
+    }
+
+    /// Seals the current committed metric sample at an irreversible terminal.
+    ///
+    /// This is crate-private because only the transport terminal owns proof
+    /// that a provisional provider-exact count can no longer arrive.
+    #[cfg(feature = "provider-transport")]
+    pub(crate) fn sealed_metric_receipt(&self) -> AgentProviderInputMetricReceipt {
         AgentProviderInputMetricReceipt::from_committed(self)
     }
 
@@ -920,7 +1005,7 @@ impl AgentCommittedProviderInput {
         (self.active, self.evidence)
     }
 
-    #[cfg(feature = "provider-transport")]
+    #[cfg(any(test, feature = "provider-transport"))]
     fn bind_provider_exact_input_count(
         &mut self,
         count: &AgentProviderExactInputCount,
@@ -1299,22 +1384,33 @@ impl AgentCommittedProviderRequest {
         self.input.metrics()
     }
 
-    /// Copyable exact identity and metrics proof for run-local qualification.
-    pub fn input_metric_receipt(&self) -> AgentProviderInputMetricReceipt {
+    /// Copyable identity and metrics only when input accounting is final.
+    pub fn input_metric_receipt(&self) -> Option<AgentProviderInputMetricReceipt> {
         self.input.metric_receipt()
+    }
+
+    /// Final content-free receipt sealed by a transport terminal.
+    #[cfg(feature = "provider-transport")]
+    pub(crate) fn sealed_input_metric_receipt(&self) -> AgentProviderInputMetricReceipt {
+        self.input.sealed_metric_receipt()
     }
 
     /// Attaches an authenticated provider-exact count to this exact request.
     ///
     /// The count must match the immutable call, request digest, tokenizer, and
-    /// original policy reservation. An existing exact-local count must agree;
-    /// disagreement is a version/integration failure rather than a metric
-    /// overwrite.
-    #[cfg(feature = "provider-transport")]
+    /// original conservative policy reservation. A previously authenticated
+    /// exact count must agree; disagreement is a version/integration failure
+    /// rather than a metric overwrite.
+    #[cfg(any(test, feature = "provider-transport"))]
     pub fn bind_provider_exact_input_count(
         &mut self,
         count: AgentProviderExactInputCount,
     ) -> Result<(), AgentProviderRequestError> {
+        if self.request.config().input_accounting_mode()
+            != super::AgentProviderInputAccountingMode::ProviderExactAfterConservativeReservation
+        {
+            return Err(AgentProviderRequestError::ProviderInputCountMismatch);
+        }
         let projection = self.request.openai_input_token_request()?;
         if count.call != self.request.call()
             || count.request != self.request.digest()
@@ -1372,6 +1468,7 @@ pub struct AgentPreparedObservationRequest {
     delivery: crate::semantic_model::SemanticObservationDeliveryAuthority,
     semantic_stats: SemanticEncodingStats,
     semantic_payload_tokens: AgentProviderInputTokenCount,
+    structured_input_tokens: Option<AgentProviderInputTokenCount>,
     continuation_transcript: Option<AgentProviderTranscript>,
 }
 
@@ -1415,6 +1512,60 @@ impl AgentPreparedObservationRequest {
             delivery,
             semantic_stats,
             semantic_payload_tokens,
+            structured_input_tokens: None,
+            continuation_transcript,
+        })
+    }
+
+    /// Builds and conservatively reserves an OpenAI observation for exact counting.
+    ///
+    /// UTF-8 byte lengths are upper bounds only. Neither the semantic payload
+    /// nor objective is represented as exact tokenizer output, and model
+    /// generation remains unavailable until the authenticated full-request
+    /// count replaces the conservative structured measurement.
+    pub fn try_openai_for_provider_exact_count(
+        policy: &mut AgentRunPolicy,
+        call_request: AgentModelCallRequest,
+        observation: &SemanticObservation,
+        payload: SemanticModelPayload,
+        objective: &AgentProviderObjective,
+        config: AgentProviderCallConfig,
+    ) -> Result<Self, AgentProviderRequestError> {
+        let semantic_payload_tokens =
+            AgentProviderInputTokenCount::from_measurement(payload.token_measurement());
+        let body = encode_openai_body(&config, objective.as_str(), payload.as_str())?;
+        let structured_input = conservative_request_measurement(&config, &body)?;
+        config.validate_provider_exact_initial_request(
+            call_request,
+            payload.token_measurement(),
+            objective.token_measurement(),
+            &structured_input,
+        )?;
+        let admission = policy.prepare_provider_observation_input(
+            call_request,
+            observation,
+            &payload,
+            u64::from(structured_input.tokens()),
+        )?;
+        let call = AgentProviderCallIdentity::from_admission(&admission);
+        let (semantic_content, semantic_stats, delivery) = payload.into_provider_parts();
+        let continuation_transcript =
+            AgentProviderTranscript::try_initial(objective.shared_content(), semantic_content);
+        let request = AgentProviderRequest {
+            call,
+            config,
+            endpoint: AgentProviderEndpoint::OpenAiResponses,
+            body,
+        };
+        Ok(Self {
+            request,
+            admission,
+            delivery,
+            semantic_stats,
+            semantic_payload_tokens,
+            structured_input_tokens: Some(AgentProviderInputTokenCount::from_measurement(
+                &structured_input,
+            )),
             continuation_transcript,
         })
     }
@@ -1458,6 +1609,7 @@ impl AgentPreparedObservationRequest {
             delivery,
             semantic_stats,
             semantic_payload_tokens,
+            structured_input_tokens: None,
             continuation_transcript,
         })
     }
@@ -1478,7 +1630,7 @@ impl AgentPreparedObservationRequest {
             &self.request,
             AgentProviderSemanticInputStats::Observation(self.semantic_stats),
             Some(self.semantic_payload_tokens),
-            None,
+            self.structured_input_tokens,
         );
         AgentProviderTransportInput {
             request: self.request,
@@ -1510,6 +1662,7 @@ impl fmt::Debug for AgentPreparedObservationRequest {
             .field("admission", &self.admission)
             .field("semantic_stats", &self.semantic_stats)
             .field("semantic_payload_tokens", &self.semantic_payload_tokens)
+            .field("structured_input_tokens", &self.structured_input_tokens)
             .field("delivery", &"[redacted]")
             .field(
                 "continuation_transcript",
@@ -1788,7 +1941,7 @@ impl AgentProviderDiffRequestDraft {
         diff: &SemanticDiff,
     ) -> Result<AgentPreparedDiffRequest, AgentProviderRequestError> {
         let structured_input = provider_count_preflight(
-            self.request.config(),
+            &self.request,
             call_request,
             Some(self.delivery.token_measurement()),
         )?;
@@ -2040,7 +2193,7 @@ impl AgentProviderReadContinuationRequestDraft {
         read: &SemanticReadResult<'_>,
     ) -> Result<AgentPreparedReadContinuationRequest, AgentProviderRequestError> {
         let structured_input = provider_count_preflight(
-            self.request.config(),
+            &self.request,
             call_request,
             Some(self.delivery.token_measurement()),
         )?;
@@ -2311,7 +2464,7 @@ impl AgentProviderExtractionRequestDraft {
             return Err(AgentProviderRequestError::Encoding);
         }
         let structured_input = provider_count_preflight(
-            self.request.config(),
+            &self.request,
             call_request,
             Some(self.delivery.token_measurement()),
         )?;
@@ -2573,7 +2726,7 @@ impl AgentProviderLocateRequestDraft {
         result: &SemanticLocateResult,
     ) -> Result<AgentPreparedLocateRequest, AgentProviderRequestError> {
         let structured_input = provider_count_preflight(
-            self.request.config(),
+            &self.request,
             call_request,
             Some(self.delivery.token_measurement()),
         )?;
@@ -2701,8 +2854,8 @@ impl fmt::Debug for AgentPreparedLocateRequest {
 ///
 /// The canonical PNG is base64-encoded only into the bounded immutable request
 /// body and is not retained in a reusable transcript. This move-only draft has
-/// no policy or transport authority until exact local structured-input counting
-/// and visual source admission both succeed.
+/// no policy or transport authority until visual source admission and either
+/// trusted local exact counting or conservative provider-exact preflight succeed.
 #[must_use]
 pub struct AgentProviderScreenshotRequestDraft {
     request: AgentProviderRequest,
@@ -2750,7 +2903,7 @@ impl AgentProviderScreenshotRequestDraft {
         })
     }
 
-    /// Immutable provider body available only to a trusted local counter.
+    /// Immutable provider body available to trusted accounting preflight only.
     pub const fn request(&self) -> &AgentProviderRequest {
         &self.request
     }
@@ -2824,7 +2977,7 @@ impl AgentProviderScreenshotRequestDraft {
         call_request: AgentModelCallRequest,
         observation: &SemanticObservation,
     ) -> Result<AgentPreparedScreenshotRequest, AgentProviderRequestError> {
-        let structured_input = provider_count_preflight(self.request.config(), call_request, None)?;
+        let structured_input = provider_count_preflight(&self.request, call_request, None)?;
         let call = self.request.call();
         let admission = policy.prepare_provider_screenshot_input(
             call_request,
@@ -4541,31 +4694,30 @@ fn invalid_provider_text_character(character: char) -> bool {
 }
 
 fn provider_count_preflight(
-    config: &AgentProviderCallConfig,
+    provider_request: &AgentProviderRequest,
     request: AgentModelCallRequest,
     newest_semantic: Option<&SemanticTokenMeasurement>,
 ) -> Result<SemanticTokenMeasurement, AgentProviderRequestError> {
-    if config.provider() != AgentProviderKind::OpenAiResponses
-        || newest_semantic.is_some_and(|measurement| measurement.revision() != config.tokenizer())
-        || u64::from(config.fixed_input_tokens())
-            > u64::from(request.budget().additional_input_tokens())
-        || u64::from(config.max_output_tokens()) > u64::from(request.budget().output_tokens())
-    {
-        return Err(AgentProviderContractError::AdmissionBudget.into());
+    if provider_request.endpoint() != AgentProviderEndpoint::OpenAiResponses {
+        return Err(AgentProviderContractError::InputAccountingMode.into());
     }
-    let semantic_tokens =
-        newest_semantic.map_or(0_u64, |measurement| u64::from(measurement.tokens()));
-    let reserved = semantic_tokens
-        .checked_add(u64::from(request.budget().additional_input_tokens()))
-        .ok_or(AgentProviderContractError::AdmissionBudget)?;
-    if reserved == 0 || reserved > config.pricing_profile().max_input_tokens() {
-        return Err(AgentProviderContractError::AdmissionBudget.into());
-    }
-    let tokens =
-        u32::try_from(reserved).map_err(|_| AgentProviderContractError::AdmissionBudget)?;
+    let structured =
+        conservative_request_measurement(provider_request.config(), provider_request.body())?;
+    provider_request
+        .config()
+        .validate_provider_exact_continuation_request(request, newest_semantic, &structured)?;
+    Ok(structured)
+}
+
+fn conservative_request_measurement(
+    config: &AgentProviderCallConfig,
+    body: &[u8],
+) -> Result<SemanticTokenMeasurement, AgentProviderRequestError> {
+    let bytes =
+        u32::try_from(body.len()).map_err(|_| AgentProviderContractError::AdmissionBudget)?;
     SemanticTokenMeasurement::try_new(
         config.tokenizer().clone(),
-        tokens,
+        bytes,
         SemanticTokenCountQuality::Conservative,
     )
     .map_err(|_| AgentProviderContractError::AdmissionBudget.into())
@@ -4708,6 +4860,36 @@ mod tests {
                     tokens: MAX_AGENT_PROVIDER_OBJECTIVE_TOKENS + 1,
                     quality: SemanticTokenCountQuality::ExactLocal,
                 },
+                &selected,
+            ),
+            Err(AgentProviderObjectiveError::TokenLimit)
+        ));
+
+        for content in ["ascii objective", "zażółć"] {
+            let objective =
+                AgentProviderObjective::try_admit_conservative_utf8(content.to_owned(), &selected)
+                    .expect("conservative objective");
+            assert_eq!(
+                objective.token_measurement().tokens(),
+                u32::try_from(content.len()).expect("bounded bytes")
+            );
+            assert_eq!(
+                objective.token_measurement().quality(),
+                SemanticTokenCountQuality::Conservative
+            );
+            assert_eq!(objective.token_measurement().revision(), &selected);
+            assert!(!format!("{objective:?}").contains(content));
+        }
+        assert!(matches!(
+            AgentProviderObjective::try_admit_conservative_utf8(
+                "use ghp_abcdefghijklmnop".to_owned(),
+                &selected,
+            ),
+            Err(AgentProviderObjectiveError::Secret)
+        ));
+        assert!(matches!(
+            AgentProviderObjective::try_admit_conservative_utf8(
+                "x".repeat(MAX_AGENT_PROVIDER_OBJECTIVE_TOKENS as usize + 1),
                 &selected,
             ),
             Err(AgentProviderObjectiveError::TokenLimit)

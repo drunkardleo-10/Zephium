@@ -396,7 +396,8 @@ tokens. Only an exact prior tool-only `locate` stop may bind it to a strictly
 newer same-plan call. OpenAI and Anthropic receive their matching fixed
 function/tool result through the bounded stateless transcript; the complete
 immutable body must pass the pinned local whole-input counter before policy
-reservation. Policy rejoins the exact committed observation cohort and proves
+reservation, or use the OpenAI-only provider-exact path described below. Policy
+rejoins the exact committed observation cohort and proves
 every returned reference was already disclosed. Committing delivery therefore
 adds no origin, account, sensitivity, trust, or reference taint; it returns a
 content-free receipt and retains the same observation acknowledgement for a
@@ -406,11 +407,15 @@ carry bounded page strings. A read result records the exact full-observation
 fingerprint in addition to its context, generation, capture time, provenance,
 omissions, and content guard. Only the matching prior tool-only `read` stop may
 bind its token-admitted `ZREAD2` bytes to a newer same-plan call. The full
-OpenAI or Anthropic replay must receive an `ExactLocal` latest-result count and
-whole-input count before policy mutation; provider-backed counting is rejected
-because it would itself disclose the result. Policy proves the exact committed
-baseline cohort and every returned reference/origin, then reuses that cohort
-unchanged. This admits truthful empty reads, preserves the conservative prior
+OpenAI or Anthropic replay must retain the exact semantic-delivery revision.
+The exact-local path requires an exact (`ExactLocal` or authenticated
+`ProviderExact`) latest-result measurement and an `ExactLocal` whole-input
+count before policy mutation. The OpenAI-only provider-exact path instead
+reserves the already-serialized complete replay by its UTF-8 byte length before
+the authenticated count request; an Anthropic provider estimate is never
+accepted as exact admission. Policy proves the exact committed baseline cohort
+and every returned reference/origin, then reuses that cohort unchanged. This
+admits truthful empty reads, preserves the conservative prior
 sensitivity and trust, and adds no origin, account, reference, or taint-cohort
 growth. Its delivery receipt remains deliberately weaker than an observation
 acknowledgement; the move-only bound request carries the prior acknowledgement
@@ -427,10 +432,11 @@ trusted schema ID may bind a strictly newer same-plan call. Deterministic
 `ZEXTRACT1` input carries trusted, closed schema field declarations followed by
 the exact hostile `ZREAD2` evidence; one guard binds the full schema definition,
 read, observation fingerprint, context, generation, and capture time. The
-complete immutable replay must receive an `ExactLocal` provider/model/tokenizer
-count before policy reserves it, then policy rejoins the unchanged committed
-baseline taint without adding origins, references, authority, or a new
-observation acknowledgement.
+complete immutable replay must either receive an `ExactLocal` pinned
+provider/model/tokenizer count, or enter the OpenAI-only conservative-reserve
+then authenticated-exact-count path, before model generation. Policy rejoins
+the unchanged committed baseline taint without adding origins, references,
+authority, or a new observation acknowledgement.
 
 The mapping call exposes no browser tools. OpenAI uses strict Responses
 `text.format` JSON Schema and Anthropic uses stable Messages
@@ -814,6 +820,25 @@ stream, structured-output, tool-call, usage, cancellation, retry-after, and
 error contracts. Local and hosted transports attach later without changing the
 browser vocabulary.
 
+Input accounting is an explicit immutable call mode rather than an inferred
+provider default. `ExactLocal` requires pinned exact (`ExactLocal` or
+authenticated `ProviderExact`) semantic/objective measurements and an
+`ExactLocal` complete structured-request measurement before dispatch. The OpenAI Responses
+mode `ProviderExactAfterConservativeReservation` first encodes the immutable
+request, records the newest semantic projection as `Conservative`, and reserves
+the complete serialized request's UTF-8 byte length as a conservative input
+ceiling. Policy commits that already-authorized disclosure before transport
+sends the canonical token-relevant projection to `/v1/responses/input_tokens`.
+Only an authenticated `ProviderExact` count bound to the exact call, request
+digest, projection, counting-contract revision, pricing range, and original
+reservation can unlock generation. A count above the reservation, malformed or
+failed count response, cancellation, or protocol mismatch cannot dispatch the
+model request and settles exact-zero generation usage; the conservative policy
+ceiling remains held until terminal settlement. Provider-exact standard-rate
+calls are capped at 272,000 input tokens so a future long-context pricing tier
+cannot be charged under the wrong schedule. Anthropic remains exact-local until
+it offers a qualifying exact authenticated contract.
+
 The BYOK HTTPS shell uses private exact provider endpoints, provider-bound
 zeroizing credential owners, redirect refusal, identity-only response content
 encoding, bounded deadlines, and at most four simultaneous attempts. The sole
@@ -940,15 +965,14 @@ authority, and serialized-body byte accounting without initially holding policy
 or transport-commit authority. A synchronous provider-specific local counter
 may inspect only that exact fixed body and must return an `ExactLocal`
 measurement for the pinned model/tokenizer. JSON-byte tokenization is not a
-valid implementation. Provider-backed counting is intentionally rejected here:
-even OpenAI's exact counting endpoint would disclose page data and therefore
-needs its own future typed transport admission, while Anthropic documents its
-preflight count as an estimate. Once the exact local count fits the latest-diff
-plus additional-input authorization ceiling, fixed output bound, and pricing
-range, policy validates the exact diff, baseline taint, account/context, call,
-manifest, lease, and node before reserving the exact whole-input count rather
-than the larger authorization ceiling. The resulting prepared diff uses the
-same bounded transport as full observations and reads.
+valid implementation. Alternatively, an OpenAI provider-exact call reserves
+the complete already-serialized body by UTF-8 byte length, commits the same
+policy-authorized disclosure, and requires the exact bound count before
+generation. `ProviderEstimate` is rejected, and Anthropic has no provider-exact
+path. Both modes validate the semantic delivery revision, fixed output bound,
+pricing range, exact diff, baseline taint, account/context, call, manifest,
+lease, and node before transport can progress. The resulting prepared diff uses
+the same bounded transport as full observations and reads.
 
 Diff disclosure authority is split from the compact content before a provider
 request can retain it. The stateless draft keeps the redacted, content-free
@@ -957,8 +981,8 @@ counting grants no disclosure authority; successful policy admission joins the
 same authority to transport. Refusal or cancellation drops it, and only an
 exact transport commit mints the diff receipt, advances policy taint, and makes
 the current acknowledgement plus bounded transcript eligible for one later
-tool-only continuation. Until reviewed pinned local counters are installed for
-the proof models, production still falls back to a fresh full observation.
+tool-only continuation. Provider-exact counting changes accounting quality, not
+semantic authority or continuation eligibility.
 
 Viewport screenshots use a separate one-shot visual continuation. Only an
 exact prior `screenshot` tool-only stop can bind the canonical PNG, and it must
@@ -978,10 +1002,12 @@ not generic multimodal or computer-use bridges.
 The model-facing visual seam caps canonical PNG at 1,300,000 bytes and retained
 private text at 64 KiB inside the existing 2 MiB serialized request ceiling.
 Base64 is allocated once at checked exact capacity. The complete immutable
-multimodal body must receive an `ExactLocal` count from the pinned
-provider/model/tokenizer counter before policy reservation; a remote count
-would itself disclose the screenshot and is rejected. The fixed model
-instruction treats pixels as hostile page data and grants them no opaque
+multimodal body must either receive an `ExactLocal` count from the pinned
+provider/model/tokenizer counter or, for OpenAI only, fit the conservative
+whole-body reservation and authenticated provider-exact count sequence. The
+standard 272,000-input ceiling rejects oversized provider-exact image requests
+before dispatch rather than silently selecting long-context pricing. The fixed
+model instruction treats pixels as hostile page data and grants them no opaque
 reference or action authority. On exact transport commitment, every observed
 frame origin gains conservative `Sensitive` / `UntrustedPage` taint with zero
 references. Refusal or pre-commit cancellation releases the reservation, while
@@ -1260,12 +1286,22 @@ machine resource measures remain qualification-harness inputs. Committed
 provider input now carries a separate fixed, content-free qualification value
 with the exact serialized request bytes, the existing closed semantic or
 screenshot encoding stats, the newest semantic-payload token count when one
-exists, and the whole structured-replay count only when the trusted local
-counter actually ran. It is inaccessible before disclosure commit, capped at
-64 bytes, and owns no content, tokenizer label, sink, clock, task, or browser
-resource. That commit also mints an at-most-192-byte copyable metric receipt
+exists, and the whole structured-replay measurement when either the trusted
+local counter ran or the provider-exact path established its conservative
+reservation. The authenticated count replaces only that structured measurement
+with `ProviderExact`; it never relabels the semantic metric. It is inaccessible
+before disclosure commit, capped at 64 bytes, and owns no content, tokenizer
+label, sink, clock, task, or browser resource. An exact-local accounting-mode
+commit can mint an at-most-192-byte copyable metric receipt immediately even
+when an exact semantic measurement came from the provider. A provider-exact commit
+cannot: while its structured count remains `Conservative`, the public attempt
+returns no receipt, so a stale provisional sample cannot consume the call id in
+the replay-protected reducer. Authenticated counting exposes the updated
+`ProviderExact` receipt on the counted typestate and terminal result. If counting
+fails, the terminal result instead seals the original conservative disclosure as
+the one final receipt while generation usage remains exact zero. Every receipt is
 bound to the private canonical manifest revision, call, lease, and node. A
-separate optional run-local reducer consumes only those receipts, rejects
+separate optional run-local reducer consumes only final receipts, rejects
 revision/node mismatch, call replay, contradictory closed shapes, arithmetic
 overflow, and run or node operation-budget excess before logical mutation,
 then aggregates exact bytes, lines, source-shape/redaction counts, and measured

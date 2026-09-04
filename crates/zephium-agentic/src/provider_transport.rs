@@ -1156,6 +1156,7 @@ pub enum AgentProviderDisclosureStage {
 pub struct AgentProviderTransportResult {
     active: AgentActiveModelCall,
     config: AgentProviderCallConfig,
+    input_metric_receipt: AgentProviderInputMetricReceipt,
     outcome: AgentProviderTransportOutcomeOwned,
     disclosure_stage: AgentProviderDisclosureStage,
     continuation: Option<Box<AgentProviderContinuationSeed>>,
@@ -1175,6 +1176,15 @@ impl AgentProviderTransportResult {
     /// Exact provider, model, tokenizer, pricing, and response bounds for the call.
     pub const fn config(&self) -> &AgentProviderCallConfig {
         &self.config
+    }
+
+    /// Final content-free metrics for the input that crossed disclosure commit.
+    ///
+    /// Provider-exact success carries the authenticated `ProviderExact` whole-
+    /// request count. A count-phase terminal carries the original conservative
+    /// reservation, now final because the attempt can no longer reach Counted.
+    pub const fn input_metric_receipt(&self) -> AgentProviderInputMetricReceipt {
+        self.input_metric_receipt
     }
 
     /// Closed content-free terminal transport outcome.
@@ -1228,6 +1238,7 @@ impl AgentProviderTransportResult {
         let Self {
             active,
             config,
+            input_metric_receipt: _,
             outcome,
             disclosure_stage,
             continuation,
@@ -1304,6 +1315,7 @@ impl fmt::Debug for AgentProviderTransportResult {
             .debug_struct("AgentProviderTransportResult")
             .field("active", &self.active)
             .field("config", &self.config)
+            .field("input_metric_receipt", &self.input_metric_receipt)
             .field("outcome", &self.outcome())
             .field("usage", &self.usage_knowledge())
             .field("disclosure_stage", &self.disclosure_stage)
@@ -1486,6 +1498,11 @@ impl AgentProviderCountedAttempt {
         self.attempt.input_metrics()
     }
 
+    /// Final ProviderExact input metrics bound before generation dispatch.
+    pub fn input_metric_receipt(&self) -> AgentProviderInputMetricReceipt {
+        self.attempt.committed.sealed_input_metric_receipt()
+    }
+
     /// Cancels before generation while preserving count-disclosure evidence.
     pub fn cancel_without_model_dispatch(self) -> AgentProviderTransportResult {
         (*self.attempt).cancel_without_dispatch()
@@ -1530,8 +1547,12 @@ impl AgentProviderAttempt {
         self.committed.input_metrics()
     }
 
-    /// Copyable exact identity and metrics proof for run-local qualification.
-    pub fn input_metric_receipt(&self) -> AgentProviderInputMetricReceipt {
+    /// Final input metrics when no provider count can still replace them.
+    ///
+    /// Exact-local attempts return one receipt. Provider-exact pre-count
+    /// attempts return `None`; their receipt becomes available only through
+    /// [`AgentProviderCountedAttempt`] or a terminal transport result.
+    pub fn input_metric_receipt(&self) -> Option<AgentProviderInputMetricReceipt> {
         self.committed.input_metric_receipt()
     }
 
@@ -1552,6 +1573,8 @@ impl AgentProviderAttempt {
             );
         };
         if self.provider != AgentProviderKind::OpenAiResponses
+            || self.committed.request().config().input_accounting_mode()
+                != crate::AgentProviderInputAccountingMode::ProviderExactAfterConservativeReservation
             || self.cancellation.is_cancelled()
             || self.shutdown.is_cancelled()
             || Instant::now() >= self.deadline
@@ -1764,6 +1787,7 @@ impl AgentProviderAttempt {
     /// input projection, while policy taint remains committed from admission.
     pub fn cancel_without_dispatch(mut self) -> AgentProviderTransportResult {
         let slot = self.slot.take();
+        let input_metric_receipt = self.committed.sealed_input_metric_receipt();
         let (request, input, _) = (*self.committed).into_parts();
         let (active, _) = input.into_parts();
         let (_, config, _, _) = request.into_transport_parts();
@@ -1773,20 +1797,42 @@ impl AgentProviderAttempt {
             cancelled_failure(),
             self.prior_disclosure_stage,
             None,
+            input_metric_receipt,
             slot,
         )
     }
 
     /// Dispatches an Anthropic request without an OpenAI accounting phase.
     ///
-    /// OpenAI attempts cannot use this entry point; they become dispatchable
-    /// only through [`Self::count_openai_input_tokens`] and the returned
-    /// [`AgentProviderCountedAttempt`] typestate.
+    /// OpenAI attempts cannot use this entry point. Provider-exact OpenAI calls
+    /// become dispatchable only through [`Self::count_openai_input_tokens`] and
+    /// [`AgentProviderCountedAttempt`]; pinned exact-local OpenAI calls use
+    /// [`Self::execute_openai_exact_local`].
     pub async fn execute_anthropic<F>(self, consume: F) -> AgentProviderTransportResult
     where
         F: FnMut(AgentProviderStreamBatch) -> AgentProviderBatchDisposition,
     {
         if self.provider != AgentProviderKind::AnthropicMessages {
+            let disclosure_stage = self.prior_disclosure_stage;
+            return self.finish_without_model(protocol_failure(), disclosure_stage);
+        }
+        self.execute_model(consume).await
+    }
+
+    /// Dispatches an OpenAI request admitted by pinned exact-local accounting.
+    ///
+    /// Provider-exact attempts cannot use this path; they remain typestate-gated
+    /// behind the authenticated count phase.
+    pub async fn execute_openai_exact_local<F>(self, consume: F) -> AgentProviderTransportResult
+    where
+        F: FnMut(AgentProviderStreamBatch) -> AgentProviderBatchDisposition,
+    {
+        if self.provider != AgentProviderKind::OpenAiResponses
+            || !matches!(
+                self.committed.request().config().input_accounting_mode(),
+                crate::AgentProviderInputAccountingMode::ExactLocal { .. }
+            )
+        {
             let disclosure_stage = self.prior_disclosure_stage;
             return self.finish_without_model(protocol_failure(), disclosure_stage);
         }
@@ -1812,6 +1858,7 @@ impl AgentProviderAttempt {
     {
         let prior_disclosure_stage = self.prior_disclosure_stage;
         let slot = self.slot.take();
+        let input_metric_receipt = self.committed.sealed_input_metric_receipt();
         let (request, input, continuation) = (*self.committed).into_parts();
         let (active, _) = input.into_parts();
         let (call, config, endpoint_class, body) = request.into_transport_parts();
@@ -1824,6 +1871,7 @@ impl AgentProviderAttempt {
                 protocol_failure(),
                 prior_disclosure_stage,
                 continuation,
+                input_metric_receipt,
                 slot,
             );
         }
@@ -1834,6 +1882,7 @@ impl AgentProviderAttempt {
                 timeout_failure(),
                 prior_disclosure_stage,
                 continuation,
+                input_metric_receipt,
                 slot,
             );
         }
@@ -1848,6 +1897,7 @@ impl AgentProviderAttempt {
                 cancelled_failure(),
                 prior_disclosure_stage,
                 continuation,
+                input_metric_receipt,
                 slot,
             );
         }
@@ -1860,6 +1910,7 @@ impl AgentProviderAttempt {
                     protocol_failure(),
                     prior_disclosure_stage,
                     continuation,
+                    input_metric_receipt,
                     slot,
                 );
             }
@@ -1873,6 +1924,7 @@ impl AgentProviderAttempt {
                     protocol_failure(),
                     prior_disclosure_stage,
                     continuation,
+                    input_metric_receipt,
                     slot,
                 );
             }
@@ -1891,6 +1943,7 @@ impl AgentProviderAttempt {
                 cancelled_failure(),
                 prior_disclosure_stage,
                 continuation,
+                input_metric_receipt,
                 slot,
             );
         }
@@ -1901,6 +1954,7 @@ impl AgentProviderAttempt {
                 timeout_failure(),
                 prior_disclosure_stage,
                 continuation,
+                input_metric_receipt,
                 slot,
             );
         }
@@ -1915,6 +1969,7 @@ impl AgentProviderAttempt {
                     cancelled_failure(),
                     AgentProviderDisclosureStage::ModelRequestMayHaveDispatched,
                     continuation,
+                    input_metric_receipt,
                     slot,
                 );
             }
@@ -1925,6 +1980,7 @@ impl AgentProviderAttempt {
                     cancelled_failure(),
                     AgentProviderDisclosureStage::ModelRequestMayHaveDispatched,
                     continuation,
+                    input_metric_receipt,
                     slot,
                 );
             }
@@ -1935,6 +1991,7 @@ impl AgentProviderAttempt {
                     timeout_failure(),
                     AgentProviderDisclosureStage::ModelRequestMayHaveDispatched,
                     continuation,
+                    input_metric_receipt,
                     slot,
                 );
             }
@@ -1950,6 +2007,7 @@ impl AgentProviderAttempt {
                     outcome,
                     AgentProviderDisclosureStage::ModelRequestMayHaveDispatched,
                     continuation,
+                    input_metric_receipt,
                     slot,
                 );
             }
@@ -1961,6 +2019,7 @@ impl AgentProviderAttempt {
                 protocol_failure(),
                 AgentProviderDisclosureStage::ModelRequestMayHaveDispatched,
                 continuation,
+                input_metric_receipt,
                 slot,
             );
         }
@@ -1971,6 +2030,7 @@ impl AgentProviderAttempt {
                 protocol_failure(),
                 AgentProviderDisclosureStage::ModelRequestMayHaveDispatched,
                 continuation,
+                input_metric_receipt,
                 slot,
             );
         }
@@ -1982,6 +2042,7 @@ impl AgentProviderAttempt {
                 AgentProviderTransportOutcomeOwned::Failed(failure),
                 AgentProviderDisclosureStage::ModelRequestMayHaveDispatched,
                 continuation,
+                input_metric_receipt,
                 slot,
             );
         }
@@ -1997,6 +2058,7 @@ impl AgentProviderAttempt {
                 protocol_failure(),
                 AgentProviderDisclosureStage::ModelRequestMayHaveDispatched,
                 continuation,
+                input_metric_receipt,
                 slot,
             );
         }
@@ -2012,6 +2074,7 @@ impl AgentProviderAttempt {
                         cancelled_failure(),
                         AgentProviderDisclosureStage::ModelRequestMayHaveDispatched,
                         continuation,
+                        input_metric_receipt,
                         slot,
                     );
                 }
@@ -2022,6 +2085,7 @@ impl AgentProviderAttempt {
                         cancelled_failure(),
                         AgentProviderDisclosureStage::ModelRequestMayHaveDispatched,
                         continuation,
+                        input_metric_receipt,
                         slot,
                     );
                 }
@@ -2032,6 +2096,7 @@ impl AgentProviderAttempt {
                         timeout_failure(),
                         AgentProviderDisclosureStage::ModelRequestMayHaveDispatched,
                         continuation,
+                        input_metric_receipt,
                         slot,
                     );
                 }
@@ -2048,6 +2113,7 @@ impl AgentProviderAttempt {
                         outcome,
                         AgentProviderDisclosureStage::ModelRequestMayHaveDispatched,
                         continuation,
+                        input_metric_receipt,
                         slot,
                     );
                 }
@@ -2061,6 +2127,7 @@ impl AgentProviderAttempt {
                         protocol_failure(),
                         AgentProviderDisclosureStage::ModelRequestMayHaveDispatched,
                         continuation,
+                        input_metric_receipt,
                         slot,
                     );
                 }
@@ -2080,6 +2147,7 @@ impl AgentProviderAttempt {
                             integration_failure(),
                             AgentProviderDisclosureStage::ModelRequestMayHaveDispatched,
                             continuation,
+                            input_metric_receipt,
                             slot,
                         );
                     }
@@ -2092,6 +2160,7 @@ impl AgentProviderAttempt {
                     cancelled_failure(),
                     AgentProviderDisclosureStage::ModelRequestMayHaveDispatched,
                     continuation,
+                    input_metric_receipt,
                     slot,
                 );
             }
@@ -2112,6 +2181,7 @@ impl AgentProviderAttempt {
             outcome,
             AgentProviderDisclosureStage::ModelRequestMayHaveDispatched,
             continuation,
+            input_metric_receipt,
             slot,
         )
     }
@@ -2122,6 +2192,7 @@ impl AgentProviderAttempt {
         disclosure_stage: AgentProviderDisclosureStage,
     ) -> AgentProviderTransportResult {
         let slot = self.slot.take();
+        let input_metric_receipt = self.committed.sealed_input_metric_receipt();
         let (request, input, continuation) = (*self.committed).into_parts();
         let (active, _) = input.into_parts();
         let (_, config, _, _) = request.into_transport_parts();
@@ -2131,6 +2202,7 @@ impl AgentProviderAttempt {
             outcome,
             disclosure_stage,
             continuation,
+            input_metric_receipt,
             slot,
         )
     }
@@ -2210,6 +2282,7 @@ fn finish_attempt(
     mut outcome: AgentProviderTransportOutcomeOwned,
     mut disclosure_stage: AgentProviderDisclosureStage,
     mut continuation: Option<AgentProviderContinuationSeed>,
+    input_metric_receipt: AgentProviderInputMetricReceipt,
     mut slot: Option<AgentProviderSlot>,
 ) -> AgentProviderTransportResult {
     if let AgentProviderTransportOutcomeOwned::Stream(finished) = &outcome {
@@ -2241,6 +2314,7 @@ fn finish_attempt(
     AgentProviderTransportResult {
         active,
         config,
+        input_metric_receipt,
         outcome,
         disclosure_stage,
         continuation: continuation.map(Box::new),
@@ -2465,28 +2539,31 @@ mod tests {
         compute_semantic_diff, decode_semantic_snapshot, encode_semantic_diff,
         encode_semantic_extraction_request, encode_semantic_observation, read_semantic_observation,
         AgentAccountAttestationId, AgentAccountScope, AgentBrowserToolKind,
-        AgentContextAccountBinding, AgentEffectScope, AgentModelCallBudget, AgentModelCallId,
-        AgentModelCallRequest, AgentModelCallSettlement, AgentPlanLeaseBinding, AgentPlanLeaseId,
-        AgentPlanNodeAuthority, AgentPlanNodeId, AgentPlanNodeScope, AgentPolicyInstant,
-        AgentPreparedObservationRequest, AgentProviderCallConfig, AgentProviderDiffRequestDraft,
-        AgentProviderExtractionRequestDraft, AgentProviderLocalInputTokenCounter,
-        AgentProviderModelRevision, AgentProviderObjective, AgentProviderPricingContractError,
-        AgentProviderPricingError, AgentProviderPricingProfile, AgentProviderPricingRevision,
-        AgentProviderPricingSchedule, AgentProviderReasoningEffort, AgentProviderResponseRoute,
-        AgentProviderRetryDisposition, AgentProviderSemanticInputStats, AgentProviderStopReason,
-        AgentProviderStreamBudget, AgentProviderTokenRates, AgentRunBudget, AgentRunManifest,
-        AgentRunManifestId, AgentRunScope, ContextCapabilities, ContextCapability, ContextId,
-        ContextIdentity, ContextKind, ContextOperationId, ContextRegistry, ContextRunId,
-        ContextSettlement, FrameGeneration, FrameId, SemanticCaptureInstant, SemanticDecodeContext,
-        SemanticDiffBudget, SemanticDiffOutcome, SemanticEffectClass,
-        SemanticExtractionFieldSchema, SemanticExtractionSchema, SemanticExtractionSchemaId,
-        SemanticFrameJoin, SemanticFrameTrust, SemanticInvocationId, SemanticModelEncodingBudget,
-        SemanticObservation, SemanticObservationAssembler, SemanticObservationBudget,
-        SemanticObservationId, SemanticObservationRequest, SemanticOrigin, SemanticReadAuthority,
-        SemanticReadBudget, SemanticReadSensitivityLimit, SemanticSensitivity,
-        SemanticSnapshotGeneration, SemanticTokenCountQuality, SemanticTokenCountRequirement,
-        SemanticTokenCounter, SemanticTokenCounterError, SemanticTokenMeasurement,
-        SemanticTokenizerRevision, MAX_AGENT_PROVIDER_REQUEST_BYTES, SEMANTIC_WIRE_VERSION,
+        AgentContextAccountBinding, AgentDelegationSpec, AgentDelegationTopology, AgentEffectScope,
+        AgentModelCallBudget, AgentModelCallId, AgentModelCallRequest, AgentModelCallSettlement,
+        AgentPlanLeaseBinding, AgentPlanLeaseId, AgentPlanNodeAuthority, AgentPlanNodeId,
+        AgentPlanNodeScope, AgentPolicyInstant, AgentPreparedObservationRequest,
+        AgentProviderCallConfig, AgentProviderDiffRequestDraft,
+        AgentProviderExtractionRequestDraft, AgentProviderInputKind,
+        AgentProviderLocalInputTokenCounter, AgentProviderModelRevision, AgentProviderObjective,
+        AgentProviderPricingContractError, AgentProviderPricingError, AgentProviderPricingProfile,
+        AgentProviderPricingRevision, AgentProviderPricingSchedule, AgentProviderReasoningEffort,
+        AgentProviderResponseRoute, AgentProviderRetryDisposition, AgentProviderSemanticInputStats,
+        AgentProviderStopReason, AgentProviderStreamBudget, AgentProviderTokenRates,
+        AgentRunBudget, AgentRunManifest, AgentRunManifestId, AgentRunProviderInputMetrics,
+        AgentRunScope, AgentRunSupervisor, AgentSupervisorId, ContextCapabilities,
+        ContextCapability, ContextId, ContextIdentity, ContextKind, ContextOperationId,
+        ContextRegistry, ContextRunId, ContextSettlement, FrameGeneration, FrameId,
+        SemanticCaptureInstant, SemanticDecodeContext, SemanticDiffBudget, SemanticDiffOutcome,
+        SemanticEffectClass, SemanticExtractionFieldSchema, SemanticExtractionSchema,
+        SemanticExtractionSchemaId, SemanticFrameJoin, SemanticFrameTrust, SemanticInvocationId,
+        SemanticModelEncodingBudget, SemanticObservation, SemanticObservationAssembler,
+        SemanticObservationBudget, SemanticObservationId, SemanticObservationRequest,
+        SemanticOrigin, SemanticReadAuthority, SemanticReadBudget, SemanticReadSensitivityLimit,
+        SemanticSensitivity, SemanticSnapshotGeneration, SemanticTokenCountQuality,
+        SemanticTokenCountRequirement, SemanticTokenCounter, SemanticTokenCounterError,
+        SemanticTokenMeasurement, SemanticTokenizerRevision, MAX_AGENT_PROVIDER_REQUEST_BYTES,
+        SEMANTIC_WIRE_VERSION,
     };
     use serde_json::json;
     use zephium_core::ids::ProfileId;
@@ -2583,6 +2660,41 @@ mod tests {
         (fixture.policy, fixture.input)
     }
 
+    fn provider_exact_fixture() -> (AgentRunPolicy, AgentProviderTransportInput) {
+        let fixture = stateful_provider_fixture_with_accounting(
+            AgentProviderKind::OpenAiResponses,
+            AgentProviderPricingProfile::try_new(
+                AgentProviderPricingRevision::new(1).expect("pricing revision"),
+                crate::MAX_AGENT_PROVIDER_EXACT_COUNTED_INPUT_TOKENS,
+            )
+            .expect("pricing profile"),
+            true,
+        );
+        (fixture.policy, fixture.input)
+    }
+
+    fn provider_input_metrics(
+        policy: &AgentRunPolicy,
+        supervisor_id: u64,
+    ) -> AgentRunProviderInputMetrics {
+        let topology = AgentDelegationTopology::try_new(
+            policy.manifest(),
+            policy
+                .manifest()
+                .plan_nodes()
+                .iter()
+                .map(|node| AgentDelegationSpec::new(node.id(), None))
+                .collect(),
+        )
+        .expect("provider metric topology");
+        let supervisor = AgentRunSupervisor::new(
+            AgentSupervisorId::new(supervisor_id).expect("provider metric supervisor"),
+            topology,
+        );
+        AgentRunProviderInputMetrics::try_new(policy.manifest(), &supervisor)
+            .expect("provider input metrics")
+    }
+
     fn stateful_provider_fixture(provider: AgentProviderKind) -> StatefulProviderFixture {
         stateful_provider_fixture_with_profile(
             provider,
@@ -2598,6 +2710,18 @@ mod tests {
         provider: AgentProviderKind,
         pricing_profile: AgentProviderPricingProfile,
     ) -> StatefulProviderFixture {
+        stateful_provider_fixture_with_accounting(provider, pricing_profile, false)
+    }
+
+    fn stateful_provider_fixture_with_accounting(
+        provider: AgentProviderKind,
+        pricing_profile: AgentProviderPricingProfile,
+        provider_exact: bool,
+    ) -> StatefulProviderFixture {
+        assert!(
+            !provider_exact || provider == AgentProviderKind::OpenAiResponses,
+            "provider-exact fixture is OpenAI-only"
+        );
         let run = ContextRunId::generate();
         let profile = ProfileId::generate();
         let identity =
@@ -2662,35 +2786,63 @@ mod tests {
         .expect("observation");
         let tokenizer =
             SemanticTokenizerRevision::try_new("transport-test-v1".to_owned()).expect("tokenizer");
-        let payload = encode_semantic_observation(
-            &observation,
-            SemanticModelEncodingBudget::try_new(
-                8_192,
-                1_000,
-                SemanticTokenCountRequirement::Exact,
+        let payload = if provider_exact {
+            encode_semantic_observation(
+                &observation,
+                SemanticModelEncodingBudget::INITIAL_CONSERVATIVE,
             )
-            .expect("encoding budget"),
-        )
-        .expect("encode")
-        .admit(
-            &FixedCounter {
-                revision: tokenizer.clone(),
-                tokens: 10,
-            },
-            &tokenizer,
-        )
-        .expect("payload");
-        let objective = AgentProviderObjective::try_admit(
-            "Summarize the synthetic marker".to_owned(),
-            &FixedCounter {
-                revision: tokenizer.clone(),
-                tokens: 3,
-            },
-            &tokenizer,
-        )
-        .expect("objective");
+            .expect("encode")
+            .admit_conservative_utf8(&tokenizer)
+            .expect("conservative payload")
+        } else {
+            encode_semantic_observation(
+                &observation,
+                SemanticModelEncodingBudget::try_new(
+                    8_192,
+                    1_000,
+                    SemanticTokenCountRequirement::Exact,
+                )
+                .expect("encoding budget"),
+            )
+            .expect("encode")
+            .admit(
+                &FixedCounter {
+                    revision: tokenizer.clone(),
+                    tokens: 10,
+                },
+                &tokenizer,
+            )
+            .expect("payload")
+        };
+        let objective = if provider_exact {
+            AgentProviderObjective::try_admit_conservative_utf8(
+                "Summarize the synthetic marker".to_owned(),
+                &tokenizer,
+            )
+            .expect("conservative objective")
+        } else {
+            AgentProviderObjective::try_admit(
+                "Summarize the synthetic marker".to_owned(),
+                &FixedCounter {
+                    revision: tokenizer.clone(),
+                    tokens: 3,
+                },
+                &tokenizer,
+            )
+            .expect("objective")
+        };
         let effects = AgentEffectScope::try_new(&[SemanticEffectClass::Read]).expect("effects");
-        let run_budget = AgentRunBudget::try_new(8, 1_000, 10_000, 1).expect("run budget");
+        let run_budget = AgentRunBudget::try_new(
+            8,
+            if provider_exact {
+                crate::MAX_AGENT_PROVIDER_EXACT_COUNTED_INPUT_TOKENS + 20
+            } else {
+                1_000
+            },
+            10_000,
+            1,
+        )
+        .expect("run budget");
         let scope = AgentRunScope::try_new(
             vec![profile],
             vec![AgentAccountScope::Anonymous],
@@ -2738,7 +2890,17 @@ mod tests {
             AgentModelCallId::new(1).expect("call"),
             lease,
             account,
-            AgentModelCallBudget::try_new(8, 20, 100).expect("model budget"),
+            AgentModelCallBudget::try_new(
+                if provider_exact {
+                    u32::try_from(crate::MAX_AGENT_PROVIDER_EXACT_COUNTED_INPUT_TOKENS)
+                        .expect("provider-exact fixture ceiling fits u32")
+                } else {
+                    8
+                },
+                20,
+                100,
+            )
+            .expect("model budget"),
             AgentPolicyInstant::from_millis(NOW),
         );
         let model = AgentProviderModelRevision::try_new(
@@ -2756,10 +2918,26 @@ mod tests {
         let schedule =
             fixture_pricing_schedule(provider, model, reasoning, tokenizer, pricing_profile)
                 .expect("provider schedule");
-        let config = schedule
-            .try_call_config(5, 20, AgentProviderStreamBudget::STANDARD)
-            .expect("provider config");
+        let config = if provider_exact {
+            schedule
+                .try_provider_exact_call_config(20, AgentProviderStreamBudget::STANDARD)
+                .expect("provider-exact config")
+        } else {
+            schedule
+                .try_call_config(5, 20, AgentProviderStreamBudget::STANDARD)
+                .expect("provider config")
+        };
         let prepared = match provider {
+            AgentProviderKind::OpenAiResponses if provider_exact => {
+                AgentPreparedObservationRequest::try_openai_for_provider_exact_count(
+                    &mut policy,
+                    request,
+                    &observation,
+                    payload,
+                    &objective,
+                    config.clone(),
+                )
+            }
             AgentProviderKind::OpenAiResponses => AgentPreparedObservationRequest::try_openai(
                 &mut policy,
                 request,
@@ -3736,7 +3914,9 @@ mod tests {
             "synthetic-openai-key".to_owned(),
         )
         .expect("credential");
-        let (mut policy, input) = provider_fixture(AgentProviderKind::OpenAiResponses);
+        let (mut policy, input) = provider_exact_fixture();
+        let mut input_reducer = provider_input_metrics(&policy, 41_001);
+        let reserved_before_count = policy.accounting().reserved_model_tokens();
         let attempt = transport
             .try_admit(
                 input,
@@ -3745,10 +3925,42 @@ mod tests {
                 AgentProviderCancellation::new(),
             )
             .expect("admission");
+        assert_eq!(
+            attempt.input_metric_receipt(),
+            None,
+            "provisional conservative accounting must not be recordable"
+        );
+        let admitted_call = attempt.call();
+        let admitted_metrics = attempt.input_metrics();
+        assert_eq!(
+            admitted_metrics
+                .semantic_payload_tokens()
+                .expect("semantic reservation")
+                .quality(),
+            SemanticTokenCountQuality::Conservative
+        );
+        let conservative_structured = admitted_metrics
+            .structured_input_tokens()
+            .expect("whole-request reservation");
+        assert_eq!(
+            conservative_structured.tokens(),
+            admitted_metrics.serialized_request_bytes()
+        );
+        assert_eq!(
+            conservative_structured.quality(),
+            SemanticTokenCountQuality::Conservative
+        );
         let counted = match attempt.count_openai_input_tokens().await {
             AgentProviderExactCountOutcome::Counted(counted) => counted,
             AgentProviderExactCountOutcome::Failed(_) => panic!("exact count expected"),
         };
+        let counted_metric_receipt = counted.input_metric_receipt();
+        assert_eq!(counted_metric_receipt.call(), admitted_call.call());
+        assert_eq!(counted_metric_receipt.metrics(), counted.input_metrics());
+        input_reducer
+            .record(counted_metric_receipt)
+            .expect("post-count ProviderExact metrics are recordable");
+        assert_eq!(input_reducer.snapshot().calls(), 1);
         assert_eq!(counted.count().measurement().tokens(), 17);
         assert_eq!(
             counted.count().measurement().quality(),
@@ -3763,11 +3975,25 @@ mod tests {
             structured.quality(),
             SemanticTokenCountQuality::ProviderExact
         );
+        assert_eq!(
+            counted
+                .input_metrics()
+                .semantic_payload_tokens()
+                .expect("semantic metric survives exact provider count")
+                .quality(),
+            SemanticTokenCountQuality::Conservative
+        );
+        assert_eq!(
+            policy.accounting().reserved_model_tokens(),
+            reserved_before_count,
+            "provider counting must retain the conservative policy ceiling"
+        );
         let debug = format!("{counted:?}");
         assert!(!debug.contains("synthetic-openai-key"));
         assert!(!debug.contains("synthetic fixture marker"));
 
         let result = counted.cancel_without_model_dispatch();
+        assert_eq!(result.input_metric_receipt(), counted_metric_receipt);
         assert_eq!(
             result.disclosure_stage(),
             AgentProviderDisclosureStage::InputTokenCountDisclosed
@@ -3835,7 +4061,7 @@ mod tests {
             "synthetic-openai-key".to_owned(),
         )
         .expect("credential");
-        let (mut policy, input) = provider_fixture(AgentProviderKind::OpenAiResponses);
+        let (mut policy, input) = provider_exact_fixture();
         let attempt = transport
             .try_admit(
                 input,
@@ -3902,7 +4128,8 @@ mod tests {
             "synthetic-openai-key".to_owned(),
         )
         .expect("credential");
-        let (mut policy, input) = provider_fixture(AgentProviderKind::OpenAiResponses);
+        let (mut policy, input) = provider_exact_fixture();
+        let mut input_reducer = provider_input_metrics(&policy, 41_002);
         let result = match transport
             .try_admit(
                 input,
@@ -3917,6 +4144,19 @@ mod tests {
             AgentProviderExactCountOutcome::Counted(_) => panic!("oversized response accepted"),
             AgentProviderExactCountOutcome::Failed(result) => result,
         };
+        let terminal_metric_receipt = result.input_metric_receipt();
+        assert_eq!(
+            terminal_metric_receipt
+                .metrics()
+                .structured_input_tokens()
+                .expect("final conservative whole-request accounting")
+                .quality(),
+            SemanticTokenCountQuality::Conservative
+        );
+        input_reducer
+            .record(terminal_metric_receipt)
+            .expect("terminal count failure finalizes conservative input metrics");
+        assert_eq!(input_reducer.snapshot().calls(), 1);
         assert!(matches!(
             result.outcome(),
             AgentProviderTransportOutcome::Failed(failure)
@@ -3934,7 +4174,10 @@ mod tests {
         else {
             panic!("count failure settles immediately")
         };
-        settlement.settle(&mut policy).expect("policy settlement");
+        let receipt = settlement.settle(&mut policy).expect("policy settlement");
+        assert_eq!(receipt.usage_accounting(), AgentModelUsageAccounting::Exact);
+        assert_eq!(receipt.input_tokens(), 0);
+        assert_eq!(receipt.output_tokens(), 0);
         let captured = server.finish();
         let head = std::str::from_utf8(&captured.head)
             .expect("request head")
@@ -3944,13 +4187,23 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn provider_count_above_admitted_input_reservation_fails_closed() {
+        let (mut policy, input) = provider_exact_fixture();
+        let over_reservation = input
+            .request()
+            .byte_len()
+            .checked_add(1)
+            .and_then(|tokens| u32::try_from(tokens).ok())
+            .expect("fixture request fits bounded provider count");
         let server = OneShotServer::spawn(
             "200 OK",
             &[
                 ("Content-Type", "application/json"),
                 ("Content-Encoding", "identity"),
             ],
-            vec![br#"{"object":"response.input_tokens","input_tokens":21}"#.to_vec()],
+            vec![format!(
+                "{{\"object\":\"response.input_tokens\",\"input_tokens\":{over_reservation}}}"
+            )
+            .into_bytes()],
         );
         let transport = test_transport(&server);
         let credential = AgentProviderCredential::try_new(
@@ -3958,7 +4211,6 @@ mod tests {
             "synthetic-openai-key".to_owned(),
         )
         .expect("credential");
-        let (mut policy, input) = provider_fixture(AgentProviderKind::OpenAiResponses);
         let result = match transport
             .try_admit(
                 input,
@@ -3986,8 +4238,90 @@ mod tests {
         else {
             panic!("over-budget count settles without model usage")
         };
-        settlement.settle(&mut policy).expect("policy settlement");
+        let receipt = settlement.settle(&mut policy).expect("policy settlement");
+        assert_eq!(receipt.usage_accounting(), AgentModelUsageAccounting::Exact);
+        assert_eq!(receipt.input_tokens(), 0);
+        assert_eq!(receipt.output_tokens(), 0);
         let _captured = server.finish();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn provider_count_below_catalog_pricing_range_never_dispatches_generation() {
+        let fixture = stateful_provider_fixture_with_accounting(
+            AgentProviderKind::OpenAiResponses,
+            AgentProviderPricingProfile::try_for_input_range(
+                AgentProviderPricingRevision::new(1).expect("pricing revision"),
+                32,
+                crate::MAX_AGENT_PROVIDER_EXACT_COUNTED_INPUT_TOKENS,
+            )
+            .expect("ranged pricing profile"),
+            true,
+        );
+        let mut policy = fixture.policy;
+        let server = OneShotServer::spawn(
+            "200 OK",
+            &[
+                ("Content-Type", "application/json"),
+                ("Content-Encoding", "identity"),
+            ],
+            vec![br#"{"object":"response.input_tokens","input_tokens":17}"#.to_vec()],
+        );
+        let transport = test_transport(&server);
+        let credential = AgentProviderCredential::try_new(
+            AgentProviderKind::OpenAiResponses,
+            "synthetic-openai-key".to_owned(),
+        )
+        .expect("credential");
+        let result = match transport
+            .try_admit(
+                fixture.input,
+                &mut policy,
+                &credential,
+                AgentProviderCancellation::new(),
+            )
+            .expect("admission")
+            .count_openai_input_tokens()
+            .await
+        {
+            AgentProviderExactCountOutcome::Counted(_) => {
+                panic!("below-range input count reached generation typestate")
+            }
+            AgentProviderExactCountOutcome::Failed(result) => result,
+        };
+        assert_eq!(
+            result.disclosure_stage(),
+            AgentProviderDisclosureStage::InputTokenCountDisclosed
+        );
+        assert_eq!(
+            result.usage_knowledge(),
+            AgentProviderUsageKnowledge::ExactZeroBeforeModelDispatch
+        );
+        assert_eq!(
+            result
+                .input_metric_receipt()
+                .metrics()
+                .structured_input_tokens()
+                .expect("final conservative reservation")
+                .quality(),
+            SemanticTokenCountQuality::Conservative
+        );
+        let AgentProviderPolicySettlement::Immediate(settlement) = result.into_policy_settlement()
+        else {
+            panic!("below-range count must settle before model dispatch")
+        };
+        let receipt = settlement
+            .settle(&mut policy)
+            .expect("exact-zero settlement");
+        assert_eq!(receipt.usage_accounting(), AgentModelUsageAccounting::Exact);
+        assert_eq!(receipt.input_tokens(), 0);
+        assert_eq!(receipt.output_tokens(), 0);
+
+        let captured = server.finish();
+        let head = std::str::from_utf8(&captured.head)
+            .expect("request head")
+            .to_ascii_lowercase();
+        assert!(head.starts_with("post /v1/responses/input_tokens http/1.1\r\n"));
+        assert!(transport.snapshot().expect("snapshot").is_idle());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4033,6 +4367,85 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn openai_accounting_modes_cannot_bypass_their_dispatch_typestate() {
+        let openai = Url::parse("http://127.0.0.1:9/v1/responses").expect("openai URL");
+        let anthropic = Url::parse("http://127.0.0.1:9/v1/messages").expect("anthropic URL");
+        let transport = AgentProviderTransport::try_new_loopback(
+            AgentProviderTransportConfig::STANDARD,
+            openai,
+            anthropic,
+        )
+        .expect("transport");
+        let credential = AgentProviderCredential::try_new(
+            AgentProviderKind::OpenAiResponses,
+            "synthetic-openai-key".to_owned(),
+        )
+        .expect("credential");
+
+        let (mut exact_policy, exact_input) = provider_fixture(AgentProviderKind::OpenAiResponses);
+        let exact_result = match transport
+            .try_admit(
+                exact_input,
+                &mut exact_policy,
+                &credential,
+                AgentProviderCancellation::new(),
+            )
+            .expect("exact admission")
+            .count_openai_input_tokens()
+            .await
+        {
+            AgentProviderExactCountOutcome::Counted(_) => {
+                panic!("exact-local input reached provider counting")
+            }
+            AgentProviderExactCountOutcome::Failed(result) => result,
+        };
+        assert_eq!(
+            exact_result.disclosure_stage(),
+            AgentProviderDisclosureStage::NotDispatched
+        );
+        assert_eq!(
+            exact_result.usage_knowledge(),
+            AgentProviderUsageKnowledge::ExactZeroBeforeModelDispatch
+        );
+        let AgentProviderPolicySettlement::Immediate(exact_settlement) =
+            exact_result.into_policy_settlement()
+        else {
+            panic!("exact-local count bypass must settle immediately")
+        };
+        exact_settlement
+            .settle(&mut exact_policy)
+            .expect("exact-local settlement");
+
+        let (mut provider_policy, provider_input) = provider_exact_fixture();
+        let provider_result = transport
+            .try_admit(
+                provider_input,
+                &mut provider_policy,
+                &credential,
+                AgentProviderCancellation::new(),
+            )
+            .expect("provider-exact admission")
+            .execute_openai_exact_local(|_| AgentProviderBatchDisposition::Continue)
+            .await;
+        assert_eq!(
+            provider_result.disclosure_stage(),
+            AgentProviderDisclosureStage::NotDispatched
+        );
+        assert_eq!(
+            provider_result.usage_knowledge(),
+            AgentProviderUsageKnowledge::ExactZeroBeforeModelDispatch
+        );
+        let AgentProviderPolicySettlement::Immediate(provider_settlement) =
+            provider_result.into_policy_settlement()
+        else {
+            panic!("provider-exact direct bypass must settle immediately")
+        };
+        provider_settlement
+            .settle(&mut provider_policy)
+            .expect("provider-exact settlement");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn openai_request_is_single_copy_single_post_and_normalized() {
         let stream = openai_success_stream();
         let split = stream.len() / 2;
@@ -4064,7 +4477,9 @@ mod tests {
         assert!(!attempt_debug.contains("synthetic fixture marker"));
         let continuation = attempt.input_evidence().clone();
         let input_metrics = attempt.input_metrics();
-        let metric_receipt = attempt.input_metric_receipt();
+        let metric_receipt = attempt
+            .input_metric_receipt()
+            .expect("exact-local input metrics are final before dispatch");
         assert_eq!(metric_receipt.call(), attempt.call().call());
         assert_eq!(metric_receipt.metrics(), input_metrics);
         assert!(input_metrics.serialized_request_bytes() > 0);
@@ -4103,7 +4518,7 @@ mod tests {
 
         let mut text = String::new();
         let result = attempt
-            .execute(|batch| {
+            .execute_openai_exact_local(|batch| {
                 for delta in batch.into_deltas() {
                     text.push_str(delta.as_str());
                 }
@@ -4993,6 +5408,208 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn openai_diff_is_single_post_and_retains_the_next_exact_seed() {
         qualify_admitted_diff_transport(AgentProviderKind::OpenAiResponses).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn openai_provider_exact_initial_and_diff_publish_only_post_count_metrics() {
+        let mut fixture = stateful_provider_fixture_with_accounting(
+            AgentProviderKind::OpenAiResponses,
+            AgentProviderPricingProfile::try_new(
+                AgentProviderPricingRevision::new(1).expect("pricing revision"),
+                crate::MAX_AGENT_PROVIDER_EXACT_COUNTED_INPUT_TOKENS,
+            )
+            .expect("pricing profile"),
+            true,
+        );
+        let mut input_reducer = provider_input_metrics(&fixture.policy, 51_001);
+        let credential = AgentProviderCredential::try_new(
+            AgentProviderKind::OpenAiResponses,
+            "synthetic-openai-key".to_owned(),
+        )
+        .expect("credential");
+        let initial_server = SequenceServer::spawn(vec![
+            ScriptedResponse {
+                delay: Duration::ZERO,
+                content_type: "application/json",
+                body: br#"{"object":"response.input_tokens","input_tokens":17}"#.to_vec(),
+            },
+            ScriptedResponse {
+                delay: Duration::ZERO,
+                content_type: "text/event-stream; charset=utf-8",
+                body: openai_tool_stream(),
+            },
+        ]);
+        let initial_transport = AgentProviderTransport::try_new_loopback(
+            AgentProviderTransportConfig::STANDARD,
+            initial_server.openai.clone(),
+            initial_server.anthropic.clone(),
+        )
+        .expect("initial transport");
+        let initial_attempt = initial_transport
+            .try_admit(
+                fixture.input,
+                &mut fixture.policy,
+                &credential,
+                AgentProviderCancellation::new(),
+            )
+            .expect("initial admission");
+        assert!(initial_attempt.input_metric_receipt().is_none());
+        let initial_counted = match initial_attempt.count_openai_input_tokens().await {
+            AgentProviderExactCountOutcome::Counted(counted) => counted,
+            AgentProviderExactCountOutcome::Failed(result) => {
+                panic!("initial count failed: {result:?}")
+            }
+        };
+        let initial_metric_receipt = initial_counted.input_metric_receipt();
+        input_reducer
+            .record(initial_metric_receipt)
+            .expect("record initial post-count metrics");
+        let initial_result = initial_counted
+            .execute(|batch| {
+                assert!(batch.deltas().is_empty());
+                AgentProviderBatchDisposition::Continue
+            })
+            .await;
+        assert_eq!(
+            initial_result.input_metric_receipt(),
+            initial_metric_receipt
+        );
+        let AgentProviderPolicySettlement::PricingRequired(initial_settlement) =
+            initial_result.into_policy_settlement()
+        else {
+            panic!("initial usage must be priced")
+        };
+        let initial_schedule = pricing_schedule(initial_settlement.config());
+        let initial_terminal = initial_settlement
+            .settle(&mut fixture.policy, &initial_schedule)
+            .expect("initial settlement");
+        let (_, continuation) = initial_terminal
+            .into_tool_turn()
+            .expect("initial tool turn")
+            .into_parts();
+        let initial_requests = initial_server.finish();
+        assert_eq!(initial_requests.len(), 2);
+
+        let current = successor_observation(&fixture.observation);
+        let diff = match compute_semantic_diff(
+            &fixture.observation,
+            continuation.baseline(),
+            &current,
+            SemanticDiffBudget::ACTION,
+        ) {
+            SemanticDiffOutcome::Diff(diff) => diff,
+            SemanticDiffOutcome::FreshSnapshot(reason) => {
+                panic!("unexpected fresh snapshot: {reason:?}")
+            }
+        };
+        let diff_payload = encode_semantic_diff(
+            &diff,
+            SemanticModelEncodingBudget::try_new(
+                16 * 1024,
+                1_000,
+                SemanticTokenCountRequirement::ConservativeAllowed,
+            )
+            .expect("diff budget"),
+        )
+        .expect("encode diff")
+        .admit_conservative_utf8(fixture.config.tokenizer())
+        .expect("conservative diff");
+        let request = AgentModelCallRequest::new(
+            AgentModelCallId::new(2).expect("diff call"),
+            fixture.lease,
+            fixture.account,
+            AgentModelCallBudget::try_new(
+                u32::try_from(crate::MAX_AGENT_PROVIDER_EXACT_COUNTED_INPUT_TOKENS)
+                    .expect("provider-exact ceiling fits u32"),
+                20,
+                100,
+            )
+            .expect("diff call budget"),
+            AgentPolicyInstant::from_millis(NOW),
+        );
+        let draft = AgentProviderDiffRequestDraft::try_new(
+            continuation
+                .bind_diff_request(request, &fixture.config, &diff, diff_payload)
+                .expect("bind provider-exact diff"),
+        )
+        .expect("encode provider-exact diff");
+        let prepared = draft
+            .try_prepare_for_provider_exact_count(&mut fixture.policy, request, &diff)
+            .expect("reserve provider-exact diff");
+        let diff_server = SequenceServer::spawn(vec![
+            ScriptedResponse {
+                delay: Duration::ZERO,
+                content_type: "application/json",
+                body: br#"{"object":"response.input_tokens","input_tokens":17}"#.to_vec(),
+            },
+            ScriptedResponse {
+                delay: Duration::ZERO,
+                content_type: "text/event-stream; charset=utf-8",
+                body: openai_tool_stream(),
+            },
+        ]);
+        let diff_transport = AgentProviderTransport::try_new_loopback(
+            AgentProviderTransportConfig::STANDARD,
+            diff_server.openai.clone(),
+            diff_server.anthropic.clone(),
+        )
+        .expect("diff transport");
+        let diff_attempt = diff_transport
+            .try_admit(
+                prepared.into_transport_input(),
+                &mut fixture.policy,
+                &credential,
+                AgentProviderCancellation::new(),
+            )
+            .expect("diff admission");
+        assert!(diff_attempt.input_metric_receipt().is_none());
+        let diff_counted = match diff_attempt.count_openai_input_tokens().await {
+            AgentProviderExactCountOutcome::Counted(counted) => counted,
+            AgentProviderExactCountOutcome::Failed(result) => {
+                panic!("diff count failed: {result:?}")
+            }
+        };
+        let diff_metric_receipt = diff_counted.input_metric_receipt();
+        input_reducer
+            .record(diff_metric_receipt)
+            .expect("record diff post-count metrics");
+        let diff_result = diff_counted
+            .execute(|batch| {
+                assert!(batch.deltas().is_empty());
+                AgentProviderBatchDisposition::Continue
+            })
+            .await;
+        assert_eq!(diff_result.input_metric_receipt(), diff_metric_receipt);
+        let AgentProviderPolicySettlement::PricingRequired(diff_settlement) =
+            diff_result.into_policy_settlement()
+        else {
+            panic!("diff usage must be priced")
+        };
+        let diff_schedule = pricing_schedule(diff_settlement.config());
+        let _diff_terminal = diff_settlement
+            .settle(&mut fixture.policy, &diff_schedule)
+            .expect("diff settlement");
+        let diff_requests = diff_server.finish();
+        assert_eq!(diff_requests.len(), 2);
+
+        let snapshot = input_reducer.snapshot();
+        assert_eq!(snapshot.calls(), 2);
+        for kind in [
+            AgentProviderInputKind::Observation,
+            AgentProviderInputKind::Diff,
+        ] {
+            let metrics = snapshot.kind(kind);
+            assert_eq!(metrics.calls(), 1);
+            assert_eq!(
+                metrics.structured_input_quality(SemanticTokenCountQuality::ProviderExact),
+                1
+            );
+            assert_eq!(
+                metrics.structured_input_quality(SemanticTokenCountQuality::Conservative),
+                0
+            );
+        }
+        assert_eq!(fixture.policy.pending_model_calls(), 0);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
