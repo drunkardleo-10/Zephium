@@ -67,8 +67,15 @@
     const descriptor = objectGetOwnPropertyDescriptor(prototype, name);
     return descriptor && typeof descriptor.get === "function" ? descriptor.get : null;
   };
+  const setter = (prototype, name) => {
+    if (typeof prototype !== "object" || prototype === null) return null;
+    const descriptor = objectGetOwnPropertyDescriptor(prototype, name);
+    return descriptor && typeof descriptor.set === "function" ? descriptor.set : null;
+  };
   const read = (accessor, receiver) =>
     accessor === null ? undefined : apply(accessor, receiver, []);
+  const write = (accessor, receiver, value) =>
+    accessor === null ? undefined : apply(accessor, receiver, [value]);
 
   const nodeTypeGetter = getter(Node.prototype, "nodeType");
   const nodeParentGetter = getter(Node.prototype, "parentNode");
@@ -120,10 +127,16 @@
     typeof HTMLSelectElement === "function"
       ? getter(HTMLSelectElement.prototype, "selectedIndex")
       : null;
+  const selectIndexSetter =
+    typeof HTMLSelectElement === "function"
+      ? setter(HTMLSelectElement.prototype, "selectedIndex")
+      : null;
   const selectLabelsGetter =
     typeof HTMLSelectElement === "function" ? getter(HTMLSelectElement.prototype, "labels") : null;
   const optionIndexGetter =
     typeof HTMLOptionElement === "function" ? getter(HTMLOptionElement.prototype, "index") : null;
+  const optionLabelGetter =
+    typeof HTMLOptionElement === "function" ? getter(HTMLOptionElement.prototype, "label") : null;
   const optionSelectedGetter =
     typeof HTMLOptionElement === "function"
       ? getter(HTMLOptionElement.prototype, "selected")
@@ -1036,6 +1049,16 @@
     const ariaLabel = attribute(element, "aria-label", MAX_NAME_BYTES * 4);
     if (ariaLabel !== null && ariaLabel !== "") return ariaLabel;
 
+    if (descriptor.tag === "option" && optionLabelGetter !== null) {
+      let label;
+      try {
+        label = read(optionLabelGetter, element);
+      } catch (_) {
+        label = null;
+      }
+      if (typeof label === "string" && label !== "") return label;
+    }
+
     let labelsGetter = null;
     if (descriptor.tag === "input") labelsGetter = inputLabelsGetter;
     if (descriptor.tag === "textarea") labelsGetter = textareaLabelsGetter;
@@ -1522,13 +1545,29 @@
           const visibleStyle = styleIsVisible(item.node);
           const rect = visibleStyle ? elementRect(item.node) : null;
           const optionInExpansion = descriptor.role === "option" && anchored;
-          const visible = visibleStyle && (rect !== null || optionInExpansion);
+          // Native <option> elements do not have independent page geometry in
+          // WebKit while their owning <select> is closed. Retain them only when
+          // their nearest retained semantic parent is an already-admitted native
+          // select. This exposes bounded, ref-addressable choices without making
+          // arbitrary non-rendered DOM actionable or treating offscreen selects
+          // as visible.
+          const optionOfAdmittedSelect =
+            descriptor.role === "option" &&
+            descriptor.tag === "option" &&
+            parent !== null &&
+            records[parent] !== undefined &&
+            tagName(records[parent].element) === "select";
+          const visible =
+            visibleStyle && (rect !== null || optionInExpansion || optionOfAdmittedSelect);
           const initialPriority =
             descriptor.role === "dialog" ||
             descriptor.role === "landmark" ||
             focused.has(item.node);
-          const admitted =
-            visible && (!anchored ? rect !== null && (initialPriority || inViewport(rect)) : true);
+          const admitted = visible && (
+            !anchored
+              ? optionOfAdmittedSelect || (rect !== null && (initialPriority || inViewport(rect)))
+              : true
+          );
           if (admitted) {
             const semanticDepth = parent === null ? 0 : records[parent].depth + 1;
             if (semanticDepth > MAX_TREE_DEPTH) {
@@ -1915,6 +1954,27 @@
     );
   }
 
+  function descriptorMatchesSelectedValue(expected, actual, desired) {
+    if (!validRuntimeDescriptor(expected) || !validRuntimeDescriptor(actual)) return false;
+    return (
+      expected.r === actual.r && expected.o === actual.o && expected.q === actual.q &&
+      expected.s === actual.s && expected.n === actual.n &&
+      actual.vk === 4 && actual.vt === null && actual.vo === desired && !actual.vb
+    );
+  }
+
+  function descriptorMatchesSelectedOption(expected, actual) {
+    if (!validRuntimeDescriptor(expected) || !validRuntimeDescriptor(actual)) return false;
+    const selectedBit = 2;
+    return (
+      expected.r === actual.r && expected.o === actual.o && expected.q === actual.q &&
+      (expected.s & ~selectedBit) === (actual.s & ~selectedBit) &&
+      (actual.s & selectedBit) !== 0 && expected.n === actual.n &&
+      expected.vk === actual.vk && expected.vt === actual.vt &&
+      expected.vo === actual.vo && expected.vb === actual.vb
+    );
+  }
+
   function fillControlKind(descriptor, value) {
     if (descriptor.tag === "input") {
       if (
@@ -2010,6 +2070,22 @@
       }]);
     } catch (_) {
       clearPageRelayAttributes(target);
+      return "applied_unverified";
+    }
+  }
+
+  function runFixedSelect(target, desired) {
+    if (selectIndexGetter === null || selectIndexSetter === null) {
+      return "unsupported_interaction";
+    }
+    try {
+      write(selectIndexSetter, target, desired);
+    } catch (_) {
+      return "applied_unverified";
+    }
+    try {
+      return read(selectIndexGetter, target) === desired ? "ok" : "applied_unverified";
+    } catch (_) {
       return "applied_unverified";
     }
   }
@@ -2166,6 +2242,32 @@
       } catch (_) {
         return actionFault("applied_unverified");
       }
+    } else if (request.k === "select") {
+      const desired = read(optionIndexGetter, selectedOption);
+      const result = runFixedSelect(target, desired);
+      if (result !== "ok") return actionFault(result);
+      const finalTarget = resolveKeyAtGeneration(request.t, request.g);
+      const finalOption = resolveKeyAtGeneration(request.p, request.g);
+      const finalTargetDescriptor = finalTarget === target ? runtimeDescriptor(target, request.g) : null;
+      const finalOptionDescriptor = finalOption === selectedOption
+        ? runtimeDescriptor(selectedOption, request.g)
+        : null;
+      if (
+        !descriptorMatchesSelectedValue(request.f, finalTargetDescriptor, desired) ||
+        !descriptorMatchesSelectedOption(request.of, finalOptionDescriptor) ||
+        selectDelta(target, selectedOption) !== 0
+      ) {
+        return actionFault("applied_unverified");
+      }
+      return encodeActionEvidence(
+        request,
+        "fixed_semantic_recipe",
+        readiness,
+        geometry,
+        viewport,
+        point,
+        delta
+      );
     } else {
       return actionFault("unsupported_interaction");
     }

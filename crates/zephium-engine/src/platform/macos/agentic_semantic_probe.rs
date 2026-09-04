@@ -228,11 +228,22 @@ type ModelFinishCallback<'a> = dyn FnMut(
     ) -> Result<(), ()>
     + 'a;
 
+/// Closed page and action sequence for a two-turn model qualification run.
+#[doc(hidden)]
+#[derive(Clone, Copy)]
+pub enum MacosAgenticSemanticTwoActionScenario {
+    /// Fixed loopback click followed by fill.
+    FixedClickFill,
+    /// Fixed-origin Wikipedia fill followed by language selection.
+    PublicFillSelect,
+}
+
 enum ProbeMode<'a> {
     Full,
     ModelClick(&'a mut ModelInitialCallback<'a>),
     ModelPublicFill(&'a mut ModelInitialCallback<'a>),
     ModelTwoAction {
+        scenario: MacosAgenticSemanticTwoActionScenario,
         prepare_initial: &'a mut ModelInitialCallback<'a>,
         prepare_continuation: &'a mut ModelContinuationCallback<'a>,
         finish: &'a mut ModelFinishCallback<'a>,
@@ -352,6 +363,7 @@ pub(crate) fn run_model_public_fill(
 }
 
 pub(crate) fn run_model_two_action(
+    scenario: MacosAgenticSemanticTwoActionScenario,
     mut prepare_initial: impl FnMut(
         &zephium_agentic::SemanticObservation,
         MacosAgenticSemanticProbeAuthority,
@@ -372,6 +384,7 @@ pub(crate) fn run_model_two_action(
 ) -> Result<(), &'static str> {
     let pending = objc2::rc::autoreleasepool(|_| {
         begin(ProbeMode::ModelTwoAction {
+            scenario,
             prepare_initial: &mut prepare_initial,
             prepare_continuation: &mut prepare_continuation,
             finish: &mut verify_final,
@@ -385,7 +398,14 @@ pub(crate) fn run_model_two_action(
 
 fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
     let full_probe = matches!(&mode, ProbeMode::Full);
-    let public_fill_probe = matches!(&mode, ProbeMode::ModelPublicFill(_));
+    let public_fill_probe = matches!(
+        &mode,
+        ProbeMode::ModelPublicFill(_)
+            | ProbeMode::ModelTwoAction {
+                scenario: MacosAgenticSemanticTwoActionScenario::PublicFillSelect,
+                ..
+            }
+    );
     let page_relay_probe = full_probe && page_world_fill_relay_probe_enabled();
     let hostile_relay_probe = full_probe && page_world_fill_relay_hostile_probe_enabled();
     if hostile_relay_probe && !page_relay_probe {
@@ -573,15 +593,25 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
                 )?))
             }
             ProbeMode::ModelTwoAction {
-                prepare_initial, ..
+                scenario,
+                prepare_initial,
+                ..
             } => {
                 let authority = model_probe_authority(&first_observation)?;
                 let request = prepare_initial(&first_observation, authority)
                     .map_err(|()| "model_action_prepare")?;
+                let expected_kind = match scenario {
+                    MacosAgenticSemanticTwoActionScenario::FixedClickFill => {
+                        zephium_agentic::SemanticActionKind::Click
+                    }
+                    MacosAgenticSemanticTwoActionScenario::PublicFillSelect => {
+                        zephium_agentic::SemanticActionKind::Fill
+                    }
+                };
                 PendingInitialClick::Model(Box::new(execute_model_action(
                     &view,
                     request,
-                    Some(zephium_agentic::SemanticActionKind::Click),
+                    Some(expected_kind),
                     &runtime,
                 )?))
             }
@@ -626,6 +656,7 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
                         }));
                     }
                     ProbeMode::ModelTwoAction {
+                        scenario,
                         prepare_continuation,
                         finish,
                         ..
@@ -639,12 +670,16 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
                             observed_at,
                         )
                         .map_err(|()| "model_continuation_prepare")?;
-                        let pending = execute_model_action(
-                            &view,
-                            request,
-                            Some(zephium_agentic::SemanticActionKind::Fill),
-                            &runtime,
-                        )?;
+                        let expected_kind = match scenario {
+                            MacosAgenticSemanticTwoActionScenario::FixedClickFill => {
+                                zephium_agentic::SemanticActionKind::Fill
+                            }
+                            MacosAgenticSemanticTwoActionScenario::PublicFillSelect => {
+                                zephium_agentic::SemanticActionKind::Select
+                            }
+                        };
+                        let pending =
+                            execute_model_action(&view, request, Some(expected_kind), &runtime)?;
                         wait_for_action_security_settle(
                             &runtime,
                             model_action_settle_delay(pending.wait, pending.settle_millis)?,
@@ -1239,7 +1274,7 @@ fn model_probe_authority(
         AgentEffectScope::try_new(&[SemanticEffectClass::Read, SemanticEffectClass::LocalWrite])
             .map_err(|_| "model_authority_effects")?;
     let budget = AgentRunBudget::try_new(
-        2,
+        3,
         MODEL_PROBE_MODEL_TOKEN_BUDGET,
         MODEL_PROBE_COST_BUDGET_MICRO_USD,
         1,
@@ -1706,13 +1741,29 @@ fn snapshot_value_is(snapshot: &SemanticSnapshot, name: &str, expected: &str) ->
 }
 
 fn verify_public_discovery_snapshot(snapshot: &SemanticSnapshot) -> Result<(), &'static str> {
-    if snapshot.completeness() != SemanticCompleteness::Complete
-        || !snapshot
-            .nodes()
-            .iter()
-            .any(|node| matches!(node.role(), SemanticRole::Textbox | SemanticRole::Searchbox))
-    {
+    if snapshot.completeness() != SemanticCompleteness::Complete {
         return Err("public_discovery_snapshot");
+    }
+    if !snapshot
+        .nodes()
+        .iter()
+        .any(|node| matches!(node.role(), SemanticRole::Textbox | SemanticRole::Searchbox))
+    {
+        return Err("public_discovery_textbox_missing");
+    }
+    if !snapshot
+        .nodes()
+        .iter()
+        .any(|node| node.operations().contains(SemanticOperationClass::Select))
+    {
+        return Err("public_discovery_select_missing");
+    }
+    if !snapshot
+        .nodes()
+        .iter()
+        .any(|node| node.role() == SemanticRole::Option && node_name_is(node, "Deutsch"))
+    {
+        return Err("public_discovery_option_missing");
     }
     Ok(())
 }

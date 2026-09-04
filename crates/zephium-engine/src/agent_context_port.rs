@@ -1240,6 +1240,7 @@ impl AgentBrowserPort for EngineAgentBrowserPort {
                 request.kind(),
                 zephium_agentic::SemanticActionKind::Click
                     | zephium_agentic::SemanticActionKind::Fill
+                    | zephium_agentic::SemanticActionKind::Select
             ) || request.frame().frame() != zephium_agentic::FrameId::MAIN
                 || request.frame().trust() != zephium_agentic::SemanticFrameTrust::SameOrigin
                 || request.frame().context().identity().kind()

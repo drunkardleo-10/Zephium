@@ -1554,7 +1554,7 @@ impl EngineHost {
         }
         if !matches!(
             request.kind(),
-            SemanticActionKind::Click | SemanticActionKind::Fill
+            SemanticActionKind::Click | SemanticActionKind::Fill | SemanticActionKind::Select
         ) {
             task.refuse(SemanticActionNativeFailure::UnsupportedInteraction);
             return;

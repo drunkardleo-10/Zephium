@@ -9,13 +9,13 @@
 //! Closed macOS semantic-action adapter.
 //!
 //! Exact target revalidation and action dispatch start inside the immutable
-//! isolated runtime. Click remains a fixed isolated-world recipe; Fill uses
-//! the separately attested page-world compatibility shim and returns only a
-//! correlated provisional terminal. Neither result succeeds until the core's
-//! fresh semantic postcondition verification. Engine-native responder
-//! delivery remains excluded because physical evidence shows that it grants
-//! page user activation and therefore needs separate capability and
-//! presentation authority.
+//! isolated runtime. Click and native-select changes use fixed isolated-world
+//! recipes; Fill uses the separately attested page-world compatibility shim.
+//! Every result is only a correlated provisional terminal until the core's
+//! fresh semantic postcondition verification. Engine-native responder delivery
+//! remains excluded because physical evidence shows that it grants page user
+//! activation and therefore needs separate capability and presentation
+//! authority.
 
 use std::time::Instant;
 
@@ -39,7 +39,7 @@ pub(super) fn dispatch(
 ) {
     if !matches!(
         request.kind(),
-        SemanticActionKind::Click | SemanticActionKind::Fill
+        SemanticActionKind::Click | SemanticActionKind::Fill | SemanticActionKind::Select
     ) {
         let completed_at = failure_instant(
             &request,

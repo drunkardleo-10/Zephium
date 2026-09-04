@@ -862,6 +862,8 @@ fn validate_engine_root(source: &str) -> Result<(), String> {
         "platform::macos::run_agentic_semantic_probe()",
         "pubfnrun_macos_agentic_semantic_model_public_fill_probe(",
         "platform::macos::run_agentic_semantic_model_public_fill_probe(prepare)",
+        "pubfnrun_macos_agentic_semantic_model_two_action_probe(",
+        "platform::macos::run_agentic_semantic_model_two_action_probe(",
         "#[cfg(all(target_os=\"windows\",feature=\"native-agentic-semantic-probe\"))]",
         "pubfnrun_windows_agentic_semantic_probe(",
         "mode:zephium_agentic::WindowsSemanticProbeMode",
@@ -2517,6 +2519,7 @@ fn validate_macos_semantic_probe(
         "#[cfg(feature=\"native-agentic-semantic-probe\")]modagentic_semantic_probe;",
         "#[cfg(feature=\"native-agentic-semantic-probe\")]pub(crate)useagentic_semantic_probe::runasrun_agentic_semantic_probe;",
         "pub(crate)useagentic_semantic_probe::run_model_public_fillasrun_agentic_semantic_model_public_fill_probe;",
+        "pub(crate)useagentic_semantic_probe::run_model_two_actionasrun_agentic_semantic_model_two_action_probe;",
     ] {
         if !module.contains(required) {
             return Err(format!(
@@ -2568,6 +2571,8 @@ fn validate_macos_semantic_probe(
         "server.shutdown()",
         "constPUBLIC_DISCOVERY_PROBE_URL:&str=\"https://www.wikipedia.org/\";",
         "ProbeMode::ModelPublicFill",
+        "MacosAgenticSemanticTwoActionScenario::PublicFillSelect",
+        "SemanticActionKind::Select",
         "url==PUBLIC_DISCOVERY_PROBE_URL",
         "allow_hidden_responder_change:public_fill_probe",
     ] {
@@ -6559,7 +6564,7 @@ fn validate_semantic_execution_contract(
     let action_method = &engine_port[start..end];
     for required in [
         "#[cfg(target_os=\"macos\")]",
-        "!matches!(request.kind(),zephium_agentic::SemanticActionKind::Click|zephium_agentic::SemanticActionKind::Fill)",
+        "!matches!(request.kind(),zephium_agentic::SemanticActionKind::Click|zephium_agentic::SemanticActionKind::Fill|zephium_agentic::SemanticActionKind::Select)",
         "request.frame().frame()!=zephium_agentic::FrameId::MAIN",
         "request.frame().trust()!=zephium_agentic::SemanticFrameTrust::SameOrigin",
         "request.frame().context().identity().kind()!=zephium_agentic::ContextKind::Owned",
@@ -6588,7 +6593,7 @@ fn validate_semantic_execution_contract(
 
     let macos_action = compact(macos_action);
     for required in [
-        "!matches!(request.kind(),SemanticActionKind::Click|SemanticActionKind::Fill)",
+        "!matches!(request.kind(),SemanticActionKind::Click|SemanticActionKind::Fill|SemanticActionKind::Select)",
         "encode_semantic_action_runtime_invocation(&request)",
         "semantic.dispatch_action(invocation,move|outcome|",
         "Ok(evidence)=>complete_runtime_recipe(request,evidence,admitted_at)",
@@ -9958,6 +9963,7 @@ mod tests {
                         request.kind(),
                         zephium_agentic::SemanticActionKind::Click
                             | zephium_agentic::SemanticActionKind::Fill
+                            | zephium_agentic::SemanticActionKind::Select
                     ) || request.frame().frame() != zephium_agentic::FrameId::MAIN
                         || request.frame().trust() != zephium_agentic::SemanticFrameTrust::SameOrigin
                         || request.frame().context().identity().kind()
@@ -9978,7 +9984,7 @@ mod tests {
         let macos_action = r#"
             if !matches!(
                 request.kind(),
-                SemanticActionKind::Click | SemanticActionKind::Fill
+                SemanticActionKind::Click | SemanticActionKind::Fill | SemanticActionKind::Select
             ) {}
             encode_semantic_action_runtime_invocation(&request);
             semantic.dispatch_action(invocation, move |outcome| {
@@ -12375,6 +12381,24 @@ mod tests {
             pub fn run_macos_agentic_semantic_probe() -> Result<(), &'static str> {
                 platform::macos::run_agentic_semantic_probe()
             }
+            pub fn run_macos_agentic_semantic_model_public_fill_probe(
+                prepare: impl FnMut(),
+            ) -> Result<(), &'static str> {
+                platform::macos::run_agentic_semantic_model_public_fill_probe(prepare)
+            }
+            pub fn run_macos_agentic_semantic_model_two_action_probe(
+                scenario: MacosAgenticSemanticTwoActionScenario,
+                prepare_initial: impl FnMut(),
+                prepare_continuation: impl FnMut(),
+                verify_final: impl FnMut(),
+            ) -> Result<(), &'static str> {
+                platform::macos::run_agentic_semantic_model_two_action_probe(
+                    scenario,
+                    prepare_initial,
+                    prepare_continuation,
+                    verify_final,
+                )
+            }
             #[cfg(all(target_os = "windows", feature = "native-agentic-semantic-probe"))]
             pub fn run_windows_agentic_semantic_probe(
                 request_id: u64,
@@ -12399,7 +12423,7 @@ mod tests {
         assert!(validate_engine_platform_module("mod agentic_input_probe;", "test").is_err());
 
         let semantic_module = format!(
-            "{module}\n#[cfg(feature = \"native-agentic-semantic-probe\")]\nmod agentic_semantic_probe;\n#[cfg(feature = \"native-agentic-semantic-probe\")]\npub(crate) use agentic_semantic_probe::run as run_agentic_semantic_probe;"
+            "{module}\n#[cfg(feature = \"native-agentic-semantic-probe\")]\nmod agentic_semantic_probe;\n#[cfg(feature = \"native-agentic-semantic-probe\")]\npub(crate) use agentic_semantic_probe::run as run_agentic_semantic_probe;\n#[cfg(feature = \"native-agentic-semantic-probe\")]\npub(crate) use agentic_semantic_probe::run_model_public_fill as run_agentic_semantic_model_public_fill_probe;\n#[cfg(feature = \"native-agentic-semantic-probe\")]\npub(crate) use agentic_semantic_probe::run_model_two_action as run_agentic_semantic_model_two_action_probe;"
         );
         let semantic_source = r#"
             FixtureRoute::SemanticRuntime;
@@ -12441,6 +12465,12 @@ mod tests {
             view.retire_semantic_runtime();
             Weak::from_retained(&page);
             server.shutdown();
+            const PUBLIC_DISCOVERY_PROBE_URL: &str = "https://www.wikipedia.org/";
+            ProbeMode::ModelPublicFill;
+            MacosAgenticSemanticTwoActionScenario::PublicFillSelect;
+            SemanticActionKind::Select;
+            url == PUBLIC_DISCOVERY_PROBE_URL;
+            allow_hidden_responder_change: public_fill_probe;
         "#;
         let semantic_binary = r#"
             if arguments.as_slice() != ["--ci-hidden-fixed-dom"] {}

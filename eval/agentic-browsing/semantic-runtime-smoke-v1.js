@@ -150,13 +150,32 @@ class HTMLTextAreaElement extends Element {
 }
 
 class HTMLSelectElement extends Element {
-  get selectedIndex() { return 0; }
-  get labels() { return new NodeList(); }
+  constructor(attributes = {}, selectedIndex = 0) {
+    super("select", attributes);
+    this._selectedIndex = selectedIndex;
+    this._labels = new NodeList();
+  }
+  get selectedIndex() { return this._selectedIndex; }
+  set selectedIndex(value) {
+    this._selectedIndex = this._rewriteAfterSet ? 0 : Number(value);
+  }
+  get labels() { return this._labels; }
 }
 
 class HTMLOptionElement extends Element {
-  get index() { return 0; }
-  get selected() { return false; }
+  constructor(attributes = {}, index = 0, selected = false, label = "") {
+    super("option", attributes);
+    this._index = index;
+    this._selected = selected;
+    this._label = label;
+  }
+  get index() { return this._index; }
+  get label() { return this.attributes.label || this._label; }
+  get selected() {
+    return this._parent instanceof HTMLSelectElement
+      ? this._parent._selectedIndex === this._index
+      : this._selected;
+  }
 }
 
 class Document extends Node {
@@ -282,6 +301,18 @@ overflowingLabel.append(new CharacterData(`${"x".repeat(506)}api key`));
 labelOverflowInput._labels = new NodeList([overflowingLabel]);
 const paragraph = new Element("p");
 paragraph.append(new CharacterData("Normal private workspace text"));
+const languageSelect = new HTMLSelectElement({ "aria-label": "Language" });
+const englishOption = new HTMLOptionElement({}, 0, true, "English");
+const germanOption = new HTMLOptionElement({}, 1, false, "Deutsch");
+englishOption.rect = { x: 0, y: 0, width: 0, height: 0 };
+germanOption.rect = { x: 0, y: 0, width: 0, height: 0 };
+languageSelect.append(englishOption);
+languageSelect.append(germanOption);
+const offscreenSelect = new HTMLSelectElement({ "aria-label": "Offscreen language" });
+offscreenSelect.rect = { x: 10, y: 900, width: 160, height: 32 };
+const offscreenOption = new HTMLOptionElement({}, 0, false, "Must stay filtered");
+offscreenOption.rect = { x: 0, y: 0, width: 0, height: 0 };
+offscreenSelect.append(offscreenOption);
 
 const openHost = new Element("div");
 openHost._shadow = new ShadowRoot();
@@ -412,6 +443,8 @@ main.append(attributeOverflowInput);
 main.append(labelOverflowInput);
 main.append(overflowingLabel);
 main.append(paragraph);
+main.append(languageSelect);
+main.append(offscreenSelect);
 main.append(openHost);
 main.append(closedHost);
 body.append(main);
@@ -473,6 +506,22 @@ assert(!initialWire.includes("never-cross-bridge"), "password value crossed brid
 assert(!initialWire.includes("Closed shadow secret"), "closed shadow root was bypassed");
 assert(initial.n.some((node) => node.n === "Open shadow action"), "open shadow root missing");
 assert(initial.n.some((node) => node.n === "Save"), "captured element methods were poisoned");
+const languageNode = initial.n.find((node) => node.n === "Language");
+assert(languageNode && languageNode.r === "combobox", "visible native select missing");
+const languageNodeIndex = initial.n.indexOf(languageNode);
+const englishNode = initial.n.find((node) => node.n === "English");
+const germanNode = initial.n.find((node) => node.n === "Deutsch");
+assert(
+  englishNode && germanNode &&
+    englishNode.r === "option" && germanNode.r === "option" &&
+    englishNode.p === languageNodeIndex && germanNode.p === languageNodeIndex &&
+    englishNode.b === undefined && germanNode.b === undefined,
+  "non-geometric options of an admitted native select were not retained"
+);
+assert(
+  !initial.n.some((node) => node.n === "Must stay filtered"),
+  "option of an offscreen native select escaped initial filtering"
+);
 const passwordNode = initial.n.find((node) => node.r === "password");
 assert(passwordNode && passwordNode.v.k === "redacted", "password not redacted");
 const lateSecretNode = initial.n.find((node) => node.n === "Large ordinary field");
@@ -660,16 +709,17 @@ async function finish() {
   button._children = savedButtonChildren;
   assert(runtime.invoke(`{"padding":"${"x".repeat(17800)}"}`) === "E1:invalid_request", "oversize action request accepted");
 
-  const roleCodes = Object.freeze({textbox: 8, searchbox: 10});
+  const roleCodes = Object.freeze({textbox: 8, searchbox: 10, combobox: 13, option: 15});
   const descriptorFor = (node) => ({
     r: roleCodes[node.r],
     o: node.o || 0,
     q: node.q === "sensitive" ? 2 : node.q === "secret" ? 3 : 1,
     s: node.s || 0,
     n: node.n === undefined ? null : node.n,
-    vk: node.v && node.v.k === "text" ? 1 : node.v && node.v.k === "redacted" ? 2 : 0,
+    vk: node.v && node.v.k === "text" ? 1 :
+      node.v && node.v.k === "redacted" ? 2 : node.v && node.v.k === "ordinal" ? 4 : 0,
     vt: node.v && node.v.k === "text" ? node.v.value : null,
-    vo: 0,
+    vo: node.v && node.v.k === "ordinal" ? node.v.value : 0,
     vb: false
   });
   const actionNode = (name) => transported.n.find((node) => node.n === name);
@@ -688,6 +738,38 @@ async function finish() {
     f: descriptorFor(targetNode),
     of: null
   });
+  const selectRequest = (attempt) => JSON.stringify({
+    v: 1,
+    o: "action_execute",
+    a: attempt,
+    i: 101,
+    g: 101,
+    t: languageNode.k,
+    r: languageNode.r,
+    k: "select",
+    e: { x: 10, y: 10, w: 160, h: 32 },
+    p: germanNode.k,
+    z: null,
+    f: descriptorFor(languageNode),
+    of: descriptorFor(germanNode)
+  });
+  document._hit = languageSelect;
+  const selectSuccess = JSON.parse(runtime.invoke(selectRequest(29)));
+  assert(
+    selectSuccess.a === 29 && selectSuccess.d === 1 &&
+      selectSuccess.b === "fixed_semantic_recipe" && languageSelect._selectedIndex === 1 &&
+      germanOption.selected,
+    "fixed native-select execution evidence mismatch"
+  );
+  languageSelect._selectedIndex = 0;
+  languageSelect._rewriteAfterSet = true;
+  assert(
+    runtime.invoke(selectRequest(30)) === "E2:applied_unverified" &&
+      languageSelect._selectedIndex === 0,
+    "page-rewritten native selection remained retryable"
+  );
+  languageSelect._rewriteAfterSet = false;
+  document._hit = button;
   const assertInputEvent = (target, expected) => {
     const events = fillEvents.get(target);
     assert(
@@ -946,6 +1028,8 @@ async function finish() {
     no_webcrypto_required: true,
     fixed_action_execution: true,
     fixed_fill_execution: true,
+    fixed_select_execution: true,
+    select_rewrite_nonretryable: true,
     fill_native_primitives_captured: true,
     fill_input_event_contract: true,
     fill_contenteditable_excluded: true,
