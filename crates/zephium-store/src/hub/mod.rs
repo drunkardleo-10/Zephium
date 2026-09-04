@@ -5,6 +5,8 @@
 //! actor thread (`actor.rs`) serializes all access.
 
 mod agent_audit;
+#[cfg(feature = "work-execution")]
+mod agent_work;
 mod blocker;
 mod compatibility;
 mod deletion;
@@ -61,6 +63,8 @@ pub(crate) const MAX_TITLE_BYTES: usize = zephium_core::item::MAX_PAGE_TITLE_CHA
 pub(crate) const MAX_NAME_BYTES: usize = MAX_SESSION_NAME_CHARS * 4;
 
 pub struct Hub {
+    #[cfg(feature = "work-execution")]
+    work: Option<agent_work::WorkOwnership>,
     dir: Option<PathBuf>,
     meta: Connection,
     profiles: HashMap<ProfileId, Connection>,
@@ -127,6 +131,8 @@ impl Hub {
             |row| row.get::<_, bool>(0),
         )?;
         let mut hub = Self {
+            #[cfg(feature = "work-execution")]
+            work: None,
             dir: Some(dir.clone()),
             meta,
             profiles: HashMap::new(),
@@ -228,6 +234,8 @@ impl Hub {
         configure(&meta)?;
         migrations::apply(&mut meta, migrations::META)?;
         Ok(Self {
+            #[cfg(feature = "work-execution")]
+            work: None,
             dir: None,
             meta,
             profiles: HashMap::new(),

@@ -1368,6 +1368,34 @@ pub static META: &[Migration] = &[
             )
         },
     },
+    Migration {
+        version: 17,
+        up: |tx| {
+            tx.execute_batch(
+                "CREATE TABLE agent_work_owner (
+                 id INTEGER PRIMARY KEY CHECK (id = 1),
+                 incarnation BLOB NOT NULL CHECK (length(incarnation) = 16)
+             ) STRICT;
+             CREATE TABLE agent_work_runs (
+                 run_key BLOB PRIMARY KEY CHECK (length(run_key) = 32),
+                 record BLOB NOT NULL CHECK (length(record) = 96
+                     AND substr(record, 1, 1) = X'01'
+                     AND substr(record, 33, 32) = run_key),
+                 terminal INTEGER NOT NULL CHECK (terminal IN (0, 1))
+             ) STRICT, WITHOUT ROWID;
+             CREATE UNIQUE INDEX agent_work_run_identity
+                 ON agent_work_runs(substr(run_key, 17, 16));
+             CREATE TRIGGER agent_work_capacity BEFORE INSERT ON agent_work_runs
+             WHEN (SELECT count(*) FROM agent_work_runs) >= 1024
+             BEGIN SELECT RAISE(ABORT, 'work capacity exceeded'); END;
+             CREATE TRIGGER agent_work_terminal_immutable BEFORE UPDATE ON agent_work_runs
+             WHEN OLD.terminal = 1 OR NEW.run_key != OLD.run_key
+             BEGIN SELECT RAISE(ABORT, 'work terminal is immutable'); END;
+             CREATE TRIGGER agent_work_retained BEFORE DELETE ON agent_work_runs
+             BEGIN SELECT RAISE(ABORT, 'work retention is explicit'); END;",
+            )
+        },
+    },
 ];
 
 pub static PROFILE: &[Migration] = &[

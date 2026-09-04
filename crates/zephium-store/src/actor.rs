@@ -5,6 +5,8 @@
 //! pending state first.
 
 mod agent_audit;
+#[cfg(feature = "work-execution")]
+mod agent_work;
 
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
@@ -605,6 +607,12 @@ fn retry_delay(failures: u32) -> Duration {
 }
 
 enum Cmd {
+    #[cfg(feature = "work-execution")]
+    AgentWork(
+        zephium_agentic::AgentWorkJournalRequest,
+        agent_work::WorkPermit,
+        zephium_agentic::AgentWorkJournalCompletion,
+    ),
     SaveWake,
     VisitWake,
     SettingWake,
@@ -1496,6 +1504,8 @@ fn observe_extension_service_store_call<T>(
 }
 
 pub struct SqliteStore {
+    #[cfg(feature = "work-execution")]
+    work_admission: OnceLock<Arc<AtomicUsize>>,
     tx: SyncSender<Cmd>,
     latest_session: Arc<Mutex<Option<SessionState>>>,
     pending_visits: Arc<Mutex<PendingVisits>>,
@@ -1599,6 +1609,8 @@ impl SqliteStore {
             })?;
         Ok(Self {
             tx,
+            #[cfg(feature = "work-execution")]
+            work_admission: OnceLock::new(),
             latest_session,
             pending_visits,
             pending_settings,
@@ -3591,6 +3603,10 @@ fn actor(
                     ProfileDeletionFinalizeOutcome::Failed
                 };
                 let _ = reply.send(result);
+            }
+            #[cfg(feature = "work-execution")]
+            Some(Cmd::AgentWork(request, _permit, completion)) => {
+                agent_work::settle(&mut hub, request, completion);
             }
             Some(Cmd::AppendAgentAudit(delivery, _permit, completion)) => {
                 if let Some(message) =

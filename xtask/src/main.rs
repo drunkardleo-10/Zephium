@@ -17,6 +17,7 @@ mod extension_tree;
 mod macos_extension_compatibility;
 mod macos_process_family;
 mod webview2_extension_boundary;
+mod work_persistence_boundary;
 
 use std::process::{exit, Command};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1001,7 +1002,9 @@ fn ci() {
 
 fn check_agentic_probe_boundary() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-    if let Err(error) = agentic_probe_boundary::check(&repository) {
+    if let Err(error) = agentic_probe_boundary::check(&repository)
+        .and_then(|()| work_persistence_boundary::check(&repository))
+    {
         eprintln!("agentic diagnostic release boundary failed: {error}");
         exit(1);
     }

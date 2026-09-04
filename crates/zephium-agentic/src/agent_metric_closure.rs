@@ -224,6 +224,10 @@ impl AgentRunMetricClosure {
         self.manifest
     }
 
+    pub(crate) const fn manifest_guard(self) -> [u8; 32] {
+        self.manifest_guard
+    }
+
     /// Exact mutable supervisor incarnation at closure.
     pub const fn supervisor(self) -> AgentSupervisorId {
         self.supervisor

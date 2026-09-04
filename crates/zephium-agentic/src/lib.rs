@@ -32,6 +32,7 @@ mod agent_policy;
 mod agent_progress_metrics;
 mod agent_provider;
 mod agent_supervisor;
+mod agent_work_journal;
 mod context;
 mod context_port;
 mod context_registry;
@@ -218,6 +219,11 @@ pub use agent_supervisor::{
     AgentSupervisorNodeStatus, AgentSupervisorRuntimeError, AgentSupervisorRuntimeStatus,
     AgentSupervisorWait, MAX_AGENT_DELEGATION_DEPTH, MAX_AGENT_EXECUTING_SUPERVISOR_NODES,
     MAX_AGENT_LIVE_SUPERVISOR_NODES,
+};
+pub use agent_work_journal::{
+    AgentWorkDebt, AgentWorkDisposition, AgentWorkIncarnation, AgentWorkJournalCompletion,
+    AgentWorkJournalError, AgentWorkJournalMutation, AgentWorkJournalPort, AgentWorkJournalReply,
+    AgentWorkJournalRequest, AgentWorkRecord, AGENT_WORK_RECORD_BYTES, MAX_DURABLE_AGENT_WORK_RUNS,
 };
 #[cfg(all(
     feature = "provider-transport",

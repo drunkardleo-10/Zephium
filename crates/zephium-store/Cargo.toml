@@ -4,9 +4,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+work-execution = ["dep:zephium-private-fs"]
+
 [dependencies]
 zephium-agentic.workspace = true
 zephium-core.workspace = true
+zephium-private-fs = { workspace = true, optional = true }
 rusqlite.workspace = true
 serde.workspace = true
 serde_json = { workspace = true, features = ["unbounded_depth"] }

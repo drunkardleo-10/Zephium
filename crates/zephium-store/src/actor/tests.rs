@@ -67,6 +67,8 @@ fn rgba() -> Vec<u8> {
 fn test_store_with_sender(tx: SyncSender<Cmd>) -> SqliteStore {
     let (_exit, exited) = mpsc::sync_channel(1);
     SqliteStore {
+        #[cfg(feature = "work-execution")]
+        work_admission: OnceLock::new(),
         tx,
         latest_session: Arc::new(Mutex::new(None)),
         pending_visits: Arc::new(Mutex::new(PendingVisits::new())),
@@ -95,6 +97,94 @@ fn test_store_with_sender(tx: SyncSender<Cmd>) -> SqliteStore {
         extension_service_startup_requirement:
             ExtensionServiceStoreStartupRequirement::NativeOwnershipReconciliationRequired,
     }
+}
+
+#[cfg(feature = "work-execution")]
+#[test]
+fn work_journal_mailbox_is_lazy_bounded_and_refusal_never_calls_completion() {
+    use zephium_agentic::{AgentWorkJournalError, AgentWorkJournalPort, AgentWorkJournalRequest};
+    let (tx, rx) = mpsc::sync_channel(8);
+    let store = test_store_with_sender(tx);
+    assert!(store.work_admission.get().is_none());
+    for _ in 0..4 {
+        assert!(store
+            .dispatch(
+                AgentWorkJournalRequest::Claim,
+                Box::new(|_| panic!("not pumped"))
+            )
+            .is_ok());
+    }
+    assert_eq!(
+        store.dispatch(
+            AgentWorkJournalRequest::Claim,
+            Box::new(|_| panic!("refused callback"))
+        ),
+        Err(AgentWorkJournalError::Capacity)
+    );
+    drop(rx.recv().unwrap());
+    assert!(store
+        .dispatch(
+            AgentWorkJournalRequest::Claim,
+            Box::new(|_| panic!("not pumped"))
+        )
+        .is_ok());
+    drop(rx);
+    assert_eq!(
+        store.work_admission.get().unwrap().load(Ordering::Acquire),
+        0
+    );
+    assert_eq!(
+        store.dispatch(
+            AgentWorkJournalRequest::Claim,
+            Box::new(|_| panic!("refused callback"))
+        ),
+        Err(AgentWorkJournalError::Shutdown)
+    );
+}
+
+#[cfg(feature = "work-execution")]
+#[test]
+fn work_journal_callback_loss_and_panic_do_not_reclaim_process_identity_or_kill_store() {
+    use zephium_agentic::{AgentWorkJournalPort, AgentWorkJournalReply, AgentWorkJournalRequest};
+    let directory = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(directory.path()).unwrap();
+    // A lost acknowledgement keeps the Store's exact incarnation and lock.
+    store
+        .dispatch(AgentWorkJournalRequest::Claim, Box::new(|_| {}))
+        .unwrap();
+    store
+        .dispatch(
+            AgentWorkJournalRequest::Claim,
+            Box::new(|_| panic!("fixture callback panic")),
+        )
+        .unwrap();
+    let (tx, rx) = mpsc::sync_channel(1);
+    store
+        .dispatch(
+            AgentWorkJournalRequest::Claim,
+            Box::new(move |result| {
+                let _ = tx.send(result);
+            }),
+        )
+        .unwrap();
+    let AgentWorkJournalReply::Claimed { owner, records } =
+        rx.recv_timeout(Duration::from_secs(5)).unwrap().unwrap()
+    else {
+        panic!()
+    };
+    assert!(records.is_empty());
+    let (tx, rx) = mpsc::sync_channel(1);
+    store
+        .dispatch(
+            AgentWorkJournalRequest::Claim,
+            Box::new(move |result| {
+                let _ = tx.send(result);
+            }),
+        )
+        .unwrap();
+    assert!(
+        matches!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), Ok(AgentWorkJournalReply::Claimed { owner: again, .. }) if again == owner)
+    );
 }
 
 fn create_profile_file(dir: &Path, profile: ProfileId) -> std::path::PathBuf {
