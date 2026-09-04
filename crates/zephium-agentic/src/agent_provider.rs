@@ -723,6 +723,7 @@ pub struct AgentProviderCallConfig {
     max_output_tokens: u32,
     stream: AgentProviderStreamBudget,
     store_response: bool,
+    locate_act_only: bool,
 }
 
 impl AgentProviderCallConfig {
@@ -758,7 +759,25 @@ impl AgentProviderCallConfig {
             max_output_tokens,
             stream,
             store_response: false,
+            locate_act_only: false,
         })
+    }
+
+    /// Restricts advertised browser capabilities to the bounded locate/act driver.
+    ///
+    /// This trusted host setting is bound into continuation configuration and
+    /// applies equally to every provider protocol and request turn.
+    pub fn restrict_to_locate_and_act(mut self) -> Self {
+        self.locate_act_only = true;
+        self
+    }
+
+    pub(super) fn permits_tool(&self, kind: AgentBrowserToolKind) -> bool {
+        !self.locate_act_only
+            || matches!(
+                kind,
+                AgentBrowserToolKind::Locate | AgentBrowserToolKind::Act
+            )
     }
 
     /// Enables provider-side response retention for an inspectable public-data probe.

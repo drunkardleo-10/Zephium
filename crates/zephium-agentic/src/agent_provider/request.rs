@@ -3483,6 +3483,7 @@ fn encode_openai_body(
     }
     let tools = browser_tool_definitions()
         .iter()
+        .filter(|tool| config.permits_tool(tool.kind))
         .map(|tool| OpenAiToolWire {
             r#type: "function",
             name: tool.kind.as_str(),
@@ -3575,6 +3576,7 @@ fn encode_openai_continuation_body(
     debug_assert_eq!(input.len(), input_items);
     let tools = browser_tool_definitions()
         .iter()
+        .filter(|tool| config.permits_tool(tool.kind))
         .map(|tool| OpenAiToolWire {
             r#type: "function",
             name: tool.kind.as_str(),
@@ -3744,6 +3746,7 @@ fn encode_openai_screenshot_continuation_body(
     debug_assert_eq!(input.len(), input_items);
     let tools = browser_tool_definitions()
         .iter()
+        .filter(|tool| config.permits_tool(tool.kind))
         .map(|tool| OpenAiToolWire {
             r#type: "function",
             name: tool.kind.as_str(),
@@ -3788,6 +3791,7 @@ fn encode_anthropic_body(
     validate_anthropic_tool_definitions(definitions)?;
     let tools = definitions
         .iter()
+        .filter(|tool| config.permits_tool(tool.kind))
         .map(|tool| AnthropicToolWire {
             name: tool.kind.as_str(),
             description: tool.description,
@@ -3896,6 +3900,7 @@ fn encode_anthropic_continuation_body(
     debug_assert_eq!(messages.len(), message_count);
     let tools = definitions
         .iter()
+        .filter(|tool| config.permits_tool(tool.kind))
         .map(|tool| AnthropicToolWire {
             name: tool.kind.as_str(),
             description: tool.description,
@@ -4123,6 +4128,7 @@ fn encode_anthropic_screenshot_continuation_body(
     debug_assert_eq!(messages.len(), message_count);
     let tools = definitions
         .iter()
+        .filter(|tool| config.permits_tool(tool.kind))
         .map(|tool| AnthropicToolWire {
             name: tool.kind.as_str(),
             description: tool.description,
@@ -4855,6 +4861,65 @@ mod tests {
             call: crate::AgentModelCallId::new(1).expect("call"),
             lease: crate::AgentPlanLeaseId::from_raw(1),
             node: crate::AgentPlanNodeId::from_raw(1),
+        }
+    }
+
+    #[test]
+    fn locate_act_capability_is_provider_neutral_stateless_and_config_bound() {
+        for provider in [
+            AgentProviderKind::OpenAiResponses,
+            AgentProviderKind::AnthropicMessages,
+        ] {
+            let config = AgentProviderCallConfig::try_for_test(
+                provider,
+                super::super::AgentProviderModelRevision::try_new("fixture-model".to_owned())
+                    .expect("model"),
+                super::super::AgentProviderReasoningEffort::None,
+                revision("fixture:v1"),
+                super::super::AgentProviderPricingProfile::try_new(
+                    super::super::AgentProviderPricingRevision::new(1).expect("revision"),
+                    16_384,
+                )
+                .expect("profile"),
+                512,
+                1024,
+                super::super::AgentProviderStreamBudget::STANDARD,
+            )
+            .expect("config");
+            let restricted = config.clone().restrict_to_locate_and_act();
+            assert_ne!(
+                restricted, config,
+                "continuation equality must bind capability"
+            );
+            for kind in AgentBrowserToolKind::ALL {
+                assert_eq!(
+                    restricted.permits_tool(kind),
+                    matches!(
+                        kind,
+                        AgentBrowserToolKind::Locate | AgentBrowserToolKind::Act
+                    )
+                );
+            }
+            let body = match provider {
+                AgentProviderKind::OpenAiResponses => {
+                    encode_openai_body(&restricted, "fixture", "fixture")
+                }
+                AgentProviderKind::AnthropicMessages => {
+                    encode_anthropic_body(&restricted, "fixture", "fixture")
+                }
+            }
+            .expect("body");
+            let wire: Value = serde_json::from_slice(&body).expect("wire");
+            let names = wire["tools"]
+                .as_array()
+                .expect("tools")
+                .iter()
+                .map(|tool| tool["name"].as_str().expect("name"))
+                .collect::<BTreeSet<_>>();
+            assert_eq!(names, BTreeSet::from(["act", "locate"]));
+            if provider == AgentProviderKind::OpenAiResponses {
+                assert_eq!(wire["store"], false);
+            }
         }
     }
 
