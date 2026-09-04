@@ -27,6 +27,7 @@ pub use runtime::{
     AgentRuntimeConfig, AgentRuntimeController, AgentRuntimeControllerFuture,
     AgentRuntimeControllerTerminalClaim, AgentRuntimeControllerTerminalClass,
     AgentRuntimeControllerTerminalRefusal, AgentRuntimeEvent, AgentRuntimeHandle,
-    AgentRuntimeStagedStopReason, AgentRuntimeWorker, AgentRuntimeWorkerFault, PendingAgentRuntime,
-    RuntimeSpawnError, MAX_AGENT_RUNTIME_COMMAND_CAPACITY, MIN_AGENT_RUNTIME_COMMAND_CAPACITY,
+    AgentRuntimeStagedStopReason, AgentRuntimeStopReason, AgentRuntimeWorker,
+    AgentRuntimeWorkerFault, PendingAgentRuntime, RuntimeSpawnError,
+    MAX_AGENT_RUNTIME_COMMAND_CAPACITY, MIN_AGENT_RUNTIME_COMMAND_CAPACITY,
 };

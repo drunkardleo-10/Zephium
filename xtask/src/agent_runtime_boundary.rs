@@ -116,7 +116,7 @@ fn validate_manifest(source: &str) -> Result<(), String> {
                     .iter()
                     .filter_map(Value::as_str)
                     .collect::<BTreeSet<_>>()
-                    == BTreeSet::from(["macros", "rt", "sync", "time"])
+                    == BTreeSet::from(["macros", "net", "rt", "sync", "time"])
             })
             != Some(true)
     {

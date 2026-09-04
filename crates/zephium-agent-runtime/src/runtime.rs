@@ -358,6 +358,34 @@ pub enum AgentRuntimeEvent {
     ShutdownRequested,
 }
 
+/// Trusted product reason for permanently revoking this run's automation.
+/// A request is not a takeover/suspension acknowledgement: the controller
+/// must reconcile dispatched work before a host can transfer control.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum AgentRuntimeStopReason {
+    /// The user cancelled this run.
+    Cancelled = 1,
+    /// The user requested exclusive human control.
+    HumanTakeover = 2,
+    /// The product requested resource suspension.
+    Suspend = 3,
+    /// Trusted policy authority was revoked.
+    PolicyRevoked = 4,
+}
+
+impl AgentRuntimeStopReason {
+    fn from_code(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(Self::Cancelled),
+            2 => Some(Self::HumanTakeover),
+            3 => Some(Self::Suspend),
+            4 => Some(Self::PolicyRevoked),
+            _ => None,
+        }
+    }
+}
+
 impl fmt::Debug for AgentRuntimeEvent {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let label = match self {
@@ -529,6 +557,10 @@ pub struct AgentRuntimeWorker {
 }
 
 impl AgentRuntimeWorker {
+    /// The first trusted product stop request, if one was admitted.
+    pub fn stop_reason(&self) -> Option<AgentRuntimeStopReason> {
+        AgentRuntimeStopReason::from_code(self.inner.stop_reason.load(Ordering::Acquire))
+    }
     /// Waits without a lost-wake race for the next closed controller event.
     ///
     /// Shutdown and cancellation win over every other event once, then a
@@ -869,6 +901,7 @@ struct RuntimeInner {
     next_ticket: AtomicU64,
     current_ticket: AtomicU64,
     cancelled: AtomicBool,
+    stop_reason: AtomicU8,
     shutdown_requested: AtomicBool,
     shutdown_deadline: Mutex<Option<Instant>>,
     // Serializes the final CLAIMING->CLAIMED transition against lifecycle
@@ -902,8 +935,19 @@ impl RuntimeInner {
     }
 
     fn seal_and_cancel(&self) {
+        self.seal_and_stop(AgentRuntimeStopReason::Cancelled);
+    }
+
+    fn seal_and_stop(&self, reason: AgentRuntimeStopReason) {
         let _gate = recover_lock(&self.terminal_claim_gate);
         if self.seal_for_control(false) {
+            // First admitted stop wins; later requests cannot rewrite history.
+            let _ = self.stop_reason.compare_exchange(
+                0,
+                reason as u8,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
             self.cancelled.store(true, Ordering::Release);
         }
         self.control_wake.notify_waiters();
@@ -1225,6 +1269,11 @@ impl AgentRuntimeHandle {
         self.inner.seal_and_cancel();
     }
 
+    /// Requests trusted revocation without granting native takeover authority.
+    pub fn stop_and_seal(&self, reason: AgentRuntimeStopReason) {
+        self.inner.seal_and_stop(reason);
+    }
+
     /// Returns a content-free projection of the staged shell state.
     pub fn status(&self) -> AgentRunStatus {
         self.inner.status()
@@ -1285,6 +1334,7 @@ impl PendingAgentRuntime {
             next_ticket: AtomicU64::new(1),
             current_ticket: AtomicU64::new(0),
             cancelled: AtomicBool::new(false),
+            stop_reason: AtomicU8::new(0),
             shutdown_requested: AtomicBool::new(false),
             shutdown_deadline: Mutex::new(None),
             terminal_claim_gate: Mutex::new(()),
@@ -1527,6 +1577,9 @@ fn worker_main(
     // observable; it releases only when this worker thread returns.
     let _permit_until_worker_exit = permit;
     let runtime = match tokio::runtime::Builder::new_current_thread()
+        // Created only for an explicitly admitted agent worker. Provider and
+        // local transport futures share this reactor; no second executor.
+        .enable_io()
         .enable_time()
         .build()
     {
@@ -2286,6 +2339,7 @@ mod tests {
             next_ticket: AtomicU64::new(1),
             current_ticket: AtomicU64::new(0),
             cancelled: AtomicBool::new(false),
+            stop_reason: AtomicU8::new(0),
             shutdown_requested: AtomicBool::new(false),
             shutdown_deadline: Mutex::new(None),
             terminal_claim_gate: Mutex::new(()),
@@ -3662,6 +3716,7 @@ mod tests {
             next_ticket: AtomicU64::new(1),
             current_ticket: AtomicU64::new(0),
             cancelled: AtomicBool::new(false),
+            stop_reason: AtomicU8::new(0),
             shutdown_requested: AtomicBool::new(false),
             shutdown_deadline: Mutex::new(None),
             terminal_claim_gate: Mutex::new(()),

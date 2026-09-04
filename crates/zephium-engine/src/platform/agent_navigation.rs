@@ -698,6 +698,54 @@ mod tests {
     }
 
     #[test]
+    fn committed_is_not_ready_and_revocation_fences_late_native_failure() {
+        for sealed in [false, true] {
+            let gate = super::AgentNavigationController::default();
+            let operation = operation(zephium_agentic::ContextOperationKind::Navigate);
+            let target =
+                zephium_agentic::ContextNavigationTarget::parse("https://example.test/ready")
+                    .expect("target");
+            gate.arm(operation, target.clone(), Arc::new(AtomicBool::new(false)))
+                .expect("arm");
+            gate.observe(event(
+                51,
+                wry::NavigationEventPhase::Started,
+                target.as_url().as_str(),
+            ))
+            .expect("start");
+            gate.observe(event(
+                51,
+                wry::NavigationEventPhase::Committed,
+                target.as_url().as_str(),
+            ))
+            .expect("commit");
+            assert!(gate.disarm(operation));
+            assert!(!gate.location_stable_for_result());
+            assert_eq!(gate.document_finished_for_audit(operation), Some(false));
+            if sealed {
+                assert!(gate.seal_location_observation());
+                assert!(!gate.allows(target.as_url().as_str()));
+                assert_eq!(gate.request_location_check(), Ok(false));
+                assert!(gate
+                    .arm(operation, target.clone(), Arc::new(AtomicBool::new(false)))
+                    .is_err());
+            }
+            let late = gate.observe(event(
+                51,
+                wry::NavigationEventPhase::Failed,
+                target.as_url().as_str(),
+            ));
+            assert_eq!(
+                late.is_ok(),
+                sealed,
+                "only explicit revocation can fence the callback"
+            );
+            assert_eq!(gate.document_finished_for_audit(operation), Some(false));
+            assert!(!gate.location_stable_for_result());
+        }
+    }
+
+    #[test]
     fn location_check_can_defer_without_creating_a_second_queue_entry() {
         let gate = super::AgentNavigationController::default();
         let operation = operation(zephium_agentic::ContextOperationKind::Navigate);
@@ -885,6 +933,7 @@ struct AgentCommittedNavigation {
 }
 
 struct AgentNavigationState {
+    observation_sealed: bool,
     bootstrap_available: bool,
     bootstrap_pending: bool,
     bootstrap_native_id: Option<wry::NavigationId>,
@@ -900,6 +949,7 @@ struct AgentNavigationState {
 impl Default for AgentNavigationState {
     fn default() -> Self {
         Self {
+            observation_sealed: false,
             bootstrap_available: true,
             bootstrap_pending: false,
             bootstrap_native_id: None,
@@ -1003,7 +1053,8 @@ impl AgentNavigationController {
             return Err(());
         }
         let mut state = self.state.lock().map_err(|_| ())?;
-        if state.renderer_lost != requires_renderer_loss
+        if state.observation_sealed
+            || state.renderer_lost != requires_renderer_loss
             || state.armed.is_some()
             || state.location_callback_pending
             || state.location_dirty
@@ -1096,7 +1147,7 @@ impl AgentNavigationController {
         let Ok(mut state) = self.state.lock() else {
             return false;
         };
-        if state.renderer_lost {
+        if state.renderer_lost || state.observation_sealed {
             return false;
         }
         if let Some(armed) = state.armed.as_ref() {
@@ -1118,7 +1169,7 @@ impl AgentNavigationController {
         event: wry::NavigationEvent,
     ) -> Result<AgentNavigationObservation, ()> {
         let mut state = self.state.lock().map_err(|_| ())?;
-        if state.renderer_lost {
+        if state.renderer_lost || state.observation_sealed {
             return Ok(AgentNavigationObservation::none());
         }
         let Some(armed) = state.armed.as_mut() else {
@@ -1300,7 +1351,7 @@ impl AgentNavigationController {
     /// replacement event.
     pub(crate) fn request_location_check(&self) -> Result<bool, ()> {
         let mut state = self.state.lock().map_err(|_| ())?;
-        if state.renderer_lost {
+        if state.renderer_lost || state.observation_sealed {
             return Ok(false);
         }
         if !state.location_ready {
@@ -1427,6 +1478,7 @@ impl AgentNavigationController {
         let Ok(mut state) = self.state.lock() else {
             return false;
         };
+        state.observation_sealed = true;
         state.location_ready = false;
         state.location_callback_pending = false;
         state.location_dirty = false;

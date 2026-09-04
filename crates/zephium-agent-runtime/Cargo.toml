@@ -8,5 +8,5 @@ publish = false
 [dependencies]
 crossbeam-queue.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+tokio = { workspace = true, features = ["macros", "net", "rt", "sync", "time"] }
 zephium-agentic.workspace = true

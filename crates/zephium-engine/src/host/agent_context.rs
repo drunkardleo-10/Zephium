@@ -1445,6 +1445,11 @@ impl EngineHost {
                         .is_some_and(|last| invocation.invocation().get() <= last.get())
                 {
                     Some(SemanticRuntimePortFailure::Stale)
+                } else if !binding.view.navigation().location_stable_for_result() {
+                    // Committed navigation is not native load completion. Do
+                    // not run a semantic request before the exact location
+                    // observer has drained; no snapshot generation is spent.
+                    Some(SemanticRuntimePortFailure::NotReady)
                 } else {
                     None
                 }
@@ -2618,6 +2623,7 @@ impl EngineHost {
             if !rejoins {
                 return Err(ContextPortFailure::Stale);
             }
+            let location_sealed = binding.view.navigation().seal_location_observation();
             crate::platform::imp::stop_loading(binding.view.view());
             binding
                 .view
@@ -2629,7 +2635,6 @@ impl EngineHost {
             binding.renderer_loss_rejoin_pending = false;
             binding.renderer_loss_deferred_for_replacement = false;
             binding.navigation_replacement_rejoin_pending = false;
-            let location_sealed = binding.view.navigation().seal_location_observation();
             let pending_navigation = binding.pending_navigation.take();
             let pending_recovery = binding.pending_recovery.take();
             let pending_screenshot = binding.pending_screenshot.take();
