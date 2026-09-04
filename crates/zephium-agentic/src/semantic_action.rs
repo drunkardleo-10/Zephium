@@ -477,7 +477,14 @@ impl SemanticActionProposal {
         verification: SemanticVerification,
         settle_budget: SemanticSettleBudget,
     ) -> Result<Self, SemanticActionContractError> {
-        if !verification_matches(intent.kind(), verification) || !wait_matches(wait, verification) {
+        if !verification_matches(intent.kind(), verification)
+            || !wait_matches(wait, verification)
+            || matches!(
+                wait,
+                SemanticWaitCondition::MutationQuiet(quiet)
+                    if quiet.millis() > settle_budget.millis()
+            )
+        {
             return Err(SemanticActionContractError::OutcomeContract);
         }
         Ok(Self {
@@ -2754,6 +2761,21 @@ mod tests {
         assert_eq!(
             SemanticSettleBudget::try_new(MAX_SEMANTIC_ACTION_SETTLE_MILLIS + 1),
             Err(SemanticActionContractError::SettleBudget)
+        );
+        assert_eq!(
+            SemanticActionProposal::try_new(
+                SemanticActionIntent::Fill {
+                    target: SemanticReferenceId::new(3).expect("textbox"),
+                    value: SemanticActionText::try_new("bounded value".to_owned()).expect("value"),
+                },
+                SemanticEffectClass::LocalWrite,
+                SemanticWaitCondition::MutationQuiet(
+                    SemanticMutationQuietPeriod::try_new(200).expect("quiet")
+                ),
+                SemanticVerification::TargetValueMatchesInput,
+                SemanticSettleBudget::try_new(100).expect("budget"),
+            ),
+            Err(SemanticActionContractError::OutcomeContract)
         );
         assert_eq!(
             SemanticActionProposal::try_new(

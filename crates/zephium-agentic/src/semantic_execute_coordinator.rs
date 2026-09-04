@@ -286,6 +286,20 @@ pub struct SemanticModelClickQualificationExecution {
     execution: SemanticActionQualificationExecution,
 }
 
+/// Release-excluded owner for one model-supplied snapshot-verifiable action.
+///
+/// This expands live qualification beyond the first click without weakening
+/// the production action contract. It accepts only local writes whose
+/// postcondition can be established from the adjacent semantic snapshot. A
+/// navigation, dialog, scroll, or external effect still requires its distinct
+/// production evidence source and is refused here.
+#[cfg(feature = "probe-harness")]
+#[must_use]
+pub struct SemanticModelActionQualificationExecution {
+    execution: SemanticActionQualificationExecution,
+    expected_proof: crate::SemanticEffectProofKind,
+}
+
 #[cfg(feature = "probe-harness")]
 #[must_use]
 struct SemanticActionQualificationExecution {
@@ -538,6 +552,89 @@ impl SemanticModelClickQualificationExecution {
             observed_at,
             crate::SemanticEffectProofKind::TargetState,
         )
+    }
+}
+
+#[cfg(feature = "probe-harness")]
+impl SemanticModelActionQualificationExecution {
+    /// Binds one decoded model action to the exact observation it references.
+    pub fn prepare(
+        observation: &crate::SemanticObservation,
+        proposal: crate::SemanticActionProposal,
+        batch: u64,
+        attempt: u64,
+        requested_at: SemanticActionExecutionInstant,
+    ) -> Result<Self, SemanticActionQualificationError> {
+        if proposal.effect() != crate::SemanticEffectClass::LocalWrite
+            || !matches!(
+                proposal.wait(),
+                crate::SemanticWaitCondition::Immediate
+                    | crate::SemanticWaitCondition::MutationQuiet(_)
+                    | crate::SemanticWaitCondition::TargetState { .. }
+            )
+        {
+            return Err(SemanticActionQualificationError::Preparation);
+        }
+        let expected_proof = match proposal.verification() {
+            crate::SemanticVerification::TargetState { .. } => {
+                crate::SemanticEffectProofKind::TargetState
+            }
+            crate::SemanticVerification::TargetValueMatchesInput => {
+                crate::SemanticEffectProofKind::ExactTargetValue
+            }
+            crate::SemanticVerification::TargetValueChanged => {
+                crate::SemanticEffectProofKind::TargetValueChanged
+            }
+            crate::SemanticVerification::TargetSelectionMatchesOption => {
+                crate::SemanticEffectProofKind::ExactSelection
+            }
+            crate::SemanticVerification::TargetSelectionChanged => {
+                crate::SemanticEffectProofKind::SelectionChanged
+            }
+            crate::SemanticVerification::NavigationCommitted
+            | crate::SemanticVerification::Dialog(_)
+            | crate::SemanticVerification::ScrollPositionChanged => {
+                return Err(SemanticActionQualificationError::Preparation);
+            }
+        };
+        Ok(Self {
+            execution: SemanticActionQualificationExecution::prepare(
+                observation,
+                proposal,
+                batch,
+                attempt,
+                requested_at,
+            )?,
+            expected_proof,
+        })
+    }
+
+    /// Moves the exact production native request to the platform adapter once.
+    pub fn take_native_request(
+        &mut self,
+    ) -> Result<SemanticActionNativeRequest, SemanticActionQualificationError> {
+        self.execution.take_native_request()
+    }
+
+    /// Typed settle condition selected by the model and bound by production validation.
+    pub const fn wait(&self) -> crate::SemanticWaitCondition {
+        self.execution.action.wait()
+    }
+
+    /// Hard relative settle budget bound into the prepared action.
+    pub const fn settle_budget(&self) -> crate::SemanticSettleBudget {
+        self.execution.action.settle_budget()
+    }
+
+    /// Rejoins and independently verifies one adjacent semantic snapshot.
+    pub fn settle_and_verify(
+        self,
+        settlement: SemanticActionNativeSettlement,
+        snapshot: &crate::SemanticSnapshot,
+        observed_at: crate::SemanticSettleInstant,
+    ) -> Result<crate::SemanticActionExecutionApplied, SemanticActionQualificationError> {
+        self.execution
+            .settle_and_verify(settlement, snapshot, observed_at, self.expected_proof)
     }
 }
 

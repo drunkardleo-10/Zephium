@@ -3200,7 +3200,6 @@ struct OpenAiReasoningReplayWire<'a> {
     id: &'a str,
     summary: [(); 0],
     encrypted_content: &'a str,
-    status: &'static str,
 }
 
 #[derive(Serialize)]
@@ -3420,7 +3419,6 @@ fn push_openai_replay_items<'a>(
                     id,
                     summary: [],
                     encrypted_content,
-                    status: "completed",
                 },
             )),
             OpenAiResponseReplayItem::FunctionCall => {
@@ -5042,7 +5040,7 @@ mod tests {
         assert_eq!(items[0]["id"], "rs_before_1");
         assert_eq!(items[0]["summary"], serde_json::json!([]));
         assert_eq!(items[0]["encrypted_content"], encrypted_before);
-        assert_eq!(items[0]["status"], "completed");
+        assert!(items[0].get("status").is_none());
         assert_eq!(items[1]["type"], "function_call");
         assert_eq!(items[1]["id"], "fc_replay_order_1");
         assert_eq!(items[1]["call_id"], "call_replay_order_1");

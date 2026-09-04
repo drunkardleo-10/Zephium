@@ -40,6 +40,13 @@ pub const INITIAL_SEMANTIC_MODEL_TOKEN_TARGET: u32 = 2_000;
 pub const INITIAL_PROVIDER_EXACT_CONSERVATIVE_TOKEN_CEILING: u32 = 4 * 1_024;
 /// Normal action-diff token target from the product qualification contract.
 pub const ACTION_SEMANTIC_DIFF_TOKEN_TARGET: u32 = 200;
+/// Conservative byte ceiling for an action diff before provider-exact counting.
+///
+/// Compact diff UTF-8 length is a safe token upper bound, but it is not an
+/// accurate token count. Keep 200 tokens as the measured product target while
+/// allowing a tightly bounded 1 KiB preflight for providers that authenticate
+/// and exactly count the complete continuation request before generation.
+pub const ACTION_DIFF_PROVIDER_EXACT_CONSERVATIVE_TOKEN_CEILING: u32 = 1_024;
 /// Hard token ceiling for one content-free semantic-locate result.
 pub const SEMANTIC_LOCATE_RESULT_TOKEN_CEILING: u32 = 2_048;
 /// Maximum bounded provider/model/tokenizer revision label bytes.
@@ -108,6 +115,17 @@ impl SemanticModelEncodingBudget {
     pub const ACTION_DIFF_CONSERVATIVE: Self = Self {
         max_bytes: 16 * 1024,
         max_tokens: ACTION_SEMANTIC_DIFF_TOKEN_TARGET,
+        token_requirement: SemanticTokenCountRequirement::ConservativeAllowed,
+    };
+
+    /// Action diff preflight for a provider with exact whole-request counting.
+    ///
+    /// This does not claim that byte length is the model's exact token count.
+    /// It only admits a small bounded diff to the authenticated provider count
+    /// gate while retaining the 200-token product target as a measured metric.
+    pub const ACTION_DIFF_PROVIDER_EXACT_CONSERVATIVE: Self = Self {
+        max_bytes: ACTION_DIFF_PROVIDER_EXACT_CONSERVATIVE_TOKEN_CEILING,
+        max_tokens: ACTION_DIFF_PROVIDER_EXACT_CONSERVATIVE_TOKEN_CEILING,
         token_requirement: SemanticTokenCountRequirement::ConservativeAllowed,
     };
 

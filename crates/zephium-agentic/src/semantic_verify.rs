@@ -987,6 +987,8 @@ mod tests {
             crate::SemanticActionExecutionInstant::from_millis(80),
         )
         .expect("execution");
+        assert_eq!(native.wait(), action.wait());
+        assert_eq!(native.settle_budget(), action.settle_budget());
         let actual_geometry = native.expected_geometry();
         let (backend, readiness) = if action.kind() == crate::SemanticActionKind::Fill {
             (

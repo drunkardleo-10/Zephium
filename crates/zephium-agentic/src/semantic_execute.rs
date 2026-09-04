@@ -16,8 +16,9 @@ use crate::{
     AgentActiveEffect, AgentEffectId, ContextIdentity, SemanticActionAttemptId,
     SemanticActionFailure, SemanticActionKind, SemanticActionRuntimeDescriptor, SemanticActionText,
     SemanticFrameJoin, SemanticInvocationId, SemanticPreparedAction, SemanticPressKey,
-    SemanticRect, SemanticRole, SemanticScrollAmount, SemanticScrollDirection, SemanticSettleError,
-    SemanticSettleInstant, SemanticSettleTracker, SemanticSnapshotGeneration,
+    SemanticRect, SemanticRole, SemanticScrollAmount, SemanticScrollDirection,
+    SemanticSettleBudget, SemanticSettleError, SemanticSettleInstant, SemanticSettleTracker,
+    SemanticSnapshotGeneration, SemanticWaitCondition,
 };
 
 /// Maximum time between final policy dispatch and one native backend terminal.
@@ -159,6 +160,8 @@ struct NativeCorrelation {
     checkpoint_invocation: SemanticInvocationId,
     checkpoint_snapshot: SemanticSnapshotGeneration,
     target: SemanticActionNativeTargetId,
+    wait: SemanticWaitCondition,
+    settle_budget: SemanticSettleBudget,
     requested_at: SemanticActionExecutionInstant,
     deadline: SemanticActionExecutionInstant,
     guard: [u8; 32],
@@ -365,6 +368,16 @@ impl SemanticActionNativeRequest {
     /// Closed action class.
     pub const fn kind(&self) -> SemanticActionKind {
         self.recipe.kind()
+    }
+
+    /// Typed post-native condition the shell must drive before verification.
+    pub const fn wait(&self) -> SemanticWaitCondition {
+        self.correlation.wait
+    }
+
+    /// Hard post-native settle ceiling bound into this exact action.
+    pub const fn settle_budget(&self) -> SemanticSettleBudget {
+        self.correlation.settle_budget
     }
 
     /// Exact bounded fill text for a fill recipe.
@@ -1044,6 +1057,8 @@ pub(crate) fn prepare_semantic_action_execution(
         checkpoint_invocation: action.checkpoint_invocation(),
         checkpoint_snapshot: action.checkpoint_snapshot(),
         target,
+        wait: action.wait(),
+        settle_budget: action.settle_budget(),
         requested_at,
         deadline,
         guard,

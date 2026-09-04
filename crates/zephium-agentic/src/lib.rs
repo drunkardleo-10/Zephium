@@ -407,7 +407,8 @@ pub use semantic_execute_coordinator::{
 pub use semantic_execute_coordinator::{
     SemanticActionQualificationError, SemanticClickQualificationError,
     SemanticClickQualificationExecution, SemanticFillQualificationError,
-    SemanticFillQualificationExecution, SemanticModelClickQualificationExecution,
+    SemanticFillQualificationExecution, SemanticModelActionQualificationExecution,
+    SemanticModelClickQualificationExecution,
 };
 pub use semantic_extract::{
     extract_delivered_semantic_read, extract_semantic_read, SemanticExtractedBoolean,
@@ -435,10 +436,10 @@ pub use semantic_model::{
     SemanticModelEncodingError, SemanticModelPayload, SemanticTokenCountQuality,
     SemanticTokenCountRequirement, SemanticTokenCounter, SemanticTokenCounterError,
     SemanticTokenMeasurement, SemanticTokenMeasurementError, SemanticTokenizerRevision,
-    SemanticTokenizerRevisionError, ACTION_SEMANTIC_DIFF_TOKEN_TARGET,
-    INITIAL_SEMANTIC_MODEL_TOKEN_TARGET, MAX_SEMANTIC_MODEL_BYTES, MAX_SEMANTIC_MODEL_TOKENS,
-    MAX_SEMANTIC_TOKENIZER_REVISION_BYTES, SEMANTIC_LOCATE_RESULT_TOKEN_CEILING,
-    SEMANTIC_MODEL_SCHEMA_VERSION,
+    SemanticTokenizerRevisionError, ACTION_DIFF_PROVIDER_EXACT_CONSERVATIVE_TOKEN_CEILING,
+    ACTION_SEMANTIC_DIFF_TOKEN_TARGET, INITIAL_SEMANTIC_MODEL_TOKEN_TARGET,
+    MAX_SEMANTIC_MODEL_BYTES, MAX_SEMANTIC_MODEL_TOKENS, MAX_SEMANTIC_TOKENIZER_REVISION_BYTES,
+    SEMANTIC_LOCATE_RESULT_TOKEN_CEILING, SEMANTIC_MODEL_SCHEMA_VERSION,
 };
 pub use semantic_observation::{
     SemanticExpansionKind, SemanticFrameBoundary, SemanticFrameBoundaryStatus,

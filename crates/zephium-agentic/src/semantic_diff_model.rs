@@ -1279,6 +1279,22 @@ mod tests {
             Err(SemanticModelEncodingError::TokenLimit)
         ));
 
+        let provider_exact_preflight = encode_semantic_diff(
+            &diff,
+            SemanticModelEncodingBudget::ACTION_DIFF_PROVIDER_EXACT_CONSERVATIVE,
+        )
+        .expect("provider-exact diff encoding")
+        .admit_conservative_utf8(&selected)
+        .expect("bounded provider-exact preflight");
+        assert!(
+            provider_exact_preflight.token_measurement().tokens()
+                > crate::ACTION_SEMANTIC_DIFF_TOKEN_TARGET
+        );
+        assert!(
+            provider_exact_preflight.token_measurement().tokens()
+                <= crate::ACTION_DIFF_PROVIDER_EXACT_CONSERVATIVE_TOKEN_CEILING
+        );
+
         assert!(matches!(
             encode_semantic_diff(&diff, SemanticModelEncodingBudget::ACTION_DIFF_EXACT)
                 .expect("exact encoding")
