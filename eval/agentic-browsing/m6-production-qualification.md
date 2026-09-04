@@ -35,6 +35,28 @@ qualify native-select `input`/`change` event compatibility, difficult sites,
 authentication, navigation, extensions, Browse concurrency, Windows, or the
 shipping policy actor.
 
+The first compact GPT-5.6 Luna slice is also recorded. Collapsed combobox
+options remain in Rust's full semantic authority but are omitted from the model
+projection; the control reports the bounded option count and explicitly marks
+its option references as discoverable through `locate`. Geometry likewise
+remains available to native freshness, hit-testing, occlusion, and action
+revalidation while coordinates are absent from model input. A retained
+public-page trace exposed one rejected Luna proposal that reused a visible
+`Deutsch` link as a select option. Production binding correctly refused it as
+an invalid selection target. The projection contract was then made explicit,
+and qualification diagnostics now preserve the exact content-free binding,
+checkpoint, or native-admission refusal class.
+
+The corrected repeatability sweep passed three unconstrained and three
+forced-locate workflows: six of six runs, twelve of twelve independently
+verified native effects, and zero focus theft. The sweep consumed 78,533 input
+and 1,823 output tokens, cost 4,810 micro-USD, spent 65,029 ms in the provider,
+and completed in 71,282 ms wall-clock. Each unconstrained run independently
+chose the bounded locate path. Initial semantic disclosure was 3,116 bytes per
+run, compared with 10,663 semantic bytes across each earlier two-turn Terra
+workflow before collapsed-option projection. These are exact evidence for this
+one public page and task, not a multi-site or release qualification.
+
 ## Mechanically enforced evidence
 
 `cargo xtask check-agentic-probe-boundary` is part of ordinary CI and now:

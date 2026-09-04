@@ -124,6 +124,26 @@ feature from optimized and ordinary desktop builds. Re-running it still
 requires separate explicit authorization; the committed result does not
 authorize future native execution.
 
+The release-excluded live-provider probe can run the reviewed public
+Wikipedia workflow with GPT-5.6 Luna. It reads the development OpenAI key from
+the fixed Login Keychain item through Apple's `/usr/bin/security` executable,
+retains only these explicitly public qualification responses for dashboard
+inspection, and emits content-free aggregate metrics locally:
+
+```sh
+cargo run --locked -p zephium-terra-macos-probe \
+  --features live-probe -- --live-public-luna-suite-inspectable
+```
+
+The suite launches three unconstrained and three forced-locate workflows in
+fresh AppKit processes. Each run fills Wikipedia's search control, obtains the
+collapsed language option through the bounded semantic-locate path, selects
+it, and independently verifies both native effects from fresh observations.
+It is an external-network, paid-provider qualification and must be run only
+with explicit authorization. Exact reviewed aggregate results are recorded in
+`native-input-matrix-v1.json`; provider payloads, page content, credentials,
+and raw traces must never be committed.
+
 The Windows adapter can be compile-qualified from another host, but only a
 physical Windows run is behavioral evidence. On an authorized named Windows
 device, the preferred non-focused workflow is the checked-in fail-closed

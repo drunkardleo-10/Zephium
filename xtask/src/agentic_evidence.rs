@@ -582,16 +582,16 @@ fn validate_native_results(results: &[NativeResult], reviewed_on: &str) -> Resul
 }
 
 fn validate_real_site_runs(results: &[RealSiteRun]) -> Result<(), String> {
-    if results.len() != 3 {
+    if results.len() != 5 {
         return Err(
-            "committed real-site evidence must contain all three reviewed early slices".to_owned(),
+            "committed real-site evidence must contain all five reviewed early slices".to_owned(),
         );
     }
     let results = results
         .iter()
         .map(|result| (result.scope.as_str(), result))
         .collect::<BTreeMap<_, _>>();
-    if results.len() != 3 {
+    if results.len() != 5 {
         return Err("committed real-site evidence scopes must be unique".to_owned());
     }
     validate_public_fill(
@@ -611,6 +611,20 @@ fn validate_real_site_runs(results: &[RealSiteRun]) -> Result<(), String> {
             .get("allowlisted_public_discovery_locate_continuation")
             .ok_or_else(|| {
                 "committed real-site evidence lost the locate-continuation slice".to_owned()
+            })?,
+    )?;
+    validate_public_luna_compact(
+        results
+            .get("allowlisted_public_discovery_luna_compact_workflow")
+            .ok_or_else(|| {
+                "committed real-site evidence lost the compact Luna workflow slice".to_owned()
+            })?,
+    )?;
+    validate_public_luna_forced_locate(
+        results
+            .get("allowlisted_public_discovery_luna_compact_forced_locate")
+            .ok_or_else(|| {
+                "committed real-site evidence lost the forced-locate Luna slice".to_owned()
             })?,
     )
 }
@@ -770,6 +784,113 @@ fn validate_public_locate_continuation(result: &RealSiteRun) -> Result<(), Strin
     }
     exact_strings(
         "public locate-continuation real-site non-claims",
+        &result.non_claims,
+        &[
+            "difficult_real_site_qualification",
+            "navigation_or_submission",
+            "authenticated_profile_behavior",
+            "extension_interaction",
+            "multi_site_compatibility",
+            "windows_behavior",
+            "browse_concurrency",
+            "shipping_policy_actor_integration",
+            "reactive_select_event_compatibility",
+        ],
+    )
+}
+
+fn validate_public_luna_compact(result: &RealSiteRun) -> Result<(), String> {
+    validate_date(
+        "compact Luna real-site result reviewed_on",
+        &result.reviewed_on,
+    )?;
+    if result.reviewed_on != "2026-09-04"
+        || result.scope != "allowlisted_public_discovery_luna_compact_workflow"
+        || result.site != "Wikipedia"
+        || result.task != "fill_search_locate_latent_language_then_select_without_submission"
+        || result.command
+            != "cargo run --locked -p zephium-terra-macos-probe --features live-probe -- --live-public-luna-suite-inspectable"
+        || result.platform != "macos"
+        || result.os_version != "27.0"
+        || result.os_build != "26A5425a"
+        || result.engine != "WebKit"
+        || result.engine_version != "22625.1.29.11.26"
+        || result.model != "gpt-5.6-luna"
+        || result.profile != "ephemeral"
+        || result.extensions != "absent"
+        || result.presentation != "hidden"
+        || result.backend != "page_world_compatibility_fill_then_fixed_semantic_recipe"
+        || result.runs != 3
+        || result.successful_runs != 3
+        || result.model_turns_per_run != [3, 3, 3]
+        || result.verified_actions != 6
+        || result.exact_value_verifications != 3
+        || result.exact_selection_verifications != 3
+        || result.input_tokens_per_run != [13_063, 13_080, 13_060]
+        || result.output_tokens_per_run != [303, 326, 302]
+        || result.serialized_request_bytes_per_run != [81_539, 81_687, 81_539]
+        || result.semantic_bytes_per_run != [3_611, 3_611, 3_611]
+        || result.charged_micro_usd_per_run != [975, 742, 709]
+        || result.provider_elapsed_ms_per_run != [10_346, 9_778, 12_721]
+        || result.elapsed_ms_per_run != [11_413, 10_865, 13_801]
+        || result.focus_theft_rows != 0
+        || result.hidden_page_autofocus != "internal_responder_change_only"
+        || result.native_teardown != "drained_each_run"
+        || result.status != "passed"
+    {
+        return Err("reviewed macOS compact Luna aggregate drifted".to_owned());
+    }
+    validate_public_two_action_non_claims("compact Luna real-site non-claims", result)
+}
+
+fn validate_public_luna_forced_locate(result: &RealSiteRun) -> Result<(), String> {
+    validate_date(
+        "forced-locate Luna real-site result reviewed_on",
+        &result.reviewed_on,
+    )?;
+    if result.reviewed_on != "2026-09-04"
+        || result.scope != "allowlisted_public_discovery_luna_compact_forced_locate"
+        || result.site != "Wikipedia"
+        || result.task
+            != "fill_search_force_locate_latent_language_then_select_without_submission"
+        || result.command
+            != "cargo run --locked -p zephium-terra-macos-probe --features live-probe -- --live-public-luna-suite-inspectable"
+        || result.platform != "macos"
+        || result.os_version != "27.0"
+        || result.os_build != "26A5425a"
+        || result.engine != "WebKit"
+        || result.engine_version != "22625.1.29.11.26"
+        || result.model != "gpt-5.6-luna"
+        || result.profile != "ephemeral"
+        || result.extensions != "absent"
+        || result.presentation != "hidden"
+        || result.backend != "page_world_compatibility_fill_then_fixed_semantic_recipe"
+        || result.runs != 3
+        || result.successful_runs != 3
+        || result.model_turns_per_run != [3, 3, 3]
+        || result.verified_actions != 6
+        || result.exact_value_verifications != 3
+        || result.exact_selection_verifications != 3
+        || result.input_tokens_per_run != [13_095, 13_137, 13_098]
+        || result.output_tokens_per_run != [290, 323, 279]
+        || result.serialized_request_bytes_per_run != [81_761, 82_053, 81_713]
+        || result.semantic_bytes_per_run != [3_690, 3_690, 3_690]
+        || result.charged_micro_usd_per_run != [962, 741, 681]
+        || result.provider_elapsed_ms_per_run != [10_756, 10_172, 11_256]
+        || result.elapsed_ms_per_run != [11_656, 11_240, 12_307]
+        || result.focus_theft_rows != 0
+        || result.hidden_page_autofocus != "internal_responder_change_only"
+        || result.native_teardown != "drained_each_run"
+        || result.status != "passed"
+    {
+        return Err("reviewed macOS forced-locate Luna aggregate drifted".to_owned());
+    }
+    validate_public_two_action_non_claims("forced-locate Luna real-site non-claims", result)
+}
+
+fn validate_public_two_action_non_claims(label: &str, result: &RealSiteRun) -> Result<(), String> {
+    exact_strings(
+        label,
         &result.non_claims,
         &[
             "difficult_real_site_qualification",

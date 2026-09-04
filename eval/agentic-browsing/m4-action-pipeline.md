@@ -37,6 +37,17 @@ shipping-controller integration. The Windows host keeps screenshot dispatch
 unsupported until its physical semantic-runtime qualifier promotes exact
 snapshot-generation lifecycle support.
 
+A later GPT-5.6 Luna pass projected collapsed options as latent Rust-side
+semantics, removed model-facing geometry coordinates, and narrowed the action
+schema to action-valid wait and verification variants. After a retained public
+trace exposed Luna reusing a same-named link as an option, the compact control
+projection gained the explicit `option_refs=locate` affordance and the model
+contract made target/option roles exact. The release-excluded qualifier now
+reports specific content-free binding/checkpoint/native-admission reasons. A
+three-plus-three Luna repeatability sweep then passed all twelve fill/select
+effects, with every unconstrained run choosing `locate` without being told to.
+The exact aggregate is recorded in `native-input-matrix-v1.json`.
+
 This evidence describes a functional-core seam plus one qualified macOS fixed
 click route. It does not claim that model-declared effects are trusted, that
 trusted native input is production-admitted, or that M4 is complete.
