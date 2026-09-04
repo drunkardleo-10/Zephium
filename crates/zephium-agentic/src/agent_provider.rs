@@ -596,6 +596,7 @@ impl AgentProviderCallIdentity {
     }
 
     /// Whether this correlation still names the supplied committed authority.
+    #[cfg(any(feature = "provider-transport", test))]
     pub(crate) fn matches_active(self, active: &AgentActiveModelCall) -> bool {
         self == Self::from_active(active)
     }

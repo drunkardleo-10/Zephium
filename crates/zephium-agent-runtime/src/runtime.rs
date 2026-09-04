@@ -25,14 +25,24 @@ use zephium_agentic::{
 };
 
 use crate::mailbox::{
-    AgentAuditSink, AgentRuntimeMailbox, AgentRuntimeMailboxItem, AgentRuntimeMailboxWake,
-    SemanticActionSink,
+    AgentAuditSink, AgentRuntimeMailbox, AgentRuntimeMailboxCleanClaimRefusal,
+    AgentRuntimeMailboxItem, AgentRuntimeMailboxWake, SemanticActionSink,
 };
 use crate::{AgentRuntimeMailboxConfig, AgentRuntimeMailboxFault, NativeEventSink};
 
 const RUN_IDLE: u8 = 0;
 const RUN_ACTIVE: u8 = 1;
 const RUN_SEALED: u8 = 2;
+// A controller clean-close claim is deliberately a two-step linearization.
+// Cancellation and lifecycle shutdown can turn CLAIMING/CLAIMED into SEALED;
+// only the moved proof may commit CLAIMED to SUCCEEDED.
+const RUN_CLAIMING: u8 = 3;
+const RUN_CLAIMED: u8 = 4;
+const RUN_SUCCEEDED: u8 = 5;
+const TERMINAL_CLASS_NONE: u8 = 0;
+const TERMINAL_CLASS_ORDINARY: u8 = 1;
+const TERMINAL_CLASS_CANCELLED: u8 = 2;
+const TERMINAL_CLASS_SHUTDOWN: u8 = 3;
 const STAGED_STOP_NONE: u8 = 0;
 const STAGED_STOP_UNEXPECTED_NATIVE_EVENT: u8 = 1;
 const STAGED_STOP_TERMINAL_OVERFLOW: u8 = 2;
@@ -371,6 +381,111 @@ pub enum AgentRuntimeWorkerFault {
     Mailbox(AgentRuntimeMailboxFault),
 }
 
+/// Content-free reason a controller could not atomically claim success.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum AgentRuntimeControllerTerminalRefusal {
+    /// The run was no longer in its sole active controller state.
+    #[error("agent runtime controller terminal claim is no longer active")]
+    Inactive,
+    /// Cancellation was observed before the claim linearized.
+    #[error("agent runtime controller terminal claim was cancelled")]
+    Cancelled,
+    /// Lifecycle shutdown was observed before the claim linearized.
+    #[error("agent runtime controller terminal claim was shut down")]
+    Shutdown,
+    /// Callback intake faulted while the claim was closing ingress.
+    #[error("agent runtime controller terminal claim observed a mailbox fault")]
+    MailboxFault,
+    /// A terminal callback remained queued at the claim point.
+    #[error("agent runtime controller terminal claim observed terminal callback debt")]
+    TerminalDebt,
+    /// An unsolicited native signal remained queued at the claim point.
+    #[error("agent runtime controller terminal claim observed native signal debt")]
+    SignalDebt,
+    /// A control command remained queued at the claim point.
+    #[error("agent runtime controller terminal claim observed control debt")]
+    ControlDebt,
+}
+
+/// Exact control-state class expected by one clean controller terminal claim.
+///
+/// The controller's business outcome remains its own closed vocabulary. This
+/// class only prevents a cancelled or lifecycle-sealed runtime from being
+/// misreported as an ordinary quiescent turn.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgentRuntimeControllerTerminalClass {
+    /// No runtime cancellation or lifecycle shutdown was observed.
+    Ordinary,
+    /// The controller drained after one user cancellation.
+    Cancelled,
+    /// The controller drained during lifecycle shutdown.
+    Shutdown,
+}
+
+impl AgentRuntimeControllerTerminalClass {
+    const fn code(self) -> u8 {
+        match self {
+            Self::Ordinary => TERMINAL_CLASS_ORDINARY,
+            Self::Cancelled => TERMINAL_CLASS_CANCELLED,
+            Self::Shutdown => TERMINAL_CLASS_SHUTDOWN,
+        }
+    }
+
+    const fn from_code(code: u8) -> Option<Self> {
+        match code {
+            TERMINAL_CLASS_ORDINARY => Some(Self::Ordinary),
+            TERMINAL_CLASS_CANCELLED => Some(Self::Cancelled),
+            TERMINAL_CLASS_SHUTDOWN => Some(Self::Shutdown),
+            _ => None,
+        }
+    }
+}
+
+/// Move-only proof that the current runtime accepted a clean controller close.
+///
+/// It is intentionally not a runtime lifecycle success: the runtime remains a
+/// one-run, fail-closed shell. Dropping an uncommitted proof revokes the claim.
+#[must_use]
+pub struct AgentRuntimeControllerTerminalClaim {
+    inner: Arc<RuntimeInner>,
+    ticket: AgentRunTicket,
+    committed: bool,
+}
+
+impl AgentRuntimeControllerTerminalClaim {
+    /// Returns the exact sole run ticket bound to this claim.
+    pub const fn ticket(&self) -> AgentRunTicket {
+        self.ticket
+    }
+
+    /// Commits the previously linearized clean controller terminal claim.
+    pub fn commit(mut self) {
+        let _gate = recover_lock(&self.inner.terminal_claim_gate);
+        // `self` is the sole move-only owner created by CLAIMING->CLAIMED.
+        // Lifecycle control cannot revoke CLAIMED and no other API can create
+        // or consume this proof, so this is an infallible typestate edge.
+        self.inner.run_state.store(RUN_SUCCEEDED, Ordering::Release);
+        self.inner
+            .terminal_claim_class
+            .store(TERMINAL_CLASS_NONE, Ordering::Release);
+        self.committed = true;
+    }
+}
+
+impl Drop for AgentRuntimeControllerTerminalClaim {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.inner.fail_success_claim();
+        }
+    }
+}
+
+impl fmt::Debug for AgentRuntimeControllerTerminalClaim {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("AgentRuntimeControllerTerminalClaim([move-only, redacted])")
+    }
+}
+
 /// Move-only capability for the one controller running on the named worker.
 ///
 /// It intentionally exposes neither worker queues nor scheduler primitives,
@@ -456,6 +571,58 @@ impl AgentRuntimeWorker {
         }
     }
 
+    /// Waits for a retained event while reconciling an already-accepted
+    /// terminal obligation.
+    ///
+    /// Unlike [`Self::next_event`], a sticky mailbox fault is observed through
+    /// [`Self::status`] but does not preempt queued or future terminal callback
+    /// settlement. This narrow cleanup-only API is not a general event loop:
+    /// it exists so a controller can drain the exact audit callback it already
+    /// transferred before returning opaque recovery.
+    pub async fn next_event_for_terminal_cleanup(&mut self) -> AgentRuntimeEvent {
+        loop {
+            let mut notified = std::pin::pin!(self.inner.control_wake.notified());
+            notified.as_mut().enable();
+            if self.inner.shutdown_requested.load(Ordering::Acquire) && !self.shutdown_delivered {
+                self.shutdown_delivered = true;
+                return AgentRuntimeEvent::ShutdownRequested;
+            }
+            if self.inner.cancelled.load(Ordering::Acquire)
+                && !self.cancellation_delivered
+                && !self.shutdown_delivered
+            {
+                if self.inner.shutdown_requested.load(Ordering::Acquire) {
+                    continue;
+                }
+                self.cancellation_delivered = true;
+                return AgentRuntimeEvent::CancellationRequested;
+            }
+            if let Some(item) = self.inner.mailbox.try_pop_terminal() {
+                return controller_event_from_mailbox(item);
+            }
+            if let Some(item) = self.inner.mailbox.try_pop_signal() {
+                return controller_event_from_mailbox(item);
+            }
+            let mailbox_wait = self.inner.mailbox.wait_for_cleanup_work();
+            tokio::pin!(mailbox_wait);
+            tokio::select! {
+                biased;
+                _ = &mut notified => {}
+                _ = &mut mailbox_wait => {}
+            }
+        }
+    }
+
+    /// Removes one already-retained mailbox item after a terminal claim was
+    /// refused. The closed event enum preserves any move-only settlement for
+    /// opaque controller recovery; it never exposes a queue or mailbox handle.
+    pub fn try_drain_terminal_claim_refusal_event(&mut self) -> Option<AgentRuntimeEvent> {
+        self.inner
+            .mailbox
+            .try_pop()
+            .map(controller_event_from_mailbox)
+    }
+
     /// Returns the exact ticket for the sole admitted run, if one exists.
     pub fn current_run_ticket(&self) -> Option<AgentRunTicket> {
         NonZeroU64::new(self.inner.current_ticket.load(Ordering::Acquire)).map(AgentRunTicket)
@@ -483,6 +650,54 @@ impl AgentRuntimeWorker {
     /// Creates one exact move-only durable-audit completion callback.
     pub fn audit_completion(&self) -> AgentAuditCompletion {
         self.inner.mailbox.audit_sink().completion()
+    }
+
+    /// Atomically closes callback ingress and claims a controller success.
+    ///
+    /// This waits for callbacks which entered before ingress closed, then
+    /// rejects success if cancellation, lifecycle shutdown, a mailbox fault,
+    /// a queued terminal settlement, or an unsolicited native signal won the
+    /// race. The returned proof must be committed only when the controller's
+    /// own policy closure is also irreversible; dropping it fails closed.
+    pub async fn try_claim_controller_terminal(
+        &mut self,
+        class: AgentRuntimeControllerTerminalClass,
+    ) -> Result<AgentRuntimeControllerTerminalClaim, AgentRuntimeControllerTerminalRefusal> {
+        // Even a control-class refusal is a terminal controller decision: seal
+        // ingress and wait preexisting writers before returning it so the
+        // caller can synchronously retain every queued move-only settlement.
+        let began = self.inner.begin_terminal_claim(class);
+        let mailbox = self.inner.mailbox.try_claim_clean_quiescence().await;
+        match mailbox {
+            Ok(()) => {}
+            Err(AgentRuntimeMailboxCleanClaimRefusal::Fault) => {
+                self.inner.fail_success_claim();
+                return Err(AgentRuntimeControllerTerminalRefusal::MailboxFault);
+            }
+            Err(AgentRuntimeMailboxCleanClaimRefusal::TerminalDebt) => {
+                self.inner.fail_success_claim();
+                return Err(AgentRuntimeControllerTerminalRefusal::TerminalDebt);
+            }
+            Err(AgentRuntimeMailboxCleanClaimRefusal::SignalDebt) => {
+                self.inner.fail_success_claim();
+                return Err(AgentRuntimeControllerTerminalRefusal::SignalDebt);
+            }
+        }
+        began?;
+        if !self.inner.commands.is_empty() {
+            self.inner.fail_success_claim();
+            return Err(AgentRuntimeControllerTerminalRefusal::ControlDebt);
+        }
+        self.inner.finish_terminal_claim(class)?;
+        let ticket = self.current_run_ticket().ok_or_else(|| {
+            self.inner.fail_success_claim();
+            AgentRuntimeControllerTerminalRefusal::Inactive
+        })?;
+        Ok(AgentRuntimeControllerTerminalClaim {
+            inner: Arc::clone(&self.inner),
+            ticket,
+            committed: false,
+        })
     }
 }
 
@@ -624,6 +839,11 @@ struct RuntimeInner {
     cancelled: AtomicBool,
     shutdown_requested: AtomicBool,
     shutdown_deadline: Mutex<Option<Instant>>,
+    // Serializes the final CLAIMING->CLAIMED transition against lifecycle
+    // cancellation/shutdown publication. Once CLAIMED, the returned move-only
+    // proof is the clean-terminal linearization point.
+    terminal_claim_gate: Mutex<()>,
+    terminal_claim_class: AtomicU8,
     fault_shutdown_requested: AtomicBool,
     staged_stop_reason: AtomicU8,
     completion: CompletionState,
@@ -633,9 +853,12 @@ impl RuntimeInner {
     fn status(&self) -> AgentRunStatus {
         let run_state = self.run_state.load(Ordering::Acquire);
         AgentRunStatus {
-            admitted: run_state == RUN_ACTIVE,
+            admitted: run_state == RUN_ACTIVE
+                || run_state == RUN_CLAIMING
+                || run_state == RUN_CLAIMED,
             cancelled: self.cancelled.load(Ordering::Acquire),
-            sealed: run_state == RUN_SEALED || self.shutdown_requested.load(Ordering::Acquire),
+            sealed: run_state != RUN_IDLE && run_state != RUN_ACTIVE
+                || self.shutdown_requested.load(Ordering::Acquire),
             mailbox_fault: self.mailbox.fault(),
             staged_stop_reason: AgentRuntimeStagedStopReason::from_code(
                 self.staged_stop_reason.load(Ordering::Acquire),
@@ -644,20 +867,36 @@ impl RuntimeInner {
     }
 
     fn seal_and_cancel(&self) {
-        self.run_state.store(RUN_SEALED, Ordering::Release);
-        self.cancelled.store(true, Ordering::Release);
+        let _gate = recover_lock(&self.terminal_claim_gate);
+        if self.seal_for_control(false) {
+            self.cancelled.store(true, Ordering::Release);
+        }
         self.control_wake.notify_waiters();
     }
 
     fn request_cooperative_shutdown_until(&self, deadline: Instant) {
+        let _gate = recover_lock(&self.terminal_claim_gate);
         let mut retained_deadline = recover_lock(&self.shutdown_deadline);
         match *retained_deadline {
             Some(current) if current <= deadline => {}
             _ => *retained_deadline = Some(deadline),
         }
-        self.run_state.store(RUN_SEALED, Ordering::Release);
-        self.shutdown_requested.store(true, Ordering::Release);
-        self.cancelled.store(true, Ordering::Release);
+        if matches!(
+            self.run_state.load(Ordering::Acquire),
+            RUN_CLAIMED | RUN_SUCCEEDED
+        ) {
+            // A moved terminal proof already linearized the run's business
+            // outcome, but the host must still retain an absolute reap bound
+            // in case a malicious controller holds that proof and never
+            // returns. Do not rewrite semantic shutdown/cancel flags here.
+            drop(retained_deadline);
+            self.control_wake.notify_waiters();
+            return;
+        }
+        if self.seal_for_control(true) {
+            self.shutdown_requested.store(true, Ordering::Release);
+            self.cancelled.store(true, Ordering::Release);
+        }
         drop(retained_deadline);
         self.control_wake.notify_waiters();
     }
@@ -682,8 +921,187 @@ impl RuntimeInner {
     }
 
     fn request_final_shutdown(&self) {
+        if self.clean_terminal_claimed() {
+            self.mailbox.close_clean();
+            return;
+        }
         self.request_cooperative_shutdown_until(Instant::now());
         self.mailbox.close();
+    }
+
+    async fn close_and_drain_for_finalization(&self) {
+        if self.clean_terminal_claimed() {
+            self.mailbox.close_and_drain_clean().await;
+        } else {
+            self.mailbox.close_and_drain().await;
+        }
+    }
+
+    fn clean_terminal_claimed(&self) -> bool {
+        matches!(
+            self.run_state.load(Ordering::Acquire),
+            RUN_CLAIMED | RUN_SUCCEEDED
+        )
+    }
+
+    fn seal_for_control(&self, shutdown: bool) -> bool {
+        loop {
+            let current = self.run_state.load(Ordering::Acquire);
+            match current {
+                RUN_IDLE | RUN_ACTIVE => match self.run_state.compare_exchange(
+                    current,
+                    RUN_SEALED,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => return true,
+                    Err(_) => continue,
+                },
+                RUN_CLAIMING => match AgentRuntimeControllerTerminalClass::from_code(
+                    self.terminal_claim_class.load(Ordering::Acquire),
+                ) {
+                    // Repeating the same cancellation class cannot revoke an
+                    // already-linearizing clean cancelled terminal. Lifecycle
+                    // shutdown is stronger and deliberately does revoke it.
+                    Some(AgentRuntimeControllerTerminalClass::Cancelled) if !shutdown => {
+                        return true;
+                    }
+                    Some(AgentRuntimeControllerTerminalClass::Shutdown) => return true,
+                    _ => match self.run_state.compare_exchange(
+                        RUN_CLAIMING,
+                        RUN_SEALED,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    ) {
+                        Ok(_) => return true,
+                        Err(_) => continue,
+                    },
+                },
+                RUN_SEALED => return true,
+                // A late user cancellation loses to the terminal proof. A
+                // lifecycle shutdown still publishes its force-drop deadline
+                // while preserving the proof's eventual commit.
+                RUN_CLAIMED => return shutdown,
+                RUN_SUCCEEDED => return false,
+                _ => return false,
+            }
+        }
+    }
+
+    fn begin_terminal_claim(
+        &self,
+        class: AgentRuntimeControllerTerminalClass,
+    ) -> Result<(), AgentRuntimeControllerTerminalRefusal> {
+        let expected = match class {
+            AgentRuntimeControllerTerminalClass::Ordinary => {
+                if self.shutdown_requested.load(Ordering::Acquire) {
+                    return Err(AgentRuntimeControllerTerminalRefusal::Shutdown);
+                }
+                if self.cancelled.load(Ordering::Acquire) {
+                    return Err(AgentRuntimeControllerTerminalRefusal::Cancelled);
+                }
+                RUN_ACTIVE
+            }
+            AgentRuntimeControllerTerminalClass::Cancelled => {
+                if self.shutdown_requested.load(Ordering::Acquire) {
+                    return Err(AgentRuntimeControllerTerminalRefusal::Shutdown);
+                }
+                if !self.cancelled.load(Ordering::Acquire) {
+                    return Err(AgentRuntimeControllerTerminalRefusal::Inactive);
+                }
+                RUN_SEALED
+            }
+            AgentRuntimeControllerTerminalClass::Shutdown => {
+                if !self.shutdown_requested.load(Ordering::Acquire) {
+                    return Err(AgentRuntimeControllerTerminalRefusal::Inactive);
+                }
+                RUN_SEALED
+            }
+        };
+        self.terminal_claim_class
+            .store(class.code(), Ordering::Release);
+        self.run_state
+            .compare_exchange(expected, RUN_CLAIMING, Ordering::AcqRel, Ordering::Acquire)
+            .map(|_| ())
+            .map_err(|_| {
+                self.terminal_claim_class
+                    .store(TERMINAL_CLASS_NONE, Ordering::Release);
+                self.terminal_refusal()
+            })
+    }
+
+    fn fail_success_claim(&self) {
+        let _ = self.run_state.compare_exchange(
+            RUN_CLAIMING,
+            RUN_SEALED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        self.terminal_claim_class
+            .store(TERMINAL_CLASS_NONE, Ordering::Release);
+        let _ = self.run_state.compare_exchange(
+            RUN_CLAIMED,
+            RUN_SEALED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        self.control_wake.notify_waiters();
+    }
+
+    fn finish_terminal_claim(
+        &self,
+        class: AgentRuntimeControllerTerminalClass,
+    ) -> Result<(), AgentRuntimeControllerTerminalRefusal> {
+        let _gate = recover_lock(&self.terminal_claim_gate);
+        match class {
+            AgentRuntimeControllerTerminalClass::Ordinary
+                if self.shutdown_requested.load(Ordering::Acquire) =>
+            {
+                self.fail_success_claim();
+                return Err(AgentRuntimeControllerTerminalRefusal::Shutdown);
+            }
+            AgentRuntimeControllerTerminalClass::Ordinary
+                if self.cancelled.load(Ordering::Acquire) =>
+            {
+                self.fail_success_claim();
+                return Err(AgentRuntimeControllerTerminalRefusal::Cancelled);
+            }
+            AgentRuntimeControllerTerminalClass::Cancelled
+                if self.shutdown_requested.load(Ordering::Acquire)
+                    || !self.cancelled.load(Ordering::Acquire) =>
+            {
+                self.fail_success_claim();
+                return Err(self.terminal_refusal());
+            }
+            AgentRuntimeControllerTerminalClass::Shutdown
+                if !self.shutdown_requested.load(Ordering::Acquire) =>
+            {
+                self.fail_success_claim();
+                return Err(self.terminal_refusal());
+            }
+            _ => {}
+        }
+        self.run_state
+            .compare_exchange(
+                RUN_CLAIMING,
+                RUN_CLAIMED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .map(|_| ())
+            .map_err(|_| self.terminal_refusal())
+    }
+
+    fn terminal_refusal(&self) -> AgentRuntimeControllerTerminalRefusal {
+        if self.shutdown_requested.load(Ordering::Acquire) {
+            AgentRuntimeControllerTerminalRefusal::Shutdown
+        } else if self.cancelled.load(Ordering::Acquire) {
+            AgentRuntimeControllerTerminalRefusal::Cancelled
+        } else if self.mailbox.fault().is_some() {
+            AgentRuntimeControllerTerminalRefusal::MailboxFault
+        } else {
+            AgentRuntimeControllerTerminalRefusal::Inactive
+        }
     }
 
     fn record_staged_stop(&self, reason: AgentRuntimeStagedStopReason) {
@@ -834,6 +1252,8 @@ impl PendingAgentRuntime {
             cancelled: AtomicBool::new(false),
             shutdown_requested: AtomicBool::new(false),
             shutdown_deadline: Mutex::new(None),
+            terminal_claim_gate: Mutex::new(()),
+            terminal_claim_class: AtomicU8::new(TERMINAL_CLASS_NONE),
             fault_shutdown_requested: AtomicBool::new(false),
             staged_stop_reason: AtomicU8::new(STAGED_STOP_NONE),
             completion: CompletionState::new(),
@@ -1094,12 +1514,12 @@ async fn worker_loop(
         let mut notified = std::pin::pin!(inner.control_wake.notified());
         notified.as_mut().enable();
         if inner.shutdown_requested.load(Ordering::Acquire) {
-            inner.mailbox.close_and_drain().await;
+            inner.close_and_drain_for_finalization().await;
             break;
         }
         if inner.cancelled.load(Ordering::Acquire) {
             inner.request_final_shutdown();
-            inner.mailbox.close_and_drain().await;
+            inner.close_and_drain_for_finalization().await;
             break;
         }
         // A controller-owned start must remain queued until it is bound so the
@@ -1115,7 +1535,7 @@ async fn worker_loop(
             }
         }
         if inner.shutdown_requested.load(Ordering::Acquire) {
-            inner.mailbox.close_and_drain().await;
+            inner.close_and_drain_for_finalization().await;
             break;
         }
         if browser.is_none() {
@@ -1144,13 +1564,13 @@ async fn worker_loop(
                                 // an implicit clean outcome. Seal, drain, and
                                 // release the browser only on this worker.
                                 inner.request_final_shutdown();
-                                inner.mailbox.close_and_drain().await;
+                                inner.close_and_drain_for_finalization().await;
                                 break;
                             }
                         }
                         None => {
                             inner.request_final_shutdown();
-                            inner.mailbox.close_and_drain().await;
+                            inner.close_and_drain_for_finalization().await;
                             break;
                         }
                     },
@@ -1820,6 +2240,8 @@ mod tests {
             cancelled: AtomicBool::new(false),
             shutdown_requested: AtomicBool::new(false),
             shutdown_deadline: Mutex::new(None),
+            terminal_claim_gate: Mutex::new(()),
+            terminal_claim_class: AtomicU8::new(TERMINAL_CLASS_NONE),
             fault_shutdown_requested: AtomicBool::new(false),
             staged_stop_reason: AtomicU8::new(STAGED_STOP_NONE),
             completion: CompletionState::new(),
@@ -1833,6 +2255,119 @@ mod tests {
             shutdown_delivered: false,
             not_send: PhantomData,
         }
+    }
+
+    fn active_controller_test_inner() -> Arc<RuntimeInner> {
+        let inner = controller_test_inner();
+        inner.run_state.store(RUN_ACTIVE, Ordering::Release);
+        inner.current_ticket.store(1, Ordering::Release);
+        inner
+    }
+
+    #[test]
+    fn terminal_claim_closes_racing_ingress_and_commits_only_once() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("controller claim runtime");
+        runtime.block_on(async {
+            let inner = active_controller_test_inner();
+            let mut worker = controller_test_worker(Arc::clone(&inner));
+            let claim = worker
+                .try_claim_controller_terminal(AgentRuntimeControllerTerminalClass::Ordinary)
+                .await
+                .expect("empty active controller claims terminal");
+            assert_eq!(claim.ticket().get(), 1);
+            assert!(inner.mailbox.publish_test_terminal().is_err());
+            claim.commit();
+            assert!(inner.status().sealed());
+            assert!(inner.mailbox.fault().is_none());
+        });
+    }
+
+    #[test]
+    fn terminal_claim_rejects_queued_callback_debt_before_clean_publication() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("controller claim runtime");
+        runtime.block_on(async {
+            let inner = active_controller_test_inner();
+            inner
+                .mailbox
+                .publish_test_terminal()
+                .expect("bounded terminal debt queues");
+            let mut worker = controller_test_worker(Arc::clone(&inner));
+            assert!(matches!(
+                worker
+                    .try_claim_controller_terminal(AgentRuntimeControllerTerminalClass::Ordinary)
+                    .await,
+                Err(AgentRuntimeControllerTerminalRefusal::TerminalDebt)
+            ));
+            assert!(inner.status().sealed());
+            assert!(inner.mailbox.try_pop_terminal().is_some());
+        });
+    }
+
+    #[test]
+    fn terminal_claim_rejects_queued_native_signal_debt_before_clean_publication() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("controller claim runtime");
+        runtime.block_on(async {
+            let inner = active_controller_test_inner();
+            inner
+                .mailbox
+                .publish_test_signal()
+                .expect("bounded signal debt queues");
+            let mut worker = controller_test_worker(Arc::clone(&inner));
+            assert!(matches!(
+                worker
+                    .try_claim_controller_terminal(AgentRuntimeControllerTerminalClass::Ordinary)
+                    .await,
+                Err(AgentRuntimeControllerTerminalRefusal::SignalDebt)
+            ));
+            // Production signal values use the same closed controller event
+            // path; this mailbox-private marker only proves claim rejection.
+        });
+    }
+
+    #[test]
+    fn cancelled_and_shutdown_terminal_claims_preserve_their_exact_control_class() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("controller claim runtime");
+        runtime.block_on(async {
+            let cancelled = active_controller_test_inner();
+            cancelled.seal_and_cancel();
+            let mut worker = controller_test_worker(Arc::clone(&cancelled));
+            let claim = worker
+                .try_claim_controller_terminal(AgentRuntimeControllerTerminalClass::Cancelled)
+                .await
+                .expect("cancelled drain claims clean terminal");
+            // Repeated user cancellation cannot revoke an equivalent claim.
+            cancelled.seal_and_cancel();
+            claim.commit();
+            assert!(cancelled.status().cancelled());
+            assert!(cancelled.mailbox.fault().is_none());
+
+            let shutdown = active_controller_test_inner();
+            let deadline = Instant::now() + Duration::from_secs(1);
+            shutdown.request_cooperative_shutdown_until(deadline);
+            let mut worker = controller_test_worker(Arc::clone(&shutdown));
+            let claim = worker
+                .try_claim_controller_terminal(AgentRuntimeControllerTerminalClass::Shutdown)
+                .await
+                .expect("shutdown drain claims clean terminal");
+            // A tightened lifecycle deadline remains available to reap a
+            // controller which maliciously holds the move-only proof.
+            shutdown.request_cooperative_shutdown_until(Instant::now());
+            assert!(shutdown.shutdown_deadline().is_some());
+            claim.commit();
+            assert!(shutdown.status().mailbox_fault().is_none());
+        });
     }
 
     fn controller_test_context() -> zephium_agentic::ContextJoin {
@@ -2855,6 +3390,8 @@ mod tests {
             cancelled: AtomicBool::new(false),
             shutdown_requested: AtomicBool::new(false),
             shutdown_deadline: Mutex::new(None),
+            terminal_claim_gate: Mutex::new(()),
+            terminal_claim_class: AtomicU8::new(TERMINAL_CLASS_NONE),
             fault_shutdown_requested: AtomicBool::new(false),
             staged_stop_reason: AtomicU8::new(STAGED_STOP_NONE),
             completion: CompletionState::new(),

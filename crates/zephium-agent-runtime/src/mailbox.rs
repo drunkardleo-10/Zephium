@@ -159,6 +159,17 @@ pub(crate) enum AgentRuntimeMailboxWake {
     Fault(AgentRuntimeMailboxFault),
 }
 
+/// Content-free reason callback intake could not be cleanly claimed.
+///
+/// This remains crate-private: the controller worker exposes a closed runtime
+/// refusal instead of its mailbox implementation details.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AgentRuntimeMailboxCleanClaimRefusal {
+    Fault,
+    TerminalDebt,
+    SignalDebt,
+}
+
 enum TerminalItem {
     Native(ContextNativeEvent),
     SemanticAction(SemanticActionNativeSettlement),
@@ -237,12 +248,42 @@ impl AgentRuntimeMailbox {
 
     /// Permanently closes native callback intake and wakes the controller.
     pub(crate) fn close(&self) {
+        self.close_ingress_clean();
+        self.publish_fault(AgentRuntimeMailboxFault::Closed);
+    }
+
+    /// Closes callback ingress without manufacturing a mailbox fault.
+    ///
+    /// The controller-success linearization uses this only after it has
+    /// already closed every controller-owned effect and audit obligation. A
+    /// callback which raced before this close is still counted by `ingress`
+    /// and must be drained before clean claim can succeed; a later callback is
+    /// simply refused and cannot create new debt after the claim point.
+    fn close_ingress_clean(&self) {
         let _ = self
             .inner
             .ingress
             .fetch_or(INGRESS_CLOSED, Ordering::AcqRel);
-        self.publish_fault(AgentRuntimeMailboxFault::Closed);
         self.inner.ingress_wake.notify_waiters();
+    }
+
+    /// Atomically closes ingress, waits for racing callback writes, and proves
+    /// that no callback debt or sticky intake fault remains.
+    pub(crate) async fn try_claim_clean_quiescence(
+        &self,
+    ) -> Result<(), AgentRuntimeMailboxCleanClaimRefusal> {
+        self.close_ingress_clean();
+        self.wait_for_ingress_drain().await;
+        if self.fault().is_some() {
+            return Err(AgentRuntimeMailboxCleanClaimRefusal::Fault);
+        }
+        if !self.inner.terminal.is_empty() {
+            return Err(AgentRuntimeMailboxCleanClaimRefusal::TerminalDebt);
+        }
+        if !self.inner.signals.is_empty() {
+            return Err(AgentRuntimeMailboxCleanClaimRefusal::SignalDebt);
+        }
+        Ok(())
     }
 
     /// Closes callback intake, waits for any already-admitted callback to
@@ -253,6 +294,23 @@ impl AgentRuntimeMailbox {
         while let Some(item) = self.try_pop() {
             discard_staged_item(item);
         }
+    }
+
+    /// Cleanly closes and drains after a committed controller terminal claim.
+    ///
+    /// The claim already proved no queue debt; this only refuses late ingress
+    /// and releases mailbox storage without manufacturing a `Closed` fault.
+    pub(crate) async fn close_and_drain_clean(&self) {
+        self.close_ingress_clean();
+        self.wait_for_ingress_drain().await;
+        while let Some(item) = self.try_pop() {
+            discard_staged_item(item);
+        }
+    }
+
+    /// Cleanly refuses any late callback after a terminal claim.
+    pub(crate) fn close_clean(&self) {
+        self.close_ingress_clean();
     }
 
     /// Removes exactly one item, always draining terminal work before signals.
@@ -311,6 +369,23 @@ impl AgentRuntimeMailbox {
             }
             if !self.inner.signals.is_empty() {
                 return AgentRuntimeMailboxWake::SignalReady;
+            }
+            notified.await;
+        }
+    }
+
+    /// Waits for retained callback/signal work while deliberately ignoring a
+    /// sticky fault.
+    ///
+    /// A controller which already owns an accepted durable-audit callback uses
+    /// this bounded cleanup path: overflow makes success impossible, but it
+    /// must not erase the exact audit settlement that was admitted first.
+    pub(crate) async fn wait_for_cleanup_work(&self) {
+        loop {
+            let mut notified = std::pin::pin!(self.inner.wake.notified());
+            notified.as_mut().enable();
+            if !self.inner.terminal.is_empty() || !self.inner.signals.is_empty() {
+                return;
             }
             notified.await;
         }
@@ -444,12 +519,12 @@ impl AgentRuntimeMailbox {
     }
 
     #[cfg(test)]
-    fn publish_test_terminal(&self) -> Result<(), AgentRuntimeMailboxFault> {
+    pub(crate) fn publish_test_terminal(&self) -> Result<(), AgentRuntimeMailboxFault> {
         self.publish_terminal(TerminalItem::Test)
     }
 
     #[cfg(test)]
-    fn publish_test_signal(&self) -> Result<(), AgentRuntimeMailboxFault> {
+    pub(crate) fn publish_test_signal(&self) -> Result<(), AgentRuntimeMailboxFault> {
         self.publish_signal(SignalItem::Test)
     }
 }
