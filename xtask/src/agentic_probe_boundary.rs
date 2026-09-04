@@ -2389,6 +2389,9 @@ fn validate_owned_context_viewport_contract(
         "native_view.setAutoresizingMask(Mask::ViewNotSizable)",
         "page.isInspectable()",
         "native_view.autoresizingMask()!=Mask::ViewNotSizable",
+        ".with_background_throttling(wry::BackgroundThrottlingPolicy::Throttle)",
+        "configuration.preferences().inactiveSchedulingPolicy()",
+        "scheduling!=objc2_web_kit::WKInactiveSchedulingPolicy::Throttle",
         "frame.size.width!=f64::from(viewport.width())",
         "frame.size.height!=f64::from(viewport.height())",
     ] {
@@ -13447,6 +13450,24 @@ mod tests {
             windows,
         )
         .is_err());
+        for (needle, replacement) in [
+            (
+                ".with_background_throttling(wry::BackgroundThrottlingPolicy::Throttle)",
+                ".with_background_throttling(wry::BackgroundThrottlingPolicy::Disabled)",
+            ),
+            (
+                "scheduling != objc2_web_kit::WKInactiveSchedulingPolicy::Throttle",
+                "false",
+            ),
+        ] {
+            assert!(validate_owned_context_viewport_contract(
+                context_port,
+                host,
+                &macos.replace(needle, replacement),
+                windows,
+            )
+            .is_err());
+        }
         assert!(validate_owned_context_viewport_contract(
             context_port,
             host,

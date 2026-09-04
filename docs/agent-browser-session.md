@@ -67,3 +67,19 @@ audit acknowledgement.
 
 The excluded native workflow harness may exercise this driver, but a successful
 single public workflow would not by itself establish production qualification.
+
+## macOS scheduling ownership
+
+Ready Work-owned views use WebKit's `Throttle` inactive scheduling policy,
+attested from the live configuration at construction. Hidden views remain
+runnable with background CPU limits; Browse's scheduling policy is unchanged.
+WebKit's default `Suspend` can stop an inactive view's tasks despite Rust still
+owning an authorized in-flight semantic request. The policy meanings and
+default are defined by [Apple's WKPreferences documentation](https://developer.apple.com/documentation/webkit/wkpreferences/inactiveschedulingpolicy-swift.property).
+
+There is no per-request full-speed override or shared mutable restore guard.
+Refusals, callback timeouts and teardown retain the ordinary owned-view close
+path. Explicit native macOS suspend/resume is not yet wired into the host (the
+existing adapter is Windows-only); this change does not claim suspended-page
+or idle battery qualification. A future macOS suspend adapter must revoke
+automation authority before parking the page and re-attest on resume.

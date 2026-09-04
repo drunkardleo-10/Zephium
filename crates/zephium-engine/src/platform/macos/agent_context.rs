@@ -330,6 +330,10 @@ where
     let renderer_semantic = semantic.controller().clone();
     let builder = WebViewBuilder::new()
         .with_url("about:blank")
+        // Ready Work contexts must keep their bounded semantic channel runnable.
+        // Preserve background CPU throttling; only the Rust lifecycle may close
+        // this owned page. Do not opt Browse tabs out of their ordinary policy.
+        .with_background_throttling(wry::BackgroundThrottlingPolicy::Throttle)
         .with_bounds(Rect {
             position: Position::Logical(LogicalPosition::new(0.0, 0.0)),
             size: Size::Logical(LogicalSize::new(
@@ -468,11 +472,17 @@ pub(crate) fn attest_owned_agent_view(
     let page = super::native_webview(view);
     // SAFETY: the marker above proves main-thread access; `page` and every
     // object returned from it are retained by objc2 for these bounded reads.
-    let (configuration, extension_controller) = unsafe {
+    let (configuration, extension_controller, scheduling) = unsafe {
         let configuration = page.configuration();
         let extension_controller = configuration.webExtensionController();
-        (configuration, extension_controller)
+        let scheduling = configuration.preferences().inactiveSchedulingPolicy();
+        (configuration, extension_controller, scheduling)
     };
+    // Available since macOS 14.0, below Zephium's deployment floor. Ready
+    // owned pages must remain runnable without disabling background CPU limits.
+    if scheduling != objc2_web_kit::WKInactiveSchedulingPolicy::Throttle {
+        return Err(AgentOwnedViewConstructionError::Native);
+    }
     if extension_controller.is_some() {
         return Err(AgentOwnedViewConstructionError::ExtensionIsolation);
     }
