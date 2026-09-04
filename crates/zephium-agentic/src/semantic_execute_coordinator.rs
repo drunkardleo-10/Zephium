@@ -272,6 +272,20 @@ pub struct SemanticClickQualificationExecution {
     execution: SemanticActionQualificationExecution,
 }
 
+/// Release-excluded owner for one model-supplied local semantic click.
+///
+/// This is deliberately narrower than the general execution coordinator. It
+/// accepts one already-decoded proposal, requires the fixed local-click
+/// contract, then uses the production observation binder, native request
+/// contract, settlement, and verification pipeline. It never mints product
+/// policy authority; production controller code must use the policy actor's
+/// assessment and dispatch path instead.
+#[cfg(feature = "probe-harness")]
+#[must_use]
+pub struct SemanticModelClickQualificationExecution {
+    execution: SemanticActionQualificationExecution,
+}
+
 #[cfg(feature = "probe-harness")]
 #[must_use]
 struct SemanticActionQualificationExecution {
@@ -454,6 +468,64 @@ impl SemanticClickQualificationExecution {
     }
 
     /// Rejoins, settles, and verifies one exact adjacent semantic snapshot.
+    pub fn settle_and_verify(
+        self,
+        settlement: SemanticActionNativeSettlement,
+        snapshot: &crate::SemanticSnapshot,
+        observed_at: crate::SemanticSettleInstant,
+    ) -> Result<crate::SemanticActionExecutionApplied, SemanticActionQualificationError> {
+        self.execution.settle_and_verify(
+            settlement,
+            snapshot,
+            observed_at,
+            crate::SemanticEffectProofKind::TargetState,
+        )
+    }
+}
+
+#[cfg(feature = "probe-harness")]
+impl SemanticModelClickQualificationExecution {
+    /// Binds exactly one decoded model click proposal to one observation.
+    ///
+    /// The model's opaque reference and declared target-state contract travel
+    /// unchanged into the production binding core. Anything other than one
+    /// local click with target-state verification is refused before native
+    /// request construction.
+    pub fn prepare(
+        observation: &crate::SemanticObservation,
+        proposal: crate::SemanticActionProposal,
+        batch: u64,
+        attempt: u64,
+        requested_at: SemanticActionExecutionInstant,
+    ) -> Result<Self, SemanticActionQualificationError> {
+        if !matches!(proposal.intent(), crate::SemanticActionIntent::Click { .. })
+            || proposal.effect() != crate::SemanticEffectClass::LocalWrite
+            || !matches!(
+                proposal.verification(),
+                crate::SemanticVerification::TargetState { .. }
+            )
+        {
+            return Err(SemanticActionQualificationError::Preparation);
+        }
+        Ok(Self {
+            execution: SemanticActionQualificationExecution::prepare(
+                observation,
+                proposal,
+                batch,
+                attempt,
+                requested_at,
+            )?,
+        })
+    }
+
+    /// Moves the exact production native request to the platform adapter once.
+    pub fn take_native_request(
+        &mut self,
+    ) -> Result<SemanticActionNativeRequest, SemanticActionQualificationError> {
+        self.execution.take_native_request()
+    }
+
+    /// Rejoins, settles, and verifies one exact fresh semantic snapshot.
     pub fn settle_and_verify(
         self,
         settlement: SemanticActionNativeSettlement,

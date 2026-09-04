@@ -24,20 +24,24 @@ use raw_window_handle::{
     AppKitWindowHandle, HandleError, HasWindowHandle, RawWindowHandle, WindowHandle,
 };
 use zephium_agentic::{
-    encode_semantic_runtime_invocation, ContextCapabilities, ContextCapability, ContextId,
-    ContextIdentity, ContextKind, ContextNavigationTarget, ContextOperationId,
-    ContextOwnedViewport, ContextProfileStorageClass, ContextRegistry, ContextRunId,
-    ContextSettlement, FixtureRoute, FixtureServer, FixtureServerError, FrameId,
+    encode_semantic_runtime_invocation, AgentAccountAttestationId, AgentAccountScope,
+    AgentContextAccountBinding, AgentEffectScope, AgentPlanLeaseBinding, AgentPlanLeaseId,
+    AgentPlanNodeAuthority, AgentPlanNodeId, AgentPlanNodeScope, AgentPolicyInstant,
+    AgentRunBudget, AgentRunManifest, AgentRunManifestId, AgentRunScope, ContextCapabilities,
+    ContextCapability, ContextId, ContextIdentity, ContextKind, ContextNavigationTarget,
+    ContextOperationId, ContextOwnedViewport, ContextProfileStorageClass, ContextRegistry,
+    ContextRunId, ContextSettlement, FixtureRoute, FixtureServer, FixtureServerError, FrameId,
     SemanticActionExecutionBackend, SemanticActionExecutionInstant, SemanticActionNativeReadiness,
     SemanticActionNativeSettlement, SemanticActionQualificationError, SemanticActionText,
-    SemanticClickQualificationExecution, SemanticCompleteness, SemanticExpansionKind,
-    SemanticFillQualificationExecution, SemanticFrameJoin, SemanticFrameTrust,
-    SemanticFrameUnsupported, SemanticInvocationId, SemanticNode, SemanticObservationAssembler,
-    SemanticObservationBudget, SemanticObservationId, SemanticObservationRequest,
-    SemanticOperationClass, SemanticOrigin, SemanticRole, SemanticRuntimeBudget,
-    SemanticRuntimeFault, SemanticRuntimeInvocation, SemanticRuntimePortFailure,
-    SemanticRuntimeResultError, SemanticSensitivity, SemanticSettleInstant, SemanticSnapshot,
-    SemanticSnapshotGeneration, SemanticState, SemanticValueSummary,
+    SemanticClickQualificationExecution, SemanticCompleteness, SemanticEffectClass,
+    SemanticExpansionKind, SemanticFillQualificationExecution, SemanticFrameJoin,
+    SemanticFrameTrust, SemanticFrameUnsupported, SemanticInvocationId, SemanticNode,
+    SemanticObservationAssembler, SemanticObservationBudget, SemanticObservationId,
+    SemanticObservationRequest, SemanticOperationClass, SemanticOrigin, SemanticRole,
+    SemanticRuntimeBudget, SemanticRuntimeFault, SemanticRuntimeInvocation,
+    SemanticRuntimePortFailure, SemanticRuntimeResultError, SemanticSensitivity,
+    SemanticSettleInstant, SemanticSnapshot, SemanticSnapshotGeneration, SemanticState,
+    SemanticValueSummary,
 };
 use zephium_core::ids::ProfileId;
 
@@ -56,6 +60,10 @@ const RUN_LOOP_SLICE: Duration = Duration::from_millis(5);
 const MAX_DOCUMENT_LOADING_RETRIES: u16 = 512;
 const PAGE_WORLD_FILL_RELAY_PROBE_ENV: &str = "ZEPHIUM_PAGE_WORLD_FILL_RELAY_PROBE";
 const PAGE_WORLD_FILL_RELAY_HOSTILE_PROBE_ENV: &str = "ZEPHIUM_PAGE_WORLD_FILL_RELAY_HOSTILE_PROBE";
+const MODEL_PROBE_POLICY_NOW_MILLIS: u64 = 10_000;
+const MODEL_PROBE_POLICY_EXPIRES_MILLIS: u64 = MODEL_PROBE_POLICY_NOW_MILLIS + 10 * 60 * 1_000;
+const MODEL_PROBE_MODEL_TOKEN_BUDGET: u64 = 300_000;
+const MODEL_PROBE_COST_BUDGET_MICRO_USD: u64 = 1_000_000;
 
 struct ProbeHostView {
     view: Retained<NSView>,
@@ -65,6 +73,16 @@ struct PendingPrimaryClick {
     execution: SemanticClickQualificationExecution,
     settlement: SemanticActionNativeSettlement,
     admitted_at: Instant,
+}
+
+struct PendingModelClick {
+    settlement: SemanticActionNativeSettlement,
+    admitted_at: Instant,
+}
+
+enum PendingInitialClick {
+    Fixed(Box<PendingPrimaryClick>),
+    Model(Box<PendingModelClick>),
 }
 
 struct PendingPrimaryFill {
@@ -149,8 +167,91 @@ struct CapturedSnapshot {
     snapshot: SemanticSnapshot,
 }
 
+enum ProbeMode<'a> {
+    Full,
+    ModelClick(
+        &'a mut dyn FnMut(
+            &zephium_agentic::SemanticObservation,
+            MacosAgenticSemanticProbeAuthority,
+        ) -> Result<zephium_agentic::SemanticActionNativeRequest, ()>,
+    ),
+}
+
+/// Fixed run authority bound to the live release-excluded semantic fixture.
+///
+/// The bundle is minted beside the context registry from the exact current
+/// context join. Callers can consume it once to construct the provider policy
+/// turn, but cannot select a profile, run, origin, account, effect scope, or
+/// budget independently.
+#[doc(hidden)]
+#[must_use]
+pub struct MacosAgenticSemanticProbeAuthority {
+    manifest: AgentRunManifest,
+    lease: AgentPlanLeaseBinding,
+    account: AgentContextAccountBinding,
+    observation: SemanticObservationRequest,
+    frame: SemanticFrameJoin,
+    invocation: SemanticInvocationId,
+    snapshot_generation: SemanticSnapshotGeneration,
+    now: AgentPolicyInstant,
+}
+
+impl MacosAgenticSemanticProbeAuthority {
+    /// Consumes the exact authority needed to construct one pre-observed Terra turn.
+    pub fn into_parts(
+        self,
+    ) -> (
+        AgentRunManifest,
+        AgentPlanLeaseBinding,
+        AgentContextAccountBinding,
+        SemanticObservationRequest,
+        SemanticFrameJoin,
+        SemanticInvocationId,
+        SemanticSnapshotGeneration,
+        AgentPolicyInstant,
+    ) {
+        (
+            self.manifest,
+            self.lease,
+            self.account,
+            self.observation,
+            self.frame,
+            self.invocation,
+            self.snapshot_generation,
+            self.now,
+        )
+    }
+}
+
+/// Move-only terminal returned by the release-excluded model-click session.
+///
+/// Page content remains confined to the semantic snapshot and this value has
+/// no logging implementation. The caller must rejoin it with the exact
+/// model-proposal owner that created the native request.
+#[doc(hidden)]
+#[must_use]
+pub struct MacosAgenticSemanticModelClickTerminal {
+    settlement: SemanticActionNativeSettlement,
+    snapshot: SemanticSnapshot,
+    observed_at: SemanticSettleInstant,
+}
+
+impl MacosAgenticSemanticModelClickTerminal {
+    /// Consumes the terminal into the exact native settlement, fresh snapshot,
+    /// and trusted monotonic observation instant required by verification.
+    pub fn into_parts(
+        self,
+    ) -> (
+        SemanticActionNativeSettlement,
+        SemanticSnapshot,
+        SemanticSettleInstant,
+    ) {
+        (self.settlement, self.snapshot, self.observed_at)
+    }
+}
+
 struct PendingTeardown {
-    execution: Result<(), &'static str>,
+    execution: Result<Option<MacosAgenticSemanticModelClickTerminal>, &'static str>,
     page: Weak<WKWebView>,
     window: Weak<NSWindow>,
     store: Weak<WKWebsiteDataStore>,
@@ -158,13 +259,27 @@ struct PendingTeardown {
 }
 
 pub(crate) fn run() -> Result<(), &'static str> {
-    let pending = objc2::rc::autoreleasepool(|_| begin())?;
-    finish(pending)
+    let pending = objc2::rc::autoreleasepool(|_| begin(ProbeMode::Full))?;
+    match finish(pending)? {
+        None => Ok(()),
+        Some(_) => Err("unexpected_model_terminal"),
+    }
 }
 
-fn begin() -> Result<PendingTeardown, &'static str> {
-    let page_relay_probe = page_world_fill_relay_probe_enabled();
-    let hostile_relay_probe = page_world_fill_relay_hostile_probe_enabled();
+pub(crate) fn run_model_click(
+    mut prepare: impl FnMut(
+        &zephium_agentic::SemanticObservation,
+        MacosAgenticSemanticProbeAuthority,
+    ) -> Result<zephium_agentic::SemanticActionNativeRequest, ()>,
+) -> Result<MacosAgenticSemanticModelClickTerminal, &'static str> {
+    let pending = objc2::rc::autoreleasepool(|_| begin(ProbeMode::ModelClick(&mut prepare)))?;
+    finish(pending)?.ok_or("missing_model_terminal")
+}
+
+fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
+    let full_probe = matches!(&mode, ProbeMode::Full);
+    let page_relay_probe = full_probe && page_world_fill_relay_probe_enabled();
+    let hostile_relay_probe = full_probe && page_world_fill_relay_hostile_probe_enabled();
     if hostile_relay_probe && !page_relay_probe {
         return Err("relay_hostile_requires_page_relay");
     }
@@ -309,7 +424,19 @@ fn begin() -> Result<PendingTeardown, &'static str> {
         verify_first_snapshot(&first_capture.snapshot)?;
         let first_generation = first_capture.snapshot.generation();
         let first_observation = assemble_observation(first_capture)?;
-        let pending_click = execute_primary_click(&view, &first_observation, &runtime)?;
+        let pending_click = match &mut mode {
+            ProbeMode::Full => PendingInitialClick::Fixed(Box::new(execute_primary_click(
+                &view,
+                &first_observation,
+                &runtime,
+            )?)),
+            ProbeMode::ModelClick(prepare) => {
+                let authority = model_probe_authority(&first_observation)?;
+                let request =
+                    prepare(&first_observation, authority).map_err(|()| "model_action_prepare")?;
+                PendingInitialClick::Model(Box::new(execute_model_click(&view, request, &runtime)?))
+            }
+        };
         let action_settle_deadline = Instant::now()
             .checked_add(ACTION_SECURITY_SETTLE)
             .ok_or("action_settle")?;
@@ -328,8 +455,21 @@ fn begin() -> Result<PendingTeardown, &'static str> {
             &mut successful_snapshots,
             &runtime,
         )?;
-        verify_primary_click_execution(pending_click, &after_click.snapshot)?;
-        verify_primary_click(&after_click.snapshot)?;
+        match pending_click {
+            PendingInitialClick::Fixed(pending) => {
+                verify_primary_click_execution(*pending, &after_click.snapshot)?;
+                verify_primary_click(&after_click.snapshot)?;
+            }
+            PendingInitialClick::Model(pending) => {
+                verify_primary_click(&after_click.snapshot)?;
+                let observed_at = action_observed_at(pending.admitted_at)?;
+                return Ok(Some(MacosAgenticSemanticModelClickTerminal {
+                    settlement: pending.settlement,
+                    snapshot: after_click.snapshot,
+                    observed_at,
+                }));
+            }
+        }
 
         let mut prior_capture = after_click;
         for (name, value, role, batch, attempt, completed) in [
@@ -694,7 +834,7 @@ fn begin() -> Result<PendingTeardown, &'static str> {
         if successful_snapshots != expected_snapshots {
             return Err("snapshot_count_verification");
         }
-        Ok(())
+        Ok(None)
     })();
 
     // Stop the fixed listener before cancelling the native page so an
@@ -731,7 +871,9 @@ fn begin() -> Result<PendingTeardown, &'static str> {
     })
 }
 
-fn finish(pending: PendingTeardown) -> Result<(), &'static str> {
+fn finish(
+    pending: PendingTeardown,
+) -> Result<Option<MacosAgenticSemanticModelClickTerminal>, &'static str> {
     let run_loop = NSRunLoop::mainRunLoop();
     let deadline = Instant::now()
         .checked_add(TEARDOWN_TIMEOUT)
@@ -870,6 +1012,88 @@ fn assemble_observation(
     assembler.finish().map_err(|_| "action_observation")
 }
 
+fn model_probe_authority(
+    observation: &zephium_agentic::SemanticObservation,
+) -> Result<MacosAgenticSemanticProbeAuthority, &'static str> {
+    let snapshot = observation
+        .frames()
+        .first()
+        .ok_or("model_authority_snapshot")?;
+    let frame = snapshot.frame().clone();
+    if observation.frames().len() != 1 || observation.request().context() != frame.context() {
+        return Err("model_authority_observation");
+    }
+    let identity = frame.context().identity();
+    let profile = identity.profile();
+    let account_scope = AgentAccountScope::Anonymous;
+    let origin = frame.origin().clone();
+    let effects =
+        AgentEffectScope::try_new(&[SemanticEffectClass::Read, SemanticEffectClass::LocalWrite])
+            .map_err(|_| "model_authority_effects")?;
+    let budget = AgentRunBudget::try_new(
+        2,
+        MODEL_PROBE_MODEL_TOKEN_BUDGET,
+        MODEL_PROBE_COST_BUDGET_MICRO_USD,
+        1,
+    )
+    .map_err(|_| "model_authority_budget")?;
+    let scope = AgentRunScope::try_new(
+        vec![profile],
+        vec![account_scope],
+        vec![origin.clone()],
+        // The semantic policy conservatively upgrades page-controlled labels
+        // and redacted secret controls to sensitive taint. This explicit live
+        // probe authorizes that fixed loopback fixture only; secret values are
+        // still mechanically absent from the model projection.
+        SemanticSensitivity::Sensitive,
+        effects,
+        Vec::new(),
+    )
+    .map_err(|_| "model_authority_scope")?;
+    let node = AgentPlanNodeId::generate();
+    let authority = AgentPlanNodeAuthority::try_new(
+        vec![profile],
+        vec![account_scope],
+        vec![origin],
+        SemanticSensitivity::Sensitive,
+        effects,
+    )
+    .map_err(|_| "model_authority_node")?;
+    let expires_at = AgentPolicyInstant::from_millis(MODEL_PROBE_POLICY_EXPIRES_MILLIS);
+    let manifest = AgentRunManifest::try_new(
+        AgentRunManifestId::generate(),
+        identity.owner(),
+        scope,
+        budget,
+        AgentPolicyInstant::from_millis(MODEL_PROBE_POLICY_NOW_MILLIS),
+        expires_at,
+        vec![AgentPlanNodeScope::new(
+            node,
+            authority,
+            budget,
+            AgentPolicyInstant::from_millis(MODEL_PROBE_POLICY_EXPIRES_MILLIS - 1),
+        )],
+    )
+    .map_err(|_| "model_authority_manifest")?;
+    let lease = AgentPlanLeaseBinding::new(AgentPlanLeaseId::generate(), node);
+    let account = AgentContextAccountBinding::new(
+        AgentAccountAttestationId::generate(),
+        frame.context(),
+        account_scope,
+        AgentPolicyInstant::from_millis(MODEL_PROBE_POLICY_NOW_MILLIS),
+    );
+    Ok(MacosAgenticSemanticProbeAuthority {
+        manifest,
+        lease,
+        account,
+        observation: observation.request().clone(),
+        frame,
+        invocation: snapshot.invocation(),
+        snapshot_generation: snapshot.generation(),
+        now: AgentPolicyInstant::from_millis(MODEL_PROBE_POLICY_NOW_MILLIS + 1),
+    })
+}
+
 fn execute_primary_click(
     view: &AgentOwnedView,
     observation: &zephium_agentic::SemanticObservation,
@@ -919,6 +1143,48 @@ fn execute_primary_click(
     }
     Ok(PendingPrimaryClick {
         execution,
+        settlement,
+        admitted_at,
+    })
+}
+
+fn execute_model_click(
+    view: &AgentOwnedView,
+    request: zephium_agentic::SemanticActionNativeRequest,
+    runtime: &ProbeRuntime<'_, '_>,
+) -> Result<PendingModelClick, &'static str> {
+    if request.kind() != zephium_agentic::SemanticActionKind::Click {
+        return Err("model_action_kind");
+    }
+    let admitted_at = Instant::now();
+    let result = Rc::new(RefCell::new(None));
+    let completion = Rc::clone(&result);
+    view.dispatch_semantic_action(request, admitted_at, move |settlement| {
+        if let Ok(mut slot) = completion.try_borrow_mut() {
+            if slot.is_none() {
+                *slot = Some(settlement);
+            }
+        }
+    });
+    let deadline = Instant::now()
+        .checked_add(SNAPSHOT_TIMEOUT)
+        .ok_or("model_action_timeout")?;
+    while result.borrow().is_none() && !runtime.failed() && Instant::now() < deadline {
+        runtime.pump();
+    }
+    if runtime.failed() {
+        return Err("model_action_native_state");
+    }
+    let settlement = result
+        .try_borrow_mut()
+        .map_err(|_| "model_action_state")?
+        .take()
+        .ok_or("model_action_timeout")?;
+    runtime.native_guard.sample();
+    if runtime.failed() {
+        return Err("model_action_native_state");
+    }
+    Ok(PendingModelClick {
         settlement,
         admitted_at,
     })
@@ -993,12 +1259,7 @@ fn verify_primary_click_execution(
     pending: PendingPrimaryClick,
     snapshot: &SemanticSnapshot,
 ) -> Result<(), &'static str> {
-    let elapsed = u64::try_from(pending.admitted_at.elapsed().as_millis())
-        .map_err(|_| "action_verification_clock")?;
-    let observed_at = 10_000_u64
-        .checked_add(elapsed)
-        .map(SemanticSettleInstant::from_millis)
-        .ok_or("action_verification_clock")?;
+    let observed_at = action_observed_at(pending.admitted_at)?;
     let applied = pending
         .execution
         .settle_and_verify(pending.settlement, snapshot, observed_at)
@@ -1010,6 +1271,15 @@ fn verify_primary_click_execution(
         return Err("action_evidence");
     }
     Ok(())
+}
+
+fn action_observed_at(admitted_at: Instant) -> Result<SemanticSettleInstant, &'static str> {
+    let elapsed = u64::try_from(admitted_at.elapsed().as_millis())
+        .map_err(|_| "action_verification_clock")?;
+    10_000_u64
+        .checked_add(elapsed)
+        .map(SemanticSettleInstant::from_millis)
+        .ok_or("action_verification_clock")
 }
 
 fn verify_primary_fill_execution(

@@ -30,6 +30,14 @@ pub const MAX_SEMANTIC_MODEL_BYTES: u32 = 512 * 1024;
 pub const MAX_SEMANTIC_MODEL_TOKENS: u32 = 272_000;
 /// Initial-snapshot token target from the product qualification contract.
 pub const INITIAL_SEMANTIC_MODEL_TOKEN_TARGET: u32 = 2_000;
+/// Conservative preflight ceiling for an initial provider-exact snapshot.
+///
+/// UTF-8 bytes are a safe token upper bound but routinely overstate the real
+/// tokenizer count. Keep the product's 2k target as the measured efficiency
+/// objective while allowing a tightly bounded 4k local preflight; the complete
+/// immutable request is counted by the authenticated provider endpoint before
+/// generation begins.
+pub const INITIAL_PROVIDER_EXACT_CONSERVATIVE_TOKEN_CEILING: u32 = 4 * 1_024;
 /// Normal action-diff token target from the product qualification contract.
 pub const ACTION_SEMANTIC_DIFF_TOKEN_TARGET: u32 = 200;
 /// Hard token ceiling for one content-free semantic-locate result.
@@ -61,6 +69,17 @@ impl SemanticModelEncodingBudget {
     pub const INITIAL_CONSERVATIVE: Self = Self {
         max_bytes: 32 * 1024,
         max_tokens: INITIAL_SEMANTIC_MODEL_TOKEN_TARGET,
+        token_requirement: SemanticTokenCountRequirement::ConservativeAllowed,
+    };
+
+    /// Initial provider-exact snapshot with a bounded conservative preflight.
+    ///
+    /// This does not label byte length as an exact model-token count. It only
+    /// permits the request to reach the provider's authenticated exact-count
+    /// gate while retaining a 4k worst-case semantic-input ceiling.
+    pub const INITIAL_PROVIDER_EXACT_CONSERVATIVE: Self = Self {
+        max_bytes: INITIAL_PROVIDER_EXACT_CONSERVATIVE_TOKEN_CEILING,
+        max_tokens: INITIAL_PROVIDER_EXACT_CONSERVATIVE_TOKEN_CEILING,
         token_requirement: SemanticTokenCountRequirement::ConservativeAllowed,
     };
 
@@ -1415,6 +1434,19 @@ mod tests {
                 .admit_conservative_utf8(&selected),
             Err(SemanticModelEncodingError::TokenLimit)
         ));
+    }
+
+    #[test]
+    fn provider_exact_preflight_keeps_target_and_conservative_ceiling_distinct() {
+        let budget = SemanticModelEncodingBudget::INITIAL_PROVIDER_EXACT_CONSERVATIVE;
+        assert_eq!(budget.max_bytes(), 4 * 1_024);
+        assert_eq!(budget.max_tokens(), 4 * 1_024);
+        assert_eq!(
+            budget.token_requirement(),
+            SemanticTokenCountRequirement::ConservativeAllowed
+        );
+        assert!(INITIAL_SEMANTIC_MODEL_TOKEN_TARGET < budget.max_tokens());
+        assert!(budget.max_tokens() < MAX_SEMANTIC_MODEL_TOKENS);
     }
 
     #[test]

@@ -60,6 +60,12 @@ pub(crate) use agent_context::{
 pub(crate) use agentic_input_probe::run as run_agentic_input_matrix;
 #[cfg(feature = "native-agentic-semantic-probe")]
 pub(crate) use agentic_semantic_probe::run as run_agentic_semantic_probe;
+#[cfg(feature = "native-agentic-semantic-probe")]
+pub(crate) use agentic_semantic_probe::run_model_click as run_agentic_semantic_model_click_probe;
+#[cfg(feature = "native-agentic-semantic-probe")]
+pub use agentic_semantic_probe::{
+    MacosAgenticSemanticModelClickTerminal, MacosAgenticSemanticProbeAuthority,
+};
 
 use dispatch2::DispatchObject as _;
 

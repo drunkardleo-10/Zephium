@@ -56,6 +56,32 @@ pub fn run_macos_agentic_semantic_probe() -> Result<(), &'static str> {
     platform::macos::run_agentic_semantic_probe()
 }
 
+/// Runs one fixed-fixture semantic session using a caller-supplied model action.
+///
+/// The callback receives the initial production semantic observation and must
+/// return one already-bound native action request. The hidden engine session
+/// executes that request, captures an adjacent fresh snapshot, tears down all
+/// native owners, and returns the move-only terminal for caller verification.
+/// This diagnostic API is absent from ordinary and optimized builds.
+#[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+#[doc(hidden)]
+pub fn run_macos_agentic_semantic_model_click_probe(
+    prepare: impl FnMut(
+        &zephium_agentic::SemanticObservation,
+        MacosAgenticSemanticProbeAuthority,
+    ) -> Result<zephium_agentic::SemanticActionNativeRequest, ()>,
+) -> Result<MacosAgenticSemanticModelClickTerminal, &'static str> {
+    platform::macos::run_agentic_semantic_model_click_probe(prepare)
+}
+
+#[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+#[doc(hidden)]
+pub use platform::macos::MacosAgenticSemanticModelClickTerminal;
+
+#[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+#[doc(hidden)]
+pub use platform::macos::MacosAgenticSemanticProbeAuthority;
+
 /// Runs one bounded Windows native-input matrix on the owning STA thread.
 ///
 /// This diagnostic API is absent from ordinary and optimized builds. It owns

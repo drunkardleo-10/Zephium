@@ -407,7 +407,7 @@ pub use semantic_execute_coordinator::{
 pub use semantic_execute_coordinator::{
     SemanticActionQualificationError, SemanticClickQualificationError,
     SemanticClickQualificationExecution, SemanticFillQualificationError,
-    SemanticFillQualificationExecution,
+    SemanticFillQualificationExecution, SemanticModelClickQualificationExecution,
 };
 pub use semantic_extract::{
     extract_delivered_semantic_read, extract_semantic_read, SemanticExtractedBoolean,
