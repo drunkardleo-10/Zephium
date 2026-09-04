@@ -17,6 +17,7 @@ repository = "https://github.com/zephium/zephium"
 
 [workspace.dependencies]
 zephium-agentic = { path = "crates/zephium-agentic", version = "=0.1.0" }
+zephium-agent-runtime = { path = "crates/zephium-agent-runtime", version = "=0.1.0" }
 zephium-agent-provider-transport = { path = "crates/zephium-agent-provider-transport", version = "=0.1.0" }
 zephium-blocker = { path = "crates/zephium-blocker", version = "=0.1.0", default-features = false }
 zephium-blocker-service = { path = "crates/zephium-blocker-service", version = "=0.1.0", default-features = false }
@@ -50,6 +51,7 @@ thiserror = "2"
 ulid = "1"
 url = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros"] }
+crossbeam-queue = "=0.3.12"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
