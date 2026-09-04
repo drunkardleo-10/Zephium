@@ -1460,6 +1460,11 @@ earlier gate.
 
 ### Milestone 6 — Production qualification
 
+The current reusable locate/act controller vertical and its explicit host
+obligations are documented in [Bounded semantic browser session](agent-browser-session.md).
+The [M6 engineering record](../eval/agentic-browsing/m6-production-qualification.md)
+separately reports real-site evidence and remaining shipping integration gaps.
+
 - complete deterministic, real-site, concurrent-use, endurance, and fault
   suites;
 - profile hot paths and remove unnecessary allocation, serialization, native

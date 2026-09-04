@@ -145,6 +145,29 @@ pub use platform::macos::MacosAgenticSemanticProbeAuthority;
 #[doc(hidden)]
 pub use platform::macos::MacosAgenticSemanticTwoActionScenario;
 
+/// Hosts one bounded variable-length public workflow through the production native adapter.
+/// The exact registry projection is supplied at each decision; all requests
+/// must already carry policy authority, and each callback must independently
+/// verify its preceding terminal. This qualifier is excluded from release.
+#[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+#[doc(hidden)]
+pub fn run_macos_agentic_semantic_model_workflow_probe(
+    initial: impl FnMut(
+        &zephium_agentic::SemanticObservation,
+        MacosAgenticSemanticProbeAuthority,
+        zephium_agentic::ContextAutomationState,
+    ) -> Result<zephium_agentic::SemanticActionNativeRequest, ()>,
+    next: impl FnMut(
+        &zephium_agentic::SemanticObservation,
+        zephium_agentic::SemanticActionNativeSettlement,
+        &zephium_agentic::SemanticObservation,
+        zephium_agentic::SemanticSettleInstant,
+        zephium_agentic::ContextAutomationState,
+    ) -> Result<Option<zephium_agentic::SemanticActionNativeRequest>, ()>,
+) -> Result<(), &'static str> {
+    platform::macos::run_agentic_semantic_model_workflow_probe(initial, next)
+}
+
 /// Runs one bounded Windows native-input matrix on the owning STA thread.
 ///
 /// This diagnostic API is absent from ordinary and optimized builds. It owns

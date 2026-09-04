@@ -10,6 +10,7 @@ const ROOT: &str = "crates/zephium-agent-controller/src/lib.rs";
 const PROBE: &str = "crates/zephium-agent-controller/src/probe.rs";
 const TERRA: &str = "crates/zephium-agent-controller/src/terra.rs";
 const ACTION: &str = "crates/zephium-agent-controller/src/action.rs";
+const QUALIFIER: &str = "crates/zephium-terra-macos-probe/src/main.rs";
 const ALLOWED_DEPENDENCIES: [&str; 6] = [
     "thiserror",
     "tokio",
@@ -47,6 +48,7 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     validate_probe(&probe)?;
     validate_terra(&terra)?;
     validate_action(&action)?;
+    validate_workflow_qualifier(&read(repository.join(QUALIFIER))?)?;
     validate_inventory(&repository.join("crates/zephium-agent-controller"))?;
     Ok(())
 }
@@ -261,56 +263,44 @@ fn validate_inventory(crate_root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{
-        validate_action, validate_manifest, validate_probe, validate_root, validate_terra,
-    };
-
-    const MANIFEST: &str = include_str!("../../crates/zephium-agent-controller/Cargo.toml");
-    const ROOT: &str = include_str!("../../crates/zephium-agent-controller/src/lib.rs");
-    const PROBE: &str = include_str!("../../crates/zephium-agent-controller/src/probe.rs");
-    const TERRA: &str = include_str!("../../crates/zephium-agent-controller/src/terra.rs");
-    const ACTION: &str = include_str!("../../crates/zephium-agent-controller/src/action.rs");
-
-    #[test]
-    fn current_controller_boundary_is_valid() {
-        validate_manifest(MANIFEST).expect("controller manifest");
-        validate_root(ROOT).expect("controller root");
-        validate_probe(PROBE).expect("controller probe");
-        validate_terra(TERRA).expect("controller Terra path");
-        validate_action(ACTION).expect("controller native action path");
-    }
-
-    #[test]
-    fn mutation_cannot_reenable_default_transport_or_content_reading() {
-        assert!(validate_manifest(
-            &MANIFEST.replace("default = []", "default = [\"provider-transport\"]")
-        )
-        .is_err());
-        assert!(validate_terra(&format!("{TERRA}\nlet _ = delta.as_str();")).is_err());
-    }
-
-    #[test]
-    fn mutation_cannot_bypass_action_authority_or_drop_pending_ownership() {
-        for boundary in [
-            "authorize_semantic_effect",
-            "dispatch_semantic_effect",
-            "verify_semantic_action_terminal",
-            "settle_verified_semantic_terminal",
-            "finalize_accounted_semantic_action_result",
-            "self.pending = Some",
-        ] {
-            assert!(
-                validate_action(&ACTION.replace(boundary, "removed_boundary")).is_err(),
-                "{boundary}"
-            );
+fn validate_workflow_qualifier(source: &str) -> Result<(), String> {
+    let workflow = source
+        .split_once("fn run_variable_workflow()")
+        .and_then(|(_, source)| source.split_once("fn run_two_action("))
+        .map(|(source, _)| source)
+        .ok_or_else(|| "generalized native workflow qualifier is missing".to_owned())?;
+    for required in [
+        "AgentBrowserSession::try_new",
+        "AgentBrowserModel::Luna",
+        "AgentBrowserRetention::InspectablePublicData",
+        ".next_action(",
+        ".authorize_action(",
+        ".settle_action(",
+        ".continue_after_verified_action(",
+        "workflow.progress.observe(initial, final_query, language)",
+        "workflow.session = Some(refusal.into_session())",
+        "terminal.model_receipts().len() != workflow.metrics.len()",
+        "workflow.verified < 3",
+        "workflow.metrics.len() > 8",
+    ] {
+        if !workflow.contains(required) {
+            return Err(format!(
+                "native workflow lost production boundary: {required}"
+            ));
         }
-        assert!(validate_action(&format!(
-            "{ACTION}\nSemanticModelActionQualificationExecution"
-        ))
-        .is_err());
     }
+    for forbidden in [
+        "TerraProbeActionBridge",
+        "SemanticModelActionQualificationExecution",
+        "for_execution_qualification",
+    ] {
+        if workflow.contains(forbidden) {
+            return Err(format!(
+                "native workflow acquired synthetic authority: {forbidden}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn validate_action(source: &str) -> Result<(), String> {
@@ -342,4 +332,76 @@ fn validate_action(source: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        validate_action, validate_manifest, validate_probe, validate_root, validate_terra,
+        validate_workflow_qualifier,
+    };
+
+    const MANIFEST: &str = include_str!("../../crates/zephium-agent-controller/Cargo.toml");
+    const ROOT: &str = include_str!("../../crates/zephium-agent-controller/src/lib.rs");
+    const PROBE: &str = include_str!("../../crates/zephium-agent-controller/src/probe.rs");
+    const TERRA: &str = include_str!("../../crates/zephium-agent-controller/src/terra.rs");
+    const ACTION: &str = include_str!("../../crates/zephium-agent-controller/src/action.rs");
+    const QUALIFIER: &str = include_str!("../../crates/zephium-terra-macos-probe/src/main.rs");
+
+    #[test]
+    fn current_controller_boundary_is_valid() {
+        validate_manifest(MANIFEST).expect("controller manifest");
+        validate_root(ROOT).expect("controller root");
+        validate_probe(PROBE).expect("controller probe");
+        validate_terra(TERRA).expect("controller Terra path");
+        validate_action(ACTION).expect("controller native action path");
+        validate_workflow_qualifier(QUALIFIER).expect("same-driver native qualification path");
+    }
+
+    #[test]
+    fn mutation_cannot_reenable_default_transport_or_content_reading() {
+        assert!(validate_manifest(
+            &MANIFEST.replace("default = []", "default = [\"provider-transport\"]")
+        )
+        .is_err());
+        assert!(validate_terra(&format!("{TERRA}\nlet _ = delta.as_str();")).is_err());
+    }
+
+    #[test]
+    fn mutation_cannot_bypass_action_authority_or_drop_pending_ownership() {
+        for boundary in [
+            "authorize_semantic_effect",
+            "dispatch_semantic_effect",
+            "verify_semantic_action_terminal",
+            "settle_verified_semantic_terminal",
+            "finalize_accounted_semantic_action_result",
+            "self.pending = Some",
+        ] {
+            assert!(
+                validate_action(&ACTION.replace(boundary, "removed_boundary")).is_err(),
+                "{boundary}"
+            );
+        }
+        assert!(validate_action(&format!(
+            "{ACTION}\nSemanticModelActionQualificationExecution"
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn workflow_qualifier_cannot_replace_real_policy_or_claim_partial_success() {
+        for boundary in [
+            "AgentBrowserSession::try_new",
+            ".authorize_action(",
+            ".settle_action(",
+            "workflow.progress.observe(initial, final_query, language)",
+            "workflow.session = Some(refusal.into_session())",
+            "terminal.model_receipts().len() != workflow.metrics.len()",
+        ] {
+            assert!(
+                validate_workflow_qualifier(&QUALIFIER.replace(boundary, "removed_boundary"))
+                    .is_err()
+            );
+        }
+    }
 }

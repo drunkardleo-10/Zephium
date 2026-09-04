@@ -48,9 +48,18 @@ fn main() {
         [argument] if argument == "--live-public-luna-suite-inspectable" => {
             run_luna_inspectable_suite()
         }
+        [argument] if argument == "--live-public-luna-workflow-inspectable" => {
+            run_variable_workflow()
+        }
         _ => std::process::exit(2),
     };
     if let Err(error) = result {
+        if let ProbeFailure::Provider(reason) = error {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "browser-workflow-provider: refusal={reason:?}; content=redacted"
+            );
+        }
         let _ = writeln!(
             std::io::stderr().lock(),
             "macos-terra-agentic-probe: failed; stage={}; action_step={}; tool_kind={}; engine_reason={}; encoding_reason={}; verification_reason={}; wait={}; settle_millis={}; locate_query_bytes={}; locate_query_terms={}; locate_scanned_nodes={}; protocol_event={}; content=redacted",
@@ -856,6 +865,376 @@ fn run_luna_inspectable_suite() -> Result<(), ProbeFailure> {
             return Err(ProbeFailure::SuiteChild);
         }
     }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+struct PreparedSearchProgress {
+    prepared: bool,
+}
+
+#[cfg(target_os = "macos")]
+impl PreparedSearchProgress {
+    fn observe(&mut self, initial: bool, final_query: bool, language: bool) -> bool {
+        self.prepared |= initial && language;
+        self.prepared && final_query && language
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod workflow_tests {
+    use super::PreparedSearchProgress;
+
+    #[test]
+    fn preparation_accepts_either_order_but_requires_the_refinement_after_both() {
+        for first in [(true, false, false), (false, false, true)] {
+            let mut progress = PreparedSearchProgress::default();
+            assert!(!progress.observe(first.0, first.1, first.2));
+            assert!(!progress.observe(true, false, true));
+            assert!(progress.observe(false, true, true));
+        }
+    }
+
+    #[test]
+    fn partial_milestones_and_early_refinement_cannot_certify_completion() {
+        let mut progress = PreparedSearchProgress::default();
+        for observation in [
+            (true, false, false),
+            (false, true, false),
+            (false, true, true),
+            (false, false, false),
+            (false, true, true),
+        ] {
+            assert!(!progress.observe(observation.0, observation.1, observation.2));
+        }
+        assert!(!progress.observe(true, false, true));
+        assert!(!progress.observe(false, true, false));
+        assert!(!progress.observe(false, false, true));
+        assert!(progress.observe(false, true, true));
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn run_variable_workflow() -> Result<(), ProbeFailure> {
+    use std::cell::{Cell, RefCell};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use zephium_agent_controller::{
+        AgentBrowserModel, AgentBrowserRetention, AgentBrowserSession, TerraControllerClock,
+        TerraControllerRunInput, TerraControllerTurnInput,
+    };
+    use zephium_agent_provider_transport::{
+        load_macos_probe_openai_credential, AgentProviderTransportConfig,
+    };
+    use zephium_agentic::{
+        AgentEffectAssessment, AgentEffectSettlement, AgentPolicyInstant,
+        SemanticActionExecutionInstant, SemanticActionKind, SemanticEffectClass,
+        SemanticEffectProofKind, SemanticObservation, SemanticRole, SemanticState,
+        SemanticValueSummary,
+    };
+
+    struct Clock {
+        started: Instant,
+        base: AgentPolicyInstant,
+    }
+    impl TerraControllerClock for Clock {
+        fn now(
+            &self,
+        ) -> Result<AgentPolicyInstant, zephium_agent_controller::TerraControllerClockError>
+        {
+            let elapsed = u64::try_from(self.started.elapsed().as_millis())
+                .map_err(|_| zephium_agent_controller::TerraControllerClockError::Invalid)?;
+            let millis = self
+                .base
+                .millis()
+                .checked_add(elapsed)
+                .ok_or(zephium_agent_controller::TerraControllerClockError::Invalid)?;
+            Ok(AgentPolicyInstant::from_millis(millis))
+        }
+    }
+    fn state(observation: &SemanticObservation) -> (bool, bool, bool) {
+        let mut initial = false;
+        let mut final_query = false;
+        let mut language = false;
+        for node in observation.frames().iter().flat_map(|frame| frame.nodes()) {
+            if matches!(node.role(), SemanticRole::Searchbox | SemanticRole::Textbox) {
+                if let Some(SemanticValueSummary::Text(value)) = node.value() {
+                    let preview = value.preview();
+                    initial |= !preview.truncated()
+                        && preview.source_bytes() == "Zephium browser".len()
+                        && preview.text() == "Zephium browser";
+                    final_query |= !preview.truncated()
+                        && preview.source_bytes() == "Zephium open source browser".len()
+                        && preview.text() == "Zephium open source browser";
+                }
+            }
+            language |= node.role() == SemanticRole::Option
+                && node.name().is_some_and(|name| name.as_str() == "Deutsch")
+                && node.states().contains(SemanticState::Selected);
+        }
+        (initial, final_query, language)
+    }
+    struct Metric {
+        model: zephium_agentic::AgentModelCallReceipt,
+        input: zephium_agentic::AgentProviderInputMetricReceipt,
+        elapsed: Duration,
+        wall_elapsed: Duration,
+    }
+    struct State {
+        session: Option<AgentBrowserSession>,
+        metrics: Vec<Metric>,
+        verified: u8,
+        terminal: Option<zephium_agent_controller::AgentBrowserSessionTerminal>,
+        progress: PreparedSearchProgress,
+        complete: bool,
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .map_err(|_| ProbeFailure::Runtime)?;
+    let workflow = RefCell::new(State {
+        session: None,
+        metrics: Vec::with_capacity(8),
+        verified: 0,
+        terminal: None,
+        progress: PreparedSearchProgress::default(),
+        complete: false,
+    });
+    let failure = Cell::new(None);
+    let started = Instant::now();
+    let result = zephium_engine::run_macos_agentic_semantic_model_workflow_probe(
+        |observation, authority, automation| {
+            let run = || -> Result<_, ProbeFailure> {
+                let (manifest, lease, account, request, frame, invocation, generation, now) =
+                    authority.into_parts();
+                let clock = Arc::new(Clock {
+                    started: Instant::now(),
+                    base: now,
+                });
+                let objective = "Prepare a public Wikipedia search without submitting or navigating. Fill the search with exactly Zephium browser and choose Deutsch in the search language selector, in either order. Once both are verified, refine the search text to exactly Zephium open source browser. Use one local_write act action per turn. Locate option references when needed. For each action use mutation_quiet=100 ms, settle_budget=1000 ms, and exact value or exact selected-option verification. Do not click links or submit. The host checks the exact milestones and stops when the final prepared search is verified.";
+                let turn = TerraControllerTurnInput::try_new(
+                    account,
+                    request,
+                    frame,
+                    invocation,
+                    generation,
+                    objective.to_owned(),
+                )
+                .map_err(|_| ProbeFailure::Authority)?;
+                let input = TerraControllerRunInput::try_new_for_model(
+                    manifest,
+                    lease,
+                    turn,
+                    probe_controller_ids()?,
+                    clock,
+                    Instant::now()
+                        .checked_add(Duration::from_secs(120))
+                        .ok_or(ProbeFailure::Authority)?,
+                    AgentBrowserModel::Luna,
+                )
+                .map_err(|_| ProbeFailure::Authority)?;
+                let credential =
+                    load_macos_probe_openai_credential().map_err(|_| ProbeFailure::Keychain)?;
+                let mut workflow = workflow
+                    .try_borrow_mut()
+                    .map_err(|_| ProbeFailure::Authority)?;
+                workflow.session = Some(
+                    AgentBrowserSession::try_new(
+                        input,
+                        AgentProviderTransportConfig::STANDARD,
+                        credential,
+                        AgentBrowserModel::Luna,
+                        AgentBrowserRetention::InspectablePublicData,
+                    )
+                    .map_err(ProbeFailure::Provider)?,
+                );
+                let State {
+                    session, metrics, ..
+                } = &mut *workflow;
+                let session = session.as_mut().ok_or(ProbeFailure::Authority)?;
+                let turn = runtime
+                    .block_on(session.start_initial(observation))
+                    .map_err(ProbeFailure::Provider)?;
+                let frames = observation
+                    .frames()
+                    .iter()
+                    .map(|frame| frame.frame().clone())
+                    .collect::<Vec<_>>();
+                let proposal = runtime
+                    .block_on(session.next_action(
+                        turn,
+                        observation,
+                        &frames,
+                        |model, input, elapsed| {
+                            metrics.push(Metric {
+                                model,
+                                input,
+                                elapsed,
+                                wall_elapsed: started.elapsed(),
+                            });
+                        },
+                    ))
+                    .map_err(ProbeFailure::Provider)?;
+                if !matches!(
+                    proposal.action().kind(),
+                    SemanticActionKind::Fill | SemanticActionKind::Select
+                ) {
+                    return Err(ProbeFailure::Authority);
+                }
+                let assessment = AgentEffectAssessment::new(
+                    proposal.action(),
+                    proposal.action().frame().origin().clone(),
+                    SemanticEffectClass::LocalWrite,
+                );
+                let native = session
+                    .authorize_action(
+                        proposal,
+                        &assessment,
+                        automation,
+                        SemanticActionExecutionInstant::from_millis(10_000),
+                    )
+                    .map_err(ProbeFailure::Provider)?;
+                writeln!(std::io::stdout().lock(), "browser-workflow-action: step=1; kind={:?}; state=authorized; content=redacted", native.kind()).map_err(|_| ProbeFailure::Output)?;
+                Ok(native)
+            };
+            run().map_err(|error| failure.set(Some(error)))
+        },
+        |baseline, native, current, observed_at, automation| {
+            let run = || -> Result<_, ProbeFailure> {
+                let mut workflow = workflow
+                    .try_borrow_mut()
+                    .map_err(|_| ProbeFailure::Authority)?;
+                let (receipt, transition) = workflow
+                    .session
+                    .as_mut()
+                    .ok_or(ProbeFailure::Authority)?
+                    .settle_action(native, baseline, current, observed_at)
+                    .map_err(ProbeFailure::Provider)?;
+                if !matches!(
+                    receipt.settlement(),
+                    AgentEffectSettlement::Verified(
+                        SemanticEffectProofKind::ExactTargetValue
+                            | SemanticEffectProofKind::ExactSelection
+                    )
+                ) {
+                    return Err(ProbeFailure::Verification);
+                }
+                workflow.verified = workflow
+                    .verified
+                    .checked_add(1)
+                    .ok_or(ProbeFailure::Metrics)?;
+                let (initial, final_query, language) = state(current);
+                writeln!(std::io::stdout().lock(), "browser-workflow-effect: step={}; state=verified; initial_query={}; final_query={}; language_selected={}; content=redacted",
+                    workflow.verified, initial, final_query, language).map_err(|_| ProbeFailure::Output)?;
+                if workflow.progress.observe(initial, final_query, language) {
+                    drop(transition);
+                    let session = workflow.session.take().ok_or(ProbeFailure::Authority)?;
+                    match session.try_finish() {
+                        Ok(terminal) => workflow.terminal = Some(terminal),
+                        Err(refusal) => {
+                            let error = refusal.error();
+                            workflow.session = Some(refusal.into_session());
+                            return Err(ProbeFailure::Provider(error));
+                        }
+                    }
+                    workflow.complete = true;
+                    return Ok(None);
+                }
+                let turn = runtime
+                    .block_on(
+                        workflow
+                            .session
+                            .as_mut()
+                            .ok_or(ProbeFailure::Authority)?
+                            .continue_after_verified_action(transition),
+                    )
+                    .map_err(ProbeFailure::Provider)?;
+                let frames = current
+                    .frames()
+                    .iter()
+                    .map(|frame| frame.frame().clone())
+                    .collect::<Vec<_>>();
+                let State {
+                    session, metrics, ..
+                } = &mut *workflow;
+                let session = session.as_mut().ok_or(ProbeFailure::Authority)?;
+                let proposal = runtime
+                    .block_on(session.next_action(
+                        turn,
+                        current,
+                        &frames,
+                        |model, input, elapsed| {
+                            metrics.push(Metric {
+                                model,
+                                input,
+                                elapsed,
+                                wall_elapsed: started.elapsed(),
+                            });
+                        },
+                    ))
+                    .map_err(ProbeFailure::Provider)?;
+                if !matches!(
+                    proposal.action().kind(),
+                    SemanticActionKind::Fill | SemanticActionKind::Select
+                ) {
+                    return Err(ProbeFailure::Authority);
+                }
+                let assessment = AgentEffectAssessment::new(
+                    proposal.action(),
+                    proposal.action().frame().origin().clone(),
+                    SemanticEffectClass::LocalWrite,
+                );
+                let native = session
+                    .authorize_action(
+                        proposal,
+                        &assessment,
+                        automation,
+                        SemanticActionExecutionInstant::from_millis(10_000),
+                    )
+                    .map_err(ProbeFailure::Provider)?;
+                writeln!(
+                    std::io::stdout().lock(),
+                    "browser-workflow-action: kind={:?}; state=authorized; content=redacted",
+                    native.kind()
+                )
+                .map_err(|_| ProbeFailure::Output)?;
+                Ok(Some(native))
+            };
+            run().map_err(|error| failure.set(Some(error)))
+        },
+    );
+    let mut workflow = workflow.into_inner();
+    use std::io::Write as _;
+    for (ordinal, metric) in workflow.metrics.iter().enumerate() {
+        let metrics = metric.input.metrics();
+        writeln!(std::io::stdout().lock(), "browser-workflow-turn: turn={}; input_tokens={}; output_tokens={}; request_bytes={}; semantic_bytes={}; provider_elapsed_ms={}; wall_elapsed_ms={}; charged_micro_usd={}; content=redacted",
+            ordinal + 1, metric.model.input_tokens(), metric.model.output_tokens(), metrics.serialized_request_bytes(), metrics.semantic().disclosed_bytes(), metric.elapsed.as_millis(), metric.wall_elapsed.as_millis(), metric.model.cost_micro_usd()).map_err(|_| ProbeFailure::Output)?;
+    }
+    // Even a refused workflow retains its session until native teardown returned.
+    let recovery = workflow.session.take().map(AgentBrowserSession::try_finish);
+    if let Err(error) = result {
+        writeln!(std::io::stdout().lock(), "browser-workflow: refused; turns={}; verified_actions={}; provider_policy_drain={}; elapsed_ms={}; content=redacted",
+            workflow.metrics.len(), workflow.verified,
+            if recovery.as_ref().is_none_or(Result::is_ok) { "drained" } else { "recovery_required" },
+            started.elapsed().as_millis()).map_err(|_| ProbeFailure::Output)?;
+        return Err(failure.get().unwrap_or(ProbeFailure::Engine(error)));
+    }
+    if !workflow.complete
+        || workflow.terminal.is_none()
+        || workflow.verified < 3
+        || workflow.metrics.len() > 8
+    {
+        return Err(ProbeFailure::Metrics);
+    }
+    let terminal = workflow.terminal.as_ref().ok_or(ProbeFailure::Metrics)?;
+    if terminal.model_receipts().len() != workflow.metrics.len() {
+        return Err(ProbeFailure::Metrics);
+    }
+    writeln!(std::io::stdout().lock(), "browser-workflow: passed; model=gpt-5.6-luna; provider_storage=retained-public-probe; turns={}; verified_actions={}; real_policy=true; focus_theft=0; background_scheduling=cpu_throttled; native_teardown=drained; elapsed_ms={}; content=redacted",
+        workflow.metrics.len(), workflow.verified, started.elapsed().as_millis()).map_err(|_| ProbeFailure::Output)?;
     Ok(())
 }
 

@@ -2523,6 +2523,7 @@ fn validate_macos_semantic_probe(
         "#[cfg(feature=\"native-agentic-semantic-probe\")]pub(crate)useagentic_semantic_probe::runasrun_agentic_semantic_probe;",
         "pub(crate)useagentic_semantic_probe::run_model_public_fillasrun_agentic_semantic_model_public_fill_probe;",
         "pub(crate)useagentic_semantic_probe::run_model_two_actionasrun_agentic_semantic_model_two_action_probe;",
+        "#[cfg(feature=\"native-agentic-semantic-probe\")]pub(crate)useagentic_semantic_probe::run_model_workflowasrun_agentic_semantic_model_workflow_probe;",
     ] {
         if !module.contains(required) {
             return Err(format!(
@@ -2578,6 +2579,12 @@ fn validate_macos_semantic_probe(
         "SemanticActionKind::Select",
         "url==PUBLIC_DISCOVERY_PROBE_URL",
         "allow_hidden_responder_change:public_fill_probe",
+        "ProbeMode::ModelWorkflow{initial,next}",
+        "for_in0..8{",
+        ".acknowledge_observation(identity.id(),first)",
+        "generation=capture.snapshot.generation()",
+        "None=>returnOk(None)",
+        "letexecution=execution.and_then(|terminal|",
     ] {
         if !source.contains(required) {
             return Err(format!(
@@ -12429,8 +12436,11 @@ mod tests {
         validate_engine_platform_module(module, "test").expect("valid module gates");
         assert!(validate_engine_platform_module("mod agentic_input_probe;", "test").is_err());
 
-        let semantic_module = format!(
+        let mut semantic_module = format!(
             "{module}\n#[cfg(feature = \"native-agentic-semantic-probe\")]\nmod agentic_semantic_probe;\n#[cfg(feature = \"native-agentic-semantic-probe\")]\npub(crate) use agentic_semantic_probe::run as run_agentic_semantic_probe;\n#[cfg(feature = \"native-agentic-semantic-probe\")]\npub(crate) use agentic_semantic_probe::run_model_public_fill as run_agentic_semantic_model_public_fill_probe;\n#[cfg(feature = \"native-agentic-semantic-probe\")]\npub(crate) use agentic_semantic_probe::run_model_two_action as run_agentic_semantic_model_two_action_probe;"
+        );
+        semantic_module.push_str(
+            "\n#[cfg(feature = \"native-agentic-semantic-probe\")]\npub(crate) use agentic_semantic_probe::run_model_workflow as run_agentic_semantic_model_workflow_probe;",
         );
         let semantic_source = r#"
             FixtureRoute::SemanticRuntime;
@@ -12478,6 +12488,12 @@ mod tests {
             SemanticActionKind::Select;
             url == PUBLIC_DISCOVERY_PROBE_URL;
             allow_hidden_responder_change: public_fill_probe;
+            ProbeMode::ModelWorkflow { initial, next };
+            for _ in 0..8 {}
+            registry.acknowledge_observation(identity.id(), first);
+            generation = capture.snapshot.generation();
+            None => return Ok(None),
+            let execution = execution.and_then(|terminal| {});
         "#;
         let semantic_binary = r#"
             if arguments.as_slice() != ["--ci-hidden-fixed-dom"] {}
@@ -12520,6 +12536,19 @@ mod tests {
             semantic_fixture,
         )
         .expect("valid semantic probe gate");
+        for boundary in [
+            "for _ in 0..8 {}",
+            "registry.acknowledge_observation(identity.id(), first);",
+            "let execution = execution.and_then(|terminal| {});",
+        ] {
+            assert!(validate_macos_semantic_probe(
+                &semantic_module,
+                &semantic_source.replace(boundary, ""),
+                semantic_binary,
+                semantic_fixture,
+            )
+            .is_err());
+        }
         assert!(validate_macos_semantic_probe(
             &semantic_module,
             &format!("{semantic_source}\nevaluate_script();"),

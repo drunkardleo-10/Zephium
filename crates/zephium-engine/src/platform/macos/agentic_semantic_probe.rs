@@ -228,6 +228,21 @@ type ModelFinishCallback<'a> = dyn FnMut(
     ) -> Result<(), ()>
     + 'a;
 
+type WorkflowInitialCallback<'a> = dyn FnMut(
+        &zephium_agentic::SemanticObservation,
+        MacosAgenticSemanticProbeAuthority,
+        zephium_agentic::ContextAutomationState,
+    ) -> Result<zephium_agentic::SemanticActionNativeRequest, ()>
+    + 'a;
+type WorkflowNextCallback<'a> = dyn FnMut(
+        &zephium_agentic::SemanticObservation,
+        SemanticActionNativeSettlement,
+        &zephium_agentic::SemanticObservation,
+        SemanticSettleInstant,
+        zephium_agentic::ContextAutomationState,
+    ) -> Result<Option<zephium_agentic::SemanticActionNativeRequest>, ()>
+    + 'a;
+
 /// Closed page and action sequence for a two-turn model qualification run.
 #[doc(hidden)]
 #[derive(Clone, Copy)]
@@ -242,6 +257,10 @@ enum ProbeMode<'a> {
     Full,
     ModelClick(&'a mut ModelInitialCallback<'a>),
     ModelPublicFill(&'a mut ModelInitialCallback<'a>),
+    ModelWorkflow {
+        initial: &'a mut WorkflowInitialCallback<'a>,
+        next: &'a mut WorkflowNextCallback<'a>,
+    },
     ModelTwoAction {
         scenario: MacosAgenticSemanticTwoActionScenario,
         prepare_initial: &'a mut ModelInitialCallback<'a>,
@@ -396,11 +415,38 @@ pub(crate) fn run_model_two_action(
     }
 }
 
+pub(crate) fn run_model_workflow(
+    mut initial: impl FnMut(
+        &zephium_agentic::SemanticObservation,
+        MacosAgenticSemanticProbeAuthority,
+        zephium_agentic::ContextAutomationState,
+    ) -> Result<zephium_agentic::SemanticActionNativeRequest, ()>,
+    mut next: impl FnMut(
+        &zephium_agentic::SemanticObservation,
+        SemanticActionNativeSettlement,
+        &zephium_agentic::SemanticObservation,
+        SemanticSettleInstant,
+        zephium_agentic::ContextAutomationState,
+    ) -> Result<Option<zephium_agentic::SemanticActionNativeRequest>, ()>,
+) -> Result<(), &'static str> {
+    let pending = objc2::rc::autoreleasepool(|_| {
+        begin(ProbeMode::ModelWorkflow {
+            initial: &mut initial,
+            next: &mut next,
+        })
+    })?;
+    match finish(pending)? {
+        None => Ok(()),
+        Some(_) => Err("unexpected_model_terminal"),
+    }
+}
+
 fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
     let full_probe = matches!(&mode, ProbeMode::Full);
     let public_fill_probe = matches!(
         &mode,
         ProbeMode::ModelPublicFill(_)
+            | ProbeMode::ModelWorkflow { .. }
             | ProbeMode::ModelTwoAction {
                 scenario: MacosAgenticSemanticTwoActionScenario::PublicFillSelect,
                 ..
@@ -564,7 +610,73 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
         }
         let first_generation = first_capture.snapshot.generation();
         let first_observation = assemble_observation(first_capture)?;
+        if let ProbeMode::ModelWorkflow { initial, next } = &mut mode {
+            let authority = model_probe_authority_with_budget(&first_observation, 16)?;
+            registry
+                .acknowledge_observation(identity.id(), first)
+                .map_err(|_| "workflow_observation_ack")?;
+            let automation = registry
+                .automation_state(identity.id())
+                .map_err(|_| "workflow_context")?;
+            let mut request = initial(&first_observation, authority, automation)
+                .map_err(|()| "workflow_initial")?;
+            let mut baseline = first_observation;
+            let mut generation = first_generation;
+            for _ in 0..8 {
+                if !matches!(
+                    request.kind(),
+                    zephium_agentic::SemanticActionKind::Fill
+                        | zephium_agentic::SemanticActionKind::Select
+                ) {
+                    return Err("workflow_action_kind");
+                }
+                let pending = execute_model_action(&view, request, None, &runtime)?;
+                wait_for_action_security_settle(
+                    &runtime,
+                    model_action_settle_delay(pending.wait, pending.settle_millis)?,
+                )?;
+                generation = generation.next().ok_or("workflow_generation")?;
+                let capture = capture_snapshot(
+                    &view,
+                    first,
+                    &first_url,
+                    generation,
+                    &mut next_invocation,
+                    &mut successful_snapshots,
+                    &runtime,
+                )
+                .map_err(|reason| match reason {
+                    "snapshot_timeout" => "workflow_snapshot_timeout",
+                    "snapshot_result" => "workflow_snapshot_result",
+                    reason => reason,
+                })?;
+                generation = capture.snapshot.generation();
+                let current = assemble_observation(capture)?;
+                let observed_at = action_observed_at(pending.admitted_at)?;
+                registry
+                    .acknowledge_observation(identity.id(), first)
+                    .map_err(|_| "workflow_observation_ack")?;
+                let automation = registry
+                    .automation_state(identity.id())
+                    .map_err(|_| "workflow_context")?;
+                match next(
+                    &baseline,
+                    pending.settlement,
+                    &current,
+                    observed_at,
+                    automation,
+                )
+                .map_err(|()| "workflow_next")?
+                {
+                    None => return Ok(None),
+                    Some(next_request) => request = next_request,
+                }
+                baseline = current;
+            }
+            return Err("workflow_action_limit");
+        }
         let pending_click = match &mut mode {
+            ProbeMode::ModelWorkflow { .. } => return Err("workflow_state"),
             ProbeMode::Full => PendingInitialClick::Fixed(Box::new(execute_primary_click(
                 &view,
                 &first_observation,
@@ -704,7 +816,9 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
                         .map_err(|()| "model_final_verify")?;
                         return Ok(None);
                     }
-                    ProbeMode::Full => return Err("model_mode_state"),
+                    ProbeMode::Full | ProbeMode::ModelWorkflow { .. } => {
+                        return Err("model_mode_state")
+                    }
                 }
             }
         }
@@ -1075,6 +1189,18 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
         Ok(None)
     })();
 
+    // Every successful mode, including early model-workflow completion, must
+    // prove the owned view is still isolated, CPU-throttled and callback-drained
+    // before retirement. The teardown below also runs after every refusal.
+    let execution = execution.and_then(|terminal| {
+        view.attest(profile, ContextProfileStorageClass::Ephemeral, Some(&store))
+            .map_err(|_| "view_attestation_verification")?;
+        if view.semantic_pending_for_audit() != Some(false) {
+            return Err("semantic_pending_verification");
+        }
+        Ok(terminal)
+    });
+
     // Stop the fixed listener before cancelling the native page so an
     // in-flight favicon or subresource socket is cancelled under the fixture's
     // explicit stop state rather than misclassified as a worker fault.
@@ -1258,6 +1384,13 @@ fn assemble_observation(
 fn model_probe_authority(
     observation: &zephium_agentic::SemanticObservation,
 ) -> Result<MacosAgenticSemanticProbeAuthority, &'static str> {
+    model_probe_authority_with_budget(observation, 3)
+}
+
+fn model_probe_authority_with_budget(
+    observation: &zephium_agentic::SemanticObservation,
+    operations: u32,
+) -> Result<MacosAgenticSemanticProbeAuthority, &'static str> {
     let snapshot = observation
         .frames()
         .first()
@@ -1274,7 +1407,7 @@ fn model_probe_authority(
         AgentEffectScope::try_new(&[SemanticEffectClass::Read, SemanticEffectClass::LocalWrite])
             .map_err(|_| "model_authority_effects")?;
     let budget = AgentRunBudget::try_new(
-        3,
+        operations,
         MODEL_PROBE_MODEL_TOKEN_BUDGET,
         MODEL_PROBE_COST_BUDGET_MICRO_USD,
         1,
@@ -1425,7 +1558,7 @@ fn execute_model_action(
         .try_borrow_mut()
         .map_err(|_| "model_action_state")?
         .take()
-        .ok_or("model_action_timeout")?;
+        .ok_or("model_action_callback_timeout")?;
     runtime.native_guard.sample();
     if runtime.failed() {
         return Err("model_action_native_state");
@@ -1814,7 +1947,7 @@ fn capture_snapshot(
 
     for retry in 0..MAX_DOCUMENT_LOADING_RETRIES {
         if runtime.failed() || Instant::now() >= deadline {
-            return Err("snapshot_timeout");
+            return Err("snapshot_loading_timeout");
         }
         let invocation_value = take_semantic_identity(next_invocation)?;
         let generation = first_generation
@@ -1849,7 +1982,7 @@ fn capture_snapshot(
             Err(_) => return Err("snapshot_result"),
         }
     }
-    Err("snapshot_timeout")
+    Err("snapshot_loading_timeout")
 }
 
 fn dispatch_invocation(
@@ -1894,7 +2027,7 @@ fn dispatch_invocation(
         .try_borrow_mut()
         .map_err(|_| "snapshot_state")?
         .take()
-        .ok_or("snapshot_timeout")?;
+        .ok_or("snapshot_callback_timeout")?;
     Ok(outcome)
 }
 

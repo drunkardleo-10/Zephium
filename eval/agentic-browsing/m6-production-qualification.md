@@ -57,6 +57,94 @@ run, compared with 10,663 semantic bytes across each earlier two-turn Terra
 workflow before collapsed-option projection. These are exact evidence for this
 one public page and task, not a multi-site or release qualification.
 
+## Reusable production-path session: public Luna workflow
+
+The next vertical uses `AgentBrowserSession` on the normal `provider-transport`
+feature path, not the excluded synthetic `TerraProbeActionBridge`. See
+[the session host contract](../../docs/agent-browser-session.md). One policy,
+transport and cancellation owner handles up to eight model turns and eight
+actions, including semantic locate and independently verified continuations.
+The existing shipping text-only controller is unchanged; Work actor integration,
+durable audit closure, other provider adapters and complete native cancellation
+recovery remain open. This is reusable-driver evidence, not production release
+qualification.
+
+The excluded host opens only public Wikipedia in a hidden ephemeral,
+extension-free owned view. The task allows initial query preparation and language
+selection in either order, then requires a refined query after both coexist in
+verified state. The model chooses tools and ordering; the native loop is bounded
+but has no fixed two-action callbacks. A trusted host predicate, not model text
+or an effect count, terminates the task. No search is submitted, link clicked,
+navigation performed after initial loading, or external record written.
+
+Command, repeated independently three times on the qualification Mac:
+
+```sh
+cargo run --locked -p zephium-terra-macos-probe --features live-probe -- --live-public-luna-workflow-inspectable
+```
+
+The reviewed final-policy sweep completed 3/3 workflows and 9/9 independently
+verified effects. Each run chose Fill → Select → Fill, used one semantic locate
+turn, satisfied the initial and final task predicates, stole no focus, and
+drained the page/window/store owners. Every successful mode re-attests native
+isolation and CPU-throttled scheduling before retirement.
+
+| Run | Model turns | Input tokens | Output tokens | Provider ms | Wall ms | Cost micro-USD |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 4 | 13,173 | 338 | 17,211 | 18,384 | 801 |
+| 2 | 4 | 13,218 | 380 | 12,662 | 14,688 | 856 |
+| 3 | 4 | 13,147 | 327 | 13,522 | 14,975 | 785 |
+| Total | 12 | 39,538 | 1,045 | 43,395 | 48,047 | 2,442 |
+
+Per-turn reviewed numerical receipts follow. Provider time includes exact-token
+counting and execution; wall time is cumulative from native workflow start to
+the receipt callback. Serialized request bytes count the model request body,
+not HTTP headers or the separate counting request. Semantic bytes are newly
+disclosed payload bytes, not the entire retained conversation.
+
+| Run.turn | Input | Output | Request bytes | Semantic bytes | Provider ms | Cumulative wall ms | Micro-USD |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1.1 | 3019 | 114 | 16584 | 3116 | 3386 | 3904 | 198 |
+| 1.2 | 3231 | 55 | 18927 | 287 | 2402 | 6553 | 180 |
+| 1.3 | 3346 | 80 | 20935 | 208 | 9081 | 15641 | 190 |
+| 1.4 | 3577 | 89 | 23204 | 408 | 2342 | 18141 | 233 |
+| 2.1 | 3019 | 133 | 16584 | 3116 | 2787 | 3301 | 221 |
+| 2.2 | 3250 | 48 | 19055 | 287 | 2293 | 5713 | 177 |
+| 2.3 | 3358 | 82 | 20999 | 208 | 4806 | 10525 | 191 |
+| 2.4 | 3591 | 117 | 23292 | 408 | 2776 | 14431 | 267 |
+| 3.1 | 3019 | 105 | 16584 | 3116 | 4827 | 5355 | 187 |
+| 3.2 | 3222 | 55 | 18863 | 287 | 2822 | 8719 | 178 |
+| 3.3 | 3337 | 81 | 20843 | 208 | 2422 | 11149 | 191 |
+| 3.4 | 3569 | 86 | 23112 | 408 | 3451 | 14733 | 229 |
+
+Total serialized request bytes were 238,982 and disclosed semantic bytes 12,057.
+Provider retention was explicitly enabled only for this public qualifier, using
+fixed content-free metadata. OpenAI Logs remain exact provider-boundary truth;
+local content-free receipts remain truth for binding, policy, native execution,
+settlement, verification, timing and teardown. Production/BYOK remain stateless.
+No provider payload, credential, page content, screenshot or raw trace is stored
+in this engineering record.
+
+Earlier investigation runs are excluded from the sweep. With WebKit's default
+inactive `Suspend` policy, native requests reached the isolated channel but a
+later snapshot reply stalled after two verified effects. Longer waits and a
+request-scoped wake/restore did not fix that baseline. `Throttle` construction
+policy keeps Rust-Ready owned pages runnable without disabling background CPU
+limits; the live policy is now natively attested and source-gated. Browse policy
+is unchanged. No idle battery/CPU/RAM qualification, macOS native suspend/resume,
+concurrent-user interaction, authenticated site, navigation, or difficult-site
+coverage is claimed.
+
+Validation for this slice: 507 functional-core library tests, 7 controller tests,
+457 engine library tests with `agentic-browser`, 2 task-postcondition tests and
+165 xtask tests pass. Strict all-feature/all-target Clippy covers the engine,
+controller, qualifier and xtask. Controller, native-probe, model-catalog and
+runtime source gates pass, including the semantic JavaScript smoke fixture.
+The hidden native fixed-DOM regression passes 10 snapshots across 4 epochs with
+verified click/fill, stale-anchor refusal/recovery, no focus theft and no retained
+views. The normal `provider-transport` controller compiles optimized; enabling
+the qualification harness in an optimized build is correctly compile-refused.
+
 ## Mechanically enforced evidence
 
 `cargo xtask check-agentic-probe-boundary` is part of ordinary CI and now:
