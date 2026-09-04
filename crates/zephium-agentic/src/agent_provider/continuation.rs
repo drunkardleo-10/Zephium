@@ -434,6 +434,7 @@ impl AgentProviderContinuation {
     ) -> Result<AgentProviderBoundDiffContinuation, AgentProviderContinuationError> {
         let next_call = AgentProviderCallIdentity {
             manifest: self.prior_call.manifest(),
+            manifest_guard: self.prior_call.manifest_guard_for_continuation(),
             call: request.id(),
             lease: request.lease(),
             node: self.prior_call.node(),
@@ -483,6 +484,7 @@ impl AgentProviderContinuation {
     ) -> Result<AgentProviderBoundLocateContinuation, AgentProviderContinuationError> {
         let next_call = AgentProviderCallIdentity {
             manifest: self.prior_call.manifest(),
+            manifest_guard: self.prior_call.manifest_guard_for_continuation(),
             call: request.id(),
             lease: request.lease(),
             node: self.prior_call.node(),
@@ -501,8 +503,10 @@ impl AgentProviderContinuation {
         if next_config != &self.config {
             return Err(AgentProviderContinuationError::Config);
         }
-        if next_call.manifest() != self.prior_call.manifest()
-            || next_call.lease() != self.prior_call.lease()
+        if !next_call.matches_manifest_revision(
+            self.prior_call.manifest(),
+            self.prior_call.manifest_guard_for_continuation(),
+        ) || next_call.lease() != self.prior_call.lease()
             || next_call.node() != self.prior_call.node()
             || next_call.call() <= self.prior_call.call()
         {
@@ -547,6 +551,7 @@ impl AgentProviderContinuation {
     ) -> Result<AgentProviderBoundReadContinuation, AgentProviderContinuationError> {
         let next_call = AgentProviderCallIdentity {
             manifest: self.prior_call.manifest(),
+            manifest_guard: self.prior_call.manifest_guard_for_continuation(),
             call: request.id(),
             lease: request.lease(),
             node: self.prior_call.node(),
@@ -565,8 +570,10 @@ impl AgentProviderContinuation {
         if next_config != &self.config {
             return Err(AgentProviderContinuationError::Config);
         }
-        if next_call.manifest() != self.prior_call.manifest()
-            || next_call.lease() != self.prior_call.lease()
+        if !next_call.matches_manifest_revision(
+            self.prior_call.manifest(),
+            self.prior_call.manifest_guard_for_continuation(),
+        ) || next_call.lease() != self.prior_call.lease()
             || next_call.node() != self.prior_call.node()
             || next_call.call() <= self.prior_call.call()
         {
@@ -613,6 +620,7 @@ impl AgentProviderContinuation {
     ) -> Result<AgentProviderBoundExtractionContinuation, AgentProviderContinuationError> {
         let next_call = AgentProviderCallIdentity {
             manifest: self.prior_call.manifest(),
+            manifest_guard: self.prior_call.manifest_guard_for_continuation(),
             call: request.id(),
             lease: request.lease(),
             node: self.prior_call.node(),
@@ -632,8 +640,10 @@ impl AgentProviderContinuation {
         if next_config != &self.config {
             return Err(AgentProviderContinuationError::Config);
         }
-        if next_call.manifest() != self.prior_call.manifest()
-            || next_call.lease() != self.prior_call.lease()
+        if !next_call.matches_manifest_revision(
+            self.prior_call.manifest(),
+            self.prior_call.manifest_guard_for_continuation(),
+        ) || next_call.lease() != self.prior_call.lease()
             || next_call.node() != self.prior_call.node()
             || next_call.call() <= self.prior_call.call()
         {
@@ -680,6 +690,7 @@ impl AgentProviderContinuation {
     ) -> Result<AgentProviderBoundScreenshotContinuation, AgentProviderContinuationError> {
         let next_call = AgentProviderCallIdentity {
             manifest: self.prior_call.manifest(),
+            manifest_guard: self.prior_call.manifest_guard_for_continuation(),
             call: request.id(),
             lease: request.lease(),
             node: self.prior_call.node(),
@@ -687,8 +698,10 @@ impl AgentProviderContinuation {
         if next_config != &self.config {
             return Err(AgentProviderContinuationError::Config);
         }
-        if next_call.manifest() != self.prior_call.manifest()
-            || next_call.lease() != self.prior_call.lease()
+        if !next_call.matches_manifest_revision(
+            self.prior_call.manifest(),
+            self.prior_call.manifest_guard_for_continuation(),
+        ) || next_call.lease() != self.prior_call.lease()
             || next_call.node() != self.prior_call.node()
             || next_call.call() <= self.prior_call.call()
         {
@@ -737,8 +750,10 @@ impl AgentProviderContinuation {
         if next_config != &self.config {
             return Err(AgentProviderContinuationError::Config);
         }
-        if next_call.manifest() != self.prior_call.manifest()
-            || next_call.lease() != self.prior_call.lease()
+        if !next_call.matches_manifest_revision(
+            self.prior_call.manifest(),
+            self.prior_call.manifest_guard_for_continuation(),
+        ) || next_call.lease() != self.prior_call.lease()
             || next_call.node() != self.prior_call.node()
             || next_call.call() <= self.prior_call.call()
         {
@@ -1582,6 +1597,7 @@ mod tests {
     fn call(value: u64) -> AgentProviderCallIdentity {
         AgentProviderCallIdentity {
             manifest: crate::AgentRunManifestId::from_raw(21),
+            manifest_guard: [0; 32],
             call: crate::AgentModelCallId::new(value).expect("call"),
             lease: crate::AgentPlanLeaseId::from_raw(22),
             node: crate::AgentPlanNodeId::from_raw(23),
@@ -1884,6 +1900,48 @@ mod tests {
         assert!(matches!(
             locate_continuation.bind_diff(call(2), &config, &diff, locate_diff_payload),
             Err(AgentProviderContinuationError::ToolKind)
+        ));
+
+        let foreign_correlation = super::super::AgentBrowserToolCall::decode_openai(
+            prior,
+            "fc_foreign_revision_1".to_owned(),
+            "call_foreign_revision_1".to_owned(),
+            "back",
+            "{}".to_owned(),
+        )
+        .expect("tool")
+        .into_continuation_parts()
+        .0;
+        let foreign_continuation = AgentProviderContinuationSeed {
+            call: prior,
+            config: config.clone(),
+            baseline: baseline.clone(),
+            transcript: transcript(),
+        }
+        .join_terminal_tool(completion(prior, 2), foreign_correlation)
+        .expect("terminal join");
+        let foreign_payload = encode_semantic_diff(
+            &diff,
+            SemanticModelEncodingBudget::try_new(
+                16 * 1024,
+                16 * 1024,
+                SemanticTokenCountRequirement::Exact,
+            )
+            .expect("encoding budget"),
+        )
+        .expect("encode")
+        .admit(&counter, config.tokenizer())
+        .expect("admit");
+        let foreign_next = AgentProviderCallIdentity {
+            manifest: prior.manifest(),
+            manifest_guard: [1; 32],
+            call: crate::AgentModelCallId::new(2).expect("call"),
+            lease: prior.lease(),
+            node: prior.node(),
+        };
+        assert!(matches!(
+            foreign_continuation.bind_diff(foreign_next, &config, &diff, foreign_payload),
+            Err(AgentProviderContinuationError::Lineage)
         ));
 
         let seed = AgentProviderContinuationSeed {

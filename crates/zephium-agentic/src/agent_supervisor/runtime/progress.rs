@@ -7,9 +7,9 @@
 
 use super::*;
 use crate::{
-    AgentActiveEffect, AgentActiveModelCall, AgentEffectPermit, AgentEffectReceipt,
-    AgentModelCallReceipt, AgentModelCallSettlement, AgentNeedsHumanReason,
-    AgentNeedsHumanTransition, ContextId, SemanticActionFailure, SemanticEffectClass,
+    AgentActiveEffect, AgentEffectPermit, AgentEffectReceipt, AgentModelCallReceipt,
+    AgentModelCallSettlement, AgentNeedsHumanReason, AgentNeedsHumanTransition, ContextId,
+    SemanticActionFailure, SemanticEffectClass,
 };
 
 /// Closed semantic operation currently owned by one supervisor node.
@@ -248,11 +248,16 @@ impl AgentRunSupervisor {
         Ok(progress)
     }
 
-    /// Records an exact committed model call as the current active resource.
+    /// Records a trusted controller's guarded committed-model correlation after
+    /// transport admission as the current active resource.
+    ///
+    /// The identity is non-authorizing: it correlates an already admitted call
+    /// but does not itself prove model commitment or expose active policy
+    /// authority to the controller.
     pub fn record_active_model_call(
         &mut self,
         execution: &AgentNodeExecution,
-        call: &AgentActiveModelCall,
+        call: crate::AgentProviderCallIdentity,
     ) -> Result<AgentSemanticProgress, AgentSupervisorRuntimeError> {
         if !call.matches_manifest_revision(self.topology.manifest(), self.topology.manifest_guard())
             || call.node() != execution.node()
@@ -261,7 +266,7 @@ impl AgentRunSupervisor {
         }
         let activity = AgentProgressActivity::try_new(
             AgentProgressOperation::Model,
-            Some(AgentProgressResource::ModelCall(call.id())),
+            Some(AgentProgressResource::ModelCall(call.call())),
         )?;
         self.record_progress_activity(execution, activity)
     }

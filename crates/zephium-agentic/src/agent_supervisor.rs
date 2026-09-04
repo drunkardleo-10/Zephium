@@ -1831,7 +1831,10 @@ mod tests {
             root_id,
         );
         let active_model_progress = supervisor
-            .record_active_model_call(&execution, &active_model)
+            .record_active_model_call(
+                &execution,
+                crate::AgentProviderCallIdentity::from_active(&active_model),
+            )
             .expect("active model progress");
         assert_eq!(active_model_progress.state(), AgentProgressState::Active);
         let model = AgentModelCallReceipt::for_progress_test(
@@ -1917,7 +1920,10 @@ mod tests {
         );
         assert_eq!(
             supervisor
-                .record_active_model_call(&execution, &foreign_active_model)
+                .record_active_model_call(
+                    &execution,
+                    crate::AgentProviderCallIdentity::from_active(&foreign_active_model),
+                )
                 .expect_err("same-id foreign manifest revision"),
             AgentSupervisorRuntimeError::ProgressAuthority
         );

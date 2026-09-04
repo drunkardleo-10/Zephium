@@ -617,6 +617,7 @@ impl<'a, 'read> AgentProviderExtractionInput<'a, 'read> {
 #[must_use]
 pub struct AgentModelCallAdmission {
     manifest: AgentRunManifestId,
+    manifest_guard: [u8; 32],
     id: AgentModelCallId,
     lease: AgentPlanLeaseId,
     node: AgentPlanNodeId,
@@ -646,6 +647,12 @@ impl AgentModelCallAdmission {
     /// Exact approved plan node reserving this call.
     pub const fn node(&self) -> AgentPlanNodeId {
         self.node
+    }
+
+    /// Private manifest-revision binding copied only into non-authorizing
+    /// provider correlations and checked by the supervisor progress projector.
+    pub(crate) const fn manifest_guard_for_provider(&self) -> [u8; 32] {
+        self.manifest_guard
     }
 
     /// Complete provider-accounted input-token reservation for this call.
@@ -1878,6 +1885,7 @@ impl AgentRunPolicy {
         self.last_call = Some(id);
         Ok(AgentModelCallAdmission {
             manifest: self.manifest.id(),
+            manifest_guard: self.manifest.guard(),
             id,
             lease,
             node: node_id,
@@ -6724,6 +6732,7 @@ mod tests {
         );
         let missing = AgentModelCallAdmission {
             manifest: fixture.policy.manifest().id(),
+            manifest_guard: fixture.policy.manifest().guard(),
             id: AgentModelCallId::new(99).expect("call"),
             lease: fixture.lease,
             node: AgentPlanNodeId::from_raw(1),

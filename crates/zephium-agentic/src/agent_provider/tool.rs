@@ -1518,6 +1518,7 @@ mod tests {
     fn source_call() -> AgentProviderCallIdentity {
         AgentProviderCallIdentity {
             manifest: crate::AgentRunManifestId::from_raw(1),
+            manifest_guard: [0; 32],
             call: crate::AgentModelCallId::new(2).expect("call"),
             lease: crate::AgentPlanLeaseId::from_raw(3),
             node: crate::AgentPlanNodeId::from_raw(4),

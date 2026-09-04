@@ -357,6 +357,12 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         &read(repository.join(AGENTIC_SUPERVISOR_PROGRESS))?,
         &read(repository.join(AGENTIC_AUDIT))?,
     )?;
+    validate_provider_call_identity_progress_boundary(
+        &read(repository.join(AGENTIC_POLICY))?,
+        &read(repository.join(AGENTIC_PROVIDER_ROOT))?,
+        &read(repository.join(AGENTIC_PROVIDER_CONTINUATION))?,
+        &read(repository.join(AGENTIC_SUPERVISOR_PROGRESS))?,
+    )?;
     validate_profile_lease_release_contract(
         &read(repository.join(AGENTIC_ROOT))?,
         &read(repository.join(AGENTIC_PROFILE_LEASE))?,
@@ -7254,6 +7260,84 @@ fn validate_progress_manifest_revision_contract(
     Ok(())
 }
 
+fn validate_provider_call_identity_progress_boundary(
+    policy: &str,
+    provider: &str,
+    continuation: &str,
+    progress: &str,
+) -> Result<(), String> {
+    let policy = compact(policy);
+    for required in [
+        "pubstructAgentModelCallAdmission{manifest:AgentRunManifestId,manifest_guard:[u8;32]",
+        "manifest_guard:self.manifest.guard(),",
+        "pub(crate)constfnmanifest_guard_for_provider(&self)->[u8;32]{self.manifest_guard}",
+    ] {
+        if !policy.contains(required) {
+            return Err(format!(
+                "model admission lost its private manifest guard for provider correlation {required}"
+            ));
+        }
+    }
+
+    let provider = compact(provider);
+    for required in [
+        "pubstructAgentProviderCallIdentity{manifest:AgentRunManifestId,manifest_guard:[u8;32]",
+        "pub(crate)fnfrom_admission(admission:&AgentModelCallAdmission)->Self",
+        "manifest_guard:admission.manifest_guard_for_provider()",
+        "pub(crate)fnfrom_active(active:&AgentActiveModelCall)->Self",
+        "manifest_guard:active.manifest_guard_for_metrics()",
+        "pub(crate)fnmatches_manifest_revision(self,manifest:AgentRunManifestId,manifest_guard:[u8;32],)->bool{self.manifest==manifest&&self.manifest_guard==manifest_guard}",
+        "pub(crate)constfnmanifest_guard_for_continuation(self)->[u8;32]{self.manifest_guard}",
+        "field(\"manifest_guard\",&\"[redacted]\")",
+    ] {
+        if !provider.contains(required) {
+            return Err(format!(
+                "provider call identity lost its private guarded projection {required}"
+            ));
+        }
+    }
+    for forbidden in [
+        "pubfnfrom_admission(",
+        "pubfnfrom_active(",
+        "pubfnmatches_active(",
+        "pubfnmanifest_guard(",
+        "pubconstfnmanifest_guard(",
+        "pubfnmanifest_guard_for_continuation(",
+        "pubconstfnmanifest_guard_for_continuation(",
+    ] {
+        if provider.contains(forbidden) {
+            return Err(format!(
+                "provider call identity exposed policy or manifest authority {forbidden}"
+            ));
+        }
+    }
+
+    let continuation = compact(continuation);
+    if continuation
+        .matches("next_call.matches_manifest_revision(self.prior_call.manifest(),self.prior_call.manifest_guard_for_continuation(),)")
+        .count()
+        != 5
+    {
+        return Err(
+            "all provider continuation lineages must retain the private manifest guard".to_owned(),
+        );
+    }
+
+    let progress = compact(progress);
+    for required in [
+        "pubfnrecord_active_model_call(&mutself,execution:&AgentNodeExecution,call:crate::AgentProviderCallIdentity,)->Result<AgentSemanticProgress,AgentSupervisorRuntimeError>",
+        "call.matches_manifest_revision(self.topology.manifest(),self.topology.manifest_guard())",
+        "Some(AgentProgressResource::ModelCall(call.call()))",
+    ] {
+        if !progress.contains(required) {
+            return Err(format!(
+                "supervisor model progress lost guarded call projection {required}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_profile_lease_release_contract(
     root: &str,
     profile_lease: &str,
@@ -10777,6 +10861,101 @@ mod tests {
             supervisor,
             &progress,
             "",
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn provider_call_identity_keeps_manifest_guard_private_through_progress_and_lineage() {
+        let policy = r#"
+            pub struct AgentModelCallAdmission {
+                manifest: AgentRunManifestId,
+                manifest_guard: [u8; 32],
+            }
+            manifest_guard: self.manifest.guard(),
+            pub(crate) const fn manifest_guard_for_provider(&self) -> [u8; 32] {
+                self.manifest_guard
+            }
+        "#;
+        let provider = r#"
+            pub struct AgentProviderCallIdentity {
+                manifest: AgentRunManifestId,
+                manifest_guard: [u8; 32],
+            }
+            pub(crate) fn from_admission(admission: &AgentModelCallAdmission) -> Self {}
+            manifest_guard: admission.manifest_guard_for_provider(),
+            pub(crate) fn from_active(active: &AgentActiveModelCall) -> Self {}
+            manifest_guard: active.manifest_guard_for_metrics(),
+            pub(crate) fn matches_manifest_revision(
+                self,
+                manifest: AgentRunManifestId,
+                manifest_guard: [u8; 32],
+            ) -> bool {
+                self.manifest == manifest && self.manifest_guard == manifest_guard
+            }
+            pub(crate) const fn manifest_guard_for_continuation(self) -> [u8; 32] {
+                self.manifest_guard
+            }
+            formatter.field("manifest_guard", &"[redacted]");
+        "#;
+        let lineage = r#"
+            next_call.matches_manifest_revision(
+                self.prior_call.manifest(),
+                self.prior_call.manifest_guard_for_continuation(),
+            );
+        "#
+        .repeat(5);
+        let progress = r#"
+            pub fn record_active_model_call(
+                &mut self,
+                execution: &AgentNodeExecution,
+                call: crate::AgentProviderCallIdentity,
+            ) -> Result<AgentSemanticProgress, AgentSupervisorRuntimeError> {
+                call.matches_manifest_revision(
+                    self.topology.manifest(),
+                    self.topology.manifest_guard()
+                );
+                Some(AgentProgressResource::ModelCall(call.call()));
+            }
+        "#;
+        validate_provider_call_identity_progress_boundary(policy, provider, &lineage, progress)
+            .expect("guarded provider correlation boundary");
+        assert!(validate_provider_call_identity_progress_boundary(
+            policy,
+            &provider.replace("pub(crate) fn from_active", "pub fn from_active"),
+            &lineage,
+            progress,
+        )
+        .is_err());
+        assert!(validate_provider_call_identity_progress_boundary(
+            policy,
+            &provider.replace(
+                "pub(crate) const fn manifest_guard_for_continuation",
+                "pub const fn manifest_guard_for_continuation",
+            ),
+            &lineage,
+            progress,
+        )
+        .is_err());
+        assert!(validate_provider_call_identity_progress_boundary(
+            policy,
+            provider,
+            &lineage.replacen(
+                "next_call.matches_manifest_revision",
+                "next_call.matches_public",
+                1
+            ),
+            progress,
+        )
+        .is_err());
+        assert!(validate_provider_call_identity_progress_boundary(
+            policy,
+            provider,
+            &lineage,
+            &progress.replace(
+                "call.matches_manifest_revision",
+                "call.matches_public_manifest"
+            ),
         )
         .is_err());
     }

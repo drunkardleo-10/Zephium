@@ -1031,7 +1031,10 @@ mod tests {
             root,
         );
         supervisor
-            .record_active_model_call(&execution, &active_model)
+            .record_active_model_call(
+                &execution,
+                crate::AgentProviderCallIdentity::from_active(&active_model),
+            )
             .expect("active model");
         record(&mut ledger, &mut metrics, &supervisor, root, 3, 120);
         let model_receipt = AgentModelCallReceipt::for_progress_test(
@@ -1298,7 +1301,10 @@ mod tests {
             root,
         );
         supervisor
-            .record_active_model_call(&execution, &active)
+            .record_active_model_call(
+                &execution,
+                crate::AgentProviderCallIdentity::from_active(&active),
+            )
             .expect("active model");
         record(&mut ledger, &mut metrics, &supervisor, root, 4, 140);
         supervisor
@@ -1330,7 +1336,10 @@ mod tests {
             root,
         );
         supervisor
-            .record_active_model_call(&execution, &active)
+            .record_active_model_call(
+                &execution,
+                crate::AgentProviderCallIdentity::from_active(&active),
+            )
             .expect("active model");
         record(&mut ledger, &mut metrics, &supervisor, root, 3, 120);
         let before = metrics.snapshot();

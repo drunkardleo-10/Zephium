@@ -4775,6 +4775,7 @@ mod tests {
     fn provider_call_identity() -> AgentProviderCallIdentity {
         AgentProviderCallIdentity {
             manifest: crate::AgentRunManifestId::from_raw(1),
+            manifest_guard: [0; 32],
             call: crate::AgentModelCallId::new(1).expect("call"),
             lease: crate::AgentPlanLeaseId::from_raw(1),
             node: crate::AgentPlanNodeId::from_raw(1),
@@ -5103,6 +5104,7 @@ mod tests {
             let _ = crate::AgentBrowserToolCall::decode(
                 AgentProviderCallIdentity {
                     manifest: crate::AgentRunManifestId::from_raw(1),
+                    manifest_guard: [0; 32],
                     call: crate::AgentModelCallId::new(1).expect("call"),
                     lease: crate::AgentPlanLeaseId::from_raw(1),
                     node: crate::AgentPlanNodeId::from_raw(1),

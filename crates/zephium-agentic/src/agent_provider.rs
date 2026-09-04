@@ -525,6 +525,7 @@ fn bounded_identity_str(bytes: &[u8], len: u8) -> &str {
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub struct AgentProviderCallIdentity {
     manifest: AgentRunManifestId,
+    manifest_guard: [u8; 32],
     call: AgentModelCallId,
     lease: AgentPlanLeaseId,
     node: AgentPlanNodeId,
@@ -532,9 +533,10 @@ pub struct AgentProviderCallIdentity {
 
 impl AgentProviderCallIdentity {
     /// Projects non-authorizing correlation from a prepared policy admission.
-    pub fn from_admission(admission: &AgentModelCallAdmission) -> Self {
+    pub(crate) fn from_admission(admission: &AgentModelCallAdmission) -> Self {
         Self {
             manifest: admission.manifest(),
+            manifest_guard: admission.manifest_guard_for_provider(),
             call: admission.id(),
             lease: admission.lease(),
             node: admission.node(),
@@ -542,9 +544,10 @@ impl AgentProviderCallIdentity {
     }
 
     /// Projects non-authorizing correlation from a committed model call.
-    pub fn from_active(active: &AgentActiveModelCall) -> Self {
+    pub(crate) fn from_active(active: &AgentActiveModelCall) -> Self {
         Self {
             manifest: active.manifest(),
+            manifest_guard: active.manifest_guard_for_metrics(),
             call: active.id(),
             lease: active.lease(),
             node: active.node(),
@@ -571,8 +574,22 @@ impl AgentProviderCallIdentity {
         self.node
     }
 
+    /// Checks this non-authorizing correlation against one exact private
+    /// manifest revision without exposing the revision guard to callers.
+    pub(crate) fn matches_manifest_revision(
+        self,
+        manifest: AgentRunManifestId,
+        manifest_guard: [u8; 32],
+    ) -> bool {
+        self.manifest == manifest && self.manifest_guard == manifest_guard
+    }
+
+    pub(crate) const fn manifest_guard_for_continuation(self) -> [u8; 32] {
+        self.manifest_guard
+    }
+
     /// Whether this correlation still names the supplied committed authority.
-    pub fn matches_active(self, active: &AgentActiveModelCall) -> bool {
+    pub(crate) fn matches_active(self, active: &AgentActiveModelCall) -> bool {
         self == Self::from_active(active)
     }
 }
@@ -582,6 +599,7 @@ impl fmt::Debug for AgentProviderCallIdentity {
         formatter
             .debug_struct("AgentProviderCallIdentity")
             .field("manifest", &self.manifest)
+            .field("manifest_guard", &"[redacted]")
             .field("call", &self.call)
             .field("lease", &self.lease)
             .field("node", &self.node)
@@ -1840,6 +1858,22 @@ mod tests {
             ),
             Err(AgentProviderContractError::ReasoningEffort)
         );
+    }
+
+    #[test]
+    fn provider_call_identity_keeps_its_manifest_guard_private_and_redacted() {
+        let identity = AgentProviderCallIdentity {
+            manifest: AgentRunManifestId::from_raw(7),
+            manifest_guard: [0xA5; 32],
+            call: AgentModelCallId::new(8).expect("call"),
+            lease: AgentPlanLeaseId::from_raw(9),
+            node: AgentPlanNodeId::from_raw(10),
+        };
+        let debug = format!("{identity:?}");
+        assert!(debug.contains("[redacted]"));
+        assert!(!debug.contains("165"));
+        assert!(identity.matches_manifest_revision(identity.manifest(), [0xA5; 32]));
+        assert!(!identity.matches_manifest_revision(identity.manifest(), [0x5A; 32]));
     }
 
     #[test]

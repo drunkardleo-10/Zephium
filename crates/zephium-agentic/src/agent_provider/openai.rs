@@ -1726,6 +1726,7 @@ mod tests {
     fn call() -> AgentProviderCallIdentity {
         AgentProviderCallIdentity {
             manifest: AgentRunManifestId::from_raw(1),
+            manifest_guard: [0; 32],
             call: AgentModelCallId::new(2).expect("call"),
             lease: AgentPlanLeaseId::from_raw(3),
             node: AgentPlanNodeId::from_raw(4),

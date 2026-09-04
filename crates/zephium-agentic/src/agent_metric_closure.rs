@@ -805,7 +805,10 @@ mod tests {
                 ROOT,
             );
             self.supervisor
-                .record_active_model_call(&execution, &active_model)
+                .record_active_model_call(
+                    &execution,
+                    crate::AgentProviderCallIdentity::from_active(&active_model),
+                )
                 .expect("active model");
             record(
                 &mut self.ledger,
@@ -905,7 +908,10 @@ mod tests {
                     ROOT,
                 );
                 self.supervisor
-                    .record_active_model_call(&execution, &active_model)
+                    .record_active_model_call(
+                        &execution,
+                        crate::AgentProviderCallIdentity::from_active(&active_model),
+                    )
                     .expect("active model");
                 record(
                     &mut self.ledger,

@@ -258,6 +258,7 @@ mod tests {
     fn call(id: u64) -> AgentProviderCallIdentity {
         AgentProviderCallIdentity {
             manifest: AgentRunManifestId::from_raw(901),
+            manifest_guard: [0; 32],
             call: AgentModelCallId::new(id).expect("call"),
             lease: AgentPlanLeaseId::from_raw(902),
             node: AgentPlanNodeId::from_raw(903),
