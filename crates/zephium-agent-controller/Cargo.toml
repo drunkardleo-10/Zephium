@@ -1,0 +1,26 @@
+[package]
+name = "zephium-agent-controller"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+build = false
+
+[features]
+default = []
+provider-transport = [
+    "dep:zephium-agent-provider-transport",
+    "zephium-agent-provider-transport/provider-transport",
+]
+probe-harness = [
+    "provider-transport",
+    "zephium-agent-provider-transport/probe-harness",
+]
+
+[dependencies]
+thiserror.workspace = true
+tokio = { workspace = true, features = ["time"] }
+zephium-agentic.workspace = true
+zephium-agent-model-catalog.workspace = true
+zephium-agent-provider-transport = { workspace = true, optional = true }
+zephium-agent-runtime.workspace = true

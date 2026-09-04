@@ -6168,6 +6168,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "zephium-agent-controller"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.18",
+ "tokio",
+ "zephium-agent-model-catalog",
+ "zephium-agent-provider-transport",
+ "zephium-agent-runtime",
+ "zephium-agentic",
+]
+
+[[package]]
 name = "zephium-agent-model-catalog"
 version = "0.1.0"
 dependencies = [
@@ -6542,6 +6554,17 @@ dependencies = [
  "windows",
  "zephium-agentic",
  "zephium-core",
+]
+
+[[package]]
+name = "zephium-terra-macos-probe"
+version = "0.1.0"
+dependencies = [
+ "tokio",
+ "zephium-agent-controller",
+ "zephium-agent-provider-transport",
+ "zephium-agentic",
+ "zephium-engine",
 ]
 
 [[package]]

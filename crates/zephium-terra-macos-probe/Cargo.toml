@@ -1,0 +1,27 @@
+[package]
+name = "zephium-terra-macos-probe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+build = false
+
+[features]
+default = []
+live-probe = [
+    "zephium-agent-controller/probe-harness",
+    "zephium-agent-provider-transport/probe-harness",
+    "zephium-engine/native-agentic-semantic-probe",
+]
+
+[[bin]]
+name = "macos-terra-agentic-probe"
+path = "src/main.rs"
+required-features = ["live-probe"]
+
+[dependencies]
+zephium-agent-controller.workspace = true
+zephium-agent-provider-transport.workspace = true
+zephium-agentic.workspace = true
+zephium-engine.workspace = true
+tokio = { workspace = true, features = ["rt", "time"] }
