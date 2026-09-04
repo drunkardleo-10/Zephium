@@ -19,14 +19,16 @@ fn main() {
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
     let result = match arguments.as_slice() {
         [argument] if argument == "--live-fixed-click" => run_fixed_click(),
+        [argument] if argument == "--live-public-wikipedia-fill" => run_public_wikipedia_fill(),
         [argument] if argument == "--live-two-action" => run_two_action(),
         _ => std::process::exit(2),
     };
     if let Err(error) = result {
         let _ = writeln!(
             std::io::stderr().lock(),
-            "macos-terra-agentic-probe: failed; stage={}; encoding_reason={}; verification_reason={}; wait={}; settle_millis={}; protocol_event={}; content=redacted",
+            "macos-terra-agentic-probe: failed; stage={}; engine_reason={}; encoding_reason={}; verification_reason={}; wait={}; settle_millis={}; protocol_event={}; content=redacted",
             error.label(),
+            error.engine_reason_label(),
             error.encoding_reason_label(),
             error.verification_reason_label(),
             error.wait_label(),
@@ -45,7 +47,7 @@ enum ProbeFailure {
     Authority,
     Provider(zephium_agent_controller::TerraProbeProviderError),
     Proposal,
-    Engine,
+    Engine(&'static str),
     Verification,
     PostClickVerification {
         error: zephium_agent_controller::TerraProbeActionBridgeError,
@@ -198,12 +200,19 @@ impl ProbeFailure {
             Self::Provider(TerraProbeProviderError::Continuation) => "provider_continuation",
             Self::Provider(TerraProbeProviderError::TurnLimit) => "provider_turn_limit",
             Self::Proposal => "proposal_contract",
-            Self::Engine => "native_engine",
+            Self::Engine(_) => "native_engine",
             Self::Verification => "fresh_snapshot_verification",
             Self::PostClickVerification { .. } => "post_click_verification",
             Self::PostFillVerification { .. } => "post_fill_verification",
             Self::Metrics => "metrics",
             Self::Output => "output",
+        }
+    }
+
+    const fn engine_reason_label(self) -> &'static str {
+        match self {
+            Self::Engine(reason) => reason,
+            _ => "not_applicable",
         }
     }
 
@@ -321,6 +330,24 @@ impl ProbeFailure {
 }
 
 #[cfg(target_os = "macos")]
+const fn action_backend_label(
+    backend: zephium_agentic::SemanticActionExecutionBackend,
+) -> &'static str {
+    match backend {
+        zephium_agentic::SemanticActionExecutionBackend::FixedSemanticRecipe => {
+            "fixed_semantic_recipe"
+        }
+        zephium_agentic::SemanticActionExecutionBackend::PageWorldCompatibilityFill => {
+            "page_world_compatibility_fill"
+        }
+        zephium_agentic::SemanticActionExecutionBackend::EngineNativeInput => "engine_native_input",
+        zephium_agentic::SemanticActionExecutionBackend::InProcessAccessibility => {
+            "in_process_accessibility"
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn run_fixed_click() -> Result<(), ProbeFailure> {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
@@ -422,7 +449,8 @@ fn run_fixed_click() -> Result<(), ProbeFailure> {
             Ok(request)
         },
     );
-    let terminal = terminal_result.map_err(|_| callback_failure.unwrap_or(ProbeFailure::Engine))?;
+    let terminal =
+        terminal_result.map_err(|error| callback_failure.unwrap_or(ProbeFailure::Engine(error)))?;
     let (settlement, snapshot, observed_at) = terminal.into_parts();
     let report = bridge
         .ok_or(ProbeFailure::Proposal)?
@@ -471,6 +499,143 @@ fn probe_controller_ids() -> Result<zephium_agent_controller::TerraControllerIds
         AgentAuditDeliveryId::new(1).ok_or(ProbeFailure::Authority)?,
     )
     .map_err(|_| ProbeFailure::Authority)
+}
+
+#[cfg(target_os = "macos")]
+fn run_public_wikipedia_fill() -> Result<(), ProbeFailure> {
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+    use zephium_agent_controller::{
+        run_initial_terra_probe, TerraControllerClock, TerraControllerRunInput,
+        TerraControllerTurnInput, TerraProbeActionBridge,
+    };
+    use zephium_agent_provider_transport::{
+        load_macos_development_openai_credential, AgentProviderTransportConfig,
+    };
+    use zephium_agentic::{AgentPolicyInstant, SemanticActionExecutionInstant};
+
+    struct Clock(AgentPolicyInstant);
+    impl TerraControllerClock for Clock {
+        fn now(
+            &self,
+        ) -> Result<AgentPolicyInstant, zephium_agent_controller::TerraControllerClockError>
+        {
+            Ok(self.0)
+        }
+    }
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .map_err(|_| ProbeFailure::Runtime)?;
+    let mut credential =
+        Some(load_macos_development_openai_credential().map_err(|_| ProbeFailure::Keychain)?);
+    let mut bridge = None;
+    let mut metrics = None;
+    let mut callback_failure = None;
+    let started = Instant::now();
+    let terminal_result = zephium_engine::run_macos_agentic_semantic_model_public_fill_probe(
+        |observation, authority| {
+            let (manifest, lease, account, request, frame, invocation, generation, now) =
+                authority.into_parts();
+            let turn = TerraControllerTurnInput::try_new(
+                account,
+                request,
+                frame,
+                invocation,
+                generation,
+                "On the current Wikipedia public discovery page, fill its search input with exactly Zephium browser. Return exactly one act action and do not submit or navigate. Use effect=local_write, wait=mutation_quiet 100 ms, verification=target_value_matches_input, and settle_budget=1000 ms."
+                    .to_owned(),
+            )
+            .map_err(|_| {
+                callback_failure = Some(ProbeFailure::Authority);
+            })?;
+            let input = TerraControllerRunInput::try_new(
+                manifest,
+                lease,
+                turn,
+                probe_controller_ids().map_err(|_| {
+                    callback_failure = Some(ProbeFailure::Authority);
+                })?,
+                Arc::new(Clock(now)),
+                Instant::now()
+                    .checked_add(Duration::from_secs(120))
+                    .ok_or_else(|| {
+                        callback_failure = Some(ProbeFailure::Authority);
+                    })?,
+            )
+            .map_err(|_| {
+                callback_failure = Some(ProbeFailure::Authority);
+            })?;
+            let key = credential.take().ok_or_else(|| {
+                callback_failure = Some(ProbeFailure::Keychain);
+            })?;
+            let provider_started = Instant::now();
+            let turn = runtime
+                .block_on(run_initial_terra_probe(
+                    input,
+                    AgentProviderTransportConfig::STANDARD,
+                    key,
+                    observation,
+                ))
+                .map_err(|error| {
+                    callback_failure = Some(ProbeFailure::Provider(error));
+                })?;
+            let provider_elapsed = provider_started.elapsed();
+            let receipt = turn.receipt();
+            let input = turn.input();
+            let mut action = TerraProbeActionBridge::try_prepare(
+                turn.into_tool_turn(),
+                observation,
+                1,
+                1,
+                SemanticActionExecutionInstant::from_millis(10_000),
+            )
+            .map_err(|_| {
+                callback_failure = Some(ProbeFailure::Proposal);
+            })?;
+            let request = action.take_native_request().map_err(|_| {
+                callback_failure = Some(ProbeFailure::Proposal);
+            })?;
+            bridge = Some(action);
+            metrics = Some((receipt, input, provider_elapsed));
+            Ok(request)
+        },
+    );
+    let terminal =
+        terminal_result.map_err(|error| callback_failure.unwrap_or(ProbeFailure::Engine(error)))?;
+    let (settlement, snapshot, observed_at) = terminal.into_parts();
+    let action = bridge.ok_or(ProbeFailure::Proposal)?;
+    let wait = action.wait();
+    let settle_millis = action.settle_millis();
+    let report = action
+        .settle_and_verify(settlement, &snapshot, observed_at)
+        .map_err(|error| ProbeFailure::PostFillVerification {
+            error,
+            wait,
+            settle_millis,
+        })?;
+    let backend = action_backend_label(report.applied().backend());
+    let (receipt, input, provider_elapsed) = metrics.ok_or(ProbeFailure::Metrics)?;
+    let input = input.metrics();
+    let provider_elapsed = provider_elapsed.as_millis();
+    let elapsed = started.elapsed().as_millis();
+    use std::io::Write as _;
+    writeln!(
+        std::io::stdout().lock(),
+        "macos-terra-agentic-probe: passed; workflow=public-wikipedia-search-fill; model=gpt-5.6-terra; turns=1; verified_actions=1; backend={backend}; profile=ephemeral; extensions=absent; presentation=hidden; focus_theft=false; input_tokens={}; output_tokens={}; total_tokens={}; request_bytes={}; semantic_bytes={}; charged_micro_usd={}; provider_elapsed_ms={provider_elapsed}; elapsed_ms={elapsed}; content=redacted",
+        receipt.input_tokens(),
+        receipt.output_tokens(),
+        receipt
+            .input_tokens()
+            .saturating_add(receipt.output_tokens()),
+        input.serialized_request_bytes(),
+        input.semantic().disclosed_bytes(),
+        receipt.cost_micro_usd(),
+    )
+    .map_err(|_| ProbeFailure::Output)?;
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -695,7 +860,11 @@ fn run_two_action() -> Result<(), ProbeFailure> {
             Ok(())
         },
     );
-    result.map_err(|_| callback_failure.get().unwrap_or(ProbeFailure::Engine))?;
+    result.map_err(|error| {
+        callback_failure
+            .get()
+            .unwrap_or(ProbeFailure::Engine(error))
+    })?;
     let state = state.into_inner();
     if state.credential.is_some()
         || state.session.is_some()

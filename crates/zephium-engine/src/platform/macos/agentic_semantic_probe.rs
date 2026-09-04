@@ -51,6 +51,7 @@ use super::{
 };
 
 const NAVIGATION_TIMEOUT: Duration = Duration::from_secs(10);
+const PUBLIC_NAVIGATION_TIMEOUT: Duration = Duration::from_secs(30);
 const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(5);
 const ACTION_SECURITY_SETTLE: Duration = Duration::from_millis(125);
 const MUTATION_GATE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -64,6 +65,7 @@ const MODEL_PROBE_POLICY_NOW_MILLIS: u64 = 10_000;
 const MODEL_PROBE_POLICY_EXPIRES_MILLIS: u64 = MODEL_PROBE_POLICY_NOW_MILLIS + 10 * 60 * 1_000;
 const MODEL_PROBE_MODEL_TOKEN_BUDGET: u64 = 300_000;
 const MODEL_PROBE_COST_BUDGET_MICRO_USD: u64 = 1_000_000;
+const PUBLIC_DISCOVERY_PROBE_URL: &str = "https://www.wikipedia.org/";
 
 struct ProbeHostView {
     view: Retained<NSView>,
@@ -115,6 +117,18 @@ impl CallbackState {
     fn failed(&self) -> bool {
         self.renderer_lost.get() || self.invariant_failed.get() || self.callback_panicked.get()
     }
+
+    fn failure_stage(&self) -> Option<&'static str> {
+        if self.renderer_lost.get() {
+            Some("renderer_lost")
+        } else if self.invariant_failed.get() {
+            Some("callback_invariant")
+        } else if self.callback_panicked.get() {
+            Some("callback_panicked")
+        } else {
+            None
+        }
+    }
 }
 
 struct NativeStateGuard<'a> {
@@ -123,28 +137,47 @@ struct NativeStateGuard<'a> {
     page: &'a WKWebView,
     window_main: bool,
     first_responder: Option<usize>,
-    failed: Cell<bool>,
+    allow_hidden_responder_change: bool,
+    failure: Cell<Option<&'static str>>,
 }
 
 impl NativeStateGuard<'_> {
     fn sample(&self) {
-        if self.window.isVisible()
-            || self.window.isKeyWindow()
-            || self.window.isMainWindow() != self.window_main
-            || !self.page.isHidden()
-            || self.app.isActive()
-            || self
-                .window
-                .firstResponder()
-                .map(|responder| Retained::as_ptr(&responder).addr())
-                != self.first_responder
+        let failure = if self.window.isVisible() {
+            Some("window_became_visible")
+        } else if self.window.isKeyWindow() {
+            Some("window_became_key")
+        } else if self.window.isMainWindow() != self.window_main {
+            Some("window_main_state_changed")
+        } else if !self.page.isHidden() {
+            Some("page_became_visible")
+        } else if self.app.isActive() {
+            Some("application_became_active")
+        } else if self
+            .window
+            .firstResponder()
+            .map(|responder| Retained::as_ptr(&responder).addr())
+            != self.first_responder
         {
-            self.failed.set(true);
+            if self.allow_hidden_responder_change {
+                None
+            } else {
+                Some("hidden_first_responder_changed")
+            }
+        } else {
+            None
+        };
+        if self.failure.get().is_none() {
+            self.failure.set(failure);
         }
     }
 
     fn failed(&self) -> bool {
-        self.failed.get()
+        self.failure.get().is_some()
+    }
+
+    fn failure_stage(&self) -> Option<&'static str> {
+        self.failure.get()
     }
 }
 
@@ -161,6 +194,12 @@ impl ProbeRuntime<'_, '_> {
 
     fn pump(&self) {
         pump_once(self.run_loop, Some(self.native_guard));
+    }
+
+    fn failure_stage(&self) -> Option<&'static str> {
+        self.callbacks
+            .failure_stage()
+            .or_else(|| self.native_guard.failure_stage())
     }
 }
 
@@ -192,6 +231,7 @@ type ModelFinishCallback<'a> = dyn FnMut(
 enum ProbeMode<'a> {
     Full,
     ModelClick(&'a mut ModelInitialCallback<'a>),
+    ModelPublicFill(&'a mut ModelInitialCallback<'a>),
     ModelTwoAction {
         prepare_initial: &'a mut ModelInitialCallback<'a>,
         prepare_continuation: &'a mut ModelContinuationCallback<'a>,
@@ -199,7 +239,7 @@ enum ProbeMode<'a> {
     },
 }
 
-/// Fixed run authority bound to the live release-excluded semantic fixture.
+/// Fixed run authority bound to one live release-excluded semantic context.
 ///
 /// The bundle is minted beside the context registry from the exact current
 /// context join. Callers can consume it once to construct the provider policy
@@ -245,20 +285,20 @@ impl MacosAgenticSemanticProbeAuthority {
     }
 }
 
-/// Move-only terminal returned by the release-excluded model-click session.
+/// Move-only terminal returned by a release-excluded model-action session.
 ///
 /// Page content remains confined to the semantic snapshot and this value has
 /// no logging implementation. The caller must rejoin it with the exact
 /// model-proposal owner that created the native request.
 #[doc(hidden)]
 #[must_use]
-pub struct MacosAgenticSemanticModelClickTerminal {
+pub struct MacosAgenticSemanticModelActionTerminal {
     settlement: SemanticActionNativeSettlement,
     snapshot: SemanticSnapshot,
     observed_at: SemanticSettleInstant,
 }
 
-impl MacosAgenticSemanticModelClickTerminal {
+impl MacosAgenticSemanticModelActionTerminal {
     /// Consumes the terminal into the exact native settlement, fresh snapshot,
     /// and trusted monotonic observation instant required by verification.
     pub fn into_parts(
@@ -272,8 +312,11 @@ impl MacosAgenticSemanticModelClickTerminal {
     }
 }
 
+/// Compatibility name for the original fixed-fixture click probe.
+pub type MacosAgenticSemanticModelClickTerminal = MacosAgenticSemanticModelActionTerminal;
+
 struct PendingTeardown {
-    execution: Result<Option<MacosAgenticSemanticModelClickTerminal>, &'static str>,
+    execution: Result<Option<MacosAgenticSemanticModelActionTerminal>, &'static str>,
     page: Weak<WKWebView>,
     window: Weak<NSWindow>,
     store: Weak<WKWebsiteDataStore>,
@@ -295,6 +338,16 @@ pub(crate) fn run_model_click(
     ) -> Result<zephium_agentic::SemanticActionNativeRequest, ()>,
 ) -> Result<MacosAgenticSemanticModelClickTerminal, &'static str> {
     let pending = objc2::rc::autoreleasepool(|_| begin(ProbeMode::ModelClick(&mut prepare)))?;
+    finish(pending)?.ok_or("missing_model_terminal")
+}
+
+pub(crate) fn run_model_public_fill(
+    mut prepare: impl FnMut(
+        &zephium_agentic::SemanticObservation,
+        MacosAgenticSemanticProbeAuthority,
+    ) -> Result<zephium_agentic::SemanticActionNativeRequest, ()>,
+) -> Result<MacosAgenticSemanticModelActionTerminal, &'static str> {
+    let pending = objc2::rc::autoreleasepool(|_| begin(ProbeMode::ModelPublicFill(&mut prepare)))?;
     finish(pending)?.ok_or("missing_model_terminal")
 }
 
@@ -332,6 +385,7 @@ pub(crate) fn run_model_two_action(
 
 fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
     let full_probe = matches!(&mode, ProbeMode::Full);
+    let public_fill_probe = matches!(&mode, ProbeMode::ModelPublicFill(_));
     let page_relay_probe = full_probe && page_world_fill_relay_probe_enabled();
     let hostile_relay_probe = full_probe && page_world_fill_relay_hostile_probe_enabled();
     if hostile_relay_probe && !page_relay_probe {
@@ -437,7 +491,11 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
         first_responder: window
             .firstResponder()
             .map(|responder| Retained::as_ptr(&responder).addr()),
-        failed: Cell::new(false),
+        // A public page may autofocus within its own hidden, non-key window.
+        // That internal responder state is not user focus theft; visibility,
+        // key-window, main-window, and application activation remain strict.
+        allow_hidden_responder_change: public_fill_probe,
+        failure: Cell::new(None),
     };
     native_guard.sample();
     let run_loop = NSRunLoop::mainRunLoop();
@@ -449,15 +507,19 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
     let mut next_invocation = 1_u64;
     let mut successful_snapshots = 0_u8;
     let execution = (|| {
-        let first_url = server.url(if page_relay_probe {
-            if hostile_relay_probe {
-                FixtureRoute::SemanticRuntimeRelayHostile
-            } else {
-                FixtureRoute::SemanticRuntimeRelay
-            }
+        let first_url = if public_fill_probe {
+            PUBLIC_DISCOVERY_PROBE_URL.to_owned()
         } else {
-            FixtureRoute::SemanticRuntime
-        });
+            server.url(if page_relay_probe {
+                if hostile_relay_probe {
+                    FixtureRoute::SemanticRuntimeRelayHostile
+                } else {
+                    FixtureRoute::SemanticRuntimeRelay
+                }
+            } else {
+                FixtureRoute::SemanticRuntime
+            })
+        };
         let first = navigate(
             &mut view,
             &mut registry,
@@ -475,7 +537,11 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
             &mut successful_snapshots,
             &runtime,
         )?;
-        verify_first_snapshot(&first_capture.snapshot)?;
+        if public_fill_probe {
+            verify_public_discovery_snapshot(&first_capture.snapshot)?;
+        } else {
+            verify_first_snapshot(&first_capture.snapshot)?;
+        }
         let first_generation = first_capture.snapshot.generation();
         let first_observation = assemble_observation(first_capture)?;
         let pending_click = match &mut mode {
@@ -492,6 +558,17 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
                     &view,
                     request,
                     Some(zephium_agentic::SemanticActionKind::Click),
+                    &runtime,
+                )?))
+            }
+            ProbeMode::ModelPublicFill(prepare) => {
+                let authority = model_probe_authority(&first_observation)?;
+                let request =
+                    prepare(&first_observation, authority).map_err(|()| "model_action_prepare")?;
+                PendingInitialClick::Model(Box::new(execute_model_action(
+                    &view,
+                    request,
+                    Some(zephium_agentic::SemanticActionKind::Fill),
                     &runtime,
                 )?))
             }
@@ -531,11 +608,18 @@ fn begin(mut mode: ProbeMode<'_>) -> Result<PendingTeardown, &'static str> {
                 verify_primary_click(&after_click.snapshot)?;
             }
             PendingInitialClick::Model(pending) => {
-                verify_primary_click(&after_click.snapshot)?;
                 let observed_at = action_observed_at(pending.admitted_at)?;
                 match &mut mode {
                     ProbeMode::ModelClick(_) => {
-                        return Ok(Some(MacosAgenticSemanticModelClickTerminal {
+                        verify_primary_click(&after_click.snapshot)?;
+                        return Ok(Some(MacosAgenticSemanticModelActionTerminal {
+                            settlement: pending.settlement,
+                            snapshot: after_click.snapshot,
+                            observed_at,
+                        }));
+                    }
+                    ProbeMode::ModelPublicFill(_) => {
+                        return Ok(Some(MacosAgenticSemanticModelActionTerminal {
                             settlement: pending.settlement,
                             snapshot: after_click.snapshot,
                             observed_at,
@@ -1067,8 +1151,13 @@ fn navigate(
         return Err("navigation_load");
     }
 
+    let timeout = if url == PUBLIC_DISCOVERY_PROBE_URL {
+        PUBLIC_NAVIGATION_TIMEOUT
+    } else {
+        NAVIGATION_TIMEOUT
+    };
     let deadline = Instant::now()
-        .checked_add(NAVIGATION_TIMEOUT)
+        .checked_add(timeout)
         .ok_or("navigation_timeout")?;
     while !runtime.failed()
         && runtime.callbacks.navigation.borrow().is_none()
@@ -1616,6 +1705,18 @@ fn snapshot_value_is(snapshot: &SemanticSnapshot, name: &str, expected: &str) ->
         })
 }
 
+fn verify_public_discovery_snapshot(snapshot: &SemanticSnapshot) -> Result<(), &'static str> {
+    if snapshot.completeness() != SemanticCompleteness::Complete
+        || !snapshot
+            .nodes()
+            .iter()
+            .any(|node| matches!(node.role(), SemanticRole::Textbox | SemanticRole::Searchbox))
+    {
+        return Err("public_discovery_snapshot");
+    }
+    Ok(())
+}
+
 fn wait_for_action_security_settle(
     runtime: &ProbeRuntime<'_, '_>,
     duration: Duration,
@@ -1727,8 +1828,11 @@ fn dispatch_invocation(
     {
         runtime.pump();
     }
-    if completion_failed.get() || runtime.failed() {
-        return Err("snapshot_state");
+    if completion_failed.get() {
+        return Err("snapshot_completion_state");
+    }
+    if let Some(stage) = runtime.failure_stage() {
+        return Err(stage);
     }
     let outcome = result
         .try_borrow_mut()

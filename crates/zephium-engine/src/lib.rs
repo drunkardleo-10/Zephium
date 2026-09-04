@@ -74,6 +74,24 @@ pub fn run_macos_agentic_semantic_model_click_probe(
     platform::macos::run_agentic_semantic_model_click_probe(prepare)
 }
 
+/// Runs one allowlisted public-site semantic fill using a model action.
+///
+/// The URL is compiled into the release-excluded engine probe; callers cannot
+/// supply or redirect its authority to another origin. The hidden ephemeral
+/// context captures one production semantic observation, executes one bound
+/// fill, captures adjacent state, and returns a move-only terminal for
+/// independent verification without returning raw page content.
+#[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+#[doc(hidden)]
+pub fn run_macos_agentic_semantic_model_public_fill_probe(
+    prepare: impl FnMut(
+        &zephium_agentic::SemanticObservation,
+        MacosAgenticSemanticProbeAuthority,
+    ) -> Result<zephium_agentic::SemanticActionNativeRequest, ()>,
+) -> Result<MacosAgenticSemanticModelActionTerminal, &'static str> {
+    platform::macos::run_agentic_semantic_model_public_fill_probe(prepare)
+}
+
 /// Runs one fixed-fixture two-action model continuation session.
 ///
 /// The first callback receives the initial observation and run authority. The
@@ -112,6 +130,10 @@ pub fn run_macos_agentic_semantic_model_two_action_probe(
 #[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
 #[doc(hidden)]
 pub use platform::macos::MacosAgenticSemanticModelClickTerminal;
+
+#[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+#[doc(hidden)]
+pub use platform::macos::MacosAgenticSemanticModelActionTerminal;
 
 #[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
 #[doc(hidden)]
