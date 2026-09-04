@@ -10,6 +10,27 @@ use std::time::Instant;
 
 use crate::AgentNativeShutdownProof;
 
+/// Constructor-closed, move-only evidence that provider admission and slots
+/// are permanently drained. The type is available without transport features;
+/// constructing it requires consuming the real transport's shutdown proof.
+#[must_use]
+pub struct AgentProviderShutdownProof {
+    _private: (),
+}
+
+#[cfg(feature = "provider-transport")]
+impl From<crate::AgentProviderTransportShutdownProof> for AgentProviderShutdownProof {
+    fn from(_proof: crate::AgentProviderTransportShutdownProof) -> Self {
+        Self { _private: () }
+    }
+}
+
+impl fmt::Debug for AgentProviderShutdownProof {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("AgentProviderShutdownProof([closed])")
+    }
+}
+
 /// Terminal result of consuming the complete agent browser lifecycle.
 ///
 /// `Clean` is deliberately impossible without the constructor-closed native
@@ -97,5 +118,21 @@ mod tests {
         );
         assert_eq!(calls.load(Ordering::Acquire), 1);
         assert!(outcome.into_native_proof().is_none());
+    }
+
+    #[cfg(feature = "provider-transport")]
+    #[test]
+    fn provider_lifecycle_evidence_consumes_a_real_sealed_transport_proof() {
+        let transport =
+            crate::AgentProviderTransport::try_new(crate::AgentProviderTransportConfig::STANDARD)
+                .expect("idle test transport");
+        assert!(transport.try_prove_shutdown().is_err());
+        transport.seal();
+        let proof = AgentProviderShutdownProof::from(
+            transport
+                .try_prove_shutdown()
+                .expect("sealed idle transport"),
+        );
+        assert_eq!(format!("{proof:?}"), "AgentProviderShutdownProof([closed])");
     }
 }

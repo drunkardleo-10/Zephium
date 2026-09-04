@@ -17,7 +17,8 @@ use thiserror::Error;
 use tokio::sync::Notify;
 use zephium_agentic::{
     AgentAuditCompletion, AgentAuditDeliverySettlement, AgentBrowserLifecycle, AgentBrowserPort,
-    AgentBrowserShutdownOutcome, ContextCookieTransferRequest, ContextDispatch, ContextNativeEvent,
+    AgentBrowserShutdownOutcome, AgentNativeShutdownProof, AgentProviderShutdownProof,
+    AgentRunPolicySettlement, ContextCookieTransferRequest, ContextDispatch, ContextNativeEvent,
     ContextNativeRequest, ContextNavigationReplacement, ContextRendererLoss,
     ContextResourceAuditId, ContextShutdownDispatch, SemanticActionNativeCompletion,
     SemanticActionNativeRequest, SemanticActionNativeSettlement, SemanticRuntimeInvocation,
@@ -443,8 +444,9 @@ impl AgentRuntimeControllerTerminalClass {
 
 /// Move-only proof that the current runtime accepted a clean controller close.
 ///
-/// It is intentionally not a runtime lifecycle success: the runtime remains a
-/// one-run, fail-closed shell. Dropping an uncommitted proof revokes the claim.
+/// A business-only commit is not lifecycle success. A lifecycle commit also
+/// consumes independent native and policy/audit proofs. Dropping an
+/// uncommitted claim revokes it.
 #[must_use]
 pub struct AgentRuntimeControllerTerminalClaim {
     inner: Arc<RuntimeInner>,
@@ -460,10 +462,34 @@ impl AgentRuntimeControllerTerminalClaim {
 
     /// Commits the previously linearized clean controller terminal claim.
     pub fn commit(mut self) {
+        self.commit_inner(None);
+    }
+
+    /// Commits terminal policy/audit consumption and exact native shutdown.
+    ///
+    /// The runtime retains the move-only native proof until its worker returns
+    /// normally and is joined. Timeout, unwind, callback debt or mailbox fault
+    /// still preclude clean lifecycle shutdown. The policy settlement is
+    /// constructor-closed evidence, not permission to run another task.
+    pub fn commit_with_shutdown(
+        mut self,
+        native: AgentNativeShutdownProof,
+        policy: AgentRunPolicySettlement,
+        provider: AgentProviderShutdownProof,
+    ) {
+        self.commit_inner(Some(RuntimeShutdownClosure {
+            native,
+            _policy: policy,
+            _provider: provider,
+        }));
+    }
+
+    fn commit_inner(&mut self, closure: Option<RuntimeShutdownClosure>) {
         let _gate = recover_lock(&self.inner.terminal_claim_gate);
         // `self` is the sole move-only owner created by CLAIMING->CLAIMED.
         // Lifecycle control cannot revoke CLAIMED and no other API can create
         // or consume this proof, so this is an infallible typestate edge.
+        *recover_lock(&self.inner.shutdown_closure) = closure;
         self.inner.run_state.store(RUN_SUCCEEDED, Ordering::Release);
         self.inner
             .terminal_claim_class
@@ -829,6 +855,12 @@ impl CompletionState {
     }
 }
 
+struct RuntimeShutdownClosure {
+    native: AgentNativeShutdownProof,
+    _policy: AgentRunPolicySettlement,
+    _provider: AgentProviderShutdownProof,
+}
+
 struct RuntimeInner {
     mailbox: AgentRuntimeMailbox,
     commands: ArrayQueue<WorkerCommand>,
@@ -844,6 +876,9 @@ struct RuntimeInner {
     // proof is the clean-terminal linearization point.
     terminal_claim_gate: Mutex<()>,
     terminal_claim_class: AtomicU8,
+    // One optional content-free terminal record; no background work or queue.
+    shutdown_closure: Mutex<Option<RuntimeShutdownClosure>>,
+    controller_returned: AtomicBool,
     fault_shutdown_requested: AtomicBool,
     staged_stop_reason: AtomicU8,
     completion: CompletionState,
@@ -1254,6 +1289,8 @@ impl PendingAgentRuntime {
             shutdown_deadline: Mutex::new(None),
             terminal_claim_gate: Mutex::new(()),
             terminal_claim_class: AtomicU8::new(TERMINAL_CLASS_NONE),
+            shutdown_closure: Mutex::new(None),
+            controller_returned: AtomicBool::new(false),
             fault_shutdown_requested: AtomicBool::new(false),
             staged_stop_reason: AtomicU8::new(STAGED_STOP_NONE),
             completion: CompletionState::new(),
@@ -1391,12 +1428,16 @@ impl AgentBrowserLifecycle for RuntimeLifecycle {
             }
             return AgentBrowserShutdownOutcome::Unclean;
         }
-        if let Some(worker) = self.worker.take() {
-            worker.join();
+        let joined = self.worker.take().is_some_and(RuntimeWorkerOwnership::join);
+        if joined
+            && self.inner.controller_returned.load(Ordering::Acquire)
+            && self.inner.run_state.load(Ordering::Acquire) == RUN_SUCCEEDED
+            && self.inner.mailbox.fault().is_none()
+        {
+            if let Some(closure) = recover_lock(&self.inner.shutdown_closure).take() {
+                return AgentBrowserShutdownOutcome::Clean(closure.native);
+            }
         }
-        // This is intentionally fail-closed staged integration. The shell has
-        // no controller-owned native shutdown/audit proof yet, so it must not
-        // claim Clean merely because its worker exited.
         AgentBrowserShutdownOutcome::Unclean
     }
 }
@@ -1630,8 +1671,8 @@ async fn run_controller_no_unwind(
     // one-shot shutdown event, cancel external work, and drain terminal/audit
     // callbacks. A spontaneous mailbox fault receives the same bounded path
     // with this host's fixed deadline. Only expiry force-drops a
-    // non-cooperative controller, and every path remains unclean.
-    {
+    // non-cooperative controller; forced expiry remains unclean.
+    let returned = {
         let controller_done = poll_controller_without_unwind(future.as_mut());
         tokio::pin!(controller_done);
         loop {
@@ -1646,7 +1687,7 @@ async fn run_controller_no_unwind(
 
             if let Some(deadline) = inner.shutdown_deadline() {
                 if Instant::now() >= deadline {
-                    break;
+                    break false;
                 }
                 let deadline_wait =
                     tokio::time::sleep_until(tokio::time::Instant::from_std(deadline));
@@ -1657,16 +1698,16 @@ async fn run_controller_no_unwind(
                     tokio::pin!(mailbox_fault);
                     tokio::select! {
                         biased;
-                        _ = &mut controller_done => break,
-                        _ = &mut deadline_wait => break,
+                        returned = &mut controller_done => break returned,
+                        _ = &mut deadline_wait => break false,
                         _ = &mut mailbox_fault => inner.request_fault_shutdown(),
                         _ = &mut control => {}
                     }
                 } else {
                     tokio::select! {
                         biased;
-                        _ = &mut controller_done => break,
-                        _ = &mut deadline_wait => break,
+                        returned = &mut controller_done => break returned,
+                        _ = &mut deadline_wait => break false,
                         _ = &mut control => {}
                     }
                 }
@@ -1677,16 +1718,22 @@ async fn run_controller_no_unwind(
             tokio::pin!(mailbox_fault);
             tokio::select! {
                 biased;
-                _ = &mut controller_done => break,
+                returned = &mut controller_done => break returned,
                 _ = &mut mailbox_fault => inner.request_fault_shutdown(),
                 _ = &mut control => {}
             }
         }
-    }
+    };
     // A malicious or faulty controller may also panic while its future is
     // being dropped. Treat that exactly like a polling panic: the caller below
     // still seals and drains this runtime on the same worker.
-    let _ = catch_unwind(AssertUnwindSafe(|| drop(future)));
+    let dropped = catch_unwind(AssertUnwindSafe(|| drop(future))).is_ok();
+    inner
+        .controller_returned
+        .store(returned && dropped, Ordering::Release);
+    if !returned || !dropped {
+        recover_lock(&inner.shutdown_closure).take();
+    }
 }
 
 fn poll_controller_without_unwind<'future>(
@@ -1758,12 +1805,13 @@ impl RuntimeWorkerOwnership {
         self.worker.is_finished()
     }
 
-    fn join(self) {
-        let _ = self.worker.join();
+    fn join(self) -> bool {
+        let joined = self.worker.join().is_ok();
         // Keep the lifecycle owner's permit alive until the actual worker has
         // been joined. The worker itself holds the other Arc until its thread
         // returns, so either ordering preserves process-wide exclusion.
         let _permit_until_joined = self.permit;
+        joined
     }
 }
 
@@ -2242,10 +2290,236 @@ mod tests {
             shutdown_deadline: Mutex::new(None),
             terminal_claim_gate: Mutex::new(()),
             terminal_claim_class: AtomicU8::new(TERMINAL_CLASS_NONE),
+            shutdown_closure: Mutex::new(None),
+            controller_returned: AtomicBool::new(false),
             fault_shutdown_requested: AtomicBool::new(false),
             staged_stop_reason: AtomicU8::new(STAGED_STOP_NONE),
             completion: CompletionState::new(),
         })
+    }
+
+    fn closed_shutdown_evidence() -> (AgentNativeShutdownProof, AgentRunPolicySettlement) {
+        use zephium_agentic::*;
+        let context = controller_test_context();
+        let root = AgentPlanNodeId::generate();
+        let origin = SemanticOrigin::parse("https://shutdown.invalid").expect("origin");
+        let effects = AgentEffectScope::try_new(&[SemanticEffectClass::Read]).expect("effects");
+        let budget = AgentRunBudget::try_new(1, 1, 1, 1).expect("budget");
+        let profile = context.identity().profile();
+        let manifest = AgentRunManifest::try_new(
+            AgentRunManifestId::generate(),
+            context.identity().owner(),
+            AgentRunScope::try_new(
+                vec![profile],
+                vec![AgentAccountScope::Anonymous],
+                vec![origin.clone()],
+                SemanticSensitivity::Public,
+                effects,
+                Vec::new(),
+            )
+            .expect("scope"),
+            budget,
+            AgentPolicyInstant::from_millis(1),
+            AgentPolicyInstant::from_millis(100),
+            vec![AgentPlanNodeScope::new(
+                root,
+                AgentPlanNodeAuthority::try_new(
+                    vec![profile],
+                    vec![AgentAccountScope::Anonymous],
+                    vec![origin],
+                    SemanticSensitivity::Public,
+                    effects,
+                )
+                .expect("authority"),
+                budget,
+                AgentPolicyInstant::from_millis(99),
+            )],
+        )
+        .expect("manifest");
+        let mut supervisor = AgentRunSupervisor::new(
+            AgentSupervisorId::new(1).expect("id"),
+            AgentDelegationTopology::try_new(&manifest, vec![AgentDelegationSpec::new(root, None)])
+                .expect("topology"),
+        );
+        let accounting =
+            AgentRunAccountingMetrics::try_new(&manifest, &supervisor).expect("accounting");
+        let mut progress =
+            AgentRunProgressMetrics::try_new(&manifest, &supervisor).expect("progress");
+        let actions =
+            AgentRunActionPerformanceMetrics::try_new(&manifest, &supervisor).expect("actions");
+        let inputs = AgentRunProviderInputMetrics::try_new(&manifest, &supervisor).expect("inputs");
+        let mut audit = AgentAuditLedger::try_new(&manifest, &supervisor).expect("audit");
+        let mut record = |supervisor: &AgentRunSupervisor, value: u64| {
+            let event = audit
+                .record_current(
+                    supervisor,
+                    root,
+                    AgentAuditEventId::new(value).expect("id"),
+                    AgentPolicyInstant::from_millis(value),
+                )
+                .expect("event");
+            progress.record_event(event).expect("progress");
+        };
+        record(&supervisor, 1);
+        let execution = supervisor
+            .start(root, AgentSupervisorAttemptId::new(1).expect("id"))
+            .expect("start");
+        record(&supervisor, 2);
+        supervisor
+            .complete(execution, AgentSupervisorCompletion::Succeeded)
+            .expect("complete");
+        record(&supervisor, 3);
+        let closure = AgentRunMetricClosure::try_close(
+            &manifest,
+            &supervisor,
+            &accounting,
+            &progress,
+            &actions,
+            &inputs,
+        )
+        .expect("closure");
+        audit.seal_for_shutdown().expect("seal");
+        let delivery = audit
+            .begin_delivery(
+                AgentAuditDeliveryId::new(1).expect("id"),
+                MAX_AGENT_AUDIT_DELIVERY_EVENTS,
+            )
+            .expect("delivery");
+        audit
+            .settle_delivery(
+                delivery
+                    .proof()
+                    .settle(AgentAuditDeliveryOutcome::Committed),
+            )
+            .expect("commit");
+        let policy = AgentRunPolicy::try_new(
+            manifest,
+            vec![AgentPlanLeaseBinding::new(
+                AgentPlanLeaseId::generate(),
+                root,
+            )],
+        )
+        .expect("policy");
+        let settled = policy
+            .settle_metric_closure(closure, &accounting, audit)
+            .expect("settled");
+        let mut contexts = ContextRegistry::new();
+        contexts.seal_for_shutdown().expect("seal");
+        let mut profiles = ContextProfileLeaseRegistry::new();
+        profiles.seal_for_shutdown().expect("seal");
+        let mut cookies = ContextCookieTransferRegistry::new();
+        cookies.seal_for_shutdown().expect("seal");
+        let mut executions = SemanticActionExecutionCoordinator::new();
+        executions.seal();
+        let mut settlements = SemanticActionSettlementCoordinator::new();
+        settlements.seal();
+        let mut screenshots = SemanticScreenshotCoordinator::new();
+        screenshots.seal_for_shutdown();
+        let mut native =
+            AgentNativeShutdownCoordinator::try_new(AgentNativeShutdownResources::new(
+                contexts,
+                profiles,
+                cookies,
+                executions,
+                settlements,
+                screenshots,
+            ))
+            .expect("cohort");
+        let id = ContextResourceAuditId::new(1).expect("id");
+        native.begin_port_seal(id).expect("seal");
+        native
+            .account_port_seal(id, ContextShutdownDispatch::AuditScheduled)
+            .expect("dispatch");
+        native
+            .settle_shutdown_audit(ContextShutdownAuditSettlement::new(
+                id,
+                Ok(
+                    ContextNativeResourceSnapshot::try_new(ContextNativeResourceCounts {
+                        known_bindings: 0,
+                        resident_views: 0,
+                        owned_reservations: 0,
+                        borrowed_leases: 0,
+                        visible_surfaces: 0,
+                        suspended_views: 0,
+                        pending_operations: 0,
+                        pending_captures: 0,
+                        queued_tasks: 0,
+                    })
+                    .expect("zero"),
+                ),
+            ))
+            .expect("audit");
+        (native.finish().expect("native proof"), settled)
+    }
+
+    struct ClosedController(u8);
+
+    impl AgentRuntimeController for ClosedController {
+        fn run(
+            self: Box<Self>,
+            mut worker: AgentRuntimeWorker,
+            _browser: AgentRuntimeBrowser,
+        ) -> AgentRuntimeControllerFuture {
+            Box::pin(async move {
+                assert!(matches!(
+                    worker.next_event().await,
+                    Ok(AgentRuntimeEvent::RunStarted(_))
+                ));
+                let claim = worker
+                    .try_claim_controller_terminal(AgentRuntimeControllerTerminalClass::Ordinary)
+                    .await
+                    .expect("claim");
+                let (_native, _policy) = closed_shutdown_evidence();
+                // Native-zero and policy closure alone are insufficient:
+                // only the real provider transport can supply its third proof.
+                claim.commit();
+                match self.0 {
+                    0 => {}
+                    1 => panic!("test controller panic after closed evidence"),
+                    _ => std::future::pending::<()>().await,
+                }
+            })
+        }
+    }
+
+    #[test]
+    fn lifecycle_cannot_infer_provider_drain_from_native_policy_or_worker_exit() {
+        let _guard = runtime_test_guard();
+        for mode in 0..3 {
+            let pending = PendingAgentRuntime::spawn_suspended_with_controller(
+                AgentRuntimeConfig::STANDARD,
+                Box::new(ClosedController(mode)),
+            )
+            .expect("runtime");
+            let composition = pending.bind_browser_port(Arc::new(RecordingPort {
+                calls: AtomicUsize::new(0),
+            }));
+            let (handle, completion, lifecycle) = composition.into_parts();
+            handle.start_run().expect("run");
+            // Wait until commit; do not race shutdown against initial admission.
+            for _ in 0..200 {
+                if handle.inner.run_state.load(Ordering::Acquire) == RUN_SUCCEEDED {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            assert_eq!(
+                handle.inner.run_state.load(Ordering::Acquire),
+                RUN_SUCCEEDED
+            );
+            if mode < 2 {
+                wait_stopped(&completion);
+            }
+            let outcome = lifecycle.shutdown_until(Instant::now() + Duration::from_millis(50));
+            assert!(matches!(outcome, AgentBrowserShutdownOutcome::Unclean));
+            assert_eq!(
+                handle.inner.controller_returned.load(Ordering::Acquire),
+                mode == 0
+            );
+            wait_stopped(&completion);
+            let next = spawn_after_true_worker_exit();
+            drop(next);
+        }
     }
 
     fn controller_test_worker(inner: Arc<RuntimeInner>) -> AgentRuntimeWorker {
@@ -3392,6 +3666,8 @@ mod tests {
             shutdown_deadline: Mutex::new(None),
             terminal_claim_gate: Mutex::new(()),
             terminal_claim_class: AtomicU8::new(TERMINAL_CLASS_NONE),
+            shutdown_closure: Mutex::new(None),
+            controller_returned: AtomicBool::new(false),
             fault_shutdown_requested: AtomicBool::new(false),
             staged_stop_reason: AtomicU8::new(STAGED_STOP_NONE),
             completion: CompletionState::new(),

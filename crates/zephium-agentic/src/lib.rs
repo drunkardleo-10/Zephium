@@ -99,7 +99,9 @@ pub use agent_input_metrics::{
     AgentProviderInputNodeMetrics, AgentProviderInputShapeMetrics, AgentRunProviderInputMetrics,
     AgentRunProviderInputSnapshot, MAX_AGENT_PROVIDER_INPUT_SNAPSHOT_BYTES,
 };
-pub use agent_lifecycle::{AgentBrowserLifecycle, AgentBrowserShutdownOutcome};
+pub use agent_lifecycle::{
+    AgentBrowserLifecycle, AgentBrowserShutdownOutcome, AgentProviderShutdownProof,
+};
 pub use agent_manifest::{
     AgentAccountAttestationId, AgentAccountId, AgentAccountScope, AgentContextAccountBinding,
     AgentDataFlowRule, AgentEffectScope, AgentManifestContractError, AgentPlanLeaseId,
