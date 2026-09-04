@@ -7,6 +7,9 @@
     deny(clippy::panic, clippy::unreachable, clippy::unwrap_used)
 )]
 
+#[cfg(target_os = "macos")]
+mod work_actor;
+
 #[cfg(not(target_os = "macos"))]
 fn main() {
     std::process::exit(2);
@@ -51,6 +54,7 @@ fn main() {
         [argument] if argument == "--live-public-luna-workflow-inspectable" => {
             run_variable_workflow()
         }
+        [argument] if argument == "--live-public-luna-work-actor-inspectable" => work_actor::run(),
         _ => std::process::exit(2),
     };
     if let Err(error) = result {
@@ -151,6 +155,7 @@ impl ProbeFailure {
                 "provider_locate_encoding"
             }
             Self::Provider(TerraProbeProviderError::Transport) => "provider_transport",
+            Self::Provider(TerraProbeProviderError::Journal) => "product_journal",
             Self::Provider(TerraProbeProviderError::PreDispatchTerminal(_)) => {
                 "provider_pre_dispatch_terminal"
             }

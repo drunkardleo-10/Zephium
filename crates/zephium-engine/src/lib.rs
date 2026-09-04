@@ -145,6 +145,24 @@ pub use platform::macos::MacosAgenticSemanticProbeAuthority;
 #[doc(hidden)]
 pub use platform::macos::MacosAgenticSemanticTwoActionScenario;
 
+/// Release-excluded main-thread observer of a real product runtime actor.
+#[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+#[doc(hidden)]
+pub type MacosAgentWorkProbePoll = Box<dyn FnMut(bool) -> Option<Result<(), &'static str>>>;
+
+/// Pumps the actual production EngineHost port for an excluded public qualifier.
+#[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+#[doc(hidden)]
+pub fn run_macos_agentic_work_actor_probe(
+    profile: zephium_core::ids::ProfileId,
+    sink: impl Fn(zephium_agentic::ContextNativeEvent) + Send + Sync + 'static,
+    start: impl FnOnce(
+        std::sync::Arc<dyn zephium_agentic::AgentBrowserPort>,
+    ) -> Result<MacosAgentWorkProbePoll, &'static str>,
+) -> Result<(), &'static str> {
+    platform::macos::run_agentic_work_actor_probe(profile, sink, start)
+}
+
 /// Hosts one bounded variable-length public workflow through the production native adapter.
 /// The exact registry projection is supplied at each decision; all requests
 /// must already carry policy authority, and each callback must independently

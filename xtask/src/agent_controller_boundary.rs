@@ -10,7 +10,9 @@ const ROOT: &str = "crates/zephium-agent-controller/src/lib.rs";
 const PROBE: &str = "crates/zephium-agent-controller/src/probe.rs";
 const TERRA: &str = "crates/zephium-agent-controller/src/terra.rs";
 const ACTION: &str = "crates/zephium-agent-controller/src/action.rs";
+const WORK: &str = "crates/zephium-agent-controller/src/work.rs";
 const QUALIFIER: &str = "crates/zephium-terra-macos-probe/src/main.rs";
+const WORK_QUALIFIER: &str = "crates/zephium-terra-macos-probe/src/work_actor.rs";
 const ALLOWED_DEPENDENCIES: [&str; 6] = [
     "thiserror",
     "tokio",
@@ -48,7 +50,9 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     validate_probe(&probe)?;
     validate_terra(&terra)?;
     validate_action(&action)?;
+    validate_work(&read(repository.join(WORK))?)?;
     validate_workflow_qualifier(&read(repository.join(QUALIFIER))?)?;
+    validate_work_actor_qualifier(&read(repository.join(WORK_QUALIFIER))?)?;
     validate_inventory(&repository.join("crates/zephium-agent-controller"))?;
     Ok(())
 }
@@ -201,6 +205,10 @@ fn validate_terra(source: &str) -> Result<(), String> {
         "pub fn try_finish(",
         "AgentBrowserSessionFinishRefusal",
         "self.policy.accounting().reserved_model_tokens() != 0",
+        "action_executions: zephium_agentic::SemanticActionExecutionCoordinator::new()",
+        "action_settlements: zephium_agentic::SemanticActionSettlementCoordinator::new()",
+        "self.action_executions.seal()",
+        "self.action_settlements.seal()",
         "continue_after_verified_action",
         "continue_after_locate",
         "locate_semantic_observation",
@@ -256,6 +264,8 @@ fn validate_inventory(crate_root: &Path) -> Result<(), String> {
             "lib.rs".to_owned(),
             "probe.rs".to_owned(),
             "terra.rs".to_owned(),
+            "work.rs".to_owned(),
+            "work_tests.rs".to_owned(),
         ])
     {
         return Err("controller source inventory drifted".to_owned());
@@ -308,13 +318,16 @@ fn validate_action(source: &str) -> Result<(), String> {
         "SemanticActionBatch::bind",
         "authorize_semantic_effect",
         "dispatch_semantic_effect",
-        "SemanticActionExecutionCoordinator::new",
-        "SemanticActionSettlementCoordinator::new",
+        "execution: &mut SemanticActionExecutionCoordinator",
+        "settlement: &mut SemanticActionSettlementCoordinator",
+        "terminal: Option<SemanticActionBatchResult>",
+        "record_success",
         "verify_semantic_action_terminal",
         "settle_verified_semantic_terminal",
         "finalize_accounted_semantic_action_result",
         "self.pending = Some",
         "self.terminal = Some",
+        "*proposal_failure = Some(self)",
         "AgentBrowserActionFinalizationRefusal",
     ] {
         if !source.contains(required) {
@@ -334,11 +347,86 @@ fn validate_action(source: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_work(source: &str) -> Result<(), String> {
+    for required in [
+        "impl AgentRuntimeController for AgentWorkController",
+        "AgentRunSupervisor",
+        "AgentAuditLedger",
+        "AgentRunMetricClosure::try_close",
+        "AgentNativeShutdownResources::new",
+        "claim.commit_with_shutdown(proof, settlement, provider)",
+        "state.task.evaluate(&observation)",
+        "state.native.revoke(browser)",
+        ".begin_action_settlement(",
+        "MAX_AGENT_WORK_EVENTS: usize = 64",
+        "AgentWorkOutcome::Recovery",
+        "worker.try_drain_terminal_claim_refusal_event()",
+        "recovery_close: Option<ContextOperationJoin>",
+        "Self::begin_recovery_close(state, browser)",
+    ] {
+        if !source.contains(required) {
+            return Err(format!("Work actor lost boundary: {required}"));
+        }
+    }
+    for forbidden in FORBIDDEN_TERRA_TOKENS.into_iter().chain([
+        "SemanticModelActionQualificationExecution",
+        "for_execution_qualification",
+        "TerraProbeActionBridge",
+    ]) {
+        if source.contains(forbidden) {
+            return Err(format!(
+                "Work actor acquired forbidden authority: {forbidden}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_work_actor_qualifier(source: &str) -> Result<(), String> {
+    for required in [
+        "impl AgentWorkTask for Task",
+        "AgentWorkController::try_new_for_probe(",
+        "PendingAgentRuntime::spawn_suspended_with_controller(",
+        "pending.bind_browser_port(port)",
+        "zephium_engine::run_macos_agentic_work_actor_probe(",
+        "zephium_store::SqliteStore::open(",
+        "AgentBrowserRetention::InspectablePublicData",
+        "AgentWorkOutcome::Succeeded(settlement)",
+        "AgentBrowserShutdownOutcome::Clean(_)",
+        "StoreShutdownOutcome::Clean",
+        "settlement.closure().effects()",
+    ] {
+        if !source.contains(required) {
+            return Err(format!(
+                "Work qualifier lost actual product boundary: {required}"
+            ));
+        }
+    }
+    for forbidden in [
+        "TerraProbeActionBridge",
+        "for_execution_qualification",
+        "SemanticModelActionQualificationExecution",
+        "impl AgentBrowserPort",
+        "set_var(",
+        "std::fs::write",
+        "request.body()",
+        "println!(\"{observation",
+        "println!(\"{response",
+    ] {
+        if source.contains(forbidden) {
+            return Err(format!(
+                "Work qualifier acquired synthetic/content authority: {forbidden}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         validate_action, validate_manifest, validate_probe, validate_root, validate_terra,
-        validate_workflow_qualifier,
+        validate_work, validate_work_actor_qualifier, validate_workflow_qualifier,
     };
 
     const MANIFEST: &str = include_str!("../../crates/zephium-agent-controller/Cargo.toml");
@@ -346,7 +434,10 @@ mod tests {
     const PROBE: &str = include_str!("../../crates/zephium-agent-controller/src/probe.rs");
     const TERRA: &str = include_str!("../../crates/zephium-agent-controller/src/terra.rs");
     const ACTION: &str = include_str!("../../crates/zephium-agent-controller/src/action.rs");
+    const WORK: &str = include_str!("../../crates/zephium-agent-controller/src/work.rs");
     const QUALIFIER: &str = include_str!("../../crates/zephium-terra-macos-probe/src/main.rs");
+    const WORK_QUALIFIER: &str =
+        include_str!("../../crates/zephium-terra-macos-probe/src/work_actor.rs");
 
     #[test]
     fn current_controller_boundary_is_valid() {
@@ -355,7 +446,29 @@ mod tests {
         validate_probe(PROBE).expect("controller probe");
         validate_terra(TERRA).expect("controller Terra path");
         validate_action(ACTION).expect("controller native action path");
+        validate_work(WORK).expect("production Work actor");
         validate_workflow_qualifier(QUALIFIER).expect("same-driver native qualification path");
+        validate_work_actor_qualifier(WORK_QUALIFIER)
+            .expect("actual actor/native/store qualification path");
+    }
+
+    #[test]
+    fn actor_qualification_requires_actual_runtime_native_and_durable_closure() {
+        for boundary in [
+            "pending.bind_browser_port(port)",
+            "zephium_store::SqliteStore::open(",
+            "AgentBrowserShutdownOutcome::Clean(_)",
+            "AgentWorkOutcome::Succeeded(settlement)",
+        ] {
+            assert!(validate_work_actor_qualifier(
+                &WORK_QUALIFIER.replace(boundary, "removed_boundary")
+            )
+            .is_err());
+        }
+        assert!(
+            validate_work_actor_qualifier(&format!("{WORK_QUALIFIER}\nimpl AgentBrowserPort"))
+                .is_err()
+        );
     }
 
     #[test]

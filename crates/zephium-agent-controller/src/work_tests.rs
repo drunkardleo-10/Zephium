@@ -1,0 +1,998 @@
+//! Deterministic actor fixtures; loopback only, no native handles or real page data.
+
+use super::*;
+use std::sync::atomic::{AtomicU64, Ordering};
+use zephium_agent_runtime::{
+    AgentRuntimeConfig, AgentRuntimeHandle, NativeEventSink, PendingAgentRuntime,
+};
+
+static SERIAL: Mutex<()> = Mutex::new(());
+
+struct Clock(AtomicU64);
+impl TerraControllerClock for Clock {
+    fn now(&self) -> Result<AgentPolicyInstant, super::super::TerraControllerClockError> {
+        Ok(AgentPolicyInstant::from_millis(
+            self.0.fetch_add(1, Ordering::Relaxed),
+        ))
+    }
+}
+
+struct Task;
+impl AgentWorkTask for Task {
+    fn evaluate(
+        &mut self,
+        observation: &SemanticObservation,
+    ) -> Result<AgentWorkTaskProgress, AgentWorkFailure> {
+        assert_eq!(observation.frames().len(), 1);
+        Ok(AgentWorkTaskProgress::Complete)
+    }
+    fn assess(
+        &self,
+        _action: &SemanticPreparedAction,
+    ) -> Result<AgentEffectAssessment, AgentWorkFailure> {
+        Err(AgentWorkFailure::Contract)
+    }
+    fn attest_account(
+        &self,
+        context: ContextJoin,
+        now: AgentPolicyInstant,
+    ) -> Result<AgentContextAccountBinding, AgentWorkFailure> {
+        Ok(AgentContextAccountBinding::new(
+            AgentAccountAttestationId::generate(),
+            context,
+            AgentAccountScope::Anonymous,
+            now,
+        ))
+    }
+}
+
+fn input() -> AgentWorkRunInput {
+    input_with_effects(&[SemanticEffectClass::Read, SemanticEffectClass::LocalWrite])
+}
+
+fn input_with_effects(allowed: &[SemanticEffectClass]) -> AgentWorkRunInput {
+    let profile = 1_u128.into();
+    let context = ContextIdentity::new(
+        ContextId::generate(),
+        ContextRunId::generate(),
+        profile,
+        ContextKind::Owned,
+    );
+    let origin = SemanticOrigin::parse("https://work-fixture.invalid/").expect("origin");
+    let effects = AgentEffectScope::try_new(allowed).expect("effects");
+    let budget = AgentRunBudget::try_new(24, 1_000_000, 1_000_000, 1).expect("budget");
+    let node = AgentPlanNodeId::generate();
+    let manifest = AgentRunManifest::try_new(
+        AgentRunManifestId::generate(),
+        context.owner(),
+        AgentRunScope::try_new(
+            vec![profile],
+            vec![AgentAccountScope::Anonymous],
+            vec![origin.clone()],
+            SemanticSensitivity::Public,
+            effects,
+            Vec::new(),
+        )
+        .expect("scope"),
+        budget,
+        AgentPolicyInstant::from_millis(1),
+        AgentPolicyInstant::from_millis(100_000),
+        vec![AgentPlanNodeScope::new(
+            node,
+            AgentPlanNodeAuthority::try_new(
+                vec![profile],
+                vec![AgentAccountScope::Anonymous],
+                vec![origin],
+                SemanticSensitivity::Public,
+                effects,
+            )
+            .expect("authority"),
+            budget,
+            AgentPolicyInstant::from_millis(99_999),
+        )],
+    )
+    .expect("manifest");
+    let ids = TerraControllerIds::try_new(
+        AgentSupervisorId::new(1).expect("id"),
+        AgentSupervisorAttemptId::new(1).expect("id"),
+        AgentSupervisorCancellationId::new(1).expect("id"),
+        AgentModelCallId::new(1).expect("id"),
+        [1, 2, 3, 4].map(|raw| AgentAuditEventId::new(raw).expect("id")),
+        AgentAuditDeliveryId::new(1).expect("id"),
+    )
+    .expect("ids");
+    AgentWorkRunInput::try_new(
+        manifest,
+        AgentPlanLeaseBinding::new(AgentPlanLeaseId::generate(), node),
+        AgentWorkContextSpec::try_new(
+            context,
+            ContextProfileStorageClass::Ephemeral,
+            ContextNavigationTarget::parse("https://work-fixture.invalid/").expect("target"),
+        )
+        .expect("context"),
+        "Verify a deterministic fixture.".to_owned(),
+        AgentWorkRunSettings::new(
+            AgentBrowserModel::Luna,
+            ids,
+            Arc::new(Clock(AtomicU64::new(2))),
+            Instant::now() + Duration::from_secs(10),
+        ),
+    )
+    .expect("input")
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Fault {
+    None,
+    ConstructDispatch,
+    ConstructCallback,
+    NavigateDispatch,
+    NavigateTarget,
+    Observe,
+    NativeNonzero,
+    AuditRefused,
+    AuditLost,
+    ObservationLost,
+    CancellationLost,
+    CloseLost,
+    CloseRefused,
+    DeadlineObservation,
+    ShutdownObservation,
+    ActionDispatch,
+    ActionCallback,
+    ActionCancel,
+    ActionLost,
+    ActionNeedsHuman,
+    CancelObservation,
+    TakeoverObservation,
+    SuspendObservation,
+    RevokeObservation,
+    Readiness,
+    RendererObservation,
+    MailboxPressure,
+}
+
+struct Audit(Fault);
+impl AgentAuditPort for Audit {
+    fn append(
+        &self,
+        batch: AgentAuditDelivery,
+        completion: AgentAuditCompletion,
+    ) -> AgentAuditDispatch {
+        let proof = batch.proof();
+        if self.0 == Fault::AuditRefused {
+            return AgentAuditDispatch::Refused(proof.settle(AgentAuditDeliveryOutcome::Refused(
+                AgentAuditSinkFailure::AppendFailed,
+            )));
+        }
+        if self.0 != Fault::AuditLost {
+            completion(proof.settle(AgentAuditDeliveryOutcome::Committed));
+        }
+        AgentAuditDispatch::Accepted(proof)
+    }
+}
+
+struct Port {
+    sink: NativeEventSink,
+    fault: Fault,
+    calls: Mutex<Vec<u8>>,
+    control: Arc<Mutex<Option<AgentRuntimeHandle>>>,
+}
+
+impl Port {
+    fn send(&self, event: ContextNativeEvent) {
+        let _ = self.sink.publish(event);
+    }
+}
+
+impl AgentBrowserPort for Port {
+    fn dispatch(&self, request: ContextNativeRequest) -> ContextDispatch {
+        let event = match request {
+            ContextNativeRequest::Construct(request) => {
+                lock(&self.calls).push(1);
+                assert_eq!(request.source(), ContextConstructionSource::Owned);
+                if self.fault == Fault::ConstructDispatch {
+                    return ContextDispatch::Rejected(ContextPortFailure::NativeRefused);
+                }
+                ContextNativeEvent::ConstructionSettled(
+                    ContextConstructionSettlement::try_new(
+                        request.operation(),
+                        if self.fault == Fault::ConstructCallback {
+                            Err(ContextPortFailure::NativeRefused)
+                        } else {
+                            Ok(ContextConstructionProof::MacOsOwnedSelectedProfileExtensionFree)
+                        },
+                    )
+                    .expect("construction"),
+                )
+            }
+            ContextNativeRequest::Navigate(request) => {
+                lock(&self.calls).push(2);
+                if self.fault == Fault::NavigateDispatch {
+                    return ContextDispatch::Unsupported;
+                }
+                let target = if self.fault == Fault::NavigateTarget {
+                    ContextNavigationTarget::parse("https://other.invalid/").expect("target")
+                } else {
+                    request.target().clone()
+                };
+                ContextNativeEvent::NavigationSettled(
+                    ContextNavigationSettlement::try_new(request.operation(), Ok(target))
+                        .expect("navigation"),
+                )
+            }
+            ContextNativeRequest::Cancel(request) => {
+                lock(&self.calls).push(4);
+                if self.fault == Fault::CancellationLost {
+                    return ContextDispatch::Scheduled;
+                }
+                ContextNativeEvent::CancellationSettled(ContextCancellationSettlement::new(
+                    request.current(),
+                    Ok(()),
+                ))
+            }
+            ContextNativeRequest::Transition(request) => {
+                lock(&self.calls).push(5);
+                assert_eq!(request.operation().kind(), ContextOperationKind::Close);
+                if self.fault == Fault::CloseLost {
+                    return ContextDispatch::Scheduled;
+                }
+                ContextNativeEvent::TransitionSettled(
+                    ContextTransitionSettlement::try_new(
+                        request.operation(),
+                        if self.fault == Fault::CloseRefused {
+                            Err(ContextPortFailure::NativeRefused)
+                        } else {
+                            Ok(())
+                        },
+                    )
+                    .expect("close"),
+                )
+            }
+        };
+        self.send(event);
+        ContextDispatch::Scheduled
+    }
+
+    fn invoke_semantic(&self, invocation: SemanticRuntimeInvocation) -> ContextDispatch {
+        lock(&self.calls).push(3);
+        let correlation = invocation.correlation();
+        assert_eq!(
+            correlation.snapshot_generation(),
+            SemanticSnapshotGeneration::INITIAL
+        );
+        let wire = format!("{{\"v\":1,\"i\":{},\"g\":{},\"c\":\"complete\",\"n\":[{{\"k\":1,\"r\":\"document\",\"o\":16}},{{\"k\":2,\"p\":0,\"r\":\"textbox\",\"n\":\"Field\",\"s\":64,\"o\":2,\"v\":{{\"k\":\"text\",\"value\":\"\"}},\"b\":{{\"x\":10,\"y\":20,\"w\":120,\"h\":30}}}}]}}", correlation.invocation().get(), correlation.snapshot_generation().get());
+        let snapshot = decode_semantic_snapshot(
+            SemanticDecodeContext::new(
+                correlation.invocation(),
+                correlation.frame().clone(),
+                correlation.snapshot_generation(),
+            ),
+            wire.as_bytes(),
+        )
+        .expect("fixture snapshot");
+        if matches!(
+            self.fault,
+            Fault::CancelObservation
+                | Fault::ObservationLost
+                | Fault::CancellationLost
+                | Fault::CloseLost
+                | Fault::CloseRefused
+        ) {
+            lock(&self.control)
+                .as_ref()
+                .expect("control")
+                .cancel_and_seal();
+        }
+        if matches!(
+            self.fault,
+            Fault::ObservationLost | Fault::DeadlineObservation | Fault::ShutdownObservation
+        ) {
+            return ContextDispatch::Scheduled;
+        }
+        let reason = match self.fault {
+            Fault::TakeoverObservation => Some(AgentRuntimeStopReason::HumanTakeover),
+            Fault::SuspendObservation => Some(AgentRuntimeStopReason::Suspend),
+            Fault::RevokeObservation => Some(AgentRuntimeStopReason::PolicyRevoked),
+            _ => None,
+        };
+        if let Some(reason) = reason {
+            let control = lock(&self.control);
+            let control = control.as_ref().expect("control");
+            control.stop_and_seal(reason);
+            control.cancel_and_seal(); // Cannot overwrite the first reason.
+        }
+        if self.fault == Fault::RendererObservation {
+            self.send(ContextNativeEvent::RendererLost(ContextRendererLoss::new(
+                correlation.frame().context(),
+            )));
+        }
+        if self.fault == Fault::MailboxPressure {
+            for raw in 1..=32 {
+                self.send(ContextNativeEvent::ResourceAuditSettled(
+                    ContextResourceAuditSettlement::new(
+                        ContextResourceAuditId::new(raw).expect("id"),
+                        Err(ContextPortFailure::NativeRefused),
+                    ),
+                ));
+            }
+        }
+        self.send(ContextNativeEvent::SemanticRuntimeSettled(Box::new(
+            SemanticRuntimeSettlement::try_new(
+                correlation,
+                if self.fault == Fault::Observe {
+                    Err(SemanticRuntimePortFailure::Transport)
+                } else if self.fault == Fault::Readiness
+                    && lock(&self.calls).iter().filter(|call| **call == 3).count() < 3
+                {
+                    Err(SemanticRuntimePortFailure::NotReady)
+                } else {
+                    Ok(snapshot)
+                },
+            )
+            .expect("snapshot"),
+        )));
+        ContextDispatch::Scheduled
+    }
+
+    fn seal_for_shutdown(&self, audit: ContextResourceAuditId) -> ContextShutdownDispatch {
+        lock(&self.calls).push(6);
+        let snapshot = ContextNativeResourceSnapshot::try_new(ContextNativeResourceCounts {
+            known_bindings: 0,
+            resident_views: 0,
+            owned_reservations: 0,
+            borrowed_leases: 0,
+            visible_surfaces: 0,
+            suspended_views: 0,
+            pending_operations: 0,
+            pending_captures: 0,
+            queued_tasks: u8::from(self.fault == Fault::NativeNonzero),
+        })
+        .expect("counts");
+        self.send(ContextNativeEvent::ShutdownAuditSettled(
+            ContextShutdownAuditSettlement::new(audit, Ok(snapshot)),
+        ));
+        ContextShutdownDispatch::AuditScheduled
+    }
+    fn transfer_cookies(&self, _request: ContextCookieTransferRequest) -> ContextDispatch {
+        ContextDispatch::Unsupported
+    }
+    fn audit_resources(&self, _audit: ContextResourceAuditId) -> ContextDispatch {
+        ContextDispatch::Unsupported
+    }
+    fn execute_semantic_action(
+        &self,
+        request: SemanticActionNativeRequest,
+        completion: SemanticActionNativeCompletion,
+    ) -> ContextDispatch {
+        lock(&self.calls).push(7);
+        match self.fault {
+            Fault::ActionDispatch => return ContextDispatch::Unsupported,
+            Fault::ActionCallback => {}
+            Fault::ActionCancel | Fault::ActionLost => {
+                lock(&self.control)
+                    .as_ref()
+                    .expect("control")
+                    .stop_and_seal(AgentRuntimeStopReason::HumanTakeover);
+                if self.fault == Fault::ActionLost {
+                    return ContextDispatch::Scheduled;
+                }
+            }
+            _ => panic!("completed task must not execute an action"),
+        }
+        let now = request.requested_at();
+        completion(request.fail(SemanticActionNativeFailure::AppliedUnverified, now));
+        ContextDispatch::Scheduled
+    }
+    fn capture_semantic_screenshot(
+        &self,
+        _request: SemanticScreenshotNativeRequest,
+        _completion: SemanticScreenshotNativeCompletion,
+    ) -> ContextDispatch {
+        ContextDispatch::Unsupported
+    }
+}
+
+fn run(
+    fault: Fault,
+) -> (
+    AgentWorkOutcome,
+    AgentBrowserShutdownOutcome,
+    Vec<u8>,
+    Vec<AgentWorkEvent>,
+) {
+    let mut input = input();
+    if matches!(fault, Fault::AuditLost | Fault::DeadlineObservation) {
+        input.settings.deadline = Instant::now() + Duration::from_millis(200);
+    }
+    let credential = AgentProviderCredential::try_new(
+        AgentProviderKind::OpenAiResponses,
+        "fixture-not-a-secret".to_owned(),
+    )
+    .expect("credential");
+    let (controller, handle) = AgentWorkController::try_new(
+        input,
+        AgentProviderTransportConfig::STANDARD,
+        credential,
+        Arc::new(Audit(fault)),
+        Box::new(Task),
+    )
+    .expect("actor");
+    drive(controller, handle, fault)
+}
+
+fn drive(
+    controller: AgentWorkController,
+    handle: AgentWorkHandle,
+    fault: Fault,
+) -> (
+    AgentWorkOutcome,
+    AgentBrowserShutdownOutcome,
+    Vec<u8>,
+    Vec<AgentWorkEvent>,
+) {
+    drive_with_control(controller, handle, fault, Arc::new(Mutex::new(None)))
+}
+
+fn drive_with_control(
+    controller: AgentWorkController,
+    mut handle: AgentWorkHandle,
+    fault: Fault,
+    control: Arc<Mutex<Option<AgentRuntimeHandle>>>,
+) -> (
+    AgentWorkOutcome,
+    AgentBrowserShutdownOutcome,
+    Vec<u8>,
+    Vec<AgentWorkEvent>,
+) {
+    let pending = PendingAgentRuntime::spawn_suspended_with_controller(
+        AgentRuntimeConfig::STANDARD,
+        Box::new(controller),
+    )
+    .expect("runtime");
+    let port = Arc::new(Port {
+        sink: pending.native_event_sink(),
+        fault,
+        calls: Mutex::new(Vec::new()),
+        control,
+    });
+    let (runtime, completion, lifecycle) = pending.bind_browser_port(port.clone()).into_parts();
+    let mut lifecycle = Some(lifecycle);
+    let mut requested_shutdown = None;
+    *lock(&port.control) = Some(runtime.clone());
+    assert!(lock(&port.calls).is_empty());
+    runtime.start_run().expect("run");
+    let wait_deadline = Instant::now() + Duration::from_secs(12);
+    let outcome = loop {
+        // Never keep the diagnostic mutex across the blocking lifecycle join:
+        // cleanup callbacks on the worker also append their call codes.
+        let shutdown_ready = fault == Fault::ShutdownObservation && lock(&port.calls).contains(&3);
+        if shutdown_ready {
+            if let Some(lifecycle) = lifecycle.take() {
+                requested_shutdown =
+                    Some(lifecycle.shutdown_until(Instant::now() + Duration::from_secs(2)));
+            }
+        }
+        if let Some(outcome) = handle.take_outcome() {
+            break outcome;
+        }
+        if completion.is_stopped() {
+            break handle
+                .take_outcome()
+                .expect("controller stopped without recovery ownership");
+        }
+        assert!(Instant::now() < wait_deadline, "actor fixture deadline");
+        std::thread::sleep(Duration::from_millis(2));
+    };
+    let shutdown = requested_shutdown.unwrap_or_else(|| {
+        lifecycle
+            .expect("lifecycle")
+            .shutdown_until(Instant::now() + Duration::from_secs(2))
+    });
+    let calls = lock(&port.calls).clone();
+    let events = std::iter::from_fn(|| handle.take_event()).collect();
+    (outcome, shutdown, calls, events)
+}
+
+#[test]
+fn explicit_readiness_preserves_snapshot_generation_and_stop_reasons_are_first_wins() {
+    let _guard = lock(&SERIAL);
+    let (outcome, shutdown, calls, _) = run(Fault::Readiness);
+    assert!(matches!(outcome, AgentWorkOutcome::Succeeded(_)));
+    assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
+    assert_eq!(calls, [1, 2, 3, 3, 3, 4, 5, 6]);
+    for (fault, expected) in [
+        (Fault::TakeoverObservation, AgentWorkFailure::HumanTakeover),
+        (
+            Fault::SuspendObservation,
+            AgentWorkFailure::SuspendRequested,
+        ),
+        (Fault::RevokeObservation, AgentWorkFailure::PolicyRevoked),
+    ] {
+        let (outcome, shutdown, calls, _) = run(fault);
+        let AgentWorkOutcome::Recovery(recovery) = outcome else {
+            panic!("stop cannot complete");
+        };
+        assert_eq!(recovery.failure(), expected);
+        assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Unclean));
+        assert_eq!(calls.iter().filter(|call| **call == 4).count(), 1);
+        assert_eq!(calls.iter().filter(|call| **call == 5).count(), 1);
+    }
+}
+
+#[cfg(feature = "probe-harness")]
+#[test]
+fn variable_provider_turns_use_real_worker_io_and_stop_at_the_exact_ceiling() {
+    let _guard = lock(&SERIAL);
+    provider_fixture(ProviderFault::Ceiling);
+}
+
+#[cfg(feature = "probe-harness")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProviderFault {
+    Ceiling,
+    CountRefused,
+    StreamRefused,
+    CancelCount,
+    CancelStream,
+    Native(Fault),
+}
+
+#[cfg(feature = "probe-harness")]
+#[test]
+fn native_action_refusal_takeover_and_callback_loss_keep_the_original_effect_owner() {
+    let _guard = lock(&SERIAL);
+    for fault in [
+        Fault::ActionDispatch,
+        Fault::ActionCallback,
+        Fault::ActionCancel,
+        Fault::ActionLost,
+        Fault::ActionNeedsHuman,
+    ] {
+        provider_fixture(ProviderFault::Native(fault));
+    }
+}
+
+#[cfg(feature = "probe-harness")]
+#[test]
+fn provider_refusals_and_count_stream_cancellation_races_retain_exact_debt() {
+    let _guard = lock(&SERIAL);
+    for fault in [
+        ProviderFault::CountRefused,
+        ProviderFault::StreamRefused,
+        ProviderFault::CancelCount,
+        ProviderFault::CancelStream,
+    ] {
+        provider_fixture(fault);
+    }
+}
+
+#[cfg(feature = "probe-harness")]
+fn provider_fixture(fault: ProviderFault) {
+    use std::io::{Read as _, Write as _};
+    struct Continue;
+    impl AgentWorkTask for Continue {
+        fn evaluate(
+            &mut self,
+            _: &SemanticObservation,
+        ) -> Result<AgentWorkTaskProgress, AgentWorkFailure> {
+            Ok(AgentWorkTaskProgress::Continue)
+        }
+        fn assess(
+            &self,
+            action: &SemanticPreparedAction,
+        ) -> Result<AgentEffectAssessment, AgentWorkFailure> {
+            Ok(AgentEffectAssessment::new(
+                action,
+                action.frame().origin().clone(),
+                SemanticEffectClass::LocalWrite,
+            ))
+        }
+        fn attest_account(
+            &self,
+            context: ContextJoin,
+            now: AgentPolicyInstant,
+        ) -> Result<AgentContextAccountBinding, AgentWorkFailure> {
+            Task.attest_account(context, now)
+        }
+    }
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("loopback listener");
+    listener.set_nonblocking(true).expect("nonblocking");
+    let endpoint = format!(
+        "http://{}/v1/responses",
+        listener.local_addr().expect("address")
+    );
+    let control = Arc::new(Mutex::new(None::<AgentRuntimeHandle>));
+    let server_control = control.clone();
+    let requests = match fault {
+        ProviderFault::Ceiling => 16,
+        ProviderFault::CountRefused | ProviderFault::CancelCount => 1,
+        _ => 2,
+    };
+    let server = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(12);
+        let mut turns = 0;
+        for _ in 0..requests {
+            let (mut socket, _) = loop {
+                match listener.accept() {
+                    Ok(socket) => break socket,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline, "bounded provider fixture");
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                    Err(_) => panic!("loopback accept"),
+                }
+            };
+            // Darwin accept inherits O_NONBLOCK from the listener. The bounded
+            // blocking fixture reader must opt out before installing its timeout.
+            socket
+                .set_nonblocking(false)
+                .expect("blocking fixture reader");
+            socket
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("timeout");
+            let mut request = Vec::new();
+            let mut bytes = [0; 4096];
+            let (header, expected) = loop {
+                let count = socket.read(&mut bytes).expect("bounded request");
+                assert!(count > 0 && request.len() + count <= 512 * 1024);
+                request.extend_from_slice(&bytes[..count]);
+                if let Some(header) = request.windows(4).position(|value| value == b"\r\n\r\n") {
+                    let head = std::str::from_utf8(&request[..header]).expect("HTTP fixture");
+                    let length = head
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|value| value.trim().parse::<usize>().expect("length"))
+                        })
+                        .expect("content length");
+                    break (header, header + 4 + length);
+                }
+            };
+            while request.len() < expected {
+                let count = socket.read(&mut bytes).expect("request body");
+                assert!(count > 0 && request.len() + count <= 512 * 1024);
+                request.extend_from_slice(&bytes[..count]);
+            }
+            let is_count = request.starts_with(b"POST /v1/responses/input_tokens ");
+            let cancelled = (is_count && fault == ProviderFault::CancelCount)
+                || (!is_count && fault == ProviderFault::CancelStream);
+            if cancelled {
+                lock(&server_control)
+                    .as_ref()
+                    .expect("control")
+                    .stop_and_seal(AgentRuntimeStopReason::HumanTakeover);
+            }
+            let refused = (is_count && fault == ProviderFault::CountRefused)
+                || (!is_count && fault == ProviderFault::StreamRefused);
+            let (kind, body) = if is_count {
+                (
+                    "application/json",
+                    r#"{"object":"response.input_tokens","input_tokens":17}"#.to_owned(),
+                )
+            } else {
+                assert!(std::str::from_utf8(&request[header + 4..])
+                    .expect("synthetic request")
+                    .contains("\"store\":false"));
+                turns += 1;
+                (
+                    "text/event-stream",
+                    tool_stream(turns, matches!(fault, ProviderFault::Native(_))),
+                )
+            };
+            let status = if refused {
+                "503 Service Unavailable"
+            } else {
+                "200 OK"
+            };
+            let response = write!(socket, "HTTP/1.1 {status}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            assert!(cancelled || response.is_ok());
+        }
+        turns
+    });
+    let transport = AgentProviderTransport::try_new_loopback(
+        AgentProviderTransportConfig::STANDARD,
+        &endpoint,
+        "http://127.0.0.1:9/v1/messages",
+    )
+    .expect("loopback transport");
+    let credential = AgentProviderCredential::try_new(
+        AgentProviderKind::OpenAiResponses,
+        "fixture-not-a-secret".to_owned(),
+    )
+    .expect("credential");
+    let approved = if fault == ProviderFault::Native(Fault::ActionNeedsHuman) {
+        input_with_effects(&[SemanticEffectClass::Read])
+    } else {
+        input()
+    };
+    let (controller, handle) = AgentWorkController::try_new_for_probe(
+        approved,
+        transport,
+        credential,
+        Arc::new(Audit(Fault::None)),
+        Box::new(Continue),
+        AgentBrowserRetention::Stateless,
+    )
+    .expect("actor");
+    let native_fault = if let ProviderFault::Native(fault) = fault {
+        fault
+    } else {
+        Fault::None
+    };
+    let (outcome, shutdown, calls, events) =
+        drive_with_control(controller, handle, native_fault, control);
+    let AgentWorkOutcome::Recovery(recovery) = outcome else {
+        panic!("model never satisfies trusted predicate");
+    };
+    if fault == ProviderFault::Ceiling {
+        assert_eq!(
+            recovery.failure(),
+            AgentWorkFailure::Browser(AgentBrowserProviderError::TurnLimit)
+        );
+    } else if matches!(
+        fault,
+        ProviderFault::CancelCount
+            | ProviderFault::CancelStream
+            | ProviderFault::Native(Fault::ActionCancel | Fault::ActionLost)
+    ) {
+        assert_eq!(recovery.failure(), AgentWorkFailure::HumanTakeover);
+    } else {
+        assert!(matches!(recovery.failure(), AgentWorkFailure::Browser(_)));
+    }
+    let session = recovery.state.session.as_ref().expect("retained session");
+    assert!(session.credential.is_none());
+    assert_eq!(session.policy.pending_model_calls(), 0);
+    assert!(session.transport.snapshot().expect("transport").is_idle());
+    assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Unclean));
+    if let ProviderFault::Native(fault) = fault {
+        if fault == Fault::ActionNeedsHuman {
+            assert_eq!(calls, [1, 2, 3, 4, 5]);
+            assert!(session.action.is_none());
+            assert!(
+                session.action_proposal_failure.is_some(),
+                "original prepared batch survives authorization refusal"
+            );
+            assert!(
+                session.failure.is_some(),
+                "authorization refusal cannot admit another action"
+            );
+            assert_eq!(session.policy.pending_effects(), 0);
+            assert!(events.iter().any(|event| event.kind()
+                == AgentWorkEventKind::NeedsHuman(AgentNeedsHumanReason::ScopeExpansion)));
+        } else {
+            assert_eq!(calls, [1, 2, 3, 7, 4, 5]);
+            let action = session
+                .action
+                .as_ref()
+                .expect("original action and batch retained");
+            if matches!(fault, Fault::ActionDispatch | Fault::ActionCallback) {
+                assert!(
+                    action.retained_failure().is_some(),
+                    "charged failed effect retained"
+                );
+                assert_eq!(session.policy.pending_effects(), 0);
+            } else {
+                assert_eq!(session.policy.pending_effects(), 1);
+                assert_eq!(
+                    recovery.state.native.action_pending,
+                    fault == Fault::ActionLost
+                );
+            }
+        }
+        assert!(!events.iter().any(|event| matches!(
+            event.kind(),
+            AgentWorkEventKind::Verified | AgentWorkEventKind::Terminal
+        )));
+    } else {
+        assert_eq!(calls, [1, 2, 3, 4, 5]);
+    }
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.kind(), AgentWorkEventKind::ModelSettled { .. }))
+            .count(),
+        if fault == ProviderFault::Ceiling {
+            8
+        } else {
+            1
+        }
+    );
+    assert_eq!(server.join().expect("fixture server"), requests / 2);
+}
+
+#[cfg(feature = "probe-harness")]
+fn tool_stream(turn: u8, native: bool) -> String {
+    let name = if native { "act" } else { "locate" };
+    let arguments = if native {
+        r#"{\"actions\":[{\"kind\":\"fill\",\"target\":\"@a2\",\"value\":\"fixture value\",\"effect\":\"local_write\",\"wait\":{\"kind\":\"immediate\"},\"verification\":{\"kind\":\"target_value_matches_input\"},\"settle_millis\":1000}]}"#
+    } else {
+        r#"{\"semantic_query\":\"document\",\"scope\":{\"kind\":\"initial\"}}"#
+    };
+    let item = format!(
+        r#"{{"type":"function_call","id":"fc_{turn}","call_id":"call_{turn}","name":"{name}","arguments":"{arguments}","status":"completed"}}"#
+    );
+    let pending = format!(
+        r#"{{"type":"function_call","id":"fc_{turn}","call_id":"call_{turn}","name":"{name}","arguments":"","status":"in_progress"}}"#
+    );
+    let events = [
+        (
+            "response.created",
+            format!(
+                r#"{{"type":"response.created","response":{{"id":"resp_{turn}","status":"in_progress","model":"gpt-5.6-luna","service_tier":"default"}}}}"#
+            ),
+        ),
+        (
+            "response.output_item.added",
+            format!(r#"{{"type":"response.output_item.added","output_index":0,"item":{pending}}}"#),
+        ),
+        (
+            "response.function_call_arguments.delta",
+            format!(
+                r#"{{"type":"response.function_call_arguments.delta","item_id":"fc_{turn}","delta":"{arguments}"}}"#
+            ),
+        ),
+        (
+            "response.function_call_arguments.done",
+            format!(
+                r#"{{"type":"response.function_call_arguments.done","item_id":"fc_{turn}","name":"{name}","arguments":"{arguments}"}}"#
+            ),
+        ),
+        (
+            "response.output_item.done",
+            format!(r#"{{"type":"response.output_item.done","output_index":0,"item":{item}}}"#),
+        ),
+        (
+            "response.completed",
+            format!(
+                r#"{{"type":"response.completed","response":{{"id":"resp_{turn}","status":"completed","model":"gpt-5.6-luna","service_tier":"default","output":[{item}],"usage":{{"input_tokens":17,"output_tokens":3,"total_tokens":20,"input_tokens_details":{{"cached_tokens":0}},"output_tokens_details":{{"reasoning_tokens":0}}}}}}}}"#
+            ),
+        ),
+    ];
+    events
+        .into_iter()
+        .map(|(event, body)| format!("event: {event}\ndata: {body}\n\n"))
+        .collect::<String>()
+        + "data: [DONE]\n\n"
+}
+
+#[test]
+fn trusted_completion_closes_original_context_audit_policy_provider_and_runtime() {
+    let _guard = lock(&SERIAL);
+    let (outcome, shutdown, calls, events) = run(Fault::None);
+    let AgentWorkOutcome::Succeeded(settlement) = outcome else {
+        panic!("{outcome:?}");
+    };
+    assert_eq!(settlement.closure().model_calls(), 0);
+    assert_eq!(settlement.closure().effects(), 0);
+    assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
+    assert_eq!(calls, [1, 2, 3, 4, 5, 6]);
+    assert_eq!(
+        events.last().expect("terminal").kind(),
+        AgentWorkEventKind::Terminal
+    );
+    for pair in events.windows(2) {
+        assert_eq!(pair[0].sequence() + 1, pair[1].sequence());
+    }
+}
+
+#[test]
+fn native_audit_cancellation_renderer_and_mailbox_faults_never_claim_success() {
+    let _guard = lock(&SERIAL);
+    for fault in [
+        Fault::ConstructDispatch,
+        Fault::ConstructCallback,
+        Fault::NavigateDispatch,
+        Fault::NavigateTarget,
+        Fault::Observe,
+        Fault::NativeNonzero,
+        Fault::AuditRefused,
+        Fault::AuditLost,
+        Fault::CancelObservation,
+        Fault::RendererObservation,
+        Fault::MailboxPressure,
+    ] {
+        let (outcome, shutdown, calls, _) = run(fault);
+        assert!(
+            matches!(outcome, AgentWorkOutcome::Recovery(_)),
+            "{fault:?}: {outcome:?}"
+        );
+        assert!(
+            matches!(shutdown, AgentBrowserShutdownOutcome::Unclean),
+            "{fault:?}"
+        );
+        if matches!(
+            fault,
+            Fault::Observe | Fault::CancelObservation | Fault::RendererObservation
+        ) {
+            assert!(
+                calls.contains(&5),
+                "{fault:?}: recovery must close the owned page"
+            );
+        }
+    }
+}
+
+#[test]
+fn lost_callbacks_and_close_refusal_preserve_debt_without_leaving_cleanup_unscheduled() {
+    let _guard = lock(&SERIAL);
+    for fault in [
+        Fault::ObservationLost,
+        Fault::CancellationLost,
+        Fault::CloseLost,
+        Fault::CloseRefused,
+        Fault::DeadlineObservation,
+        Fault::ShutdownObservation,
+    ] {
+        let (outcome, shutdown, calls, _) = run(fault);
+        let AgentWorkOutcome::Recovery(recovery) = outcome else {
+            panic!("lost debt cannot complete");
+        };
+        assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Unclean));
+        assert_eq!(
+            calls.iter().filter(|call| **call == 4).count(),
+            1,
+            "{fault:?}"
+        );
+        assert_eq!(
+            calls.iter().filter(|call| **call == 5).count(),
+            1,
+            "{fault:?}"
+        );
+        assert!(
+            !calls.contains(&6),
+            "unreconciled resources cannot be sealed into a clean proof"
+        );
+        let native = &recovery.state.native;
+        match fault {
+            Fault::ObservationLost | Fault::DeadlineObservation | Fault::ShutdownObservation => {
+                assert!(native.observation.is_some())
+            }
+            Fault::CancellationLost => assert!(native.cancellation.is_some()),
+            Fault::CloseLost => assert!(native.recovery_close.is_some()),
+            Fault::CloseRefused => assert!(native.profile.is_some()),
+            _ => unreachable!(),
+        }
+        if matches!(
+            fault,
+            Fault::ObservationLost
+                | Fault::DeadlineObservation
+                | Fault::CancellationLost
+                | Fault::ShutdownObservation
+        ) {
+            assert!(
+                native.profile.is_none(),
+                "exact close callback releases only the context/profile owner"
+            );
+        }
+        if fault == Fault::DeadlineObservation {
+            assert_eq!(recovery.failure(), AgentWorkFailure::Deadline);
+        }
+        if fault == Fault::ShutdownObservation {
+            assert_eq!(recovery.failure(), AgentWorkFailure::Shutdown);
+        }
+    }
+}
+
+#[test]
+fn product_backpressure_is_bounded_sticky_and_content_free() {
+    let run = ContextRunId::generate();
+    let mut events = WorkEvents::new(run).expect("events");
+    for _ in 0..MAX_AGENT_WORK_EVENTS {
+        events
+            .publish(AgentWorkEventKind::Observing)
+            .expect("capacity");
+    }
+    assert_eq!(
+        events.publish(AgentWorkEventKind::Verified),
+        Err(AgentWorkFailure::Backpressure)
+    );
+    assert_eq!(events.queue.len(), MAX_AGENT_WORK_EVENTS);
+    events.queue.pop_front();
+    assert_eq!(
+        events.publish(AgentWorkEventKind::Verified),
+        Err(AgentWorkFailure::Backpressure)
+    );
+    assert!(!format!("{:?}", events.queue).contains("work-fixture"));
+}

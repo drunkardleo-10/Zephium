@@ -162,6 +162,19 @@ impl SemanticActionExecutionCoordinator {
         Ok((SemanticActionExecutionReservation { key, deadline }, native))
     }
 
+    /// Checks an exact native terminal without consuming it or its reservation.
+    /// Hosts use this to retain a mismatched callback for explicit recovery.
+    pub fn accepts_settlement(
+        &self,
+        reservation: &SemanticActionExecutionReservation,
+        settlement: &SemanticActionNativeSettlement,
+    ) -> bool {
+        self.reservation_index(reservation).is_ok_and(|index| {
+            self.pending[index].coordinator_key() == settlement.coordinator_key()
+                && self.pending[index].matches_native_settlement(settlement)
+        })
+    }
+
     /// Admits one exact native terminal and releases only its reservation.
     pub fn settle(
         &mut self,

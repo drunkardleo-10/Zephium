@@ -1,9 +1,11 @@
 # Bounded semantic browser session
 
 `zephium-agent-controller::AgentBrowserSession` is available on the normal
-`provider-transport` feature path. It is a reusable locate/act driver, not yet
-the Work application's supervisor/lifecycle actor. The existing
-`TerraTextOnlyController` remains the shipping runtime integration.
+`provider-transport` feature path. The production-path
+[`AgentWorkController`](agent-work-execution.md) now drives this session on the
+existing runtime worker, with the real browser-context, supervisor, audit and
+lifecycle authorities. `TerraTextOnlyController` remains a legacy adapter;
+desktop Work admission and persistence are not yet wired to the new actor.
 
 The session removes the diagnostic two-action control flow: one owned policy
 and transport can process up to eight provider turns and eight native actions.
@@ -28,6 +30,10 @@ There is no automatic action retry or successful continuation after a refusal.
    observation and call `settle_action` with the exact native terminal. This
    composes policy dispatch, native correlation, settlement, independent
    snapshot evidence, policy charging and accounted-result finalization.
+   An asynchronous host instead uses `begin_action_settlement`, the core's
+   exact `wake_action_settlement` schedule, and `verify_action_settlement`.
+   Obtain only the adjacent fresh snapshot after settlement; polling with
+   unrelated snapshots cannot substitute for the core's exact evidence join.
 6. Evaluate the user's task-level postcondition from trusted observed state.
    Stop explicitly when it holds, or consume the verified transition with
    `continue_after_verified_action` and repeat. Model text cannot certify task
@@ -53,9 +59,12 @@ audit acknowledgement.
 
 - Snapshot-verifiable actions only. Navigation, dialog and scroll evidence
   require distinct host adapters and are explicitly refused.
-- An incomplete settlement remains a typed retained recovery state. A general
-  native-event/settlement polling actor and fresh-full-snapshot continuation
-  are not implemented by this slice.
+- Immediate and mutation-quiet waits only. State/navigation/dialog/scroll waits
+  require explicit host adapters; the bounded driver excludes their schemas
+  and independently refuses them before native dispatch.
+- An incomplete settlement remains a typed retained recovery state. The Work
+  actor owns native callback/timer settlement and adjacent fresh snapshots;
+  explicit post-failure reconciliation/resumption remains an application seam.
 - Model selection is centralized in the trusted catalog: the supplied transport
   adapters are currently GPT-5.6 Terra and Luna. Both use the same semantic
   loop. Local/other hosted adapters and the Work UI wiring remain outstanding.

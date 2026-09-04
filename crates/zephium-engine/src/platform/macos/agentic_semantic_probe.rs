@@ -2441,6 +2441,157 @@ fn new_window(mtm: MainThreadMarker) -> Result<Retained<NSWindow>, &'static str>
     Ok(window)
 }
 
+/// Qualifies an actual EngineHost port, not a directly constructed probe page.
+/// The caller owns runtime/controller/audit policy; this adapter only pumps
+/// the same main-thread dispatch used by the application composition root.
+pub(crate) fn run_work_actor(
+    profile: ProfileId,
+    sink: impl Fn(zephium_agentic::ContextNativeEvent) + Send + Sync + 'static,
+    start: impl FnOnce(
+        Arc<dyn zephium_agentic::AgentBrowserPort>,
+    ) -> Result<crate::MacosAgentWorkProbePoll, &'static str>,
+) -> Result<(), &'static str> {
+    use zephium_core::ports::engine::Engine as _;
+    let mtm = MainThreadMarker::new().ok_or("actor_main_thread")?;
+    let app = NSApplication::sharedApplication(mtm);
+    if !app.setActivationPolicy(NSApplicationActivationPolicy::Accessory) {
+        return Err("actor_activation_policy");
+    }
+    app.finishLaunching();
+    let window = new_window(mtm)?;
+    let view = window.contentView().ok_or("actor_host_view")?;
+    let parent = RawWindowHandle::AppKit(AppKitWindowHandle::new(
+        NonNull::from(&*view).cast::<c_void>(),
+    ));
+    let data = tempfile::tempdir().map_err(|_| "actor_temp_profile")?;
+    let (sender, receiver) = std::sync::mpsc::sync_channel::<Box<dyn FnOnce() + Send>>(256);
+    let dispatch: crate::MainThreadDispatch =
+        Arc::new(move |operation| sender.try_send(operation).is_ok());
+    let fatal = Arc::new(std::sync::Mutex::new(None));
+    let fatal_sink = fatal.clone();
+    let policy = Arc::new(std::sync::atomic::AtomicU8::new(0));
+    let policy_sink = policy.clone();
+    let generation =
+        zephium_core::blocker::ContentPolicyGeneration::new(1).ok_or("actor_policy_generation")?;
+    let engine = crate::install(
+        parent,
+        dispatch,
+        data.path().to_owned(),
+        zephium_core::runtime_security::RuntimeSecurityAdvisories::new(),
+        crate::InitialUserContent::new(
+            zephium_core::ports::engine::UserContentGeneration::new(1).ok_or("actor_generation")?,
+            Default::default(),
+        ),
+        move |event| {
+            if let crate::EngineEvent::ContentRulesSettled {
+                profile: settled,
+                requested,
+                settlement,
+            } = event
+            {
+                if settled == profile && requested == generation {
+                    policy_sink.store(
+                        if matches!(
+                            settlement,
+                            zephium_core::ports::engine::ContentRuleSettlement::Applied { .. }
+                        ) {
+                            1
+                        } else {
+                            2
+                        },
+                        Ordering::Release,
+                    );
+                }
+            }
+        },
+        move |reason| {
+            *fatal_sink
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(reason);
+        },
+    )
+    .map_err(|_| "actor_engine_install")?;
+    let active = app.isActive();
+    let main = window.isMainWindow();
+    let run_loop = NSRunLoop::currentRunLoop();
+    let result = (|| {
+        if engine.install_content_rules(
+            profile,
+            generation,
+            zephium_core::blocker::ContentRules::allow_all(
+                zephium_core::blocker::ContentRuleDigest::from_bytes([0; 32]),
+            ),
+        ) != zephium_core::ports::engine::NativeDispatch::Scheduled
+        {
+            return Err("actor_profile_policy_dispatch");
+        }
+        let policy_deadline = Instant::now() + Duration::from_secs(5);
+        while policy.load(Ordering::Acquire) == 0 && Instant::now() < policy_deadline {
+            for _ in 0..256 {
+                let Ok(operation) = receiver.try_recv() else {
+                    break;
+                };
+                operation();
+            }
+            pump_once(&run_loop, None);
+        }
+        if policy.load(Ordering::Acquire) != 1 {
+            return Err("actor_profile_policy");
+        }
+        let port = engine
+            .take_agent_browser_port(sink)
+            .ok_or("actor_port_taken")?;
+        let mut poll = start(port)?;
+        let deadline = Instant::now() + Duration::from_secs(180);
+        loop {
+            for _ in 0..256 {
+                let Ok(operation) = receiver.try_recv() else {
+                    break;
+                };
+                operation();
+            }
+            let failure = *fatal
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let failure = failure.or_else(|| {
+                (window.isVisible()
+                    || window.isKeyWindow()
+                    || window.isMainWindow() != main
+                    || app.isActive() != active)
+                    .then_some("actor_focus_isolation")
+            });
+            if let Some(result) = poll(failure.is_some()) {
+                return failure.map_or(result, Err);
+            }
+            if Instant::now() >= deadline {
+                return Err("actor_host_deadline");
+            }
+            pump_once(&run_loop, None);
+        }
+    })();
+    let shutdown = Arc::new(std::sync::atomic::AtomicU8::new(0));
+    let callback = shutdown.clone();
+    engine.shutdown(Box::new(move |clean| {
+        callback.store(if clean { 1 } else { 2 }, Ordering::Release);
+    }));
+    let deadline = Instant::now() + TEARDOWN_TIMEOUT;
+    while shutdown.load(Ordering::Acquire) == 0 && Instant::now() < deadline {
+        for _ in 0..256 {
+            let Ok(operation) = receiver.try_recv() else {
+                break;
+            };
+            operation();
+        }
+        pump_once(&run_loop, None);
+    }
+    window.close();
+    result?;
+    if shutdown.load(Ordering::Acquire) != 1 {
+        return Err("actor_host_teardown");
+    }
+    Ok(())
+}
+
 fn pump_once(run_loop: &NSRunLoop, native_guard: Option<&NativeStateGuard<'_>>) {
     if let Some(native_guard) = native_guard {
         native_guard.sample();

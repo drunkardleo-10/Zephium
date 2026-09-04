@@ -3481,7 +3481,7 @@ fn encode_openai_body(
     if config.provider() != AgentProviderKind::OpenAiResponses {
         return Err(AgentProviderContractError::ProviderKind.into());
     }
-    let tools = browser_tool_definitions()
+    let tools = browser_tool_definitions_for(config)
         .iter()
         .filter(|tool| config.permits_tool(tool.kind))
         .map(|tool| OpenAiToolWire {
@@ -3574,7 +3574,7 @@ fn encode_openai_continuation_body(
         ));
     }
     debug_assert_eq!(input.len(), input_items);
-    let tools = browser_tool_definitions()
+    let tools = browser_tool_definitions_for(config)
         .iter()
         .filter(|tool| config.permits_tool(tool.kind))
         .map(|tool| OpenAiToolWire {
@@ -3744,7 +3744,7 @@ fn encode_openai_screenshot_continuation_body(
         },
     ));
     debug_assert_eq!(input.len(), input_items);
-    let tools = browser_tool_definitions()
+    let tools = browser_tool_definitions_for(config)
         .iter()
         .filter(|tool| config.permits_tool(tool.kind))
         .map(|tool| OpenAiToolWire {
@@ -3787,7 +3787,7 @@ fn encode_anthropic_body(
     if config.provider() != AgentProviderKind::AnthropicMessages {
         return Err(AgentProviderContractError::ProviderKind.into());
     }
-    let definitions = anthropic_browser_tool_definitions();
+    let definitions = anthropic_browser_tool_definitions(config);
     validate_anthropic_tool_definitions(definitions)?;
     let tools = definitions
         .iter()
@@ -3838,7 +3838,7 @@ fn encode_anthropic_continuation_body(
     if config.provider() != AgentProviderKind::AnthropicMessages {
         return Err(AgentProviderContractError::ProviderKind.into());
     }
-    let definitions = anthropic_browser_tool_definitions();
+    let definitions = anthropic_browser_tool_definitions(config);
     validate_anthropic_tool_definitions(definitions)?;
     let message_count = 1_usize
         .checked_add(
@@ -4023,7 +4023,7 @@ fn encode_anthropic_screenshot_continuation_body(
     if config.provider() != AgentProviderKind::AnthropicMessages {
         return Err(AgentProviderContractError::ProviderKind.into());
     }
-    let definitions = anthropic_browser_tool_definitions();
+    let definitions = anthropic_browser_tool_definitions(config);
     validate_anthropic_tool_definitions(definitions)?;
     let transcript = continuation.transcript();
     let message_count = 3_usize
@@ -4230,7 +4230,22 @@ struct AnthropicBrowserToolDefinition {
 }
 
 static BROWSER_TOOL_DEFINITIONS: LazyLock<Vec<BrowserToolDefinition>> =
-    LazyLock::new(build_browser_tool_definitions);
+    LazyLock::new(|| build_browser_tool_definitions(false));
+
+static LOCATE_ACT_TOOL_DEFINITIONS: LazyLock<Vec<BrowserToolDefinition>> =
+    LazyLock::new(|| build_browser_tool_definitions(true));
+
+static ANTHROPIC_LOCATE_ACT_TOOL_DEFINITIONS: LazyLock<Vec<AnthropicBrowserToolDefinition>> =
+    LazyLock::new(|| {
+        LOCATE_ACT_TOOL_DEFINITIONS
+            .iter()
+            .map(|tool| AnthropicBrowserToolDefinition {
+                kind: tool.kind,
+                description: tool.description,
+                input_schema: project_anthropic_schema(&tool.parameters),
+            })
+            .collect()
+    });
 
 static ANTHROPIC_BROWSER_TOOL_DEFINITIONS: LazyLock<Vec<AnthropicBrowserToolDefinition>> =
     LazyLock::new(|| {
@@ -4252,8 +4267,24 @@ pub(super) fn browser_tool_definitions() -> &'static [BrowserToolDefinition] {
     &BROWSER_TOOL_DEFINITIONS
 }
 
-fn anthropic_browser_tool_definitions() -> &'static [AnthropicBrowserToolDefinition] {
-    &ANTHROPIC_BROWSER_TOOL_DEFINITIONS
+fn browser_tool_definitions_for(
+    config: &AgentProviderCallConfig,
+) -> &'static [BrowserToolDefinition] {
+    if config.locate_act_only {
+        &LOCATE_ACT_TOOL_DEFINITIONS
+    } else {
+        browser_tool_definitions()
+    }
+}
+
+fn anthropic_browser_tool_definitions(
+    config: &AgentProviderCallConfig,
+) -> &'static [AnthropicBrowserToolDefinition] {
+    if config.locate_act_only {
+        &ANTHROPIC_LOCATE_ACT_TOOL_DEFINITIONS
+    } else {
+        &ANTHROPIC_BROWSER_TOOL_DEFINITIONS
+    }
 }
 
 fn extraction_output_schema() -> &'static Value {
@@ -4407,13 +4438,20 @@ fn count_schema_unions(schema: &Value) -> usize {
     }
 }
 
-fn build_browser_tool_definitions() -> Vec<BrowserToolDefinition> {
+fn build_browser_tool_definitions(snapshot_only: bool) -> Vec<BrowserToolDefinition> {
     AgentBrowserToolKind::ALL
         .into_iter()
+        .filter(|kind| {
+            !snapshot_only
+                || matches!(
+                    kind,
+                    AgentBrowserToolKind::Locate | AgentBrowserToolKind::Act
+                )
+        })
         .map(|kind| BrowserToolDefinition {
             kind,
             description: tool_description(kind),
-            parameters: tool_parameters(kind),
+            parameters: tool_parameters(kind, snapshot_only),
         })
         .collect()
 }
@@ -4438,7 +4476,7 @@ fn tool_description(kind: AgentBrowserToolKind) -> &'static str {
     }
 }
 
-fn tool_parameters(kind: AgentBrowserToolKind) -> Value {
+fn tool_parameters(kind: AgentBrowserToolKind, snapshot_only: bool) -> Value {
     match kind {
         AgentBrowserToolKind::Navigate => strict_object(vec![(
             "url",
@@ -4464,8 +4502,8 @@ fn tool_parameters(kind: AgentBrowserToolKind) -> Value {
             json!({
                 "type":"array",
                 "minItems":1,
-                "maxItems":MAX_SEMANTIC_ACTIONS_PER_BATCH,
-                "items":action_schema()
+                "maxItems":if snapshot_only { 1 } else { MAX_SEMANTIC_ACTIONS_PER_BATCH },
+                "items":action_schema(snapshot_only)
             }),
         )]),
         AgentBrowserToolKind::Wait => strict_object(vec![
@@ -4518,14 +4556,16 @@ fn scope_schema() -> Value {
     ])
 }
 
-fn action_schema() -> Value {
-    any_of(vec![
+fn action_schema(snapshot_only: bool) -> Value {
+    let mut variants = vec![
         action_variant(
+            snapshot_only,
             SemanticActionKind::Click,
             "click",
             vec![("target", reference_schema())],
         ),
         action_variant(
+            snapshot_only,
             SemanticActionKind::Fill,
             "fill",
             vec![
@@ -4537,6 +4577,7 @@ fn action_schema() -> Value {
             ],
         ),
         action_variant(
+            snapshot_only,
             SemanticActionKind::Select,
             "select",
             vec![
@@ -4545,6 +4586,7 @@ fn action_schema() -> Value {
             ],
         ),
         action_variant(
+            snapshot_only,
             SemanticActionKind::Press,
             "press",
             vec![
@@ -4571,6 +4613,7 @@ fn action_schema() -> Value {
             ],
         ),
         action_variant(
+            snapshot_only,
             SemanticActionKind::Scroll,
             "scroll",
             vec![
@@ -4582,10 +4625,15 @@ fn action_schema() -> Value {
                 ),
             ],
         ),
-    ])
+    ];
+    if snapshot_only {
+        variants.pop();
+    } // Scroll requires a distinct native evidence adapter.
+    any_of(variants)
 }
 
 fn action_variant(
+    snapshot_only: bool,
     action: SemanticActionKind,
     kind: &'static str,
     mut properties: Vec<(&'static str, Value)>,
@@ -4603,8 +4651,8 @@ fn action_variant(
                 "capability_boundary",
             ]),
         ),
-        ("wait", action_wait_schema(action)),
-        ("verification", verification_schema(action)),
+        ("wait", action_wait_schema(action, snapshot_only)),
+        ("verification", verification_schema(action, snapshot_only)),
         (
             "settle_millis",
             json!({"type":"integer","minimum":1,"maximum":MAX_SEMANTIC_ACTION_SETTLE_MILLIS}),
@@ -4613,8 +4661,18 @@ fn action_variant(
     tagged_object(kind, properties)
 }
 
-fn action_wait_schema(action: SemanticActionKind) -> Value {
+fn action_wait_schema(action: SemanticActionKind, snapshot_only: bool) -> Value {
     let mut variants = vec![tagged_object("immediate", Vec::new())];
+    if snapshot_only {
+        variants.push(tagged_object(
+            "mutation_quiet",
+            vec![(
+                "millis",
+                json!({"type":"integer","minimum":1,"maximum":MAX_SEMANTIC_MUTATION_QUIET_MILLIS}),
+            )],
+        ));
+        return any_of(variants);
+    }
     match action {
         SemanticActionKind::Scroll => {
             variants.push(tagged_object("scroll_position_changed", Vec::new()));
@@ -4686,7 +4744,7 @@ fn standalone_wait_schema() -> Value {
     ])
 }
 
-fn verification_schema(action: SemanticActionKind) -> Value {
+fn verification_schema(action: SemanticActionKind, snapshot_only: bool) -> Value {
     let target_state = || {
         tagged_object(
             "target_state",
@@ -4696,6 +4754,19 @@ fn verification_schema(action: SemanticActionKind) -> Value {
             ],
         )
     };
+    if snapshot_only {
+        match action {
+            SemanticActionKind::Click => return target_state(),
+            SemanticActionKind::Press => {
+                return any_of(vec![
+                    target_state(),
+                    tagged_object("target_value_changed", Vec::new()),
+                    tagged_object("target_selection_changed", Vec::new()),
+                ])
+            }
+            _ => {}
+        }
+    }
     match action {
         SemanticActionKind::Click => any_of(vec![
             target_state(),
@@ -4887,6 +4958,24 @@ mod tests {
             )
             .expect("config");
             let restricted = config.clone().restrict_to_locate_and_act();
+            let definitions = browser_tool_definitions_for(&restricted);
+            assert_eq!(definitions.len(), 2);
+            let act = definitions
+                .iter()
+                .find(|tool| tool.kind == AgentBrowserToolKind::Act)
+                .expect("act");
+            let actions = &act.parameters["properties"]["actions"];
+            assert_eq!(actions["maxItems"], 1);
+            let variants = actions["items"]["anyOf"].as_array().expect("actions");
+            assert_eq!(variants.len(), 4);
+            for action in variants {
+                let waits = action["properties"]["wait"]["anyOf"]
+                    .as_array()
+                    .expect("waits");
+                assert_eq!(waits.len(), 2);
+                assert_eq!(waits[0]["properties"]["kind"]["enum"][0], "immediate");
+                assert_eq!(waits[1]["properties"]["kind"]["enum"][0], "mutation_quiet");
+            }
             assert_ne!(
                 restricted, config,
                 "continuation equality must bind capability"
@@ -4917,6 +5006,20 @@ mod tests {
                 .map(|tool| tool["name"].as_str().expect("name"))
                 .collect::<BTreeSet<_>>();
             assert_eq!(names, BTreeSet::from(["act", "locate"]));
+            let schemas = wire["tools"].to_string();
+            for unsupported in [
+                "navigation_committed",
+                "dialog",
+                "scroll_position_changed",
+                "document_ready",
+                "semantic_change",
+                "url_changed",
+            ] {
+                assert!(
+                    !schemas.contains(&format!("\"{unsupported}\"")),
+                    "unsupported native adapter: {unsupported}"
+                );
+            }
             if provider == AgentProviderKind::OpenAiResponses {
                 assert_eq!(wire["store"], false);
             }

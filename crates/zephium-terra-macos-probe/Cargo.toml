@@ -24,4 +24,8 @@ zephium-agent-controller.workspace = true
 zephium-agent-provider-transport.workspace = true
 zephium-agentic.workspace = true
 zephium-engine.workspace = true
+zephium-agent-runtime.workspace = true
+zephium-store.workspace = true
+zephium-core.workspace = true
+tempfile.workspace = true
 tokio = { workspace = true, features = ["rt", "time"] }

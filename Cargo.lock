@@ -6560,11 +6560,15 @@ dependencies = [
 name = "zephium-terra-macos-probe"
 version = "0.1.0"
 dependencies = [
+ "tempfile",
  "tokio",
  "zephium-agent-controller",
  "zephium-agent-provider-transport",
+ "zephium-agent-runtime",
  "zephium-agentic",
+ "zephium-core",
  "zephium-engine",
+ "zephium-store",
 ]
 
 [[package]]

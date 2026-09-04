@@ -133,6 +133,7 @@ impl TerraProbeActionBridge {
             TerraProbeVerifiedTransition {
                 continuation: self.continuation,
                 diff,
+                terminal: None,
             },
         ))
     }

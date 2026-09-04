@@ -52,6 +52,14 @@ use zephium_agentic::{
 
 use crate::action::AgentBrowserVerifiedTransition;
 
+#[path = "work.rs"]
+pub(crate) mod work;
+pub use work::{
+    AgentWorkContextSpec, AgentWorkController, AgentWorkEvent, AgentWorkEventKind,
+    AgentWorkFailure, AgentWorkHandle, AgentWorkOutcome, AgentWorkRecovery, AgentWorkRunInput,
+    AgentWorkRunSettings, AgentWorkTask, AgentWorkTaskProgress, MAX_AGENT_WORK_EVENTS,
+};
+
 /// This text-only/discarding vertical never needs Terra's catalog-wide 128k
 /// output ceiling. Keeping its own 8k ceiling bounds wasted generation and
 /// the conservative reservation without widening catalog authority.
@@ -1895,8 +1903,10 @@ impl fmt::Debug for TerraControllerRecovery {
 /// this driver alone is not a fully closed Work run.
 #[must_use]
 pub struct AgentBrowserSession {
+    journal: Option<work::WorkJournal>,
+    journal_receipts: usize,
     policy: AgentRunPolicy,
-    transport: AgentProviderTransport,
+    transport: BrowserSessionTransport,
     credential: Option<AgentProviderCredential>,
     attempt: Option<AgentProviderAttempt>,
     retained_terminal: Option<BrowserUnsettledTerminal>,
@@ -1915,7 +1925,12 @@ pub struct AgentBrowserSession {
     cancellation: AgentProviderCancellation,
     next_action: u64,
     action: Option<crate::AgentBrowserAction>,
+    action_executions: zephium_agentic::SemanticActionExecutionCoordinator,
+    action_settlements: zephium_agentic::SemanticActionSettlementCoordinator,
     action_refusal: Option<crate::AgentBrowserActionFinalizationRefusal>,
+    action_admission_failure: Option<zephium_agentic::AgentFailedSemanticEffect>,
+    action_proposal_failure: Option<crate::AgentBrowserActionProposal>,
+    action_terminal: Option<zephium_agentic::SemanticActionBatchResult>,
     failure: Option<AgentBrowserProviderError>,
     deadline: Instant,
     turns: u8,
@@ -1971,6 +1986,24 @@ impl AgentBrowserSession {
         model: AgentBrowserModel,
         retention: AgentBrowserRetention,
     ) -> Result<Self, AgentBrowserProviderError> {
+        let transport = AgentProviderTransport::try_new(transport_config)
+            .map_err(|_| AgentBrowserProviderError::Transport)?;
+        Self::try_new_with_transport(
+            input,
+            BrowserSessionTransport(transport),
+            credential,
+            model,
+            retention,
+        )
+    }
+
+    fn try_new_with_transport(
+        input: TerraControllerRunInput,
+        transport: BrowserSessionTransport,
+        credential: AgentProviderCredential,
+        model: AgentBrowserModel,
+        retention: AgentBrowserRetention,
+    ) -> Result<Self, AgentBrowserProviderError> {
         let TerraControllerRunInput {
             manifest,
             lease,
@@ -2005,11 +2038,11 @@ impl AgentBrowserSession {
         };
         let policy = AgentRunPolicy::try_new(manifest, vec![lease])
             .map_err(|_| AgentBrowserProviderError::Authority)?;
-        let transport = AgentProviderTransport::try_new(transport_config)
-            .map_err(|_| AgentBrowserProviderError::Transport)?;
         let next_call = ids.model_call().get();
         Ok(Self {
             policy,
+            journal: None,
+            journal_receipts: 0,
             transport,
             credential: Some(credential),
             attempt: None,
@@ -2026,7 +2059,12 @@ impl AgentBrowserSession {
             cancellation: AgentProviderCancellation::new(),
             next_action: 1,
             action: None,
+            action_executions: zephium_agentic::SemanticActionExecutionCoordinator::new(),
+            action_settlements: zephium_agentic::SemanticActionSettlementCoordinator::new(),
             action_refusal: None,
+            action_admission_failure: None,
+            action_proposal_failure: None,
+            action_terminal: None,
             failure: None,
             deadline,
             turns: 0,
@@ -2218,6 +2256,16 @@ impl AgentBrowserSession {
                 .try_admit(input, &mut self.policy, credential, cancellation)
                 .map_err(|_| AgentBrowserProviderError::Transport)?,
         );
+        if let Some(journal) = self.journal.as_mut() {
+            let call = self
+                .attempt
+                .as_ref()
+                .and_then(AgentProviderAttempt::call)
+                .ok_or(AgentBrowserProviderError::Journal)?;
+            journal
+                .model_active(call)
+                .map_err(|_| AgentBrowserProviderError::Journal)?;
+        }
         let counted = tokio::time::timeout_at(
             tokio::time::Instant::from_std(self.deadline),
             self.attempt
@@ -2264,7 +2312,7 @@ impl AgentBrowserSession {
         drop(self.attempt.take());
         let input = result.input_metric_receipt();
         let disclosure = result.disclosure_stage();
-        let mut turn = settle_browser_result(
+        let turn = settle_browser_result(
             result,
             disclosure,
             input,
@@ -2272,7 +2320,9 @@ impl AgentBrowserSession {
             &mut self.policy,
             &mut self.retained_terminal,
             &mut self.model_receipts,
-        )?;
+        );
+        self.record_model_receipts()?;
+        let mut turn = turn?;
         turn.provider_elapsed = provider_started.elapsed();
         Ok(turn)
     }
@@ -2286,6 +2336,8 @@ impl AgentBrowserSession {
     ) -> Result<AgentBrowserSessionTerminal, AgentBrowserSessionFinishRefusal> {
         self.transport.seal();
         self.cancellation.cancel();
+        self.action_executions.seal();
+        self.action_settlements.seal();
         drop(self.credential.take());
         drop(self.objective.take());
         if let Some(attempt) = self.attempt.take() {
@@ -2306,10 +2358,19 @@ impl AgentBrowserSession {
                 Err(_) => self.failure = Some(AgentBrowserProviderError::Transport),
             }
         }
-        let error = if self.transport.try_prove_shutdown().is_err() {
+        if self.record_model_receipts().is_err() {
+            self.failure = Some(AgentBrowserProviderError::Journal);
+        }
+        let provider = self.transport.try_prove_shutdown();
+        let error = if provider.is_err() {
             Some(AgentBrowserProviderError::Transport)
         } else if self.action.is_some()
+            || self.action_executions.status().pending() != 0
+            || self.action_settlements.status().pending() != 0
             || self.action_refusal.is_some()
+            || self.action_admission_failure.is_some()
+            || self.action_proposal_failure.is_some()
+            || self.action_terminal.is_some()
             || self.retained_terminal.is_some()
             || self.policy.is_sealed()
             || self.policy.pending_model_calls() != 0
@@ -2323,12 +2384,17 @@ impl AgentBrowserSession {
             self.failure
         };
         self.finished = true;
-        match error {
-            Some(error) => Err(AgentBrowserSessionFinishRefusal {
+        match (error, provider) {
+            (Some(error), _) => Err(AgentBrowserSessionFinishRefusal {
                 error,
                 session: Box::new(self),
             }),
-            None => Ok(AgentBrowserSessionTerminal {
+            (None, Ok(provider)) => Ok(AgentBrowserSessionTerminal {
+                session: Box::new(self),
+                provider: provider.into(),
+            }),
+            (None, Err(_)) => Err(AgentBrowserSessionFinishRefusal {
+                error: AgentBrowserProviderError::Transport,
                 session: Box::new(self),
             }),
         }
@@ -2340,6 +2406,18 @@ impl AgentBrowserSession {
         self.try_finish()
             .map(|_| ())
             .map_err(|refusal| refusal.error)
+    }
+
+    fn record_model_receipts(&mut self) -> Result<(), AgentBrowserProviderError> {
+        if let Some(journal) = self.journal.as_mut() {
+            for &(receipt, input) in &self.model_receipts[self.journal_receipts..] {
+                journal
+                    .model_settled(receipt, input)
+                    .map_err(|_| AgentBrowserProviderError::Journal)?;
+                self.journal_receipts += 1;
+            }
+        }
+        Ok(())
     }
 
     fn policy_now(&mut self) -> Result<AgentPolicyInstant, AgentBrowserProviderError> {
@@ -2395,6 +2473,13 @@ impl AgentBrowserSession {
             self.check_live()?;
             record(turn.receipt(), turn.input(), turn.provider_elapsed());
             let tool = turn.into_tool_turn();
+            if let Some(journal) = self.journal.as_ref() {
+                journal
+                    .emit(work::AgentWorkEventKind::ToolProposed(
+                        tool.proposal().kind(),
+                    ))
+                    .map_err(|_| AgentBrowserProviderError::Journal)?;
+            }
             match tool.proposal().kind() {
                 zephium_agentic::AgentBrowserToolKind::Locate => {
                     // Locate is observation-bound, and its ref inventory must
@@ -2477,8 +2562,21 @@ impl AgentBrowserSession {
                 assessment,
                 dispatch,
                 requested_at,
+                &mut self.action_executions,
+                self.journal.as_mut(),
+                &mut self.action_admission_failure,
+                &mut self.action_proposal_failure,
             )
-            .map_err(AgentBrowserProviderError::Action)?;
+            .map_err(|error| {
+                let error = AgentBrowserProviderError::Action(error);
+                self.failure = Some(error);
+                error
+            })?;
+        if action.journal_failed() {
+            self.action = Some(action);
+            self.failure = Some(AgentBrowserProviderError::Journal);
+            return Err(AgentBrowserProviderError::Journal);
+        }
         let native = action
             .take_native_request()
             .map_err(AgentBrowserProviderError::Action)?;
@@ -2504,21 +2602,127 @@ impl AgentBrowserSession {
             .action
             .as_mut()
             .ok_or(AgentBrowserProviderError::ActionPending)?;
-        let accounted = match action.settle(&mut self.policy, native, current, observed_at) {
+        let accounted = match action.settle(
+            &mut self.policy,
+            native,
+            current,
+            observed_at,
+            &mut self.action_executions,
+            &mut self.action_settlements,
+        ) {
             Ok(accounted) => accounted,
             Err(error) => {
                 let error = AgentBrowserProviderError::Action(error);
-                self.failure = Some(error);
+                if error
+                    != AgentBrowserProviderError::Action(
+                        crate::AgentBrowserActionError::SettlementPending,
+                    )
+                {
+                    self.failure = Some(error);
+                }
                 return Err(error);
             }
         };
+        self.finish_action(accounted, baseline, current, observed_at)
+    }
+
+    /// Moves the exact native terminal into its original settlement owner.
+    /// A returned wake is a clock boundary, never evidence of task completion.
+    pub fn begin_action_settlement(
+        &mut self,
+        native: zephium_agentic::SemanticActionNativeSettlement,
+    ) -> Result<Option<zephium_agentic::SemanticSettleInstant>, AgentBrowserProviderError> {
+        self.action
+            .as_mut()
+            .ok_or(AgentBrowserProviderError::ActionPending)?
+            .begin_settlement(
+                &mut self.policy,
+                native,
+                &mut self.action_executions,
+                &mut self.action_settlements,
+            )
+            .map_err(AgentBrowserProviderError::Action)
+    }
+
+    /// Advances only the retained coordinator's exact scheduled clock wake.
+    pub fn wake_action_settlement(
+        &mut self,
+        now: zephium_agentic::SemanticSettleInstant,
+    ) -> Result<Option<zephium_agentic::SemanticSettleInstant>, AgentBrowserProviderError> {
+        self.action
+            .as_mut()
+            .ok_or(AgentBrowserProviderError::ActionPending)?
+            .wake_settlement(now, &mut self.action_settlements)
+            .map_err(AgentBrowserProviderError::Action)
+    }
+
+    /// Verifies the single adjacent fresh snapshot after settlement, without
+    /// issuing another native action or relaxing reference freshness.
+    pub fn verify_action_settlement(
+        &mut self,
+        baseline: &zephium_agentic::SemanticObservation,
+        current: &zephium_agentic::SemanticObservation,
+        observed_at: zephium_agentic::SemanticSettleInstant,
+    ) -> Result<
+        (
+            zephium_agentic::AgentEffectReceipt,
+            AgentBrowserVerifiedTransition,
+        ),
+        AgentBrowserProviderError,
+    > {
+        let result = self
+            .action
+            .as_mut()
+            .ok_or(AgentBrowserProviderError::ActionPending)?
+            .verify_settlement(&mut self.policy, current, observed_at);
+        match result {
+            Ok(accounted) => self.finish_action(accounted, baseline, current, observed_at),
+            Err(error) => {
+                let error = AgentBrowserProviderError::Action(error);
+                if error
+                    != AgentBrowserProviderError::Action(
+                        crate::AgentBrowserActionError::SettlementPending,
+                    )
+                {
+                    self.failure = Some(error);
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn finish_action(
+        &mut self,
+        accounted: zephium_agentic::AgentVerifiedSemanticEffect,
+        baseline: &zephium_agentic::SemanticObservation,
+        current: &zephium_agentic::SemanticObservation,
+        observed_at: zephium_agentic::SemanticSettleInstant,
+    ) -> Result<
+        (
+            zephium_agentic::AgentEffectReceipt,
+            AgentBrowserVerifiedTransition,
+        ),
+        AgentBrowserProviderError,
+    > {
         let receipt = accounted.receipt();
         let action = self
             .action
             .take()
             .ok_or(AgentBrowserProviderError::ActionPending)?;
         match action.into_transition(accounted, baseline, current, observed_at) {
-            Ok(transition) => Ok((receipt, transition)),
+            Ok(mut transition) => {
+                if let Some(journal) = self.journal.as_mut() {
+                    let terminal = transition
+                        .batch_result()
+                        .ok_or(AgentBrowserProviderError::Journal)?;
+                    if journal.action_settled(receipt, terminal).is_err() {
+                        self.action_terminal = transition.terminal.take();
+                        self.failure = Some(AgentBrowserProviderError::Journal);
+                        return Err(AgentBrowserProviderError::Journal);
+                    }
+                }
+                Ok((receipt, transition))
+            }
             Err(refusal) => {
                 self.action_refusal = Some(refusal);
                 self.failure = Some(AgentBrowserProviderError::Continuation);
@@ -2528,9 +2732,22 @@ impl AgentBrowserSession {
     }
 }
 
-impl Drop for AgentBrowserSession {
+// The transport's field owner seals even when a whole session is dropped.
+// Keeping Drop on this leaf lets a proven-drained terminal move its original
+// policy, journal and native coordinators into the product closure owner.
+struct BrowserSessionTransport(AgentProviderTransport);
+
+impl std::ops::Deref for BrowserSessionTransport {
+    type Target = AgentProviderTransport;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Drop for BrowserSessionTransport {
     fn drop(&mut self) {
-        self.transport.seal();
+        self.0.seal();
     }
 }
 
@@ -2566,6 +2783,7 @@ impl BrowserUnsettledTerminal {
 #[must_use]
 pub struct AgentBrowserSessionTerminal {
     session: Box<AgentBrowserSession>,
+    provider: zephium_agentic::AgentProviderShutdownProof,
 }
 
 impl AgentBrowserSessionTerminal {
@@ -2797,6 +3015,9 @@ impl fmt::Debug for AgentBrowserProviderTurn {
 /// Closed content-free session refusal. No variant authorizes a blind retry.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum AgentBrowserProviderError {
+    /// Product projection or exact durable accounting refused a transition.
+    #[error("browser session journal refused a transition")]
+    Journal,
     /// Caller revoked this session; resuming requires a new observation and run.
     #[error("browser session was cancelled")]
     Cancelled,

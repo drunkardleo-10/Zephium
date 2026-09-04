@@ -64,10 +64,10 @@ feature path, not the excluded synthetic `TerraProbeActionBridge`. See
 [the session host contract](../../docs/agent-browser-session.md). One policy,
 transport and cancellation owner handles up to eight model turns and eight
 actions, including semantic locate and independently verified continuations.
-The existing shipping text-only controller is unchanged; Work actor integration,
-durable audit closure, other provider adapters and complete native cancellation
-recovery remain open. This is reusable-driver evidence, not production release
-qualification.
+At this earlier checkpoint the shipping text-only controller was unchanged;
+Work actor integration and durable audit closure were still open. The following
+Work actor section records the next vertical separately. Other provider adapters
+and complete recovery remain open. This is not production release qualification.
 
 The excluded host opens only public Wikipedia in a hidden ephemeral,
 extension-free owned view. The task allows initial query preparation and language
@@ -144,6 +144,87 @@ The hidden native fixed-DOM regression passes 10 snapshots across 4 epochs with
 verified click/fill, stale-anchor refusal/recovery, no focus theft and no retained
 views. The normal `provider-transport` controller compiles optimized; enabling
 the qualification harness in an optimized build is correctly compile-refused.
+
+## Production-path Work actor: public Luna workflow
+
+The 2026-09-05 pass uses `AgentWorkController` on the normal
+`provider-transport` path, the existing runtime worker/mailbox, the real
+`EngineHost::take_agent_browser_port`, and the durable `SqliteStore` audit port.
+The excluded wrapper only installs an explicit policy for its isolated public
+profile, pumps the real native dispatcher, checks focus and collects content-free
+metrics. It does not implement a fake browser port or substitute qualification
+policy/native owners. See [the actor contract](../../docs/agent-work-execution.md).
+
+```sh
+cargo run --locked -p zephium-terra-macos-probe --features live-probe -- --live-public-luna-work-actor-inspectable
+```
+
+The same public preparation/refinement task is terminated by the trusted
+predicate, not three effects or model text. Three integration runs completed with
+four provider turns and three verified effects each, no focus theft, and clean
+native/provider/policy/audit/runtime/store closure. The first run preceded final
+schema pruning; the two final-schema runs advertise only supported snapshot
+actions and immediate/mutation-quiet waits. This gives 2/2 final-schema workflows
+and 6/6 effects (3/3 actor integrations and 9/9 effects across the pass), not a
+controlled performance comparison.
+
+| Configuration | Input tokens | Output tokens | Request bytes | Semantic bytes | Provider-turn ms | Total wall ms | Charged micro-USD |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Initial actor integration | 13,173 | 347 | 79,594 | 4,019 | 10,687 | 12,717 | 814 |
+| Bounded native-adapter schemas, run 1 | 11,217 | 385 | 61,460 | 4,209 | 10,650 | 12,201 | 1,407 |
+| Bounded native-adapter schemas, run 2 | 11,216 | 389 | 61,692 | 4,113 | 9,467 | 10,887 | 834 |
+| Final-schema total | 22,433 | 774 | 123,152 | 8,322 | 20,117 | 23,088 | 2,241 |
+
+Final-schema per-turn receipts:
+
+| Run.turn | Input | Output | Request bytes | Semantic bytes | Provider-turn ms | Cumulative wall ms | Charged micro-USD |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1.1 | 2512 | 103 | 12000 | 3116 | 3351 | 3933 | 752 |
+| 1.2 | 2713 | 60 | 14259 | 287 | 2363 | 6915 | 174 |
+| 1.3 | 2878 | 85 | 16454 | 398 | 2446 | 9363 | 199 |
+| 1.4 | 3114 | 137 | 18747 | 408 | 2490 | 11986 | 282 |
+| 2.1 | 2512 | 109 | 12000 | 3116 | 2517 | 3158 | 182 |
+| 2.2 | 2719 | 71 | 14323 | 287 | 2416 | 5786 | 188 |
+| 2.3 | 2872 | 90 | 16528 | 302 | 2054 | 7843 | 202 |
+| 2.4 | 3113 | 119 | 18841 | 408 | 2480 | 10538 | 262 |
+
+These are policy-charged `PricedCeiling` receipts, not a provider invoice or a
+claim of server-only inference time. Provider-turn time includes exact token
+counting and streaming. Request bytes exclude HTTP headers and the separate
+count request; semantic bytes count newly disclosed input. Explicit public
+OpenAI Logs remain provider-boundary truth, while local typed receipts prove
+projection, policy, native execution, settlement, audit and teardown.
+
+Real integration exposed three previously unexercised seams: the runtime timer-
+only worker lacked I/O, committed navigation did not yet prove observation
+readiness, and adjacent snapshot verification must follow the core's settlement
+wake rather than repeated snapshot polling. The fixes enable I/O only on the
+existing active worker, refuse premature observation as NotReady, fence late
+navigation callbacks after revocation, and consume the exact settlement schedule.
+No longer wait, blind native retry, relaxed freshness or fabricated proof was used.
+
+The default desktop still has no Work run-admission/persistence adapter. Explicit
+failure reconciliation, approval resume, macOS native suspend/resume, more tools,
+authenticated sites, concurrent Browse and battery qualification remain open.
+Recovery is retained ownership, not success or a resumable user product yet.
+
+Validation: 508 functional-core, 15 controller, 35 runtime, 458 engine
+(`agentic-browser`), 245 store, 166 xtask and 2 qualifier-predicate tests pass.
+Controller tests exercise eight variable provider turns through the real worker's
+localhost I/O; count/stream refusal and takeover races; native admission,
+observation, renderer, cancellation, deadline and lifecycle shutdown faults;
+lost observation/cancellation/close/audit callbacks; close refusal; native-action
+dispatch/terminal refusal, takeover and callback loss; exact policy NeedsHuman
+and retained prepared batches; mailbox and product backpressure. These fixtures
+do not claim native-device fault injection.
+Strict all-feature/all-target Clippy covers controller/runtime/core/engine/store/
+qualifier/xtask. Production optimized controller and engine checks pass. Runtime,
+controller, model-catalog, native-adapter and broad probe/source gates pass.
+The default desktop dependency graph contains no controller, agent runtime,
+provider transport or reqwest; the runtime has no provider dependency.
+CI explicitly lints/tests the enabled controller path despite its intentional
+absence from the default desktop graph. Optimized probe-harness compilation is
+correctly refused.
 
 ## Mechanically enforced evidence
 

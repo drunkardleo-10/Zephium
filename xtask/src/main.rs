@@ -906,6 +906,49 @@ fn ci() {
             "warnings",
         ],
     );
+    // The ordinary desktop graph intentionally excludes Work execution. Test
+    // and lint its enabled production path explicitly; probe-harness here only
+    // permits deterministic localhost fixtures, never a live provider run.
+    for target in ["--all-targets", "--lib"] {
+        run(
+            "cargo",
+            &[
+                "clippy",
+                "--locked",
+                "-p",
+                "zephium-agent-controller",
+                "--features",
+                "provider-transport",
+                target,
+                "--",
+                "-D",
+                "warnings",
+            ],
+        );
+    }
+    run(
+        "cargo",
+        &[
+            "test",
+            "--locked",
+            "-p",
+            "zephium-agent-controller",
+            "--features",
+            "probe-harness",
+        ],
+    );
+    run(
+        "cargo",
+        &[
+            "check",
+            "--locked",
+            "--release",
+            "-p",
+            "zephium-agent-controller",
+            "--features",
+            "provider-transport",
+        ],
+    );
     // `--all-targets` enables test-only references while linting library
     // artifacts, which can hide dead production paths behind cfg(test).
     run(

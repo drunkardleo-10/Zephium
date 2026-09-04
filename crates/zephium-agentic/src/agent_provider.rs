@@ -763,7 +763,8 @@ impl AgentProviderCallConfig {
         })
     }
 
-    /// Restricts advertised browser capabilities to the bounded locate/act driver.
+    /// Restricts advertised capabilities to locate and one snapshot-verifiable
+    /// action per turn, with immediate or mutation-quiet settlement only.
     ///
     /// This trusted host setting is bound into continuation configuration and
     /// applies equally to every provider protocol and request turn.
