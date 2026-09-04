@@ -22,22 +22,24 @@ use zephium_agent_runtime::{
     MAX_AGENT_RUNTIME_SIGNAL_CAPACITY, MAX_AGENT_RUNTIME_TERMINAL_CAPACITY,
 };
 use zephium_agentic::{
-    encode_semantic_diff, encode_semantic_observation, encode_semantic_runtime_invocation,
-    AgentAuditDeliveryId, AgentAuditDispatch, AgentAuditEventId, AgentAuditLedger, AgentAuditPort,
+    encode_semantic_diff, encode_semantic_locate_result, encode_semantic_observation,
+    encode_semantic_runtime_invocation, locate_semantic_observation, AgentAuditDeliveryId,
+    AgentAuditDispatch, AgentAuditEventId, AgentAuditLedger, AgentAuditPort,
     AgentContextAccountBinding, AgentDelegationSpec, AgentDelegationTopology, AgentModelCallBudget,
     AgentModelCallId, AgentModelCallReceipt, AgentModelCallRequest, AgentModelCallSettlement,
     AgentNodeExecution, AgentPlanLeaseBinding, AgentPolicyInstant, AgentPreparedObservationRequest,
     AgentProviderBatchDisposition, AgentProviderCallConfig, AgentProviderCancellation,
     AgentProviderDiffRequestDraft, AgentProviderDisclosureStage, AgentProviderFailureClass,
-    AgentProviderImmediateSettlement, AgentProviderObjective, AgentProviderPolicySettlement,
-    AgentProviderProtocolError, AgentProviderProtocolEvent, AgentProviderRequestSettlement,
-    AgentProviderStopReason, AgentProviderStreamConclusion, AgentProviderTransportInput,
-    AgentProviderTransportOutcome, AgentProviderTransportResult, AgentRunAccountingMetrics,
-    AgentRunActionPerformanceMetrics, AgentRunMetricClosure, AgentRunPolicy,
-    AgentRunProgressMetrics, AgentRunProviderInputMetrics, AgentRunSupervisor,
-    AgentSupervisorAttemptId, AgentSupervisorCancellationId, AgentSupervisorCancellationReason,
-    AgentSupervisorCompletion, AgentSupervisorFailure, AgentSupervisorId, ContextDispatch,
-    ContextNativeEvent, SemanticInvocationId, SemanticModelEncodingBudget,
+    AgentProviderImmediateSettlement, AgentProviderLocateRequestDraft, AgentProviderObjective,
+    AgentProviderPolicySettlement, AgentProviderProtocolError, AgentProviderProtocolEvent,
+    AgentProviderRequestSettlement, AgentProviderSettledToolTurn, AgentProviderStopReason,
+    AgentProviderStreamConclusion, AgentProviderTransportInput, AgentProviderTransportOutcome,
+    AgentProviderTransportResult, AgentRunAccountingMetrics, AgentRunActionPerformanceMetrics,
+    AgentRunMetricClosure, AgentRunPolicy, AgentRunProgressMetrics, AgentRunProviderInputMetrics,
+    AgentRunSupervisor, AgentSupervisorAttemptId, AgentSupervisorCancellationId,
+    AgentSupervisorCancellationReason, AgentSupervisorCompletion, AgentSupervisorFailure,
+    AgentSupervisorId, ContextDispatch, ContextNativeEvent, SemanticInvocationId,
+    SemanticLocateBudget, SemanticLocateId, SemanticLocateRequest, SemanticModelEncodingBudget,
     SemanticModelEncodingError, SemanticObservationAssembler, SemanticObservationRequest,
     SemanticRuntimeBudget, SemanticSnapshotGeneration, MAX_AGENT_AUDIT_DELIVERY_EVENTS,
 };
@@ -56,7 +58,7 @@ const MAX_TERRA_CONTROLLER_HARD_DEADLINE: Duration = Duration::from_secs(10 * 60
 const MAX_DEFERRED_RUNTIME_EVENTS: usize =
     MAX_AGENT_RUNTIME_TERMINAL_CAPACITY + MAX_AGENT_RUNTIME_SIGNAL_CAPACITY;
 #[cfg(feature = "probe-harness")]
-const MAX_TERRA_PROBE_MODEL_TURNS: u8 = 2;
+const MAX_TERRA_PROBE_MODEL_TURNS: u8 = 3;
 
 const _: () = {
     assert!(TERRA_CONTROLLER_MAX_OUTPUT_TOKENS < TERRA_MAX_OUTPUT_TOKENS);
@@ -1902,24 +1904,7 @@ impl TerraProbeSession {
         if Instant::now() >= self.deadline {
             return Err(TerraProbeProviderError::Deadline);
         }
-        let call_id =
-            AgentModelCallId::new(self.next_call).ok_or(TerraProbeProviderError::Authority)?;
-        self.next_call = self
-            .next_call
-            .checked_add(1)
-            .ok_or(TerraProbeProviderError::Authority)?;
-        let now = AgentPolicyInstant::from_millis(self.next_policy_millis);
-        self.next_policy_millis = self
-            .next_policy_millis
-            .checked_add(1)
-            .ok_or(TerraProbeProviderError::Clock)?;
-        let request = AgentModelCallRequest::new(
-            call_id,
-            self.lease.lease(),
-            self.account,
-            terra_probe_call_budget()?,
-            now,
-        );
+        let request = self.next_model_call_request()?;
         let (continuation, diff) = transition.into_parts();
         let payload = encode_semantic_diff(
             &diff,
@@ -1936,6 +1921,99 @@ impl TerraProbeSession {
             .try_prepare_for_provider_exact_count(&mut self.policy, request, &diff)
             .map_err(|_| TerraProbeProviderError::Authority)?;
         self.drive(prepared.into_transport_input()).await
+    }
+
+    /// Executes one bounded semantic locate requested by the prior model turn.
+    ///
+    /// The model query is never interpreted as a selector. It enters the fixed
+    /// Rust matcher against the exact acknowledged observation, and only the
+    /// bounded content-free locate projection is returned to the provider.
+    pub async fn continue_after_locate(
+        &mut self,
+        turn: AgentProviderSettledToolTurn,
+        observation: &zephium_agentic::SemanticObservation,
+        locate_id: u64,
+    ) -> Result<TerraProbeProviderTurn, TerraProbeProviderError> {
+        if self.finished || self.turns >= MAX_TERRA_PROBE_MODEL_TURNS {
+            return Err(TerraProbeProviderError::TurnLimit);
+        }
+        if Instant::now() >= self.deadline {
+            return Err(TerraProbeProviderError::Deadline);
+        }
+        let (proposal, continuation) = turn.into_parts();
+        let zephium_agentic::AgentBrowserToolProposal::Locate { query, scope } = proposal else {
+            return Err(TerraProbeProviderError::LocateTool);
+        };
+        let frames = observation
+            .frames()
+            .iter()
+            .map(|snapshot| snapshot.frame().clone())
+            .collect::<Vec<_>>();
+        let query = query.into_locate_query();
+        let query_bytes =
+            u16::try_from(query.byte_len()).map_err(|_| TerraProbeProviderError::Authority)?;
+        let query_terms =
+            u8::try_from(query.term_count()).map_err(|_| TerraProbeProviderError::Authority)?;
+        let request = SemanticLocateRequest::bind(
+            SemanticLocateId::new(locate_id).ok_or(TerraProbeProviderError::Authority)?,
+            observation,
+            continuation.baseline(),
+            &frames,
+            query,
+            scope
+                .try_into_locate_scope()
+                .map_err(|_| TerraProbeProviderError::LocateTool)?,
+            SemanticLocateBudget::STANDARD,
+        )
+        .map_err(|_| TerraProbeProviderError::Locate)?;
+        let result = locate_semantic_observation(observation, request)
+            .map_err(|_| TerraProbeProviderError::Locate)?;
+        if result.matches().is_empty() {
+            return Err(TerraProbeProviderError::LocateNoMatches {
+                query_bytes,
+                query_terms,
+                scanned_nodes: result.stats().scanned_nodes(),
+            });
+        }
+        let payload = encode_semantic_locate_result(
+            &result,
+            SemanticModelEncodingBudget::LOCATE_RESULT_PROVIDER_EXACT_CONSERVATIVE,
+        )
+        .and_then(|encoded| encoded.admit_conservative_utf8(self.config.tokenizer()))
+        .map_err(TerraProbeProviderError::LocateEncoding)?;
+        let model_request = self.next_model_call_request()?;
+        let bound = continuation
+            .bind_locate_request(model_request, &self.config, &result, payload)
+            .map_err(|_| TerraProbeProviderError::Continuation)?;
+        let draft = AgentProviderLocateRequestDraft::try_new(bound)
+            .map_err(|_| TerraProbeProviderError::Continuation)?;
+        let prepared = draft
+            .try_prepare_for_provider_exact_count(&mut self.policy, model_request, &result)
+            .map_err(|_| TerraProbeProviderError::Authority)?;
+        self.drive(prepared.into_transport_input()).await
+    }
+
+    fn next_model_call_request(
+        &mut self,
+    ) -> Result<AgentModelCallRequest, TerraProbeProviderError> {
+        let call_id =
+            AgentModelCallId::new(self.next_call).ok_or(TerraProbeProviderError::Authority)?;
+        self.next_call = self
+            .next_call
+            .checked_add(1)
+            .ok_or(TerraProbeProviderError::Authority)?;
+        let now = AgentPolicyInstant::from_millis(self.next_policy_millis);
+        self.next_policy_millis = self
+            .next_policy_millis
+            .checked_add(1)
+            .ok_or(TerraProbeProviderError::Clock)?;
+        Ok(AgentModelCallRequest::new(
+            call_id,
+            self.lease.lease(),
+            self.account,
+            terra_probe_call_budget()?,
+            now,
+        ))
     }
 
     async fn drive(
@@ -2171,6 +2249,25 @@ pub enum TerraProbeProviderError {
     /// The verified semantic action diff could not be encoded.
     #[error("Terra probe action diff encoding failed")]
     DiffEncoding(SemanticModelEncodingError),
+    /// The provider locate proposal was not compatible with the fixed matcher.
+    #[error("Terra probe locate tool contract failed")]
+    LocateTool,
+    /// The fixed semantic matcher refused the acknowledged observation.
+    #[error("Terra probe semantic locate failed")]
+    Locate,
+    /// The fixed semantic matcher found no non-secret result for the query.
+    #[error("Terra probe semantic locate returned no matches")]
+    LocateNoMatches {
+        /// Bounded UTF-8 length of the redacted model query.
+        query_bytes: u16,
+        /// Distinct normalized query-term count.
+        query_terms: u8,
+        /// In-scope semantic nodes examined by the fixed matcher.
+        scanned_nodes: u16,
+    },
+    /// The bounded semantic locate result could not be encoded.
+    #[error("Terra probe locate result encoding failed")]
+    LocateEncoding(SemanticModelEncodingError),
     /// Exact-count or streaming provider transport failed.
     #[error("Terra probe transport failed")]
     Transport,

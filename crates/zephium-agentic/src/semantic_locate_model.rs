@@ -8,7 +8,7 @@
 use std::fmt;
 
 use crate::semantic_model::{
-    checked_write, role_label, sensitivity_label, source_label,
+    checked_write, conservative_utf8_measurement, role_label, sensitivity_label, source_label,
     validate_semantic_token_measurement, BoundedModelBuffer,
 };
 use crate::{
@@ -141,6 +141,27 @@ impl SemanticEncodedLocateResult {
         expected_revision: &SemanticTokenizerRevision,
     ) -> Result<SemanticLocateModelPayload, SemanticModelEncodingError> {
         let measurement = self.measure(counter, expected_revision)?;
+        Ok(SemanticLocateModelPayload {
+            content: self.content,
+            stats: self.stats,
+            measurement,
+            locate: self.locate,
+            observation: self.observation,
+            observation_generation: self.observation_generation,
+            context: self.context,
+            acknowledgement: self.acknowledgement,
+            observation_guard: self.observation_guard,
+            locate_guard: self.locate_guard,
+        })
+    }
+
+    /// Admits UTF-8 length as a conservative provider-count preflight.
+    pub fn admit_conservative_utf8(
+        self,
+        revision: &SemanticTokenizerRevision,
+    ) -> Result<SemanticLocateModelPayload, SemanticModelEncodingError> {
+        let measurement = conservative_utf8_measurement(&self.content, revision)?;
+        validate_semantic_token_measurement(&self.budget, &measurement, revision)?;
         Ok(SemanticLocateModelPayload {
             content: self.content,
             stats: self.stats,
@@ -797,6 +818,19 @@ mod tests {
             ),
             Err(SemanticModelEncodingError::TokenQuality)
         ));
+
+        let provider_exact = encode_semantic_locate_result(
+            &result,
+            SemanticModelEncodingBudget::LOCATE_RESULT_PROVIDER_EXACT_CONSERVATIVE,
+        )
+        .expect("provider-exact encode")
+        .admit_conservative_utf8(&revision)
+        .expect("provider-exact conservative admission");
+        assert!(provider_exact.matches_result(&result));
+        assert_eq!(
+            provider_exact.token_measurement().quality(),
+            SemanticTokenCountQuality::Conservative
+        );
 
         let encoded = encode_semantic_locate_result(
             &result,

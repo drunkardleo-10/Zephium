@@ -104,6 +104,11 @@ impl SemanticLocateQuery {
         &self.source
     }
 
+    /// UTF-8 bytes in the bounded source query, without exposing its content.
+    pub fn byte_len(&self) -> usize {
+        self.source.len()
+    }
+
     /// Number of distinct normalized lookup terms.
     pub fn term_count(&self) -> usize {
         self.terms.len()
